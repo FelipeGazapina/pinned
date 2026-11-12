@@ -5204,7 +5204,7 @@
                 ]
               },
               {
-                "description": "`slack::Account`.",
+                "description": "`slack::Connected`: `slack::Account` with the bot and whether the token added it.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -5226,10 +5226,16 @@
                   "cmd": {
                     "type": "string",
                     "const": "disconnect_slack"
+                  },
+                  "bot": {
+                    "description": "The bot to remove; empty for the default bot, which is what an app before several bots means.",
+                    "type": "string",
+                    "default": ""
                   }
                 },
                 "required": [
-                  "cmd"
+                  "cmd",
+                  "bot"
                 ]
               },
               {
@@ -5239,10 +5245,16 @@
                   "cmd": {
                     "type": "string",
                     "const": "slack_suggestions"
+                  },
+                  "bot": {
+                    "description": "The bot whose channels to list; empty for the default bot.",
+                    "type": "string",
+                    "default": ""
                   }
                 },
                 "required": [
-                  "cmd"
+                  "cmd",
+                  "bot"
                 ]
               },
               {
@@ -5881,6 +5893,13 @@
                       "string",
                       "null"
                     ]
+                  },
+                  "slack_keys": {
+                    "description": "Each Slack bot's token by bot id. `slack_key` stays the default bot's.",
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
                   },
                   "github_key": {
                     "type": [
@@ -15195,7 +15214,7 @@
                 ]
               },
               {
-                "description": "`slack::Account`.",
+                "description": "`slack::Connected`: `slack::Account` with the bot and whether the token added it.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -15217,6 +15236,11 @@
                   "cmd": {
                     "type": "string",
                     "const": "disconnect_slack"
+                  },
+                  "bot": {
+                    "description": "The bot to remove; empty for the default bot, which is what an app before several bots means.",
+                    "type": "string",
+                    "default": ""
                   }
                 },
                 "required": [
@@ -15230,6 +15254,11 @@
                   "cmd": {
                     "type": "string",
                     "const": "slack_suggestions"
+                  },
+                  "bot": {
+                    "description": "The bot whose channels to list; empty for the default bot.",
+                    "type": "string",
+                    "default": ""
                   }
                 },
                 "required": [
@@ -15869,6 +15898,13 @@
                       "string",
                       "null"
                     ]
+                  },
+                  "slack_keys": {
+                    "description": "Each Slack bot's token by bot id. `slack_key` stays the default bot's.",
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
                   },
                   "github_key": {
                     "type": [
@@ -21351,7 +21387,7 @@
                 ]
               },
               {
-                "description": "`slack::Account`.",
+                "description": "`slack::Connected`: `slack::Account` with the bot and whether the token added it.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -21373,10 +21409,16 @@
                   "cmd": {
                     "type": "string",
                     "const": "disconnect_slack"
+                  },
+                  "bot": {
+                    "description": "The bot to remove; empty for the default bot, which is what an app before several bots means.",
+                    "type": "string",
+                    "default": ""
                   }
                 },
                 "required": [
-                  "cmd"
+                  "cmd",
+                  "bot"
                 ]
               },
               {
@@ -21386,10 +21428,16 @@
                   "cmd": {
                     "type": "string",
                     "const": "slack_suggestions"
+                  },
+                  "bot": {
+                    "description": "The bot whose channels to list; empty for the default bot.",
+                    "type": "string",
+                    "default": ""
                   }
                 },
                 "required": [
-                  "cmd"
+                  "cmd",
+                  "bot"
                 ]
               },
               {
@@ -22028,6 +22076,13 @@
                       "string",
                       "null"
                     ]
+                  },
+                  "slack_keys": {
+                    "description": "Each Slack bot's token by bot id. `slack_key` stays the default bot's.",
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
                   },
                   "github_key": {
                     "type": [
@@ -28140,7 +28195,7 @@
                 ]
               },
               {
-                "description": "`slack::Account`.",
+                "description": "`slack::Connected`: `slack::Account` with the bot and whether the token added it.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -28162,6 +28217,11 @@
                   "cmd": {
                     "type": "string",
                     "const": "disconnect_slack"
+                  },
+                  "bot": {
+                    "description": "The bot to remove; empty for the default bot, which is what an app before several bots means.",
+                    "type": "string",
+                    "default": ""
                   }
                 },
                 "required": [
@@ -28175,6 +28235,11 @@
                   "cmd": {
                     "type": "string",
                     "const": "slack_suggestions"
+                  },
+                  "bot": {
+                    "description": "The bot whose channels to list; empty for the default bot.",
+                    "type": "string",
+                    "default": ""
                   }
                 },
                 "required": [
@@ -28814,6 +28879,13 @@
                       "string",
                       "null"
                     ]
+                  },
+                  "slack_keys": {
+                    "description": "Each Slack bot's token by bot id. `slack_key` stays the default bot's.",
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": "string"
+                    }
                   },
                   "github_key": {
                     "type": [
@@ -43489,6 +43561,13 @@
               }
             ]
           },
+          "slack_bots": {
+            "description": "Every connected Slack bot, the default first, with its token's last characters only.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Bot"
+            }
+          },
           "github": {
             "anyOf": [
               {
@@ -43614,6 +43693,50 @@
               "team",
               "userId",
               "name"
+            ]
+          },
+          "Bot": {
+            "description": "One of the account's Slack bots, each the user's own Slack app with its own token. Its token is\na key named `connectors::slack_bot_key(id)`, never part of this.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "The bot's own user id, which also names its token's key.",
+                "type": "string"
+              },
+              "teamId": {
+                "description": "Empty for a bot moved over from the single-bot store until its token is checked again.",
+                "type": "string",
+                "default": ""
+              },
+              "team": {
+                "type": "string"
+              },
+              "userId": {
+                "description": "The bot's own user id, which `<@…>` mentions carry.",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "appId": {
+                "description": "Empty until Slack is asked for it.",
+                "type": "string",
+                "default": ""
+              },
+              "keyHint": {
+                "description": "The token's last characters.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "id",
+              "teamId",
+              "team",
+              "userId",
+              "name",
+              "appId",
+              "keyHint"
             ]
           },
           "Account3": {
@@ -45152,6 +45275,13 @@
               }
             ]
           },
+          "slack_bots": {
+            "description": "Every connected Slack bot, the default first, with its token's last characters only.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Bot"
+            }
+          },
           "github": {
             "anyOf": [
               {
@@ -45268,6 +45398,47 @@
               }
             },
             "required": [
+              "team",
+              "userId",
+              "name"
+            ]
+          },
+          "Bot": {
+            "description": "One of the account's Slack bots, each the user's own Slack app with its own token. Its token is\na key named `connectors::slack_bot_key(id)`, never part of this.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "The bot's own user id, which also names its token's key.",
+                "type": "string"
+              },
+              "teamId": {
+                "description": "Empty for a bot moved over from the single-bot store until its token is checked again.",
+                "type": "string",
+                "default": ""
+              },
+              "team": {
+                "type": "string"
+              },
+              "userId": {
+                "description": "The bot's own user id, which `<@…>` mentions carry.",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "appId": {
+                "description": "Empty until Slack is asked for it.",
+                "type": "string",
+                "default": ""
+              },
+              "keyHint": {
+                "description": "The token's last characters.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "id",
               "team",
               "userId",
               "name"
@@ -46844,6 +47015,252 @@
           "userId",
           "name"
         ]
+      }
+    },
+    "SlackBot": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Bot",
+        "description": "One of the account's Slack bots, each the user's own Slack app with its own token. Its token is\na key named `connectors::slack_bot_key(id)`, never part of this.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "description": "The bot's own user id, which also names its token's key.",
+            "type": "string"
+          },
+          "teamId": {
+            "description": "Empty for a bot moved over from the single-bot store until its token is checked again.",
+            "type": "string",
+            "default": ""
+          },
+          "team": {
+            "type": "string"
+          },
+          "userId": {
+            "description": "The bot's own user id, which `<@…>` mentions carry.",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "appId": {
+            "description": "Empty until Slack is asked for it.",
+            "type": "string",
+            "default": ""
+          },
+          "keyHint": {
+            "description": "The token's last characters.",
+            "type": "string",
+            "default": ""
+          }
+        },
+        "required": [
+          "id",
+          "teamId",
+          "team",
+          "userId",
+          "name",
+          "appId",
+          "keyHint"
+        ]
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Bot",
+        "description": "One of the account's Slack bots, each the user's own Slack app with its own token. Its token is\na key named `connectors::slack_bot_key(id)`, never part of this.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "description": "The bot's own user id, which also names its token's key.",
+            "type": "string"
+          },
+          "teamId": {
+            "description": "Empty for a bot moved over from the single-bot store until its token is checked again.",
+            "type": "string",
+            "default": ""
+          },
+          "team": {
+            "type": "string"
+          },
+          "userId": {
+            "description": "The bot's own user id, which `<@…>` mentions carry.",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "appId": {
+            "description": "Empty until Slack is asked for it.",
+            "type": "string",
+            "default": ""
+          },
+          "keyHint": {
+            "description": "The token's last characters.",
+            "type": "string",
+            "default": ""
+          }
+        },
+        "required": [
+          "id",
+          "team",
+          "userId",
+          "name"
+        ]
+      }
+    },
+    "SlackConnected": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Connected",
+        "description": "What `connect_slack` answers: the bot's account, as before, and whether the token added a bot\nor replaced the token of one already connected.",
+        "type": "object",
+        "properties": {
+          "team": {
+            "type": "string"
+          },
+          "userId": {
+            "description": "The bot's own user id, which `<@…>` mentions carry.",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "bot": {
+            "$ref": "#/$defs/Bot"
+          },
+          "added": {
+            "description": "True when the token added a bot, false when it updated the token of a bot already kept.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "team",
+          "userId",
+          "name",
+          "bot",
+          "added"
+        ],
+        "$defs": {
+          "Bot": {
+            "description": "One of the account's Slack bots, each the user's own Slack app with its own token. Its token is\na key named `connectors::slack_bot_key(id)`, never part of this.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "The bot's own user id, which also names its token's key.",
+                "type": "string"
+              },
+              "teamId": {
+                "description": "Empty for a bot moved over from the single-bot store until its token is checked again.",
+                "type": "string",
+                "default": ""
+              },
+              "team": {
+                "type": "string"
+              },
+              "userId": {
+                "description": "The bot's own user id, which `<@…>` mentions carry.",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "appId": {
+                "description": "Empty until Slack is asked for it.",
+                "type": "string",
+                "default": ""
+              },
+              "keyHint": {
+                "description": "The token's last characters.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "id",
+              "teamId",
+              "team",
+              "userId",
+              "name",
+              "appId",
+              "keyHint"
+            ]
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Connected",
+        "description": "What `connect_slack` answers: the bot's account, as before, and whether the token added a bot\nor replaced the token of one already connected.",
+        "type": "object",
+        "properties": {
+          "team": {
+            "type": "string"
+          },
+          "userId": {
+            "description": "The bot's own user id, which `<@…>` mentions carry.",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "bot": {
+            "$ref": "#/$defs/Bot"
+          },
+          "added": {
+            "description": "True when the token added a bot, false when it updated the token of a bot already kept.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "team",
+          "userId",
+          "name",
+          "bot",
+          "added"
+        ],
+        "$defs": {
+          "Bot": {
+            "description": "One of the account's Slack bots, each the user's own Slack app with its own token. Its token is\na key named `connectors::slack_bot_key(id)`, never part of this.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "The bot's own user id, which also names its token's key.",
+                "type": "string"
+              },
+              "teamId": {
+                "description": "Empty for a bot moved over from the single-bot store until its token is checked again.",
+                "type": "string",
+                "default": ""
+              },
+              "team": {
+                "type": "string"
+              },
+              "userId": {
+                "description": "The bot's own user id, which `<@…>` mentions carry.",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "appId": {
+                "description": "Empty until Slack is asked for it.",
+                "type": "string",
+                "default": ""
+              },
+              "keyHint": {
+                "description": "The token's last characters.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "id",
+              "team",
+              "userId",
+              "name"
+            ]
+          }
+        }
       }
     },
     "Suggestions": {
@@ -50329,6 +50746,13 @@
                   }
                 ]
               },
+              "slack_bots": {
+                "description": "Every connected Slack bot, the default first, with its token's last characters only.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Bot"
+                }
+              },
               "github": {
                 "anyOf": [
                   {
@@ -50454,6 +50878,50 @@
               "team",
               "userId",
               "name"
+            ]
+          },
+          "Bot": {
+            "description": "One of the account's Slack bots, each the user's own Slack app with its own token. Its token is\na key named `connectors::slack_bot_key(id)`, never part of this.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "The bot's own user id, which also names its token's key.",
+                "type": "string"
+              },
+              "teamId": {
+                "description": "Empty for a bot moved over from the single-bot store until its token is checked again.",
+                "type": "string",
+                "default": ""
+              },
+              "team": {
+                "type": "string"
+              },
+              "userId": {
+                "description": "The bot's own user id, which `<@…>` mentions carry.",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "appId": {
+                "description": "Empty until Slack is asked for it.",
+                "type": "string",
+                "default": ""
+              },
+              "keyHint": {
+                "description": "The token's last characters.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "id",
+              "teamId",
+              "team",
+              "userId",
+              "name",
+              "appId",
+              "keyHint"
             ]
           },
           "Account3": {
@@ -53521,6 +53989,13 @@
                   }
                 ]
               },
+              "slack_bots": {
+                "description": "Every connected Slack bot, the default first, with its token's last characters only.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Bot"
+                }
+              },
               "github": {
                 "anyOf": [
                   {
@@ -53637,6 +54112,47 @@
               }
             },
             "required": [
+              "team",
+              "userId",
+              "name"
+            ]
+          },
+          "Bot": {
+            "description": "One of the account's Slack bots, each the user's own Slack app with its own token. Its token is\na key named `connectors::slack_bot_key(id)`, never part of this.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "The bot's own user id, which also names its token's key.",
+                "type": "string"
+              },
+              "teamId": {
+                "description": "Empty for a bot moved over from the single-bot store until its token is checked again.",
+                "type": "string",
+                "default": ""
+              },
+              "team": {
+                "type": "string"
+              },
+              "userId": {
+                "description": "The bot's own user id, which `<@…>` mentions carry.",
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "appId": {
+                "description": "Empty until Slack is asked for it.",
+                "type": "string",
+                "default": ""
+              },
+              "keyHint": {
+                "description": "The token's last characters.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "id",
               "team",
               "userId",
               "name"

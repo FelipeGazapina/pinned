@@ -26,6 +26,46 @@ pub struct Account {
     pub name: String,
 }
 
+/// One of the account's Slack bots, each the user's own Slack app with its own token. Its token is
+/// a key named `connectors::slack_bot_key(id)`, never part of this.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Bot {
+    /// The bot's own user id, which also names its token's key.
+    pub id: String,
+    /// Empty for a bot moved over from the single-bot store until its token is checked again.
+    #[serde(default)]
+    pub team_id: String,
+    pub team: String,
+    /// The bot's own user id, which `<@…>` mentions carry.
+    pub user_id: String,
+    pub name: String,
+    /// Empty until Slack is asked for it.
+    #[serde(default)]
+    pub app_id: String,
+    /// The token's last characters.
+    #[serde(default)]
+    pub key_hint: String,
+}
+
+impl Bot {
+    /// The single-bot shape, which `Settings.slack` and older apps read.
+    pub fn account(&self) -> Account {
+        Account { team: self.team.clone(), user_id: self.user_id.clone(), name: self.name.clone() }
+    }
+}
+
+/// What `connect_slack` answers: the bot's account, as before, and whether the token added a bot
+/// or replaced the token of one already connected.
+#[derive(Serialize, Deserialize, Clone, Debug, schemars::JsonSchema)]
+pub struct Connected {
+    #[serde(flatten)]
+    pub account: Account,
+    pub bot: Bot,
+    /// True when the token added a bot, false when it updated the token of a bot already kept.
+    pub added: bool,
+}
+
 /// A new message that mentions the bot.
 #[derive(Debug, PartialEq)]
 pub struct Mention {
@@ -129,13 +169,22 @@ async fn answer(response: reqwest::Response) -> Result<Value, String> {
     Ok(body)
 }
 
-pub async fn account(token: &str) -> Result<Account, String> {
+/// The bot a token belongs to, with no key hint.
+pub async fn bot(token: &str) -> Result<Bot, String> {
     let body = call(token, "auth.test", &[]).await?;
     if body["bot_id"].as_str().is_none() {
         return Err("that is not a bot token; use the one that starts with xoxb-".into());
     }
     let field = |k: &str| body[k].as_str().unwrap_or_default().to_owned();
-    Ok(Account { team: field("team"), user_id: field("user_id"), name: field("user") })
+    Ok(Bot {
+        id: field("user_id"),
+        team_id: field("team_id"),
+        team: field("team"),
+        user_id: field("user_id"),
+        name: field("user"),
+        app_id: String::new(),
+        key_hint: String::new(),
+    })
 }
 
 /// Every channel the token can see, public and private, as (id, name, the bot is a member).

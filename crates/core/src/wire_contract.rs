@@ -84,6 +84,8 @@ pub fn current(version: &str, routes: &[&str]) -> Contract {
     outbound.insert("LinearAccount".into(), schemas::<linear::Account>());
     outbound.insert("Suggestions".into(), schemas::<Suggestions>());
     outbound.insert("SlackAccount".into(), schemas::<slack::Account>());
+    outbound.insert("SlackBot".into(), schemas::<slack::Bot>());
+    outbound.insert("SlackConnected".into(), schemas::<slack::Connected>());
     outbound.insert("Connector".into(), schemas::<Connector>());
     outbound.insert("SyncProject".into(), schemas::<sync::Project>());
     outbound.insert("SyncEntry".into(), schemas::<sync::Entry>());

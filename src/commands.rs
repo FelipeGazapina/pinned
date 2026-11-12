@@ -33,18 +33,18 @@ pub async fn linear_suggestions(connectors: State<'_, Connectors>) -> Result<Sug
 }
 
 #[tauri::command]
-pub async fn connect_slack(connectors: State<'_, Connectors>, token: String) -> Result<slack::Account, String> {
+pub async fn connect_slack(connectors: State<'_, Connectors>, token: String) -> Result<slack::Connected, String> {
     connectors.connect_slack(&token).await
 }
 
 #[tauri::command]
-pub fn disconnect_slack(connectors: State<Connectors>) -> Result<(), String> {
-    connectors.disconnect_slack()
+pub fn disconnect_slack(connectors: State<Connectors>, bot: Option<String>) -> Result<(), String> {
+    connectors.disconnect_slack(bot.as_deref().unwrap_or_default())
 }
 
 #[tauri::command]
-pub async fn slack_suggestions(connectors: State<'_, Connectors>) -> Result<Vec<String>, String> {
-    connectors.slack_suggestions().await
+pub async fn slack_suggestions(connectors: State<'_, Connectors>, bot: Option<String>) -> Result<Vec<String>, String> {
+    connectors.slack_suggestions(bot.as_deref().unwrap_or_default()).await
 }
 
 #[tauri::command]
