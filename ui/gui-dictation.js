@@ -403,6 +403,7 @@ function onDictationError(message) {
 /** The permission message under the composer; `settings` names the System Settings pane its
  * button opens, and without it the button hides (a browser's settings can't be opened for it). */
 const dictationPermissionNote = document.getElementById("dictation-permission");
+const DICTATION_ALLOWED_NOTE = "Microphone and Speech Recognition are on. Click the mic to dictate.";
 
 function showDictationPermission({ message, settings }) {
   if (!dictationPermissionNote) return;
@@ -423,7 +424,7 @@ async function recheckDictationPermission() {
   if (gate.action === "explain") return showDictationPermission(gate);
   if (dictationPermissionNote?.hidden) return;
   hideDictationPermission();
-  if (gate.action === "record") dictationShow("Microphone and Speech Recognition are on. Click the mic to dictate.");
+  if (gate.action === "record") dictationShow(DICTATION_ALLOWED_NOTE);
 }
 
 /** Asked on every click: macOS through the helper, a browser through getUserMedia. */
@@ -454,6 +455,7 @@ async function startDictation() {
   dictationState.live = null;
   dictationState.session = { raw: [], cleaned: [], startedAt: Date.now() };
   dropDictationFeedback();
+  if (composerNote.textContent === DICTATION_ALLOWED_NOTE) dictationShow("");
   dictationState.restarts = 0;
   dictationState.locale = dictationLocale();
   renderDictationButton();

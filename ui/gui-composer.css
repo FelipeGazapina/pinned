@@ -630,6 +630,7 @@ html[data-appearance="light"] #composer-footer { box-shadow: 0 12px 28px -18px r
   #context-meter .used { stroke: var(--g-blue); stroke-linecap: butt; }
   #composer .tools > :is(#composer-attach, #composer-dictate) { width: 30px; height: 30px; border-radius: 8px; color: var(--g-side-muted); }
   #composer .tools > :is(#composer-attach, #composer-dictate) .i { width: 16px; height: 16px; }
+  #composer .tools > #composer-dictate[data-active="true"] { color: var(--g-error); }
   #composer .tools > #composer-dictate-lang { width: auto; min-width: 0; height: 30px; padding: 0 6px; border-radius: 8px; color: var(--g-side-muted); font: 600 11px/1 var(--g-sans); letter-spacing: 0; }
   #composer .round { width: 32px; height: 32px; margin-left: 0; }
   #composer .round:hover { transform: none; }
