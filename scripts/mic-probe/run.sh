@@ -4,8 +4,8 @@
 # the entitled run shows the real system prompt and leaves a TCC entry behind.
 # Usage: scripts/mic-probe/run.sh <out-dir>
 set -euo pipefail
-cd "$(dirname "$0")"
 out=$(mkdir -p "$1" && cd "$1" && pwd)
+cd "$(dirname "$0")"
 swiftc -O probe.swift -o "$out/probe" -framework AVFoundation
 
 for variant in plain entitled; do
@@ -34,8 +34,9 @@ PLIST
   screencapture -x "$out/$variant.png" || echo "screencapture failed"
   for _ in $(seq 1 30); do [ -s "$out/$variant.txt" ] && break; sleep 1; done
   cat "$out/$variant.txt" 2>/dev/null || echo "no answer yet"
-  log show --start "$since" --style compact --predicate 'subsystem == "com.apple.TCC" AND eventMessage CONTAINS "kTCCServiceMicrophone"' 2>/dev/null \
-    | grep -oE "(Prompting policy for hardened runtime; service: kTCCServiceMicrophone requires entitlement [a-z.-]+ but it is missing|Policy disallows prompt|AUTHREQ_PROMPTING: msgID=[0-9.]+, service=kTCCServiceMicrophone)" \
-    | sort | uniq -c | tee "$out/$variant.tcc.txt"
+  # tccd's reasons; the log can lag, so an empty list is not a failure.
+  log show --start "$since" --style compact --predicate 'process == "tccd" AND eventMessage CONTAINS "kTCCServiceMicrophone"' 2>/dev/null \
+    | grep -oE "(requires entitlement [a-z.-]+ but it is missing|Policy disallows prompt|AUTHREQ_PROMPTING|AUTHREQ_RESULT[^,]*)" \
+    | sort | uniq -c | tee "$out/$variant.tcc.txt" || true
   pkill -f "$variant/MicProbe.app" || true
 done
