@@ -3,6 +3,18 @@ name: release
 on:
   push:
     tags: ["v*"]
+  workflow_call:
+    inputs:
+      dry_run:
+        description: Build and verify every leg without a tag, a release or a change to latest.json on GitHub
+        type: boolean
+        default: false
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Build and verify every leg without a tag, a release or a change to latest.json on GitHub
+        type: boolean
+        default: true
 
 permissions:
   contents: write
@@ -13,13 +25,19 @@ concurrency:
 
 env:
   GH_REPO: ${{ github.repository }}
-  RELEASE_NOTES: On a Mac, install the .dmg. On Windows, run the _x64-setup.exe. Or click the update button in a running pinned.
+  RELEASE_NOTES: On a Mac, install the .dmg. On Windows, run the _x64-setup.exe. On Linux, run the .AppImage or install the .deb. Or click the update button in a running pinned.
 
 jobs:
   draft:
     runs-on: ubuntu-latest
     steps:
+      - name: Refuse a real release run that is not on a tag
+        if: ${{ !inputs.dry_run && github.ref_type != 'tag' }}
+        run: |
+          echo "a real release runs on a v* tag only, set dry_run to true" >&2
+          exit 1
       - name: Open a draft release
+        if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -45,6 +63,12 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             args: --target x86_64-pc-windows-msvc --bundles nsis
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            args: --target x86_64-unknown-linux-gnu --bundles appimage,deb
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            args: --target aarch64-unknown-linux-gnu --bundles appimage,deb
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -59,8 +83,14 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: swatinem/rust-cache@v2
+      - name: Install the Linux build libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libxdo-dev libssl-dev patchelf build-essential
       - run: npm ci
       - name: Draft the release
+        if: ${{ !inputs.dry_run }}
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -79,6 +109,7 @@ jobs:
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: bash scripts/apple-signing-env.sh >> "$GITHUB_ENV"
       - id: tauri
+        if: ${{ !inputs.dry_run }}
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -91,26 +122,53 @@ jobs:
           releaseDraft: true
           includeUpdaterJson: false
           args: ${{ matrix.args }}
+      # No tagName and no releaseId: tauri-action only builds, writes no release and lists the bundles it made.
+      - id: tauri-dry
+        if: ${{ inputs.dry_run }}
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        with:
+          includeUpdaterJson: false
+          args: ${{ matrix.args }}
       - name: Write this leg's updater fragment
         shell: bash
         env:
-          ARTIFACT_PATHS: ${{ steps.tauri.outputs.artifactPaths }}
+          ARTIFACT_PATHS: ${{ steps.tauri.outputs.artifactPaths || steps.tauri-dry.outputs.artifactPaths }}
           TARGET: ${{ matrix.target }}
-          APP_VERSION: ${{ steps.tauri.outputs.appVersion }}
+          APP_VERSION: ${{ steps.tauri.outputs.appVersion || steps.tauri-dry.outputs.appVersion }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
+          tag="$GITHUB_REF_NAME"
+          stage=()
+          if [[ "$DRY_RUN" == true ]]; then
+            tag="v${APP_VERSION}-dryrun"
+            stage=(--stage dry-run-bundles)
+          fi
           bash scripts/updater-fragment.sh \
             --target "$TARGET" \
-            --tag "$GITHUB_REF_NAME" \
+            --tag "$tag" \
             --repo "$GITHUB_REPOSITORY" \
             --version "$APP_VERSION" \
             --paths "$ARTIFACT_PATHS" \
-            --out updater-fragment.json
+            --out updater-fragment.json \
+            "${stage[@]}"
       - uses: actions/upload-artifact@v4
         with:
           name: updater-${{ matrix.target }}
           path: updater-fragment.json
           if-no-files-found: error
           overwrite: true
+      - name: Keep this leg's bundles for the dry-run check
+        if: ${{ inputs.dry_run }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: dry-run-bundles-${{ matrix.target }}
+          path: dry-run-bundles
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 3
 
   linux-node:
     needs: draft
@@ -158,13 +216,27 @@ jobs:
           pattern: updater-*
           path: updater-fragments
       - name: Assemble latest.json
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           pub_date=$(python3 -c 'from datetime import datetime, timezone; print(datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z")')
+          tag="$GITHUB_REF_NAME"
+          version=()
+          if [[ "$DRY_RUN" == true ]]; then
+            fragment_version=$(jq -r '.version' updater-fragments/*/updater-fragment.json | sort -u)
+            [[ "$fragment_version" != *$'\n'* && -n "$fragment_version" ]] || {
+              echo "the updater fragments disagree on the version: $fragment_version" >&2
+              exit 1
+            }
+            tag="v${fragment_version}-dryrun"
+            version=(--version "$fragment_version")
+          fi
           bash scripts/assemble-latest-json.sh \
             --notes "$RELEASE_NOTES" \
             --pub-date "$pub_date" \
-            --tag "$GITHUB_REF_NAME" \
+            --tag "$tag" \
             --out node-release/latest.json \
+            "${version[@]}" \
             updater-fragments
       - name: Sign checksums of those exact bytes
         env:
@@ -172,6 +244,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         run: bash scripts/sign-node-sums.sh node-release
       - name: Upload the signed node files
+        if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -181,8 +254,29 @@ jobs:
             node-release/pinned-server-x86_64-unknown-linux-musl \
             node-release/pinned-server-aarch64-unknown-linux-musl \
             node-release/latest.json
+      - uses: actions/download-artifact@v4
+        if: ${{ inputs.dry_run }}
+        with:
+          pattern: dry-run-bundles-*
+          path: dry-run-release
+          merge-multiple: true
+      - name: Verify the dry run the way publish does, on local files
+        if: ${{ inputs.dry_run }}
+        run: |
+          cp node-release/* dry-run-release/
+          bash scripts/release-asset.sh verify dry-run-release
+      - name: Keep the dry-run release files
+        if: ${{ inputs.dry_run }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: dry-run-release
+          path: dry-run-release
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 3
 
   publish:
+    if: ${{ !inputs.dry_run }}
     needs: [build, linux-node, sign-node]
     runs-on: ubuntu-latest
     concurrency:
