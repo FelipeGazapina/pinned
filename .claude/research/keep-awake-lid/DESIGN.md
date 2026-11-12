@@ -290,3 +290,250 @@ agent starts, and nothing would restore after a crash. Rejected.
 The logind lock dies with its file descriptor (section 1.3). pinned changes the existing hold to
 `--what=sleep:idle:handle-lid-switch` while an agent runs and the switch is on. The existing
 `tail --pid` trick and process group (`src/awake.rs:70-110`) already end it when pinned dies.
+
+---
+
+## 3. What counts as "an agent is running", and the grace time
+
+### 3.1 Where the node already knows it
+
+All of it lives in the node, `crates/core/src/machine.rs`, which runs inside the desktop app:
+
+- **Tabs** (`Machine::tabs`, one `Tab` per session: threads, Captains, workers, the global
+  Orchestrator, workflow sessions, connector sessions). `Tab::notice_idle()`
+  (`machine.rs:588`) and `Tab::quiet()` (`machine.rs:572`) already decide "between turns":
+  a turn is in progress when `turn_pending` is set (typed, no hook yet), `status` is `Working`
+  (unless it is only waiting on background work it left, `background_wait`), it is `starting`, or
+  it left shells running (`shells_left`). The wire mirror is `SessionState::of`
+  (`global_orchestrator.rs:687`): `Running` when `status == Working || orchestrator_turn`.
+- **The Orchestrator's turn** on a Captain: `TabView::orchestrator_turn` (`wire.rs:145`), set
+  when the global orchestrator's message started a turn before its first hook.
+- **Messages waiting to be typed**: `TabView::queued` (`wire.rs:149`), worker news and orchestrator
+  requests that will start a turn as soon as the tab is idle.
+- **Delegated tasks**: `delegates.running()` (`delegate/registry.rs:1482`), every task not in a
+  terminal `WorkState` (`delegate/mod.rs:318`: `Working`, `WaitingForChildren`). `summary()`
+  (`machine.rs:5830`) already filters out tasks that run on another machine (`task.remote`).
+- **Scheduled workflow / connector runs**: owned by the hub (`graph/runner.rs`), but their work is
+  a session on a machine (`talk` opens a tab; `run_now` starts it), so the tab rule covers them.
+
+### 3.2 The rule
+
+New pure function in core, `awake::busy(&tabs, &tasks, now) -> Busy { agents: u32, waiting: u32 }`.
+A machine is **busy** when any of these holds, counting only work on this machine:
+
+1. a tab of `Program::Agent` with a turn in progress: `turn_pending`, `starting`,
+   `status == Working` (including `background_wait`, since background work it started is still
+   agent work), or `shells_left`;
+2. a tab with `orchestrator_turn` or `queued > 0`;
+3. a delegated task not terminal and not `remote`.
+
+**Does not count:** a tab sitting at its prompt; a `Failed` tab; a tab waiting out a usage limit
+(`resume_at`): that can be hours, and the session continues when the machine wakes; a plain shell
+in the terminal panel (the brief says agents; `panel.rs:1399` `busy()` exists if Felipe wants
+shells too later).
+
+**Waiting on the user mid-turn** (`NeedsInput` while the turn is open: an approval or a question)
+counts, so Felipe can answer from the phone and the work goes on. But it is capped: if **every**
+busy tab has been waiting on the user for **30 minutes**, the machine is treated as not busy and
+the hub shows "Waiting on you; let the Mac sleep". Without the cap one forgotten approval keeps a
+laptop awake in a bag all night.
+
+### 3.3 Grace time
+
+**2 minutes** after the last agent ends before giving the lid hold back. Reasons: a Captain often
+starts a new turn seconds after a worker reports (`queued` covers most, not all); a worker's end
+reaches its parent through the hub; scheduled steps chain. Two minutes of a closed laptop awake is
+cheap; sleeping mid-chain loses the next step until the lid opens. The grace time is a constant,
+not a setting.
+
+Evaluation: on every tab status change (the node already emits events there) plus a 10 s tick; the
+result is debounced, so a flicker between two turns does not toggle the root helper.
+
+---
+
+## 4. Heat guard
+
+A closed MacBook in a bag with agents compiling Rust is the real risk.
+
+**macOS.** `ProcessInfo.processInfo.thermalState` and `thermalStateDidChangeNotification`
+([thermalState](https://developer.apple.com/documentation/foundation/processinfo/thermalstate-swift.property),
+[thermalStateDidChangeNotification](https://developer.apple.com/documentation/foundation/processinfo/thermalstatedidchangenotification)).
+Apple: `.serious` means "Fans are running at maximum speed" and the system is reducing performance;
+`.critical` means "the device needs to cool down"
+([serious](https://developer.apple.com/documentation/foundation/processinfo/thermalstate-swift.enum/serious),
+[critical](https://developer.apple.com/documentation/foundation/processinfo/thermalstate-swift.enum/critical)).
+Rule, **only while the lid is closed** (the lid state is the root domain's `AppleClamshellState`
+registry property, set in `IOPMrootDomain.cpp` and readable without privileges):
+
+- `.critical` → release the lid hold now.
+- `.serious` for 5 minutes in a row → release.
+- After a heat release, the lid hold is not taken again until the lid opens: the user has to look.
+
+Remember that with `SleepDisabled` the kernel will not do its own thermal-emergency sleep
+(section 1.1), so the helper repeats the `.critical` check itself (section 2.1).
+
+**Windows.** No public user-mode thermal-state API that I found in Microsoft's docs; ACPI thermal
+zones go to the kernel's thermal manager. Guard: the **time cap** (8 h per stretch on battery) and
+the battery floor. Lid state from `GUID_LIDSWITCH_STATE_CHANGE`
+([Power Setting GUIDs](https://learn.microsoft.com/en-us/windows/win32/power/power-setting-guids),
+not re-read for this design).
+
+**Linux.** `/sys/class/thermal/thermal_zone*/temp` against each zone's `passive`/`hot` trip points
+([kernel thermal sysfs](https://docs.kernel.org/driver-api/thermal/sysfs-api.html), not re-read):
+release when any zone passes its `hot` trip, or within 5 °C of `critical`. Plus the time cap. Lid
+state: logind's `LidClosed` property.
+
+**What the user sees** (app Settings line, the machine on the hub, and a notification in the app
+next time it is opened):
+
+- "Stopped keeping awake at 14:32: the Mac was too hot with the lid closed. It went to sleep."
+- "Stopped keeping awake at 02:10: 8 hours on battery with the lid closed."
+
+**Battery floor (all platforms):** read every 30 s (`IOPSCopyPowerSourcesInfo` on macOS,
+`GetSystemPowerStatus` on Windows, `/sys/class/power_supply/*/capacity` on Linux). Below the floor
+on battery → release; "Stopped keeping awake at 19% battery. It went to sleep." Plugging in again
+while the lid is closed takes the hold back on its own if agents still run (the machine is awake
+for a moment on AC attach? **No**: once asleep, it stays asleep until the lid opens; so after a
+release the next hold waits for the next wake).
+
+---
+
+## 5. Network with the lid closed, and what the hub shows
+
+### 5.1 Does the node keep its hub connection?
+
+- **macOS with `SleepDisabled`:** the machine never sleeps, so it is in full wake with the display
+  off. This is **not** Power Nap or dark wake, which pinned must not count on: Power Nap is a short
+  dark wake for system tasks, not for third-party apps. The node's WebSocket (`link.rs`, ping every
+  20 s, `link.rs:21`) should stay up over Wi-Fi. **To confirm in Felipe's manual test** (1.1).
+- **App Nap**: pinned does not opt out of App Nap anywhere today (`grep` finds no
+  `beginActivity`). With the window gone and the lid closed, macOS may throttle pinned's timers.
+  While the lid hold is on, the app takes
+  `ProcessInfo.beginActivity(options: [.userInitiated, .idleSystemSleepDisabled])`
+  ([ActivityOptions](https://developer.apple.com/documentation/foundation/processinfo/activityoptions))
+  and ends it with the hold. This also replaces `caffeinate` for the idle part on macOS.
+- **Windows:** classic S3 laptops stay fully on with `LIDACTION = 0`. Modern Standby laptops:
+  uncertain (1.2); on battery "the networking stacks may initiate disconnection" if standby is
+  entered. Beta until tested.
+- **Linux:** with the lid inhibited the machine is simply on.
+
+### 5.2 What the hub shows for that machine
+
+Precedent: the app already reports Run in the background with `MachineEvent::Background { on }`
+(`wire.rs:1005`), kept by the hub as `MachineView::background` (`wire.rs:1472`, `hub.rs:1156`).
+Same pattern, with one difference: **the hub keeps the last report after the machine goes
+offline**, because "went to sleep at 19%" matters exactly when it is offline.
+
+Settings → Machines (`ui/account.js` `machineStateHtml`) and the machine's row in the web app show
+one line:
+
+| State | Line |
+|---|---|
+| Switch on, nothing running | "Sleeps when idle · keeps awake while agents run" |
+| Holding, lid open | "Kept awake · 2 agents running" |
+| Holding, lid closed | "Awake with the lid closed · 2 agents running · 64% battery" |
+| Grace | "Agents finished · sleeps in 2 min" |
+| Released on battery (offline after) | "Went to sleep at 14:32: battery at 19%" |
+| Released on heat / time cap | "Went to sleep at 14:32: too hot" / "…: 8 h on battery" |
+| Needs approval on the Mac | "Keep awake with the lid closed needs approval on this Mac" |
+
+### 5.3 Wire changes, additive only (AGENTS.md)
+
+All in `crates/core/src/wire.rs`, all new names, nothing renamed or removed:
+
+- `Call::KeepAwakeSettings` → `awake::Settings`; `Call::SetKeepAwakeSettings { settings }` →
+  the saved `awake::Settings`. A machine without the app refuses, like `SetBackground`.
+- `awake::Settings { lid: bool, battery_floor: u8 /* default 20 */, battery_hours: u8 /* default
+  8, 0 = no cap */, heat_guard: bool /* default true */ }`, every field `#[serde(default)]`.
+- `MachineEvent::Awake { state: AwakeReport }`, sent on connect and on each change.
+  `AwakeReport { lid_switch: bool, holding: bool, lid_closed: Option<bool>, on_battery:
+  Option<bool>, battery: Option<u8>, agents: u32, stopped: Option<Stopped> }`,
+  `Stopped { reason: StopReason, at: i64 }`,
+  `enum StopReason { LowBattery, Heat, TimeCap, WaitingTooLong, NotApproved, Failed }`.
+- `MachineView::awake: Option<AwakeReport>` with
+  `#[serde(default, skip_serializing_if = "Option::is_none")]`.
+
+An old app never sends the event and never reads the field. An old hub receiving
+`MachineEvent::Awake` from a new app: same situation as when `Background` was added; the hub
+deploys before apps update (hub-deploy on every push), so in practice the hub is newer. After the
+wire PR: `cargo run -p pinned-server --bin wire-contract -- snapshot current` and `-- check`
+(exit 0). No existing snapshot is edited.
+
+---
+
+## 6. Agents read and set it like the user
+
+`crates/core/src/surface.rs` `ACTIONS` must list every new `Call`
+(`every_wire_call_has_one_action` fails otherwise, `surface.rs:998`). Proposed:
+
+```rust
+n("keep_awake_settings", Read, "Whether this machine keeps awake with the lid closed while agents run, its battery floor, battery time cap and heat guard, and what it is doing now: holding, lid closed, battery, and why it last stopped.").wired(),
+n("set_keep_awake_settings", Confirm, "Turns keeping awake with the lid closed on or off on the machine, or changes its battery floor, battery time cap or heat guard. The user approves it in the app; on a Mac the first time also needs approval in System Settings.").wired(),
+```
+
+- Per machine: `act` already runs a `Call` "on the session's machine or the one it names"
+  (`Action::on`), so "keep my MacBook awake while you work" from the Orchestrator on another
+  machine works with `machine: "macbook"`.
+- **Why `Confirm`, not `Write`:** it changes how hot and how drained a closed laptop gets, and on a
+  Mac it starts a root helper. Today's comparable switch, `set_background`, is `Excluded` ("the
+  user's own setting"). Felipe asked that agents can set it, so one tap in the app is the middle
+  ground. Turning it **off** could be `Write`; one class per action keeps it simple, and the
+  confirmation for "off" is a single tap. If Felipe wants "off" without asking, split into
+  `set_keep_awake_settings` (Confirm) and a `stop_keeping_awake` (Write) later.
+- An agent can never approve the macOS System Settings prompt; if approval is missing, the answer
+  says "needs approval on the Mac" (`StopReason::NotApproved`), and the app shows the button.
+- The plugin's `actions` list picks it up from `ACTIONS`; no MCP change.
+
+---
+
+## 7. Plan: small PRs, proof, model tier, manual tests
+
+No test runs on Felipe's MacBook except the manual list at the end. Rust tests run on the existing
+CI runners (`macos.yml` macos-latest, `windows.yml` windows-latest, `linux.yml`) and on an Upstash
+Box (Linux) for core, wire and hub. GitHub's macOS and Windows runners are throwaway VMs with
+passwordless admin, so the real power-setting round trips run there, never on a person's machine.
+
+| # | PR | What | Proof | Model |
+|---|---|---|---|---|
+| 1 | `awake: busy rule and lid policy` | core, pure: `awake::busy()` (3.2), the hold state machine (grace 2 min, battery floor, 8 h cap, 30 min waiting cap, heat inputs), `awake::Settings` saved in the config dir. No platform code. | Unit tests with fake tabs/tasks and a fake clock: every row of 3.2, grace, floor, cap, heat. Runs on all three CI OSes and a Box. | Sonnet 5.5 |
+| 2 | `wire: keep-awake settings and report` | 5.3 wire types, `surface.rs` entries (6), node answers `Call`s via `AppWindow` (refuses without the app), hub keeps `MachineView::awake` across offline. | `wire.rs` round-trip tests; `surface.rs` suite; hub test modeled on `a_machine_reports_run_in_the_background_on_its_view_while_it_is_online` (`hub.rs:1500`) plus "kept after offline"; `wire-contract check` exit 0, `snapshot current` committed. | Sonnet 5.5 |
+| 3 | `macos: pinned-lid-helper` | The root daemon (2.1): socket + peer uid, lease/TTL, journal, restore at start and on SIGTERM, 24 h cap, its own battery/thermal check. Power-setting writes behind a trait. | Unit tests with a fake power backend (no root): lease ends on socket close, on TTL, restores at start from journal, refuses wrong uid, keeps a pre-existing `disablesleep 1`. **CI-only** job on macos-latest: run the helper under `sudo` with the real backend, hold, `pmset -g` shows `SleepDisabled 1`, kill the client, shows 0 within 2 s; `kill -9` the helper, restart it, journal restores. | Opus 5.5 (root code, security) |
+| 3b | optional: restore without the bundle | the system-binary one-shot of 2.1, only if SMAppService allows it cleanly. | CI macOS: delete the helper binary mid-hold, the one-shot restores. | Opus 5.5 |
+| 4 | `macos: lid switch in General` | `SMAppService` register/approve/unregister, `AppWindow` methods, lease client, App Nap activity, battery/thermal/lid readers, the switch and its lines in `gui-features.js`, the app notice after a stop. macOS 12 and ad-hoc builds show it disabled with the reason. | Rust unit tests (state → UI line); a `ui/*.test.js` like `settings-page.test.js` for every line of 5.2; CI macOS build of the bundle checks `Contents/Library/LaunchDaemons/*.plist` and the helper's signature. | Sonnet 5.5 |
+| 5 | `windows: lid action hold` | 2.2: read/write `LIDACTION` AC+DC, journal, HKCU Run restore, `--lid-guard`, access-denied message. | **CI-only** on windows-latest: hold → `powercfg /q SCHEME_CURRENT SUB_BUTTONS LIDACTION` shows 0; kill pinned's test process → guard restores; run `--restore-lid` with a journal → restored and Run key gone. | Sonnet 5.5 |
+| 6 | `linux: handle-lid-switch` | add `handle-lid-switch` to the inhibitor while holding (2.3). | Extend `the_hold_takes_an_inhibitor_and_leaves_nothing_running_or_says_why_not` (`awake.rs`); a runner with no logind must still name the tool in its error. | Haiku 5.5 |
+| 7 | `hub/web: show the awake state` | Machines page and machine row lines of 5.2. | `ui/machine-load.test.js`-style tests per line; one Playwright web-sweep on a Box against a local hub with a fake machine reporting each state. | Sonnet 5.5 |
+| 8 | `docs + changelog` | Settings help, "turn it off before deleting pinned", CHANGELOG 0.18.2. | Review. | Haiku 5.5 |
+
+Order: 1 → 2 → (3, 5, 6 in parallel) → 4 → 7 → 8. Release once 1–4 and 7 are in; 5 and 6 can
+ship labeled beta.
+
+### Manual test list for Felipe (MacBook, signed build, on battery and on charger)
+
+1. Turn **Keep working with the lid closed** on. System Settings opens to Login Items; approve.
+   The switch says On. `pmset -g | grep SleepDisabled` shows **0** (nothing runs yet).
+2. Start a worker on a long task. Within 10 s `pmset -g` shows `SleepDisabled 1`, the hub's
+   Machines page says "Kept awake · 1 agent running".
+3. Close the lid, on charger. From the phone, the hub shows "Awake with the lid closed"; send the
+   Orchestrator a message; it answers. Wait 10 min; the worker keeps reporting.
+4. Same on battery. Lid closed, 10 min; worker still reports; the battery % on the hub moves.
+5. Let the worker finish with the lid closed. ~2 min later the Mac sleeps (the hub shows it
+   offline). Open the lid: `SleepDisabled 0`.
+6. Set the floor to a value just under the current battery %, close the lid with a worker running.
+   When it crosses, the hub shows "Went to sleep at …: battery at N%"; the Mac is asleep.
+7. With a worker running, `kill -9` pinned. Within a few seconds `pmset -g` shows
+   `SleepDisabled 0`.
+8. Turn the switch off. pinned leaves System Settings → Login Items, `SleepDisabled 0`, and a lid
+   close with a worker running sleeps the Mac as before.
+
+(Heat cannot be tested safely by hand; it is covered by unit tests with a fake thermal state.)
+
+---
+
+## Open questions for Felipe
+
+1. 20% floor and an 8 h battery cap: OK, or no cap?
+2. Should a session waiting on your approval keep the laptop awake for 30 min (proposed), or not
+   at all?
+3. Is the Developer ID signing on for releases? If not, the Mac switch needs it (2.1).
+4. Agents turning it **off** without asking: want that as a separate `Write` action?
