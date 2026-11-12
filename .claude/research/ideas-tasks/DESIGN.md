@@ -9,7 +9,7 @@ Felipe asked for two features:
 
 Both are reachable from the Orchestrator, from any session through `act`/`actions`, and from the UI (desktop, hub web, phone width).
 
-**Naming.** The UI says **Ideas** and **Tasks**. On the wire and in agent tools, Tasks are called `schedule_*`, never `task_*`. `delegate_task`, `task_status`, `task_cancel` and `task_review` already exist for delegated child tasks (`crates/core/src/reminders.rs`, `crates/core/src/delegate/`), the composer already shows a "Tasks" strip for Claude Code's todo list (`ui/gui-composer.js:835`), and Usage shows "Tasks" for delegated runs (`ui/delegation.js:69`). An agent told to "create a task" must not end up calling `delegate_task`, so the tool names stay separate and the tool descriptions say which is which.
+**Naming.** The UI says **Ideas** and **Tasks**. On the wire and in agent tools, Tasks are named `save_schedule`, `list_schedules`, `pause_schedule`, `delete_schedule`, `run_schedule_now` (and Ideas `save_idea`, `list_ideas`, `delete_idea`), never `task_*`. `delegate_task`, `task_status`, `task_cancel` and `task_review` already exist for delegated child tasks (`crates/core/src/reminders.rs`, `crates/core/src/delegate/`), the composer already shows a "Tasks" strip for Claude Code's todo list (`ui/gui-composer.js:835`), and Usage shows "Tasks" for delegated runs (`ui/delegation.js:69`). An agent told to "create a task" must not end up calling `delegate_task`, so the tool names stay separate and the tool descriptions say which is which.
 
 ---
 
@@ -147,7 +147,7 @@ Rules:
 
 - **"Agent type must not matter"** holds because the target is an address, not a role. Every delivery path below already exists for that kind of agent. The task module only picks the path.
 - The scheduler lives **on the hub**, the one place that is always on, sees every machine, and already runs the connector loop. Tasks are stored in Postgres like connectors: tables `tasks`, `task_runs`, `ideas`.
-- Natural language ("tomorrow at 9 a.m.") is turned into a `Schedule` by the agent, never by the hub. `schedule_save` validates the schedule and answers the next three run times in the task's zone ("next: Fri 13 Nov 09:00 BRT"), so the agent can read them back to Felipe before he moves on.
+- Natural language ("tomorrow at 9 a.m.") is turned into a `Schedule` by the agent, never by the hub. `save_schedule` validates the schedule and answers the next three run times in the task's zone ("next: Fri 13 Nov 09:00 BRT"), so the agent can read them back to Felipe before he moves on.
 - `tz` defaults to the zone of the device or machine that saves the task (`Intl.DateTimeFormat().resolvedOptions().timeZone` in the UI, the machine's zone for an agent). The hub evaluates with `chrono-tz`. A local time skipped by a DST change runs at the first valid minute after it. A local time that happens twice runs once, at the first.
 
 ### 2.3 What is migrated or deleted
@@ -155,16 +155,16 @@ Rules:
 | Today | 0.18.2 | Later |
 |---|---|---|
 | `reminders::Reminders`, `reminders.json`, `watch_reminders`, `notify` (desktop-only) | On first start after update, a signed-in app turns each pending `Reminder` into a `Once` task with `Target::Me` and renames the file to `reminders.migrated.json`. `Target::Me` fires as a hub push to every device (desktop notification + web push via `sw.js`/`sw-notifications.js`) | Delete `Reminders`, `watch_reminders` and the file handling in 0.19 |
-| `remind_me`, `list_reminders`, `cancel_reminder` tools, `agent::Message::{Remind, ListReminders, CancelReminder}` | Kept as **aliases** with the same names and arguments. They now create, list and cancel `Target::Me` tasks through the hub. Their descriptions say "prefer schedule_save". Sessions started by older apps keep working because the tool names do not change | Remove the aliases one minor version after every snapshot-listed app ships `schedule_*` (the agent tool list is not wire-contract, but old MCP configs on disk still name the tools) |
+| `remind_me`, `list_reminders`, `cancel_reminder` tools, `agent::Message::{Remind, ListReminders, CancelReminder}` | Kept as **aliases** with the same names and arguments. They now create, list and cancel `Target::Me` tasks through the hub. Their descriptions say "prefer save_schedule". Sessions started by older apps keep working because the tool names do not change | Remove the aliases one minor version after every snapshot-listed app ships the schedule actions (the agent tool list is not wire-contract, but old MCP configs on disk still name the tools) |
 | `--no-reminders` / `NO_REMINDERS` on nodes | `Target::Me` no longer needs a desktop, so nodes offer the tools too. The flag stays accepted and becomes a no-op | Delete the flag |
-| Run now (`run_workflow`, `HubCall::RunWorkflow`, `Call::RunNow`) | Unchanged. `schedule_run_now` of an `Action::Workflow` task calls the same `Hub::run_workflow` | — |
-| "Remember to do X someday" in `memory_save` | The Orchestrator's prompt (`global_orchestrator.rs:802`) says: facts go to memory, things to do someday go to `idea_save`. There is no automatic move of old memories: we cannot tell an idea from a fact without guessing. The Ideas page has "Import from Orchestrator memory…", which lists memories whose `kind` is `idea`/`todo` and lets Felipe pick them | — |
+| Run now (`run_workflow`, `HubCall::RunWorkflow`, `Call::RunNow`) | Unchanged. `run_schedule_now` of an `Action::Workflow` task calls the same `Hub::run_workflow` | — |
+| "Remember to do X someday" in `memory_save` | The Orchestrator's prompt (`global_orchestrator.rs:802`) says: facts go to memory, things to do someday go to `save_idea`. There is no automatic move of old memories: we cannot tell an idea from a fact without guessing. The Ideas page has "Import from Orchestrator memory…", which lists memories whose `kind` is `idea`/`todo` and lets Felipe pick them | — |
 
 ### 2.4 Ideas
 
 - **Account-wide, with an optional project.** An idea is Felipe's, not a repo's: many ideas ("an iPad app", "a cheaper box tier") have no project yet. `project: Option<String>` (a repo key such as `github.com/FelipeGazapina/pinned`) lets the list filter by project and lets a Captain list "ideas for my project".
 - **Type** (`crates/core/src/ideas.rs`, new): `Idea { id, title, text, project: Option<String>, status: Open | Done | Dropped, task: Option<String>, created_by: Actor, created_at, updated_at }`. Stored in the hub table `ideas`.
-- **How an idea differs from memory.** Memory is *what is true*: preferences, decisions, conventions. Agents recall it into their prompts on their own. An idea is *what might be done*. It is never recalled into a prompt and is read only when someone asks. The tool descriptions say this in one line each. `idea_save` saves whatever it is given, and the Orchestrator prompt carries the split ("anota essa ideia" → `idea_save`; "lembra que eu prefiro X" → `memory_save`). A filter that guessed would only cause surprises.
+- **How an idea differs from memory.** Memory is *what is true*: preferences, decisions, conventions. Agents recall it into their prompts on their own. An idea is *what might be done*. It is never recalled into a prompt and is read only when someone asks. The tool descriptions say this in one line each. `save_idea` saves whatever it is given, and the Orchestrator prompt carries the split ("anota essa ideia" → `save_idea`; "lembra que eu prefiro X" → `memory_save`). A filter that guessed would only cause surprises.
 - **Idea → task.** "Schedule…" on an idea opens the task editor with the title and text filled in and `task.idea = idea.id`. The idea stays, shows "Scheduled: Fri 09:00", and moves to `Done` when a one-time task's run ends `done`. "Send to Captain now" is the same as Run now: a task with no schedule is just `send_to_captain`, so it calls that directly and creates no task.
 
 ### 2.5 Wire contract (AGENTS.md)
@@ -243,20 +243,20 @@ Two existing lists, and nothing new to invent:
 ### 4.3 Approving at creation
 
 - `Task.approvals: Vec<Approval { item: NeverItem, must_contain: String, repo: String }>`. Example: `{ item: Release, must_contain: "v0.18.2", repo: "github.com/FelipeGazapina/pinned" }`. A held command is covered only when its item matches, it runs in that repo's checkout, and its text contains `must_contain`. That is "that exact action": releasing **v0.18.2** of pinned, not "any release". An empty `must_contain` is refused.
-- **Only Felipe grants approvals.** In the UI he ticks "Allowed without asking: ☑ release v0.18.2" in the task editor. When an agent sends `schedule_save` with `approvals`, the save is classified `Confirm`: it becomes a confirmation that shows the task and each approval, and nothing is saved until he approves. A `schedule_save` without approvals is `Write`.
+- **Only Felipe grants approvals.** In the UI he ticks "Allowed without asking: ☑ release v0.18.2" in the task editor. When an agent sends `save_schedule` with `approvals`, the save is classified `Confirm`: it becomes a confirmation that shows the task and each approval, and nothing is saved until he approves. A `save_schedule` without approvals is `Write`.
 - An approval never covers `Secrets`, `SelfGrant` or `Payment`. Those always hold. It also never covers what AGENTS.md reserves for the owner: approving the `hub-breaking-change` environment, or deleting or editing a wire snapshot.
 - Approvals are shown on the task card ("✓ may release v0.18.2"). Changing a task's action or target drops its approvals, and Felipe has to grant them again.
 
 ### 4.4 Agent-created tasks
 
-- `created_by: Actor { role: ActorRole, machine, tab, session_title }`, or the user. Every `schedule_*` and `idea_*` act goes through `act`, so the existing audit trail (`agent_actions`) already records who, when and with which arguments. Acts inside a task run carry `AuditEntry.task`.
+- `created_by: Actor { role: ActorRole, machine, tab, session_title }`, or the user. Every schedule and idea act goes through `act`, so the existing audit trail (`agent_actions`) already records who, when and with which arguments. Acts inside a task run carry `AuditEntry.task`.
 - **Visible.** A task created by an agent shows a chip ("by Captain · pinned") on its card. Creating one sends an FYI row to the Inbox: "The Orchestrator scheduled *Release pinned 0.18.2* for Fri 13 Nov 09:00 — Open · Pause". There is no approval for a plain prompt task: an agent that can `prompt` or `send_to_captain` now can already do the same thing now, and scheduling adds no power, only a delay.
 - **Guard rails on agents** (not on Felipe):
   - minimum interval 15 minutes for an agent's cron;
   - at most 20 enabled agent-created tasks per account (`Refused` with the list);
   - a task run may create tasks, but one created inside a task run cannot itself create more (`depth ≤ 1`, carried in the environment), so a task cannot keep rescheduling itself;
   - an agent may edit, pause or delete any task, as the user can. Felipe asked for that, and the audit trail shows it. Deleting a task Felipe created is `Confirm`.
-- **One switch.** "Pause all tasks" on the Tasks page and as `schedule_pause { all: true }` (that one is `Confirm` for agents: a stuck agent must not silence everything).
+- **One switch.** "Pause all tasks" on the Tasks page and as `pause_schedule { all: true }` (that one is `Confirm` for agents: a stuck agent must not silence everything).
 
 ---
 
@@ -386,7 +386,7 @@ The tab bar stays at four tabs: Threads, Needs you, Orchestrator, More. Tasks an
 ```
 
 - On the phone, Ideas' quick-add sits pinned above the keyboard, so capturing an idea is one tap from More.
-- The Orchestrator tab is the other quick path: "anota: iPad layout" → `idea_save`.
+- The Orchestrator tab is the other quick path: "anota: iPad layout" → `save_idea`.
 
 ### 5.5 Workflows page
 
@@ -401,7 +401,7 @@ Each PR runs `cargo run -p pinned-server --bin wire-contract -- snapshot current
 | # | PR | Contents | Proof | Model |
 |---|---|---|---|---|
 | 1 | `core: schedule and idea types` | `crates/core/src/schedule.rs` (`Task`, `Schedule`, `Target`, `Action`, `OnMissed`, `Fallback`, `Approval`, `TaskRun`, `next_after(schedule, tz, after)`), `ideas.rs` (`Idea`). Deps: `chrono-tz`, `croner` (cron with DST-safe evaluation). No callers yet | Unit tests: once / cron / weekdays; DST gap (São Paulo, New York) and overlap; leap day; "tomorrow 09:00" across midnight; invalid cron refused with a readable error; serde round-trip with defaults (an older JSON without the new fields) | **sonnet** |
-| 2 | `hub: ideas store and calls` | Tables `ideas`; `HubCall::{ListIdeas, SaveIdea, DeleteIdea}`; `Settings.ideas` push field; `surface::ACTIONS` rows `list_ideas`/`save_idea`/`delete_idea` (Read/Write/Write, wired); `idea_*` tools for the Orchestrator and every session; Orchestrator prompt split memory vs idea (`global_orchestrator.rs:802`) | `crates/server/tests/hub.rs`: save, list by project, edit, delete, another account cannot see; `surface.rs` tests (`every_wire_call_has_one_action`); wire-contract check additive | **sonnet** |
+| 2 | `hub: ideas store and calls` | Tables `ideas`; `HubCall::{ListIdeas, SaveIdea, DeleteIdea}`; `Settings.ideas` push field; `surface::ACTIONS` rows `list_ideas`/`save_idea`/`delete_idea` (Read/Write/Write, wired); the idea tools for the Orchestrator and every session; Orchestrator prompt split memory vs idea (`global_orchestrator.rs:802`) | `crates/server/tests/hub.rs`: save, list by project, edit, delete, another account cannot see; `surface.rs` tests (`every_wire_call_has_one_action`); wire-contract check additive | **sonnet** |
 | 3 | `ui: Ideas page` | Shell page `ideas`, sidebar nav row, More row on phone, quick-add, editor, filters | `ui/ideas.test.js` (render, filters, quick-add sends `save_idea`); tutorial video: sidebar → Ideas → add → edit → delete, then the same at phone width via More | **sonnet** |
 | 4 | `hub: schedule store and calls` | Tables `tasks`, `task_runs` (`unique (task, due_at)`); `HubCall::{ListSchedules, SaveSchedule{dry_run}, PauseSchedule, DeleteSchedule, ScheduleRuns}`; `Settings.schedules`; actions `list_schedules` (Read), `save_schedule` (Write; **Confirm** when it carries approvals, through a `.checks()` like `marks::agent_check`), `pause_schedule`, `delete_schedule` (Confirm for a user-created task); agent caps (15-min interval, 20 tasks) | Hub tests: CRUD; dry-run answers next 3 times in tz; agent with approvals → confirmation, not saved; caps refused; audit rows carry the creator | **sonnet** |
 | 5 | `hub: the scheduler` | `schedule::Scheduler` loop in `Hub::watch_all`; claim-once insert; delivery per target (`Me` push, `Orchestrator`, `Captain` via the `send_to_captain` handoff, `Session` via `prompt` with wait-for-idle / unarchive, `Worker` via delegate placement, `Workflow` via `run_workflow`); `request_id = task:<id>:<due>`; grace, `OnMissed`, coalescing; restart recovery; `RunScheduleNow` + `run_schedule_now` action (`starts_work`) | Hub tests with a paused tokio clock: fires once; two schedulers on one DB fire once; host offline → waits → delivered in grace / missed after; `Ask` creates a Needs-you row; `Skip` and coalescing after a 7-day gap; hub restart mid-run does not resend (`Lost`); busy Captain → queued; limits refusal → retried then failed | **opus** |
@@ -409,7 +409,7 @@ Each PR runs `cargo run -p pinned-server --bin wire-contract -- snapshot current
 | 7 | `ui: Tasks page` | Shell page `tasks`, nav row with next run and held count, cards, editor (dry-run Next line, tz picker, approvals only in the user's UI), history, Pause all; Needs you rows for held and missed; More row on phone | `ui/tasks.test.js` (card sentences, editor builds `Schedule`, held row buttons); tutorial video: create "release at 09:00" task with an approval, Run now, see it held for an unapproved deploy, approve from Needs you; phone width via More | **sonnet** |
 | 8 | `ui+hub: workflows ↔ tasks, ideas → tasks` | Schedule… on workflow cards/editor, "⏱ next" line; Schedule… on ideas (`task.idea`), idea `Done` when its one-time task finishes | UI tests; hub test idea status follows its task; tutorial video: schedule a workflow, schedule an idea | **sonnet** |
 | 9 | `reminders → tasks` | `remind_me`/`list_reminders`/`cancel_reminder` become aliases over `Target::Me` tasks; `reminders.json` migration on first signed-in start; nodes offer them; `Target::Me` push to desktop + web push | `crates/core/tests/delegate_mcp.rs` updated: same tool names and arguments, now land on the hub; migration test (file → tasks → `.migrated`); desktop notification still shows (manual note in PR) | **sonnet** |
-| 10 | `docs + changelog` | CHANGELOG 0.18.2 entries, Orchestrator help text, `docs/global-orchestrator/CONTRACTS.md` section for `schedule_*`/`idea_*` | Review only | **haiku** |
+| 10 | `docs + changelog` | CHANGELOG 0.18.2 entries, Orchestrator help text, `docs/global-orchestrator/CONTRACTS.md` section for the schedule and idea actions | Review only | **haiku** |
 | 11 | *(0.19)* `remove reminders store` | Delete `Reminders`, `watch_reminders`, `--no-reminders` handling; later the alias tools | Tests still green; wire check | **haiku** |
 
 Order and parallelism: 1 → (2, 4) in parallel → 3 after 2 → 5 after 4 → 6 after 5 → 7 after 5 (held UI after 6) → 8, 9 → 10. Ideas (1–3) can ship alone if Tasks slip.
