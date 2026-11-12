@@ -373,8 +373,7 @@ pub struct OverviewCheckout {
     pub captain: CaptainState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub captain_tab: Option<TabId>,
-    /// Worker tabs of the project at work on that machine: running a turn, waiting on the user or
-    /// failed. A worker whose turn ended is not counted.
+    /// Worker tabs of the project running on that machine.
     #[serde(default)]
     pub workers: u32,
     /// How busy that machine is, as it last reported. Absent while it is offline or too old to report.
