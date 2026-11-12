@@ -7,6 +7,8 @@
 - Finished workers no longer look active. Under a Captain in the sidebar, the workers whose turn ended now fold into a "Finished" group that opens with a click, and the workers still running, waiting on you or failed stay where they were. A Captain's Workers card stays in the turn that started its workers, and no longer follows the conversation to its end once every worker is done, and when it lists only the workers at work its header still counts every worker. The global Orchestrator's `projects()` count no longer includes workers that already finished, and the Projects page counts workers the same way.
 - Slack: a mention in a thread that a workflow already follows now files a ticket when it asks for one, and a second request in the same thread answers with the same ticket. Already on main (#193).
 - Dictation on macOS: clicking Allow no longer ends in "Microphone access denied". The app now carries the microphone entitlement that macOS requires before it will ask. While Microphone or Speech Recognition is off, every click on the mic says which one and opens its System Settings pane; in a browser it says how to unblock the microphone for the site. macOS may ask again for Microphone and Speech Recognition after an update, because the app is not yet signed with an Apple Developer ID.
+- Settings: an action that fails now says why in a note at the bottom of the window. Before, a failed click, Enter in a token field or ⌘S showed nothing, so a refused Disconnect looked like a click that did nothing.
+- Windows desktop app: MCP server values (environment variables and headers) could not be saved, and the Upstash Box Claude token was kept in a hidden NTFS stream that copies, zips and backups left out. Both are now stored under an escaped file name, and a token kept the old way is still read.
 
 ### Added
 
@@ -16,3 +18,15 @@
 - Usage page: an Upstash Box section with what Upstash reports for this month's boxes, pinned's own count of box hours, and the boxes running now. Already on main (#199).
 - Sessions that run in an Upstash Box show the Upstash mark beside their name: in the sidebar (threads, Captains and workers), the Workers card, the phone Workers sheet and Needs you. The mark comes from the machine's Upstash Box field, not its name, and reads "Running in an Upstash Box" to screen readers.
 - Upstash Box: a box pinned opens is named after its project and role, e.g. `pinned-worker-7fc0a1`, in the Upstash dashboard. Boxes already running keep their old `pinned-<id>` names until they end.
+- Slack: connect several bots, one per workspace or Slack app. The Slack card lists them by workspace and shows which workflows use each. A workflow picks its bot in the trigger, next to the channel. Its replies, tickets and the workflows it calls use that bot, and a thread stays with the bot that first answered it. An existing Slack connection becomes the first bot, the default, with nothing to redo. Video: [connecting a second bot](https://github.com/FelipeGazapina/pinned/releases/download/v0.18.1/multi-slack-ui.webm).
+
+### Changed
+
+- Opening a long thread, on desktop and phone, now shows its newest 300 messages first and reads older ones as you scroll up. On a 2,000-turn thread the last turn showed in 0.65 s instead of 2.8 s. A machine still on 0.18.0 sends the whole thread as before, so update it too.
+- Disconnecting Slack is now refused while any workflow uses that bot, paused workflows included. This also applies with a single bot and from an older app. Move those workflows to another bot, or delete them, then disconnect. The message names the workflows.
+- On a 0.18.0 desktop app, Disconnect for Slack appears to do nothing while a workflow uses the bot. Update the app, or move or delete those workflows first.
+
+### Rolling back to 0.18.0
+
+- Slack: once a hub, or a desktop app used without signing in, is back on 0.18.0 and saves its settings, only the first Slack bot connected is kept. Workflows that used another bot then run with that first bot. After updating again, connect the other bots and pick them in those workflows again.
+- If you roll the desktop app back to 0.18.0, enter again any MCP server value or Upstash Box Claude token you changed while on 0.18.1. 0.18.1 saves those keys under a new file name, and 0.18.0 doesn't find that file. Keys 0.18.1 only read still work after a rollback. Slack, Linear, GitHub, Vercel and Upstash keys keep their names.
