@@ -222,8 +222,8 @@ body.resizing-rows { cursor: row-resize; user-select: none; }
 #composer .controls .pick { margin-left: 0; }
 #composer .pick[aria-pressed="true"] { background: var(--g-accent); color: var(--g-fg); }
 #composer .pick:active:not([aria-haspopup]) { transform: scale(0.97); }
-#plan-toggle .i { width: 18px; height: 18px; }
-#plan-toggle[aria-pressed="true"] .i { color: currentColor; }
+#plan-chip[hidden] { display: none; }
+#plan-chip { flex: none; align-self: center; padding: 1px 6px; border-radius: 6px; background: var(--g-hover); color: var(--g-fg); font-size: 11px; font-weight: 500; line-height: 16px; }
 #more-button[hidden] { display: none; }
 #composer[data-compact="true"] :is(#traits-block, #mode-block) { display: none; }
 #composer[data-narrow="true"] #model-button .name { display: none; }
@@ -587,14 +587,6 @@ html[data-appearance="light"] #composer-footer { box-shadow: 0 12px 28px -18px r
 #approval .answer-row { display: contents; }
 #approval :is(.extra, .waiting), #approval [data-approval-more] .chev { display: none; }
 #worker-banner { display: none; }
-@media (max-width: 768px) {
-  #plan-toggle { display: contents; }
-  #plan-toggle .pick[aria-pressed="false"] { display: none; }
-  #plan-toggle .pick[data-plan-seg="build"][aria-pressed="true"] { background: none; color: var(--g-muted); }
-  #plan-toggle .pick[data-plan-seg="build"][aria-pressed="true"]:hover { background: var(--g-accent); color: var(--g-fg); }
-  #plan-toggle [data-plan-seg="plan"] .i { color: currentColor; }
-}
-
 /* The composer as Main, Worker-Approval and Panel draw it: strips 14px in from the box's sides and
    flush with it, the box's controls as named chips, and one row while the side panel narrows it. */
 @media (min-width: 769px) {
@@ -620,9 +612,7 @@ html[data-appearance="light"] #composer-footer { box-shadow: 0 12px 28px -18px r
   #composer[data-narrow="true"] .tools #model-button .name { display: inline; }
   #composer #more-button > .i { width: 16px; height: 16px; }
   #traits-button .name[data-unit]::after { content: " " attr(data-unit); }
-  #plan-toggle { display: flex; padding: 2px; border-radius: 7px; background: rgb(var(--g-ink-rgb) / 0.05); }
-  #plan-toggle .pick { height: 24px; padding: 0 9px; border-radius: 5px; font-size: 12px; }
-  #plan-toggle .pick[aria-pressed="true"] { background: rgb(var(--g-ink-rgb) / 0.1); color: var(--g-fg); }
+  #plan-chip { margin-left: 2px; }
 
   #context-meter { width: 16px; height: 16px; margin: 0 2px; border-radius: 50%; }
   #context-meter svg { width: 16px; height: 16px; }

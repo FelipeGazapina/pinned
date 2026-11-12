@@ -73,8 +73,8 @@ const OPENCODE_GO_MODELS = [
 ];
 const ULTRATHINK = "Ultrathink:\n";
 
-/** Claude's permission modes, named and drawn as T3 Code's runtime modes. Plan is T3's separate
- * Build / Plan toggle; in claude it is one more stop of the Shift+Tab cycle. */
+/** Claude's permission modes, named and drawn as T3 Code's runtime modes. Plan is one more stop of
+ * claude's Shift+Tab cycle: the composer has no control for it, only the chip that shows it. */
 const MODES = {
   manual: { label: "Supervised", icon: "lock", hint: "Ask before commands and file changes." },
   accept: { label: "Auto-accept edits", icon: "pen-line", hint: "Auto-approve edits, ask before other actions." },
@@ -1554,7 +1554,7 @@ onGuiKey("e", () => {
 }, { shift: true });
 
 const modeButton = document.getElementById("mode-button");
-const planToggle = document.getElementById("plan-toggle");
+const planChip = document.getElementById("plan-chip");
 /** The model the composer names: the thread's own, else the one its parent's delegate_task started it on. */
 function chipModel(tab) {
   const own = modelName(tab);
@@ -1582,6 +1582,7 @@ function renderControls(tab) {
   if (!traitsBlock.hidden) setHtml(traitsButton, `${icon("brain")}<span class="name"${level ? ` data-unit="effort"` : ""}>${esc(label)}</span>${icon("chevron-down")}`);
   traitsButton.setAttribute("aria-label", label ? (level ? `${label} effort` : label) : "Reasoning");
   const mode = tab?.view.running && MODES[tab.mode] && tab.mode;
+  planChip.hidden = mode !== "plan";
   document.getElementById("mode-block").hidden = !mode;
   document.getElementById("more-button").hidden = !(tab?.view.running && (mode || label)) || composer.dataset.compact !== "true";
   if (!mode) return;
@@ -1591,13 +1592,6 @@ function renderControls(tab) {
   modeButton.dataset.mode = shown;
   modeButton.innerHTML = `${icon(MODES[access].icon)}<span class="name">${esc(MODES[access].label)}</span>${icon("chevron-down")}`;
   modeButton.title = `${MODES[access].hint} (${bindingLabel("composer.mode") ?? ""})`;
-  const plan = mode === "plan";
-  for (const seg of planToggle.children) {
-    const on = (seg.dataset.planSeg === "plan") === plan;
-    seg.setAttribute("aria-pressed", on);
-    seg.title = seg.dataset.planSeg === "plan" ? "Plan mode" : "Build mode";
-    if (!seg.firstChild) seg.innerHTML = seg.dataset.planSeg === "plan" ? `${icon("pencil-ruler")}<span class="name">Plan</span>` : `${icon("bot")}<span class="name">Build</span>`;
-  }
 }
 const accessEntries = (tab) => {
   const mode = tab.mode === "plan" ? threadOf(tab).access ?? "manual" : tab.mode;
@@ -1606,12 +1600,6 @@ const accessEntries = (tab) => {
 modeButton.onclick = (e) => {
   if (!composerMenu.hidden && composerMenu.dataset.kind === "access") return (composerMenu.hidden = true);
   if (active?.mode) openMenu(e.currentTarget, accessEntries(active), "access");
-};
-/** Build | Plan: the other segment switches. A phone shows only the current one, which switches. */
-planToggle.onclick = (e) => {
-  const seg = e.target.closest("[data-plan-seg]");
-  if (!seg || !active) return;
-  if ((seg.dataset.planSeg === "plan") !== (active.mode === "plan") || narrow(768)) togglePlan(active);
 };
 onGuiKey("a", () => {
   if (document.getElementById("mode-block").hidden) return;

@@ -4841,30 +4841,41 @@ async function sweep(profileName) {
       await openAccess();
       await press(page.locator("#composer-menu button", { hasText: label }).last());
     };
-    const PLAN_SHOWN = '#plan-toggle [aria-pressed="true"]';
+    // The composer has no Build | Plan control: a phone's model chip and a narrow composer's "…" list Plan mode, and a wide one cycles claude's modes with Shift+Tab.
+    const planOn = () => page.locator("#plan-chip:not([hidden])").isVisible();
     const togglePlan = async (to) => {
-      // Build | Plan is two segments; a phone shows only the current one, which switches.
-      if (!folded) return tapOrClick((await page.evaluate(() => narrow(768))) ? PLAN_SHOWN : `#plan-toggle [data-plan-seg="${to === "Plan" ? "plan" : "build"}"]`);
+      if (await page.evaluate(() => narrow(768))) {
+        await tapOrClick("#composer-chip");
+        return press(page.locator("#composer-menu button", { hasText: "Plan mode" }).last());
+      }
+      if (!folded) {
+        await page.focus("#prompt");
+        for (let i = 0; i < 6 && (await planOn()) !== (to === "Plan"); i++) {
+          await page.keyboard.press("Shift+Tab");
+          await page.waitForTimeout(300);
+        }
+        return;
+      }
       await tapOrClick("#more-button");
       await press(page.locator("#composer-menu button", { hasText: to }).last());
     };
     check(!(await page.locator("#mode-button").isVisible()), "a mode shows before claude drew its mode line");
     await sendPrompt("/modes");
-    await waitFor("the mode control", async () => (await text("#mode-button")) === "Supervised" && (await text(PLAN_SHOWN)) === "Build");
+    await waitFor("the mode control", async () => (await text("#mode-button")) === "Supervised" && !(await planOn()));
     await openAccess();
     const modes = await accessRows();
     check(modes.join("|") === "Supervised*|Auto-accept edits|Auto|Full access", `access modes: ${modes.join("|")}`);
     await press(page.locator("#composer-menu button", { hasText: "Auto-accept edits" }).last());
     await waitFor("Auto-accept edits", async () => (await text("#mode-button")) === "Auto-accept edits");
     await togglePlan("Plan");
-    await waitFor("Plan", async () => (await text(PLAN_SHOWN)) === "Plan" && (await page.getAttribute('#plan-toggle [data-plan-seg="plan"]', "aria-pressed")) === "true");
+    await waitFor("Plan", planOn);
     check(/plan mode on/.test(await termText()), "claude's screen never reached plan mode");
     check((await text("#mode-button")) === "Auto-accept edits", `in Plan, Access shows ${await text("#mode-button")}`);
     await pickAccess("Supervised");
     await waitFor("Supervised kept for Build", async () => (await text("#mode-button")) === "Supervised");
-    check((await text(PLAN_SHOWN)) === "Plan", "picking an access mode left Plan");
+    check(await planOn(), "picking an access mode left Plan");
     await togglePlan("Chat");
-    await waitFor("Build in Supervised", async () => (await text(PLAN_SHOWN)) === "Build" && (await text("#mode-button")) === "Supervised");
+    await waitFor("Build in Supervised", async () => !(await planOn()) && (await text("#mode-button")) === "Supervised");
     check(/manual mode on/.test((await termText()).split("\n").filter(Boolean).slice(-3).join("\n")), "Build didn't go back to claude's manual mode");
     if (!touch) {
       await page.focus("#prompt");

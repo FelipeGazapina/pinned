@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.18.2 (Unreleased)
+
+### Changed
+
+- The Build | Plan selector is gone from the composer. Sessions still start in build, and plan mode is entered with Shift+Tab in the message box, from Mode › Plan in the "…" menu of a narrow composer, or from Plan mode in a phone's model chip; a Plan chip shows beside the composer while claude is in plan mode.
+
 ## 0.18.1 (2026-11-12)
 
 ### Fixed
