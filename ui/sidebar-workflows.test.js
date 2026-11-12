@@ -20,7 +20,13 @@ test("the Workflows row is the last shortcut in the sidebar, after Usage", () =>
   assert.deepEqual(rows, ["orchestrator", "needs-you", "pull-requests", "usage", "workflows"]);
   const row = nav.match(/<button [^>]*data-nav="workflows"[^>]*>.*<\/button>/)[0];
   assert.match(row, /^<button type="button" class="nav-row" /);
-  assert.match(row, /<span class="mark" data-side-icon="workflow"><\/span><span class="label">Workflows<\/span>/);
+  assert.match(row, /<span class="mark" data-side-icon="side-workflow"><\/span><span class="label">Workflows<\/span>/);
+});
+
+test("the Workflows row draws a non-empty icon from the sidebar's icon map", () => {
+  const row = indexSrc.match(/<button [^>]*data-nav="workflows"[^>]*>.*<\/button>/)[0];
+  const key = row.match(/data-side-icon="([^"]+)"/)[1];
+  assert.match(sidebarSrc, new RegExp(`^  "${key}": \`[^\`]+\`,$`, "m"));
 });
 
 test("clicking the Workflows row opens Settings on the Workflows section and closes the list on a narrow screen", () => {
@@ -72,15 +78,17 @@ function activeRows({ shell = null, settings = false, section = "general" }) {
   vm.createContext(context);
   vm.runInContext(`${line(sidebarSrc, "const setText")}\n${fn(sidebarSrc, "drawCount")}\n${fn(sidebarSrc, "drawNav")}\ndrawNav();`, context);
   const on = (name) => rows[name].classList.names.has("active");
-  return { workflows: on("workflows"), usage: on("usage") };
+  return { workflows: on("workflows"), usage: on("usage"), needsYou: on("needs-you") };
 }
 
 test("the Workflows row is active while the Workflows section of Settings is open, and not on other sections", () => {
-  assert.deepEqual(activeRows({ settings: true, section: "connectors" }), { workflows: true, usage: false });
-  assert.deepEqual(activeRows({ settings: true, section: "general" }), { workflows: false, usage: false });
+  assert.deepEqual(activeRows({ settings: true, section: "connectors" }), { workflows: true, usage: false, needsYou: false });
+  assert.deepEqual(activeRows({ settings: true, section: "general" }), { workflows: false, usage: false, needsYou: false });
+  assert.deepEqual(activeRows({ settings: true, section: "machines" }), { workflows: false, usage: false, needsYou: false });
 });
 
 test("the Workflows row is not active once Settings closes, nor on a shell page", () => {
-  assert.deepEqual(activeRows({ settings: false, section: "connectors" }), { workflows: false, usage: false });
-  assert.deepEqual(activeRows({ shell: "usage", section: "connectors" }), { workflows: false, usage: true });
+  assert.deepEqual(activeRows({ settings: false, section: "connectors" }), { workflows: false, usage: false, needsYou: false });
+  assert.deepEqual(activeRows({ shell: "usage", section: "connectors" }), { workflows: false, usage: true, needsYou: false });
+  assert.deepEqual(activeRows({ shell: "needs-you", section: "connectors" }), { workflows: false, usage: false, needsYou: true });
 });
