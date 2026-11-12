@@ -8,6 +8,9 @@ const panelBody = document.getElementById("panel-body");
 const guiOn = () => document.body.dataset.mode === "gui";
 const POLL_MS = 1200;
 const THREAD_READ_GAP_MS = 100;
+/** The items a thread opens on, its newest, and each page read back before them as the reader
+ * scrolls up: a few screens of turns, so a long conversation opens without reading all of it. */
+const THREAD_PAGE = 300;
 const narrow = (px) => matchMedia(`(max-width: ${px}px)`).matches;
 
 const threads = new Map();
@@ -95,7 +98,8 @@ const ago = (unix) => {
 };
 /** The global orchestrator's folder is not a project: its tab shows the orchestrator's own name (global-chat.js), not the folder's. */
 const projectName = (tab) => (typeof isGlobalTab === "function" && isGlobalTab(tab) ? globalSettings.name : threadOf(tab).workspace?.scratch ? "No project" : (threadOf(tab).workspace?.project ?? tab.view.cwd).split(/[\\/]/).filter(Boolean).pop() || "/");
-const firstPrompt = (tab) => threadOf(tab).items.find((i) => i.kind === "user")?.text.split("\n")[0];
+/** A thread holding only its newest pages has its first prompt from the machine. */
+const firstPrompt = (tab) => ((threadOf(tab).start > 0 && threadOf(tab).opening) || threadOf(tab).items.find((i) => i.kind === "user")?.text)?.split("\n")[0];
 const threadTitle = (tab) => sideMarks.titles[threadKey(tab)] || tab.view.title || firstPrompt(tab) || "New thread";
 /** `text` as a head that CSS truncates and its last 8 characters, once it is longer than `over`. */
 /** Puts `html` in `el` unless it is already there. A redraw that rewrites a control swaps the node a press
@@ -143,7 +147,9 @@ async function fetchThread(tab) {
       t.readAt = performance.now();
       const before = drawnOf(t);
       const from = t.next;
-      let page = await callOn(tab.machine, { cmd: "thread", tab: tab.view.id, from });
+      // A thread opens on its newest page, read back from the end; then it reads on from there.
+      const ask = (from) => ({ cmd: "thread", tab: tab.view.id, from, ...(from ? {} : { limit: THREAD_PAGE }) });
+      let page = await callOn(tab.machine, ask(from));
       // The thread started over while this read was out: what came back follows a place it left.
       if (t.next !== from) {
         t.again = true;
@@ -155,8 +161,10 @@ async function fetchThread(tab) {
       if (page.session !== t.session) {
         const restart = t.next > 0;
         Object.assign(t, { session: page.session, items: [], next: 0, history: null, todos: null, branch: null, context: null });
-        if (restart) page = await callOn(tab.machine, { cmd: "thread", tab: tab.view.id, from: 0 });
+        if (restart) page = await callOn(tab.machine, ask(0));
       }
+      // Where the items held start, for the page before them. A machine on an older pinned sends them all.
+      if (!t.next || page.reset) Object.assign(t, { start: t.next ? 0 : page.start ?? 0, opening: page.opening ?? null, olderError: null });
       t.unsupported = false;
       const grew = page.items.length > 0 || !t.loaded;
       if (page.items.some((i) => i.kind === "model")) t.picked = null;
@@ -212,7 +220,7 @@ const KEPT_OFF_SCREEN = new Set(["user", "steer", "text", "error", "note", "pr",
 function lightenThreads() {
   const shown = tabs.filter((tab) => threadOf(tab).shownAt && !threadOf(tab).light).sort((a, b) => threadOf(b).shownAt - threadOf(a).shownAt).slice(0, WHOLE_THREADS);
   let bytes = 0;
-  const whole = shown.filter((tab, i) => (bytes += threadOf(tab).next) <= WHOLE_BYTES || i === 0);
+  const whole = shown.filter((tab, i) => (bytes += threadOf(tab).next - (threadOf(tab).start ?? 0)) <= WHOLE_BYTES || i === 0);
   for (const tab of tabs) {
     const t = threadOf(tab);
     if (t.light || !t.loaded || t.fetching || followed(tab) || whole.includes(tab) || (KEEPS_FREED_MEMORY && !t.shownAt)) continue;
@@ -225,6 +233,49 @@ function lightenThreads() {
 function onThreadEvent(machine, event) {
   const tab = tabByKey(keyOf(machine, event.tab));
   if (tab && followed(tab) && guiOn() && !document.hidden) fetchThread(tab);
+}
+
+/** Reads the page before the oldest items the thread holds and puts it in front of them, since the
+ * reader scrolled up to it. Its turns show at once, above the ones on screen. */
+function fetchOlder(tab) {
+  const t = threadOf(tab);
+  if (t.olderRead) return t.olderRead;
+  if (!(t.start > 0) || !t.loaded || t.light) return Promise.resolve();
+  const [session, before] = [t.session, t.start];
+  Object.assign(t, { fetchingOlder: true, olderError: null });
+  t.olderRead = (async () => {
+    try {
+      const page = await callOn(tab.machine, { cmd: "thread", tab: tab.view.id, from: 0, limit: THREAD_PAGE, before });
+      if (t.session !== session || t.start !== before || page.start == null) return;
+      // The transcript was replaced: the thread is read again from its newest page.
+      if (page.reset) return Object.assign(t, { items: [], next: 0, loaded: false, start: 0 });
+      const held = turnsFor(t).length;
+      Object.assign(t, { items: [...page.items, ...t.items], start: page.start, readBack: true });
+      t.limit = (t.limit ?? TURNS_SHOWN) + turnsFor(t).length - held;
+    } catch (e) {
+      t.olderError = String(e);
+    } finally {
+      Object.assign(t, { fetchingOlder: false, olderRead: null });
+      if (tab === active && guiOn()) {
+        if (!t.loaded) fetchThread(tab);
+        renderThread();
+      }
+    }
+  })();
+  // Drawn once the read is out, so the draw finds it and asks for no second one.
+  if (tab === active && guiOn()) renderThread();
+  return t.olderRead;
+}
+
+/** Reads pages back until `found()` holds or the thread's start is read: a link to an old message,
+ * or a search through the whole thread. */
+async function olderUntil(tab, found) {
+  const t = threadOf(tab);
+  while (!found() && t.start > 0) {
+    const before = t.start;
+    await fetchOlder(tab);
+    if (t.start === before) return;
+  }
 }
 
 async function fetchWorkspace(tab) {
