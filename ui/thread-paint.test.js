@@ -475,7 +475,7 @@ test("a Workers block whose turn is not shown follows the thread with only the w
     tab.thread.limit = 1;
     sandbox.renderThread();
     assert.deepEqual(turnWith("Three readers are on it."), []);
-    assert.deepEqual(block(turnWith("Nothing else for now.")[0]), ["Workers0 of 1 done1 working", "Read the API"], "the last turn shows the one still at work");
+    assert.deepEqual(block(turnWith("Nothing else for now.")[0]), ["Workers2 of 3 done1 working", "Read the API"], "the last turn counts all three workers and lists only the one still at work");
     api.view.status = "done";
     threadView.dataset.key = "";
     sandbox.renderThread();
