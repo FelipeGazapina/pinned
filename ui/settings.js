@@ -462,7 +462,7 @@ function loadSlackChannels(bot) {
 const watchesSlack = (c) => [c.trigger?.kind, ...(c.graph?.nodes ?? []).map((n) => n.watch?.kind)].some((k) => k === "slack-mention" || k === "slack-message");
 /** The workflows that run through a bot; one with no bot of its own runs through the default. */
 const slackBotUsers = (bot, isDefault) =>
-  (settings.connectors ?? []).filter((c) => (c.slack_bot ? c.slack_bot === bot.id : isDefault && watchesSlack(c))).map((c) => c.name);
+  (settings.connectors ?? []).filter((c) => (c.slackBot ? c.slackBot === bot.id : isDefault && watchesSlack(c))).map((c) => c.name);
 
 /** What the card says about the last connect, and why the last remove was refused, until the next one. */
 let slackNote = "";
@@ -549,8 +549,8 @@ function slackBotSelect(c) {
   if (bots.length < 2) return "";
   const ids = ["", ...bots.slice(1).map((b) => b.id)];
   const label = (id) => { const b = id ? bots.find((x) => x.id === id) : bots[0]; return `@${b.name} in ${b.team}${id ? "" : " (default)"}`; };
-  const selected = c.slack_bot === bots[0].id ? "" : (c.slack_bot ?? "");
-  return `<label>Bot ${select("slack_bot", ids, label, selected)}</label>`;
+  const selected = c.slackBot === bots[0].id ? "" : (c.slackBot ?? "");
+  return `<label>Bot ${select("slackBot", ids, label, selected)}</label>`;
 }
 
 const kindHtml = (c) => `<label>Starts when ${select("trigger.kind", Object.keys(TRIGGERS), (t) => TRIGGERS[t].text, c.trigger.kind)}</label>`;
@@ -1585,7 +1585,7 @@ function edit(index, draft = clone(settings.connectors[index]), open = null) {
   if (trigger?.watch) syncTriggerFromWatch(draft, trigger.watch);
   const first = draft.graph?.nodes?.[0]?.id ?? null;
   view = { name: "edit", index, draft, original: JSON.stringify(draft), open: open ?? first, zoom: null, pan: null, menu: false, graphPick: null, selectedEdge: null, connectFrom: null, drag: null };
-  if (slackBots().length > 1) loadSlackChannels(draft.slack_bot ?? "");
+  if (slackBots().length > 1) loadSlackChannels(draft.slackBot ?? "");
   loadFolders(draft);
 }
 
@@ -2323,7 +2323,7 @@ settingsPage.addEventListener("change", async (e) => {
   const path = e.target.dataset.bind;
   if (path in RESHAPES) return reshape((c) => RESHAPES[path](c, e.target.value));
   if (path === "folder") return fillRepo();
-  if (path === "slack_bot") return void loadSlackChannels(e.target.value);
+  if (path === "slackBot") return void loadSlackChannels(e.target.value);
   if (e.target.dataset.toggle !== "enabled") return;
   // The list's switch saves right away, as the connector's other fields are already saved.
   const i = e.target.closest(".flow-card").dataset.index;

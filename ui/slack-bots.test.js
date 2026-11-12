@@ -105,7 +105,7 @@ test("with one bot the card lists it as the default and offers Add a bot without
 });
 
 test("two bots in two workspaces are grouped by workspace; only the first is the default", () => {
-  const connectors = [workflow("Triage"), workflow("Ops alerts", { slack_bot: "UB2" }), workflow("Paused one", { slack_bot: "UB2", enabled: false })];
+  const connectors = [workflow("Triage"), workflow("Ops alerts", { slackBot: "UB2" }), workflow("Paused one", { slackBot: "UB2", enabled: false })];
   const { context } = load({ bots: [SUPPORT, OPS], connectors });
   const html = card(context);
   assert.ok(html.indexOf("<h3>Acme</h3>") < html.indexOf("@pinned-support"));
@@ -188,9 +188,9 @@ for (const step of ["slack-trigger", "message-trigger"]) {
     const html = context.__steps[step].fields(workflow("A"));
     assert.match(
       html,
-      /<label>Bot <select data-bind="slack_bot"><option value="" selected>@pinned-support in Acme \(default\)<\/option><option value="UB2">@pinned-ops in Globex<\/option><\/select><\/label>/,
+      /<label>Bot <select data-bind="slackBot"><option value="" selected>@pinned-support in Acme \(default\)<\/option><option value="UB2">@pinned-ops in Globex<\/option><\/select><\/label>/,
     );
-    assert.match(context.__steps[step].fields(workflow("A", { slack_bot: "UB2" })), /<option value="UB2" selected>/);
+    assert.match(context.__steps[step].fields(workflow("A", { slackBot: "UB2" })), /<option value="UB2" selected>/);
   });
 }
 
@@ -202,17 +202,17 @@ test("the Slack trigger counts as connected with bots, even without the single l
   assert.deepEqual(JSON.parse(JSON.stringify(context.__steps["slack-trigger"].issues(workflow("A")))), ["Connect Slack under Connectors."]);
 });
 
-test("picking the second bot saves slack_bot on the connector, not on the trigger, and loads that bot's channels", async () => {
+test("picking the second bot saves slackBot on the connector, not on the trigger, and loads that bot's channels", async () => {
   const { context, calls, fire } = load({ bots: [SUPPORT, OPS], reply: (call) => (call.cmd === "slack_suggestions" ? ["ops-alerts"] : {}) });
   const draft = workflow("A", { repo: "", model: "", account: "", team: "", label: "", instructions: "" });
   context.__setView({ name: "edit", index: 0, draft, original: "", open: null, zoom: null, pan: null, menu: false, graphPick: null, selectedEdge: null, connectFrom: null, drag: null });
-  const target = { dataset: { bind: "slack_bot" }, value: "UB2", type: "select-one" };
+  const target = { dataset: { bind: "slackBot" }, value: "UB2", type: "select-one" };
   fire("input", target);
-  assert.equal(draft.slack_bot, "UB2");
-  assert.equal("slack_bot" in draft.trigger, false);
+  assert.equal(draft.slackBot, "UB2");
+  assert.equal("slackBot" in draft.trigger, false);
   fire("change", target);
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))), { cmd: "slack_suggestions", bot: "UB2" });
-  fire("input", { dataset: { bind: "slack_bot" }, value: "", type: "select-one" });
-  assert.equal(draft.slack_bot, "");
+  fire("input", { dataset: { bind: "slackBot" }, value: "", type: "select-one" });
+  assert.equal(draft.slackBot, "");
 });
