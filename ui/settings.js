@@ -171,6 +171,7 @@ function renderSettingsNav() {
 function showPage(name) {
   const section = settingsSectionOf(name) ?? settingsSections[0];
   name = page = section.page;
+  document.body.dataset.settingsPage = name;
   save("settings-page", name);
   delete settingsPage.dataset.view;
   renderSettingsNav();

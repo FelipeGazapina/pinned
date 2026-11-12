@@ -125,6 +125,7 @@ function orchestratorNav(entries) {
     askGlobalSettings() {},
     navCounts: () => ({ needsYou: 0, orchestrator: 0, reviews: 0, usage: null, machinesOnline: 0, machinesTotal: machines.size }),
     shellPage: () => null,
+    settingsOpen: () => false,
     navRow: (name) => (rows[name] ??= part()),
     isGlobalOrchestratorTab: () => false,
     machineName: (id) => machines.get(id)?.view.name ?? "machine",

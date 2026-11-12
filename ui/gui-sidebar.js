@@ -2385,6 +2385,7 @@ function drawNav() {
     usage.title = `${counts.usage.account}: ${percent}% of the 5-hour window, resets ${new Date(counts.usage.resetsAt).toLocaleTimeString(APP_LOCALE, { hour: "numeric", minute: "2-digit" })}`;
   }
   for (const name of ["needs-you", "pull-requests", "usage"]) navRow(name).classList.toggle("active", page === name);
+  navRow("workflows").classList.toggle("active", settingsOpen() && document.body.dataset.settingsPage === "connectors");
   setText(document.getElementById("machines-online"), `${counts.machinesOnline} ${counts.machinesOnline === 1 ? "machine" : "machines"} online`);
   accountButton.classList.toggle("offline", !counts.machinesOnline);
   const searchKey = document.getElementById("search-key");
@@ -2392,12 +2393,18 @@ function drawNav() {
   searchKey.hidden = !searchKey.textContent;
 }
 navRow("orchestrator").onclick = () => openGlobalChat();
+/** Workflows is a section of Settings, not a page of its own: the row opens Settings on that section, and on a narrow screen the list closes as a page opens. */
+function openWorkflows() {
+  if (narrow(768)) toggleSidebar(false);
+  openSettings("connectors");
+}
+navRow("workflows").onclick = openWorkflows;
 // The model and the page scripts load after this one.
 document.addEventListener("DOMContentLoaded", () => {
   onModelChange(drawNav);
   drawNav();
 }, { once: true });
-new MutationObserver(() => guiOn() && drawNav()).observe(document.body, { attributeFilter: ["data-page"] });
+new MutationObserver(() => guiOn() && drawNav()).observe(document.body, { attributeFilter: ["data-page", "data-settings-page"] });
 
 /** The footer's Account and pages menu: Settings, Way of working, Skills, Projects, Machines,
  * Archive and Check for updates, each with what it holds now. */
