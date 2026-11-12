@@ -139,7 +139,7 @@ pub async fn pick_folder(app: AppHandle, start: Option<String>) -> Option<String
 
 /// Opens `url` in the default browser. On Windows through explorer.exe, since cmd's `start` would
 /// cut the URL at its first `&`.
-fn open(url: &str) -> Result<(), String> {
+pub(crate) fn open(url: &str) -> Result<(), String> {
     #[cfg(windows)]
     let opener = "explorer.exe";
     #[cfg(target_os = "linux")]

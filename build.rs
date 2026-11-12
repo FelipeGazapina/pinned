@@ -44,9 +44,37 @@ fn build_dictation_helper() {
                     std::fs::Permissions::from_mode(0o755),
                 );
             }
+            sign_dictation_helper("binaries/dictation-helper");
         }
         Ok(ok) => println!("cargo:warning=pinned: swiftc failed ({ok}); this build has no dictation"),
         Err(e) => println!("cargo:warning=pinned: swiftc not found ({e}); this build has no dictation"),
+    }
+}
+
+/// Tauri signs the app but leaves bundled resources as the linker signed them. Sign the helper
+/// with the app's entitlements and the hardened runtime, under its own identifier, so it records
+/// under the same rules as the app that macOS holds responsible for it.
+#[cfg(target_os = "macos")]
+fn sign_dictation_helper(path: &str) {
+    println!("cargo:rerun-if-changed=Entitlements.plist");
+    let status = std::process::Command::new("codesign")
+        .args([
+            "--force",
+            "--sign",
+            "-",
+            "--options",
+            "runtime",
+            "--identifier",
+            "dev.personal-harness.pinned.dictation-helper",
+            "--entitlements",
+            "Entitlements.plist",
+            path,
+        ])
+        .status();
+    match status {
+        Ok(ok) if ok.success() => {}
+        Ok(ok) => println!("cargo:warning=pinned: codesign of dictation-helper failed ({ok})"),
+        Err(e) => println!("cargo:warning=pinned: codesign not found ({e})"),
     }
 }
 
