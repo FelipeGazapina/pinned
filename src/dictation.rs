@@ -70,7 +70,11 @@ impl Dictation {
                 return Ok(p);
             }
         }
-        Err("dictation helper not bundled with this build".into())
+        if cfg!(target_os = "macos") {
+            Err("dictation helper not bundled with this build".into())
+        } else {
+            Err("Dictation needs macOS".into())
+        }
     }
 
     pub fn running(&self) -> bool {
