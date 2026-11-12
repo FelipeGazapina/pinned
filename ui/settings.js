@@ -162,8 +162,8 @@ function onHubSettings(latest) {
   if (page === "integrations") {
     const asks = document.getElementById("box-asks");
     if (asks) asks.innerHTML = boxAskRows();
-    const note = document.getElementById("pending-workflow");
-    if (note && pendingWorkflow) note.outerHTML = pendingWorkflowHtml();
+    // Once the connector the note waits for is connected, the whole page shows it.
+    if (pendingWorkflow && triggerReady(pendingWorkflow.kind)) return showPage("integrations");
     return;
   }
   if (page !== "connectors") return;
