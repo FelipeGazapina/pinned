@@ -14,7 +14,9 @@ const registry = read("../crates/core/src/delegate/registry.rs");
 
 test("the notices the machine types are the ones the divider reads", () => {
   for (const words of [
-    'format!("[pinned] Worker {worker} \\"{title}\\" {what}")',
+    // `title` is one quoted field (`pinned_lines::field`), so the notice reads `Worker tab-7 "title" …`.
+    'let title = pinned_lines::field(&self.tab(worker, |t| t.title.clone())',
+    'format!("[pinned] Worker {worker} {title} {what}")',
     'format!("finished. Its last message:',
     'format!("needs input: {}"',
     'format!("stopped on an error: {}"',
