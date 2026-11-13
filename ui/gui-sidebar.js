@@ -2384,7 +2384,7 @@ function drawNav() {
     usage.querySelector(".bar > span").style.width = `${Math.min(100, Math.max(0, percent))}%`;
     usage.title = `${counts.usage.account}: ${percent}% of the 5-hour window, resets ${new Date(counts.usage.resetsAt).toLocaleTimeString(APP_LOCALE, { hour: "numeric", minute: "2-digit" })}`;
   }
-  const stuck = typeof usageState === "undefined" ? 0 : (usageState.box.data?.stuck?.length ?? 0);
+  const stuck = typeof usageState === "undefined" ? 0 : (usageState.stuck?.length ?? 0);
   const stuckMark = navRow("usage").querySelector(".stuck-box");
   stuckMark.hidden = !stuck;
   stuckMark.title = stuck ? `pinned could not delete ${stuck} Upstash ${stuck === 1 ? "box" : "boxes"}. ${stuck === 1 ? "It is" : "They are"} still running on Upstash and can be deleted in the Upstash console. Open Usage.` : "";

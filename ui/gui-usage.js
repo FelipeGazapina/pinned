@@ -17,7 +17,7 @@ const GO_COLOR = "#4c8dff";
 const providerColor = (account) => (account.go ? GO_COLOR : CLAUDE_COLOR);
 const providerName = (account) => (account.go ? "OpenCode Go" : "Claude Code");
 /** `envs` holds each machine's transcripts and `limits` its claude's limits check; `selected` is null for every machine, as T3 Code's environment filter. */
-const usageState = { metric: "limits", days: 30, breakdown: "model", selected: null, envs: new Map(), limits: new Map(), limitsNow: 0, refreshing: false, now: 0, seq: 0, box: { data: null, error: "", loading: false, seq: 0 } };
+const usageState = { metric: "limits", days: 30, breakdown: "model", selected: null, envs: new Map(), limits: new Map(), limitsNow: 0, refreshing: false, now: 0, seq: 0, box: { data: null, error: "", loading: false, seq: 0 }, stuck: [] };
 try {
   const saved = JSON.parse(load("gui-usage-page"));
   if (USAGE_METRICS.some(([m]) => m === saved?.metric)) usageState.metric = saved.metric;
@@ -630,7 +630,7 @@ function stuckBoxesHtml(stuck) {
 }
 function boxBodyHtml(box, now) {
   const u = box.data;
-  if (!u) return box.error ? boxNotice(`Could not read Upstash Box usage: ${box.error}`) : `<p class="muted note" role="status">Loading…</p>`;
+  if (!u) return box.error ? `${stuckBoxesHtml(usageState.stuck)}${boxNotice(`Could not read Upstash Box usage: ${box.error}`)}` : `<p class="muted note" role="status">Loading…</p>`;
   const stuck = stuckBoxesHtml(u.stuck);
   if (!u.connected) return `${stuck}<p class="muted note">Connect Upstash in Settings › Connectors to see box usage.</p>`;
   return `${stuck}${u.error ? boxNotice(u.error) : ""}${boxFiguresHtml(u)}${u.error ? "" : boxListsHtml(u.boxes ?? [], now, box.open)}`;
@@ -650,7 +650,10 @@ async function fetchBoxUsage() {
   if (shellPage() === "usage") renderUsagePage();
   try {
     const data = await hub.hub({ cmd: "box_usage" });
-    if (seq === box.seq) Object.assign(box, { data, error: "" });
+    if (seq === box.seq) {
+      Object.assign(box, { data, error: "" });
+      usageState.stuck = data.stuck ?? [];
+    }
   } catch (e) {
     if (seq === box.seq) Object.assign(box, { data: null, error: String(e?.message ?? e) });
   }
@@ -659,9 +662,19 @@ async function fetchBoxUsage() {
   if (shellPage() === "usage") renderUsagePage();
   drawNav();
 }
-// The sidebar's Usage mark needs the answer without the page open: a look soon after start, then every 10 minutes.
-setTimeout(fetchBoxUsage, 8000);
-setInterval(fetchBoxUsage, 10 * 60 * 1000);
+/** The sidebar's Usage mark: asks the hub for the boxes it could not delete, which lists nothing at Upstash. A look that fails, or a hub that does not know the call, keeps the last answer. */
+async function fetchStuckBoxes() {
+  if (!hub) return;
+  try {
+    const stuck = await hub.hub({ cmd: "stuck_boxes" });
+    if (!Array.isArray(stuck)) return;
+    usageState.stuck = stuck;
+    drawNav();
+  } catch {}
+}
+// The mark needs the answer without the page open: a look soon after start, when the hub connects, then every 10 minutes.
+setTimeout(fetchStuckBoxes, 8000);
+setInterval(fetchStuckBoxes, 10 * 60 * 1000);
 document.addEventListener("click", (e) => {
   const email = e.target.closest?.("#usage-pop .redacted");
   if (!email) return;

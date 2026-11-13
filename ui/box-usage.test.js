@@ -21,15 +21,15 @@ const sectionSrc = between(usageSrc, "const BOX_LIVE", 'document.addEventListene
 const NOW = 1793491210 + 2 * 3600 + 5 * 60;
 
 /** The section's code as the page runs it, over a hub that answers `box_usage` with `answer`. */
-function boxPage({ answer, hubOn = true } = {}) {
+function boxPage({ answer, stuckAnswer = async () => [], hubOn = true } = {}) {
   const renders = [];
   const context = {
     esc: (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;"),
     icon: (name) => `[${name}]`,
     shellPage: () => "usage",
     renderUsagePage: () => renders.push(context.boxUsageHtml(context.usageState.box, NOW)),
-    usageState: { box: { data: null, error: "", loading: false, seq: 0 } },
-    hub: hubOn ? { hub: async (message) => (assert.equal(JSON.stringify(message), '{"cmd":"box_usage"}'), answer()) } : null,
+    usageState: { box: { data: null, error: "", loading: false, seq: 0 }, stuck: [] },
+    hub: hubOn ? { hub: async (message) => (message.cmd === "stuck_boxes" ? stuckAnswer(message) : (assert.equal(JSON.stringify(message), '{"cmd":"box_usage"}'), answer())) } : null,
     pageView: { addEventListener: (type, handler) => (context.toggled = { type, handler }) },
     renders,
     drawn: 0,
@@ -241,10 +241,10 @@ test("opening the page and the refresh button reload the box section, and a slow
 test("boxes pinned could not delete show as one notice per reason, also when Upstash is not connected", () => {
   const page = boxPage({ answer: async () => ({}) });
   const html = (data) => page.boxUsageHtml({ data, error: "", loading: false, open: {} }, NOW);
-  const stuck = [{ id: "r1", why: "Upstash answered 503" }, { id: "r2", why: "Upstash answered 503" }, { id: "r3", why: "still being deleted" }];
+  const stuck = [{ id: "r1", why: "Upstash answered 503" }, { id: "r2", why: "Upstash answered 503" }, { id: "r3", why: "Upstash answered 500" }];
   const off = html({ connected: false, stuck });
   assert.match(off, /2 boxes pinned could not delete: Upstash answered 503/);
-  assert.match(off, /1 box pinned could not delete: still being deleted\. It is still running on Upstash and can be deleted in the Upstash console\./);
+  assert.match(off, /1 box pinned could not delete: Upstash answered 500\. It is still running on Upstash and can be deleted in the Upstash console\./);
   assert.match(off, /2 boxes pinned could not delete: Upstash answered 503\. They are still running on Upstash and can be deleted in the Upstash console\./);
   assert.match(off, /Connect Upstash in Settings/);
   assert.equal(off.match(/limit-notices/g).length, 2);
@@ -260,23 +260,61 @@ test("a stuck reason is escaped", () => {
   assert.match(html, /&lt;b&gt;bold&lt;\/b&gt; &amp; more/);
 });
 
-test("the sidebar's Usage entry is marked while a box is stuck, and redrawn once the answer is in", async () => {
-  const page = boxPage({ answer: async () => ({ connected: false, stuck: [{ id: "r1", why: "Upstash answered 503" }] }) });
-  await page.fetchBoxUsage();
+test("the sidebar's Usage entry is marked from the hub's own look, and redrawn once the answer is in", async () => {
+  const calls = [];
+  const page = boxPage({ answer: async () => ({ connected: false, stuck: [] }), stuckAnswer: async (m) => (calls.push(m.cmd), [{ id: "fake-box-0001", why: "Upstash answered 503" }]) });
+  await page.fetchStuckBoxes();
+  assert.deepEqual(calls, ["stuck_boxes"]);
   assert.equal(page.drawn, 1);
-  assert.equal(page.usageState.box.data.stuck.length, 1);
   const sidebarSrc = read("gui-sidebar.js");
   const mark = between(sidebarSrc, "const stuck = typeof usageState", '  for (const name of ["needs-you"');
-  const draw = (box) => {
+  const draw = (stuck) => {
     const el = { hidden: true, title: "" };
-    const context = { usageState: { box }, navRow: () => ({ querySelector: () => el }) };
+    const context = { usageState: { stuck }, navRow: () => ({ querySelector: () => el }) };
     vm.createContext(context);
     vm.runInContext(mark, context);
     return el;
   };
-  const marked = draw(page.usageState.box);
+  const marked = draw(page.usageState.stuck);
   assert.equal(marked.hidden, false);
   assert.match(marked.title, /could not delete 1 Upstash box\. It is still running on Upstash and can be deleted in the Upstash console\. Open Usage\./);
-  assert.equal(draw({ data: { connected: true, stuck: [] } }).hidden, true);
-  assert.equal(draw({ data: null }).hidden, true);
+  assert.equal(draw([]).hidden, true);
+});
+
+test("the background look asks stuck_boxes, never box_usage, and keeps its last answer when a look fails or the hub does not know the call", async () => {
+  let next = async () => [{ id: "fake-box-0001", why: "Upstash answered 503" }];
+  const page = boxPage({ answer: async () => assert.fail("box_usage is not the background look"), stuckAnswer: () => next() });
+  await page.fetchStuckBoxes();
+  assert.equal(page.usageState.stuck.length, 1);
+  next = async () => { throw new Error("unknown command: stuck_boxes"); };
+  await page.fetchStuckBoxes();
+  assert.equal(page.usageState.stuck.length, 1, "a failed look keeps the last answer");
+  next = async () => ({ error: "not a list" });
+  await page.fetchStuckBoxes();
+  assert.equal(page.usageState.stuck.length, 1);
+  next = async () => [];
+  await page.fetchStuckBoxes();
+  assert.equal(page.usageState.stuck.length, 0, "an answer with none clears the mark");
+  const old = boxPage({ answer: async () => assert.fail("no fallback to box_usage"), stuckAnswer: async () => { throw new Error("unknown command: stuck_boxes"); } });
+  await old.fetchStuckBoxes();
+  assert.deepEqual(old.usageState.stuck, []);
+  assert.equal(old.drawn, 0, "an older hub shows no mark");
+  assert.equal(old.renders.length, 0, "and no error");
+  const offline = boxPage({ answer: async () => assert.fail("no hub"), hubOn: false });
+  await offline.fetchStuckBoxes();
+  assert.equal(offline.drawn, 0);
+});
+
+test("the Usage page's own answer also feeds the mark, and a failed box_usage still shows the hub's last list", async () => {
+  const stuck = [{ id: "fake-box-0002", why: "Upstash answered 500: fake outage" }];
+  const page = boxPage({ answer: async () => ({ connected: true, error: "Upstash answered 500", stuck }) });
+  await page.fetchBoxUsage();
+  assert.deepEqual(page.usageState.stuck, stuck);
+  const html = page.boxUsageHtml(page.usageState.box, NOW);
+  assert.match(html, /1 box pinned could not delete: Upstash answered 500: fake outage/, "shown also when the Upstash list call failed");
+  const failing = boxPage({ answer: async () => { throw new Error("hub said no"); } });
+  failing.usageState.stuck = stuck;
+  await failing.fetchBoxUsage();
+  assert.match(failing.boxUsageHtml(failing.usageState.box, NOW), /could not delete[^]*Could not read Upstash Box usage: hub said no/);
+  assert.deepEqual(failing.usageState.stuck, stuck);
 });
