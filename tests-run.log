@@ -225,3 +225,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:11:15Z #103 overlapping_tasks_on_one_box_each_pay_for_their_own_span_however_their_records_arrive ok / avail=15058M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:11:16Z #104 an_agent_cannot_add_or_widen_a_workflows_convex_step START / avail=15058M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:11:20Z #104 an_agent_cannot_add_or_widen_a_workflows_convex_step ok / avail=15058M /workspace avail=19374M node_stat=Ssl node_tcp=1
+2026-11-13T04:11:21Z #105 a_session_reads_convex_through_the_hub_and_the_key_never_leaves_it START / avail=15058M /workspace avail=19374M node_stat=Ssl
