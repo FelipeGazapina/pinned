@@ -23093,7 +23093,7 @@
             "type": "object",
             "properties": {
               "id": {
-                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `work` or `personal`.",
                 "type": "string"
               },
               "driver_kind": {
@@ -30793,7 +30793,7 @@
             "type": "object",
             "properties": {
               "id": {
-                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `work` or `personal`.",
                 "type": "string"
               },
               "driver_kind": {
@@ -42820,7 +42820,7 @@
             "type": "object",
             "properties": {
               "id": {
-                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `work` or `personal`.",
                 "type": "string"
               },
               "driver_kind": {
@@ -43119,7 +43119,7 @@
             "type": "object",
             "properties": {
               "id": {
-                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `work` or `personal`.",
                 "type": "string"
               },
               "driver_kind": {
@@ -44351,7 +44351,7 @@
             "type": "object",
             "properties": {
               "id": {
-                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `work` or `personal`.",
                 "type": "string"
               },
               "driver_kind": {
@@ -44397,7 +44397,7 @@
                 "type": "string"
               },
               "account": {
-                "description": "The account the session runs under, such as `claude` or `bloom`.",
+                "description": "The account the session runs under, such as `work` or `personal`.",
                 "type": "string"
               },
               "project": {
@@ -44965,7 +44965,7 @@
             "type": "object",
             "properties": {
               "id": {
-                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `work` or `personal`.",
                 "type": "string"
               },
               "driver_kind": {
@@ -45010,7 +45010,7 @@
                 "type": "string"
               },
               "account": {
-                "description": "The account the session runs under, such as `claude` or `bloom`.",
+                "description": "The account the session runs under, such as `work` or `personal`.",
                 "type": "string"
               },
               "project": {
@@ -45517,7 +45517,7 @@
             "type": "object",
             "properties": {
               "id": {
-                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `work` or `personal`.",
                 "type": "string"
               },
               "driver_kind": {
@@ -45840,7 +45840,7 @@
             "type": "object",
             "properties": {
               "id": {
-                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `work` or `personal`.",
                 "type": "string"
               },
               "driver_kind": {
@@ -46240,7 +46240,7 @@
             "type": "object",
             "properties": {
               "id": {
-                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `work` or `personal`.",
                 "type": "string"
               },
               "driver_kind": {
@@ -46554,7 +46554,7 @@
             "type": "object",
             "properties": {
               "id": {
-                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `work` or `personal`.",
                 "type": "string"
               },
               "driver_kind": {
@@ -48787,7 +48787,7 @@
                 "default": ""
               },
               "project": {
-                "description": "A repo key such as `github.com/FelipeGazapina/pinned`; none for an idea that has no project yet.",
+                "description": "A repo key such as `github.com/acme/site`; none for an idea that has no project yet.",
                 "type": [
                   "string",
                   "null"
@@ -51014,7 +51014,7 @@
                 "default": ""
               },
               "project": {
-                "description": "A repo key such as `github.com/FelipeGazapina/pinned`; none for an idea that has no project yet.",
+                "description": "A repo key such as `github.com/acme/site`; none for an idea that has no project yet.",
                 "type": [
                   "string",
                   "null"
@@ -54913,7 +54913,7 @@
             "type": "object",
             "properties": {
               "id": {
-                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `work` or `personal`.",
                 "type": "string"
               },
               "driver_kind": {
@@ -57640,7 +57640,7 @@
                 "default": ""
               },
               "project": {
-                "description": "A repo key such as `github.com/FelipeGazapina/pinned`; none for an idea that has no project yet.",
+                "description": "A repo key such as `github.com/acme/site`; none for an idea that has no project yet.",
                 "type": [
                   "string",
                   "null"
@@ -58907,7 +58907,7 @@
             "type": "object",
             "properties": {
               "id": {
-                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `work` or `personal`.",
                 "type": "string"
               },
               "driver_kind": {
@@ -61547,7 +61547,7 @@
                 "default": ""
               },
               "project": {
-                "description": "A repo key such as `github.com/FelipeGazapina/pinned`; none for an idea that has no project yet.",
+                "description": "A repo key such as `github.com/acme/site`; none for an idea that has no project yet.",
                 "type": [
                   "string",
                   "null"
@@ -62747,7 +62747,7 @@
             "type": "object",
             "properties": {
               "id": {
-                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `work` or `personal`.",
                 "type": "string"
               },
               "driver_kind": {
@@ -68306,7 +68306,7 @@
             "type": "object",
             "properties": {
               "id": {
-                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `work` or `personal`.",
                 "type": "string"
               },
               "driver_kind": {

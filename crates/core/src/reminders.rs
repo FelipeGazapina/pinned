@@ -556,7 +556,7 @@ fn project_tools() -> [(Audience, serde_json::Value); 20] {
         })),
         (Audience::GlobalOrchestrator, serde_json::json!({
             "name": "sessions",
-            "description": "List as JSON every session of the account on every online machine and account: loose threads the user opened, workers and Capitães. Each has its id (for read_session), project (key, name, path), machine, account (such as claude or bloom), role (captain, worker or thread), the Capitão a worker works for, title, branch, PR, state and last_activity (Unix seconds). state is running (working on a turn), idle (its turn ended), waiting_on_input (it asks the user mid-turn), error (it stopped on an error) or settled (its session is not running). Newest activity first. machines lists every machine of the account, so an offline one or one that needs to update pinned shows. Call it to answer what runs in a project or on a machine.",
+            "description": "List as JSON every session of the account on every online machine and account: loose threads the user opened, workers and Capitães. Each has its id (for read_session), project (key, name, path), machine, account (such as work or personal), role (captain, worker or thread), the Capitão a worker works for, title, branch, PR, state and last_activity (Unix seconds). state is running (working on a turn), idle (its turn ended), waiting_on_input (it asks the user mid-turn), error (it stopped on an error) or settled (its session is not running). Newest activity first. machines lists every machine of the account, so an offline one or one that needs to update pinned shows. Call it to answer what runs in a project or on a machine.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -580,7 +580,7 @@ fn project_tools() -> [(Audience, serde_json::Value); 20] {
         })),
         (Audience::GlobalOrchestrator, serde_json::json!({
             "name": "repo_overview",
-            "description": "Read-only look at a project's repository: the machine, branch and HEAD it read, size, languages, top folders, packages, CLAUDE.md, AGENTS.md and the start of the README, the latest commits and the project's memories. Use it before you hand a Capitão more than a one-liner. Off until Felipe turns it on in Settings; every call is in Agent activity.",
+            "description": "Read-only look at a project's repository: the machine, branch and HEAD it read, size, languages, top folders, packages, CLAUDE.md, AGENTS.md and the start of the README, the latest commits and the project's memories. Use it before you hand a Capitão more than a one-liner. Off until the user turns it on in Settings > Account > Orchestrator repo access; every call is in Agent activity.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
