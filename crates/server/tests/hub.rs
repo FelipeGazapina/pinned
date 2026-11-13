@@ -2394,7 +2394,7 @@ fn a_box_run_boots_its_own_node_and_the_box_goes_when_its_tab_closes() {
     assert_eq!((created[0].size, created[0].init_command.as_str()), (BoxSize::Small, "sh /workspace/home/.pinned/start.sh || true"));
     ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
     let machine = ana.box_machine();
-    assert_eq!(hub.boxes.file(&format!("{BOX_DIR}/box.env")), Some(format!("CLAUDE_CODE_OAUTH_TOKEN='{CLAUDE_TOKEN}'\n")), "no GitHub token without GitHub");
+    assert_eq!(hub.boxes.file(&format!("{BOX_DIR}/box.env")), Some(format!("CLAUDE_CODE_OAUTH_TOKEN='{CLAUDE_TOKEN}'\nPINNED_BOX=1\n")), "no GitHub token without GitHub");
     let token = hub.boxes.state.lock().unwrap().accounts[0].machine_token.clone();
     for script in &hub.boxes.state.lock().unwrap().scripts {
         for secret in [BOX_KEY, CLAUDE_TOKEN, token.as_str()] {
@@ -5082,7 +5082,7 @@ fn a_box_worker_signs_in_with_the_named_token_nests_under_its_caller_and_goes_wh
     assert_eq!((started["workState"].as_str(), started["machine"].as_str()), (Some("working"), Some("Box · Slow suite")), "{started}");
     assert_eq!(started["tabId"], Value::Null, "the box has not booted yet");
     wait_for("the worker thread running on the box", || box_tabs(&hub.boxes).iter().any(|t| t.role == Some(Role::Worker) && t.running));
-    assert_eq!(hub.boxes.file(&format!("{BOX_DIR}/box.env")), Some("CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-bloomtoken'\n".into()), "bloom's token, and no GitHub token without GitHub");
+    assert_eq!(hub.boxes.file(&format!("{BOX_DIR}/box.env")), Some("CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-bloomtoken'\nPINNED_BOX=1\n".into()), "bloom's token, and no GitHub token without GitHub");
     assert_eq!(hub.boxes.state.lock().unwrap().created[0].size, BoxSize::Small);
     let child = box_tabs(&hub.boxes).into_iter().find(|t| t.role == Some(Role::Worker)).unwrap();
     assert_eq!(
@@ -5418,7 +5418,7 @@ fn the_global_orchestrator_opens_a_captain_in_a_box_with_the_accounts_connection
     let captain = box_tabs(&hub.boxes).into_iter().find(|t| t.role == Some(Role::Orchestrator)).unwrap();
     assert!(captain.cwd.ends_with("/site"), "{}", captain.cwd);
     ana.client.wait_machines(&[("mini", true), ("Box · Captain site", true)]);
-    assert_eq!(hub.boxes.file(&format!("{BOX_DIR}/box.env")), Some(format!("CLAUDE_CODE_OAUTH_TOKEN='{CLAUDE_TOKEN}'\n")));
+    assert_eq!(hub.boxes.file(&format!("{BOX_DIR}/box.env")), Some(format!("CLAUDE_CODE_OAUTH_TOKEN='{CLAUDE_TOKEN}'\nPINNED_BOX=1\n")));
 
     let again = send("r-2", "Also the footer.").unwrap();
     assert_eq!((again["box"].as_str(), again["tab"].as_str()), (sent["box"].as_str(), Some(captain.id.as_str())), "the box that runs the Captain takes the next message: {again}");
