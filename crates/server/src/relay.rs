@@ -161,7 +161,7 @@ async fn look(hub: &Hub, account: &Account, machine: &str, settings_wait: Durati
 /// Repo reads an account's global orchestrator may make a minute and an hour.
 pub const READS_PER_MINUTE: usize = 30;
 pub const READS_PER_HOUR: usize = 300;
-pub const INSIGHT_OFF: &str = "Reading repositories is off for this account, so the Orchestrator can't look at the code. you can turn it on in Settings > Account > Orchestrator repo access.";
+pub const INSIGHT_OFF: &str = "Reading repositories is off for this account, so the Orchestrator can't look at the code. The user can turn it on in Settings > Account > Orchestrator repo access.";
 
 /// When an account's repo reads came, for their limit.
 #[derive(Default)]
