@@ -2719,23 +2719,27 @@ fn parse_effort(name: &str) -> Option<Effort> {
     }
 }
 
-/// Parses a session node's permission name. Unknown names inherit the owner's mode.
-fn parse_permission(name: &str) -> Option<PermissionMode> {
-    match name.trim() {
-        "manual" => Some(PermissionMode::Manual),
-        "acceptEdits" => Some(PermissionMode::AcceptEdits),
-        "auto" => Some(PermissionMode::Auto),
-        "dontAsk" => Some(PermissionMode::DontAsk),
-        "bypassPermissions" => Some(PermissionMode::BypassPermissions),
-        "plan" => Some(PermissionMode::Plan),
-        _ => None,
+/// Parses a session node's permission name: empty inherits the owner's mode, and only the exact
+/// names count. Saving, the agent check, the audit line and the runner all read it here, so no
+/// layer reads a value as a mode another layer does not.
+pub fn parse_permission(name: &str) -> Result<Option<PermissionMode>, String> {
+    match name {
+        "" => Ok(None),
+        "manual" => Ok(Some(PermissionMode::Manual)),
+        "acceptEdits" => Ok(Some(PermissionMode::AcceptEdits)),
+        "auto" => Ok(Some(PermissionMode::Auto)),
+        "dontAsk" => Ok(Some(PermissionMode::DontAsk)),
+        "bypassPermissions" => Ok(Some(PermissionMode::BypassPermissions)),
+        "plan" => Ok(Some(PermissionMode::Plan)),
+        _ => Err("its permission must be manual, acceptEdits, auto, dontAsk, bypassPermissions or plan, or empty to use the workflow's own".into()),
     }
 }
 
 /// A session node's setup over the session owner's own settings: every field it names wins,
 /// empty text fields inherit. The merged connector builds the opening prompt and spec exactly
-/// as the owner's would, so a bare node behaves like today's talk.
-fn merge_session(owner: &Connector, setup: &SessionSetup) -> Connector {
+/// as the owner's would, so a bare node behaves like today's talk. A permission that is not an exact
+/// name opens no session, whatever the owner's mode.
+fn merge_session(owner: &Connector, setup: &SessionSetup) -> Result<Connector, String> {
     let mut merged = owner.clone();
     if !setup.folder.trim().is_empty() {
         merged.folder = setup.folder.trim().into();
@@ -2749,7 +2753,7 @@ fn merge_session(owner: &Connector, setup: &SessionSetup) -> Connector {
     if let Some(effort) = parse_effort(&setup.effort) {
         merged.effort = effort;
     }
-    if let Some(permission) = parse_permission(&setup.permission) {
+    if let Some(permission) = parse_permission(&setup.permission)? {
         merged.permission_mode = permission;
     }
     if !setup.account.trim().is_empty() {
@@ -2761,7 +2765,7 @@ fn merge_session(owner: &Connector, setup: &SessionSetup) -> Connector {
     if !setup.instructions.trim().is_empty() {
         merged.instructions = setup.instructions.clone();
     }
-    merged
+    Ok(merged)
 }
 
 /// The session `Effect::Open` starts for `owner`: the trigger as today's builders read it, the
@@ -3541,7 +3545,9 @@ impl Connectors {
         Fut: Future<Output = R>,
         R: Taken,
     {
-        let mut owner_c = merge_session(&self.store.lock().unwrap().connector(owner).cloned()?, session);
+        // A step stored before the save check read its permission as the runner does.
+        let merged = merge_session(&self.store.lock().unwrap().connector(owner).cloned()?, session);
+        let mut owner_c = merged.inspect_err(|e| eprintln!("pinned: workflow {} opened no session for a step: {e}", run.connector))?;
         // A proof step requires the video like the connector's proof flag does. The session
         // still records it; this only appends the instructions to its opening prompt.
         if !owner_c.proof && self.graph_has_proof(owner) {
@@ -4567,7 +4573,7 @@ impl Connectors {
             Trigger::LinearLabel { .. } | Trigger::SlackMention { .. } => {}
         }
         let (owner, setup, proof) = manual_start(&self.library(), &self.names(), id)?;
-        let mut owner = merge_session(&self.store.lock().unwrap().connector(&owner).cloned()?, &setup);
+        let mut owner = merge_session(&self.store.lock().unwrap().connector(&owner).cloned()?, &setup).map_err(|e| format!("the workflow's session step can't run: {e}"))?;
         owner.proof |= proof || self.graph_has_proof(&owner.id);
         let title: String = format!("{} · Run now", workflow.name).chars().take(TAB_NAME_CHARS).collect();
         let mut run = manual_run(&owner, id, &title, &setup.prompt, by, Utc::now(), &self.exe);
@@ -4930,13 +4936,14 @@ mod tests {
     #[test]
     fn a_session_step_overrides_only_the_fields_it_names() {
         let owner = linear_connector();
-        let merged = merge_session(&owner, &SessionSetup::default());
+        let merged = merge_session(&owner, &SessionSetup::default()).unwrap();
         assert_eq!(merged.folder, owner.folder);
         assert_eq!(merged.effort, owner.effort);
         let merged = merge_session(
             &owner,
             &SessionSetup { folder: " /work ".into(), model: "haiku".into(), effort: "low".into(), permission: "auto".into(), account: "work".into(), worktree: true, instructions: "Be quick.".into(), ..Default::default() },
-        );
+        )
+        .unwrap();
         assert_eq!(merged.folder, PathBuf::from("/work"));
         assert_eq!(merged.model, "haiku");
         assert_eq!(merged.effort, Effort::Low);
@@ -4945,9 +4952,10 @@ mod tests {
         assert!(merged.worktree);
         assert_eq!(merged.instructions, "Be quick.");
         assert_eq!(merged.repo, owner.repo);
-        let merged = merge_session(&owner, &SessionSetup { effort: "nonsense".into(), permission: "nonsense".into(), ..Default::default() });
+        let merged = merge_session(&owner, &SessionSetup { effort: "nonsense".into(), ..Default::default() }).unwrap();
         assert_eq!(merged.effort, owner.effort);
         assert_eq!(merged.permission_mode, owner.permission_mode);
+        assert!(merge_session(&owner, &SessionSetup { permission: "nonsense".into(), ..Default::default() }).is_err(), "a permission that is not a name opens nothing");
     }
 
     #[test]

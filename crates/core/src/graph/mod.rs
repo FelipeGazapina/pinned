@@ -376,6 +376,9 @@ impl Graph {
             if let NodeKind::Switch(switch) = &node.kind {
                 self.check_switch(node, switch)?;
             }
+            if let NodeKind::Session(setup) = &node.kind {
+                crate::connectors::parse_permission(&setup.permission).map_err(|e| format!("\"{}\": {e}", node.name))?;
+            }
         }
         Ok(())
     }

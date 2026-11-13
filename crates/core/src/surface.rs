@@ -788,11 +788,16 @@ pub fn widening(call: &Parsed) -> Option<String> {
 }
 
 /// Whether `call` saves a workflow with a session that skips its permission prompts. It runs later,
-/// outside the saving session, so a session that asks for its own prompts may not save one.
+/// outside the saving session, so a session that asks for its own prompts may not save one. A
+/// permission the runner's parse does not read counts too: the check never reads a value as safe
+/// that another layer could read as a mode.
 pub fn skips_prompts(call: &Parsed) -> bool {
+    fn skips(field: &Value) -> bool {
+        field.as_str().is_some_and(|name| matches!(crate::connectors::parse_permission(name), Ok(Some(crate::connectors::PermissionMode::BypassPermissions)) | Err(_)))
+    }
     fn walk(value: &Value) -> bool {
         match value {
-            Value::Object(fields) => fields.iter().any(|(name, field)| (matches!(name.as_str(), "permissionMode" | "permission") && field == "bypassPermissions") || walk(field)),
+            Value::Object(fields) => fields.iter().any(|(name, field)| (matches!(name.as_str(), "permissionMode" | "permission") && skips(field)) || walk(field)),
             Value::Array(items) => items.iter().any(walk),
             _ => false,
         }
