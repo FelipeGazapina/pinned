@@ -8805,6 +8805,33 @@ fn the_hub_holds_no_end_whose_tab_is_not_one_pinned_makes() {
 }
 
 #[test]
+fn a_worker_whose_end_the_hub_cannot_look_up_a_machine_for_hears_no_database_text() {
+    let hub = TestHub::start("held_lookup_error");
+    let (token, _, mut ana) = signed_in(&hub.url, "ana@acme.dev");
+    let (offline, _) = account::register_machine(&hub.url, &token, "ana-old", "linux").unwrap();
+    let (online, online_token) = account::register_machine(&hub.url, &token, "ana-mac", "linux").unwrap();
+    let (_, mini_token) = account::register_machine(&hub.url, &token, "ana-mini", "linux").unwrap();
+    let mini_raw = RawMachine::start(&hub.url, &mini_token, |_| RawReply::Ok(Value::Null));
+    let mac_raw = RawMachine::start(&hub.url, &online_token, |_| RawReply::Ok(json!("unknown")));
+    wait_for("mac and mini online", || ana.machines().iter().filter(|(_, up)| *up).count() == 2);
+    // The machine lookup now fails in Postgres, as a lost connection or a schema change would.
+    admin_on(&hub.database, "alter table machines rename column name to label");
+    let end = |to: &str| json!({ "cmd": "remote_ended", "to": to, "tab": "tab-1", "task": "task-1", "end": { "state": "result_available", "summary": "Suite green." } });
+    assert_eq!(
+        mini_raw.ask(end(&offline.id)),
+        Err("the hub could not keep the end of task task-1 for its machine, which is offline; it is sent again".into()),
+        "an offline machine"
+    );
+    assert_eq!(
+        mini_raw.ask(end(&online.id)),
+        Err("the hub could not keep the end of task task-1 that its machine did not take; it is sent again".into()),
+        "an online machine that did not take it"
+    );
+    assert_eq!(mac_raw.calls("remote_ended"), 1);
+    assert_eq!(held_ends(&hub, None), 0);
+}
+
+#[test]
 fn a_machine_that_answers_a_held_end_with_an_error_is_offered_no_more_until_it_connects_again() {
     let hub = TestHub::start("held_error_stops");
     let (_ana, mac, mac_token, _mini, mini_raw, _) = held_for_offline_mac(&hub);
