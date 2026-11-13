@@ -63,6 +63,13 @@ impl JsonSchema for Bytes {
     }
 }
 
+/// When the machine slept: the last tick before it and the first after it, in unix seconds.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
+pub struct CutBySleep {
+    pub slept_at: u64,
+    pub woke_at: u64,
+}
+
 /// What a tab runs.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
@@ -109,6 +116,9 @@ pub struct TabView {
     /// A turn was running when pinned quit, so the tab has work left to continue.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub interrupted: bool,
+    /// The turn died on an API error while the machine slept, so it stopped where the sleep cut it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cut_by_sleep: Option<CutBySleep>,
     /// What the conversation's work came to so far, once its transcript holds any of it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stats: Option<ThreadStats>,
@@ -164,6 +174,11 @@ pub struct TabView {
     /// it waits on, read from its transcript, such as the command a permission prompt shows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ask_detail: Option<String>,
+    /// The questionnaire the session waits on the user to answer, which `Call::AnswerQuestions`
+    /// answers. While it is open the tab reads as a question mid-turn, so an app that predates it
+    /// still shows the tab waiting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub questions: Option<crate::questions::Questionnaire>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
@@ -229,6 +244,9 @@ pub enum Call {
     /// `null`, once the tab's turn is stopped as the app's Stop button stops it: claude's background
     /// agents and workflows first, then the turn, then the turn their "stopped" notices wake.
     StopTurn { tab: TabId },
+    /// `null`, once `reply` closes the questionnaire `id` open on the tab. Refused when it is
+    /// closed already, or the reply does not fit its questions.
+    AnswerQuestions { tab: TabId, id: String, reply: crate::questions::QuestionsReply },
     /// The tab's new folder, canonical. Stands in for the folder dialog on a remote machine;
     /// the client then sends `StartClaude`.
     SetFolder { tab: TabId, path: String },
@@ -1103,7 +1121,7 @@ pub enum HubCall {
     /// `RunStarted`: a session of the saved workflow `id`, started now with no trigger behind it,
     /// on the machine the workflow names and under the limits of its project there.
     RunWorkflow { id: String },
-    /// `graph::Graph`: a workflow map drafted from a plain description by a chat model.
+    /// Kept for older apps, whose Generate with AI button still sends it. The hub answers an error: an agent creates a workflow with `save_connector`.
     GenerateWorkflow { model: String, description: String },
     /// Starts an interactive session on a new Upstash Box cloning `repo`. Returns `BoxStatus`.
     OpenBox {
@@ -1359,6 +1377,27 @@ pub enum HubCall {
     /// `Vec<mcp::Entry>`: the account's own MCP servers, which every session pinned starts loads
     /// while enabled, each with the names of its secrets and never their values.
     ListMcpServers,
+    /// `Vec<ideas::Idea>`: the account's ideas, the most recently changed first; with `project` (a repo key),
+    /// only that project's.
+    ListIdeas {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+    },
+    /// `ideas::Idea`: adds an idea, or with `id` changes that one (its title, text and project as sent, and its
+    /// status when sent). The hub sets who made it and the times.
+    SaveIdea {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        title: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<crate::ideas::IdeaStatus>,
+    },
+    /// Removes the account's idea `id`.
+    DeleteIdea { id: String },
     /// `mcp::Entry`: adds a server, enabled, or with `id` changes that one, keeping its enabled
     /// state. `secrets` holds what the user typed in the app; a name left out or blank keeps the
     /// value the server has, and a new name needs one.
@@ -1709,6 +1748,7 @@ mod tests {
             updated: Some(1792400000),
             session: Some("s1".into()),
             interrupted: false,
+            cut_by_sleep: None,
             stats: Some(ThreadStats { active_ms: Some(4_320_000), cost_usd: Some(3.42) }),
             branch: Some("felipe/forms".into()),
             pr: Some(PrLink { number: 92, url: "https://github.com/o/site/pull/92".into() }),
@@ -1724,6 +1764,7 @@ mod tests {
             work: None,
             question: None,
             ask_detail: None,
+            questions: None,
         }
     }
 
@@ -1747,6 +1788,48 @@ mod tests {
         let plain = serde_json::to_value(tab_view()).unwrap();
         assert!(plain.get("orchestrator_global").is_none(), "{plain}");
         assert!(!serde_json::from_value::<TabView>(plain).unwrap().orchestrator_global);
+    }
+
+    #[test]
+    fn a_tab_carries_its_open_questions_and_an_older_tab_reads_without_them() {
+        use crate::questions::{QOption, Question, Questionnaire};
+        let asked = Questionnaire {
+            id: "q-7".into(),
+            title: Some("Checkout redesign".into()),
+            questions: vec![Question {
+                header: Some("Branch".into()),
+                question: "Base the fix on main or on release/0.18?".into(),
+                changes: "which branch the PR targets".into(),
+                options: vec![QOption { label: "main".into(), description: Some("ships in the next release".into()), recommended: true }, QOption { label: "release/0.18".into(), description: None, recommended: false }],
+                multi_select: false,
+            }],
+            projects: vec![],
+            at: 1_794_240_000,
+        };
+        let tab = TabView { questions: Some(asked), ..tab_view() };
+        let sent = serde_json::to_value(&tab).unwrap();
+        assert_eq!(
+            sent["questions"],
+            json!({ "id": "q-7", "title": "Checkout redesign", "at": 1_794_240_000, "questions": [{ "header": "Branch", "question": "Base the fix on main or on release/0.18?", "changes": "which branch the PR targets", "options": [{ "label": "main", "description": "ships in the next release", "recommended": true }, { "label": "release/0.18" }] }] })
+        );
+        assert_eq!(serde_json::from_value::<TabView>(sent).unwrap(), tab);
+        let older = serde_json::to_value(tab_view()).unwrap();
+        assert!(older.get("questions").is_none(), "a tab with no questions sends none: {older}");
+        assert_eq!(serde_json::from_value::<TabView>(older).unwrap().questions, None, "an older machine's tab reads with no questions");
+    }
+
+    #[test]
+    fn answer_questions_round_trips_answered_and_skipped() {
+        use crate::questions::{Answer, QuestionsReply};
+        round_trip(
+            Call::AnswerQuestions {
+                tab: "tab-1".into(),
+                id: "q-7".into(),
+                reply: QuestionsReply::Answered { answers: vec![Answer { chosen: vec!["main".into()], text: None }, Answer { chosen: vec![], text: Some("Only the desktop one".into()) }] },
+            },
+            json!({ "cmd": "answer_questions", "tab": "tab-1", "id": "q-7", "reply": { "kind": "answered", "answers": [{ "chosen": ["main"] }, { "text": "Only the desktop one" }] } }),
+        );
+        round_trip(Call::AnswerQuestions { tab: "tab-1".into(), id: "q-7".into(), reply: QuestionsReply::Skipped }, json!({ "cmd": "answer_questions", "tab": "tab-1", "id": "q-7", "reply": { "kind": "skipped" } }));
     }
 
     #[test]
@@ -2161,7 +2244,7 @@ mod tests {
             }),
         );
         round_trip(
-            ToClient::Settings { settings: Settings { linear: None, slack: None, slack_bots: vec![], github: None, vercel: None, upstash: None, box_claude_tokens: BTreeMap::new(), connectors: vec![], checked: None, boxes: BoxAccess::default(), box_asks: vec![], convex: vec![], repo_insight: Default::default(), schedules: vec![] } },
+            ToClient::Settings { settings: Settings { linear: None, slack: None, slack_bots: vec![], github: None, vercel: None, upstash: None, box_claude_tokens: BTreeMap::new(), connectors: vec![], checked: None, boxes: BoxAccess::default(), box_asks: vec![], convex: vec![], ideas: vec![], repo_insight: Default::default(), schedules: vec![] } },
             json!({ "type": "settings", "settings": { "linear": null, "slack": null, "github": null, "vercel": null, "upstash": null, "connectors": [], "checked": null } }),
         );
         let old: ToClient = serde_json::from_value(json!({ "type": "machines", "machines": [] })).unwrap();
@@ -2240,6 +2323,14 @@ mod tests {
             json!({ "cmd": "import_mcp_server", "machine": "m1", "account": "claude", "name": "linear", "project": "github.com/a/b" }),
         );
         round_trip(HubCall::LoadMcpServers, json!({ "cmd": "load_mcp_servers" }));
+        round_trip(HubCall::ListIdeas { project: None }, json!({ "cmd": "list_ideas" }));
+        round_trip(HubCall::ListIdeas { project: Some("github.com/a/b".into()) }, json!({ "cmd": "list_ideas", "project": "github.com/a/b" }));
+        round_trip(HubCall::SaveIdea { id: None, title: "An iPad app".into(), text: String::new(), project: None, status: None }, json!({ "cmd": "save_idea", "title": "An iPad app" }));
+        round_trip(
+            HubCall::SaveIdea { id: Some("i1".into()), title: "An iPad app".into(), text: "Maybe.".into(), project: Some("github.com/a/b".into()), status: Some(crate::ideas::IdeaStatus::Dropped) },
+            json!({ "cmd": "save_idea", "id": "i1", "title": "An iPad app", "text": "Maybe.", "project": "github.com/a/b", "status": "dropped" }),
+        );
+        round_trip(HubCall::DeleteIdea { id: "i1".into() }, json!({ "cmd": "delete_idea", "id": "i1" }));
     }
 
     #[test]

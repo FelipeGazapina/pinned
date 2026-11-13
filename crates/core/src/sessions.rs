@@ -31,6 +31,9 @@ pub struct Saved {
     /// Claude's permission mode from the last hook that reported one. `plan` is read-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
+    /// The turn died on an API error while the machine slept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cut_by_sleep: Option<crate::wire::CutBySleep>,
     /// The session of the tab that started this one, which nests it there again on restore.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawned_by: Option<String>,
@@ -95,7 +98,7 @@ mod tests {
 
     #[test]
     fn interrupted_sessions_continue_once_no_limit_blocks_them() {
-        let saved = |interrupted, resume_at| Saved { cwd: "/repo".into(), session: "s1".into(), env: vec![], bypass: false, interrupted, resume_at, held: false, account: "claude".into(), model: None, permission_mode: None, spawned_by: None };
+        let saved = |interrupted, resume_at| Saved { cwd: "/repo".into(), session: "s1".into(), env: vec![], bypass: false, interrupted, resume_at, held: false, account: "claude".into(), model: None, permission_mode: None, cut_by_sleep: None, spawned_by: None };
         let resumed = vec!["--resume".to_owned(), "s1".to_owned()];
         let continued = [resumed.clone(), vec![CONTINUE_PROMPT.to_owned()]].concat();
         let claude = crate::accounts::Provider::Claude;
@@ -117,7 +120,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pinned-sessions-atomic-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("sessions.json");
-        let kept = |session: &str| Saved { cwd: "/repo".into(), session: session.into(), env: vec![], bypass: false, interrupted: true, resume_at: None, held: false, account: "claude".into(), model: None, permission_mode: None, spawned_by: None };
+        let kept = |session: &str| Saved { cwd: "/repo".into(), session: session.into(), env: vec![], bypass: false, interrupted: true, resume_at: None, held: false, account: "claude".into(), model: None, permission_mode: None, cut_by_sleep: None, spawned_by: None };
         save(&file, &[kept("s1")]).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
         assert!(save(&file, &[kept("s2")]).is_err(), "a read-only drive fails the write");
@@ -135,6 +138,7 @@ mod tests {
             env: vec![("PINNED_ISSUE".into(), "uuid".into())],
             bypass: true,
             interrupted: true,
+            cut_by_sleep: Some(crate::wire::CutBySleep { slept_at: 1792400000, woke_at: 1792420000 }),
             resume_at: Some(1792382400),
             held: true,
             account: "work".into(),

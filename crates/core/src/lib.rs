@@ -44,6 +44,7 @@ pub mod prwatch;
 pub mod placement;
 pub mod pty;
 pub mod pulls;
+pub mod questions;
 pub mod reading;
 pub mod reminders;
 pub mod repo_look;
@@ -51,6 +52,7 @@ pub mod scaffold;
 pub mod schedule;
 pub mod scripts;
 pub mod sessions;
+pub mod sleep;
 #[cfg(unix)]
 pub mod shell;
 pub mod setup_token;

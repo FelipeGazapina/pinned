@@ -916,7 +916,6 @@ function connectorsHtml() {
   return `${intro}
     ${settings.connectors.map(cardHtml).join("")}
     <button class="new-card" data-action="new-connector">＋ New workflow</button>
-    <button class="new-card" data-action="generate-workflow">✳ Generate with AI</button>
     <p class="hint" id="checked">${esc(checkedText())}</p>`;
 }
 
@@ -1796,15 +1795,6 @@ function showStep(id, focus) {
   if (focus) settingsPage.querySelector(".node-panel .details [data-bind]")?.focus();
 }
 
-
-/** Backend generation errors, translated into what to change before trying again. */
-function generateErrorHint(err) {
-  const raw = String(err?.message ?? err);
-  if (raw.includes("has no usable trigger")) return `${raw} Name where it listens, e.g. "when mentioned in #support", then generate again.`;
-  if (raw.includes("did not answer with a workflow map")) return `${raw} Simplify the description into short steps and try again.`;
-  if (raw.includes("which is no step")) return `${raw} Ask for fewer, simply linked steps and try again.`;
-  return raw;
-}
 const actions = {
   "go-integrations": () => showPage("integrations"),
   "open-linear-keys": () => (TAURI ? invoke("open_linear_keys") : window.open(LINEAR_KEYS, "_blank", "noopener")),
@@ -1975,44 +1965,6 @@ const actions = {
   "new-connector"() {
     view = { name: "pick" };
     redraw();
-  },
-  "generate-workflow"() {
-    const chats = suggestions.models.filter((m) => m.kind !== "decision");
-    showDialog(`<div class="dialog-head"><h2><span>Generate workflow</span></h2>
-      <p class="muted">Describe the automation. A chat model drafts the map; review it before saving, as AI can make mistakes.</p></div>
-      <div class="dialog-body generate-body">
-        <label>Model <select id="generate-model">${chats.map((m) => `<option value="${esc(m.id)}">${esc(m.id)}</option>`).join("") || `<option value="">Connect the Vercel AI Gateway first</option>`}</select></label>
-        <label>What should the workflow do?<textarea id="generate-text" rows="5" placeholder="When the bot is mentioned in #support, sort the message; fix bugs in a session and reply when done"></textarea></label>
-        <p class="error" id="generate-error"></p>
-      </div>
-      <div class="dialog-foot"><span class="muted"></span><span class="buttons"><button type="button" class="primary" data-generate>Generate</button></span></div>`);
-    shellDialog.dataset.kind = "generate";
-    shellDialog.querySelector("[data-generate]").onclick = async (e) => {
-      const button = e.target.closest("[data-generate]");
-      const error = document.getElementById("generate-error");
-      const description = document.getElementById("generate-text").value;
-      error.textContent = "";
-      if (!description.trim()) {
-        error.textContent = "Describe the workflow first.";
-        return;
-      }
-      button.disabled = true;
-      button.textContent = "Generating…";
-      try {
-        const graph = await connectorCall("generate_workflow", { model: document.getElementById("generate-model").value, description });
-        const watch = graph.nodes.find((n) => (n.type ?? n.kind) === "trigger")?.watch;
-        const kind = watch?.kind === "linear-label" ? "linear-label" : watch?.kind === "slack-mention" ? "slack-mention" : watch?.kind === "slack-message" ? "slack-message" : "called";
-        const draft = blank(kind);
-        draft.graph = graph;
-        closeDialog();
-        edit(-1, draft, graph.nodes[0]?.id ?? null);
-        redraw();
-      } catch (err) {
-        error.textContent = generateErrorHint(err);
-        button.disabled = false;
-        button.textContent = "Generate";
-      }
-    };
   },
   "connect-for-trigger"(button) {
     pendingWorkflow = { kind: button.dataset.kind };

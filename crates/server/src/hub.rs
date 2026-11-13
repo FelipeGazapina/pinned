@@ -6,6 +6,8 @@ use pinned_core::agent::{AgentStatus, Stage, Subject, Usage, CONNECTOR_ENV};
 use pinned_core::schedule::{self, Actor, SaveAnswer, Task};
 use pinned_core::connectors::{Settings, Connectors, Delivery, Keys, Placement, Run, RunsOn, Storage, Work};
 use pinned_core::convex::client::Http as ConvexHttp;
+use pinned_core::ideas::{Idea, IdeaStatus};
+use pinned_core::schedule::Actor;
 use pinned_core::delegate::{RunTarget, TaskRecord};
 use pinned_core::marks::{self, Archived, Mark, MarkChange, SessionMarks};
 use pinned_core::taste::{TasteField, TastePatch, TasteScope, Tastes};
@@ -536,13 +538,13 @@ impl Hub {
             HubCall::SlackSuggestions { bot } => (json(c().await?.slack_suggestions(&bot).await?), false),
             HubCall::SaveConnector { connector } => (json(c().await?.save_connector(connector)?), true),
             HubCall::DeleteConnector { id } => (json(c().await?.delete_connector(&id)?), true),
-            call @ (HubCall::ListSchedules | HubCall::SaveSchedule { .. } | HubCall::PauseSchedule { .. } | HubCall::DeleteSchedule { .. } | HubCall::ScheduleRuns { .. }) => return self.schedule_call(account, call, &Actor::User).await,
+            call @ (HubCall::ListSchedules | HubCall::SaveSchedule { .. } | HubCall::PauseSchedule { .. } | HubCall::DeleteSchedule { .. } | HubCall::ScheduleRuns { .. }) => return self.schedule_call(account, call, Actor::User).await,
             HubCall::SetReleaseProtection { on } => {
                 self.db.set_release_protection(account.id, on).await?;
                 return json(on);
             }
             HubCall::RunWorkflow { id } => return json(self.run_workflow(account, &id).await?),
-            HubCall::GenerateWorkflow { model, description } => (json(c().await?.generate_workflow(&model, &description).await?), false),
+            HubCall::GenerateWorkflow { .. } => return Err("Generate with AI was removed: ask an agent to create the workflow".into()),
             HubCall::OpenBox { repo, size, budget_usd } => (json(self.boxes.open_session(self, account, repo, size, budget_usd, None).await?), false),
             HubCall::BoxStatus { machine } => {
                 let machine = Uuid::parse_str(&machine).map_err(|_| format!("this account has no machine {machine}"))?;
@@ -724,6 +726,16 @@ impl Hub {
             HubCall::AgentAudit { before, limit } => {
                 let limit = i64::from(limit.unwrap_or(50).clamp(1, 200));
                 return json(self.db.audit_rows(account.id, before, limit).await?);
+            }
+            HubCall::ListIdeas { project } => return json(self.db.ideas(account.id, project.as_deref().map(str::trim).filter(|p| !p.is_empty())).await?),
+            HubCall::SaveIdea { id, title, text, project, status } => return json(self.save_idea(account, Actor::User, id.as_deref(), &title, &text, project.as_deref(), status).await?),
+            HubCall::DeleteIdea { id } => {
+                let unknown = || format!("this account has no idea {id}");
+                if !self.db.delete_idea(account.id, Uuid::parse_str(&id).map_err(|_| unknown())?).await? {
+                    return Err(unknown());
+                }
+                self.push_settings(account).await;
+                return Ok(Value::Null);
             }
             HubCall::ListMcpServers => return json(c().await?.mcp_servers()),
             HubCall::SaveMcpServer { id, server, secrets } => return json(c().await?.save_mcp_server(id.as_deref(), server, &secrets)?),
@@ -910,21 +922,27 @@ impl Hub {
         }
     }
 
+    /// The account's settings with its ideas and scheduled tasks, which live in the hub's own tables. A failed ideas
+    /// read leaves them out rather than failing the settings every app loads.
+    async fn settings(&self, account: &Account) -> Result<pinned_core::connectors::Settings, String> {
+        let mut settings = self.connectors(account).await?.get_settings();
+        settings.ideas = self.db.ideas(account.id, None).await.unwrap_or_else(|e| {
+            eprintln!("pinned-server: could not read the ideas of account {}: {e}", account.id);
+            Vec::new()
+        });
+        settings.schedules = self.db.tasks(account.id).await?;
+        Ok(settings)
+    }
+
     async fn push_settings(&self, account: &Account) {
         if let Ok(settings) = self.settings(account).await {
             account.broadcast(&ToClient::Settings { settings });
         }
     }
 
-    /// The account's settings as clients see them: its connectors' and its scheduled tasks.
-    async fn settings(&self, account: &Account) -> Result<Settings, String> {
-        let settings = self.connectors(account).await?.get_settings();
-        Ok(Settings { schedules: self.db.tasks(account.id).await?, ..settings })
-    }
-
     /// The schedule calls, for `actor`, who is recorded as a new task's creator and held to the caps
     /// that apply to agents. Tasks are stored and edited here; nothing fires them yet.
-    pub async fn schedule_call(self: &Arc<Self>, account: &Arc<Account>, call: HubCall, actor: &Actor) -> Result<Value, String> {
+    pub async fn schedule_call(self: &Arc<Self>, account: &Arc<Account>, call: HubCall, actor: Actor) -> Result<Value, String> {
         let unknown = |id: &str| format!("this account has no task {id}");
         let parse = |id: &str| Uuid::parse_str(id.trim()).map_err(|_| unknown(id));
         match call {
@@ -1007,6 +1025,25 @@ impl Hub {
             }
             _ => Err("not a schedule call".into()),
         }
+    }
+
+    /// Adds an idea made by `by`, or with `id` changes that one. The hub sets who made it and the times.
+    pub(crate) async fn save_idea(&self, account: &Account, by: Actor, id: Option<&str>, title: &str, text: &str, project: Option<&str>, status: Option<IdeaStatus>) -> Result<Idea, String> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err("an idea needs a title".into());
+        }
+        let project = project.map(str::trim).filter(|p| !p.is_empty());
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+        let idea = match id {
+            Some(id) => {
+                let unknown = || format!("this account has no idea {id}");
+                self.db.edit_idea(account.id, Uuid::parse_str(id).map_err(|_| unknown())?, title, text.trim(), project, status, now).await?.ok_or_else(unknown)?
+            }
+            None => self.db.add_idea(account.id, title, text.trim(), project, status.unwrap_or_default(), &by, now).await?,
+        };
+        self.push_settings(account).await;
+        Ok(idea)
     }
 
     pub fn logged_out(&self, hash: &[u8]) {
