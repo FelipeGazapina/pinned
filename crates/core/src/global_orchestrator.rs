@@ -637,8 +637,12 @@ pub fn overview_at(machines: &[MachineSnapshot], now: u64) -> Overview {
 /// The first version that sends `TabView.alive` (and `asleep`, `headless`, `stopped`); an older machine leaves it `false`.
 const ALIVE_FROM: (u32, u32, u32) = (0, 18, 2);
 
-/// Whether a machine at `version` sends `TabView.alive`. A version that does not parse (a dev build) does.
+/// Whether a machine at `version` sends `TabView.alive`. A machine with no version reads as old; a
+/// version that does not parse (a dev build) does send it.
 fn reports_alive(version: &str) -> bool {
+    if version.trim().is_empty() {
+        return false;
+    }
     let core = version.split(['-', '+']).next().unwrap_or_default();
     let mut parts = core.split('.').map(|p| p.parse::<u32>());
     match (parts.next(), parts.next(), parts.next(), parts.next()) {
@@ -998,6 +1002,7 @@ mod tests {
         assert_eq!(counted("0.18.2"), 0);
         assert_eq!(counted("0.18.2-rc.1+build.7"), 0);
         assert_eq!(counted("dev"), 0, "a version that does not parse takes the new rule");
+        assert_eq!(counted(""), 1, "a machine with no version reads as old");
         assert_eq!(counted("0.9.30"), 1);
     }
 
