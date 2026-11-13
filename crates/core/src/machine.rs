@@ -1938,7 +1938,7 @@ impl Machine {
         let (cwd, account) = self.tab(&id, |t| (t.cwd.clone(), t.account.clone()))?;
         let project = history::project_of(&cwd);
         let limits = caller.map_or_else(|| self.tastes().resolve(&captain_scope(&project)).limits(), |caller| self.limits_in(caller, &project));
-        let effort = match limits.admit(model.as_deref(), flag("--effort").as_deref(), &self.claude_models()) {
+        let effort = match limits.admit(&account, model.as_deref(), flag("--effort").as_deref(), &self.claude_models()) {
             Ok(effort) => effort,
             Err(refused) => {
                 self.close_tab(&id);
@@ -2399,7 +2399,7 @@ impl Machine {
     /// returns its folder. Claude's own /model saves its pick as the default for every session.
     /// With `account`, a model from another account moves the conversation there first.
     pub fn set_model(&self, tab: &str, model: &str, cols: u16, rows: u16, account: Option<&str>) -> Result<String, String> {
-        if model.starts_with('-') || !model.bytes().all(|b| b.is_ascii_alphanumeric() || b"-.[]_".contains(&b)) {
+        if model.is_empty() || model.starts_with('-') || !model.bytes().all(|b| b.is_ascii_alphanumeric() || b"-.[]_".contains(&b)) {
             return Err(format!("{model:?} is not a model name"));
         }
         if let Some(id) = account.filter(|id| !id.is_empty()) {
@@ -3514,9 +3514,17 @@ impl Machine {
         if let Call::StartClaude { tab, cols, rows } = call {
             return json(self.start_for(caller, &tab, cols, rows)?);
         }
-        if let Call::SetModel { model, .. } = &call {
+        if let Call::SetModel { tab, model, account, .. } = &call {
             // An agent moves a session only to a model its own project allows, as it starts a worker.
-            self.caller_limits(caller)?.admit(Some(model), None, &self.claude_models())?;
+            // The account the session runs on after the call. A tab that is not here is refused by the call itself.
+            let to = match account.as_deref().filter(|id| !id.is_empty()) {
+                Some(id) => Some(self.accounts.get(id).ok_or_else(|| format!("no account {id} on this machine"))?),
+                None => self.tab(tab, |t| t.account.clone()).ok(),
+            };
+            let limits = self.caller_limits(caller)?;
+            if let Some(to) = to {
+                limits.admit(&to, Some(model), None, &self.claude_models())?;
+            }
         }
         if let Call::Enqueue { path, text, request_id, busy, .. } = call {
             return json(self.enqueue_for(caller, &path, &text, &request_id, busy)?);
@@ -3573,10 +3581,10 @@ impl Machine {
         if tab == caller {
             return Err("enqueue hands a message to a Captain; your own session is the one reading this".into());
         }
-        let (running, model) = self.tab(&tab, |t| (t.live() || t.starting, t.model.clone()))?;
+        let (running, model, account) = self.tab(&tab, |t| (t.live() || t.starting, t.model.clone(), t.account.clone()))?;
         if !running {
             let limits = self.limits_in(caller, &project);
-            limits.admit(model.as_deref(), None, &self.claude_models())?;
+            limits.admit(&account, model.as_deref(), None, &self.claude_models())?;
             let working = self.delegates.working_in(&project);
             if working >= limits.parallel as usize {
                 return Err(workers_full(working));
@@ -3625,7 +3633,7 @@ impl Machine {
             return Err(format!("{tab} runs with {} access, wider than your session's {}", access.as_str(), ceiling.as_str()));
         }
         let limits = self.caller_limits(caller)?;
-        let effort = limits.admit(model.as_deref(), None, &self.claude_models())?;
+        let effort = limits.admit(&account, model.as_deref(), None, &self.claude_models())?;
         let caller_ref = Caller { tab: Some(caller.to_owned()), task: None };
         let title = title.unwrap_or_else(|| format!("Session in {}", cwd.file_name().map_or_else(|| cwd.display().to_string(), |name| name.to_string_lossy().into_owned())));
         let new = NewTask {
@@ -4671,17 +4679,28 @@ impl Machine {
     fn delegate_elsewhere(&self, caller: &crate::delegate::Caller, tool: Option<String>, mut request: crate::delegate::Request, limits: taste::Limits, placed: crate::placement::Placed, may_refuse: bool) -> Result<Sent, String> {
         use crate::delegate::{resolve_access, Claim, NewTask, Parent, RemoteTarget};
         let tab = caller.tab.clone().ok_or("only a thread delegates to another machine or a box, and this is a headless task")?;
-        let (account, cwd, ceiling, session) = self.tab(&tab, |t| (t.account.id.clone(), t.cwd.clone(), t.child_access(), t.claude_session.clone()))?;
+        let (account, cwd, ceiling, session) = self.tab(&tab, |t| (t.account.clone(), t.cwd.clone(), t.child_access(), t.claude_session.clone()))?;
         let access = resolve_access(ceiling, &request)?;
         let repo = request.target.boxed.as_ref().and_then(|b| b.repo.clone()).or_else(|| git_remote(&cwd));
         if repo.is_none() {
             return Err("this thread's folder has no git origin, so no other machine or box can find its project".into());
         }
-        let account = request.target.account.clone().filter(|id| !id.is_empty()).unwrap_or(account);
-        let provider = self.accounts.get(&account).map_or(Provider::Claude, |a| a.provider);
+        let named = request.target.account.clone().filter(|id| !id.is_empty()).map(|id| self.accounts.get(&id).ok_or(id));
+        let (account, unheld) = match named {
+            Some(Ok(account)) => (account, false),
+            Some(Err(id)) => (Account { id, ..Account::builtin(Provider::Claude) }, true),
+            None => (account, false),
+        };
+        let provider = account.provider;
         let place = Some(placed.machine_name.clone()).filter(|name| !name.is_empty()).or_else(|| request.target.machine.clone()).unwrap_or_else(|| "an Upstash Box".into());
         // Held here to the caller's limits, and sent with them, so the worker there is held too.
-        let effort = limits.admit(request.target.model.as_deref(), request.target.effort.as_deref(), &self.claude_models())?;
+        // An account this machine lacks is held by the machine that runs it, which checks the model
+        // again against that account's own login and list: here it is priced by its words.
+        let effort = if unheld {
+            limits.admit_unheld(request.target.model.as_deref(), request.target.effort.as_deref(), &self.claude_models())?
+        } else {
+            limits.admit(&account, request.target.model.as_deref(), request.target.effort.as_deref(), &self.claude_models())?
+        };
         let (budget_ms, limit_ms) = crate::delegate::run_limits(request.budget_ms, request.limit_ms, limits.time_limit_ms())?;
         (request.target.effort, request.budget_ms, request.limit_ms) = (effort.clone(), Some(budget_ms), Some(limit_ms));
         let held = taste::Limits { time_limit_min: limit_ms.div_ceil(60_000).try_into().unwrap_or(u32::MAX), ..limits };
@@ -4690,7 +4709,7 @@ impl Machine {
             parent: Parent::Tab(tab.clone()),
             tool,
             title: request.title.clone(),
-            account,
+            account: account.id,
             provider,
             model: request.target.model.clone(),
             cwd,
@@ -4834,12 +4853,21 @@ impl Machine {
     }
 
     /// `Call::RemoteEnded`: the machine `from` ran this machine's task `task` for `tab`, and it ended.
-    fn remote_ended(&self, from: &str, tab: &str, task: &str, end: &crate::delegate::RemoteEnd) -> bool {
+    /// `true` when this machine took the end; `"settled"` when the task had ended already with this
+    /// same end, as from a status look that read it first, so the hub has nothing left to keep;
+    /// `"unknown"` for a task it does not know, or one that ended otherwise, which the hub keeps
+    /// unclaimed. A machine before 0.18.2 answers `false` for both.
+    fn remote_ended(&self, from: &str, tab: &str, task: &str, end: &crate::delegate::RemoteEnd) -> Value {
         // The tab that delegated it may have a new id since: a restart gives every tab one.
-        let Some(parent) = self.delegates.settle_remote(task, tab, from, end) else { return false };
-        self.maybe_deliver(&parent);
-        self.emit_tabs();
-        true
+        match self.delegates.settle_remote(task, tab, from, end) {
+            Some(parent) => {
+                self.maybe_deliver(&parent);
+                self.emit_tabs();
+                Value::Bool(true)
+            }
+            None if self.delegates.holds_remote_end(task, tab, from, end) => json!(crate::delegate::END_SETTLED),
+            None => json!(crate::delegate::END_UNKNOWN),
+        }
     }
 
     /// `Call::RemoteAsked`: the machine `from` runs this machine's task `task` for `tab`, and its
@@ -5230,10 +5258,7 @@ impl Machine {
         let from = model.as_deref().and_then(|asked| ladder.iter().position(|rung| rung.model == asked)).map_or(0, |at| at + 1);
         let claude = self.claude_models();
         for rung in &ladder[from..] {
-            if limits.admit(Some(&rung.model), effort, &claude).is_err() {
-                continue;
-            }
-            let runs = self.accounts.list().into_iter().filter(|next| next.id != account.id && self.rung_runs_on(rung, next));
+            let runs = self.accounts.list().into_iter().filter(|next| next.id != account.id && self.rung_runs_on(rung, next) && limits.admit(next, Some(&rung.model), effort, &claude).is_ok());
             let Some(next) = runs.into_iter().find(|next| !matches!(self.admit_account(next), Admit::Blocked(_))) else { continue };
             let moved = Moved { account: account.id.clone(), model: model.clone(), reason: blocked.note() };
             return Ok((next, Some(rung.model.clone()), Some(moved)));
@@ -5295,7 +5320,7 @@ impl Machine {
         let inherited_model = if parent_auth == account.auth { inherited_model } else { None };
         let model = crate::delegate::child_model(parent_provider, account.provider, inherited_model, request.target.model.clone());
         let (account, mut model, moved) = self.route_around_limits(account, model, &limits, &cwd, request.target.effort.as_deref())?;
-        let mut effort = limits.admit(model.as_deref(), request.target.effort.as_deref(), &self.claude_models())?;
+        let mut effort = limits.admit(&account, model.as_deref(), request.target.effort.as_deref(), &self.claude_models())?;
         let (budget_ms, limit_ms) = crate::delegate::run_limits(request.budget_ms, request.limit_ms, limits.time_limit_ms())?;
         self.ensure_parent(parent_tab.as_deref(), None)?;
         let isolated = request.isolation == Isolation::Worktree;
@@ -12144,6 +12169,59 @@ Have another model review a risky change before it goes ahead.";
 
     #[test]
     #[cfg(unix)]
+    fn a_model_id_the_machine_does_not_list_is_refused_under_a_tier_cap_by_a_worker_and_by_set_model() {
+        let (m, dir, captain) = limited_captain("limits-unlisted", TastePatch { tier: Some(taste::Tier::Mid), ..TastePatch::default() });
+        let unlisted = "is not in this machine's list of Claude models";
+        let error = refused(&m, &captain, work(Some("claude-nova-9-9"), None));
+        assert!(error.starts_with("claude-nova-9-9 ") && error.contains(unlisted), "{error}");
+        let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
+        let tab = m.open_tab(Some(path), false).unwrap();
+        let work = m.accounts.get("work").unwrap();
+        m.tab(&tab, |t| t.account = work).unwrap();
+        let set = m.call(Call::ActFor { caller: captain.clone(), call: json!({ "cmd": "set_model", "tab": tab, "model": "claude-nova-9-9", "cols": 80, "rows": 24 }) });
+        let error = set.unwrap_err();
+        assert!(error.starts_with("claude-nova-9-9 ") && error.contains(unlisted), "{error}");
+        assert_ne!(m.tab(&tab, |t| t.model.clone()).unwrap().as_deref(), Some("claude-nova-9-9"), "a refused model is not set");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_empty_model_name_is_refused_by_set_model_in_a_tier_capped_project() {
+        let (m, dir, captain) = limited_captain("limits-empty-model", TastePatch { tier: Some(taste::Tier::Mid), ..TastePatch::default() });
+        let claude = dir.join("claude");
+        titling_claude(&claude);
+        let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
+        let act = |call: Value| m.call(Call::ActFor { caller: captain.clone(), call });
+        let tab = m.open_tab(Some(path.clone()), false).unwrap();
+        let work = m.accounts.get("work").unwrap();
+        m.tab(&tab, |t| (t.account, t.model) = (work, Some("claude-haiku-5-5".into()))).unwrap();
+        assert_eq!(act(json!({ "cmd": "start_claude", "tab": tab, "cols": 80, "rows": 24 })), Ok(json!(path)));
+        started(&claude, &tab);
+        let set = act(json!({ "cmd": "set_model", "tab": tab, "model": "", "cols": 80, "rows": 24 }));
+        assert!(set.unwrap_err().starts_with("name a model:"), "the cap treats an empty model as none");
+        let direct = m.call(Call::SetModel { tab: tab.clone(), model: String::new(), cols: 80, rows: 24, account: None });
+        assert_eq!(direct, Err("\"\" is not a model name".into()));
+        assert_eq!(m.tab(&tab, |t| t.model.clone()).unwrap().as_deref(), Some("claude-haiku-5-5"), "a refused model changes nothing");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agents_set_model_names_an_account_or_a_tab_that_is_not_here_and_is_refused_as_such() {
+        let (m, dir, captain) = limited_captain("limits-set-model-gone", TastePatch { tier: Some(taste::Tier::Mid), ..TastePatch::default() });
+        let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
+        let tab = m.open_tab(Some(path), false).unwrap();
+        let act = |call: Value| m.call(Call::ActFor { caller: captain.clone(), call });
+        let set = |tab: &str, account: Option<&str>| act(json!({ "cmd": "set_model", "tab": tab, "model": "claude-haiku-5-5", "account": account, "cols": 80, "rows": 24 }));
+        assert_eq!(set(&tab, Some("elsewhere")), Err("no account elsewhere on this machine".into()));
+        assert!(set("tab-gone", None).is_err(), "a tab that is not here is refused");
+        assert!(set("tab-gone", Some("work")).is_err(), "a tab that is not here is refused");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn a_call_above_the_tier_or_the_most_effort_is_refused_and_one_without_effort_gets_the_default() {
         let limits = TastePatch { tier: Some(taste::Tier::Mid), default_effort: Some(taste::Effort::Low), max_effort: Some(taste::Effort::High), ..TastePatch::default() };
         let (m, dir, captain) = limited_captain("limits-tier", limits);
@@ -12758,8 +12836,8 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(*asked.lock().unwrap(), vec![tab.clone()], "the 60 s look asks after it by the tab id the other machine knows");
 
         let end = crate::delegate::RemoteEnd { state: "result_available".into(), summary: Some("Green.".into()), error: None, usage: None };
-        assert_eq!(after.remote_ended("m-other", &tab, &task, &end), false, "only the machine that runs it ends it");
-        assert!(after.remote_ended("m-mini", &tab, &task, &end), "the end the machine sends, naming the old tab id, is taken");
+        assert_eq!(after.remote_ended("m-other", &tab, &task, &end), json!("unknown"), "only the machine that runs it ends it");
+        assert_eq!(after.remote_ended("m-mini", &tab, &task, &end), json!(true), "the end the machine sends, naming the old tab id, is taken");
         let done = after.delegates.get(&task).unwrap();
         assert_eq!((done.state.as_str(), done.summary.as_deref()), ("result_available", Some("Green.")));
         let notice = after.delegates.claim_notice(&tabs[0]).map(|(text, _)| text).unwrap_or_default();
@@ -12949,7 +13027,7 @@ Have another model review a risky change before it goes ahead.";
             error: None,
             usage: Some(crate::usage::TaskUsage { tokens_in: 1200, tokens_out: 30, cost_usd: Some(0.42), wall_ms: 90_000, box_usd: Some(0.05), box_ms: Some(30 * 60_000) }),
         };
-        assert!(m.remote_ended("m-mini", "tab-1", &id, &end));
+        assert_eq!(m.remote_ended("m-mini", "tab-1", &id, &end), json!(true));
         let usage = m.delegates.get(&id).unwrap().usage;
         assert_eq!((usage.tokens_in, usage.cost_usd, usage.box_ms), (1200, Some(0.42), Some(30 * 60_000)));
         assert_eq!(m.delegates.records().len(), 0, "the machine that ran the task records it, so a run counts once");
@@ -12961,7 +13039,7 @@ Have another model review a risky change before it goes ahead.";
         let m = machine();
         let id = delegated_elsewhere(&m, "tab-1", "", "Box · Slow");
         let end = crate::delegate::RemoteEnd { state: "failed".into(), summary: None, error: Some("Upstash Box: the box ended before its task did".into()), usage: None };
-        assert!(m.remote_ended("m-box", "tab-1", &id, &end), "a start that never got its answer still hears how it ended");
+        assert_eq!(m.remote_ended("m-box", "tab-1", &id, &end), json!(true), "a start that never got its answer still hears how it ended");
         assert_eq!(state_of(&m, &id), ("failed".into(), Some("Upstash Box: the box ended before its task did".into())));
     }
 
@@ -13040,6 +13118,54 @@ Have another model review a risky change before it goes ahead.";
         *waiting.lock().unwrap() = Value::Null;
         m.check_remotes(now + Duration::from_secs(130));
         assert_eq!(status(&m)["waiting"], Value::Null, "a `null` from a machine that keeps count says it waits on nothing");
+    }
+
+    #[test]
+    fn a_remote_end_the_hub_passes_again_or_after_a_status_answered_it_settles_the_task_once() {
+        let m = machine();
+        let end = |summary: &str| crate::delegate::RemoteEnd { state: "result_available".into(), summary: Some(summary.into()), error: None, usage: None };
+        let status = |m: &Machine, id: &str| m.delegates.status(&crate::delegate::Caller { tab: Some("tab-1".into()), task: None }, id).unwrap();
+        let id = delegated_elsewhere(&m, "tab-1", "m-box", "box");
+        assert_eq!(m.call(Call::RemoteEnded { from: "m-box".into(), tab: "tab-1".into(), task: id.clone(), end: end("Suite green.") }).unwrap(), json!(true));
+        let ended = m.delegates.get(&id).unwrap().ended;
+        assert_eq!(m.call(Call::RemoteEnded { from: "m-box".into(), tab: "tab-1".into(), task: id.clone(), end: end("Suite green.") }).unwrap(), json!("settled"), "a repeat, as after a lost answer, is a no-op the hub may drop");
+        assert_eq!(m.call(Call::RemoteEnded { from: "m-box".into(), tab: "tab-1".into(), task: id.clone(), end: end("Suite green, again.") }).unwrap(), json!("unknown"), "another end of a settled task is not this one's");
+        assert_eq!((status(&m, &id)["summary"].as_str(), m.delegates.get(&id).unwrap().ended), (Some("Suite green."), ended));
+
+        // The hub's held end answered a status look first, then reaches the machine as RemoteEnded.
+        let id = delegated_elsewhere(&m, "tab-1", "m-box2", "box2");
+        m.set_hub(Arc::new(|call| match call {
+            HubCall::RemoteTask { .. } => Ok(json!({ "workState": "result_available", "summary": "From the hub." })),
+            _ => Err("not this test's".into()),
+        }));
+        m.check_remotes(Instant::now() + Duration::from_secs(61));
+        assert_eq!(status(&m, &id)["summary"].as_str(), Some("From the hub."));
+        assert_eq!(m.call(Call::RemoteEnded { from: "m-box2".into(), tab: "tab-1".into(), task: id.clone(), end: end("From the hub.") }).unwrap(), json!("settled"), "the status look settled it with this same end");
+        assert_eq!(status(&m, &id)["workState"].as_str(), Some("result_available"));
+    }
+
+    #[test]
+    fn a_remote_end_is_settled_when_a_status_look_took_it_first_and_unknown_for_a_task_this_machine_does_not_hold() {
+        let m = machine();
+        let fake = "sk-ant-api03-FAKEFAKEFAKEFAKE0000";
+        let end = |state: &str, summary: &str| crate::delegate::RemoteEnd { state: state.into(), summary: Some(summary.into()), error: None, usage: None };
+        let ended = |from: &str, task: &str, end: crate::delegate::RemoteEnd| m.call(Call::RemoteEnded { from: from.into(), tab: "tab-1".into(), task: task.into(), end }).unwrap();
+
+        // Status first: the live look read the worker's own text, and the end that follows is the hub's masked copy.
+        let id = delegated_elsewhere(&m, "tab-1", "m-box", "box");
+        let live = format!("Deployed with {fake}.");
+        m.set_hub(Arc::new(move |call| match call {
+            HubCall::RemoteTask { .. } => Ok(json!({ "workState": "result_available", "summary": live })),
+            _ => Err("not this test's".into()),
+        }));
+        m.check_remotes(Instant::now() + Duration::from_secs(61));
+        assert_eq!(m.delegates.get(&id).unwrap().state, crate::delegate::WorkState::ResultAvailable, "the status look settled it");
+        assert_eq!(ended("m-box", &id, end("result_available", "Deployed with [hidden].")), json!("settled"));
+        assert_eq!(ended("m-box", &id, end("failed", "Deployed with [hidden].")), json!("unknown"), "a terminal task holding another state");
+        assert_eq!(ended("m-box", &id, end("result_available", "Something else.")), json!("unknown"), "a terminal task holding another summary");
+        assert_eq!(ended("m-other", &id, end("result_available", "Deployed with [hidden].")), json!("unknown"), "from a machine that did not run it");
+
+        assert_eq!(ended("m-box", "task-nobody-made", end("result_available", "Suite green.")), json!("unknown"), "a task this machine does not know");
     }
 
     #[test]
@@ -13225,6 +13351,51 @@ Have another model review a risky change before it goes ahead.";
         let third = Machine::new(launch(), Some(config), None, |_| {});
         assert_eq!(third.delegates.remote_ends(), vec![], "an end the hub took is not sent again");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_remote_end_a_0_18_1_hub_answers_with_a_string_is_sent_once_and_not_again() {
+        use crate::delegate::{Access, Mode, NewTask, Parent};
+        // A 0.18.1 hub passes the origin's answer through as it is, so a 0.18.2 origin's "settled" or
+        // "unknown" reaches the worker. Like a bare false, it is not taken, and the end is not sent again.
+        for answer in [json!(crate::delegate::END_SETTLED), json!(crate::delegate::END_UNKNOWN), json!(false)] {
+            let root = temp("remote-end-string");
+            let m = Machine::new(launch(), Some(root.join("config")), None, |_| {});
+            let sends = Arc::new(AtomicU64::new(0));
+            let (counted, reply) = (sends.clone(), answer.clone());
+            m.set_hub(Arc::new(move |call| match call {
+                HubCall::RemoteEnded { .. } => {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    Ok(reply.clone())
+                }
+                _ => Ok(Value::Null),
+            }));
+            let key = crate::delegate::Origin::key("m-mac", "tab-1");
+            let task = m.delegates.begin(NewTask {
+                parent: Parent::Tab(key.clone()),
+                tool: None,
+                title: "Slow suite".into(),
+                account: "claude".into(),
+                provider: Provider::Claude,
+                model: None,
+                cwd: std::env::temp_dir(),
+                mode: Mode::Async,
+                access: Access::Auto,
+                isolated: false,
+                caller_key: format!("tab:{key}"),
+                client_request_id: Some("task-mac".into()),
+                role: None,
+            });
+            m.delegates.fail(&task.id, "the suite broke".into(), None);
+            let now = Instant::now();
+            m.send_remote_ends(now);
+            m.send_remote_ends(now + REMOTE_LOOK * 2);
+            m.send_remote_ends(now + REMOTE_LOOK * 10);
+            assert_eq!(sends.load(Ordering::SeqCst), 1, "{answer}: sent once, then left");
+            assert_eq!(m.delegates.remote_ends(), vec![], "{answer}: nothing waits to be sent again");
+            drop(m);
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
 
     #[test]
@@ -14987,6 +15158,37 @@ Have another model review a risky change before it goes ahead.";
 
     #[test]
     #[cfg(unix)]
+    fn a_worker_another_machine_sent_under_a_tier_cap_is_checked_here_against_this_machines_claude_list() {
+        // This machine sets no ceiling of its own: the one in the request is the only cap.
+        let (m, dir, _captain) = limited_captain("remote-unlisted", TastePatch::default());
+        let repo = "https://github.com/acme/app.git";
+        for args in [&["init", "-q"][..], &["remote", "add", "origin", repo]] {
+            assert!(std::process::Command::new("git").args(args).current_dir(dir.join("app")).status().unwrap().success());
+        }
+        let capped = taste::Limits { tier: taste::Tier::Mid, ..Default::default() };
+        let sent = |task: &str, args: Value| {
+            let origin = crate::delegate::Origin { machine: "m-book".into(), machine_name: "MacBook".into(), tab: "tab-1".into(), task: task.into(), access: crate::delegate::Access::Auto, delegator: Default::default(), limits: capped };
+            let request = crate::delegate::parse_request(&args).unwrap();
+            m.call(Call::Delegate { origin, request: Box::new(request), repo: Some(repo.into()), token: None })
+        };
+        let spawned = || std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().starts_with("claude.")).count();
+        let before = spawned();
+
+        let error = sent("t1", work(Some("claude-nova-9-9"), None)).unwrap_err();
+        assert!(error.starts_with("claude-nova-9-9 is not in this machine's list of Claude models"), "a Claude id this machine does not list is refused here: {error}");
+        let error = sent("t2", json!({ "task": "Fix the parser.", "title": "Parser", "target": { "providerInstanceId": "away-account", "model": "claude-sonnet-5-5" } })).unwrap_err();
+        assert_eq!(error, "no account away-account on this machine");
+        assert!(m.delegates.running().is_empty(), "a refused worker claimed no task: {:?}", m.delegates.running());
+        assert_eq!(spawned(), before, "a refused worker spawned no child");
+
+        // The same request with a listed model starts, so the refusals were the check, not the setup.
+        assert_eq!(sent("t3", work(Some("claude-sonnet-5-5"), None)).unwrap()["workState"], "working");
+        assert_eq!(m.delegates.running().len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn a_machine_reports_its_accounts_workers_and_workers_at_once_and_never_a_token_or_email() {
         let (m, dir, captain) = limited_captain("reports-state", TastePatch { parallel: Some(4), ..TastePatch::default() });
         delegate_task(&m, &captain, work(Some("claude-sonnet-5-5"), None));
@@ -15227,6 +15429,37 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!((&started["machine"], &started["placement"]), (&json!("mac-mini"), &json!({ "machine": "m-mini", "machineName": "mac-mini", "by": "policy", "reason": PREFERRED })));
         let status: Value = serde_json::from_str(&m.task_status(Some(captain), None, started["taskId"].as_str().unwrap()).unwrap()).unwrap();
         assert_eq!(status["placement"], started["placement"]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_remote_worker_under_a_tier_cap_holds_a_claude_id_to_the_list_whoever_holds_the_account() {
+        let (m, dir, captain) = placing_captain("place-unheld");
+        m.set_local_taste(&TasteScope::Captains, TastePatch { tier: Some(taste::Tier::Mid), ..TastePatch::default() }).unwrap();
+        let calls = placing_hub(&m, vec![], &[]);
+        let on = |account: &str, model: &str| json!({ "task": "Fix the parser.", "title": "Parser", "target": { "machine": "m-mini", "providerInstanceId": account, "model": model } });
+        let started = delegate_task(&m, &captain, on("away-account", "kimi-k3"));
+        assert_eq!(started["placement"]["machine"], "m-mini", "an account only the other machine holds is priced by the words of its model: {started}");
+        assert_eq!(placing_calls(&calls), vec!["delegate m-mini"]);
+        let error = refused(&m, &captain, on("work", "claude-nova-9-9"));
+        assert!(error.starts_with("claude-nova-9-9 ") && error.contains("is not in this machine's list of Claude models"), "{error}");
+        assert_eq!(placing_calls(&calls), vec!["delegate m-mini"], "the refused call reached no machine");
+        let error = refused(&m, &captain, on("away-account", "claude-opus-5-5"));
+        assert!(error.contains("high-tier"), "words that say high are still refused: {error}");
+        // The machine that runs it may be on 0.18.1 and price by words alone, so the sender holds a
+        // Claude id to its own list even for an account it does not hold.
+        let error = refused(&m, &captain, on("away-account", "claude-nova-9-9"));
+        assert!(error.starts_with("claude-nova-9-9 ") && error.contains("is not in this machine's list of Claude models"), "{error}");
+        assert_eq!(placing_calls(&calls), vec!["delegate m-mini"], "the refused call reached no machine");
+        let started = delegate_task(&m, &captain, on("away-account", "glm-5.3"));
+        assert_eq!(started["placement"]["machine"], "m-mini", "an alias or another driver's id is still priced by its words: {started}");
+        let started = delegate_task(&m, &captain, on("away-account", "sonnet"));
+        assert_eq!(started["placement"]["machine"], "m-mini", "{started}");
+        assert_eq!(placing_calls(&calls), vec!["delegate m-mini"; 3]);
+        m.set_local_taste(&TasteScope::Captains, TastePatch { tier: Some(taste::Tier::High), ..TastePatch::default() }).unwrap();
+        let started = delegate_task(&m, &captain, on("away-account", "claude-nova-9-9"));
+        assert_eq!(started["placement"]["machine"], "m-mini", "with no tier cap nothing is checked against the list: {started}");
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -1,3 +1,4 @@
+pub mod box_exit;
 pub mod boxes;
 pub mod db;
 pub mod http;

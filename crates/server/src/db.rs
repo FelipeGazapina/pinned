@@ -130,6 +130,21 @@ alter table accounts add column if not exists release_protection boolean not nul
 -- `started` is unix milliseconds.
 create table if not exists agent_boxes (box text primary key, account uuid not null references accounts on delete cascade,
   machine uuid not null, tab text not null, role text not null, started bigint not null);
+-- The end of a task a worker ran for `origin_machine`, which the hub took while that machine was
+-- offline, or a worker box's it-ended notice it could not pass on. The row goes once
+-- `origin_machine` took it, or after `HELD_FOR`. `unclaimed_at` is when `origin_machine` answered
+-- that it did not take it, as one that restarted and forgot the task does, or was removed: the row
+-- then stays for `HELD_FOR`, is not offered again, and `unclaimed_ends` lists it.
+-- `read_at` is when `origin_machine`'s own status look of the task was answered from the row: that
+-- machine knows the task and settled it then, so a later not-taken is its repeat, not a forgotten task.
+create table if not exists held_ends (account uuid not null references accounts on delete cascade,
+  origin_machine uuid not null, task text not null, origin_tab text not null, from_machine uuid not null,
+  report jsonb not null, held_at timestamptz not null default now(),
+  primary key (account, origin_machine, task));
+alter table held_ends add column if not exists unclaimed_at timestamptz;
+alter table held_ends add column if not exists read_at timestamptz;
+-- The expiry deletes by age across every account.
+create index if not exists held_ends_by_held_at on held_ends (held_at);
 -- What might be done, as opposed to memory: an account's own list with an optional project (a repo key).
 -- `created_by` is a `schedule::Actor` as json; `created_at` and `updated_at` are unix seconds.
 create table if not exists ideas (id uuid primary key, account uuid not null references accounts on delete cascade,
@@ -137,12 +152,33 @@ create table if not exists ideas (id uuid primary key, account uuid not null ref
   task text, created_by jsonb not null, created_at bigint not null, updated_at bigint not null);
 create index if not exists ideas_by_account on ideas (account, updated_at desc);
 ";
+/// How long the hub keeps an end that its machine never came back for.
+const HELD_FOR: &str = "interval '30 days'";
+/// The most held ends one hub-wide expiry run deletes.
+pub const HELD_EXPIRY_BATCH: i64 = 1000;
+/// The most waiting held ends of one machine the hub reads at once when it connects.
+pub const HELD_PAGE: i64 = 500;
+/// The most unclaimed ends `unclaimed_ends` lists, the newest.
+pub const HELD_UNCLAIMED_LIST: i64 = 200;
 const LEARNING_SCHEMA: &str = "
 create table if not exists dictation_feedback (id uuid primary key, account uuid not null,
   created_at timestamptz not null default now(), rating text not null, raw text not null, cleaned text not null,
   final_text text not null, locale text not null, engine text not null, app_version text not null,
   platform text not null, duration_ms bigint not null);
 ";
+/// An end the hub keeps for the machine whose tab delegated the task, as `held_ends` stores it.
+pub struct HeldEnd {
+    pub task: String,
+    pub tab: String,
+    pub from: Uuid,
+    /// The `RemoteEnd`.
+    pub end: Value,
+    /// When `origin` answered it did not take it, unix milliseconds; `None` while it waits to be offered.
+    pub unclaimed_at: Option<u64>,
+    /// Whether `origin`'s own status look of the task was answered from it.
+    pub read: bool,
+}
+
 /// A box row of the account, as the Usage page joins it to what Upstash lists.
 pub struct OpenedBox {
     pub upstash: String,
@@ -674,9 +710,191 @@ impl Db {
         Ok(n == 1)
     }
 
+    /// Deletes the machine. The ends held for it can no longer be delivered, so those still waiting
+    /// turn unclaimed in the same statement, and `unclaimed_ends` lists them for their `HELD_FOR`,
+    /// as a Captain box's that ended or a machine the user removed.
     pub async fn remove_machine(&self, account: Uuid, machine: Uuid) -> Result<bool, String> {
-        let n = self.client().await?.execute("delete from machines where id = $1 and account = $2", &[&machine, &account]).await.map_err(err)?;
-        Ok(n == 1)
+        let row = self
+            .client()
+            .await?
+            .query_one(
+                "with gone as (delete from machines where id = $1 and account = $2 returning id),
+                   orphaned as (update held_ends set unclaimed_at = now() where account = $2 and origin_machine = $1 and unclaimed_at is null)
+                 select count(*) from gone",
+                &[&machine, &account],
+            )
+            .await
+            .map_err(err)?;
+        Ok(row.get::<_, i64>(0) == 1)
+    }
+
+    /// Keeps the end of task `task` that `from` ran for `origin`'s tab `tab`, unless one is kept for
+    /// it already: the first one stays. `unclaimed` keeps it as one `origin` answered it did not
+    /// take, and marks one kept already so. Returns whether the row is new, once it is committed.
+    pub async fn hold_end(&self, account: Uuid, origin: Uuid, task: &str, tab: &str, from: Uuid, end: &Value, unclaimed: bool) -> Result<bool, String> {
+        let row = self
+            .client()
+            .await?
+            .query_one(
+                "insert into held_ends (account, origin_machine, task, origin_tab, from_machine, report, unclaimed_at)
+                 values ($1, $2, $3, $4, $5, $6, case when $7 then now() end)
+                 on conflict (account, origin_machine, task) do update set unclaimed_at = coalesce(held_ends.unclaimed_at, excluded.unclaimed_at)
+                 returning xmax = 0",
+                &[&account, &origin, &task, &tab, &from, end, &unclaimed],
+            )
+            .await
+            .map_err(err)?;
+        Ok(row.get(0))
+    }
+
+    /// `origin` answered the held end of `task` and did not take it: it stays, unclaimed, for `HELD_FOR`.
+    pub async fn unclaim_held_end(&self, account: Uuid, origin: Uuid, task: &str) -> Result<(), String> {
+        self.client()
+            .await?
+            .execute(
+                "update held_ends set unclaimed_at = coalesce(unclaimed_at, now()) where account = $1 and origin_machine = $2 and task = $3",
+                &[&account, &origin, &task],
+            )
+            .await
+            .map_err(err)
+            .map(drop)
+    }
+
+    /// The ends of the account that its machine did not take, younger than `HELD_FOR`, newest first:
+    /// at most `HELD_UNCLAIMED_LIST`.
+    pub async fn unclaimed_ends(&self, account: Uuid) -> Result<Vec<pinned_core::delegate::UnclaimedEnd>, String> {
+        let rows = self
+            .client()
+            .await?
+            .query(
+                &format!(
+                    "select task, origin_machine, origin_tab, from_machine, report,
+                       (extract(epoch from held_at) * 1000)::bigint, (extract(epoch from unclaimed_at) * 1000)::bigint
+                     from held_ends where account = $1 and unclaimed_at is not null and held_at > now() - {HELD_FOR}
+                     order by unclaimed_at desc, task limit $2"
+                ),
+                &[&account, &HELD_UNCLAIMED_LIST],
+            )
+            .await
+            .map_err(err)?;
+        let mut ends = Vec::new();
+        for r in rows {
+            let task: String = r.get(0);
+            let Ok(end) = serde_json::from_value(r.get(4)) else {
+                eprintln!("pinned-server: the unclaimed end of task {task} of account {account} is unreadable; it is left out");
+                continue;
+            };
+            let (origin, from): (Uuid, Uuid) = (r.get(1), r.get(3));
+            let (held_at, unclaimed_at): (i64, i64) = (r.get(5), r.get(6));
+            ends.push(pinned_core::delegate::UnclaimedEnd {
+                task,
+                origin_machine: origin.to_string(),
+                origin_tab: r.get(2),
+                from_machine: from.to_string(),
+                end,
+                held_at: held_at.max(0) as u64,
+                unclaimed_at: unclaimed_at.max(0) as u64,
+            });
+        }
+        Ok(ends)
+    }
+
+    /// The ends the account holds for `origin`, or only the one of `task`, younger than `HELD_FOR`.
+    pub async fn held_ends(&self, account: Uuid, origin: Uuid, task: Option<&str>) -> Result<Vec<HeldEnd>, String> {
+        let rows = self
+            .client()
+            .await?
+            .query(
+                &format!(
+                    "select task, origin_tab, from_machine, report, (extract(epoch from unclaimed_at) * 1000)::bigint, read_at is not null from held_ends
+                     where account = $1 and origin_machine = $2 and ($3::text is null or task = $3) and held_at > now() - {HELD_FOR} order by held_at"
+                ),
+                &[&account, &origin, &task],
+            )
+            .await
+            .map_err(err)?;
+        Ok(rows
+            .iter()
+            .map(|r| HeldEnd { task: r.get(0), tab: r.get(1), from: r.get(2), end: r.get(3), unclaimed_at: r.get::<_, Option<i64>>(4).map(|ms| ms.max(0) as u64), read: r.get(5) })
+            .collect())
+    }
+
+    /// One page of the tasks whose ends wait for `origin`, younger than `HELD_FOR`, by `held_at`
+    /// and task: up to `HELD_PAGE` after `after`, as the last of the page before gave it. Only the
+    /// tasks, not their reports, and none `origin` answered already (unclaimed).
+    pub async fn waiting_held_tasks(&self, account: Uuid, origin: Uuid, after: Option<(String, String)>) -> Result<Vec<(String, String)>, String> {
+        let (held_at, task) = after.unzip();
+        let rows = self
+            .client()
+            .await?
+            .query(
+                &format!(
+                    "select held_at::text, task from held_ends
+                     where account = $1 and origin_machine = $2 and unclaimed_at is null and held_at > now() - {HELD_FOR}
+                       and ($3::text is null or (held_at, task) > ($3::text::timestamptz, $4::text))
+                     order by held_at, task limit $5"
+                ),
+                &[&account, &origin, &held_at, &task, &HELD_PAGE],
+            )
+            .await
+            .map_err(err)?;
+        Ok(rows.iter().map(|r| (r.get(0), r.get(1))).collect())
+    }
+
+    /// `origin`'s own status look of `task` was answered from its held end.
+    pub async fn read_held_end(&self, account: Uuid, origin: Uuid, task: &str) -> Result<(), String> {
+        self.client()
+            .await?
+            .execute(
+                "update held_ends set read_at = coalesce(read_at, now()) where account = $1 and origin_machine = $2 and task = $3",
+                &[&account, &origin, &task],
+            )
+            .await
+            .map_err(err)
+            .map(drop)
+    }
+
+    /// `origin` took the held end of `task`.
+    pub async fn drop_held_end(&self, account: Uuid, origin: Uuid, task: &str) -> Result<(), String> {
+        self.client()
+            .await?
+            .execute("delete from held_ends where account = $1 and origin_machine = $2 and task = $3", &[&account, &origin, &task])
+            .await
+            .map_err(err)
+            .map(drop)
+    }
+
+    /// Deletes up to `limit` held ends of any account, waiting or unclaimed, whose `held_at` is older
+    /// than `HELD_FOR`, and returns how many. Only `held_ends` rows; the rest go on the next run.
+    pub async fn expire_all_held_ends(&self, limit: i64) -> Result<u64, String> {
+        self.client()
+            .await?
+            .execute(
+                &format!(
+                    "delete from held_ends where ctid in (select ctid from held_ends where held_at <= now() - {HELD_FOR} limit $1)
+                     and held_at <= now() - {HELD_FOR}"
+                ),
+                &[&limit],
+            )
+            .await
+            .map_err(err)
+    }
+
+    /// Deletes up to `HELD_EXPIRY_BATCH` of the account's held ends older than `HELD_FOR`, and
+    /// returns how many. Bounded, as it runs on every connection of a machine over the hub's one
+    /// shared connection; the rest go on the next connection or the hub-wide run.
+    pub async fn expire_held_ends(&self, account: Uuid) -> Result<u64, String> {
+        self.client()
+            .await?
+            .execute(
+                &format!(
+                    "delete from held_ends where ctid in (select ctid from held_ends where account = $1 and held_at <= now() - {HELD_FOR} limit $2)
+                     and account = $1 and held_at <= now() - {HELD_FOR}"
+                ),
+                &[&account, &HELD_EXPIRY_BATCH],
+            )
+            .await
+            .map_err(err)
     }
 
     /// Gives the machine `id` of the account a fresh token, adding it when it is new. The hub adds a

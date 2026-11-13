@@ -106,6 +106,9 @@ pub(crate) fn too_old_for_run_now(account: &Account, machine: &str, subject: &Su
     format!("{name} runs an older pinned that has no Run now: update it in Settings › Machines")
 }
 
+/// How often the hub expires held ends for every account.
+pub const HELD_EXPIRY_EVERY: Duration = Duration::from_secs(3600);
+
 pub struct Hub {
     pub db: Db,
     pub public_url: String,
@@ -123,6 +126,8 @@ pub struct Hub {
     unlocks: Mutex<HashMap<Vec<u8>, Unlock>>,
     /// Turns true when the hub is about to stop, so every socket sends its close frame.
     going_away: tokio::sync::watch::Sender<bool>,
+    /// When the hub last expired held ends for every account, so it runs at most once an hour.
+    held_expired: Mutex<Option<Instant>>,
 }
 
 struct Unlock {
@@ -220,7 +225,7 @@ impl Hub {
     pub fn new(db: Db, public_url: String, signup: Signup, box_api: Arc<dyn BoxApi>, box_policy: boxes::Policy, convex_http: Arc<dyn ConvexHttp>) -> Arc<Hub> {
         let public_url = public_url.trim_end_matches('/').to_owned();
         let boxes = Boxes::new(box_api, box_policy, &public_url);
-        Arc::new(Hub { db, public_url, signup, boxes, convex_http, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default(), unlocks: Mutex::default(), going_away: tokio::sync::watch::channel(false).0 })
+        Arc::new(Hub { db, public_url, signup, boxes, convex_http, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default(), unlocks: Mutex::default(), going_away: tokio::sync::watch::channel(false).0, held_expired: Mutex::default() })
     }
 
     /// Tells every socket to close with a going away frame. The hub stops serving afterwards.
@@ -245,6 +250,11 @@ impl Hub {
     /// repeat of that start waits for the first and finds its worker instead of making another.
     pub async fn hold_start(&self, account: &Account, machine: &str, tab: &str, task: &str) -> tokio::sync::OwnedMutexGuard<()> {
         self.hold(format!("start:{}:{machine}:{tab}:{task}", account.id)).await
+    }
+
+    /// One delivery of the end the hub holds for `origin`'s task `task` at a time.
+    pub async fn hold_delivery(&self, account: &Account, origin: Uuid, task: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        self.hold(format!("held:{}:{origin}:{task}", account.id)).await
     }
 
     async fn hold(&self, key: String) -> tokio::sync::OwnedMutexGuard<()> {
@@ -286,6 +296,36 @@ impl Hub {
             self.watch(&account).await?;
         }
         Ok(())
+    }
+
+    /// Deletes up to `db::HELD_EXPIRY_BATCH` held ends of any account, waiting or unclaimed, held
+    /// longer than 30 days, so an account whose machines never come back keeps none past them. Runs
+    /// at most once per `HELD_EXPIRY_EVERY`, or on the next tick after a run that deleted a full
+    /// batch; a call before that, or one whose delete failed, deletes nothing and returns 0. A
+    /// failure is logged without any row's text.
+    pub async fn expire_held_ends(&self) -> u64 {
+        {
+            let mut last = self.held_expired.lock().unwrap();
+            if last.is_some_and(|at| at.elapsed() < HELD_EXPIRY_EVERY) {
+                return 0;
+            }
+            *last = Some(Instant::now());
+        }
+        match self.db.expire_all_held_ends(crate::db::HELD_EXPIRY_BATCH).await {
+            Ok(0) => 0,
+            Ok(n) => {
+                eprintln!("pinned-server: {n} held ends older than 30 days expired");
+                if n >= crate::db::HELD_EXPIRY_BATCH as u64 {
+                    // A full batch may leave more: the next tick runs again.
+                    *self.held_expired.lock().unwrap() = None;
+                }
+                n
+            }
+            Err(e) => {
+                eprintln!("pinned-server: could not expire the held ends older than 30 days: {e}");
+                0
+            }
+        }
     }
 
     pub async fn account(&self, id: Uuid) -> Result<Arc<Account>, String> {
@@ -331,6 +371,9 @@ impl Hub {
         tokio::spawn(async move {
             loop {
                 hub.boxes.reap(&hub, &account).await;
+                // Hub-wide, at most once an hour whichever account's tick comes first; it only logs
+                // a failure, so the reaper goes on either way.
+                hub.expire_held_ends().await;
                 tokio::time::sleep(hub.boxes.policy.tick).await;
             }
         });
@@ -708,6 +751,7 @@ impl Hub {
                 return json(stats);
             }
             HubCall::BoxUsage => return json(boxes::usage(self, account).await?),
+            HubCall::UnclaimedEnds => return json(self.db.unclaimed_ends(account.id).await?),
             HubCall::SessionMarks => return json(self.db.session_marks(account.id).await?),
             HubCall::MarkSessions { changes } => {
                 marks::check(&changes)?;
@@ -1741,8 +1785,8 @@ mod tests {
     /// the box `age` old, under the default policy (idle 10 minutes, max_life 4 hours).
     fn reaped(seen: impl Fn() -> Seen, held: Duration, age: Duration) -> Option<boxes::End> {
         let (start, mut timers, policy) = (Instant::now(), boxes::Timers::default(), boxes::Policy::default());
-        assert_eq!(boxes::verdict(Duration::ZERO, seen(), &mut timers, start, &policy), None, "nothing ends it at its first look");
-        boxes::verdict(age, seen(), &mut timers, start + held, &policy)
+        assert_eq!(boxes::verdict(Duration::ZERO, seen(), &mut timers, start, &policy, false), None, "nothing ends it at its first look");
+        boxes::verdict(age, seen(), &mut timers, start + held, &policy, false)
     }
 
     const MIN: Duration = Duration::from_secs(60);

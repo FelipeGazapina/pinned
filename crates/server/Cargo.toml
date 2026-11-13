@@ -37,4 +37,6 @@ flate2 = "1"
 libc = "0.2"
 minisign = "0.7"
 reqwest = { version = "0.13", default-features = false, features = ["blocking"] }
+tempfile = "3"
+tokio = { version = "1", features = ["test-util"] }
 tungstenite = "0.28"

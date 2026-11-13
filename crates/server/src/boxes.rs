@@ -10,7 +10,7 @@ use futures_util::future::BoxFuture;
 use pinned_core::account::Credentials;
 use pinned_core::accounts::{self, Provider};
 use pinned_core::agent::{session_env, Subject, CAPTAIN_CONNECTOR, DELEGATE_CONNECTOR, INTERACTIVE_CONNECTOR};
-use pinned_core::connectors::{unix_millis, BoxPermission, BoxSize, BoxStep, Connectors, FixedClaim, Placement, Run};
+use pinned_core::connectors::{unix_millis, BoxAccess, BoxPermission, BoxSize, BoxStep, Connectors, FixedClaim, Placement, Run};
 use pinned_core::delegate::{BoxTarget, Delegator, DelegatorKind, Origin, RemoteEnd, Request, RunTarget, TaskOutcome, TaskRecord, TaskUsage};
 use pinned_core::surface::ActorRole;
 use pinned_core::global_orchestrator::BusyPolicy;
@@ -395,12 +395,16 @@ pub fn offline_answer(phase: &Phase, removed: bool, machine: &str) -> String {
     }
 }
 
-pub(crate) fn verdict(age: Duration, seen: Seen, t: &mut Timers, now: Instant, p: &Policy) -> Option<End> {
+/// `delegating` is a box whose tab waits on workers in other boxes. It is quiet, or done with its own
+/// turn, while they run, so neither starts its Idle, Done or Exited timer: only its max life (and,
+/// before this, its budget) ends it then, so their ends find it.
+pub(crate) fn verdict(age: Duration, seen: Seen, t: &mut Timers, now: Instant, p: &Policy, delegating: bool) -> Option<End> {
     // `None` is a condition this look can't see, as the session's while its node is offline: its
     // timer neither starts nor restarts, so a dropped link doesn't buy a quiet box more time.
     let (offline, gone, exited, quiet) = match seen {
         Seen::Offline => (Some(true), None, None, None),
         Seen::NoTab => (Some(false), Some(true), None, None),
+        Seen::Tab { .. } if delegating => (Some(false), Some(false), Some(false), Some(false)),
         Seen::Tab { running, quiet } => (Some(false), Some(false), Some(!running), Some(quiet)),
     };
     let held = |since: &mut Option<Instant>, on: Option<bool>| match on {
@@ -663,13 +667,26 @@ pub fn start_script(login: &str, repo: Option<&str>) -> String {
     START.replace("{{login}}", &quoted(login)).replace("{{clones}}", &quoted(&clones))
 }
 
-/// The secrets the node and its sessions run with, as `start.sh` sources them.
-fn box_env(keys: &Keys, github: Option<&str>) -> String {
+/// What the node and its sessions run with, as `start.sh` sources it: the secrets, and, when
+/// `leaves`, `PINNED_BOX=1`, which tells the node it runs in a box and may exit for good once the hub
+/// has refused it for 15 minutes.
+fn box_env(keys: &Keys, github: Option<&str>, leaves: bool) -> String {
     let mut env = format!("CLAUDE_CODE_OAUTH_TOKEN='{}'\n", quoted(&keys.claude_token));
     if let Some(token) = github {
         env += &format!("GH_TOKEN='{}'\n", quoted(token));
     }
+    if leaves {
+        env += &format!("{}=1\n", crate::box_exit::BOX_ENV);
+    }
     env
+}
+
+/// Whether the node in row `row`'s box may leave once the hub has refused it for 15 minutes. Not
+/// in the fixed box ("One box, reused"): the reaper ends that row only when Upstash stops listing
+/// the box, so a node that left would leave every later run failing with its machine offline. A
+/// fixed box its hub has disowned keeps running until the fixed-box limit (#247) lands.
+fn leaves_when_refused(access: &BoxAccess, row: &str) -> bool {
+    !access.owns_row(row)
 }
 
 /// An `owner/repo` shorthand or GitHub clone URL as the https URL the box clones.
@@ -1294,7 +1311,8 @@ impl Boxes {
         let signs_in = row.signs_in_as();
         let claude_token = connectors.box_claude_token(&signs_in).ok_or_else(|| format!("No Claude token is kept for {signs_in}: {ADD_TOKEN}."))?;
         let keys = Keys { api_key: keys.api_key.clone(), claude_token };
-        self.api.write(key, id, &format!("{DIR}/box.env"), box_env(&keys, connectors.github_token().as_deref())).await?;
+        let leaves = leaves_when_refused(&connectors.box_access(), &row.id);
+        self.api.write(key, id, &format!("{DIR}/box.env"), box_env(&keys, connectors.github_token().as_deref(), leaves)).await?;
         self.api.write(key, id, &format!("{DIR}/start.sh"), start_script(&login, row.spec.repo.as_deref())).await?;
         let exec = self.api.exec(key, id, bootstrap_script(&hub.public_url)).await?;
         if exec.exit_code != 0 {
@@ -1373,7 +1391,7 @@ impl Boxes {
     }
 
     /// A worker box ended before its task did: the machine whose tab delegated the task hears it
-    /// failed, so it does not wait on it. A box that ends for its task's end, `Done`, has nothing to tell.
+    /// failed, so it does not wait on it. One that can't hear it now gets it from the hub's held ends. A box that ends for its task's end, `Done`, has nothing to tell.
     async fn tell_origin(&self, hub: &Hub, account: &Account, row: &BoxRow, why: &End) {
         let BoxWork::Delegate { origin, .. } = &row.work else { return };
         let error = match why {
@@ -1384,9 +1402,15 @@ impl Boxes {
         };
         let mut end = RemoteEnd { state: "failed".into(), summary: None, error: Some(error), usage: None };
         self.add_end_box_usage(hub, account, row, &mut end).await;
-        let ended = Call::RemoteEnded { from: row.machine.to_string(), tab: origin.tab.clone(), task: origin.task.clone(), end };
+        let ended = Call::RemoteEnded { from: row.machine.to_string(), tab: origin.tab.clone(), task: origin.task.clone(), end: end.clone() };
         if let Err(e) = hub.call_machine(account, &origin.machine, ended, ORIGIN_WAIT).await {
             eprintln!("pinned-server: could not tell {} that box {} ended: {}", origin.machine, row.id, String::from(e));
+            // Held for it, unless the worker's own end is held already: that one stays.
+            match crate::remote::hold_end(hub, account, &origin.machine, &row.machine.to_string(), &origin.tab, &origin.task, end, false).await {
+                Ok(true) => {}
+                Ok(false) => eprintln!("pinned-server: {} is no machine of account {} any more, so box {}'s end goes untold", origin.machine, account.id, row.id),
+                Err(e) => eprintln!("pinned-server: box {}'s end goes untold: {e}", row.id),
+            }
         }
     }
 
@@ -1533,6 +1557,14 @@ impl Boxes {
             _ => None,
         };
         let rows = hub.db.boxes(account.id).await?;
+        // The machines whose tabs delegated a task that still runs in a worker box.
+        let delegating: HashSet<String> = rows
+            .iter()
+            .filter_map(|row| match row {
+                Ok(BoxRow { phase, work: BoxWork::Delegate { origin, .. }, .. }) if !matches!(phase, Phase::Ending(_)) => Some(origin.machine.clone()),
+                _ => None,
+            })
+            .collect();
         let now = Instant::now();
         for row in rows {
             let row = match row {
@@ -1594,7 +1626,7 @@ impl Boxes {
                                 _ => seen,
                             };
                             let was_offline = slot.offline_since;
-                            let verdict = verdict(row.age, seen, slot, now, &self.policy);
+                            let verdict = verdict(row.age, seen, slot, now, &self.policy, delegating.contains(&machine));
                             if matches!(row.work, BoxWork::Delegate { .. }) {
                                 match (was_offline, slot.offline_since) {
                                     (None, Some(_)) => eprintln!("pinned-server: box {} of account {} went offline", row.id, account.id),
@@ -1874,8 +1906,8 @@ mod tests {
     /// The verdict after `seen` held for `held`, judged at the start and at the end.
     fn after(seen: Seen, held: Duration, age: Duration) -> Option<End> {
         let (start, mut timers) = (Instant::now(), Timers::default());
-        assert_eq!(verdict(Duration::ZERO, seen, &mut timers, start, &policy()), None);
-        verdict(age, seen, &mut timers, start + held, &policy())
+        assert_eq!(verdict(Duration::ZERO, seen, &mut timers, start, &policy(), false), None);
+        verdict(age, seen, &mut timers, start + held, &policy(), false)
     }
 
     #[test]
@@ -1966,8 +1998,33 @@ mod tests {
     fn max_life_ends_a_box_whatever_its_session_does() {
         let working = Seen::Tab { running: true, quiet: false };
         let mut timers = Timers::default();
-        assert_eq!(verdict(19 * MIN, working, &mut timers, Instant::now(), &policy()), None);
-        assert_eq!(verdict(21 * MIN, working, &mut timers, Instant::now(), &policy()), Some(End::Expired));
+        assert_eq!(verdict(19 * MIN, working, &mut timers, Instant::now(), &policy(), false), None);
+        assert_eq!(verdict(21 * MIN, working, &mut timers, Instant::now(), &policy(), false), Some(End::Expired));
+    }
+
+    #[test]
+    fn a_box_others_delegate_from_ignores_idle_and_exited_and_still_meets_its_max_life() {
+        let (start, mut t) = (Instant::now(), Timers::default());
+        for seen in [Seen::Tab { running: true, quiet: true }, Seen::Tab { running: false, quiet: true }] {
+            for minute in [0, 21, 60, 19 * 60] {
+                assert_eq!(verdict(MIN, seen, &mut t, start + minute * MIN, &policy(), true), None, "{seen:?} at {minute} min while its worker hangs");
+            }
+        }
+        t.done = true;
+        assert_eq!(verdict(MIN, Seen::Tab { running: true, quiet: true }, &mut t, start + 30 * 60 * MIN, &Policy { done: MIN, ..policy() }, true), None, "nor Done");
+        assert_eq!(verdict(21 * MIN, Seen::Tab { running: true, quiet: true }, &mut t, start, &policy(), true), Some(End::Expired), "max life ends it");
+        // A node gone offline, or its tab closed, still ends it, by the default policy's 10 and 2 minutes.
+        let p = Policy::default();
+        let (mut offline, mut closed) = (Timers::default(), Timers::default());
+        assert_eq!(verdict(MIN, Seen::Offline, &mut offline, start, &p, true), None);
+        assert_eq!(verdict(MIN, Seen::Offline, &mut offline, start + 10 * MIN - Duration::from_secs(1), &p, true), None);
+        assert_eq!(verdict(MIN, Seen::Offline, &mut offline, start + 10 * MIN, &p, true), Some(End::Offline), "a node gone offline still ends it");
+        assert_eq!(verdict(MIN, Seen::NoTab, &mut closed, start, &p, true), None);
+        assert_eq!(verdict(MIN, Seen::NoTab, &mut closed, start + 2 * MIN - Duration::from_secs(1), &p, true), None);
+        assert_eq!(verdict(MIN, Seen::NoTab, &mut closed, start + 2 * MIN, &p, true), Some(End::TabClosed), "a closed tab still ends it after 2 minutes");
+        // Its workers are done: the quiet it had then counts from now.
+        assert_eq!(verdict(MIN, Seen::Tab { running: true, quiet: true }, &mut t, start + 40 * 60 * MIN, &policy(), false), None);
+        assert_eq!(verdict(MIN, Seen::Tab { running: true, quiet: true }, &mut t, start + 40 * 60 * MIN + 21 * MIN, &policy(), false), Some(End::Done));
     }
 
     #[test]
@@ -1975,11 +2032,11 @@ mod tests {
         let p = policy();
         let (start, mut t) = (Instant::now(), Timers::default());
         let quiet = Seen::Tab { running: true, quiet: true };
-        assert_eq!(verdict(MIN, quiet, &mut t, start, &p), None);
-        assert_eq!(verdict(MIN, Seen::Tab { running: true, quiet: false }, &mut t, start + 15 * MIN, &p), None, "working again");
-        assert_eq!(verdict(MIN, quiet, &mut t, start + 16 * MIN, &p), None);
-        assert_eq!(verdict(MIN, quiet, &mut t, start + 35 * MIN, &p), None, "quiet for 19 minutes since it worked");
-        assert_eq!(verdict(MIN, quiet, &mut t, start + 37 * MIN, &p), Some(End::Idle));
+        assert_eq!(verdict(MIN, quiet, &mut t, start, &p, false), None);
+        assert_eq!(verdict(MIN, Seen::Tab { running: true, quiet: false }, &mut t, start + 15 * MIN, &p, false), None, "working again");
+        assert_eq!(verdict(MIN, quiet, &mut t, start + 16 * MIN, &p, false), None);
+        assert_eq!(verdict(MIN, quiet, &mut t, start + 35 * MIN, &p, false), None, "quiet for 19 minutes since it worked");
+        assert_eq!(verdict(MIN, quiet, &mut t, start + 37 * MIN, &p, false), Some(End::Idle));
     }
 
     #[test]
@@ -1987,13 +2044,41 @@ mod tests {
         let p = Policy { done: 2 * MIN, ..policy() };
         let (start, mut t) = (Instant::now(), Timers::default());
         let quiet = Seen::Tab { running: true, quiet: true };
-        assert_eq!(verdict(MIN, quiet, &mut t, start, &p), None);
-        assert_eq!(verdict(MIN, quiet, &mut t, start + 3 * MIN, &p), None, "quiet without a pull request waits out idle");
+        assert_eq!(verdict(MIN, quiet, &mut t, start, &p, false), None);
+        assert_eq!(verdict(MIN, quiet, &mut t, start + 3 * MIN, &p, false), None, "quiet without a pull request waits out idle");
         t.done = true;
-        assert_eq!(verdict(MIN, Seen::Tab { running: true, quiet: false }, &mut t, start + 4 * MIN, &p), None, "still working");
-        assert_eq!(verdict(MIN, quiet, &mut t, start + 5 * MIN, &p), None);
-        assert_eq!(verdict(MIN, quiet, &mut t, start + 6 * MIN, &p), None, "quiet for 1 of 2 minutes");
-        assert_eq!(verdict(MIN, quiet, &mut t, start + 7 * MIN, &p), Some(End::Done));
+        assert_eq!(verdict(MIN, Seen::Tab { running: true, quiet: false }, &mut t, start + 4 * MIN, &p, false), None, "still working");
+        assert_eq!(verdict(MIN, quiet, &mut t, start + 5 * MIN, &p, false), None);
+        assert_eq!(verdict(MIN, quiet, &mut t, start + 6 * MIN, &p, false), None, "quiet for 1 of 2 minutes");
+        assert_eq!(verdict(MIN, quiet, &mut t, start + 7 * MIN, &p, false), Some(End::Done));
+    }
+
+    #[test]
+    fn a_captain_box_outlives_a_short_disconnect_and_ends_offline_after_ten_minutes() {
+        // The shipped policy: a node offline for 10 minutes ends its box, and a reconnect resets that.
+        let p = Policy::default();
+        assert_eq!(p.offline, 10 * MIN);
+        let sec = Duration::from_secs(1);
+        for delegating in [true, false] {
+            // A Captain quiet while its workers run, or a session at work.
+            let waiting = Seen::Tab { running: true, quiet: delegating };
+            let (start, mut t) = (Instant::now(), Timers::default());
+            assert_eq!(verdict(MIN, waiting, &mut t, start, &p, delegating), None);
+            // A hub deploy: the node drops for 30 seconds and reconnects.
+            assert_eq!(verdict(MIN, Seen::Offline, &mut t, start + sec, &p, delegating), None);
+            assert_eq!(verdict(MIN, Seen::Offline, &mut t, start + 31 * sec, &p, delegating), None);
+            assert_eq!(verdict(MIN, waiting, &mut t, start + 40 * sec, &p, delegating), None, "back after 30 s");
+            // Offline for 9 min 59 s, then back: still not ended, and the clock starts over.
+            let away = start + MIN;
+            assert_eq!(verdict(MIN, Seen::Offline, &mut t, away, &p, delegating), None);
+            assert_eq!(verdict(MIN, Seen::Offline, &mut t, away + 10 * MIN - sec, &p, delegating), None, "9 min 59 s offline");
+            assert_eq!(verdict(MIN, waiting, &mut t, away + 10 * MIN, &p, delegating), None, "back before 10 min");
+            // The next drop counts from zero: 10 minutes of it end the box.
+            let gone = away + 11 * MIN;
+            assert_eq!(verdict(MIN, Seen::Offline, &mut t, gone, &p, delegating), None);
+            assert_eq!(verdict(MIN, Seen::Offline, &mut t, gone + 10 * MIN - sec, &p, delegating), None, "a reconnect reset the clock");
+            assert_eq!(verdict(MIN, Seen::Offline, &mut t, gone + 10 * MIN, &p, delegating), Some(End::Offline), "delegating: {delegating}");
+        }
     }
 
     #[test]
@@ -2001,10 +2086,10 @@ mod tests {
         let p = policy();
         let (start, mut t) = (Instant::now(), Timers::default());
         let quiet = Seen::Tab { running: true, quiet: true };
-        assert_eq!(verdict(MIN, quiet, &mut t, start, &p), None);
-        assert_eq!(verdict(MIN, Seen::Offline, &mut t, start + 10 * MIN, &p), None);
-        assert_eq!(verdict(MIN, quiet, &mut t, start + 19 * MIN, &p), None);
-        assert_eq!(verdict(MIN, quiet, &mut t, start + 21 * MIN, &p), Some(End::Idle));
+        assert_eq!(verdict(MIN, quiet, &mut t, start, &p, false), None);
+        assert_eq!(verdict(MIN, Seen::Offline, &mut t, start + 10 * MIN, &p, false), None);
+        assert_eq!(verdict(MIN, quiet, &mut t, start + 19 * MIN, &p, false), None);
+        assert_eq!(verdict(MIN, quiet, &mut t, start + 21 * MIN, &p, false), Some(End::Idle));
     }
 
     #[test]
@@ -2028,28 +2113,31 @@ mod tests {
         let p = Policy::default();
         let (start, mut t) = (Instant::now(), Timers::default());
         let working = Seen::Tab { running: true, quiet: false };
-        assert_eq!(verdict(30 * MIN, working, &mut t, start, &p), None);
-        assert_eq!(verdict(31 * MIN, Seen::Offline, &mut t, start + MIN, &p), None);
-        assert_eq!(verdict(40 * MIN, Seen::Offline, &mut t, start + 10 * MIN, &p), None, "offline for 9 of 10 minutes");
-        assert_eq!(verdict(41 * MIN, working, &mut t, start + 11 * MIN, &p), None, "back within the grace");
-        assert_eq!(verdict(42 * MIN, Seen::Offline, &mut t, start + 12 * MIN, &p), None);
-        assert_eq!(verdict(51 * MIN, Seen::Offline, &mut t, start + 21 * MIN, &p), None, "a blink restarts the grace");
-        assert_eq!(verdict(53 * MIN, Seen::Offline, &mut t, start + 23 * MIN, &p), Some(End::Offline));
+        assert_eq!(verdict(30 * MIN, working, &mut t, start, &p, false), None);
+        assert_eq!(verdict(31 * MIN, Seen::Offline, &mut t, start + MIN, &p, false), None);
+        assert_eq!(verdict(40 * MIN, Seen::Offline, &mut t, start + 10 * MIN, &p, false), None, "offline for 9 of 10 minutes");
+        assert_eq!(verdict(41 * MIN, working, &mut t, start + 11 * MIN, &p, false), None, "back within the grace");
+        assert_eq!(verdict(42 * MIN, Seen::Offline, &mut t, start + 12 * MIN, &p, false), None);
+        assert_eq!(verdict(51 * MIN, Seen::Offline, &mut t, start + 21 * MIN, &p, false), None, "a blink restarts the grace");
+        assert_eq!(verdict(53 * MIN, Seen::Offline, &mut t, start + 23 * MIN, &p, false), Some(End::Offline));
     }
 
     #[test]
     fn a_flapping_box_still_ends_at_its_max_life_and_its_budget() {
         let p = Policy::default();
-        let (start, mut t) = (Instant::now(), Timers::default());
-        let working = Seen::Tab { running: true, quiet: false };
-        let mut minute = 0;
-        // Offline 9 minutes, back 1, over and over: never offline for the whole grace.
-        while minute < 4 * 60 {
-            let seen = if minute % 10 == 9 { working } else { Seen::Offline };
-            assert_eq!(verdict(minute * MIN, seen, &mut t, start + minute * MIN, &p), None, "minute {minute}");
-            minute += 1;
+        // A Captain box waiting on its workers (quiet, `delegating`) too: its hold does not lift max life.
+        for delegating in [false, true] {
+            let (start, mut t) = (Instant::now(), Timers::default());
+            let working = Seen::Tab { running: true, quiet: delegating };
+            let mut minute = 0;
+            // Offline 9 minutes, back 1, over and over: never offline for the whole grace.
+            while minute < 4 * 60 {
+                let seen = if minute % 10 == 9 { working } else { Seen::Offline };
+                assert_eq!(verdict(minute * MIN, seen, &mut t, start + minute * MIN, &p, delegating), None, "minute {minute}");
+                minute += 1;
+            }
+            assert_eq!(verdict(4 * 60 * MIN, Seen::Offline, &mut t, start + 4 * 60 * MIN, &p, delegating), Some(End::Expired), "delegating: {delegating}");
         }
-        assert_eq!(verdict(4 * 60 * MIN, Seen::Offline, &mut t, start + 4 * 60 * MIN, &p), Some(End::Expired));
         assert!(over_budget(&spec_with(Some(BOX_USD_PER_HOUR)), 60 * MIN), "a budget ends it sooner whatever it is seen as");
     }
 
@@ -2093,10 +2181,174 @@ mod tests {
         assert!(scripts[1].contains(r#"const clones = ["app"].map"#), "{}", scripts[1]);
         assert!(start_script("felipe", None).contains("const clones = [].map"));
         assert_eq!(
-            box_env(&keys, Some("ghp_SECRETGITHUB")),
-            "CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-SECRETCLAUDE'\nGH_TOKEN='ghp_SECRETGITHUB'\n"
+            box_env(&keys, Some("ghp_SECRETGITHUB"), true),
+            "CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-SECRETCLAUDE'\nGH_TOKEN='ghp_SECRETGITHUB'\nPINNED_BOX=1\n"
         );
         assert_eq!(start_script("o'brien", None).lines().find(|l| l.contains("user.name")), Some("git config --global user.name 'o'\\''brien'"));
+    }
+
+    #[test]
+    fn a_box_env_tells_its_node_it_runs_in_a_box() {
+        let keys = Keys { api_key: "box_SECRETKEY".into(), claude_token: "sk-ant-oat01-SECRETCLAUDE".into() };
+        for github in [None, Some("ghp_SECRETGITHUB")] {
+            let env = box_env(&keys, github, true);
+            assert!(env.lines().any(|line| line == "PINNED_BOX=1"), "{env}");
+            assert!(!env.contains("box_SECRETKEY"), "{env}");
+        }
+    }
+
+    fn fixed_access(row: &str) -> BoxAccess {
+        BoxAccess { workflow: BoxPermission::Fixed { row: Some(row.into()) }, ..BoxAccess::default() }
+    }
+
+    #[test]
+    fn a_fixed_box_env_does_not_mark_its_node_to_leave_and_a_fresh_box_env_does() {
+        let keys = Keys { api_key: "fake-api-key".into(), claude_token: "fake-claude-token".into() };
+        let access = fixed_access("fixed-row");
+        let fixed = box_env(&keys, None, leaves_when_refused(&access, "fixed-row"));
+        assert!(!fixed.contains("PINNED_BOX"), "{fixed}");
+        assert!(fixed.lines().any(|line| line.starts_with("CLAUDE_CODE_OAUTH_TOKEN=")), "{fixed}");
+        for (access, row) in [(&access, "fresh-row"), (&BoxAccess::default(), "fresh-row")] {
+            let fresh = box_env(&keys, None, leaves_when_refused(access, row));
+            assert!(fresh.lines().any(|line| line == "PINNED_BOX=1"), "{fresh}");
+        }
+    }
+
+    /// Runs the box's start script with a fake HOME and its work directory in a temp dir, with fake
+    /// `node`, `git` and `gh`, and a fake `pinned-server` that records the `PINNED_BOX` it started with.
+    #[cfg(unix)]
+    struct StartRun {
+        dir: std::path::PathBuf,
+        home: std::path::PathBuf,
+        bin: std::path::PathBuf,
+        _root: tempfile::TempDir,
+    }
+
+    #[cfg(unix)]
+    impl StartRun {
+        fn new() -> StartRun {
+            let keys = Keys { api_key: "fake-api-key".into(), claude_token: "fake-claude-token".into() };
+            StartRun::with_env(box_env(&keys, None, true))
+        }
+
+        /// As `new`, with `env` as the box's `box.env`.
+        fn with_env(env: String) -> StartRun {
+            use std::os::unix::fs::PermissionsExt;
+            let root = tempfile::tempdir().unwrap();
+            let (dir, home, bin) = (root.path().join("pinned"), root.path().join("home"), root.path().join("bin"));
+            for path in [&dir, &home, &bin] {
+                std::fs::create_dir_all(path).unwrap();
+            }
+            let executable = |path: std::path::PathBuf, body: &str| {
+                std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            };
+            for fake in ["node", "git", "gh"] {
+                executable(bin.join(fake), "exit 0");
+            }
+            executable(dir.join("pinned-server"), &format!("printf '%s' \"$PINNED_BOX\" >{}/started", dir.display()));
+            std::fs::write(dir.join("box.env"), env).unwrap();
+            StartRun { dir, home, bin, _root: root }
+        }
+
+        /// Runs the script once and returns what the node it launched saw as `PINNED_BOX`, if it launched one.
+        fn start(&self) -> Option<String> {
+            let script = start_script("fake-login", None);
+            let script = script.replace("DIR=/workspace/home/.pinned", &format!("DIR={}", self.dir.display()));
+            assert!(script.contains(&format!("DIR={}\n", self.dir.display())), "the script no longer sets DIR on its own line");
+            let _ = std::fs::remove_file(self.dir.join("started"));
+            let status = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&script)
+                .env_clear()
+                .env("HOME", &self.home)
+                .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
+                .status()
+                .unwrap();
+            assert!(status.success());
+            for _ in 0..100 {
+                if let Ok(seen) = std::fs::read_to_string(self.dir.join("started")) {
+                    return Some(seen);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            assert!(!self.dir.join("node.pid").exists(), "the script launched a node that never ran");
+            None
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn pair_fake(dir: &std::path::Path) {
+        let creds = pinned_core::account::Credentials {
+            hub: "https://hub.example".into(),
+            email: "box@example.invalid".into(),
+            user_token: String::new(),
+            machine_id: "m1".into(),
+            machine_token: "fake-machine-token".into(),
+        };
+        creds.save(dir).unwrap();
+    }
+
+    // The script launches the node with `setsid`, which macOS lacks; a box only ever runs on Linux.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_start_script_launches_a_paired_node_with_pinned_box_set() {
+        let run = StartRun::new();
+        pair_fake(&run.dir);
+        assert_eq!(run.start().as_deref(), Some("1"), "the node did not start with PINNED_BOX=1");
+        assert!(run.dir.join("node.pid").exists());
+    }
+
+    /// Starts row `row`'s node with the env its boot writes under `access`, then has the hub refuse
+    /// it for an hour: the stand-in for `link.refused_for()` resolves 30 s past the span, as it does
+    /// on the first 4001 after 15 minutes of them. Does what `node()` does when the wait ends, and
+    /// returns whether the node left, how many times it ended its sessions, and whether it is paired.
+    #[cfg(target_os = "linux")]
+    async fn refused_for_an_hour(access: &BoxAccess, row: &str) -> (bool, usize, bool) {
+        let keys = Keys { api_key: "fake-api-key".into(), claude_token: "fake-claude-token".into() };
+        let run = StartRun::with_env(box_env(&keys, None, leaves_when_refused(access, row)));
+        pair_fake(&run.dir);
+        let seen = run.start().expect("the start script did not launch the node");
+        let refused = tokio::time::sleep(pinned_core::link::BOX_REFUSED_FOR + Duration::from_secs(30));
+        let in_box = crate::box_exit::is_box(Some(seen.as_str()));
+        let left = tokio::time::timeout(Duration::from_secs(3600), crate::box_exit::refused_in_box(in_box, refused)).await.is_ok();
+        let quit = std::cell::Cell::new(0);
+        if left {
+            crate::box_exit::leave(&run.dir, "fake-machine-token", || quit.set(quit.get() + 1), |_| {});
+        }
+        (left, quit.get(), pinned_core::account::Credentials::load(&run.dir).is_some())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(start_paused = true)]
+    async fn a_fixed_box_node_refused_well_past_the_span_stays_up_and_keeps_its_account() {
+        let access = fixed_access("fixed-row");
+        assert_eq!(refused_for_an_hour(&access, "fixed-row").await, (false, 0, true), "the fixed box's node left");
+        // The same refusals end a fresh box's node, so the check above can fail.
+        assert_eq!(refused_for_an_hour(&access, "fresh-row").await, (true, 1, false), "a fresh box's node stayed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_start_script_does_not_launch_a_node_that_has_no_account() {
+        let run = StartRun::new();
+        assert_eq!(run.start(), None, "a node started with no account.json");
+        assert!(!run.dir.join("node.pid").exists());
+        assert!(!run.home.join(".profile").exists(), "the script went past its account check");
+    }
+
+    // The script launches the node with `setsid`, which macOS lacks; a box only ever runs on Linux.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_container_restart_after_a_node_left_for_good_starts_no_node() {
+        let run = StartRun::new();
+        pair_fake(&run.dir);
+        assert_eq!(run.start().as_deref(), Some("1"));
+        // The node leaves for good and, in a restart, the pid file's number belongs to nothing.
+        crate::box_exit::leave(&run.dir, "fake-machine-token", || {}, |_| {});
+        let _ = std::fs::remove_file(run.dir.join("node.pid"));
+        assert_eq!(run.start(), None, "the start script relaunched a node that left for good");
+        assert!(!run.dir.join("node.pid").exists());
     }
 
     #[test]
