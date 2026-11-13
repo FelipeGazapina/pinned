@@ -41,6 +41,7 @@ pub mod private;
 pub mod process;
 pub mod projects;
 pub mod prwatch;
+pub mod pinned_lines;
 pub mod placement;
 pub mod pty;
 pub mod pulls;
