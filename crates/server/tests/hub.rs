@@ -8338,6 +8338,67 @@ fn a_worker_box_end_reaches_a_parent_that_was_offline_and_the_box_ends_done_at_o
 }
 
 #[test]
+fn a_parent_that_looks_before_its_held_end_is_delivered_reads_the_end_not_a_gone_box() {
+    let hub = TestHub::start_with_boxes("held_look_first", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let mac_dir = temp("held-look-first-mac");
+    let (mut mac, creds, captain) = sleepy_mac(&hub, &mut ana, &mac_dir);
+    let (task, child) = box_worker(&hub, &mut ana, &mac_dir, &captain);
+    let box_dir = hub.boxes.root.join(&hub.boxes.live()[0]);
+    let machine = ana.box_machine();
+
+    mac.link.take().unwrap().stop();
+    ana.client.wait_machines(&[("mac", false), ("Box · Slow suite", true)]);
+    hook(&box_dir, json!({ "kind": "agent", "status": "working", "tab": child.id, "session": "s-suite" }));
+    hook(&box_dir, json!({ "kind": "agent", "status": "done", "tab": child.id, "session": "s-suite", "reply": "Suite green; 412 tests pass." }));
+    wait_for("the box, its row and its machine to go", || {
+        hub.boxes.live().is_empty() && ana.rows(&hub) == 0 && hub.runtime.block_on(hub.hub().db.machine_name(ana.id, uuid::Uuid::parse_str(&machine).unwrap())).unwrap().is_none()
+    });
+    assert_eq!(held_ends(&hub, Some(ana.id)), 1);
+
+    // mac is back, and its remote check runs before the hub's delivery got through: the delivery
+    // is refused here, so the look is the first thing mac hears.
+    let busy = RawMachine::start(&hub.url, &creds.machine_token, |call| match call["cmd"].as_str().unwrap() {
+        "remote_ended" => RawReply::Err("not now".into()),
+        _ => RawReply::Ok(Value::Null),
+    });
+    wait_for("the hub to offer mac the held end", || busy.calls("remote_ended") == 1);
+    let look = busy.ask(remote_task_call(&machine, &task, None)).unwrap();
+    assert_eq!((look["workState"].as_str(), look["summary"].as_str()), (Some("result_available"), Some("Suite green; 412 tests pass.")), "the held end, not 'this account has no machine': {look}");
+    drop(busy);
+
+    // The real mac reconnects: its check and the delivery race, and the task ends with the held result.
+    mac.link = Some(link::spawn(creds, mac.machine.clone(), "0.0.0-test"));
+    wait_for("mac's task to end", || task_status(&mac_dir, &captain, &task)["workState"] != "working");
+    let status = task_status(&mac_dir, &captain, &task);
+    assert_eq!((status["workState"].as_str(), status["summary"].as_str()), (Some("result_available"), Some("Suite green; 412 tests pass.")), "not gone from this account: {status}");
+    wait_for("the held row to go", || held_ends(&hub, None) == 0);
+    assert_eq!(ana.client.hub(json!({ "cmd": "unclaimed_ends" })), Ok(json!([])), "mac had it, so it is not listed unclaimed");
+}
+
+#[test]
+fn a_held_end_its_parent_read_by_status_goes_when_the_delivery_finds_it_settled() {
+    let hub = TestHub::start("held_read");
+    let (mut ana, _mac, mac_token, mini, _mini_raw, _) = held_for_offline_mac(&hub);
+    ana.hub(json!({ "cmd": "remove_machine", "id": mini.id })).unwrap();
+    let busy = RawMachine::start(&hub.url, &mac_token, |call| match call["cmd"].as_str().unwrap() {
+        "remote_ended" => RawReply::Err("not now".into()),
+        _ => RawReply::Ok(Value::Null),
+    });
+    wait_for("the hub to offer mac the held end", || busy.calls("remote_ended") == 1);
+    assert_eq!(busy.ask(remote_task_call(&mini.id, "task-1", None)).unwrap()["summary"], "Suite green.", "mac settles the task from its status");
+    drop(busy);
+    // Settled already, mac answers the delivery with not taken: a repeat, not a forgotten task.
+    let settled = RawMachine::start(&hub.url, &mac_token, |call| match call["cmd"].as_str().unwrap() {
+        "remote_ended" => RawReply::Ok(json!(false)),
+        _ => RawReply::Ok(Value::Null),
+    });
+    wait_for("the hub to offer mac the held end again", || settled.calls("remote_ended") == 1);
+    wait_for("the held row to go", || held_ends(&hub, None) == 0);
+    assert_eq!(ana.hub(json!({ "cmd": "unclaimed_ends" })), Ok(json!([])), "nor is it listed unclaimed");
+}
+
+#[test]
 fn a_box_ended_notice_its_parent_missed_is_held_and_told_once_it_is_back() {
     let hub = TestHub::start_with_boxes("held_notice", Signup::Open, fast());
     let mut ana = BoxAccount::new(&hub);

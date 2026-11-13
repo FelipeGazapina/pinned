@@ -121,9 +121,21 @@ pub(crate) async fn resolve(hub: &Hub, account: &Account, asked: &str) -> Result
 /// still boots, or that it is offline once it had connected. A task whose end the hub holds for
 /// `from` answers from it first, as its box and machine may be gone.
 async fn remote_task(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, machine: &str, tab: TabId, task: String, cancel: Option<String>) -> Result<Value, String> {
+    // After a delivery of that end that runs now, as on the reconnect of `from`: a look never
+    // overtakes it, so while the hub holds an end, `from` reads it, never a gone worker.
+    let delivering = match Uuid::parse_str(from) {
+        Ok(origin) => Some(hub.hold_delivery(account, origin, &task).await),
+        Err(_) => None,
+    };
     if let Some(end) = held_end(hub, account, from, &task).await? {
+        if cancel.is_none() {
+            if let Ok(origin) = Uuid::parse_str(from) {
+                let _ = hub.db.read_held_end(account.id, origin, &task).await;
+            }
+        }
         return Ok(json!({ "workState": end.state, "summary": end.summary, "error": end.error, "usage": end.usage }));
     }
+    drop(delivering);
     let worker_box = hub.boxes.delegate_box(hub, account, machine).await?;
     let asked = Call::RemoteTask { origin_machine: from.to_owned(), tab, task, cancel: cancel.clone() };
     let offline = match worker_box.as_ref().filter(|_| !account.is_online(machine)) {
@@ -272,12 +284,16 @@ pub async fn deliver_held(hub: Arc<Hub>, account: Arc<Account>, machine: String)
         Err(e) => return eprintln!("pinned-server: could not read the ends held for machine {machine}: {e}"),
     };
     for held in held.into_iter().filter(|held| held.unclaimed_at.is_none()) {
-        // A delivery that ran meanwhile, from another connection of the machine, dropped or unclaimed the row.
+        // A delivery that ran meanwhile, from another connection of the machine, dropped or unclaimed
+        // the row, and a status look meanwhile may have read it.
         let _delivering = hub.hold_delivery(&account, origin, &held.task).await;
-        match hub.db.held_ends(account.id, origin, Some(&held.task)).await {
-            Ok(rows) if rows.iter().any(|row| row.unclaimed_at.is_none()) => {}
-            _ => continue,
-        }
+        let read = match hub.db.held_ends(account.id, origin, Some(&held.task)).await {
+            Ok(rows) => match rows.iter().find(|row| row.unclaimed_at.is_none()) {
+                Some(row) => row.read,
+                None => continue,
+            },
+            Err(_) => continue,
+        };
         let Ok(end) = serde_json::from_value::<RemoteEnd>(held.end) else {
             eprintln!("pinned-server: the held end of task {} for machine {machine} is unreadable; it is dropped", held.task);
             let _ = hub.db.drop_held_end(account.id, origin, &held.task).await;
@@ -290,6 +306,13 @@ pub async fn deliver_held(hub: Arc<Hub>, account: Arc<Account>, machine: String)
                     eprintln!("pinned-server: could not drop the delivered end of task {}: {e}", held.task);
                 }
                 eprintln!("pinned-server: passed the held end of task {} to machine {machine} (taken: true)", held.task);
+            }
+            Ok(_) if read => {
+                // It settled the task from the status it read, so its not-taken is a repeat.
+                if let Err(e) = hub.db.drop_held_end(account.id, origin, &held.task).await {
+                    eprintln!("pinned-server: could not drop the read end of task {}: {e}", held.task);
+                }
+                eprintln!("pinned-server: machine {machine} had the held end of task {} from its status already", held.task);
             }
             Ok(taken) => {
                 if let Err(e) = hub.db.unclaim_held_end(account.id, origin, &held.task).await {

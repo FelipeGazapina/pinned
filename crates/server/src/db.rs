@@ -118,11 +118,14 @@ create table if not exists agent_boxes (box text primary key, account uuid not n
 -- `origin_machine` took it, when that machine is removed, or after `HELD_FOR`. `unclaimed_at` is
 -- when `origin_machine` answered that it did not take it, as one that restarted and forgot the
 -- task does: the row then stays for `HELD_FOR`, is not offered again, and `unclaimed_ends` lists it.
+-- `read_at` is when `origin_machine`'s own status look of the task was answered from the row: that
+-- machine knows the task and settled it then, so a later not-taken is its repeat, not a forgotten task.
 create table if not exists held_ends (account uuid not null references accounts on delete cascade,
   origin_machine uuid not null, task text not null, origin_tab text not null, from_machine uuid not null,
   report jsonb not null, held_at timestamptz not null default now(),
   primary key (account, origin_machine, task));
 alter table held_ends add column if not exists unclaimed_at timestamptz;
+alter table held_ends add column if not exists read_at timestamptz;
 -- What might be done, as opposed to memory: an account's own list with an optional project (a repo key).
 -- `created_by` is a `schedule::Actor` as json; `created_at` and `updated_at` are unix seconds.
 create table if not exists ideas (id uuid primary key, account uuid not null references accounts on delete cascade,
@@ -147,6 +150,8 @@ pub struct HeldEnd {
     pub end: Value,
     /// When `origin` answered it did not take it, unix milliseconds; `None` while it waits to be offered.
     pub unclaimed_at: Option<u64>,
+    /// Whether `origin`'s own status look of the task was answered from it.
+    pub read: bool,
 }
 
 /// A box row of the account, as the Usage page joins it to what Upstash lists.
@@ -754,7 +759,7 @@ impl Db {
             .await?
             .query(
                 &format!(
-                    "select task, origin_tab, from_machine, report, (extract(epoch from unclaimed_at) * 1000)::bigint from held_ends
+                    "select task, origin_tab, from_machine, report, (extract(epoch from unclaimed_at) * 1000)::bigint, read_at is not null from held_ends
                      where account = $1 and origin_machine = $2 and ($3::text is null or task = $3) and held_at > now() - {HELD_FOR} order by held_at"
                 ),
                 &[&account, &origin, &task],
@@ -763,8 +768,21 @@ impl Db {
             .map_err(err)?;
         Ok(rows
             .iter()
-            .map(|r| HeldEnd { task: r.get(0), tab: r.get(1), from: r.get(2), end: r.get(3), unclaimed_at: r.get::<_, Option<i64>>(4).map(|ms| ms.max(0) as u64) })
+            .map(|r| HeldEnd { task: r.get(0), tab: r.get(1), from: r.get(2), end: r.get(3), unclaimed_at: r.get::<_, Option<i64>>(4).map(|ms| ms.max(0) as u64), read: r.get(5) })
             .collect())
+    }
+
+    /// `origin`'s own status look of `task` was answered from its held end.
+    pub async fn read_held_end(&self, account: Uuid, origin: Uuid, task: &str) -> Result<(), String> {
+        self.client()
+            .await?
+            .execute(
+                "update held_ends set read_at = coalesce(read_at, now()) where account = $1 and origin_machine = $2 and task = $3",
+                &[&account, &origin, &task],
+            )
+            .await
+            .map_err(err)
+            .map(drop)
     }
 
     /// `origin` took the held end of `task`.
