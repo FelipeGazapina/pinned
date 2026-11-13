@@ -2387,7 +2387,7 @@ function drawNav() {
   const stuck = typeof usageState === "undefined" ? 0 : (usageState.stuck?.length ?? 0);
   const stuckMark = navRow("usage").querySelector(".stuck-box");
   stuckMark.hidden = !stuck;
-  stuckMark.title = stuck ? `pinned could not delete ${stuck} Upstash ${stuck === 1 ? "box" : "boxes"}. ${stuck === 1 ? "It is" : "They are"} still running on Upstash and can be deleted in the Upstash console. Open Usage.` : "";
+  stuckMark.title = stuck ? stuckMarkTitle(usageState.stuck) : "";
   for (const name of ["needs-you", "pull-requests", "usage"]) navRow(name).classList.toggle("active", page === name);
   setText(document.getElementById("machines-online"), `${counts.machinesOnline} ${counts.machinesOnline === 1 ? "machine" : "machines"} online`);
   accountButton.classList.toggle("offline", !counts.machinesOnline);

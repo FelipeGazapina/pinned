@@ -622,11 +622,36 @@ function boxListsHtml(boxes, now, open) {
     ${others.length ? `<details class="box-others"${open ? " open" : ""}><summary>Other boxes (${others.length})</summary>${boxTableHtml(others, "Other boxes", "Status", now)}</details>` : ""}`;
 }
 const boxNotice = (text) => `<div class="limit-notices" role="alert">${icon("triangle-alert")}<div><p>${esc(text)}</p></div></div>`;
-/** One notice per distinct reason: the boxes pinned could not delete, still running on Upstash. */
+/** A stuck box with no `unconfirmed` flag is one pinned knows is on Upstash; one with it is a row that never recorded a box id. */
+const stuckSplit = (stuck) => [(stuck ?? []).filter((b) => !b.unconfirmed), (stuck ?? []).filter((b) => b.unconfirmed)];
+const stuckCount = (n) => `${n} ${n === 1 ? "box" : "boxes"}`;
+const stillRunning = (n) => `${n === 1 ? "It is" : "They are"} still running on Upstash and can be deleted in the Upstash console.`;
+/** What pinned says of a row with no Upstash id when its delete failed: it does not know a box exists. */
+const unconfirmedTail = (n) => n === 1
+  ? "pinned could not confirm whether a box exists on Upstash for it. Check the Upstash console and delete it there if it does."
+  : "pinned could not confirm whether a box exists on Upstash for any of them. Check the Upstash console and delete any you find there.";
+/** One notice per distinct reason: the boxes pinned could not delete and knows are still running on Upstash, and the rows it could not confirm a box for. */
 function stuckBoxesHtml(stuck) {
-  const byWhy = new Map();
-  for (const { why } of stuck ?? []) byWhy.set(why, (byWhy.get(why) ?? 0) + 1);
-  return [...byWhy].map(([why, n]) => boxNotice(`${n} ${n === 1 ? "box" : "boxes"} pinned could not delete: ${why}. ${n === 1 ? "It is" : "They are"} still running on Upstash and can be deleted in the Upstash console.`)).join("");
+  const notices = [];
+  const [known, unconfirmed] = stuckSplit(stuck);
+  for (const [list, line] of [
+    [known, (n, why) => `${stuckCount(n)} pinned could not delete: ${why}. ${stillRunning(n)}`],
+    [unconfirmed, (n, why) => `${stuckCount(n)} pinned could not end: ${why}. ${unconfirmedTail(n)}`],
+  ]) {
+    const byWhy = new Map();
+    for (const { why } of list) byWhy.set(why, (byWhy.get(why) ?? 0) + 1);
+    for (const [why, n] of byWhy) notices.push(boxNotice(line(n, why)));
+  }
+  return notices.join("");
+}
+/** The title of the sidebar's mark on Usage: the same two cases as the notices. */
+function stuckMarkTitle(stuck) {
+  const [known, unconfirmed] = stuckSplit(stuck);
+  const k = known.length;
+  const u = unconfirmed.length;
+  const knownText = `pinned could not delete ${k} Upstash ${k === 1 ? "box" : "boxes"}. ${stillRunning(k)}`;
+  const unconfirmedText = `${k ? "Separately, pinned" : "pinned"} could not end ${u} ${k ? "more " : ""}${u === 1 ? "box" : "boxes"}. ${unconfirmedTail(u)}`;
+  return `${[k ? knownText : "", u ? unconfirmedText : ""].filter(Boolean).join(" ")} Open Usage.`;
 }
 function boxBodyHtml(box, now) {
   const u = box.data;

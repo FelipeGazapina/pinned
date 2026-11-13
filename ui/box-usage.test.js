@@ -39,7 +39,7 @@ function boxPage({ answer, stuckAnswer = async () => [], hubOn = true } = {}) {
   };
   vm.createContext(context);
   vm.runInContext(`${line(usageSrc, "const usd = ")}\n${line(read("settings.js"), "const BOX_SIZES = ")}\n${sectionSrc}
-    this.boxUsageHtml = boxUsageHtml; this.fetchBoxUsage = fetchBoxUsage;`, context);
+    this.boxUsageHtml = boxUsageHtml; this.fetchBoxUsage = fetchBoxUsage; this.stuckMarkTitle = stuckMarkTitle;`, context);
   return context;
 }
 const text = (html) => html.replace(/<[^>]*>/g, " ").replace(/&amp;/g, "&").replace(/\s+/g, " ").trim();
@@ -260,6 +260,65 @@ test("a stuck reason is escaped", () => {
   assert.match(html, /&lt;b&gt;bold&lt;\/b&gt; &amp; more/);
 });
 
+/** The sidebar's Usage mark, drawn by the code `drawNav` runs, over a stuck list. */
+function drawMark(page, stuck) {
+  const mark = between(read("gui-sidebar.js"), "const stuck = typeof usageState", '  for (const name of ["needs-you"');
+  const el = { hidden: true, title: "" };
+  const context = { usageState: { stuck }, stuckMarkTitle: page.stuckMarkTitle, navRow: () => ({ querySelector: () => el }) };
+  vm.createContext(context);
+  vm.runInContext(mark, context);
+  return el;
+}
+
+const KNOWN = { id: "fake-row-1", why: "Upstash answered 503" };
+const UNCONFIRMED = { id: "fake-row-2", why: "Upstash is not connected, or its Claude token is missing", unconfirmed: true };
+const CONFIRM = "pinned could not confirm whether a box exists on Upstash for it. Check the Upstash console and delete it there if it does.";
+
+test("a row with no Upstash id says pinned could not confirm a box exists, and does not say it is still running", () => {
+  const page = boxPage({ answer: async () => ({}) });
+  const html = (stuck, connected = false) => page.boxUsageHtml({ data: { connected, stuck }, error: "", loading: false, open: {} }, NOW);
+  const notice = text(html([UNCONFIRMED]));
+  assert.ok(notice.includes(`1 box pinned could not end: Upstash is not connected, or its Claude token is missing. ${CONFIRM}`), notice);
+  assert.doesNotMatch(notice, /still running/);
+  assert.equal(html([UNCONFIRMED]).match(/limit-notices/g).length, 1);
+  const many = text(html([UNCONFIRMED, { ...UNCONFIRMED, id: "fake-row-3" }]));
+  assert.match(many, /2 boxes pinned could not end: .* for any of them\. Check the Upstash console and delete any you find there\./);
+  assert.doesNotMatch(many, /still running/);
+});
+
+test("a row with its Upstash id keeps saying it is still running on Upstash", () => {
+  const page = boxPage({ answer: async () => ({}) });
+  const known = text(page.boxUsageHtml({ data: { connected: false, stuck: [KNOWN] }, error: "", loading: false, open: {} }, NOW));
+  assert.match(known, /1 box pinned could not delete: Upstash answered 503\. It is still running on Upstash and can be deleted in the Upstash console\./);
+  assert.doesNotMatch(known, /could not confirm/);
+});
+
+test("known and unconfirmed boxes with the same reason show as two notices, each with its own text", () => {
+  const page = boxPage({ answer: async () => ({}) });
+  const same = { ...UNCONFIRMED, why: KNOWN.why };
+  const html = page.boxUsageHtml({ data: { connected: true, stuck: [same, KNOWN, { ...KNOWN, id: "fake-row-4" }], boxes: [], upstash: { cpu_hours: 0, compute_usd: 0, boxes: 0 }, pinned: PINNED }, error: "", loading: false, open: {} }, NOW);
+  assert.equal(html.match(/limit-notices/g).length, 2);
+  assert.match(text(html), /2 boxes pinned could not delete: Upstash answered 503\. They are still running on Upstash and can be deleted in the Upstash console\./);
+  assert.match(text(html), new RegExp(`1 box pinned could not end: Upstash answered 503\. ${CONFIRM.replace(/\./g, "\\.")}`));
+});
+
+test("the mark's title follows the notice: known, unconfirmed, and both", () => {
+  const page = boxPage({ answer: async () => ({}) });
+  const known = drawMark(page, [KNOWN]);
+  assert.equal(known.hidden, false);
+  assert.equal(known.title, "pinned could not delete 1 Upstash box. It is still running on Upstash and can be deleted in the Upstash console. Open Usage.");
+  const unconfirmed = drawMark(page, [UNCONFIRMED]);
+  assert.equal(unconfirmed.hidden, false, "a row with no Upstash id is not hidden");
+  assert.equal(unconfirmed.title, `pinned could not end 1 box. ${CONFIRM} Open Usage.`);
+  assert.doesNotMatch(unconfirmed.title, /still running/);
+  const two = drawMark(page, [UNCONFIRMED, { ...UNCONFIRMED, id: "fake-row-3" }]);
+  assert.equal(two.title, "pinned could not end 2 boxes. pinned could not confirm whether a box exists on Upstash for any of them. Check the Upstash console and delete any you find there. Open Usage.");
+  const mix = drawMark(page, [KNOWN, { ...KNOWN, id: "fake-row-4" }, UNCONFIRMED]);
+  assert.equal(mix.hidden, false);
+  assert.equal(mix.title, `pinned could not delete 2 Upstash boxes. They are still running on Upstash and can be deleted in the Upstash console. Separately, pinned could not end 1 more box. ${CONFIRM} Open Usage.`);
+  assert.equal(drawMark(page, []).hidden, true);
+});
+
 test("the sidebar's Usage entry is marked from the hub's own look, and redrawn once the answer is in", async () => {
   const calls = [];
   const page = boxPage({ answer: async () => ({ connected: false, stuck: [] }), stuckAnswer: async (m) => (calls.push(m.cmd), [{ id: "fake-box-0001", why: "Upstash answered 503" }]) });
@@ -270,7 +329,7 @@ test("the sidebar's Usage entry is marked from the hub's own look, and redrawn o
   const mark = between(sidebarSrc, "const stuck = typeof usageState", '  for (const name of ["needs-you"');
   const draw = (stuck) => {
     const el = { hidden: true, title: "" };
-    const context = { usageState: { stuck }, navRow: () => ({ querySelector: () => el }) };
+    const context = { usageState: { stuck }, stuckMarkTitle: page.stuckMarkTitle, navRow: () => ({ querySelector: () => el }) };
     vm.createContext(context);
     vm.runInContext(mark, context);
     return el;
