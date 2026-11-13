@@ -227,11 +227,13 @@ impl Questions {
     /// Moves the questionnaires of Claude session `session` that still wait on the user, or whose
     /// outcome has not reached it, to `tab`, the tab that resumed that session. Whether any moved.
     pub fn rekey(&mut self, session: &str, tab: &str) -> bool {
-        let open_here = self.open_on(tab).is_some();
+        let mut open_here = self.open_on(tab).is_some();
         let mut moved = false;
         for asked in self.asked.iter_mut().filter(|a| a.session.as_deref() == Some(session) && a.tab != tab) {
             let waits = (asked.is_open() && !open_here) || (!asked.is_open() && !asked.notified);
             if waits {
+                // A tab holds one open questionnaire: once one moved here, the others stay.
+                open_here |= asked.is_open();
                 asked.tab = tab.to_owned();
                 moved = true;
             }
@@ -512,6 +514,21 @@ mod tests {
         assert_eq!(q.open("tab-2", None, None, None, vec![question("Other?", &["yes", "no"])], vec![], 2).unwrap(), "q-2");
         q.answer("tab-1", "q-1", QuestionsReply::Skipped).unwrap();
         assert_eq!(q.open("tab-1", None, None, None, vec![question("Next?", &["yes", "no"])], vec![], 3).unwrap(), "q-3");
+    }
+
+    #[test]
+    fn rekey_puts_one_open_questionnaire_on_the_tab_even_when_two_share_the_session() {
+        let mut q = Questions::default();
+        let first = q.open("tab-1", Some("s-1".into()), None, None, vec![question("Base on main?", &["main", "release"])], vec![], 1).unwrap();
+        let second = q.open("tab-2", Some("s-1".into()), None, None, vec![question("Phone too?", &["yes", "no"])], vec![], 2).unwrap();
+        let done = q.open("tab-3", Some("s-1".into()), None, None, vec![question("Ship it?", &["yes", "no"])], vec![], 3).unwrap();
+        q.answer("tab-3", &done, QuestionsReply::Skipped).unwrap();
+
+        assert!(q.rekey("s-1", "tab-4"));
+        let open_on_new: Vec<&str> = q.asked.iter().filter(|a| a.tab == "tab-4" && a.is_open()).map(|a| a.questionnaire.id.as_str()).collect();
+        assert_eq!(open_on_new, [first.as_str()], "exactly one open questionnaire lands on the tab");
+        assert_eq!(q.open_on("tab-2").map(|o| o.id.clone()), Some(second), "the other stays where it was");
+        assert!(q.asked.iter().any(|a| a.questionnaire.id == done && a.tab == "tab-4"), "the closed one whose outcome has not reached the session still moves");
     }
 
     #[test]
