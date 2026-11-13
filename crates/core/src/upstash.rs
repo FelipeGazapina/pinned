@@ -298,13 +298,25 @@ const ECHO_LIMIT: usize = 300;
 
 /// `text` as an error may carry it: the key replaced with "…" (an empty key replaces nothing) and
 /// no more than `ECHO_LIMIT` characters. The key goes first, so cutting never leaves half of it.
+/// A body printed as JSON and a serde error quoting with `{:?}` show a key holding `"`, `\` or a
+/// control character escaped, so both escaped forms go too.
 /// Every error built from what Upstash sent passes here, as it reaches the log and the app.
 fn echoed(key: &str, text: &str) -> String {
-    let scrubbed = if key.is_empty() { text.to_owned() } else { text.replace(key, "…") };
+    let mut scrubbed = text.to_owned();
+    for form in [key.to_owned(), unquoted(&serde_json::to_string(key).unwrap_or_default()), unquoted(&format!("{key:?}"))] {
+        if !form.is_empty() {
+            scrubbed = scrubbed.replace(&form, "…");
+        }
+    }
     match scrubbed.char_indices().nth(ECHO_LIMIT) {
         Some((end, _)) => format!("{}…", &scrubbed[..end]),
         None => scrubbed,
     }
+}
+
+/// `quoted` without its outer quotes.
+fn unquoted(quoted: &str) -> String {
+    quoted.strip_prefix('"').and_then(|q| q.strip_suffix('"')).unwrap_or_default().to_owned()
 }
 
 /// What Upstash's refusal reads as. Upstash's own `error` text could echo the key.
