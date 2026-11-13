@@ -5,6 +5,8 @@ use pinned_core::accounts::AccountId;
 use pinned_core::agent::{AgentStatus, Stage, Subject, Usage, CONNECTOR_ENV};
 use pinned_core::connectors::{Connectors, Delivery, Keys, Placement, Run, RunsOn, Storage, Work};
 use pinned_core::convex::client::Http as ConvexHttp;
+use pinned_core::ideas::{Idea, IdeaStatus};
+use pinned_core::schedule::Actor;
 use pinned_core::delegate::{RunTarget, TaskRecord};
 use pinned_core::marks::{self, Archived, Mark, MarkChange, SessionMarks};
 use pinned_core::taste::{TasteField, TastePatch, TasteScope, Tastes};
@@ -526,7 +528,7 @@ impl Hub {
                 }
                 return Ok(Value::Null);
             }
-            HubCall::GetSettings => (json(c().await?.get_settings()), false),
+            HubCall::GetSettings => return json(self.settings(account).await?),
             HubCall::ConnectLinear { key } => (json(c().await?.connect_linear(&key).await?), true),
             HubCall::DisconnectLinear => (json(c().await?.disconnect_linear()?), true),
             HubCall::LinearSuggestions => (json(c().await?.linear_suggestions().await?), false),
@@ -536,7 +538,7 @@ impl Hub {
             HubCall::SaveConnector { connector } => (json(c().await?.save_connector(connector)?), true),
             HubCall::DeleteConnector { id } => (json(c().await?.delete_connector(&id)?), true),
             HubCall::RunWorkflow { id } => return json(self.run_workflow(account, &id).await?),
-            HubCall::GenerateWorkflow { model, description } => (json(c().await?.generate_workflow(&model, &description).await?), false),
+            HubCall::GenerateWorkflow { .. } => return Err("Generate with AI was removed: ask an agent to create the workflow".into()),
             HubCall::OpenBox { repo, size, budget_usd } => (json(self.boxes.open_session(self, account, repo, size, budget_usd, None).await?), false),
             HubCall::BoxStatus { machine } => {
                 let machine = Uuid::parse_str(&machine).map_err(|_| format!("this account has no machine {machine}"))?;
@@ -718,6 +720,16 @@ impl Hub {
             HubCall::AgentAudit { before, limit } => {
                 let limit = i64::from(limit.unwrap_or(50).clamp(1, 200));
                 return json(self.db.audit_rows(account.id, before, limit).await?);
+            }
+            HubCall::ListIdeas { project } => return json(self.db.ideas(account.id, project.as_deref().map(str::trim).filter(|p| !p.is_empty())).await?),
+            HubCall::SaveIdea { id, title, text, project, status } => return json(self.save_idea(account, Actor::User, id.as_deref(), &title, &text, project.as_deref(), status).await?),
+            HubCall::DeleteIdea { id } => {
+                let unknown = || format!("this account has no idea {id}");
+                if !self.db.delete_idea(account.id, Uuid::parse_str(&id).map_err(|_| unknown())?).await? {
+                    return Err(unknown());
+                }
+                self.push_settings(account).await;
+                return Ok(Value::Null);
             }
             HubCall::ListMcpServers => return json(c().await?.mcp_servers()),
             HubCall::SaveMcpServer { id, server, secrets } => return json(c().await?.save_mcp_server(id.as_deref(), server, &secrets)?),
@@ -904,10 +916,40 @@ impl Hub {
         }
     }
 
+    /// The account's settings with its ideas, which live in the hub's own table. A failed ideas
+    /// read leaves them out rather than failing the settings every app loads.
+    async fn settings(&self, account: &Account) -> Result<pinned_core::connectors::Settings, String> {
+        let mut settings = self.connectors(account).await?.get_settings();
+        settings.ideas = self.db.ideas(account.id, None).await.unwrap_or_else(|e| {
+            eprintln!("pinned-server: could not read the ideas of account {}: {e}", account.id);
+            Vec::new()
+        });
+        Ok(settings)
+    }
+
     async fn push_settings(&self, account: &Account) {
-        if let Ok(connectors) = self.connectors(account).await {
-            account.broadcast(&ToClient::Settings { settings: connectors.get_settings() });
+        if let Ok(settings) = self.settings(account).await {
+            account.broadcast(&ToClient::Settings { settings });
         }
+    }
+
+    /// Adds an idea made by `by`, or with `id` changes that one. The hub sets who made it and the times.
+    pub(crate) async fn save_idea(&self, account: &Account, by: Actor, id: Option<&str>, title: &str, text: &str, project: Option<&str>, status: Option<IdeaStatus>) -> Result<Idea, String> {
+        let title = title.trim();
+        if title.is_empty() {
+            return Err("an idea needs a title".into());
+        }
+        let project = project.map(str::trim).filter(|p| !p.is_empty());
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+        let idea = match id {
+            Some(id) => {
+                let unknown = || format!("this account has no idea {id}");
+                self.db.edit_idea(account.id, Uuid::parse_str(id).map_err(|_| unknown())?, title, text.trim(), project, status, now).await?.ok_or_else(unknown)?
+            }
+            None => self.db.add_idea(account.id, title, text.trim(), project, status.unwrap_or_default(), &by, now).await?,
+        };
+        self.push_settings(account).await;
+        Ok(idea)
     }
 
     pub fn logged_out(&self, hash: &[u8]) {

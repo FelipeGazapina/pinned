@@ -2383,7 +2383,12 @@ fn a_box_run_boots_its_own_node_and_the_box_goes_when_its_tab_closes() {
     assert_eq!(created.len(), 1);
     let row = created[0].labels[1].strip_prefix("p:").unwrap().to_owned();
     assert_eq!((created[0].labels[0].as_str(), row.len()), (label.as_str(), 16));
-    assert_eq!(created[0].name, format!("pinned-{row}"));
+    // `<project>-<role>-<first 6 of the row>`: the project is the repo folder's name, cut to leave room for the rest.
+    let tail = format!("-workflow-{}", &row[..6]);
+    let folder = ana.repo.file_name().unwrap().to_str().unwrap().to_lowercase();
+    let mut project = folder.split(|c: char| !c.is_ascii_alphanumeric()).filter(|part| !part.is_empty()).collect::<Vec<_>>().join("-");
+    project.truncate(40 - tail.len());
+    assert_eq!(created[0].name, format!("{}{tail}", project.trim_matches('-')));
     assert_eq!((created[0].size, created[0].init_command.as_str()), (BoxSize::Small, "sh /workspace/home/.pinned/start.sh || true"));
     ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
     let machine = ana.box_machine();
@@ -4527,6 +4532,8 @@ fn an_accounts_tastes_are_read_written_and_imported_only_by_that_account() {
 #[test]
 fn an_accounts_box_budget_bounds_only_its_own_boxes_and_shows_only_in_its_tastes() {
     let hub = TestHub::start_with_boxes("iso_limits", Signup::Open, fast());
+    // The box's node already has its checkout of the repo, so its boot clones nothing over the network.
+    hub.boxes.state.lock().unwrap().checkout = Some(("site".into(), SITE.into()));
     let mut ana = BoxAccount::new(&hub);
     let mut bob = BoxAccount::named(&hub, "bob@acme.dev");
     for client in [&mut ana.client, &mut bob.client] {
@@ -6306,11 +6313,11 @@ fn an_agent_manages_its_accounts_workflows_projects_sessions_settings_and_usage_
 
     let listed = session_tool(&ana.dir, &ana.tab, json!({ "name": "actions" })).unwrap();
     let class = |name: &str| listed["actions"].as_array().unwrap().iter().find(|a| a["name"] == name).map(|a| a["class"].as_str().unwrap().to_owned());
-    for (name, expected) in [("save_connector", "write"), ("delete_connector", "confirm"), ("generate_workflow", "write"), ("clone", "write"), ("share_project", "write"), ("prompt", "write"), ("enqueue", "write"), ("set_taste", "confirm"), ("reset_taste_field", "confirm"), ("save_skill", "write"), ("token_usage", "read"), ("delegation_stats", "read")] {
+    for (name, expected) in [("save_connector", "write"), ("delete_connector", "confirm"), ("clone", "write"), ("share_project", "write"), ("prompt", "write"), ("enqueue", "write"), ("set_taste", "confirm"), ("reset_taste_field", "confirm"), ("save_skill", "write"), ("token_usage", "read"), ("delegation_stats", "read")] {
         assert_eq!(class(name).as_deref(), Some(expected), "{name}");
     }
     assert_eq!(class("run_workflow").as_deref(), Some("write"), "a Run now is held to the caller's limits, with no approval");
-    assert!(class("run").is_none() && class("run_now").is_none() && class("node_clone").is_none(), "the hub's run and the token-taking clone stay closed");
+    assert!(class("run").is_none() && class("run_now").is_none() && class("node_clone").is_none() && class("generate_workflow").is_none(), "the hub's run, the token-taking clone and the removed generate_workflow stay closed");
 
     // Workflows: save, edit, list, and a refusal for one that skips permission prompts.
     let workflow = |name: &str, mode: &str, id: Option<&str>| {
@@ -6335,8 +6342,6 @@ fn an_agent_manages_its_accounts_workflows_projects_sessions_settings_and_usage_
         Err("save_connector would run a session that skips its permission prompts, and your own session asks for them".into()),
         "a workflow outlives the session that saved it, so it never runs wider than that session"
     );
-    assert_eq!(act(&ana.dir, &ana.tab, "generate_workflow", json!({ "model": "gpt-6-luna", "description": "Triage bugs" })), Err("Vercel AI Gateway is not connected: connect it in pinned's Connectors settings".into()));
-    assert_eq!(act(&ana.dir, &ana.tab, "generate_workflow", json!({ "model": "gpt-6-luna", "description": " " })), Err("describe the workflow first".into()));
     assert_eq!(act(&ana.dir, &ana.tab, "run", json!({})), Err("run is not open to agents: the hub's way to start a workflow's session: its raw arguments and environment could pass for a workflow's".into()));
 
     // Bob's account holds none of Ana's workflows, and cannot reach, edit or delete one.
@@ -7194,6 +7199,18 @@ fn a_single_bot_slack_import_becomes_the_default_bot_and_replies_still_use_its_k
 }
 
 #[test]
+fn an_older_apps_generate_workflow_gets_a_short_error() {
+    let hub = TestHub::start_with("old_generate", Signup::Open);
+    let (token, _) = account::signup(&hub.url, "ana@acme.dev", "correct horse").unwrap();
+    let mut app = Client::app(&hub.url, &token);
+    app.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    assert_eq!(
+        app.hub(json!({ "cmd": "generate_workflow", "model": "x", "description": "y" })),
+        Err("Generate with AI was removed: ask an agent to create the workflow".into())
+    );
+}
+
+#[test]
 fn the_reads_of_linear_slack_github_and_vercel_answer_from_the_callers_account_or_refuse_cleanly() {
     let Pair { _hub, url: _, mut ana, mut bob } = ana_and_bob("agent_reads");
     let mut seen = Seen(vec![]);
@@ -7214,17 +7231,14 @@ fn the_reads_of_linear_slack_github_and_vercel_answer_from_the_callers_account_o
         assert_eq!(asked_of(host), reached + 1, "{action}: a refused read reaches nobody, and never takes ana's key");
     }
 
-    let draft = json!({ "model": "openai/gpt-5", "description": "when a bug is filed, fix it" });
-    let gateway = "ai-gateway.vercel.sh:443";
-    let reached = asked_of(gateway);
-    let hers = seen.log(act(&ana.dir, &ana.tab, "generate_workflow", draft.clone())).unwrap_err();
-    assert!(hers.starts_with("Vercel AI Gateway: unreachable"), "ana's draft goes to her gateway key: {hers}");
-    assert_eq!(asked_of(gateway), reached + 1);
-    let none = "Vercel AI Gateway is not connected: connect it in pinned's Connectors settings";
-    assert_eq!(seen.log(act(&bob.dir, &bob.tab, "generate_workflow", draft.clone())), Err(none.into()), "bob has no gateway key to draft with");
-    assert_eq!(seen.log(bob.client.hub(json!({ "cmd": "generate_workflow", "model": "openai/gpt-5", "description": "x" }))), Err(none.into()));
-    assert_eq!(asked_of(gateway), reached + 1, "bob's refused draft reaches nobody");
+    // An account-wide read answers each caller from its own account.
+    for (agent, own) in [(&ana, "ana-mac"), (&bob, "bob-mac")] {
+        let machines = ran(seen.log(act(&agent.dir, &agent.tab, "machines", json!({}))));
+        let names: Vec<&str> = machines.as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap()).collect();
+        assert_eq!(names, [own], "machines lists the caller's own account only");
+    }
 
+    let gateway = "ai-gateway.vercel.sh:443";
     // The model list is the gateway's public one: it reads nothing of an account, so both ask the gateway alike.
     for agent in [&ana, &bob] {
         let before = asked_of(gateway);
@@ -7246,7 +7260,7 @@ fn the_reads_of_linear_slack_github_and_vercel_answer_from_the_callers_account_o
         holds_none_of(&all, &format!("{who}'s audit trail"), &format!("{:?}", trail_of(client)));
     }
     let bobs_reads: std::collections::BTreeSet<String> = trail_of(&mut bob.client).into_iter().map(|r| r.0).collect();
-    assert_eq!(bobs_reads.into_iter().collect::<Vec<_>>(), ["generate_workflow", "github_repos", "linear_suggestions", "slack_suggestions", "vercel_models"], "bob's trail holds his reads only");
+    assert_eq!(bobs_reads.into_iter().collect::<Vec<_>>(), ["github_repos", "linear_suggestions", "machines", "slack_suggestions", "vercel_models"], "bob's trail holds his reads only");
 }
 
 #[test]
@@ -8208,4 +8222,90 @@ fn box_usage_never_shows_one_account_the_boxes_or_tasks_of_another() {
     for leaked in ["site", "ana-mac", "worker", "ghp_"] {
         assert!(!b.to_string().contains(leaked), "ana's {leaked} reached bob: {b}");
     }
+}
+
+#[test]
+fn an_account_saves_lists_edits_and_deletes_its_ideas_and_no_other_account_sees_or_changes_one() {
+    let hub = TestHub::start_with("ideas_store", Signup::Open);
+    let url = hub.url.clone();
+    let (ana_token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let (bob_token, _) = account::signup(&url, "bob@acme.dev", "correct horse").unwrap();
+    let mut ana = Client::app(&url, &ana_token);
+    let mut bob = Client::app(&url, &bob_token);
+    let site = "github.com/acme/site";
+
+    assert_eq!(ana.hub(json!({ "cmd": "list_ideas" })).unwrap(), json!([]), "a new account has no ideas");
+    let ipad = ana.hub(json!({ "cmd": "save_idea", "title": "An iPad app", "text": "  Maybe next year.  " })).unwrap();
+    let ipad_id = ipad["id"].as_str().unwrap().to_owned();
+    assert_eq!((ipad["title"].as_str(), ipad["text"].as_str(), ipad["status"].as_str()), (Some("An iPad app"), Some("Maybe next year."), Some("open")));
+    assert_eq!(ipad["created_by"], json!({ "kind": "user" }), "the hub sets who made it");
+    assert!(ipad["project"].is_null() && ipad["task"].is_null());
+    assert!(ipad["created_at"].as_i64().unwrap() > 1_700_000_000 && ipad["created_at"] == ipad["updated_at"], "the hub sets the times: {ipad}");
+    let cache = ana.hub(json!({ "cmd": "save_idea", "title": "Cache the diff", "project": site })).unwrap();
+    let cache_id = cache["id"].as_str().unwrap().to_owned();
+    assert_ne!(ipad_id, cache_id);
+    assert_eq!(ana.hub(json!({ "cmd": "save_idea", "title": "  " })), Err("an idea needs a title".into()));
+
+    let ids = |listed: Value| listed.as_array().unwrap().iter().map(|i| i["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    let mut both = ids(ana.hub(json!({ "cmd": "list_ideas" })).unwrap());
+    both.sort();
+    let mut expected = vec![ipad_id.clone(), cache_id.clone()];
+    expected.sort();
+    assert_eq!(both, expected, "the list holds all of them");
+    assert_eq!(ids(ana.hub(json!({ "cmd": "list_ideas", "project": site })).unwrap()), [cache_id.clone()], "by project");
+    assert_eq!(ana.hub(json!({ "cmd": "list_ideas", "project": "github.com/acme/other" })).unwrap(), json!([]));
+
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let edited = ana.hub(json!({ "cmd": "save_idea", "id": ipad_id, "title": "An iPad app, read-only", "project": site, "status": "dropped" })).unwrap();
+    assert_eq!((edited["id"].as_str(), edited["title"].as_str(), edited["project"].as_str(), edited["status"].as_str()), (Some(ipad_id.as_str()), Some("An iPad app, read-only"), Some(site), Some("dropped")));
+    assert_eq!(edited["text"], "", "an edit sets the text as sent");
+    assert_eq!((edited["created_at"].clone(), edited["created_by"].clone()), (ipad["created_at"].clone(), ipad["created_by"].clone()), "an edit keeps who made it and when");
+    assert!(edited["updated_at"].as_i64() > ipad["updated_at"].as_i64());
+    let kept = ana.hub(json!({ "cmd": "save_idea", "id": ipad_id, "title": "An iPad app, read-only" })).unwrap();
+    assert_eq!((kept["status"].as_str(), kept["project"].is_null()), (Some("dropped"), true), "a status left out is kept; a project left out clears it");
+    assert_eq!(ids(ana.hub(json!({ "cmd": "list_ideas" })).unwrap())[0], ipad_id, "the most recently changed comes first");
+
+    let settings = ana.hub(json!({ "cmd": "get_settings" })).unwrap();
+    assert_eq!(settings["ideas"].as_array().unwrap().len(), 2, "the settings carry the ideas");
+    assert!(bob.hub(json!({ "cmd": "get_settings" })).unwrap().get("ideas").is_none(), "an account with none gets no field");
+
+    assert_eq!(bob.hub(json!({ "cmd": "list_ideas" })).unwrap(), json!([]), "bob lists none of ana's");
+    assert_eq!(bob.hub(json!({ "cmd": "list_ideas", "project": site })).unwrap(), json!([]));
+    let no_idea = |id: &str| Err(format!("this account has no idea {id}"));
+    assert_eq!(bob.hub(json!({ "cmd": "save_idea", "id": cache_id, "title": "Bob's now" })), no_idea(&cache_id), "bob cannot edit ana's idea");
+    assert_eq!(bob.hub(json!({ "cmd": "delete_idea", "id": cache_id })), no_idea(&cache_id), "bob cannot delete it");
+    let after = ana.hub(json!({ "cmd": "list_ideas", "project": site })).unwrap();
+    assert_eq!(after.as_array().unwrap().iter().find(|i| i["id"] == json!(cache_id)).unwrap()["title"], "Cache the diff", "ana's idea is untouched");
+
+    assert_eq!(ana.hub(json!({ "cmd": "delete_idea", "id": cache_id })).unwrap(), Value::Null);
+    assert_eq!(ids(ana.hub(json!({ "cmd": "list_ideas" })).unwrap()), [ipad_id.clone()]);
+    assert_eq!(ana.hub(json!({ "cmd": "delete_idea", "id": cache_id })), no_idea(&cache_id), "a second delete finds nothing");
+    assert_eq!(ana.hub(json!({ "cmd": "delete_idea", "id": "not-an-id" })), no_idea("not-an-id"));
+}
+
+#[test]
+fn an_agent_saves_and_lists_ideas_through_act_and_its_role_is_kept() {
+    let hub = TestHub::start_with("agent_ideas", Signup::Open);
+    let url = hub.url.clone();
+    let (ana_token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let ana = agent_of(&url, &ana_token, "ana@acme.dev", "ana-mac");
+
+    let saved = act(&ana.dir, &ana.tab, "save_idea", json!({ "title": "A cheaper box tier", "project": "github.com/acme/site" })).unwrap();
+    assert_eq!(saved["outcome"], "done", "{saved}");
+    let idea = &saved["result"];
+    assert_eq!(idea["created_by"]["kind"], "agent", "{idea}");
+    assert_eq!(idea["created_by"]["role"], "session");
+    assert_eq!(idea["created_by"]["tab"], ana.tab.as_str());
+    let id = idea["id"].as_str().unwrap();
+
+    let listed = act(&ana.dir, &ana.tab, "list_ideas", json!({ "project": "github.com/acme/site" })).unwrap();
+    assert_eq!(listed["result"].as_array().unwrap().len(), 1);
+    let edited = act(&ana.dir, &ana.tab, "save_idea", json!({ "id": id, "title": "A cheaper box tier", "status": "done" })).unwrap();
+    assert_eq!(edited["result"]["status"], "done");
+    assert_eq!(edited["result"]["created_by"], idea["created_by"], "an edit keeps the creator");
+    let mut app = ana.client;
+    assert_eq!(app.hub(json!({ "cmd": "list_ideas" })).unwrap().as_array().unwrap().len(), 1, "the app sees the agent's idea");
+    let deleted = act(&ana.dir, &ana.tab, "delete_idea", json!({ "id": id })).unwrap();
+    assert_eq!(deleted["outcome"], "done");
+    assert_eq!(act(&ana.dir, &ana.tab, "list_ideas", json!({})).unwrap()["result"], json!([]));
 }

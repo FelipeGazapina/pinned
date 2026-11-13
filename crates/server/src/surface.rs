@@ -5,6 +5,7 @@
 use crate::boxes::Opener;
 use crate::db::{Audit, Held};
 use crate::hub::{Account, Hub};
+use pinned_core::schedule::Actor;
 use pinned_core::surface::{self, ActAnswer, Action, ActorRole, AgentAct, AuditOutcome, Class, Confirmation, Decided, Decision, Parsed, Side};
 use pinned_core::connectors::{Placement, RunsOn};
 use pinned_core::wire::{Call, HubCall, RunStarted, ToClient};
@@ -39,6 +40,10 @@ struct Caller {
 }
 
 impl Caller {
+    fn actor(&self) -> Actor {
+        Actor::Agent { role: self.role, machine: self.machine.to_string(), tab: self.tab.clone(), session_title: self.title.clone() }
+    }
+
     fn of(account: &Account, machine: &str, tab: &str) -> Result<Caller, String> {
         let id = Uuid::parse_str(machine).map_err(|_| format!("this account has no machine {machine}"))?;
         let view = account.tab(machine, tab);
@@ -143,7 +148,7 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
     let ran = if surface::HUB_LIMITS.contains(&admitted.action.name) {
         limited(hub, account, &caller, admitted.action, admitted.call).await
     } else {
-        run(hub, account, &caller.tab, admitted.call, &admitted.target, admitted.on_origin).await
+        run(hub, account, &caller.tab, caller.actor(), admitted.call, &admitted.target, admitted.on_origin).await
     };
     match ran {
         Ok(result) => {
@@ -211,10 +216,12 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
 /// Runs the call as the app runs it: a `HubCall` through the hub's own path, a `Call` on its
 /// machine, where the origin machine hears which session asked. Another machine hears no session
 /// for a call that checks one, which then refuses what needs the asking session's own.
-async fn run(hub: &Arc<Hub>, account: &Arc<Account>, caller_tab: &str, call: Parsed, target: &str, on_origin: bool) -> Result<Value, String> {
+async fn run(hub: &Arc<Hub>, account: &Arc<Account>, caller_tab: &str, actor: Actor, call: Parsed, target: &str, on_origin: bool) -> Result<Value, String> {
     match call {
         // An agent's Unarchive only reopens the tab: starting a session is `start_claude`'s, under its limits.
         Parsed::Hub(HubCall::UnarchiveSession { session }) => json(hub.unarchive_session(account, &session, false).await?),
+        // An idea made by an agent says which one.
+        Parsed::Hub(HubCall::SaveIdea { id, title, text, project, status }) => json(hub.save_idea(account, actor, id.as_deref(), &title, &text, project.as_deref(), status).await?),
         Parsed::Hub(call) => Box::pin(hub.hub_call(account, call)).await,
         Parsed::Node(call) => {
             let guarded = matches!(call, Call::Prompt { .. } | Call::OpenGlobalOrchestrator | Call::RestartClaude { .. } | Call::SetModel { .. } | Call::SetBypass { .. } | Call::Rewind { .. } | Call::SwitchAccount { .. } | Call::SetWorkspace { .. });
@@ -359,7 +366,8 @@ async fn rerun(hub: &Arc<Hub>, account: &Arc<Account>, action: &'static Action, 
         None => asked.machine.clone(),
     };
     let on_origin = target == asked.machine;
-    run(hub, account, &asked.tab, call, &target, on_origin).await
+    let actor = Actor::Agent { role: asked.role, machine: asked.machine.clone(), tab: asked.tab.clone(), session_title: asked.title.clone() };
+    run(hub, account, &asked.tab, actor, call, &target, on_origin).await
 }
 
 /// Tells the session that asked what the user decided, through the queue its worker reports use.

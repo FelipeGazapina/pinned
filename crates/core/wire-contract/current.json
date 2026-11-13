@@ -474,6 +474,31 @@
                 ]
               },
               {
+                "description": "`null`, once `reply` closes the questionnaire `id` open on the tab. Refused when it is\nclosed already, or the reply does not fit its questions.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "answer_questions"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "reply": {
+                    "$ref": "#/$defs/QuestionsReply"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "id",
+                  "reply"
+                ]
+              },
+              {
                 "description": "The tab's new folder, canonical. Stands in for the folder dialog on a remote machine;\nthe client then sends `StartClaude`.",
                 "type": "object",
                 "properties": {
@@ -3353,6 +3378,62 @@
               }
             ]
           },
+          "QuestionsReply": {
+            "description": "How the user closed a questionnaire.\n\n`{\"kind\":\"answered\",\"answers\":[{\"chosen\":[\"main\"]}]}`, `{\"kind\":\"skipped\"}`",
+            "oneOf": [
+              {
+                "description": "One answer per question, in the questions' order.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "answered"
+                  },
+                  "answers": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/Answer"
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "answers"
+                ]
+              },
+              {
+                "description": "The agent goes on with its recommendations and states its assumptions.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "skipped"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Answer": {
+            "description": "The answer to one question: the labels of the options chosen, what the user typed, or both.",
+            "type": "object",
+            "properties": {
+              "chosen": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "text": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
           "RunSpec": {
             "description": "A connector's session, the same on any machine.\n\n`{\"folder\":\"/repo\",\"repo\":\"git@github.com:o/r.git\",\"args\":[\"--name\",\"ENG-7\"],\"env\":[[\"PINNED_CONNECTOR\",\"c1\"]]}`",
             "type": "object",
@@ -5643,7 +5724,7 @@
                 ]
               },
               {
-                "description": "`graph::Graph`: a workflow map drafted from a plain description by a chat model.",
+                "description": "Kept for older apps, whose Generate with AI button still sends it. The hub answers an error: an agent creates a workflow with `save_connector`.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -6989,6 +7070,84 @@
                 },
                 "required": [
                   "cmd"
+                ]
+              },
+              {
+                "description": "`Vec<ideas::Idea>`: the account's ideas, the most recently changed first; with `project` (a repo key),\nonly that project's.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "list_ideas"
+                  },
+                  "project": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`ideas::Idea`: adds an idea, or with `id` changes that one (its title, text and project as sent, and its\nstatus when sent). The hub sets who made it and the times.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "save_idea"
+                  },
+                  "id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "project": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "status": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/IdeaStatus"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "title"
+                ]
+              },
+              {
+                "description": "Removes the account's idea `id`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "delete_idea"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
                 ]
               },
               {
@@ -9840,6 +9999,14 @@
               "args"
             ]
           },
+          "IdeaStatus": {
+            "type": "string",
+            "enum": [
+              "open",
+              "done",
+              "dropped"
+            ]
+          },
           "Spec": {
             "description": "A server of the account's list, as the app and agents write it.",
             "type": "object",
@@ -10573,6 +10740,31 @@
                 "required": [
                   "cmd",
                   "tab"
+                ]
+              },
+              {
+                "description": "`null`, once `reply` closes the questionnaire `id` open on the tab. Refused when it is\nclosed already, or the reply does not fit its questions.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "answer_questions"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "reply": {
+                    "$ref": "#/$defs/QuestionsReply"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "id",
+                  "reply"
                 ]
               },
               {
@@ -13433,6 +13625,62 @@
               }
             ]
           },
+          "QuestionsReply": {
+            "description": "How the user closed a questionnaire.\n\n`{\"kind\":\"answered\",\"answers\":[{\"chosen\":[\"main\"]}]}`, `{\"kind\":\"skipped\"}`",
+            "oneOf": [
+              {
+                "description": "One answer per question, in the questions' order.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "answered"
+                  },
+                  "answers": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/Answer"
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "answers"
+                ]
+              },
+              {
+                "description": "The agent goes on with its recommendations and states its assumptions.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "skipped"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Answer": {
+            "description": "The answer to one question: the labels of the options chosen, what the user typed, or both.",
+            "type": "object",
+            "properties": {
+              "chosen": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "text": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
           "RunSpec": {
             "description": "A connector's session, the same on any machine.\n\n`{\"folder\":\"/repo\",\"repo\":\"git@github.com:o/r.git\",\"args\":[\"--name\",\"ENG-7\"],\"env\":[[\"PINNED_CONNECTOR\",\"c1\"]]}`",
             "type": "object",
@@ -15673,7 +15921,7 @@
                 ]
               },
               {
-                "description": "`graph::Graph`: a workflow map drafted from a plain description by a chat model.",
+                "description": "Kept for older apps, whose Generate with AI button still sends it. The hub answers an error: an agent creates a workflow with `save_connector`.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -17009,6 +17257,84 @@
                 },
                 "required": [
                   "cmd"
+                ]
+              },
+              {
+                "description": "`Vec<ideas::Idea>`: the account's ideas, the most recently changed first; with `project` (a repo key),\nonly that project's.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "list_ideas"
+                  },
+                  "project": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`ideas::Idea`: adds an idea, or with `id` changes that one (its title, text and project as sent, and its\nstatus when sent). The hub sets who made it and the times.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "save_idea"
+                  },
+                  "id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "project": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "status": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/IdeaStatus"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "title"
+                ]
+              },
+              {
+                "description": "Removes the account's idea `id`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "delete_idea"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
                 ]
               },
               {
@@ -19764,6 +20090,14 @@
               "action"
             ]
           },
+          "IdeaStatus": {
+            "type": "string",
+            "enum": [
+              "open",
+              "done",
+              "dropped"
+            ]
+          },
           "Spec": {
             "description": "A server of the account's list, as the app and agents write it.",
             "type": "object",
@@ -20759,6 +21093,17 @@
                   "string",
                   "null"
                 ]
+              },
+              "questions": {
+                "description": "The questionnaire the session waits on the user to answer, which `Call::AnswerQuestions`\nanswers. While it is open the tab reads as a question mid-turn, so an app that predates it\nstill shows the tab waiting.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Questionnaire"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -20925,6 +21270,103 @@
               "usd",
               "unknown",
               "workers"
+            ]
+          },
+          "Questionnaire": {
+            "description": "The questions an agent asks the user in one go.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "`q-7`, unique on its machine.",
+                "type": "string"
+              },
+              "title": {
+                "description": "What the questions are about, in a few words.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "questions": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/QuestionnaireQuestion"
+                }
+              },
+              "projects": {
+                "description": "The project keys whose message from the global orchestrator waits on the answers.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "at": {
+                "description": "Unix seconds it was asked.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "id",
+              "questions",
+              "at"
+            ]
+          },
+          "QuestionnaireQuestion": {
+            "description": "One question of a questionnaire.",
+            "type": "object",
+            "properties": {
+              "header": {
+                "description": "A short chip label, such as `Branch`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "question": {
+                "type": "string"
+              },
+              "changes": {
+                "description": "What the agent does differently depending on the answer.",
+                "type": "string"
+              },
+              "options": {
+                "description": "The agent's recommendation first.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/QOption"
+                }
+              },
+              "multi_select": {
+                "description": "The user may choose more than one option.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "question",
+              "options"
+            ]
+          },
+          "QOption": {
+            "type": "object",
+            "properties": {
+              "label": {
+                "type": "string"
+              },
+              "description": {
+                "description": "One line: what choosing it leads to.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "recommended": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "label"
             ]
           },
           "AgentEvent": {
@@ -21853,7 +22295,7 @@
                 ]
               },
               {
-                "description": "`graph::Graph`: a workflow map drafted from a plain description by a chat model.",
+                "description": "Kept for older apps, whose Generate with AI button still sends it. The hub answers an error: an agent creates a workflow with `save_connector`.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -23199,6 +23641,84 @@
                 },
                 "required": [
                   "cmd"
+                ]
+              },
+              {
+                "description": "`Vec<ideas::Idea>`: the account's ideas, the most recently changed first; with `project` (a repo key),\nonly that project's.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "list_ideas"
+                  },
+                  "project": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`ideas::Idea`: adds an idea, or with `id` changes that one (its title, text and project as sent, and its\nstatus when sent). The hub sets who made it and the times.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "save_idea"
+                  },
+                  "id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "project": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "status": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/IdeaStatus"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "title"
+                ]
+              },
+              {
+                "description": "Removes the account's idea `id`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "delete_idea"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
                 ]
               },
               {
@@ -26753,6 +27273,14 @@
               "args"
             ]
           },
+          "IdeaStatus": {
+            "type": "string",
+            "enum": [
+              "open",
+              "done",
+              "dropped"
+            ]
+          },
           "Spec": {
             "description": "A server of the account's list, as the app and agents write it.",
             "type": "object",
@@ -27601,6 +28129,17 @@
                   "string",
                   "null"
                 ]
+              },
+              "questions": {
+                "description": "The questionnaire the session waits on the user to answer, which `Call::AnswerQuestions`\nanswers. While it is open the tab reads as a question mid-turn, so an app that predates it\nstill shows the tab waiting.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Questionnaire"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -27760,6 +28299,103 @@
               "usd",
               "unknown",
               "workers"
+            ]
+          },
+          "Questionnaire": {
+            "description": "The questions an agent asks the user in one go.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "`q-7`, unique on its machine.",
+                "type": "string"
+              },
+              "title": {
+                "description": "What the questions are about, in a few words.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "questions": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/QuestionnaireQuestion"
+                }
+              },
+              "projects": {
+                "description": "The project keys whose message from the global orchestrator waits on the answers.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "at": {
+                "description": "Unix seconds it was asked.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "id",
+              "questions",
+              "at"
+            ]
+          },
+          "QuestionnaireQuestion": {
+            "description": "One question of a questionnaire.",
+            "type": "object",
+            "properties": {
+              "header": {
+                "description": "A short chip label, such as `Branch`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "question": {
+                "type": "string"
+              },
+              "changes": {
+                "description": "What the agent does differently depending on the answer.",
+                "type": "string"
+              },
+              "options": {
+                "description": "The agent's recommendation first.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/QOption"
+                }
+              },
+              "multi_select": {
+                "description": "The user may choose more than one option.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "question",
+              "options"
+            ]
+          },
+          "QOption": {
+            "type": "object",
+            "properties": {
+              "label": {
+                "type": "string"
+              },
+              "description": {
+                "description": "One line: what choosing it leads to.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "recommended": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "label"
             ]
           },
           "AgentEvent": {
@@ -28665,7 +29301,7 @@
                 ]
               },
               {
-                "description": "`graph::Graph`: a workflow map drafted from a plain description by a chat model.",
+                "description": "Kept for older apps, whose Generate with AI button still sends it. The hub answers an error: an agent creates a workflow with `save_connector`.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -30001,6 +30637,84 @@
                 },
                 "required": [
                   "cmd"
+                ]
+              },
+              {
+                "description": "`Vec<ideas::Idea>`: the account's ideas, the most recently changed first; with `project` (a repo key),\nonly that project's.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "list_ideas"
+                  },
+                  "project": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`ideas::Idea`: adds an idea, or with `id` changes that one (its title, text and project as sent, and its\nstatus when sent). The hub sets who made it and the times.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "save_idea"
+                  },
+                  "id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "text": {
+                    "type": "string"
+                  },
+                  "project": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "status": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/IdeaStatus"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "title"
+                ]
+              },
+              {
+                "description": "Removes the account's idea `id`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "delete_idea"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
                 ]
               },
               {
@@ -33445,6 +34159,14 @@
             "required": [
               "tab",
               "action"
+            ]
+          },
+          "IdeaStatus": {
+            "type": "string",
+            "enum": [
+              "open",
+              "done",
+              "dropped"
             ]
           },
           "Spec": {
@@ -40766,6 +41488,13 @@
                 ],
                 "format": "uint64",
                 "minimum": 0
+              },
+              "questions": {
+                "description": "The id of the questionnaire a `question` waits on, which `TabView::questions` holds. Its\n`ask` stays `question`, which every node reads.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -41382,6 +42111,13 @@
                 ],
                 "format": "uint64",
                 "minimum": 0
+              },
+              "questions": {
+                "description": "The id of the questionnaire a `question` waits on, which `TabView::questions` holds. Its\n`ask` stays `question`, which every node reads.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -43706,6 +44442,13 @@
               "$ref": "#/$defs/ConvexConnection"
             }
           },
+          "ideas": {
+            "description": "The account's ideas. Only the hub fills it, from its own table, when it pushes or answers settings.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Idea"
+            }
+          },
           "repo_insight": {
             "description": "Absent on the wire while it is off.",
             "$ref": "#/$defs/RepoInsight"
@@ -45306,6 +46049,131 @@
               "preview"
             ]
           },
+          "Idea": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string",
+                "default": ""
+              },
+              "project": {
+                "description": "A repo key such as `github.com/FelipeGazapina/pinned`; none for an idea that has no project yet.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "status": {
+                "$ref": "#/$defs/IdeaStatus",
+                "default": "open"
+              },
+              "task": {
+                "description": "The task scheduled from this idea.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "created_by": {
+                "$ref": "#/$defs/Actor"
+              },
+              "created_at": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "updated_at": {
+                "type": "integer",
+                "format": "int64"
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "text",
+              "project",
+              "status",
+              "task",
+              "created_by",
+              "created_at",
+              "updated_at"
+            ]
+          },
+          "IdeaStatus": {
+            "type": "string",
+            "enum": [
+              "open",
+              "done",
+              "dropped"
+            ]
+          },
+          "Actor": {
+            "description": "Who created a task or an idea: the user, or an agent by the part it plays.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "user"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "agent"
+                  },
+                  "role": {
+                    "$ref": "#/$defs/ActorRole"
+                  },
+                  "machine": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "tab": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "session_title": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "role",
+                  "machine",
+                  "tab",
+                  "session_title"
+                ]
+              }
+            ]
+          },
+          "ActorRole": {
+            "description": "The part the session that acted plays, as its tab shows it.",
+            "type": "string",
+            "enum": [
+              "global_orchestrator",
+              "captain",
+              "worker",
+              "taste_chat",
+              "workflow",
+              "session"
+            ]
+          },
           "RepoInsight": {
             "description": "Whether the global orchestrator may read the account's repositories with its repo tools. Off\nuntil the user turns it on in Settings.",
             "type": "object",
@@ -45424,6 +46292,13 @@
             "type": "array",
             "items": {
               "$ref": "#/$defs/ConvexConnection"
+            }
+          },
+          "ideas": {
+            "description": "The account's ideas. Only the hub fills it, from its own table, when it pushes or answers settings.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Idea"
             }
           },
           "repo_insight": {
@@ -46960,6 +47835,124 @@
               "preview"
             ]
           },
+          "Idea": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string",
+                "default": ""
+              },
+              "project": {
+                "description": "A repo key such as `github.com/FelipeGazapina/pinned`; none for an idea that has no project yet.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "status": {
+                "$ref": "#/$defs/IdeaStatus",
+                "default": "open"
+              },
+              "task": {
+                "description": "The task scheduled from this idea.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "created_by": {
+                "$ref": "#/$defs/Actor"
+              },
+              "created_at": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "updated_at": {
+                "type": "integer",
+                "format": "int64"
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "created_by",
+              "created_at",
+              "updated_at"
+            ]
+          },
+          "IdeaStatus": {
+            "type": "string",
+            "enum": [
+              "open",
+              "done",
+              "dropped"
+            ]
+          },
+          "Actor": {
+            "description": "Who created a task or an idea: the user, or an agent by the part it plays.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "user"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "agent"
+                  },
+                  "role": {
+                    "$ref": "#/$defs/ActorRole"
+                  },
+                  "machine": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "tab": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "session_title": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "role"
+                ]
+              }
+            ]
+          },
+          "ActorRole": {
+            "description": "The part the session that acted plays, as its tab shows it.",
+            "type": "string",
+            "enum": [
+              "global_orchestrator",
+              "captain",
+              "worker",
+              "taste_chat",
+              "workflow",
+              "session"
+            ]
+          },
           "RepoInsight": {
             "description": "Whether the global orchestrator may read the account's repositories with its repo tools. Off\nuntil the user turns it on in Settings.",
             "type": "object",
@@ -47845,6 +48838,17 @@
               "string",
               "null"
             ]
+          },
+          "questions": {
+            "description": "The questionnaire the session waits on the user to answer, which `Call::AnswerQuestions`\nanswers. While it is open the tab reads as a question mid-turn, so an app that predates it\nstill shows the tab waiting.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Questionnaire"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -48011,6 +49015,103 @@
               "usd",
               "unknown",
               "workers"
+            ]
+          },
+          "Questionnaire": {
+            "description": "The questions an agent asks the user in one go.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "`q-7`, unique on its machine.",
+                "type": "string"
+              },
+              "title": {
+                "description": "What the questions are about, in a few words.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "questions": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/QuestionnaireQuestion"
+                }
+              },
+              "projects": {
+                "description": "The project keys whose message from the global orchestrator waits on the answers.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "at": {
+                "description": "Unix seconds it was asked.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "id",
+              "questions",
+              "at"
+            ]
+          },
+          "QuestionnaireQuestion": {
+            "description": "One question of a questionnaire.",
+            "type": "object",
+            "properties": {
+              "header": {
+                "description": "A short chip label, such as `Branch`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "question": {
+                "type": "string"
+              },
+              "changes": {
+                "description": "What the agent does differently depending on the answer.",
+                "type": "string"
+              },
+              "options": {
+                "description": "The agent's recommendation first.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/QOption"
+                }
+              },
+              "multi_select": {
+                "description": "The user may choose more than one option.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "question",
+              "options"
+            ]
+          },
+          "QOption": {
+            "type": "object",
+            "properties": {
+              "label": {
+                "type": "string"
+              },
+              "description": {
+                "description": "One line: what choosing it leads to.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "recommended": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "label"
             ]
           }
         }
@@ -48232,6 +49333,17 @@
               "string",
               "null"
             ]
+          },
+          "questions": {
+            "description": "The questionnaire the session waits on the user to answer, which `Call::AnswerQuestions`\nanswers. While it is open the tab reads as a question mid-turn, so an app that predates it\nstill shows the tab waiting.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Questionnaire"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -48391,6 +49503,103 @@
               "usd",
               "unknown",
               "workers"
+            ]
+          },
+          "Questionnaire": {
+            "description": "The questions an agent asks the user in one go.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "`q-7`, unique on its machine.",
+                "type": "string"
+              },
+              "title": {
+                "description": "What the questions are about, in a few words.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "questions": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/QuestionnaireQuestion"
+                }
+              },
+              "projects": {
+                "description": "The project keys whose message from the global orchestrator waits on the answers.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "at": {
+                "description": "Unix seconds it was asked.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "id",
+              "questions",
+              "at"
+            ]
+          },
+          "QuestionnaireQuestion": {
+            "description": "One question of a questionnaire.",
+            "type": "object",
+            "properties": {
+              "header": {
+                "description": "A short chip label, such as `Branch`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "question": {
+                "type": "string"
+              },
+              "changes": {
+                "description": "What the agent does differently depending on the answer.",
+                "type": "string"
+              },
+              "options": {
+                "description": "The agent's recommendation first.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/QOption"
+                }
+              },
+              "multi_select": {
+                "description": "The user may choose more than one option.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "question",
+              "options"
+            ]
+          },
+          "QOption": {
+            "type": "object",
+            "properties": {
+              "label": {
+                "type": "string"
+              },
+              "description": {
+                "description": "One line: what choosing it leads to.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "recommended": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "label"
             ]
           }
         }
@@ -50178,6 +51387,17 @@
                   "string",
                   "null"
                 ]
+              },
+              "questions": {
+                "description": "The questionnaire the session waits on the user to answer, which `Call::AnswerQuestions`\nanswers. While it is open the tab reads as a question mid-turn, so an app that predates it\nstill shows the tab waiting.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Questionnaire"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -50344,6 +51564,103 @@
               "usd",
               "unknown",
               "workers"
+            ]
+          },
+          "Questionnaire": {
+            "description": "The questions an agent asks the user in one go.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "`q-7`, unique on its machine.",
+                "type": "string"
+              },
+              "title": {
+                "description": "What the questions are about, in a few words.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "questions": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/QuestionnaireQuestion"
+                }
+              },
+              "projects": {
+                "description": "The project keys whose message from the global orchestrator waits on the answers.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "at": {
+                "description": "Unix seconds it was asked.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "id",
+              "questions",
+              "at"
+            ]
+          },
+          "QuestionnaireQuestion": {
+            "description": "One question of a questionnaire.",
+            "type": "object",
+            "properties": {
+              "header": {
+                "description": "A short chip label, such as `Branch`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "question": {
+                "type": "string"
+              },
+              "changes": {
+                "description": "What the agent does differently depending on the answer.",
+                "type": "string"
+              },
+              "options": {
+                "description": "The agent's recommendation first.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/QOption"
+                }
+              },
+              "multi_select": {
+                "description": "The user may choose more than one option.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "question",
+              "options"
+            ]
+          },
+          "QOption": {
+            "type": "object",
+            "properties": {
+              "label": {
+                "type": "string"
+              },
+              "description": {
+                "description": "One line: what choosing it leads to.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "recommended": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "label"
             ]
           },
           "Reply": {
@@ -50900,6 +52217,13 @@
                 "type": "array",
                 "items": {
                   "$ref": "#/$defs/ConvexConnection"
+                }
+              },
+              "ideas": {
+                "description": "The account's ideas. Only the hub fills it, from its own table, when it pushes or answers settings.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Idea"
                 }
               },
               "repo_insight": {
@@ -52467,6 +53791,131 @@
               "preview"
             ]
           },
+          "Idea": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string",
+                "default": ""
+              },
+              "project": {
+                "description": "A repo key such as `github.com/FelipeGazapina/pinned`; none for an idea that has no project yet.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "status": {
+                "$ref": "#/$defs/IdeaStatus",
+                "default": "open"
+              },
+              "task": {
+                "description": "The task scheduled from this idea.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "created_by": {
+                "$ref": "#/$defs/Actor"
+              },
+              "created_at": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "updated_at": {
+                "type": "integer",
+                "format": "int64"
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "text",
+              "project",
+              "status",
+              "task",
+              "created_by",
+              "created_at",
+              "updated_at"
+            ]
+          },
+          "IdeaStatus": {
+            "type": "string",
+            "enum": [
+              "open",
+              "done",
+              "dropped"
+            ]
+          },
+          "Actor": {
+            "description": "Who created a task or an idea: the user, or an agent by the part it plays.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "user"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "agent"
+                  },
+                  "role": {
+                    "$ref": "#/$defs/ActorRole"
+                  },
+                  "machine": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "tab": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "session_title": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "role",
+                  "machine",
+                  "tab",
+                  "session_title"
+                ]
+              }
+            ]
+          },
+          "ActorRole": {
+            "description": "The part the session that acted plays, as its tab shows it.",
+            "type": "string",
+            "enum": [
+              "global_orchestrator",
+              "captain",
+              "worker",
+              "taste_chat",
+              "workflow",
+              "session"
+            ]
+          },
           "RepoInsight": {
             "description": "Whether the global orchestrator may read the account's repositories with its repo tools. Off\nuntil the user turns it on in Settings.",
             "type": "object",
@@ -52736,18 +54185,6 @@
               "action",
               "about",
               "args"
-            ]
-          },
-          "ActorRole": {
-            "description": "The part the session that acted plays, as its tab shows it.",
-            "type": "string",
-            "enum": [
-              "global_orchestrator",
-              "captain",
-              "worker",
-              "taste_chat",
-              "workflow",
-              "session"
             ]
           },
           "Decision": {
@@ -53446,6 +54883,17 @@
                   "string",
                   "null"
                 ]
+              },
+              "questions": {
+                "description": "The questionnaire the session waits on the user to answer, which `Call::AnswerQuestions`\nanswers. While it is open the tab reads as a question mid-turn, so an app that predates it\nstill shows the tab waiting.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Questionnaire"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -53605,6 +55053,103 @@
               "usd",
               "unknown",
               "workers"
+            ]
+          },
+          "Questionnaire": {
+            "description": "The questions an agent asks the user in one go.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "`q-7`, unique on its machine.",
+                "type": "string"
+              },
+              "title": {
+                "description": "What the questions are about, in a few words.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "questions": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/QuestionnaireQuestion"
+                }
+              },
+              "projects": {
+                "description": "The project keys whose message from the global orchestrator waits on the answers.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "at": {
+                "description": "Unix seconds it was asked.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "id",
+              "questions",
+              "at"
+            ]
+          },
+          "QuestionnaireQuestion": {
+            "description": "One question of a questionnaire.",
+            "type": "object",
+            "properties": {
+              "header": {
+                "description": "A short chip label, such as `Branch`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "question": {
+                "type": "string"
+              },
+              "changes": {
+                "description": "What the agent does differently depending on the answer.",
+                "type": "string"
+              },
+              "options": {
+                "description": "The agent's recommendation first.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/QOption"
+                }
+              },
+              "multi_select": {
+                "description": "The user may choose more than one option.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "question",
+              "options"
+            ]
+          },
+          "QOption": {
+            "type": "object",
+            "properties": {
+              "label": {
+                "type": "string"
+              },
+              "description": {
+                "description": "One line: what choosing it leads to.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "recommended": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "label"
             ]
           },
           "Reply": {
@@ -54149,6 +55694,13 @@
                 "type": "array",
                 "items": {
                   "$ref": "#/$defs/ConvexConnection"
+                }
+              },
+              "ideas": {
+                "description": "The account's ideas. Only the hub fills it, from its own table, when it pushes or answers settings.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Idea"
                 }
               },
               "repo_insight": {
@@ -55650,6 +57202,124 @@
               "preview"
             ]
           },
+          "Idea": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string",
+                "default": ""
+              },
+              "project": {
+                "description": "A repo key such as `github.com/FelipeGazapina/pinned`; none for an idea that has no project yet.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "status": {
+                "$ref": "#/$defs/IdeaStatus",
+                "default": "open"
+              },
+              "task": {
+                "description": "The task scheduled from this idea.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "created_by": {
+                "$ref": "#/$defs/Actor"
+              },
+              "created_at": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "updated_at": {
+                "type": "integer",
+                "format": "int64"
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "created_by",
+              "created_at",
+              "updated_at"
+            ]
+          },
+          "IdeaStatus": {
+            "type": "string",
+            "enum": [
+              "open",
+              "done",
+              "dropped"
+            ]
+          },
+          "Actor": {
+            "description": "Who created a task or an idea: the user, or an agent by the part it plays.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "user"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "agent"
+                  },
+                  "role": {
+                    "$ref": "#/$defs/ActorRole"
+                  },
+                  "machine": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "tab": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "session_title": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "role"
+                ]
+              }
+            ]
+          },
+          "ActorRole": {
+            "description": "The part the session that acted plays, as its tab shows it.",
+            "type": "string",
+            "enum": [
+              "global_orchestrator",
+              "captain",
+              "worker",
+              "taste_chat",
+              "workflow",
+              "session"
+            ]
+          },
           "RepoInsight": {
             "description": "Whether the global orchestrator may read the account's repositories with its repo tools. Off\nuntil the user turns it on in Settings.",
             "type": "object",
@@ -55913,18 +57583,6 @@
               "role",
               "action",
               "args"
-            ]
-          },
-          "ActorRole": {
-            "description": "The part the session that acted plays, as its tab shows it.",
-            "type": "string",
-            "enum": [
-              "global_orchestrator",
-              "captain",
-              "worker",
-              "taste_chat",
-              "workflow",
-              "session"
             ]
           },
           "Decision": {
@@ -56698,6 +58356,31 @@
                 "required": [
                   "cmd",
                   "tab"
+                ]
+              },
+              {
+                "description": "`null`, once `reply` closes the questionnaire `id` open on the tab. Refused when it is\nclosed already, or the reply does not fit its questions.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "answer_questions"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "reply": {
+                    "$ref": "#/$defs/QuestionsReply"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "id",
+                  "reply"
                 ]
               },
               {
@@ -59580,6 +61263,62 @@
               }
             ]
           },
+          "QuestionsReply": {
+            "description": "How the user closed a questionnaire.\n\n`{\"kind\":\"answered\",\"answers\":[{\"chosen\":[\"main\"]}]}`, `{\"kind\":\"skipped\"}`",
+            "oneOf": [
+              {
+                "description": "One answer per question, in the questions' order.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "answered"
+                  },
+                  "answers": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/Answer"
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "answers"
+                ]
+              },
+              {
+                "description": "The agent goes on with its recommendations and states its assumptions.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "skipped"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Answer": {
+            "description": "The answer to one question: the labels of the options chosen, what the user typed, or both.",
+            "type": "object",
+            "properties": {
+              "chosen": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "text": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
           "RunSpec": {
             "description": "A connector's session, the same on any machine.\n\n`{\"folder\":\"/repo\",\"repo\":\"git@github.com:o/r.git\",\"args\":[\"--name\",\"ENG-7\"],\"env\":[[\"PINNED_CONNECTOR\",\"c1\"]]}`",
             "type": "object",
@@ -62174,6 +63913,31 @@
                 "required": [
                   "cmd",
                   "tab"
+                ]
+              },
+              {
+                "description": "`null`, once `reply` closes the questionnaire `id` open on the tab. Refused when it is\nclosed already, or the reply does not fit its questions.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "answer_questions"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "reply": {
+                    "$ref": "#/$defs/QuestionsReply"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "id",
+                  "reply"
                 ]
               },
               {
@@ -65033,6 +66797,62 @@
                 ]
               }
             ]
+          },
+          "QuestionsReply": {
+            "description": "How the user closed a questionnaire.\n\n`{\"kind\":\"answered\",\"answers\":[{\"chosen\":[\"main\"]}]}`, `{\"kind\":\"skipped\"}`",
+            "oneOf": [
+              {
+                "description": "One answer per question, in the questions' order.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "answered"
+                  },
+                  "answers": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/Answer"
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "answers"
+                ]
+              },
+              {
+                "description": "The agent goes on with its recommendations and states its assumptions.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "skipped"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Answer": {
+            "description": "The answer to one question: the labels of the options chosen, what the user typed, or both.",
+            "type": "object",
+            "properties": {
+              "chosen": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "text": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
           },
           "RunSpec": {
             "description": "A connector's session, the same on any machine.\n\n`{\"folder\":\"/repo\",\"repo\":\"git@github.com:o/r.git\",\"args\":[\"--name\",\"ENG-7\"],\"env\":[[\"PINNED_CONNECTOR\",\"c1\"]]}`",

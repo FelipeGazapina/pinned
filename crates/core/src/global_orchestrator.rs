@@ -438,6 +438,10 @@ pub struct Waiting {
     /// Unix seconds of the tab's last status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<u64>,
+    /// The id of the questionnaire a `question` waits on, which `TabView::questions` holds. Its
+    /// `ask` stays `question`, which every node reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub questions: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
@@ -612,6 +616,7 @@ pub fn overview_at(machines: &[MachineSnapshot], now: u64) -> Overview {
                     title: session.title.clone(),
                     message: session.message.clone(),
                     since: tab.updated,
+                    questions: tab.questions.as_ref().filter(|_| kind == WaitingKind::NeedsInput).map(|q| q.id.clone()),
                 });
             }
             sessions.push(session);
@@ -799,7 +804,9 @@ Quando uma ferramenta falha porque uma máquina ou o hub precisa atualizar, ou p
 Quando uma resposta termina com uma pergunta fechada ao Felipe, a última linha traz só as opções, separadas por \" | \", assim:
 Opções: Sim | Ainda não
 
-Guarde fatos duráveis sobre o Felipe e os projetos dele (preferências, decisões, qual máquina tem o quê) com memory_save, procure com memory_search antes de decidir e apague os errados com memory_forget."
+Guarde fatos duráveis sobre o Felipe e os projetos dele (preferências, decisões, qual máquina tem o quê) com memory_save, procure com memory_search antes de decidir e apague os errados com memory_forget.
+
+O que é verdade e vale lembrar (\"lembra que eu prefiro X\") vai para memory_save. O que talvez se faça um dia (\"anota essa ideia\") vai para save_idea, pela ferramenta act: uma ideia nunca volta para um prompt sozinha, e list_ideas só a lê quando alguém pede. Não mova memórias antigas para ideias por conta própria."
     )
 }
 
@@ -1075,6 +1082,34 @@ mod tests {
         assert_eq!(question_in("Mandei ao Orquestrador o caminho de cliques; ele já recebeu. Não mexi no código."), None, "the Captain's report asks nothing");
         assert_eq!(question_in("Use `a?.b`, see https://x.dev/search?q=1, then:\n```js\nconst ok = done ? 1 : 2; // why?\n```\nDone."), None, "question marks in code and links");
         assert_eq!(question_in("1. **Ship it now?**"), Some("Ship it now?".into()));
+    }
+
+    #[test]
+    fn open_questions_wait_on_the_user_as_a_question_while_the_hooks_say_the_turn_works() {
+        let asked = crate::questions::Questionnaire {
+            id: "q-7".into(),
+            title: Some("Checkout redesign".into()),
+            questions: vec![crate::questions::Question {
+                header: Some("Branch".into()),
+                question: "Base the fix on main or on release/0.18?".into(),
+                changes: "which branch the PR targets".into(),
+                options: vec![crate::questions::QOption { label: "main".into(), description: None, recommended: true }, crate::questions::QOption { label: "release/0.18".into(), description: None, recommended: false }],
+                multi_select: false,
+            }],
+            projects: vec![],
+            at: 1794239000,
+        };
+        let working = TabView { updated: Some(1794239000), ..view("tab-c-2", "/w/site/.claude/worktrees/pinned-1", Some(Role::Worker), true, Some(AgentStatus::Working)) };
+        assert_eq!(waiting_kind(&working), None);
+        let tab = crate::questions::shown(working, &asked);
+        assert_eq!(waiting_kind(&tab), Some(WaitingKind::NeedsInput));
+        assert_eq!(ask_of(tab.message.as_deref()), (AskKind::Question, None));
+        let machines = [MachineSnapshot { id: "m-1", name: "MacBook", online: true, version: "0.18.2", projects: &[], tabs: std::slice::from_ref(&tab), problem: None }];
+        let waiting = overview_at(&machines, 1794240000).waiting;
+        assert_eq!(waiting.len(), 1);
+        assert_eq!((waiting[0].ask, waiting[0].detail.as_deref(), waiting[0].questions.as_deref()), (Some(AskKind::Question), Some("Base the fix on main or on release/0.18?"), Some("q-7")));
+        let own = crate::questions::shown(TabView { orchestrator_global: true, ..view("tab-c-4", "/home/f/.pinned/orquestrador", None, true, Some(AgentStatus::Working)) }, &asked);
+        assert_eq!((waiting_kind(&own), own.questions.map(|q| q.id)), (None, Some("q-7".into())), "the global orchestrator's own questions show in its chat, not in waiting()");
     }
 
     #[test]
