@@ -6675,6 +6675,7 @@ mod tests {
             updated: None,
             session: session.map(str::to_owned),
             interrupted: false,
+            cut_by_sleep: None,
             stats: None,
             branch: None,
             pr: None,

@@ -14,6 +14,7 @@ const NEEDS_YOU_KINDS = {
   plan: { label: "Plan", glyph: "needs", rank: 0 },
   limit: { label: "Usage limit", glyph: "failed", rank: 1 },
   failed: { label: "Failed", glyph: "failed", rank: 2 },
+  sleep: { label: "Stopped", glyph: "failed", rank: 2 },
   review: { label: "Finished", glyph: "unread", rank: 3 },
   offer: { label: "Asked", glyph: "idle", rank: 4 },
 };
@@ -32,10 +33,11 @@ function needsYouCards() {
     const view = item.tab.view;
     const line =
       item.kind === "failed" ? String(view.message ?? "").trim() || null
+        : item.kind === "sleep" ? item.sleep.text
         : item.kind === "review" ? needsYouFinished(item.tab)
         : item.kind === "question" ? item.ask.text
         : null;
-    return { key: `thread:${item.tab.key}`, kind: item.kind, title: item.title, where: `${item.project} · ${item.machine}`, machine: item.tab.machine, since: item.since, tab: item.tab, ask: item.ask, limit: item.limit, line, confirmation: null };
+    return { key: `thread:${item.tab.key}`, kind: item.kind, title: item.title, where: `${item.project} · ${item.machine}`, machine: item.tab.machine, since: item.since, tab: item.tab, ask: item.ask, limit: item.limit, line, confirmation: null, ...(item.sleep ? { sleep: item.sleep } : {}) };
   };
   const threads = needsYouItems().map(threadCard);
   const listed = new Set(threads.map((c) => c.tab));
@@ -116,6 +118,8 @@ function needsYouActionsHtml(card) {
       return row(`${card.limit.switchTo.map((a) => nyButton("switch", `Continue under ${a.name}`, "ny-secondary ny-plain", ` data-account="${esc(a.id)}"`)).join("")}${nyButton("snooze", "Snooze", "ny-quiet")}`);
     case "failed":
       return row(nyOpen());
+    case "sleep":
+      return row(`${nyButton("continue", "Continue", "ny-primary")}${nyOpen()}`);
     default:
       return "";
   }
@@ -136,7 +140,8 @@ function needsYouCardHtml(card, answer = null) {
       : card.kind === "agent" && Object.keys(card.confirmation.args ?? {}).length ? `<pre>${esc(JSON.stringify(card.confirmation.args, null, 2))}</pre>`
       : card.line && card.line !== card.title ? `<p class="ny-line">${esc(card.line)}</p>`
       : "";
-  const agentLine = card.kind === "agent" ? `<p class="ny-line">${esc(card.line)}</p>` : "";
+  const unsupervised = card.sleep?.delegated ? `<p class="ny-line">${esc(`${nyPlural(card.sleep.delegated, "delegated task")} still running with nobody to supervise ${card.sleep.delegated === 1 ? "it" : "them"}.`)}</p>` : "";
+  const agentLine = unsupervised + (card.kind === "agent" ? `<p class="ny-line">${esc(card.line)}</p>` : "");
   const actions = answer?.state === "sent" ? "" : `<fieldset class="ny-fields"${answer?.state === "sending" ? " disabled" : ""}>${needsYouActionsHtml(card)}</fieldset>`;
   const note = answer ? `<p class="ny-note" role="status">${NEEDS_YOU_NOTES[answer.state]}</p>` : "";
   return `<article ${attrs} aria-label="${esc(label)}">${needsYouHeadHtml(card)}<div class="ny-name">${esc(card.title)}</div>${body}${agentLine}${actions}${note}</article>`;
@@ -217,7 +222,18 @@ async function needsYouAnswer(card, choice) {
   drawNeedsYou();
 }
 
+/** What the harness types to a session that has work left, as sessions.rs's CONTINUE_PROMPT. */
+const CONTINUE_PROMPT = "Continue from where you left off.";
+
+/** Types the prompt as the user would; Enter follows apart, or the terminal takes it as part of a paste. */
+async function needsYouContinue(card) {
+  await typeInto(card.tab, CONTINUE_PROMPT);
+  await new Promise((r) => setTimeout(r, 300));
+  await typeInto(card.tab, "\r");
+}
+
 const NEEDS_YOU_ACTS = {
+  continue: (card) => needsYouContinue(card),
   open: (card) => activate(card.tab),
   approve: (card) => needsYouAnswer(card, "approve"),
   decline: (card) => needsYouAnswer(card, "decline"),
