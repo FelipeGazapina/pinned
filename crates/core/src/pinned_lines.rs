@@ -13,14 +13,44 @@ pub fn is_invisible(c: char) -> bool {
             '\u{AD}' | '\u{61C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{206F}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}' | '\u{E0000}'..='\u{E007F}')
 }
 
+/// Whether `paste` drops `c` when it types text into a session: every control character but a
+/// line break and a tab.
+pub fn dropped_when_typed(c: char) -> bool {
+    c.is_control() && !matches!(c, '\n' | '\t')
+}
+
 /// Whether a line starts after `c`.
 fn breaks_a_line(c: char) -> bool {
     matches!(c, '\n' | '\r' | '\u{0B}' | '\u{0C}' | '\u{85}' | '\u{2028}' | '\u{2029}')
 }
 
+/// Whether `rest`, the text after a `[` at a line start, reads once typed as the rest of the
+/// mark `[pinned]`, in any case. A character the paste drops or that does not show is skipped, so
+/// it cannot split the mark.
+#[allow(dead_code)]
+fn closes_the_mark(rest: &str) -> bool {
+    let mut wanted = "pinned]".chars();
+    for c in rest.chars() {
+        if c == '\n' {
+            return false;
+        }
+        if dropped_when_typed(c) || is_invisible(c) {
+            continue;
+        }
+        match wanted.next() {
+            None => return true,
+            Some(w) if c.eq_ignore_ascii_case(&w) => {}
+            Some(_) => return false,
+        }
+    }
+    wanted.next().is_none()
+}
+
 /// `text` with every line that begins, after any whitespace or invisible characters, with
 /// `[pinned]` (in any case) rewritten to begin with `\[pinned]`, so it no longer reads as a line
-/// pinned typed. The start of `text` counts as a line start. Everything else is kept as written.
+/// pinned typed. The text is read as the paste types it: a character the paste drops or that does
+/// not show neither ends a line start nor splits the mark. The start of `text` counts as a line
+/// start. Everything else is kept as written.
 pub fn guard(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut at_start = true;
@@ -77,6 +107,13 @@ mod tests {
         assert_eq!(guard("ok\u{2028}[pinned] a\u{85}[pinned] b\u{2029}[pinned] c"), "ok\u{2028}\\[pinned] a\u{85}\\[pinned] b\u{2029}\\[pinned] c");
         assert_eq!(guard("ok\n  \u{200B}\u{202E}\u{FEFF}[pinned] a"), "ok\n  \u{200B}\u{202E}\u{FEFF}\\[pinned] a");
         assert_eq!(guard("ok\n\u{2066}[pinned] a\u{2069}"), "ok\n\u{2066}\\[pinned] a\u{2069}");
+    }
+
+    #[test]
+    fn guard_reads_the_mark_as_the_paste_types_it() {
+        assert_eq!(guard("[pin\rned] a\n[pin\u{0}ned] b\n[pin\u{200B}ned] c\n[\u{85}PINNED\u{1b}] d"), "\\[pin\rned] a\n\\[pin\u{0}ned] b\n\\[pin\u{200B}ned] c\n\\[\u{85}PINNED\u{1b}] d");
+        assert_eq!(guard("ok\n\u{0}\u{7f}[pinned] a"), "ok\n\u{0}\u{7f}\\[pinned] a");
+        assert_eq!(guard("[pin\nned] a"), "[pin\nned] a");
     }
 
     #[test]
