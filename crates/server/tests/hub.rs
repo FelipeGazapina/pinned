@@ -114,7 +114,7 @@ impl TestHub {
             box_policy: self.policy.clone(),
             convex_http: Arc::new(Replay::new(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../core/tests/fixtures/convex"), CONVEX_KEY).unwrap()),
             learning_db: self.learning.as_ref().map(|learning| format!("{}/{learning}", postgres())),
-            access: self.access,
+            access: self.access.clone(),
         };
         let start = Instant::now();
         // A restarted hub takes its old address, which the dying runtime may not have let go of yet.
@@ -1910,7 +1910,7 @@ fn new_account(n: usize) -> Value {
 }
 
 fn behind(proxy: pinned_server::http::TrustedProxy, max_accounts: Option<u32>) -> pinned_server::http::Access {
-    pinned_server::http::Access { trusted_proxy: proxy, max_accounts }
+    pinned_server::http::Access { trusted_proxy: proxy, max_accounts, hashing: None }
 }
 
 const TOO_MANY_SIGNUPS: &str = "too many sign ups; try again in 15 minutes";
@@ -2091,6 +2091,86 @@ fn an_unknown_email_costs_the_same_password_hash_as_a_wrong_password() {
     let known = fastest("user1@example.invalid", 10);
     let unknown = fastest("nobody@example.invalid", 20);
     assert!(unknown * 2 > known, "an unknown email answers in {unknown:?}, a known one with a wrong password in {known:?}");
+}
+
+/// A hash queue with one place and no waiting: while a turn is held, every request is told busy at once.
+fn one_place_queue() -> pinned_server::http::Hashing {
+    pinned_server::http::Hashing::new(1, 0, std::time::Duration::from_secs(1))
+}
+
+/// The queue's only turn, held until it drops.
+fn hold(queue: &pinned_server::http::Hashing) -> pinned_server::http::Turn {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+    runtime.block_on(queue.turn()).expect("a free turn")
+}
+
+fn behind_with(queue: &pinned_server::http::Hashing) -> pinned_server::http::Access {
+    pinned_server::http::Access { hashing: Some(queue.clone()), ..behind(pinned_server::http::TrustedProxy::Railway, None) }
+}
+
+#[test]
+fn busy_answers_do_not_spend_the_owners_sign_in_attempts() {
+    let queue = one_place_queue();
+    let hub = TestHub::start_behind_proxy("busylogin", Signup::Open, behind_with(&queue));
+    let url = hub.url.clone();
+    assert_eq!(post_with(&url, "/api/signup", &[("x-real-ip", "198.51.100.7")], new_account(1)).0, 200);
+    let held = hold(&queue);
+    for n in 0..10 {
+        assert_eq!(login_from(&url, "203.0.113.9", "user1@example.invalid", "correct horse"), 503, "busy answer {n}");
+    }
+    drop(held);
+    assert_eq!(login_from(&url, "203.0.113.9", "user1@example.invalid", "correct horse"), 200, "with the queue free, the right password signs in");
+}
+
+#[test]
+fn a_request_whose_hash_ran_keeps_its_stamp_whatever_busy_answers_follow() {
+    let queue = one_place_queue();
+    let hub = TestHub::start_behind_proxy("busykept", Signup::Open, behind_with(&queue));
+    let url = hub.url.clone();
+    assert_eq!(post_with(&url, "/api/signup", &[("x-real-ip", "198.51.100.7")], new_account(1)).0, 200);
+    assert_eq!(login_from(&url, "203.0.113.9", "user1@example.invalid", "wrong horse"), 401, "a wrong password: its hash ran");
+    let held = hold(&queue);
+    for n in 0..15 {
+        assert_eq!(login_from(&url, "203.0.113.9", "user1@example.invalid", "wrong horse"), 503, "busy answer {n}");
+    }
+    drop(held);
+    // The address holds 10 stamps: one is the wrong password, and the busy answers left nothing, so 9 more fit.
+    let mut more = 0;
+    while login_from(&url, "203.0.113.9", "user1@example.invalid", "wrong horse") == 401 {
+        more += 1;
+        assert!(more <= 20, "the address's bound never held");
+    }
+    assert_eq!(more, 9, "exactly one stamp was left on the address by the earlier requests");
+}
+
+#[test]
+fn busy_answers_do_not_spend_an_addresss_sign_ups() {
+    let queue = one_place_queue();
+    let hub = TestHub::start_behind_proxy("busysignup", Signup::Open, behind_with(&queue));
+    let url = hub.url.clone();
+    let held = hold(&queue);
+    for n in 0..6 {
+        assert_eq!(post_with(&url, "/api/signup", &[("x-real-ip", "198.51.100.7")], new_account(n)).0, 503, "busy answer {n}");
+    }
+    drop(held);
+    assert_eq!(post_with(&url, "/api/signup", &[("x-real-ip", "198.51.100.7")], new_account(1)).0, 200, "the address's 5 sign ups are all still there");
+}
+
+#[test]
+fn busy_answers_do_not_spend_an_accounts_password_changes() {
+    let queue = one_place_queue();
+    let hub = TestHub::start_behind_proxy("busypassword", Signup::Open, behind_with(&queue));
+    let url = hub.url.clone();
+    let (status, session) = post_with(&url, "/api/signup", &[("x-real-ip", "198.51.100.7")], new_account(1));
+    assert_eq!(status, 200);
+    let bearer = format!("Bearer {}", session["token"].as_str().unwrap());
+    let change = || post_with(&url, "/api/password", &[("x-real-ip", "198.51.100.7"), ("authorization", &bearer)], json!({ "current": "correct horse", "password": "another horse 2" })).0;
+    let held = hold(&queue);
+    for n in 0..10 {
+        assert_eq!(change(), 503, "busy answer {n}");
+    }
+    drop(held);
+    assert_eq!(change(), 200, "with the queue free, the right current password changes it");
 }
 
 #[test]

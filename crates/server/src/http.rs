@@ -108,11 +108,14 @@ impl std::str::FromStr for TrustedProxy {
 }
 
 /// Who and how many the hub lets in, beyond `--signup`.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Access {
     pub trusted_proxy: TrustedProxy,
     /// Accounts the hub holds at most; none means no limit.
     pub max_accounts: Option<u32>,
+    /// The queue for password hashes. None is the hub's own, `CONCURRENT_HASHES` running and `HASH_QUEUE`
+    /// waiting; a test gives its own, to hold turns from outside.
+    pub hashing: Option<Hashing>,
 }
 
 pub struct Server {
@@ -163,7 +166,8 @@ fn route(spec: &str) -> &str {
 }
 
 pub fn router(hub: Arc<Hub>, ui: PathBuf, downloads: PathBuf, learning: Option<db::Learning>, access: Access) -> Router {
-    let server = Arc::new(Server { hub, access, signups: tokio::sync::Mutex::new(()), downloads, attempts: Mutex::new(Limiter::new(ATTEMPT_KEYS)), class_said: Mutex::default(), hashing: Hashing::new(CONCURRENT_HASHES, HASH_QUEUE, HASH_WAIT), learning });
+    let hashing = access.hashing.clone().unwrap_or_else(|| Hashing::new(CONCURRENT_HASHES, HASH_QUEUE, HASH_WAIT));
+    let server = Arc::new(Server { hub, access, signups: tokio::sync::Mutex::new(()), downloads, attempts: Mutex::new(Limiter::new(ATTEMPT_KEYS)), class_said: Mutex::default(), hashing, learning });
     Router::new()
         .route(route("POST /api/signup"), post(signup))
         // The app's sign-in form reads it from whichever hub the user types, so any origin may.
@@ -325,7 +329,8 @@ fn email(raw: &str) -> Result<String, Error> {
 }
 
 /// The argon2 hashes: at most `running` at once, and at most `queue` more waiting, each for at most `wait`.
-struct Hashing {
+#[derive(Clone, Debug)]
+pub struct Hashing {
     running: Arc<tokio::sync::Semaphore>,
     /// The running ones and the waiting ones.
     admitted: Arc<tokio::sync::Semaphore>,
@@ -333,20 +338,21 @@ struct Hashing {
 }
 
 /// A turn to hash. It ends when it drops.
-struct Turn {
+#[derive(Debug)]
+pub struct Turn {
     _admitted: tokio::sync::OwnedSemaphorePermit,
     _running: tokio::sync::OwnedSemaphorePermit,
 }
 
 impl Hashing {
-    fn new(running: usize, queue: usize, wait: Duration) -> Hashing {
+    pub fn new(running: usize, queue: usize, wait: Duration) -> Hashing {
         Hashing { running: Arc::new(tokio::sync::Semaphore::new(running)), admitted: Arc::new(tokio::sync::Semaphore::new(running + queue)), wait }
     }
 
     /// A turn to hash, held until it drops. None at once when the queue is full, or once the wait runs
     /// out: the caller answers busy and hashes nothing. A caller that is dropped while it waits gives
     /// its place back.
-    async fn turn(&self) -> Option<Turn> {
+    pub async fn turn(&self) -> Option<Turn> {
         let admitted = self.admitted.clone().try_acquire_owned().ok()?;
         let running = tokio::time::timeout(self.wait, self.running.clone().acquire_owned()).await.ok()?.ok()?;
         Some(Turn { _admitted: admitted, _running: running })
@@ -357,6 +363,11 @@ impl Hashing {
     /// its hash runs does not stop the hash, and must not free its place either.
     async fn blocking<T: Send + 'static>(&self, work: impl FnOnce() -> T + Send + 'static) -> Result<T, Error> {
         let turn = self.turn().await.ok_or_else(busy)?;
+        Hashing::run(turn, work).await
+    }
+
+    /// `work` on a blocking thread, which holds `turn` until it ends.
+    async fn run<T: Send + 'static>(turn: Turn, work: impl FnOnce() -> T + Send + 'static) -> Result<T, Error> {
         tokio::task::spawn_blocking(move || {
             let _turn = turn;
             work()
@@ -370,10 +381,10 @@ fn busy() -> Error {
     Error(StatusCode::SERVICE_UNAVAILABLE, BUSY.into())
 }
 
-async fn hash_password(server: &Server, password: String) -> Result<String, Error> {
+/// A hash of `password` for a request that counted `keys`; see `Server::hashed`.
+async fn hash_password(server: &Server, keys: &[(String, usize)], password: String) -> Result<String, Error> {
     server
-        .hashing
-        .blocking(move || {
+        .hashed(keys, move || {
             use argon2::password_hash::{PasswordHasher, SaltString};
             use rand_core::OsRng;
             argon2::Argon2::default().hash_password(password.as_bytes(), &SaltString::generate(&mut OsRng)).map(|h| h.to_string())
@@ -385,11 +396,10 @@ async fn hash_password(server: &Server, password: String) -> Result<String, Erro
 /// Whether `password` is the one `hash` holds. With no hash, as for an email no account has, it checks
 /// against a stand-in that never matches at the same cost, so the time taken doesn't tell whether the
 /// account exists.
-/// A full queue answers `busy` and runs no hash.
-async fn password_matches(server: &Server, password: String, hash: Option<String>) -> Result<bool, Error> {
+/// A full queue answers `busy` and runs no hash. `keys` are the stamps the request counted; see `Server::hashed`.
+async fn password_matches(server: &Server, keys: &[(String, usize)], password: String, hash: Option<String>) -> Result<bool, Error> {
     server
-        .hashing
-        .blocking(move || {
+        .hashed(keys, move || {
             use argon2::password_hash::{PasswordHash, PasswordVerifier};
             let known = hash.is_some();
             let hash = hash.unwrap_or_else(|| no_account_hash().to_owned());
@@ -425,9 +435,9 @@ async fn signup(State(server): State<Arc<Server>>, ConnectInfo(peer): ConnectInf
         return Err(Error(StatusCode::FORBIDDEN, "this hub already has its account, so sign in with it instead".into()));
     }
     let too_many = || Error(StatusCode::TOO_MANY_REQUESTS, "too many sign ups; try again in 15 minutes".into());
-    if server.attempt(&[(format!("signup:{}", server.client_address(peer, &headers)), ADDRESS_SIGNUPS)]).is_none() {
+    let Some(mut counted) = server.attempt(&[(format!("signup:{}", server.client_address(peer, &headers)), ADDRESS_SIGNUPS)]) else {
         return Err(too_many());
-    }
+    };
     // After the limiter, so a full hub's answer costs a counted attempt before it costs a query.
     if at_cap(&server).await? {
         return Err(Error(StatusCode::FORBIDDEN, NOT_TAKING.into()));
@@ -447,10 +457,11 @@ async fn signup(State(server): State<Arc<Server>>, ConnectInfo(peer): ConnectInf
     };
     // Only a sign up that would make an account counts against the hub's window, so a stranger without
     // a good code can't spend the invited testers' share of it.
-    if server.attempt(&[("hub:signup".to_owned(), HUB_SIGNUPS)]).is_none() {
+    let Some(hub_counted) = server.attempt(&[("hub:signup".to_owned(), HUB_SIGNUPS)]) else {
         return Err(too_many());
-    }
-    let hash = hash_password(&server, body.password).await?;
+    };
+    counted.extend(hub_counted);
+    let hash = hash_password(&server, &counted, body.password).await?;
     // Counted again with the account made under one lock, so signups racing at the cap can't pass it.
     let _slot = match server.access.max_accounts {
         Some(_) => Some(server.signups.lock().await),
@@ -515,6 +526,17 @@ impl Server {
     /// Takes back the attempts of a sign in that succeeded, given the keys `attempt` counted.
     pub(crate) fn succeeded(&self, keys: &[(String, usize)]) {
         self.attempts.lock().unwrap().succeeded(keys);
+    }
+
+    /// `work` on a blocking thread behind a hash turn, for a request that counted `keys`. When no turn
+    /// comes the answer is `busy` and no password was checked, so the request's stamps go back: a flood
+    /// must not spend the owner's attempts. A request whose hash ran keeps them.
+    async fn hashed<T: Send + 'static>(&self, keys: &[(String, usize)], work: impl FnOnce() -> T + Send + 'static) -> Result<T, Error> {
+        let Some(turn) = self.hashing.turn().await else {
+            self.succeeded(keys);
+            return Err(busy());
+        };
+        Hashing::run(turn, work).await
     }
 }
 
@@ -687,7 +709,7 @@ async fn login(State(server): State<Arc<Server>>, ConnectInfo(peer): ConnectInfo
     };
     // An unknown email takes the same path, hash included, to the same answer as a wrong password.
     let (account, hash) = server.hub.db.account_by_email(&email).await.map_err(internal)?.unzip();
-    let matches = password_matches(&server, body.password, hash).await?;
+    let matches = password_matches(&server, &keys, body.password, hash).await?;
     let Some(account) = account.filter(|_| matches) else { return Err(Error(StatusCode::UNAUTHORIZED, "wrong email or password".into())) };
     server.succeeded(&keys);
     server.attempts.lock().unwrap().known.remember(email, address, Instant::now());
@@ -709,11 +731,12 @@ async fn change_password(State(server): State<Arc<Server>>, headers: HeaderMap, 
         return Err(Error(StatusCode::TOO_MANY_REQUESTS, "too many wrong passwords; try again in 15 minutes".into()));
     };
     let (view, hash) = server.hub.db.account(account).await.map_err(internal)?.ok_or_else(|| Error(StatusCode::UNAUTHORIZED, "sign in first".into()))?;
-    if !password_matches(&server, body.current, Some(hash)).await? {
+    if !password_matches(&server, &keys, body.current, Some(hash)).await? {
         return Err(Error(StatusCode::FORBIDDEN, "the current password is wrong".into()));
     }
     server.succeeded(&keys);
-    let hash = hash_password(&server, body.password).await?;
+    // The stamps went back with the right password, so a busy answer here has none to give back.
+    let hash = hash_password(&server, &[], body.password).await?;
     server.hub.db.set_password(account, &hash).await.map_err(internal)?;
     eprintln!("pinned-server: account {account} changed its password");
     Ok(Json(view))
@@ -844,7 +867,7 @@ async fn unlock(server: &Server, account: &Account, client: u64, password: Strin
         return Err("too many wrong passwords; try again in 15 minutes".into());
     };
     let (_, hash) = server.hub.db.account(account.id).await?.ok_or("this account no longer exists")?;
-    if !password_matches(server, password, Some(hash)).await.map_err(|Error(_, why)| why)? {
+    if !password_matches(server, &keys, password, Some(hash)).await.map_err(|Error(_, why)| why)? {
         return Err("that is not this account's password".into());
     }
     server.succeeded(&keys);

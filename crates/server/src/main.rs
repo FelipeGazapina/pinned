@@ -108,7 +108,7 @@ fn hub(args: &[String]) -> Result<(), String> {
         box_policy: pinned_server::boxes::Policy::default(),
         convex_http: std::sync::Arc::new(pinned_core::convex::client::Reqwest),
         learning_db: args.flags.get("learning-db").cloned(),
-        access: pinned_server::http::Access { trusted_proxy, max_accounts },
+        access: pinned_server::http::Access { trusted_proxy, max_accounts, hashing: None },
     };
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     runtime.block_on(async {
