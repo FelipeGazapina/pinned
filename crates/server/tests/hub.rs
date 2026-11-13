@@ -8371,10 +8371,6 @@ fn held_for_offline_mac(hub: &TestHub) -> (Client, MachineView, String, MachineV
     (ana, mac, mac_token, mini, mini_raw, uuid::Uuid::parse_str(&ana_id).unwrap())
 }
 
-fn remote_task_call(machine: &str, task: &str) -> Value {
-    json!({ "cmd": "remote_task", "machine": machine, "tab": "tab-1", "task": task })
-}
-
 #[test]
 fn a_held_end_answers_its_tasks_status_after_its_worker_is_gone_and_stays_until_answered() {
     let hub = TestHub::start("held_status");
@@ -8385,14 +8381,14 @@ fn a_held_end_answers_its_tasks_status_after_its_worker_is_gone_and_stays_until_
         _ => RawReply::Ok(Value::Null),
     });
     wait_for("the hub to offer mac the held end", || mac_raw.calls("remote_ended") == 1);
-    let status = mac_raw.ask(remote_task_call(&mini.id, "task-1")).unwrap();
+    let status = mac_raw.ask(remote_task_call(&mini.id, "task-1", None)).unwrap();
     assert_eq!(
         (status["workState"].as_str(), status["summary"].as_str(), status["usage"]["tokens_in"].as_u64()),
         (Some("result_available"), Some("Suite green."), Some(1200)),
         "answered from the held end, not 'this account has no machine': {status}"
     );
     assert_eq!(held_ends(&hub, None), 1, "a machine that did not take it keeps it held");
-    assert_eq!(mac_raw.ask(remote_task_call(&mini.id, "task-2")), Err(format!("this account has no machine {}", mini.id)), "another task of a gone machine is still gone");
+    assert_eq!(mac_raw.ask(remote_task_call(&mini.id, "task-2", None)), Err(format!("this account has no machine {}", mini.id)), "another task of a gone machine is still gone");
     let _ = mac;
 }
 
@@ -8404,7 +8400,7 @@ fn another_account_neither_reads_nor_receives_a_held_end() {
     let (_, bob_machine_token) = account::register_machine(&hub.url, &bob_token, "bob-mac", "linux").unwrap();
     let bob_raw = RawMachine::start(&hub.url, &bob_machine_token, |_| RawReply::Ok(json!(true)));
     bob.wait_machines(&[("bob-mac", true)]);
-    assert_eq!(bob_raw.ask(remote_task_call(&mini.id, "task-1")), Err(format!("this account has no machine {}", mini.id)), "bob reads nothing of ana's held end");
+    assert_eq!(bob_raw.ask(remote_task_call(&mini.id, "task-1", None)), Err(format!("this account has no machine {}", mini.id)), "bob reads nothing of ana's held end");
     let forged = json!({ "cmd": "remote_ended", "to": mac.id, "tab": "tab-1", "task": "task-9", "end": { "state": "failed", "error": "forged" } });
     assert_eq!(bob_raw.ask(forged), Err(format!("this account has no machine {}", mac.id)), "nor holds an end for ana's offline machine");
     std::thread::sleep(Duration::from_millis(500));
@@ -8430,7 +8426,7 @@ fn a_held_end_expires_after_30_days_unread() {
     let delivered: Vec<Value> = mac_raw.calls.lock().unwrap().iter().filter(|c| c["cmd"] == "remote_ended").map(|c| c["task"].clone()).collect();
     assert_eq!(delivered, vec![json!("task-2")], "the 31-day one is never delivered");
     assert_eq!(held_ends(&hub, None), 0, "and is deleted");
-    assert_eq!(mac_raw.ask(remote_task_call(&mini.id, "task-1")), Err(format!("this account has no machine {}", mini.id)), "nor answers a status");
+    assert_eq!(mac_raw.ask(remote_task_call(&mini.id, "task-1", None)), Err(format!("this account has no machine {}", mini.id)), "nor answers a status");
 }
 
 #[test]
@@ -8563,7 +8559,7 @@ fn a_held_end_its_restarted_parent_does_not_take_stays_readable_through_status_a
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(held_ends(&hub, None), 1, "not taken is not deleted");
 
-    let status = mac_raw.ask(remote_task_call(&mini.id, "task-1")).unwrap();
+    let status = mac_raw.ask(remote_task_call(&mini.id, "task-1", None)).unwrap();
     assert_eq!((status["workState"].as_str(), status["summary"].as_str()), (Some("result_available"), Some("Suite green.")), "status answers from the row: {status}");
     let listed = ana.hub(json!({ "cmd": "unclaimed_ends" })).unwrap();
     let listed = listed.as_array().unwrap();
