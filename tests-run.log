@@ -37,3 +37,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:02:55Z #14 a_node_reads_an_older_hubs_refusal_of_a_later_call_as_an_unknown_command ok / avail=15124M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:02:56Z #15 a_plugin_tree_is_stored_without_settings_env_or_claude_json START / avail=15124M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:03:02Z #15 a_plugin_tree_is_stored_without_settings_env_or_claude_json ok / avail=15124M /workspace avail=19374M node_stat=Ssl node_tcp=1
+2026-11-13T04:03:03Z #16 an_executable_hook_stays_executable_through_the_hub START / avail=15124M /workspace avail=19374M node_stat=Ssl
