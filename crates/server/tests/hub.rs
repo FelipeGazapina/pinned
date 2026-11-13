@@ -7651,23 +7651,30 @@ fn a_session_box_follows_only_its_setting_and_budget_and_only_its_owner_answers_
     wait_for("four boxes", || created(&hub) == 4);
 
     let machine = fresh["result"]["machine"].as_str().unwrap().to_owned();
-    let decide = |ana: &mut Agent, asked: &Value| ana.client.hub(json!({ "cmd": "decide_confirmation", "id": asked["id"], "approve": true })).unwrap();
+    // The decision is the owner's, made in the app after it unlocks with the password; an agent's connection never decides.
+    let decide = |app: &mut Client, asked: &Value| app.hub(json!({ "cmd": "decide_confirmation", "id": asked["id"], "approve": true })).unwrap();
+    assert_eq!(owner.hub(json!({ "cmd": "decide_confirmation", "id": "none", "approve": true })), Err("unlock with your password in the app to do this".into()), "a locked app cannot decide");
+    owner.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    bobs_app.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
     let asked = act(&ana.dir, &ana.tab, "extend_box", json!({ "machine": machine, "extra_usd": 1.5 })).unwrap();
     assert_eq!(asked["outcome"], "pending", "an agent's extend waits for the owner: {asked}");
-    let extended = decide(&mut ana, &asked);
+    let extended = decide(&mut owner, &asked);
     assert_eq!((extended["outcome"].as_str(), extended["result"]["budget_usd"].as_f64()), (Some("done"), Some(2.5)), "within the Box budget the owner's yes extends it: {extended}");
     let asked = act(&ana.dir, &ana.tab, "extend_box", json!({ "machine": machine, "extra_usd": 1.0 })).unwrap();
     assert_eq!(
-        decide(&mut ana, &asked)["outcome"].as_str(),
+        decide(&mut owner, &asked)["outcome"].as_str(),
         Some("failed: a box may spend at most US$ 3.00; name less, or raise Box budget in Settings › Way of working"),
         "past the Box budget it is refused"
     );
     let asked = act(&bob.dir, &bob.tab, "extend_box", json!({ "machine": machine, "extra_usd": 0.5 })).unwrap();
-    assert_eq!(decide(&mut bob, &asked)["outcome"].as_str(), Some("failed: this machine is no box"));
+    assert_eq!(decide(&mut bobs_app, &asked)["outcome"].as_str(), Some("failed: this machine is no box"));
     assert_eq!(bobs_app.hub(json!({ "cmd": "extend_box", "machine": machine, "extra_usd": 0.5 })), Err("this machine is no box".into()));
     assert_eq!(owner.hub(json!({ "cmd": "extend_box", "machine": machine, "extra_usd": 0.5 })).unwrap()["budget_usd"].as_f64(), Some(3.0), "the owner's extend needs no password");
-    nothing_waits_on(&mut owner);
-    nothing_waits_on(&mut bobs_app);
+    // Only the agents' extends were ever confirmations, and the owner decided each: no open or answer became one.
+    for app in [&mut owner, &mut bobs_app] {
+        let all = app.hub(json!({ "cmd": "confirmations" })).unwrap();
+        assert!(!all.as_array().unwrap().is_empty() && all.as_array().unwrap().iter().all(|c| c["action"] == "extend_box" && c["decision"] == "approved"), "{all}");
+    }
 }
 
 #[test]
