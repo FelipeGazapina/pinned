@@ -8765,31 +8765,33 @@ fn an_origins_answer_to_an_end_decides_whether_the_hub_drops_it_or_lists_it_uncl
         tasks
     };
     // Held while mac is offline, then delivered on its connection.
-    for task in ["held-settled", "held-unknown"] {
+    for task in ["held-took", "held-settled", "held-unknown"] {
         assert_eq!(mini_raw.ask(end(task)), Ok(json!(true)), "{task}: held for mac, which is offline");
     }
-    // mac answers by task: a 0.18.2 node says settled or unknown, a 0.18.1 one a bare false, and a
-    // 0.17 one, which predates the call, an error.
+    // mac answers by task: a 0.18.2 node says true, settled or unknown, a 0.18.1 one a bare false,
+    // and a 0.17 one, which predates the call, an error.
     let mac_raw = RawMachine::start(&hub.url, &mac_token, |call| match (call["cmd"].as_str().unwrap(), call["task"].as_str().unwrap_or_default()) {
+        ("remote_ended", task) if task.ends_with("-took") => RawReply::Ok(json!(true)),
         ("remote_ended", task) if task.ends_with("-settled") => RawReply::Ok(json!("settled")),
         ("remote_ended", task) if task.ends_with("-unknown") => RawReply::Ok(json!("unknown")),
         ("remote_ended", task) if task.ends_with("-false") => RawReply::Ok(json!(false)),
         ("remote_ended", task) if task.ends_with("-error") => RawReply::Err("this machine runs pinned 0.17.20, which can't answer that: unknown variant `remote_ended`".into()),
         _ => RawReply::Ok(Value::Null),
     });
-    wait_for("the hub to deliver both held ends", || mac_raw.calls("remote_ended") == 2);
-    wait_for("the settled row to go", || held_ends(&hub, None) == 1);
-    assert_eq!(listed(&mut ana), ["held-unknown"], "a held end mac settled already goes; one it does not know is listed");
+    wait_for("the hub to deliver the three held ends", || mac_raw.calls("remote_ended") == 3);
+    wait_for("the taken and settled rows to go", || held_ends(&hub, None) == 1);
+    assert_eq!(listed(&mut ana), ["held-unknown"], "a held end mac took or settled already goes; one it does not know is listed");
 
     // Live, with mac online. The worker always hears a bool.
+    assert_eq!(mini_raw.ask(end("live-took")), Ok(json!(true)));
     assert_eq!(mini_raw.ask(end("live-settled")), Ok(json!(true)), "settled reads as taken");
     assert_eq!(mini_raw.ask(end("live-unknown")), Ok(json!(false)));
     assert_eq!(mini_raw.ask(end("live-false")), Ok(json!(false)), "a 0.18.1 origin's false, as before");
     assert_eq!(mini_raw.ask(end("live-error")), Ok(json!(false)), "an origin's error, as before");
-    assert_eq!(listed(&mut ana), ["held-unknown", "live-error", "live-unknown"], "settled and a bare false keep nothing; unknown and an error are listed");
+    assert_eq!(listed(&mut ana), ["held-unknown", "live-error", "live-unknown"], "taken, settled and a bare false keep nothing; unknown and an error are listed");
     assert_eq!(held_ends(&hub, None), 3);
     let reports = held_reports(&hub);
-    assert!(!reports.iter().any(|r| r.contains("live-false") || r.contains("live-settled")), "{reports:?}");
+    assert!(!reports.iter().any(|r| r.contains("live-false") || r.contains("live-settled") || r.contains("-took")), "{reports:?}");
 }
 
 #[test]
@@ -8889,7 +8891,7 @@ fn held_ends_older_than_30_days_expire_for_every_account_at_most_a_bound_per_run
         format!("insert into held_ends (account, origin_machine, task, origin_tab, from_machine, report, held_at, unclaimed_at)
             values ('{account}', gen_random_uuid(), '{task}', 'tab-1', gen_random_uuid(), '{{}}', now() - interval '{days} days', {unclaimed});")
     };
-    admin_on(&hub.database, &[row(&ana, "ana-waiting-29", 29, false), row(&ana, "ana-waiting-31", 31, false), row(&ana, "ana-unclaimed-29", 29, true), row(&ana, "ana-unclaimed-31", 31, true), row(&bob, "bob-waiting-29", 29, false)].concat());
+    admin_on(&hub.database, &[row(&ana, "ana-waiting-29", 29, false), row(&ana, "ana-waiting-31", 31, false), row(&ana, "ana-unclaimed-29", 29, true), row(&ana, "ana-unclaimed-31", 31, true), row(&bob, "bob-waiting-29", 29, false), row(&bob, "bob-unclaimed-31", 31, true)].concat());
     let tasks = || -> Vec<String> {
         hub.runtime.block_on(async {
             let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), hub.database), tokio_postgres::NoTls).await.unwrap();
@@ -8902,13 +8904,13 @@ fn held_ends_older_than_30_days_expire_for_every_account_at_most_a_bound_per_run
     admin_on(&hub.database, "create function refuse_expiry() returns trigger language plpgsql as $$ begin raise exception 'disk full'; end $$;
         create trigger refuse_expiry before delete on held_ends for each row execute function refuse_expiry()");
     assert_eq!(hub.runtime.block_on(hub.hub().expire_held_ends()), 0, "the failure is logged, not raised");
-    assert_eq!(held_ends(&hub, None), 5);
+    assert_eq!(held_ends(&hub, None), 6);
     admin_on(&hub.database, "drop trigger refuse_expiry on held_ends");
     assert_eq!(hub.runtime.block_on(hub.hub().expire_held_ends()), 0, "at most once an hour");
-    assert_eq!(held_ends(&hub, None), 5);
+    assert_eq!(held_ends(&hub, None), 6);
 
     let expire = || hub.runtime.block_on(hub.hub().db.expire_all_held_ends(pinned_server::db::HELD_EXPIRY_BATCH)).unwrap();
-    assert_eq!(expire(), 2);
+    assert_eq!(expire(), 3);
     assert_eq!(tasks(), ["ana-unclaimed-29", "ana-waiting-29", "bob-waiting-29"], "31 days go, waiting or unclaimed; 29 days stay, in any account");
 
     let bound = pinned_server::db::HELD_EXPIRY_BATCH;

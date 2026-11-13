@@ -13285,6 +13285,51 @@ Have another model review a risky change before it goes ahead.";
     }
 
     #[test]
+    fn a_remote_end_a_0_18_1_hub_answers_with_a_string_is_sent_once_and_not_again() {
+        use crate::delegate::{Access, Mode, NewTask, Parent};
+        // A 0.18.1 hub passes the origin's answer through as it is, so a 0.18.2 origin's "settled" or
+        // "unknown" reaches the worker. Like a bare false, it is not taken, and the end is not sent again.
+        for answer in [json!(crate::delegate::END_SETTLED), json!(crate::delegate::END_UNKNOWN), json!(false)] {
+            let root = temp("remote-end-string");
+            let m = Machine::new(launch(), Some(root.join("config")), None, |_| {});
+            let sends = Arc::new(AtomicU64::new(0));
+            let (counted, reply) = (sends.clone(), answer.clone());
+            m.set_hub(Arc::new(move |call| match call {
+                HubCall::RemoteEnded { .. } => {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    Ok(reply.clone())
+                }
+                _ => Ok(Value::Null),
+            }));
+            let key = crate::delegate::Origin::key("m-mac", "tab-1");
+            let task = m.delegates.begin(NewTask {
+                parent: Parent::Tab(key.clone()),
+                tool: None,
+                title: "Slow suite".into(),
+                account: "claude".into(),
+                provider: Provider::Claude,
+                model: None,
+                cwd: std::env::temp_dir(),
+                mode: Mode::Async,
+                access: Access::Auto,
+                isolated: false,
+                caller_key: format!("tab:{key}"),
+                client_request_id: Some("task-mac".into()),
+                role: None,
+            });
+            m.delegates.fail(&task.id, "the suite broke".into(), None);
+            let now = Instant::now();
+            m.send_remote_ends(now);
+            m.send_remote_ends(now + REMOTE_LOOK * 2);
+            m.send_remote_ends(now + REMOTE_LOOK * 10);
+            assert_eq!(sends.load(Ordering::SeqCst), 1, "{answer}: sent once, then left");
+            assert_eq!(m.delegates.remote_ends(), vec![], "{answer}: nothing waits to be sent again");
+            drop(m);
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
     #[cfg(unix)]
     fn a_worker_past_its_budget_is_stopped_and_task_status_shows_what_it_spent() {
         let (m, dir, captain) = limited_captain("limits-budget", TastePatch { budget_cents: Some(50), ..TastePatch::default() });
