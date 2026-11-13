@@ -6016,13 +6016,12 @@ fn an_agents_save_that_calls_a_stored_workflow_whose_session_skips_prompts_is_re
     // `back` and `back_asks` call `to_back` / `to_back_skips` again, which already call them.
     let cycle = workflow(Some(&back), "Back", called(), &[&format!("call:{to_back}")]);
     let cycle_skips = workflow(Some(&back_asks), "Back asks", called(), &[&format!("call:{to_back_skips}")]);
-    for (why, save) in [("a direct call", &direct), ("a call two levels deep", &deep), ("an unknown target", &unknown)] {
-        assert_eq!(act(&owner.dir, &owner.tab, "save_connector", save.clone()), Err(refused.to_owned()), "{why}");
-    }
+    // Every case answers before the assert, so a failure names each one that was not refused.
+    let cases = [("a direct call", &direct), ("a call two levels deep", &deep), ("an unknown target", &unknown), ("a cycle through one that skips prompts", &cycle_skips)];
+    let answers: Vec<_> = cases.iter().map(|(why, save)| (*why, act(&owner.dir, &owner.tab, "save_connector", (*save).clone()).map(|done| done["outcome"].clone()))).collect();
+    assert_eq!(answers, cases.map(|(why, _)| (why, Err(refused.to_owned()))));
     assert_eq!(names(&mut owner.client), before, "nothing is saved");
     let calls_back = |answer: &Result<Value, String>| answer.as_ref().is_err_and(|e| e.starts_with("\"Call 0\" calls ") && e.ends_with(", which calls back"));
-    let cycle_answer = act(&owner.dir, &owner.tab, "save_connector", cycle_skips.clone());
-    assert_eq!(cycle_answer, Err(refused.to_owned()), "a cycle through one that skips prompts ends with the refusal");
     let cycle_answer = act(&owner.dir, &wide, "save_connector", cycle_skips.clone());
     assert!(calls_back(&cycle_answer), "a session that skips prompts gets the save's own answer: {cycle_answer:?}");
     for tab in [&owner.tab, &wide] {
