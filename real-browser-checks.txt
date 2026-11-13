@@ -1,18 +1,39 @@
-Real browser (Chromium), local hub, invented ideas. Type, pause 2 s past the autosave, keep typing in the same field.
+Real browser (Chromium via Playwright), local hub from this branch's target/, invented ideas, fixture account on example.test.
+Asserted in the browser during each recording (a failed check stops the run):
 
-gui-ideas.js at c8e0f6bb (before):
-  field: "The charts keep light colors in dark mode. AAAA"        <- " BBBB", typed after the pause, was lost
-  active: BODY.                                                     <- the editor lost the focus
+== desktop 1280 px
+PASS 5 seeded ideas listed (Keyboard shortcuts cheat sheet | Export a thread as Markdown | Dark mode for the usage page | Reminder when a long task finishes | Sort the project list by last activity)
+PASS the quick idea is first
+PASS the fourth idea is Dark mode (Weekly digest of finished tasks | Keyboard shortcuts cheat sheet | Export a thread as Markdown | Dark mode for the usage page | Reminder when a long task finishes | Sort the project list by last activity)
+PASS the editor opens in the fourth place (index 3)
+PASS after Saved the open card is still the fourth (index 3; Weekly digest of finished tasks | Keyboard shortcuts cheat sheet | Export a thread as Markdown | [editor: Dark mode for the usage page] | Reminder when a long task finishes | Sort the project list by last activity)
+PASS the editor is the same element
+PASS typing after the autosave landed (The charts keep light colors in dark mode. AAAA BBBB)
+PASS focus stayed in the text field
+PASS after the second autosave the card is still the fourth (index 3)
+PASS the second editor is the only editor
+PASS the second editor has the focus
+PASS the first idea saved, with every word (The charts keep light colors in dark mode. AAAA BBBB CCCC)
+PASS the done idea shows under Done
+PASS the caption covers neither the card nor the menu ({"caption":[653,696],"card":[226,301],"menu":[265,404]})
+PASS the idea is open again
+PASS the deleted idea is gone
+PASS the palette opened the Ideas page
 
-gui-ideas.js after the fix:
-  field: "The charts keep light colors in dark mode. AAAA BBBB"
-  active: TEXTAREA.text
-
-The recording scripts also assert, on both the 1280 px and the 390 px runs:
-  PASS the text field still has the focus after the autosave
-  PASS every typed character landed in the field
-  PASS the text field is the same element as before the pause
-  PASS the second editor has the focus
-  PASS the second idea's editor stays open
-  PASS the first idea saved
-  PASS the deleted idea is gone
+== phone 390 px
+PASS 5 seeded ideas listed (Keyboard shortcuts cheat sheet | Export a thread as Markdown | Dark mode for the usage page | Reminder when a long task finishes | Sort the project list by last activity)
+PASS the quick idea is first
+PASS the fourth idea is Dark mode (Weekly digest of finished tasks | Keyboard shortcuts cheat sheet | Export a thread as Markdown | Dark mode for the usage page | Reminder when a long task finishes | Sort the project list by last activity)
+PASS the editor opens in the fourth place (index 3)
+PASS after Saved the open card is still the fourth (index 3; Weekly digest of finished tasks | Keyboard shortcuts cheat sheet | Export a thread as Markdown | [editor: Dark mode for the usage page] | Reminder when a long task finishes | Sort the project list by last activity)
+PASS the editor is the same element
+PASS typing after the autosave landed (The charts keep light colors in dark mode. AAAA BBBB)
+PASS focus stayed in the text field
+PASS after the second autosave the card is still the fourth (index 3)
+PASS the second editor is the only editor
+PASS the second editor has the focus
+PASS the first idea saved, with every word (The charts keep light colors in dark mode. AAAA BBBB CCCC)
+PASS the done idea shows under Done
+PASS the caption covers neither the card nor the menu ({"caption":[18,61],"card":[243,360],"menu":[282,421]})
+PASS the idea is open again
+PASS the deleted idea is gone
