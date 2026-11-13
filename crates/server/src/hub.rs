@@ -928,14 +928,17 @@ impl Hub {
     }
 
     /// The account's settings with its ideas and scheduled tasks, which live in the hub's own tables. A failed ideas
-    /// read leaves them out rather than failing the settings every app loads.
+    /// or tasks read leaves them out rather than failing the settings every app loads, and the push of them.
     async fn settings(&self, account: &Account) -> Result<pinned_core::connectors::Settings, String> {
         let mut settings = self.connectors(account).await?.get_settings();
         settings.ideas = self.db.ideas(account.id, None).await.unwrap_or_else(|e| {
             eprintln!("pinned-server: could not read the ideas of account {}: {e}", account.id);
             Vec::new()
         });
-        settings.schedules = self.db.tasks(account.id).await?;
+        settings.schedules = self.db.tasks(account.id).await.unwrap_or_else(|e| {
+            eprintln!("pinned-server: could not read the scheduled tasks of account {}: {e}", account.id);
+            Vec::new()
+        });
         Ok(settings)
     }
 

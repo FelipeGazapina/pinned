@@ -957,26 +957,32 @@ impl Db {
     // ---- Scheduled tasks ----
 
     /// The account's tasks, soonest first (paused and finished ones last), each with its last run.
+    /// A task or run that does not read is skipped and logged by its id, never its text, so one bad
+    /// row leaves the others readable.
     pub async fn tasks(&self, account: Uuid) -> Result<Vec<Task>, String> {
         let client = self.client().await?;
-        let rows = client.query("select task, next_at from tasks where account = $1 order by next_at nulls last, created_at", &[&account]).await.map_err(err)?;
+        let rows = client.query("select id, task, next_at from tasks where account = $1 order by next_at nulls last, created_at", &[&account]).await.map_err(err)?;
         let runs = client
-            .query("select distinct on (task) run from task_runs where account = $1 order by task, due_at desc", &[&account])
+            .query("select distinct on (task) task, run from task_runs where account = $1 order by task, due_at desc", &[&account])
             .await
             .map_err(err)?;
         let mut last: BTreeMap<String, TaskRun> = BTreeMap::new();
         for row in runs {
-            let run: TaskRun = serde_json::from_value(row.get(0)).map_err(|e| format!("account {account} has an unreadable task run: {e}"))?;
-            last.insert(run.task.clone(), run);
+            match serde_json::from_value::<TaskRun>(row.get(1)) {
+                Ok(run) => drop(last.insert(run.task.clone(), run)),
+                Err(_) => eprintln!("pinned-server: account {account}'s task {} has an unreadable last run; it is left out", row.get::<_, Uuid>(0)),
+            }
         }
-        rows.iter()
-            .map(|r| {
-                let mut task = stored_task(account, r.get(0))?;
-                task.next_at = r.get(1);
-                task.last_run = last.remove(&task.id);
-                Ok(task)
+        Ok(rows
+            .iter()
+            .filter_map(|r| match serde_json::from_value::<Task>(r.get(1)) {
+                Ok(task) => Some(Task { next_at: r.get(2), last_run: last.remove(&task.id), ..task }),
+                Err(_) => {
+                    eprintln!("pinned-server: account {account}'s task {} does not read as a task; it is left out", r.get::<_, Uuid>(0));
+                    None
+                }
             })
-            .collect()
+            .collect())
     }
 
     pub async fn task(&self, account: Uuid, id: Uuid) -> Result<Option<Task>, String> {
@@ -1034,8 +1040,17 @@ impl Db {
 
     /// The task's runs, newest first.
     pub async fn task_runs(&self, account: Uuid, id: Uuid, limit: i64) -> Result<Vec<TaskRun>, String> {
-        let rows = self.client().await?.query("select run from task_runs where account = $1 and task = $2 order by due_at desc limit $3", &[&account, &id, &limit]).await.map_err(err)?;
-        rows.iter().map(|r| serde_json::from_value(r.get(0)).map_err(|e| format!("account {account} has an unreadable task run: {e}"))).collect()
+        let rows = self.client().await?.query("select run, due_at from task_runs where account = $1 and task = $2 order by due_at desc limit $3", &[&account, &id, &limit]).await.map_err(err)?;
+        Ok(rows
+            .iter()
+            .filter_map(|r| {
+                let run = serde_json::from_value(r.get(0)).ok();
+                if run.is_none() {
+                    eprintln!("pinned-server: account {account}'s task {id} has an unreadable run due at {}; it is left out", r.get::<_, i64>(1));
+                }
+                run
+            })
+            .collect())
     }
 
     pub async fn release_protection(&self, account: Uuid) -> Result<bool, String> {
