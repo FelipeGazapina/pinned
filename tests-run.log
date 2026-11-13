@@ -250,3 +250,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
   The orphans (test binary ppid 1, its node on 127.0.0.1 only, HOME/config under /tmp/pinned-server-node-login-<pid>) were started by this driver; I ended the node's group at 04:19:35Z. No box process was touched; node 288 stayed Ssl with its link up throughout.
   cgroup memory at that point: current≈6.5 GB (anon≈0.67 GB, file≈5.7 GB), memory.events max=660 oom_kill=0.
 2026-11-13T04:19:56Z #115 an_accounts_mcp_servers_reach_its_own_sessions_and_agents_never_see_or_send_a_secret START / avail=15051M /workspace avail=19374M node_stat=Ssl
+2026-11-13T04:20:07Z #115 an_accounts_mcp_servers_reach_its_own_sessions_and_agents_never_see_or_send_a_secret ok / avail=15051M /workspace avail=19374M node_stat=Ssl node_tcp=1
