@@ -44,6 +44,7 @@ pub mod prwatch;
 pub mod placement;
 pub mod pty;
 pub mod pulls;
+pub mod questions;
 pub mod reading;
 pub mod reminders;
 pub mod repo_look;

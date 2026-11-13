@@ -2383,7 +2383,12 @@ fn a_box_run_boots_its_own_node_and_the_box_goes_when_its_tab_closes() {
     assert_eq!(created.len(), 1);
     let row = created[0].labels[1].strip_prefix("p:").unwrap().to_owned();
     assert_eq!((created[0].labels[0].as_str(), row.len()), (label.as_str(), 16));
-    assert_eq!(created[0].name, format!("pinned-{row}"));
+    // `<project>-<role>-<first 6 of the row>`: the project is the repo folder's name, cut to leave room for the rest.
+    let tail = format!("-workflow-{}", &row[..6]);
+    let folder = ana.repo.file_name().unwrap().to_str().unwrap().to_lowercase();
+    let mut project = folder.split(|c: char| !c.is_ascii_alphanumeric()).filter(|part| !part.is_empty()).collect::<Vec<_>>().join("-");
+    project.truncate(40 - tail.len());
+    assert_eq!(created[0].name, format!("{}{tail}", project.trim_matches('-')));
     assert_eq!((created[0].size, created[0].init_command.as_str()), (BoxSize::Small, "sh /workspace/home/.pinned/start.sh || true"));
     ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
     let machine = ana.box_machine();
@@ -4528,6 +4533,8 @@ fn an_accounts_tastes_are_read_written_and_imported_only_by_that_account() {
 #[test]
 fn an_accounts_box_budget_bounds_only_its_own_boxes_and_shows_only_in_its_tastes() {
     let hub = TestHub::start_with_boxes("iso_limits", Signup::Open, fast());
+    // The box's node already has its checkout of the repo, so its boot clones nothing over the network.
+    hub.boxes.state.lock().unwrap().checkout = Some(("site".into(), SITE.into()));
     let mut ana = BoxAccount::new(&hub);
     let mut bob = BoxAccount::named(&hub, "bob@acme.dev");
     for client in [&mut ana.client, &mut bob.client] {
