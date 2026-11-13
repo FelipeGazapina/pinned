@@ -30,11 +30,19 @@ const MIN_PASSWORD: usize = 8;
 /// Sign-in attempts allowed within `ATTEMPT_WINDOW` from one address, the only limit a stranger can't
 /// spend on someone else's behalf.
 const ADDRESS_ATTEMPTS: usize = 10;
-/// A higher limit per email slows guessing spread over many addresses without letting one
-/// address lock the owner out.
-const EMAIL_ATTEMPTS: usize = 100;
+/// Failed sign ins allowed within `ATTEMPT_WINDOW` against one email from addresses that never signed in
+/// to it, however many addresses they come from. Above `ADDRESS_ATTEMPTS`, so one address can't lock the
+/// owner out; an address the owner signed in from is not held by it.
+const EMAIL_ATTEMPTS: usize = 30;
+/// Wrong passwords allowed within `ATTEMPT_WINDOW` to unlock one account's apps, over all its logins.
+const ACCOUNT_UNLOCKS: usize = 100;
 const ADDRESS_SIGNUPS: usize = 5;
-const ATTEMPT_KEYS: usize = 100_000;
+/// Keys the limiter holds at most, under 20 MB when filled by one-off keys of the longest email. Rotating addresses or emails can't grow
+/// it past this; when it is full a request that needs a new key is refused, and no live key is dropped.
+const ATTEMPT_KEYS: usize = 50_000;
+/// Addresses an account signed in from that the limiter remembers at most, and for how long.
+const KNOWN_ADDRESSES: usize = 10_000;
+const KNOWN_FOR: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// The one answer to a sign up without a good code, so it tells nobody which codes or accounts exist.
 /// The one answer to a sign up at a hub that holds as many accounts as it was told to.
 const NOT_TAKING: &str = "This hub is not taking new accounts.";
@@ -250,14 +258,31 @@ async fn hash_password(server: &Server, password: String) -> Result<String, Erro
     .map_err(|e| internal(e.to_string()))
 }
 
-async fn password_matches(server: &Server, password: String, hash: String) -> bool {
+/// Whether `password` is the one `hash` holds. With no hash, as for an email no account has, it checks
+/// against a stand-in that never matches at the same cost, so the time taken doesn't tell whether the
+/// account exists.
+async fn password_matches(server: &Server, password: String, hash: Option<String>) -> bool {
     let Ok(_permit) = server.hashing.acquire().await else { return false };
     tokio::task::spawn_blocking(move || {
         use argon2::password_hash::{PasswordHash, PasswordVerifier};
-        PasswordHash::new(&hash).is_ok_and(|h| argon2::Argon2::default().verify_password(password.as_bytes(), &h).is_ok())
+        let known = hash.is_some();
+        let hash = hash.unwrap_or_else(|| no_account_hash().to_owned());
+        let matches = PasswordHash::new(&hash).is_ok_and(|h| argon2::Argon2::default().verify_password(password.as_bytes(), &h).is_ok());
+        known && matches
     })
     .await
     .unwrap_or(false)
+}
+
+/// An argon2 hash made as an account's is, of a random password nobody knows.
+fn no_account_hash() -> &'static str {
+    static HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    HASH.get_or_init(|| {
+        use argon2::password_hash::{PasswordHasher, SaltString};
+        use rand_core::{OsRng, RngCore};
+        let unknown = OsRng.next_u64().to_string();
+        argon2::Argon2::default().hash_password(unknown.as_bytes(), &SaltString::generate(&mut OsRng)).map(|h| h.to_string()).unwrap_or_default()
+    })
 }
 
 /// Whether the hub holds as many accounts as `--max-accounts` lets it. The first account counts like any other.
@@ -329,29 +354,71 @@ impl Server {
     }
 }
 
-/// Attempts within `ATTEMPT_WINDOW`, per key.
+/// Attempts within `ATTEMPT_WINDOW`, per key, and the addresses each email signed in from.
 struct Limiter {
     keys: HashMap<String, Vec<Instant>>,
     cap: usize,
+    /// When the expired keys were last dropped, so a full limiter is not swept on every request.
+    swept: Option<Instant>,
+    known: HashMap<String, Instant>,
+    /// When a full limiter last said so.
+    full_logged: Option<Instant>,
 }
 
 impl Limiter {
     fn new(cap: usize) -> Limiter {
-        Limiter { keys: HashMap::new(), cap }
+        Limiter { keys: HashMap::new(), cap, swept: None, known: HashMap::new(), full_logged: None }
     }
 
+    /// A key holds at most its limit of stamps: one at its limit takes no more.
     fn attempt(&mut self, keys: &[(String, usize)], now: Instant) -> bool {
-        self.keys.retain(|_, at| {
-            at.retain(|at| now.duration_since(*at) < ATTEMPT_WINDOW);
-            !at.is_empty()
-        });
+        let live = |at: &Instant| now.saturating_duration_since(*at) < ATTEMPT_WINDOW;
+        for (key, _) in keys {
+            if let Some(at) = self.keys.get_mut(key) {
+                at.retain(live);
+            }
+        }
         if keys.iter().any(|(key, limit)| self.keys.get(key).is_some_and(|at| at.len() >= *limit)) {
+            return false;
+        }
+        let new = |limiter: &Limiter| keys.iter().filter(|(key, _)| !limiter.keys.contains_key(key)).count();
+        let full = |limiter: &Limiter| limiter.keys.len() + new(limiter) > limiter.cap;
+        let since = |at: Option<Instant>| at.map_or(Duration::MAX, |at| now.saturating_duration_since(at));
+        // A whole sweep at most once a second when full, else once a minute.
+        if since(self.swept) >= Duration::from_secs(60) || (full(self) && since(self.swept) >= Duration::from_secs(1)) {
+            self.keys.retain(|_, at| {
+                at.retain(live);
+                !at.is_empty()
+            });
+            self.swept = Some(now);
+        }
+        if full(self) {
+            if since(self.full_logged) >= Duration::from_secs(60 * 60) {
+                eprintln!("pinned-server: the attempt limiter holds {} keys, its most; requests that need a new key are refused until old ones expire", self.cap);
+                self.full_logged = Some(now);
+            }
             return false;
         }
         for (key, _) in keys {
             self.keys.entry(key.clone()).or_default().push(now);
         }
         true
+    }
+
+    /// Whether `key`, an email and an address, signed in within `KNOWN_FOR`.
+    fn known(&self, key: &str, now: Instant) -> bool {
+        self.known.get(key).is_some_and(|at| now.saturating_duration_since(*at) < KNOWN_FOR)
+    }
+
+    /// Notes a sign in, unless the limiter already holds as many as it keeps: then an address is not
+    /// remembered, and only loses the way past the email's bound.
+    fn remember(&mut self, key: String, now: Instant) {
+        if self.known.len() >= KNOWN_ADDRESSES && !self.known.contains_key(&key) {
+            self.known.retain(|_, at| now.saturating_duration_since(*at) < KNOWN_FOR);
+        }
+        if self.known.len() < KNOWN_ADDRESSES || self.known.contains_key(&key) {
+            self.known.insert(key, now);
+        }
     }
 
     fn succeeded(&mut self, keys: &[(String, usize)]) {
@@ -365,17 +432,23 @@ impl Limiter {
 
 async fn login(State(server): State<Arc<Server>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, Json(body): Json<SignIn>) -> Answer<Session> {
     let email = email(&body.email)?;
-    let keys = [(format!("email:{email}"), EMAIL_ATTEMPTS), (format!("address:{}", server.client_address(peer, &headers)), ADDRESS_ATTEMPTS)];
+    let address = server.client_address(peer, &headers);
+    // Guesses from addresses that never signed in to this email share one bound, so changing address
+    // doesn't buy more of them; the owner's own address is held only by its own limit.
+    let known = format!("{email}\n{address}");
+    let mut keys = vec![(format!("address:{address}"), ADDRESS_ATTEMPTS)];
+    if !server.attempts.lock().unwrap().known(&known, Instant::now()) {
+        keys.push((format!("email:{email}"), EMAIL_ATTEMPTS));
+    }
     if !server.attempt(&keys) {
         return Err(Error(StatusCode::TOO_MANY_REQUESTS, "too many failed sign ins; try again in 15 minutes".into()));
     }
-    let found = server.hub.db.account_by_email(&email).await.map_err(internal)?;
-    let account = match found {
-        Some((account, hash)) => password_matches(&server, body.password, hash).await.then_some(account),
-        None => None,
-    };
-    let Some(account) = account else { return Err(Error(StatusCode::UNAUTHORIZED, "wrong email or password".into())) };
+    // An unknown email takes the same path, hash included, to the same answer as a wrong password.
+    let (account, hash) = server.hub.db.account_by_email(&email).await.map_err(internal)?.unzip();
+    let matches = password_matches(&server, body.password, hash).await;
+    let Some(account) = account.filter(|_| matches) else { return Err(Error(StatusCode::UNAUTHORIZED, "wrong email or password".into())) };
     server.succeeded(&keys);
+    server.attempts.lock().unwrap().remember(known, Instant::now());
     let token = server.hub.db.create_login(Uuid::parse_str(&account.id).unwrap()).await.map_err(internal)?;
     Ok(Json(Session { token, account }))
 }
@@ -395,7 +468,7 @@ async fn change_password(State(server): State<Arc<Server>>, headers: HeaderMap, 
         return Err(Error(StatusCode::TOO_MANY_REQUESTS, "too many wrong passwords; try again in 15 minutes".into()));
     }
     let (view, hash) = server.hub.db.account(account).await.map_err(internal)?.ok_or_else(|| Error(StatusCode::UNAUTHORIZED, "sign in first".into()))?;
-    if !password_matches(&server, body.current, hash).await {
+    if !password_matches(&server, body.current, Some(hash)).await {
         return Err(Error(StatusCode::FORBIDDEN, "the current password is wrong".into()));
     }
     server.succeeded(&keys);
@@ -525,12 +598,12 @@ async fn unlock(server: &Server, account: &Account, client: u64, password: Strin
     let login: String = account.login_of(client).ok_or("this connection closed")?.iter().map(|b| format!("{b:02x}")).collect();
     // Per login, so whatever guesses with a login read off a disk locks out only that login; the
     // owner's other devices still unlock.
-    let keys = [(format!("unlock:{login}"), ADDRESS_ATTEMPTS), (format!("unlock:{}", account.id), EMAIL_ATTEMPTS)];
+    let keys = [(format!("unlock:{login}"), ADDRESS_ATTEMPTS), (format!("unlock:{}", account.id), ACCOUNT_UNLOCKS)];
     if !server.attempt(&keys) {
         return Err("too many wrong passwords; try again in 15 minutes".into());
     }
     let (_, hash) = server.hub.db.account(account.id).await?.ok_or("this account no longer exists")?;
-    if !password_matches(server, password, hash).await {
+    if !password_matches(server, password, Some(hash)).await {
         return Err("that is not this account's password".into());
     }
     server.succeeded(&keys);
