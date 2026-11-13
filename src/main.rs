@@ -593,7 +593,11 @@ fn main() {
             let from_arg = std::env::args().nth(1).and_then(|d| dunce::canonicalize(d).ok()).filter(|p| p.is_dir());
             let handle = app.handle().clone();
             let updater = handle.clone();
-            let machine = Machine::new(launch, config.clone(), from_arg, move |event: MachineEvent| drop(handle.emit("machine", event)));
+            let on_event = move |event: MachineEvent| drop(handle.emit("machine", event));
+            let machine = match config.as_deref() {
+                Some(dir) => Machine::new(launch, pinned_core::space::Space::at(dir), from_arg, on_event),
+                None => Machine::without_dir(launch, from_arg, on_event),
+            };
             machine.set_installer(Arc::new(DesktopUpdate { app: updater }));
             app.manage(Background::load(config.clone()));
             // macOS and Linux (through the single-instance plugin) bring the window back when the

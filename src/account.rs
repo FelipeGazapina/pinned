@@ -1,12 +1,10 @@
 use pinned_core::account::{self, Credentials};
-use pinned_core::connectors::{self, Connectors, Keys};
+use pinned_core::connectors::{self, Connectors};
 use pinned_core::link::{self, Link};
 use pinned_core::login_store::{self, LoginStore};
 use pinned_core::machine::{Event, Listener, Machine};
-use pinned_core::wire::HubCall;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
 use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -205,8 +203,8 @@ pub async fn sign_in(app: AppHandle, hub: String, email: String, password: Strin
             watcher.abort();
         }
         let link = connect(&creds, app.state::<Arc<Machine>>().inner().clone());
+        account::after_sign_in(&link, &creds);
         *state.signed_in.write().unwrap() = Some(SignedIn { creds, link });
-        import_when_empty(app.clone());
         Ok(state.view())
     })
     .await
@@ -249,34 +247,6 @@ pub async fn sign_out(app: AppHandle) -> Result<(), String> {
     })
     .await
     .map_err(|e| e.to_string())?
-}
-
-fn import_when_empty(app: AppHandle) {
-    std::thread::spawn(move || {
-        let state = app.state::<Account>();
-        for _ in 0..60 {
-            if state.signed_in.read().unwrap().as_ref().is_some_and(|s| s.link.online()) {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(250));
-        }
-        let (mut store, keys) = app.state::<Connectors>().export();
-        let has_local = keys != Keys::default() || store["connectors"].as_array().is_some_and(|c| !c.is_empty());
-        if !has_local {
-            return;
-        }
-        let signed_in = state.signed_in.read().unwrap();
-        let Some(SignedIn { link, creds }) = signed_in.as_ref() else { return };
-        // Their folders are on this Mac, so they keep running here while it's online.
-        for connector in store["connectors"].as_array_mut().into_iter().flatten() {
-            if connector["machine"].as_str().unwrap_or_default().is_empty() {
-                connector["machine"] = creds.machine_id.clone().into();
-            }
-        }
-        if let Err(e) = link.call_hub(HubCall::Import { store, linear_key: keys.linear, slack_key: keys.slack, slack_keys: keys.slack_bots, github_key: keys.github, vercel_key: keys.vercel }) {
-            eprintln!("pinned: could not move this Mac's workflows to the account: {e}");
-        }
-    });
 }
 
 #[cfg(test)]

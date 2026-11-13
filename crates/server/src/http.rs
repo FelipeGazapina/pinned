@@ -596,6 +596,20 @@ fn client_frame(server: &Arc<Server>, account: &Arc<Account>, client: u64, text:
     }
 }
 
+/// What the hub tells an app too old to move its own connectors or tastes into an account.
+const UPDATE_TO_IMPORT: &str = "Update pinned on this computer to 0.18.2 or later. This version can't move its own connectors or way of working into an account.";
+
+/// Whether the leading `major.minor.patch` of `version` reaches `min`, a suffix such as `-rc1`
+/// ignored. A version that does not read as three numbers is below every `min`.
+fn at_least(version: &str, min: (u64, u64, u64)) -> bool {
+    let mut parts = version.splitn(3, '.');
+    let mut number = || parts.next()?.chars().take_while(char::is_ascii_digit).collect::<String>().parse::<u64>().ok();
+    match (number(), number(), number()) {
+        (Some(major), Some(minor), Some(patch)) => (major, minor, patch) >= min,
+        _ => false,
+    }
+}
+
 async fn machine_socket(State(server): State<Arc<Server>>, upgrade: WebSocketUpgrade) -> Response {
     upgrade
         .max_message_size(sync::MESSAGE_LIMIT)
@@ -645,7 +659,7 @@ async fn serve_machine(hub: Arc<Hub>, mut socket: WebSocket) {
                 break;
             }
             frame = tokio::time::timeout(MACHINE_SILENT, stream.next()) => match frame {
-                Ok(Some(Ok(Message::Text(text)))) => machine_frame(&hub, &account, &machine, socket_id, &text),
+                Ok(Some(Ok(Message::Text(text)))) => machine_frame(&hub, &account, &machine, socket_id, &version, &text),
                 Ok(Some(Ok(Message::Close(_)) | Err(_)) | None) | Err(_) => break,
                 Ok(Some(Ok(_))) => {}
             },
@@ -666,7 +680,7 @@ async fn serve_machine(hub: Arc<Hub>, mut socket: WebSocket) {
     eprintln!("pinned-server: machine {machine} of account {} disconnected", account.id);
 }
 
-fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: u64, text: &str) {
+fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: u64, version: &str, text: &str) {
     match serde_json::from_str::<MachineFrame>(text) {
         Ok(MachineFrame::Reply(reply)) => {
             if account.answered(machine, socket, reply) {
@@ -710,7 +724,7 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
         }
         Ok(MachineFrame::Output { viewer, tab, data }) => account.output(machine, &viewer, tab, data),
         Ok(MachineFrame::Call { id, call }) => {
-            let (hub, account, machine) = (hub.clone(), account.clone(), machine.to_owned());
+            let (hub, account, machine, version) = (hub.clone(), account.clone(), machine.to_owned(), version.to_owned());
             tokio::spawn(async move {
                 // A machine holds a lesser credential than a login: it may only pass on the callbacks
                 // of sessions it runs, so a prompt-injected session can't act for another connector or thread,
@@ -723,7 +737,7 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
                     HubCall::Act { act } => crate::surface::act(&hub, &account, &machine, act).await,
                     HubCall::Confirmations => hub.hub_call(&account, HubCall::Confirmations).await,
                     HubCall::DecideConfirmation { .. } => Err("only the account's owner decides, in the app".to_owned()),
-                    call => return forward(hub, account, machine, socket, id, call).await,
+                    call => return forward(hub, account, machine, socket, &version, id, call).await,
                 };
                 if let Err(e) = &surfaced {
                     eprintln!("pinned-server: machine {machine}'s agent act failed: {e}");
@@ -741,7 +755,7 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
 }
 
 /// A machine's hub call other than an agent's act: only the callbacks its sessions may pass on.
-async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: u64, id: u64, call: HubCall) {
+async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: u64, version: &str, id: u64, call: HubCall) {
     if matches!(call, HubCall::Delegate { .. } | HubCall::RemoteTask { .. } | HubCall::RemoteEnded { .. } | HubCall::RemoteAsked { .. } | HubCall::Place { .. }) {
         let result = crate::remote::serve(&hub, &account, &machine, call).await;
         if let Err(e) = &result {
@@ -795,15 +809,22 @@ async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: 
     let result = match work {
         Some((connector, subject)) if account.working_on(&connector, &subject, |id| *id == machine) => hub.hub_call(&account, call).await,
         Some(_) => Err("this machine runs no session of that workflow on that subject".into()),
-        // An app's first sign-in moves its own connectors and tastes in, which only an empty account
-        // takes, every machine keeps its projects' files in step with the account's, and a Capitão
+        // An app's own connectors and tastes move in only from 0.18.2, which sends neither: an
+        // older app would offer what an earlier account on its computer left. Only an empty
+        // account takes them.
+        None if matches!(call, HubCall::Import { .. } | HubCall::ImportTastes { .. }) => {
+            if at_least(version, (0, 18, 2)) {
+                hub.hub_call(&account, call).await
+            } else {
+                return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, Err(UPDATE_TO_IMPORT.into()))));
+            }
+        }
+        // Every machine keeps its projects' files in step with the account's, and a Capitão
         // or the global orchestrator starts with the account's tastes, and a delegator reads how
         // the account's delegated tasks went.
         None if matches!(
             call,
-            HubCall::Import { .. }
-                | HubCall::ImportTastes { .. }
-                | HubCall::GetTastes
+            HubCall::GetTastes
                 | HubCall::DelegationStats { .. }
                 | HubCall::MachineStates
                 | HubCall::ShareProject { .. }
@@ -834,7 +855,14 @@ async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: 
 
 #[cfg(test)]
 mod tests {
-    use super::ROUTES;
+    use super::{at_least, ROUTES};
+
+    #[test]
+    fn at_least_reads_three_numbers_and_ignores_a_suffix() {
+        let min = (0, 18, 2);
+        let seen: Vec<bool> = ["0.18.1", "0.18.2", "0.18.2-rc1", "0.18.10", "0.0.0-test", "", "0.18"].iter().map(|v| at_least(v, min)).collect();
+        assert_eq!(seen, [false, true, true, true, false, false, false]);
+    }
 
     #[test]
     fn the_router_serves_each_published_route() {

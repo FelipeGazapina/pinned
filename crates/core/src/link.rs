@@ -309,7 +309,7 @@ impl Syncer {
 
     fn cycle(&mut self, shared: &Shared, machine: &Machine, file: &Path) {
         if self.state.is_none() {
-            match sync::State::load(file, &crate::machine::home().join(".claude")) {
+            match sync::State::load(file, &machine.user_home().join(".claude")) {
                 Ok(loaded) => {
                     self.state = Some(loaded);
                     machine.hold_sync_state(true);
@@ -469,7 +469,6 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
     eprintln!("pinned: connected to {}", creds.hub);
     let (sharing, reporting) = (machine.clone(), shared.clone());
     std::thread::spawn(move || {
-        sharing.share_tastes_again();
         sharing.send_records();
         sharing.warm_statuses();
         report_state(&reporting, &sharing);
@@ -710,6 +709,7 @@ fn ws_url(hub: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::space::Space;
     use std::sync::atomic::AtomicBool;
 
     fn waits(backoff: &mut Backoff, count: usize) -> Vec<u64> {
@@ -783,7 +783,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("sync.json");
         std::fs::write(&file, b"").unwrap();
-        let machine = Machine::new(crate::machine::tests::launch(), Some(dir.clone()), None, |_| {});
+        let machine = Machine::new(crate::machine::tests::launch(), Space::at(&dir), None, |_| {});
         let shared = Shared::default();
         let (out, _frames) = channel::unbounded_channel();
         *shared.out.lock().unwrap() = Some(out);
@@ -808,7 +808,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("sync.json");
-        let machine = Machine::new(crate::machine::tests::launch(), Some(dir.clone()), None, |_| {});
+        let machine = Machine::new(crate::machine::tests::launch(), Space::at(&dir), None, |_| {});
         let shared = Shared::default();
         let (out, frames) = channel::unbounded_channel();
         *shared.out.lock().unwrap() = Some(out);
@@ -940,7 +940,7 @@ mod tests {
         let file = dir.join("sync.json");
         let saved = r#"{"hashes":{},"agreed":{"github.com/acme/app /work/app":{"skills/a.md":"abc"}},"claude_homes":{}}"#;
         std::fs::write(&file, saved).unwrap();
-        let machine = Machine::new(crate::machine::tests::launch(), Some(dir.clone()), None, |_| {});
+        let machine = Machine::new(crate::machine::tests::launch(), Space::at(&dir), None, |_| {});
         assert_eq!(machine.call(Call::ResetSync), Ok(Value::Null));
         assert_eq!(std::fs::read_to_string(&file).unwrap(), saved);
         assert_eq!(dir.join("sync.json.damaged").exists(), false);
@@ -1186,7 +1186,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pinned-link-{}-socket-{}", std::process::id(), sign_ins_to_watch));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let machine = Machine::new(crate::machine::tests::launch(), Some(dir.clone()), None, |_| {});
+        let machine = Machine::new(crate::machine::tests::launch(), Space::at(&dir), None, |_| {});
         let shared = Arc::new(Shared { refused_span: RefusedSpan(span), ..Shared::default() });
         let (_stop, stopped) = watch::channel(false);
         let watched = async {
@@ -1273,7 +1273,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("pinned-link-{}-paused-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let machine = Machine::new(crate::machine::tests::launch(), Some(dir.clone()), None, |_| {});
+        let machine = Machine::new(crate::machine::tests::launch(), Space::at(&dir), None, |_| {});
         let shared = Arc::new(Shared::default());
         let (_stop, stopped) = watch::channel(false);
         let started = tokio::time::Instant::now();
@@ -1416,7 +1416,7 @@ mod tests {
         use std::sync::atomic::AtomicBool;
 
         let restarted = Arc::new(AtomicBool::new(false));
-        let machine = Machine::new(
+        let machine = Machine::without_dir(
             Launch {
                 exe: "pinned".into(),
                 bins: BTreeMap::new(),
@@ -1431,7 +1431,6 @@ mod tests {
                 first_run_wait: std::time::Duration::from_secs(60),
                 starting_limit: std::time::Duration::from_secs(600),
             },
-            None,
             None,
             |_| {},
         );
@@ -1492,7 +1491,7 @@ mod tests {
         use std::sync::atomic::AtomicBool;
 
         let restarted = Arc::new(AtomicBool::new(false));
-        let machine = Machine::new(
+        let machine = Machine::without_dir(
             Launch {
                 exe: "pinned".into(),
                 bins: BTreeMap::new(),
@@ -1507,7 +1506,6 @@ mod tests {
                 first_run_wait: std::time::Duration::from_secs(60),
                 starting_limit: std::time::Duration::from_secs(600),
             },
-            None,
             None,
             |_| {},
         );

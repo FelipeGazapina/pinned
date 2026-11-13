@@ -1,5 +1,6 @@
 use pinned_core::account::{self, Credentials, Signup};
 use pinned_core::link;
+use pinned_core::space::Space;
 use pinned_core::machine::{Launch, Machine};
 use pinned_core::reminders;
 use std::collections::HashMap;
@@ -178,7 +179,7 @@ fn node(args: &[String]) -> Result<(), String> {
     if let Some(config) = &launch.mcp_config {
         reminders::write_mcp_config(config, &exe, false).map_err(|e| format!("could not write claude's MCP config: {e}"))?;
     }
-    let machine = Machine::new(launch, Some(dir.clone()), None, |_| {});
+    let machine = Machine::new(launch, Space::at(&dir), None, |_| {});
     machine.set_installer(Arc::new(pinned_server::self_update::NodeUpdate::production()));
     let version = running_version();
     let machine_token = creds.machine_token.clone();

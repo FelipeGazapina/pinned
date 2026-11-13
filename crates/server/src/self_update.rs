@@ -439,6 +439,7 @@ pub(crate) fn start_replacement(plan: &Plan, dest: &Path) -> Result<(), String> 
 
 #[cfg(test)]
 mod tests {
+    use pinned_core::space::Space;
     use super::*;
     use serde_json::json;
     use std::collections::HashMap;
@@ -874,7 +875,7 @@ mod tests {
         };
         let (nudge, nudges) = std::sync::mpsc::channel();
         let nudge = Mutex::new(nudge);
-        let machine = Machine::new(launch, Some(dir.clone()), Some(dir.clone()), move |event| {
+        let machine = Machine::new(launch, Space::at(&dir), Some(dir.clone()), move |event| {
             if let Event::Thread { tab } = event {
                 let _ = nudge.lock().unwrap().send(tab);
             }
