@@ -13862,7 +13862,7 @@ Have another model review a risky change before it goes ahead.";
 
     #[test]
     #[cfg(unix)]
-    fn a_question_asked_in_a_thread_after_its_task_ended_is_not_closed_with_it() {
+    fn open_questions_asked_after_their_task_ended_stay_open_while_older_ones_close() {
         use crate::questions::{Outcome, QOption, Question};
         let (m, dir, _captain, task, child, transcript) = captain_with_thread_child("thread-questions-after-end");
         m.record_event(hook_event(&child, "working", &transcript, Some("Board check")));
