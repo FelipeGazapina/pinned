@@ -109,3 +109,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:05:51Z #48 workflow_boxes_that_are_off_or_disconnected_open_nothing START / avail=15074M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:05:54Z #48 workflow_boxes_that_are_off_or_disconnected_open_nothing ok / avail=15074M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:05:55Z #49 an_account_without_a_stored_box_permission_still_opens_a_box START / avail=15074M /workspace avail=19374M node_stat=Ssl
+2026-11-13T04:05:58Z #49 an_account_without_a_stored_box_permission_still_opens_a_box ok / avail=15074M /workspace avail=19374M node_stat=Ssl node_tcp=1
