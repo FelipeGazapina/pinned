@@ -3047,12 +3047,14 @@ impl Connectors {
     /// machine, and every run `holds_box` finds for `holder`, fails with `why`. Its subject is freed
     /// (no longer `handled`, followed or tied to a Slack bot, so the next trigger may start it
     /// again) only as `release` allows: never for `Keep`, once per subject for `Once`. Nothing
-    /// reopens the session. Answers how many runs failed.
+    /// reopens the session. Answers how many runs failed. When their save fails, the runs are left
+    /// as they were, so a retry fails them once.
     pub async fn box_ended(&self, machine: &str, holder: Option<(&str, &Subject)>, why: &str, release: BoxEndRelease) -> Result<usize, String> {
         let _guard = self.driving.lock().await;
         let at = Utc::now().to_rfc3339();
         let released = self.store.lock().unwrap().box_released.clone();
         let mut whys = vec![];
+        let mut before = vec![];
         let failed: Vec<(String, Subject)> = {
             let mut runs = self.runs.lock().unwrap();
             let mut failed = vec![];
@@ -3064,6 +3066,7 @@ impl Connectors {
                     let frees = release == BoxEndRelease::Once && !released.get(&owner).is_some_and(|keys| keys.contains(&subject_key(&run.subject)));
                     let then = if frees { "its next trigger may start it once more" } else { "it starts again only when you run it" };
                     let why = format!("{why}; the run stopped, and {then}");
+                    before.push(run.clone());
                     runner::push(run, Wake::BoxEnded { why: why.clone() }, &at);
                     whys.push(why);
                     failed.push((owner, run.subject.clone()));
@@ -3074,7 +3077,16 @@ impl Connectors {
         if failed.is_empty() {
             return Ok(0);
         }
-        self.save_runs()?;
+        if let Err(e) = self.save_runs() {
+            // Undone, so the hub's retry finds the runs still going and fails them then.
+            let mut runs = self.runs.lock().unwrap();
+            for was in before {
+                if let Some(slot) = runs.iter_mut().find(|run| run.id == was.id) {
+                    *slot = was;
+                }
+            }
+            return Err(e);
+        }
         {
             let mut store = self.store.lock().unwrap();
             for (owner, subject) in &failed {
@@ -5242,6 +5254,62 @@ mod tests {
         );
         assert_eq!(connectors.store.lock().unwrap().connectors[0].created.len(), 1);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Runs that fail to save once, then save into `saved`.
+    #[derive(Clone, Default)]
+    struct RunsFailOnce {
+        inner: MemStorage,
+        failed: std::sync::Arc<Mutex<bool>>,
+        saved: std::sync::Arc<Mutex<Option<Vec<u8>>>>,
+    }
+
+    impl Storage for RunsFailOnce {
+        fn load(&self) -> Option<Vec<u8>> {
+            self.inner.load()
+        }
+        fn save(&self, store: &[u8]) -> Result<(), String> {
+            self.inner.save(store)
+        }
+        fn key(&self, name: &str) -> Option<String> {
+            self.inner.key(name)
+        }
+        fn write_key(&self, name: &str, key: &str) -> Result<(), String> {
+            self.inner.write_key(name, key)
+        }
+        fn remove_key(&self, name: &str) {
+            self.inner.remove_key(name)
+        }
+        fn load_runs(&self) -> Option<Vec<u8>> {
+            None
+        }
+        fn save_runs(&self, bytes: &[u8]) -> Result<(), String> {
+            if !std::mem::replace(&mut *self.failed.lock().unwrap(), true) {
+                return Err("could not save the runs: disk full".into());
+            }
+            *self.saved.lock().unwrap() = Some(bytes.to_vec());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_box_end_whose_run_save_fails_is_retried_and_fails_the_run_once() {
+        let subject = Subject::LinearIssue { issue: "uuid".into() };
+        let storage = RunsFailOnce::default();
+        storage.inner.save(&serde_json::to_vec(&Store { connectors: vec![Connector { handled: vec!["uuid".into()], ..linear_connector() }], ..Store::default() }).unwrap()).unwrap();
+        let connectors = Connectors::new(storage.clone(), "/bin/pinned".into());
+        connectors.runs.lock().unwrap().push(held_run("c1", &subject, "box-1", &[]));
+
+        assert_eq!(block_on(connectors.box_ended("box-1", None, "Upstash Box: its box went offline", BoxEndRelease::Once)), Err("could not save the runs: disk full".into()));
+        assert!(matches!(connectors.runs.lock().unwrap()[0].status, Status::Waiting), "the run is left going for the retry");
+        assert_eq!(handled_of(&connectors), ["uuid"], "and its issue is not freed yet");
+
+        assert_eq!(block_on(connectors.box_ended("box-1", None, "Upstash Box: its box went offline", BoxEndRelease::Once)), Ok(1), "the retry fails it");
+        let saved: Vec<runner::Run> = serde_json::from_slice(&storage.saved.lock().unwrap().clone().unwrap()).unwrap();
+        assert!(matches!(&saved[0].status, Status::Failed { .. }), "and saves it failed");
+        assert!(handled_of(&connectors).is_empty());
+        assert_eq!(block_on(connectors.box_ended("box-1", None, "Upstash Box: its box went offline", BoxEndRelease::Once)), Ok(0), "a third pass finds nothing to fail");
+        assert_eq!(connectors.box_failures.lock().unwrap().len(), 1, "the card hears of it once");
     }
 
     #[test]
