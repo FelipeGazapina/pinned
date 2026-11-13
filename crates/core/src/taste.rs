@@ -495,7 +495,7 @@ impl Limits {
     /// `claude-` id is still held to this machine's Claude list, since a machine on 0.18.1 that
     /// receives it prices by words alone and would let an id with no cost word through as Mid.
     pub fn admit_unheld(&self, model: Option<&str>, effort: Option<&str>, claude: &[crate::claude_models::ClaudeModel]) -> Result<Option<String>, String> {
-        let claude_id = false;
+        let claude_id = model.is_some_and(|m| m.starts_with("claude-"));
         self.admit_priced(claude_id, model, effort, claude)
     }
 
