@@ -121,9 +121,15 @@ pub(crate) async fn resolve(hub: &Hub, account: &Account, asked: &str) -> Result
 async fn remote_task(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, machine: &str, tab: TabId, task: String, cancel: Option<String>) -> Result<Value, String> {
     let worker_box = hub.boxes.delegate_box(hub, account, machine).await?;
     let asked = Call::RemoteTask { origin_machine: from.to_owned(), tab, task, cancel: cancel.clone() };
-    let offline = worker_box.as_ref().filter(|_| !account.is_online(machine)).map(|row| crate::boxes::offline_answer(&row.phase));
-    let answer = match offline {
-        Some(e) => Err(e.to_owned()),
+    let offline = match worker_box.as_ref().filter(|_| !account.is_online(machine)) {
+        Some(row) => {
+            let removed = matches!(row.phase, crate::boxes::Phase::Ending(_)) && hub.db.machine_name(account.id, row.machine).await?.is_none();
+            Some(crate::boxes::offline_answer(&row.phase, removed, machine))
+        }
+        None => None,
+    };
+    let answer = match &offline {
+        Some(e) => Err(e.clone()),
         None => call(hub, account, machine, asked, LOOK_WAIT).await,
     };
     match (worker_box, cancel) {
@@ -131,7 +137,7 @@ async fn remote_task(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, machine
             let mut answer = answer.unwrap_or_else(|_| json!({ "workState": "cancelled", "error": reason }));
             hub.boxes.add_box_usage(hub, account, &row, &mut answer).await;
             // A box cancelled while its link is down ends for that, not as done.
-            let why = if offline == Some(pinned_core::delegate::BOX_OFFLINE) { crate::boxes::End::Offline } else { crate::boxes::End::Done };
+            let why = if offline.as_deref() == Some(pinned_core::delegate::BOX_OFFLINE) { crate::boxes::End::Offline } else { crate::boxes::End::Done };
             hub.boxes.end_delegate(hub, account, row, why).await?;
             Ok(answer)
         }

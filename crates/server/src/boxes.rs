@@ -379,13 +379,17 @@ fn over_budget(spec: &RunSpec, age: Duration) -> bool {
     spec.budget_usd.is_some_and(|b| b > 0.0 && age.as_secs_f64() * BOX_USD_PER_HOUR / 3600.0 >= b)
 }
 
-/// What the hub answers about a worker box whose node is offline. A row turns `Running` once its
-/// node connected and took its task, so one before that never connected and still boots; one
-/// after it dropped its link, and the reaper ends it once it stays offline past `Policy::offline`.
-pub fn offline_answer(phase: &Phase) -> &'static str {
+/// What the hub answers about the worker box on `machine` while its node is offline. A row turns
+/// `Running` once its node connected and took its task, so one before that never connected and still
+/// boots; one after it dropped its link, and the reaper ends it once it stays offline past
+/// `Policy::offline`. An ending row whose machine is `removed` already told its origin why it ended,
+/// and outlives that machine only while its box can't be deleted (as with Upstash disconnected), so
+/// it reads as gone, as it will once the row goes: an older parent would otherwise wait on it.
+pub fn offline_answer(phase: &Phase, removed: bool, machine: &str) -> String {
     match phase {
-        Phase::Creating | Phase::Booting => BOX_BOOTING,
-        Phase::Running | Phase::Ending(_) => BOX_OFFLINE,
+        Phase::Creating | Phase::Booting => BOX_BOOTING.to_owned(),
+        Phase::Ending(_) if removed => format!("this account has no machine {machine}"),
+        Phase::Running | Phase::Ending(_) => BOX_OFFLINE.to_owned(),
     }
 }
 
@@ -1880,9 +1884,19 @@ mod tests {
     }
 
     #[test]
-    fn a_worker_box_that_never_connected_is_booting_and_one_that_connected_is_offline() {
-        assert_eq!((offline_answer(&Phase::Creating), offline_answer(&Phase::Booting)), (BOX_BOOTING, BOX_BOOTING));
-        assert_eq!((offline_answer(&Phase::Running), offline_answer(&Phase::Ending(End::Offline))), (BOX_OFFLINE, BOX_OFFLINE));
+    fn a_worker_box_that_never_connected_is_booting_one_that_connected_is_offline_and_an_ending_one_is_gone() {
+        let answer = |phase: Phase, removed: bool| offline_answer(&phase, removed, "m-box");
+        assert_eq!((answer(Phase::Creating, false), answer(Phase::Booting, false)), (BOX_BOOTING.to_owned(), BOX_BOOTING.to_owned()));
+        assert_eq!(answer(Phase::Running, false), BOX_OFFLINE);
+        for end in [End::Offline, End::Done, End::Expired, End::Failed("fake".into())] {
+            // Until its machine goes, the origin's own end report names the reason.
+            assert_eq!(answer(Phase::Ending(end.clone()), false), BOX_OFFLINE, "{end:?}");
+            // A 0.18.1 parent keeps waiting on BOX_OFFLINE, with its limit paused while the worker
+            // waited on the user, so a row whose box can't be deleted must read as gone.
+            let gone = answer(Phase::Ending(end.clone()), true);
+            assert_eq!(gone, "this account has no machine m-box", "{end:?}");
+            assert!(pinned_core::delegate::machine_gone(&gone), "{end:?}");
+        }
     }
 
     #[test]
