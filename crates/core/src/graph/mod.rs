@@ -376,6 +376,12 @@ impl Graph {
             if let NodeKind::Switch(switch) = &node.kind {
                 self.check_switch(node, switch)?;
             }
+            if let NodeKind::Session(setup) = &node.kind {
+                crate::connectors::parse_permission(&setup.permission).map_err(|e| format!("\"{}\": {e}", node.name))?;
+                if setup.model.trim().starts_with('-') {
+                    return Err(format!("\"{}\": its model may not start with -, which claude could read as an option", node.name));
+                }
+            }
         }
         Ok(())
     }
@@ -500,6 +506,22 @@ mod tests {
             .ports(),
             vec![Port { id: PortId("no".into()), label: "no".into() }, Port { id: PortId("out".into()), label: "otherwise".into() }]
         );
+    }
+
+    #[test]
+    fn a_session_step_whose_permission_is_not_a_known_name_is_refused() {
+        let trigger = node("trigger", "Start", NodeKind::Trigger { watch: Watch::Called });
+        let graph = |permission: &str| {
+            let step = node("s", "Fix", NodeKind::Session(SessionSetup { permission: permission.into(), ..SessionSetup::default() }));
+            Graph { nodes: vec![trigger.clone(), step], edges: vec![edge("trigger", "out", "s")] }
+        };
+        for kept in ["", "manual", "acceptEdits", "auto", "dontAsk", "bypassPermissions", "plan"] {
+            assert_eq!(graph(kept).validate(&|_| true), Ok(()), "{kept:?}");
+        }
+        for refused in [" bypassPermissions ", "Plan", "nonsense"] {
+            let error = graph(refused).validate(&|_| true).unwrap_err();
+            assert!(error.starts_with("\"Fix\"") && error.contains("permission"), "{refused:?}: {error}");
+        }
     }
 
     #[test]

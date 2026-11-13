@@ -379,8 +379,31 @@ fn reject_call_cycle(origin: &str, origin_graph: &Graph, store: &Store) -> Resul
 }
 
 fn graph_of(store: &Store, workflow: &str) -> Option<Graph> {
-    let connector = store.connectors.iter().find(|connector| connector.id == workflow)?;
-    Some(connector.graph.clone().unwrap_or_else(|| migrate(connector)))
+    store.connectors.iter().find(|connector| connector.id == workflow).map(run_graph)
+}
+
+/// The graph a run of `connector` walks: its stored graph, else the one `migrate` builds.
+fn run_graph(connector: &Connector) -> Graph {
+    connector.graph.clone().unwrap_or_else(|| migrate(connector))
+}
+
+/// Sets the graph and legacy fields `connector` is stored with when a save sends `graph`, as
+/// `save_connector` stores it: a sent graph equal to `migrate` is stored as `None`; with no graph
+/// sent, an edited stored graph stays and one equal to `migrate` of the stored copy is dropped.
+fn settle_graph(store: &Store, connector: &mut Connector, graph: Option<Graph>) {
+    if let Some(graph) = graph {
+        refresh_legacy(connector, &graph);
+        connector.graph = (graph != migrate(connector)).then_some(graph);
+    } else if let Some(existing) = store.connectors.iter().find(|existing| existing.id == connector.id && !connector.id.is_empty()) {
+        if let Some(stored) = existing.graph.clone() {
+            if stored == migrate(existing) {
+                connector.graph = None;
+            } else {
+                refresh_legacy(connector, &stored);
+                connector.graph = Some(stored);
+            }
+        }
+    }
 }
 
 fn walk_calls(graph: &Graph, stack: &mut Vec<String>, origin: &str, origin_graph: &Graph, store: &Store) -> Result<(), String> {
@@ -2722,23 +2745,64 @@ fn parse_effort(name: &str) -> Option<Effort> {
     }
 }
 
-/// Parses a session node's permission name. Unknown names inherit the owner's mode.
-fn parse_permission(name: &str) -> Option<PermissionMode> {
-    match name.trim() {
-        "manual" => Some(PermissionMode::Manual),
-        "acceptEdits" => Some(PermissionMode::AcceptEdits),
-        "auto" => Some(PermissionMode::Auto),
-        "dontAsk" => Some(PermissionMode::DontAsk),
-        "bypassPermissions" => Some(PermissionMode::BypassPermissions),
-        "plan" => Some(PermissionMode::Plan),
-        _ => None,
+/// Parses a session node's permission name: empty inherits the owner's mode, and only the exact
+/// names count. Saving, the agent check, the audit line and the runner all read it here, so no
+/// layer reads a value as a mode another layer does not.
+pub fn parse_permission(name: &str) -> Result<Option<PermissionMode>, String> {
+    match name {
+        "" => Ok(None),
+        "manual" => Ok(Some(PermissionMode::Manual)),
+        "acceptEdits" => Ok(Some(PermissionMode::AcceptEdits)),
+        "auto" => Ok(Some(PermissionMode::Auto)),
+        "dontAsk" => Ok(Some(PermissionMode::DontAsk)),
+        "bypassPermissions" => Ok(Some(PermissionMode::BypassPermissions)),
+        "plan" => Ok(Some(PermissionMode::Plan)),
+        _ => Err("its permission must be manual, acceptEdits, auto, dontAsk, bypassPermissions or plan, or empty to use the workflow's own".into()),
     }
+}
+
+/// Walks `connector` and each workflow it reaches through its Call steps, to any depth, itself
+/// first. Each is visited once, so a cycle ends. `visit` gets the workflow's graph, or `None` when
+/// the library has none, and the walk stops at its first answer.
+fn reach_calls<T>(library: &runner::Library, connector: &str, mut visit: impl FnMut(&str, Option<&Graph>) -> Option<T>) -> Option<T> {
+    let (mut todo, mut seen) = (vec![connector.to_owned()], std::collections::BTreeSet::new());
+    while let Some(id) = todo.pop() {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        let graph = library.get(&id);
+        if let Some(found) = visit(&id, graph) {
+            return Some(found);
+        }
+        for node in graph.iter().flat_map(|graph| &graph.nodes) {
+            if let NodeKind::Call { workflow } = &node.kind {
+                todo.push(workflow.clone());
+            }
+        }
+    }
+    None
+}
+
+/// Why `connector` must start no run: the first session step, in its graph or a graph it calls,
+/// whose permission the parse cannot read, named with its workflow.
+fn unreadable_step(library: &runner::Library, names: &BTreeMap<String, String>, connector: &str) -> Option<String> {
+    let name = |id: &str| names.get(id).cloned().unwrap_or_else(|| id.to_owned());
+    reach_calls(library, connector, |id, graph| {
+        graph?.nodes.iter().find_map(|node| match &node.kind {
+            NodeKind::Session(setup) => parse_permission(&setup.permission).err().map(|e| {
+                let holder = if id == connector { String::new() } else { format!(" of workflow {:?}, which it calls,", name(id)) };
+                format!("workflow {:?} starts no run: step {:?}{holder} has a permission pinned cannot read: {e}", name(connector), node.name)
+            }),
+            _ => None,
+        })
+    })
 }
 
 /// A session node's setup over the session owner's own settings: every field it names wins,
 /// empty text fields inherit. The merged connector builds the opening prompt and spec exactly
-/// as the owner's would, so a bare node behaves like today's talk.
-fn merge_session(owner: &Connector, setup: &SessionSetup) -> Connector {
+/// as the owner's would, so a bare node behaves like today's talk. A permission that is not an exact
+/// name opens no session, whatever the owner's mode.
+fn merge_session(owner: &Connector, setup: &SessionSetup) -> Result<Connector, String> {
     let mut merged = owner.clone();
     if !setup.folder.trim().is_empty() {
         merged.folder = setup.folder.trim().into();
@@ -2752,7 +2816,7 @@ fn merge_session(owner: &Connector, setup: &SessionSetup) -> Connector {
     if let Some(effort) = parse_effort(&setup.effort) {
         merged.effort = effort;
     }
-    if let Some(permission) = parse_permission(&setup.permission) {
+    if let Some(permission) = parse_permission(&setup.permission)? {
         merged.permission_mode = permission;
     }
     if !setup.account.trim().is_empty() {
@@ -2764,7 +2828,7 @@ fn merge_session(owner: &Connector, setup: &SessionSetup) -> Connector {
     if !setup.instructions.trim().is_empty() {
         merged.instructions = setup.instructions.clone();
     }
-    merged
+    Ok(merged)
 }
 
 /// The session `Effect::Open` starts for `owner`: the trigger as today's builders read it, the
@@ -2954,23 +3018,46 @@ impl Connectors {
         R: Taken,
     {
         loop {
-            let _guard = self.driving.lock().await;
-            let (work, mut error) = self.poll().await;
-            for work in work {
-                if let Err(e) = self.hand_over(work, &open).await {
-                    error.get_or_insert(e);
-                }
-            }
-            if let Err(e) = self.drive_locked(&open).await {
-                error.get_or_insert(e);
-            }
-            drop(_guard);
-            let error = merge_error(error, self.runs_broken.lock().unwrap().clone());
-            let check = Check { at: chrono::Utc::now().to_rfc3339(), error };
-            *self.checked.lock().unwrap() = Some(check.clone());
+            let check = self.check_once(&open).await;
             on_check(&check);
             let _ = tokio::time::timeout(INTERVAL, self.wake.notified()).await;
         }
+    }
+
+    /// One check of `watch`. While an enabled workflow holds a step whose permission the parse
+    /// cannot read, every check names it, because its trigger starts no run until the step is fixed.
+    #[doc(hidden)]
+    pub async fn check_once<F, Fut, R>(&self, open: &F) -> Check
+    where
+        F: Fn(Work) -> Fut,
+        Fut: Future<Output = R>,
+        R: Taken,
+    {
+        let _guard = self.driving.lock().await;
+        let (work, mut error) = self.poll().await;
+        for work in work {
+            if let Err(e) = self.hand_over(work, open).await {
+                error.get_or_insert(e);
+            }
+        }
+        if let Err(e) = self.drive_locked(open).await {
+            error.get_or_insert(e);
+        }
+        drop(_guard);
+        let error = self.unreadable().into_iter().fold(error, |error, why| merge_error(error, Some(why)));
+        let error = merge_error(error, self.runs_broken.lock().unwrap().clone());
+        let check = Check { at: chrono::Utc::now().to_rfc3339(), error };
+        *self.checked.lock().unwrap() = Some(check.clone());
+        check
+    }
+
+    /// Why each enabled workflow starts no run: a step, in its graph or one it calls, whose
+    /// permission the parse cannot read. Stored values are left as they are: trimming one could
+    /// turn it into a mode that skips prompts.
+    fn unreadable(&self) -> Vec<String> {
+        let (library, names) = (self.library(), self.names());
+        let enabled: Vec<String> = self.store.lock().unwrap().connectors.iter().filter(|c| c.enabled).map(|c| c.id.clone()).collect();
+        enabled.iter().filter_map(|id| unreadable_step(&library, &names, id)).collect()
     }
 
     /// True while a run of `subject` is still going and its session belongs to `connector`.
@@ -3019,6 +3106,9 @@ impl Connectors {
     /// because it has no Linear or Slack network.
     #[doc(hidden)]
     pub fn begin(&self, connector: String, subject: Subject, input: TriggerInput, at: &str) -> Result<(), String> {
+        if let Some(why) = unreadable_step(&self.library(), &self.names(), &connector) {
+            return Err(why);
+        }
         if run_open(&self.runs.lock().unwrap(), &connector, &subject) {
             return Ok(());
         }
@@ -3040,7 +3130,7 @@ impl Connectors {
     }
 
     fn library(&self) -> runner::Library {
-        self.store.lock().unwrap().connectors.iter().map(|c| (c.id.clone(), c.graph.clone().unwrap_or_else(|| migrate(c)))).collect()
+        self.store.lock().unwrap().connectors.iter().map(|c| (c.id.clone(), run_graph(c))).collect()
     }
 
     fn names(&self) -> BTreeMap<String, String> {
@@ -3464,6 +3554,9 @@ impl Connectors {
         if !edited || item.mentioned.is_empty() {
             return Ok(false);
         }
+        if let Some(why) = unreadable_step(library, &self.names(), &run.connector) {
+            return Err(why);
+        }
         let Some((node, classify)) = runner::routing_classify(library, &run.connector) else { return Ok(false) };
         let Ok(TriggerInput::Slack { channel, channel_name, thread, mut posts, .. }) = trigger_of(&run) else { return Ok(false) };
         if matches!((&run.status, &run.session), (Status::Done, Session::None)) {
@@ -3544,7 +3637,9 @@ impl Connectors {
         Fut: Future<Output = R>,
         R: Taken,
     {
-        let mut owner_c = merge_session(&self.store.lock().unwrap().connector(owner).cloned()?, session);
+        // A step stored before the save check read its permission as the runner does.
+        let merged = merge_session(&self.store.lock().unwrap().connector(owner).cloned()?, session);
+        let mut owner_c = merged.inspect_err(|e| eprintln!("pinned: workflow {} opened no session for a step: {e}", run.connector))?;
         // A proof step requires the video like the connector's proof flag does. The session
         // still records it; this only appends the instructions to its opening prompt.
         if !owner_c.proof && self.graph_has_proof(owner) {
@@ -4312,26 +4407,10 @@ impl Connectors {
     /// untouched case stays derivable. What this returns still carries a graph, as `get_settings` does.
     pub fn save_connector(&self, mut connector: Connector) -> Result<Connector, String> {
         let mut store = self.store.lock().unwrap();
-        if let Some(graph) = connector.graph.take() {
-            {
-                let called = |id: &str| call_target(&store, connector.id.as_str(), &graph, id);
-                graph.validate(&called)?;
-            }
-            reject_call_cycle(connector.id.as_str(), &graph, &store)?;
-            let had = store.connectors.iter().find(|c| !connector.id.is_empty() && c.id == connector.id).and_then(convex_step);
-            check_convex_step(&graph, &store.convex, had.as_ref().map(|step| step.connection.as_str()))?;
-            refresh_legacy(&mut connector, &graph);
-            connector.graph = (graph != migrate(&connector)).then_some(graph);
-        } else if let Some(existing) = store.connectors.iter().find(|existing| existing.id == connector.id && !connector.id.is_empty()) {
-            if let Some(stored) = existing.graph.clone() {
-                if stored == migrate(existing) {
-                    connector.graph = None;
-                } else {
-                    refresh_legacy(&mut connector, &stored);
-                    connector.graph = Some(stored);
-                }
-            }
-        }
+        let graph = connector.graph.take();
+        let had = store.connectors.iter().find(|c| !connector.id.is_empty() && c.id == connector.id).and_then(convex_step);
+        save_checks(&store, &connector, graph.as_ref(), &store.convex, had.as_ref().map(|step| step.connection.as_str())).map_err(|refused| refused.error)?;
+        settle_graph(&store, &mut connector, graph);
         match store.connectors.iter_mut().find(|c| c.id == connector.id && !c.id.is_empty()) {
             Some(existing) => {
                 connector.since = existing.since.clone();
@@ -4376,8 +4455,12 @@ impl Connectors {
     pub fn import(&self, store: serde_json::Value, keys: Keys) -> Result<bool, String> {
         let mut imported: Store = serde_json::from_value(store).map_err(|e| format!("not a connectors store: {e}"))?;
         let mut current = self.store.lock().unwrap();
-        if current.linear.is_some() || current.slack.is_some() || !current.slack_bots.is_empty() || current.github.is_some() || current.vercel.is_some() || !current.connectors.is_empty() {
+        let integrated = current.linear.is_some() || current.slack.is_some() || !current.slack_bots.is_empty() || current.github.is_some() || current.vercel.is_some();
+        if integrated || !current.convex.is_empty() || !current.connectors.is_empty() {
             return Ok(false);
+        }
+        for connector in &imported.connectors {
+            save_checks(&imported, connector, connector.graph.as_ref(), &current.convex, None).map_err(|_| import_refusal(&imported, connector, &current.convex))?;
         }
         let present = |key: Option<String>| key.map(|k| k.trim().to_owned()).filter(|k| !k.is_empty());
         let (linear_key, slack_key, github_key, vercel_key) = (present(keys.linear), present(keys.slack), present(keys.github), present(keys.vercel));
@@ -4417,6 +4500,16 @@ impl Connectors {
             }
         }
         self.channels.lock().unwrap().clear();
+        // What the account set up itself stays its own: a file never replaces it. Its Upstash
+        // account, Claude token hints and Slack thread claims also stand for keys and bots of this
+        // account that the file does not carry.
+        imported.upstash = current.upstash.take();
+        imported.box_claude_tokens = std::mem::take(&mut current.box_claude_tokens);
+        imported.boxes = std::mem::take(&mut current.boxes);
+        imported.box_asks = std::mem::take(&mut current.box_asks);
+        imported.box_grants = std::mem::take(&mut current.box_grants);
+        imported.repo_insight = std::mem::take(&mut current.repo_insight);
+        imported.slack_threads = std::mem::take(&mut current.slack_threads);
         imported.mcp_servers = std::mem::take(&mut current.mcp_servers);
         imported.convex = std::mem::take(&mut current.convex);
         *current = imported;
@@ -4577,7 +4670,7 @@ impl Connectors {
             Trigger::LinearLabel { .. } | Trigger::SlackMention { .. } => {}
         }
         let (owner, setup, proof) = manual_start(&self.library(), &self.names(), id)?;
-        let mut owner = merge_session(&self.store.lock().unwrap().connector(&owner).cloned()?, &setup);
+        let mut owner = merge_session(&self.store.lock().unwrap().connector(&owner).cloned()?, &setup).map_err(|e| format!("the workflow's session step can't run: {e}"))?;
         owner.proof |= proof || self.graph_has_proof(&owner.id);
         let title: String = format!("{} · Run now", workflow.name).chars().take(TAB_NAME_CHARS).collect();
         let mut run = manual_run(&owner, id, &title, &setup.prompt, by, Utc::now(), &self.exe);
@@ -4586,6 +4679,58 @@ impl Connectors {
         }
         Ok(run)
     }
+}
+
+/// Which save check refused a workflow, and why.
+struct Refused {
+    check: &'static str,
+    error: String,
+}
+
+/// How long a name from an imported file may be in a refusal, before it is cut with "…".
+const IMPORT_NAME_CHARS: usize = 80;
+/// How long the reason after the workflow's name may be, for ids and other text the file sets.
+const IMPORT_WHY_CHARS: usize = 300;
+
+/// `text` from an imported file as a refusal shows it: control characters removed, cut at `chars`.
+fn in_refusal(text: &str, chars: usize) -> String {
+    crate::thread::clip(&text.chars().filter(|c| !c.is_control()).collect::<String>(), chars)
+}
+
+/// Why an import of `imported` is refused for `connector`, one line of bounded length. The checks
+/// run again on a copy whose workflow and step names are cut, so a name the file sets reaches the
+/// message cut, and the reason is cut once more for the ids it can carry.
+fn import_refusal(imported: &Store, connector: &Connector, connected: &[convex::Connection]) -> String {
+    let named = |c: &Connector| {
+        let mut c = c.clone();
+        c.name = in_refusal(&c.name, IMPORT_NAME_CHARS);
+        for node in c.graph.iter_mut().flat_map(|graph| graph.nodes.iter_mut()) {
+            node.name = in_refusal(&node.name, IMPORT_NAME_CHARS);
+        }
+        c
+    };
+    let shown = Store { connectors: imported.connectors.iter().map(named).collect(), ..Store::default() };
+    let workflow = named(connector);
+    let (check, why) = match save_checks(&shown, &workflow, workflow.graph.as_ref(), connected, None) {
+        Err(refused) => (refused.check, refused.error),
+        Ok(()) => ("save", "it fails a check a save runs".into()),
+    };
+    format!("nothing was imported: workflow \"{}\" fails the {check} check: {}", workflow.name, in_refusal(&why, IMPORT_WHY_CHARS))
+}
+
+/// The checks a workflow passes before it is stored, by `save_connector` and by `import` alike.
+/// `store` is the store it joins, which its Call steps and cycles are read against; `connected` is
+/// the account's Convex deployments, and `had` the one the stored workflow already named.
+fn save_checks(store: &Store, connector: &Connector, graph: Option<&Graph>, connected: &[convex::Connection], had: Option<&str>) -> Result<(), Refused> {
+    let refused = |check| move |error| Refused { check, error };
+    if connector.model.trim().starts_with('-') {
+        return Err(refused("model")("the workflow's model may not start with -, which claude could read as an option".into()));
+    }
+    let Some(graph) = graph else { return Ok(()) };
+    let called = |id: &str| call_target(store, connector.id.as_str(), graph, id);
+    graph.validate(&called).map_err(refused("graph"))?;
+    reject_call_cycle(connector.id.as_str(), graph, store).map_err(refused("call cycle"))?;
+    check_convex_step(graph, connected, had).map_err(refused("Convex step"))
 }
 
 /// The workflow's Convex step, anywhere in its own stored graph.
@@ -4711,6 +4856,49 @@ impl Connectors {
         }
         let key = convex::DeployKey::kept(&*self.storage, &grant.connection.id)?;
         convex::client::read(http, &key, &grant, ask).await.map(Value::String)
+    }
+
+    /// The graph a save of `incoming` keeps from the store: the stored one, when the save carries
+    /// none and names a workflow that has one. Checks that read the incoming call read this too.
+    pub fn kept_graph(&self, incoming: &Connector) -> Option<crate::graph::Graph> {
+        if incoming.graph.is_some() || incoming.id.is_empty() {
+            return None;
+        }
+        self.store.lock().unwrap().connectors.iter().find(|c| c.id == incoming.id).and_then(|c| c.graph.clone())
+    }
+
+    /// Whether a save of `incoming` reaches, through its Call steps to any depth, a stored workflow
+    /// `skips` holds for, or one the store does not have. The graph walked is the one `library`
+    /// holds for this workflow after the save. A save that sends a graph is walked on that graph as
+    /// sent: `settle_graph` stores it as itself, or as `None` when it equals `migrate`, and then
+    /// `run_graph` builds the same graph. It is not settled here, because this runs before the save
+    /// validates anything and `settle_graph` projects the graph, which needs a trigger. A save with
+    /// no graph is settled, as `save_connector` does, and walked on `run_graph` of that: a stored
+    /// graph, else what `migrate` builds (a slack-message router's categories become Call steps).
+    /// A called workflow opens its own session from its own stored setup, so a check that reads
+    /// only the save must read these too.
+    pub fn calls_any(&self, incoming: &Connector, skips: impl Fn(&Connector) -> bool) -> bool {
+        let mut library = self.library();
+        let store = self.store.lock().unwrap();
+        let walked = match &incoming.graph {
+            Some(sent) => sent.clone(),
+            None => {
+                let mut saved = incoming.clone();
+                settle_graph(&store, &mut saved, None);
+                run_graph(&saved)
+            }
+        };
+        library.insert(incoming.id.clone(), walked);
+        let store = store.connectors.clone();
+        reach_calls(&library, &incoming.id, |id, graph| {
+            let called = (id != incoming.id).then(|| store.iter().find(|c| c.id == id));
+            match called {
+                None => None,
+                Some(Some(target)) if graph.is_some() && !skips(target) => None,
+                Some(_) => Some(()),
+            }
+        })
+        .is_some()
     }
 
     /// Whether saving `incoming` would let its workflow read more of Convex than the stored one
@@ -4940,13 +5128,14 @@ mod tests {
     #[test]
     fn a_session_step_overrides_only_the_fields_it_names() {
         let owner = linear_connector();
-        let merged = merge_session(&owner, &SessionSetup::default());
+        let merged = merge_session(&owner, &SessionSetup::default()).unwrap();
         assert_eq!(merged.folder, owner.folder);
         assert_eq!(merged.effort, owner.effort);
         let merged = merge_session(
             &owner,
             &SessionSetup { folder: " /work ".into(), model: "haiku".into(), effort: "low".into(), permission: "auto".into(), account: "work".into(), worktree: true, instructions: "Be quick.".into(), ..Default::default() },
-        );
+        )
+        .unwrap();
         assert_eq!(merged.folder, PathBuf::from("/work"));
         assert_eq!(merged.model, "haiku");
         assert_eq!(merged.effort, Effort::Low);
@@ -4955,9 +5144,10 @@ mod tests {
         assert!(merged.worktree);
         assert_eq!(merged.instructions, "Be quick.");
         assert_eq!(merged.repo, owner.repo);
-        let merged = merge_session(&owner, &SessionSetup { effort: "nonsense".into(), permission: "nonsense".into(), ..Default::default() });
+        let merged = merge_session(&owner, &SessionSetup { effort: "nonsense".into(), ..Default::default() }).unwrap();
         assert_eq!(merged.effort, owner.effort);
         assert_eq!(merged.permission_mode, owner.permission_mode);
+        assert!(merge_session(&owner, &SessionSetup { permission: "nonsense".into(), ..Default::default() }).is_err(), "a permission that is not a name opens nothing");
     }
 
     #[test]
@@ -5200,6 +5390,134 @@ mod tests {
         let reloaded = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into()).get_settings().connectors;
         assert_eq!(reloaded[0].followed["C0123ABCD:1792400050.000200"].cursor, "1792400090.000000", "the cursor moved all the same");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Imports `workflow` into the empty account in `dir` and expects a refusal that names the
+    /// workflow and `check`, with nothing written: the store on disk stays as it was and no key lands.
+    fn refused_import(connectors: &Connectors, dir: &std::path::Path, workflow: Connector, check: &str, why: &str) {
+        let before = std::fs::read(dir.join("connectors.json")).unwrap();
+        let name = workflow.name.clone();
+        let store = serde_json::json!({ "connectors": [serde_json::to_value(workflow).unwrap()] });
+        let keys = Keys { linear: Some("lin_api_fake".into()), ..Keys::default() };
+        let error = connectors.import(store, keys).expect_err("the import is refused");
+        assert!(error.contains(&format!("workflow {name:?} fails the {check} check")), "{error}");
+        assert!(error.contains(why), "{error}");
+        assert_eq!(std::fs::read(dir.join("connectors.json")).unwrap(), before, "the store is unchanged");
+        assert!(!dir.join("linear-key").exists(), "no key was written");
+        assert!(connectors.export().0["connectors"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_import_refusal_names_the_workflow_and_step_on_one_bounded_line() {
+        let (connectors, dir) = stored("import-long-names", vec![]);
+        let long = |head: &str| format!("{head}\n{}", "x".repeat(500));
+        let mut graph = talks(&["go"]);
+        graph.nodes[1].name = long("Step");
+        graph.nodes[1].kind = NodeKind::Session(SessionSetup { permission: "everything".into(), ..SessionSetup::default() });
+        let workflow = Connector { id: "c9".into(), name: long("Nightly"), graph: Some(graph), ..linear_connector() };
+        let store = serde_json::json!({ "connectors": [serde_json::to_value(workflow).unwrap()] });
+        let error = connectors.import(store, Keys::default()).expect_err("the import is refused");
+        assert!(!error.chars().any(char::is_control), "one line: {error:?}");
+        assert!(error.chars().count() <= 450, "{} characters: {error}", error.chars().count());
+        let cut = |head: &str| format!("{head}{}…", "x".repeat(80 - head.len()));
+        assert!(error.contains(&format!("workflow \"{}\" fails the graph check", cut("Nightly"))), "{error}");
+        assert!(error.contains(&format!("\"{}\": its permission must be manual", cut("Step"))), "{error}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_import_refuses_a_workflow_whose_step_permission_pinned_cannot_read() {
+        let (connectors, dir) = stored("import-permission", vec![]);
+        let mut graph = talks(&["go"]);
+        graph.nodes[1].kind = NodeKind::Session(SessionSetup { permission: "everything".into(), ..SessionSetup::default() });
+        let workflow = Connector { id: "c9".into(), name: "Nightly".into(), graph: Some(graph), ..linear_connector() };
+        refused_import(&connectors, &dir, workflow, "graph", "its permission must be manual");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_import_refuses_a_workflow_whose_model_starts_with_a_dash() {
+        let (connectors, dir) = stored("import-model", vec![]);
+        let workflow = Connector { id: "c9".into(), name: "Nightly".into(), model: " --dangerously-skip-permissions".into(), ..linear_connector() };
+        refused_import(&connectors, &dir, workflow, "model", "may not start with -");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_import_refuses_a_workflow_with_an_invalid_graph() {
+        let (connectors, dir) = stored("import-graph", vec![]);
+        let graph = crate::graph::Graph { nodes: vec![], edges: vec![] };
+        let workflow = Connector { id: "c9".into(), name: "Nightly".into(), graph: Some(graph), ..linear_connector() };
+        refused_import(&connectors, &dir, workflow, "graph", "a workflow needs a trigger");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// An empty account whose `field` is `account` imports a store whose `field` is `incoming`:
+    /// the account's own value stays, as stored before the import.
+    fn kept_on_import(name: &str, field: &str, account: serde_json::Value, incoming: serde_json::Value) {
+        let dir = temp_dir(name);
+        let storage = FileStorage::new(dir.clone());
+        let own: Store = serde_json::from_value(serde_json::json!({ "connectors": [], field: account })).unwrap();
+        storage.save(&serde_json::to_vec(&own).unwrap()).unwrap();
+        let connectors = Connectors::new(storage, "/bin/pinned".into());
+        let before = on_disk(&dir)[field].clone();
+        assert!(!before.is_null(), "the account has {field} set");
+        let exported = serde_json::json!({ "connectors": [serde_json::to_value(Connector { id: "c9".into(), ..linear_connector() }).unwrap()], field: incoming });
+        assert_eq!(connectors.import(exported, Keys::default()), Ok(true));
+        let after = on_disk(&dir);
+        assert_eq!(after["connectors"][0]["id"], "c9", "the workflows came in");
+        assert_eq!(after[field], before, "the import kept the account's own {field}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_import_keeps_the_accounts_upstash() {
+        kept_on_import("import-keeps-upstash", "upstash", serde_json::json!({ "key_hint": "…up01", "claude_hint": "…cl01" }), serde_json::json!({ "key_hint": "…up99", "claude_hint": "…cl99" }));
+    }
+
+    #[test]
+    fn an_import_keeps_the_accounts_box_claude_tokens() {
+        kept_on_import("import-keeps-box-tokens", "box_claude_tokens", serde_json::json!({ "fake-account-0001": "…tk01" }), serde_json::json!({ "fake-account-0009": "…tk99" }));
+    }
+
+    #[test]
+    fn an_import_keeps_the_accounts_box_permissions() {
+        kept_on_import(
+            "import-keeps-boxes",
+            "boxes",
+            serde_json::json!({ "workflow": { "mode": "fixed", "row": "fake-box-row-0001" }, "session": { "mode": "ask" }, "worker": { "mode": "fresh" }, "orchestrator": { "mode": "off" } }),
+            serde_json::json!({ "workflow": { "mode": "fresh" }, "session": { "mode": "fresh" }, "worker": { "mode": "fresh" }, "orchestrator": { "mode": "fresh" } }),
+        );
+    }
+
+    #[test]
+    fn an_import_keeps_the_accounts_box_asks() {
+        kept_on_import(
+            "import-keeps-box-asks",
+            "box_asks",
+            serde_json::json!([{ "id": "e9094fa8594e83a3", "connector": "fake-workflow-0002", "subject": { "issue": "fake-issue-id-0001" } }]),
+            serde_json::json!([{ "id": "0000000000000099", "connector": "c9", "subject": { "issue": "fake-issue-id-0099" } }]),
+        );
+    }
+
+    #[test]
+    fn an_import_keeps_the_accounts_box_grants() {
+        kept_on_import(
+            "import-keeps-box-grants",
+            "box_grants",
+            serde_json::json!([{ "connector": "fake-workflow-0001", "subject": { "issue": "fake-issue-id-0001" }, "allow": false }]),
+            serde_json::json!([{ "connector": "c9", "subject": { "issue": "fake-issue-id-0099" }, "allow": true }]),
+        );
+    }
+
+    #[test]
+    fn an_import_keeps_the_accounts_repo_insight() {
+        kept_on_import("import-keeps-repo-insight", "repo_insight", serde_json::json!({ "on": true }), serde_json::json!({ "on": false }));
+    }
+
+    #[test]
+    fn an_import_keeps_the_accounts_slack_threads() {
+        kept_on_import("import-keeps-slack-threads", "slack_threads", serde_json::json!({ "fake-channel-0002:1700000000.000200": "FAKEBOT0002" }), serde_json::json!({ "fake-channel-0002:1700000000.000200": "FAKEBOT0099" }));
     }
 
     #[test]
@@ -6454,6 +6772,29 @@ mod tests {
     }
 
     #[test]
+    fn a_save_with_no_graph_is_walked_on_the_graph_its_run_builds() {
+        let skips = |connector: &Connector| connector.permission_mode == PermissionMode::BypassPermissions;
+        let skipping = Connector { id: "c7".into(), name: "Skips".into(), permission_mode: PermissionMode::BypassPermissions, ..called() };
+        // The stored router's graph is its own `migrate`, so a save without a graph drops it.
+        let mut kept = router();
+        kept.graph = Some(migrate(&router()));
+        let (connectors, dir) = stored("graphless-calls", vec![kept, slack_connector(), called(), skipping]);
+        let naming = |id: &str, workflow: &str| {
+            let mut connector = router();
+            connector.id = id.into();
+            if let Trigger::SlackMessage { decide, .. } = &mut connector.trigger {
+                decide.categories[1].workflow = Some(workflow.into());
+            }
+            connector
+        };
+        assert!(connectors.calls_any(&naming("", "c7"), skips), "a new router whose category names a workflow that skips prompts");
+        assert!(connectors.calls_any(&naming("c5", "c7"), skips), "a save that drops the stored graph runs the router it sends");
+        assert!(!connectors.calls_any(&naming("", "c6"), skips), "a router whose categories name workflows that ask");
+        assert!(!connectors.calls_any(&naming("c5", "c6"), skips));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_save_of_the_migrated_graph_stores_none_and_still_returns_one() {
         let (connectors, dir) = stored("collapse-graph", vec![router(), slack_connector(), called()]);
         let mut incoming = router();
@@ -6751,6 +7092,7 @@ mod tests {
             headless: false,
             stopped: None,
             questions: None,
+            read_only: false,
         }
     }
 
@@ -6837,6 +7179,101 @@ mod tests {
         let settled = settle(&mut store, vec![("c1", Found::Issue(issue())), ("c2", Found::Issue(issue()))]);
         let started: Vec<_> = settled.starts.iter().map(|start| start.connector.clone()).collect();
         assert_eq!(started, vec!["c1".to_owned()]);
+    }
+
+    #[test]
+    fn a_stored_step_whose_permission_is_not_an_exact_name_never_opens_a_session_that_skips_prompts() {
+        let mut connector = linear_connector();
+        let mut graph = talks(&[]);
+        let step = SessionSetup { permission: " bypassPermissions ".into(), ..SessionSetup::default() };
+        graph.nodes.push(node("s", "Fix", NodeKind::Session(step)));
+        graph.edges.push(edge("t", "out", "s"));
+        connector.graph = Some(graph);
+        // Written as an older save would have kept it, past today's check at save.
+        let (connectors, dir) = stored("odd-permission", vec![connector]);
+        let subject = Subject::LinearIssue { issue: "uuid".into() };
+        assert!(connectors.begin("c1".into(), subject.clone(), issue_trigger(), "2026-10-29T12:00:00Z").is_err(), "its trigger starts no run");
+        // A run that started before that check still opens no session.
+        let run = runner::start(&connectors.library(), "c1", subject, serde_json::to_value(issue_trigger()).unwrap(), "2026-10-29T12:00:00Z");
+        connectors.runs.lock().unwrap().push(run);
+        let opened = std::sync::Mutex::new(Vec::<Vec<String>>::new());
+        let open = |work: Work| {
+            if let Work::Run(run) = &work {
+                opened.lock().unwrap().push(run.args.clone());
+            }
+            placed(work)
+        };
+        let _ = block_on(connectors.drive(&open));
+        let opened = opened.into_inner().unwrap();
+        assert!(!opened.iter().any(|args| args.windows(2).any(|pair| pair[0] == "--permission-mode" && pair[1] == "bypassPermissions")), "{opened:?}");
+        assert!(opened.is_empty(), "a step whose permission is not a known name opens no session: {opened:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_workflow_with_a_step_whose_permission_is_unreadable_starts_no_run_and_every_check_names_it() {
+        let with_step = |id: &str, name: &str, permission: &str| {
+            let mut connector = linear_connector();
+            connector.id = id.into();
+            connector.name = name.into();
+            let mut graph = talks(&[]);
+            let step = SessionSetup { permission: permission.into(), ..SessionSetup::default() };
+            graph.nodes.push(node("s", "Fix", NodeKind::Session(step)));
+            graph.edges.push(edge("t", "out", "s"));
+            connector.graph = Some(graph);
+            connector
+        };
+        // Written as an older save would have kept it, past today's check at save.
+        let (connectors, dir) = stored("unreadable-step", vec![with_step("c1", "Odd", " bypassPermissions "), with_step("c2", "Fine", "acceptEdits")]);
+        let odd = Subject::LinearIssue { issue: "odd".into() };
+        let fine = Subject::LinearIssue { issue: "fine".into() };
+        let refused = connectors.begin("c1".into(), odd.clone(), issue_trigger(), "2026-10-29T12:00:00Z").unwrap_err();
+        assert!(refused.contains("\"Odd\"") && refused.contains("\"Fix\""), "{refused}");
+        connectors.begin("c2".into(), fine.clone(), issue_trigger(), "2026-10-29T12:00:00Z").unwrap();
+        let opened = std::sync::Mutex::new(Vec::<Vec<String>>::new());
+        let open = |work: Work| {
+            if let Work::Run(run) = &work {
+                opened.lock().unwrap().push(run.args.clone());
+            }
+            placed(work)
+        };
+        for _ in 0..2 {
+            let check = block_on(connectors.check_once(&open));
+            let error = check.error.unwrap_or_default();
+            assert!(error.contains("workflow \"Odd\"") && error.contains("step \"Fix\""), "every check names the workflow and the step: {error}");
+            assert!(!error.contains("\"Fine\""), "{error}");
+        }
+        assert!(connectors.runs.lock().unwrap().iter().all(|run| run.connector == "c2"), "the unreadable workflow starts no run");
+        let store = connectors.store.lock().unwrap();
+        assert!(!store.handled(&subject_key(&odd)), "its subject is not claimed");
+        assert!(store.handled(&subject_key(&fine)), "the readable workflow claims its own");
+        drop(store);
+        let opened = opened.into_inner().unwrap();
+        assert_eq!(opened.len(), 1, "the readable workflow still runs: {opened:?}");
+        assert!(opened[0].windows(2).any(|pair| pair[0] == "--permission-mode" && pair[1] == "acceptEdits"), "{opened:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_model_that_starts_with_a_dash_is_refused_at_save_so_it_never_reaches_claude_as_an_option() {
+        let (connectors, dir) = stored("dash-model", vec![]);
+        let mut own = linear_connector();
+        own.model = "--dangerously-skip-permissions".into();
+        let error = connectors.save_connector(own).err().unwrap();
+        assert!(error.contains("model") && error.contains("start with -"), "{error}");
+        let mut stepped = linear_connector();
+        let mut graph = talks(&[]);
+        let step = SessionSetup { model: " -x".into(), ..SessionSetup::default() };
+        graph.nodes.push(node("s", "Fix", NodeKind::Session(step)));
+        graph.edges.push(edge("t", "out", "s"));
+        stepped.graph = Some(graph);
+        let error = connectors.save_connector(stepped).err().unwrap();
+        assert!(error.starts_with("\"Fix\"") && error.contains("model"), "{error}");
+        assert!(connectors.store.lock().unwrap().connectors.is_empty(), "neither was saved");
+        let mut plain = linear_connector();
+        plain.model = "claude-sonnet-5-5".into();
+        assert_eq!(claude_args(&plain, "w", "n".into())[..2], ["--model", "claude-sonnet-5-5"], "a model is the value after --model");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -8180,8 +8617,9 @@ mod tests {
         fn an_import_keeps_the_connections_and_their_keys() {
             let (connectors, storage) = hub();
             connect(&connectors, KEY, &[SITE]).unwrap();
-            let imported = connectors.import(json!({ "linear": null, "connectors": [] }), Keys::default()).unwrap();
-            assert!(imported);
+            // A connected deployment makes the account not empty, so the import leaves it alone.
+            let imported = connectors.import(json!({ "linear": null, "connectors": [], "convex": [] }), Keys::default()).unwrap();
+            assert!(!imported);
             assert_eq!(repos(&connectors), [("quick-lemur-789".to_owned(), vec![SITE.to_owned()])]);
             assert_eq!(storage.keys.lock().unwrap().get("convex-key-quick-lemur-789").map(String::as_str), Some(KEY));
         }
@@ -8282,6 +8720,45 @@ mod tests {
             let prompts = opened.lock().unwrap().clone();
             assert_eq!(prompts.len(), 1);
             assert!(prompts[0].contains("\n\nYou may read the tables invoices of Convex deployment quick-lemur-789 (dev) with the tools convex_tables and convex_data."), "{}", prompts[0]);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn an_import_refuses_a_convex_step_the_accounts_connections_do_not_allow() {
+            let (connectors, dir) = stored("convex-import-refused", vec![]);
+            let mut graph = talks(&["go"]);
+            graph.nodes.push(reads("gone-deployment-1", None));
+            let workflow = Connector { id: "c9".into(), name: "Invoices".into(), graph: Some(graph), ..linear_connector() };
+            refused_import(&connectors, &dir, workflow, "Convex step", "reads Convex deployment gone-deployment-1, which is not connected");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn an_import_whose_workflows_pass_the_save_checks_is_stored() {
+            // An account with a Convex deployment is not empty, so an import that passes carries no Convex step.
+            let (connectors, dir) = stored("convex-import-clean", vec![]);
+            let workflow = Connector { id: "c9".into(), name: "Invoices".into(), graph: Some(talks(&["go"])), ..linear_connector() };
+            let store = serde_json::json!({ "connectors": [serde_json::to_value(workflow).unwrap()] });
+            assert_eq!(connectors.import(store, Keys::default()), Ok(true));
+            let stored = connectors.get_settings().connectors;
+            assert_eq!(stored.len(), 1);
+            assert_eq!(stored[0].graph, Some(talks(&["go"])));
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn an_import_into_an_account_with_only_convex_connected_is_refused() {
+            let (connectors, dir) = with_convex("convex-import-not-empty", vec![]);
+            let before = std::fs::read(dir.join("connectors.json")).unwrap();
+            let mut graph = talks(&["go"]);
+            graph.nodes.push(reads("quick-lemur-789", Some(&["invoices"])));
+            let workflow = Connector { id: "c9".into(), name: "Invoices".into(), graph: Some(graph), ..linear_connector() };
+            let store = serde_json::json!({ "connectors": [serde_json::to_value(workflow).unwrap()] });
+            let keys = Keys { linear: Some("lin_api_fake".into()), ..Keys::default() };
+            assert_eq!(connectors.import(store, keys), Ok(false), "the account is not empty");
+            assert_eq!(std::fs::read(dir.join("connectors.json")).unwrap(), before, "the store is unchanged");
+            assert!(!dir.join("linear-key").exists(), "no key was written");
+            assert!(connectors.get_settings().connectors.is_empty());
             let _ = std::fs::remove_dir_all(dir);
         }
 
