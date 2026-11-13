@@ -25,7 +25,7 @@ pub fn in_box() -> bool {
     is_box(std::env::var(BOX_ENV).ok().as_deref())
 }
 
-fn is_box(value: Option<&str>) -> bool {
+pub(crate) fn is_box(value: Option<&str>) -> bool {
     value == Some("1")
 }
 

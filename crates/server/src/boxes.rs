@@ -10,7 +10,7 @@ use futures_util::future::BoxFuture;
 use pinned_core::account::Credentials;
 use pinned_core::accounts::{self, Provider};
 use pinned_core::agent::{session_env, Subject, CAPTAIN_CONNECTOR, DELEGATE_CONNECTOR, INTERACTIVE_CONNECTOR};
-use pinned_core::connectors::{unix_millis, BoxPermission, BoxSize, BoxStep, Connectors, FixedClaim, Placement, Run};
+use pinned_core::connectors::{unix_millis, BoxAccess, BoxPermission, BoxSize, BoxStep, Connectors, FixedClaim, Placement, Run};
 use pinned_core::delegate::{BoxTarget, Delegator, DelegatorKind, Origin, RemoteEnd, Request, RunTarget, TaskOutcome, TaskRecord, TaskUsage};
 use pinned_core::surface::ActorRole;
 use pinned_core::global_orchestrator::BusyPolicy;
@@ -663,15 +663,26 @@ pub fn start_script(login: &str, repo: Option<&str>) -> String {
     START.replace("{{login}}", &quoted(login)).replace("{{clones}}", &quoted(&clones))
 }
 
-/// What the node and its sessions run with, as `start.sh` sources it: the secrets, and `PINNED_BOX=1`,
-/// which tells the node it runs in a box and may exit for good once the hub has refused it for 15 minutes.
-fn box_env(keys: &Keys, github: Option<&str>) -> String {
+/// What the node and its sessions run with, as `start.sh` sources it: the secrets, and, when
+/// `leaves`, `PINNED_BOX=1`, which tells the node it runs in a box and may exit for good once the hub
+/// has refused it for 15 minutes.
+fn box_env(keys: &Keys, github: Option<&str>, leaves: bool) -> String {
     let mut env = format!("CLAUDE_CODE_OAUTH_TOKEN='{}'\n", quoted(&keys.claude_token));
     if let Some(token) = github {
         env += &format!("GH_TOKEN='{}'\n", quoted(token));
     }
-    env += &format!("{}=1\n", crate::box_exit::BOX_ENV);
+    if leaves {
+        env += &format!("{}=1\n", crate::box_exit::BOX_ENV);
+    }
     env
+}
+
+/// Whether the node in row `row`'s box may leave once the hub has refused it for 15 minutes. Not
+/// in the fixed box ("One box, reused"): the reaper ends that row only when Upstash stops listing
+/// the box, so a node that left would leave every later run failing with its machine offline. A
+/// fixed box its hub has disowned keeps running until the fixed-box limit (#247) lands.
+fn leaves_when_refused(access: &BoxAccess, row: &str) -> bool {
+    !access.owns_row(row)
 }
 
 /// An `owner/repo` shorthand or GitHub clone URL as the https URL the box clones.
@@ -1296,7 +1307,8 @@ impl Boxes {
         let signs_in = row.signs_in_as();
         let claude_token = connectors.box_claude_token(&signs_in).ok_or_else(|| format!("No Claude token is kept for {signs_in}: {ADD_TOKEN}."))?;
         let keys = Keys { api_key: keys.api_key.clone(), claude_token };
-        self.api.write(key, id, &format!("{DIR}/box.env"), box_env(&keys, connectors.github_token().as_deref())).await?;
+        let leaves = leaves_when_refused(&connectors.box_access(), &row.id);
+        self.api.write(key, id, &format!("{DIR}/box.env"), box_env(&keys, connectors.github_token().as_deref(), leaves)).await?;
         self.api.write(key, id, &format!("{DIR}/start.sh"), start_script(&login, row.spec.repo.as_deref())).await?;
         let exec = self.api.exec(key, id, bootstrap_script(&hub.public_url)).await?;
         if exec.exit_code != 0 {
@@ -2095,7 +2107,7 @@ mod tests {
         assert!(scripts[1].contains(r#"const clones = ["app"].map"#), "{}", scripts[1]);
         assert!(start_script("felipe", None).contains("const clones = [].map"));
         assert_eq!(
-            box_env(&keys, Some("ghp_SECRETGITHUB")),
+            box_env(&keys, Some("ghp_SECRETGITHUB"), true),
             "CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-SECRETCLAUDE'\nGH_TOKEN='ghp_SECRETGITHUB'\nPINNED_BOX=1\n"
         );
         assert_eq!(start_script("o'brien", None).lines().find(|l| l.contains("user.name")), Some("git config --global user.name 'o'\\''brien'"));
@@ -2105,9 +2117,26 @@ mod tests {
     fn a_box_env_tells_its_node_it_runs_in_a_box() {
         let keys = Keys { api_key: "box_SECRETKEY".into(), claude_token: "sk-ant-oat01-SECRETCLAUDE".into() };
         for github in [None, Some("ghp_SECRETGITHUB")] {
-            let env = box_env(&keys, github);
+            let env = box_env(&keys, github, true);
             assert!(env.lines().any(|line| line == "PINNED_BOX=1"), "{env}");
             assert!(!env.contains("box_SECRETKEY"), "{env}");
+        }
+    }
+
+    fn fixed_access(row: &str) -> BoxAccess {
+        BoxAccess { workflow: BoxPermission::Fixed { row: Some(row.into()) }, ..BoxAccess::default() }
+    }
+
+    #[test]
+    fn a_fixed_box_env_does_not_mark_its_node_to_leave_and_a_fresh_box_env_does() {
+        let keys = Keys { api_key: "fake-api-key".into(), claude_token: "fake-claude-token".into() };
+        let access = fixed_access("fixed-row");
+        let fixed = box_env(&keys, None, leaves_when_refused(&access, "fixed-row"));
+        assert!(!fixed.contains("PINNED_BOX"), "{fixed}");
+        assert!(fixed.lines().any(|line| line.starts_with("CLAUDE_CODE_OAUTH_TOKEN=")), "{fixed}");
+        for (access, row) in [(&access, "fresh-row"), (&BoxAccess::default(), "fresh-row")] {
+            let fresh = box_env(&keys, None, leaves_when_refused(access, row));
+            assert!(fresh.lines().any(|line| line == "PINNED_BOX=1"), "{fresh}");
         }
     }
 
@@ -2124,6 +2153,12 @@ mod tests {
     #[cfg(unix)]
     impl StartRun {
         fn new() -> StartRun {
+            let keys = Keys { api_key: "fake-api-key".into(), claude_token: "fake-claude-token".into() };
+            StartRun::with_env(box_env(&keys, None, true))
+        }
+
+        /// As `new`, with `env` as the box's `box.env`.
+        fn with_env(env: String) -> StartRun {
             use std::os::unix::fs::PermissionsExt;
             let root = tempfile::tempdir().unwrap();
             let (dir, home, bin) = (root.path().join("pinned"), root.path().join("home"), root.path().join("bin"));
@@ -2138,8 +2173,7 @@ mod tests {
                 executable(bin.join(fake), "exit 0");
             }
             executable(dir.join("pinned-server"), &format!("printf '%s' \"$PINNED_BOX\" >{}/started", dir.display()));
-            let keys = Keys { api_key: "fake-api-key".into(), claude_token: "fake-claude-token".into() };
-            std::fs::write(dir.join("box.env"), box_env(&keys, None)).unwrap();
+            std::fs::write(dir.join("box.env"), env).unwrap();
             StartRun { dir, home, bin, _root: root }
         }
 
@@ -2189,6 +2223,35 @@ mod tests {
         pair_fake(&run.dir);
         assert_eq!(run.start().as_deref(), Some("1"), "the node did not start with PINNED_BOX=1");
         assert!(run.dir.join("node.pid").exists());
+    }
+
+    /// Starts row `row`'s node with the env its boot writes under `access`, then has the hub refuse
+    /// it for an hour: the stand-in for `link.refused_for()` resolves 30 s past the span, as it does
+    /// on the first 4001 after 15 minutes of them. Does what `node()` does when the wait ends, and
+    /// returns whether the node left, how many times it ended its sessions, and whether it is paired.
+    #[cfg(target_os = "linux")]
+    async fn refused_for_an_hour(access: &BoxAccess, row: &str) -> (bool, usize, bool) {
+        let keys = Keys { api_key: "fake-api-key".into(), claude_token: "fake-claude-token".into() };
+        let run = StartRun::with_env(box_env(&keys, None, leaves_when_refused(access, row)));
+        pair_fake(&run.dir);
+        let seen = run.start().expect("the start script did not launch the node");
+        let refused = tokio::time::sleep(pinned_core::link::BOX_REFUSED_FOR + Duration::from_secs(30));
+        let in_box = crate::box_exit::is_box(Some(seen.as_str()));
+        let left = tokio::time::timeout(Duration::from_secs(3600), crate::box_exit::refused_in_box(in_box, refused)).await.is_ok();
+        let quit = std::cell::Cell::new(0);
+        if left {
+            crate::box_exit::leave(&run.dir, || quit.set(quit.get() + 1), |_| {});
+        }
+        (left, quit.get(), pinned_core::account::Credentials::load(&run.dir).is_some())
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test(start_paused = true)]
+    async fn a_fixed_box_node_refused_well_past_the_span_stays_up_and_keeps_its_account() {
+        let access = fixed_access("fixed-row");
+        assert_eq!(refused_for_an_hour(&access, "fixed-row").await, (false, 0, true), "the fixed box's node left");
+        // The same refusals end a fresh box's node, so the check above can fail.
+        assert_eq!(refused_for_an_hour(&access, "fresh-row").await, (true, 1, false), "a fresh box's node stayed");
     }
 
     #[cfg(unix)]
