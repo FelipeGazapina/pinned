@@ -1891,21 +1891,29 @@ impl Boxes {
                 }
                 Phase::Ending(_) => None,
             };
+            let id = row.id.clone();
             let finished = match ended {
                 Some(why) => self.finish(hub, account, row, why, key.as_deref()).await,
                 None if matches!(row.phase, Phase::Ending(_)) => {
                     // A hub that stopped between ending the row and recording it records it now,
-                    // and fails the runs it held.
-                    if let Phase::Ending(why) = &row.phase {
-                        self.fail_held_runs(hub, account, &row, why).await?;
+                    // and fails the runs it held. A row whose runs cannot be failed stays
+                    // `Ending` for the next pass; the rows after it still get their turn.
+                    let held = match &row.phase {
+                        Phase::Ending(why) => self.fail_held_runs(hub, account, &row, why).await,
+                        _ => Ok(()),
+                    };
+                    match held {
+                        Ok(()) => {
+                            self.record_agent_box(hub, account, &row).await;
+                            self.end(hub, account, &row.remains(), key.as_deref()).await
+                        }
+                        Err(e) => Err(e),
                     }
-                    self.record_agent_box(hub, account, &row).await;
-                    self.end(hub, account, &row.remains(), key.as_deref()).await
                 }
                 None => Ok(()),
             };
             if let Err(e) = finished {
-                eprintln!("pinned-server: could not end a box of account {}: {e}", account.id);
+                eprintln!("pinned-server: could not end box {id} of account {}: {e}", account.id);
             }
         }
         if let (Some(listed), Some(key)) = (listed, &key) {
