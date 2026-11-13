@@ -9013,8 +9013,7 @@ mod tests {
     /// Every path in `old` whose key or value is not in `new`. `new` may hold more keys than `old`
     /// (a new field with a default), but an array must keep its length and an old value its value.
     fn lost(old: &Value, new: &Value, path: &str, out: &mut Vec<String>) {
-        if let Some((_, why)) = MIGRATED.iter().find(|(migrated, _)| *migrated == path) {
-            let _ = why;
+        if MIGRATED.iter().any(|(migrated, _)| *migrated == path) {
             return;
         }
         match (old, new) {
