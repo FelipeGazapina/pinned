@@ -5111,6 +5111,139 @@ mod tests {
         assert!(serde_json::to_value(&old).unwrap().get("ask").is_none());
     }
 
+    /// A run of `subject` that waits on its session on box machine `machine`, having handed `sent` on.
+    fn held_run(connector: &str, subject: &Subject, machine: &str, sent: &[String]) -> runner::Run {
+        serde_json::from_value(serde_json::json!({
+            "id": format!("run-{machine}"), "connector": connector, "subject": subject, "status": "waiting", "session_owner": connector,
+            "session": { "state": "live", "machine": machine, "tab": "t1", "claude": null, "since": 1, "saw_working": false, "await_working": false },
+            "log": [], "context": {}, "stack": [], "pending": null, "ready": null, "claimed": true, "sent": sent,
+        }))
+        .unwrap()
+    }
+
+    /// How many sessions the next check starts for issue `uuid`, still labelled.
+    fn next_check_starts(connectors: &Connectors) -> usize {
+        let runs = connectors.runs.lock().unwrap().clone();
+        let settled = connectors.store.lock().unwrap().settle(&["c1".into()], vec![("c1".into(), Found::Issue(issue()))], checked_at(), "/bin/pinned", &runs);
+        settled.work.len() + settled.starts.len()
+    }
+
+    fn handled_of(connectors: &Connectors) -> Vec<String> {
+        connectors.store.lock().unwrap().connectors[0].handled.clone()
+    }
+
+    fn failed_why(connectors: &Connectors, machine: &str) -> String {
+        let runs = connectors.runs.lock().unwrap();
+        match &runs.iter().find(|run| run.id == format!("run-{machine}")).unwrap().status {
+            Status::Failed { why } => why.clone(),
+            other => panic!("the run is {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_box_that_ends_for_its_budget_or_max_life_keeps_a_labelled_issue_handled() {
+        let subject = Subject::LinearIssue { issue: "uuid".into() };
+        let linear = Connector { handled: vec!["uuid".into()], ..linear_connector() };
+        let (connectors, dir) = stored("box-end-keep", vec![linear]);
+        // The hub ends a box for its budget and for its max life both as `End::Expired`, which it
+        // passes as `Keep`; one end of each here.
+        for machine in ["box-budget", "box-max-life"] {
+            connectors.runs.lock().unwrap().push(held_run("c1", &subject, machine, &[]));
+            assert_eq!(block_on(connectors.box_ended(machine, None, "Upstash Box: the box ended before its task did: it ran out of time or budget", BoxEndRelease::Keep)), Ok(1));
+            assert_eq!(
+                failed_why(&connectors, machine),
+                "Upstash Box: the box ended before its task did: it ran out of time or budget; the run stopped, and it starts again only when you run it"
+            );
+            assert_eq!(handled_of(&connectors), ["uuid"], "the issue stays handled");
+            assert_eq!(next_check_starts(&connectors), 0, "the next check starts no run for the still-labelled issue");
+        }
+        let reloaded = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into());
+        assert_eq!(handled_of(&reloaded), ["uuid"]);
+        assert!(reloaded.store.lock().unwrap().box_released.is_empty(), "a kept subject spends no release");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_offline_box_end_frees_its_issue_once_and_a_second_keeps_it_handled() {
+        let subject = Subject::LinearIssue { issue: "uuid".into() };
+        let linear = Connector { handled: vec!["uuid".into()], ..linear_connector() };
+        let (connectors, dir) = stored("box-end-once", vec![linear]);
+        connectors.runs.lock().unwrap().push(held_run("c1", &subject, "box-1", &[]));
+        assert_eq!(block_on(connectors.box_ended("box-1", None, "Upstash Box: its box went offline", BoxEndRelease::Once)), Ok(1));
+        assert_eq!(failed_why(&connectors, "box-1"), "Upstash Box: its box went offline; the run stopped, and its next trigger may start it once more");
+        assert!(handled_of(&connectors).is_empty());
+        assert_eq!(next_check_starts(&connectors), 1, "the one release starts one new run");
+        assert_eq!(handled_of(&connectors), ["uuid"], "which claims the issue again");
+
+        connectors.runs.lock().unwrap().push(held_run("c1", &subject, "box-2", &[]));
+        assert_eq!(block_on(connectors.box_ended("box-2", None, "Upstash Box: its box went offline", BoxEndRelease::Once)), Ok(1));
+        assert_eq!(failed_why(&connectors, "box-2"), "Upstash Box: its box went offline; the run stopped, and it starts again only when you run it");
+        assert_eq!(handled_of(&connectors), ["uuid"], "a second box end keeps it handled");
+        assert_eq!(next_check_starts(&connectors), 0);
+
+        let reloaded = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into());
+        assert_eq!(reloaded.store.lock().unwrap().box_released, BTreeMap::from([("c1".to_owned(), ["uuid".to_owned()].into())]), "the mark is stored");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_failed_boot_frees_its_issue_once_and_a_second_keeps_it_handled() {
+        let subject = Subject::LinearIssue { issue: "uuid".into() };
+        let linear = Connector { handled: vec!["uuid".into()], ..linear_connector() };
+        let (connectors, dir) = stored("boot-once", vec![linear]);
+        let refuse = |_: Work| async { Err::<(), String>("Upstash Box: the box did not connect within 5 min".to_owned()) };
+        connectors.box_boot_failed(&subject);
+        assert_eq!(
+            block_on(connectors.hand_over(Work::Run(run(&linear_connector(), &issue(), "/bin/pinned")), &refuse)),
+            Err("could not open a session in /repo: Upstash Box: the box did not connect within 5 min; the next check tries again".into())
+        );
+        assert!(handled_of(&connectors).is_empty());
+        assert_eq!(next_check_starts(&connectors), 1, "one new run starts");
+
+        connectors.box_boot_failed(&subject);
+        assert_eq!(
+            block_on(connectors.hand_over(Work::Run(run(&linear_connector(), &issue(), "/bin/pinned")), &refuse)),
+            Err("could not open a session in /repo: Upstash Box: the box did not connect within 5 min; its box failed before, so it starts again only when you run it".into())
+        );
+        assert_eq!(handled_of(&connectors), ["uuid"], "a second failed boot keeps it handled");
+        assert_eq!(next_check_starts(&connectors), 0);
+
+        // An open that fails without a box end still frees the issue, as before.
+        assert!(block_on(connectors.hand_over(Work::Run(run(&linear_connector(), &issue(), "/bin/pinned")), &refuse)).is_err());
+        assert!(handled_of(&connectors).is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_one_retry_after_a_box_end_repeats_no_slack_reply_and_no_linear_write() {
+        const THREAD: &str = "1792400050.000200";
+        let subject = Subject::SlackThread { channel: "C0123ABCD".into(), thread: THREAD.into() };
+        let key = format!("C0123ABCD:{THREAD}");
+        let mut slack = slack_connector();
+        slack.handled = vec![key.clone()];
+        // The first run's session filed this issue; Linear is not connected, so any Linear call fails.
+        slack.created.insert(key.clone(), Filed { id: "uuid-9".into(), identifier: "ENG-9".into(), url: "https://linear.example/ENG-9".into() });
+        let (connectors, dir) = stored("box-end-retry", vec![slack]);
+        let reply = Connectors::reply_key("C0123ABCD", THREAD, "On it");
+        connectors.runs.lock().unwrap().push(held_run("c2", &subject, "box-1", std::slice::from_ref(&reply)));
+        assert_eq!(block_on(connectors.box_ended("box-1", None, "Upstash Box: its box went offline", BoxEndRelease::Once)), Ok(1));
+        assert!(connectors.store.lock().unwrap().connectors[0].handled.is_empty(), "the thread is free for one retry");
+
+        let mut lib = runner::Library::new();
+        lib.insert("c2".into(), migrate(&slack_connector()));
+        let mut retry = runner::start(&lib, "c2", subject, serde_json::json!({}), "2026-01-01T00:00:00Z");
+        // Slack has no bot here, so a post would fail: Ok means nothing was posted.
+        assert_eq!(block_on(connectors.perform_reply(&mut retry, "c2", "On it")), Ok(Supplied::Done), "the reply already posted is not posted again");
+        assert_eq!(block_on(connectors.slack_reply("c2", "C0123ABCD", THREAD, "On it")), Ok("that reply is already posted by the workflow run".into()));
+        assert_eq!(
+            block_on(connectors.perform_file_issue(&mut retry, "c2", "ENG", "", "", "Broken button", "D")),
+            Ok(Supplied::Done),
+            "the issue the first run filed is answered, and Linear gets no second write"
+        );
+        assert_eq!(connectors.store.lock().unwrap().connectors[0].created.len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn a_run_no_tab_took_is_found_again_by_the_next_check() {
         let mut linear = linear_connector();
