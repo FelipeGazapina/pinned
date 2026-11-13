@@ -207,6 +207,21 @@ impl Questions {
         true
     }
 
+    /// Closes as cancelled every questionnaire open for one of `tasks`, a cancelled task and its
+    /// descendants. Whether any was.
+    pub fn cancel_tasks(&mut self, tasks: &[String]) -> bool {
+        let mut any = false;
+        for asked in self.asked.iter_mut().filter(|a| a.is_open() && a.task.as_ref().is_some_and(|task| tasks.contains(task))) {
+            asked.outcome = Some(Outcome::Cancelled);
+            asked.notified = true;
+            any = true;
+        }
+        if any {
+            self.closed();
+        }
+        any
+    }
+
     /// How the questionnaire `id` stands, for the `question_user` call that waits on it:
     /// `{"outcome":"open"}` while it waits, else the call's result, which then counts as delivered.
     pub fn status(&mut self, id: &str, now: Instant) -> Result<serde_json::Value, String> {
@@ -567,6 +582,20 @@ mod tests {
         assert_eq!(again.waiting_tasks().collect::<Vec<_>>(), ["task-1"]);
         assert_eq!(asked.wait_limit_secs, None, "no wait limit unless a task sets one");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cancelling_tasks_closes_the_questions_their_workers_have_open_and_no_others() {
+        let mut q = Questions::default();
+        q.open("tab-1", None, Some("task-1".into()), None, vec![question("One?", &["yes", "no"])], vec![], 0).unwrap();
+        q.open("tab-2", None, Some("task-2".into()), None, vec![question("Two?", &["yes", "no"])], vec![], 0).unwrap();
+        q.open("tab-3", None, None, None, vec![question("Three?", &["yes", "no"])], vec![], 0).unwrap();
+        assert!(!q.cancel_tasks(&["task-9".into()]));
+        assert!(q.cancel_tasks(&["task-1".into(), "task-3".into()]));
+        assert!(q.open_on("tab-1").is_none(), "its worker's task was cancelled");
+        assert!(q.open_on("tab-2").is_some() && q.open_on("tab-3").is_some(), "another task's, and one with no task, stay open");
+        assert_eq!(q.get("q-1").map(|a| (a.outcome.clone(), a.notified)), Some((Some(Outcome::Cancelled), true)));
+        assert!(!q.cancel_tasks(&["task-1".into()]), "a closed one is not closed again");
     }
 
     #[test]

@@ -4737,11 +4737,23 @@ impl Machine {
                 }
             }
         }
-        let mut body = self.delegates.cancel(&caller, id, reason, self.launch.path_env.as_deref())?;
+        let mut body = self.cancel_with_questions(&caller, id, reason)?;
         if let Some(note) = note {
             body["note"] = json!(note);
         }
         Ok(body.to_string())
+    }
+
+    /// Cancels task `id` and its working descendants, and closes the questions their workers had
+    /// open as cancelled, with no notice: nobody waits on them any more. Stopping a turn, closing
+    /// a tab and archiving drop a tab's questions the same way.
+    fn cancel_with_questions(&self, caller: &crate::delegate::Caller, id: &str, reason: &str) -> Result<Value, String> {
+        let tree = self.delegates.working_tree(id);
+        let body = self.delegates.cancel(caller, id, reason, self.launch.path_env.as_deref())?;
+        if self.questions.lock().unwrap().cancel_tasks(&tree) {
+            self.emit_tabs();
+        }
+        Ok(body)
     }
 
     /// `delegate_task` with `target.machine` or `target.box`, or placed on another machine: the hub
@@ -5083,7 +5095,7 @@ impl Machine {
         let id = self.delegates.for_origin(&key, task).ok_or_else(|| format!("no task {task} of that thread runs here"))?;
         let caller = crate::delegate::Caller { tab: Some(key), task: None };
         if let Some(reason) = cancel {
-            return self.delegates.cancel(&caller, &id, reason, self.launch.path_env.as_deref());
+            return self.cancel_with_questions(&caller, &id, reason);
         }
         let mut status = self.delegates.status(&caller, &id)?;
         if let Some(thread) = self.delegates.get(&id).and_then(|t| t.thread.filter(|thread| thread.runs && !t.state.terminal())) {
@@ -13992,6 +14004,78 @@ Have another model review a risky change before it goes ahead.";
         }
         drop(questions);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn task_cancel_closes_the_open_questions_of_a_thread_child_and_its_tab_stops_asking() {
+        let (m, dir, captain, task, child, _transcript) = captain_with_thread_child("thread-cancel-asks");
+        m.record_event(AgentEvent { session: Some("s-child".into()), ..hook(&child, AgentStatus::Working) });
+        let id = m.project_tool("", branch_questions(Some(&task))).unwrap();
+        let status = || m.project_tool(&child, ProjectTool::QuestionStatus { id: id.clone() }).map(|text| serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone());
+        assert_eq!((status(), m.view(&child).unwrap().questions.map(|q| q.id)), (Ok(json!("open")), Some(id.clone())), "the tab asks");
+
+        m.task_cancel(Some(captain), None, &task, "no longer needed").unwrap();
+        assert_eq!(m.delegates.get(&task).map(|t| t.state), Some(crate::delegate::WorkState::Cancelled));
+        assert_eq!(m.view(&child).unwrap().questions, None, "the tab has no open questions");
+        assert!(m.questions.lock().unwrap().open_on(&child).is_none() && m.questions.lock().unwrap().waiting_tasks().next().is_none());
+        assert_eq!(status(), Ok(json!("cancelled")), "the call that waits answers cancelled");
+        let asked = m.questions.lock().unwrap().get(&id).cloned().unwrap();
+        assert!(asked.notified, "no notice follows");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn task_cancel_closes_the_questions_a_headless_child_left_on_its_parents_tab() {
+        let m = machine();
+        let account = Account::builtin(Provider::Claude);
+        let parent = m.add_tab("/repo".into(), account.clone(), vec![], vec![], false, None);
+        let task = m.delegates.begin(crate::delegate::NewTask {
+            parent: crate::delegate::Parent::Tab(parent.clone()),
+            tool: None,
+            title: "Look".into(),
+            account: account.id.clone(),
+            provider: Provider::Claude,
+            model: None,
+            cwd: "/repo".into(),
+            mode: crate::delegate::Mode::Async,
+            access: crate::delegate::Access::Auto,
+            isolated: false,
+            caller_key: format!("tab:{parent}"),
+            client_request_id: None,
+            role: None,
+        });
+        let question = || vec![crate::questions::Question { header: None, question: "Base on main?".into(), changes: "the PR target".into(), options: vec![], multi_select: false }];
+        let id = m.questions.lock().unwrap().open(&parent, None, Some(task.id.clone()), None, question(), vec![], 1).unwrap();
+        m.task_cancel(Some(parent.clone()), None, &task.id, "no longer needed").unwrap();
+        let questions = m.questions.lock().unwrap();
+        assert!(questions.open_on(&parent).is_none(), "the parent's tab keeps no questions of a cancelled child");
+        assert_eq!(questions.get(&id).map(|asked| (asked.outcome.clone(), asked.notified)), Some((Some(crate::questions::Outcome::Cancelled), true)));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_cancel_from_the_machine_that_sent_a_worker_closes_the_questions_it_has_open_here() {
+        let (m, dir, _captain) = limited_captain("remote-cancel-asks", TastePatch { parallel: Some(2), ..TastePatch::default() });
+        let project = dir.join("app");
+        for args in [&["init", "-q"][..], &["remote", "add", "origin", "https://github.com/acme/app.git"]] {
+            assert!(std::process::Command::new("git").args(args).current_dir(&project).status().unwrap().success());
+        }
+        m.set_hub_id("m-mini".into(), "mac-mini".into());
+        let origin = crate::delegate::Origin { machine: "m-book".into(), machine_name: "MacBook".into(), tab: "tab-1".into(), task: "t1".into(), access: crate::delegate::Access::Auto, delegator: Default::default(), limits: Default::default() };
+        let request = crate::delegate::parse_request(&work(Some("claude-sonnet-5-5"), None)).unwrap();
+        m.call(Call::Delegate { origin, request: Box::new(request), repo: Some("https://github.com/acme/app.git".into()), token: None }).unwrap();
+        let task = m.delegates.for_origin(&crate::delegate::Origin::key("m-book", "tab-1"), "t1").unwrap();
+        let id = m.project_tool("", branch_questions(Some(&task))).unwrap();
+        assert!(m.questions.lock().unwrap().waiting_tasks().any(|t| t == task), "the worker here waits on the user");
+
+        let body = m.call(Call::RemoteTask { origin_machine: "m-book".into(), tab: "tab-1".into(), task: "t1".into(), cancel: Some("no longer needed".into()) }).unwrap();
+        assert_eq!(body["workState"], "cancelled");
+        let questions = m.questions.lock().unwrap();
+        assert!(questions.waiting_tasks().next().is_none(), "nothing waits on the user any more");
+        assert_eq!(questions.get(&id).map(|asked| asked.outcome.clone()), Some(Some(crate::questions::Outcome::Cancelled)));
+        drop(questions);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
