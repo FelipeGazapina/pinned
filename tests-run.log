@@ -120,3 +120,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:06:16Z #53 an_unknown_event_keeps_the_machine_socket_and_a_thread_reaches_only_its_watcher ok / avail=15074M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:06:17Z #54 a_watched_tab_is_nudged_and_again_after_the_machine_restarts START / avail=15074M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:06:22Z #54 a_watched_tab_is_nudged_and_again_after_the_machine_restarts ok / avail=15074M /workspace avail=19374M node_stat=Ssl node_tcp=1
+2026-11-13T04:06:25Z #55 a_dropped_machine_link_is_nudged_again_once_the_client_names_its_tabs START / avail=15073M /workspace avail=19374M node_stat=Ssl
