@@ -326,23 +326,43 @@ fn email(raw: &str) -> Result<String, Error> {
 
 /// The argon2 hashes: at most `running` at once, and at most `queue` more waiting, each for at most `wait`.
 struct Hashing {
-    running: tokio::sync::Semaphore,
+    running: Arc<tokio::sync::Semaphore>,
     /// The running ones and the waiting ones.
-    admitted: tokio::sync::Semaphore,
+    admitted: Arc<tokio::sync::Semaphore>,
     wait: Duration,
+}
+
+/// A turn to hash. It ends when it drops.
+struct Turn {
+    _admitted: tokio::sync::OwnedSemaphorePermit,
+    _running: tokio::sync::OwnedSemaphorePermit,
 }
 
 impl Hashing {
     fn new(running: usize, queue: usize, wait: Duration) -> Hashing {
-        Hashing { running: tokio::sync::Semaphore::new(running), admitted: tokio::sync::Semaphore::new(running + queue), wait }
+        Hashing { running: Arc::new(tokio::sync::Semaphore::new(running)), admitted: Arc::new(tokio::sync::Semaphore::new(running + queue)), wait }
     }
 
-    /// A turn to hash, held until the permits drop. None at once when the queue is full, or once the
-    /// wait runs out: the caller answers busy and hashes nothing.
-    async fn turn(&self) -> Option<(tokio::sync::SemaphorePermit<'_>, tokio::sync::SemaphorePermit<'_>)> {
-        let admitted = self.admitted.try_acquire().ok()?;
-        let running = tokio::time::timeout(self.wait, self.running.acquire()).await.ok()?.ok()?;
-        Some((admitted, running))
+    /// A turn to hash, held until it drops. None at once when the queue is full, or once the wait runs
+    /// out: the caller answers busy and hashes nothing. A caller that is dropped while it waits gives
+    /// its place back.
+    async fn turn(&self) -> Option<Turn> {
+        let admitted = self.admitted.clone().try_acquire_owned().ok()?;
+        let running = tokio::time::timeout(self.wait, self.running.clone().acquire_owned()).await.ok()?.ok()?;
+        Some(Turn { _admitted: admitted, _running: running })
+    }
+
+    /// Runs `work` on a blocking thread behind a turn. `busy` when the queue is full or the wait runs out.
+    /// The turn moves into the thread, so it ends when the work does: a request that is dropped while
+    /// its hash runs does not stop the hash, and must not free its place either.
+    async fn blocking<T: Send + 'static>(&self, work: impl FnOnce() -> T + Send + 'static) -> Result<T, Error> {
+        let turn = self.turn().await.ok_or_else(busy)?;
+        tokio::task::spawn_blocking(move || {
+            let _turn = turn;
+            work()
+        })
+        .await
+        .map_err(|e| internal(e.to_string()))
     }
 }
 
@@ -351,15 +371,15 @@ fn busy() -> Error {
 }
 
 async fn hash_password(server: &Server, password: String) -> Result<String, Error> {
-    let _turn = server.hashing.turn().await.ok_or_else(busy)?;
-    tokio::task::spawn_blocking(move || {
-        use argon2::password_hash::{PasswordHasher, SaltString};
-        use rand_core::OsRng;
-        argon2::Argon2::default().hash_password(password.as_bytes(), &SaltString::generate(&mut OsRng)).map(|h| h.to_string())
-    })
-    .await
-    .map_err(|e| internal(e.to_string()))?
-    .map_err(|e| internal(e.to_string()))
+    server
+        .hashing
+        .blocking(move || {
+            use argon2::password_hash::{PasswordHasher, SaltString};
+            use rand_core::OsRng;
+            argon2::Argon2::default().hash_password(password.as_bytes(), &SaltString::generate(&mut OsRng)).map(|h| h.to_string())
+        })
+        .await?
+        .map_err(|e| internal(e.to_string()))
 }
 
 /// Whether `password` is the one `hash` holds. With no hash, as for an email no account has, it checks
@@ -367,16 +387,16 @@ async fn hash_password(server: &Server, password: String) -> Result<String, Erro
 /// account exists.
 /// A full queue answers `busy` and runs no hash.
 async fn password_matches(server: &Server, password: String, hash: Option<String>) -> Result<bool, Error> {
-    let _turn = server.hashing.turn().await.ok_or_else(busy)?;
-    tokio::task::spawn_blocking(move || {
-        use argon2::password_hash::{PasswordHash, PasswordVerifier};
-        let known = hash.is_some();
-        let hash = hash.unwrap_or_else(|| no_account_hash().to_owned());
-        let matches = PasswordHash::new(&hash).is_ok_and(|h| argon2::Argon2::default().verify_password(password.as_bytes(), &h).is_ok());
-        known && matches
-    })
-    .await
-    .map_err(|e| internal(e.to_string()))
+    server
+        .hashing
+        .blocking(move || {
+            use argon2::password_hash::{PasswordHash, PasswordVerifier};
+            let known = hash.is_some();
+            let hash = hash.unwrap_or_else(|| no_account_hash().to_owned());
+            let matches = PasswordHash::new(&hash).is_ok_and(|h| argon2::Argon2::default().verify_password(password.as_bytes(), &h).is_ok());
+            known && matches
+        })
+        .await
 }
 
 /// An argon2 hash made as an account's is, of a random password nobody knows.
@@ -1486,6 +1506,83 @@ mod tests {
         assert!(answer.is_none() && waited >= Duration::from_millis(300) && waited < Duration::from_secs(2), "told busy after its wait, not {waited:?}");
         drop(holder);
         assert!(hashing.turn().await.is_some(), "once the holder lets go, requests hash again");
+    }
+
+    /// Starts work behind a turn that runs until the returned sender fires, then drops the request that
+    /// started it, as a client that leaves does. The work is still running when this returns.
+    async fn abandon_a_running_hash(hashing: &std::sync::Arc<super::Hashing>) -> std::sync::mpsc::Sender<()> {
+        use std::time::Duration;
+        let (started, running) = std::sync::mpsc::channel::<()>();
+        let (finish, finished) = std::sync::mpsc::channel::<()>();
+        let request = tokio::spawn({
+            let hashing = hashing.clone();
+            async move {
+                let _ = hashing
+                    .blocking(move || {
+                        started.send(()).unwrap();
+                        finished.recv().ok();
+                    })
+                    .await;
+            }
+        });
+        tokio::task::spawn_blocking(move || running.recv_timeout(Duration::from_secs(10))).await.unwrap().expect("the work started");
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled(), "the request was dropped while its work ran");
+        finish
+    }
+
+    #[tokio::test]
+    async fn a_hash_still_running_after_its_request_is_dropped_keeps_its_turn_until_it_ends() {
+        use std::time::{Duration, Instant};
+        let hashing = std::sync::Arc::new(super::Hashing::new(1, 1, Duration::from_millis(300)));
+        let finish = abandon_a_running_hash(&hashing).await;
+        let started = Instant::now();
+        let next = hashing.blocking(|| ()).await;
+        assert!(next.is_err() && started.elapsed() >= Duration::from_millis(300), "the next request waited out its turn behind the running hash, got {:?} after {:?}", next.is_ok(), started.elapsed());
+        finish.send(()).unwrap();
+        let mut free = false;
+        for _ in 0..5 {
+            free = free || hashing.blocking(|| ()).await.is_ok();
+        }
+        assert!(free, "once the work ends, requests hash again");
+    }
+
+    #[tokio::test]
+    async fn a_full_queue_stays_full_while_the_hash_of_a_dropped_request_runs() {
+        use std::time::{Duration, Instant};
+        let hashing = std::sync::Arc::new(super::Hashing::new(1, 0, Duration::from_secs(30)));
+        let finish = abandon_a_running_hash(&hashing).await;
+        let started = Instant::now();
+        let next = tokio::time::timeout(Duration::from_secs(3), hashing.blocking(|| ())).await.expect("answered before the hash ends");
+        assert!(next.is_err() && started.elapsed() < Duration::from_secs(1), "told busy at once while the hash runs, after {:?}", started.elapsed());
+        finish.send(()).unwrap();
+        let mut free = false;
+        for _ in 0..50 {
+            free = free || hashing.blocking(|| ()).await.is_ok();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(free, "once the work ends, requests hash again");
+    }
+
+    #[tokio::test]
+    async fn a_waiting_turn_whose_request_is_dropped_gives_its_admitted_slot_back() {
+        use std::time::Duration;
+        let hashing = std::sync::Arc::new(super::Hashing::new(1, 1, Duration::from_secs(30)));
+        let holder = hashing.turn().await.expect("a free turn");
+        let waiting = tokio::spawn({
+            let hashing = hashing.clone();
+            async move { hashing.blocking(|| ()).await.is_ok() }
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let full = tokio::time::timeout(Duration::from_secs(3), hashing.blocking(|| ())).await.expect("answered at once");
+        assert!(full.is_err(), "with the holder running and one waiting, the queue is full");
+        waiting.abort();
+        assert!(waiting.await.unwrap_err().is_cancelled());
+        // Its slot is free again: the next request is let in to wait, not told busy.
+        let admitted = tokio::time::timeout(Duration::from_millis(300), hashing.blocking(|| ())).await;
+        assert!(admitted.is_err(), "the next request is waiting for its turn, not refused");
+        drop(holder);
+        assert!(hashing.blocking(|| ()).await.is_ok(), "and gets it once the holder lets go");
     }
 
     #[test]
