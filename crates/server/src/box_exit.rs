@@ -53,13 +53,15 @@ pub fn reason() -> String {
 ///
 /// The file goes only if it still holds `machine_token`, this node's own. A re-boot of the box
 /// writes a new token there while this node still runs, and that file belongs to the node the
-/// re-boot starts: it stays, and one more line says so.
+/// re-boot starts: it stays, and one more line says so. A file that cannot be read stays too, with
+/// one more line; a node with no file has nothing to keep.
 pub fn leave(dir: &Path, machine_token: &str, quit: impl FnOnce(), mut log: impl FnMut(&str)) {
     log(&reason());
     quit();
     match Credentials::load(dir) {
         Some(creds) if creds.machine_token == machine_token => Credentials::remove(dir),
         Some(_) => log("pinned-server: account.json holds another machine token than this node's, so it stays for the node that wrote it"),
+        None if Credentials::path(dir).exists() => log("pinned-server: account.json could not be read, so it stays"),
         None => {}
     }
 }
@@ -158,12 +160,28 @@ mod tests {
     }
 
     #[test]
-    fn an_account_file_with_the_nodes_own_token_is_removed() {
+    fn an_account_file_that_cannot_be_read_stays_and_the_log_says_so_without_its_content() {
         let dir = tempfile::tempdir().unwrap();
-        paired(dir.path(), "fake-old-token");
+        let file = dir.path().join("account.json");
+        std::fs::write(&file, "{ not json, fake-token-0a1b2c").unwrap();
+        let (quit, lines) = (RefCell::new(0), RefCell::new(Vec::new()));
+        leave(dir.path(), "fake-old-token", || *quit.borrow_mut() += 1, |line| lines.borrow_mut().push(line.to_owned()));
+        assert_eq!(*quit.borrow(), 1, "the node still ends its sessions");
+        assert!(file.exists(), "an unreadable file is kept");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "{ not json, fake-token-0a1b2c", "and left as it was");
+        let lines = lines.into_inner();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert_eq!(lines[1], "pinned-server: account.json could not be read, so it stays");
+        for line in &lines {
+            assert!(!line.contains("fake-") && !line.contains(dir.path().to_str().unwrap()), "{line}");
+        }
+    }
+
+    #[test]
+    fn a_node_with_no_account_file_logs_only_why_it_left() {
+        let dir = tempfile::tempdir().unwrap();
         let lines = RefCell::new(Vec::new());
         leave(dir.path(), "fake-old-token", || {}, |line| lines.borrow_mut().push(line.to_owned()));
-        assert!(!dir.path().join("account.json").exists());
         assert_eq!(lines.borrow().len(), 1, "{:?}", lines.borrow());
     }
 

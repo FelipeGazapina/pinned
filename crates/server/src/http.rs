@@ -983,6 +983,11 @@ fn client_frame(server: &Arc<Server>, account: &Arc<Account>, client: u64, text:
                 let refused = "only the hub asks a machine for a Claude token: use Use for boxes on the Upstash Box card".to_owned();
                 account.to_client(client, &ToClient::Reply(Reply::new(id, Err(refused))));
             }
+            // The machine runs what these carry, which the unlock check above never saw.
+            call if call.only_the_hub_sends() => {
+                let refused = "only the hub sends this call to a machine".to_owned();
+                account.to_client(client, &ToClient::Reply(Reply::new(id, Err(refused))));
+            }
             Call::WatchThreads { tabs } => {
                 account.watch_threads(client, &machine, tabs);
                 account.to_client(client, &ToClient::Reply(Reply::new(id, Ok(Value::Null))));

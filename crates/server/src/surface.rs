@@ -6,7 +6,7 @@ use crate::boxes::Opener;
 use crate::db::{Audit, Held};
 use crate::hub::{Account, Hub};
 use pinned_core::surface::{self, ActAnswer, Action, ActorRole, AgentAct, AuditOutcome, Class, Confirmation, Decided, Decision, Parsed, Side};
-use pinned_core::connectors::{Placement, RunsOn};
+use pinned_core::connectors::{Connector, Placement, RunsOn};
 use pinned_core::schedule::{self, Actor};
 use pinned_core::wire::{Call, HubCall, RunStarted, ToClient};
 use serde_json::Value;
@@ -35,7 +35,8 @@ struct Caller {
     role: ActorRole,
     session: Option<String>,
     title: String,
-    /// Its session skips its own permission prompts.
+    /// Its session skips its own permission prompts, read as the node reads it for a child: a
+    /// session in plan mode, or in a mode its node does not know yet, does not.
     bypass: bool,
 }
 
@@ -53,7 +54,7 @@ impl Caller {
             known: view.is_some(),
             role: view.as_ref().map_or(ActorRole::Session, ActorRole::of),
             session: view.as_ref().and_then(|v| v.session.clone()),
-            bypass: view.as_ref().is_some_and(|v| v.bypass),
+            bypass: view.as_ref().is_some_and(|v| v.bypass && !v.read_only),
             title: view.and_then(|v| v.title.or(v.prompt_title)).unwrap_or_default(),
         })
     }
@@ -122,7 +123,7 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
             return Err(refusal);
         }
     };
-    if admitted.action.class == Class::Confirm || why.is_some() {
+    if surface::held_for_owner(admitted.action) || why.is_some() {
         let asked = Confirmation {
             id: String::new(),
             at: 0,
@@ -211,7 +212,20 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
         return Err(format!("{name} would run a session that skips its permission prompts, and your own session asks for them"));
     }
     if let Parsed::Hub(HubCall::SaveConnector { connector }) = &call {
-        if hub.connectors(account).await?.widens_convex(connector) {
+        let connectors = hub.connectors(account).await?;
+        // A save with no graph keeps the stored one, which then runs on the trigger this save sets.
+        if let Some(graph) = connectors.kept_graph(connector).filter(|_| !caller.bypass) {
+            let kept = Parsed::Hub(HubCall::SaveConnector { connector: Connector { graph: Some(graph), ..connector.clone() } });
+            if surface::skips_prompts(&kept) {
+                return Err(format!("{name} would keep this workflow's session that skips its permission prompts, and your own session asks for them"));
+            }
+        }
+        // A called workflow opens its session from its own stored setup, on this save's trigger.
+        let skips = |target: &Connector| surface::skips_prompts(&Parsed::Hub(HubCall::SaveConnector { connector: target.clone() }));
+        if !caller.bypass && connectors.calls_any(connector, skips) {
+            return Err(format!("{name} would call a workflow whose session skips its permission prompts, or one pinned cannot read, and your own session asks for them"));
+        }
+        if connectors.widens_convex(connector) {
             return Err(format!("{name} would let this workflow read more of Convex than it does now. Only the user sets what a workflow reads from Convex, on its Read Convex data step in the app."));
         }
     }

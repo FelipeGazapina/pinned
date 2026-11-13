@@ -607,6 +607,7 @@ impl Tab {
             headless: self.headless && self.session.is_none(),
             stopped: self.stopped.clone().filter(|_| !self.live()),
             questions: None,
+            read_only: self.child_access() == crate::delegate::Access::ReadOnly,
         }
     }
 
@@ -2674,8 +2675,7 @@ impl Machine {
         })??;
         if mode_unknown || cleared {
             self.save_sessions();
-        }
-        if cleared {
+            // The hub reads the tab's `read_only` from this frame, so the mode change reaches it now.
             self.emit_tabs();
         }
         if submitted {
@@ -9984,6 +9984,33 @@ echo '{"type":"result","result":"ok"}'
         assert_eq!(argv_of(&m, &tab, &argv), plan);
         m.record_event(AgentEvent { permission_mode: Some("default".into()), ..done_event(&tab) });
         assert_eq!(argv_of(&m, &tab, &argv), full);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn shift_tab_sends_a_tabs_frame_that_reads_read_only_at_once() {
+        let root = temp("shift-tab-frame");
+        let claude = claude_recording_argv(&root);
+        // Each frame with the thread that emitted it. `emit` calls the callback on the emitting
+        // thread, so a frame from this thread while `write_input` runs is one `write_input` sent,
+        // never a frame the session's own threads send around it.
+        let frames = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(std::thread::ThreadId, Vec<TabView>)>::new()));
+        let seen = frames.clone();
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, None, Some(root.clone()), move |event| {
+            if let Event::Tabs { tabs } = event {
+                seen.lock().unwrap().push((std::thread::current().id(), tabs));
+            }
+        });
+        let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], true, None);
+        m.record_event(AgentEvent { permission_mode: Some("default".into()), ..done_event(&tab) });
+        let read_only = |frame: &Vec<TabView>| frame.iter().find(|view| view.id == tab).map(|view| view.read_only);
+        let here = std::thread::current().id();
+        let last_here = |from: usize| frames.lock().unwrap()[from..].iter().filter(|(thread, _)| *thread == here).last().and_then(|(_, frame)| read_only(frame));
+        assert_eq!(last_here(0), Some(false), "a session that skips prompts reads as such");
+        let sent = frames.lock().unwrap().len();
+        m.write_input(&tab, b"\x1b[Z").unwrap();
+        assert_eq!(last_here(sent), Some(true), "Shift+Tab alone sends, from write_input itself, a tabs frame that reads read-only");
         let _ = std::fs::remove_dir_all(root);
     }
 

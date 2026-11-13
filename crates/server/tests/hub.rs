@@ -2870,6 +2870,7 @@ fn a_box_run_boots_its_own_node_and_the_box_goes_when_its_tab_closes() {
     project.truncate(40 - tail.len());
     assert_eq!(created[0].name, format!("{}{tail}", project.trim_matches('-')));
     assert_eq!((created[0].size, created[0].init_command.as_str()), (BoxSize::Small, "sh /workspace/home/.pinned/start.sh || true"));
+    assert!(!created[0].keep_alive, "a temporary box is a standard box: Upstash pauses it when idle and bills its CPU time");
     ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
     let machine = ana.box_machine();
     assert_eq!(hub.boxes.file(&format!("{BOX_DIR}/box.env")), Some(format!("CLAUDE_CODE_OAUTH_TOKEN='{CLAUDE_TOKEN}'\nPINNED_BOX=1\n")), "no GitHub token without GitHub");
@@ -3267,6 +3268,7 @@ fn a_fixed_workflow_permission_reuses_one_box_across_two_runs() {
     ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
     assert_eq!(open(ana.box_run(issue("uuid-2"))), Ok(()));
     assert_eq!(created(&hub), 1, "the second run uses the box the first run opened");
+    assert!(hub.boxes.state.lock().unwrap().created[0].keep_alive, "the fixed box keeps running while idle, so the runs after the first still find its node");
     // The reaper never ends the fixed box while Upstash lists it, so its node must not leave on refusals.
     let env = hub.boxes.file(&format!("{BOX_DIR}/box.env")).expect("the boot wrote no box.env");
     assert!(!env.contains("PINNED_BOX"), "{env}");
@@ -3361,6 +3363,186 @@ fn a_fixed_box_stays_after_its_session_ends_so_the_next_run_reuses_it() {
     }
     assert_eq!(open(ana.box_run(issue("uuid-2"))), Ok(()));
     assert_eq!(created(&hub), 1);
+}
+
+/// The account's workflow store as Postgres holds it, runs included.
+fn account_store(hub: &TestHub, account: uuid::Uuid) -> Value {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let (client, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        let row = client.query_one("select store::text from accounts where id::text = $1", &[&account.to_string()]).await.unwrap();
+        serde_json::from_str(row.get::<_, &str>(0)).unwrap()
+    })
+}
+
+/// Gives the account a workflow run of issue `held` that waits on the box's session, with that issue
+/// handled, as a hub restarted over them reads them, and reconnects `ana`. The run holds the box.
+/// Returns the box machine.
+fn hold_box(hub: &mut TestHub, ana: &mut BoxAccount, held: &str) -> String {
+    let machine = ana.box_machine();
+    let tab = hub.boxes.with_node(|node| node.machine.tabs()[0].id.clone());
+    let run = json!({
+        "id": "run-held", "connector": ana.connector, "subject": issue(held), "status": "waiting", "session_owner": ana.connector,
+        "session": { "state": "live", "machine": machine, "tab": tab, "claude": null, "since": 1, "saw_working": false, "await_working": false },
+        "log": [], "context": {}, "stack": [], "pending": null, "ready": null, "claimed": true,
+    });
+    admin_on(
+        &hub.database,
+        &format!("update accounts set store = jsonb_set(jsonb_set(store, '{{runs}}', '{}'::jsonb), '{{connectors,0,handled}}', '[\"{held}\"]'::jsonb)", json!([run])),
+    );
+    hub.restart();
+    ana.client = Client::connect(&hub.url, &ana.token);
+    machine
+}
+
+/// The run `hold_box` gave the account failed with `why`, the workflow's check says so, its issue
+/// is free for the next trigger when `freed` (handled when not), and no box was created after the
+/// first `boxes`.
+fn assert_run_failed(hub: &TestHub, ana: &mut BoxAccount, why: &str, boxes: usize, freed: bool) {
+    wait_for("the run to fail", || account_store(hub, ana.id)["runs"][0]["status"]["failed"]["why"].is_string());
+    // Read, not waited for: a check that ran before the client connected pushed its frame to no one.
+    let says = |ana: &mut BoxAccount| ana.client.hub(json!({ "cmd": "get_settings" })).unwrap()["checked"]["error"].as_str().is_some_and(|e| e.contains(why));
+    let start = Instant::now();
+    while !says(ana) {
+        assert!(start.elapsed() < WAIT, "timed out waiting for the check that says why");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let store = account_store(hub, ana.id);
+    assert_eq!(store["runs"][0]["status"]["failed"]["why"], json!(why), "{store}");
+    if freed {
+        assert_eq!(store["connectors"][0]["handled"], json!([]), "its issue is no longer handled");
+        let marks = store["box_released_at"][ana.connector.as_str()].as_object().unwrap_or_else(|| panic!("{store}"));
+        assert_eq!(marks.keys().collect::<Vec<_>>(), [store["runs"][0]["subject"]["issue"].as_str().unwrap()], "and it spent its one release");
+        let at = marks.values().next().unwrap().as_u64().unwrap();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        assert!(now.saturating_sub(at) < 60 * 60 * 1000, "the mark keeps the time of the release: {store}");
+    } else {
+        assert_eq!(store["connectors"][0]["handled"], json!([store["runs"][0]["subject"]["issue"]]), "its issue stays handled");
+        assert!(store.get("box_released_at").is_none(), "{store}");
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(created(hub), boxes, "nothing opened another box for the run");
+    assert_eq!(account_store(hub, ana.id)["runs"].as_array().map(Vec::len), Some(1), "and no other run started");
+}
+
+const STOPPED: &str = "; the run stopped, and its next trigger may start it once more";
+const KEPT: &str = "; the run stopped, and it starts again only when you run it";
+
+#[test]
+fn a_run_whose_box_goes_offline_past_the_wait_fails_with_why_and_frees_its_issue() {
+    let mut hub = TestHub::start_with_boxes("box_run_offline", Signup::Open, Policy { offline: Duration::from_secs(3), ..fast() });
+    let mut ana = BoxAccount::new(&hub);
+    assert_eq!(hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-1")))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    let machine = hold_box(&mut hub, &mut ana, "uuid-1");
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    wait_for("the box's tabs frame", || ana.tabs_held(&hub, &machine).is_some_and(|held| held > 0));
+    drop_box_node(&hub.boxes, "box_1");
+    wait_for("the box to go", || hub.boxes.live().is_empty());
+    assert_run_failed(&hub, &mut ana, &format!("Upstash Box: its box went offline and did not come back within 3 s{STOPPED}"), 1, true);
+}
+
+#[test]
+fn a_run_whose_box_reaches_its_max_life_fails_with_why_and_keeps_its_issue_handled() {
+    let mut hub = TestHub::start_with_boxes("box_run_expired", Signup::Open, Policy { offline: Duration::from_secs(3600), ..fast() });
+    let mut ana = BoxAccount::new(&hub);
+    assert_eq!(hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-1")))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    hub.policy.max_life = Duration::from_millis(1);
+    hold_box(&mut hub, &mut ana, "uuid-1");
+    wait_for("the box to go", || hub.boxes.live().is_empty());
+    assert_run_failed(&hub, &mut ana, &format!("Upstash Box: the box ended before its task did: it ran out of time or budget{KEPT}"), 1, false);
+}
+
+#[test]
+fn a_run_whose_box_machine_is_removed_fails_with_why_and_keeps_its_issue_handled() {
+    let mut hub = TestHub::start_with_boxes("box_run_removed", Signup::Open, Policy { offline: Duration::from_secs(3600), ..fast() });
+    let mut ana = BoxAccount::new(&hub);
+    assert_eq!(hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-1")))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    let machine = hold_box(&mut hub, &mut ana, "uuid-1");
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    ana.client.hub(json!({ "cmd": "remove_machine", "id": machine })).unwrap();
+    assert_eq!(hub.boxes.live(), Vec::<String>::new());
+    assert_run_failed(&hub, &mut ana, &format!("Upstash Box: the box ended before its task did: someone removed its machine{KEPT}"), 1, false);
+}
+
+#[test]
+fn a_run_on_the_fixed_box_fails_when_upstash_stops_listing_the_box() {
+    let mut hub = TestHub::start_with_boxes("box_run_fixed_gone", Signup::Open, Policy { offline: Duration::from_secs(3600), ..fast() });
+    let mut ana = BoxAccount::new(&hub);
+    set_workflow(&mut ana.client, "fixed");
+    assert_eq!(hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-1")))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    // A later run on the one reused box: the row still names the first run's issue.
+    let machine = hold_box(&mut hub, &mut ana, "uuid-2");
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    wait_for("the box's tabs frame", || ana.tabs_held(&hub, &machine).is_some_and(|held| held > 0));
+    let gone = hub.boxes.state.lock().unwrap().boxes.remove("box_1");
+    drop(gone);
+    wait_for("the row to go", || ana.rows(&hub) == 0);
+    assert_run_failed(&hub, &mut ana, &format!("Upstash Box: the box ended before its task did: it was deleted outside pinned{STOPPED}"), 1, true);
+}
+
+/// One row whose runs the hub cannot fail (their save is refused) stays `Ending` and is retried,
+/// and the pass still ends the account's other rows: the next one is past its budget and goes at
+/// once, not when the first row can finish.
+#[test]
+fn a_box_row_that_cannot_fail_its_runs_does_not_stop_the_pass_for_the_next_row() {
+    let mut hub = TestHub::start_with_boxes("box_reap_continues", Signup::Open, Policy { offline: Duration::from_secs(3600), ..fast() });
+    let mut ana = BoxAccount::new(&hub);
+    assert_eq!(hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-1")))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    // The first box (the older row) holds a run that is waiting on it.
+    let machine = hold_box(&mut hub, &mut ana, "uuid-1");
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    assert_eq!(hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-2")))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true), ("Box · ENG-7 Fix login", true)]);
+    let ids: Vec<String> = hub.runtime.block_on(hub.hub().db.boxes(ana.id)).unwrap().into_iter().map(|row| row.ok().unwrap().id).collect();
+    assert_eq!(ids.len(), 2);
+
+    // Removing the first box's machine ends its row, but its run cannot be failed: the row stays
+    // `Ending`, and so does its box.
+    hub.hub().refuse_run_saves.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(ana.client.hub(json!({ "cmd": "remove_machine", "id": machine })).is_err(), "the run cannot be failed");
+    assert_eq!(ana.rows(&hub), 2);
+
+    // The second box is past its budget. The first row is retried first in every pass and still fails.
+    hub.runtime.block_on(hub.hub().db.set_box_budget(ana.id, &ids[1], 0.000_000_1)).unwrap();
+    wait_for("the second row, past its budget, to end in a pass the first row cannot finish", || ana.rows(&hub) == 1);
+    assert_eq!(hub.boxes.live(), ["box_1"], "the first box stays while its run cannot be failed");
+    assert!(account_store(&hub, ana.id)["runs"][0]["status"].get("failed").is_none(), "its run is not failed yet");
+
+    // Once the runs save works, the retry fails the run and ends the row.
+    hub.hub().refuse_run_saves.store(false, std::sync::atomic::Ordering::SeqCst);
+    wait_for("the first row to end", || ana.rows(&hub) == 0);
+    wait_for("the run to fail", || account_store(&hub, ana.id)["runs"][0]["status"]["failed"]["why"].is_string());
+    assert_eq!(hub.boxes.live(), Vec::<String>::new());
+}
+
+/// A workflow kind set to a fixed box is exempt from every box timer but vanishing, so an agent
+/// never sets it: its act waits for the owner, changes nothing meanwhile, and once the owner
+/// approves, the kind is fixed with no row (the hub names one at the first run).
+#[test]
+fn an_agents_set_box_access_to_fixed_waits_for_its_owner_and_changes_nothing_until_then() {
+    let hub = TestHub::start_with_boxes("agent_fixed_box", Signup::Open, fast());
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &token, "ana@acme.dev", "ana-mac");
+    ana.client.hub(json!({ "cmd": "connect_upstash", "key": BOX_KEY, "claude_token": CLAUDE_TOKEN })).unwrap();
+    let workflow = |ana: &mut Agent| ana.client.hub(json!({ "cmd": "get_settings" })).unwrap()["boxes"]["workflow"].clone();
+    // Absent on the wire while it is the default: workflows fresh.
+    assert_eq!(workflow(&mut ana), Value::Null);
+
+    let held = act(&ana.dir, &ana.tab, "set_box_access", json!({ "access": { "workflow": { "mode": "fixed" } } })).unwrap();
+    assert_eq!(held["outcome"], "pending", "{held}");
+    assert_eq!(waiting_actions(&mut ana.client), ["set_box_access"]);
+    assert_eq!(workflow(&mut ana), Value::Null, "nothing changed while it waits");
+
+    ana.client.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    assert_eq!(approve(&mut ana.client, &held["id"], json!({})).unwrap()["outcome"], "done");
+    assert_eq!(workflow(&mut ana), json!({ "mode": "fixed" }), "fixed, naming no row");
 }
 
 #[test]
@@ -5854,6 +6036,7 @@ fn a_box_worker_signs_in_with_the_named_token_nests_under_its_caller_and_goes_wh
     wait_for("the worker thread running on the box", || box_tabs(&hub.boxes).iter().any(|t| t.role == Some(Role::Worker) && t.running));
     assert_eq!(hub.boxes.file(&format!("{BOX_DIR}/box.env")), Some("CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-bloomtoken'\nPINNED_BOX=1\n".into()), "bloom's token, and no GitHub token without GitHub");
     assert_eq!(hub.boxes.state.lock().unwrap().created[0].size, BoxSize::Small);
+    assert!(!hub.boxes.state.lock().unwrap().created[0].keep_alive, "a worker's box is temporary: it is not kept running while idle");
     let child = box_tabs(&hub.boxes).into_iter().find(|t| t.role == Some(Role::Worker)).unwrap();
     assert_eq!(
         (child.spawned_by.as_deref(), child.spawned_on.as_deref(), child.title.as_deref(), child.running),
@@ -6349,9 +6532,33 @@ fn a_task_on_a_box_is_billed_the_box_time_since_the_previous_task_on_that_box() 
     let task = |id: &str| stats["slowest"].as_array().unwrap().iter().find(|t| t["id"] == id).unwrap().clone();
     assert_eq!(minutes(&stats["totals"]["box_ms"]), 30.0, "both tasks together are billed the box's whole 30 minutes: {stats}");
     let usd = stats["totals"]["box_usd"].as_f64().unwrap();
-    assert!((usd - 0.5 * pinned_core::wire::BOX_USD_PER_HOUR).abs() < 0.01, "{usd}");
+    let rate = pinned_core::wire::box_usd_per_hour(pinned_core::connectors::BoxSize::Medium);
+    assert_eq!(rate, 0.20, "the box above is Medium");
+    assert!((usd - 0.5 * rate).abs() < 0.01, "{usd}");
     let a_cost = task("task-a")["cost_usd"].as_f64().unwrap();
-    assert!((a_cost - (0.2 + 10.0 / 60.0 * pinned_core::wire::BOX_USD_PER_HOUR)).abs() < 0.01, "task-a: its 10 box minutes plus its agent cost, sent twice and billed once: {a_cost}");
+    assert!((a_cost - (0.2 + 10.0 / 60.0 * rate)).abs() < 0.01, "task-a: its 10 box minutes plus its agent cost, sent twice and billed once: {a_cost}");
+}
+
+#[test]
+fn a_box_whose_size_is_unreadable_keeps_its_task_records_with_no_box_time() {
+    let hub = TestHub::start("delegation_box_size");
+    let url = hub.url.clone();
+    let (token, ana_account, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (machine, machine_token) = account::register_machine(&url, &token, "Box · site", "linux").unwrap();
+    admin_on(&hub.database, &format!(
+        "insert into boxes (id, account, machine, upstash, connector, subject, spec, size, phase, created_at) values ('anas-box', '{ana_account}', '{}', 'box_ana', 'interactive', '{{\"issue\":\"b1\"}}', '{{\"folder\":\"/w\",\"args\":[]}}', 'enormous', 'running', now() - interval '30 minutes')",
+        machine.id,
+    ));
+    let raw = RawMachine::start(&url, &machine_token, |_| RawReply::Ok(Value::Null));
+    ana.wait_machines(&[("Box · site", true)]);
+    let now = now_ms();
+    let records = [task_record("task-a", "claude-sonnet-5-5", "done", 5, Some(0.2), now - 60_000), task_record("task-b", "claude-sonnet-5-5", "done", 15, Some(0.4), now)];
+    assert_eq!(raw.ask(json!({ "cmd": "record_tasks", "records": records })), Ok(Value::Null), "the batch is kept");
+
+    let stats = ana.hub(json!({ "cmd": "delegation_stats", "days": 1 })).unwrap();
+    let ids: Vec<&str> = stats["slowest"].as_array().unwrap().iter().map(|t| t["id"].as_str().unwrap()).collect();
+    assert_eq!((ids.contains(&"task-a"), ids.contains(&"task-b")), (true, true), "{stats}");
+    assert_eq!(stats["totals"]["box_ms"].as_f64().unwrap_or(0.0), 0.0, "no box time is billed: {stats}");
 }
 
 #[test]
@@ -6390,7 +6597,7 @@ fn overlapping_tasks_on_one_box_each_pay_for_their_own_span_however_their_record
     let stats = ana.hub(json!({ "cmd": "delegation_stats", "days": 1 })).unwrap();
     let box_minutes = |id: &str| {
         let task = stats["slowest"].as_array().unwrap().iter().find(|t| t["id"] == id).unwrap_or_else(|| panic!("{id} in {stats}"));
-        (task["cost_usd"].as_f64().unwrap() / pinned_core::wire::BOX_USD_PER_HOUR * 60.0).round()
+        (task["cost_usd"].as_f64().unwrap() / pinned_core::wire::box_usd_per_hour(pinned_core::connectors::BoxSize::Medium) * 60.0).round()
     };
     assert_eq!(box_minutes("task-b"), 40.0, "task-b pays from the box's start to its own end");
     assert_eq!(box_minutes("task-a"), 20.0, "task-a pays only the span after task-b ended");
@@ -6465,6 +6672,367 @@ fn an_agent_cannot_add_or_widen_a_workflows_convex_step() {
     let widened = ana.client.hub(as_call(workflow("Plain", Some(&plain), Some(json!({ "connection": "quick-lemur-789" }))))).unwrap();
     assert_eq!(widened["id"], plain.as_str(), "the owner's own save sets the step");
     assert_eq!(step_of(&mut ana.client, &plain), ("Plain".to_owned(), Some(Value::Null)));
+}
+
+#[test]
+fn an_agents_workflow_step_whose_permission_the_runner_would_read_as_bypass_is_refused_like_bypass() {
+    let hub = TestHub::start("odd_permission");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &token, "ana@acme.dev", "odd-permission-mac");
+    let folder = ana.dir.join("site").canonicalize().unwrap().display().to_string();
+    let workflow = |permission: &str| {
+        json!({ "connector": {
+            "name": "Fix", "enabled": false, "trigger": { "kind": "linear-label", "label": "agent" },
+            "folder": folder, "model": "claude-sonnet-5-5", "effort": "medium", "permissionMode": "acceptEdits", "worktree": false, "instructions": "Fix it.",
+            "graph": {
+                "nodes": [
+                    { "id": "t", "name": "Trigger", "position": [0, 0], "type": "trigger", "watch": { "kind": "linear-label", "label": "agent" } },
+                    { "id": "s", "name": "Fix", "position": [1, 0], "type": "session", "permission": permission },
+                ],
+                "edges": [{ "from": "t", "port": "out", "to": "s" }],
+            },
+        } })
+    };
+    let refused = Err("save_connector would run a session that skips its permission prompts, and your own session asks for them".to_owned());
+    assert_eq!(act(&ana.dir, &ana.tab, "save_connector", workflow("bypassPermissions")), refused, "the exact name");
+    assert_eq!(act(&ana.dir, &ana.tab, "save_connector", workflow(" bypassPermissions ")), refused, "a spelling the runner used to trim to it");
+    let count = |client: &mut Client| client.hub(json!({ "cmd": "get_settings" })).unwrap()["connectors"].as_array().map_or(0, Vec::len);
+    assert_eq!(count(&mut ana.client), 0, "neither was saved");
+
+    let mut own = workflow(" bypassPermissions ");
+    own["cmd"] = json!("save_connector");
+    let error = ana.client.hub(own).unwrap_err();
+    assert!(error.starts_with("\"Fix\"") && error.contains("permission"), "the owner's own save names the step and the field: {error}");
+    assert_eq!(count(&mut ana.client), 0);
+
+    // A session that skips its own prompts passes the agent check, and the save itself refuses the step.
+    let wide = ana.node.machine.open_tab(Some(folder.clone()), true).unwrap();
+    ana.client.wait("the bypass tab at the hub", |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == wide.as_str() && t["bypass"] == true));
+    let failed = act(&ana.dir, &wide, "save_connector", workflow(" bypassPermissions ")).unwrap_err();
+    assert!(failed.starts_with("\"Fix\"") && failed.contains("permission"), "{failed}");
+    assert_eq!(count(&mut ana.client), 0);
+    let trail = ana.client.hub(json!({ "cmd": "agent_audit" })).unwrap();
+    let rows: Vec<(&str, &str, &str, &str)> = trail.as_array().unwrap().iter().map(|r| (r["tab"].as_str().unwrap(), r["action"].as_str().unwrap(), r["outcome"].as_str().unwrap(), r["detail"].as_str().unwrap())).collect();
+    let refused = refused.unwrap_err();
+    assert_eq!(
+        rows,
+        [(wide.as_str(), "save_connector", "failed", failed.as_str()), (ana.tab.as_str(), "save_connector", "refused", refused.as_str()), (ana.tab.as_str(), "save_connector", "refused", refused.as_str())],
+        "both refusals of the session that asks for prompts, and the failed save of the one that skips them, are on the trail"
+    );
+}
+
+#[test]
+fn an_agents_save_without_a_graph_cannot_set_the_trigger_of_a_stored_session_that_skips_prompts() {
+    let hub = TestHub::start("kept_graph");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "owner@example.com", "correct horse").unwrap();
+    let mut owner = agent_of(&url, &token, "owner@example.com", "kept-graph-mac");
+    let folder = owner.dir.join("site").canonicalize().unwrap().display().to_string();
+    let workflow = |id: Option<&str>, label: &str, enabled: bool, permission: Option<&str>| {
+        let mut connector = json!({
+            "name": "Fix", "enabled": enabled, "trigger": { "kind": "linear-label", "label": label },
+            "folder": folder, "model": "claude-sonnet-5-5", "effort": "medium", "permissionMode": "acceptEdits", "worktree": false, "instructions": "Fix it.",
+        });
+        if let Some(permission) = permission {
+            connector["graph"] = json!({
+                "nodes": [
+                    { "id": "t", "name": "Trigger", "position": [0, 0], "type": "trigger", "watch": { "kind": "linear-label", "label": label } },
+                    { "id": "s", "name": "Fix", "position": [1, 0], "type": "session", "permission": permission },
+                ],
+                "edges": [{ "from": "t", "port": "out", "to": "s" }],
+            });
+        }
+        if let Some(id) = id {
+            connector["id"] = json!(id);
+        }
+        json!({ "connector": connector })
+    };
+    let mut own = workflow(None, "idle", false, Some("bypassPermissions"));
+    own["cmd"] = json!("save_connector");
+    let id = owner.client.hub(own).unwrap()["id"].as_str().unwrap().to_owned();
+    let stored = |client: &mut Client| {
+        let settings = client.hub(json!({ "cmd": "get_settings" })).unwrap();
+        let saved = settings["connectors"].as_array().unwrap().iter().find(|c| c["id"] == id.as_str()).cloned().unwrap();
+        (saved["enabled"].clone(), saved["trigger"]["label"].clone(), saved["graph"]["nodes"][1]["permission"].clone())
+    };
+
+    let refused = "save_connector would keep this workflow's session that skips its permission prompts, and your own session asks for them";
+    assert_eq!(act(&owner.dir, &owner.tab, "save_connector", workflow(Some(&id), "agent", true, None)), Err(refused.to_owned()), "a save with no graph keeps the stored one");
+    assert_eq!(stored(&mut owner.client), (json!(false), json!("idle"), json!("bypassPermissions")), "nothing is saved");
+    let trail = owner.client.hub(json!({ "cmd": "agent_audit" })).unwrap();
+    let rows: Vec<(&str, &str, &str)> = trail.as_array().unwrap().iter().map(|r| (r["action"].as_str().unwrap(), r["outcome"].as_str().unwrap(), r["detail"].as_str().unwrap())).collect();
+    assert_eq!(rows, [("save_connector", "refused", refused)]);
+
+    let asks = act(&owner.dir, &owner.tab, "save_connector", workflow(Some(&id), "agent", true, Some("acceptEdits"))).unwrap();
+    assert_eq!(asks["outcome"], "done", "a save whose own graph asks for prompts runs: {asks}");
+    assert_eq!(stored(&mut owner.client), (json!(true), json!("agent"), json!("acceptEdits")));
+}
+
+#[test]
+fn an_agents_save_that_calls_a_stored_workflow_whose_session_skips_prompts_is_refused_at_any_depth() {
+    let hub = TestHub::start("call_steps");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "owner@example.com", "correct horse").unwrap();
+    let mut owner = agent_of(&url, &token, "owner@example.com", "call-steps-mac");
+    let folder = owner.dir.join("site").canonicalize().unwrap().display().to_string();
+    // A workflow whose steps run in order after its trigger: `call:<id>` calls one, any other text
+    // is a session step with that permission.
+    let workflow = |id: Option<&str>, name: &str, trigger: Value, steps: &[&str]| {
+        let mut nodes = vec![json!({ "id": "t", "name": "Trigger", "position": [0, 0], "type": "trigger", "watch": trigger.clone() })];
+        let mut edges = Vec::new();
+        for (i, step) in steps.iter().enumerate() {
+            let node = match step.strip_prefix("call:") {
+                Some(target) => json!({ "id": format!("n{i}"), "name": format!("Call {i}"), "position": [i + 1, 0], "type": "call", "workflow": target }),
+                None => json!({ "id": format!("n{i}"), "name": format!("Step {i}"), "position": [i + 1, 0], "type": "session", "permission": step }),
+            };
+            nodes.push(node);
+            edges.push(json!({ "from": if i == 0 { "t".to_owned() } else { format!("n{}", i - 1) }, "port": "out", "to": format!("n{i}") }));
+        }
+        let mut connector = json!({
+            "name": name, "enabled": false, "trigger": trigger,
+            "folder": folder, "model": "claude-sonnet-5-5", "effort": "medium", "permissionMode": "acceptEdits", "worktree": false, "instructions": "Fix it.",
+            "graph": { "nodes": nodes, "edges": edges },
+        });
+        if let Some(id) = id {
+            connector["id"] = json!(id);
+        }
+        json!({ "connector": connector })
+    };
+    let called = || json!({ "kind": "called" });
+    let label = |label: &str| json!({ "kind": "linear-label", "label": label });
+    let mut own = |connector: Value| {
+        let mut call = connector;
+        call["cmd"] = json!("save_connector");
+        owner.client.hub(call).unwrap()["id"].as_str().unwrap().to_owned()
+    };
+    let skips = own(workflow(None, "Skips", called(), &["bypassPermissions"]));
+    let asks = own(workflow(None, "Asks", called(), &["acceptEdits"]));
+    let calls_skips = own(workflow(None, "Calls skips", called(), &[&format!("call:{skips}")]));
+    let calls_asks = own(workflow(None, "Calls asks", called(), &[&format!("call:{asks}")]));
+    let back = own(workflow(None, "Back", called(), &["acceptEdits"]));
+    let back_asks = own(workflow(None, "Back asks", called(), &["acceptEdits"]));
+    let to_back = own(workflow(None, "To back", called(), &[&format!("call:{back}")]));
+    let to_back_skips = own(workflow(None, "To back skips", called(), &[&format!("call:{back_asks}"), "bypassPermissions"]));
+    let names = |client: &mut Client| {
+        let settings = client.hub(json!({ "cmd": "get_settings" })).unwrap();
+        let mut names: Vec<String> = settings["connectors"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap().to_owned()).collect();
+        names.sort();
+        names
+    };
+    let before = names(&mut owner.client);
+    let wide = owner.node.machine.open_tab(Some(folder.clone()), true).unwrap();
+    owner.client.wait("the bypass tab at the hub", |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == wide.as_str() && t["bypass"] == true));
+
+    let refused = "save_connector would call a workflow whose session skips its permission prompts, or one pinned cannot read, and your own session asks for them";
+    let direct = workflow(None, "Direct", label("direct"), &[&format!("call:{skips}")]);
+    let deep = workflow(None, "Deep", label("deep"), &[&format!("call:{calls_skips}")]);
+    let unknown = workflow(None, "Unknown", label("unknown"), &["call:no-such-workflow"]);
+    // `back` and `back_asks` call `to_back` / `to_back_skips` again, which already call them.
+    let cycle = workflow(Some(&back), "Back", called(), &[&format!("call:{to_back}")]);
+    let cycle_skips = workflow(Some(&back_asks), "Back asks", called(), &[&format!("call:{to_back_skips}")]);
+    // Every case answers before the assert, so a failure names each one that was not refused.
+    let cases = [("a direct call", &direct), ("a call two levels deep", &deep), ("an unknown target", &unknown), ("a cycle through one that skips prompts", &cycle_skips)];
+    let answers: Vec<_> = cases.iter().map(|(why, save)| (*why, act(&owner.dir, &owner.tab, "save_connector", (*save).clone()).map(|done| done["outcome"].clone()))).collect();
+    assert_eq!(answers, cases.map(|(why, _)| (why, Err(refused.to_owned()))));
+    assert_eq!(names(&mut owner.client), before, "nothing is saved");
+    let calls_back = |answer: &Result<Value, String>| answer.as_ref().is_err_and(|e| e.starts_with("\"Call 0\" calls ") && e.ends_with(", which calls back"));
+    let cycle_answer = act(&owner.dir, &wide, "save_connector", cycle_skips.clone());
+    assert!(calls_back(&cycle_answer), "a session that skips prompts gets the save's own answer: {cycle_answer:?}");
+    for tab in [&owner.tab, &wide] {
+        let cycle_answer = act(&owner.dir, tab, "save_connector", cycle.clone());
+        assert!(calls_back(&cycle_answer), "a cycle where nothing skips prompts ends with the save's answer: {cycle_answer:?}");
+    }
+
+    for (why, save) in [("a direct call", &direct), ("a call two levels deep", &deep)] {
+        assert_eq!(act(&owner.dir, &wide, "save_connector", save.clone()).unwrap()["outcome"], "done", "a session that skips prompts may save {why}");
+    }
+    for (tab, name) in [(&owner.tab, "Asks chain"), (&wide, "Wide chain")] {
+        let chain = workflow(None, name, label(name), &[&format!("call:{calls_asks}")]);
+        assert_eq!(act(&owner.dir, tab, "save_connector", chain).unwrap()["outcome"], "done", "a chain where nothing skips prompts saves");
+    }
+    let mut after = before.clone();
+    after.extend(["Asks chain", "Deep", "Direct", "Wide chain"].map(String::from));
+    after.sort();
+    assert_eq!(names(&mut owner.client), after);
+}
+
+/// A save a session that asks for prompts sends with a graph that has no trigger is refused in one
+/// line, as the owner's own save is, and the account's store still answers afterwards.
+#[test]
+fn an_agents_save_whose_graph_has_no_trigger_is_refused_and_leaves_the_accounts_store_working() {
+    let hub = TestHub::start("no_trigger");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "owner@example.com", "correct horse").unwrap();
+    let mut owner = agent_of(&url, &token, "owner@example.com", "no-trigger-mac");
+    let folder = owner.dir.join("site").canonicalize().unwrap().display().to_string();
+    let workflow = |name: &str, graph: Value| {
+        json!({ "connector": {
+            "name": name, "enabled": false, "trigger": { "kind": "linear-label", "label": name },
+            "folder": folder, "model": "claude-sonnet-5-5", "effort": "medium", "permissionMode": "acceptEdits", "worktree": false, "instructions": "Fix it.",
+            "graph": graph,
+        } })
+    };
+    let session = json!({ "id": "n", "name": "Step", "position": [1, 0], "type": "session", "permission": "acceptEdits" });
+    let ordinary = |name: &str| {
+        let trigger = json!({ "id": "t", "name": "Trigger", "position": [0, 0], "type": "trigger", "watch": { "kind": "linear-label", "label": name } });
+        workflow(name, json!({ "nodes": [trigger, session.clone()], "edges": [{ "from": "t", "port": "out", "to": "n" }] }))
+    };
+    let mut own = ordinary("Before");
+    own["cmd"] = json!("save_connector");
+    let before = owner.client.hub(own).unwrap()["id"].as_str().unwrap().to_owned();
+
+    let triggerless = workflow("Headless", json!({ "nodes": [session.clone()], "edges": [] }));
+    let empty = workflow("Empty", json!({ "nodes": [], "edges": [] }));
+    let mut owns = triggerless.clone();
+    owns["cmd"] = json!("save_connector");
+    assert_eq!(owner.client.hub(owns), Err("a workflow needs a trigger".to_owned()), "the owner's own save answers this");
+    // Both saves ask for prompts, so the agent check walks them before the save validates anything.
+    let answers: Vec<_> = [&triggerless, &empty].map(|save| act(&owner.dir, &owner.tab, "save_connector", save.clone()).map(|done| done["outcome"].clone())).into();
+    assert_eq!(answers, [Err("a workflow needs a trigger".to_owned()), Err("a workflow needs a trigger".to_owned())]);
+
+    // The store lock is not poisoned: the same account saves, reads and runs as before.
+    assert_eq!(act(&owner.dir, &owner.tab, "save_connector", ordinary("After")).unwrap()["outcome"], "done", "the next ordinary save");
+    let settings = owner.client.hub(json!({ "cmd": "get_settings" })).unwrap();
+    let mut names: Vec<&str> = settings["connectors"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap()).collect();
+    names.sort();
+    assert_eq!(names, ["After", "Before"], "only the two ordinary saves are stored");
+    let started = owner.client.hub(json!({ "cmd": "run_workflow", "id": before }));
+    assert!(started.is_ok(), "the workflow check reads the store: {started:?}");
+}
+
+/// What a session's hook reports when its permission mode is `mode`.
+fn report_mode(dir: &Path, tab: &str, mode: &str) {
+    let mut stream = std::os::unix::net::UnixStream::connect(dir.join("sock")).unwrap();
+    writeln!(stream, "{}", json!({ "kind": "agent", "status": "working", "tab": tab, "permission_mode": mode })).unwrap();
+}
+
+#[test]
+fn a_session_that_skips_prompts_in_plan_mode_is_refused_a_workflow_that_skips_them_as_the_node_reads_it() {
+    let hub = TestHub::start("plan_bypass");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "owner@example.com", "correct horse").unwrap();
+    let mut owner = agent_of(&url, &token, "owner@example.com", "plan-bypass-mac");
+    let folder = owner.dir.join("site").canonicalize().unwrap().display().to_string();
+    let workflow = |id: Option<&str>, label: &str, enabled: bool, permission: Option<&str>| {
+        let mut connector = json!({
+            "name": "Fix", "enabled": enabled, "trigger": { "kind": "linear-label", "label": label },
+            "folder": folder, "model": "claude-sonnet-5-5", "effort": "medium", "permissionMode": "acceptEdits", "worktree": false, "instructions": "Fix it.",
+        });
+        if let Some(permission) = permission {
+            connector["graph"] = json!({
+                "nodes": [
+                    { "id": "t", "name": "Trigger", "position": [0, 0], "type": "trigger", "watch": { "kind": "linear-label", "label": label } },
+                    { "id": "s", "name": "Fix", "position": [1, 0], "type": "session", "permission": permission },
+                ],
+                "edges": [{ "from": "t", "port": "out", "to": "s" }],
+            });
+        }
+        if let Some(id) = id {
+            connector["id"] = json!(id);
+        }
+        json!({ "connector": connector })
+    };
+    let mut own = workflow(None, "idle", false, Some("bypassPermissions"));
+    own["cmd"] = json!("save_connector");
+    let id = owner.client.hub(own).unwrap()["id"].as_str().unwrap().to_owned();
+    let labels = |client: &mut Client| {
+        let settings = client.hub(json!({ "cmd": "get_settings" })).unwrap();
+        let mut labels: Vec<String> = settings["connectors"].as_array().unwrap().iter().map(|c| format!("{}:{}:{}", c["enabled"], c["trigger"]["label"].as_str().unwrap(), c["graph"]["nodes"][1]["permission"].as_str().unwrap())).collect();
+        labels.sort();
+        labels
+    };
+
+    let wide = owner.node.machine.open_tab(Some(folder.clone()), true).unwrap();
+    owner.client.wait("the bypass tab at the hub", |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == wide.as_str() && t["bypass"] == true));
+    report_mode(&owner.dir, &wide, "plan");
+    owner.client.wait("plan mode at the hub", |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == wide.as_str() && t["read_only"] == true));
+    let runs = "save_connector would run a session that skips its permission prompts, and your own session asks for them";
+    let keeps = "save_connector would keep this workflow's session that skips its permission prompts, and your own session asks for them";
+    assert_eq!(act(&owner.dir, &wide, "save_connector", workflow(None, "plan", false, Some("bypassPermissions"))), Err(runs.to_owned()), "a graph that skips prompts");
+    assert_eq!(act(&owner.dir, &wide, "save_connector", workflow(Some(&id), "plan", true, None)), Err(keeps.to_owned()), "no graph, so the stored one is kept");
+    assert_eq!(labels(&mut owner.client), ["false:idle:bypassPermissions"], "nothing is saved");
+
+    report_mode(&owner.dir, &wide, "bypassPermissions");
+    owner.client.wait("bypass mode at the hub", |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == wide.as_str() && t["bypass"] == true && t["read_only"].is_null()));
+    assert_eq!(act(&owner.dir, &wide, "save_connector", workflow(None, "new", false, Some("bypassPermissions"))).unwrap()["outcome"], "done", "a graph that skips prompts");
+    assert_eq!(act(&owner.dir, &wide, "save_connector", workflow(Some(&id), "idle", true, None)).unwrap()["outcome"], "done", "no graph");
+    assert_eq!(labels(&mut owner.client), ["false:new:bypassPermissions", "true:idle:bypassPermissions"], "both saved; the save with no graph turned the stored one on");
+}
+
+/// The `cmd` of every call the hub sends the raw machine socket `ws` within `limit`.
+fn calls_heard(ws: &mut WebSocket<MaybeTlsStream<TcpStream>>, limit: Duration) -> Vec<String> {
+    let mut heard = vec![];
+    let start = Instant::now();
+    while start.elapsed() < limit {
+        match ws.read() {
+            Ok(Message::Text(text)) => {
+                let frame: Value = serde_json::from_str(&text).unwrap();
+                if frame["type"] == "call" {
+                    heard.push(frame["call"]["cmd"].as_str().unwrap_or_default().to_owned());
+                }
+            }
+            Ok(Message::Ping(payload)) => ws.send(Message::Pong(payload)).unwrap(),
+            Ok(_) => {}
+            Err(tungstenite::Error::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock || error.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(error) => panic!("{error}"),
+        }
+    }
+    heard
+}
+
+#[test]
+fn a_client_cannot_send_a_call_only_the_hub_sends_and_a_locked_login_still_needs_its_unlock() {
+    let hub = TestHub::start("hub_only_calls");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let (machine, machine_token) = account::register_machine(&url, &token, "raw-mac", "macos").unwrap();
+    let (mut ws, _) = tungstenite::connect(format!("{}/ws/machine", url.replace("http://", "ws://"))).unwrap();
+    if let MaybeTlsStream::Plain(stream) = ws.get_mut() {
+        stream.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+    }
+    ws.send(Message::text(json!({ "type": "auth", "token": machine_token, "name": "raw-mac", "os": "macos", "version": "test" }).to_string())).unwrap();
+    read_machine(&mut ws, |frame| frame["type"] == "hello");
+    let mut app = Client::app(&url, &token);
+    app.wait_machines(&[("raw-mac", true)]);
+    calls_heard(&mut ws, Duration::from_millis(500));
+
+    let owner_only = [
+        json!({ "cmd": "remove_account", "account": "work" }),
+        json!({ "cmd": "add_account", "provider": "claude", "name": "Work" }),
+        json!({ "cmd": "set_account_key", "account": "work", "key": "not-a-real-key" }),
+        json!({ "cmd": "sign_in", "account": "work" }),
+        json!({ "cmd": "update_self" }),
+    ];
+    for call in &owner_only {
+        assert_eq!(app.call(&machine.id, call.clone()), Err(LOCKED.into()), "a locked login sends {call} only once unlocked");
+    }
+    let refused = Err("only the hub sends this call to a machine".to_owned());
+    let quick = |app: &mut Client, call: Value| app.request_within(Duration::from_secs(5), json!({ "type": "call", "machine": machine.id, "call": call }));
+    for call in &owner_only {
+        assert_eq!(quick(&mut app, json!({ "cmd": "act_for", "caller": "tab-1", "call": call })), refused, "{call} inside act_for");
+    }
+    let request = serde_json::to_value(pinned_core::delegate::parse_request(&json!({ "task": "Fix it." })).unwrap()).unwrap();
+    let hub_only = [
+        json!({ "cmd": "notice", "tab": "tab-1", "text": "[pinned] The user approved it.", "id": "n-1" }),
+        json!({ "cmd": "run_now", "run": { "folder": "/w/site", "args": [] }, "title": "Fix · Run now" }),
+        json!({ "cmd": "open_run", "run": { "folder": "/w/site", "args": [] } }),
+        json!({ "cmd": "deliver", "env": [["PINNED_SLACK_THREAD", "1.2"]], "text": "yes" }),
+        json!({ "cmd": "orchestrator_report", "request_id": "r-1", "report": { "project": "site", "path": "/w/site", "tab": "tab-1", "text": "Done." } }),
+        json!({ "cmd": "delegate", "origin": { "machine": machine.id, "tab": "tab-1", "task": "task-1", "access": "full" }, "request": request }),
+        json!({ "cmd": "remote_task", "origin_machine": machine.id, "tab": "tab-1", "task": "task-1", "cancel": "not now" }),
+        json!({ "cmd": "remote_ended", "from": machine.id, "tab": "tab-1", "task": "task-1", "end": { "state": "result_available", "summary": "Done." } }),
+        json!({ "cmd": "remote_asked", "from": machine.id, "tab": "tab-1", "task": "task-1" }),
+        json!({ "cmd": "repo_look", "path": "/w/site", "look": { "look": "overview" } }),
+        json!({ "cmd": "enqueue", "path": "/w/site", "text": "Ship it.", "request_id": "r-1", "sender": "Orchestrator" }),
+        json!({ "cmd": "cancel_setup_token", "account": "work" }),
+    ];
+    for call in &hub_only {
+        assert_eq!(quick(&mut app, call.clone()), refused, "{call}");
+    }
+    let heard = calls_heard(&mut ws, Duration::from_millis(1500));
+    assert!(!heard.iter().any(|cmd| cmd == "act_for" || hub_only.iter().any(|call| call["cmd"] == cmd.as_str())), "the machine heard {heard:?}");
+    assert!(!heard.iter().any(|cmd| owner_only.iter().any(|call| call["cmd"] == cmd.as_str())), "the machine heard {heard:?}");
 }
 
 /// What a session's `act` tool answers: the hub's `ActAnswer`, or the refusal.
@@ -6778,6 +7346,7 @@ fn an_agent_holding_what_its_machine_keeps_readable_cannot_approve_or_run_a_conf
         assert_eq!(agent.hub(decide.clone()), Err(LOCKED.into()), "the agent approves nothing");
         assert_eq!(agent.hub(json!({ "cmd": "remove_machine", "id": spare.id })), Err(LOCKED.into()), "nor runs the confirm action itself");
         assert_eq!(agent.hub(json!({ "cmd": "create_invite" })), Err(LOCKED.into()));
+        assert_eq!(agent.hub(json!({ "cmd": "extend_box", "machine": spare.id, "extra_usd": 1.0 })), Err(LOCKED.into()), "extending a box is money: a login read from disk never extends");
         assert_eq!(agent.call(&ana.machine, json!({ "cmd": "update_self" })), Err(LOCKED.into()), "nor a confirm-class call on a machine");
     }
     assert_eq!(logins, 1, "the app's login is the one login on the machine");
@@ -7571,7 +8140,7 @@ fn another_accounts_agent_reaches_none_of_an_accounts_machines_connections_invit
     };
     assert_eq!(bob_decides(&mut bob, "revoke_invite", json!({ "id": anas_invite })), format!("failed: this account has no unused invite {anas_invite}"));
     assert_eq!(bob_decides(&mut bob, "revoke_agent", json!({ "id": grant })), format!("failed: this account has no agent {grant}"));
-    assert_eq!(act(&bob.dir, &bob.tab, "extend_box", json!({ "machine": mini, "extra_usd": 5.0 })), Err("this machine is no box".into()));
+    assert_eq!(bob_decides(&mut bob, "extend_box", json!({ "machine": mini, "extra_usd": 5.0 })), "failed: this machine is no box");
     assert_eq!(act(&bob.dir, &bob.tab, "answer_box", json!({ "id": "q-ana", "allow": true })), Err(format!("answer_box is not open to agents: {ANSWER_BOX_CLOSED}")));
     let bobs_token = act(&bob.dir, &bob.tab, "set_box_claude_token", json!({ "name": "bloom" })).unwrap()["id"].clone();
     assert_eq!(approve(&mut bob.client, &bobs_token, json!({ "token": "sk-ant-oat01-bobsown" })), Err("connect Upstash Box first".into()), "bob's key goes to bob's own connection");
@@ -8259,18 +8828,35 @@ fn a_session_box_follows_only_its_setting_and_budget_and_only_its_owner_answers_
     wait_for("four boxes", || created(&hub) == 4);
 
     let machine = fresh["result"]["machine"].as_str().unwrap().to_owned();
-    let extended = act(&ana.dir, &ana.tab, "extend_box", json!({ "machine": machine, "extra_usd": 1.5 })).unwrap();
-    assert_eq!((extended["outcome"].as_str(), extended["result"]["budget_usd"].as_f64()), (Some("done"), Some(2.5)), "within the Box budget an agent's extend runs at once: {extended}");
+    // The decision is the owner's, made in the app after it unlocks with the password; an agent's connection never decides.
+    let decide = |app: &mut Client, asked: &Value| app.hub(json!({ "cmd": "decide_confirmation", "id": asked["id"], "approve": true })).unwrap();
+    assert_eq!(owner.hub(json!({ "cmd": "decide_confirmation", "id": "none", "approve": true })), Err("unlock with your password in the app to do this".into()), "a locked app cannot decide");
+    owner.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    bobs_app.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    let asked = act(&ana.dir, &ana.tab, "extend_box", json!({ "machine": machine, "extra_usd": 1.5 })).unwrap();
+    assert_eq!(asked["outcome"], "pending", "an agent's extend waits for the owner: {asked}");
+    let extended = decide(&mut owner, &asked);
+    assert_eq!((extended["outcome"].as_str(), extended["result"]["budget_usd"].as_f64()), (Some("done"), Some(2.5)), "within the Box budget the owner's yes extends it: {extended}");
+    let asked = act(&ana.dir, &ana.tab, "extend_box", json!({ "machine": machine, "extra_usd": 1.0 })).unwrap();
     assert_eq!(
-        act(&ana.dir, &ana.tab, "extend_box", json!({ "machine": machine, "extra_usd": 1.0 })),
-        Err("a box may spend at most US$ 3.00; name less, or raise Box budget in Settings › Way of working".into()),
+        decide(&mut owner, &asked)["outcome"].as_str(),
+        Some("failed: a box may spend at most US$ 3.00; name less, or raise Box budget in Settings › Way of working"),
         "past the Box budget it is refused"
     );
-    assert_eq!(act(&bob.dir, &bob.tab, "extend_box", json!({ "machine": machine, "extra_usd": 0.5 })), Err("this machine is no box".into()));
+    let asked = act(&bob.dir, &bob.tab, "extend_box", json!({ "machine": machine, "extra_usd": 0.5 })).unwrap();
+    assert_eq!(decide(&mut bobs_app, &asked)["outcome"].as_str(), Some("failed: this machine is no box"));
     assert_eq!(bobs_app.hub(json!({ "cmd": "extend_box", "machine": machine, "extra_usd": 0.5 })), Err("this machine is no box".into()));
-    assert_eq!(owner.hub(json!({ "cmd": "extend_box", "machine": machine, "extra_usd": 0.5 })).unwrap()["budget_usd"].as_f64(), Some(3.0), "the owner's extend needs no password");
-    nothing_waits_on(&mut owner);
-    nothing_waits_on(&mut bobs_app);
+    let mut locked_app = Client::app(&url, &token);
+    let extend = json!({ "cmd": "extend_box", "machine": machine, "extra_usd": 0.5 });
+    assert_eq!(locked_app.hub(extend.clone()), Err(LOCKED.into()), "a locked app asks for the password before it extends");
+    locked_app.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    assert_eq!(locked_app.hub(extend).unwrap()["budget_usd"].as_f64(), Some(3.0), "once unlocked the app's own extend goes through");
+    // Only the agents' extends were ever confirmations, and the owner decided each: no open or answer became one.
+    for (app, expected) in [(&mut owner, 2), (&mut bobs_app, 1)] {
+        let all = app.hub(json!({ "cmd": "confirmations" })).unwrap();
+        assert!(all.as_array().unwrap().iter().all(|c| c["action"] == "extend_box" && c["decision"] == "approved"), "{all}");
+        assert_eq!(all.as_array().unwrap().len(), expected, "exactly the extends this account's agents asked for: {all}");
+    }
 }
 
 #[test]
@@ -8341,7 +8927,7 @@ fn a_captain_box_follows_only_its_access_setting_and_the_owner_answers_its_ask_o
 }
 
 #[test]
-fn a_locked_app_still_needs_the_password_for_every_confirm_action_and_never_for_a_box_answer_or_budget() {
+fn a_locked_app_still_needs_the_password_for_every_confirm_action_and_never_for_a_box_answer() {
     use pinned_core::surface::{self, Class, Parsed};
     let hub = TestHub::start("locked_confirms");
     let (token, _) = account::signup(&hub.url, "ana@acme.dev", "correct horse").unwrap();
@@ -8376,6 +8962,7 @@ fn a_locked_app_still_needs_the_password_for_every_confirm_action_and_never_for_
         ("revoke_agent", json!({ "id": "g1" })),
         ("set_taste", json!({ "scope": { "kind": "captains" }, "patch": { "box_budget_cents": 100 } })),
         ("reset_taste_field", json!({ "scope": { "kind": "captains" }, "field": "box_budget_cents" })),
+        ("set_box_size", json!({ "size": "small" })),
         ("set_box_claude_token", json!({ "name": "bloom" })),
         ("remove_box_claude_token", json!({ "name": "bloom" })),
         ("mint_box_claude_token", json!({ "machine": machine, "account": "bloom" })),
@@ -8386,6 +8973,7 @@ fn a_locked_app_still_needs_the_password_for_every_confirm_action_and_never_for_
         ("connect_convex", json!({ "repos": ["github.com/acme/site"] })),
         ("set_convex_repos", json!({ "id": "quick-lemur-789", "repos": [] })),
         ("disconnect_convex", json!({ "id": "quick-lemur-789" })),
+        ("extend_box", json!({ "machine": machine, "extra_usd": 1.0 })),
     ]
     .into_iter()
     .collect();
@@ -8400,7 +8988,35 @@ fn a_locked_app_still_needs_the_password_for_every_confirm_action_and_never_for_
         assert_eq!(answer, Err(LOCKED.into()), "{} still needs the password on a locked app", action.name);
     }
     assert_eq!(app.hub(json!({ "cmd": "answer_box", "id": "q-1", "allow": true })), Err("that box question is gone".into()), "a box question's answer needs no password");
-    assert_eq!(app.hub(json!({ "cmd": "extend_box", "machine": machine, "extra_usd": 1.0 })), Err("this machine is no box".into()), "nor does a box's budget");
+    assert_eq!(
+        app.hub(json!({ "cmd": "extend_box", "machine": machine, "extra_usd": 1.0 })),
+        Err(LOCKED.into()),
+        "a locked login cannot extend a box"
+    );
+}
+
+#[test]
+fn a_locked_login_cannot_extend_a_box_until_it_unlocks() {
+    let hub = TestHub::start_with_boxes("locked_extend", Signup::Open, fast());
+    hub.boxes.state.lock().unwrap().checkout = Some(("site".into(), SITE.into()));
+    let mut ana = BoxAccount::new(&hub);
+    ana.client.hub(json!({ "cmd": "set_box_access", "access": { "session": { "mode": "fresh" } } })).unwrap();
+    ana.client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": { "box_budget_cents": 500 } })).unwrap();
+    let opened = ana.client.hub(json!({ "cmd": "open_box", "repo": "acme/site", "size": "small", "budget_usd": 1.0 })).unwrap();
+    assert_eq!(opened["budget_usd"].as_f64(), Some(1.0));
+    let machine = opened["machine"].as_str().unwrap().to_owned();
+    let budget_of = |client: &mut Client| client.hub(json!({ "cmd": "box_status", "machine": machine })).unwrap()["budget_usd"].as_f64();
+    let before = budget_of(&mut ana.client);
+    assert_eq!(before, Some(1.0), "the box's budget, read back before");
+
+    let mut app = Client::app(&hub.url, &ana.token);
+    let extend = json!({ "cmd": "extend_box", "machine": machine, "extra_usd": 2.0 });
+    assert_eq!(app.hub(extend.clone()), Err(LOCKED.into()), "a locked login cannot extend a box");
+    assert_eq!(budget_of(&mut ana.client), before, "the refused call changed nothing");
+
+    app.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    assert_eq!(app.hub(extend).unwrap()["budget_usd"].as_f64(), Some(3.0), "once unlocked the same call goes through");
+    assert_eq!(budget_of(&mut ana.client), Some(3.0), "the budget rose by exactly the amount");
 }
 
 const BLOOM_TOKEN: &str = "sk-ant-oat01-bloomtoken";

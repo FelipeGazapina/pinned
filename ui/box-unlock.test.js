@@ -5,6 +5,7 @@ import vm from "node:vm";
 
 const hubSrc = readFileSync(new URL("./hub.js", import.meta.url), "utf8");
 const settingsSrc = readFileSync(new URL("./settings.js", import.meta.url), "utf8");
+const timelineSrc = readFileSync(new URL("./gui-timeline.js", import.meta.url), "utf8");
 const LOCKED = "unlock with your password in the app to do this";
 /** The hub calls only the owner makes on a locked login (`surface::owner_only`): the manifest's
  * confirm actions, read from the manifest itself. */
@@ -76,6 +77,36 @@ function app(answers = {}, world = {}) {
 
 test("the manifest this test reads lists the confirm actions", () => {
   assert.ok(CONFIRM.has("set_box_access") && CONFIRM.has("set_box_claude_token") && CONFIRM.size > 20, [...CONFIRM].join(" "));
+});
+
+test("the manifest lists extend_box as a confirm action: a locked app asks the password to extend", () => {
+  assert.ok(CONFIRM.has("extend_box"));
+});
+
+test("Extend on a locked app shows the unlock prompt, then the hub gets extend_box once unlocked", async () => {
+  const told = [];
+  const funded = new Map();
+  const { context, calls, prompts } = app({ extend_box: { budget_usd: 4, phase: "running" } }, {
+    boxInfo: funded,
+    boxWarned: new Set(),
+    tell: (html) => told.push(html),
+    esc: (text) => String(text),
+    renderThread() {},
+    renderSidebar() {},
+  });
+  const start = timelineSrc.indexOf("async function extendBoxFunds(");
+  const end = timelineSrc.indexOf("/** A banner offering to continue the turn", start);
+  vm.runInContext(timelineSrc.slice(start, end), context);
+  await vm.runInContext("extendBoxFunds({ machine: 'box-1', key: 'box-1:tab-1' }, 2)", context);
+  assert.deepEqual(prompts, [""], "the password prompt shows once, with no error");
+  assert.deepEqual(here(calls), [
+    { cmd: "extend_box", machine: "box-1", extra_usd: 2 },
+    { cmd: "extend_box", machine: "box-1", extra_usd: 2 },
+  ], "the hub answered LOCKED, then received the extend again after the unlock");
+  assert.equal(funded.get("box-1").budget_usd, 4, "the extend finished");
+  assert.equal(told.length, 1);
+  assert.match(told[0], /Box funded/);
+  assert.doesNotMatch(told[0], /failed|unlock with your password/);
 });
 
 test("yes on the Upstash card's box question is one call, with no password prompt", async () => {
