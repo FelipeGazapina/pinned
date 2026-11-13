@@ -159,3 +159,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:07:58Z #73 another_accounts_marks_stay_its_own_even_on_the_same_session_id START / avail=15072M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:08:02Z #73 another_accounts_marks_stay_its_own_even_on_the_same_session_id ok / avail=15072M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:08:03Z #74 a_refused_mark_change_keeps_and_pushes_nothing_and_a_machine_may_not_mark START / avail=15072M /workspace avail=19374M node_stat=Ssl
+2026-11-13T04:08:08Z #74 a_refused_mark_change_keeps_and_pushes_nothing_and_a_machine_may_not_mark ok / avail=15072M /workspace avail=19374M node_stat=Ssl node_tcp=1
