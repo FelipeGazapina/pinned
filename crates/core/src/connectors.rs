@@ -1607,7 +1607,7 @@ pub struct Connectors {
     known_tabs: Mutex<HashMap<String, (u64, Vec<TabView>)>>,
     /// The Slack bots `fill_bots` already asked Slack about, so it asks once per bot.
     bots_filled: Mutex<std::collections::HashSet<String>>,
-    /// Why runs failed when their box ended, for the next check to report.
+    /// Why runs failed when their box ended, for the next check to report on the workflows card.
     box_failures: Mutex<Vec<String>>,
 }
 
@@ -3019,6 +3019,8 @@ impl Connectors {
             self.save(&store)?;
         }
         self.box_failures.lock().unwrap().push(why.to_owned());
+        // The next check reports it now, not a whole interval later.
+        self.wake.notify_one();
         Ok(failed.len())
     }
 

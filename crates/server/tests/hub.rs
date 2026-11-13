@@ -2821,10 +2821,11 @@ fn hold_box(hub: &mut TestHub, ana: &mut BoxAccount, held: &str) -> String {
     machine
 }
 
-/// The run `hold_box` gave the account failed with `why`, its issue is free for the next trigger,
-/// and no box was created after the first `boxes`.
-fn assert_run_failed(hub: &TestHub, ana: &BoxAccount, why: &str, boxes: usize) {
+/// The run `hold_box` gave the account failed with `why`, the workflow's check says so, its issue
+/// is free for the next trigger, and no box was created after the first `boxes`.
+fn assert_run_failed(hub: &TestHub, ana: &mut BoxAccount, why: &str, boxes: usize) {
     wait_for("the run to fail", || account_store(hub, ana.id)["runs"][0]["status"]["failed"]["why"].is_string());
+    ana.client.wait("the check that says why", |f| f["type"] == "settings" && f["settings"]["checked"]["error"].as_str().is_some_and(|e| e.contains(why)));
     let store = account_store(hub, ana.id);
     assert_eq!(store["runs"][0]["status"]["failed"]["why"], json!(why), "{store}");
     assert_eq!(store["connectors"][0]["handled"], json!([]), "its issue is no longer handled");
@@ -2846,7 +2847,7 @@ fn a_run_whose_box_goes_offline_past_the_wait_fails_with_why_and_frees_its_issue
     wait_for("the box's tabs frame", || ana.tabs_held(&hub, &machine).is_some_and(|held| held > 0));
     drop_box_node(&hub.boxes, "box_1");
     wait_for("the box to go", || hub.boxes.live().is_empty());
-    assert_run_failed(&hub, &ana, &format!("Upstash Box: its box went offline and did not come back within 3 s{STOPPED}"), 1);
+    assert_run_failed(&hub, &mut ana, &format!("Upstash Box: its box went offline and did not come back within 3 s{STOPPED}"), 1);
 }
 
 #[test]
@@ -2858,7 +2859,7 @@ fn a_run_whose_box_reaches_its_max_life_fails_with_why_and_frees_its_issue() {
     hub.policy.max_life = Duration::from_millis(1);
     hold_box(&mut hub, &mut ana, "uuid-1");
     wait_for("the box to go", || hub.boxes.live().is_empty());
-    assert_run_failed(&hub, &ana, &format!("Upstash Box: the box ended before its task did: it ran out of time or budget{STOPPED}"), 1);
+    assert_run_failed(&hub, &mut ana, &format!("Upstash Box: the box ended before its task did: it ran out of time or budget{STOPPED}"), 1);
 }
 
 #[test]
@@ -2871,7 +2872,7 @@ fn a_run_whose_box_machine_is_removed_fails_with_why_and_frees_its_issue() {
     ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
     ana.client.hub(json!({ "cmd": "remove_machine", "id": machine })).unwrap();
     assert_eq!(hub.boxes.live(), Vec::<String>::new());
-    assert_run_failed(&hub, &ana, &format!("Upstash Box: the box ended before its task did: someone removed its machine{STOPPED}"), 1);
+    assert_run_failed(&hub, &mut ana, &format!("Upstash Box: the box ended before its task did: someone removed its machine{STOPPED}"), 1);
 }
 
 #[test]
@@ -2888,7 +2889,7 @@ fn a_run_on_the_fixed_box_fails_when_upstash_stops_listing_the_box() {
     let gone = hub.boxes.state.lock().unwrap().boxes.remove("box_1");
     drop(gone);
     wait_for("the row to go", || ana.rows(&hub) == 0);
-    assert_run_failed(&hub, &ana, &format!("Upstash Box: the box ended before its task did: it was deleted outside pinned{STOPPED}"), 1);
+    assert_run_failed(&hub, &mut ana, &format!("Upstash Box: the box ended before its task did: it was deleted outside pinned{STOPPED}"), 1);
 }
 
 #[test]
