@@ -171,6 +171,7 @@ function paletteStatus(tab) {
   if (phase === "input") return { label: "Awaiting Input", tone: "input" };
   if (phase === "working") return { label: "Working", tone: "info", pulse: true };
   if (phase === "failed") return { label: "Failed", tone: "error" };
+  if (phase === "stopped") return { label: "Stopped", tone: "warning" };
   return unseenDone(tab) ? { label: "Completed", tone: "success" } : null;
 }
 /** ThreadRowLeadingStatus: the pull request's state icon, then the status dot and its label. */

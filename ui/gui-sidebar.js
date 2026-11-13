@@ -384,6 +384,7 @@ function statusSlot(tab) {
   }
   if (phase === "input") return { icon: "message-circle-question", text: "Input", tone: "input" };
   if (phase === "failed") return tab.view.resume_at ? { icon: "circle-alert", text: "Limited", tone: "limited" } : { icon: "circle-alert", text: "Failed", tone: "error" };
+  if (phase === "stopped") return { icon: "circle-stop", text: "Stopped", title: tab.view.stopped ? `Stopped: ${tab.view.stopped}` : "Stopped mid-turn", tone: "limited" };
   if (wokeNow(tab) && tab !== active) return { icon: "alarm-clock", text: "Woke", tone: "limited", woke: true };
   return null;
 }

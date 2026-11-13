@@ -156,7 +156,9 @@ function page({ settings = {}, older = false, offline = false } = {}) {
     tell: (message) => told.push(message),
   };
   vm.createContext(context);
-  vm.runInContext(`${read("global-orchestrator.js")}\n${read("composer-tags.js")}\n${read("gui-global-orchestrator.js")}`, context);
+  const main = read("main.js");
+  const liveRules = main.slice(main.indexOf("const aliveOf"), main.indexOf("const statusOf"));
+  vm.runInContext(`${liveRules}\n${read("global-orchestrator.js")}\n${read("composer-tags.js")}\n${read("gui-global-orchestrator.js")}`, context);
   return { context, element, elements, calls, events, activated, surfaces, told, pages, click: (e) => listeners.click(e) };
 }
 

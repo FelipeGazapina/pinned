@@ -176,13 +176,13 @@ const groupName = (group) => projectTagName(group, group.checkouts.map((c) => pr
 const groupSlug = (group) => tagSlug(groupName(group));
 
 /** Each project's running workers by machine, as `projects()` counts them: worker tabs with a live
- * session or a headless child at work, a finished one left out (`threadState` "done", the rule the
+ * process or a headless child at work, a finished one left out (`threadState` "done", the rule the
  * sidebar folds its Finished group by), by project slug and machine id. */
 function runningWorkers() {
   const by = new Map();
   for (const group of projectGroups(true)) {
     const counts = new Map();
-    for (const tab of group.tabs) if (tab.view.role === "worker" && (tab.view.running || tab.view.status === "working") && threadState(tab) !== "done") counts.set(tab.machine, (counts.get(tab.machine) ?? 0) + 1);
+    for (const tab of group.tabs) if (tab.view.role === "worker" && atWork(tab.view) && threadState(tab) !== "done") counts.set(tab.machine, (counts.get(tab.machine) ?? 0) + 1);
     by.set(groupSlug(group), counts);
   }
   return by;

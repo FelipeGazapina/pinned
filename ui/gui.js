@@ -115,8 +115,9 @@ const prOf = (tab) => threadOf(tab).items.findLast((i) => i.kind === "pr");
 /** claude's hooks report no answer to a permission menu, so a permission notice with no menu on
  * screen means the turn went on. It sends "waiting for your input" a while after a turn ends. */
 function hookPhase(tab) {
-  if (tab.menu) return "asking";
   const status = statusOf(tab);
+  if (status === "stopped") return status;
+  if (tab.menu) return "asking";
   const message = tab.view.message ?? "";
   if (status !== "needs-input") return status;
   if (/permission/i.test(message)) return "working";

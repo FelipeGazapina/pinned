@@ -147,7 +147,9 @@ function threadWorker(w, started = new Map()) {
       : thread === "needs" ? "needs"
       : thread === "working" ? "working"
       : phase === "done" ? "done"
-      : w.view.running ? "working"
+      : phase === "stopped" ? "stopped"
+      : w.view.asleep && !w.view.status ? "idle"
+      : atWork(w.view) ? "working"
       : "stopped";
   const last = state === "done" ? t.items.findLast((i) => i.kind === "text") : t.items.findLast((i) => STEP_KINDS.has(i.kind));
   const since = state === "working" ? unixOf(lastPrompt(w)?.at) * 1000 : state === "needs" ? (w.view.updated ?? 0) * 1000 : 0;
@@ -158,7 +160,7 @@ function threadWorker(w, started = new Map()) {
     agent: null,
     title: threadTitle(w),
     state,
-    step: stepOf(last, w.view.cwd),
+    step: state === "stopped" && w.view.stopped ? w.view.stopped : stepOf(last, w.view.cwd),
     ask,
     model: modelOf(w)?.name ?? t.items.findLast((i) => i.kind === "model")?.name ?? started.get(w.view.id) ?? null,
     elapsedMs: w.view.stats?.active_ms ?? null,
