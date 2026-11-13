@@ -1069,7 +1069,7 @@ mod tests {
                 "switch_account", "prompt", "regenerate_title", "save_skill", "set_usage_prices", "save_project_scripts", "set_workspace",
                 "device_hub", "device_agents", "device", "rewind", "fork", "update_self", "connect_linear", "disconnect_linear", "connect_slack",
                 "disconnect_slack", "connect_github", "disconnect_github", "connect_vercel", "disconnect_vercel", "connect_upstash",
-                "disconnect_upstash", "set_box_access", "set_repo_insight", "clone", "share_project", "save_connector", "delete_connector",
+                "disconnect_upstash", "save_schedule", "pause_schedule", "delete_schedule", "set_box_access", "set_repo_insight", "clone", "share_project", "save_connector", "delete_connector",
                 "generate_workflow", "run_workflow", "open_box", "extend_box", "rename_machine", "remove_machine", "pair_code", "create_invite", "revoke_invite",
                 "stage", "slack_reply", "linear_create", "linear_take", "approve_agent", "deny_agent", "revoke_agent", "set_taste",
                 "reset_taste_field", "set_box_size", "set_box_claude_token", "remove_box_claude_token", "mint_box_claude_token", "cancel_box_claude_token", "mark_sessions", "archive_session", "unarchive_session",
@@ -1081,6 +1081,12 @@ mod tests {
         for name in ["set_taste", "reset_taste_field", "set_box_size", "delete_connector"] {
             assert_eq!(find(name).map(|a| a.class), Some(Confirm), "{name} carries limits or deletes, so the user approves it");
         }
+        assert_eq!(find("list_schedules").map(|a| a.class), Some(Read));
+        assert_eq!(find("schedule_runs").map(|a| a.class), Some(Read));
+        for name in ["save_schedule", "pause_schedule", "delete_schedule"] {
+            assert_eq!(find(name).map(|a| (a.class, a.wired)), Some((Write, true)), "{name}: Write, and the server turns a save with approvals or a delete of the user's task into a confirmation");
+        }
+        assert_eq!(find("set_release_protection").map(|a| a.class), Some(Excluded), "no agent turns tag and main protection on");
         assert!(find("enqueue").is_some_and(|a| a.starts_work), "a message that starts a Captain goes through the limits");
         assert!(find("run_workflow").is_some_and(|a| a.starts_work && a.class == Write), "a Run now goes through the limits, with no approval");
         assert_eq!(find("run_now").map(|a| a.class), Some(Excluded), "only the hub starts a Run now on a machine");
