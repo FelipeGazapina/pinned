@@ -61,6 +61,15 @@ const el = (extra = {}) => ({
     this.removals += 1;
     if (doc.activeElement === this) doc.activeElement = null;
   },
+  get firstChild() {
+    return this.children[0] ?? null;
+  },
+  get nextSibling() {
+    return this.parentNode?.children[this.parentNode.children.indexOf(this) + 1] ?? null;
+  },
+  insertBefore(node, ref) {
+    attach(this, [node], ref ? this.children.indexOf(ref) - (node.parentNode === this && this.children.indexOf(node) < this.children.indexOf(ref) ? 1 : 0) : this.children.length - (node.parentNode === this ? 1 : 0));
+  },
   after(...nodes) {
     attach(this.parentNode, nodes, this.parentNode.children.indexOf(this) + 1);
   },
@@ -566,6 +575,23 @@ test("the open editor stays the same element, with its focus, through every redr
   assert.equal(field.value, "first part, second part", "the text typed during the save is still there");
   p.filter("status", "all");
   assert.equal(editor.removals, 0, "a filter change does not take it out either");
+});
+
+test("a redraw keeps the cards that did not change, so a click that began before it still lands", async () => {
+  const p = page();
+  await p.show();
+  await p.click("edit", "i1");
+  p.type(p.run("ideasUi.editor"), "text", "Typed, not saved yet");
+  const cardOf = (id) => p.part(".ideas-list").children.find((c) => c.dataset.id === id);
+  const second = cardOf("i2");
+  // Pressing the mouse on the second card takes the focus out of the editor, which saves and redraws the page.
+  p.onEditor("focusout", p.run("ideasUi.editor"));
+  await flush();
+  assert.equal(sent(p).length, 1, "the blur saved the first idea");
+  assert.equal(cardOf("i2"), second, "the second card is the element the mouse went down on");
+  assert.equal(second.removals, 0, "and it was never taken out of the page");
+  await p.click("edit", "i2");
+  assert.equal(p.run("ideasUi.editing"), "i2", "so the click opens it");
 });
 
 test("closing an editor the user did not touch sends nothing, and an agent's edit stays", async () => {

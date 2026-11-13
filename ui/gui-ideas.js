@@ -28,6 +28,7 @@ const ideasUi = {
   timer: 0,
   refreshTimer: 0,
   filterHtml: null, // the project filter's options as last written
+  cards: new Map(), // id -> { html, node }: a card's element is kept while what it shows is the same
 };
 
 const ideasHub = () => typeof hub !== "undefined" && !!hub;
@@ -129,6 +130,7 @@ function showIdeas() {
   ideasUi.editing = null;
   ideasUi.base = null;
   ideasUi.filterHtml = null;
+  ideasUi.cards = new Map();
   drawIdeas();
   ideasLoad();
 }
@@ -147,12 +149,24 @@ function drawIdeas() {
   const add = pageView.querySelector(".ideas-add");
   add.hidden = !ideasHub();
   const shown = ideasShown();
+  const kept = new Map();
   const cards = shown.map((idea) => {
     if (idea.id === ideasUi.editing && ideasUi.editor) return ideasUi.editor;
+    // A card whose content did not change stays the element it is: a click that began on it before this
+    // draw, such as the one on a second idea that blurred the editor and so saved it, must still land.
+    const html = ideaCardHtml(idea);
+    const hit = ideasUi.cards.get(idea.id);
+    if (hit?.html === html) {
+      kept.set(idea.id, hit);
+      return hit.node;
+    }
     const holder = document.createElement("template");
-    holder.innerHTML = ideaCardHtml(idea);
-    return holder.content.firstElementChild;
+    holder.innerHTML = html;
+    const node = holder.content.firstElementChild;
+    kept.set(idea.id, { html, node });
+    return node;
   });
+  ideasUi.cards = kept;
   placeCards(list, cards);
   const error = pageView.querySelector(".ideas-error");
   error.hidden = !ideasUi.error;
@@ -173,15 +187,21 @@ function drawIdeas() {
   }
 }
 
-/** Puts `cards` in the list. The open editor is never taken out and put back, which would drop its
- * focus and caret: the other cards go around it. */
+/** Puts `cards` in the list, touching only the elements that are out of place. The open editor is never
+ * taken out and put back, which would drop its focus and caret: the other cards go around it. */
 function placeCards(list, cards) {
+  for (const child of [...list.children]) if (!cards.includes(child)) child.remove();
+  const lay = (items, ref) => {
+    for (const card of items) {
+      if (card === ref) ref = ref.nextSibling;
+      else list.insertBefore(card, ref);
+    }
+  };
   const editor = ideasUi.editor;
   const at = cards.indexOf(editor);
-  if (at < 0 || editor.parentNode !== list) return list.replaceChildren(...cards);
-  for (const child of [...list.children]) if (child !== editor) child.remove();
-  list.prepend(...cards.slice(0, at));
-  editor.after(...cards.slice(at + 1));
+  if (at < 0 || editor.parentNode !== list) return lay(cards, list.firstChild);
+  lay(cards.slice(0, at), list.firstChild);
+  lay(cards.slice(at + 1), editor.nextSibling);
 }
 
 function ideaPut(idea) {
