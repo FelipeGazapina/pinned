@@ -61,6 +61,15 @@ const INVITE_NEEDED: &str = "this hub needs a valid invite code to create an acc
 const ATTEMPT_WINDOW: Duration = Duration::from_secs(15 * 60);
 /// Each argon2 hash holds about 19 MiB, so only this many run at once whatever arrives.
 const CONCURRENT_HASHES: usize = 4;
+/// Requests that wait for a hash at most, beyond the ones running. One hash took about 0.45 s on a test
+/// box, so a full queue drains in about 4 s (32 / 4 × 0.45 s): a burst of real sign ins fits, and a flood
+/// past it is told busy at once instead of growing the queue.
+const HASH_QUEUE: usize = 32;
+/// How long a request waits for its hash at most: above a full queue's drain time, so it fires only when
+/// hashes run slower than they should, and well under a client's own timeout.
+const HASH_WAIT: Duration = Duration::from_secs(10);
+/// The answer to a request that found the hash queue full or waited past `HASH_WAIT`.
+const BUSY: &str = "pinned is busy; try again in a minute";
 const AUTH_WAIT: Duration = Duration::from_secs(15);
 /// Keeps sockets alive through proxies that close idle ones, such as nginx after 60s.
 const PING: Duration = Duration::from_secs(25);
@@ -111,7 +120,7 @@ pub struct Server {
     attempts: Mutex<Limiter>,
     /// When the log last named the kind of address the limiter keys on.
     class_said: Mutex<Option<Instant>>,
-    hashing: tokio::sync::Semaphore,
+    hashing: Hashing,
     learning: Option<db::Learning>,
 }
 
@@ -150,7 +159,7 @@ fn route(spec: &str) -> &str {
 }
 
 pub fn router(hub: Arc<Hub>, ui: PathBuf, downloads: PathBuf, learning: Option<db::Learning>, access: Access) -> Router {
-    let server = Arc::new(Server { hub, access, signups: tokio::sync::Mutex::new(()), downloads, attempts: Mutex::new(Limiter::new(ATTEMPT_KEYS)), class_said: Mutex::default(), hashing: tokio::sync::Semaphore::new(CONCURRENT_HASHES), learning });
+    let server = Arc::new(Server { hub, access, signups: tokio::sync::Mutex::new(()), downloads, attempts: Mutex::new(Limiter::new(ATTEMPT_KEYS)), class_said: Mutex::default(), hashing: Hashing::new(CONCURRENT_HASHES, HASH_QUEUE, HASH_WAIT), learning });
     Router::new()
         .route(route("POST /api/signup"), post(signup))
         // The app's sign-in form reads it from whichever hub the user types, so any origin may.
@@ -311,8 +320,34 @@ fn email(raw: &str) -> Result<String, Error> {
     Ok(email)
 }
 
+/// The argon2 hashes: at most `running` at once, and at most `queue` more waiting, each for at most `wait`.
+struct Hashing {
+    running: tokio::sync::Semaphore,
+    /// The running ones and the waiting ones.
+    admitted: tokio::sync::Semaphore,
+    wait: Duration,
+}
+
+impl Hashing {
+    fn new(running: usize, queue: usize, wait: Duration) -> Hashing {
+        Hashing { running: tokio::sync::Semaphore::new(running), admitted: tokio::sync::Semaphore::new(running + queue), wait }
+    }
+
+    /// A turn to hash, held until the permits drop. None at once when the queue is full, or once the
+    /// wait runs out: the caller answers busy and hashes nothing.
+    async fn turn(&self) -> Option<(tokio::sync::SemaphorePermit<'_>, tokio::sync::SemaphorePermit<'_>)> {
+        let admitted = self.admitted.try_acquire().ok()?;
+        let running = tokio::time::timeout(self.wait, self.running.acquire()).await.ok()?.ok()?;
+        Some((admitted, running))
+    }
+}
+
+fn busy() -> Error {
+    Error(StatusCode::SERVICE_UNAVAILABLE, BUSY.into())
+}
+
 async fn hash_password(server: &Server, password: String) -> Result<String, Error> {
-    let _permit = server.hashing.acquire().await.map_err(|e| internal(e.to_string()))?;
+    let _turn = server.hashing.turn().await.ok_or_else(busy)?;
     tokio::task::spawn_blocking(move || {
         use argon2::password_hash::{PasswordHasher, SaltString};
         use rand_core::OsRng;
@@ -326,8 +361,9 @@ async fn hash_password(server: &Server, password: String) -> Result<String, Erro
 /// Whether `password` is the one `hash` holds. With no hash, as for an email no account has, it checks
 /// against a stand-in that never matches at the same cost, so the time taken doesn't tell whether the
 /// account exists.
-async fn password_matches(server: &Server, password: String, hash: Option<String>) -> bool {
-    let Ok(_permit) = server.hashing.acquire().await else { return false };
+/// A full queue answers `busy` and runs no hash.
+async fn password_matches(server: &Server, password: String, hash: Option<String>) -> Result<bool, Error> {
+    let _turn = server.hashing.turn().await.ok_or_else(busy)?;
     tokio::task::spawn_blocking(move || {
         use argon2::password_hash::{PasswordHash, PasswordVerifier};
         let known = hash.is_some();
@@ -336,7 +372,7 @@ async fn password_matches(server: &Server, password: String, hash: Option<String
         known && matches
     })
     .await
-    .unwrap_or(false)
+    .map_err(|e| internal(e.to_string()))
 }
 
 /// An argon2 hash made as an account's is, of a random password nobody knows.
@@ -623,7 +659,7 @@ async fn login(State(server): State<Arc<Server>>, ConnectInfo(peer): ConnectInfo
     };
     // An unknown email takes the same path, hash included, to the same answer as a wrong password.
     let (account, hash) = server.hub.db.account_by_email(&email).await.map_err(internal)?.unzip();
-    let matches = password_matches(&server, body.password, hash).await;
+    let matches = password_matches(&server, body.password, hash).await?;
     let Some(account) = account.filter(|_| matches) else { return Err(Error(StatusCode::UNAUTHORIZED, "wrong email or password".into())) };
     server.succeeded(&keys);
     server.attempts.lock().unwrap().known.remember(email, address, Instant::now());
@@ -645,7 +681,7 @@ async fn change_password(State(server): State<Arc<Server>>, headers: HeaderMap, 
         return Err(Error(StatusCode::TOO_MANY_REQUESTS, "too many wrong passwords; try again in 15 minutes".into()));
     };
     let (view, hash) = server.hub.db.account(account).await.map_err(internal)?.ok_or_else(|| Error(StatusCode::UNAUTHORIZED, "sign in first".into()))?;
-    if !password_matches(&server, body.current, Some(hash)).await {
+    if !password_matches(&server, body.current, Some(hash)).await? {
         return Err(Error(StatusCode::FORBIDDEN, "the current password is wrong".into()));
     }
     server.succeeded(&keys);
@@ -780,7 +816,7 @@ async fn unlock(server: &Server, account: &Account, client: u64, password: Strin
         return Err("too many wrong passwords; try again in 15 minutes".into());
     };
     let (_, hash) = server.hub.db.account(account.id).await?.ok_or("this account no longer exists")?;
-    if !password_matches(server, password, Some(hash)).await {
+    if !password_matches(server, password, Some(hash)).await.map_err(|Error(_, why)| why)? {
         return Err("that is not this account's password".into());
     }
     server.succeeded(&keys);
@@ -1405,6 +1441,43 @@ mod tests {
         assert!(limiter.attempt(&refused, false, now).is_none(), "the hub's ceiling is spent");
         assert_eq!(limiter.keys[&refused[0].0], before, "the refused request left its address's key as it was");
         assert!(!limiter.spent(&refused[..1], now), "the address keeps its own room");
+    }
+
+    #[tokio::test]
+    async fn with_every_hash_running_and_the_queue_full_one_more_request_is_told_busy_at_once() {
+        use std::time::{Duration, Instant};
+        let hashing = std::sync::Arc::new(super::Hashing::new(1, 2, Duration::from_secs(30)));
+        let holder = hashing.turn().await.expect("a free turn");
+        let queued: Vec<_> = (0..2)
+            .map(|_| {
+                let hashing = hashing.clone();
+                tokio::spawn(async move { hashing.turn().await.is_some() })
+            })
+            .collect();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let started = Instant::now();
+        let answer = tokio::time::timeout(Duration::from_secs(3), hashing.turn()).await.expect("answered before the holder lets go");
+        assert!(answer.is_none() && started.elapsed() < Duration::from_secs(1), "told busy at once, after {:?}", started.elapsed());
+        let super::Error(status, text) = super::busy();
+        assert_eq!((status.as_u16(), text.as_str()), (503, "pinned is busy; try again in a minute"));
+        drop(holder);
+        for waiting in queued {
+            assert!(waiting.await.unwrap(), "a request in the queue gets its turn once the holder lets go");
+        }
+        assert!(hashing.turn().await.is_some(), "once the holder lets go, requests hash again");
+    }
+
+    #[tokio::test]
+    async fn a_request_that_waits_past_the_hash_wait_is_told_busy() {
+        use std::time::{Duration, Instant};
+        let hashing = super::Hashing::new(1, 2, Duration::from_millis(300));
+        let holder = hashing.turn().await.expect("a free turn");
+        let started = Instant::now();
+        let answer = tokio::time::timeout(Duration::from_secs(3), hashing.turn()).await.expect("answered once its wait ran out");
+        let waited = started.elapsed();
+        assert!(answer.is_none() && waited >= Duration::from_millis(300) && waited < Duration::from_secs(2), "told busy after its wait, not {waited:?}");
+        drop(holder);
+        assert!(hashing.turn().await.is_some(), "once the holder lets go, requests hash again");
     }
 
     #[test]
