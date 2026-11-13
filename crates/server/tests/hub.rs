@@ -2093,6 +2093,41 @@ fn an_unknown_email_costs_the_same_password_hash_as_a_wrong_password() {
     assert!(unknown * 2 > known, "an unknown email answers in {unknown:?}, a known one with a wrong password in {known:?}");
 }
 
+#[test]
+fn rotating_the_edge_header_does_not_pass_the_hub_wide_signup_ceiling() {
+    let hub = TestHub::start_behind_proxy("hubsignups", Signup::Open, behind(pinned_server::http::TrustedProxy::Railway, None));
+    let url = hub.url.clone();
+    let from = |address: String, n: usize| post_with(&url, "/api/signup", &[("x-real-ip", &address)], new_account(n));
+    for n in 0..5 {
+        assert_eq!(from("198.51.100.1".into(), n).0, 200);
+    }
+    assert_eq!(from("198.51.100.1".into(), 5).0, 429, "one address over its own limit");
+    for n in 0..50 {
+        assert_eq!(from(format!("203.0.113.{n}"), 10 + n).0, 200, "sign up {n} of the hub's window; an address refused above spent none of it");
+    }
+    assert_eq!(from("203.0.113.100".into(), 100), (429, json!({ "error": TOO_MANY_SIGNUPS })), "a new address finds the hub's window spent");
+}
+
+#[test]
+fn rotating_the_edge_header_does_not_pass_the_hub_wide_agent_registration_ceiling() {
+    let hub = TestHub::start_behind_proxy("hubregister", Signup::Open, behind(pinned_server::http::TrustedProxy::Railway, None));
+    let register = |address: String| post_with(&hub.url, "/oauth/register", &[("x-real-ip", &address)], json!({ "redirect_uris": ["https://agent.example/oauth/callback"], "client_name": "Rotation test" }));
+    for n in 0..100 {
+        assert_eq!(register(format!("203.0.113.{}", n % 250)).0, 201, "registration {n}");
+    }
+    let (status, body) = register("198.51.100.1".into());
+    assert_eq!((status, body["error_description"].clone()), (429, json!("too many registrations; try again in 15 minutes")), "a new address finds the hub's window spent");
+}
+
+#[test]
+fn at_its_cap_a_hub_counts_a_signup_against_its_address_before_it_counts_the_accounts() {
+    let hub = TestHub::start_behind_proxy("caporder", Signup::Open, behind(pinned_server::http::TrustedProxy::Off, Some(0)));
+    for n in 0..5 {
+        assert_eq!(post_with(&hub.url, "/api/signup", &[], new_account(n)), (403, json!({ "error": NOT_TAKING })));
+    }
+    assert_eq!(post_with(&hub.url, "/api/signup", &[], new_account(5)), (429, json!({ "error": TOO_MANY_SIGNUPS })), "the limiter answers before the count runs");
+}
+
 fn signed_in_client(url: &str, token: &str) -> Client {
     let mut client = Client::connect(url, token);
     client.wait("hello", |f| f["type"] == "hello");
