@@ -21,6 +21,7 @@ pub mod global_orchestrator;
 pub mod graph;
 pub mod history;
 pub mod hooks;
+pub mod ideas;
 pub mod ipc;
 pub mod linear;
 pub mod link;
@@ -47,6 +48,7 @@ pub mod reading;
 pub mod reminders;
 pub mod repo_look;
 pub mod scaffold;
+pub mod schedule;
 pub mod scripts;
 pub mod sessions;
 #[cfg(unix)]

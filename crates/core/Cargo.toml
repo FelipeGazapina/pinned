@@ -31,6 +31,10 @@ rusqlite = { version = "0.41", features = ["bundled"] }
 tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
 # Reads a session's screen only while it waits on a menu, to tell when the user answered (menu_watch.rs).
 vt100 = "0.15"
+# Time zones and five-field cron for schedule.rs. croner evaluates in any chrono zone and handles DST (a skipped
+# local time runs at the first valid minute after it, a repeated one once), which the hub scheduler relies on.
+chrono-tz = "0.10"
+croner = "4"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "test-util"] }
