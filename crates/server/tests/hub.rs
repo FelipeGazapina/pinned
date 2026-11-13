@@ -2778,6 +2778,7 @@ fn node_with_a_transcript(name: &str) -> (TestHub, Client, String, PathBuf, Node
             env: vec![],
             bypass: false,
             interrupted: false,
+            cut_by_sleep: None,
             resume_at: None,
             held: false,
             account: "work".into(),
