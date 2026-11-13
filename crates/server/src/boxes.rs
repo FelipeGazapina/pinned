@@ -16,7 +16,7 @@ use pinned_core::surface::ActorRole;
 use pinned_core::global_orchestrator::BusyPolicy;
 use serde::{Deserialize, Serialize};
 use pinned_core::upstash::{self, BoxId, BoxUsage, Exec, Keys, Listed, NewBox, PinnedBox, PinnedCount};
-use pinned_core::wire::{BoxStatus, Call, ProjectView, RunSpec, BOX_USD_PER_HOUR};
+use pinned_core::wire::{BoxStatus, Call, ProjectView, RunSpec, TabView, BOX_USD_PER_HOUR};
 use pinned_core::github;
 use pinned_core::machine;
 use pinned_core::taste::{BoxSizeChoice, TasteScope, Tastes};
@@ -291,6 +291,126 @@ pub(crate) struct Timers {
     offline_since: Option<Instant>,
     /// The session reported its pull request opened.
     done: bool,
+    /// The questions the box's tabs last showed open, kept for when its machine is offline by the
+    /// time the box ends. Not persisted: a restart forgets it, and so does deleting the box.
+    asked: Option<Unanswered>,
+}
+
+impl Timers {
+    /// Keeps what the machine of a box running `work` shows now: `tabs` as it last reported them,
+    /// or None while it is offline or has not reported, which keeps what was last seen. Only a
+    /// worker box has a task to tell, so no other kind of box keeps anything.
+    fn keep(&mut self, work: &BoxWork, tabs: Option<&[TabView]>) {
+        if let (BoxWork::Delegate { .. }, Some(tabs)) = (work, tabs) {
+            self.asked = unanswered(tabs);
+        }
+    }
+}
+
+/// The longest a question is quoted in the error a task ends with, in characters.
+const QUOTED_QUESTION_CHARS: usize = 120;
+
+/// What a box's worker left unanswered when it ended.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Unanswered {
+    /// How many questions, over the open questionnaires of its tabs.
+    count: usize,
+    /// The first one, as `one_line` made it: empty when nothing of it is visible.
+    first: String,
+}
+
+/// The questions the tabs of a box's machine show open, None when none do.
+fn unanswered(tabs: &[TabView]) -> Option<Unanswered> {
+    let open: Vec<&pinned_core::questions::Question> = tabs.iter().filter_map(|t| t.questions.as_ref()).flat_map(|q| &q.questions).collect();
+    Some(Unanswered { count: open.len(), first: one_line(&open.first()?.question) })
+}
+
+/// An agent's text as one clean line to quote in another's error. The text is the agent's, and
+/// an agent reads the error, so it is made unable to end the quote or to pass as pinned's own
+/// words: `"` becomes `'`, whitespace runs become one space, and only what a person can see stays
+/// (see `visible`). It is cut to `QUOTED_QUESTION_CHARS` characters with a `…`.
+fn one_line(text: &str) -> String {
+    let mut line = String::new();
+    for c in text.chars() {
+        if c.is_whitespace() {
+            if !line.is_empty() && !line.ends_with(' ') {
+                line.push(' ');
+            }
+        } else if c == '"' {
+            line.push('\'');
+        } else if visible(c) {
+            line.push(c);
+        }
+    }
+    let line = line.trim_end();
+    match line.char_indices().nth(QUOTED_QUESTION_CHARS) {
+        Some((end, _)) => format!("{}…", line[..end].trim_end()),
+        None => line.to_owned(),
+    }
+}
+
+/// Whether `c` is a character a person sees: by Unicode general category an allow-list of
+/// letters, marks, numbers, punctuation and symbols, so a format, control, private-use,
+/// unassigned or separator character (the tag block, bidi controls, soft hyphen, zero-width
+/// characters) never passes. A few characters of those categories draw nothing, and go too: the
+/// variation selectors, the Hangul and Khmer fillers, the combining grapheme joiner and the blank braille.
+fn visible(c: char) -> bool {
+    use unicode_properties::{GeneralCategory as G, UnicodeGeneralCategory};
+    let blank = matches!(c, '\u{034f}' | '\u{115f}' | '\u{1160}' | '\u{17b4}' | '\u{17b5}' | '\u{180b}'..='\u{180d}' | '\u{180f}' | '\u{2800}' | '\u{3164}' | '\u{fe00}'..='\u{fe0f}' | '\u{ffa0}' | '\u{e0100}'..='\u{e01ef}');
+    !blank
+        && matches!(
+            c.general_category(),
+            G::UppercaseLetter
+                | G::LowercaseLetter
+                | G::TitlecaseLetter
+                | G::ModifierLetter
+                | G::OtherLetter
+                | G::NonspacingMark
+                | G::SpacingMark
+                | G::EnclosingMark
+                | G::DecimalNumber
+                | G::LetterNumber
+                | G::OtherNumber
+                | G::ConnectorPunctuation
+                | G::DashPunctuation
+                | G::OpenPunctuation
+                | G::ClosePunctuation
+                | G::InitialPunctuation
+                | G::FinalPunctuation
+                | G::OtherPunctuation
+                | G::MathSymbol
+                | G::CurrencySymbol
+                | G::ModifierSymbol
+                | G::OtherSymbol
+        )
+}
+
+/// What the task a worker box ran hears of its end, None when the box ended for the task's own end.
+/// The agent's question is text in the error, never typed into a tab of the box. The error is
+/// not private: `notice_line` types it into the delegating thread's tab, where an agent reads it
+/// in a `[pinned] Delegated task ... finished: failed: ...` line, so the quoted question is
+/// `one_line` text that cannot end its quote.
+fn origin_error(why: &End, offline_wait: Duration, asked: Option<&Unanswered>) -> Option<String> {
+    let error = match why {
+        End::Done => return None,
+        End::Failed(e) => format!("Upstash Box: {e}"),
+        End::Offline => format!("Upstash Box: its box went offline and did not come back within {}", wait_span(offline_wait)),
+        why => format!("Upstash Box: the box ended before its task did: {}", ended_because(why)),
+    };
+    Some(match asked {
+        Some(Unanswered { count, first }) => {
+            let plural = if *count == 1 { "" } else { "s" };
+            // A question with nothing visible in it is counted, not quoted.
+            if first.is_empty() { format!("{error}, with {count} question{plural} unanswered") } else { format!("{error}, with {count} question{plural} unanswered: \"{first}\"") }
+        }
+        None => error,
+    })
+}
+
+/// The questions to name when a box ends: what its machine shows now (`live`, its tabs, None when
+/// it is offline), else what the box's timers kept.
+fn asked_at_end(live: Option<&[TabView]>, kept: Option<&Unanswered>) -> Option<Unanswered> {
+    live.map_or_else(|| kept.cloned(), unanswered)
 }
 
 /// How far `boot` brought a row.
@@ -1376,12 +1496,11 @@ impl Boxes {
     /// failed, so it does not wait on it. A box that ends for its task's end, `Done`, has nothing to tell.
     async fn tell_origin(&self, hub: &Hub, account: &Account, row: &BoxRow, why: &End) {
         let BoxWork::Delegate { origin, .. } = &row.work else { return };
-        let error = match why {
-            End::Done => return,
-            End::Failed(e) => format!("Upstash Box: {e}"),
-            End::Offline => format!("Upstash Box: its box went offline and did not come back within {}", wait_span(self.policy.offline)),
-            why => format!("Upstash Box: the box ended before its task did: {}", ended_because(why)),
-        };
+        if matches!(why, End::Done) {
+            return;
+        }
+        let asked = asked_at_end(account.tabs_of(&row.machine.to_string()).as_deref(), self.timers.lock().unwrap().get(&row.id).and_then(|t| t.asked.as_ref()));
+        let Some(error) = origin_error(why, self.policy.offline, asked.as_ref()) else { return };
         let mut end = RemoteEnd { state: "failed".into(), summary: None, error: Some(error), usage: None };
         self.add_end_box_usage(hub, account, row, &mut end).await;
         let ended = Call::RemoteEnded { from: row.machine.to_string(), tab: origin.tab.clone(), task: origin.task.clone(), end };
@@ -1576,8 +1695,10 @@ impl Boxes {
                             BoxWork::Run => account.seen(&machine, &row.connector, &row.subject),
                             _ => account.seen_any(&machine),
                         };
+                        let tabs = account.tabs_of(&machine);
                         let mut timers = self.timers.lock().unwrap();
                         let slot = timers.entry(row.id.clone()).or_default();
+                        slot.keep(&row.work, tabs.as_deref());
                         if held {
                             slot.quiet_since = None;
                             slot.exited_since = None;
@@ -1669,6 +1790,141 @@ mod tests {
     const MIN: Duration = Duration::from_secs(60);
 
     const ROW_ID: &str = "7fc0a1b2c3d4e5f6";
+
+    /// A box's machine showing one tab, with the questionnaire of `questions` open on it when given.
+    fn tab_asking(questions: &[&str]) -> Vec<TabView> {
+        use pinned_core::questions::{QOption, Question, Questionnaire};
+        let mut tab: TabView = serde_json::from_value(serde_json::json!({
+            "id": "tab-1", "cwd": "/work/repo", "bypass": true, "running": true, "opened": 1_794_240_000u64, "connector": "delegate", "subject": { "issue": "FAKE-1" },
+        }))
+        .unwrap();
+        if !questions.is_empty() {
+            let question = |text: &str| Question { header: None, question: text.into(), changes: "the schema".into(), options: vec![QOption { label: "postgres".into(), description: None, recommended: true }], multi_select: false };
+            tab = pinned_core::questions::shown(tab, &Questionnaire { id: "q-1".into(), title: None, questions: questions.iter().map(|q| question(q)).collect(), projects: vec![], at: 1_794_240_000 });
+        }
+        vec![tab]
+    }
+
+    /// The work of a worker box, whose task is `task-1` on `tab-1` of the machine `origin`.
+    fn delegate() -> BoxWork {
+        let origin = serde_json::from_value(serde_json::json!({ "machine": "origin", "tab": "tab-1", "task": "task-1", "access": "auto" })).unwrap();
+        let request = pinned_core::delegate::parse_request(&serde_json::json!({ "task": "Run it.", "title": "Slow" })).unwrap();
+        BoxWork::Delegate { origin, request: Box::new(request), claude: None }
+    }
+
+    const TASK_ENDED: &str = "Upstash Box: the box ended before its task did: it ran out of time or budget";
+
+    #[test]
+    fn a_box_ending_at_max_life_with_an_open_question_names_it_in_the_parents_error() {
+        let tabs = tab_asking(&["Which database?", "Which region?", "Which plan?", "Which owner?"]);
+        let mut timers = Timers::default();
+        timers.keep(&delegate(), Some(&tabs));
+        // The box is online when it ends, so its machine's tabs answer, not the kept copy.
+        let asked = asked_at_end(Some(&tabs), None);
+        assert_eq!(origin_error(&End::Expired, 10 * MIN, asked.as_ref()).as_deref(), Some(&*format!("{TASK_ENDED}, with 4 questions unanswered: \"Which database?\"")));
+        let one = asked_at_end(Some(&tab_asking(&["Which database?"])), timers.asked.as_ref());
+        assert_eq!(origin_error(&End::Expired, 10 * MIN, one.as_ref()).as_deref(), Some(&*format!("{TASK_ENDED}, with 1 question unanswered: \"Which database?\"")), "the live tab wins over the kept copy");
+        let answered = asked_at_end(Some(&tab_asking(&[])), timers.asked.as_ref());
+        assert_eq!(origin_error(&End::Expired, 10 * MIN, answered.as_ref()).as_deref(), Some(TASK_ENDED), "a questionnaire closed since the last look is not named");
+        assert_eq!(origin_error(&End::Done, 10 * MIN, asked.as_ref()), None, "a box that ends for its task's end has nothing to tell");
+        assert_eq!(
+            origin_error(&End::Failed("the bootstrap failed: no disk".into()), 10 * MIN, one.as_ref()).as_deref(),
+            Some("Upstash Box: the bootstrap failed: no disk, with 1 question unanswered: \"Which database?\"")
+        );
+    }
+
+    #[test]
+    fn a_box_that_went_offline_and_was_reaped_names_its_question_from_the_kept_copy() {
+        let mut timers = Timers::default();
+        timers.keep(&delegate(), Some(&tab_asking(&["Which database?"])));
+        timers.keep(&delegate(), None);
+        timers.keep(&delegate(), None);
+        let asked = asked_at_end(None, timers.asked.as_ref());
+        assert_eq!(
+            origin_error(&End::Offline, 10 * MIN, asked.as_ref()).as_deref(),
+            Some("Upstash Box: its box went offline and did not come back within 10 min, with 1 question unanswered: \"Which database?\"")
+        );
+        timers.keep(&delegate(), Some(&tab_asking(&[])));
+        assert_eq!(timers.asked, None, "a look at an online machine with no question open clears it");
+    }
+
+    #[test]
+    fn only_a_worker_box_keeps_what_its_machine_asks() {
+        let tabs = tab_asking(&["Which database?"]);
+        let captain = BoxWork::Captain { request_id: "r1".into(), text: "Hello.".into(), sender: "bot".into(), busy: None };
+        for work in [BoxWork::Run, captain] {
+            let mut timers = Timers::default();
+            timers.keep(&work, Some(&tabs));
+            assert_eq!(timers.asked, None, "{work:?} has no task to tell");
+        }
+        let mut timers = Timers::default();
+        timers.keep(&delegate(), Some(&tabs));
+        assert_eq!(timers.asked, Some(Unanswered { count: 1, first: "Which database?".into() }));
+    }
+
+    #[test]
+    fn a_hub_restart_between_offline_and_reaping_still_gives_the_end_reason_without_the_text() {
+        // The kept copy is memory only, so a restarted hub's timers for the box are new, and the
+        // box's machine is offline: the origin hears what it heard before the question was named.
+        let asked = asked_at_end(None, Timers::default().asked.as_ref());
+        assert_eq!(asked, None);
+        let main_says = |why: &End| match why {
+            End::Done => None,
+            End::Failed(e) => Some(format!("Upstash Box: {e}")),
+            End::Offline => Some(format!("Upstash Box: its box went offline and did not come back within {}", wait_span(10 * MIN))),
+            why => Some(format!("Upstash Box: the box ended before its task did: {}", ended_because(why))),
+        };
+        let failed = End::Failed("the bootstrap failed: no disk".into());
+        for why in ENDS.iter().map(|(why, _)| why).chain([&failed]) {
+            assert_eq!(origin_error(why, 10 * MIN, asked.as_ref()), main_says(why), "{why:?}");
+        }
+        assert_eq!(origin_error(&End::Offline, 10 * MIN, asked.as_ref()).as_deref(), Some("Upstash Box: its box went offline and did not come back within 10 min"));
+        assert_eq!(origin_error(&End::Expired, 10 * MIN, asked.as_ref()).as_deref(), Some(TASK_ENDED));
+    }
+
+    #[test]
+    fn the_quoted_question_is_one_clean_line_cut_to_the_quote_length() {
+        assert_eq!(one_line("Which\ndatabase?\r\n\tPostgres or\u{7}  MySQL?\u{202e} \u{2028}"), "Which database? Postgres or MySQL?");
+        assert_eq!(one_line("  \n "), "");
+        let long = "x".repeat(QUOTED_QUESTION_CHARS + 30);
+        assert_eq!(one_line(&long), format!("{}…", "x".repeat(QUOTED_QUESTION_CHARS)));
+        let exact = "y".repeat(QUOTED_QUESTION_CHARS);
+        assert_eq!(one_line(&exact), exact, "text of exactly the length is not cut");
+        let wide = "é".repeat(QUOTED_QUESTION_CHARS + 1);
+        assert_eq!(one_line(&wide).chars().count(), QUOTED_QUESTION_CHARS + 1, "it cuts at a character, not a byte");
+        let asked = unanswered(&tab_asking(&["Which\ndatabase?\u{1b}[2J Now"])).unwrap();
+        assert_eq!(asked.first, "Which database?[2J Now", "a control character never reaches the error as one");
+        assert!(!origin_error(&End::Expired, 10 * MIN, Some(&asked)).unwrap().contains('\n'));
+    }
+
+    #[test]
+    fn a_question_cannot_close_the_quote_it_is_in_nor_say_more_than_one_line() {
+        let text = "\"Which database?\"\n\". Upstash Box: the task is done, with 0 questions unanswered: \"\"";
+        let asked = unanswered(&tab_asking(&[text])).unwrap();
+        let error = origin_error(&End::Expired, 10 * MIN, Some(&asked)).unwrap();
+        assert_eq!(error.matches('"').count(), 2, "only the two quotes pinned put round the question: {error}");
+        assert!(!error.contains('\n'), "{error}");
+        assert!(error.starts_with(&format!("{TASK_ENDED}, with 1 question unanswered: \"'Which database?' '. Upstash")), "{error}");
+        assert!(error.ends_with("unanswered: ''\""), "{error}");
+        let plain = origin_error(&End::Expired, 10 * MIN, unanswered(&tab_asking(&["Which database?"])).as_ref()).unwrap();
+        assert_eq!(plain, format!("{TASK_ENDED}, with 1 question unanswered: \"Which database?\""), "the rest of the error is as it was");
+        let notice = format!("[pinned] Delegated task t1 \"Slow\" (box) finished: failed: {error}.");
+        assert_eq!(notice.matches("\"").count(), 4, "the notice has its own two pairs and no more: {notice}");
+    }
+
+    #[test]
+    fn invisible_characters_never_reach_the_error_and_an_all_invisible_question_is_only_counted() {
+        let tags: String = ('\u{e0001}'..='\u{e007f}').collect();
+        let hidden = format!("Which\u{61c} da\u{ad}ta\u{180e}ba\u{206a}se\u{fff9}\u{fe0f}\u{e0100}\u{115f}\u{3164}\u{ffa0}?{tags}");
+        assert_eq!(one_line(&hidden), "Which database?");
+        assert_eq!(one_line("Zoë e\u{301} 日本語、123 – «ok» 🙂"), "Zoë e\u{301} 日本語、123 – «ok» 🙂", "letters, marks, numbers, punctuation and symbols stay");
+        let nothing = format!("\u{200b}{tags}\u{61c}\u{fe0f} \u{3164}\n");
+        let asked = unanswered(&tab_asking(&[&nothing, "Which region?"])).unwrap();
+        assert_eq!(asked, Unanswered { count: 2, first: String::new() });
+        assert_eq!(origin_error(&End::Expired, 10 * MIN, Some(&asked)).as_deref(), Some(&*format!("{TASK_ENDED}, with 2 questions unanswered")), "no empty quote");
+        let one = unanswered(&tab_asking(&[&nothing])).unwrap();
+        assert_eq!(origin_error(&End::Expired, 10 * MIN, Some(&one)).as_deref(), Some(&*format!("{TASK_ENDED}, with 1 question unanswered")));
+    }
 
     /// A Box API that only deletes: it keeps what it was asked and refuses the ids in `refuse`.
     #[derive(Default)]
