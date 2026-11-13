@@ -5,3 +5,4 @@ node 288: ppid 1 pgid 288 sid 288 (own session, as in run 1); logger pid 8311 pp
 order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:01:36Z #1 an_agent_acts_as_its_own_account_audited_and_a_confirm_runs_once_its_owner_approves START / avail=15141M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:01:44Z #1 an_agent_acts_as_its_own_account_audited_and_a_confirm_runs_once_its_owner_approves ok / avail=15125M /workspace avail=19374M node_stat=Ssl node_tcp=1
+2026-11-13T04:01:45Z #2 a_client_drives_a_tab_on_a_paired_node_through_the_hub START / avail=15125M /workspace avail=19374M node_stat=Ssl
