@@ -39,3 +39,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:03:02Z #15 a_plugin_tree_is_stored_without_settings_env_or_claude_json ok / avail=15124M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:03:03Z #16 an_executable_hook_stays_executable_through_the_hub START / avail=15124M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:03:05Z #16 an_executable_hook_stays_executable_through_the_hub ok / avail=15124M /workspace avail=19374M node_stat=Ssl node_tcp=1
+2026-11-13T04:03:06Z #17 an_omitted_executable_field_keeps_the_stored_bit_through_the_hub START / avail=15124M /workspace avail=19374M node_stat=Ssl
