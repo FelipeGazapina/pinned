@@ -39262,6 +39262,259 @@
         ]
       }
     },
+    "Idea": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Idea",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string",
+            "default": ""
+          },
+          "project": {
+            "description": "A repo key such as `github.com/FelipeGazapina/pinned`; none for an idea that has no project yet.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "status": {
+            "$ref": "#/$defs/IdeaStatus",
+            "default": "open"
+          },
+          "task": {
+            "description": "The task scheduled from this idea.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "created_by": {
+            "$ref": "#/$defs/Actor"
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "text",
+          "project",
+          "status",
+          "task",
+          "created_by",
+          "created_at",
+          "updated_at"
+        ],
+        "$defs": {
+          "IdeaStatus": {
+            "type": "string",
+            "enum": [
+              "open",
+              "done",
+              "dropped"
+            ]
+          },
+          "Actor": {
+            "description": "Who created a task or an idea: the user, or an agent by the part it plays.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "user"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "agent"
+                  },
+                  "role": {
+                    "$ref": "#/$defs/ActorRole"
+                  },
+                  "machine": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "tab": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "session_title": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "role",
+                  "machine",
+                  "tab",
+                  "session_title"
+                ]
+              }
+            ]
+          },
+          "ActorRole": {
+            "description": "The part the session that acted plays, as its tab shows it.",
+            "type": "string",
+            "enum": [
+              "global_orchestrator",
+              "captain",
+              "worker",
+              "taste_chat",
+              "workflow",
+              "session"
+            ]
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Idea",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string",
+            "default": ""
+          },
+          "project": {
+            "description": "A repo key such as `github.com/FelipeGazapina/pinned`; none for an idea that has no project yet.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "status": {
+            "$ref": "#/$defs/IdeaStatus",
+            "default": "open"
+          },
+          "task": {
+            "description": "The task scheduled from this idea.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "created_by": {
+            "$ref": "#/$defs/Actor"
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "created_by",
+          "created_at",
+          "updated_at"
+        ],
+        "$defs": {
+          "IdeaStatus": {
+            "type": "string",
+            "enum": [
+              "open",
+              "done",
+              "dropped"
+            ]
+          },
+          "Actor": {
+            "description": "Who created a task or an idea: the user, or an agent by the part it plays.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "user"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "agent"
+                  },
+                  "role": {
+                    "$ref": "#/$defs/ActorRole"
+                  },
+                  "machine": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "tab": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "session_title": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "role"
+                ]
+              }
+            ]
+          },
+          "ActorRole": {
+            "description": "The part the session that acted plays, as its tab shows it.",
+            "type": "string",
+            "enum": [
+              "global_orchestrator",
+              "captain",
+              "worker",
+              "taste_chat",
+              "workflow",
+              "session"
+            ]
+          }
+        }
+      }
+    },
     "Invites": {
       "send": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -44050,13 +44303,6 @@
               "$ref": "#/$defs/ConvexConnection"
             }
           },
-          "ideas": {
-            "description": "The account's ideas. Only the hub fills it, from its own table, when it pushes or answers settings.",
-            "type": "array",
-            "items": {
-              "$ref": "#/$defs/Idea"
-            }
-          },
           "repo_insight": {
             "description": "Absent on the wire while it is off.",
             "$ref": "#/$defs/RepoInsight"
@@ -45657,131 +45903,6 @@
               "preview"
             ]
           },
-          "Idea": {
-            "type": "object",
-            "properties": {
-              "id": {
-                "type": "string"
-              },
-              "title": {
-                "type": "string"
-              },
-              "text": {
-                "type": "string",
-                "default": ""
-              },
-              "project": {
-                "description": "A repo key such as `github.com/FelipeGazapina/pinned`; none for an idea that has no project yet.",
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "default": null
-              },
-              "status": {
-                "$ref": "#/$defs/IdeaStatus",
-                "default": "open"
-              },
-              "task": {
-                "description": "The task scheduled from this idea.",
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "default": null
-              },
-              "created_by": {
-                "$ref": "#/$defs/Actor"
-              },
-              "created_at": {
-                "type": "integer",
-                "format": "int64"
-              },
-              "updated_at": {
-                "type": "integer",
-                "format": "int64"
-              }
-            },
-            "required": [
-              "id",
-              "title",
-              "text",
-              "project",
-              "status",
-              "task",
-              "created_by",
-              "created_at",
-              "updated_at"
-            ]
-          },
-          "IdeaStatus": {
-            "type": "string",
-            "enum": [
-              "open",
-              "done",
-              "dropped"
-            ]
-          },
-          "Actor": {
-            "description": "Who created a task or an idea: the user, or an agent by the part it plays.",
-            "oneOf": [
-              {
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "user"
-                  }
-                },
-                "required": [
-                  "kind"
-                ]
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "agent"
-                  },
-                  "role": {
-                    "$ref": "#/$defs/ActorRole"
-                  },
-                  "machine": {
-                    "type": "string",
-                    "default": ""
-                  },
-                  "tab": {
-                    "type": "string",
-                    "default": ""
-                  },
-                  "session_title": {
-                    "type": "string",
-                    "default": ""
-                  }
-                },
-                "required": [
-                  "kind",
-                  "role",
-                  "machine",
-                  "tab",
-                  "session_title"
-                ]
-              }
-            ]
-          },
-          "ActorRole": {
-            "description": "The part the session that acted plays, as its tab shows it.",
-            "type": "string",
-            "enum": [
-              "global_orchestrator",
-              "captain",
-              "worker",
-              "taste_chat",
-              "workflow",
-              "session"
-            ]
-          },
           "RepoInsight": {
             "description": "Whether the global orchestrator may read the account's repositories with its repo tools. Off\nuntil the user turns it on in Settings.",
             "type": "object",
@@ -45900,13 +46021,6 @@
             "type": "array",
             "items": {
               "$ref": "#/$defs/ConvexConnection"
-            }
-          },
-          "ideas": {
-            "description": "The account's ideas. Only the hub fills it, from its own table, when it pushes or answers settings.",
-            "type": "array",
-            "items": {
-              "$ref": "#/$defs/Idea"
             }
           },
           "repo_insight": {
@@ -47441,124 +47555,6 @@
               "dev",
               "prod",
               "preview"
-            ]
-          },
-          "Idea": {
-            "type": "object",
-            "properties": {
-              "id": {
-                "type": "string"
-              },
-              "title": {
-                "type": "string"
-              },
-              "text": {
-                "type": "string",
-                "default": ""
-              },
-              "project": {
-                "description": "A repo key such as `github.com/FelipeGazapina/pinned`; none for an idea that has no project yet.",
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "default": null
-              },
-              "status": {
-                "$ref": "#/$defs/IdeaStatus",
-                "default": "open"
-              },
-              "task": {
-                "description": "The task scheduled from this idea.",
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "default": null
-              },
-              "created_by": {
-                "$ref": "#/$defs/Actor"
-              },
-              "created_at": {
-                "type": "integer",
-                "format": "int64"
-              },
-              "updated_at": {
-                "type": "integer",
-                "format": "int64"
-              }
-            },
-            "required": [
-              "id",
-              "title",
-              "created_by",
-              "created_at",
-              "updated_at"
-            ]
-          },
-          "IdeaStatus": {
-            "type": "string",
-            "enum": [
-              "open",
-              "done",
-              "dropped"
-            ]
-          },
-          "Actor": {
-            "description": "Who created a task or an idea: the user, or an agent by the part it plays.",
-            "oneOf": [
-              {
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "user"
-                  }
-                },
-                "required": [
-                  "kind"
-                ]
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "agent"
-                  },
-                  "role": {
-                    "$ref": "#/$defs/ActorRole"
-                  },
-                  "machine": {
-                    "type": "string",
-                    "default": ""
-                  },
-                  "tab": {
-                    "type": "string",
-                    "default": ""
-                  },
-                  "session_title": {
-                    "type": "string",
-                    "default": ""
-                  }
-                },
-                "required": [
-                  "kind",
-                  "role"
-                ]
-              }
-            ]
-          },
-          "ActorRole": {
-            "description": "The part the session that acted plays, as its tab shows it.",
-            "type": "string",
-            "enum": [
-              "global_orchestrator",
-              "captain",
-              "worker",
-              "taste_chat",
-              "workflow",
-              "session"
             ]
           },
           "RepoInsight": {
@@ -51503,13 +51499,6 @@
                   "$ref": "#/$defs/ConvexConnection"
                 }
               },
-              "ideas": {
-                "description": "The account's ideas. Only the hub fills it, from its own table, when it pushes or answers settings.",
-                "type": "array",
-                "items": {
-                  "$ref": "#/$defs/Idea"
-                }
-              },
               "repo_insight": {
                 "description": "Absent on the wire while it is off.",
                 "$ref": "#/$defs/RepoInsight"
@@ -53075,131 +53064,6 @@
               "preview"
             ]
           },
-          "Idea": {
-            "type": "object",
-            "properties": {
-              "id": {
-                "type": "string"
-              },
-              "title": {
-                "type": "string"
-              },
-              "text": {
-                "type": "string",
-                "default": ""
-              },
-              "project": {
-                "description": "A repo key such as `github.com/FelipeGazapina/pinned`; none for an idea that has no project yet.",
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "default": null
-              },
-              "status": {
-                "$ref": "#/$defs/IdeaStatus",
-                "default": "open"
-              },
-              "task": {
-                "description": "The task scheduled from this idea.",
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "default": null
-              },
-              "created_by": {
-                "$ref": "#/$defs/Actor"
-              },
-              "created_at": {
-                "type": "integer",
-                "format": "int64"
-              },
-              "updated_at": {
-                "type": "integer",
-                "format": "int64"
-              }
-            },
-            "required": [
-              "id",
-              "title",
-              "text",
-              "project",
-              "status",
-              "task",
-              "created_by",
-              "created_at",
-              "updated_at"
-            ]
-          },
-          "IdeaStatus": {
-            "type": "string",
-            "enum": [
-              "open",
-              "done",
-              "dropped"
-            ]
-          },
-          "Actor": {
-            "description": "Who created a task or an idea: the user, or an agent by the part it plays.",
-            "oneOf": [
-              {
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "user"
-                  }
-                },
-                "required": [
-                  "kind"
-                ]
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "agent"
-                  },
-                  "role": {
-                    "$ref": "#/$defs/ActorRole"
-                  },
-                  "machine": {
-                    "type": "string",
-                    "default": ""
-                  },
-                  "tab": {
-                    "type": "string",
-                    "default": ""
-                  },
-                  "session_title": {
-                    "type": "string",
-                    "default": ""
-                  }
-                },
-                "required": [
-                  "kind",
-                  "role",
-                  "machine",
-                  "tab",
-                  "session_title"
-                ]
-              }
-            ]
-          },
-          "ActorRole": {
-            "description": "The part the session that acted plays, as its tab shows it.",
-            "type": "string",
-            "enum": [
-              "global_orchestrator",
-              "captain",
-              "worker",
-              "taste_chat",
-              "workflow",
-              "session"
-            ]
-          },
           "RepoInsight": {
             "description": "Whether the global orchestrator may read the account's repositories with its repo tools. Off\nuntil the user turns it on in Settings.",
             "type": "object",
@@ -53469,6 +53333,18 @@
               "action",
               "about",
               "args"
+            ]
+          },
+          "ActorRole": {
+            "description": "The part the session that acted plays, as its tab shows it.",
+            "type": "string",
+            "enum": [
+              "global_orchestrator",
+              "captain",
+              "worker",
+              "taste_chat",
+              "workflow",
+              "session"
             ]
           },
           "Decision": {
@@ -54870,13 +54746,6 @@
                 "type": "array",
                 "items": {
                   "$ref": "#/$defs/ConvexConnection"
-                }
-              },
-              "ideas": {
-                "description": "The account's ideas. Only the hub fills it, from its own table, when it pushes or answers settings.",
-                "type": "array",
-                "items": {
-                  "$ref": "#/$defs/Idea"
                 }
               },
               "repo_insight": {
@@ -56378,124 +56247,6 @@
               "preview"
             ]
           },
-          "Idea": {
-            "type": "object",
-            "properties": {
-              "id": {
-                "type": "string"
-              },
-              "title": {
-                "type": "string"
-              },
-              "text": {
-                "type": "string",
-                "default": ""
-              },
-              "project": {
-                "description": "A repo key such as `github.com/FelipeGazapina/pinned`; none for an idea that has no project yet.",
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "default": null
-              },
-              "status": {
-                "$ref": "#/$defs/IdeaStatus",
-                "default": "open"
-              },
-              "task": {
-                "description": "The task scheduled from this idea.",
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "default": null
-              },
-              "created_by": {
-                "$ref": "#/$defs/Actor"
-              },
-              "created_at": {
-                "type": "integer",
-                "format": "int64"
-              },
-              "updated_at": {
-                "type": "integer",
-                "format": "int64"
-              }
-            },
-            "required": [
-              "id",
-              "title",
-              "created_by",
-              "created_at",
-              "updated_at"
-            ]
-          },
-          "IdeaStatus": {
-            "type": "string",
-            "enum": [
-              "open",
-              "done",
-              "dropped"
-            ]
-          },
-          "Actor": {
-            "description": "Who created a task or an idea: the user, or an agent by the part it plays.",
-            "oneOf": [
-              {
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "user"
-                  }
-                },
-                "required": [
-                  "kind"
-                ]
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "agent"
-                  },
-                  "role": {
-                    "$ref": "#/$defs/ActorRole"
-                  },
-                  "machine": {
-                    "type": "string",
-                    "default": ""
-                  },
-                  "tab": {
-                    "type": "string",
-                    "default": ""
-                  },
-                  "session_title": {
-                    "type": "string",
-                    "default": ""
-                  }
-                },
-                "required": [
-                  "kind",
-                  "role"
-                ]
-              }
-            ]
-          },
-          "ActorRole": {
-            "description": "The part the session that acted plays, as its tab shows it.",
-            "type": "string",
-            "enum": [
-              "global_orchestrator",
-              "captain",
-              "worker",
-              "taste_chat",
-              "workflow",
-              "session"
-            ]
-          },
           "RepoInsight": {
             "description": "Whether the global orchestrator may read the account's repositories with its repo tools. Off\nuntil the user turns it on in Settings.",
             "type": "object",
@@ -56759,6 +56510,18 @@
               "role",
               "action",
               "args"
+            ]
+          },
+          "ActorRole": {
+            "description": "The part the session that acted plays, as its tab shows it.",
+            "type": "string",
+            "enum": [
+              "global_orchestrator",
+              "captain",
+              "worker",
+              "taste_chat",
+              "workflow",
+              "session"
             ]
           },
           "Decision": {
