@@ -115,9 +115,9 @@ create table if not exists agent_boxes (box text primary key, account uuid not n
   machine uuid not null, tab text not null, role text not null, started bigint not null);
 -- The end of a task a worker ran for `origin_machine`, which the hub took while that machine was
 -- offline, or a worker box's it-ended notice it could not pass on. The row goes once
--- `origin_machine` took it, when that machine is removed, or after `HELD_FOR`. `unclaimed_at` is
--- when `origin_machine` answered that it did not take it, as one that restarted and forgot the
--- task does: the row then stays for `HELD_FOR`, is not offered again, and `unclaimed_ends` lists it.
+-- `origin_machine` took it, or after `HELD_FOR`. `unclaimed_at` is when `origin_machine` answered
+-- that it did not take it, as one that restarted and forgot the task does, or was removed: the row
+-- then stays for `HELD_FOR`, is not offered again, and `unclaimed_ends` lists it.
 -- `read_at` is when `origin_machine`'s own status look of the task was answered from the row: that
 -- machine knows the task and settled it then, so a later not-taken is its repeat, not a forgotten task.
 create table if not exists held_ends (account uuid not null references accounts on delete cascade,
@@ -674,12 +674,22 @@ impl Db {
         Ok(n == 1)
     }
 
+    /// Deletes the machine. The ends held for it can no longer be delivered, so those still waiting
+    /// turn unclaimed in the same statement, and `unclaimed_ends` lists them for their `HELD_FOR`,
+    /// as a Captain box's that ended or a machine the user removed.
     pub async fn remove_machine(&self, account: Uuid, machine: Uuid) -> Result<bool, String> {
-        let client = self.client().await?;
-        let n = client.execute("delete from machines where id = $1 and account = $2", &[&machine, &account]).await.map_err(err)?;
-        // Nothing can read the ends held for it any more.
-        client.execute("delete from held_ends where account = $1 and origin_machine = $2", &[&account, &machine]).await.map_err(err)?;
-        Ok(n == 1)
+        let row = self
+            .client()
+            .await?
+            .query_one(
+                "with gone as (delete from machines where id = $1 and account = $2 returning id),
+                   orphaned as (update held_ends set unclaimed_at = now() where account = $2 and origin_machine = $1 and unclaimed_at is null)
+                 select count(*) from gone",
+                &[&machine, &account],
+            )
+            .await
+            .map_err(err)?;
+        Ok(row.get::<_, i64>(0) == 1)
     }
 
     /// Keeps the end of task `task` that `from` ran for `origin`'s tab `tab`, unless one is kept for

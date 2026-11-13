@@ -8856,6 +8856,30 @@ fn a_status_look_waits_while_the_hub_passes_its_tasks_end_so_the_end_is_not_list
 }
 
 #[test]
+fn a_removed_machines_held_ends_stay_listed_unclaimed_and_the_machine_is_gone() {
+    let hub = TestHub::start("held_removed");
+    let (mut ana, mac, _mac_token, _mini, mini_raw, ana_id) = held_for_offline_mac(&hub);
+    let end = json!({ "cmd": "remote_ended", "to": mac.id, "tab": "tab-1", "task": "task-2", "end": { "state": "failed", "error": "Tests failed." } });
+    assert_eq!(mini_raw.ask(end), Ok(json!(true)));
+    // task-1 still waits for mac; task-2 mac answered it did not know an hour ago.
+    admin_on(&hub.database, "update held_ends set unclaimed_at = now() - interval '1 hour' where task = 'task-2'");
+    let before = ana.hub(json!({ "cmd": "unclaimed_ends" })).unwrap();
+    assert_eq!(before.as_array().unwrap().len(), 1, "{before}");
+
+    ana.hub(json!({ "cmd": "remove_machine", "id": mac.id })).unwrap();
+    let mac_id = uuid::Uuid::parse_str(&mac.id).unwrap();
+    assert_eq!(hub.runtime.block_on(hub.hub().db.machine_name(ana_id, mac_id)).unwrap(), None, "the machine is gone");
+    assert!(!ana.machines().iter().any(|(name, _)| name == "ana-mac"));
+    let listed = ana.hub(json!({ "cmd": "unclaimed_ends" })).unwrap();
+    let mut tasks: Vec<&str> = listed.as_array().unwrap().iter().map(|e| e["task"].as_str().unwrap()).collect();
+    tasks.sort();
+    assert_eq!(tasks, ["task-1", "task-2"], "the waiting one turned unclaimed, and the unclaimed one stayed: {listed}");
+    let task2 = listed.as_array().unwrap().iter().find(|e| e["task"] == "task-2").unwrap();
+    assert_eq!(task2["unclaimed_at"], before[0]["unclaimed_at"], "an unclaimed row keeps when it was unclaimed");
+    assert_eq!(held_ends(&hub, None), 2);
+}
+
+#[test]
 fn an_account_saves_lists_edits_and_deletes_its_ideas_and_no_other_account_sees_or_changes_one() {
     let hub = TestHub::start_with("ideas_store", Signup::Open);
     let url = hub.url.clone();
