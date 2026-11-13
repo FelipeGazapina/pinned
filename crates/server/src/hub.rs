@@ -86,6 +86,19 @@ impl Outbox {
 }
 pub type Sent = (String, oneshot::Receiver<Result<Value, String>>);
 
+/// The workflow and subject a call acts on through the account's Linear and Slack connections:
+/// only a session that runs that workflow on that subject may make it.
+pub(crate) fn work_of(call: &HubCall) -> Option<(String, Subject)> {
+    match call {
+        HubCall::Stage { connector, subject, .. } | HubCall::RunSet { connector, subject, .. } => Some((connector.clone(), subject.clone())),
+        HubCall::SlackReply { connector, channel, thread, .. }
+        | HubCall::LinearCreate { connector, channel, thread, .. }
+        | HubCall::LinearTake { connector, channel, thread, .. } => {
+            Some((connector.clone(), Subject::SlackThread { channel: channel.clone(), thread: thread.clone() }))
+        }
+        _ => None,
+    }
+}
 /// The call that starts `spec` on a machine. A Run now goes as `RunNow`, which the machine holds
 /// to the limits of the project it runs in.
 pub(crate) fn run_call(spec: RunSpec, subject: &Subject) -> Call {
@@ -1240,6 +1253,14 @@ impl Account {
             .filter(|(id, _)| on(id))
             .flat_map(|(_, m)| m.tabs())
             .any(|t| t.running && t.connector.as_deref() == Some(connector) && t.subject.as_ref() == Some(subject))
+    }
+
+    /// Whether the session in tab `tab` of the online `machine` itself is running `connector` on `subject`.
+    pub fn runs_on_tab(&self, connector: &str, subject: &Subject, machine: &str, tab: &str) -> bool {
+        let live = self.live.lock().unwrap();
+        live.machines
+            .get(machine)
+            .is_some_and(|m| m.tabs().iter().any(|t| t.id == tab && t.running && t.connector.as_deref() == Some(connector) && t.subject.as_ref() == Some(subject)))
     }
 
     /// Machines a workflow run may go to: online, never a box's, `preferred` first, then the most recently connected.

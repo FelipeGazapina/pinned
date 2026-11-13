@@ -7013,8 +7013,11 @@ fn another_accounts_agent_reaches_none_of_an_accounts_machines_connections_invit
         } }))
         .unwrap();
     let connector = workflow["id"].as_str().unwrap().to_owned();
-    let staged = act(&ana.dir, &ana.tab, "stage", json!({ "connector": connector, "issue": "uuid-1", "stage": "coding" })).unwrap();
-    assert_eq!(staged["result"], "this workflow has no column for that stage, so the issue stays where it is", "a session that runs no workflow reaches the account's own");
+    assert_eq!(
+        act(&ana.dir, &ana.tab, "stage", json!({ "connector": connector, "issue": "uuid-1", "stage": "coding" })),
+        Err("stage acts only for the workflow and subject this session runs".into()),
+        "a session that runs no workflow reaches none of the account's"
+    );
 
     let client_id = register_agent(&url, &http);
     let request = authorize(&url, &http, &client_id, &pkce().1, "st-a");
@@ -7054,10 +7057,10 @@ fn another_accounts_agent_reaches_none_of_an_accounts_machines_connections_invit
         assert_eq!(on(&bob, Some(ana.machine.as_str()), action, args), none(&ana.machine), "{action}");
     }
     assert_eq!(on(&bob, Some("ana-vps"), "update_self", json!({})), none("ana-vps"), "a confirm on another account's machine is refused before it waits");
-    assert_eq!(act(&bob.dir, &bob.tab, "stage", json!({ "connector": connector, "issue": "uuid-1", "stage": "coding" })), Err("the workflow was deleted".into()));
-    assert_eq!(act(&bob.dir, &bob.tab, "slack_reply", json!({ "connector": connector, "channel": "C1", "thread": "1.2", "text": "mine now" })), Err("the workflow was deleted".into()));
-    assert_eq!(act(&bob.dir, &bob.tab, "linear_create", json!({ "connector": connector, "channel": "C1", "thread": "1.2", "title": "x", "description": "y" })), Err("the workflow was deleted".into()));
-    assert_eq!(act(&bob.dir, &bob.tab, "linear_take", json!({ "connector": connector, "channel": "C1", "thread": "1.2", "issue": "ENG-7" })), Err("Linear is not connected: connect it in pinned's Connectors settings".into()), "bob's act runs on his own connections");
+    assert_eq!(act(&bob.dir, &bob.tab, "stage", json!({ "connector": connector, "issue": "uuid-1", "stage": "coding" })), Err("stage acts only for the workflow and subject this session runs".into()));
+    assert_eq!(act(&bob.dir, &bob.tab, "slack_reply", json!({ "connector": connector, "channel": "C1", "thread": "1.2", "text": "mine now" })), Err("slack_reply acts only for the workflow and subject this session runs".into()));
+    assert_eq!(act(&bob.dir, &bob.tab, "linear_create", json!({ "connector": connector, "channel": "C1", "thread": "1.2", "title": "x", "description": "y" })), Err("linear_create acts only for the workflow and subject this session runs".into()));
+    assert_eq!(act(&bob.dir, &bob.tab, "linear_take", json!({ "connector": connector, "channel": "C1", "thread": "1.2", "issue": "ENG-7" })), Err("linear_take acts only for the workflow and subject this session runs".into()), "bob's session runs no workflow, so his act is refused before it reaches a connection");
     assert_eq!(act(&bob.dir, &bob.tab, "box_status", json!({ "machine": mini })), Err("this machine is no box".into()));
     assert_eq!(act(&bob.dir, &bob.tab, "invites", json!({})).unwrap()["result"]["pending"], json!([]));
     assert_eq!(act(&bob.dir, &bob.tab, "external_agents", json!({})).unwrap()["result"]["agents"], json!([]));
@@ -7528,7 +7531,13 @@ fn a_single_bot_slack_import_becomes_the_default_bot_and_replies_still_use_its_k
     assert!(connections(&mut bob.client).get("slack_bots").is_none(), "bob has no bot");
 
     let reached = asked_of("slack.com:443");
-    let reply = act(&ana.dir, &ana.tab, "slack_reply", json!({ "connector": "c1", "channel": "C1", "thread": "1.2", "text": "on it" })).unwrap_err();
+    let thread = Subject::SlackThread { channel: "C1".into(), thread: "1.2".into() };
+    let run = Run { cwd: ana.dir.join("site"), repo: None, args: vec![], connector: "c1".into(), subject: thread.clone(), mentioned: vec![], account: None, runs_on: RunsOn::Machine(ana.machine.clone()), input: String::new() };
+    let session = ana.node.machine.run(&run.spec()).unwrap();
+    ana.client.wait("the workflow's session at the hub", |f| {
+        f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == session.as_str() && t["connector"] == "c1")
+    });
+    let reply = act(&ana.dir, &session, "slack_reply", json!({ "connector": "c1", "channel": "C1", "thread": "1.2", "text": "on it" })).unwrap_err();
     assert!(reply.starts_with("Slack unreachable"), "the reply goes out with the default bot's key: {reply}");
     assert_eq!(asked_of("slack.com:443"), reached + 1);
     holds_none_of(&[key], "the reply's error", &reply);
@@ -10148,4 +10157,105 @@ fn an_agent_saves_and_lists_ideas_through_act_and_its_role_is_kept() {
     let deleted = act(&ana.dir, &ana.tab, "delete_idea", json!({ "id": id })).unwrap();
     assert_eq!(deleted["outcome"], "done");
     assert_eq!(act(&ana.dir, &ana.tab, "list_ideas", json!({})).unwrap()["result"], json!([]));
+}
+
+/// An account with one machine, a plain session `ana.tab`, and two workflows with no Linear column, so
+/// an act of theirs that passes the hub's check moves nothing and reaches no service.
+struct Workflows {
+    hub: TestHub,
+    account: uuid::Uuid,
+    ana: Agent,
+    a: String,
+    b: String,
+}
+
+fn workflows_of(name: &str) -> Workflows {
+    let hub = TestHub::start(name);
+    outside_world();
+    let (token, account) = account::signup(&hub.url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&hub.url, &token, "ana@acme.dev", &format!("{name}-mac"));
+    ana.client.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    let site = ana.dir.join("site").display().to_string();
+    let mut save = |name: &str| {
+        let saved = ana
+            .client
+            .hub(json!({ "cmd": "save_connector", "connector": {
+                "name": name, "enabled": false, "trigger": { "kind": "linear-label", "label": "agent" },
+                "folder": site, "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false, "instructions": "", "machine": "",
+            } }))
+            .unwrap();
+        saved["id"].as_str().unwrap().to_owned()
+    };
+    let (a, b) = (save("A"), save("B"));
+    Workflows { account: uuid::Uuid::parse_str(&account.id).unwrap(), hub, ana, a, b }
+}
+
+impl Workflows {
+    /// Starts workflow `connector` on `subject` on the account's machine, and answers its session's tab once the hub sees it run.
+    fn run(&mut self, connector: &str, subject: Subject) -> String {
+        let run = Run {
+            cwd: self.ana.dir.join("site"),
+            repo: None,
+            args: vec![],
+            connector: connector.to_owned(),
+            subject: subject.clone(),
+            mentioned: vec![],
+            account: None,
+            runs_on: RunsOn::Machine(self.ana.machine.clone()),
+            input: String::new(),
+        };
+        assert_eq!(self.hub.runtime.block_on(self.hub.hub().open(self.account, Work::Run(run))), Ok(()));
+        let tab = self.ana.node.machine.tabs().into_iter().find(|t| t.connector.as_deref() == Some(connector) && t.subject.as_ref() == Some(&subject)).unwrap().id;
+        self.ana.client.wait("the workflow's session at the hub", |f| {
+            f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == tab.as_str() && t["connector"] == connector)
+        });
+        tab
+    }
+
+    fn act(&self, tab: &str, action: &str, args: Value) -> Result<Value, String> {
+        act(&self.ana.dir, tab, action, args)
+    }
+}
+
+fn refused(action: &str) -> Result<Value, String> {
+    Err(format!("{action} acts only for the workflow and subject this session runs"))
+}
+
+const NO_COLUMN: &str = "this workflow has no column for that stage, so the issue stays where it is";
+
+#[test]
+fn a_session_that_runs_no_workflow_cannot_stage_through_act() {
+    let w = workflows_of("act_runs_none");
+    let reached = outside_world().lock().unwrap().len();
+    assert_eq!(w.act(&w.ana.tab, "stage", json!({ "connector": w.a, "issue": "uuid-1", "stage": "coding" })), refused("stage"));
+    assert_eq!(w.act(&w.ana.tab, "slack_reply", json!({ "connector": w.a, "channel": "C1", "thread": "1.2", "text": "x" })), refused("slack_reply"));
+    assert_eq!(outside_world().lock().unwrap().len(), reached, "nothing left the hub");
+}
+
+#[test]
+fn a_session_may_not_act_for_another_subject_or_another_workflow() {
+    let mut w = workflows_of("act_other_subject");
+    let tab = w.run(&w.a.clone(), issue("uuid-1"));
+    assert_eq!(w.act(&tab, "stage", json!({ "connector": w.a, "issue": "uuid-2", "stage": "coding" })), refused("stage"), "another issue of its own workflow");
+    assert_eq!(w.act(&tab, "slack_reply", json!({ "connector": w.a, "channel": "C1", "thread": "1.2", "text": "x" })), refused("slack_reply"), "a thread it does not run");
+    assert_eq!(w.act(&tab, "stage", json!({ "connector": w.b, "issue": "uuid-1", "stage": "coding" })), refused("stage"), "its own issue, but another workflow");
+}
+
+#[test]
+fn another_tab_of_the_same_machine_may_not_act_for_a_session_that_runs_the_workflow() {
+    let mut w = workflows_of("act_other_tab");
+    let tab = w.run(&w.a.clone(), issue("uuid-1"));
+    assert_ne!(tab, w.ana.tab);
+    assert_eq!(w.act(&w.ana.tab, "stage", json!({ "connector": w.a, "issue": "uuid-1", "stage": "coding" })), refused("stage"), "the machine runs it, this tab does not");
+}
+
+#[test]
+fn the_session_that_runs_a_workflow_on_a_subject_passes_the_check_through_act() {
+    let mut w = workflows_of("act_own_run");
+    let tab = w.run(&w.a.clone(), issue("uuid-1"));
+    let reached = outside_world().lock().unwrap().len();
+    let staged = w.act(&tab, "stage", json!({ "connector": w.a, "issue": "uuid-1", "stage": "coding" })).unwrap();
+    assert_eq!(staged["result"], NO_COLUMN, "past the check, and the workflow has no column to move to");
+    assert_eq!(w.act(&tab, "linear_take", json!({ "connector": w.a, "channel": "C1", "thread": "1.2", "issue": "ENG-7" })), refused("linear_take"), "a thread it does not run");
+    assert_eq!(outside_world().lock().unwrap().len(), reached, "nothing left the hub");
 }
