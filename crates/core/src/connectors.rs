@@ -4379,18 +4379,11 @@ impl Connectors {
     /// A graph equal to `migrate` of the connector being stored is stored as `None`, so the
     /// untouched case stays derivable. What this returns still carries a graph, as `get_settings` does.
     pub fn save_connector(&self, mut connector: Connector) -> Result<Connector, String> {
-        if connector.model.trim().starts_with('-') {
-            return Err("the workflow's model may not start with -, which claude could read as an option".into());
-        }
         let mut store = self.store.lock().unwrap();
-        if let Some(graph) = connector.graph.take() {
-            {
-                let called = |id: &str| call_target(&store, connector.id.as_str(), &graph, id);
-                graph.validate(&called)?;
-            }
-            reject_call_cycle(connector.id.as_str(), &graph, &store)?;
-            let had = store.connectors.iter().find(|c| !connector.id.is_empty() && c.id == connector.id).and_then(convex_step);
-            check_convex_step(&graph, &store.convex, had.as_ref().map(|step| step.connection.as_str()))?;
+        let graph = connector.graph.take();
+        let had = store.connectors.iter().find(|c| !connector.id.is_empty() && c.id == connector.id).and_then(convex_step);
+        save_checks(&store, &connector, graph.as_ref(), &store.convex, had.as_ref().map(|step| step.connection.as_str())).map_err(|refused| refused.error)?;
+        if let Some(graph) = graph {
             refresh_legacy(&mut connector, &graph);
             connector.graph = (graph != migrate(&connector)).then_some(graph);
         } else if let Some(existing) = store.connectors.iter().find(|existing| existing.id == connector.id && !connector.id.is_empty()) {
@@ -4449,6 +4442,11 @@ impl Connectors {
         let mut current = self.store.lock().unwrap();
         if current.linear.is_some() || current.slack.is_some() || !current.slack_bots.is_empty() || current.github.is_some() || current.vercel.is_some() || !current.connectors.is_empty() {
             return Ok(false);
+        }
+        for connector in &imported.connectors {
+            save_checks(&imported, connector, connector.graph.as_ref(), &current.convex, None).map_err(|refused| {
+                format!("nothing was imported: workflow {:?} fails the {} check: {}", connector.name, refused.check, refused.error)
+            })?;
         }
         let present = |key: Option<String>| key.map(|k| k.trim().to_owned()).filter(|k| !k.is_empty());
         let (linear_key, slack_key, github_key, vercel_key) = (present(keys.linear), present(keys.slack), present(keys.github), present(keys.vercel));
@@ -4657,6 +4655,27 @@ impl Connectors {
         }
         Ok(run)
     }
+}
+
+/// Which save check refused a workflow, and why.
+struct Refused {
+    check: &'static str,
+    error: String,
+}
+
+/// The checks a workflow passes before it is stored, by `save_connector` and by `import` alike.
+/// `store` is the store it joins, which its Call steps and cycles are read against; `connected` is
+/// the account's Convex deployments, and `had` the one the stored workflow already named.
+fn save_checks(store: &Store, connector: &Connector, graph: Option<&Graph>, connected: &[convex::Connection], had: Option<&str>) -> Result<(), Refused> {
+    let refused = |check| move |error| Refused { check, error };
+    if connector.model.trim().starts_with('-') {
+        return Err(refused("model")("the workflow's model may not start with -, which claude could read as an option".into()));
+    }
+    let Some(graph) = graph else { return Ok(()) };
+    let called = |id: &str| call_target(store, connector.id.as_str(), graph, id);
+    graph.validate(&called).map_err(refused("graph"))?;
+    reject_call_cycle(connector.id.as_str(), graph, store).map_err(refused("call cycle"))?;
+    check_convex_step(graph, connected, had).map_err(refused("Convex step"))
 }
 
 /// The workflow's Convex step, anywhere in its own stored graph.
