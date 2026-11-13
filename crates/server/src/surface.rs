@@ -329,7 +329,7 @@ pub async fn decide(hub: &Arc<Hub>, account: &Arc<Account>, id: &str, approve: b
         }
     }
     let shown = surface::hide_entered_in(surface::redact(result.clone(), action.map_or(&[][..], |a| a.hides)), &entered);
-    hub.db.finish_confirmation(key, &outcome, &shown).await?;
+    hub.db.finish_confirmation(account.id, key, &outcome, &shown).await?;
     push_confirmations(hub, account).await;
     let decided = Held { confirmation: Confirmation { decision: Some(decision), outcome: Some(outcome.clone()), ..asked.clone() }, session: held.session.clone(), result: shown };
     let (hub_for_notice, account_for_notice) = (hub.clone(), account.clone());
@@ -399,7 +399,7 @@ async fn notify(hub: &Hub, account: &Account, held: &Held) -> Result<bool, Strin
         return Ok(false);
     }
     let id = Uuid::parse_str(&asked.id).map_err(|e| e.to_string())?;
-    hub.db.notified(id).await.map(|()| true)
+    hub.db.notified(account.id, id).await.map(|()| true)
 }
 
 /// Sends the notices a machine missed while it was offline, once it is back, and again while its
