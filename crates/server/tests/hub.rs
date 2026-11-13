@@ -2626,6 +2626,110 @@ fn a_box_stays_while_the_upstash_key_itself_is_missing() {
 }
 
 #[test]
+fn a_stuck_box_is_given_the_no_keys_reason_only_when_the_upstash_key_is_missing_not_the_claude_token() {
+    // A slow tick, so the reaper does not retry the rows while the test looks.
+    let policy = Policy { tab_gone: Duration::from_secs(3600), offline: Duration::from_secs(3600), tick: Duration::from_secs(3600), ..fast() };
+    let mut hub = TestHub::start_with_boxes("box_stuck_reason", Signup::Open, policy);
+    let mut ana = BoxAccount::new(&hub);
+    let account = ana.id;
+    let open = |hub: &TestHub, work| hub.runtime.block_on(hub.hub().open(account, work));
+    let machines = |hub: &TestHub| hub.runtime.block_on(hub.hub().db.boxes(account)).unwrap().into_iter().map(|r| r.unwrap().machine.to_string()).collect::<Vec<_>>();
+    assert_eq!(open(&hub, ana.box_run(issue("uuid-1"))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    assert_eq!(open(&hub, ana.box_run(issue("uuid-2"))), Ok(()));
+    let rows = machines(&hub);
+    assert_eq!((rows.len(), hub.boxes.live().len()), (2, 2));
+
+    // The Claude token is gone and the Box key is one Upstash refuses: ending goes through the real
+    // `end`, which asks Upstash, and the delete fails there. That is not "Upstash is not connected".
+    restart_with_secrets(&mut hub, "jsonb_set(secrets - 'claude-oauth-token', '{upstash-box-key}', '\"wrong-key\"')");
+    let mut client = Client::connect(&hub.url, &ana.token);
+    client.wait("hello", |f| f["type"] == "hello");
+    let refused = client.hub(json!({ "cmd": "remove_machine", "id": rows[0] })).unwrap_err();
+    assert!(refused.contains("Invalid box API key"), "{refused}");
+    let stuck = client.hub(json!({ "cmd": "stuck_boxes" })).unwrap();
+    assert_eq!(stuck.as_array().map(Vec::len), Some(1), "{stuck}");
+    assert_eq!(stuck[0]["why"], "Upstash Box refused the key: Invalid box API key", "{stuck}");
+    assert!(stuck[0].get("unconfirmed").is_none(), "{stuck}");
+    assert!(!stuck.to_string().contains("wrong-key"), "{stuck}");
+
+    // The Box key itself is gone: now the fixed reason, which names only Upstash.
+    restart_with_secrets(&mut hub, "secrets - 'upstash-box-key'");
+    let mut client = Client::connect(&hub.url, &ana.token);
+    client.wait("hello", |f| f["type"] == "hello");
+    let refused = client.hub(json!({ "cmd": "remove_machine", "id": rows[1] })).unwrap_err();
+    assert!(refused.starts_with("Upstash Box is not connected, so box "), "{refused}");
+    let stuck = client.hub(json!({ "cmd": "stuck_boxes" })).unwrap();
+    // The restarted hub's first pass also retried the first row, and it is stuck for the same reason.
+    let stuck = stuck.as_array().unwrap();
+    assert!(!stuck.is_empty() && stuck.iter().all(|s| s["why"] == "Upstash is not connected"), "{stuck:?}");
+    assert!(!json!(stuck).to_string().contains("Claude"), "{stuck:?}");
+}
+
+#[test]
+fn a_box_row_with_no_upstash_id_is_listed_unconfirmed_through_the_real_end_and_a_row_with_an_id_is_not() {
+    // A slow tick, so the reaper does not retry the rows while the test looks.
+    let policy = Policy { tab_gone: Duration::from_secs(3600), offline: Duration::from_secs(3600), tick: Duration::from_secs(3600), ..fast() };
+    let mut hub = TestHub::start_with_boxes("box_stuck_unconfirmed", Signup::Open, policy);
+    let mut ana = BoxAccount::new(&hub);
+    let account = ana.id;
+    let open = |hub: &TestHub, work| hub.runtime.block_on(hub.hub().open(account, work));
+    let rows = |hub: &TestHub| hub.runtime.block_on(hub.hub().db.boxes(account)).unwrap().into_iter().map(|r| r.unwrap()).collect::<Vec<_>>();
+    assert_eq!(open(&hub, ana.box_run(issue("uuid-1"))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    let unrecorded = rows(&hub).remove(0);
+    assert_eq!(open(&hub, ana.box_run(issue("uuid-2"))), Ok(()));
+    let recorded = rows(&hub).into_iter().find(|r| r.id != unrecorded.id).unwrap();
+    assert!(unrecorded.upstash.is_some() && recorded.upstash.is_some());
+    // As a row whose box was created but whose id was never written, as after a crash between the two.
+    admin_on(&hub.database, &format!("update boxes set upstash = null where id = '{}'", unrecorded.id));
+
+    // The Box key is one Upstash refuses, so the label list for the row with no id fails, and the
+    // delete of the other row's box fails. Both go through the real `end`, by removing their machines.
+    restart_with_secrets(&mut hub, "jsonb_set(secrets, '{upstash-box-key}', '\"wrong-key\"')");
+    let mut client = Client::connect(&hub.url, &ana.token);
+    client.wait("hello", |f| f["type"] == "hello");
+    for row in [&unrecorded, &recorded] {
+        let refused = client.hub(json!({ "cmd": "remove_machine", "id": row.machine.to_string() })).unwrap_err();
+        assert!(refused.contains("Invalid box API key"), "{refused}");
+    }
+    let stuck = client.hub(json!({ "cmd": "stuck_boxes" })).unwrap();
+    let listed = stuck.as_array().unwrap();
+    assert_eq!(listed.len(), 2, "{stuck}");
+    let of = |id: &str| listed.iter().find(|s| s["id"] == id).unwrap_or_else(|| panic!("{id} is not listed: {stuck}"));
+    assert_eq!(of(&unrecorded.id)["unconfirmed"], json!(true), "pinned never learned this row's box id: {stuck}");
+    assert!(of(&recorded.id).get("unconfirmed").is_none(), "a row with its Upstash id is a known box: {stuck}");
+    // Which box: the known row by its Upstash id, the unconfirmed one by the label to look for.
+    assert_eq!(of(&recorded.id)["upstash"], json!(recorded.upstash.as_ref().unwrap().0), "{stuck}");
+    assert!(of(&recorded.id).get("label").is_none(), "{stuck}");
+    assert_eq!(of(&unrecorded.id)["label"], json!(format!("p:{}", unrecorded.id)), "{stuck}");
+    assert!(of(&unrecorded.id).get("upstash").is_none(), "{stuck}");
+    assert!(listed.iter().all(|s| s["why"] == "Upstash Box refused the key: Invalid box API key"), "{stuck}");
+    assert!(!stuck.to_string().contains("wrong-key"), "{stuck}");
+
+    // The Box key is gone: nothing is asked of Upstash, and the row with no id is still unconfirmed.
+    restart_with_secrets(&mut hub, "secrets - 'upstash-box-key'");
+    let mut client = Client::connect(&hub.url, &ana.token);
+    client.wait("hello", |f| f["type"] == "hello");
+    for row in [&unrecorded, &recorded] {
+        let refused = client.hub(json!({ "cmd": "remove_machine", "id": row.machine.to_string() })).unwrap_err();
+        assert!(refused.starts_with("Upstash Box is not connected, so box "), "{refused}");
+    }
+    let stuck = client.hub(json!({ "cmd": "stuck_boxes" })).unwrap();
+    let listed = stuck.as_array().unwrap();
+    assert_eq!(listed.len(), 2, "{stuck}");
+    let of = |id: &str| listed.iter().find(|s| s["id"] == id).unwrap_or_else(|| panic!("{id} is not listed: {stuck}"));
+    assert_eq!(of(&unrecorded.id)["unconfirmed"], json!(true), "{stuck}");
+    assert!(of(&recorded.id).get("unconfirmed").is_none(), "{stuck}");
+    // Which box: the known row by its Upstash id, the unconfirmed one by the label to look for.
+    assert_eq!(of(&recorded.id)["upstash"], json!(recorded.upstash.as_ref().unwrap().0), "{stuck}");
+    assert!(of(&recorded.id).get("label").is_none(), "{stuck}");
+    assert_eq!(of(&unrecorded.id)["label"], json!(format!("p:{}", unrecorded.id)), "{stuck}");
+    assert!(of(&unrecorded.id).get("upstash").is_none(), "{stuck}");
+    assert!(listed.iter().all(|s| s["why"] == "Upstash is not connected"), "{stuck}");
+}
+
+#[test]
 fn a_box_goes_once_its_session_opened_its_pull_request_and_stopped() {
     let hub = TestHub::start_with_boxes("box_done", Signup::Open, Policy { done: Duration::from_millis(300), ..fast() });
     let mut ana = BoxAccount::new(&hub);
@@ -8430,6 +8534,46 @@ fn box_usage_reports_an_upstash_that_fails_and_still_counts_pinneds_own() {
     assert!(error.starts_with("Upstash did not answer: Upstash Box unreachable: "), "{error}");
     assert!(!silent.to_string().contains(hang), "{silent}");
     assert_eq!((silent["connected"].clone(), silent["boxes"].clone(), silent["pinned"].clone()), (json!(true), json!([]), json!({ "box_hours": 0.25, "tasks": 1, "since": month })));
+}
+
+#[test]
+fn a_box_whose_delete_failed_is_listed_by_stuck_boxes_and_by_box_usage_without_upstash() {
+    let hub = TestHub::start("stuck_boxes");
+    let (token, id, mut ana) = signed_in(&hub.url, "ana@acme.dev");
+    let (_, _, mut bob) = signed_in(&hub.url, "bob@acme.dev");
+    let (machine, _) = account::register_machine(&hub.url, &token, "fake-machine", "linux").unwrap();
+    opened_box(&hub, &id, &machine.id, "fake-box-0001", "fake-upstash-0001", "git@github.com:acme/site.git");
+    assert_eq!(ana.hub(json!({ "cmd": "stuck_boxes" })).unwrap(), json!([]), "a box that is running is not stuck");
+
+    // No Upstash is connected, so ending the box cannot delete it: the delete fails and is recorded.
+    let ended = ana.hub(json!({ "cmd": "remove_machine", "id": machine.id }));
+    assert!(ended.as_ref().is_err_and(|e| e.contains("Upstash Box is not connected")), "{ended:?}");
+
+    let stuck = ana.hub(json!({ "cmd": "stuck_boxes" })).unwrap();
+    println!("stuck_boxes answer: {stuck}");
+    let listed = stuck.as_array().unwrap();
+    assert_eq!(listed.len(), 1, "{stuck}");
+    assert_eq!(listed[0]["id"], "fake-box-0001");
+    assert!(listed[0].get("unconfirmed").is_none(), "a row with its Upstash id is a known box: {stuck}");
+    assert_eq!(listed[0]["why"], "Upstash is not connected", "only the Upstash connection is named: {stuck}");
+
+    let usage = ana.hub(json!({ "cmd": "box_usage" })).unwrap();
+    println!("box_usage answer: {usage}");
+    assert_eq!((usage["connected"].clone(), usage["stuck"].clone()), (json!(false), stuck.clone()));
+    assert_eq!(bob.hub(json!({ "cmd": "stuck_boxes" })).unwrap(), json!([]), "another account does not see it");
+    assert!(bob.hub(json!({ "cmd": "box_usage" })).unwrap().get("stuck").is_none());
+}
+
+#[test]
+fn stuck_boxes_does_not_wait_on_upstash() {
+    let hub = TestHub::start("stuck_boxes_quick");
+    let hang = "box_testkey-stuck-hang";
+    let (_, _, mut ana) = usage_account(&hub.url, "ana@acme.dev", hang);
+    upstash_answers(hang, None);
+    let started = Instant::now();
+    let answer = ana.request_within(Duration::from_secs(10), json!({ "type": "hub", "call": { "cmd": "stuck_boxes" } })).unwrap();
+    assert!(started.elapsed() < Duration::from_secs(10), "box_usage waits 15 s for this Upstash; stuck_boxes must not ask it at all");
+    assert_eq!(answer, json!([]));
 }
 
 #[test]
