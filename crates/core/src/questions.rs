@@ -281,7 +281,7 @@ impl Questions {
         self.asked.iter().any(|a| a.is_open() || !a.notified)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn set_wait_limit(&mut self, id: &str, secs: Option<u64>) {
         if let Some(asked) = self.asked.iter_mut().find(|a| a.questionnaire.id == id) {
             asked.wait_limit_secs = secs;

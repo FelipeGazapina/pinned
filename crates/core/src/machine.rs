@@ -13571,6 +13571,7 @@ Have another model review a risky change before it goes ahead.";
     }
 
     /// What `question_user` sends the node: one question on the branch, main recommended.
+    #[cfg(unix)]
     fn branch_questions(task: Option<&str>) -> ProjectTool {
         use crate::questions::{QOption, Question};
         let option = |label: &str, recommended| QOption { label: label.into(), description: None, recommended };
@@ -13582,6 +13583,7 @@ Have another model review a risky change before it goes ahead.";
         }
     }
 
+    #[cfg(unix)]
     fn chose_main(tab: &str, id: &str) -> Call {
         use crate::questions::{Answer, QuestionsReply};
         Call::AnswerQuestions { tab: tab.into(), id: id.into(), reply: QuestionsReply::Answered { answers: vec![Answer { chosen: vec!["main".into()], text: None }] } }
