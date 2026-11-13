@@ -23,3 +23,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:02:34Z #9 a_connector_run_goes_to_its_machine_else_another_online_one ok / avail=15125M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:02:36Z #10 an_apps_first_sign_in_moves_its_connectors_into_an_empty_account_only START / avail=15125M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:02:38Z #10 an_apps_first_sign_in_moves_its_connectors_into_an_empty_account_only ok / avail=15125M /workspace avail=19374M node_stat=Ssl node_tcp=1
+2026-11-13T04:02:39Z #11 the_accounts_taste_lives_on_the_hub_and_a_machines_old_style_seeds_an_empty_account_once START / avail=15124M /workspace avail=19374M node_stat=Ssl
