@@ -596,6 +596,10 @@ fn client_frame(server: &Arc<Server>, account: &Arc<Account>, client: u64, text:
     }
 }
 
+fn at_least(_version: &str, _min: (u64, u64, u64)) -> bool {
+    false
+}
+
 async fn machine_socket(State(server): State<Arc<Server>>, upgrade: WebSocketUpgrade) -> Response {
     upgrade
         .max_message_size(sync::MESSAGE_LIMIT)
@@ -834,7 +838,14 @@ async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: 
 
 #[cfg(test)]
 mod tests {
-    use super::ROUTES;
+    use super::{at_least, ROUTES};
+
+    #[test]
+    fn at_least_reads_three_numbers_and_ignores_a_suffix() {
+        let min = (0, 18, 2);
+        let seen: Vec<bool> = ["0.18.1", "0.18.2", "0.18.2-rc1", "0.18.10", "0.0.0-test", "", "0.18"].iter().map(|v| at_least(v, min)).collect();
+        assert_eq!(seen, [false, true, true, true, false, false, false]);
+    }
 
     #[test]
     fn the_router_serves_each_published_route() {

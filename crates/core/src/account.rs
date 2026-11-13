@@ -1,8 +1,10 @@
 //! The calls block, so make them off any async runtime's workers (reqwest's blocking client
 //! panics inside one). The binary installs rustls's ring provider before the first call.
 
+use crate::connectors::{Connectors, Keys};
+use crate::link::Link;
 use crate::login_store::LoginStore;
-use crate::wire::{AccountView, MachineId, MachineView};
+use crate::wire::{AccountView, HubCall, MachineId, MachineView};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -275,6 +277,30 @@ pub fn logout(hub: &str, user_token: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("{hub} answered {}", response.status()))
+    }
+}
+
+/// The steps after a sign-in links this machine to the account, run where the link is held.
+pub fn after_sign_in(connectors: &Connectors, link: &Link, creds: &Credentials) {
+    for _ in 0..60 {
+        if link.online() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    let (mut store, keys) = connectors.export();
+    let has_local = keys != Keys::default() || store["connectors"].as_array().is_some_and(|c| !c.is_empty());
+    if !has_local {
+        return;
+    }
+    // Their folders are on this Mac, so they keep running here while it's online.
+    for connector in store["connectors"].as_array_mut().into_iter().flatten() {
+        if connector["machine"].as_str().unwrap_or_default().is_empty() {
+            connector["machine"] = creds.machine_id.clone().into();
+        }
+    }
+    if let Err(e) = link.call_hub(HubCall::Import { store, linear_key: keys.linear, slack_key: keys.slack, slack_keys: keys.slack_bots, github_key: keys.github, vercel_key: keys.vercel }) {
+        eprintln!("pinned: could not move this Mac's workflows to the account: {e}");
     }
 }
 
