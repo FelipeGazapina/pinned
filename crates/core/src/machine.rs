@@ -527,6 +527,11 @@ impl Tab {
         self.session.is_some() || self.asleep
     }
 
+    /// Questions open on the tab wait on the user: it is live, or it shows a headless child at work.
+    fn asks(&self) -> bool {
+        self.live() || (self.task.is_some() && self.session.is_none() && self.status == Some(AgentStatus::Working))
+    }
+
     /// The tab as clients see it. `turns` are the projects whose Capitão runs a turn that a message
     /// from the global orchestrator started.
     fn view(&self, id: &str, turns: &HashSet<PathBuf>, queued: &HashMap<String, u32>, work: &HashMap<String, crate::delegate::WorkCost>) -> TabView {
@@ -1625,8 +1630,13 @@ impl Machine {
         self.tab(tab, |t| t.view(tab, &turns, &queued, &work)).map(|v| self.shown(v))
     }
 
-    /// `view` with the questionnaire open on its tab, which makes it a question mid-turn.
+    /// `view` with the questionnaire open on its tab, which makes it a question mid-turn. Only a
+    /// live tab asks: one whose process exited keeps its own state, and its questions wait in the
+    /// store for the tab that resumes its session.
     fn shown(&self, view: TabView) -> TabView {
+        if !self.tab(&view.id, |t| t.asks()).unwrap_or(false) {
+            return view;
+        }
         match self.questions.lock().unwrap().open_on(&view.id) {
             Some(open) => crate::questions::shown(view, open),
             None => view,
@@ -1638,6 +1648,9 @@ impl Machine {
         self.tab(tab, |_| ())?;
         self.questions.lock().unwrap().answer(tab, id, reply)?;
         self.emit_tabs();
+        // A call that still waits takes the answer; with none, the notice goes as soon as it can.
+        self.arm_delegate_pass();
+        self.maybe_deliver(tab);
         Ok(())
     }
 
@@ -2568,6 +2581,10 @@ impl Machine {
     /// wake claude for a turn of its own, which the last Esc ends.
     pub fn stop_turn(&self, tab: &str) -> Result<(), String> {
         const KILL_AGENTS: &[u8] = b"\x18\x0b";
+        // Stopping the turn drops what it asked: the call that waits answers cancelled.
+        if self.questions.lock().unwrap().cancel_tab(tab) {
+            self.emit_tabs();
+        }
         // A session that sleeps runs no turn, and the keys would start it.
         if !Shells::owns(tab) && self.tab(tab, |t| t.asleep)? {
             return Ok(());
@@ -2649,6 +2666,8 @@ impl Machine {
         };
         let made = closed.as_ref().and_then(|t| t.made.clone());
         drop(closed);
+        // Closed or archived: its questions go, with no notice.
+        self.questions.lock().unwrap().cancel_tab(tab);
         self.delegates.drop_kept_worktrees(tab, &owned, path.as_deref());
         if let Some(made) = made {
             if !owned.iter().any(|dir| dir == &made) {
@@ -4272,6 +4291,16 @@ impl Machine {
             .filter_map(|id| self.tab(id, |t| t.claude_session.clone()).ok().flatten().map(|session| (session, id.clone())))
             .collect();
         self.delegates.rebind(&sessions);
+        // Tab ids change with a restart: the tab that resumed a session takes over its questions.
+        {
+            let mut questions = self.questions.lock().unwrap();
+            for (session, tab) in &sessions {
+                questions.rekey(session, tab);
+            }
+        }
+        if self.questions.lock().unwrap().unsettled() {
+            self.arm_delegate_pass();
+        }
         self.resume_workers(&sessions);
         if self.delegates.has_pending() {
             self.arm_delegate_pass();
@@ -5716,12 +5745,15 @@ impl Machine {
     fn maybe_deliver(&self, tab: &str) {
         if !self.parent_idle(tab) {
             // A sleeping session starts for its news, and a later pass types it.
-            if self.tab(tab, |t| t.asleep).unwrap_or(false) && self.delegates.has_news(tab) {
+            if self.tab(tab, |t| t.asleep).unwrap_or(false) && (self.delegates.has_news(tab) || self.questions.lock().unwrap().late_notice(tab, Instant::now()).is_some()) {
                 if let Err(error) = self.awake(tab) {
                     eprintln!("pinned: could not wake {tab} for its news: {error}");
                 }
                 self.arm_delegate_pass();
             }
+            return;
+        }
+        if self.deliver_answers(tab) {
             return;
         }
         let Some((text, ids)) = self.delegates.claim_notice(tab) else { return };
@@ -5731,6 +5763,26 @@ impl Machine {
         } else {
             let typed = self.delegates.drop_claimed_reports(tab);
             self.sent.lock().unwrap().typed(&typed);
+            self.emit_tabs();
+        }
+    }
+
+    /// Types the outcome of questions the session asked into it, once no `question_user` call
+    /// waits on them any more: the call returned pending, or pinned restarted. Once only.
+    fn deliver_answers(&self, tab: &str) -> bool {
+        let Some((id, text)) = self.questions.lock().unwrap().late_notice(tab, Instant::now()) else { return false };
+        if self.write_notice(tab, &text) != Ok(true) {
+            return false;
+        }
+        self.questions.lock().unwrap().notified(&id);
+        self.emit_tabs();
+        true
+    }
+
+    /// Closes as skipped the questions whose wait limit passed. The call that waits, or a notice,
+    /// tells the session.
+    fn expire_questions(&self) {
+        if self.questions.lock().unwrap().expire(unix_now()) {
             self.emit_tabs();
         }
     }
@@ -5768,6 +5820,7 @@ impl Machine {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let stopped = machine.delegates.enforce_limits(Instant::now(), machine.launch.path_env.as_deref());
                 machine.clear_answered_asks(Instant::now());
+                machine.expire_questions();
                 machine.note_user_waits(Instant::now());
                 machine.look_after_remotes(stopped);
                 machine.send_remote_ends(Instant::now());
@@ -6008,6 +6061,9 @@ impl Machine {
             let task = self.tab(tab, |t| t.task.clone()).ok().flatten();
             let holds = worker || (role.is_none() && task.is_some());
             let held = holds && event.status == AgentStatus::Done && self.waits_on_background(tab, &event);
+            // A turn that ends with its questions open waits on the user: the answer's notice
+            // starts the next turn, and that turn's end ends the task.
+            let asking = holds && event.status == AgentStatus::Done && self.questions.lock().unwrap().open_on(tab).is_some();
             if let (Some(task), AgentStatus::Working) = (&task, event.status) {
                 self.delegates.turn_started(task);
             }
@@ -6018,14 +6074,14 @@ impl Machine {
                 self.note_question(tab, self.reply_of(tab, &event));
             }
             match role {
-                Some((Role::Worker, _)) if held => {}
+                Some((Role::Worker, _)) if held || asking => {}
                 Some((Role::Worker, project)) => {
                     if !self.settle_thread_task(tab, &event) {
                         self.report_worker(tab, &project, &event, before);
                     }
                 }
                 Some((Role::Orchestrator, project)) if matches!(event.status, AgentStatus::Done | AgentStatus::Failed) => self.captain_turn_ended(tab, &project, &event),
-                None if held => {}
+                None if held || asking => {}
                 // A workflow's Run now is a task with no worker role: its turn ends it like a worker's.
                 None => {
                     self.settle_thread_task(tab, &event);
@@ -6169,6 +6225,9 @@ impl Machine {
         };
         if let Some(task) = task {
             self.delegates.set_worker_session(&task, &session);
+        }
+        if new && self.questions.lock().unwrap().rekey(&session, tab) {
+            self.arm_delegate_pass();
         }
         if changed {
             self.save_sessions();
