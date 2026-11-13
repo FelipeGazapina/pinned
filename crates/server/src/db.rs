@@ -10,6 +10,7 @@ use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use rand_core::{OsRng, RngCore};
 use pinned_core::account::{DictationEngine, DictationFeedback, DictationRating};
 use pinned_core::agent::Subject;
+use pinned_core::connectors::BoxSize;
 use pinned_core::delegate::TaskRecord;
 use pinned_core::ideas::{Idea, IdeaStatus};
 use pinned_core::schedule::Actor;
@@ -1212,15 +1213,17 @@ impl Db {
         Ok(u64::try_from(row.get::<_, i64>(0)).unwrap_or(0))
     }
 
-    /// When the box `machine` runs in was made, in unix milliseconds, while it is one of the account's boxes.
-    pub async fn box_created_ms(&self, account: Uuid, machine: Uuid) -> Result<Option<u64>, String> {
+    /// When the box `machine` runs in was made, in unix milliseconds, and its size, while it is one of the account's boxes.
+    pub async fn box_created(&self, account: Uuid, machine: Uuid) -> Result<Option<(u64, BoxSize)>, String> {
         let row = self
             .client()
             .await?
-            .query_opt("select (extract(epoch from created_at) * 1000)::bigint from boxes where account = $1 and machine = $2", &[&account, &machine])
+            .query_opt("select (extract(epoch from created_at) * 1000)::bigint, size from boxes where account = $1 and machine = $2", &[&account, &machine])
             .await
             .map_err(err)?;
-        Ok(row.and_then(|r| u64::try_from(r.get::<_, i64>(0)).ok()))
+        let Some(row) = row else { return Ok(None) };
+        let size = serde_json::from_value(Value::String(row.get(1))).map_err(unreadable)?;
+        Ok(u64::try_from(row.get::<_, i64>(0)).ok().map(|created| (created, size)))
     }
 
     /// The account's tastes, read as what they were saved as on the current parallel defaults.

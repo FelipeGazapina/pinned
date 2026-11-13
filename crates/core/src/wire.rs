@@ -5,8 +5,16 @@ use crate::accounts::{self, AccountId, Auth, Provider};
 use crate::agent::{AgentEvent, AgentStatus, Role, Stage, Subject, Usage};
 use crate::connectors::{BoxAccess, BoxSize, Connector, Settings};
 
-/// What an Upstash Box hour costs in USD. The app previews budgets from it; the hub enforces them.
-pub const BOX_USD_PER_HOUR: f64 = 0.10;
+/// What an hour on a box of `size` costs in USD: Upstash's price per active CPU hour for that
+/// size. The hub enforces budgets from it. It is a ceiling: Upstash bills a standard box for its
+/// active CPU time, not for the hours it exists, and the box's storage is not counted.
+pub fn box_usd_per_hour(size: BoxSize) -> f64 {
+    match size {
+        BoxSize::Small => 0.10,
+        BoxSize::Medium => 0.20,
+        BoxSize::Large => 0.40,
+    }
+}
 use crate::branches::GitStep;
 use crate::scripts::Script;
 use crate::panel::{Candidates, MergeMethod, PrChange, ReviewComment, ReviewEvent, StackAction, StackHead};

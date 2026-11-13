@@ -5731,9 +5731,11 @@ fn a_task_on_a_box_is_billed_the_box_time_since_the_previous_task_on_that_box() 
     let task = |id: &str| stats["slowest"].as_array().unwrap().iter().find(|t| t["id"] == id).unwrap().clone();
     assert_eq!(minutes(&stats["totals"]["box_ms"]), 30.0, "both tasks together are billed the box's whole 30 minutes: {stats}");
     let usd = stats["totals"]["box_usd"].as_f64().unwrap();
-    assert!((usd - 0.5 * pinned_core::wire::BOX_USD_PER_HOUR).abs() < 0.01, "{usd}");
+    let rate = pinned_core::wire::box_usd_per_hour(pinned_core::connectors::BoxSize::Medium);
+    assert_eq!(rate, 0.20, "the box above is Medium");
+    assert!((usd - 0.5 * rate).abs() < 0.01, "{usd}");
     let a_cost = task("task-a")["cost_usd"].as_f64().unwrap();
-    assert!((a_cost - (0.2 + 10.0 / 60.0 * pinned_core::wire::BOX_USD_PER_HOUR)).abs() < 0.01, "task-a: its 10 box minutes plus its agent cost, sent twice and billed once: {a_cost}");
+    assert!((a_cost - (0.2 + 10.0 / 60.0 * rate)).abs() < 0.01, "task-a: its 10 box minutes plus its agent cost, sent twice and billed once: {a_cost}");
 }
 
 #[test]
@@ -5772,7 +5774,7 @@ fn overlapping_tasks_on_one_box_each_pay_for_their_own_span_however_their_record
     let stats = ana.hub(json!({ "cmd": "delegation_stats", "days": 1 })).unwrap();
     let box_minutes = |id: &str| {
         let task = stats["slowest"].as_array().unwrap().iter().find(|t| t["id"] == id).unwrap_or_else(|| panic!("{id} in {stats}"));
-        (task["cost_usd"].as_f64().unwrap() / pinned_core::wire::BOX_USD_PER_HOUR * 60.0).round()
+        (task["cost_usd"].as_f64().unwrap() / pinned_core::wire::box_usd_per_hour(pinned_core::connectors::BoxSize::Medium) * 60.0).round()
     };
     assert_eq!(box_minutes("task-b"), 40.0, "task-b pays from the box's start to its own end");
     assert_eq!(box_minutes("task-a"), 20.0, "task-a pays only the span after task-b ended");

@@ -16,7 +16,7 @@ use pinned_core::surface::ActorRole;
 use pinned_core::global_orchestrator::BusyPolicy;
 use serde::{Deserialize, Serialize};
 use pinned_core::upstash::{self, BoxId, BoxUsage, Exec, Keys, Listed, NewBox, PinnedBox, PinnedCount};
-use pinned_core::wire::{BoxStatus, Call, ProjectView, RunSpec, BOX_USD_PER_HOUR};
+use pinned_core::wire::{BoxStatus, Call, ProjectView, RunSpec, box_usd_per_hour};
 use pinned_core::github;
 use pinned_core::machine;
 use pinned_core::taste::{BoxSizeChoice, TasteScope, Tastes};
@@ -330,7 +330,7 @@ pub fn agent_box_record(row: &BoxRow, opener: &Opener, started: u64, ended: u64,
     let box_ms = ended.saturating_sub(started);
     let (outcome, reason, limit) = match why {
         End::Failed(why) => (TaskOutcome::Failed, Some(why.clone()), None),
-        End::Expired if over_budget(&row.spec, Duration::from_millis(box_ms)) => (TaskOutcome::Limit, None, Some("budget".to_owned())),
+        End::Expired if over_budget(&row.spec, row.size, Duration::from_millis(box_ms)) => (TaskOutcome::Limit, None, Some("budget".to_owned())),
         End::Expired => (TaskOutcome::Limit, None, Some("time".to_owned())),
         End::Removed | End::Disconnected => (TaskOutcome::Cancelled, None, None),
         End::TabClosed | End::Exited | End::Idle | End::Done | End::Offline | End::Vanished => (TaskOutcome::Done, None, None),
@@ -343,7 +343,7 @@ pub fn agent_box_record(row: &BoxRow, opener: &Opener, started: u64, ended: u64,
     };
     let repo = row.spec.repo.as_deref();
     let delegator = Delegator { kind, tab: Some(opener.tab.clone()), project: repo.and_then(machine::repo_key), project_name: repo.and_then(machine::repo_name).map(str::to_owned) };
-    let usage = TaskUsage { wall_ms: box_ms, box_ms: Some(box_ms), box_usd: Some(box_ms as f64 / 3_600_000.0 * BOX_USD_PER_HOUR), ..TaskUsage::default() };
+    let usage = TaskUsage { wall_ms: box_ms, box_ms: Some(box_ms), box_usd: Some(box_ms as f64 / 3_600_000.0 * box_usd_per_hour(row.size)), ..TaskUsage::default() };
     TaskRecord {
         id: row.id.clone(),
         machine: opener.machine.to_string(),
@@ -375,9 +375,9 @@ fn started_box(row: &BoxRow) -> serde_json::Value {
     serde_json::json!({ "machine": row.machine.to_string(), "machineName": machine_name(&row.spec), "box": row.id, "workState": "working" })
 }
 
-/// Whether the spec's budget paid for `age` at the box hourly rate. None budgets run free.
-fn over_budget(spec: &RunSpec, age: Duration) -> bool {
-    spec.budget_usd.is_some_and(|b| b > 0.0 && age.as_secs_f64() * BOX_USD_PER_HOUR / 3600.0 >= b)
+/// Whether the spec's budget paid for `age` at the hourly rate of a box of `size`. None budgets run free.
+fn over_budget(spec: &RunSpec, size: BoxSize, age: Duration) -> bool {
+    spec.budget_usd.is_some_and(|b| b > 0.0 && age.as_secs_f64() * box_usd_per_hour(size) / 3600.0 >= b)
 }
 
 /// What the hub answers about the worker box on `machine` while its node is offline. A row turns
@@ -685,6 +685,40 @@ fn leaves_when_refused(access: &BoxAccess, row: &str) -> bool {
     !access.owns_row(row)
 }
 
+/// A box's budget pays for at least an hour on its size.
+fn minimum_budget(size: BoxSize, budget: f64) -> Result<(), String> {
+    let hour = box_usd_per_hour(size);
+    if budget >= hour {
+        return Ok(());
+    }
+    Err(format!("name at least ${hour:.2}, an hour on a {} box", size.name()))
+}
+
+/// What the app shows of a box: its phase, age, budget and the hourly rate of its size.
+fn status_of(row: BoxRow, tab: Option<String>) -> BoxStatus {
+    let phase = match &row.phase {
+        Phase::Creating => "creating",
+        Phase::Booting => "booting",
+        Phase::Running => "running",
+        Phase::Ending(_) => "ending",
+    }
+    .to_owned();
+    BoxStatus { id: row.id, phase, machine: row.machine.to_string(), tab, age_secs: row.age.as_secs_f64(), budget_usd: row.spec.budget_usd, rate_usd_per_hour: box_usd_per_hour(row.size) }
+}
+
+/// The box to create for `row`, under the hub label `label`. Only the fixed box ("One box,
+/// reused") keeps running while idle, at Upstash's fixed monthly price per box; every other box
+/// is a standard one that Upstash bills for its active CPU time and pauses when idle.
+fn new_box(access: &BoxAccess, row: &BoxRow, label: &str) -> NewBox {
+    NewBox {
+        name: box_name(Some(row.spec.folder.as_str()).filter(|f| !f.is_empty()), row.spec.repo.as_deref(), BoxRole::of(row), &row.id),
+        labels: vec![label.to_owned(), row_label(&row.id)],
+        size: row.size,
+        keep_alive: access.owns_row(&row.id),
+        init_command: format!("sh {DIR}/start.sh || true"),
+    }
+}
+
 /// An `owner/repo` shorthand or GitHub clone URL as the https URL the box clones.
 fn normalize_repo(repo: &str) -> Option<String> {
     let repo = repo.trim().trim_end_matches('/').trim_end_matches(".git");
@@ -840,9 +874,7 @@ impl Boxes {
         let size = box_size(hub, account, Some(&repo), size).await?.size();
         let budget_usd = box_budget(hub, account, Some(&repo), budget_usd).await?;
         if let Some(budget) = budget_usd {
-            if !(budget >= BOX_USD_PER_HOUR) {
-                return Err(format!("name at least ${BOX_USD_PER_HOUR:.2}, an hour on a box"));
-            }
+            minimum_budget(size, budget)?;
         }
         self.within_cap(&hub.db.boxes(account.id).await?)?;
         let name = machine::repo_name(&repo).unwrap_or("repo").to_owned();
@@ -884,7 +916,7 @@ impl Boxes {
                 eprintln!("pinned-server: could not boot interactive box {}: {e}", row.id);
             }
         });
-        Ok(BoxStatus { id, phase: "creating".into(), machine: machine.to_string(), tab: None, age_secs: 0.0, budget_usd, rate_usd_per_hour: BOX_USD_PER_HOUR })
+        Ok(status_of(fresh, None))
     }
 
     /// `delegate_task` with `target.box`: a new box, opened with the account's own connection,
@@ -1003,15 +1035,8 @@ impl Boxes {
     /// The box behind `machine`: its phase, age and budget, for its cost display.
     pub async fn box_status(&self, hub: &Hub, account: &Arc<Account>, machine: Uuid) -> Result<BoxStatus, String> {
         let row = hub.db.box_of(account.id, machine).await?.ok_or_else(|| "this machine is no box".to_owned())?;
-        let phase = match &row.phase {
-            Phase::Creating => "creating",
-            Phase::Booting => "booting",
-            Phase::Running => "running",
-            Phase::Ending(_) => "ending",
-        }
-        .to_owned();
         let tab = account.placed(&row.connector, &row.subject).map(|(_, tab)| tab);
-        Ok(BoxStatus { id: row.id, phase, machine: machine.to_string(), tab, age_secs: row.age.as_secs_f64(), budget_usd: row.spec.budget_usd, rate_usd_per_hour: BOX_USD_PER_HOUR })
+        Ok(status_of(row, tab))
     }
 
     /// Adds `extra_usd` to the box behind `machine`'s budget.
@@ -1247,18 +1272,8 @@ impl Boxes {
                 None => match self.api.list(key, &row_label(&row.id)).await?.into_iter().next() {
                     Some(listed) => (listed.id, false),
                     None => {
-                        let new = NewBox {
-                            name: box_name(
-                                Some(row.spec.folder.as_str()).filter(|f| !f.is_empty()),
-                                row.spec.repo.as_deref(),
-                                BoxRole::of(row),
-                                &row.id,
-                            ),
-                            labels: vec![self.label.clone(), row_label(&row.id)],
-                            size: row.size,
-                            init_command: format!("sh {DIR}/start.sh || true"),
-                        };
-                        (self.api.create(key, new).await?, true)
+                        let access = hub.connectors(account).await?.box_access();
+                        (self.api.create(key, new_box(&access, row, &self.label)).await?, true)
                     }
                 },
             };
@@ -1418,11 +1433,11 @@ impl Boxes {
         }
     }
 
-    fn with_box_time(usage: Option<TaskUsage>, ms: u64) -> TaskUsage {
+    fn with_box_time(usage: Option<TaskUsage>, size: BoxSize, ms: u64) -> TaskUsage {
         let mut usage = usage.unwrap_or_default();
         usage.wall_ms = usage.wall_ms.max(ms);
         usage.box_ms = Some(ms);
-        usage.box_usd = Some(ms as f64 / 3_600_000.0 * BOX_USD_PER_HOUR);
+        usage.box_usd = Some(ms as f64 / 3_600_000.0 * box_usd_per_hour(size));
         usage
     }
 
@@ -1431,14 +1446,14 @@ impl Boxes {
     pub async fn add_box_usage(&self, hub: &Hub, account: &Account, row: &BoxRow, answer: &mut serde_json::Value) {
         let ended = matches!(answer["workState"].as_str(), Some("result_available" | "failed" | "cancelled"));
         let ms = self.box_time(hub, account, row, ended).await;
-        let usage = Self::with_box_time(serde_json::from_value(answer["usage"].clone()).ok(), ms);
+        let usage = Self::with_box_time(serde_json::from_value(answer["usage"].clone()).ok(), row.size, ms);
         answer["usage"] = serde_json::to_value(usage).unwrap_or_default();
     }
 
     /// Adds the box's cost to the usage of an end the worker's machine reports.
     pub async fn add_end_box_usage(&self, hub: &Hub, account: &Account, row: &BoxRow, end: &mut RemoteEnd) {
         let ms = self.box_time(hub, account, row, true).await;
-        end.usage = Some(Self::with_box_time(end.usage, ms));
+        end.usage = Some(Self::with_box_time(end.usage, row.size, ms));
     }
 
     /// Ends the row for `why`, unless it is ending already, and deletes its box.
@@ -1578,7 +1593,7 @@ impl Boxes {
                 Phase::Running => {
                     let gone = listed.as_ref().zip(row.upstash.as_ref()).is_some_and(|(listed, id)| !listed.iter().any(|b| b.id == *id));
                     // A budget outlives idleness: the box ends when its money runs out, whatever it does.
-                    let over_budget = over_budget(&row.spec, row.age);
+                    let over_budget = over_budget(&row.spec, row.size, row.age);
                     // Later runs reuse this row. The fresh-box timers would delete it between them.
                     if connectors.box_access().owns_row(&row.id) {
                         gone.then_some(End::Vanished)
@@ -1935,7 +1950,7 @@ mod tests {
                 "id": "0123456789abcdef", "machine": "00000000-0000-0000-0000-000000000007", "machine_name": "", "title": "Box · site",
                 "delegator": { "kind": "captain", "tab": "tab-1", "project": "github.com/acme/site", "project_name": "site" },
                 "provider": "claude", "account": "claude", "target": "box", "started": 1_000, "ended": 1_000 + half_hour,
-                "usage": { "tokens_in": 0, "tokens_out": 0, "wall_ms": half_hour, "box_usd": 0.5 * BOX_USD_PER_HOUR, "box_ms": half_hour },
+                "usage": { "tokens_in": 0, "tokens_out": 0, "wall_ms": half_hour, "box_usd": 0.5 * box_usd_per_hour(BoxSize::Small), "box_ms": half_hour },
                 "outcome": "done",
             })
         );
@@ -1956,10 +1971,96 @@ mod tests {
     #[test]
     fn a_budget_ends_the_box_when_its_money_runs_out() {
         let hour = Duration::from_secs(3600);
-        assert!(!over_budget(&spec_with(None), 100 * hour), "no budget runs free");
-        assert!(!over_budget(&spec_with(Some(1.0)), 9 * hour), "$1 buys ten hours");
-        assert!(over_budget(&spec_with(Some(1.0)), 10 * hour), "the tenth hour spends the last cent");
-        assert!(over_budget(&spec_with(Some(0.1)), hour + Duration::from_secs(1)), "$0.10 buys one hour");
+        let small = BoxSize::Small;
+        assert!(!over_budget(&spec_with(None), small, 100 * hour), "no budget runs free");
+        assert!(!over_budget(&spec_with(Some(1.0)), small, 9 * hour), "$1 buys ten hours");
+        assert!(over_budget(&spec_with(Some(1.0)), small, 10 * hour), "the tenth hour spends the last cent");
+        assert!(over_budget(&spec_with(Some(0.1)), small, hour + Duration::from_secs(1)), "$0.10 buys one hour");
+    }
+
+    #[test]
+    fn a_budget_runs_out_sooner_on_a_bigger_box() {
+        let hour = Duration::from_secs(3600);
+        assert!(!over_budget(&spec_with(Some(1.0)), BoxSize::Medium, 4 * hour), "$1 buys five Medium hours at $0.20");
+        assert!(over_budget(&spec_with(Some(1.0)), BoxSize::Medium, 5 * hour));
+        assert!(!over_budget(&spec_with(Some(1.0)), BoxSize::Large, 2 * hour), "$1 buys two and a half Large hours at $0.40");
+        assert!(over_budget(&spec_with(Some(1.0)), BoxSize::Large, 2 * hour + 30 * MIN));
+        assert!(!over_budget(&spec_with(None), BoxSize::Large, 100 * hour), "no budget runs free on any size");
+    }
+
+    #[test]
+    fn the_box_price_is_upstashs_per_size() {
+        assert_eq!([BoxSize::Small, BoxSize::Medium, BoxSize::Large].map(box_usd_per_hour), [0.10, 0.20, 0.40]);
+    }
+
+    #[test]
+    fn the_least_budget_is_an_hour_on_the_boxs_own_size() {
+        assert_eq!(minimum_budget(BoxSize::Small, 0.10), Ok(()));
+        assert_eq!(minimum_budget(BoxSize::Small, 0.09), Err("name at least $0.10, an hour on a small box".into()));
+        assert_eq!(minimum_budget(BoxSize::Medium, 0.19), Err("name at least $0.20, an hour on a medium box".into()));
+        assert_eq!(minimum_budget(BoxSize::Medium, 0.20), Ok(()));
+        assert_eq!(minimum_budget(BoxSize::Large, 0.39), Err("name at least $0.40, an hour on a large box".into()));
+        assert_eq!(minimum_budget(BoxSize::Large, 0.40), Ok(()));
+    }
+
+    fn row_of(size: BoxSize, phase: Phase, work: BoxWork, connector: &str, id: &str) -> BoxRow {
+        BoxRow {
+            id: id.into(),
+            account: Uuid::nil(),
+            machine: Uuid::from_u128(9),
+            upstash: None,
+            connector: connector.into(),
+            subject: Subject::LinearIssue { issue: "box".into() },
+            spec: RunSpec { budget_usd: Some(2.0), ..spec_with(None) },
+            size,
+            phase,
+            age: 90 * MIN,
+            work,
+        }
+    }
+
+    #[test]
+    fn the_chip_carries_the_rate_of_the_boxs_size() {
+        for (size, rate) in [(BoxSize::Small, 0.10), (BoxSize::Medium, 0.20), (BoxSize::Large, 0.40)] {
+            let status = status_of(row_of(size, Phase::Running, BoxWork::Run, INTERACTIVE_CONNECTOR, ROW_ID), Some("tab-1".into()));
+            assert_eq!((status.rate_usd_per_hour, status.phase.as_str(), status.budget_usd, status.age_secs), (rate, "running", Some(2.0), 5400.0), "{size:?}");
+        }
+        let creating = status_of(row_of(BoxSize::Large, Phase::Creating, BoxWork::Run, INTERACTIVE_CONNECTOR, ROW_ID), None);
+        assert_eq!((creating.rate_usd_per_hour, creating.phase.as_str()), (0.40, "creating"));
+    }
+
+    #[test]
+    fn an_agents_box_is_billed_at_the_rate_of_its_size() {
+        let opener = Opener { machine: Uuid::from_u128(7), tab: "tab-1".into(), role: ActorRole::Captain };
+        let hour = 3_600_000;
+        for (size, usd) in [(BoxSize::Small, 0.10), (BoxSize::Medium, 0.20), (BoxSize::Large, 0.40)] {
+            let row = row_of(size, Phase::Ending(End::Done), BoxWork::Run, INTERACTIVE_CONNECTOR, ROW_ID);
+            let record = agent_box_record(&row, &opener, 0, hour, &End::Done);
+            assert!((record.usage.box_usd.unwrap() - usd).abs() < 1e-9, "{size:?}: {:?}", record.usage.box_usd);
+        }
+        let medium = row_of(BoxSize::Medium, Phase::Ending(End::Expired), BoxWork::Run, INTERACTIVE_CONNECTOR, ROW_ID);
+        assert_eq!(agent_box_record(&medium, &opener, 0, 5 * hour, &End::Expired).limit.as_deref(), Some("budget"), "$2 is ten Medium hours: five is not the budget");
+    }
+
+    /// A temporary box and the fixed one, both built from the same access.
+    fn fixed_access() -> BoxAccess {
+        BoxAccess { workflow: BoxPermission::Fixed { row: Some(ROW_ID.into()) }, ..BoxAccess::default() }
+    }
+
+    #[test]
+    fn only_the_fixed_row_gets_a_keep_alive_box() {
+        let access = fixed_access();
+        let fixed = row_of(BoxSize::Medium, Phase::Creating, BoxWork::Run, "nightly", ROW_ID);
+        assert!(new_box(&access, &fixed, "hub:000000000000").keep_alive, "the fixed row outlives the runs it serves");
+        let worker = BoxWork::Captain { request_id: "r".into(), text: "t".into(), sender: "s".into(), busy: None };
+        for (work, connector) in [(BoxWork::Run, "nightly"), (BoxWork::Run, INTERACTIVE_CONNECTOR), (worker, CAPTAIN_CONNECTOR)] {
+            let temporary = row_of(BoxSize::Medium, Phase::Creating, work, connector, "0123456789abcdef");
+            let new = new_box(&access, &temporary, "hub:000000000000");
+            assert!(!new.keep_alive, "{connector}: a temporary box is a standard one");
+        }
+        let fresh = new_box(&BoxAccess::default(), &fixed, "hub:000000000000");
+        assert!(!fresh.keep_alive, "with no fixed row named, even this id is temporary");
+        assert_eq!((fresh.size, fresh.labels.len()), (BoxSize::Medium, 2), "the rest of the box is the same");
     }
 
     #[test]
@@ -2064,7 +2165,7 @@ mod tests {
             minute += 1;
         }
         assert_eq!(verdict(4 * 60 * MIN, Seen::Offline, &mut t, start + 4 * 60 * MIN, &p), Some(End::Expired));
-        assert!(over_budget(&spec_with(Some(BOX_USD_PER_HOUR)), 60 * MIN), "a budget ends it sooner whatever it is seen as");
+        assert!(over_budget(&spec_with(Some(box_usd_per_hour(BoxSize::Small))), BoxSize::Small, 60 * MIN), "a budget ends it sooner whatever it is seen as");
     }
 
     #[test]
