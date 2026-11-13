@@ -1818,8 +1818,8 @@ fn span(ms: u64) -> String {
 fn notice_line(task: &Task) -> String {
     let who = who(task);
     let outcome = match task.state {
-        WorkState::Failed => format!("failed: {}", task.error.as_deref().unwrap_or("the agent failed")),
-        WorkState::Cancelled => format!("cancelled: {}", task.error.as_deref().unwrap_or("cancelled")),
+        WorkState::Failed => format!("failed: {}", crate::pinned_lines::field(task.error.as_deref().unwrap_or("the agent failed"))),
+        WorkState::Cancelled => format!("cancelled: {}", crate::pinned_lines::field(task.error.as_deref().unwrap_or("cancelled"))),
         _ => "result available".into(),
     };
     let note = task.ended_by.as_deref().map(|how| format!(" {how}.")).unwrap_or_default();

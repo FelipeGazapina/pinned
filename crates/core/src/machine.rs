@@ -3887,8 +3887,8 @@ impl Machine {
             AgentStatus::Done => format!("finished. Its last message:\n\n{}", pinned_lines::guard(&truncate(&self.reply_of(worker, event).unwrap_or_else(|| "(none)".into()), REPORT_CHARS, "the whole message is in the worker's thread"))),
             // Claude says it waits for input a while after every finished turn too.
             AgentStatus::NeedsInput if before == Some(AgentStatus::Done) => return,
-            AgentStatus::NeedsInput => format!("needs input: {}", event.message.as_deref().unwrap_or("it is waiting")),
-            AgentStatus::Failed => format!("stopped on an error: {}", event.message.as_deref().unwrap_or("unknown")),
+            AgentStatus::NeedsInput => format!("needs input: {}", pinned_lines::field(event.message.as_deref().unwrap_or("it is waiting"))),
+            AgentStatus::Failed => format!("stopped on an error: {}", pinned_lines::field(event.message.as_deref().unwrap_or("unknown"))),
             AgentStatus::Working => return,
         };
         // The news goes to the tab that spawned the worker, so a worker's own workers report to
@@ -4871,7 +4871,7 @@ impl Machine {
         let Some(task) = self.delegates.get(id) else { return };
         let place = task.remote.as_ref().map_or("another machine", |remote| remote.name.as_str());
         let what = match (ask.kind, ask.tool.as_deref()) {
-            (global::AskKind::Approval, Some(tool)) => format!("approval to use {tool}"),
+            (global::AskKind::Approval, Some(tool)) => format!("approval to use {}", pinned_lines::field(tool)),
             (kind, _) => kind.word().to_owned(),
         };
         let line = format!(
@@ -13003,7 +13003,7 @@ Have another model review a risky change before it goes ahead.";
         let (notice, _) = m.delegates.claim_notice("tab-1").expect("the thread that delegated it is told");
         assert_eq!(
             notice,
-            "[pinned] Worker \"Slow suite\" on mini waits on the user for approval to use Bash: git push origin main. The user answers in its thread on mini; it keeps its place, so do not cancel it for that."
+            "[pinned] Worker \"Slow suite\" on mini waits on the user for approval to use \"Bash\": git push origin main. The user answers in its thread on mini; it keeps its place, so do not cancel it for that."
         );
         asked("m-mini", Some(bash_ask("git push origin main")));
         assert_eq!(m.delegates.claim_notice("tab-1"), None, "an ask the machine reports again is told once");
@@ -14348,7 +14348,7 @@ Have another model review a risky change before it goes ahead.";
         m.record_event(event(&worker, AgentStatus::NeedsInput, Some("Claude is waiting for your input")));
         m.record_event(event(&elsewhere, AgentStatus::Done, None));
         let expected = format!(
-            "\x1b[200~[pinned] Worker {worker} \"JSON output\" needs input: Claude needs your permission to use Bash\x1b[201~\r\
+            "\x1b[200~[pinned] Worker {worker} \"JSON output\" needs input: \"Claude needs your permission to use Bash\"\x1b[201~\r\
              \x1b[200~[pinned] Worker {worker} \"JSON output\" finished. Its last message:\n\nAdded --json in src/cli.rs; all 12 tests pass.\x1b[201~\r"
         );
         wait_for("the reports", || std::fs::read(&file).is_ok_and(|b| b.len() >= expected.len()));
@@ -14478,7 +14478,7 @@ Have another model review a risky change before it goes ahead.";
             tab: Some(worker.clone()),
             ..done_event(&worker)
         });
-        let expected = format!("\x1b[200~[pinned] Worker {worker} \"JSON output\" needs input: Claude needs your input\x1b[201~\r");
+        let expected = format!("\x1b[200~[pinned] Worker {worker} \"JSON output\" needs input: \"Claude needs your input\"\x1b[201~\r");
         wait_for("the report", || std::fs::read(&file).is_ok_and(|b| b.len() >= expected.len()));
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(String::from_utf8(std::fs::read(&file).unwrap()).unwrap(), expected);
@@ -14629,7 +14629,7 @@ Have another model review a risky change before it goes ahead.";
         let ask = |message: &str| AgentEvent { status: AgentStatus::NeedsInput, message: Some(message.into()), tab: Some(nested.clone()), ..done_event(&nested) };
 
         m.record_event(ask("May I run the tests?"));
-        let to_parent = format!("\x1b[200~[pinned] Worker {nested} \"Flag tests\" needs input: May I run the tests?\x1b[201~\r");
+        let to_parent = format!("\x1b[200~[pinned] Worker {nested} \"Flag tests\" needs input: \"May I run the tests?\"\x1b[201~\r");
         wait_for("the parent's report", || std::fs::read(&parent_file).is_ok_and(|b| b.len() >= to_parent.len()));
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(String::from_utf8(std::fs::read(&parent_file).unwrap()).unwrap(), to_parent);
@@ -14637,7 +14637,7 @@ Have another model review a risky change before it goes ahead.";
 
         m.close_tab(&parent);
         m.record_event(ask("Still there?"));
-        let to_orchestrator = format!("\x1b[200~[pinned] Worker {nested} \"Flag tests\" needs input: Still there?\x1b[201~\r");
+        let to_orchestrator = format!("\x1b[200~[pinned] Worker {nested} \"Flag tests\" needs input: \"Still there?\"\x1b[201~\r");
         wait_for("the orchestrator's report", || std::fs::read(&orchestrator_file).is_ok_and(|b| b.len() >= to_orchestrator.len()));
         assert_eq!(String::from_utf8(std::fs::read(&orchestrator_file).unwrap()).unwrap(), to_orchestrator);
         let _ = std::fs::remove_dir_all(root);
