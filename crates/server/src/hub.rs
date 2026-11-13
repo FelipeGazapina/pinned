@@ -700,6 +700,7 @@ impl Hub {
                 return json(stats);
             }
             HubCall::BoxUsage => return json(boxes::usage(self, account).await?),
+            HubCall::StuckBoxes => return json(boxes::stuck_boxes(self, account).await?),
             HubCall::SessionMarks => return json(self.db.session_marks(account.id).await?),
             HubCall::MarkSessions { changes } => {
                 marks::check(&changes)?;
