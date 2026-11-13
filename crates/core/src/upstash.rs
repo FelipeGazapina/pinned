@@ -155,6 +155,10 @@ pub struct StuckBox {
     pub id: String,
     #[serde(default)]
     pub why: String,
+    /// The row never recorded an Upstash box id and the delete failed before pinned knew whether a
+    /// box exists for it: it may or may not be running. Absent when pinned knows the box is there.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unconfirmed: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]

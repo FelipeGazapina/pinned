@@ -8271,6 +8271,7 @@ fn a_box_whose_delete_failed_is_listed_by_stuck_boxes_and_by_box_usage_without_u
     let listed = stuck.as_array().unwrap();
     assert_eq!(listed.len(), 1, "{stuck}");
     assert_eq!(listed[0]["id"], "fake-box-0001");
+    assert!(listed[0].get("unconfirmed").is_none(), "a row with its Upstash id is a known box: {stuck}");
     let why = listed[0]["why"].as_str().unwrap();
     assert!(why.contains("Upstash"), "{why}");
 

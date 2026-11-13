@@ -53,16 +53,25 @@ fn stuck_reason(e: &str, keys: Option<&Keys>) -> String {
 /// The step of `Boxes::end_steps` that failed. Only a failure at the box, or before it, leaves it
 /// running on Upstash.
 enum Failed {
-    /// The machine, the keys or Upstash.
+    /// Upstash, or the steps before it, for a row whose box id pinned has (or whose label list
+    /// named a box that then would not delete): the box is known to be there.
     Box(String),
+    /// The same steps for a row with no Upstash id, before the label list answered or when it
+    /// failed: pinned does not know whether any box exists for the row.
+    Unconfirmed(String),
     /// The hub's own row, after Upstash deleted the box.
     Row(String),
 }
 
 impl Failed {
+    /// A failure before the box delete: known only when the row recorded its Upstash id.
+    fn before_box(row: &Remains, e: String) -> Self {
+        if row.upstash.is_some() { Failed::Box(e) } else { Failed::Unconfirmed(e) }
+    }
+
     fn into_message(self) -> String {
         match self {
-            Failed::Box(e) | Failed::Row(e) => e,
+            Failed::Box(e) | Failed::Unconfirmed(e) | Failed::Row(e) => e,
         }
     }
 }
@@ -785,7 +794,7 @@ pub struct Boxes {
     cooling: Mutex<HashMap<(Uuid, String), Instant>>,
     swept: Mutex<HashMap<Uuid, Instant>>,
     /// Row id → why its last delete failed, for rows still `Ending`. Cleared once the delete works.
-    stuck: Mutex<HashMap<String, String>>,
+    stuck: Mutex<HashMap<String, (String, bool)>>,
 }
 
 impl Boxes {
@@ -1409,24 +1418,27 @@ impl Boxes {
 
     async fn end_steps(&self, hub: &Hub, account: &Arc<Account>, row: &Remains, keys: Option<&Keys>) -> Result<(), Failed> {
         let machine = row.machine.to_string();
-        hub.db.remove_machine(account.id, row.machine).await.map_err(Failed::Box)?;
+        hub.db.remove_machine(account.id, row.machine).await.map_err(|e| Failed::before_box(row, e))?;
         account.went_offline(&machine, None);
         hub.push_machines(account).await;
-        let keys = keys.ok_or_else(|| Failed::Box(format!("{NOT_CONNECTED_END} so box {} stays until it is", row.upstash.as_ref().map_or(&row.id, |b| &b.0))))?;
-        self.delete_box(keys, row).await.map_err(Failed::Box)?;
+        self.delete_box(keys, row).await?;
         hub.db.delete_box(&row.id).await.map_err(Failed::Row)?;
         eprintln!("pinned-server: deleted box {} of account {} ({})", row.id, account.id, row.why);
         Ok(())
     }
 
-    /// Deletes the row's box, or every box labelled for the row when it never recorded one.
-    async fn delete_box(&self, keys: &Keys, row: &Remains) -> Result<(), String> {
+    /// Deletes the row's box, or every box labelled for the row when it never recorded one. Without
+    /// keys nothing is asked of Upstash.
+    async fn delete_box(&self, keys: Option<&Keys>, row: &Remains) -> Result<(), Failed> {
+        let Some(keys) = keys else {
+            return Err(Failed::before_box(row, format!("{NOT_CONNECTED_END} so box {} stays until it is", row.upstash.as_ref().map_or(&row.id, |b| &b.0))));
+        };
         let key = keys.api_key.as_str();
         match &row.upstash {
-            Some(id) => self.api.delete(key, id).await?,
+            Some(id) => self.api.delete(key, id).await.map_err(Failed::Box)?,
             None => {
-                for listed in self.api.list(key, &row_label(&row.id)).await? {
-                    self.api.delete(key, &listed.id).await?;
+                for listed in self.api.list(key, &row_label(&row.id)).await.map_err(Failed::Unconfirmed)? {
+                    self.api.delete(key, &listed.id).await.map_err(Failed::Box)?;
                 }
             }
         }
@@ -1443,7 +1455,10 @@ impl Boxes {
                 self.stuck.lock().unwrap().remove(id);
             }
             Err(Failed::Box(e)) => {
-                self.stuck.lock().unwrap().insert(id.to_owned(), stuck_reason(e, keys));
+                self.stuck.lock().unwrap().insert(id.to_owned(), (stuck_reason(e, keys), false));
+            }
+            Err(Failed::Unconfirmed(e)) => {
+                self.stuck.lock().unwrap().insert(id.to_owned(), (stuck_reason(e, keys), true));
             }
             Err(Failed::Row(_)) => {
                 self.stuck.lock().unwrap().remove(id);
@@ -1456,7 +1471,7 @@ impl Boxes {
     /// box being deleted as usual.
     pub fn stuck_among(&self, rows: impl Iterator<Item = String>) -> Vec<StuckBox> {
         let record = self.stuck.lock().unwrap();
-        rows.filter_map(|id| record.get(&id).map(|why| StuckBox { why: why.clone(), id })).collect()
+        rows.filter_map(|id| record.get(&id).map(|(why, unconfirmed)| StuckBox { why: why.clone(), unconfirmed: *unconfirmed, id })).collect()
     }
 
     /// A worker box ended before its task did: the machine whose tab delegated the task hears it
@@ -2110,9 +2125,12 @@ mod tests {
     const FAKE_KEY: &str = "fake-upstash-key-0000";
     const FAKE_TOKEN: &str = "fake-claude-token-0000";
 
-    /// A Box API whose delete answers `fail` while it is set, and never touches Upstash.
+    /// A Box API whose delete answers `fail` while it is set, and whose label list answers
+    /// `list_fail`, or the boxes in `listed`; it never touches Upstash.
     struct Deleting {
         fail: Mutex<Option<String>>,
+        list_fail: Mutex<Option<String>>,
+        listed: Vec<Listed>,
     }
 
     impl BoxApi for Deleting {
@@ -2120,7 +2138,7 @@ mod tests {
             unreachable!()
         }
         fn list<'a>(&'a self, _: &'a str, _: &'a str) -> BoxFuture<'a, Result<Vec<Listed>, String>> {
-            Box::pin(async { Ok(Vec::new()) })
+            Box::pin(async move { self.list_fail.lock().unwrap().clone().map_or_else(|| Ok(self.listed.clone()), Err) })
         }
         fn write<'a>(&'a self, _: &'a str, _: &'a BoxId, _: &'a str, _: String) -> BoxFuture<'a, Result<(), String>> {
             unreachable!()
@@ -2134,7 +2152,11 @@ mod tests {
     }
 
     fn boxes_deleting(fail: Option<&str>) -> (Boxes, Arc<Deleting>) {
-        let api = Arc::new(Deleting { fail: Mutex::new(fail.map(str::to_owned)) });
+        boxes_listing(fail, None, Vec::new())
+    }
+
+    fn boxes_listing(fail: Option<&str>, list_fail: Option<&str>, listed: Vec<Listed>) -> (Boxes, Arc<Deleting>) {
+        let api = Arc::new(Deleting { fail: Mutex::new(fail.map(str::to_owned)), list_fail: Mutex::new(list_fail.map(str::to_owned)), listed });
         (Boxes::new(api.clone(), Policy::default(), "https://hub.test"), api)
     }
 
@@ -2146,6 +2168,11 @@ mod tests {
         Remains { id: id.into(), machine: Uuid::nil(), upstash: Some(BoxId("fake-box-0000".into())), why: "test".into() }
     }
 
+    /// A row whose box id was never recorded.
+    fn remains_without_id(id: &str) -> Remains {
+        Remains { upstash: None, ..remains(id) }
+    }
+
     /// What `end` does after the machine row is gone: delete the box, then settle the record.
     async fn try_delete(boxes: &Boxes, row: &Remains, keys: Option<&Keys>) -> Result<(), String> {
         try_end(boxes, row, keys, Ok(())).await
@@ -2153,13 +2180,7 @@ mod tests {
 
     /// The same, with the answer of the hub's own row delete once Upstash deleted the box.
     async fn try_end(boxes: &Boxes, row: &Remains, keys: Option<&Keys>, row_delete: Result<(), String>) -> Result<(), String> {
-        let ended = match keys {
-            Some(keys) => match boxes.delete_box(keys, row).await {
-                Ok(()) => row_delete.map_err(Failed::Row),
-                Err(e) => Err(Failed::Box(e)),
-            },
-            None => Err(Failed::Box(format!("{NOT_CONNECTED_END} so box {} stays until it is", row.id))),
-        };
+        let ended = boxes.delete_box(keys, row).await.and_then(|()| row_delete.map_err(Failed::Row));
         boxes.settle(&row.id, &ended, keys);
         ended.map_err(Failed::into_message)
     }
@@ -2173,7 +2194,7 @@ mod tests {
         let (boxes, api) = boxes_deleting(Some("Upstash answered 503"));
         let (row, keys) = (remains("row-1"), fake_keys());
         assert!(try_delete(&boxes, &row, Some(&keys)).await.is_err());
-        assert_eq!(stuck_of(&boxes, &["row-1"]), vec![StuckBox { id: "row-1".into(), why: "Upstash answered 503".into() }]);
+        assert_eq!(stuck_of(&boxes, &["row-1"]), vec![StuckBox { id: "row-1".into(), why: "Upstash answered 503".into(), unconfirmed: false }]);
         *api.fail.lock().unwrap() = None;
         assert!(try_delete(&boxes, &row, Some(&keys)).await.is_ok());
         // The row is gone now, and so is the record.
@@ -2188,7 +2209,7 @@ mod tests {
         // row-3 is a box being deleted as usual: no delete failed yet, so it is not listed.
         assert_eq!(
             stuck_of(&boxes, &["row-2", "row-3", "row-4"]),
-            vec![StuckBox { id: "row-2".into(), why: "Upstash is not connected, or its Claude token is missing".into() }]
+            vec![StuckBox { id: "row-2".into(), why: "Upstash is not connected, or its Claude token is missing".into(), unconfirmed: false }]
         );
     }
 
@@ -2234,5 +2255,52 @@ mod tests {
         *api.fail.lock().unwrap() = None;
         try_delete(&boxes, &row, Some(&keys)).await.unwrap();
         assert!(boxes.stuck.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_row_with_no_upstash_id_is_listed_unconfirmed_when_the_delete_fails_before_the_list_answers_and_a_row_with_an_id_is_listed_known() {
+        let keys = fake_keys();
+        // No keys: nothing asked of Upstash, and pinned does not know whether a box exists.
+        let (boxes, _) = boxes_deleting(None);
+        assert!(try_delete(&boxes, &remains_without_id("row-8"), None).await.is_err());
+        // The label list fails.
+        let (listing, _) = boxes_listing(None, Some("Upstash answered 502"), Vec::new());
+        assert!(try_delete(&listing, &remains_without_id("row-9"), Some(&keys)).await.is_err());
+        assert_eq!(
+            stuck_of(&boxes, &["row-8"]),
+            vec![StuckBox { id: "row-8".into(), why: NO_KEYS.into(), unconfirmed: true }]
+        );
+        assert_eq!(
+            stuck_of(&listing, &["row-9"]),
+            vec![StuckBox { id: "row-9".into(), why: "Upstash answered 502".into(), unconfirmed: true }]
+        );
+        // A row with its id whose delete fails: the box is known, with or without keys.
+        let (known, _) = boxes_deleting(Some("Upstash answered 503"));
+        assert!(try_delete(&known, &remains("row-10"), Some(&keys)).await.is_err());
+        assert!(try_delete(&known, &remains("row-11"), None).await.is_err());
+        assert_eq!(
+            stuck_of(&known, &["row-10", "row-11"]),
+            vec![
+                StuckBox { id: "row-10".into(), why: "Upstash answered 503".into(), unconfirmed: false },
+                StuckBox { id: "row-11".into(), why: NO_KEYS.into(), unconfirmed: false },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_row_with_no_upstash_id_whose_label_list_named_a_box_that_would_not_delete_is_known() {
+        let listed = vec![Listed { id: BoxId("fake-box-0001".into()), labels: vec![row_label("row-12")] }];
+        let (boxes, api) = boxes_listing(Some("Upstash answered 503"), None, listed);
+        let (row, keys) = (remains_without_id("row-12"), fake_keys());
+        assert!(try_delete(&boxes, &row, Some(&keys)).await.is_err());
+        assert_eq!(stuck_of(&boxes, &["row-12"]), vec![StuckBox { id: "row-12".into(), why: "Upstash answered 503".into(), unconfirmed: false }]);
+        // The list answered with no box at all: the row is simply deleted, and nothing is listed.
+        let (empty, _) = boxes_deleting(None);
+        assert!(try_delete(&empty, &row, Some(&keys)).await.is_ok());
+        assert!(stuck_of(&empty, &["row-12"]).is_empty());
+        // A failure before the box delete (the machine row) is unconfirmed for a row with no id only.
+        assert!(matches!(Failed::before_box(&row, "database is down".into()), Failed::Unconfirmed(_)));
+        assert!(matches!(Failed::before_box(&remains("row-13"), "database is down".into()), Failed::Box(_)));
+        drop(api);
     }
 }
