@@ -938,6 +938,13 @@ impl Delegates {
         self.cancel_tree(id, reason, path)
     }
 
+    /// `id` and its working descendants, the tasks `cancel_tree` ends.
+    pub fn working_tree(&self, id: &str) -> Vec<String> {
+        let mut order = vec![];
+        postorder(&self.tasks.lock().unwrap(), id, &mut order);
+        order
+    }
+
     /// Cancels every working descendant, then `id`. Used when the tab closes or pinned quits.
     pub fn cancel_tree(&self, id: &str, reason: &str, path: Option<&str>) -> Result<Value, String> {
         if !self.tasks.lock().unwrap().iter().any(|task| task.id == id) {

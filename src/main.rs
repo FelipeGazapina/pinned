@@ -260,7 +260,7 @@ fn focus_panel(app: AppHandle, window: Window) {
 /// so other devices can still open sessions on this Mac.
 #[tauri::command]
 fn close_tab(app: AppHandle, machine: State<Arc<Machine>>, account: State<account::Account>, tab: String) {
-    if machine.close_tab(&tab) && !account.is_signed_in() {
+    if machine.close_tab(&tab, Some(pinned_core::questions::Canceller::User)) && !account.is_signed_in() {
         machine.quit();
         app.exit(0);
     }

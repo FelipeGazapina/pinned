@@ -1594,24 +1594,40 @@ mod tests {
         assert_eq!(reconcile(Some(UpdateStatus::Restarting { to: "1.0.0".into() }), "0.9.0", Some(live.clone())), Some(live));
     }
 
-    /// A box's account with one machine showing a single tab with `status`, laid over by an open
-    /// questionnaire when `asked`, as the node shows a tab whose worker called `question_user`.
-    fn box_showing(status: AgentStatus, asked: bool, running: bool) -> Account {
-        use pinned_core::questions::{self, QOption, Question, Questionnaire};
+    /// A box's account with one machine showing `tab`.
+    fn box_with(tab: TabView) -> Account {
         let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() };
         let (out, _sent, _) = Outbox::new();
         account.came_online("box", 1, "box".into(), true, "0.18.2".into(), out);
-        let mut tab: TabView = serde_json::from_value(serde_json::json!({
+        account.machine_event("box", 1, MachineEvent::Tabs { tabs: vec![tab] });
+        account
+    }
+
+    /// The view of a worker's tab, as a node sends it before any questionnaire is laid over it.
+    fn worker_tab(status: Option<AgentStatus>, running: bool) -> TabView {
+        serde_json::from_value(serde_json::json!({
             "id": "tab-1", "cwd": "/work/repo", "bypass": true, "running": running, "opened": 1_794_240_000u64,
             "status": status, "connector": "delegate", "subject": { "issue": "FAKE-1" },
         }))
-        .unwrap();
+        .unwrap()
+    }
+
+    fn open_question() -> pinned_core::questions::Questionnaire {
+        use pinned_core::questions::{QOption, Question, Questionnaire};
+        let question = Question { header: None, question: "Base the fix on main?".into(), changes: "which branch the PR targets".into(), options: vec![QOption { label: "main".into(), description: None, recommended: true }], multi_select: false };
+        Questionnaire { id: "q-1".into(), title: None, questions: vec![question], projects: vec![], at: 1_794_240_000 }
+    }
+
+    /// A box's account with one machine showing a single tab with `status`, laid over by an open
+    /// questionnaire when `asked`. A running tab gets it as the node lays it over (`questions::shown`,
+    /// which reads as running). A tab that is not running gets only the questions, as an older node
+    /// sent it for a session that had exited: the node now shows no questionnaire on a dead tab.
+    fn box_showing(status: AgentStatus, asked: bool, running: bool) -> Account {
+        let mut tab = worker_tab(Some(status), running);
         if asked {
-            let question = Question { header: None, question: "Base the fix on main?".into(), changes: "which branch the PR targets".into(), options: vec![QOption { label: "main".into(), description: None, recommended: true }], multi_select: false };
-            tab = questions::shown(tab, &Questionnaire { id: "q-1".into(), title: None, questions: vec![question], projects: vec![], at: 1_794_240_000 });
+            tab = if running { pinned_core::questions::shown(tab, &open_question()) } else { TabView { questions: Some(open_question()), ..tab } };
         }
-        account.machine_event("box", 1, MachineEvent::Tabs { tabs: vec![tab] });
-        account
+        box_with(tab)
     }
 
     /// What the reaper decides for the box once `held` has passed since it first saw `seen`, with
@@ -1660,6 +1676,19 @@ mod tests {
             assert_eq!(look(), Seen::Tab { running: false, quiet: false }, "{which}: the question holds, the process does not");
             assert_eq!(reaped(&look, 4 * MIN, 4 * MIN), None, "{which}: exited 4 of 5 minutes");
             assert_eq!(reaped(&look, 6 * MIN, 6 * MIN), Some(boxes::End::Exited), "{which}: an open question does not keep an exited session's box");
+        }
+    }
+
+    #[test]
+    fn a_box_whose_session_exited_as_the_merged_node_shows_it_ends_as_exited() {
+        // After an exit the node sends running: false, no questionnaire and no status.
+        let account = box_with(worker_tab(None, false));
+        let subject = Subject::LinearIssue { issue: "FAKE-1".into() };
+        let looks: [(&str, Box<dyn Fn() -> Seen>); 2] = [("seen", Box::new(|| account.seen("box", "delegate", &subject))), ("seen_any", Box::new(|| account.seen_any("box")))];
+        for (which, look) in looks {
+            assert_eq!(look(), Seen::Tab { running: false, quiet: true }, "{which}: nothing holds it, the process is gone");
+            assert_eq!(reaped(&look, 4 * MIN, 4 * MIN), None, "{which}: exited 4 of 5 minutes");
+            assert_eq!(reaped(&look, 6 * MIN, 6 * MIN), Some(boxes::End::Exited), "{which}: an exited session's box ends at 5 minutes");
         }
     }
 

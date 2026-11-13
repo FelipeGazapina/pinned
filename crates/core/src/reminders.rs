@@ -21,6 +21,7 @@ const STATUS_TOOL: &str = "task_status";
 const CANCEL_TASK_TOOL: &str = "task_cancel";
 const REVIEW_TOOL: &str = "task_review";
 const STATS_TOOL: &str = "delegation_stats";
+const QUESTION_TOOL: &str = "question_user";
 pub const SERVER: &str = "pinned";
 /// Leaves the reminders tools out, on a machine with no desktop to show them on.
 pub const NO_REMINDERS: &str = "--no-reminders";
@@ -433,7 +434,7 @@ fn reminder_tools() -> Vec<Value> {
 
 /// Each project tool, named as `ProjectTool` tags it, and who is offered it. Every session gets the
 /// memory tools; one outside a project is told it has no memory.
-fn project_tools() -> [(Audience, serde_json::Value); 20] {
+fn project_tools() -> [(Audience, serde_json::Value); 21] {
     let no_args = serde_json::json!({ "type": "object", "properties": {} });
     let project = serde_json::json!({ "type": "string", "description": "The project's key from projects, its folder on this machine, or <machine>:<folder> for a folder on another machine." });
     let machine = serde_json::json!({ "type": "string", "description": "The machine's id or name from projects, with or without @. Pass it whenever projects lists the project on more than one machine." });
@@ -514,6 +515,7 @@ fn project_tools() -> [(Audience, serde_json::Value); 20] {
                 "required": ["action"],
             },
         })),
+        (Audience::Everyone, question_user_definition()),
         (Audience::GlobalOrchestrator, serde_json::json!({
             "name": "projects",
             "description": "List every project of the account as JSON: its key, name and repo, each machine that has it (online or not, with its pinned version), its Capitão's state there (livre, trabalhando or nenhum) and how many workers run, then every machine of the account with any problem, such as one that needs to update pinned. Call it to pick the project and machine before send_to_captain.",
@@ -684,6 +686,51 @@ fn project_tools() -> [(Audience, serde_json::Value); 20] {
     ]
 }
 
+/// `question_user`, as section 2.1 of the design gives it: the rules are in its description,
+/// the one text every agent kind reads.
+fn question_user_definition() -> Value {
+    json!({
+        "name": QUESTION_TOOL,
+        "description": "Ask the user before you act, when an answer would change what you do. Each question has 2-4 options, your recommendation first with recommended: true; the user can also type an answer, or skip. Ask only questions whose answer changes what happens next, never ones you could answer by reading the code, the task or your memory, and never invented ones: with no open question, do not call this. Ask everything you need in one call. The call waits until the user answers or skips. answered: go on with the answers. skipped: go on without them, take your recommended option for each, and state each assumption where your work is read (a worker in its final reply, the global orchestrator in its message to the Capitão and in its reply to the user). pending: the wait ended first; end your turn, the answers arrive as a message that starts with [pinned] Answers.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": { "type": "string", "description": "What the questions are about, in a few words, e.g. \"Checkout redesign\"." },
+                "questions": {
+                    "type": "array", "minItems": 1, "maxItems": 4,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "question": { "type": "string", "description": "One question, ending in ?" },
+                            "header": { "type": "string", "maxLength": 16, "description": "A chip label, e.g. \"Branch\"." },
+                            "changes": { "type": "string", "description": "What you do differently depending on the answer. Required: a question whose answer changes nothing is not asked." },
+                            "options": {
+                                "type": "array", "minItems": 2, "maxItems": 4,
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "label": { "type": "string", "maxLength": 60 },
+                                        "description": { "type": "string", "description": "One line: what choosing it leads to." },
+                                        "recommended": { "type": "boolean" },
+                                    },
+                                    "required": ["label"],
+                                },
+                            },
+                            "multi_select": { "type": "boolean", "default": false },
+                        },
+                        "required": ["question", "changes", "options"],
+                    },
+                },
+                "projects": {
+                    "type": "array", "items": { "type": "string" },
+                    "description": "Global orchestrator only, and required there: the project keys (from projects) whose message waits on these answers. send_to_captain to them is refused until the user answers or skips.",
+                },
+            },
+            "required": ["questions"],
+        },
+    })
+}
+
 fn remind_definition() -> Value {
     json!({
         "name": TOOL,
@@ -717,6 +764,9 @@ fn call(params: &Value, reminders: bool, output: &Mutex<impl Write>) -> Value {
     }
     if name == DELEGATE_TOOL {
         return delegate_call(params, output);
+    }
+    if name == QUESTION_TOOL {
+        return question_call(params, output);
     }
     let args = &params["arguments"];
     let request = match name {
@@ -825,6 +875,74 @@ fn delegate_call(params: &Value, output: &Mutex<impl Write>) -> Value {
         let pause = progress_every().min(StdDuration::from_millis(200));
         std::thread::sleep(pause);
     }
+}
+
+/// Opens the questionnaire on the node, then waits for the user: polls `QuestionStatus` every
+/// `QUESTION_POLL` and sends progress every `progress_every()`, until the questionnaire closes or
+/// the wait ends at `question_wait()`. The questionnaire outlives the wait: its answer then comes
+/// as a notice the node types into the session.
+fn question_call(params: &Value, output: &Mutex<impl Write>) -> Value {
+    let tab = session_var(TAB_ENV);
+    let mut tool = params["arguments"].clone();
+    if !tool.is_object() {
+        tool = json!({});
+    }
+    tool["name"] = QUESTION_TOOL.into();
+    // A headless child has no tab: the node finds the one that shows its task.
+    if let Some(task) = session_var(TASK_ENV).filter(|_| tab.is_none()) {
+        tool["task"] = task.into();
+    }
+    let ask = match serde_json::from_value::<ProjectTool>(tool) {
+        Ok(ask) => ask,
+        Err(e) => return tool_result(Err(format!("{QUESTION_TOOL}: {e}"))),
+    };
+    // A shape the node would refuse is refused here, before anything is shown.
+    if let ProjectTool::QuestionUser { title, questions, .. } = &ask {
+        if let Err(error) = crate::questions::checked(title.clone(), questions.clone()) {
+            return tool_result(Err(error));
+        }
+    }
+    let tab = tab.unwrap_or_default();
+    let task = match &ask {
+        ProjectTool::QuestionUser { task, .. } => task.clone(),
+        _ => None,
+    };
+    let id = match send(&Message::Project { tab: tab.clone(), tool: ask }) {
+        Ok(id) => id,
+        Err(error) => return tool_result(Err(error)),
+    };
+    let progress = params.get("_meta").and_then(|meta| meta.get("progressToken")).filter(|token| !token.is_null()).cloned();
+    let began = Instant::now();
+    let mut next_note = began + progress_every();
+    loop {
+        if let Some(token) = progress.as_ref().filter(|_| Instant::now() >= next_note) {
+            let note = json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/progress",
+                "params": { "progressToken": token, "progress": began.elapsed().as_secs(), "message": "waiting on the user" },
+            });
+            let _ = write_msg(output, &note);
+            next_note = Instant::now() + progress_every();
+        }
+        match send(&Message::Project { tab: tab.clone(), tool: ProjectTool::QuestionStatus { id: id.clone(), task: task.clone() } }) {
+            Ok(text) if serde_json::from_str::<Value>(&text).is_ok_and(|status| status["outcome"] == "open") => {}
+            answer => return tool_result(answer),
+        }
+        if began.elapsed() >= question_wait() {
+            return tool_result(Ok(crate::questions::pending(&id).to_string()));
+        }
+        std::thread::sleep(question_poll().min(progress_every()));
+    }
+}
+
+/// How long `question_user` waits on the user before it answers `pending`: 23 hours, under the
+/// day `MCP_TOOL_TIMEOUT` gives a session's tool call.
+fn question_wait() -> StdDuration {
+    std::env::var("PINNED_QUESTION_WAIT_MS").ok().and_then(|text| text.parse().ok()).map(StdDuration::from_millis).unwrap_or(StdDuration::from_secs(23 * 3600))
+}
+
+fn question_poll() -> StdDuration {
+    std::env::var("PINNED_QUESTION_POLL_MS").ok().and_then(|text| text.parse().ok()).filter(|ms: &u64| *ms > 0).map(StdDuration::from_millis).unwrap_or(StdDuration::from_millis(500))
 }
 
 fn progress_every() -> StdDuration {
@@ -1257,7 +1375,7 @@ fn restore_var(name: &str, value: Option<String>) {
         let names = |child| tool_definitions(true, child, Seat::Other).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
         let reminders = ["remind_me", "list_reminders", "cancel_reminder"];
         let delegation = ["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel", "task_review", "delegation_stats"];
-        let memory = ["memory_search", "memory_save", "memory_forget", "actions", "act"];
+        let memory = ["memory_search", "memory_save", "memory_forget", "actions", "act", "question_user"];
         assert_eq!(names(false), [&reminders[..], &delegation, &["agents", "work_cost"], &memory].concat());
         assert_eq!(names(true), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory].concat());
         let on_a_node = tool_definitions(false, false, Seat::Other).as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
@@ -1272,6 +1390,7 @@ fn restore_var(name: &str, value: Option<String>) {
                 "mcp__pinned__memory_forget",
                 "mcp__pinned__actions",
                 "mcp__pinned__act",
+                "mcp__pinned__question_user",
                 "mcp__pinned__projects",
                 "mcp__pinned__send_to_captain",
                 "mcp__pinned__read_captain",
@@ -1299,7 +1418,7 @@ fn restore_var(name: &str, value: Option<String>) {
         assert_eq!(ask("work_cost", serde_json::json!({"taskId": "task-7"}), Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"work_cost","taskId":"task-7"}}"#.into()));
         assert_eq!(ask("memory_forget", serde_json::json!({"id": 3}), Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"memory_forget","id":3}}"#.into()));
         assert_eq!(ask("memory_save", serde_json::json!({"title": "Deploys"}), Some("tab-2")), Err("memory_save: missing field `text`".into()));
-        assert_eq!(ask("delegate", serde_json::json!({ "task": "Fix it." }), Some("tab-2")), Err("delegate: unknown variant `delegate`, expected one of `agents`, `work_cost`, `memory_search`, `memory_save`, `memory_forget`, `projects`, `send_to_captain`, `read_captain`, `waiting`, `sessions`, `read_session`, `repo_overview`, `repo_read`, `repo_search`, `tell_orchestrator`, `taste_get`, `taste_set`, `taste_reset`, `actions`, `convex`, `act`".into()));
+        assert_eq!(ask("delegate", serde_json::json!({ "task": "Fix it." }), Some("tab-2")), Err("delegate: unknown variant `delegate`, expected one of `agents`, `work_cost`, `memory_search`, `memory_save`, `memory_forget`, `projects`, `send_to_captain`, `read_captain`, `waiting`, `sessions`, `read_session`, `repo_overview`, `repo_read`, `repo_search`, `tell_orchestrator`, `taste_get`, `taste_set`, `taste_reset`, `actions`, `convex`, `question_user`, `question_status`, `act`".into()));
         assert_eq!(ask("agents", serde_json::json!({}), Some("")), Err("PINNED_TAB is not set: run this inside a pinned tab".into()));
         assert_eq!(
             ask("act", serde_json::json!({ "action": "rename_machine", "args": { "name": "Mini", "id": "m1" }, "request_id": "r-1" }), Some("tab-2")),
@@ -1338,6 +1457,12 @@ fn restore_var(name: &str, value: Option<String>) {
     /// JSON-RPC replies and the socket lines.
     #[cfg(unix)]
     fn over_socket(task: Option<&str>, requests: &[Value], answers: Vec<Result<String, String>>) -> (Vec<Value>, Vec<String>) {
+        over_socket_in(Some("tab-1"), task, requests, answers)
+    }
+
+    /// `over_socket` in tab `tab`, or in none, as a headless child runs.
+    #[cfg(unix)]
+    fn over_socket_in(tab: Option<&str>, task: Option<&str>, requests: &[Value], answers: Vec<Result<String, String>>) -> (Vec<Value>, Vec<String>) {
         use std::io::{BufRead, Write};
         let _guard = session_env_lock();
         let dir = std::env::temp_dir().join(format!("pinned-mcp-convex-{}-{}", std::process::id(), task.unwrap_or("none")));
@@ -1368,7 +1493,10 @@ fn restore_var(name: &str, value: Option<String>) {
         };
         let previous = [SOCK_ENV, TAB_ENV, TASK_ENV, ROLE_ENV].map(|name| (name, std::env::var(name).ok()));
         std::env::set_var(SOCK_ENV, &sock);
-        std::env::set_var(TAB_ENV, "tab-1");
+        match tab {
+            Some(tab) => std::env::set_var(TAB_ENV, tab),
+            None => std::env::remove_var(TAB_ENV),
+        }
         std::env::remove_var(ROLE_ENV);
         match task {
             Some(task) => std::env::set_var(TASK_ENV, task),
@@ -1396,7 +1524,7 @@ fn restore_var(name: &str, value: Option<String>) {
         let (replies, heard) = over_socket(None, std::slice::from_ref(&list), vec![Ok(r#"{"deployment":"quick-lemur-789","kind":"dev","tables":["invoices"]}"#.into())]);
         assert_eq!(heard, [r#"{"kind":"project","tab":"tab-1","tool":{"name":"convex","ask":{"op":"offer"}}}"#]);
         let offered = names(&replies[0]);
-        assert_eq!(offered[offered.len() - 3..], ["act", "convex_tables", "convex_data"], "a table limit offers two tools after the rest");
+        assert_eq!(offered[offered.len() - 3..], ["question_user", "convex_tables", "convex_data"], "a table limit offers two tools after the rest");
         assert!(replies[0]["result"]["tools"].as_array().unwrap().last().unwrap()["description"].as_str().unwrap().contains("quick-lemur-789 (dev)"));
 
         let (replies, _) = over_socket(None, std::slice::from_ref(&list), vec![Err("Convex is not connected for `github.com/acme/site`.".into())]);
@@ -1436,7 +1564,7 @@ fn restore_var(name: &str, value: Option<String>) {
     #[cfg(unix)]
     fn the_global_orchestrator_routes_and_remembers_and_only_a_capitao_reports_to_it() {
         let reminders = ["remind_me", "list_reminders", "cancel_reminder"];
-        let memory = ["memory_search", "memory_save", "memory_forget", "actions", "act"];
+        let memory = ["memory_search", "memory_save", "memory_forget", "actions", "act", "question_user"];
         let today = [&reminders[..], &["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel", "task_review", "delegation_stats", "agents", "work_cost"], &memory].concat();
         assert_eq!(offered(None, None), today, "a plain thread sees what it saw before the global orchestrator");
         assert_eq!(offered(Some("worker"), None), today);
@@ -1464,6 +1592,111 @@ fn restore_var(name: &str, value: Option<String>) {
             ask("repo_search", serde_json::json!({ "project": "github.com/o/r", "query": "Call::", "max": 500 })),
             Ok(r#"{"kind":"project","tab":"tab-9","tool":{"name":"repo_search","project":"github.com/o/r","query":"Call::","regex":false,"case":false,"max":500}}"#.into())
         );
+    }
+
+    #[cfg(unix)]
+    fn questions_call(arguments: Value) -> Value {
+        json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": { "name": "question_user", "arguments": arguments, "_meta": { "progressToken": "p-1" } } })
+    }
+
+    #[cfg(unix)]
+    fn branch_question() -> Value {
+        json!({ "header": "Branch", "question": "Base the fix on main or on release/0.18?", "changes": "which branch the PR targets", "options": [{ "label": "main", "recommended": true }, { "label": "release/0.18" }] })
+    }
+
+    /// Runs `requests` with the question poll and progress set to `poll_ms` and `progress_ms`
+    /// and the wait to `wait_ms`.
+    #[cfg(unix)]
+    fn over_socket_timed(tab: Option<&str>, task: Option<&str>, (poll_ms, progress_ms, wait_ms): (u64, u64, Option<u64>), requests: &[Value], answers: Vec<Result<String, String>>) -> (Vec<Value>, Vec<String>) {
+        let names = ["PINNED_QUESTION_POLL_MS", "PINNED_DELEGATE_PROGRESS_MS", "PINNED_QUESTION_WAIT_MS"];
+        let previous = names.map(|name| std::env::var(name).ok());
+        std::env::set_var(names[0], poll_ms.to_string());
+        std::env::set_var(names[1], progress_ms.to_string());
+        match wait_ms {
+            Some(ms) => std::env::set_var(names[2], ms.to_string()),
+            None => std::env::remove_var(names[2]),
+        }
+        let replies = over_socket_in(tab, task, requests, answers);
+        for (name, value) in names.into_iter().zip(previous) {
+            restore_var(name, value);
+        }
+        replies
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn question_user_waits_on_the_user_reports_progress_and_answers_each_outcome() {
+        let open = || Ok(r#"{"outcome":"open","id":"q-1"}"#.to_owned());
+        let answered = r#"{"outcome":"answered","id":"q-1","answers":[{"question":"Base the fix on main or on release/0.18?","chosen":["main"],"header":"Branch","recommended":true}],"next":"Go on with these answers."}"#;
+        let call = questions_call(json!({ "title": "Checkout redesign", "questions": [branch_question()] }));
+        let mut answers = vec![Ok("q-1".to_owned())];
+        answers.extend((0..8).map(|_| open()));
+        answers.push(Ok(answered.into()));
+        let (replies, heard) = over_socket_timed(Some("tab-1"), None, (20, 50, None), std::slice::from_ref(&call), answers);
+        assert_eq!(heard[0], r#"{"kind":"project","tab":"tab-1","tool":{"name":"question_user","title":"Checkout redesign","questions":[{"header":"Branch","question":"Base the fix on main or on release/0.18?","changes":"which branch the PR targets","options":[{"label":"main","recommended":true},{"label":"release/0.18"}]}]}}"#);
+        assert_eq!(heard.len(), 10, "it asked how the questions stand until they closed: {heard:?}");
+        assert!(heard[1..].iter().all(|line| line == r#"{"kind":"project","tab":"tab-1","tool":{"name":"question_status","id":"q-1"}}"#), "{heard:?}");
+        let (notes, results): (Vec<&Value>, Vec<&Value>) = replies.iter().partition(|reply| reply["method"] == "notifications/progress");
+        assert!(!notes.is_empty(), "the wait reports progress: {replies:?}");
+        assert!(notes.iter().all(|note| note["params"]["progressToken"] == "p-1" && note["params"]["message"] == "waiting on the user"), "{notes:?}");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["result"], json!({ "content": [{ "type": "text", "text": answered }], "isError": false }));
+
+        for closed in [
+            r#"{"outcome":"skipped","id":"q-1","next":"The user skipped these questions."}"#,
+            r#"{"outcome":"cancelled","id":"q-1","next":"The user stopped this turn."}"#,
+        ] {
+            let (replies, heard) = over_socket_timed(Some("tab-1"), None, (20, 1000, None), std::slice::from_ref(&call), vec![Ok("q-1".into()), open(), Ok(closed.into())]);
+            assert_eq!(heard.len(), 3);
+            assert_eq!(replies.last().unwrap()["result"]["content"][0]["text"], closed);
+        }
+
+        let (replies, heard) = over_socket_timed(Some("tab-1"), None, (20, 1000, Some(0)), std::slice::from_ref(&call), vec![Ok("q-1".into()), open()]);
+        assert_eq!(heard.len(), 2, "the wait ended after one look");
+        let pending: Value = serde_json::from_str(replies.last().unwrap()["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(pending, json!({ "outcome": "pending", "id": "q-1", "next": "The questions are still open. End your turn now; the answers arrive as a message that starts with [pinned] Answers to q-1." }));
+
+        // A headless child has no tab: it names its task, and the node finds the tab that shows it.
+        let (_, heard) = over_socket_timed(None, Some("task-4"), (20, 1000, None), std::slice::from_ref(&call), vec![Ok("q-2".into()), Ok(r#"{"outcome":"skipped","id":"q-2"}"#.into())]);
+        assert!(heard[0].starts_with(r#"{"kind":"project","tab":"","tool":{"name":"question_user","#) && heard[0].ends_with(r#""task":"task-4"}}"#), "{heard:?}");
+        assert_eq!(heard[1], r#"{"kind":"project","tab":"","tool":{"name":"question_status","id":"q-2","task":"task-4"}}"#, "the status names the task too, so the node knows whose call it is");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn question_user_refuses_a_shape_the_user_cannot_answer_well_before_asking() {
+        let refused = |questions: Value| {
+            let (replies, heard) = over_socket_timed(Some("tab-1"), None, (20, 1000, None), &[questions_call(json!({ "questions": questions }))], vec![]);
+            assert!(heard.is_empty(), "nothing reached pinned: {heard:?}");
+            assert_eq!(replies[0]["result"]["isError"], true);
+            replies[0]["result"]["content"][0]["text"].as_str().unwrap().to_owned()
+        };
+        let mut late = branch_question();
+        late["options"] = json!([{ "label": "release/0.18" }, { "label": "main", "recommended": true }]);
+        assert_eq!(refused(json!([late])), "question 1 recommends an option that is not first: put your recommended option first and mark it recommended");
+        let mut both = branch_question();
+        both["options"][1]["recommended"] = json!(true);
+        assert_eq!(refused(json!([both])), "question 1 recommends more than one option: mark only your recommendation, and put it first");
+        assert_eq!(refused(json!([branch_question(), branch_question(), branch_question(), branch_question(), branch_question()])), "ask 1 to 4 questions in one call, not 5");
+        let mut none = branch_question();
+        none["options"][0]["recommended"] = json!(false);
+        assert_eq!(refused(json!([none])), "question 1 has no recommended option: put your recommended option first and mark it recommended");
+        let mut one = branch_question();
+        one["options"] = json!([{ "label": "main", "recommended": true }]);
+        assert_eq!(refused(json!([one])), "question 1 has 1 options: give 2 to 4");
+        let mut nothing = branch_question();
+        nothing["changes"] = json!(" ");
+        assert_eq!(refused(json!([nothing])), "question 1 does not say what its answer changes: a question whose answer changes nothing is not asked");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn every_seat_is_offered_question_user() {
+        let seats = [(Some("global-orchestrator"), None), (Some("orchestrator"), None), (Some("taste-chat"), None), (None, None), (Some("worker"), None), (None, Some("task-1"))];
+        for (role, task) in seats {
+            assert!(offered(role, task).contains(&"question_user".to_owned()), "{role:?} {task:?}");
+        }
+        assert!(permissions().contains(&"mcp__pinned__question_user".to_owned()));
     }
 
     #[test]

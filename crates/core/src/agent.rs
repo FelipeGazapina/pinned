@@ -178,6 +178,25 @@ pub enum ProjectTool {
     /// A Convex tool's ask, which the hub answers for the tab's project. `offer` comes from
     /// `pinned mcp` itself, at tools/list.
     Convex { ask: crate::convex::Ask },
+    /// Everyone's: opens a questionnaire to the user on the session's tab and answers its id. A
+    /// headless child has no tab: it sends its `task`, and the questionnaire goes on the tab that
+    /// shows that task, or its parent's.
+    QuestionUser {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        questions: Vec<crate::questions::Question>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        projects: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
+    },
+    /// How the questionnaire `id` stands: `{"outcome":"open"}` while it waits, else the tool's
+    /// result. Only the caller that asked may read it; a headless child sends its `task`.
+    QuestionStatus {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
+    },
     /// Everyone's: one action of `surface::ACTIONS`, run by the hub as the user's account and audited.
     Act {
         action: String,
