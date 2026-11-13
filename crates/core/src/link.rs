@@ -1365,6 +1365,30 @@ mod tests {
         assert!(ended <= *first + BOX_REFUSED_FOR + BACKOFF_MAX + Duration::from_secs(1), "ended after {ended:?}, long after the first 4001 past the span from {first:?}");
     }
 
+    /// Through the real `run` and the production span: one 4001, then a hub that reads no sign in
+    /// for 16 minutes, then 4001 again. The silence neither ends the wait nor starts the span over,
+    /// so the wait ends on the first 4001 at or after 15 minutes from the first one: the one that
+    /// ends the silence.
+    #[tokio::test(start_paused = true)]
+    async fn a_4001_then_silence_then_4001_ends_the_wait_on_the_first_4001_past_the_span_through_run() {
+        let t0 = tokio::time::Instant::now();
+        let answers = Answers::default();
+        let noting = answers.clone();
+        let (hub, _) = a_hub_on_this_runtime(move |n| {
+            let silent = n > 0 && t0.elapsed() < 16 * MINUTE;
+            noted(&noting, t0, if silent { Answer::Silent } else { Answer::Close(UNAUTHORIZED) })
+        })
+        .await;
+        let ended = the_wait_against(hub, 40 * MINUTE, "silence").await.expect("4001, silence and 4001 again never ended the wait");
+        let answers = answers.lock().unwrap();
+        let (first, _) = answers[0];
+        let (last, code) = *answers.iter().rfind(|(_, code)| *code == UNAUTHORIZED).unwrap();
+        assert_eq!(code, UNAUTHORIZED);
+        assert!(answers.iter().filter(|(_, code)| *code == UNAUTHORIZED).count() == 2, "{answers:?}");
+        assert!(last >= first + BOX_REFUSED_FOR, "the 4001 that ended it came at {last:?}, before the span from {first:?}");
+        assert!(ended >= last && ended <= last + Duration::from_secs(1), "ended at {ended:?}, not on the first 4001 past the span at {last:?}");
+    }
+
     struct ArmsRestart {
         restarted: Arc<std::sync::atomic::AtomicBool>,
     }
