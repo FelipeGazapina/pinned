@@ -558,6 +558,7 @@ impl Tab {
             work: work.get(id).map(|cost| cost.clone().with_own(self.tally.stats().cost_usd).total()),
             question: self.question.clone(),
             ask_detail: self.ask_detail.clone().filter(|_| self.status == Some(AgentStatus::NeedsInput)),
+            questions: None,
         }
     }
 
@@ -722,6 +723,8 @@ pub struct Machine {
     sent: Mutex<global::Ledger>,
     /// The ledger's projects in flight, which a tab's view reads while a hand-off holds `sent`.
     turns: global::Turns,
+    /// The questionnaires agents put to the user here. Takes no other lock while held.
+    questions: Mutex<crate::questions::Questions>,
     events: Box<dyn Fn(Event) + Send + Sync>,
     /// Arcs, so `emit` can call them without holding the lock a listener might subscribe under.
     listeners: Mutex<Vec<(u64, Arc<Listener>)>>,
@@ -910,6 +913,7 @@ impl Machine {
             global_dir,
             turns: sent.turns(),
             sent: Mutex::new(sent),
+            questions: Mutex::new(crate::questions::Questions::load(dir.as_deref())),
             events: Box::new(events),
             listeners: Mutex::new(vec![]),
             next_listener: AtomicU64::new(1),
@@ -1068,6 +1072,7 @@ impl Machine {
                 Ok(Value::Null)
             }
             Call::StopTurn { tab } => json(self.stop_turn(&tab)?),
+            Call::AnswerQuestions { tab, id, reply } => json(self.answer_questions(&tab, &id, reply)?),
             Call::SetFolder { tab, path } => json(self.set_folder(&tab, &path)?),
             Call::ListProjects => json(self.list_projects()),
             Call::SyncStopped => json(self.sync_stopped()),
@@ -1601,7 +1606,8 @@ impl Machine {
         let turns = self.turns.lock().unwrap().clone();
         let queued = self.delegates.queued();
         let work = self.delegates.work_costs();
-        let mut views: Vec<TabView> = self.tabs.lock().unwrap().iter().map(|(id, t)| t.view(id, &turns, &queued, &work)).collect();
+        let views: Vec<TabView> = self.tabs.lock().unwrap().iter().map(|(id, t)| t.view(id, &turns, &queued, &work)).collect();
+        let mut views: Vec<TabView> = views.into_iter().map(|v| self.shown(v)).collect();
         views.sort_by_key(|v| v.opened);
         views
     }
@@ -1610,7 +1616,23 @@ impl Machine {
         let turns = self.turns.lock().unwrap().clone();
         let queued = self.delegates.queued();
         let work = self.delegates.work_costs();
-        self.tab(tab, |t| t.view(tab, &turns, &queued, &work))
+        self.tab(tab, |t| t.view(tab, &turns, &queued, &work)).map(|v| self.shown(v))
+    }
+
+    /// `view` with the questionnaire open on its tab, which makes it a question mid-turn.
+    fn shown(&self, view: TabView) -> TabView {
+        match self.questions.lock().unwrap().open_on(&view.id) {
+            Some(open) => crate::questions::shown(view, open),
+            None => view,
+        }
+    }
+
+    /// Closes the questionnaire `id` open on `tab` with the user's reply.
+    fn answer_questions(&self, tab: &str, id: &str, reply: crate::questions::QuestionsReply) -> Result<(), String> {
+        self.tab(tab, |_| ())?;
+        self.questions.lock().unwrap().answer(tab, id, reply)?;
+        self.emit_tabs();
+        Ok(())
     }
 
     /// Adds a tab on the project at `path`, or the default folder, and returns its id.
@@ -2808,6 +2830,7 @@ impl Machine {
             let tabs = self.tabs.lock().unwrap();
             tabs.iter().map(|(id, t)| (t.view(id, &turns, &queued, &HashMap::new()), t.idle_for_archive())).collect()
         };
+        let candidates: Vec<(TabView, bool)> = candidates.into_iter().map(|(view, idle)| (self.shown(view), idle)).collect();
         let looked = Instant::now();
         {
             let mut kept = self.auto_archive_kept.lock().unwrap();
@@ -3144,6 +3167,7 @@ impl Machine {
                 machine: confirmation.machine,
                 machine_name: confirmation.machine_name,
                 tab: confirmation.tab,
+                questions: None,
             })
             .collect()
     }
@@ -3729,7 +3753,8 @@ impl Machine {
     /// The workers `from` sees, one per line, each indented under the worker that started it:
     /// the orchestrator sees every worker of its project, any other thread the ones it started.
     fn workers(&self, from: &str, project: &Path) -> String {
-        let mut workers: Vec<TabView> = self.tabs.lock().unwrap().iter().filter(|(_, t)| role_of(&t.env).is_some_and(|(r, p)| r == Role::Worker && p == project)).map(|(id, t)| t.view(id, &HashSet::new(), &HashMap::new(), &HashMap::new())).collect();
+        let workers: Vec<TabView> = self.tabs.lock().unwrap().iter().filter(|(_, t)| role_of(&t.env).is_some_and(|(r, p)| r == Role::Worker && p == project)).map(|(id, t)| t.view(id, &HashSet::new(), &HashMap::new(), &HashMap::new())).collect();
+        let mut workers: Vec<TabView> = workers.into_iter().map(|w| self.shown(w)).collect();
         workers.sort_by_key(|w| w.opened);
         let everyone = self.tab(from, |t| role_of(&t.env)).ok().flatten().is_some_and(|(role, _)| role == Role::Orchestrator);
         let is_worker = |id: &str| workers.iter().any(|w| w.id == id);
@@ -4787,7 +4812,7 @@ impl Machine {
 
     /// What the thread `tab` waits on the user for right now, or None while it waits on nothing.
     fn thread_ask(&self, tab: &str) -> Option<crate::delegate::RemoteAsk> {
-        let view = self.tab(tab, |t| t.view(tab, &HashSet::new(), &HashMap::new(), &HashMap::new())).ok()?;
+        let view = self.shown(self.tab(tab, |t| t.view(tab, &HashSet::new(), &HashMap::new(), &HashMap::new())).ok()?);
         if global::waiting_kind(&view) != Some(global::WaitingKind::NeedsInput) {
             return None;
         }
@@ -5564,7 +5589,17 @@ impl Machine {
     /// Pauses the time limit of each task whose thread here waits on the user mid-turn, and
     /// resumes the others'. A task on another machine pauses on that machine's word.
     fn note_user_waits(&self, now: Instant) {
-        let waiting: Vec<String> = self.tabs.lock().unwrap().values().filter(|t| t.status == Some(AgentStatus::NeedsInput) && t.interrupted).filter_map(|t| t.task.clone()).collect();
+        let (mut waiting, tasks): (Vec<String>, Vec<(String, String)>) = {
+            let tabs = self.tabs.lock().unwrap();
+            let asking = tabs.values().filter(|t| t.status == Some(AgentStatus::NeedsInput) && t.interrupted).filter_map(|t| t.task.clone()).collect();
+            (asking, tabs.iter().filter_map(|(id, t)| Some((id.clone(), t.task.clone()?))).collect())
+        };
+        // Open questions wait on the user however the session's hooks report it.
+        {
+            let questions = self.questions.lock().unwrap();
+            waiting.extend(tasks.into_iter().filter(|(tab, _)| questions.open_on(tab).is_some()).map(|(_, task)| task));
+            waiting.extend(questions.waiting_tasks().map(str::to_owned));
+        }
         self.delegates.note_user_waits(&waiting, now);
     }
 

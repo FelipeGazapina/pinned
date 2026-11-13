@@ -163,6 +163,11 @@ pub struct TabView {
     /// it waits on, read from its transcript, such as the command a permission prompt shows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ask_detail: Option<String>,
+    /// The questionnaire the session waits on the user to answer, which `Call::AnswerQuestions`
+    /// answers. While it is open the tab reads as a question mid-turn, so an app that predates it
+    /// still shows the tab waiting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub questions: Option<crate::questions::Questionnaire>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
@@ -228,6 +233,9 @@ pub enum Call {
     /// `null`, once the tab's turn is stopped as the app's Stop button stops it: claude's background
     /// agents and workflows first, then the turn, then the turn their "stopped" notices wake.
     StopTurn { tab: TabId },
+    /// `null`, once `reply` closes the questionnaire `id` open on the tab. Refused when it is
+    /// closed already, or the reply does not fit its questions.
+    AnswerQuestions { tab: TabId, id: String, reply: crate::questions::QuestionsReply },
     /// The tab's new folder, canonical. Stands in for the folder dialog on a remote machine;
     /// the client then sends `StartClaude`.
     SetFolder { tab: TabId, path: String },
@@ -1700,6 +1708,7 @@ mod tests {
             work: None,
             question: None,
             ask_detail: None,
+            questions: None,
         }
     }
 

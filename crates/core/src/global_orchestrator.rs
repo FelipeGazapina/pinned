@@ -438,6 +438,10 @@ pub struct Waiting {
     /// Unix seconds of the tab's last status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub since: Option<u64>,
+    /// The id of the questionnaire a `question` waits on, which `TabView::questions` holds. Its
+    /// `ask` stays `question`, which every node reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub questions: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
@@ -612,6 +616,7 @@ pub fn overview_at(machines: &[MachineSnapshot], now: u64) -> Overview {
                     title: session.title.clone(),
                     message: session.message.clone(),
                     since: tab.updated,
+                    questions: tab.questions.as_ref().filter(|_| kind == WaitingKind::NeedsInput).map(|q| q.id.clone()),
                 });
             }
             sessions.push(session);

@@ -133,6 +133,7 @@ pub const ACTIONS: &[Action] = &[
     n("resize_pty", Excluded, TERMINAL),
     n("wake", Excluded, TERMINAL),
     n("close_tab", Excluded, "closing a thread loses its place in the sidebar: agents archive it with archive_session, which the user can undo, or ask to delete it with delete_session"),
+    n("answer_questions", Excluded, "only the user answers an agent's questions"),
     n("stop_turn", Write, "Stops the turn a session is running, as the app's stop button does. The session stays open for the next prompt.").wired(),
     n("set_folder", Write, "Moves a tab that has not started to another folder.").wired(),
     n("list_projects", Read, "The machine's projects, most recent first: folder, name, repo and the agent account its sessions run under.").wired(),
