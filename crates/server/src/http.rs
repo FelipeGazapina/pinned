@@ -34,6 +34,7 @@ const ADDRESS_ATTEMPTS: usize = 10;
 /// address lock the owner out.
 const EMAIL_ATTEMPTS: usize = 100;
 const ADDRESS_SIGNUPS: usize = 5;
+const ATTEMPT_KEYS: usize = 100_000;
 /// The one answer to a sign up without a good code, so it tells nobody which codes or accounts exist.
 /// The one answer to a sign up at a hub that holds as many accounts as it was told to.
 const NOT_TAKING: &str = "This hub is not taking new accounts.";
@@ -88,7 +89,7 @@ pub struct Server {
     /// Held from counting accounts to making one, so a hub with a cap can't pass it.
     signups: tokio::sync::Mutex<()>,
     downloads: PathBuf,
-    attempts: Mutex<HashMap<String, Vec<Instant>>>,
+    attempts: Mutex<Limiter>,
     hashing: tokio::sync::Semaphore,
     learning: Option<db::Learning>,
 }
@@ -128,7 +129,7 @@ fn route(spec: &str) -> &str {
 }
 
 pub fn router(hub: Arc<Hub>, ui: PathBuf, downloads: PathBuf, learning: Option<db::Learning>, access: Access) -> Router {
-    let server = Arc::new(Server { hub, access, signups: tokio::sync::Mutex::new(()), downloads, attempts: Mutex::default(), hashing: tokio::sync::Semaphore::new(CONCURRENT_HASHES), learning });
+    let server = Arc::new(Server { hub, access, signups: tokio::sync::Mutex::new(()), downloads, attempts: Mutex::new(Limiter::new(ATTEMPT_KEYS)), hashing: tokio::sync::Semaphore::new(CONCURRENT_HASHES), learning });
     Router::new()
         .route(route("POST /api/signup"), post(signup))
         // The app's sign-in form reads it from whichever hub the user types, so any origin may.
@@ -319,25 +320,43 @@ impl Server {
     /// Counts an attempt against each key and its limit, unless one is spent. The attempt counts
     /// before the password is checked, so a burst of parallel requests can't all slip under the limit.
     pub(crate) fn attempt(&self, keys: &[(String, usize)]) -> bool {
-        let mut attempts = self.attempts.lock().unwrap();
-        attempts.retain(|_, at| {
-            at.retain(|at| at.elapsed() < ATTEMPT_WINDOW);
-            !at.is_empty()
-        });
-        if keys.iter().any(|(key, limit)| attempts.get(key).is_some_and(|at| at.len() >= *limit)) {
-            return false;
-        }
-        for (key, _) in keys {
-            attempts.entry(key.clone()).or_default().push(Instant::now());
-        }
-        true
+        self.attempts.lock().unwrap().attempt(keys, Instant::now())
     }
 
     /// Takes back the attempts of a sign in that succeeded.
     pub(crate) fn succeeded(&self, keys: &[(String, usize)]) {
-        let mut attempts = self.attempts.lock().unwrap();
+        self.attempts.lock().unwrap().succeeded(keys);
+    }
+}
+
+/// Attempts within `ATTEMPT_WINDOW`, per key.
+struct Limiter {
+    keys: HashMap<String, Vec<Instant>>,
+    cap: usize,
+}
+
+impl Limiter {
+    fn new(cap: usize) -> Limiter {
+        Limiter { keys: HashMap::new(), cap }
+    }
+
+    fn attempt(&mut self, keys: &[(String, usize)], now: Instant) -> bool {
+        self.keys.retain(|_, at| {
+            at.retain(|at| now.duration_since(*at) < ATTEMPT_WINDOW);
+            !at.is_empty()
+        });
+        if keys.iter().any(|(key, limit)| self.keys.get(key).is_some_and(|at| at.len() >= *limit)) {
+            return false;
+        }
         for (key, _) in keys {
-            if let Some(at) = attempts.get_mut(key) {
+            self.keys.entry(key.clone()).or_default().push(now);
+        }
+        true
+    }
+
+    fn succeeded(&mut self, keys: &[(String, usize)]) {
+        for (key, _) in keys {
+            if let Some(at) = self.keys.get_mut(key) {
                 at.pop();
             }
         }
@@ -899,7 +918,7 @@ async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: 
 
 #[cfg(test)]
 mod tests {
-    use super::{client_address, TrustedProxy, ROUTES};
+    use super::{client_address, Limiter, TrustedProxy, ROUTES};
     use axum::http::HeaderMap;
     use std::net::SocketAddr;
 
@@ -929,6 +948,26 @@ mod tests {
         assert_eq!(from("100.64.0.7:5000", &forwarded), "100.64.0.7", "a peer off this host is the address, whatever it forwards");
         assert_eq!(from("10.1.2.3:5000", &forwarded), "10.1.2.3");
         assert_eq!(from("127.0.0.1:5000", &[]), "127.0.0.1");
+    }
+
+    #[test]
+    fn rotating_keys_do_not_grow_the_limiter_past_its_cap_nor_evict_a_live_one() {
+        let mut limiter = Limiter::new(4);
+        let now = std::time::Instant::now();
+        let guess = |address: u32| [("email:owner@example.invalid".to_owned(), 3), (format!("address:203.0.113.{address}"), 10)];
+        assert!(limiter.attempt(&guess(1), now));
+        assert!(limiter.attempt(&guess(2), now));
+        for address in 3..50 {
+            limiter.attempt(&[(format!("address:198.51.100.{address}"), 10)], now);
+        }
+        assert!(limiter.keys.len() <= 4, "{} keys", limiter.keys.len());
+        assert_eq!(limiter.keys["email:owner@example.invalid"].len(), 2, "a full limiter keeps the account's count");
+        assert!(!limiter.attempt(&[("address:192.0.2.1".to_owned(), 10)], now), "a full limiter refuses a new key");
+        assert!(limiter.attempt(&guess(1), now), "and still takes a request whose keys it holds");
+        assert!(!limiter.attempt(&guess(2), now), "whose limit still holds");
+        let later = now + super::ATTEMPT_WINDOW;
+        assert!(limiter.attempt(&[("address:192.0.2.1".to_owned(), 10)], later), "a window later the old keys are gone");
+        assert!(limiter.keys.len() <= 4);
     }
 
     #[test]

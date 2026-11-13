@@ -2035,6 +2035,64 @@ fn with_no_trusted_proxy_a_loopback_proxys_last_forwarded_hop_still_counts() {
     assert_eq!(from("7.7.7.7, 10.0.0.2", 6).0, 200, "another last hop is another address");
 }
 
+/// A sign in to user1's account from `address`, as Railway's edge forwards it: the status.
+fn login_from(url: &str, address: &str, email: &str, password: &str) -> u16 {
+    post_with(url, "/api/login", &[("x-real-ip", address)], json!({ "email": email, "password": password })).0
+}
+
+#[test]
+fn rotating_the_edge_header_does_not_raise_the_guesses_against_one_account_past_its_bound() {
+    let hub = TestHub::start_behind_proxy("rotateguess", Signup::Open, behind(pinned_server::http::TrustedProxy::Railway, None));
+    let url = hub.url.clone();
+    assert_eq!(post_with(&url, "/api/signup", &[("x-real-ip", "198.51.100.7")], new_account(1)).0, 200);
+    // Each guess from its own address, and the email spelt a little differently each time.
+    let spellings = ["user1@example.invalid", "USER1@example.invalid", " user1@Example.Invalid "];
+    for n in 0..30 {
+        assert_eq!(login_from(&url, &format!("203.0.113.{n}"), spellings[n % 3], "wrong horse"), 401, "guess {n}");
+    }
+    assert_eq!(login_from(&url, "203.0.113.200", "user1@example.invalid", "wrong horse"), 429, "the 31st guess, from a new address, is refused");
+    assert_eq!(login_from(&url, "203.0.113.201", "User1@Example.invalid", "correct horse"), 429, "even with the password: the bound is the account's");
+    assert_eq!(login_from(&url, "203.0.113.202", "user2@example.invalid", "wrong horse"), 401, "another email has its own count");
+}
+
+#[test]
+fn a_stranger_rotating_addresses_does_not_lock_the_owner_out_of_an_address_they_signed_in_from() {
+    let hub = TestHub::start_behind_proxy("knownaddr", Signup::Open, behind(pinned_server::http::TrustedProxy::Railway, None));
+    let url = hub.url.clone();
+    assert_eq!(post_with(&url, "/api/signup", &[("x-real-ip", "198.51.100.7")], new_account(1)).0, 200);
+    assert_eq!(login_from(&url, "198.51.100.7", "user1@example.invalid", "correct horse"), 200, "the owner signs in from home");
+    let mut guesses = 0;
+    while login_from(&url, &format!("203.0.113.{guesses}"), "user1@example.invalid", "wrong horse") == 401 {
+        guesses += 1;
+        assert!(guesses <= 120, "the account's bound never held");
+    }
+    assert_eq!(guesses, 30, "the stranger's guesses stop at the account's bound");
+    assert_eq!(login_from(&url, "198.51.100.8", "user1@example.invalid", "correct horse"), 429, "a new address waits out the window");
+    assert_eq!(login_from(&url, "198.51.100.7", "user1@example.invalid", "correct horse"), 200, "the owner's own address still gets in");
+}
+
+#[test]
+fn an_unknown_email_costs_the_same_password_hash_as_a_wrong_password() {
+    let hub = TestHub::start_behind_proxy("hashtime", Signup::Open, behind(pinned_server::http::TrustedProxy::Railway, None));
+    let url = hub.url.clone();
+    assert_eq!(post_with(&url, "/api/signup", &[("x-real-ip", "198.51.100.7")], new_account(1)).0, 200);
+    let fastest = |email: &str, from: usize| {
+        (0..3)
+            .map(|n| {
+                let start = Instant::now();
+                assert_eq!(login_from(&url, &format!("203.0.113.{}", from + n), email, "wrong horse"), 401);
+                start.elapsed()
+            })
+            .min()
+            .unwrap()
+    };
+    // Once first, so a one-time cost doesn't land on either side.
+    fastest("nobody@example.invalid", 0);
+    let known = fastest("user1@example.invalid", 10);
+    let unknown = fastest("nobody@example.invalid", 20);
+    assert!(unknown * 2 > known, "an unknown email answers in {unknown:?}, a known one with a wrong password in {known:?}");
+}
+
 fn signed_in_client(url: &str, token: &str) -> Client {
     let mut client = Client::connect(url, token);
     client.wait("hello", |f| f["type"] == "hello");
