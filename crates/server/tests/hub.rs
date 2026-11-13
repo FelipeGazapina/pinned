@@ -984,11 +984,12 @@ fn the_accounts_taste_lives_on_the_hub_and_a_machines_old_style_seeds_an_empty_a
     let aggressive = json!({
         "strategy": "strongest_first", "ladder": [opus], "hard_model": opus, "parallel": 4, "autonomy": "report_at_end",
         "review_diffs": false, "second_opinion": true, "skills": [], "context": [],
-        "tier": "high", "default_effort": null, "max_effort": "max", "budget_cents": 0, "time_limit_min": 480, "box_budget_cents": 0,
+        "tier": "high", "default_effort": null, "max_effort": "max", "budget_cents": 0, "time_limit_min": 480, "box_budget_cents": 0, "box_size": null,
     });
     // 0.18.2 sends no tastes itself; the hub's side stays for a later app, and a socket stands in.
     let mut seed = MachineSock::connect(&url, &creds.machine_token, "0.18.2");
     assert_eq!(ask(&mut seed, 1, json!({ "cmd": "import_tastes", "tastes": { "captains": aggressive } })), Ok(json!(true)));
+    assert_eq!(ask(&mut seed, 2, json!({ "cmd": "import_tastes", "tastes": {} })), Ok(json!(false)), "a later machine can't replace the account's taste");
     let node = Node::start(&dir, creds);
     assert_eq!(client.hub(get()).unwrap()["captains"], aggressive, "the style a machine offered, once, to an empty account");
     let site = json!({ "kind": "project", "repo": "github.com/acme/site" });
@@ -1008,7 +1009,7 @@ fn the_accounts_taste_lives_on_the_hub_and_a_machines_old_style_seeds_an_empty_a
 
     let link = node.link.as_ref().unwrap();
     assert_eq!(link.call_hub(HubCall::GetTastes), Ok(stored.clone()), "a machine reads the account's taste");
-    assert_eq!(link.call_hub(HubCall::ImportTastes { tastes: Tastes::default() }), Ok(json!(false)), "a later machine can't replace the account's taste");
+    assert_eq!(link.call_hub(HubCall::ImportTastes { tastes: Tastes::default() }), Err(UPDATE_TO_IMPORT.into()), "this test's node reports 0.0.0-test, an app too old to import");
     let change = HubCall::SetTaste { scope: TasteScope::Captains, patch: TastePatch { parallel: Some(2), ..TastePatch::default() } };
     assert_eq!(link.call_hub(change), Err("only a machine with a Chat to adjust thread open may change the way of working".into()));
 
