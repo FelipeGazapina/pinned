@@ -12,8 +12,8 @@ use pinned_core::account::{DictationEngine, DictationFeedback, DictationRating};
 use pinned_core::agent::Subject;
 use pinned_core::delegate::TaskRecord;
 use pinned_core::ideas::{Idea, IdeaStatus};
-use pinned_core::schedule::Actor;
 use pinned_core::marks::{self, MarkChange, SessionMarks};
+use pinned_core::schedule::{Actor, Task, TaskRun};
 use pinned_core::sync;
 use pinned_core::taste::Tastes;
 use pinned_core::upstash::BoxId;
@@ -100,6 +100,7 @@ create table if not exists session_marks (account uuid not null references accou
 create table if not exists agent_actions (id uuid primary key, account uuid not null references accounts on delete cascade,
   machine uuid not null, tab text not null, role text not null, action text not null, args text not null,
   outcome text not null, detail text not null default '', request_id text, at timestamptz not null default now());
+alter table agent_actions add column if not exists task text;
 create index if not exists agent_actions_at on agent_actions (account, at desc);
 create index if not exists agent_actions_request on agent_actions (account, machine, tab, action, request_id) where request_id is not null;
 -- A confirm act that waits on the user's approval in the app, then what they decided and it came to.
@@ -109,6 +110,22 @@ create table if not exists agent_confirmations (id uuid primary key, account uui
   action text not null, args jsonb not null, request_id text, created_at timestamptz not null default now(),
   decided_at timestamptz, approved boolean, outcome text, notified boolean not null default false,
   target text, result jsonb, unique (account, machine, tab, action, request_id));
+-- Why this act waits, when the hub says more than the action's own text: a schedule act's reason.
+alter table agent_confirmations add column if not exists about text;
+-- A scheduled task per row, as the `schedule::Task` it is (without its hub-computed last run), and
+-- the columns the scheduler reads. `next_at` is unix seconds, computed on every save.
+create table if not exists tasks (id uuid primary key, account uuid not null references accounts on delete cascade,
+  task jsonb not null, enabled boolean not null, next_at bigint, by_agent boolean not null default false,
+  created_at timestamptz not null default now());
+create index if not exists tasks_account on tasks (account);
+create index if not exists tasks_due on tasks (next_at) where enabled and next_at is not null;
+-- One occurrence of a task per row, claimed once: `unique (task, due_at)`. `run` is the `schedule::TaskRun`.
+create table if not exists task_runs (task uuid not null references tasks on delete cascade,
+  account uuid not null references accounts on delete cascade, due_at bigint not null, state text not null,
+  run jsonb not null, unique (task, due_at));
+create index if not exists task_runs_account on task_runs (account, task, due_at desc);
+-- Whether tag and main protection exist for the account's repos: set only by the user's app, off until then.
+alter table accounts add column if not exists release_protection boolean not null default false;
 -- A box an agent opened through act, until the box ends and is recorded as that session's task.
 -- `started` is unix milliseconds.
 create table if not exists agent_boxes (box text primary key, account uuid not null references accounts on delete cascade,
@@ -269,6 +286,8 @@ pub struct Audit<'a> {
     pub outcome: AuditOutcome,
     pub detail: &'a str,
     pub request_id: Option<&'a str>,
+    /// The scheduled task the act is about.
+    pub task: Option<&'a str>,
 }
 
 /// A login token's account, and whether an app locked it (`Db::login`).
@@ -287,7 +306,7 @@ pub struct Held {
 }
 
 const CONFIRMATION_COLUMNS: &str = "c.id, extract(epoch from c.created_at)::bigint, c.machine, coalesce(m.name, ''), c.tab, c.title, c.role, c.action, c.args,
-  c.request_id, c.approved, extract(epoch from c.decided_at)::bigint, c.outcome, c.session, c.target, c.result";
+  c.request_id, c.approved, extract(epoch from c.decided_at)::bigint, c.outcome, c.session, c.target, c.result, c.about";
 
 fn held(r: &tokio_postgres::Row) -> Held {
     let role: String = r.get(6);
@@ -301,7 +320,7 @@ fn held(r: &tokio_postgres::Row) -> Held {
         tab: r.get(4),
         title: r.get(5),
         role: serde_json::from_value(Value::String(role)).unwrap_or(ActorRole::Session),
-        about: pinned_core::surface::find(&action).map_or_else(String::new, |a| a.about.to_owned()),
+        about: r.get::<_, Option<String>>(16).filter(|about| !about.is_empty()).unwrap_or_else(|| pinned_core::surface::find(&action).map_or_else(String::new, |a| a.about.to_owned())),
         action,
         args: r.get(8),
         target: r.get(14),
@@ -412,6 +431,15 @@ fn box_row(r: &tokio_postgres::Row) -> Result<BoxRow, Remains> {
 
 fn readable(row: Result<BoxRow, Remains>) -> Result<BoxRow, String> {
     row.map_err(|r| format!("box {} {}; the next check deletes it", r.id, r.why))
+}
+
+/// A fixed message that reaches the agent's answer, the audit detail and the hub log: a serde
+/// message can quote a stored value, so it is not kept, and only the ids go to the hub's own log.
+fn stored_task(account: Uuid, id: Uuid, value: Value) -> Result<Task, String> {
+    serde_json::from_value(value).map_err(|_| {
+        eprintln!("pinned-server: account {account}'s task {id} does not read as a task");
+        format!("task {id} could not be read")
+    })
 }
 
 fn stored_marks(account: Uuid, value: Value) -> Result<SessionMarks, String> {
@@ -1113,8 +1141,8 @@ impl Db {
         self.client()
             .await?
             .execute(
-                "insert into agent_actions (id, account, machine, tab, role, action, args, outcome, detail, request_id) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
-                &[&Uuid::new_v4(), &row.account, &row.machine, &row.tab, &row.role.name(), &row.action, &row.args, &row.outcome.name(), &row.detail, &row.request_id],
+                "insert into agent_actions (id, account, machine, tab, role, action, args, outcome, detail, request_id, task) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+                &[&Uuid::new_v4(), &row.account, &row.machine, &row.tab, &row.role.name(), &row.action, &row.args, &row.outcome.name(), &row.detail, &row.request_id, &row.task],
             )
             .await
             .map_err(err)
@@ -1128,7 +1156,7 @@ impl Db {
             .client()
             .await?
             .query(
-                "select a.id, extract(epoch from a.at)::bigint, a.machine, coalesce(m.name, ''), a.tab, a.role, a.action, a.args, a.outcome, a.detail, a.request_id
+                "select a.id, extract(epoch from a.at)::bigint, a.machine, coalesce(m.name, ''), a.tab, a.role, a.action, a.args, a.outcome, a.detail, a.request_id, a.task
                  from agent_actions a left join machines m on m.id = a.machine and m.account = a.account
                  where a.account = $1 and ($2::bigint is null or a.at < to_timestamp($2::bigint + 1)) order by a.at desc limit $3",
                 &[&account, &before, &limit],
@@ -1149,8 +1177,131 @@ impl Db {
                 outcome: AuditOutcome::parse(r.get(8)).unwrap_or(AuditOutcome::Failed),
                 detail: r.get(9),
                 request_id: r.get(10),
+                task: r.get(11),
             })
             .collect())
+    }
+
+    // ---- Scheduled tasks ----
+
+    /// The account's tasks, soonest first (paused and finished ones last), each with its last run.
+    /// A task or run that does not read is skipped and logged by its id, never its text, so one bad
+    /// row leaves the others readable.
+    pub async fn tasks(&self, account: Uuid) -> Result<Vec<Task>, String> {
+        let client = self.client().await?;
+        let rows = client.query("select id, task, next_at from tasks where account = $1 order by next_at nulls last, created_at", &[&account]).await.map_err(err)?;
+        let runs = client
+            .query("select distinct on (task) task, run from task_runs where account = $1 order by task, due_at desc", &[&account])
+            .await
+            .map_err(err)?;
+        let mut last: BTreeMap<String, TaskRun> = BTreeMap::new();
+        for row in runs {
+            match serde_json::from_value::<TaskRun>(row.get(1)) {
+                Ok(run) => drop(last.insert(run.task.clone(), run)),
+                Err(_) => eprintln!("pinned-server: account {account}'s task {} has an unreadable last run; it is left out", row.get::<_, Uuid>(0)),
+            }
+        }
+        Ok(rows
+            .iter()
+            .filter_map(|r| match serde_json::from_value::<Task>(r.get(1)) {
+                Ok(task) => Some(Task { next_at: r.get(2), last_run: last.remove(&task.id), ..task }),
+                Err(_) => {
+                    eprintln!("pinned-server: account {account}'s task {} does not read as a task; it is left out", r.get::<_, Uuid>(0));
+                    None
+                }
+            })
+            .collect())
+    }
+
+    pub async fn task(&self, account: Uuid, id: Uuid) -> Result<Option<Task>, String> {
+        let row = self.client().await?.query_opt("select task, next_at from tasks where account = $1 and id = $2", &[&account, &id]).await.map_err(err)?;
+        row.map(|r| stored_task(account, id, r.get(0)).map(|task| Task { next_at: r.get(1), ..task })).transpose()
+    }
+
+    /// Stores `task` (id and `next_at` already set) as the account's. False when the id is another account's.
+    pub async fn save_task(&self, account: Uuid, task: &Task) -> Result<bool, String> {
+        let id = Uuid::parse_str(&task.id).map_err(|_| format!("{} is not a task id", task.id))?;
+        let by_agent = matches!(task.created_by, Actor::Agent { .. });
+        let stored = Task { next_at: None, last_run: None, ..task.clone() };
+        let value = serde_json::to_value(&stored).map_err(|e| e.to_string())?;
+        let changed = self
+            .client()
+            .await?
+            .execute(
+                "insert into tasks (id, account, task, enabled, next_at, by_agent) values ($1, $2, $3, $4, $5, $6)
+                 on conflict (id) do update set task = excluded.task, enabled = excluded.enabled, next_at = excluded.next_at where tasks.account = excluded.account",
+                &[&id, &account, &value, &task.enabled, &task.next_at, &by_agent],
+            )
+            .await
+            .map_err(err)?;
+        Ok(changed > 0)
+    }
+
+    pub async fn delete_task(&self, account: Uuid, id: Uuid) -> Result<bool, String> {
+        self.client().await?.execute("delete from tasks where account = $1 and id = $2", &[&account, &id]).await.map(|n| n > 0).map_err(err)
+    }
+
+    /// Stores `task`, which an agent creates, unless the tasks agents created (`by_agent`) of the
+    /// account already number `cap`: then answers their titles and stores nothing. The count and
+    /// the insert run in one transaction that locks the account's row, so two saves at once never
+    /// both pass.
+    pub async fn add_agent_task(&self, account: Uuid, task: &Task, cap: usize) -> Result<Result<(), Vec<String>>, String> {
+        let id = Uuid::parse_str(&task.id).map_err(|_| format!("{} is not a task id", task.id))?;
+        let stored = Task { next_at: None, last_run: None, ..task.clone() };
+        let value = serde_json::to_value(&stored).map_err(|e| e.to_string())?;
+        let mut held = self.transactions.lock().await;
+        if held.as_ref().map_or(true, Client::is_closed) {
+            *held = Some(open(&self.connection.url).await?);
+        }
+        let tx = held.as_mut().expect("opened above").transaction().await.map_err(err)?;
+        tx.execute("select 1 from accounts where id = $1 for update", &[&account]).await.map_err(err)?;
+        let agents = tx.query("select coalesce(task->>'title', '') from tasks where account = $1 and by_agent order by created_at", &[&account]).await.map_err(err)?;
+        if agents.len() >= cap {
+            return Ok(Err(agents.iter().map(|r| r.get(0)).collect()));
+        }
+        tx.execute("insert into tasks (id, account, task, enabled, next_at, by_agent) values ($1, $2, $3, $4, $5, true)", &[&id, &account, &value, &task.enabled, &task.next_at])
+            .await
+            .map_err(err)?;
+        tx.commit().await.map_err(err)?;
+        Ok(Ok(()))
+    }
+
+    /// The task's runs, newest first.
+    pub async fn task_runs(&self, account: Uuid, id: Uuid, limit: i64) -> Result<Vec<TaskRun>, String> {
+        let rows = self.client().await?.query("select run, due_at from task_runs where account = $1 and task = $2 order by due_at desc limit $3", &[&account, &id, &limit]).await.map_err(err)?;
+        Ok(rows
+            .iter()
+            .filter_map(|r| {
+                let run = serde_json::from_value(r.get(0)).ok();
+                if run.is_none() {
+                    eprintln!("pinned-server: account {account}'s task {id} has an unreadable run due at {}; it is left out", r.get::<_, i64>(1));
+                }
+                run
+            })
+            .collect())
+    }
+
+    pub async fn release_protection(&self, account: Uuid) -> Result<bool, String> {
+        let row = self.client().await?.query_opt("select release_protection from accounts where id = $1", &[&account]).await.map_err(err)?;
+        Ok(row.is_some_and(|r| r.get(0)))
+    }
+
+    /// Sets the switch and writes its audit row `row` in one transaction, so a change never happens
+    /// without its row, nor a row without its change.
+    pub async fn set_release_protection(&self, account: Uuid, on: bool, row: &Audit<'_>) -> Result<(), String> {
+        let mut held = self.transactions.lock().await;
+        if held.as_ref().map_or(true, Client::is_closed) {
+            *held = Some(open(&self.connection.url).await?);
+        }
+        let tx = held.as_mut().expect("opened above").transaction().await.map_err(err)?;
+        tx.execute("update accounts set release_protection = $2 where id = $1", &[&account, &on]).await.map_err(err)?;
+        tx.execute(
+            "insert into agent_actions (id, account, machine, tab, role, action, args, outcome, detail, request_id, task) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+            &[&Uuid::new_v4(), &row.account, &row.machine, &row.tab, &row.role.name(), &row.action, &row.args, &row.outcome.name(), &row.detail, &row.request_id, &row.task],
+        )
+        .await
+        .map_err(err)?;
+        tx.commit().await.map_err(err)
     }
 
     /// What the first `action` with `request_id` from the session in `tab` on `machine` came to, and when.
@@ -1175,9 +1326,9 @@ impl Db {
         let request_id = asked.request_id.as_deref();
         let inserted = client
             .query_opt(
-                "insert into agent_confirmations (id, account, machine, tab, session, role, title, action, args, request_id, target) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                "insert into agent_confirmations (id, account, machine, tab, session, role, title, action, args, request_id, target, about) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                  on conflict (account, machine, tab, action, request_id) do nothing returning id",
-                &[&id, &account, &machine, &asked.tab, &session, &asked.role.name(), &asked.title, &asked.action, &asked.args, &request_id, &asked.target],
+                &[&id, &account, &machine, &asked.tab, &session, &asked.role.name(), &asked.title, &asked.action, &asked.args, &request_id, &asked.target, &Some(asked.about.as_str()).filter(|about| !about.is_empty())],
             )
             .await
             .map_err(err)?;
