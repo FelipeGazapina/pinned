@@ -2596,6 +2596,11 @@ fn the_reaper_sweeps_and_ends_a_box_with_only_the_upstash_key_stored() {
     assert_eq!((hub.boxes.live(), ana.rows(&hub)), (vec!["box_1".to_owned()], 1), "the box stays while tab_gone is long");
     hub.policy.tab_gone = Duration::from_millis(400);
     hub.restart();
+    assert_eq!(
+        hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-3")))),
+        Err(NOT_CONNECTED.into()),
+        "the Claude token is still gone after the last restart, so this open places no box"
+    );
     wait_for("the box to be deleted", || hub.boxes.live().is_empty());
     wait_for("the row to go", || ana.rows(&hub) == 0);
 }
