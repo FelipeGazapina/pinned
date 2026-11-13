@@ -830,6 +830,9 @@ impl Call {
                 | Call::RemoteTask { .. }
                 | Call::RemoteEnded { .. }
                 | Call::RemoteAsked { .. }
+                | Call::RepoLook { .. }
+                | Call::Enqueue { .. }
+                | Call::CancelSetupToken { .. }
         )
     }
 
