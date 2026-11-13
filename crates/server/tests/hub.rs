@@ -8687,6 +8687,37 @@ fn changing_what_a_task_does_or_where_it_goes_takes_its_approvals_away() {
 }
 
 #[test]
+fn an_agents_task_is_stored_with_secrets_masked_and_the_users_as_typed() {
+    let mut s = Schedules::start("sched_secrets");
+    let fake = "sk-ant-api03-FAKEFAKEFAKEFAKE0000";
+    let mut body = task_body(&format!("Use {fake}"));
+    body["action"] = json!({ "kind": "prompt", "text": format!("Call the API with {fake} and report") });
+    let done = s.act("save_schedule", json!({ "task": body.clone() })).unwrap();
+    assert_eq!(done["outcome"], "done", "{done}");
+    let listed = s.ana.hub(json!({ "cmd": "list_schedules" })).unwrap();
+    assert!(listed[0]["action"]["text"].as_str().unwrap().contains("[hidden]") && listed[0]["title"].as_str().unwrap().contains("[hidden]"), "{listed}");
+    assert!(!listed.to_string().contains("FAKEFAKE"), "{listed}");
+    // With approvals it waits, and once approved its must_contain is masked too.
+    let mut approved = approved_body("Install");
+    approved["approvals"][0]["must_contain"] = json!(format!("npm ci --token {fake}"));
+    let held = s.act("save_schedule", json!({ "task": approved })).unwrap();
+    assert!(!s.about(&held).contains("FAKEFAKE"), "the Confirm's reason is masked");
+    assert_eq!(s.approve(&held), "done");
+    let rows = s._hub.runtime.block_on(async {
+        let (client, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), s._hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        client.query("select task::text from tasks", &[]).await.unwrap().iter().map(|r| r.get::<_, String>(0)).collect::<Vec<_>>()
+    });
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| !row.contains("FAKEFAKE")), "no stored row holds the token: {rows:?}");
+    let trail = s.ana.hub(json!({ "cmd": "agent_audit" })).unwrap();
+    assert!(trail.as_array().unwrap().iter().all(|e| !e["detail"].as_str().unwrap_or_default().contains("FAKEFAKE")), "nor an audit detail: {trail}");
+    // The user's own save is stored as typed.
+    let mine = save_schedule(&mut s.ana, body).unwrap();
+    assert!(mine["task"]["action"]["text"].as_str().unwrap().contains(fake));
+}
+
+#[test]
 fn another_account_neither_sees_nor_touches_the_tasks() {
     let mut s = Schedules::start("sched_isolation");
     let id = save_schedule(&mut s.ana, task_body("Ana's")).unwrap()["task"]["id"].as_str().unwrap().to_owned();

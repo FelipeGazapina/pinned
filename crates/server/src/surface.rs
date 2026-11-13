@@ -500,7 +500,7 @@ fn note_task(trail: &Trail<'_>, action: &str, args: &Value, result: &Value, deta
     match (action, result["task"]["title"].as_str()) {
         ("save_schedule", Some(title)) => {
             let next = result["next"][0]["local"].as_str().map_or_else(|| "no run".to_owned(), str::to_owned);
-            format!("saved \"{title}\"; next: {next}")
+            surface::mask_secrets(&format!("saved \"{title}\"; next: {next}"))
         }
         _ => detail,
     }

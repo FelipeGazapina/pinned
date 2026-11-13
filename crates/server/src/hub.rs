@@ -997,6 +997,16 @@ impl Hub {
                     fyi: existing.as_ref().and_then(|e| e.fyi),
                     ..task
                 };
+                // An agent's text is stored with secrets masked; the user's own save is stored as typed.
+                if agent {
+                    task.title = surface::mask_secrets(&task.title);
+                    if let schedule::Action::Prompt { text } = &mut task.action {
+                        *text = surface::mask_secrets(text);
+                    }
+                    for approval in &mut task.approvals {
+                        approval.must_contain = surface::mask_secrets(&approval.must_contain);
+                    }
+                }
                 // Changing what a task does or where it goes takes its approvals away: the user grants them again.
                 if let Some(before) = &existing {
                     if (before.action != task.action || before.target != task.target) && before.approvals == task.approvals {
