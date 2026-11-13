@@ -106,3 +106,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:05:44Z #46 a_fixed_workflow_permission_reuses_one_box_across_two_runs ok / avail=15074M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:05:45Z #47 an_ask_workflow_permission_opens_nothing_until_it_is_allowed START / avail=15074M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:05:48Z #47 an_ask_workflow_permission_opens_nothing_until_it_is_allowed ok / avail=15074M /workspace avail=19374M node_stat=Ssl node_tcp=1
+2026-11-13T04:05:51Z #48 workflow_boxes_that_are_off_or_disconnected_open_nothing START / avail=15074M /workspace avail=19374M node_stat=Ssl
