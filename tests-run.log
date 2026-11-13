@@ -240,3 +240,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:17:42Z #111 a_run_now_starts_a_workflows_session_under_the_limits_and_another_account_can_neither_run_see_nor_pay_for_it START / avail=15048M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:17:49Z #111 a_run_now_starts_a_workflows_session_under_the_limits_and_another_account_can_neither_run_see_nor_pay_for_it ok / avail=15048M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:17:50Z #112 an_agent_manages_its_accounts_workflows_projects_sessions_settings_and_usage_and_another_account_reaches_none_of_it START / avail=15048M /workspace avail=19374M node_stat=Ssl
+2026-11-13T04:17:57Z #112 an_agent_manages_its_accounts_workflows_projects_sessions_settings_and_usage_and_another_account_reaches_none_of_it ok / avail=15044M /workspace avail=19374M node_stat=Ssl node_tcp=1
