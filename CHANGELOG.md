@@ -19,6 +19,7 @@
 - Agent tabs no longer read working or starting with nothing running behind them: a session killed mid-turn now reads stopped with its reason (its time limit, stopped by you, or its exit code), sleeping and resumed tabs read idle, a start that never reports fails after 10 min, and the Orchestrator's `projects()` count skips workers with no live process.
 - A worker box whose link to the hub drops for a moment keeps its task. Before, a box running for more than 5 minutes that lost its link was deleted at once as "the box did not connect within 5 min". Now its task waits for it to come back, and a box that stays offline for 10 minutes ends with that reason.
 - A worker's report is no longer lost when its Captain's machine is asleep or offline. The hub keeps the report and hands it over when the machine comes back, and the worker's box still ends at once. A report the machine no longer knows the task for, as after a restart, is kept for 30 days and listed by `unclaimed_ends`.
+- Upstash Box: removing a box machine, disconnecting Upstash or ending a worker now deletes its box with only the Upstash key stored, and one box that will not delete no longer stops the sweep from deleting the others. A box that reaches one of its limits (time, idle, budget) is now deleted too when only the key is stored.
 
 ## 0.18.1 (2026-11-12)
 

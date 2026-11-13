@@ -290,12 +290,17 @@ async fn call(key: &str, method: reqwest::Method, path: &str, body: Option<Value
     if status.is_success() {
         return Ok(body);
     }
+    Err(Failure { status: Some(status.as_u16()), message: refusal(key, status.as_u16(), &body) })
+}
+
+/// What Upstash's refusal reads as. Upstash's own `error` text could echo the key, and this message reaches the log and the app, so the key never stays in it.
+fn refusal(key: &str, status: u16, body: &Value) -> String {
     let said = body["error"].as_str().map(str::to_owned).unwrap_or_else(|| format!("request failed with status {status}"));
-    let message = match status.as_u16() {
+    let message = match status {
         401 | 403 => format!("Upstash Box refused the key: {said}"),
-        _ => format!("Upstash Box answered {}: {said}", status.as_u16()),
+        _ => format!("Upstash Box answered {status}: {said}"),
     };
-    Err(Failure { status: Some(status.as_u16()), message })
+    if key.is_empty() { message } else { message.replace(key, "…") }
 }
 
 fn parse_id(body: &Value) -> Result<BoxId, String> {
@@ -395,6 +400,18 @@ fn urlencode(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refusal_that_echoes_the_key_does_not_carry_it() {
+        let key = "box_fake-key-0000";
+        for status in [401u16, 403, 404, 500] {
+            let body = json!({ "error": format!("bad key {key} for this account ({key})") });
+            let message = refusal(key, status, &body);
+            assert!(!message.contains(key), "{status}: {message}");
+            assert!(message.contains("bad key … for this account (…)"), "{status}: {message}");
+        }
+        assert_eq!(refusal(key, 500, &json!({})), "Upstash Box answered 500: request failed with status 500");
+    }
 
     fn fixture(name: &str) -> Value {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/upstash").join(name);
