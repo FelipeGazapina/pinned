@@ -746,6 +746,8 @@ mod tests {
                 "-c",
                 "mcp_servers.pinned.args=[\"mcp\"]",
                 "-c",
+                "mcp_servers.pinned.tool_timeout_sec=86400",
+                "-c",
                 "mcp_servers.pinned.env.PINNED_SOCK=\"/tmp/pinned.sock\"",
                 "-c",
                 "mcp_servers.pinned.env.PINNED_TASK=\"task-1\"",
@@ -1348,10 +1350,7 @@ grok-4.7-high - Grok 4.7  High
     impl Drop for Leftover {
         fn drop(&mut self) {
             if let Some(pid) = std::fs::read_to_string(&self.0).ok().and_then(|text| text.trim().parse::<i32>().ok()) {
-                unsafe {
-                    libc::kill(-pid, libc::SIGKILL);
-                    libc::kill(pid, libc::SIGKILL);
-                }
+                super::drivers::signal(&[-pid, pid]);
             }
         }
     }
