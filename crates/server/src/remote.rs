@@ -329,7 +329,15 @@ pub async fn hold_end(hub: &Hub, account: &Account, origin: &str, from: &str, ta
         eprintln!("pinned-server: the hub refuses an end from {from_id} for machine {origin_id}: its task id or state is not one pinned makes");
         return Err("the hub refuses this end: its task id or state is not one pinned makes".into());
     }
-    if hub.db.machine_name(account.id, origin_id).await?.is_none() {
+    let not_kept = || match unclaimed {
+        true => format!("the hub could not keep the end of task {task} that its machine did not take; it is sent again"),
+        false => format!("the hub could not keep the end of task {task} for its machine, which is offline; it is sent again"),
+    };
+    let known = hub.db.machine_name(account.id, origin_id).await.map_err(|e| {
+        eprintln!("pinned-server: could not look up machine {origin_id} to hold the end of task {task} from {from_id}: {e}");
+        not_kept()
+    })?;
+    if known.is_none() {
         return Ok(false);
     }
     let size = end.summary.as_ref().map_or(0, String::len) + end.error.as_ref().map_or(0, String::len);
@@ -344,10 +352,7 @@ pub async fn hold_end(hub: &Hub, account: &Account, origin: &str, from: &str, ta
         }
         Err(e) => {
             eprintln!("pinned-server: could not hold the end of task {task} from {from_id} for machine {origin_id}: {e}");
-            return Err(match unclaimed {
-                true => format!("the hub could not keep the end of task {task} that its machine did not take; it is sent again"),
-                false => format!("the hub could not keep the end of task {task} for its machine, which is offline; it is sent again"),
-            });
+            return Err(not_kept());
         }
     }
     Ok(true)
