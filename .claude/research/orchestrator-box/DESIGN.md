@@ -518,7 +518,7 @@ before `pinned evidence`.
 1. **Which permission gates the Orchestrator box?** This design uses the **Sessions** box
    permission, because the user's tap is the yes, as with Open box. The alternative is the
    **Captains** permission, since a box Orchestrator mostly opens Captain boxes.
-2. **Idle time.** Captain boxes go after 10 min idle, held while any Captain box lives. You may
+2. **Idle time.** Captain boxes go after 10 min idle, held while their workers run. The Orchestrator box is held while any Captain box or worker runs, and a report that still arrives late is held on the hub, so no report depends on the answer. You may
    think for longer than that between phone messages, and each new start costs a boot of a few
    minutes. Keep 10 min, or give the Orchestrator box 30 min?
 3. **Max life of 4 h.** Every box ends at 4 h, whatever it does. Keep that for the Orchestrator,
