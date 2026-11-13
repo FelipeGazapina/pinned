@@ -3,10 +3,10 @@ use crate::db::{self, Db};
 use pinned_core::account::Signup;
 use pinned_core::accounts::AccountId;
 use pinned_core::agent::{AgentStatus, Stage, Subject, Usage, CONNECTOR_ENV};
+use pinned_core::schedule::{self, Actor, SaveAnswer, Task};
 use pinned_core::connectors::{Connectors, Delivery, Keys, Placement, Run, RunsOn, Storage, Work};
 use pinned_core::convex::client::Http as ConvexHttp;
 use pinned_core::ideas::{Idea, IdeaStatus};
-use pinned_core::schedule::Actor;
 use pinned_core::delegate::{RunTarget, TaskRecord};
 use pinned_core::marks::{self, Archived, Mark, MarkChange, SessionMarks};
 use pinned_core::taste::{TasteField, TastePatch, TasteScope, Tastes};
@@ -580,6 +580,14 @@ impl Hub {
             HubCall::SlackSuggestions { bot } => (json(c().await?.slack_suggestions(&bot).await?), false),
             HubCall::SaveConnector { connector } => (json(c().await?.save_connector(connector)?), true),
             HubCall::DeleteConnector { id } => (json(c().await?.delete_connector(&id)?), true),
+            call @ (HubCall::ListSchedules | HubCall::SaveSchedule { .. } | HubCall::PauseSchedule { .. } | HubCall::DeleteSchedule { .. } | HubCall::ScheduleRuns { .. }) => return self.schedule_call(account, call, Actor::User).await,
+            // Only an app reaches this, unlocked (`surface::owner_only`): no agent action and no machine call sets it.
+            HubCall::SetReleaseProtection { on } => {
+                let (args, detail) = (serde_json::json!({ "on": on }).to_string(), format!("the user's app turned release protection {}", if on { "on" } else { "off" }));
+                let row = db::Audit { account: account.id, machine: Uuid::nil(), tab: "app", role: surface::ActorRole::Session, action: "set_release_protection", args: &args, outcome: surface::AuditOutcome::Done, detail: &detail, request_id: None, task: None };
+                self.db.set_release_protection(account.id, on, &row).await?;
+                return json(on);
+            }
             HubCall::RunWorkflow { id } => return json(self.run_workflow(account, &id).await?),
             HubCall::GenerateWorkflow { .. } => return Err("Generate with AI was removed: ask an agent to create the workflow".into()),
             HubCall::OpenBox { repo, size, budget_usd } => (json(self.boxes.open_session(self, account, repo, size, budget_usd, None).await?), false),
@@ -960,12 +968,16 @@ impl Hub {
         }
     }
 
-    /// The account's settings with its ideas, which live in the hub's own table. A failed ideas
-    /// read leaves them out rather than failing the settings every app loads.
+    /// The account's settings with its ideas and scheduled tasks, which live in the hub's own tables. A failed ideas
+    /// or tasks read leaves them out rather than failing the settings every app loads, and the push of them.
     async fn settings(&self, account: &Account) -> Result<pinned_core::connectors::Settings, String> {
         let mut settings = self.connectors(account).await?.get_settings();
         settings.ideas = self.db.ideas(account.id, None).await.unwrap_or_else(|e| {
             eprintln!("pinned-server: could not read the ideas of account {}: {e}", account.id);
+            Vec::new()
+        });
+        settings.schedules = self.db.tasks(account.id).await.unwrap_or_else(|e| {
+            eprintln!("pinned-server: could not read the scheduled tasks of account {}: {e}", account.id);
             Vec::new()
         });
         Ok(settings)
@@ -974,6 +986,110 @@ impl Hub {
     async fn push_settings(&self, account: &Account) {
         if let Ok(settings) = self.settings(account).await {
             account.broadcast(&ToClient::Settings { settings });
+        }
+    }
+
+    /// The schedule calls, for `actor`, who is recorded as a new task's creator and held to the caps
+    /// that apply to agents. Tasks are stored and edited here; nothing fires them yet.
+    pub async fn schedule_call(self: &Arc<Self>, account: &Arc<Account>, call: HubCall, actor: Actor) -> Result<Value, String> {
+        let unknown = |id: &str| format!("this account has no task {id}");
+        let parse = task_key;
+        match call {
+            HubCall::ListSchedules => json(self.db.tasks(account.id).await?),
+            HubCall::ScheduleRuns { id, limit } => {
+                let key = parse(&id)?;
+                self.db.task(account.id, key).await?.ok_or_else(|| unknown(&id))?;
+                json(self.db.task_runs(account.id, key, i64::from(limit.unwrap_or(20).clamp(1, 200))).await?)
+            }
+            HubCall::DeleteSchedule { id } => {
+                if !self.db.delete_task(account.id, parse(&id)?).await? {
+                    return Err(unknown(&id));
+                }
+                self.push_settings(account).await;
+                Ok(Value::Null)
+            }
+            HubCall::PauseSchedule { id, paused } => {
+                let mut task = self.db.task(account.id, parse(&id)?).await?.ok_or_else(|| unknown(&id))?;
+                task.enabled = !paused;
+                task.updated_at = schedule::now();
+                task.next_at = if task.enabled { schedule::next_after(&task.schedule, &task.tz, task.updated_at)? } else { None };
+                if task.enabled && task.next_at.is_none() {
+                    return Err("that time has already passed: edit the task to pick a time that is still ahead".into());
+                }
+                self.db.save_task(account.id, &task).await?;
+                self.push_settings(account).await;
+                json(task)
+            }
+            HubCall::SaveSchedule { task, dry_run } => {
+                let now = schedule::now();
+                let protected = self.db.release_protection(account.id).await?;
+                let existing = match task.id.trim() {
+                    "" => None,
+                    id => self.db.task(account.id, parse(id)?).await?,
+                };
+                let agent = matches!(actor, Actor::Agent { .. });
+                if agent && existing.is_none() && !task.id.trim().is_empty() {
+                    return Err(format!("this account has no task {}: leave id empty to create one", task.id));
+                }
+                let mut task = Task {
+                    id: existing.as_ref().map_or_else(|| if task.id.trim().is_empty() { Uuid::new_v4().to_string() } else { task.id.trim().to_owned() }, |e| e.id.clone()),
+                    created_by: existing.as_ref().map_or_else(|| actor.clone(), |e| e.created_by.clone()),
+                    created_at: existing.as_ref().map_or(now, |e| e.created_at),
+                    updated_at: now,
+                    next_at: None,
+                    last_run: None,
+                    fyi: existing.as_ref().and_then(|e| e.fyi),
+                    ..task
+                };
+                // An agent's text is stored with secrets masked; the user's own save is stored as typed.
+                if agent {
+                    task.title = surface::mask_secrets(&task.title);
+                    if let schedule::Action::Prompt { text } = &mut task.action {
+                        *text = surface::mask_secrets(text);
+                    }
+                    for approval in &mut task.approvals {
+                        approval.must_contain = surface::mask_secrets(&approval.must_contain);
+                    }
+                }
+                // Changing what a task does or where it goes takes its approvals away: the user grants them again.
+                if let Some(before) = &existing {
+                    if (before.action != task.action || before.target != task.target) && before.approvals == task.approvals {
+                        task.approvals.clear();
+                    }
+                }
+                if agent {
+                    schedule::agent_floor(&task)?;
+                }
+                schedule::check_save(&task, protected)?;
+                if task.enabled {
+                    task.next_at = schedule::next_after(&task.schedule, &task.tz, now)?;
+                    if task.next_at.is_none() {
+                        return Err("that time has already passed: pick a time that is still ahead".into());
+                    }
+                }
+                let next = schedule::next_run_times(&task.schedule, &task.tz, now)?;
+                let created = agent && existing.is_none();
+                if created {
+                    // The notice rule: a task an agent creates is active at once, and the user sees an Inbox row.
+                    task.fyi = Some(now);
+                } else if !agent {
+                    task.fyi = None;
+                }
+                if dry_run {
+                    return json(SaveAnswer { task: None, next });
+                }
+                if created {
+                    // Counted and stored in one locked step, so two saves at once never pass the cap together.
+                    if let Err(held) = self.db.add_agent_task(account.id, &task, schedule::AGENT_MAX_TASKS).await? {
+                        return Err(format!("agents may hold at most {} tasks and {} exist: delete one first ({})", schedule::AGENT_MAX_TASKS, held.len(), held.join(", ")));
+                    }
+                } else if !self.db.save_task(account.id, &task).await? {
+                    return Err(unknown(&task.id));
+                }
+                self.push_settings(account).await;
+                json(SaveAnswer { task: Some(task), next })
+            }
+            _ => Err("not a schedule call".into()),
         }
     }
 
@@ -1562,6 +1678,13 @@ impl Storage for PgStorage {
             self.write_keys(&keys);
         }
     }
+}
+
+/// A task id as an app or an agent sends it. Every schedule call, and the agent check before it
+/// (`surface::schedule_needs_ok`), reads ids through this one parse, so the check and the act
+/// always name the same task; an id it cannot read is refused, never passed.
+pub(crate) fn task_key(id: &str) -> Result<Uuid, String> {
+    Uuid::parse_str(id.trim()).map_err(|_| format!("this account has no task {id}"))
 }
 
 #[cfg(test)]
