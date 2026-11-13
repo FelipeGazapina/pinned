@@ -51,6 +51,10 @@ const OVERFLOW: &str = "overflow:";
 /// Addresses the limiter remembers at most, and for how long, in each of its two sets: emails' sign-in
 /// addresses and accounts' agent addresses.
 const KNOWN_ADDRESSES: usize = 10_000;
+/// Addresses one owner keeps at most: an email's, or an account's agents'. A person's laptop, phone and
+/// desktop over 30 days of home, office, mobile data and a few trips fit easily, and 500 owners are
+/// needed to fill `KNOWN_ADDRESSES`. At its cap an owner replaces its own oldest address.
+const KNOWN_PER_OWNER: usize = 20;
 const KNOWN_FOR: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// How often the log names the kind of address the limiter keys on, after the first request of a hub's run.
 const CLASS_EVERY: Duration = Duration::from_secs(60 * 60);
@@ -576,7 +580,7 @@ impl Limiter {
 }
 
 /// Addresses each owner proved itself from within `KNOWN_FOR`: an email that signed in, or an account
-/// whose agent got a token. At most `KNOWN_ADDRESSES` pairs.
+/// whose agent got a token. At most `KNOWN_ADDRESSES` pairs, and `KNOWN_PER_OWNER` per owner.
 #[derive(Default)]
 struct Remembered {
     by_owner: HashMap<String, HashMap<String, Instant>>,
@@ -599,14 +603,18 @@ impl Remembered {
         self.by_address.get(address).is_some_and(|owners| owners.iter().any(|owner| self.knows(owner, address, now)))
     }
 
-    /// Notes the pair, or refreshes its time. When it holds as many as it keeps it first drops the expired
+    /// Notes the pair, or refreshes its time. An owner at its cap replaces its own oldest pair, so it never
+    /// takes another owner's room. Otherwise, when it holds as many as it keeps it first drops the expired
     /// ones; if it is still full the address is not remembered, and only loses the way past the bound.
     fn remember(&mut self, owner: String, address: String, now: Instant) {
         if let Some(at) = self.by_owner.get_mut(&owner).and_then(|addresses| addresses.get_mut(&address)) {
             *at = now;
             return;
         }
-        if self.len >= KNOWN_ADDRESSES {
+        let oldest = self.by_owner.get(&owner).filter(|addresses| addresses.len() >= KNOWN_PER_OWNER).and_then(|addresses| addresses.iter().min_by_key(|(_, at)| **at)).map(|(address, _)| address.clone());
+        if let Some(oldest) = oldest {
+            self.forget(&owner, &oldest);
+        } else if self.len >= KNOWN_ADDRESSES {
             let expired: Vec<(String, String)> = self
                 .by_owner
                 .iter()
@@ -1478,6 +1486,70 @@ mod tests {
         assert!(answer.is_none() && waited >= Duration::from_millis(300) && waited < Duration::from_secs(2), "told busy after its wait, not {waited:?}");
         drop(holder);
         assert!(hashing.turn().await.is_some(), "once the holder lets go, requests hash again");
+    }
+
+    #[test]
+    fn one_email_remembering_past_its_cap_keeps_exactly_its_cap_and_leaves_room_for_another() {
+        use super::{Remembered, KNOWN_ADDRESSES, KNOWN_PER_OWNER};
+        let now = std::time::Instant::now();
+        let mut known = Remembered::default();
+        let at = |n: usize| now + std::time::Duration::from_secs(n as u64);
+        let address = |n: usize| format!("203.0.{}.{}", n / 250, n % 250);
+        for n in 0..=KNOWN_ADDRESSES {
+            known.remember("one@example.invalid".into(), address(n), at(n));
+        }
+        let later = at(KNOWN_ADDRESSES);
+        assert_eq!(known.by_owner["one@example.invalid"].len(), KNOWN_PER_OWNER, "the email keeps its cap");
+        assert_eq!(known.len, KNOWN_PER_OWNER);
+        assert!(known.knows("one@example.invalid", &address(KNOWN_ADDRESSES), later), "its newest address is kept");
+        assert!(!known.knows("one@example.invalid", &address(KNOWN_ADDRESSES - KNOWN_PER_OWNER), later), "its oldest went");
+        known.remember("two@example.invalid".into(), "198.51.100.1".into(), later);
+        assert!(known.knows("two@example.invalid", "198.51.100.1", later), "another email still finds room");
+    }
+
+    #[test]
+    fn the_remembered_addresses_hold_their_cap_over_every_email() {
+        use super::{Remembered, KNOWN_ADDRESSES, KNOWN_PER_OWNER};
+        let now = std::time::Instant::now();
+        let mut known = Remembered::default();
+        for owner in 0..KNOWN_ADDRESSES / KNOWN_PER_OWNER {
+            for n in 0..KNOWN_PER_OWNER {
+                known.remember(format!("owner-{owner}@example.invalid"), format!("203.0.{owner}.{n}"), now);
+            }
+        }
+        assert_eq!(known.len, KNOWN_ADDRESSES);
+        known.remember("late@example.invalid".into(), "198.51.100.1".into(), now);
+        assert!(!known.knows("late@example.invalid", "198.51.100.1", now), "a full table remembers no new email");
+        assert_eq!((known.len, known.by_owner.values().map(|a| a.len()).sum::<usize>()), (KNOWN_ADDRESSES, KNOWN_ADDRESSES));
+        assert!(known.knows_address("203.0.0.0", now), "a lookup by address finds the ones it holds");
+    }
+
+    #[test]
+    fn a_remembered_address_older_than_30_days_is_dropped() {
+        use super::{Remembered, KNOWN_ADDRESSES, KNOWN_FOR, KNOWN_PER_OWNER};
+        let now = std::time::Instant::now();
+        let mut known = Remembered::default();
+        for owner in 0..KNOWN_ADDRESSES / KNOWN_PER_OWNER {
+            for n in 0..KNOWN_PER_OWNER {
+                known.remember(format!("owner-{owner}@example.invalid"), format!("203.0.{owner}.{n}"), now);
+            }
+        }
+        let later = now + KNOWN_FOR;
+        assert!(!known.knows("owner-0@example.invalid", "203.0.0.0", later) && !known.knows_address("203.0.0.0", later), "30 days on it is not known");
+        known.remember("late@example.invalid".into(), "198.51.100.1".into(), later);
+        assert!(known.knows("late@example.invalid", "198.51.100.1", later), "the expired ones made room");
+        assert_eq!((known.len, known.by_owner.len(), known.by_address.len()), (1, 1, 1), "every expired pair was dropped");
+    }
+
+    #[test]
+    fn remembering_a_known_pair_again_refreshes_its_time_instead_of_adding_one() {
+        use super::{Remembered, KNOWN_FOR};
+        let now = std::time::Instant::now();
+        let mut known = Remembered::default();
+        known.remember("one@example.invalid".into(), "198.51.100.1".into(), now);
+        known.remember("one@example.invalid".into(), "198.51.100.1".into(), now + KNOWN_FOR / 2);
+        assert_eq!((known.len, known.by_owner["one@example.invalid"].len()), (1, 1));
+        assert!(known.knows("one@example.invalid", "198.51.100.1", now + KNOWN_FOR), "known 30 days after the second sign in");
     }
 
     #[test]
