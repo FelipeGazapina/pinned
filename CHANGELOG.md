@@ -2,6 +2,10 @@
 
 ## 0.18.2 (Unreleased)
 
+### Added
+
+- Workflows: Generate with AI now drafts with a Claude Code account signed in on your machines, so it works without the Vercel AI Gateway. The Model list shows the Claude accounts of this computer first, or of the first online machine when this computer is offline, then the Vercel chat models when the gateway is connected. The draft runs `claude -p` with Sonnet in the machine's scratch folder, not in a project, and gives up after 4 minutes. The machine must run 0.18.2. An older machine says to update it or to pick a Vercel model.
+
 ### Fixed
 
 - Workflows: in New workflow, clicking Linear (or any Slack option) with that connector connected now continues the setup instead of opening Connectors. Since 0.17.10 every option sent you to Connectors and said "Connect Linear", whatever was connected. When the connector is missing, Connectors now says which workflow sent you there, and connecting it, or Back to the workflow, returns you to that workflow as you left it.
