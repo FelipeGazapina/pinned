@@ -8727,9 +8727,11 @@ fn a_release_approval_is_refused_until_the_user_turns_protection_on_and_no_agent
     assert!(agent.contains("not open to agents"), "{agent}");
     assert_eq!(save_schedule(&mut s.ana, release("gh release create v1.2.3", "release")), Err(reason.into()), "still off");
     // Another account's switch is its own.
+    s.bob.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
     assert_eq!(s.bob.hub(json!({ "cmd": "set_release_protection", "on": true })), Ok(json!(true)));
     assert_eq!(save_schedule(&mut s.ana, release("gh release create v1.2.3", "release")), Err(reason.into()), "bob's switch is bob's");
 
+    s.ana.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
     assert_eq!(s.ana.hub(json!({ "cmd": "set_release_protection", "on": true })), Ok(json!(true)));
     let on = save_schedule(&mut s.ana, release("gh release create v1.2.3", "release")).unwrap();
     assert_eq!(on["task"]["approvals"][0]["must_contain"], "gh release create v1.2.3");
@@ -8737,6 +8739,30 @@ fn a_release_approval_is_refused_until_the_user_turns_protection_on_and_no_agent
     assert_eq!(s.act("save_schedule", json!({ "task": release("railway up", "deploy") })).unwrap()["outcome"], "pending");
     assert_eq!(s.ana.hub(json!({ "cmd": "set_release_protection", "on": false })), Ok(json!(false)));
     assert_eq!(save_schedule(&mut s.ana, release("railway up", "deploy")), Err(reason.into()), "off again");
+}
+
+#[test]
+fn release_protection_needs_the_unlock_and_each_change_has_an_audit_row() {
+    let mut s = Schedules::start("sched_protection_unlock");
+    let mut release = task_body("Release");
+    release["approvals"] = json!([{ "item": "release", "must_contain": "gh release create", "repo": "github.com/acme/app" }]);
+    // A login read off the disk is not the user: without the password nothing changes.
+    assert_eq!(s.ana.hub(json!({ "cmd": "set_release_protection", "on": true })), Err(pinned_core::surface::LOCKED.into()));
+    assert!(save_schedule(&mut s.ana, release.clone()).is_err(), "still off");
+    let audited = |s: &mut Schedules| -> Vec<(String, String)> {
+        let rows = s.ana.hub(json!({ "cmd": "agent_audit" })).unwrap();
+        rows.as_array().unwrap().iter().filter(|e| e["action"] == "set_release_protection").map(|e| (e["args"].as_str().unwrap().to_owned(), e["detail"].as_str().unwrap().to_owned())).collect()
+    };
+    assert_eq!(audited(&mut s), Vec::<(String, String)>::new(), "a refused change writes no row");
+
+    s.ana.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    assert_eq!(s.ana.hub(json!({ "cmd": "set_release_protection", "on": true })), Ok(json!(true)));
+    assert!(save_schedule(&mut s.ana, release).is_ok(), "on");
+    assert_eq!(s.ana.hub(json!({ "cmd": "set_release_protection", "on": false })), Ok(json!(false)));
+    assert_eq!(audited(&mut s), [
+        (r#"{"on":false}"#.to_owned(), "the user's app turned release protection off".to_owned()),
+        (r#"{"on":true}"#.to_owned(), "the user's app turned release protection on".to_owned()),
+    ], "who and on or off, newest first");
 }
 
 #[test]

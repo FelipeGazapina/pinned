@@ -364,10 +364,11 @@ pub const ACTIONS: &[Action] = &[
 pub const LOCKED: &str = "unlock with your password in the app to do this";
 
 /// Whether a signed-in client must have unlocked with the password to run `cmd` on `side`: a
-/// decision always, and a `confirm` action on a `locked` login. The app keeps its login on disk,
-/// where any process of the same user reads it; the unlock lives in the app's memory only.
+/// decision and the release-protection switch always, and a `confirm` action on a `locked` login.
+/// The app keeps its login on disk, where any process of the same user reads it; the unlock lives
+/// in the app's memory only.
 pub fn owner_only(side: Side, cmd: &str, locked: bool) -> bool {
-    if side == Side::Hub && cmd == "decide_confirmation" {
+    if side == Side::Hub && matches!(cmd, "decide_confirmation" | "set_release_protection") {
         return true;
     }
     locked && of_cmd(side, cmd).is_some_and(|action| action.class == Confirm)
@@ -1022,6 +1023,7 @@ mod tests {
     fn a_decision_always_needs_the_unlock_and_a_confirm_action_needs_it_on_a_locked_login() {
         let needs = |side, cmd, locked| owner_only(side, cmd, locked);
         assert!(needs(Side::Hub, "decide_confirmation", false) && needs(Side::Hub, "decide_confirmation", true));
+        assert!(needs(Side::Hub, "set_release_protection", false) && needs(Side::Hub, "set_release_protection", true), "pre-approving releases needs the password");
         assert!(needs(Side::Hub, "remove_machine", true) && !needs(Side::Hub, "remove_machine", false), "an older app's login keeps its calls");
         assert!(needs(Side::Node, "update_self", true) && needs(Side::Hub, "approve_agent", true) && needs(Side::Hub, "set_taste", true));
         assert!(!needs(Side::Hub, "machines", true) && !needs(Side::Hub, "rename_machine", true) && !needs(Side::Node, "write_input", true));
@@ -1032,7 +1034,7 @@ mod tests {
             assert!(needs(Side::Hub, cmd, true), "changing who may use a box, or its credentials, still needs the password: {cmd}");
         }
         let confirm: Vec<&str> = ACTIONS.iter().filter(|a| needs(a.side, a.cmd, true)).map(|a| a.name).collect();
-        assert_eq!(confirm.len(), ACTIONS.iter().filter(|a| a.class == Confirm).count() + 1, "every confirm action and the decision: {confirm:?}");
+        assert_eq!(confirm.len(), ACTIONS.iter().filter(|a| a.class == Confirm).count() + 2, "every confirm action, the decision and the release-protection switch: {confirm:?}");
         assert!(include_str!("../../../ui/hub.js").contains(&format!("const LOCKED = \"{LOCKED}\";")), "the app asks for the password on this exact refusal");
     }
 
