@@ -728,7 +728,7 @@ impl Hub {
                 if !self.db.delete_idea(account.id, Uuid::parse_str(&id).map_err(|_| unknown())?).await? {
                     return Err(unknown());
                 }
-                self.push_settings(account).await;
+                self.ideas_changed(account);
                 return Ok(Value::Null);
             }
             HubCall::ListMcpServers => return json(c().await?.mcp_servers()),
@@ -916,8 +916,14 @@ impl Hub {
         }
     }
 
+    /// Tells each of the account's apps that an idea was saved or deleted, so they read the list again.
+    /// Only a successful save or delete sends it; the settings push, which carries no ideas, never does.
+    fn ideas_changed(&self, account: &Account) {
+        account.broadcast(&ToClient::IdeasChanged);
+    }
+
     /// Pushes the settings, which carry no ideas: the app reads them with `list_ideas`, so a push stays
-    /// small however many there are. After an idea changes it is also the signal to read them again.
+    /// small however many there are.
     async fn push_settings(&self, account: &Account) {
         if let Ok(connectors) = self.connectors(account).await {
             account.broadcast(&ToClient::Settings { settings: connectors.get_settings() });
@@ -939,7 +945,7 @@ impl Hub {
             }
             None => self.db.add_idea(account.id, title, text.trim(), project, status.unwrap_or_default(), &by, now).await?,
         };
-        self.push_settings(account).await;
+        self.ideas_changed(account);
         Ok(idea)
     }
 

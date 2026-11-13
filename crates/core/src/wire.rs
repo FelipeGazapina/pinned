@@ -1629,6 +1629,9 @@ pub enum ToClient {
     SessionMarks { marks: Vec<crate::marks::SessionMarks> },
     /// The agents' actions waiting on the user's approval, after `Hello` and after any change.
     Confirmations { items: Vec<crate::surface::Confirmation> },
+    /// An idea of the account was saved or deleted, by an app or an agent. It carries nothing: the app reads
+    /// the list again with `list_ideas`. An app that does not know this frame drops it and stays connected.
+    IdeasChanged,
 }
 
 /// Machine to hub. The first frame must be `Auth` with the machine's token.
@@ -2224,6 +2227,7 @@ mod tests {
         );
         let bare = serde_json::to_value(ToClient::Machines { machines: vec![], tabs: None }).unwrap();
         assert!(bare.get("tabs").is_none());
+        round_trip(ToClient::IdeasChanged, json!({ "type": "ideas_changed" }));
     }
 
     #[test]

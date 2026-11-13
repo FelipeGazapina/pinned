@@ -50845,6 +50845,19 @@
               "type",
               "items"
             ]
+          },
+          {
+            "description": "An idea of the account was saved or deleted, by an app or an agent. It carries nothing: the app reads\nthe list again with `list_ideas`. An app that does not know this frame drops it and stays connected.",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "ideas_changed"
+              }
+            },
+            "required": [
+              "type"
+            ]
           }
         ],
         "$defs": {
@@ -54231,6 +54244,19 @@
             "required": [
               "type",
               "items"
+            ]
+          },
+          {
+            "description": "An idea of the account was saved or deleted, by an app or an agent. It carries nothing: the app reads\nthe list again with `list_ideas`. An app that does not know this frame drops it and stays connected.",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "ideas_changed"
+              }
+            },
+            "required": [
+              "type"
             ]
           }
         ],
