@@ -18,5 +18,5 @@ COPY --from=build /downloads /app/downloads
 COPY --from=build /downloads/pinned-server-x86_64-unknown-linux-musl /usr/local/bin/pinned-server
 COPY ui /app/ui
 CMD exec pinned-server hub --db "$DATABASE_URL" --listen "0.0.0.0:${PORT:-8787}" --ui /app/ui --downloads /app/downloads \
-    --public-url "https://$RAILWAY_PUBLIC_DOMAIN" --key-file /data/hub.key --signup invite \
+    --public-url "https://$RAILWAY_PUBLIC_DOMAIN" --key-file /data/hub.key --signup "${PINNED_SIGNUP:-invite}" \
     ${LEARNING_DATABASE_URL:+--learning-db "$LEARNING_DATABASE_URL"}
