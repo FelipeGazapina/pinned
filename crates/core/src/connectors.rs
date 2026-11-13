@@ -2735,6 +2735,32 @@ pub fn parse_permission(name: &str) -> Result<Option<PermissionMode>, String> {
     }
 }
 
+/// Why `connector` must start no run: the first session step, in its graph or a graph it calls,
+/// whose permission the parse cannot read, named with its workflow.
+fn unreadable_step(library: &runner::Library, names: &BTreeMap<String, String>, connector: &str) -> Option<String> {
+    let name = |id: &str| names.get(id).cloned().unwrap_or_else(|| id.to_owned());
+    let (mut todo, mut seen) = (vec![connector.to_owned()], std::collections::BTreeSet::new());
+    while let Some(id) = todo.pop() {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        let Some(graph) = library.get(&id) else { continue };
+        for node in &graph.nodes {
+            match &node.kind {
+                NodeKind::Session(setup) => {
+                    if let Err(e) = parse_permission(&setup.permission) {
+                        let holder = if id == connector { String::new() } else { format!(" of workflow {:?}, which it calls,", name(&id)) };
+                        return Some(format!("workflow {:?} starts no run: step {:?}{holder} has a permission pinned cannot read: {e}", name(connector), node.name));
+                    }
+                }
+                NodeKind::Call { workflow } => todo.push(workflow.clone()),
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
 /// A session node's setup over the session owner's own settings: every field it names wins,
 /// empty text fields inherit. The merged connector builds the opening prompt and spec exactly
 /// as the owner's would, so a bare node behaves like today's talk. A permission that is not an exact
@@ -2955,23 +2981,46 @@ impl Connectors {
         R: Taken,
     {
         loop {
-            let _guard = self.driving.lock().await;
-            let (work, mut error) = self.poll().await;
-            for work in work {
-                if let Err(e) = self.hand_over(work, &open).await {
-                    error.get_or_insert(e);
-                }
-            }
-            if let Err(e) = self.drive_locked(&open).await {
-                error.get_or_insert(e);
-            }
-            drop(_guard);
-            let error = merge_error(error, self.runs_broken.lock().unwrap().clone());
-            let check = Check { at: chrono::Utc::now().to_rfc3339(), error };
-            *self.checked.lock().unwrap() = Some(check.clone());
+            let check = self.check_once(&open).await;
             on_check(&check);
             let _ = tokio::time::timeout(INTERVAL, self.wake.notified()).await;
         }
+    }
+
+    /// One check of `watch`. While an enabled workflow holds a step whose permission the parse
+    /// cannot read, every check names it, because its trigger starts no run until the step is fixed.
+    #[doc(hidden)]
+    pub async fn check_once<F, Fut, R>(&self, open: &F) -> Check
+    where
+        F: Fn(Work) -> Fut,
+        Fut: Future<Output = R>,
+        R: Taken,
+    {
+        let _guard = self.driving.lock().await;
+        let (work, mut error) = self.poll().await;
+        for work in work {
+            if let Err(e) = self.hand_over(work, open).await {
+                error.get_or_insert(e);
+            }
+        }
+        if let Err(e) = self.drive_locked(open).await {
+            error.get_or_insert(e);
+        }
+        drop(_guard);
+        let error = self.unreadable().into_iter().fold(error, |error, why| merge_error(error, Some(why)));
+        let error = merge_error(error, self.runs_broken.lock().unwrap().clone());
+        let check = Check { at: chrono::Utc::now().to_rfc3339(), error };
+        *self.checked.lock().unwrap() = Some(check.clone());
+        check
+    }
+
+    /// Why each enabled workflow starts no run: a step, in its graph or one it calls, whose
+    /// permission the parse cannot read. Stored values are left as they are: trimming one could
+    /// turn it into a mode that skips prompts.
+    fn unreadable(&self) -> Vec<String> {
+        let (library, names) = (self.library(), self.names());
+        let enabled: Vec<String> = self.store.lock().unwrap().connectors.iter().filter(|c| c.enabled).map(|c| c.id.clone()).collect();
+        enabled.iter().filter_map(|id| unreadable_step(&library, &names, id)).collect()
     }
 
     /// True while a run of `subject` is still going and its session belongs to `connector`.
@@ -3020,6 +3069,9 @@ impl Connectors {
     /// because it has no Linear or Slack network.
     #[doc(hidden)]
     pub fn begin(&self, connector: String, subject: Subject, input: TriggerInput, at: &str) -> Result<(), String> {
+        if let Some(why) = unreadable_step(&self.library(), &self.names(), &connector) {
+            return Err(why);
+        }
         if run_open(&self.runs.lock().unwrap(), &connector, &subject) {
             return Ok(());
         }
@@ -3464,6 +3516,9 @@ impl Connectors {
         let edited = self.store.lock().unwrap().connectors.iter().any(|c| c.id == run.connector && c.graph.is_some());
         if !edited || item.mentioned.is_empty() {
             return Ok(false);
+        }
+        if let Some(why) = unreadable_step(library, &self.names(), &run.connector) {
+            return Err(why);
         }
         let Some((node, classify)) = runner::routing_classify(library, &run.connector) else { return Ok(false) };
         let Ok(TriggerInput::Slack { channel, channel_name, thread, mut posts, .. }) = trigger_of(&run) else { return Ok(false) };
@@ -6824,7 +6879,11 @@ mod tests {
         connector.graph = Some(graph);
         // Written as an older save would have kept it, past today's check at save.
         let (connectors, dir) = stored("odd-permission", vec![connector]);
-        connectors.begin("c1".into(), Subject::LinearIssue { issue: "uuid".into() }, issue_trigger(), "2026-10-29T12:00:00Z").unwrap();
+        let subject = Subject::LinearIssue { issue: "uuid".into() };
+        assert!(connectors.begin("c1".into(), subject.clone(), issue_trigger(), "2026-10-29T12:00:00Z").is_err(), "its trigger starts no run");
+        // A run that started before that check still opens no session.
+        let run = runner::start(&connectors.library(), "c1", subject, serde_json::to_value(issue_trigger()).unwrap(), "2026-10-29T12:00:00Z");
+        connectors.runs.lock().unwrap().push(run);
         let opened = std::sync::Mutex::new(Vec::<Vec<String>>::new());
         let open = |work: Work| {
             if let Work::Run(run) = &work {
@@ -6836,6 +6895,50 @@ mod tests {
         let opened = opened.into_inner().unwrap();
         assert!(!opened.iter().any(|args| args.windows(2).any(|pair| pair[0] == "--permission-mode" && pair[1] == "bypassPermissions")), "{opened:?}");
         assert!(opened.is_empty(), "a step whose permission is not a known name opens no session: {opened:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_workflow_with_a_step_whose_permission_is_unreadable_starts_no_run_and_every_check_names_it() {
+        let with_step = |id: &str, name: &str, permission: &str| {
+            let mut connector = linear_connector();
+            connector.id = id.into();
+            connector.name = name.into();
+            let mut graph = talks(&[]);
+            let step = SessionSetup { permission: permission.into(), ..SessionSetup::default() };
+            graph.nodes.push(node("s", "Fix", NodeKind::Session(step)));
+            graph.edges.push(edge("t", "out", "s"));
+            connector.graph = Some(graph);
+            connector
+        };
+        // Written as an older save would have kept it, past today's check at save.
+        let (connectors, dir) = stored("unreadable-step", vec![with_step("c1", "Odd", " bypassPermissions "), with_step("c2", "Fine", "acceptEdits")]);
+        let odd = Subject::LinearIssue { issue: "odd".into() };
+        let fine = Subject::LinearIssue { issue: "fine".into() };
+        let refused = connectors.begin("c1".into(), odd.clone(), issue_trigger(), "2026-10-29T12:00:00Z").unwrap_err();
+        assert!(refused.contains("\"Odd\"") && refused.contains("\"Fix\""), "{refused}");
+        connectors.begin("c2".into(), fine.clone(), issue_trigger(), "2026-10-29T12:00:00Z").unwrap();
+        let opened = std::sync::Mutex::new(Vec::<Vec<String>>::new());
+        let open = |work: Work| {
+            if let Work::Run(run) = &work {
+                opened.lock().unwrap().push(run.args.clone());
+            }
+            placed(work)
+        };
+        for _ in 0..2 {
+            let check = block_on(connectors.check_once(&open));
+            let error = check.error.unwrap_or_default();
+            assert!(error.contains("workflow \"Odd\"") && error.contains("step \"Fix\""), "every check names the workflow and the step: {error}");
+            assert!(!error.contains("\"Fine\""), "{error}");
+        }
+        assert!(connectors.runs.lock().unwrap().iter().all(|run| run.connector == "c2"), "the unreadable workflow starts no run");
+        let store = connectors.store.lock().unwrap();
+        assert!(!store.handled(&subject_key(&odd)), "its subject is not claimed");
+        assert!(store.handled(&subject_key(&fine)), "the readable workflow claims its own");
+        drop(store);
+        let opened = opened.into_inner().unwrap();
+        assert_eq!(opened.len(), 1, "the readable workflow still runs: {opened:?}");
+        assert!(opened[0].windows(2).any(|pair| pair[0] == "--permission-mode" && pair[1] == "acceptEdits"), "{opened:?}");
         let _ = std::fs::remove_dir_all(dir);
     }
 
