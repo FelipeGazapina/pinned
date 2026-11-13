@@ -8409,9 +8409,7 @@ fn an_account_saves_lists_edits_and_deletes_its_ideas_and_no_other_account_sees_
     assert_eq!((kept["status"].as_str(), kept["project"].is_null()), (Some("dropped"), true), "a status left out is kept; a project left out clears it");
     assert_eq!(ids(ana.hub(json!({ "cmd": "list_ideas" })).unwrap())[0], ipad_id, "the most recently changed comes first");
 
-    let settings = ana.hub(json!({ "cmd": "get_settings" })).unwrap();
-    assert_eq!(settings["ideas"].as_array().unwrap().len(), 2, "the settings carry the ideas");
-    assert!(bob.hub(json!({ "cmd": "get_settings" })).unwrap().get("ideas").is_none(), "an account with none gets no field");
+    assert!(ana.hub(json!({ "cmd": "get_settings" })).unwrap().get("ideas").is_none(), "the settings carry no ideas, however many there are: apps read them with list_ideas");
 
     assert_eq!(bob.hub(json!({ "cmd": "list_ideas" })).unwrap(), json!([]), "bob lists none of ana's");
     assert_eq!(bob.hub(json!({ "cmd": "list_ideas", "project": site })).unwrap(), json!([]));
@@ -8421,10 +8419,63 @@ fn an_account_saves_lists_edits_and_deletes_its_ideas_and_no_other_account_sees_
     let after = ana.hub(json!({ "cmd": "list_ideas", "project": site })).unwrap();
     assert_eq!(after.as_array().unwrap().iter().find(|i| i["id"] == json!(cache_id)).unwrap()["title"], "Cache the diff", "ana's idea is untouched");
 
+    ana.frames.clear();
     assert_eq!(ana.hub(json!({ "cmd": "delete_idea", "id": cache_id })).unwrap(), Value::Null);
+    let told = ana.wait("ideas_changed after a delete", |f| f["type"] == "ideas_changed");
+    assert_eq!(told, json!({ "type": "ideas_changed" }), "the signal that tells apps to read again holds no list");
     assert_eq!(ids(ana.hub(json!({ "cmd": "list_ideas" })).unwrap()), [ipad_id.clone()]);
     assert_eq!(ana.hub(json!({ "cmd": "delete_idea", "id": cache_id })), no_idea(&cache_id), "a second delete finds nothing");
     assert_eq!(ana.hub(json!({ "cmd": "delete_idea", "id": "not-an-id" })), no_idea("not-an-id"));
+}
+
+#[test]
+fn a_saved_or_deleted_idea_sends_ideas_changed_to_the_accounts_apps_and_a_settings_push_alone_does_not() {
+    let hub = TestHub::start_with("ideas_signal", Signup::Open);
+    let url = hub.url.clone();
+    let (ana_token, _) = account::signup(&url, "ana@example.test", "correct horse").unwrap();
+    let (bob_token, _) = account::signup(&url, "bob@example.test", "correct horse").unwrap();
+    // The first app is one that has not locked its login, which may turn Repo insight on; the second is as an app signs in now.
+    let mut ana = Client::connect(&url, &ana_token);
+    ana.wait("hello", |f| f["type"] == "hello");
+    let mut phone = Client::app(&url, &ana_token);
+    let mut bob = Client::app(&url, &bob_token);
+    let signals = |c: &Client| c.frames.iter().filter(|f| f["type"] == "ideas_changed").count();
+    let pushes = |c: &Client| c.frames.iter().filter(|f| f["type"] == "settings").count();
+
+    // A settings push on its own tells no app to read ideas.
+    assert_eq!(ana.hub(json!({ "cmd": "set_repo_insight", "settings": { "on": true } })).unwrap(), json!({ "on": true }));
+    ana.wait("the settings push on ana's first app", |f| f["type"] == "settings");
+    phone.wait("the settings push on ana's second app", |f| f["type"] == "settings");
+    assert_eq!((signals(&ana), signals(&phone)), (0, 0), "a settings push is not an ideas signal");
+
+    // A save tells each of the account's apps, once, and sends no settings push with it.
+    let (pushes_before, phone_pushes_before) = (pushes(&ana), pushes(&phone));
+    let idea = ana.hub(json!({ "cmd": "save_idea", "title": "An iPad app" })).unwrap();
+    let id = idea["id"].as_str().unwrap().to_owned();
+    let told = ana.wait("ideas_changed on ana's first app after a save", |f| f["type"] == "ideas_changed");
+    assert_eq!(told, json!({ "type": "ideas_changed" }));
+    phone.wait("ideas_changed on ana's second app after a save", |f| f["type"] == "ideas_changed");
+    assert_eq!((signals(&ana), signals(&phone)), (1, 1), "once each");
+    assert_eq!((pushes(&ana), pushes(&phone)), (pushes_before, phone_pushes_before), "a save sends no settings push");
+
+    // An edit, then a delete, each sends one more.
+    ana.frames.clear();
+    ana.hub(json!({ "cmd": "save_idea", "id": id, "title": "An iPad app, read-only" })).unwrap();
+    assert_eq!(signals(&ana), 1, "an edit sends one");
+    ana.frames.clear();
+    assert_eq!(ana.hub(json!({ "cmd": "delete_idea", "id": id })).unwrap(), Value::Null);
+    assert_eq!(signals(&ana), 1, "a delete sends one");
+    ana.frames.clear();
+
+    // A save or a delete the hub refuses sends nothing.
+    assert_eq!(ana.hub(json!({ "cmd": "save_idea", "title": "  " })), Err("an idea needs a title".into()));
+    assert_eq!(ana.hub(json!({ "cmd": "delete_idea", "id": id })), Err(format!("this account has no idea {id}")));
+    ana.hub(json!({ "cmd": "list_ideas" })).unwrap();
+    assert_eq!(signals(&ana), 0, "a refused save or delete is no change");
+
+    // Another account's apps hear none of it.
+    bob.hub(json!({ "cmd": "list_ideas" })).unwrap();
+    assert_eq!(signals(&bob), 0, "bob's apps are not told of ana's ideas");
 }
 
 #[test]
@@ -8452,4 +8503,18 @@ fn an_agent_saves_and_lists_ideas_through_act_and_its_role_is_kept() {
     let deleted = act(&ana.dir, &ana.tab, "delete_idea", json!({ "id": id })).unwrap();
     assert_eq!(deleted["outcome"], "done");
     assert_eq!(act(&ana.dir, &ana.tab, "list_ideas", json!({})).unwrap()["result"], json!([]));
+}
+
+#[test]
+fn get_settings_answers_without_reading_ideas() {
+    let hub = TestHub::start_with("ideas_down", Signup::Open);
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@example.test", "correct horse").unwrap();
+    let mut ana = Client::app(&url, &token);
+    ana.hub(json!({ "cmd": "save_idea", "title": "An iPad app" })).unwrap();
+    admin_on(&hub.database, "alter table ideas rename to ideas_away");
+
+    assert!(ana.hub(json!({ "cmd": "list_ideas" })).is_err(), "the ideas read itself fails");
+    let settings = ana.hub(json!({ "cmd": "get_settings" })).expect("the settings every app loads still answer");
+    assert!(settings.is_object() && settings.get("ideas").is_none(), "and they hold no ideas: {settings}");
 }

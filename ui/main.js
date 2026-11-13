@@ -1566,6 +1566,7 @@ function connectHub(signedIn) {
       account.email = frame.account.email;
       showMachines(frame.machines, frame.tabs);
       hub.hub({ cmd: "get_settings" }).then(onHubSettings, console.warn);
+      if (typeof ideasLoad === "function") ideasLoad();
       marksHub.hello(frame.account.id).catch(console.warn);
       showAgentConsent();
     },
@@ -1575,6 +1576,7 @@ function connectHub(signedIn) {
     event: (machine, event) => machine !== account.machine_id && onMachineEvent(machine, event),
     settings: (latest) => onHubSettings(latest),
     confirmations: (items) => onAgentConfirmations(items),
+    ideasChanged: () => typeof ideasRefresh === "function" && ideasRefresh(),
     locked: (error) => askOwnerPassword(error),
     online(on) {
       document.body.dataset.hub = on ? "online" : "offline";

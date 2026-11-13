@@ -126,6 +126,10 @@ class Hub {
       case "confirmations":
         this.on.confirmations?.(frame.items);
         break;
+      // An idea was saved or deleted by one of the account's apps or agents. It carries nothing: read them again.
+      case "ideas_changed":
+        this.on.ideasChanged?.();
+        break;
     }
   }
 

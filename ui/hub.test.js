@@ -107,3 +107,54 @@ test("an app with no password prompt passes the refusal on", async () => {
   answer(ws, { id: 1, err: LOCKED });
   await assert.rejects(removed, (e) => e === LOCKED);
 });
+
+/** Plays `frames` to the hub.js in `source`, signed in on a socket the test plays the hub on. */
+function appOf(source, on = {}) {
+  const sockets = [];
+  class WebSocket {
+    static OPEN = 1;
+    constructor() {
+      this.readyState = 1;
+      this.sent = [];
+      this.closed = false;
+      sockets.push(this);
+    }
+    send(text) {
+      this.sent.push(JSON.parse(text));
+    }
+    close() {
+      this.closed = true;
+    }
+  }
+  const context = { WebSocket, setTimeout: () => 0, on };
+  vm.createContext(context);
+  vm.runInContext(`${source}\nthis.hub = new Hub("https://hub.example", "login", on);`, context);
+  const ws = sockets.at(-1);
+  ws.onopen();
+  const play = (frame) => ws.onmessage({ data: JSON.stringify(frame) });
+  play({ type: "hello", tabs: {} });
+  return { hub: context.hub, ws, play, sockets };
+}
+
+test("an ideas_changed frame tells the app once, and carries nothing", () => {
+  const told = [];
+  const { play } = appOf(hubSrc, { ideasChanged: (...args) => told.push(args) });
+  play({ type: "ideas_changed" });
+  play({ type: "ideas_changed" });
+  assert.deepEqual(told, [[], []]);
+});
+
+test("an app of v0.18.1 or v0.17.x drops an ideas_changed frame and keeps its connection", async () => {
+  const old = readFileSync(new URL("./fixtures/hub-v0.18.1.js", import.meta.url), "utf8");
+  assert.doesNotMatch(old, /ideas_changed/, "that release has never heard of it");
+  const heard = [];
+  const { hub, ws, play, sockets } = appOf(old, { settings: (s) => heard.push(s), machines: () => heard.push("machines") });
+  play({ type: "ideas_changed" });
+  play({ type: "settings", settings: { connectors: [] } });
+  assert.deepEqual(here(heard), [{ connectors: [] }], "it goes on to the frames it knows");
+  assert.equal(ws.closed, false, "the socket stays open");
+  assert.equal(sockets.length, 1, "and it does not reconnect");
+  const call = hub.hub({ cmd: "list_ideas" });
+  play({ type: "reply", id: 1, ok: [] });
+  assert.deepEqual(here(await call), [], "a call still gets its answer after the frame");
+});

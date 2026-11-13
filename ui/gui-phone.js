@@ -142,6 +142,7 @@ document.getElementById("settings-nav").addEventListener("click", (e) => {
 const phoneMore = { workflows: null, taste: null };
 
 const moreHints = {
+  ideas: () => (typeof ideasOpenText === "function" ? ideasOpenText() : ""),
   reviews: () => (navCounts().reviews > 0 ? `${navCounts().reviews} to review` : ""),
   projects: () => {
     const catalog = globalProjectsCatalog();
@@ -169,6 +170,7 @@ const moreHints = {
 };
 const MORE_LISTS = [
   [
+    { id: "ideas", label: "Ideas", hint: moreHints.ideas, open: () => openPage("ideas") },
     { id: "pull-requests", label: "Pull requests", hint: moreHints.reviews, open: () => openPage("pull-requests") },
     { id: "projects", label: "Projects", hint: moreHints.projects, open: () => openGlobalProjects() },
     { id: "taste", label: "Way of working", hint: moreHints.taste, open: () => openPage("taste") },

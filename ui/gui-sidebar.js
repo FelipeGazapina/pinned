@@ -29,6 +29,7 @@ Object.assign(ICON_PATHS, {
   "side-new": `<path d="M12 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6"/><path d="M18.4 3.6a2 2 0 0 1 2.8 2.8L12 15.6l-4 1 1-4z"/>`,
   "side-bot": `<rect x="4" y="8" width="16" height="12" rx="2"/><path d="M12 8V4"/><path d="M9 14v2"/><path d="M15 14v2"/>`,
   "side-inbox": `<path d="M22 12h-6l-2 3h-4l-2-3H2"/><path d="M5.5 5.1 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.5-6.9A2 2 0 0 0 16.8 4H7.2a2 2 0 0 0-1.7 1.1z"/>`,
+  "side-ideas": `<path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5"/><path d="M9 18h6"/><path d="M10 22h4"/>`,
   "side-pr": `<circle cx="18" cy="18" r="3"/><circle cx="6" cy="6" r="3"/><path d="M13 6h3a2 2 0 0 1 2 2v7"/><path d="M6 9v12"/>`,
   "side-usage": `<path d="M5 20V10"/><path d="M12 20V4"/><path d="M19 20v-6"/>`,
   "side-add-project": `<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 10v6"/><path d="M9 13h6"/>`,
@@ -2346,7 +2347,7 @@ else {
 }
 
 /** The nav above the threads: the orchestrator on its host with the Captains' reports not yet seen,
- * what needs you, the pull requests that ask your review, and the 5-hour usage. */
+ * what needs you, the ideas still open, the pull requests that ask your review, and the 5-hour usage. */
 const sideNav = document.getElementById("side-nav");
 const navRow = (name) => sideNav.querySelector(`[data-nav="${name}"]`);
 const setText = (el, text) => el.textContent !== text && (el.textContent = text);
@@ -2373,6 +2374,11 @@ function drawNav() {
   setText(orchestrator.querySelector(".host"), host ? `${machineName(host)}${away ? " · offline" : ""}` : "");
   drawCount(orchestrator.querySelector(".count"), counts.orchestrator, `${counts.orchestrator} ${counts.orchestrator === 1 ? "report" : "reports"} from the Captains you haven't read`);
   drawCount(navRow("needs-you").querySelector(".count"), counts.needsYou, `${counts.needsYou} waiting on you`);
+  // Read from a script that loads after this one, so a page without it shows no count.
+  const ideas = navRow("ideas").querySelector(".meta");
+  const ideasOpen = typeof ideasOpenText === "function" ? ideasOpenText() : "";
+  ideas.hidden = !ideasOpen;
+  setText(ideas, ideasOpen);
   const reviews = navRow("pull-requests").querySelector(".meta");
   reviews.hidden = !(counts.reviews > 0);
   setText(reviews, counts.reviews > 0 ? `${counts.reviews} to review` : "");
@@ -2384,7 +2390,7 @@ function drawNav() {
     usage.querySelector(".bar > span").style.width = `${Math.min(100, Math.max(0, percent))}%`;
     usage.title = `${counts.usage.account}: ${percent}% of the 5-hour window, resets ${new Date(counts.usage.resetsAt).toLocaleTimeString(APP_LOCALE, { hour: "numeric", minute: "2-digit" })}`;
   }
-  for (const name of ["needs-you", "pull-requests", "usage"]) navRow(name).classList.toggle("active", page === name);
+  for (const name of ["needs-you", "ideas", "pull-requests", "usage"]) navRow(name).classList.toggle("active", page === name);
   setText(document.getElementById("machines-online"), `${counts.machinesOnline} ${counts.machinesOnline === 1 ? "machine" : "machines"} online`);
   accountButton.classList.toggle("offline", !counts.machinesOnline);
   const searchKey = document.getElementById("search-key");

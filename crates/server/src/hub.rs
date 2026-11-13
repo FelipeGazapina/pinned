@@ -528,7 +528,7 @@ impl Hub {
                 }
                 return Ok(Value::Null);
             }
-            HubCall::GetSettings => return json(self.settings(account).await?),
+            HubCall::GetSettings => (json(c().await?.get_settings()), false),
             HubCall::ConnectLinear { key } => (json(c().await?.connect_linear(&key).await?), true),
             HubCall::DisconnectLinear => (json(c().await?.disconnect_linear()?), true),
             HubCall::LinearSuggestions => (json(c().await?.linear_suggestions().await?), false),
@@ -728,7 +728,7 @@ impl Hub {
                 if !self.db.delete_idea(account.id, Uuid::parse_str(&id).map_err(|_| unknown())?).await? {
                     return Err(unknown());
                 }
-                self.push_settings(account).await;
+                self.ideas_changed(account);
                 return Ok(Value::Null);
             }
             HubCall::ListMcpServers => return json(c().await?.mcp_servers()),
@@ -916,20 +916,17 @@ impl Hub {
         }
     }
 
-    /// The account's settings with its ideas, which live in the hub's own table. A failed ideas
-    /// read leaves them out rather than failing the settings every app loads.
-    async fn settings(&self, account: &Account) -> Result<pinned_core::connectors::Settings, String> {
-        let mut settings = self.connectors(account).await?.get_settings();
-        settings.ideas = self.db.ideas(account.id, None).await.unwrap_or_else(|e| {
-            eprintln!("pinned-server: could not read the ideas of account {}: {e}", account.id);
-            Vec::new()
-        });
-        Ok(settings)
+    /// Tells each of the account's apps that an idea was saved or deleted, so they read the list again.
+    /// Only a successful save or delete sends it; the settings push, which carries no ideas, never does.
+    fn ideas_changed(&self, account: &Account) {
+        account.broadcast(&ToClient::IdeasChanged);
     }
 
+    /// Pushes the settings, which carry no ideas: the app reads them with `list_ideas`, so a push stays
+    /// small however many there are.
     async fn push_settings(&self, account: &Account) {
-        if let Ok(settings) = self.settings(account).await {
-            account.broadcast(&ToClient::Settings { settings });
+        if let Ok(connectors) = self.connectors(account).await {
+            account.broadcast(&ToClient::Settings { settings: connectors.get_settings() });
         }
     }
 
@@ -948,7 +945,7 @@ impl Hub {
             }
             None => self.db.add_idea(account.id, title, text.trim(), project, status.unwrap_or_default(), &by, now).await?,
         };
-        self.push_settings(account).await;
+        self.ideas_changed(account);
         Ok(idea)
     }
 

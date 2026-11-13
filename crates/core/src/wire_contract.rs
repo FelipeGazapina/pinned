@@ -112,6 +112,7 @@ pub fn current(version: &str, routes: &[&str]) -> Contract {
     outbound.insert("Confirmation".into(), schemas::<crate::surface::Confirmation>());
     outbound.insert("Decided".into(), schemas::<crate::surface::Decided>());
     outbound.insert("Unlocked".into(), schemas::<crate::surface::Unlocked>());
+    outbound.insert("Idea".into(), schemas::<crate::ideas::Idea>());
     outbound.insert("McpServer".into(), schemas::<crate::mcp::Entry>());
     outbound.insert("McpLoad".into(), schemas::<crate::mcp::Load>());
     outbound.insert("RunStarted".into(), schemas::<crate::wire::RunStarted>());

@@ -1651,6 +1651,9 @@ pub enum ToClient {
     SessionMarks { marks: Vec<crate::marks::SessionMarks> },
     /// The agents' actions waiting on the user's approval, after `Hello` and after any change.
     Confirmations { items: Vec<crate::surface::Confirmation> },
+    /// An idea of the account was saved or deleted, by an app or an agent. It carries nothing: the app reads
+    /// the list again with `list_ideas`. An app that does not know this frame drops it and stays connected.
+    IdeasChanged,
 }
 
 /// Machine to hub. The first frame must be `Auth` with the machine's token.
@@ -2236,7 +2239,7 @@ mod tests {
             }),
         );
         round_trip(
-            ToClient::Settings { settings: Settings { linear: None, slack: None, slack_bots: vec![], github: None, vercel: None, upstash: None, box_claude_tokens: BTreeMap::new(), connectors: vec![], checked: None, boxes: BoxAccess::default(), box_asks: vec![], convex: vec![], ideas: vec![], repo_insight: Default::default() } },
+            ToClient::Settings { settings: Settings { linear: None, slack: None, slack_bots: vec![], github: None, vercel: None, upstash: None, box_claude_tokens: BTreeMap::new(), connectors: vec![], checked: None, boxes: BoxAccess::default(), box_asks: vec![], convex: vec![], repo_insight: Default::default() } },
             json!({ "type": "settings", "settings": { "linear": null, "slack": null, "github": null, "vercel": null, "upstash": null, "connectors": [], "checked": null } }),
         );
         let old: ToClient = serde_json::from_value(json!({ "type": "machines", "machines": [] })).unwrap();
@@ -2251,6 +2254,7 @@ mod tests {
         );
         let bare = serde_json::to_value(ToClient::Machines { machines: vec![], tabs: None }).unwrap();
         assert!(bare.get("tabs").is_none());
+        round_trip(ToClient::IdeasChanged, json!({ "type": "ideas_changed" }));
     }
 
     #[test]

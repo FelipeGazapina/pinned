@@ -1162,9 +1162,6 @@ pub struct Settings {
     /// whose sessions read it. Only the hub keeps their keys.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub convex: Vec<convex::Connection>,
-    /// The account's ideas. Only the hub fills it, from its own table, when it pushes or answers settings.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ideas: Vec<crate::ideas::Idea>,
     /// Absent on the wire while it is off.
     #[serde(default, skip_serializing_if = "repo_insight_is_off")]
     pub repo_insight: RepoInsight,
@@ -3772,7 +3769,6 @@ impl Connectors {
             boxes: store.boxes.clone(),
             box_asks: store.box_asks.clone(),
             convex: store.convex.clone(),
-            ideas: Vec::new(),
             repo_insight: store.repo_insight.clone(),
         }
     }
