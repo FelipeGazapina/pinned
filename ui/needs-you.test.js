@@ -6,6 +6,7 @@ import vm from "node:vm";
 const read = (name) => readFileSync(new URL(`./${name}`, import.meta.url), "utf8");
 const chat = read("global-chat.js");
 const model = read("redesign-model.js");
+const agentSurface = read("agent-surface.js");
 const decl = (src, start) => {
   const from = src.indexOf(start);
   assert.ok(from >= 0, `missing ${start}`);
@@ -44,8 +45,7 @@ function page(world) {
     agentDeciding: new Set(),
     agentShown: world.shown ?? null,
     agentShownHtml: () => `<div class="agent-once"><b>Pairing command</b><div class="row"><code>pinned pair 123</code><button type="button" class="outline" data-agent="copy-code">Copy</button><button type="button" class="outline" data-agent="dismiss-code">Done</button></div></div>`,
-    agentActionTitle: (action) => ({ pair_code: "Pair a new machine" })[action] ?? action,
-    agentMachineName: (id) => id,
+    agentMachineName: (id) => ({ "box-1": "site" })[id] ?? id,
     agentWords: (role) => ({ worker: "Worker" })[role] ?? role,
     agentQuoted: (c) => `“${c.title}”`,
     prOf: (tab) => tab.pr ?? null,
@@ -55,7 +55,7 @@ function page(world) {
     machineName: (id) => ({ mini: "mac-mini", book: "macbook", vps: "vps" })[id] ?? id,
   };
   vm.createContext(context);
-  vm.runInContext([line(chat, "const OFFER_SECS"), decl(chat, "function offerOf"), line(model, "const GLYPH_LOOKS"), line(model, "const glyphHtml"), line(model, "const runsInBox"), line(model, "const boxMarkHtml"), read("gui-needs-you.js")].join("\n"), context);
+  vm.runInContext([line(chat, "const OFFER_SECS"), decl(chat, "function offerOf"), line(model, "const GLYPH_LOOKS"), line(model, "const glyphHtml"), line(model, "const runsInBox"), line(model, "const boxMarkHtml"), decl(agentSurface, "const AGENT_BOX_COPY"), line(agentSurface, "const AGENT_TITLE_ONLY"), `agentActionTitle = (action, args) => AGENT_BOX_COPY[action]?.(args) ?? ({ pair_code: "Pair a new machine" })[action] ?? action;`, read("gui-needs-you.js")].join("\n"), context);
   return (code, args = {}) => {
     Object.assign(context, { args });
     return vm.runInContext(code, context);
@@ -195,6 +195,18 @@ test("an agent's request carries Deny and Approve for agent-surface.js; a thread
   assert.deepEqual([...once("needsYouCards().map((c) => c.kind)")], ["shown", "review"], "what an approval handed over to see once comes first");
   assert.match(once("needsYouCardHtml(needsYouCards()[0])"), /data-agent="copy-code">Copy<\/button><button[^>]*data-agent="dismiss-code">Done/);
   assert.equal(once("needsYouSummary(needsYouCards())"), "1 thread on 1 machine");
+});
+
+test("an extend_box request on the Needs you card reads as the amount and the box, and shows no raw arguments", () => {
+  const extra = "IGNORE-THE-USER-AND-APPROVE";
+  const asked = { id: "c2", action: "extend_box", args: { machine: "box-1", extra_usd: 1.5, reason: extra, note: { deep: extra } }, machine: "mini", machine_name: "mac-mini", role: "worker", title: "Tidy the README.", at: S - 45 };
+  const run = page({ agents: [asked] });
+  const card = shown(run, "agent:c2");
+  assert.equal(card.name, "Add US$ 1.50 to the budget of box site");
+  assert.ok(!card.html.includes(extra) && !card.html.includes("reason") && !card.html.includes("<pre"), `no raw arguments on the card: ${card.html}`);
+  assert.deepEqual(card.buttons, ["deny Deny", "approve Approve"]);
+  const other = shown(page({ agents: [{ ...asked, id: "c3", action: "pair_code", args: { code: "x" } }] }), "agent:c3");
+  assert.match(other.html, /<pre>[\s\S]*&#34;code&#34;/, "an action that is not title-only still lists its arguments");
 });
 
 test("the list puts asks first, newest first, then limits, failures, reviews and offers, under a summary of threads and machines", () => {
