@@ -83,6 +83,11 @@ impl Outbox {
             Err(mpsc::error::TrySendError::Closed(_)) => Err(()),
         }
     }
+
+    /// How many frames wait for the peer to read them.
+    fn queued(&self) -> usize {
+        self.frames.max_capacity() - self.frames.capacity()
+    }
 }
 pub type Sent = (String, oneshot::Receiver<Result<Value, String>>);
 
@@ -104,6 +109,19 @@ pub(crate) fn too_old_for_run_now(account: &Account, machine: &str, subject: &Su
     }
     let name = account.name_of(machine).unwrap_or_else(|| machine.to_owned());
     format!("{name} runs an older pinned that has no Run now: update it in Settings › Machines")
+}
+
+/// How often the hub logs its census.
+pub const CENSUS_EVERY: Duration = Duration::from_secs(300);
+
+/// The resident set size, in KiB, from the text of `/proc/self/status`.
+fn rss_kib(status: &str) -> Option<u64> {
+    status.lines().find_map(|line| line.strip_prefix("VmRSS:"))?.trim().strip_suffix("kB")?.trim().parse().ok()
+}
+
+/// A byte count from the text of a cgroup v2 `memory.stat`.
+fn cgroup_bytes(stat: &str, key: &str) -> Option<u64> {
+    stat.lines().find_map(|line| line.strip_prefix(key)?.strip_prefix(' ')?.trim().parse().ok())
 }
 
 /// How often the hub expires held ends for every account.
@@ -292,6 +310,50 @@ impl Hub {
 
     pub fn next_socket(&self) -> u64 {
         self.sockets.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// One log line of counts: what the hub holds in memory, and the process's memory where the
+    /// system says. It names no account, machine, address or content. Each lock is held briefly.
+    pub fn census(&self) -> String {
+        let accounts: Vec<Arc<Account>> = self.accounts.lock().unwrap().values().cloned().collect();
+        let (mut clients, mut machines, mut frames_sum, mut frames_max, mut pending) = (0, 0, 0, 0, 0);
+        let (mut known_tabs, mut drive_waiters) = (0, 0);
+        for account in &accounts {
+            {
+                let live = account.live.lock().unwrap();
+                clients += live.clients.len();
+                machines += live.machines.len();
+                pending += live.machines.values().map(|machine| machine.pending.len()).sum::<usize>();
+                for out in live.clients.values().map(|client| &client.out).chain(live.machines.values().map(|machine| &machine.out)) {
+                    let queued = out.queued();
+                    frames_sum += queued;
+                    frames_max = frames_max.max(queued);
+                }
+            }
+            if let Some(connectors) = account.connectors.get() {
+                let (tabs, waiters) = connectors.census();
+                known_tabs += tabs;
+                drive_waiters += waiters;
+            }
+        }
+        let mut line = format!(
+            "pinned-server: census accounts={} clients={clients} machines={machines} outbox_frames_sum={frames_sum} outbox_frames_max={frames_max} pending_calls={pending} known_tabs={known_tabs} drive_waiters={drive_waiters}",
+            accounts.len()
+        );
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            line.push_str(&format!(" tasks_alive={}", runtime.metrics().num_alive_tasks()));
+        }
+        let status = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
+        if let Some(kib) = rss_kib(&status) {
+            line.push_str(&format!(" rss_mb={}", kib / 1024));
+        }
+        let stat = std::fs::read_to_string("/sys/fs/cgroup/memory.stat").unwrap_or_default();
+        for (key, field) in [("anon", "cgroup_anon_mb"), ("file", "cgroup_file_mb")] {
+            if let Some(bytes) = cgroup_bytes(&stat, key) {
+                line.push_str(&format!(" {field}={}", bytes >> 20));
+            }
+        }
+        line
     }
 
     pub async fn watch_all(self: &Arc<Self>) -> Result<(), String> {
@@ -1712,6 +1774,16 @@ pub(crate) fn task_key(id: &str) -> Result<Uuid, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_census_reads_memory_counts_and_skips_what_is_missing() {
+        assert_eq!(rss_kib("Name:\tpinned-server\nVmRSS:\t  204800 kB\nVmSwap:\t0 kB\n"), Some(204800));
+        assert_eq!(rss_kib("Name:\tpinned-server\n"), None);
+        let stat = "anon 1048576\nfile 3145728\nanon_thp 0\n";
+        assert_eq!(cgroup_bytes(stat, "anon"), Some(1 << 20));
+        assert_eq!(cgroup_bytes(stat, "file"), Some(3 << 20));
+        assert_eq!(cgroup_bytes("", "anon"), None);
+    }
 
     #[test]
     fn a_machine_back_before_a_client_saw_it_leave_gets_that_clients_watch() {
