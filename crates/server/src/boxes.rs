@@ -395,12 +395,16 @@ pub fn offline_answer(phase: &Phase, removed: bool, machine: &str) -> String {
     }
 }
 
-pub(crate) fn verdict(age: Duration, seen: Seen, t: &mut Timers, now: Instant, p: &Policy) -> Option<End> {
+/// `delegating` is a box whose tab waits on workers in other boxes. It is quiet, or done with its own
+/// turn, while they run, so neither starts its Idle, Done or Exited timer: only its max life (and,
+/// before this, its budget) ends it then, so their ends find it.
+pub(crate) fn verdict(age: Duration, seen: Seen, t: &mut Timers, now: Instant, p: &Policy, delegating: bool) -> Option<End> {
     // `None` is a condition this look can't see, as the session's while its node is offline: its
     // timer neither starts nor restarts, so a dropped link doesn't buy a quiet box more time.
     let (offline, gone, exited, quiet) = match seen {
         Seen::Offline => (Some(true), None, None, None),
         Seen::NoTab => (Some(false), Some(true), None, None),
+        Seen::Tab { .. } if delegating => (Some(false), Some(false), Some(false), Some(false)),
         Seen::Tab { running, quiet } => (Some(false), Some(false), Some(!running), Some(quiet)),
     };
     let held = |since: &mut Option<Instant>, on: Option<bool>| match on {
@@ -1402,15 +1406,21 @@ impl Boxes {
     }
 
     /// A worker box ended before its task did: the machine whose tab delegated the task hears it
-    /// failed, so it does not wait on it. A box that ends for its task's end, `Done`, has nothing to tell.
+    /// failed, so it does not wait on it. One that can't hear it now gets it from the hub's held ends. A box that ends for its task's end, `Done`, has nothing to tell.
     async fn tell_origin(&self, hub: &Hub, account: &Account, row: &BoxRow, why: &End) {
         let BoxWork::Delegate { origin, .. } = &row.work else { return };
         let Some(error) = self.box_end_error(why) else { return };
         let mut end = RemoteEnd { state: "failed".into(), summary: None, error: Some(error), usage: None };
         self.add_end_box_usage(hub, account, row, &mut end).await;
-        let ended = Call::RemoteEnded { from: row.machine.to_string(), tab: origin.tab.clone(), task: origin.task.clone(), end };
+        let ended = Call::RemoteEnded { from: row.machine.to_string(), tab: origin.tab.clone(), task: origin.task.clone(), end: end.clone() };
         if let Err(e) = hub.call_machine(account, &origin.machine, ended, ORIGIN_WAIT).await {
             eprintln!("pinned-server: could not tell {} that box {} ended: {}", origin.machine, row.id, String::from(e));
+            // Held for it, unless the worker's own end is held already: that one stays.
+            match crate::remote::hold_end(hub, account, &origin.machine, &row.machine.to_string(), &origin.tab, &origin.task, end, false).await {
+                Ok(true) => {}
+                Ok(false) => eprintln!("pinned-server: {} is no machine of account {} any more, so box {}'s end goes untold", origin.machine, account.id, row.id),
+                Err(e) => eprintln!("pinned-server: box {}'s end goes untold: {e}", row.id),
+            }
         }
     }
 
@@ -1590,6 +1600,14 @@ impl Boxes {
             _ => None,
         };
         let rows = hub.db.boxes(account.id).await?;
+        // The machines whose tabs delegated a task that still runs in a worker box.
+        let delegating: HashSet<String> = rows
+            .iter()
+            .filter_map(|row| match row {
+                Ok(BoxRow { phase, work: BoxWork::Delegate { origin, .. }, .. }) if !matches!(phase, Phase::Ending(_)) => Some(origin.machine.clone()),
+                _ => None,
+            })
+            .collect();
         let now = Instant::now();
         for row in rows {
             let row = match row {
@@ -1643,7 +1661,7 @@ impl Boxes {
                                 Seen::Offline => Seen::Offline,
                                 _ => Seen::Tab { running: true, quiet: false },
                             };
-                            let verdict = verdict(row.age, seen, slot, now, &self.policy);
+                            let verdict = verdict(row.age, seen, slot, now, &self.policy, false);
                             if over_budget {
                                 Some(End::Expired)
                             } else if gone {
@@ -1661,7 +1679,7 @@ impl Boxes {
                                 _ => seen,
                             };
                             let was_offline = slot.offline_since;
-                            let verdict = verdict(row.age, seen, slot, now, &self.policy);
+                            let verdict = verdict(row.age, seen, slot, now, &self.policy, delegating.contains(&machine));
                             if matches!(row.work, BoxWork::Delegate { .. }) {
                                 match (was_offline, slot.offline_since) {
                                     (None, Some(_)) => eprintln!("pinned-server: box {} of account {} went offline", row.id, account.id),
@@ -1945,8 +1963,8 @@ mod tests {
     /// The verdict after `seen` held for `held`, judged at the start and at the end.
     fn after(seen: Seen, held: Duration, age: Duration) -> Option<End> {
         let (start, mut timers) = (Instant::now(), Timers::default());
-        assert_eq!(verdict(Duration::ZERO, seen, &mut timers, start, &policy()), None);
-        verdict(age, seen, &mut timers, start + held, &policy())
+        assert_eq!(verdict(Duration::ZERO, seen, &mut timers, start, &policy(), false), None);
+        verdict(age, seen, &mut timers, start + held, &policy(), false)
     }
 
     #[test]
@@ -2119,8 +2137,33 @@ mod tests {
     fn max_life_ends_a_box_whatever_its_session_does() {
         let working = Seen::Tab { running: true, quiet: false };
         let mut timers = Timers::default();
-        assert_eq!(verdict(19 * MIN, working, &mut timers, Instant::now(), &policy()), None);
-        assert_eq!(verdict(21 * MIN, working, &mut timers, Instant::now(), &policy()), Some(End::Expired));
+        assert_eq!(verdict(19 * MIN, working, &mut timers, Instant::now(), &policy(), false), None);
+        assert_eq!(verdict(21 * MIN, working, &mut timers, Instant::now(), &policy(), false), Some(End::Expired));
+    }
+
+    #[test]
+    fn a_box_others_delegate_from_ignores_idle_and_exited_and_still_meets_its_max_life() {
+        let (start, mut t) = (Instant::now(), Timers::default());
+        for seen in [Seen::Tab { running: true, quiet: true }, Seen::Tab { running: false, quiet: true }] {
+            for minute in [0, 21, 60, 19 * 60] {
+                assert_eq!(verdict(MIN, seen, &mut t, start + minute * MIN, &policy(), true), None, "{seen:?} at {minute} min while its worker hangs");
+            }
+        }
+        t.done = true;
+        assert_eq!(verdict(MIN, Seen::Tab { running: true, quiet: true }, &mut t, start + 30 * 60 * MIN, &Policy { done: MIN, ..policy() }, true), None, "nor Done");
+        assert_eq!(verdict(21 * MIN, Seen::Tab { running: true, quiet: true }, &mut t, start, &policy(), true), Some(End::Expired), "max life ends it");
+        // A node gone offline, or its tab closed, still ends it, by the default policy's 10 and 2 minutes.
+        let p = Policy::default();
+        let (mut offline, mut closed) = (Timers::default(), Timers::default());
+        assert_eq!(verdict(MIN, Seen::Offline, &mut offline, start, &p, true), None);
+        assert_eq!(verdict(MIN, Seen::Offline, &mut offline, start + 10 * MIN - Duration::from_secs(1), &p, true), None);
+        assert_eq!(verdict(MIN, Seen::Offline, &mut offline, start + 10 * MIN, &p, true), Some(End::Offline), "a node gone offline still ends it");
+        assert_eq!(verdict(MIN, Seen::NoTab, &mut closed, start, &p, true), None);
+        assert_eq!(verdict(MIN, Seen::NoTab, &mut closed, start + 2 * MIN - Duration::from_secs(1), &p, true), None);
+        assert_eq!(verdict(MIN, Seen::NoTab, &mut closed, start + 2 * MIN, &p, true), Some(End::TabClosed), "a closed tab still ends it after 2 minutes");
+        // Its workers are done: the quiet it had then counts from now.
+        assert_eq!(verdict(MIN, Seen::Tab { running: true, quiet: true }, &mut t, start + 40 * 60 * MIN, &policy(), false), None);
+        assert_eq!(verdict(MIN, Seen::Tab { running: true, quiet: true }, &mut t, start + 40 * 60 * MIN + 21 * MIN, &policy(), false), Some(End::Done));
     }
 
     #[test]
@@ -2128,11 +2171,11 @@ mod tests {
         let p = policy();
         let (start, mut t) = (Instant::now(), Timers::default());
         let quiet = Seen::Tab { running: true, quiet: true };
-        assert_eq!(verdict(MIN, quiet, &mut t, start, &p), None);
-        assert_eq!(verdict(MIN, Seen::Tab { running: true, quiet: false }, &mut t, start + 15 * MIN, &p), None, "working again");
-        assert_eq!(verdict(MIN, quiet, &mut t, start + 16 * MIN, &p), None);
-        assert_eq!(verdict(MIN, quiet, &mut t, start + 35 * MIN, &p), None, "quiet for 19 minutes since it worked");
-        assert_eq!(verdict(MIN, quiet, &mut t, start + 37 * MIN, &p), Some(End::Idle));
+        assert_eq!(verdict(MIN, quiet, &mut t, start, &p, false), None);
+        assert_eq!(verdict(MIN, Seen::Tab { running: true, quiet: false }, &mut t, start + 15 * MIN, &p, false), None, "working again");
+        assert_eq!(verdict(MIN, quiet, &mut t, start + 16 * MIN, &p, false), None);
+        assert_eq!(verdict(MIN, quiet, &mut t, start + 35 * MIN, &p, false), None, "quiet for 19 minutes since it worked");
+        assert_eq!(verdict(MIN, quiet, &mut t, start + 37 * MIN, &p, false), Some(End::Idle));
     }
 
     #[test]
@@ -2140,13 +2183,41 @@ mod tests {
         let p = Policy { done: 2 * MIN, ..policy() };
         let (start, mut t) = (Instant::now(), Timers::default());
         let quiet = Seen::Tab { running: true, quiet: true };
-        assert_eq!(verdict(MIN, quiet, &mut t, start, &p), None);
-        assert_eq!(verdict(MIN, quiet, &mut t, start + 3 * MIN, &p), None, "quiet without a pull request waits out idle");
+        assert_eq!(verdict(MIN, quiet, &mut t, start, &p, false), None);
+        assert_eq!(verdict(MIN, quiet, &mut t, start + 3 * MIN, &p, false), None, "quiet without a pull request waits out idle");
         t.done = true;
-        assert_eq!(verdict(MIN, Seen::Tab { running: true, quiet: false }, &mut t, start + 4 * MIN, &p), None, "still working");
-        assert_eq!(verdict(MIN, quiet, &mut t, start + 5 * MIN, &p), None);
-        assert_eq!(verdict(MIN, quiet, &mut t, start + 6 * MIN, &p), None, "quiet for 1 of 2 minutes");
-        assert_eq!(verdict(MIN, quiet, &mut t, start + 7 * MIN, &p), Some(End::Done));
+        assert_eq!(verdict(MIN, Seen::Tab { running: true, quiet: false }, &mut t, start + 4 * MIN, &p, false), None, "still working");
+        assert_eq!(verdict(MIN, quiet, &mut t, start + 5 * MIN, &p, false), None);
+        assert_eq!(verdict(MIN, quiet, &mut t, start + 6 * MIN, &p, false), None, "quiet for 1 of 2 minutes");
+        assert_eq!(verdict(MIN, quiet, &mut t, start + 7 * MIN, &p, false), Some(End::Done));
+    }
+
+    #[test]
+    fn a_captain_box_outlives_a_short_disconnect_and_ends_offline_after_ten_minutes() {
+        // The shipped policy: a node offline for 10 minutes ends its box, and a reconnect resets that.
+        let p = Policy::default();
+        assert_eq!(p.offline, 10 * MIN);
+        let sec = Duration::from_secs(1);
+        for delegating in [true, false] {
+            // A Captain quiet while its workers run, or a session at work.
+            let waiting = Seen::Tab { running: true, quiet: delegating };
+            let (start, mut t) = (Instant::now(), Timers::default());
+            assert_eq!(verdict(MIN, waiting, &mut t, start, &p, delegating), None);
+            // A hub deploy: the node drops for 30 seconds and reconnects.
+            assert_eq!(verdict(MIN, Seen::Offline, &mut t, start + sec, &p, delegating), None);
+            assert_eq!(verdict(MIN, Seen::Offline, &mut t, start + 31 * sec, &p, delegating), None);
+            assert_eq!(verdict(MIN, waiting, &mut t, start + 40 * sec, &p, delegating), None, "back after 30 s");
+            // Offline for 9 min 59 s, then back: still not ended, and the clock starts over.
+            let away = start + MIN;
+            assert_eq!(verdict(MIN, Seen::Offline, &mut t, away, &p, delegating), None);
+            assert_eq!(verdict(MIN, Seen::Offline, &mut t, away + 10 * MIN - sec, &p, delegating), None, "9 min 59 s offline");
+            assert_eq!(verdict(MIN, waiting, &mut t, away + 10 * MIN, &p, delegating), None, "back before 10 min");
+            // The next drop counts from zero: 10 minutes of it end the box.
+            let gone = away + 11 * MIN;
+            assert_eq!(verdict(MIN, Seen::Offline, &mut t, gone, &p, delegating), None);
+            assert_eq!(verdict(MIN, Seen::Offline, &mut t, gone + 10 * MIN - sec, &p, delegating), None, "a reconnect reset the clock");
+            assert_eq!(verdict(MIN, Seen::Offline, &mut t, gone + 10 * MIN, &p, delegating), Some(End::Offline), "delegating: {delegating}");
+        }
     }
 
     #[test]
@@ -2154,10 +2225,10 @@ mod tests {
         let p = policy();
         let (start, mut t) = (Instant::now(), Timers::default());
         let quiet = Seen::Tab { running: true, quiet: true };
-        assert_eq!(verdict(MIN, quiet, &mut t, start, &p), None);
-        assert_eq!(verdict(MIN, Seen::Offline, &mut t, start + 10 * MIN, &p), None);
-        assert_eq!(verdict(MIN, quiet, &mut t, start + 19 * MIN, &p), None);
-        assert_eq!(verdict(MIN, quiet, &mut t, start + 21 * MIN, &p), Some(End::Idle));
+        assert_eq!(verdict(MIN, quiet, &mut t, start, &p, false), None);
+        assert_eq!(verdict(MIN, Seen::Offline, &mut t, start + 10 * MIN, &p, false), None);
+        assert_eq!(verdict(MIN, quiet, &mut t, start + 19 * MIN, &p, false), None);
+        assert_eq!(verdict(MIN, quiet, &mut t, start + 21 * MIN, &p, false), Some(End::Idle));
     }
 
     #[test]
@@ -2181,28 +2252,31 @@ mod tests {
         let p = Policy::default();
         let (start, mut t) = (Instant::now(), Timers::default());
         let working = Seen::Tab { running: true, quiet: false };
-        assert_eq!(verdict(30 * MIN, working, &mut t, start, &p), None);
-        assert_eq!(verdict(31 * MIN, Seen::Offline, &mut t, start + MIN, &p), None);
-        assert_eq!(verdict(40 * MIN, Seen::Offline, &mut t, start + 10 * MIN, &p), None, "offline for 9 of 10 minutes");
-        assert_eq!(verdict(41 * MIN, working, &mut t, start + 11 * MIN, &p), None, "back within the grace");
-        assert_eq!(verdict(42 * MIN, Seen::Offline, &mut t, start + 12 * MIN, &p), None);
-        assert_eq!(verdict(51 * MIN, Seen::Offline, &mut t, start + 21 * MIN, &p), None, "a blink restarts the grace");
-        assert_eq!(verdict(53 * MIN, Seen::Offline, &mut t, start + 23 * MIN, &p), Some(End::Offline));
+        assert_eq!(verdict(30 * MIN, working, &mut t, start, &p, false), None);
+        assert_eq!(verdict(31 * MIN, Seen::Offline, &mut t, start + MIN, &p, false), None);
+        assert_eq!(verdict(40 * MIN, Seen::Offline, &mut t, start + 10 * MIN, &p, false), None, "offline for 9 of 10 minutes");
+        assert_eq!(verdict(41 * MIN, working, &mut t, start + 11 * MIN, &p, false), None, "back within the grace");
+        assert_eq!(verdict(42 * MIN, Seen::Offline, &mut t, start + 12 * MIN, &p, false), None);
+        assert_eq!(verdict(51 * MIN, Seen::Offline, &mut t, start + 21 * MIN, &p, false), None, "a blink restarts the grace");
+        assert_eq!(verdict(53 * MIN, Seen::Offline, &mut t, start + 23 * MIN, &p, false), Some(End::Offline));
     }
 
     #[test]
     fn a_flapping_box_still_ends_at_its_max_life_and_its_budget() {
         let p = Policy::default();
-        let (start, mut t) = (Instant::now(), Timers::default());
-        let working = Seen::Tab { running: true, quiet: false };
-        let mut minute = 0;
-        // Offline 9 minutes, back 1, over and over: never offline for the whole grace.
-        while minute < 4 * 60 {
-            let seen = if minute % 10 == 9 { working } else { Seen::Offline };
-            assert_eq!(verdict(minute * MIN, seen, &mut t, start + minute * MIN, &p), None, "minute {minute}");
-            minute += 1;
+        // A Captain box waiting on its workers (quiet, `delegating`) too: its hold does not lift max life.
+        for delegating in [false, true] {
+            let (start, mut t) = (Instant::now(), Timers::default());
+            let working = Seen::Tab { running: true, quiet: delegating };
+            let mut minute = 0;
+            // Offline 9 minutes, back 1, over and over: never offline for the whole grace.
+            while minute < 4 * 60 {
+                let seen = if minute % 10 == 9 { working } else { Seen::Offline };
+                assert_eq!(verdict(minute * MIN, seen, &mut t, start + minute * MIN, &p, delegating), None, "minute {minute}");
+                minute += 1;
+            }
+            assert_eq!(verdict(4 * 60 * MIN, Seen::Offline, &mut t, start + 4 * 60 * MIN, &p, delegating), Some(End::Expired), "delegating: {delegating}");
         }
-        assert_eq!(verdict(4 * 60 * MIN, Seen::Offline, &mut t, start + 4 * 60 * MIN, &p), Some(End::Expired));
         assert!(over_budget(&spec_with(Some(box_usd_per_hour(BoxSize::Small))), BoxSize::Small, 60 * MIN), "a budget ends it sooner whatever it is seen as");
     }
 
