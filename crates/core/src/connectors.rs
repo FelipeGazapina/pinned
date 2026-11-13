@@ -4368,6 +4368,9 @@ impl Connectors {
     /// A graph equal to `migrate` of the connector being stored is stored as `None`, so the
     /// untouched case stays derivable. What this returns still carries a graph, as `get_settings` does.
     pub fn save_connector(&self, mut connector: Connector) -> Result<Connector, String> {
+        if connector.model.trim().starts_with('-') {
+            return Err("the workflow's model may not start with -, which claude could read as an option".into());
+        }
         let mut store = self.store.lock().unwrap();
         if let Some(graph) = connector.graph.take() {
             {
@@ -6948,6 +6951,28 @@ mod tests {
         let opened = opened.into_inner().unwrap();
         assert_eq!(opened.len(), 1, "the readable workflow still runs: {opened:?}");
         assert!(opened[0].windows(2).any(|pair| pair[0] == "--permission-mode" && pair[1] == "acceptEdits"), "{opened:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_model_that_starts_with_a_dash_is_refused_at_save_so_it_never_reaches_claude_as_an_option() {
+        let (connectors, dir) = stored("dash-model", vec![]);
+        let mut own = linear_connector();
+        own.model = "--dangerously-skip-permissions".into();
+        let error = connectors.save_connector(own).unwrap_err();
+        assert!(error.contains("model") && error.contains("start with -"), "{error}");
+        let mut stepped = linear_connector();
+        let mut graph = talks(&[]);
+        let step = SessionSetup { model: " -x".into(), ..SessionSetup::default() };
+        graph.nodes.push(node("s", "Fix", NodeKind::Session(step)));
+        graph.edges.push(edge("t", "out", "s"));
+        stepped.graph = Some(graph);
+        let error = connectors.save_connector(stepped).unwrap_err();
+        assert!(error.starts_with("\"Fix\"") && error.contains("model"), "{error}");
+        assert!(connectors.store.lock().unwrap().connectors.is_empty(), "neither was saved");
+        let mut plain = linear_connector();
+        plain.model = "claude-sonnet-5-5".into();
+        assert_eq!(claude_args(&plain, "w", "n".into())[..2], ["--model", "claude-sonnet-5-5"], "a model is the value after --model");
         let _ = std::fs::remove_dir_all(dir);
     }
 

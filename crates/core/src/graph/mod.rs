@@ -378,6 +378,9 @@ impl Graph {
             }
             if let NodeKind::Session(setup) = &node.kind {
                 crate::connectors::parse_permission(&setup.permission).map_err(|e| format!("\"{}\": {e}", node.name))?;
+                if setup.model.trim().starts_with('-') {
+                    return Err(format!("\"{}\": its model may not start with -, which claude could read as an option", node.name));
+                }
             }
         }
         Ok(())
