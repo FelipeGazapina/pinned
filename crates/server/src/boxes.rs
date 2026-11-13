@@ -283,7 +283,7 @@ pub enum Seen {
 /// When each condition of a running row began, by the hub's clock. A restart resets them, and
 /// `max_life` still bounds what a box costs.
 #[derive(Default, Debug)]
-struct Timers {
+pub(crate) struct Timers {
     quiet_since: Option<Instant>,
     exited_since: Option<Instant>,
     gone_since: Option<Instant>,
@@ -379,7 +379,7 @@ fn over_budget(spec: &RunSpec, age: Duration) -> bool {
     spec.budget_usd.is_some_and(|b| b > 0.0 && age.as_secs_f64() * BOX_USD_PER_HOUR / 3600.0 >= b)
 }
 
-fn verdict(age: Duration, seen: Seen, t: &mut Timers, now: Instant, p: &Policy) -> Option<End> {
+pub(crate) fn verdict(age: Duration, seen: Seen, t: &mut Timers, now: Instant, p: &Policy) -> Option<End> {
     // `None` is a condition this look can't see, as the session's while its node is offline: its
     // timer neither starts nor restarts, so a dropped link doesn't buy a quiet box more time.
     let (offline, gone, exited, quiet) = match seen {
