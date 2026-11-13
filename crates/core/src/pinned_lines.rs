@@ -104,7 +104,8 @@ pub fn field(text: &str) -> String {
 /// characters that look like one turned into single quotes, and a trailing backslash dropped, so it
 /// cannot add a line, end the quote, or seem to escape the closing quote.
 pub fn quoted(text: &str, max: usize) -> String {
-    format!("\"{}\"", flat(text, max).replace('"', "'"))
+    let line: String = flat(text, max).chars().map(|c| if matches!(c, '"' | '\u{201C}' | '\u{201D}' | '\u{FF02}' | '\u{2033}') { '\'' } else { c }).collect();
+    format!("\"{}\"", line.trim_end_matches(|c: char| c == '\\' || c.is_whitespace()))
 }
 
 #[cfg(test)]
