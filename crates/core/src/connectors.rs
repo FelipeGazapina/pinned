@@ -6698,6 +6698,7 @@ mod tests {
             asleep: false,
             headless: false,
             stopped: None,
+            questions: None,
         }
     }
 
