@@ -165,3 +165,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:08:17Z #76 a_machine_archives_its_own_finished_thread_but_the_hub_keeps_a_pinned_one_and_an_orchestrator START / avail=15072M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:08:20Z #76 a_machine_archives_its_own_finished_thread_but_the_hub_keeps_a_pinned_one_and_an_orchestrator ok / avail=15072M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:08:22Z #77 an_agent_files_restarts_and_archives_threads_as_the_user_but_a_delete_waits_for_approval START / avail=15072M /workspace avail=19374M node_stat=Ssl
+2026-11-13T04:08:29Z #77 an_agent_files_restarts_and_archives_threads_as_the_user_but_a_delete_waits_for_approval ok / avail=15072M /workspace avail=19374M node_stat=Ssl node_tcp=1
