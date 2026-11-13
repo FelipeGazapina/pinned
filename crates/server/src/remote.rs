@@ -223,7 +223,7 @@ async fn ended(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, to: &str, tab
     };
     drop(delivering);
     if let Some(row) = worker_box {
-        eprintln!("{}", box_done_line(row.id, account.id, &task));
+        eprintln!("{}", box_done_line(&row.id, account.id, &task));
         hub.boxes.end_delegate(hub, account, row, crate::boxes::End::Done).await?;
     }
     Ok(Value::Bool(taken))
@@ -273,13 +273,21 @@ fn held_task_ok(task: &str) -> bool {
     !task.is_empty() && task.len() <= HELD_TASK_MAX && !task.chars().any(char::is_control)
 }
 
+/// `task` as the hub logs it: the id when it is one pinned makes, else a fixed word, as a machine
+/// chooses the text and it could hold a newline.
+fn logged(task: &str) -> &str {
+    if held_task_ok(task) { task } else { "(unreadable id)" }
+}
+
 /// The log line for an end whose machine `to` answered with an error. `task` is the sender's text.
 fn refused_line(to: &str, task: &str) -> String {
+    let task = logged(task);
     format!("pinned-server: machine {to} answered the end of task {task} with an error; it is kept unclaimed")
 }
 
 /// The log line for a worker box that ended done. `task` is the sender's text.
-fn box_done_line(box_id: impl std::fmt::Display, account: Uuid, task: &str) -> String {
+fn box_done_line(box_id: &str, account: Uuid, task: &str) -> String {
+    let task = logged(task);
     format!("pinned-server: worker box {box_id} of account {account} ends done: its end of task {task} got through or is held")
 }
 
