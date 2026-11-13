@@ -65,3 +65,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:04:15Z #28 a_closed_hub_takes_only_its_first_account_whose_password_can_change ok / avail=15075M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:04:16Z #29 an_invite_hub_takes_its_first_account_then_only_single_use_codes START / avail=15075M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:04:24Z #29 an_invite_hub_takes_its_first_account_then_only_single_use_codes ok / avail=15075M /workspace avail=19374M node_stat=Ssl node_tcp=1
+2026-11-13T04:04:25Z #30 guessing_invite_codes_hits_the_sign_up_limit START / avail=15075M /workspace avail=19374M node_stat=Ssl
