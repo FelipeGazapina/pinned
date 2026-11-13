@@ -1735,6 +1735,48 @@ mod tests {
     }
 
     #[test]
+    fn a_tab_carries_its_open_questions_and_an_older_tab_reads_without_them() {
+        use crate::questions::{QOption, Question, Questionnaire};
+        let asked = Questionnaire {
+            id: "q-7".into(),
+            title: Some("Checkout redesign".into()),
+            questions: vec![Question {
+                header: Some("Branch".into()),
+                question: "Base the fix on main or on release/0.18?".into(),
+                changes: "which branch the PR targets".into(),
+                options: vec![QOption { label: "main".into(), description: Some("ships in the next release".into()), recommended: true }, QOption { label: "release/0.18".into(), description: None, recommended: false }],
+                multi_select: false,
+            }],
+            projects: vec![],
+            at: 1_794_240_000,
+        };
+        let tab = TabView { questions: Some(asked), ..tab_view() };
+        let sent = serde_json::to_value(&tab).unwrap();
+        assert_eq!(
+            sent["questions"],
+            json!({ "id": "q-7", "title": "Checkout redesign", "at": 1_794_240_000, "questions": [{ "header": "Branch", "question": "Base the fix on main or on release/0.18?", "changes": "which branch the PR targets", "options": [{ "label": "main", "description": "ships in the next release", "recommended": true }, { "label": "release/0.18" }] }] })
+        );
+        assert_eq!(serde_json::from_value::<TabView>(sent).unwrap(), tab);
+        let older = serde_json::to_value(tab_view()).unwrap();
+        assert!(older.get("questions").is_none(), "a tab with no questions sends none: {older}");
+        assert_eq!(serde_json::from_value::<TabView>(older).unwrap().questions, None, "an older machine's tab reads with no questions");
+    }
+
+    #[test]
+    fn answer_questions_round_trips_answered_and_skipped() {
+        use crate::questions::{Answer, QuestionsReply};
+        round_trip(
+            Call::AnswerQuestions {
+                tab: "tab-1".into(),
+                id: "q-7".into(),
+                reply: QuestionsReply::Answered { answers: vec![Answer { chosen: vec!["main".into()], text: None }, Answer { chosen: vec![], text: Some("Only the desktop one".into()) }] },
+            },
+            json!({ "cmd": "answer_questions", "tab": "tab-1", "id": "q-7", "reply": { "kind": "answered", "answers": [{ "chosen": ["main"] }, { "text": "Only the desktop one" }] } }),
+        );
+        round_trip(Call::AnswerQuestions { tab: "tab-1".into(), id: "q-7".into(), reply: QuestionsReply::Skipped }, json!({ "cmd": "answer_questions", "tab": "tab-1", "id": "q-7", "reply": { "kind": "skipped" } }));
+    }
+
+    #[test]
     fn a_tab_carries_its_transcripts_branch_pr_and_last_message_and_an_older_tab_reads_without_them() {
         let sent = serde_json::to_value(tab_view()).unwrap();
         assert_eq!(
