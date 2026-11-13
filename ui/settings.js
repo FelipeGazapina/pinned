@@ -359,7 +359,7 @@ function boxTokensHtml() {
       <p class="hint">Claude token per account. Every box signs in with the token of the account its project runs on, or of the one <code>delegate_task</code> names. The token above is the claude account's. A box whose account has no token here doesn't open.</p>
       ${rows}
       ${agentAskingHtml("set_box_claude_token")}
-      <div class="row"><input id="box-token-name" type="text" placeholder="Account, as bloom" autocomplete="off" spellcheck="false"${asked == null ? "" : ` value="${esc(asked)}" readonly`}>
+      <div class="row"><input id="box-token-name" type="text" placeholder="Account, as work" autocomplete="off" spellcheck="false"${asked == null ? "" : ` value="${esc(asked)}" readonly`}>
         <input id="box-token" type="password" placeholder="sk-ant-oat01-…" autocomplete="off">
         <button class="secondary" data-action="add-box-token">Add</button></div>
     </div>`;

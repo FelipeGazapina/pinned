@@ -320,7 +320,7 @@ function tasteContextHtml(t) {
   const notes = t.context.map((note, i) => `<li><span>${esc(note)}</span><button type="button" class="taste-icon" data-act="unnote" data-note="${i}" aria-label="Remove note">${icon("trash-2")}</button></li>`).join("");
   return `<section class="taste-section"><div class="taste-heading"><div class="taste-title"><h2>Context</h2>${tasteTagHtml("context")}</div><p>Notes every turn carries.</p></div>
     <ul class="taste-notes">${notes}</ul>
-    <form class="taste-note-form" data-note-form><input type="text" data-note-input value="${esc(tasteUi.note)}" placeholder="E.g. heavy builds always run on the Mac mini" aria-label="New note">
+    <form class="taste-note-form" data-note-form><input type="text" data-note-input value="${esc(tasteUi.note)}" placeholder="E.g. heavy builds always run on the build server" aria-label="New note">
       <button type="submit" class="primary">Add</button></form>
   </section>`;
 }

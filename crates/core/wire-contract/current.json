@@ -6978,6 +6978,19 @@
                 ]
               },
               {
+                "description": "`Vec<upstash::StuckBox>`: the account's boxes pinned could not delete, with why, from the\nhub's own record and rows. It reads no Upstash key and calls no Upstash.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "stuck_boxes"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
                 "description": "`Vec<marks::SessionMarks>`: how the user filed each of the account's conversations.",
                 "type": "object",
                 "properties": {
@@ -17786,6 +17799,19 @@
                 ]
               },
               {
+                "description": "`Vec<upstash::StuckBox>`: the account's boxes pinned could not delete, with why, from the\nhub's own record and rows. It reads no Upstash key and calls no Upstash.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "stuck_boxes"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
                 "description": "`Vec<marks::SessionMarks>`: how the user filed each of the account's conversations.",
                 "type": "object",
                 "properties": {
@@ -23063,7 +23089,7 @@
             "type": "object",
             "properties": {
               "id": {
-                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `work` or `personal`.",
                 "type": "string"
               },
               "driver_kind": {
@@ -24823,6 +24849,19 @@
                   "cmd": {
                     "type": "string",
                     "const": "box_usage"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`Vec<upstash::StuckBox>`: the account's boxes pinned could not delete, with why, from the\nhub's own record and rows. It reads no Upstash key and calls no Upstash.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "stuck_boxes"
                   }
                 },
                 "required": [
@@ -30746,7 +30785,7 @@
             "type": "object",
             "properties": {
               "id": {
-                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `work` or `personal`.",
                 "type": "string"
               },
               "driver_kind": {
@@ -32491,6 +32530,19 @@
                   "cmd": {
                     "type": "string",
                     "const": "box_usage"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`Vec<upstash::StuckBox>`: the account's boxes pinned could not delete, with why, from the\nhub's own record and rows. It reads no Upstash key and calls no Upstash.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "stuck_boxes"
                   }
                 },
                 "required": [
@@ -37770,6 +37822,13 @@
               "tasks": 0,
               "since": 0
             }
+          },
+          "stuck": {
+            "description": "Boxes pinned could not delete yet, with why. Filled also when Upstash is not connected.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/StuckBox"
+            }
           }
         },
         "required": [
@@ -37948,6 +38007,42 @@
               "tasks",
               "since"
             ]
+          },
+          "StuckBox": {
+            "description": "A box whose delete failed, and the last reason, scrubbed of keys and tokens.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "default": ""
+              },
+              "why": {
+                "type": "string",
+                "default": ""
+              },
+              "unconfirmed": {
+                "description": "The row never recorded an Upstash box id and the delete failed before pinned knew whether a\nbox exists for it: it may or may not be running. Absent when pinned knows the box is there.",
+                "type": "boolean"
+              },
+              "upstash": {
+                "description": "The box's id on Upstash, for a row that recorded it: what to look for in the console.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "label": {
+                "description": "For a row with no recorded Upstash id: the label its box carries there, which pinned lists by.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "why"
+            ]
           }
         }
       },
@@ -37993,6 +38088,13 @@
               "box_hours": 0.0,
               "tasks": 0,
               "since": 0
+            }
+          },
+          "stuck": {
+            "description": "Boxes pinned could not delete yet, with why. Filled also when Upstash is not connected.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/StuckBox"
             }
           }
         },
@@ -38140,6 +38242,38 @@
                 "format": "uint64",
                 "minimum": 0,
                 "default": 0
+              }
+            }
+          },
+          "StuckBox": {
+            "description": "A box whose delete failed, and the last reason, scrubbed of keys and tokens.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "default": ""
+              },
+              "why": {
+                "type": "string",
+                "default": ""
+              },
+              "unconfirmed": {
+                "description": "The row never recorded an Upstash box id and the delete failed before pinned knew whether a\nbox exists for it: it may or may not be running. Absent when pinned knows the box is there.",
+                "type": "boolean"
+              },
+              "upstash": {
+                "description": "The box's id on Upstash, for a row that recorded it: what to look for in the console.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "label": {
+                "description": "For a row with no recorded Upstash id: the label its box carries there, which pinned lists by.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             }
           }
@@ -42678,7 +42812,7 @@
             "type": "object",
             "properties": {
               "id": {
-                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `work` or `personal`.",
                 "type": "string"
               },
               "driver_kind": {
@@ -42977,7 +43111,7 @@
             "type": "object",
             "properties": {
               "id": {
-                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `work` or `personal`.",
                 "type": "string"
               },
               "driver_kind": {
@@ -44209,7 +44343,7 @@
             "type": "object",
             "properties": {
               "id": {
-                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `work` or `personal`.",
                 "type": "string"
               },
               "driver_kind": {
@@ -44255,7 +44389,7 @@
                 "type": "string"
               },
               "account": {
-                "description": "The account the session runs under, such as `claude` or `bloom`.",
+                "description": "The account the session runs under, such as `work` or `personal`.",
                 "type": "string"
               },
               "project": {
@@ -44823,7 +44957,7 @@
             "type": "object",
             "properties": {
               "id": {
-                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `work` or `personal`.",
                 "type": "string"
               },
               "driver_kind": {
@@ -44868,7 +45002,7 @@
                 "type": "string"
               },
               "account": {
-                "description": "The account the session runs under, such as `claude` or `bloom`.",
+                "description": "The account the session runs under, such as `work` or `personal`.",
                 "type": "string"
               },
               "project": {
@@ -45375,7 +45509,7 @@
             "type": "object",
             "properties": {
               "id": {
-                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `work` or `personal`.",
                 "type": "string"
               },
               "driver_kind": {
@@ -45698,7 +45832,7 @@
             "type": "object",
             "properties": {
               "id": {
-                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `work` or `personal`.",
                 "type": "string"
               },
               "driver_kind": {
@@ -46098,7 +46232,7 @@
             "type": "object",
             "properties": {
               "id": {
-                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `work` or `personal`.",
                 "type": "string"
               },
               "driver_kind": {
@@ -46412,7 +46546,7 @@
             "type": "object",
             "properties": {
               "id": {
-                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `work` or `personal`.",
                 "type": "string"
               },
               "driver_kind": {
@@ -48645,7 +48779,7 @@
                 "default": ""
               },
               "project": {
-                "description": "A repo key such as `github.com/FelipeGazapina/pinned`; none for an idea that has no project yet.",
+                "description": "A repo key such as `github.com/acme/site`; none for an idea that has no project yet.",
                 "type": [
                   "string",
                   "null"
@@ -50872,7 +51006,7 @@
                 "default": ""
               },
               "project": {
-                "description": "A repo key such as `github.com/FelipeGazapina/pinned`; none for an idea that has no project yet.",
+                "description": "A repo key such as `github.com/acme/site`; none for an idea that has no project yet.",
                 "type": [
                   "string",
                   "null"
@@ -51772,6 +51906,80 @@
               "team",
               "userId",
               "name"
+            ]
+          }
+        }
+      }
+    },
+    "StuckBox": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "StuckBox",
+        "description": "A box whose delete failed, and the last reason, scrubbed of keys and tokens.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "default": ""
+          },
+          "why": {
+            "type": "string",
+            "default": ""
+          },
+          "unconfirmed": {
+            "description": "The row never recorded an Upstash box id and the delete failed before pinned knew whether a\nbox exists for it: it may or may not be running. Absent when pinned knows the box is there.",
+            "type": "boolean"
+          },
+          "upstash": {
+            "description": "The box's id on Upstash, for a row that recorded it: what to look for in the console.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "label": {
+            "description": "For a row with no recorded Upstash id: the label its box carries there, which pinned lists by.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "why"
+        ]
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "StuckBox",
+        "description": "A box whose delete failed, and the last reason, scrubbed of keys and tokens.",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "default": ""
+          },
+          "why": {
+            "type": "string",
+            "default": ""
+          },
+          "unconfirmed": {
+            "description": "The row never recorded an Upstash box id and the delete failed before pinned knew whether a\nbox exists for it: it may or may not be running. Absent when pinned knows the box is there.",
+            "type": "boolean"
+          },
+          "upstash": {
+            "description": "The box's id on Upstash, for a row that recorded it: what to look for in the console.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "label": {
+            "description": "For a row with no recorded Upstash id: the label its box carries there, which pinned lists by.",
+            "type": [
+              "string",
+              "null"
             ]
           }
         }
@@ -54689,7 +54897,7 @@
             "type": "object",
             "properties": {
               "id": {
-                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `work` or `personal`.",
                 "type": "string"
               },
               "driver_kind": {
@@ -57412,7 +57620,7 @@
                 "default": ""
               },
               "project": {
-                "description": "A repo key such as `github.com/FelipeGazapina/pinned`; none for an idea that has no project yet.",
+                "description": "A repo key such as `github.com/acme/site`; none for an idea that has no project yet.",
                 "type": [
                   "string",
                   "null"
@@ -58679,7 +58887,7 @@
             "type": "object",
             "properties": {
               "id": {
-                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `work` or `personal`.",
                 "type": "string"
               },
               "driver_kind": {
@@ -61315,7 +61523,7 @@
                 "default": ""
               },
               "project": {
-                "description": "A repo key such as `github.com/FelipeGazapina/pinned`; none for an idea that has no project yet.",
+                "description": "A repo key such as `github.com/acme/site`; none for an idea that has no project yet.",
                 "type": [
                   "string",
                   "null"
@@ -62515,7 +62723,7 @@
             "type": "object",
             "properties": {
               "id": {
-                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `work` or `personal`.",
                 "type": "string"
               },
               "driver_kind": {
@@ -68074,7 +68282,7 @@
             "type": "object",
             "properties": {
               "id": {
-                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.",
+                "description": "The `providerInstanceId` of `orchestrator_capabilities`, such as `work` or `personal`.",
                 "type": "string"
               },
               "driver_kind": {
