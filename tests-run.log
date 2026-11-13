@@ -161,3 +161,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:08:03Z #74 a_refused_mark_change_keeps_and_pushes_nothing_and_a_machine_may_not_mark START / avail=15072M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:08:08Z #74 a_refused_mark_change_keeps_and_pushes_nothing_and_a_machine_may_not_mark ok / avail=15072M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:08:09Z #75 an_archived_thread_closes_and_comes_back_with_its_name_and_pin_and_a_delete_forgets_it START / avail=15072M /workspace avail=19374M node_stat=Ssl
+2026-11-13T04:08:16Z #75 an_archived_thread_closes_and_comes_back_with_its_name_and_pin_and_a_delete_forgets_it ok / avail=15072M /workspace avail=19374M node_stat=Ssl node_tcp=1
