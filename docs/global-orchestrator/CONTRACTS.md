@@ -524,7 +524,7 @@ Since 0.17.23 a box follows only its access setting and the Box budget, never th
 
 | Area | Actions (class) |
 |---|---|
-| Workflows | `save_connector` (write; a new workflow with no `id`, an edit with one), `generate_workflow` (write), `delete_connector` (confirm). `get_settings` (read, P1) lists the account's workflows. |
+| Workflows | `save_connector` (write; a new workflow with no `id`, an edit with one), `delete_connector` (confirm). `get_settings` (read, P1) lists the account's workflows. |
 | Projects | `create_project`, `make_folder`, `publish_project`, `set_project_account`, `save_project_scripts` (write, on a machine); `clone` (write, the hub's: it adds the account's own GitHub token, the node's `node_clone` stays excluded), `share_project` (write). The reads `list_projects`, `project_history`, `shared_projects`, `project_scripts` were already wired. |
 | Sessions | `open_scratch`, `open_orchestrator`, `open_global_orchestrator` (the global orchestrator's own session only), `prompt`, `enqueue` (`starts_work`, 13.6). `search_threads` (read) was already wired. |
 | Settings | `set_global_orchestrator_settings`, `set_usage_prices`, `save_skill` (write). `set_taste` and `reset_taste_field` stay confirm, since they carry the delegation limits. |

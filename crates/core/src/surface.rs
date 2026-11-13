@@ -133,6 +133,7 @@ pub const ACTIONS: &[Action] = &[
     n("resize_pty", Excluded, TERMINAL),
     n("wake", Excluded, TERMINAL),
     n("close_tab", Excluded, "closing a thread loses its place in the sidebar: agents archive it with archive_session, which the user can undo, or ask to delete it with delete_session"),
+    n("answer_questions", Excluded, "only the user answers an agent's questions"),
     n("stop_turn", Write, "Stops the turn a session is running, as the app's stop button does. The session stays open for the next prompt.").wired(),
     n("set_folder", Write, "Moves a tab that has not started to another folder.").wired(),
     n("list_projects", Read, "The machine's projects, most recent first: folder, name, repo and the agent account its sessions run under.").wired(),
@@ -279,7 +280,7 @@ pub const ACTIONS: &[Action] = &[
     h("sync_mark_executable", Excluded, SYNC),
     h("save_connector", Write, "Saves a workflow (a new one with no id, else the one with that id) and answers it as stored. A workflow with a session that skips permission prompts needs a session that skips them too.").wired(),
     h("delete_connector", Confirm, "Deletes a workflow.").wired(),
-    h("generate_workflow", Write, "Drafts a workflow map from a plain description with a chat model.").wired(),
+    h("generate_workflow", Excluded, "kept on the wire for 0.18.1 apps, whose Generate with AI button still sends it and gets an error; an agent creates a workflow with save_connector"),
     h("run_workflow", Write, "Runs the saved workflow id now, with no Linear issue or Slack thread behind it, and answers the session it started: its machine and tab. The session has the setup the workflow gives its sessions and opens on your own machine; a workflow set to another machine or an Upstash Box is refused. It is your task: it counts against its project's workers-at-once limit, is held to the project's tier, effort, time limit and budget, and you get its notice when its first turn ends. A workflow that only sorts Slack messages or only answers threads another workflow hands it has nothing to run.").wired().starts_work(),
     h("open_box", Write, "Starts an interactive session on a new Upstash Box cloning repo, within the account's box limit and its Box budget: budget_usd may not pass it, and is it when left out. Without size it opens at the default box size that get_box_size answers. Once the box ends it counts as your delegated task in delegation_stats.").wired().starts_work(),
     h("box_status", Read, "The phase, age and budget of the box behind machine.").wired(),
@@ -348,6 +349,9 @@ pub const ACTIONS: &[Action] = &[
     h("set_convex_repos", Confirm, "Sets the projects, as repo keys, whose sessions read the connected Convex deployment id. A project moves off any other deployment.").wired(),
     h("disconnect_convex", Confirm, "Disconnects the Convex deployment id and forgets its key.").wired(),
     h("convex_tables", Excluded, "the Read Convex data step's table list in the app: a session reads Convex through its convex_ tools"),
+    h("list_ideas", Read, "The account's ideas, most recently changed first, or with project (a repository like github.com/owner/repo) only that project's: id, title, text, project, status (open, done or dropped), task, who made it, and times. An idea is something that might be done; it is never recalled into a prompt, and facts go to memory (memory_save) instead.").wired(),
+    h("save_idea", Write, "Saves an idea: title, text and an optional project (a repository like github.com/owner/repo), or with id changes that one (status: open, done or dropped). An idea is something that might be done; it is never recalled into a prompt, and facts go to memory (memory_save) instead.").wired(),
+    h("delete_idea", Write, "Deletes an idea of the account. An idea is something that might be done; it is never recalled into a prompt, and facts go to memory (memory_save) instead.").wired(),
     h("convex", Excluded, "a session's Convex read, which its machine sends: call the convex_ tools"),
 ];
 
@@ -1062,12 +1066,13 @@ mod tests {
                 "device_hub", "device_agents", "device", "rewind", "fork", "update_self", "connect_linear", "disconnect_linear", "connect_slack",
                 "disconnect_slack", "connect_github", "disconnect_github", "connect_vercel", "disconnect_vercel", "connect_upstash",
                 "disconnect_upstash", "set_box_access", "set_repo_insight", "clone", "share_project", "save_connector", "delete_connector",
-                "generate_workflow", "run_workflow", "open_box", "extend_box", "rename_machine", "remove_machine", "pair_code", "create_invite", "revoke_invite",
+                "run_workflow", "open_box", "extend_box", "rename_machine", "remove_machine", "pair_code", "create_invite", "revoke_invite",
                 "stage", "slack_reply", "linear_create", "linear_take", "approve_agent", "deny_agent", "revoke_agent", "set_taste",
                 "reset_taste_field", "set_box_size", "set_box_claude_token", "remove_box_claude_token", "mint_box_claude_token", "cancel_box_claude_token", "mark_sessions", "archive_session", "unarchive_session",
                 "delete_session",
                 "save_mcp_server", "enable_mcp_server", "remove_mcp_server", "import_mcp_server",
                 "connect_convex", "set_convex_repos", "disconnect_convex",
+                "save_idea", "delete_idea",
             ]
         );
         for name in ["set_taste", "reset_taste_field", "set_box_size", "delete_connector"] {
@@ -1239,6 +1244,18 @@ mod tests {
         #[test]
         fn list_mcp_servers() {
             wired("list_mcp_servers", Read, "hub", false, json!({}));
+        }
+
+        #[test]
+        fn the_idea_actions() {
+            wired("list_ideas", Read, "hub", false, json!({}));
+            wired("list_ideas", Read, "hub", false, json!({ "project": "github.com/acme/site" }));
+            wired("save_idea", Write, "hub", false, json!({ "title": "An iPad app" }));
+            wired("save_idea", Write, "hub", false, json!({ "id": "i1", "title": "An iPad app", "text": "Maybe.", "project": "github.com/acme/site", "status": "dropped" }));
+            wired("delete_idea", Write, "hub", false, json!({ "id": "i1" }));
+            for name in ["list_ideas", "save_idea", "delete_idea"] {
+                assert!(find(name).unwrap().about.contains("never recalled into a prompt"), "{name} says how an idea differs from memory");
+            }
         }
 
         #[test]

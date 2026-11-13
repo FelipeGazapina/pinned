@@ -894,6 +894,7 @@ mod tests {
                 account: "work".into(),
                 model: None,
                 permission_mode: None,
+                cut_by_sleep: None,
                 spawned_by: None,
             }
         };

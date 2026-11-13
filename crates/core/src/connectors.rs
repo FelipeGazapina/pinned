@@ -1162,6 +1162,9 @@ pub struct Settings {
     /// whose sessions read it. Only the hub keeps their keys.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub convex: Vec<convex::Connection>,
+    /// The account's ideas. Only the hub fills it, from its own table, when it pushes or answers settings.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ideas: Vec<crate::ideas::Idea>,
     /// Absent on the wire while it is off.
     #[serde(default, skip_serializing_if = "repo_insight_is_off")]
     pub repo_insight: RepoInsight,
@@ -2761,283 +2764,6 @@ fn merge_session(owner: &Connector, setup: &SessionSetup) -> Connector {
     merged
 }
 
-/// The workflow map a generation model answers with. Nodes and edges name each other; ids,
-/// positions and switch references are assigned when the draft is built.
-#[derive(serde::Deserialize)]
-struct DraftGraph {
-    #[serde(default)]
-    nodes: Vec<DraftNode>,
-    #[serde(default)]
-    edges: Vec<DraftEdge>,
-}
-
-#[derive(serde::Deserialize)]
-struct DraftNode {
-    name: String,
-    #[serde(rename = "type")]
-    kind: String,
-    #[serde(default)]
-    group: Option<String>,
-    #[serde(flatten, default)]
-    fields: std::collections::BTreeMap<String, Value>,
-}
-
-#[derive(serde::Deserialize)]
-struct DraftEdge {
-    from: String,
-    #[serde(default = "default_out_port")]
-    port: String,
-    to: String,
-}
-
-fn default_out_port() -> String {
-    crate::graph::PortId::OUT.into()
-}
-
-fn generate_instructions(workflows: &str) -> String {
-    format!(
-        r#"You translate an automation description into a pinned workflow map as JSON, nothing else.
-
-A map has nodes and edges. Exactly one node is the trigger; no edge enters it. An edge links a node's output port to another node by NAME. A port with no edge ends its branch.
-
-Node types, fields (? means optional) and ports:
-- trigger: the watch that starts the run, always as a "watch" object with a kind and its channel or label copied exactly as the description writes them: {{"kind":"linear-label","label":"..."}} for a Linear label, {{"kind":"slack-mention","channel":"..."}} when the bot is @mentioned, {{"kind":"slack-message","channel":"..."}} for every message (heavy: prefer mention), {{"kind":"called"}} when another workflow calls it. Never invent another kind. Ports: out.
-- classify: asks a model: {{"model":""? (leave empty, the user picks), "instructions":""?, "questions":[{{"name":""? (lowercase kind/agent), "ask":""?, "choices":[{{"id":""?,"label":""?,"description":""?}}]}}], "branch_on":""? (a question name)}}. Ports: one per choice of the branched question, else out.
-- switch: branches on an earlier classify's answer without another model call: {{"classify":"<classify node NAME>", "question":""?, "cases":[{{"id":""?,"equals":""?}}]}}. Ports: one per case plus otherwise.
-- session: opens the run's session with its own setup: {{"prompt":""?, "folder":""?, "repo":""?, "model":""?, "effort":""? (low/medium/high/xhigh/max), "permission":""? (manual/acceptEdits/auto/dontAsk/bypassPermissions/plan), "account":""?, "worktree":false?, "instructions":""?}}. Leave environment fields empty unless the description names them; always write the prompt. The first session step opens the session, later ones type into it. Ports: out, error.
-- reply: posts text in the run's Slack thread: {{"text":""?}}. Ports: out.
-- file-issue: files a Linear issue for the run's Slack thread: {{"team":""?, "label":""?, "assignee":""?, "title":""?, "description":""?}}. Ports: out.
-- take-issue: works the thread on an existing issue: {{"issue":""? (empty takes the filed one)}}. Ports: out.
-- move-column: moves the run's Linear issue: {{"column":""?}}. Ports: out.
-- proof: requires a proof video on the pull request. Ports: out.
-- page: pings a Slack user group: {{"group":""?}}. Ports: out.
-- call: runs another workflow's map: {{"workflow":"<id>"}}. Only these ids exist, leave empty when none fits:
-{workflows}
-- stop: ends a branch. No ports.
-
-Text fields may fill values from the run with {{{{trigger.text}}}}, {{{{trigger.mention}}}}, {{{{trigger.title}}}}, {{{{trigger.url}}}}, {{{{answers.question}}}}, {{{{issue.identifier}}}} and {{{{issue.url}}}}. Prefer them over invented names: a reply posts {{{{trigger.text}}}} back, an issue title starts from {{{{trigger.mention}}}}, the message that mentioned pinned, since {{{{trigger.text}}}} is the whole thread.
-
-Every node may carry a "group" name; steps of one concern share it. Answer with one JSON object only: {{"nodes":[{{"name":""?,"type":""?, ...fields}}],"edges":[{{"from":""?,"port":"out"?,"to":""?}}]}}. Node names are unique. Ports must exist on their node."#,
-        workflows = workflows,
-    )
-}
-
-/// Turns a generated draft into a laid-out graph: unique ids, edges by node name, switch
-/// references by node name, columns left to right from the trigger, then the same validation
-/// a save runs.
-fn build_generated(store: &Store, draft: DraftGraph) -> Result<Graph, String> {
-    use crate::graph::{Case, Choice, Classify, Edge, Gate, NodeId, NodeKind, PortId, Question as GraphQuestion, SessionSetup, Switch, Watch};
-    fn slug(name: &str, used: &mut std::collections::BTreeSet<String>) -> String {
-        let mut base: String = name.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect::<String>().trim_matches('-').into();
-        if base.is_empty() {
-            base = "node".into();
-        }
-        let mut id = base.clone();
-        for i in 2.. {
-            if used.insert(id.clone()) {
-                return id;
-            }
-            id = format!("{base}-{i}");
-        }
-        unreachable!()
-    }
-    fn str_field(fields: &std::collections::BTreeMap<String, Value>, name: &str) -> String {
-        fields.get(name).and_then(Value::as_str).unwrap_or_default().trim().to_owned()
-    }
-    /// The trigger's watch, tolerating a model that names the kind but drops the channel or
-    /// flattens it beside the watch. The kind is required; an empty channel or label opens in
-    /// the editor flagged, which beats losing the whole draft.
-    fn lenient_watch(fields: &std::collections::BTreeMap<String, Value>) -> Option<Watch> {
-        let watch = fields.get("watch").cloned().unwrap_or(Value::Null);
-        if let Ok(parsed) = serde_json::from_value::<Watch>(watch.clone()) {
-            return Some(parsed);
-        }
-        let obj = watch.as_object()?;
-        let field = |name| {
-            obj.get(name)
-                .and_then(Value::as_str)
-                .or_else(|| fields.get(name).and_then(Value::as_str))
-                .unwrap_or_default()
-                .trim()
-                .to_owned()
-        };
-        match obj.get("kind").and_then(Value::as_str).or_else(|| fields.get("kind").and_then(Value::as_str))? {
-            "linear-label" => Some(Watch::LinearLabel { label: field("label") }),
-            "slack-mention" => Some(Watch::SlackMention { channel: field("channel") }),
-            "slack-message" => Some(Watch::SlackMessage { channel: field("channel") }),
-            "called" => Some(Watch::Called),
-            _ => None,
-        }
-    }
-    if draft.nodes.is_empty() {
-        return Err("the model answered no steps".into());
-    }
-    let mut used = std::collections::BTreeSet::new();
-    let mut ids = std::collections::BTreeMap::new();
-    for node in &draft.nodes {
-        if node.name.trim().is_empty() {
-            return Err("every step needs a name".into());
-        }
-        if ids.contains_key(node.name.as_str()) {
-            return Err(format!("two steps are named {:?}", node.name));
-        }
-        ids.insert(node.name.clone(), slug(&node.name, &mut used));
-    }
-    let id_of = |name: &str| ids.get(name).cloned().ok_or_else(|| format!("an edge names {name:?}, which is no step"));
-    let mut nodes = Vec::new();
-    for node in &draft.nodes {
-        let kind = match node.kind.as_str() {
-            "trigger" => {
-                let watch = lenient_watch(&node.fields).ok_or_else(|| format!("step {:?} has no usable trigger", node.name))?;
-                NodeKind::Trigger { watch }
-            }
-            "classify" => NodeKind::Classify(Classify {
-                model: str_field(&node.fields, "model"),
-                instructions: str_field(&node.fields, "instructions"),
-                questions: node
-                    .fields
-                    .get("questions")
-                    .and_then(Value::as_array)
-                    .map(|questions| {
-                        questions
-                            .iter()
-                            .map(|q| GraphQuestion {
-                                name: q.get("name").and_then(Value::as_str).unwrap_or_default().into(),
-                                ask: q.get("ask").and_then(Value::as_str).unwrap_or_default().into(),
-                                choices: q
-                                    .get("choices")
-                                    .and_then(Value::as_array)
-                                    .map(|choices| {
-                                        choices
-                                            .iter()
-                                            .map(|c| Choice {
-                                                id: PortId(c.get("id").and_then(Value::as_str).filter(|id| !id.trim().is_empty()).map(str::to_owned).unwrap_or_else(|| c.get("label").and_then(Value::as_str).unwrap_or_default().into())),
-                                                label: c.get("label").and_then(Value::as_str).unwrap_or_default().into(),
-                                                description: c.get("description").and_then(Value::as_str).unwrap_or_default().into(),
-                                            })
-                                            .collect()
-                                    })
-                                    .unwrap_or_default(),
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default(),
-                branch_on: match str_field(&node.fields, "branch_on") {
-                    branch if branch.is_empty() => None,
-                    branch => Some(branch),
-                },
-                gate: Gate::Direct,
-                fallback: Default::default(),
-            }),
-            "switch" => {
-                let classify = str_field(&node.fields, "classify");
-                let target = id_of(&classify).map_err(|_| format!("step {:?} switches on {:?}, which is no classify step", node.name, classify))?;
-                NodeKind::Switch(Switch {
-                    classify: NodeId(target),
-                    question: str_field(&node.fields, "question"),
-                    cases: node
-                        .fields
-                        .get("cases")
-                        .and_then(Value::as_array)
-                        .map(|cases| {
-                            cases
-                                .iter()
-                                .map(|c| Case {
-                                    id: PortId(c.get("id").and_then(Value::as_str).filter(|id| !id.trim().is_empty()).map(str::to_owned).unwrap_or_else(|| c.get("equals").and_then(Value::as_str).unwrap_or_default().into())),
-                                    equals: c.get("equals").and_then(Value::as_str).unwrap_or_default().into(),
-                                })
-                                .collect()
-                        })
-                        .unwrap_or_default(),
-                })
-            }
-            "session" => NodeKind::Session(SessionSetup {
-                prompt: str_field(&node.fields, "prompt"),
-                folder: str_field(&node.fields, "folder"),
-                repo: str_field(&node.fields, "repo"),
-                model: str_field(&node.fields, "model"),
-                effort: str_field(&node.fields, "effort"),
-                permission: str_field(&node.fields, "permission"),
-                account: str_field(&node.fields, "account"),
-                worktree: node.fields.get("worktree").and_then(Value::as_bool).unwrap_or(false),
-                instructions: str_field(&node.fields, "instructions"),
-            }),
-            "reply" => NodeKind::Reply { text: str_field(&node.fields, "text") },
-            "file-issue" => NodeKind::FileIssue {
-                team: str_field(&node.fields, "team"),
-                label: str_field(&node.fields, "label"),
-                assignee: str_field(&node.fields, "assignee"),
-                title: str_field(&node.fields, "title"),
-                description: str_field(&node.fields, "description"),
-            },
-            "take-issue" => NodeKind::TakeIssue { issue: str_field(&node.fields, "issue") },
-            "move-column" => NodeKind::MoveColumn { column: str_field(&node.fields, "column") },
-            "proof" => NodeKind::Proof,
-            "page" => NodeKind::Page { group: str_field(&node.fields, "group") },
-            "call" => NodeKind::Call { workflow: str_field(&node.fields, "workflow") },
-            "stop" => NodeKind::Stop,
-            // talk and stage-picked still run, but new maps use session and move-column.
-            other => return Err(format!("step {:?} is a {other:?} step, which new maps do not use", node.name)),
-        };
-        nodes.push((node, kind));
-    }
-    let mut edges = Vec::new();
-    for edge in &draft.edges {
-        edges.push(Edge { from: NodeId(id_of(&edge.from)?), port: PortId(edge.port.clone()), to: NodeId(id_of(&edge.to)?) });
-    }
-    // Columns left to right from the trigger; disconnected steps stack after the deepest one.
-    let targets: std::collections::BTreeSet<&str> = draft.edges.iter().map(|e| e.to.as_str()).collect();
-    let mut depth = std::collections::BTreeMap::new();
-    let mut order = Vec::new();
-    let mut queue: Vec<(String, i32)> = ids.iter().filter(|(name, _)| !targets.contains(name.as_str())).map(|(_, id)| (id.clone(), 0)).collect();
-    while let Some((id, at)) = queue.pop() {
-        if depth.contains_key(&id) {
-            continue;
-        }
-        depth.insert(id.clone(), at);
-        order.push(id.clone());
-        for edge in draft.edges.iter().filter(|e| ids.get(&e.from).as_deref() == Some(&id)) {
-            if let Some(to) = ids.get(&edge.to) {
-                queue.push((to.clone(), at + 1));
-            }
-        }
-    }
-    for id in ids.values() {
-        if !depth.contains_key(id) {
-            let at = depth.values().copied().max().unwrap_or(0) + 1;
-            depth.insert(id.clone(), at);
-            order.push(id.clone());
-        }
-    }
-    let mut rows: std::collections::BTreeMap<i32, i32> = std::collections::BTreeMap::new();
-    let positioned: std::collections::BTreeMap<String, [i32; 2]> = order
-        .iter()
-        .map(|id| {
-            let column = depth[id];
-            let row = rows.entry(column).or_insert(0);
-            let at = [column * 240, *row * 150];
-            *row += 1;
-            (id.clone(), at)
-        })
-        .collect();
-    let graph = Graph {
-        nodes: nodes
-            .into_iter()
-            .map(|(node, kind)| crate::graph::Node {
-                id: NodeId(ids[&node.name].clone()),
-                name: node.name.clone(),
-                position: positioned[&ids[&node.name]],
-                group_name: node.group.clone().map(|group| group.trim().to_owned()).filter(|group| !group.is_empty()),
-                kind,
-            })
-            .collect(),
-        edges,
-    };
-    let called = |id: &str| call_target(store, "", &graph, id);
-    graph.validate(&called)?;
-    Ok(graph)
-}
-
 /// The session `Effect::Open` starts for `owner`: the trigger as today's builders read it, the
 /// router's note when another workflow handed the thread over, every direct classify's answers, the
 /// talk text, and the run's history when seeded.
@@ -4046,6 +3772,7 @@ impl Connectors {
             boxes: store.boxes.clone(),
             box_asks: store.box_asks.clone(),
             convex: store.convex.clone(),
+            ideas: Vec::new(),
             repo_insight: store.repo_insight.clone(),
         }
     }
@@ -4631,34 +4358,6 @@ impl Connectors {
         let mut store = self.store.lock().unwrap();
         store.connectors.retain(|c| c.id != id);
         self.save(&store)
-    }
-
-    /// Builds a workflow graph from a plain description, with a chat model on the Vercel AI
-    /// Gateway. The model answers with nodes and edges by name; this assigns ids, lays them
-    /// out left to right, and validates the map the same a save does, so the editor opens the
-    /// draft for review. Anything the model leaves unnamed stays for the user to fill in.
-    pub async fn generate_workflow(&self, model: &str, description: &str) -> Result<Graph, String> {
-        if description.trim().is_empty() {
-            return Err("describe the workflow first".into());
-        }
-        if model.trim().is_empty() {
-            return Err("pick a chat model".into());
-        }
-        let key = self.key(VERCEL_KEY).ok_or("Vercel AI Gateway is not connected: connect it in pinned's Connectors settings")?;
-        let workflows = self
-            .store
-            .lock()
-            .unwrap()
-            .connectors
-            .iter()
-            .take(20)
-            .map(|c| format!("- {} ({})", c.name, c.id))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let answer = vercel::chat_json(&key, model.trim(), &generate_instructions(&workflows), description.trim()).await?;
-        let draft: DraftGraph = serde_json::from_value(answer).map_err(|_| "the model did not answer with a workflow map".to_owned())?;
-        let store = self.store.lock().unwrap();
-        build_generated(&store, draft)
     }
 
     /// Takes exported connectors and keys, as when a signed-out app's connectors move to its account,
@@ -5267,75 +4966,6 @@ mod tests {
         assert!(block_on(connectors.perform_take_issue(&mut run, "c2", "")).is_err());
         assert!(block_on(connectors.perform_move_column(&mut run, "c2", "  ")).is_err());
         let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn a_description_becomes_a_validated_map() {
-        let (connectors, dir) = stored("generate", vec![]);
-        std::fs::write(dir.join("vercel-key"), "vck-test").unwrap();
-        crate::vercel::set_test_content(Some(
-            r#"{"nodes":[
-              {"name":"Trigger","type":"trigger","watch":{"kind":"slack-mention","channel":"support"},"group":"Triage"},
-              {"name":"Classify","type":"classify","questions":[{"name":"kind","ask":"What is it?","choices":[{"id":"bug","label":"Bug","description":"Something broke"},{"id":"ask","label":"Question"}]}],"branch_on":"kind"},
-              {"name":"Run","type":"session","prompt":"Fix {{trigger.text}}"},
-              {"name":"Reply","type":"reply","text":"On it: {{answers.kind}}"},
-              {"name":"Move","type":"move-column","column":"In Dev"}
-            ],"edges":[
-              {"from":"Trigger","port":"out","to":"Classify"},
-              {"from":"Classify","port":"bug","to":"Run"},
-              {"from":"Run","port":"out","to":"Reply"},
-              {"from":"Reply","port":"out","to":"Move"},
-              {"from":"Classify","port":"ask","to":"Reply"}
-            ]}"#
-            .into(),
-        ));
-        let graph = block_on(connectors.generate_workflow("chat-model", "When mentioned, sort it; bugs get fixed")).unwrap();
-        crate::vercel::set_test_content(None);
-        let kinds: Vec<String> = graph.nodes.iter().map(|n| match &n.kind {
-            NodeKind::Trigger { .. } => "trigger",
-            NodeKind::Classify(_) => "classify",
-            NodeKind::Session(_) => "session",
-            NodeKind::Reply { .. } => "reply",
-            NodeKind::MoveColumn { .. } => "move",
-            other => panic!("unexpected {other:?}"),
-        }.into()).collect();
-        assert_eq!(kinds, ["trigger", "classify", "session", "reply", "move"]);
-        let run = graph.nodes.iter().find(|n| matches!(n.kind, NodeKind::Session(_))).unwrap();
-        assert!(matches!(&run.kind, NodeKind::Session(setup) if setup.prompt == "Fix {{trigger.text}}"));
-        assert_eq!(run.group_name.as_deref(), None);
-        let trigger = graph.nodes.iter().find(|n| matches!(n.kind, NodeKind::Trigger { .. })).unwrap();
-        assert_eq!(trigger.group_name.as_deref(), Some("Triage"));
-        assert!(graph.nodes.windows(2).all(|pair| pair[0].position[0] <= pair[1].position[0]), "columns run left to right");
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    fn generated(name: &str, nodes: serde_json::Value) -> Result<Graph, String> {
-        let (connectors, dir) = stored(name, vec![]);
-        let draft: DraftGraph = serde_json::from_value(json!({ "nodes": nodes, "edges": [{ "from": "Message", "port": "out", "to": "Reply" }] })).unwrap();
-        let graph = build_generated(&connectors.store.lock().unwrap(), draft);
-        let _ = std::fs::remove_dir_all(dir);
-        graph
-    }
-
-    #[test]
-    fn a_generated_trigger_missing_its_channel_opens_flagged_instead_of_failing() {
-        let graph = generated(
-            "generate-lenient",
-            json!([{ "name": "Message", "type": "trigger", "watch": { "kind": "slack-message" } }, { "name": "Reply", "type": "reply", "text": "hi" }]),
-        )
-        .unwrap();
-        let trigger = graph.nodes.iter().find(|n| matches!(n.kind, NodeKind::Trigger { .. })).unwrap();
-        assert!(matches!(&trigger.kind, NodeKind::Trigger { watch } if watch == &Watch::SlackMessage { channel: String::new() }), "the editor flags the empty channel: {trigger:?}");
-    }
-
-    #[test]
-    fn a_generated_trigger_of_an_unknown_kind_still_fails() {
-        let err = generated(
-            "generate-strict-kind",
-            json!([{ "name": "Message", "type": "trigger", "watch": { "kind": "smoke-signal" } }, { "name": "Reply", "type": "reply", "text": "hi" }]),
-        )
-        .unwrap_err();
-        assert!(err.contains("has no usable trigger"), "unexpected: {err}");
     }
 
     #[test]
@@ -7049,6 +6679,7 @@ mod tests {
             updated: None,
             session: session.map(str::to_owned),
             interrupted: false,
+            cut_by_sleep: None,
             stats: None,
             branch: None,
             pr: None,
@@ -7064,6 +6695,7 @@ mod tests {
             work: None,
             question: None,
             ask_detail: None,
+            questions: None,
         }
     }
 
@@ -8692,13 +8324,6 @@ mod tests {
             legacy.graph = None;
             assert!(!connectors.widens_convex(&legacy), "a save with no graph adds no step");
             let _ = std::fs::remove_dir_all(dir);
-        }
-
-        #[test]
-        fn the_workflow_generator_never_offers_the_step() {
-            assert!(!generate_instructions("").to_lowercase().contains("convex"));
-            let drafted = generated("convex-generated", json!([{ "name": "Message", "type": "trigger", "watch": { "kind": "slack-mention", "channel": "support" } }, { "name": "Reply", "type": "convex-data", "connection": "quick-lemur-789" }]));
-            assert_eq!(drafted.unwrap_err(), "step \"Reply\" is a \"convex-data\" step, which new maps do not use");
         }
     }
 

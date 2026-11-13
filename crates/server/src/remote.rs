@@ -117,23 +117,33 @@ pub(crate) async fn resolve(hub: &Hub, account: &Account, asked: &str) -> Result
 }
 
 /// The status of the task `from`'s tab delegated to `machine`, or its state once cancelled. A
-/// worker box still booting has no node to ask: a cancel deletes it, and a look says it boots. A
-/// task whose end the hub holds for `from` answers from it, as its box may be gone.
+/// worker box whose node is offline has no node to ask: a cancel deletes it, and a look says it
+/// still boots, or that it is offline once it had connected. A task whose end the hub holds for
+/// `from` answers from it first, as its box and machine may be gone.
 async fn remote_task(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, machine: &str, tab: TabId, task: String, cancel: Option<String>) -> Result<Value, String> {
     if let Some(end) = held_end(hub, account, from, &task).await? {
         return Ok(json!({ "workState": end.state, "summary": end.summary, "error": end.error, "usage": end.usage }));
     }
     let worker_box = hub.boxes.delegate_box(hub, account, machine).await?;
     let asked = Call::RemoteTask { origin_machine: from.to_owned(), tab, task, cancel: cancel.clone() };
-    let answer = match (&worker_box, account.is_online(machine)) {
-        (Some(_), false) => Err(pinned_core::delegate::BOX_BOOTING.to_owned()),
-        _ => call(hub, account, machine, asked, LOOK_WAIT).await,
+    let offline = match worker_box.as_ref().filter(|_| !account.is_online(machine)) {
+        Some(row) => {
+            let removed = matches!(row.phase, crate::boxes::Phase::Ending(_)) && hub.db.machine_name(account.id, row.machine).await?.is_none();
+            Some(crate::boxes::offline_answer(&row.phase, removed, machine))
+        }
+        None => None,
+    };
+    let answer = match &offline {
+        Some(e) => Err(e.clone()),
+        None => call(hub, account, machine, asked, LOOK_WAIT).await,
     };
     match (worker_box, cancel) {
         (Some(row), Some(reason)) => {
             let mut answer = answer.unwrap_or_else(|_| json!({ "workState": "cancelled", "error": reason }));
             hub.boxes.add_box_usage(hub, account, &row, &mut answer).await;
-            hub.boxes.end_delegate(hub, account, row).await?;
+            // A box cancelled while its link is down ends for that, not as done.
+            let why = if offline.as_deref() == Some(pinned_core::delegate::BOX_OFFLINE) { crate::boxes::End::Offline } else { crate::boxes::End::Done };
+            hub.boxes.end_delegate(hub, account, row, why).await?;
             Ok(answer)
         }
         (Some(row), None) => {
@@ -187,7 +197,7 @@ async fn ended(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, to: &str, tab
         Err(Unanswered::Lost(e)) => return Err(e),
     };
     if let Some(row) = worker_box {
-        hub.boxes.end_delegate(hub, account, row).await?;
+        hub.boxes.end_delegate(hub, account, row, crate::boxes::End::Done).await?;
     }
     Ok(taken)
 }

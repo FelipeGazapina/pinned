@@ -11,6 +11,8 @@ use rand_core::{OsRng, RngCore};
 use pinned_core::account::{DictationEngine, DictationFeedback, DictationRating};
 use pinned_core::agent::Subject;
 use pinned_core::delegate::TaskRecord;
+use pinned_core::ideas::{Idea, IdeaStatus};
+use pinned_core::schedule::Actor;
 use pinned_core::marks::{self, MarkChange, SessionMarks};
 use pinned_core::sync;
 use pinned_core::taste::Tastes;
@@ -121,6 +123,12 @@ create table if not exists held_ends (account uuid not null references accounts 
   report jsonb not null, held_at timestamptz not null default now(),
   primary key (account, origin_machine, task));
 alter table held_ends add column if not exists unclaimed_at timestamptz;
+-- What might be done, as opposed to memory: an account's own list with an optional project (a repo key).
+-- `created_by` is a `schedule::Actor` as json; `created_at` and `updated_at` are unix seconds.
+create table if not exists ideas (id uuid primary key, account uuid not null references accounts on delete cascade,
+  title text not null, text text not null default '', project text, status text not null default 'open',
+  task text, created_by jsonb not null, created_at bigint not null, updated_at bigint not null);
+create index if not exists ideas_by_account on ideas (account, updated_at desc);
 ";
 /// How long the hub keeps an end that its machine never came back for.
 const HELD_FOR: &str = "interval '30 days'";
@@ -915,6 +923,60 @@ impl Db {
             let role = serde_json::from_value(Value::String(r.get(2))).unwrap_or(ActorRole::Session);
             (Opener { machine: r.get(0), tab: r.get(1), role }, u64::try_from(r.get::<_, i64>(3)).unwrap_or(0))
         }))
+    }
+
+    /// The account's ideas, newest change first; with `project`, only that project's.
+    pub async fn ideas(&self, account: Uuid, project: Option<&str>) -> Result<Vec<Idea>, String> {
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "select id, title, text, project, status, task, created_by, created_at, updated_at from ideas \
+                 where account = $1 and ($2::text is null or project = $2) order by updated_at desc, created_at desc, id",
+                &[&account, &project],
+            )
+            .await
+            .map_err(err)?;
+        rows.iter().map(idea_of).collect()
+    }
+
+    /// Adds an idea made by `by` at unix second `now`.
+    pub async fn add_idea(&self, account: Uuid, title: &str, text: &str, project: Option<&str>, status: IdeaStatus, by: &Actor, now: i64) -> Result<Idea, String> {
+        let id = Uuid::new_v4();
+        let by = serde_json::to_value(by).map_err(|e| e.to_string())?;
+        let status = status_name(status);
+        let row = self
+            .client()
+            .await?
+            .query_one(
+                "insert into ideas (id, account, title, text, project, status, created_by, created_at, updated_at) values ($1, $2, $3, $4, $5, $6, $7, $8, $8) \
+                 returning id, title, text, project, status, task, created_by, created_at, updated_at",
+                &[&id, &account, &title, &text, &project, &status, &by, &now],
+            )
+            .await
+            .map_err(err)?;
+        idea_of(&row)
+    }
+
+    /// Changes the account's idea `id`, none when it has no such idea. `status` None keeps the status.
+    pub async fn edit_idea(&self, account: Uuid, id: Uuid, title: &str, text: &str, project: Option<&str>, status: Option<IdeaStatus>, now: i64) -> Result<Option<Idea>, String> {
+        let status = status.map(status_name);
+        let row = self
+            .client()
+            .await?
+            .query_opt(
+                "update ideas set title = $3, text = $4, project = $5, status = coalesce($6, status), updated_at = $7 where id = $1 and account = $2 \
+                 returning id, title, text, project, status, task, created_by, created_at, updated_at",
+                &[&id, &account, &title, &text, &project, &status, &now],
+            )
+            .await
+            .map_err(err)?;
+        row.as_ref().map(idea_of).transpose()
+    }
+
+    /// Whether the account had idea `id` to delete.
+    pub async fn delete_idea(&self, account: Uuid, id: Uuid) -> Result<bool, String> {
+        Ok(self.client().await?.execute("delete from ideas where id = $1 and account = $2", &[&id, &account]).await.map_err(err)? > 0)
     }
 
     pub async fn forget_agent_box(&self, account: Uuid, id: &str) -> Result<(), String> {
@@ -1776,4 +1838,27 @@ mod tests {
         assert_eq!(a.hash, hash(&a.text));
         assert_eq!(a.hash.len(), 32);
     }
+}
+
+fn status_name(status: IdeaStatus) -> &'static str {
+    match status {
+        IdeaStatus::Open => "open",
+        IdeaStatus::Done => "done",
+        IdeaStatus::Dropped => "dropped",
+    }
+}
+
+fn idea_of(row: &tokio_postgres::Row) -> Result<Idea, String> {
+    let status: String = row.get(4);
+    Ok(Idea {
+        id: row.get::<_, Uuid>(0).to_string(),
+        title: row.get(1),
+        text: row.get(2),
+        project: row.get(3),
+        status: serde_json::from_value(Value::String(status.clone())).map_err(|_| format!("an idea has the unknown status {status}"))?,
+        task: row.get(5),
+        created_by: serde_json::from_value(row.get(6)).map_err(|e| e.to_string())?,
+        created_at: row.get(7),
+        updated_at: row.get(8),
+    })
 }

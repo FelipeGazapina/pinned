@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::schedule::Actor;
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum IdeaStatus {
     #[default]
@@ -14,7 +14,7 @@ pub enum IdeaStatus {
     Dropped,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
 pub struct Idea {
     pub id: String,
     pub title: String,
