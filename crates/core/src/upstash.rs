@@ -73,13 +73,17 @@ impl std::fmt::Display for BoxId {
     }
 }
 
-/// A box to create. It always keeps running while idle and has Chromium, and it never gets
-/// `env_vars`: Upstash keeps those in the box's metadata, so secrets go in a file instead.
+/// A box to create. It has Chromium and it never gets `env_vars`: Upstash keeps those in the
+/// box's metadata, so secrets go in a file instead. It keeps running while idle only when
+/// `keep_alive`, which Upstash bills at a fixed monthly price per box; any other box is a standard
+/// one, billed for its active CPU time and paused by Upstash when idle.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NewBox {
     pub name: String,
     pub labels: Vec<String>,
     pub size: BoxSize,
+    /// Only the account's fixed box ("One box, reused"): it must outlive the runs it serves.
+    pub keep_alive: bool,
     /// Runs on every container start, after create and on each resume.
     pub init_command: String,
 }
@@ -90,7 +94,7 @@ impl NewBox {
             "name": self.name,
             "labels": self.labels,
             "size": self.size,
-            "keep_alive": true,
+            "keep_alive": self.keep_alive,
             "init_command": self.init_command,
             "runtime": "node",
             "browser": true,
@@ -644,8 +648,8 @@ mod tests {
     }
 
     #[test]
-    fn a_new_box_keeps_running_with_a_browser_and_no_env_vars() {
-        let new = NewBox { name: "pinned-00c0ffee".into(), labels: vec!["hub:3f9a1c2b7d4e".into(), "p:00c0ffee12345678".into()], size: BoxSize::Medium, init_command: "sh /workspace/home/.pinned/start.sh || true".into() };
+    fn a_kept_alive_box_keeps_running_with_a_browser_and_no_env_vars() {
+        let new = NewBox { name: "pinned-00c0ffee".into(), labels: vec!["hub:3f9a1c2b7d4e".into(), "p:00c0ffee12345678".into()], size: BoxSize::Medium, keep_alive: true, init_command: "sh /workspace/home/.pinned/start.sh || true".into() };
         assert_eq!(
             new.body(),
             json!({
@@ -653,6 +657,15 @@ mod tests {
                 "init_command": "sh /workspace/home/.pinned/start.sh || true", "runtime": "node", "browser": true,
             })
         );
+    }
+
+    #[test]
+    fn a_temporary_box_is_created_with_keep_alive_false() {
+        let new = NewBox { name: "pinned-00c0ffee".into(), labels: vec![], size: BoxSize::Small, keep_alive: false, init_command: String::new() };
+        let body = new.body();
+        assert_eq!(body["keep_alive"], json!(false), "a keep-alive box never pauses and bills a monthly price: {body}");
+        assert_ne!(body["keep_alive"], json!(true));
+        assert_eq!((body["runtime"].as_str(), body["browser"].as_bool()), (Some("node"), Some(true)), "only keep_alive differs");
     }
 
     #[test]

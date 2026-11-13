@@ -496,6 +496,13 @@ pub enum BoxPermission {
 }
 
 impl BoxPermission {
+    fn without_row(&self) -> Self {
+        match self {
+            BoxPermission::Fixed { .. } => BoxPermission::Fixed { row: None },
+            other => other.clone(),
+        }
+    }
+
     pub fn fixed_row(&self) -> Option<&str> {
         match self {
             BoxPermission::Fixed { row: Some(row) } => Some(row),
@@ -528,8 +535,17 @@ impl Default for BoxAccess {
 }
 
 impl BoxAccess {
+    /// Only the workflow kind (the box a run uses) has a fixed row: the hub names none for a
+    /// session, a worker or the orchestrator, so one a stored file or an old app carries there is
+    /// ignored, and the box it names keeps the normal timers.
     pub fn owns_row(&self, id: &str) -> bool {
-        [self.workflow.fixed_row(), self.session.fixed_row(), self.worker.fixed_row(), self.orchestrator.fixed_row()].into_iter().flatten().any(|row| row == id)
+        self.workflow.fixed_row() == Some(id)
+    }
+
+    /// As the hub and the apps read it: the session, worker and orchestrator kinds carry no row.
+    /// The stored file keeps what an earlier release wrote there.
+    fn without_unnamed_rows(&self) -> Self {
+        Self { workflow: self.workflow.clone(), session: self.session.without_row(), worker: self.worker.without_row(), orchestrator: self.orchestrator.without_row() }
     }
 }
 
@@ -576,10 +592,14 @@ fn box_ask_id(connector: &str, subject: &Subject) -> String {
     hasher.finalize()[..8].iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Only the hub names the fixed row, through `claim_fixed_row`, `retake_fixed_row` and
+/// `release_fixed_row`, and only for the workflow kind. A save that still asks for Fixed keeps the stored row, as an older app sends
+/// back the row it read, and any other row it names becomes none: a row named there is exempt from
+/// every box timer, so a client must not pick one.
 fn keep_fixed_row(incoming: BoxPermission, stored: &BoxPermission) -> BoxPermission {
-    match (incoming, stored) {
-        (BoxPermission::Fixed { row: None }, BoxPermission::Fixed { row: Some(kept) }) => BoxPermission::Fixed { row: Some(kept.clone()) },
-        (incoming, _) => incoming,
+    match incoming {
+        BoxPermission::Fixed { .. } => BoxPermission::Fixed { row: stored.fixed_row().map(str::to_owned) },
+        incoming => incoming,
     }
 }
 
@@ -826,6 +846,14 @@ struct Store {
     /// The connected Convex deployments. Their keys are keys, under `convex::key_name`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     convex: Vec<convex::Connection>,
+    /// The subjects a box end freed, by workflow id and then `subject_key`, with the unix millis it
+    /// did. A later failed boot or offline end of the same subject keeps it handled while the mark
+    /// is within `BOX_RELEASE_WINDOW_MS`. A mark is dropped when it is older than that or its
+    /// workflow is deleted (`prune_thread_bots`), whoever still tracks the subject. Not named
+    /// `box_released`: earlier commits of this release saved that key as a list of subjects, which
+    /// this shape cannot read, so the old key is ignored and its mark dropped.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    box_released_at: BTreeMap<String, BTreeMap<String, u64>>,
     connectors: Vec<Connector>,
 }
 
@@ -886,15 +914,38 @@ impl Store {
         }
     }
 
-    /// Drops the bots of threads no workflow handles or follows and no run works on anymore.
-    fn prune_thread_bots(&mut self, runs: &[runner::Run], starting: &[String]) -> bool {
-        let before = self.slack_threads.len();
+    /// Drops the bots of threads no workflow handles or follows and no run works on anymore, and
+    /// the box-end marks older than `BOX_RELEASE_WINDOW_MS` at `now` or of a deleted workflow.
+    fn prune_thread_bots(&mut self, runs: &[runner::Run], starting: &[String], now: u64) -> bool {
+        let before = (self.slack_threads.len(), self.box_released_at.values().map(|keys| keys.len()).sum::<usize>());
         let connectors = &self.connectors;
-        self.slack_threads.retain(|key, _| {
+        let tracked = |key: &String| {
             connectors.iter().any(|c| c.handled.iter().any(|h| h == key) || c.followed.contains_key(key)) || runs.iter().any(|run| subject_key(&run.subject) == *key)
                 || starting.contains(key)
-        });
-        self.slack_threads.len() != before
+        };
+        self.slack_threads.retain(|key, _| tracked(key));
+        self.box_released_at.retain(|workflow, _| connectors.iter().any(|c| c.id == *workflow));
+        for keys in self.box_released_at.values_mut() {
+            keys.retain(|_, at| box_release_is_live(Some(*at), now));
+        }
+        self.box_released_at.retain(|_, keys| !keys.is_empty());
+        (self.slack_threads.len(), self.box_released_at.values().map(|keys| keys.len()).sum::<usize>()) != before
+    }
+
+    /// Frees `subject` of workflow `connector` after its run's box ended, as `release` allows:
+    /// never for `Keep`, and for `Once` only when no box end freed it in the last
+    /// `BOX_RELEASE_WINDOW_MS` before `now`. Answers whether it did.
+    fn release_after_box_end(&mut self, connector: &str, subject: &Subject, release: BoxEndRelease, now: u64) -> bool {
+        let key = subject_key(subject);
+        if release == BoxEndRelease::Keep || box_release_is_live(self.box_released_at.get(connector).and_then(|keys| keys.get(&key)).copied(), now) {
+            return false;
+        }
+        self.box_released_at.entry(connector.to_owned()).or_default().insert(key.clone(), now);
+        if let Some(c) = self.connectors.iter_mut().find(|c| c.id == connector) {
+            c.unclaim(subject);
+        }
+        self.slack_threads.remove(&key);
+        true
     }
 
     /// The workflows, paused ones too, that watch Slack with the bot `id` today. A called workflow
@@ -1110,7 +1161,7 @@ impl Store {
             }
         }
         let starting: Vec<String> = settled.starts.iter().map(|start| subject_key(&start.subject)).collect();
-        settled.needs_save |= self.prune_thread_bots(runs, &starting);
+        settled.needs_save |= self.prune_thread_bots(runs, &starting, unix_millis());
         settled
     }
 }
@@ -1597,6 +1648,16 @@ fn read_runs(bytes: Option<Vec<u8>>) -> (Vec<runner::Run>, Option<String>) {
     }
 }
 
+/// How long a box-end release mark keeps its subject from being freed by another box end: a
+/// subject is freed at most once per this long, 30 days in millis.
+const BOX_RELEASE_WINDOW_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+
+/// Whether a release mark written at `at` still counts at `now`: it does until it is older than
+/// `BOX_RELEASE_WINDOW_MS`. No mark never counts.
+fn box_release_is_live(at: Option<u64>, now: u64) -> bool {
+    at.is_some_and(|at| now.saturating_sub(at) <= BOX_RELEASE_WINDOW_MS)
+}
+
 /// Unix millis now. A machine's tab list is stamped with this when it arrives.
 pub fn unix_millis() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
@@ -1633,6 +1694,22 @@ pub struct Connectors {
     known_tabs: Mutex<HashMap<String, (u64, Vec<TabView>)>>,
     /// The Slack bots `fill_bots` already asked Slack about, so it asks once per bot.
     bots_filled: Mutex<std::collections::HashSet<String>>,
+    /// Why runs failed when their box ended, for the next check to report on the workflows card.
+    box_failures: Mutex<Vec<String>>,
+    /// Subjects, by `subject_key`, whose box failed to boot while a run opened it: that open's
+    /// failure frees the subject once per 30 days (`BoxEndRelease::Once`).
+    boot_failed: Mutex<std::collections::HashSet<String>>,
+}
+
+/// What a box's end does to the subject of the run it failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoxEndRelease {
+    /// It ran out of budget or reached its max life, or the owner removed its machine or
+    /// disconnected Upstash: the subject stays handled, and only its owner runs it again.
+    Keep,
+    /// It failed to boot, went offline, or vanished from Upstash without being asked: the subject
+    /// is freed for its next trigger once per subject per 30 days (`BOX_RELEASE_WINDOW_MS`), and stays handled for the rest of that time.
+    Once,
 }
 
 /// A Slack bot with its token, as a read or a post uses it.
@@ -1667,6 +1744,8 @@ impl Connectors {
             runs_broken: Mutex::new(runs_broken),
             known_tabs: Mutex::new(HashMap::new()),
             bots_filled: Mutex::new(std::collections::HashSet::new()),
+            box_failures: Mutex::new(vec![]),
+            boot_failed: Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -1842,9 +1921,25 @@ impl Connectors {
         self.save(&store)
     }
 
+    /// The hub's box for `subject` failed to boot while a run opened it. That open's failure frees
+    /// the subject only if no box end freed it in the last 30 days.
+    pub fn box_boot_failed(&self, subject: &Subject) {
+        self.boot_failed.lock().unwrap().insert(subject_key(subject));
+    }
+
     fn unclaim(&self, connector: &str, subject: &Subject, folder: &Path, why: &str) -> String {
-        let error = format!("could not open a session in {}: {why}; the next check tries again", folder.display());
+        let booted = self.boot_failed.lock().unwrap().remove(&subject_key(subject));
+        let mut error = format!("could not open a session in {}: {why}; the next check tries again", folder.display());
         let mut store = self.store.lock().unwrap();
+        if booted {
+            if !store.release_after_box_end(connector, subject, BoxEndRelease::Once, unix_millis()) {
+                error = format!("could not open a session in {}: {why}; its box failed before, so it starts again only when you run it", folder.display());
+            }
+            return match self.save(&store) {
+                Ok(()) => error,
+                Err(e) => format!("{error}; {e}"),
+            };
+        }
         let Some(c) = store.connectors.iter_mut().find(|c| c.id == connector) else { return error };
         c.unclaim(subject);
         store.slack_threads.remove(&subject_key(subject));
@@ -2466,6 +2561,12 @@ fn trigger_posts(posts: &[slack::Post]) -> Vec<TriggerPost> {
     posts.iter().map(|post| TriggerPost { ts: post.ts.clone(), author: post.author.clone(), text: post.text.clone() }).collect()
 }
 
+/// True unless `run` started after `at_ms` (unix millis). A run's first log entry is its trigger, written when it
+/// started; a run with no readable one counts as started.
+fn started_by(run: &runner::Run, at_ms: u64) -> bool {
+    run.log.first().and_then(|entry| DateTime::parse_from_rfc3339(&entry.at).ok()).is_none_or(|started| started.timestamp_millis() <= i64::try_from(at_ms).unwrap_or(i64::MAX))
+}
+
 fn subject_key(subject: &Subject) -> String {
     match subject {
         Subject::LinearIssue { issue } => issue.clone(),
@@ -3070,6 +3171,69 @@ impl Connectors {
         })
     }
 
+    /// The box on `machine` ended before its run did. Every live run whose session is on that
+    /// machine fails with `why`, and so does a run of `holder`'s subject that no other machine has
+    /// and that started no later than `holder`'s third part, the unix millis its box row was written:
+    /// a run the box held began before the box existed, so a newer run of the same subject, on
+    /// another machine or not placed yet, is never failed by a retried end. Its subject is freed
+    /// (no longer `handled`, followed or tied to a Slack bot, so the next trigger may start it
+    /// again) only as `release` allows: never for `Keep`, once per subject per 30 days for `Once`. Nothing
+    /// reopens the session. Answers how many runs failed. When their save fails, the runs are left
+    /// as they were, so a retry fails them once.
+    pub async fn box_ended(&self, machine: &str, holder: Option<(&str, &Subject, u64)>, why: &str, release: BoxEndRelease) -> Result<usize, String> {
+        let _guard = self.driving.lock().await;
+        let at = Utc::now().to_rfc3339();
+        let released = self.store.lock().unwrap().box_released_at.clone();
+        let now = unix_millis();
+        let mut whys = vec![];
+        let mut before = vec![];
+        let failed: Vec<(String, Subject)> = {
+            let mut runs = self.runs.lock().unwrap();
+            let mut failed = vec![];
+            for run in runs.iter_mut().filter(|run| matches!(run.status, Status::Running | Status::Waiting)) {
+                let owner = run.session_owner.clone().unwrap_or_else(|| run.connector.clone());
+                let on_box = matches!(&run.session, Session::Live { machine: live, .. } if live == machine);
+                let holds = holder.is_some_and(|(connector, subject, row_written)| {
+                    &run.subject == subject && owner == connector && !matches!(&run.session, Session::Live { machine: live, .. } if live != machine) && started_by(run, row_written)
+                });
+                if on_box || holds {
+                    let frees = release == BoxEndRelease::Once && !box_release_is_live(released.get(&owner).and_then(|keys| keys.get(&subject_key(&run.subject))).copied(), now);
+                    let then = if frees { "its next trigger may start it once more" } else { "it starts again only when you run it" };
+                    let why = format!("{why}; the run stopped, and {then}");
+                    before.push(run.clone());
+                    runner::push(run, Wake::BoxEnded { why: why.clone() }, &at);
+                    whys.push(why);
+                    failed.push((owner, run.subject.clone()));
+                }
+            }
+            failed
+        };
+        if failed.is_empty() {
+            return Ok(0);
+        }
+        if let Err(e) = self.save_runs() {
+            // Undone, so the hub's retry finds the runs still going and fails them then.
+            let mut runs = self.runs.lock().unwrap();
+            for was in before {
+                if let Some(slot) = runs.iter_mut().find(|run| run.id == was.id) {
+                    *slot = was;
+                }
+            }
+            return Err(e);
+        }
+        {
+            let mut store = self.store.lock().unwrap();
+            for (owner, subject) in &failed {
+                store.release_after_box_end(owner, subject, release, now);
+            }
+            self.save(&store)?;
+        }
+        self.box_failures.lock().unwrap().extend(whys);
+        // The next check reports it now, not a whole interval later.
+        self.wake.notify_one();
+        Ok(failed.len())
+    }
+
     /// Tab statuses changed on `machine`. Waiting runs wake, then every running graph continues.
     /// `observed` is the unix millis the list arrived. Lists can queue behind a drive, so an older one never replaces a newer one.
     pub async fn on_tabs<F, Fut, R>(&self, machine: &str, observed: u64, after: &[TabView], open: F) -> Result<(), String>
@@ -3245,6 +3409,7 @@ impl Connectors {
         self.reconcile_known()?;
         let library = self.library();
         let mut failed = self.triage_inbox(&library).await;
+        failed.append(&mut self.box_failures.lock().unwrap());
         for _ in 0..256 {
             let index = self.runs.lock().unwrap().iter().position(|run| matches!(run.status, Status::Running));
             let Some(index) = index else { break };
@@ -3867,7 +4032,7 @@ impl Connectors {
             box_claude_tokens: store.box_claude_tokens.clone(),
             connectors: store.connectors.iter().cloned().map(presented).collect(),
             checked: self.checked.lock().unwrap().clone(),
-            boxes: store.boxes.clone(),
+            boxes: store.boxes.without_unnamed_rows(),
             box_asks: store.box_asks.clone(),
             convex: store.convex.clone(),
             ideas: Vec::new(),
@@ -4265,7 +4430,7 @@ impl Connectors {
     }
 
     pub fn box_access(&self) -> BoxAccess {
-        self.store.lock().unwrap().boxes.clone()
+        self.store.lock().unwrap().boxes.without_unnamed_rows()
     }
 
     /// Saves the account's box permissions.
@@ -4273,9 +4438,9 @@ impl Connectors {
         let mut store = self.store.lock().unwrap();
         let kept = BoxAccess {
             workflow: keep_fixed_row(access.workflow, &store.boxes.workflow),
-            session: keep_fixed_row(access.session, &store.boxes.session),
-            worker: keep_fixed_row(access.worker, &store.boxes.worker),
-            orchestrator: keep_fixed_row(access.orchestrator, &store.boxes.orchestrator),
+            session: access.session.without_row(),
+            worker: access.worker.without_row(),
+            orchestrator: access.orchestrator.without_row(),
         };
         store.boxes = kept.clone();
         self.save(&store)?;
@@ -5194,6 +5359,378 @@ mod tests {
         assert_eq!(serde_json::to_value(&named).unwrap()["account"], " work ");
         assert_eq!(old.ask, None, "a connector stored before the ask step has none");
         assert!(serde_json::to_value(&old).unwrap().get("ask").is_none());
+    }
+
+    /// A run of `subject` that waits on its session on box machine `machine`, having handed `sent` on.
+    fn held_run(connector: &str, subject: &Subject, machine: &str, sent: &[String]) -> runner::Run {
+        serde_json::from_value(serde_json::json!({
+            "id": format!("run-{machine}"), "connector": connector, "subject": subject, "status": "waiting", "session_owner": connector,
+            "session": { "state": "live", "machine": machine, "tab": "t1", "claude": null, "since": 1, "saw_working": false, "await_working": false },
+            "log": [], "context": {}, "stack": [], "pending": null, "ready": null, "claimed": true, "sent": sent,
+        }))
+        .unwrap()
+    }
+
+    /// How many sessions the next check starts for issue `uuid`, still labelled.
+    fn next_check_starts(connectors: &Connectors) -> usize {
+        let runs = connectors.runs.lock().unwrap().clone();
+        let settled = connectors.store.lock().unwrap().settle(&["c1".into()], vec![("c1".into(), Found::Issue(issue()))], checked_at(), "/bin/pinned", &runs);
+        settled.work.len() + settled.starts.len()
+    }
+
+    /// The subjects each workflow holds a release mark for, without their times.
+    fn marked_subjects(connectors: &Connectors) -> BTreeMap<String, Vec<String>> {
+        connectors.store.lock().unwrap().box_released_at.iter().map(|(workflow, keys)| (workflow.clone(), keys.keys().cloned().collect())).collect()
+    }
+
+    /// A check that finds no labelled issue, so nothing claims `uuid` and only the prune looks at marks.
+    fn check_finding_nothing(connectors: &Connectors) {
+        let runs = connectors.runs.lock().unwrap().clone();
+        connectors.store.lock().unwrap().settle(&["c1".into()], vec![], checked_at(), "/bin/pinned", &runs);
+    }
+
+    fn handled_of(connectors: &Connectors) -> Vec<String> {
+        connectors.store.lock().unwrap().connectors[0].handled.clone()
+    }
+
+    fn failed_why(connectors: &Connectors, machine: &str) -> String {
+        let runs = connectors.runs.lock().unwrap();
+        match &runs.iter().find(|run| run.id.0 == format!("run-{machine}")).unwrap().status {
+            Status::Failed { why } => why.clone(),
+            other => panic!("the run is {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_box_that_ends_for_its_budget_or_max_life_keeps_a_labelled_issue_handled() {
+        let subject = Subject::LinearIssue { issue: "uuid".into() };
+        let linear = Connector { handled: vec!["uuid".into()], ..linear_connector() };
+        let (connectors, dir) = stored("box-end-keep", vec![linear]);
+        // The hub ends a box for its budget and for its max life both as `End::Expired`, which it
+        // passes as `Keep`; one end of each here.
+        for machine in ["box-budget", "box-max-life"] {
+            connectors.runs.lock().unwrap().push(held_run("c1", &subject, machine, &[]));
+            assert_eq!(block_on(connectors.box_ended(machine, None, "Upstash Box: the box ended before its task did: it ran out of time or budget", BoxEndRelease::Keep)), Ok(1));
+            assert_eq!(
+                failed_why(&connectors, machine),
+                "Upstash Box: the box ended before its task did: it ran out of time or budget; the run stopped, and it starts again only when you run it"
+            );
+            assert_eq!(handled_of(&connectors), ["uuid"], "the issue stays handled");
+            assert_eq!(next_check_starts(&connectors), 0, "the next check starts no run for the still-labelled issue");
+        }
+        let reloaded = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into());
+        assert_eq!(handled_of(&reloaded), ["uuid"]);
+        assert!(reloaded.store.lock().unwrap().box_released_at.is_empty(), "a kept subject spends no release");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Earlier commits of this release saved the release mark as `"box_released_at": {"c1": ["uuid"]}`,
+    /// a list of subjects. The mark has a new key and shape, so such a store still parses: the
+    /// workflow and what it handled stay, and only the old mark is dropped.
+    #[test]
+    fn a_store_with_the_old_release_mark_shape_keeps_its_workflows() {
+        let linear = Connector { handled: vec!["uuid".into()], ..linear_connector() };
+        let mut store = serde_json::to_value(Store { connectors: vec![linear], ..Store::default() }).unwrap();
+        store["box_released"] = json!({ "c1": ["uuid"] });
+        let dir = temp_dir("old-release-mark");
+        let storage = FileStorage::new(dir.clone());
+        storage.save(&serde_json::to_vec(&store).unwrap()).unwrap();
+        let connectors = Connectors::new(storage, "/bin/pinned".into());
+        assert_eq!(connectors.store.lock().unwrap().connectors.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["c1"], "the store loaded empty");
+        assert_eq!(handled_of(&connectors), ["uuid"], "the workflow keeps what it handled");
+        assert!(marked_subjects(&connectors).is_empty(), "the old mark is dropped");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_offline_box_end_frees_its_issue_once_and_a_second_keeps_it_handled() {
+        let subject = Subject::LinearIssue { issue: "uuid".into() };
+        let linear = Connector { handled: vec!["uuid".into()], ..linear_connector() };
+        let (connectors, dir) = stored("box-end-once", vec![linear]);
+        connectors.runs.lock().unwrap().push(held_run("c1", &subject, "box-1", &[]));
+        assert_eq!(block_on(connectors.box_ended("box-1", None, "Upstash Box: its box went offline", BoxEndRelease::Once)), Ok(1));
+        assert_eq!(failed_why(&connectors, "box-1"), "Upstash Box: its box went offline; the run stopped, and its next trigger may start it once more");
+        assert!(handled_of(&connectors).is_empty());
+        assert_eq!(next_check_starts(&connectors), 1, "the one release starts one new run");
+        assert_eq!(handled_of(&connectors), ["uuid"], "which claims the issue again");
+
+        connectors.runs.lock().unwrap().push(held_run("c1", &subject, "box-2", &[]));
+        assert_eq!(block_on(connectors.box_ended("box-2", None, "Upstash Box: its box went offline", BoxEndRelease::Once)), Ok(1));
+        assert_eq!(failed_why(&connectors, "box-2"), "Upstash Box: its box went offline; the run stopped, and it starts again only when you run it");
+        assert_eq!(handled_of(&connectors), ["uuid"], "a second box end keeps it handled");
+        assert_eq!(next_check_starts(&connectors), 0);
+
+        let reloaded = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into());
+        assert_eq!(marked_subjects(&reloaded), BTreeMap::from([("c1".to_owned(), vec!["uuid".to_owned()])]), "the mark is stored");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_second_failed_boot_does_not_release_after_the_failed_run_is_dropped() {
+        let subject = Subject::LinearIssue { issue: "uuid".into() };
+        let linear = Connector { handled: vec!["uuid".into()], ..linear_connector() };
+        let (connectors, dir) = stored("boot-twice-run-dropped", vec![linear]);
+        connectors.runs.lock().unwrap().push(held_run("c1", &subject, "box-1", &[]));
+        assert_eq!(block_on(connectors.box_ended("box-1", None, "Upstash Box: its box went offline", BoxEndRelease::Once)), Ok(1));
+        assert!(handled_of(&connectors).is_empty(), "the first end frees the issue");
+        assert_eq!(marked_subjects(&connectors).len(), 1);
+
+        // The failed run is dropped before anything claims the issue again, and a check prunes.
+        connectors.runs.lock().unwrap().clear();
+        check_finding_nothing(&connectors);
+        assert_eq!(marked_subjects(&connectors), BTreeMap::from([("c1".to_owned(), vec!["uuid".to_owned()])]), "the mark outlives the run");
+        assert_eq!(next_check_starts(&connectors), 1, "the trigger claims the issue again");
+        assert_eq!(handled_of(&connectors), ["uuid"]);
+
+        let refuse = |_: Work| async { Err::<(), String>("Upstash Box: the box did not connect within 5 min".to_owned()) };
+        connectors.box_boot_failed(&subject);
+        assert_eq!(
+            block_on(connectors.hand_over(Work::Run(run(&linear_connector(), &issue(), "/bin/pinned")), &refuse)),
+            Err("could not open a session in /repo: Upstash Box: the box did not connect within 5 min; its box failed before, so it starts again only when you run it".into())
+        );
+        assert_eq!(handled_of(&connectors), ["uuid"], "a second failed boot keeps it handled");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_release_mark_older_than_thirty_days_is_dropped_and_a_newer_one_is_kept() {
+        const DAY_MS: u64 = 24 * 60 * 60 * 1000;
+        let (connectors, dir) = stored("release-mark-age", vec![linear_connector()]);
+        let now = 1_800_000_000_000_u64;
+        let mut store = connectors.store.lock().unwrap();
+        store.box_released_at.insert("c1".into(), BTreeMap::from([("older".into(), now - 30 * DAY_MS - 1), ("newer".into(), now - 30 * DAY_MS + 1)]));
+        store.box_released_at.insert("deleted".into(), BTreeMap::from([("fresh".into(), now)]));
+        assert!(store.prune_thread_bots(&[], &[], now), "the prune changes the store");
+        assert_eq!(store.box_released_at, BTreeMap::from([("c1".to_owned(), BTreeMap::from([("newer".to_owned(), now - 30 * DAY_MS + 1)]))]), "30 days and 1 ms goes, 30 days less 1 ms stays, and a deleted workflow's mark goes");
+        // A mark of a subject nothing tracks stays, however long ago nobody did.
+        assert!(!store.prune_thread_bots(&[], &[], now), "nothing more to prune");
+        // The one that stayed counts as a release until it is old, and an old one counts as none.
+        let subject = Subject::LinearIssue { issue: "newer".into() };
+        assert!(!store.release_after_box_end("c1", &subject, BoxEndRelease::Once, now), "a young mark: already released once");
+        assert!(store.release_after_box_end("c1", &subject, BoxEndRelease::Once, now + 2 * DAY_MS), "an old mark counts as none, and the release is written again");
+        assert_eq!(store.box_released_at["c1"]["newer"], now + 2 * DAY_MS, "with its new time");
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_failed_boot_frees_its_issue_once_and_a_second_keeps_it_handled() {
+        let subject = Subject::LinearIssue { issue: "uuid".into() };
+        let linear = Connector { handled: vec!["uuid".into()], ..linear_connector() };
+        let (connectors, dir) = stored("boot-once", vec![linear]);
+        let refuse = |_: Work| async { Err::<(), String>("Upstash Box: the box did not connect within 5 min".to_owned()) };
+        connectors.box_boot_failed(&subject);
+        assert_eq!(
+            block_on(connectors.hand_over(Work::Run(run(&linear_connector(), &issue(), "/bin/pinned")), &refuse)),
+            Err("could not open a session in /repo: Upstash Box: the box did not connect within 5 min; the next check tries again".into())
+        );
+        assert!(handled_of(&connectors).is_empty());
+        assert_eq!(next_check_starts(&connectors), 1, "one new run starts");
+
+        connectors.box_boot_failed(&subject);
+        assert_eq!(
+            block_on(connectors.hand_over(Work::Run(run(&linear_connector(), &issue(), "/bin/pinned")), &refuse)),
+            Err("could not open a session in /repo: Upstash Box: the box did not connect within 5 min; its box failed before, so it starts again only when you run it".into())
+        );
+        assert_eq!(handled_of(&connectors), ["uuid"], "a second failed boot keeps it handled");
+        assert_eq!(next_check_starts(&connectors), 0);
+
+        // An open that fails without a box end still frees the issue, as before.
+        assert!(block_on(connectors.hand_over(Work::Run(run(&linear_connector(), &issue(), "/bin/pinned")), &refuse)).is_err());
+        assert!(handled_of(&connectors).is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_one_retry_after_a_box_end_repeats_no_slack_reply_and_no_linear_write() {
+        const THREAD: &str = "1792400050.000200";
+        let subject = Subject::SlackThread { channel: "C0123ABCD".into(), thread: THREAD.into() };
+        let key = format!("C0123ABCD:{THREAD}");
+        let mut slack = slack_connector();
+        slack.handled = vec![key.clone()];
+        // The first run's session filed this issue; Linear is not connected, so any Linear call fails.
+        slack.created.insert(key.clone(), Filed { id: "uuid-9".into(), identifier: "ENG-9".into(), url: "https://linear.example/ENG-9".into() });
+        let (connectors, dir) = stored("box-end-retry", vec![slack]);
+        let reply = Connectors::reply_key("C0123ABCD", THREAD, "On it");
+        connectors.runs.lock().unwrap().push(held_run("c2", &subject, "box-1", std::slice::from_ref(&reply)));
+        assert_eq!(block_on(connectors.box_ended("box-1", None, "Upstash Box: its box went offline", BoxEndRelease::Once)), Ok(1));
+        assert!(connectors.store.lock().unwrap().connectors[0].handled.is_empty(), "the thread is free for one retry");
+
+        let mut lib = runner::Library::new();
+        lib.insert("c2".into(), migrate(&slack_connector()));
+        let mut retry = runner::start(&lib, "c2", subject, serde_json::json!({}), "2026-01-01T00:00:00Z");
+        // Slack has no bot here, so a post would fail: Ok means nothing was posted.
+        assert_eq!(block_on(connectors.perform_reply(&mut retry, "c2", "On it")), Ok(Supplied::Done), "the reply already posted is not posted again");
+        assert_eq!(block_on(connectors.slack_reply("c2", "C0123ABCD", THREAD, "On it")), Ok("that reply is already posted by the workflow run".into()));
+        assert_eq!(
+            block_on(connectors.perform_file_issue(&mut retry, "c2", "ENG", "", "", "Broken button", "D")),
+            Ok(Supplied::Done),
+            "the issue the first run filed is answered, and Linear gets no second write"
+        );
+        assert_eq!(connectors.store.lock().unwrap().connectors[0].created.len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Runs that fail to save once, then save into `saved`.
+    #[derive(Clone, Default)]
+    struct RunsFailOnce {
+        inner: MemStorage,
+        failed: std::sync::Arc<Mutex<bool>>,
+        saved: std::sync::Arc<Mutex<Option<Vec<u8>>>>,
+    }
+
+    impl Storage for RunsFailOnce {
+        fn load(&self) -> Option<Vec<u8>> {
+            self.inner.load()
+        }
+        fn save(&self, store: &[u8]) -> Result<(), String> {
+            self.inner.save(store)
+        }
+        fn key(&self, name: &str) -> Option<String> {
+            self.inner.key(name)
+        }
+        fn write_key(&self, name: &str, key: &str) -> Result<(), String> {
+            self.inner.write_key(name, key)
+        }
+        fn remove_key(&self, name: &str) {
+            self.inner.remove_key(name)
+        }
+        fn load_runs(&self) -> Option<Vec<u8>> {
+            None
+        }
+        fn save_runs(&self, bytes: &[u8]) -> Result<(), String> {
+            if !std::mem::replace(&mut *self.failed.lock().unwrap(), true) {
+                return Err("could not save the runs: disk full".into());
+            }
+            *self.saved.lock().unwrap() = Some(bytes.to_vec());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_box_end_whose_run_save_fails_is_retried_and_fails_the_run_once() {
+        let subject = Subject::LinearIssue { issue: "uuid".into() };
+        let storage = RunsFailOnce::default();
+        storage.inner.save(&serde_json::to_vec(&Store { connectors: vec![Connector { handled: vec!["uuid".into()], ..linear_connector() }], ..Store::default() }).unwrap()).unwrap();
+        let connectors = Connectors::new(storage.clone(), "/bin/pinned".into());
+        connectors.runs.lock().unwrap().push(held_run("c1", &subject, "box-1", &[]));
+
+        assert_eq!(block_on(connectors.box_ended("box-1", None, "Upstash Box: its box went offline", BoxEndRelease::Once)), Err("could not save the runs: disk full".into()));
+        assert!(matches!(connectors.runs.lock().unwrap()[0].status, Status::Waiting), "the run is left going for the retry");
+        assert_eq!(handled_of(&connectors), ["uuid"], "and its issue is not freed yet");
+
+        assert_eq!(block_on(connectors.box_ended("box-1", None, "Upstash Box: its box went offline", BoxEndRelease::Once)), Ok(1), "the retry fails it");
+        let saved: Vec<runner::Run> = serde_json::from_slice(&storage.saved.lock().unwrap().clone().unwrap()).unwrap();
+        assert!(matches!(&saved[0].status, Status::Failed { .. }), "and saves it failed");
+        assert!(handled_of(&connectors).is_empty());
+        assert_eq!(block_on(connectors.box_ended("box-1", None, "Upstash Box: its box went offline", BoxEndRelease::Once)), Ok(0), "a third pass finds nothing to fail");
+        assert_eq!(connectors.box_failures.lock().unwrap().len(), 1, "the card hears of it once");
+    }
+
+    /// A run of `subject` for `connector` that started at `started` (RFC 3339), whose session is `session`.
+    fn run_started(id: &str, connector: &str, subject: &Subject, started: &str, session: serde_json::Value) -> runner::Run {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "connector": connector, "subject": subject, "status": "waiting", "session_owner": connector, "session": session,
+            "log": [{ "at": started, "connector": connector, "node": "n0", "what": {} }],
+            "context": {}, "stack": [], "pending": null, "ready": null, "claimed": true, "sent": [],
+        }))
+        .unwrap()
+    }
+
+    fn status_of(connectors: &Connectors, id: &str) -> Status {
+        connectors.runs.lock().unwrap().iter().find(|run| run.id.0 == id).unwrap().status.clone()
+    }
+
+    #[test]
+    fn a_retried_box_end_fails_only_the_run_its_box_held() {
+        let subject = Subject::LinearIssue { issue: "uuid".into() };
+        let linear = Connector { handled: vec!["uuid".into()], ..linear_connector() };
+        let (connectors, dir) = stored("box-end-retry-newer", vec![linear]);
+        let row_written = u64::try_from(DateTime::parse_from_rfc3339("2026-01-01T10:01:00Z").unwrap().timestamp_millis()).unwrap();
+        let why = "Upstash Box: its box went offline";
+        let end = |connectors: &Connectors| block_on(connectors.box_ended("box-1", Some(("c1", &subject, row_written)), why, BoxEndRelease::Once));
+        // The old run's box is still booting: its session is not placed, so only its subject finds it.
+        connectors.runs.lock().unwrap().push(run_started("old", "c1", &subject, "2026-01-01T10:00:00Z", serde_json::json!({ "state": "none" })));
+        assert_eq!(end(&connectors), Ok(1), "the first pass fails the run the box held");
+        assert!(handled_of(&connectors).is_empty(), "and frees its issue once");
+
+        // The workflow moved off boxes: a newer run of the same subject works on this machine, and another has no session yet.
+        let live = serde_json::json!({ "state": "live", "machine": "local", "tab": "t1", "claude": null, "since": 1, "saw_working": false, "await_working": false });
+        connectors.runs.lock().unwrap().push(run_started("newer-live", "c1", &subject, "2026-01-01T11:00:00Z", live));
+        // Production starts a run `Running` with no session until its box is placed; it is never `Waiting` without one.
+        let mut unplaced = run_started("newer-unplaced", "c1", &subject, "2026-01-01T11:00:05Z", serde_json::json!({ "state": "none" }));
+        unplaced.status = Status::Running;
+        connectors.runs.lock().unwrap().push(unplaced);
+        connectors.store.lock().unwrap().connectors[0].handled = vec!["uuid".into()];
+        for retry in 0..3 {
+            assert_eq!(end(&connectors), Ok(0), "retry {retry} fails nothing");
+        }
+        assert_eq!(status_of(&connectors, "newer-live"), Status::Waiting);
+        assert_eq!(status_of(&connectors, "newer-unplaced"), Status::Running);
+        assert_eq!(handled_of(&connectors), ["uuid"], "the newer runs' subject stays handled by them");
+        assert!(matches!(status_of(&connectors, "old"), Status::Failed { .. }));
+        assert_eq!(connectors.box_failures.lock().unwrap().len(), 1, "the old run is failed, and the card told, once");
+        assert_eq!(marked_subjects(&connectors), BTreeMap::from([("c1".to_owned(), vec!["uuid".to_owned()])]), "one release");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A run `begin`s `Running` with no session; the next `drive` opens its session. The box row it
+    /// is meant for was written at `row_written`, before the run existed.
+    fn run_began_after_its_row(name: &str) -> (Connectors, PathBuf, Subject, u64) {
+        let subject = Subject::LinearIssue { issue: "uuid".into() };
+        let mut connector = Connector { handled: vec!["uuid".into()], ..linear_connector() };
+        connector.graph = Some(talks(&["one"]));
+        let (connectors, dir) = stored(name, vec![connector]);
+        connectors.begin("c1".into(), subject.clone(), issue_trigger(), "2026-10-29T12:00:00Z").unwrap();
+        let row_written = u64::try_from(DateTime::parse_from_rfc3339("2026-10-29T11:59:00Z").unwrap().timestamp_millis()).unwrap();
+        (connectors, dir, subject, row_written)
+    }
+
+    const BOX_ENDED: &str = "Upstash Box: its box went offline";
+
+    /// Round 3's reuse case: a box's end skips a run that began after the box's row was written, and
+    /// that run's own open then fails (its subject's last box is still being deleted). The run is
+    /// failed by that open, so nothing is left `Running` or `Waiting` with nothing to wake it.
+    #[test]
+    fn a_run_a_box_end_skipped_fails_when_its_own_open_fails() {
+        let (connectors, dir, subject, row_written) = run_began_after_its_row("reuse-open-fails");
+        assert_eq!(block_on(connectors.box_ended("box-1", Some(("c1", &subject, row_written)), BOX_ENDED, BoxEndRelease::Once)), Ok(0), "the newer, unplaced run is not the box's run");
+        assert_eq!(connectors.runs.lock().unwrap()[0].status, Status::Running, "and it goes on running");
+
+        let open = |_: Work| async { Err::<Option<Placement>, String>("Upstash Box: the last box for this is still being deleted; the next check tries again".into()) };
+        let driven = block_on(connectors.drive(&open));
+        assert!(driven.as_ref().is_err_and(|e| e.contains("still being deleted")), "the check reports it: {driven:?}");
+        let runs = connectors.runs.lock().unwrap().clone();
+        assert_eq!(runs.len(), 1);
+        match &runs[0].status {
+            Status::Failed { why } => assert!(why.contains("still being deleted"), "{why}"),
+            other => panic!("the run is {other:?}"),
+        }
+        assert!(!runs.iter().any(|run| matches!(run.status, Status::Running | Status::Waiting)), "no run is left going");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The same run whose open works: it waits on the new box's session, and when that box ends the
+    /// end fails it with the box's reason, though it began after the row it was written for.
+    #[test]
+    fn a_run_a_box_end_skipped_is_failed_by_the_end_of_the_box_it_opened() {
+        let (connectors, dir, subject, row_written) = run_began_after_its_row("reuse-open-works");
+        assert_eq!(block_on(connectors.box_ended("box-1", Some(("c1", &subject, row_written)), BOX_ENDED, BoxEndRelease::Once)), Ok(0));
+
+        let open = |_: Work| async { Ok::<Option<Placement>, String>(Some(Placement { machine: "box-1".into(), tab: "tab-1".into() })) };
+        block_on(connectors.drive(&open)).unwrap();
+        let runs = connectors.runs.lock().unwrap().clone();
+        assert!(matches!(runs[0].status, Status::Waiting), "{:?}", runs[0].status);
+        assert!(matches!(&runs[0].session, Session::Live { machine, .. } if machine == "box-1"), "{:?}", runs[0].session);
+
+        assert_eq!(block_on(connectors.box_ended("box-1", Some(("c1", &subject, row_written)), BOX_ENDED, BoxEndRelease::Once)), Ok(1), "the box it opened ended");
+        let runs = connectors.runs.lock().unwrap().clone();
+        match &runs[0].status {
+            Status::Failed { why } => assert!(why.starts_with(BOX_ENDED), "{why}"),
+            other => panic!("the run is {other:?}"),
+        }
+        assert!(!runs.iter().any(|run| matches!(run.status, Status::Running | Status::Waiting)), "no run is left going");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -6656,6 +7193,102 @@ mod tests {
         connectors.claim_fixed_row("row-1").unwrap();
         let again = connectors.set_box_access(BoxAccess { workflow: BoxPermission::Fixed { row: None }, ..BoxAccess::default() }).unwrap();
         assert_eq!(again.workflow, BoxPermission::Fixed { row: Some("row-1".into()) }, "saving fixed without a row keeps the box the hub created");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_saved_box_permission_cannot_name_the_fixed_row() {
+        let dir = temp_dir("fixed-row-named");
+        std::fs::create_dir_all(&dir).unwrap();
+        let connectors = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into());
+        let fixed = |row: &str| BoxPermission::Fixed { row: Some(row.into()) };
+        let named = connectors.set_box_access(BoxAccess { workflow: fixed("another-row"), session: fixed("row-x"), ..BoxAccess::default() }).unwrap();
+        assert_eq!((&named.workflow, &named.session), (&BoxPermission::Fixed { row: None }, &BoxPermission::Fixed { row: None }), "no stored row: the named one is dropped");
+        assert!(!connectors.box_access().owns_row("another-row") && !connectors.box_access().owns_row("row-x"), "the named boxes keep the normal timers");
+        connectors.claim_fixed_row("row-1").unwrap();
+        let named = connectors.set_box_access(BoxAccess { workflow: fixed("another-row"), ..BoxAccess::default() }).unwrap();
+        assert_eq!(named.workflow, fixed("row-1"), "the stored row stays");
+        assert!(!connectors.box_access().owns_row("another-row"));
+        let resent = connectors.set_box_access(connectors.box_access()).unwrap();
+        assert_eq!(resent.workflow, fixed("row-1"), "an older app sending back the row it read changes nothing");
+        assert_eq!(connectors.set_box_access(BoxAccess { workflow: BoxPermission::Fresh, ..BoxAccess::default() }).unwrap().workflow, BoxPermission::Fresh);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A box permission of every kind, each naming its own fixed row.
+    fn fixed_rows(prefix: &str) -> serde_json::Value {
+        serde_json::json!({
+            "workflow": { "mode": "fixed", "row": format!("{prefix}-run") },
+            "session": { "mode": "fixed", "row": format!("{prefix}-session") },
+            "worker": { "mode": "fixed", "row": format!("{prefix}-worker") },
+            "orchestrator": { "mode": "fixed", "row": format!("{prefix}-orchestrator") },
+        })
+    }
+
+    /// An account whose own `boxes` is `own` imports a file whose `boxes` is `incoming`: the file's
+    /// never come in, so the account's stay exactly as they were, none of the rows the file named
+    /// is owned, and the stored file says the same after a reload.
+    fn import_leaves_boxes(name: &str, own: serde_json::Value, incoming: serde_json::Value, file_rows: &[&str]) {
+        let dir = temp_dir(name);
+        let storage = FileStorage::new(dir.clone());
+        let store: Store = serde_json::from_value(serde_json::json!({ "connectors": [], "boxes": own })).unwrap();
+        storage.save(&serde_json::to_vec(&store).unwrap()).unwrap();
+        let connectors = Connectors::new(storage, "/bin/pinned".into());
+        let (access, stored_before) = (connectors.box_access(), on_disk(&dir)["boxes"].clone());
+        assert_eq!(connectors.import(serde_json::json!({ "connectors": [], "boxes": incoming }), Keys::default()), Ok(true));
+        assert_eq!(connectors.box_access(), access, "the import left the account's own boxes as they were");
+        for row in file_rows {
+            assert!(!connectors.box_access().owns_row(row), "{row}: owns_row answers false");
+        }
+        assert_eq!(on_disk(&dir)["boxes"], stored_before, "the stored file kept them");
+        let reloaded = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into());
+        assert_eq!(reloaded.box_access(), access, "and says the same after a reload");
+        assert_eq!(on_disk(&dir)["boxes"], stored_before);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn own_boxes(workflow: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "workflow": workflow, "session": { "mode": "ask" }, "worker": { "mode": "fresh" }, "orchestrator": { "mode": "off" } })
+    }
+
+    /// Since an import keeps the account's own `boxes`, a file naming a fixed row on every kind
+    /// names none of them here.
+    #[test]
+    fn an_imported_store_names_no_fixed_row() {
+        let file_rows = ["imported-run", "imported-session", "imported-worker", "imported-orchestrator"];
+        import_leaves_boxes("import-fixed-rows-fresh", own_boxes(serde_json::json!({ "mode": "fresh" })), fixed_rows("imported"), &file_rows);
+        import_leaves_boxes("import-fixed-rows-fixed", own_boxes(serde_json::json!({ "mode": "fixed", "row": "hub-named-row" })), fixed_rows("imported"), &file_rows);
+    }
+
+    /// The workflow kind's fixed box is exempt from every box timer but vanishing, so only the
+    /// owner chooses it, in the app: a file (which any machine of the account can send) never sets
+    /// it, whatever the account's own kind is.
+    #[test]
+    fn an_import_brings_a_fixed_workflow_box_as_fresh() {
+        let boxes = serde_json::json!({ "workflow": { "mode": "fixed", "row": "imported-run" }, "worker": { "mode": "fixed" }, "orchestrator": { "mode": "off" } });
+        import_leaves_boxes("import-fixed-workflow-fresh", own_boxes(serde_json::json!({ "mode": "fresh" })), boxes.clone(), &["imported-run"]);
+        import_leaves_boxes("import-fixed-workflow-fixed", own_boxes(serde_json::json!({ "mode": "fixed", "row": "hub-named-row" })), boxes, &["imported-run"]);
+    }
+
+    #[test]
+    fn a_store_saved_with_fixed_rows_on_session_worker_and_orchestrator_loads_with_none_there() {
+        let dir = temp_dir("load-fixed-rows");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("connectors.json"), serde_json::json!({ "connectors": [], "boxes": fixed_rows("saved") }).to_string()).unwrap();
+        let connectors = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into());
+        let none = BoxPermission::Fixed { row: None };
+        for access in [connectors.box_access(), connectors.get_settings().boxes] {
+            assert_eq!(access.workflow, BoxPermission::Fixed { row: Some("saved-run".into()) }, "the run kind's row, which the hub named, stays");
+            assert_eq!((&access.session, &access.worker, &access.orchestrator), (&none, &none, &none), "the other kinds carry none");
+            assert!(access.owns_row("saved-run"));
+            for kind in ["session", "worker", "orchestrator"] {
+                assert!(!access.owns_row(&format!("saved-{kind}")), "{kind}: owns_row ignores it");
+            }
+        }
+        // The file keeps what an earlier release saved (nothing is dropped from disk by a load).
+        connectors.save(&connectors.store.lock().unwrap()).unwrap();
+        let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("connectors.json")).unwrap()).unwrap();
+        assert_eq!(saved["boxes"], fixed_rows("saved"));
         let _ = std::fs::remove_dir_all(dir);
     }
 

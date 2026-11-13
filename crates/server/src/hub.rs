@@ -10,7 +10,7 @@ use pinned_core::ideas::{Idea, IdeaStatus};
 use pinned_core::delegate::{RunTarget, TaskRecord};
 use pinned_core::marks::{self, Archived, Mark, MarkChange, SessionMarks};
 use pinned_core::taste::{TasteField, TastePatch, TasteScope, Tastes};
-use pinned_core::wire::BOX_USD_PER_HOUR;
+use pinned_core::wire::box_usd_per_hour;
 use pinned_core::upstash;
 use base64::Engine;
 use pinned_core::{github, sync};
@@ -128,6 +128,10 @@ pub struct Hub {
     going_away: tokio::sync::watch::Sender<bool>,
     /// When the hub last expired held ends for every account, so it runs at most once an hour.
     held_expired: Mutex<Option<Instant>>,
+    /// While true, every account's runs save fails, as a full disk would make it. Only a test sets
+    /// it: a queued Postgres write cannot fail on its own at the moment a box ends.
+    #[doc(hidden)]
+    pub refuse_run_saves: Arc<AtomicBool>,
 }
 
 struct Unlock {
@@ -225,7 +229,7 @@ impl Hub {
     pub fn new(db: Db, public_url: String, signup: Signup, box_api: Arc<dyn BoxApi>, box_policy: boxes::Policy, convex_http: Arc<dyn ConvexHttp>) -> Arc<Hub> {
         let public_url = public_url.trim_end_matches('/').to_owned();
         let boxes = Boxes::new(box_api, box_policy, &public_url);
-        Arc::new(Hub { db, public_url, signup, boxes, convex_http, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default(), unlocks: Mutex::default(), going_away: tokio::sync::watch::channel(false).0, held_expired: Mutex::default() })
+        Arc::new(Hub { db, public_url, signup, boxes, convex_http, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default(), unlocks: Mutex::default(), going_away: tokio::sync::watch::channel(false).0, held_expired: Mutex::default(), refuse_run_saves: Arc::default() })
     }
 
     /// Tells every socket to close with a going away frame. The hub stops serving afterwards.
@@ -342,7 +346,7 @@ impl Hub {
             .connectors
             .get_or_try_init(|| async {
                 let stored = self.db.connectors(account.id).await?;
-                let storage = PgStorage::new(self.db.clone(), account.id, stored);
+                let storage = PgStorage::new(self.db.clone(), account.id, stored, self.refuse_run_saves.clone());
                 Ok::<_, String>(Arc::new(Connectors::new(storage, EXE_PLACEHOLDER.into())))
             })
             .await?;
@@ -825,25 +829,36 @@ impl Hub {
         let id = Uuid::parse_str(machine).map_err(|_| format!("this account has no machine {machine}"))?;
         let name = self.db.machine_name(account.id, id).await?.ok_or_else(|| format!("this account has no machine {machine}"))?;
         let _held = account.task_records.lock().await;
-        let boxed = self.db.box_created_ms(account.id, id).await?;
+        // A box whose size this hub can't read bills no box time, and the records are still kept.
+        let boxed = match self.db.box_made(account.id, id).await? {
+            Some((created, Ok(size))) => Some((created, size)),
+            Some((_, Err(e))) => {
+                eprintln!("pinned-server: machine {machine}'s task records are kept with no box time: {e}");
+                None
+            }
+            None => None,
+        };
         // Each task is billed the box time since the one that ended before it.
         records.sort_by_key(|record| record.ended);
         for mut record in records {
             record.machine = machine.to_owned();
             record.machine_name = name.clone();
             let billed = self.db.task_record(account.id, id, &record.id).await?.filter(|old| old.usage.box_ms.is_some());
-            let box_ms = match (billed, boxed) {
-                (Some(old), _) => old.usage.box_ms,
-                (None, Some(created)) => {
+            let usd = |ms: u64, size| ms as f64 / 3_600_000.0 * box_usd_per_hour(size);
+            // A record sent again keeps the figure it was billed, at the rate of its box's size.
+            let bill = match (billed, boxed) {
+                (Some(old), boxed) => old.usage.box_ms.map(|ms| (ms, old.usage.box_usd.or_else(|| boxed.map(|(_, size)| usd(ms, size))))),
+                (None, Some((created, size))) => {
                     let before = self.db.billed_box_ms(account.id, id, &record.id).await?;
-                    Some(record.ended.saturating_sub(created).saturating_sub(before))
+                    let ms = record.ended.saturating_sub(created).saturating_sub(before);
+                    Some((ms, Some(usd(ms, size))))
                 }
                 (None, None) => None,
             };
-            if let Some(ms) = box_ms {
+            if let Some((ms, box_usd)) = bill {
                 record.target = RunTarget::UpstashBox;
                 record.usage.box_ms = Some(ms);
-                record.usage.box_usd = Some(ms as f64 / 3_600_000.0 * BOX_USD_PER_HOUR);
+                record.usage.box_usd = box_usd;
             }
             self.db.save_task_record(account.id, id, &record).await?;
         }
@@ -1517,6 +1532,8 @@ struct PgStorage {
     state: Mutex<Stored>,
     keys: Mutex<BTreeMap<String, String>>,
     writes: mpsc::UnboundedSender<Write>,
+    /// `Hub::refuse_run_saves`.
+    refuse_runs: Arc<AtomicBool>,
 }
 
 /// The name of the listed project that holds `cwd`, the innermost one, else the folder's own name.
@@ -1581,7 +1598,7 @@ enum Write {
 }
 
 impl PgStorage {
-    fn new(db: Db, account: Uuid, stored: db::Connectors) -> PgStorage {
+    fn new(db: Db, account: Uuid, stored: db::Connectors, refuse_runs: Arc<AtomicBool>) -> PgStorage {
         let (writes, mut queue) = mpsc::unbounded_channel::<Write>();
         tokio::spawn(async move {
             while let Some(first) = queue.recv().await {
@@ -1614,6 +1631,7 @@ impl PgStorage {
             state: Mutex::new(Stored { store, runs }),
             keys: Mutex::new(stored.secrets),
             writes,
+            refuse_runs,
         }
     }
 
@@ -1657,6 +1675,9 @@ impl Storage for PgStorage {
     }
 
     fn save_runs(&self, bytes: &[u8]) -> Result<(), String> {
+        if self.refuse_runs.load(Ordering::SeqCst) {
+            return Err("could not save the runs: refused".into());
+        }
         let mut state = self.state.lock().unwrap();
         state.runs = bytes.to_vec();
         self.persist(&state)

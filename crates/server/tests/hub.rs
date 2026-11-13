@@ -2399,6 +2399,7 @@ fn a_box_run_boots_its_own_node_and_the_box_goes_when_its_tab_closes() {
     project.truncate(40 - tail.len());
     assert_eq!(created[0].name, format!("{}{tail}", project.trim_matches('-')));
     assert_eq!((created[0].size, created[0].init_command.as_str()), (BoxSize::Small, "sh /workspace/home/.pinned/start.sh || true"));
+    assert!(!created[0].keep_alive, "a temporary box is a standard box: Upstash pauses it when idle and bills its CPU time");
     ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
     let machine = ana.box_machine();
     assert_eq!(hub.boxes.file(&format!("{BOX_DIR}/box.env")), Some(format!("CLAUDE_CODE_OAUTH_TOKEN='{CLAUDE_TOKEN}'\nPINNED_BOX=1\n")), "no GitHub token without GitHub");
@@ -2796,6 +2797,7 @@ fn a_fixed_workflow_permission_reuses_one_box_across_two_runs() {
     ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
     assert_eq!(open(ana.box_run(issue("uuid-2"))), Ok(()));
     assert_eq!(created(&hub), 1, "the second run uses the box the first run opened");
+    assert!(hub.boxes.state.lock().unwrap().created[0].keep_alive, "the fixed box keeps running while idle, so the runs after the first still find its node");
     // The reaper never ends the fixed box while Upstash lists it, so its node must not leave on refusals.
     let env = hub.boxes.file(&format!("{BOX_DIR}/box.env")).expect("the boot wrote no box.env");
     assert!(!env.contains("PINNED_BOX"), "{env}");
@@ -2890,6 +2892,186 @@ fn a_fixed_box_stays_after_its_session_ends_so_the_next_run_reuses_it() {
     }
     assert_eq!(open(ana.box_run(issue("uuid-2"))), Ok(()));
     assert_eq!(created(&hub), 1);
+}
+
+/// The account's workflow store as Postgres holds it, runs included.
+fn account_store(hub: &TestHub, account: uuid::Uuid) -> Value {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let (client, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        let row = client.query_one("select store::text from accounts where id::text = $1", &[&account.to_string()]).await.unwrap();
+        serde_json::from_str(row.get::<_, &str>(0)).unwrap()
+    })
+}
+
+/// Gives the account a workflow run of issue `held` that waits on the box's session, with that issue
+/// handled, as a hub restarted over them reads them, and reconnects `ana`. The run holds the box.
+/// Returns the box machine.
+fn hold_box(hub: &mut TestHub, ana: &mut BoxAccount, held: &str) -> String {
+    let machine = ana.box_machine();
+    let tab = hub.boxes.with_node(|node| node.machine.tabs()[0].id.clone());
+    let run = json!({
+        "id": "run-held", "connector": ana.connector, "subject": issue(held), "status": "waiting", "session_owner": ana.connector,
+        "session": { "state": "live", "machine": machine, "tab": tab, "claude": null, "since": 1, "saw_working": false, "await_working": false },
+        "log": [], "context": {}, "stack": [], "pending": null, "ready": null, "claimed": true,
+    });
+    admin_on(
+        &hub.database,
+        &format!("update accounts set store = jsonb_set(jsonb_set(store, '{{runs}}', '{}'::jsonb), '{{connectors,0,handled}}', '[\"{held}\"]'::jsonb)", json!([run])),
+    );
+    hub.restart();
+    ana.client = Client::connect(&hub.url, &ana.token);
+    machine
+}
+
+/// The run `hold_box` gave the account failed with `why`, the workflow's check says so, its issue
+/// is free for the next trigger when `freed` (handled when not), and no box was created after the
+/// first `boxes`.
+fn assert_run_failed(hub: &TestHub, ana: &mut BoxAccount, why: &str, boxes: usize, freed: bool) {
+    wait_for("the run to fail", || account_store(hub, ana.id)["runs"][0]["status"]["failed"]["why"].is_string());
+    // Read, not waited for: a check that ran before the client connected pushed its frame to no one.
+    let says = |ana: &mut BoxAccount| ana.client.hub(json!({ "cmd": "get_settings" })).unwrap()["checked"]["error"].as_str().is_some_and(|e| e.contains(why));
+    let start = Instant::now();
+    while !says(ana) {
+        assert!(start.elapsed() < WAIT, "timed out waiting for the check that says why");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let store = account_store(hub, ana.id);
+    assert_eq!(store["runs"][0]["status"]["failed"]["why"], json!(why), "{store}");
+    if freed {
+        assert_eq!(store["connectors"][0]["handled"], json!([]), "its issue is no longer handled");
+        let marks = store["box_released_at"][ana.connector.as_str()].as_object().unwrap_or_else(|| panic!("{store}"));
+        assert_eq!(marks.keys().collect::<Vec<_>>(), [store["runs"][0]["subject"]["issue"].as_str().unwrap()], "and it spent its one release");
+        let at = marks.values().next().unwrap().as_u64().unwrap();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        assert!(now.saturating_sub(at) < 60 * 60 * 1000, "the mark keeps the time of the release: {store}");
+    } else {
+        assert_eq!(store["connectors"][0]["handled"], json!([store["runs"][0]["subject"]["issue"]]), "its issue stays handled");
+        assert!(store.get("box_released_at").is_none(), "{store}");
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(created(hub), boxes, "nothing opened another box for the run");
+    assert_eq!(account_store(hub, ana.id)["runs"].as_array().map(Vec::len), Some(1), "and no other run started");
+}
+
+const STOPPED: &str = "; the run stopped, and its next trigger may start it once more";
+const KEPT: &str = "; the run stopped, and it starts again only when you run it";
+
+#[test]
+fn a_run_whose_box_goes_offline_past_the_wait_fails_with_why_and_frees_its_issue() {
+    let mut hub = TestHub::start_with_boxes("box_run_offline", Signup::Open, Policy { offline: Duration::from_secs(3), ..fast() });
+    let mut ana = BoxAccount::new(&hub);
+    assert_eq!(hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-1")))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    let machine = hold_box(&mut hub, &mut ana, "uuid-1");
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    wait_for("the box's tabs frame", || ana.tabs_held(&hub, &machine).is_some_and(|held| held > 0));
+    drop_box_node(&hub.boxes, "box_1");
+    wait_for("the box to go", || hub.boxes.live().is_empty());
+    assert_run_failed(&hub, &mut ana, &format!("Upstash Box: its box went offline and did not come back within 3 s{STOPPED}"), 1, true);
+}
+
+#[test]
+fn a_run_whose_box_reaches_its_max_life_fails_with_why_and_keeps_its_issue_handled() {
+    let mut hub = TestHub::start_with_boxes("box_run_expired", Signup::Open, Policy { offline: Duration::from_secs(3600), ..fast() });
+    let mut ana = BoxAccount::new(&hub);
+    assert_eq!(hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-1")))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    hub.policy.max_life = Duration::from_millis(1);
+    hold_box(&mut hub, &mut ana, "uuid-1");
+    wait_for("the box to go", || hub.boxes.live().is_empty());
+    assert_run_failed(&hub, &mut ana, &format!("Upstash Box: the box ended before its task did: it ran out of time or budget{KEPT}"), 1, false);
+}
+
+#[test]
+fn a_run_whose_box_machine_is_removed_fails_with_why_and_keeps_its_issue_handled() {
+    let mut hub = TestHub::start_with_boxes("box_run_removed", Signup::Open, Policy { offline: Duration::from_secs(3600), ..fast() });
+    let mut ana = BoxAccount::new(&hub);
+    assert_eq!(hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-1")))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    let machine = hold_box(&mut hub, &mut ana, "uuid-1");
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    ana.client.hub(json!({ "cmd": "remove_machine", "id": machine })).unwrap();
+    assert_eq!(hub.boxes.live(), Vec::<String>::new());
+    assert_run_failed(&hub, &mut ana, &format!("Upstash Box: the box ended before its task did: someone removed its machine{KEPT}"), 1, false);
+}
+
+#[test]
+fn a_run_on_the_fixed_box_fails_when_upstash_stops_listing_the_box() {
+    let mut hub = TestHub::start_with_boxes("box_run_fixed_gone", Signup::Open, Policy { offline: Duration::from_secs(3600), ..fast() });
+    let mut ana = BoxAccount::new(&hub);
+    set_workflow(&mut ana.client, "fixed");
+    assert_eq!(hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-1")))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    // A later run on the one reused box: the row still names the first run's issue.
+    let machine = hold_box(&mut hub, &mut ana, "uuid-2");
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    wait_for("the box's tabs frame", || ana.tabs_held(&hub, &machine).is_some_and(|held| held > 0));
+    let gone = hub.boxes.state.lock().unwrap().boxes.remove("box_1");
+    drop(gone);
+    wait_for("the row to go", || ana.rows(&hub) == 0);
+    assert_run_failed(&hub, &mut ana, &format!("Upstash Box: the box ended before its task did: it was deleted outside pinned{STOPPED}"), 1, true);
+}
+
+/// One row whose runs the hub cannot fail (their save is refused) stays `Ending` and is retried,
+/// and the pass still ends the account's other rows: the next one is past its budget and goes at
+/// once, not when the first row can finish.
+#[test]
+fn a_box_row_that_cannot_fail_its_runs_does_not_stop_the_pass_for_the_next_row() {
+    let mut hub = TestHub::start_with_boxes("box_reap_continues", Signup::Open, Policy { offline: Duration::from_secs(3600), ..fast() });
+    let mut ana = BoxAccount::new(&hub);
+    assert_eq!(hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-1")))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    // The first box (the older row) holds a run that is waiting on it.
+    let machine = hold_box(&mut hub, &mut ana, "uuid-1");
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    assert_eq!(hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-2")))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true), ("Box · ENG-7 Fix login", true)]);
+    let ids: Vec<String> = hub.runtime.block_on(hub.hub().db.boxes(ana.id)).unwrap().into_iter().map(|row| row.ok().unwrap().id).collect();
+    assert_eq!(ids.len(), 2);
+
+    // Removing the first box's machine ends its row, but its run cannot be failed: the row stays
+    // `Ending`, and so does its box.
+    hub.hub().refuse_run_saves.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(ana.client.hub(json!({ "cmd": "remove_machine", "id": machine })).is_err(), "the run cannot be failed");
+    assert_eq!(ana.rows(&hub), 2);
+
+    // The second box is past its budget. The first row is retried first in every pass and still fails.
+    hub.runtime.block_on(hub.hub().db.set_box_budget(ana.id, &ids[1], 0.000_000_1)).unwrap();
+    wait_for("the second row, past its budget, to end in a pass the first row cannot finish", || ana.rows(&hub) == 1);
+    assert_eq!(hub.boxes.live(), ["box_1"], "the first box stays while its run cannot be failed");
+    assert!(account_store(&hub, ana.id)["runs"][0]["status"].get("failed").is_none(), "its run is not failed yet");
+
+    // Once the runs save works, the retry fails the run and ends the row.
+    hub.hub().refuse_run_saves.store(false, std::sync::atomic::Ordering::SeqCst);
+    wait_for("the first row to end", || ana.rows(&hub) == 0);
+    wait_for("the run to fail", || account_store(&hub, ana.id)["runs"][0]["status"]["failed"]["why"].is_string());
+    assert_eq!(hub.boxes.live(), Vec::<String>::new());
+}
+
+/// A workflow kind set to a fixed box is exempt from every box timer but vanishing, so an agent
+/// never sets it: its act waits for the owner, changes nothing meanwhile, and once the owner
+/// approves, the kind is fixed with no row (the hub names one at the first run).
+#[test]
+fn an_agents_set_box_access_to_fixed_waits_for_its_owner_and_changes_nothing_until_then() {
+    let hub = TestHub::start_with_boxes("agent_fixed_box", Signup::Open, fast());
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &token, "ana@acme.dev", "ana-mac");
+    ana.client.hub(json!({ "cmd": "connect_upstash", "key": BOX_KEY, "claude_token": CLAUDE_TOKEN })).unwrap();
+    let workflow = |ana: &mut Agent| ana.client.hub(json!({ "cmd": "get_settings" })).unwrap()["boxes"]["workflow"].clone();
+    // Absent on the wire while it is the default: workflows fresh.
+    assert_eq!(workflow(&mut ana), Value::Null);
+
+    let held = act(&ana.dir, &ana.tab, "set_box_access", json!({ "access": { "workflow": { "mode": "fixed" } } })).unwrap();
+    assert_eq!(held["outcome"], "pending", "{held}");
+    assert_eq!(waiting_actions(&mut ana.client), ["set_box_access"]);
+    assert_eq!(workflow(&mut ana), Value::Null, "nothing changed while it waits");
+
+    ana.client.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    assert_eq!(approve(&mut ana.client, &held["id"], json!({})).unwrap()["outcome"], "done");
+    assert_eq!(workflow(&mut ana), json!({ "mode": "fixed" }), "fixed, naming no row");
 }
 
 #[test]
@@ -5383,6 +5565,7 @@ fn a_box_worker_signs_in_with_the_named_token_nests_under_its_caller_and_goes_wh
     wait_for("the worker thread running on the box", || box_tabs(&hub.boxes).iter().any(|t| t.role == Some(Role::Worker) && t.running));
     assert_eq!(hub.boxes.file(&format!("{BOX_DIR}/box.env")), Some("CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-bloomtoken'\nPINNED_BOX=1\n".into()), "bloom's token, and no GitHub token without GitHub");
     assert_eq!(hub.boxes.state.lock().unwrap().created[0].size, BoxSize::Small);
+    assert!(!hub.boxes.state.lock().unwrap().created[0].keep_alive, "a worker's box is temporary: it is not kept running while idle");
     let child = box_tabs(&hub.boxes).into_iter().find(|t| t.role == Some(Role::Worker)).unwrap();
     assert_eq!(
         (child.spawned_by.as_deref(), child.spawned_on.as_deref(), child.title.as_deref(), child.running),
@@ -5878,9 +6061,33 @@ fn a_task_on_a_box_is_billed_the_box_time_since_the_previous_task_on_that_box() 
     let task = |id: &str| stats["slowest"].as_array().unwrap().iter().find(|t| t["id"] == id).unwrap().clone();
     assert_eq!(minutes(&stats["totals"]["box_ms"]), 30.0, "both tasks together are billed the box's whole 30 minutes: {stats}");
     let usd = stats["totals"]["box_usd"].as_f64().unwrap();
-    assert!((usd - 0.5 * pinned_core::wire::BOX_USD_PER_HOUR).abs() < 0.01, "{usd}");
+    let rate = pinned_core::wire::box_usd_per_hour(pinned_core::connectors::BoxSize::Medium);
+    assert_eq!(rate, 0.20, "the box above is Medium");
+    assert!((usd - 0.5 * rate).abs() < 0.01, "{usd}");
     let a_cost = task("task-a")["cost_usd"].as_f64().unwrap();
-    assert!((a_cost - (0.2 + 10.0 / 60.0 * pinned_core::wire::BOX_USD_PER_HOUR)).abs() < 0.01, "task-a: its 10 box minutes plus its agent cost, sent twice and billed once: {a_cost}");
+    assert!((a_cost - (0.2 + 10.0 / 60.0 * rate)).abs() < 0.01, "task-a: its 10 box minutes plus its agent cost, sent twice and billed once: {a_cost}");
+}
+
+#[test]
+fn a_box_whose_size_is_unreadable_keeps_its_task_records_with_no_box_time() {
+    let hub = TestHub::start("delegation_box_size");
+    let url = hub.url.clone();
+    let (token, ana_account, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (machine, machine_token) = account::register_machine(&url, &token, "Box · site", "linux").unwrap();
+    admin_on(&hub.database, &format!(
+        "insert into boxes (id, account, machine, upstash, connector, subject, spec, size, phase, created_at) values ('anas-box', '{ana_account}', '{}', 'box_ana', 'interactive', '{{\"issue\":\"b1\"}}', '{{\"folder\":\"/w\",\"args\":[]}}', 'enormous', 'running', now() - interval '30 minutes')",
+        machine.id,
+    ));
+    let raw = RawMachine::start(&url, &machine_token, |_| RawReply::Ok(Value::Null));
+    ana.wait_machines(&[("Box · site", true)]);
+    let now = now_ms();
+    let records = [task_record("task-a", "claude-sonnet-5-5", "done", 5, Some(0.2), now - 60_000), task_record("task-b", "claude-sonnet-5-5", "done", 15, Some(0.4), now)];
+    assert_eq!(raw.ask(json!({ "cmd": "record_tasks", "records": records })), Ok(Value::Null), "the batch is kept");
+
+    let stats = ana.hub(json!({ "cmd": "delegation_stats", "days": 1 })).unwrap();
+    let ids: Vec<&str> = stats["slowest"].as_array().unwrap().iter().map(|t| t["id"].as_str().unwrap()).collect();
+    assert_eq!((ids.contains(&"task-a"), ids.contains(&"task-b")), (true, true), "{stats}");
+    assert_eq!(stats["totals"]["box_ms"].as_f64().unwrap_or(0.0), 0.0, "no box time is billed: {stats}");
 }
 
 #[test]
@@ -5919,7 +6126,7 @@ fn overlapping_tasks_on_one_box_each_pay_for_their_own_span_however_their_record
     let stats = ana.hub(json!({ "cmd": "delegation_stats", "days": 1 })).unwrap();
     let box_minutes = |id: &str| {
         let task = stats["slowest"].as_array().unwrap().iter().find(|t| t["id"] == id).unwrap_or_else(|| panic!("{id} in {stats}"));
-        (task["cost_usd"].as_f64().unwrap() / pinned_core::wire::BOX_USD_PER_HOUR * 60.0).round()
+        (task["cost_usd"].as_f64().unwrap() / pinned_core::wire::box_usd_per_hour(pinned_core::connectors::BoxSize::Medium) * 60.0).round()
     };
     assert_eq!(box_minutes("task-b"), 40.0, "task-b pays from the box's start to its own end");
     assert_eq!(box_minutes("task-a"), 20.0, "task-a pays only the span after task-b ended");
