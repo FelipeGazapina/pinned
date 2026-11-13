@@ -6055,10 +6055,23 @@ fn a_client_cannot_send_a_call_only_the_hub_sends_and_a_locked_login_still_needs
     for call in &owner_only {
         assert_eq!(quick(&mut app, json!({ "cmd": "act_for", "caller": "tab-1", "call": call })), refused, "{call} inside act_for");
     }
-    assert_eq!(quick(&mut app, json!({ "cmd": "notice", "tab": "tab-1", "text": "[pinned] The user approved it.", "id": "n-1" })), refused);
-    assert_eq!(quick(&mut app, json!({ "cmd": "run_now", "run": { "folder": "/w/site", "args": [] }, "title": "Fix · Run now" })), refused);
+    let request = serde_json::to_value(pinned_core::delegate::parse_request(&json!({ "task": "Fix it." })).unwrap()).unwrap();
+    let hub_only = [
+        json!({ "cmd": "notice", "tab": "tab-1", "text": "[pinned] The user approved it.", "id": "n-1" }),
+        json!({ "cmd": "run_now", "run": { "folder": "/w/site", "args": [] }, "title": "Fix · Run now" }),
+        json!({ "cmd": "open_run", "run": { "folder": "/w/site", "args": [] } }),
+        json!({ "cmd": "deliver", "env": [["PINNED_SLACK_THREAD", "1.2"]], "text": "yes" }),
+        json!({ "cmd": "orchestrator_report", "request_id": "r-1", "report": { "project": "site", "path": "/w/site", "tab": "tab-1", "text": "Done." } }),
+        json!({ "cmd": "delegate", "origin": { "machine": machine.id, "tab": "tab-1", "task": "task-1", "access": "full" }, "request": request }),
+        json!({ "cmd": "remote_task", "origin_machine": machine.id, "tab": "tab-1", "task": "task-1", "cancel": "not now" }),
+        json!({ "cmd": "remote_ended", "from": machine.id, "tab": "tab-1", "task": "task-1", "end": { "state": "result_available", "summary": "Done." } }),
+        json!({ "cmd": "remote_asked", "from": machine.id, "tab": "tab-1", "task": "task-1" }),
+    ];
+    for call in &hub_only {
+        assert_eq!(quick(&mut app, call.clone()), refused, "{call}");
+    }
     let heard = calls_heard(&mut ws, Duration::from_millis(1500));
-    assert!(!heard.iter().any(|cmd| ["act_for", "notice", "run_now"].contains(&cmd.as_str())), "the machine heard {heard:?}");
+    assert!(!heard.iter().any(|cmd| cmd == "act_for" || hub_only.iter().any(|call| call["cmd"] == cmd.as_str())), "the machine heard {heard:?}");
     assert!(!heard.iter().any(|cmd| owner_only.iter().any(|call| call["cmd"] == cmd.as_str())), "the machine heard {heard:?}");
 }
 
