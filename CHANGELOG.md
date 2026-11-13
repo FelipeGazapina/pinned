@@ -24,6 +24,7 @@
 - Upstash Box: removing a box machine, disconnecting Upstash or ending a worker now deletes its box with only the Upstash key stored, and one box that will not delete no longer stops the sweep from deleting the others. A box that reaches one of its limits (time, idle, budget) is now deleted too when only the key is stored.
 - A project's model ceiling (Tier) no longer lets through a Claude model id that this machine's `claude` does not list, nor an empty model name, because the words of an id are no proof of its cost. A remote worker's model is checked against the Claude list of the machine that runs it once that machine is on 0.18.2; until then the sending machine refuses a Claude id it does not list.
 - Extending a box now asks for your password when pinned is locked.
+- An agent that asks to add money to a box now waits for your approval.
 
 ## 0.18.1 (2026-11-12)
 
