@@ -1343,6 +1343,27 @@ pub enum HubCall {
     /// `Vec<mcp::Entry>`: the account's own MCP servers, which every session pinned starts loads
     /// while enabled, each with the names of its secrets and never their values.
     ListMcpServers,
+    /// `Vec<ideas::Idea>`: the account's ideas, the most recently changed first; with `project` (a repo key),
+    /// only that project's.
+    ListIdeas {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+    },
+    /// `ideas::Idea`: adds an idea, or with `id` changes that one (its title, text and project as sent, and its
+    /// status when sent). The hub sets who made it and the times.
+    SaveIdea {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        title: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<crate::ideas::IdeaStatus>,
+    },
+    /// Removes the account's idea `id`.
+    DeleteIdea { id: String },
     /// `mcp::Entry`: adds a server, enabled, or with `id` changes that one, keeping its enabled
     /// state. `secrets` holds what the user typed in the app; a name left out or blank keeps the
     /// value the server has, and a new name needs one.
@@ -2188,7 +2209,7 @@ mod tests {
             }),
         );
         round_trip(
-            ToClient::Settings { settings: Settings { linear: None, slack: None, slack_bots: vec![], github: None, vercel: None, upstash: None, box_claude_tokens: BTreeMap::new(), connectors: vec![], checked: None, boxes: BoxAccess::default(), box_asks: vec![], convex: vec![], repo_insight: Default::default() } },
+            ToClient::Settings { settings: Settings { linear: None, slack: None, slack_bots: vec![], github: None, vercel: None, upstash: None, box_claude_tokens: BTreeMap::new(), connectors: vec![], checked: None, boxes: BoxAccess::default(), box_asks: vec![], convex: vec![], ideas: vec![], repo_insight: Default::default() } },
             json!({ "type": "settings", "settings": { "linear": null, "slack": null, "github": null, "vercel": null, "upstash": null, "connectors": [], "checked": null } }),
         );
         let old: ToClient = serde_json::from_value(json!({ "type": "machines", "machines": [] })).unwrap();
@@ -2267,6 +2288,14 @@ mod tests {
             json!({ "cmd": "import_mcp_server", "machine": "m1", "account": "claude", "name": "linear", "project": "github.com/a/b" }),
         );
         round_trip(HubCall::LoadMcpServers, json!({ "cmd": "load_mcp_servers" }));
+        round_trip(HubCall::ListIdeas { project: None }, json!({ "cmd": "list_ideas" }));
+        round_trip(HubCall::ListIdeas { project: Some("github.com/a/b".into()) }, json!({ "cmd": "list_ideas", "project": "github.com/a/b" }));
+        round_trip(HubCall::SaveIdea { id: None, title: "An iPad app".into(), text: String::new(), project: None, status: None }, json!({ "cmd": "save_idea", "title": "An iPad app" }));
+        round_trip(
+            HubCall::SaveIdea { id: Some("i1".into()), title: "An iPad app".into(), text: "Maybe.".into(), project: Some("github.com/a/b".into()), status: Some(crate::ideas::IdeaStatus::Dropped) },
+            json!({ "cmd": "save_idea", "id": "i1", "title": "An iPad app", "text": "Maybe.", "project": "github.com/a/b", "status": "dropped" }),
+        );
+        round_trip(HubCall::DeleteIdea { id: "i1".into() }, json!({ "cmd": "delete_idea", "id": "i1" }));
     }
 
     #[test]
