@@ -8475,6 +8475,7 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn the_flag_and_the_window_survive_a_reload() {
         let root = temp("cut-by-sleep-reload");
         let app = root.join("app");
