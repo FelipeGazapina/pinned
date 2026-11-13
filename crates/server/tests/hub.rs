@@ -8467,6 +8467,60 @@ fn held_for_offline_mac(hub: &TestHub) -> (Client, MachineView, String, MachineV
     (ana, mac, mac_token, mini, mini_raw, uuid::Uuid::parse_str(&ana_id).unwrap())
 }
 
+/// Every held report as Postgres stores it, as text.
+fn held_reports(hub: &TestHub) -> Vec<String> {
+    hub.runtime.block_on(async {
+        let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        db.query("select report::text from held_ends order by task", &[]).await.unwrap().iter().map(|r| r.get(0)).collect()
+    })
+}
+
+#[test]
+fn a_held_end_is_stored_delivered_and_listed_with_its_keys_masked() {
+    let hub = TestHub::start("held_masked");
+    let (token, _, mut ana) = signed_in(&hub.url, "ana@acme.dev");
+    let (mac, mac_token) = account::register_machine(&hub.url, &token, "ana-mac", "linux").unwrap();
+    let (_, mini_token) = account::register_machine(&hub.url, &token, "ana-mini", "linux").unwrap();
+    let mini_raw = RawMachine::start(&hub.url, &mini_token, |_| RawReply::Ok(Value::Null));
+    wait_for("mini online", || ana.machines().contains(&("ana-mini".into(), true)));
+    let fake = "sk-ant-api03-FAKEFAKEFAKEFAKE0000";
+    let end = json!({ "state": "failed", "summary": format!("Used {fake} to deploy."), "error": format!("401 for key {fake}") });
+    assert_eq!(mini_raw.ask(json!({ "cmd": "remote_ended", "to": mac.id, "tab": "tab-1", "task": "task-1", "end": end })), Ok(json!(true)), "held for mac, which is offline");
+    let stored = held_reports(&hub);
+    assert_eq!(stored.len(), 1);
+    assert!(!stored[0].contains("FAKEFAKE") && stored[0].matches("[hidden]").count() == 2, "the hub keeps no unmasked copy: {}", stored[0]);
+
+    // mac restarted and forgot the task: it is handed the masked end, and it stays listed, masked.
+    let mac_raw = RawMachine::start(&hub.url, &mac_token, |call| match call["cmd"].as_str().unwrap() {
+        "remote_ended" => RawReply::Ok(json!(false)),
+        _ => RawReply::Ok(Value::Null),
+    });
+    wait_for("the hub to offer mac the held end", || mac_raw.calls("remote_ended") == 1);
+    let got = mac_raw.calls.lock().unwrap().iter().find(|c| c["cmd"] == "remote_ended").cloned().unwrap();
+    assert_eq!((got["end"]["summary"].as_str(), got["end"]["error"].as_str()), (Some("Used [hidden] to deploy."), Some("401 for key [hidden]")), "{got}");
+    wait_for("the end to be listed unclaimed", || ana.hub(json!({ "cmd": "unclaimed_ends" })).unwrap().as_array().is_some_and(|l| l.len() == 1));
+    let listed = ana.hub(json!({ "cmd": "unclaimed_ends" })).unwrap();
+    assert!(!listed.to_string().contains("FAKEFAKE"), "{listed}");
+    assert_eq!((listed[0]["end"]["summary"].as_str(), listed[0]["end"]["error"].as_str()), (Some("Used [hidden] to deploy."), Some("401 for key [hidden]")), "{listed}");
+}
+
+#[test]
+fn a_held_end_with_a_nul_character_is_held_and_comes_back_without_it() {
+    let hub = TestHub::start("held_nul");
+    let (token, _, mut ana) = signed_in(&hub.url, "ana@acme.dev");
+    let (mac, mac_token) = account::register_machine(&hub.url, &token, "ana-mac", "linux").unwrap();
+    let (_, mini_token) = account::register_machine(&hub.url, &token, "ana-mini", "linux").unwrap();
+    let mini_raw = RawMachine::start(&hub.url, &mini_token, |_| RawReply::Ok(Value::Null));
+    wait_for("mini online", || ana.machines().contains(&("ana-mini".into(), true)));
+    let end = json!({ "state": "result_available", "summary": "Suite\u{0} green." });
+    assert_eq!(mini_raw.ask(json!({ "cmd": "remote_ended", "to": mac.id, "tab": "tab-1", "task": "task-1", "end": end })), Ok(json!(true)), "Postgres jsonb refuses \\u0000, so the hub drops it");
+    let mac_raw = RawMachine::start(&hub.url, &mac_token, |_| RawReply::Ok(json!(true)));
+    wait_for("mac to get it", || mac_raw.calls("remote_ended") == 1);
+    let got = mac_raw.calls.lock().unwrap().iter().find(|c| c["cmd"] == "remote_ended").cloned().unwrap();
+    assert_eq!(got["end"]["summary"].as_str(), Some("Suite green."), "{got}");
+}
+
 #[test]
 fn a_held_end_answers_its_tasks_status_after_its_worker_is_gone_and_stays_until_answered() {
     let hub = TestHub::start("held_status");

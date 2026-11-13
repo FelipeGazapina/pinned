@@ -232,8 +232,16 @@ pub fn clamp_held(text: String) -> String {
     format!("{}…[truncated by pinned: {} bytes]", &text[..cut], text.len() - cut)
 }
 
+/// `text` as the hub stores it: keys and tokens masked, then NUL characters dropped, as Postgres
+/// `jsonb` refuses `\u0000`. The hub keeps no unmasked copy, so a late report shows `[hidden]` where
+/// a live one shows the text. It runs before `clamp_held`, so a cut never leaves a token's prefix.
+pub fn scrub_held(text: &str) -> String {
+    pinned_core::surface::mask_secrets(text).replace('\0', "")
+}
+
 /// Holds `end` for the machine `origin` of the account, which is offline, until it comes back, or,
-/// `unclaimed`, as one it answered it did not take. False when `origin` is no machine of the
+/// `unclaimed`, as one it answered it did not take. Its summary and error are stored masked
+/// (`scrub_held`) and cut (`clamp_held`). False when `origin` is no machine of the
 /// account, which leaves the end to its sender. An error when the row could not be written: the
 /// sender then keeps it and sends it again. Logs ids and sizes, never the end's text.
 #[allow(clippy::too_many_arguments)]
@@ -243,8 +251,8 @@ pub async fn hold_end(hub: &Hub, account: &Account, origin: &str, from: &str, ta
         return Ok(false);
     }
     let size = end.summary.as_ref().map_or(0, String::len) + end.error.as_ref().map_or(0, String::len);
-    end.summary = end.summary.map(clamp_held);
-    end.error = end.error.map(clamp_held);
+    end.summary = end.summary.map(|text| clamp_held(scrub_held(&text)));
+    end.error = end.error.map(|text| clamp_held(scrub_held(&text)));
     let report = serde_json::to_value(&end).map_err(|e| e.to_string())?;
     match hub.db.hold_end(account.id, origin_id, task, tab, from_id, &report, unclaimed).await {
         Ok(fresh) => {
@@ -362,5 +370,17 @@ mod tests {
         // A cut inside a character backs off to its start.
         let wide = format!("{}é{}", "a".repeat(HELD_TEXT_MAX - 1), "b".repeat(5));
         assert_eq!(clamp_held(wide), format!("{}…[truncated by pinned: 7 bytes]", "a".repeat(HELD_TEXT_MAX - 1)));
+    }
+
+    #[test]
+    fn a_held_text_is_masked_before_its_cut_and_loses_its_nul_characters() {
+        let fake = "sk-ant-api03-FAKEFAKEFAKEFAKE0000";
+        assert_eq!(scrub_held(&format!("key {fake} done")), "key [hidden] done");
+        assert_eq!(scrub_held("tests\0 pass"), "tests pass");
+        // A token that straddles the cap is masked whole first, so no prefix of it is kept.
+        let straddling = format!("{} {fake}", "a".repeat(HELD_TEXT_MAX - 10));
+        assert!(clamp_held(straddling.clone()).contains("sk-ant"), "cut first, it would keep a prefix");
+        let held = clamp_held(scrub_held(&straddling));
+        assert!(!held.contains("sk-ant") && held.ends_with("[hidden]"), "{}", &held[held.len() - 40..]);
     }
 }
