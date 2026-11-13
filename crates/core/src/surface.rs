@@ -284,7 +284,7 @@ pub const ACTIONS: &[Action] = &[
     h("run_workflow", Write, "Runs the saved workflow id now, with no Linear issue or Slack thread behind it, and answers the session it started: its machine and tab. The session has the setup the workflow gives its sessions and opens on your own machine; a workflow set to another machine or an Upstash Box is refused. It is your task: it counts against its project's workers-at-once limit, is held to the project's tier, effort, time limit and budget, and you get its notice when its first turn ends. A workflow that only sorts Slack messages or only answers threads another workflow hands it has nothing to run.").wired().starts_work(),
     h("open_box", Write, "Starts an interactive session on a new Upstash Box cloning repo, within the account's box limit and its Box budget: budget_usd may not pass it, and is it when left out. Without size it opens at the default box size that get_box_size answers. Once the box ends it counts as your delegated task in delegation_stats.").wired().starts_work(),
     h("box_status", Read, "The phase, age and budget of the box behind machine.").wired(),
-    h("extend_box", Write, "Adds extra_usd to the budget of the box behind machine, which may not pass the account's Box budget for its project.").wired(),
+    h("extend_box", Confirm, "Adds extra_usd to the budget of the box behind machine, which may not pass the account's Box budget for its project. The user approves it in the app.").wired(),
     h("machines", Read, "Every machine of the account: id, name, OS, whether it is online, when it was last seen, its pinned version and update, and its box.").wired(),
     h("rename_machine", Write, "Renames the account's machine id to name.").wired(),
     h("remove_machine", Confirm, "Removes a machine from the account: its sessions stop showing, and a box's machine is deleted with its box.").wired(),
@@ -364,6 +364,10 @@ pub const LOCKED: &str = "unlock with your password in the app to do this";
 pub fn owner_only(side: Side, cmd: &str, locked: bool) -> bool {
     if side == Side::Hub && cmd == "decide_confirmation" {
         return true;
+    }
+    // The app's own Extend button is the owner; only an agent's extend_box waits, as a Confirm.
+    if side == Side::Hub && cmd == "extend_box" {
+        return false;
     }
     locked && of_cmd(side, cmd).is_some_and(|action| action.class == Confirm)
 }
@@ -1030,7 +1034,8 @@ mod tests {
             assert!(needs(Side::Hub, cmd, true), "changing who may use a box, or its credentials, still needs the password: {cmd}");
         }
         let confirm: Vec<&str> = ACTIONS.iter().filter(|a| needs(a.side, a.cmd, true)).map(|a| a.name).collect();
-        assert_eq!(confirm.len(), ACTIONS.iter().filter(|a| a.class == Confirm).count() + 1, "every confirm action and the decision: {confirm:?}");
+        assert!(confirm.contains(&"decide_confirmation") && !confirm.contains(&"extend_box"), "the decision needs the unlock, the app's own Extend does not: {confirm:?}");
+        assert_eq!(confirm.len(), ACTIONS.iter().filter(|a| a.class == Confirm).count(), "every confirm action but extend_box, and the decision: {confirm:?}");
         assert!(include_str!("../../../ui/hub.js").contains(&format!("const LOCKED = \"{LOCKED}\";")), "the app asks for the password on this exact refusal");
     }
 
@@ -1101,7 +1106,7 @@ mod tests {
                 "save_idea", "delete_idea",
             ]
         );
-        for name in ["set_taste", "reset_taste_field", "set_box_size", "delete_connector"] {
+        for name in ["set_taste", "reset_taste_field", "set_box_size", "delete_connector", "extend_box"] {
             assert_eq!(find(name).map(|a| a.class), Some(Confirm), "{name} carries limits or deletes, so the user approves it");
         }
         assert!(find("enqueue").is_some_and(|a| a.starts_work), "a message that starts a Captain goes through the limits");
@@ -1215,7 +1220,7 @@ mod tests {
             connect_upstash: Confirm on "hub" => {};
             disconnect_upstash: Confirm on "hub" => {};
             set_box_access: Confirm on "hub" => { "access": { "session": { "mode": "fresh" } } };
-            extend_box: Write on "hub" => { "machine": "m1", "extra_usd": 2.0 };
+            extend_box: Confirm on "hub" => { "machine": "m1", "extra_usd": 2.0 };
             pair_code: Confirm on "hub" => {};
             revoke_invite: Confirm on "hub" => { "id": "i1" };
             stage: Write on "hub" => { "connector": "c1", "issue": "uuid-1", "stage": "coding" };
