@@ -4395,6 +4395,8 @@ impl Machine {
                 Message::DelegationStats { days } => machine.delegation_stats(days),
                 Message::Project { tab, tool } => machine.project_tool(&tab, tool),
                 Message::Guard { tab, tool, input } => machine.guard(&tab, &tool, &input),
+                // The hub downloads the thread's files, and this machine keeps them where its sessions read them.
+                message @ Message::SlackFiles { .. } => Ok(crate::slack::save_downloads(machine.uploads.as_deref(), other(message))),
                 message => other(message),
             }
         })

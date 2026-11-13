@@ -1168,6 +1168,12 @@ pub enum HubCall {
         assignee: String,
     },
     LinearTake { connector: String, channel: String, thread: String, issue: String },
+    /// From a workflow session's `pinned slack files`: the files its Slack thread attaches, downloaded.
+    SlackFiles {
+        connector: String,
+        #[serde(flatten)]
+        subject: Subject,
+    },
     /// From a workflow session's `pinned run set`: stores `value` as `{{vars.<name>}}` of its live graph run.
     RunSet {
         connector: String,
@@ -2121,6 +2127,10 @@ mod tests {
         round_trip(
             HubCall::LinearTake { connector: "c2".into(), channel: "C1".into(), thread: "1.2".into(), issue: "ENG-7".into() },
             json!({ "cmd": "linear_take", "connector": "c2", "channel": "C1", "thread": "1.2", "issue": "ENG-7" }),
+        );
+        round_trip(
+            HubCall::SlackFiles { connector: "c2".into(), subject: Subject::SlackThread { channel: "C1".into(), thread: "1.2".into() } },
+            json!({ "cmd": "slack_files", "connector": "c2", "channel": "C1", "thread": "1.2" }),
         );
         round_trip(
             HubCall::RunSet { connector: "c2".into(), subject: Subject::SlackThread { channel: "C1".into(), thread: "1.2".into() }, name: "title".into(), value: "Export 500s".into() },

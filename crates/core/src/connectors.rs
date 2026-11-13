@@ -1289,6 +1289,8 @@ pub struct TriggerPost {
     pub ts: String,
     pub author: String,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<slack::SlackFile>,
 }
 
 /// Direct answers from one classify model, in question order. A decide's pick is not one of these.
@@ -2165,6 +2167,37 @@ impl Connectors {
         Ok("posted the reply in the Slack thread".into())
     }
 
+    /// Downloads the files a session's Slack thread attaches, for `pinned slack files`. It reads
+    /// the thread again, which finds the files of replies posted after the run started too, and
+    /// falls back to the live graph run's trigger when Slack won't list the thread. A Slack error
+    /// becomes a note, never an error, so the session's run goes on.
+    pub async fn slack_files(&self, connector: &str, subject: &Subject) -> Result<slack::Downloads, String> {
+        let Subject::SlackThread { channel, thread } = subject else { return Err("only a Slack thread's session has thread files".into()) };
+        if !self.store.lock().unwrap().connectors.iter().any(|c| c.id == connector) {
+            return Err("the workflow was deleted".into());
+        }
+        let note = |line: String| slack::Downloads { files: vec![], notes: vec![line] };
+        let Some(token) = self.key(SLACK_KEY) else { return Ok(note("Slack is not connected: connect it in pinned's Connectors settings".into())) };
+        let posts = match slack::thread(&token, channel, thread).await {
+            Ok(posts) => posts,
+            Err(e) => match self.trigger_posts(connector, subject) {
+                Some(posts) => posts,
+                None => return Ok(note(format!("pinned could not read the Slack thread: {e}"))),
+            },
+        };
+        Ok(slack::download_all(&token, &posts).await)
+    }
+
+    /// The posts the live graph run on `subject` started from.
+    fn trigger_posts(&self, connector: &str, subject: &Subject) -> Option<Vec<slack::Post>> {
+        let runs = self.runs.lock().unwrap();
+        let run = runs.iter().rev().find(|run| {
+            run.session_owner.as_deref().unwrap_or(run.connector.as_str()) == connector && &run.subject == subject && matches!(run.status, Status::Running | Status::Waiting)
+        })?;
+        let TriggerInput::Slack { posts, .. } = trigger_of(run).ok()? else { return None };
+        Some(posts.into_iter().map(|post| slack::Post { ts: post.ts, author: post.author, text: post.text, files: post.files }).collect())
+    }
+
     /// Stores `value` as `{{vars.<name>}}` of the live graph run whose session `connector` runs
     /// on `subject`, for its later steps to read. Grants nothing else: a workflow with fix off
     /// still files nothing and changes no code.
@@ -2405,6 +2438,7 @@ fn slack_run(
     prompt += c.box_note();
     let input = transcript(posts);
     prompt += &format!("\n\nSlack thread in #{channel_name}, oldest first:\n{input}");
+    prompt += &files_line("thread", posts.iter().map(|p| p.files.len()).sum());
     prompt += note.unwrap_or_default();
     args.push(prompt);
     let subject = Subject::SlackThread { channel: channel.to_owned(), thread: thread.to_owned() };
@@ -2421,7 +2455,15 @@ fn reply_header(author: &str) -> String {
 
 /// A later message of the thread, as its session receives it.
 fn reply_block(post: &slack::Post) -> String {
-    format!("{}\n{}", reply_header(&post.author), post.text)
+    format!("{}\n{}{}", reply_header(&post.author), post.text, files_line("message", post.files.len()))
+}
+
+/// Tells a session that `what` attaches `count` files and how to get them. Empty when it has none.
+fn files_line(what: &str, count: usize) -> String {
+    if count == 0 {
+        return String::new();
+    }
+    format!("\n\nThis {what} has {count} attached file(s); run `pinned slack files` to download them.")
 }
 
 fn routed_note(router: &str, category: &str) -> String {
@@ -2437,7 +2479,7 @@ fn filed_note(filed: &Filed) -> String {
 }
 
 fn trigger_posts(posts: &[slack::Post]) -> Vec<TriggerPost> {
-    posts.iter().map(|post| TriggerPost { ts: post.ts.clone(), author: post.author.clone(), text: post.text.clone() }).collect()
+    posts.iter().map(|post| TriggerPost { ts: post.ts.clone(), author: post.author.clone(), text: post.text.clone(), files: post.files.clone() }).collect()
 }
 
 fn subject_key(subject: &Subject) -> String {
@@ -2826,7 +2868,7 @@ pub fn graph_opening(owner: &Connector, trigger: &TriggerInput, answers: &[Class
             run(owner, &issue, exe)
         }
         TriggerInput::Slack { channel, channel_name, thread, posts, note, mentioned, .. } => {
-            let posts: Vec<slack::Post> = posts.iter().map(|post| slack::Post { ts: post.ts.clone(), author: post.author.clone(), text: post.text.clone() }).collect();
+            let posts: Vec<slack::Post> = posts.iter().map(|post| slack::Post { ts: post.ts.clone(), author: post.author.clone(), text: post.text.clone(), files: post.files.clone() }).collect();
             let mut opened = slack_run(owner, channel, channel_name, thread, &posts, note.as_deref(), exe);
             opened.mentioned = mentioned.clone();
             opened
@@ -5399,8 +5441,8 @@ mod tests {
 
     fn posts() -> [slack::Post; 2] {
         [
-            slack::Post { ts: "1792400050.000200".into(), author: "ana".into(), text: "@pinned export 500s since today\nsee the log".into() },
-            slack::Post { ts: "1792400060.000000".into(), author: "bruno".into(), text: "same here".into() },
+            slack::Post { ts: "1792400050.000200".into(), author: "ana".into(), text: "@pinned export 500s since today\nsee the log".into(), files: vec![] },
+            slack::Post { ts: "1792400060.000000".into(), author: "bruno".into(), text: "same here".into(), files: vec![] },
         ]
     }
 
@@ -5643,7 +5685,7 @@ mod tests {
 
     #[test]
     fn later_messages_reach_the_session_under_their_author() {
-        let post = slack::Post { ts: "1792400090.000000".into(), author: "Ana Lima".into(), text: "yes, create the task\n@pinned thanks".into() };
+        let post = slack::Post { ts: "1792400090.000000".into(), author: "Ana Lima".into(), text: "yes, create the task\n@pinned thanks".into(), files: vec![] };
         assert_eq!(reply_block(&post), "[Slack reply from Ana Lima in the thread]\nyes, create the task\n@pinned thanks");
     }
 
@@ -6577,7 +6619,7 @@ mod tests {
             channel: "C0123ABCD".into(),
             channel_name: "support".into(),
             thread: "1792400050.000200".into(),
-            posts: posts().into_iter().map(|post| TriggerPost { ts: post.ts, author: post.author, text: post.text }).collect(),
+            posts: posts().into_iter().map(|post| TriggerPost { ts: post.ts, author: post.author, text: post.text, files: post.files }).collect(),
             note,
             mentioned: vec!["1792400050.000200".into()],
             request: None,
@@ -7276,7 +7318,7 @@ mod tests {
     }
 
     fn mention_in_thread(ts: &str, text: &str) -> GraphInbox {
-        let post = slack::Post { ts: ts.into(), author: "ana".into(), text: text.into() };
+        let post = slack::Post { ts: ts.into(), author: "ana".into(), text: text.into(), files: vec![] };
         GraphInbox {
             channel: "C0123ABCD".into(),
             thread: "1792400050.000200".into(),
@@ -8325,6 +8367,511 @@ mod tests {
             assert!(!connectors.widens_convex(&legacy), "a save with no graph adds no step");
             let _ = std::fs::remove_dir_all(dir);
         }
+    }
+
+    fn screenshot() -> slack::SlackFile {
+        slack::SlackFile {
+            id: "F0SCREEN1".into(),
+            name: "export-500.png".into(),
+            mimetype: "image/png".into(),
+            size: 48213,
+            url_private: "https://files.slack.com/files-pri/T1-F0SCREEN1/export-500.png".into(),
+        }
+    }
+
+    fn console() -> slack::SlackFile {
+        slack::SlackFile {
+            id: "F0CONSOLE2".into(),
+            name: "console.jpg".into(),
+            mimetype: "image/jpeg".into(),
+            size: 120004,
+            url_private: "https://files.slack.com/files-pri/T1-F0CONSOLE2/console.jpg".into(),
+        }
+    }
+
+    /// Answers `conversations.replies` with `replies` and `users.info` with one name, once per call.
+    fn serve_replies(replies: String) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(8) {
+                let Ok(mut stream) = stream else { break };
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 1024];
+                while let Ok(n @ 1..) = std::io::Read::read(&mut stream, &mut tmp) {
+                    buf.extend_from_slice(&tmp[..n]);
+                    if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let body = if String::from_utf8_lossy(&buf).contains("conversations.replies") {
+                    replies.clone()
+                } else {
+                    r#"{"ok":true,"user":{"name":"ana","profile":{"display_name":"ana"}}}"#.to_owned()
+                };
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                let _ = std::io::Write::write_all(&mut stream, response.as_bytes());
+            }
+        });
+        format!("http://{address}/")
+    }
+
+    #[test]
+    fn a_thread_read_keeps_the_files_of_each_post_even_before_the_mention() {
+        let _api = slack::lock_api();
+        let _restore = RestoreSlack;
+        install_rustls();
+        let file = |f: slack::SlackFile| json!({ "id": f.id, "name": f.name, "mimetype": f.mimetype, "size": f.size, "url_private": f.url_private, "filetype": "png" });
+        let replies = json!({ "ok": true, "messages": [
+            { "ts": "1792400050.000200", "user": "U1", "text": "export 500s, screenshot attached", "files": [file(screenshot())] },
+            { "ts": "1792400070.000000", "user": "U1", "text": "<@UBOT> can you look?" },
+            { "ts": "1792400090.000000", "user": "U1", "text": "and the console", "files": [file(console())] },
+        ]});
+        slack::set_api_root(Some(serve_replies(replies.to_string())));
+        let posts = block_on(slack::thread("xoxb-test", "C0123ABCD", "1792400050.000200")).unwrap();
+        let files: Vec<_> = posts
+            .iter()
+            .map(|p| (p.ts.as_str(), p.files.iter().map(|f| (f.id.as_str(), f.name.as_str(), f.mimetype.as_str(), f.size)).collect::<Vec<_>>()))
+            .collect();
+        assert_eq!(
+            files,
+            [
+                ("1792400050.000200", vec![("F0SCREEN1", "export-500.png", "image/png", 48213)]),
+                ("1792400070.000000", vec![]),
+                ("1792400090.000000", vec![("F0CONSOLE2", "console.jpg", "image/jpeg", 120004)]),
+            ]
+        );
+        assert_eq!(posts[0].files[0].url_private, "https://files.slack.com/files-pri/T1-F0SCREEN1/export-500.png");
+    }
+
+    #[test]
+    fn a_stored_post_without_files_still_loads_and_one_with_none_writes_no_files_key() {
+        let old: TriggerPost = serde_json::from_str(r#"{"ts":"1792400050.000200","author":"ana","text":"it broke"}"#).unwrap();
+        assert_eq!(old, TriggerPost { ts: "1792400050.000200".into(), author: "ana".into(), text: "it broke".into(), files: vec![] });
+        assert_eq!(serde_json::to_string(&old).unwrap(), r#"{"ts":"1792400050.000200","author":"ana","text":"it broke"}"#);
+        let with = TriggerPost { files: vec![screenshot()], ..old };
+        assert_eq!(serde_json::from_str::<TriggerPost>(&serde_json::to_string(&with).unwrap()).unwrap(), with);
+    }
+
+    #[test]
+    fn a_thread_with_files_tells_its_session_how_to_download_them() {
+        let prompt = |posts: &[slack::Post]| slack_run(&slack_connector(), "C0123ABCD", "support", "1792400050.000200", posts, None, "/bin/pinned").args.last().unwrap().clone();
+        let plain = prompt(&posts());
+        assert!(!plain.contains("attached file"), "{plain}");
+        let [mut first, mut second] = posts();
+        first.files = vec![screenshot()];
+        second.files = vec![console()];
+        let line = "\n\nThis thread has 2 attached file(s); run `pinned slack files` to download them.";
+        let with = prompt(&[first, second]);
+        assert_eq!(with, format!("{plain}{line}"));
+        let opened = graph_opening(&slack_connector(), &slack_trigger_with(&[screenshot()]), &[], "", None, "/bin/pinned").unwrap();
+        assert!(opened.args.last().unwrap().ends_with("same here\n\nThis thread has 1 attached file(s); run `pinned slack files` to download them."));
+    }
+
+    fn slack_trigger_with(files: &[slack::SlackFile]) -> TriggerInput {
+        let [mut first, second] = posts();
+        first.files = files.to_vec();
+        TriggerInput::Slack {
+            channel: "C0123ABCD".into(),
+            channel_name: "support".into(),
+            thread: "1792400050.000200".into(),
+            posts: trigger_posts(&[first, second]),
+            note: None,
+            mentioned: vec![],
+            request: None,
+        }
+    }
+
+    #[test]
+    fn a_later_reply_with_files_says_so_in_its_block() {
+        let post = slack::Post { ts: "1792400090.000000".into(), author: "ana".into(), text: "here it is".into(), files: vec![screenshot()] };
+        assert_eq!(
+            reply_block(&post),
+            "[Slack reply from ana in the thread]\nhere it is\n\nThis message has 1 attached file(s); run `pinned slack files` to download them."
+        );
+    }
+
+    /// A Slack stand-in for `pinned slack files`: `conversations.replies` answers `replies`,
+    /// `users.info` names U1 ana and U2 bo, each `files` path answers its status, content type and
+    /// bytes, and any other path its own name. Returns the root and each request's head.
+    fn serve_files(replies: Value, files: Vec<(&'static str, u16, &'static str, Vec<u8>)>) -> (String, std::sync::Arc<Mutex<Vec<String>>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let heads = std::sync::Arc::new(Mutex::new(vec![]));
+        let seen = heads.clone();
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            while started.elapsed() < std::time::Duration::from_secs(10) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                    continue;
+                };
+                stream.set_nonblocking(false).unwrap();
+                let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                let mut buf = Vec::new();
+                let mut tmp = [0u8; 1024];
+                while let Ok(n @ 1..) = std::io::Read::read(&mut stream, &mut tmp) {
+                    buf.extend_from_slice(&tmp[..n]);
+                    if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let head = String::from_utf8_lossy(&buf).into_owned();
+                let path = head.split_whitespace().nth(1).unwrap_or_default().to_owned();
+                seen.lock().unwrap().push(head);
+                let (status, kind, body) = if path.contains("conversations.replies") {
+                    (200, "application/json", replies.to_string().into_bytes())
+                } else if path.contains("users.info") {
+                    let name = if path.contains("U2") { "bo" } else { "ana" };
+                    (200, "application/json", json!({ "ok": true, "user": { "name": name, "profile": { "display_name": name } } }).to_string().into_bytes())
+                } else if let Some((_, status, kind, body)) = files.iter().find(|(p, ..)| *p == path) {
+                    (*status, *kind, body.clone())
+                } else {
+                    (200, "application/octet-stream", path.into_bytes())
+                };
+                let head = format!("HTTP/1.1 {status} X\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                let _ = std::io::Write::write_all(&mut stream, &[head.into_bytes(), body].concat());
+            }
+        });
+        (format!("http://{address}/"), heads)
+    }
+
+    fn slack_file(id: &str, name: &str, mimetype: &str, size: u64) -> slack::SlackFile {
+        slack::SlackFile { id: id.into(), name: name.into(), mimetype: mimetype.into(), size, url_private: format!("https://files.slack.com/files-pri/T1-{id}/{name}") }
+    }
+
+    fn file_json(f: &slack::SlackFile) -> Value {
+        json!({ "id": f.id, "name": f.name, "mimetype": f.mimetype, "size": f.size, "url_private": f.url_private })
+    }
+
+    /// The Slack workflow's connectors, with a bot token.
+    fn slack_files_connectors(name: &str) -> (Connectors, PathBuf) {
+        let (connectors, dir) = stored(name, vec![slack_connector()]);
+        std::fs::write(dir.join(SLACK_KEY), "xoxb-test").unwrap();
+        (connectors, dir)
+    }
+
+    fn slack_thread() -> Subject {
+        Subject::SlackThread { channel: "C0123ABCD".into(), thread: "1792400050.000200".into() }
+    }
+
+    #[test]
+    fn slack_files_downloads_every_post_s_images_and_the_node_saves_them_as_uploads() {
+        let _api = slack::lock_api();
+        let _restore = RestoreSlack;
+        install_rustls();
+        let (png, jpg) = (b"\x89PNG\r\n\x1a\nscreenshot".to_vec(), b"\xff\xd8\xff\xe0console".to_vec());
+        let replies = json!({ "ok": true, "messages": [
+            { "ts": "1792400050.000200", "user": "U1", "text": "export 500s, screenshot attached", "files": [file_json(&screenshot())] },
+            { "ts": "1792400070.000000", "user": "U1", "text": "<@UBOT> can you look?" },
+            { "ts": "1792400090.000000", "user": "U2", "text": "and the console", "files": [file_json(&console())] },
+        ]});
+        let (root, heads) = serve_files(
+            replies,
+            vec![("/files-pri/T1-F0SCREEN1/export-500.png", 200, "image/png", png.clone()), ("/files-pri/T1-F0CONSOLE2/console.jpg", 200, "image/jpeg", jpg.clone())],
+        );
+        slack::set_api_root(Some(root));
+        let (connectors, dir) = slack_files_connectors("slack-files");
+        let downloads = block_on(connectors.slack_files("c2", &slack_thread())).unwrap();
+        let download = |name: &str, mimetype: &str, author: &str, ts: &str, data: &[u8]| slack::Download {
+            name: name.into(),
+            mimetype: mimetype.into(),
+            author: author.into(),
+            ts: ts.into(),
+            data: crate::wire::Bytes(data.to_vec()),
+        };
+        assert_eq!(
+            downloads,
+            slack::Downloads {
+                files: vec![
+                    download("export-500.png", "image/png", "ana", "1792400050.000200", &png),
+                    download("console.jpg", "image/jpeg", "bo", "1792400090.000000", &jpg),
+                ],
+                notes: vec![],
+            },
+            "the screenshot posted before the mention comes too"
+        );
+        let file_heads: Vec<String> = heads.lock().unwrap().iter().filter(|h| h.contains("/files-pri/")).cloned().collect();
+        assert_eq!(file_heads.len(), 2);
+        assert!(file_heads.iter().all(|h| h.to_lowercase().contains("authorization: bearer xoxb-test")), "{file_heads:?}");
+
+        let uploads = dir.join("uploads");
+        let printed = slack::save_downloads(Some(&uploads), Ok(serde_json::to_string(&downloads).unwrap()));
+        let (shot, log) = (uploads.join("export-500.png"), uploads.join("console.jpg"));
+        assert_eq!(
+            printed,
+            format!(
+                "{}  (export-500.png, image/png, from ana at 2026-10-19 08:54 UTC)\n{}  (console.jpg, image/jpeg, from bo at 2026-10-19 08:54 UTC)",
+                shot.display(),
+                log.display()
+            )
+        );
+        assert_eq!((std::fs::read(&shot).unwrap(), std::fs::read(&log).unwrap()), (png, jpg));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn slack_files_reports_a_thread_read_that_lacks_a_scope_as_what_it_is_and_leaves_the_run_alone() {
+        let _api = slack::lock_api();
+        let _restore = RestoreSlack;
+        install_rustls();
+        let (connectors, dir) = slack_files_connectors("slack-files-scope");
+        let png = b"\x89PNG\r\n\x1a\nfrom the trigger".to_vec();
+        for error in ["missing_scope", "not_allowed_token_type"] {
+            let (root, _) = serve_files(json!({ "ok": false, "error": error }), vec![("/files-pri/T1-F0SCREEN1/export-500.png", 200, "image/png", png.clone())]);
+            slack::set_api_root(Some(root));
+            let without_run = block_on(connectors.slack_files("c2", &slack_thread()));
+            assert_eq!(
+                without_run,
+                Ok(slack::Downloads { files: vec![], notes: vec![format!("pinned could not read the Slack thread: Slack: {error}")] }),
+                "a missing history scope is not a missing files:read"
+            );
+        }
+        let mut lib = runner::Library::new();
+        lib.insert("c2".into(), migrate(&slack_connector()));
+        let trigger = serde_json::to_value(slack_trigger_with(&[screenshot()])).unwrap();
+        connectors.runs.lock().unwrap().push(runner::start(&lib, "c2", slack_thread(), trigger, "2026-10-19T08:54:10Z"));
+        let status = || connectors.runs.lock().unwrap()[0].status.clone();
+        let before = status();
+        let (root, _) = serve_files(json!({ "ok": false, "error": "missing_scope" }), vec![("/files-pri/T1-F0SCREEN1/export-500.png", 200, "image/png", png.clone())]);
+        slack::set_api_root(Some(root));
+        let downloads = block_on(connectors.slack_files("c2", &slack_thread())).unwrap();
+        let names: Vec<&str> = downloads.files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!((names, downloads.files[0].data.0.clone(), downloads.notes), (vec!["export-500.png"], png, Vec::<String>::new()), "the live run's trigger stands in for the thread");
+        assert_eq!(status(), before);
+        assert_eq!(connectors.runs.lock().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn slack_files_reads_a_403_or_a_sign_in_page_as_the_missing_scope() {
+        let _api = slack::lock_api();
+        let _restore = RestoreSlack;
+        install_rustls();
+        let (connectors, dir) = slack_files_connectors("slack-files-403");
+        let replies = json!({ "ok": true, "messages": [{ "ts": "1792400050.000200", "user": "U1", "text": "<@UBOT> see", "files": [file_json(&screenshot()), file_json(&console())] }]});
+        let path = "/files-pri/T1-F0SCREEN1/export-500.png";
+        for (status, kind, body) in [(403, "text/plain", b"Forbidden".to_vec()), (200, "text/html; charset=utf-8", b"<html>Sign in to Slack</html>".to_vec())] {
+            let (root, heads) = serve_files(replies.clone(), vec![(path, status, kind, body)]);
+            slack::set_api_root(Some(root));
+            let downloads = block_on(connectors.slack_files("c2", &slack_thread())).unwrap();
+            assert_eq!(downloads, slack::Downloads { files: vec![], notes: vec![slack::NO_FILES_SCOPE.into()] }, "{status} {kind}");
+            assert!(!heads.lock().unwrap().iter().any(|h| h.contains("console.jpg")), "a file Slack won't let the app read stops the rest");
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn slack_files_skips_an_oversize_file_and_goes_on_past_a_failed_one() {
+        let _api = slack::lock_api();
+        let _restore = RestoreSlack;
+        install_rustls();
+        let (connectors, dir) = slack_files_connectors("slack-files-skip");
+        let notes = slack_file("F0NOTES", "notes.txt", "text/plain", 5);
+        let huge = slack_file("F0HUGE", "huge.png", "image/png", 21 << 20);
+        let report = slack_file("F0REPORT", "report.pdf", "application/pdf", 9);
+        let more: Vec<slack::SlackFile> = (0..18).map(|n| slack_file(&format!("F{n:02}"), &format!("f{n:02}.txt"), "text/plain", 1)).collect();
+        let replies = json!({ "ok": true, "messages": [
+            { "ts": "1792400050.000200", "user": "U1", "text": "<@UBOT> logs", "files": [file_json(&notes), file_json(&huge)] },
+            { "ts": "1792400070.000000", "user": "U2", "text": "console", "files": [file_json(&console())] },
+            { "ts": "1792400090.000000", "user": "U1", "text": "report", "files": [file_json(&report)] },
+            { "ts": "1792400095.000000", "user": "U1", "text": "the rest", "files": more.iter().map(file_json).collect::<Vec<_>>() },
+        ]});
+        let (root, heads) = serve_files(
+            replies,
+            vec![
+                ("/files-pri/T1-F0NOTES/notes.txt", 200, "text/plain", b"notes".to_vec()),
+                ("/files-pri/T1-F0CONSOLE2/console.jpg", 500, "text/plain", b"oops".to_vec()),
+                ("/files-pri/T1-F0REPORT/report.pdf", 200, "application/pdf", b"%PDF-1.7".to_vec()),
+            ],
+        );
+        slack::set_api_root(Some(root));
+        let downloads = block_on(connectors.slack_files("c2", &slack_thread())).unwrap();
+        let names: Vec<&str> = downloads.files.iter().map(|f| f.name.as_str()).collect();
+        let mut expected = vec!["report.pdf", "notes.txt"];
+        expected.extend(more[..16].iter().map(|f| f.name.as_str()));
+        assert_eq!(names, expected, "the PDF before the text files, in thread order, 20 tries at most");
+        assert_eq!(downloads.files[0].data.0, b"%PDF-1.7");
+        assert_eq!(
+            downloads.notes,
+            [
+                "skipped huge.png: 21.0 MB is over the 20.0 MB limit for one file",
+                "skipped console.jpg: Slack answered 500 Internal Server Error",
+                "skipped f16.txt: pinned downloads at most 20 files at a time",
+                "skipped f17.txt: pinned downloads at most 20 files at a time",
+            ]
+        );
+        assert!(!heads.lock().unwrap().iter().any(|h| h.contains("huge.png") || h.contains("f17.txt")), "a skipped file is never downloaded");
+        let printed = slack::save_downloads(Some(&dir.join("uploads")), Ok(serde_json::to_string(&downloads).unwrap()));
+        assert!(printed.ends_with("skipped f17.txt: pinned downloads at most 20 files at a time"), "{printed}");
+        assert_eq!(printed.lines().count(), 22);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn slack_files_on_a_thread_without_files_says_so() {
+        let _api = slack::lock_api();
+        let _restore = RestoreSlack;
+        install_rustls();
+        let (connectors, dir) = slack_files_connectors("slack-files-none");
+        let (root, _) = serve_files(json!({ "ok": true, "messages": [{ "ts": "1792400050.000200", "user": "U1", "text": "<@UBOT> hi" }]}), vec![]);
+        slack::set_api_root(Some(root));
+        let downloads = block_on(connectors.slack_files("c2", &slack_thread())).unwrap();
+        assert_eq!(slack::save_downloads(None, Ok(serde_json::to_string(&downloads).unwrap())), "this thread has no attached files");
+        assert_eq!(slack::save_downloads(None, Err("not connected to the hub".into())), "pinned could not download this thread's files: not connected to the hub");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn slack_files_stops_at_40_mb_in_all() {
+        let _api = slack::lock_api();
+        let _restore = RestoreSlack;
+        install_rustls();
+        let (connectors, dir) = slack_files_connectors("slack-files-total");
+        let shots: Vec<slack::SlackFile> = (1..=3).map(|n| slack_file(&format!("F0BIG{n}"), &format!("big{n}.png"), "image/png", 15 << 20)).collect();
+        let replies = json!({ "ok": true, "messages": [{ "ts": "1792400050.000200", "user": "U1", "text": "<@UBOT> shots", "files": shots.iter().map(file_json).collect::<Vec<_>>() }]});
+        let big = vec![7u8; 15 << 20];
+        let (root, heads) = serve_files(
+            replies,
+            vec![("/files-pri/T1-F0BIG1/big1.png", 200, "image/png", big.clone()), ("/files-pri/T1-F0BIG2/big2.png", 200, "image/png", big.clone())],
+        );
+        slack::set_api_root(Some(root));
+        let downloads = block_on(connectors.slack_files("c2", &slack_thread())).unwrap();
+        let names: Vec<&str> = downloads.files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["big1.png", "big2.png"]);
+        assert!(downloads.files.iter().all(|f| f.data.0 == big));
+        assert_eq!(downloads.notes, ["skipped big3.png: the files before it already make up the 40.0 MB pinned downloads at a time"]);
+        assert!(!heads.lock().unwrap().iter().any(|h| h.contains("big3.png")), "the file over the total is never downloaded");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn slack_files_falls_back_to_the_live_run_s_trigger_when_slack_wont_list_the_thread() {
+        let _api = slack::lock_api();
+        let _restore = RestoreSlack;
+        install_rustls();
+        let (connectors, dir) = slack_files_connectors("slack-files-trigger");
+        let png = b"\x89PNG\r\n\x1a\nfrom the trigger".to_vec();
+        let (root, _) = serve_files(json!({ "ok": false, "error": "channel_not_found" }), vec![("/files-pri/T1-F0SCREEN1/export-500.png", 200, "image/png", png.clone())]);
+        slack::set_api_root(Some(root));
+        let without_run = block_on(connectors.slack_files("c2", &slack_thread())).unwrap();
+        assert_eq!(without_run.notes, ["pinned could not read the Slack thread: Slack: channel_not_found"]);
+        let mut lib = runner::Library::new();
+        lib.insert("c2".into(), migrate(&slack_connector()));
+        let trigger = serde_json::to_value(slack_trigger_with(&[screenshot()])).unwrap();
+        connectors.runs.lock().unwrap().push(runner::start(&lib, "c2", slack_thread(), trigger, "2026-10-19T08:54:10Z"));
+        let downloads = block_on(connectors.slack_files("c2", &slack_thread())).unwrap();
+        assert_eq!(
+            downloads,
+            slack::Downloads {
+                files: vec![slack::Download {
+                    name: "export-500.png".into(),
+                    mimetype: "image/png".into(),
+                    author: "ana".into(),
+                    ts: "1792400050.000200".into(),
+                    data: crate::wire::Bytes(png),
+                }],
+                notes: vec![],
+            }
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn slack_files_fall_back_to_the_run_whose_session_the_calling_workflow_owns() {
+        let _api = slack::lock_api();
+        let _restore = RestoreSlack;
+        install_rustls();
+        let (connectors, dir) = slack_files_connectors("slack-files-owner");
+        let png = b"\x89PNG\r\n\x1a\nfrom the trigger".to_vec();
+        let (root, _) = serve_files(json!({ "ok": false, "error": "channel_not_found" }), vec![("/files-pri/T1-F0SCREEN1/export-500.png", 200, "image/png", png.clone())]);
+        slack::set_api_root(Some(root));
+        let mut lib = runner::Library::new();
+        lib.insert("c9".into(), migrate(&slack_connector()));
+        let trigger = serde_json::to_value(slack_trigger_with(&[screenshot()])).unwrap();
+        let mut run = runner::start(&lib, "c9", slack_thread(), trigger, "2026-10-19T08:54:10Z");
+        run.session_owner = Some("c2".into());
+        connectors.runs.lock().unwrap().push(run);
+        let downloads = block_on(connectors.slack_files("c2", &slack_thread())).unwrap();
+        let names: Vec<&str> = downloads.files.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!((names, downloads.notes), (vec!["export-500.png"], Vec::<String>::new()), "c2 owns the session of c9's run");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A Slack stand-in whose file answers send no Content-Length: `size` bytes then a close, or,
+    /// when `stall`, the headers and then nothing for a while.
+    fn serve_unsized_file(replies: Value, size: usize, stall: bool) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(4) {
+                let Ok(mut stream) = stream else { continue };
+                let replies = replies.clone();
+                std::thread::spawn(move || {
+                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                    let mut buf = Vec::new();
+                    let mut tmp = [0u8; 1024];
+                    while let Ok(n @ 1..) = std::io::Read::read(&mut stream, &mut tmp) {
+                        buf.extend_from_slice(&tmp[..n]);
+                        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    let head = String::from_utf8_lossy(&buf).into_owned();
+                    let path = head.split_whitespace().nth(1).unwrap_or_default().to_owned();
+                    if path.contains("/files-pri/") {
+                        let _ = std::io::Write::write_all(&mut stream, b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nConnection: close\r\n\r\n");
+                        if stall {
+                            std::thread::sleep(std::time::Duration::from_secs(3));
+                            return;
+                        }
+                        let chunk = vec![7u8; 64 << 10];
+                        let mut sent = 0;
+                        while sent < size && std::io::Write::write_all(&mut stream, &chunk[..chunk.len().min(size - sent)]).is_ok() {
+                            sent += chunk.len();
+                        }
+                        return;
+                    }
+                    let body = if path.contains("users.info") { json!({ "ok": true, "user": { "name": "ana", "profile": { "display_name": "ana" } } }) } else { replies };
+                    let body = body.to_string();
+                    let head = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                    let _ = std::io::Write::write_all(&mut stream, head.as_bytes());
+                });
+            }
+        });
+        format!("http://{address}/")
+    }
+
+    #[test]
+    fn slack_files_stops_reading_a_file_with_no_length_at_the_limit() {
+        let _api = slack::lock_api();
+        let _restore = RestoreSlack;
+        install_rustls();
+        let (connectors, dir) = slack_files_connectors("slack-files-unsized");
+        // Slack says 5 bytes, and sends no Content-Length for the 25 MB it streams.
+        let big = slack_file("F0BIG", "big.bin", "application/octet-stream", 5);
+        let replies = json!({ "ok": true, "messages": [{ "ts": "1792400050.000200", "user": "U1", "text": "<@UBOT> logs", "files": [file_json(&big)] }]});
+        slack::set_api_root(Some(serve_unsized_file(replies, 25 << 20, false)));
+        let downloads = block_on(connectors.slack_files("c2", &slack_thread())).unwrap();
+        assert_eq!(downloads, slack::Downloads { files: vec![], notes: vec!["skipped big.bin: it is over the 20.0 MB limit for one file".into()] });
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn slack_files_gives_up_on_a_file_slack_does_not_send_in_time_and_goes_on() {
+        let _api = slack::lock_api();
+        let _restore = RestoreSlack;
+        install_rustls();
+        let (connectors, dir) = slack_files_connectors("slack-files-stall");
+        let slow = slack_file("F0SLOW", "slow.bin", "application/octet-stream", 5);
+        let replies = json!({ "ok": true, "messages": [{ "ts": "1792400050.000200", "user": "U1", "text": "<@UBOT> logs", "files": [file_json(&slow)] }]});
+        slack::set_api_root(Some(serve_unsized_file(replies, 0, true)));
+        slack::set_file_wait(std::time::Duration::from_secs(1));
+        let downloads = block_on(connectors.slack_files("c2", &slack_thread())).unwrap();
+        assert_eq!(downloads, slack::Downloads { files: vec![], notes: vec!["skipped slow.bin: Slack did not send it within 1 seconds".into()] });
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     include!("legacy_outcome.rs");

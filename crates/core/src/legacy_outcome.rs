@@ -202,7 +202,7 @@ fn classify(connector: &Connector, fixture: Fixture, scripted: ScriptedModel) ->
                 replies: slack::Replies {
                     thread: THREAD_TS.into(),
                     newest: ts.into(),
-                    posts: vec![slack::Post { ts: ts.into(), author: author.into(), text: text.into() }],
+                    posts: vec![slack::Post { ts: ts.into(), author: author.into(), text: text.into(), files: vec![] }],
                     mentioned: vec![],
                 },
             },
@@ -558,7 +558,7 @@ fn interpret(connectors: &[Connector], fixture: Fixture, scripted: ScriptedModel
 
 fn walked(connectors: &[Connector], fixture: Fixture, scripted: ScriptedModel) -> Walk {
     if let Fixture::Replies { connector, author, text, ts } = fixture {
-        let post = slack::Post { ts: ts.into(), author: author.into(), text: text.into() };
+        let post = slack::Post { ts: ts.into(), author: author.into(), text: text.into(), files: vec![] };
         return Walk {
             observations: vec![Observation::Deliver {
                 connector: connector.into(),
@@ -746,7 +746,7 @@ fn trigger_input(connectors: &[Connector], subject: &Subject) -> TriggerInput {
             channel: channel.clone(),
             channel_name: channel_label(connectors),
             thread: thread.clone(),
-            posts: posts().iter().map(|post| TriggerPost { ts: post.ts.clone(), author: post.author.clone(), text: post.text.clone() }).collect(),
+            posts: posts().iter().map(|post| TriggerPost { ts: post.ts.clone(), author: post.author.clone(), text: post.text.clone(), files: vec![] }).collect(),
             note: None,
             mentioned: vec![],
             request: None,

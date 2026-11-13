@@ -395,12 +395,18 @@ fn subject() -> Result<Subject, String> {
     }
 }
 
-/// Runs when a Slack connector's session calls `pinned slack reply <text>`: asks the harness to
-/// post `text` in the session's thread and returns what the harness answered.
+/// Runs when a Slack connector's session calls `pinned slack reply <text>`, to post `text` in the
+/// session's thread, or `pinned slack files`, to download the files the thread attaches. Returns
+/// what the harness answered. A download that fails says why and still succeeds, so the session
+/// goes on without the files.
 pub fn slack(args: &[String]) -> Reply {
     let text = match args {
         [verb, text @ ..] if verb == "reply" && !text.is_empty() => text.join(" "),
-        _ => return Err(format!("usage: pinned {SLACK_SUBCOMMAND} reply <text>")),
+        [verb] if verb == "files" => {
+            let message = Message::SlackFiles { connector: env(CONNECTOR_ENV)?, subject: subject()? };
+            return Ok(ask_within(message, FILES_WAIT).unwrap_or_else(|e| format!("pinned could not download this thread's files: {e}")));
+        }
+        _ => return Err(format!("usage: pinned {SLACK_SUBCOMMAND} reply <text> | files")),
     };
     ask(Message::SlackReply { connector: env(CONNECTOR_ENV)?, channel: env(SLACK_CHANNEL_ENV)?, thread: env(SLACK_THREAD_ENV)?, text })
 }
@@ -448,8 +454,16 @@ fn env(k: &str) -> Result<String, String> {
 
 /// Sends one message to the running harness and waits for its answer.
 fn ask(message: Message) -> Reply {
+    ask_within(message, Duration::from_secs(30))
+}
+
+/// How long `pinned slack files` waits: the machine's wait for the hub (`link::FILES_CALL_WAIT`),
+/// which outlasts the hub's download deadline (`slack::DOWNLOAD_DEADLINE`), and the save after it.
+pub(crate) const FILES_WAIT: Duration = Duration::from_secs(120);
+
+fn ask_within(message: Message, wait: Duration) -> Reply {
     let mut stream = UnixStream::connect(env(SOCK_ENV)?).map_err(|e| format!("pinned is not running: {e}"))?;
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
+    let _ = stream.set_read_timeout(Some(wait));
     writeln!(stream, "{}", serde_json::to_string(&message).unwrap()).map_err(|e| e.to_string())?;
     let mut reply = String::new();
     BufReader::new(stream).read_line(&mut reply).map_err(|e| format!("pinned did not answer: {e}"))?;
@@ -574,6 +588,10 @@ mod tests {
                 Ok(format!("{connector} filed {title:?} / {description:?} for {channel}:{thread} to {assignee:?}"))
             }
             Message::LinearTake { connector, channel, thread, issue } => Ok(format!("{connector} took {issue} for {channel}:{thread}")),
+            Message::SlackFiles { connector, subject: Subject::SlackThread { channel, thread } } if thread == "1792400050.000200" => {
+                Ok(format!("{connector} saved the files of {channel}:{thread}"))
+            }
+            Message::SlackFiles { .. } => Err("the hub did not answer within 60 seconds".into()),
             Message::RunSet { connector, subject: Subject::SlackThread { channel, thread }, name, value } => {
                 Ok(format!("{connector} set {name}={value:?} for {channel}:{thread}"))
             }
@@ -604,8 +622,14 @@ mod tests {
             slack(&args(&["reply", "It's *fixed* in v2"])),
             Ok("c1 posted \"It's *fixed* in v2\" in C0123ABCD:1792400050.000200".to_owned())
         );
-        assert_eq!(slack(&args(&["reply"])), Err("usage: pinned slack reply <text>".to_owned()));
-        assert_eq!(slack(&args(&["post", "hi"])), Err("usage: pinned slack reply <text>".to_owned()));
+        let usage = Err("usage: pinned slack reply <text> | files".to_owned());
+        assert_eq!(slack(&args(&["reply"])), usage);
+        assert_eq!(slack(&args(&["post", "hi"])), usage);
+        assert_eq!(slack(&args(&["files", "x"])), usage);
+        assert_eq!(slack(&args(&["files"])), Ok("c1 saved the files of C0123ABCD:1792400050.000200".to_owned()));
+        std::env::set_var(SLACK_THREAD_ENV, "1792400099.000000");
+        assert_eq!(slack(&args(&["files"])), Ok("pinned could not download this thread's files: the hub did not answer within 60 seconds".to_owned()), "a failed download still exits 0");
+        std::env::set_var(SLACK_THREAD_ENV, "1792400050.000200");
 
         assert_eq!(stage(Some("review")), Ok("c1 moved the issue of C0123ABCD:1792400050.000200 to Review".to_owned()));
         assert_eq!(

@@ -806,6 +806,18 @@ fn a_connector_run_goes_to_its_machine_else_another_online_one() {
         Err("this machine runs no session of that workflow on that subject".into()),
         "mac-mini can't report on vps's issue"
     );
+    let thread = Subject::SlackThread { channel: "C0123ABCD".into(), thread: "1792400050.000200".into() };
+    let files = |node: &Node| node.link.as_ref().unwrap().forward(agent::Message::SlackFiles { connector: id.clone(), subject: thread.clone() });
+    assert_eq!(
+        files(&node_b),
+        Err("this machine runs no session of that workflow on that subject".into()),
+        "vps can't download the files of mac-mini's thread"
+    );
+    assert_eq!(
+        files(&node_a),
+        Ok(r#"{"files":[],"notes":["Slack is not connected: connect it in pinned's Connectors settings"]}"#.into()),
+        "mac-mini's session reaches the hub's download, which says why it has nothing"
+    );
 
     let delivery = |thread: &str| {
         Work::Delivery(Delivery { connector: id.clone(), channel: "C0123ABCD".into(), thread: thread.into(), messages: vec!["yes, file it".into()], cursor: "1792400090.000000".into(), mentioned: vec![] })

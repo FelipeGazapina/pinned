@@ -108,6 +108,36 @@ pub struct Post {
     pub ts: String,
     pub author: String,
     pub text: String,
+    /// What the message attaches, as `conversations.replies` lists it.
+    pub files: Vec<SlackFile>,
+}
+
+/// A file a message attaches. `url_private` downloads it with the bot token.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct SlackFile {
+    pub id: String,
+    pub name: String,
+    pub mimetype: String,
+    pub size: u64,
+    pub url_private: String,
+}
+
+/// The files one message attaches.
+fn files(message: &Value) -> Vec<SlackFile> {
+    let text = |file: &Value, key: &str| file[key].as_str().unwrap_or_default().to_owned();
+    message["files"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|file| file["id"].is_string())
+        .map(|file| SlackFile {
+            id: text(file, "id"),
+            name: text(file, "name"),
+            mimetype: text(file, "mimetype"),
+            size: file["size"].as_u64().unwrap_or_default(),
+            url_private: text(file, "url_private"),
+        })
+        .collect()
 }
 
 fn api_root() -> String {
@@ -121,7 +151,27 @@ fn api_root() -> String {
 /// Points Slack calls at `root` for a test. `None` restores the real API.
 #[cfg(test)]
 pub fn set_api_root(root: Option<String>) {
+    if root.is_none() {
+        *FILE_WAIT.lock().unwrap() = None;
+    }
     *API_ROOT.lock().unwrap() = root;
+}
+
+/// Shortens the wait for one file for a test; `set_api_root(None)` restores it.
+#[cfg(test)]
+pub fn set_file_wait(wait: std::time::Duration) {
+    *FILE_WAIT.lock().unwrap() = Some(wait);
+}
+
+#[cfg(test)]
+static FILE_WAIT: std::sync::Mutex<Option<std::time::Duration>> = std::sync::Mutex::new(None);
+
+fn file_wait() -> std::time::Duration {
+    #[cfg(test)]
+    if let Some(wait) = *FILE_WAIT.lock().unwrap() {
+        return wait;
+    }
+    FILE_REQUEST_WAIT
 }
 
 /// One test at a time may point Slack at a stand-in.
@@ -473,7 +523,7 @@ fn posts(messages: &Value, names: &HashMap<String, String>) -> Vec<Post> {
             for (id, n) in names {
                 text = text.replace(&format!("<@{id}>"), &format!("@{n}"));
             }
-            Post { ts: m["ts"].as_str().unwrap_or_default().to_owned(), author, text }
+            Post { ts: m["ts"].as_str().unwrap_or_default().to_owned(), author, text, files: files(m) }
         })
         .collect()
 }
@@ -509,6 +559,207 @@ pub async fn permalink(token: &str, channel: &str, thread: &str) -> Result<Strin
 
 pub async fn post(token: &str, channel: &str, thread: &str, text: &str) -> Result<(), String> {
     write(token, "chat.postMessage", json!({ "channel": channel, "thread_ts": thread, "text": text })).await.map(drop)
+}
+
+/// What `pinned slack files` prints when the Slack app may not read files.
+pub const NO_FILES_SCOPE: &str =
+    "pinned could not read this thread's files: the Slack app lacks the files:read scope; ask the workspace admin to reinstall it with files:read.";
+/// The biggest file `pinned slack files` downloads.
+pub const FILE_LIMIT: u64 = 20 << 20;
+/// The most files one `pinned slack files` downloads.
+pub const FILE_COUNT: usize = 20;
+/// The most bytes one `pinned slack files` downloads, all of which travel to the session's machine
+/// in base64 in one websocket message.
+pub const FILES_TOTAL: u64 = 40 << 20;
+/// `download_all` starts no new download this long after it began. It stays under the machine's
+/// wait for the hub's answer, so what the hub downloaded still arrives.
+pub const DOWNLOAD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(75);
+/// How long one file may take, from the request to its last byte.
+const FILE_REQUEST_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+const _: () = assert!((FILES_TOTAL as usize).div_ceil(3) * 4 + (1 << 20) <= crate::sync::MESSAGE_LIMIT);
+
+/// A thread file the hub downloaded for its session.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Download {
+    pub name: String,
+    pub mimetype: String,
+    pub author: String,
+    /// The ts of the message that attaches it.
+    pub ts: String,
+    pub data: crate::wire::Bytes,
+}
+
+/// The hub's answer to `pinned slack files`: the files it downloaded, and a line for each it did not.
+#[derive(Serialize, Deserialize, Default, Debug, PartialEq)]
+pub struct Downloads {
+    pub files: Vec<Download>,
+    pub notes: Vec<String>,
+}
+
+/// Whether a Slack error means the app may not read files.
+pub fn lacks_files_scope(error: &str) -> bool {
+    matches!(error, "Slack: missing_scope" | "Slack: not_allowed_token_type") || error == NO_FILES_SCOPE
+}
+
+/// Images and PDFs first, then the rest, each in thread order. A session reads those itself.
+fn readable_first(files: &mut [(&Post, SlackFile)]) {
+    files.sort_by_key(|(_, file)| !(file.mimetype.starts_with("image/") || file.mimetype == "application/pdf"));
+}
+
+/// Downloads the files of `posts`, `FILE_COUNT` at most and `FILES_TOTAL` bytes in all, skipping
+/// any over `FILE_LIMIT`. A file that fails is noted and the rest still download, until Slack says
+/// the app may not read files.
+pub async fn download_all(token: &str, posts: &[Post]) -> Downloads {
+    download_all_within(token, posts, DOWNLOAD_DEADLINE).await
+}
+
+async fn download_all_within(token: &str, posts: &[Post], deadline: std::time::Duration) -> Downloads {
+    let mut files: Vec<(&Post, SlackFile)> = posts.iter().flat_map(|post| post.files.iter().map(move |file| (post, file.clone()))).collect();
+    let mut downloads = Downloads::default();
+    if files.is_empty() {
+        downloads.notes.push("this thread has no attached files".into());
+        return downloads;
+    }
+    readable_first(&mut files);
+    let mut total = 0u64;
+    let began = std::time::Instant::now();
+    for (n, (post, file)) in files.into_iter().enumerate() {
+        let skip = |why: String| format!("skipped {}: {why}", file.name);
+        if began.elapsed() >= deadline {
+            downloads.notes.push(skip(format!("pinned stopped downloading after {} seconds", deadline.as_secs())));
+            continue;
+        }
+        if n >= FILE_COUNT {
+            downloads.notes.push(skip(format!("pinned downloads at most {FILE_COUNT} files at a time")));
+            continue;
+        }
+        if file.size > FILE_LIMIT {
+            downloads.notes.push(skip(format!("{} is over the {} limit for one file", megabytes(file.size), megabytes(FILE_LIMIT))));
+            continue;
+        }
+        if total + file.size > FILES_TOTAL {
+            downloads.notes.push(skip(format!("the files before it already make up the {} pinned downloads at a time", megabytes(FILES_TOTAL))));
+            continue;
+        }
+        match download(token, &file.url_private).await {
+            Ok(data) if data.len() as u64 > FILE_LIMIT => {
+                downloads.notes.push(skip(format!("{} is over the {} limit for one file", megabytes(data.len() as u64), megabytes(FILE_LIMIT))))
+            }
+            Ok(data) if total + data.len() as u64 > FILES_TOTAL => {
+                downloads.notes.push(skip(format!("the files before it already make up the {} pinned downloads at a time", megabytes(FILES_TOTAL))))
+            }
+            Ok(data) => {
+                total += data.len() as u64;
+                let name = if file.name.is_empty() { file.id.clone() } else { file.name.clone() };
+                let download = Download { name, mimetype: file.mimetype.clone(), author: post.author.clone(), ts: post.ts.clone(), data: crate::wire::Bytes(data) };
+                downloads.files.push(download);
+            }
+            Err(e) if lacks_files_scope(&e) => {
+                downloads.notes.push(NO_FILES_SCOPE.into());
+                break;
+            }
+            Err(e) => downloads.notes.push(skip(e)),
+        }
+    }
+    downloads
+}
+
+fn megabytes(bytes: u64) -> String {
+    format!("{:.1} MB", bytes as f64 / (1 << 20) as f64)
+}
+
+/// Downloads a file's `url_private` with the bot token. Slack answers 403, or a 200 with its
+/// HTML sign-in page, when the app may not read files.
+pub async fn download(token: &str, url: &str) -> Result<Vec<u8>, String> {
+    let url = reqwest::Url::parse(&file_url(url)).map_err(|e| format!("Slack sent a bad file address: {e}"))?;
+    if !slack_host(&url) {
+        return Err(format!("{} is not a Slack address", url.host_str().unwrap_or_default()));
+    }
+    let client = reqwest::Client::builder().timeout(file_wait()).build().map_err(|e| format!("pinned could not start the download: {e}"))?;
+    let mut response = client.get(url).bearer_auth(token).send().await.map_err(request_error)?;
+    let status = response.status();
+    if status == reqwest::StatusCode::FORBIDDEN {
+        return Err(NO_FILES_SCOPE.into());
+    }
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return Err(RATE_LIMITED.into());
+    }
+    if !status.is_success() {
+        return Err(format!("Slack answered {status}"));
+    }
+    let html = response.headers().get(reqwest::header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|v| v.starts_with("text/html"));
+    if html {
+        return Err(NO_FILES_SCOPE.into());
+    }
+    if response.content_length().is_some_and(|length| length > FILE_LIMIT) {
+        return Err(format!("it is over the {} limit for one file", megabytes(FILE_LIMIT)));
+    }
+    let mut data = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(request_error)? {
+        data.extend_from_slice(&chunk);
+        if data.len() as u64 > FILE_LIMIT {
+            return Err(format!("it is over the {} limit for one file", megabytes(FILE_LIMIT)));
+        }
+    }
+    Ok(data)
+}
+
+/// What a file request that failed on the way says.
+fn request_error(e: reqwest::Error) -> String {
+    if e.is_timeout() {
+        format!("Slack did not send it within {} seconds", file_wait().as_secs())
+    } else if e.is_body() || e.is_decode() {
+        format!("the download broke off: {e}")
+    } else {
+        format!("Slack unreachable: {e}")
+    }
+}
+
+/// Only Slack gets the bot token.
+fn slack_host(url: &reqwest::Url) -> bool {
+    #[cfg(test)]
+    if API_ROOT.lock().unwrap().as_deref().is_some_and(|root| url.as_str().starts_with(root)) {
+        return true;
+    }
+    url.scheme() == "https" && url.host_str().is_some_and(|host| host == "slack.com" || host.ends_with(".slack.com"))
+}
+
+/// A test's stand-in for Slack serves files.slack.com's paths too.
+fn file_url(url: &str) -> String {
+    #[cfg(test)]
+    if let (Some(root), Some(path)) = (API_ROOT.lock().unwrap().clone(), url.strip_prefix("https://files.slack.com/")) {
+        return format!("{root}{path}");
+    }
+    url.to_owned()
+}
+
+/// Saves the files of the hub's `answer` to `pinned slack files` in `dir`, and returns what the
+/// command prints: one line per file saved, then one per file left behind.
+pub fn save_downloads(dir: Option<&std::path::Path>, answer: Result<String, String>) -> String {
+    let downloads = match answer.and_then(|text| serde_json::from_str::<Downloads>(&text).map_err(|e| format!("the hub sent a bad answer: {e}"))) {
+        Ok(downloads) => downloads,
+        Err(e) if lacks_files_scope(&e) => return NO_FILES_SCOPE.into(),
+        Err(e) => return format!("pinned could not download this thread's files: {e}"),
+    };
+    let mut lines = vec![];
+    for file in &downloads.files {
+        let saved = dir.ok_or_else(|| "this machine keeps no files".to_owned()).and_then(|dir| crate::uploads::save(dir, &file.name, &file.data.0));
+        lines.push(match saved {
+            Ok(path) => format!("{}  ({}, {}, from {} at {})", path.display(), file.name, file.mimetype, file.author, posted_at(&file.ts)),
+            Err(e) => format!("skipped {}: {e}", file.name),
+        });
+    }
+    lines.extend(downloads.notes);
+    lines.join("\n")
+}
+
+/// A message's ts as the time it was posted, in UTC.
+fn posted_at(ts: &str) -> String {
+    let seconds = ts.split('.').next().and_then(|s| s.parse::<i64>().ok());
+    match seconds.and_then(|s| DateTime::from_timestamp(s, 0)) {
+        Some(at) => at.format("%Y-%m-%d %H:%M UTC").to_string(),
+        None => ts.to_owned(),
+    }
 }
 
 /// Reacts to the message `ts` with the emoji `name`. A reaction the bot already left counts as
@@ -654,6 +905,21 @@ mod tests {
         assert_eq!(block_on(group_id("xoxb-unused", " @S0123ABC ")), Ok("S0123ABC".into()), "an id needs no lookup");
     }
 
+    #[test]
+    fn download_all_starts_no_download_once_its_deadline_has_passed() {
+        let file = |name: &str| SlackFile { id: name.into(), name: name.into(), mimetype: "text/plain".into(), size: 1, url_private: format!("https://files.slack.com/files-pri/T1-{name}/{name}") };
+        let post = Post { ts: "1.2".into(), author: "ana".into(), text: "logs".into(), files: vec![file("a.txt"), file("b.txt")] };
+        let downloads = block_on(download_all_within("xoxb-test", &[post], std::time::Duration::ZERO));
+        assert_eq!(
+            downloads,
+            Downloads {
+                files: vec![],
+                notes: vec!["skipped a.txt: pinned stopped downloading after 0 seconds".into(), "skipped b.txt: pinned stopped downloading after 0 seconds".into()],
+            }
+        );
+        assert_eq!(DOWNLOAD_DEADLINE.as_secs(), 75);
+    }
+
     fn block_on<F: std::future::Future>(future: F) -> F::Output {
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(future)
     }
@@ -686,8 +952,8 @@ mod tests {
         assert_eq!(
             posts(&thread, &names),
             [
-                Post { ts: "1792400050.000200".into(), author: "ana".into(), text: "@pinned it broke for <@U9>".into() },
-                Post { ts: "1792400060.000000".into(), author: "deploybot".into(), text: "deploy failed".into() },
+                Post { ts: "1792400050.000200".into(), author: "ana".into(), text: "@pinned it broke for <@U9>".into(), files: vec![] },
+                Post { ts: "1792400060.000000".into(), author: "deploybot".into(), text: "deploy failed".into(), files: vec![] },
             ]
         );
     }
