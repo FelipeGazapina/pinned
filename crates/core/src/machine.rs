@@ -607,6 +607,7 @@ impl Tab {
             headless: self.headless && self.session.is_none(),
             stopped: self.stopped.clone().filter(|_| !self.live()),
             questions: None,
+            read_only: self.child_access() == crate::delegate::Access::ReadOnly,
         }
     }
 

@@ -190,6 +190,10 @@ pub struct TabView {
     /// still shows the tab waiting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub questions: Option<crate::questions::Questionnaire>,
+    /// The session acts read-only whatever `bypass` says: its permission mode is plan, or a key
+    /// press left the mode unknown until a hook reports it. An older node never sends it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_only: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
@@ -1757,6 +1761,7 @@ mod tests {
             headless: false,
             stopped: None,
             questions: None,
+            read_only: false,
         }
     }
 

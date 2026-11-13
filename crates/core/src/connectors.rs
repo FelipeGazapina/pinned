@@ -6793,6 +6793,7 @@ mod tests {
             headless: false,
             stopped: None,
             questions: None,
+            read_only: false,
         }
     }
 
