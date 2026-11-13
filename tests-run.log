@@ -153,3 +153,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:07:41Z #70 synced_files_skills_and_shared_projects_stay_in_their_account START / avail=15072M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:07:46Z #70 synced_files_skills_and_shared_projects_stay_in_their_account ok / avail=15072M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:07:47Z #71 a_session_mark_reaches_the_accounts_other_devices_live_and_a_clear_drops_it START / avail=15072M /workspace avail=19374M node_stat=Ssl
+2026-11-13T04:07:51Z #71 a_session_mark_reaches_the_accounts_other_devices_live_and_a_clear_drops_it ok / avail=15072M /workspace avail=19374M node_stat=Ssl node_tcp=1
