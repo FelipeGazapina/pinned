@@ -135,12 +135,16 @@ pub struct BoxUsage {
     /// Why Upstash gave no boxes, in plain text. `boxes` is empty then; `pinned` is still filled.
     #[serde(default)]
     pub error: Option<String>,
-    /// Every box the key lists, newest first.
+    /// Every box on the key that this account opened through pinned, newest first.
     #[serde(default)]
     pub boxes: Vec<UsageBox>,
-    /// The listed boxes created this UTC month.
+    /// The boxes created this UTC month, over the whole key: the figures cover every box the key
+    /// lists, not only those in `boxes`.
     #[serde(default)]
     pub upstash: Totals,
+    /// The other boxes on the key, which this account did not open: a count and sums, no names.
+    #[serde(default)]
+    pub others: OtherBoxes,
     #[serde(default)]
     pub pinned: PinnedCount,
     /// Boxes pinned could not delete yet, with why. Filled also when Upstash is not connected.
@@ -215,6 +219,21 @@ pub struct Totals {
     pub boxes: u32,
 }
 
+/// The boxes on the account's Upstash key created this UTC month that the account has no box row
+/// for, folded into figures, as the key totals count them. That is the account's own boxes pinned
+/// ended (the row goes with the box, Upstash may still list it), boxes made outside pinned, and
+/// boxes another account opened on a shared key. The count does not tell which, and no name, id
+/// or detail of these is kept.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, schemars::JsonSchema)]
+pub struct OtherBoxes {
+    #[serde(default)]
+    pub boxes: u32,
+    #[serde(default)]
+    pub cpu_hours: f64,
+    #[serde(default)]
+    pub compute_usd: f64,
+}
+
 /// pinned's count of the box time its delegated tasks ended with this UTC month. It has no price.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, schemars::JsonSchema)]
 pub struct PinnedCount {
@@ -267,6 +286,24 @@ pub fn usage_boxes(boxes: &[BoxData], since: u64) -> (Vec<UsageBox>, Totals) {
         totals.boxes += 1;
     }
     (rows, totals)
+}
+
+/// `rows` that `opened` names by id, and the rest created from `since` on (the month the key
+/// totals cover) folded into one count with their sums. A row not in `opened` is dropped whole:
+/// its name, id and detail go no further, and an earlier month's is not counted.
+pub fn keep_opened(rows: Vec<UsageBox>, opened: &[&str], since: u64) -> (Vec<UsageBox>, OtherBoxes) {
+    let mut others = OtherBoxes::default();
+    let mut kept = Vec::new();
+    for row in rows {
+        if opened.contains(&row.id.as_str()) {
+            kept.push(row);
+        } else if row.created >= since {
+            others.boxes += 1;
+            others.cpu_hours += row.cpu_hours.unwrap_or(0.0);
+            others.compute_usd += row.compute_usd.unwrap_or(0.0);
+        }
+    }
+    (kept, others)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -562,6 +599,19 @@ mod tests {
         assert!((totals.cpu_hours - 3.0).abs() < 1e-9);
         assert!((totals.compute_usd - 1.75).abs() < 1e-9);
         assert_eq!(usage_boxes(&[], NOVEMBER).1, Totals::default());
+    }
+
+    #[test]
+    fn keep_opened_lists_the_named_boxes_and_folds_every_other_into_sums() {
+        let (rows, _) = usage_boxes(&parse_all("", &usage_list()).unwrap(), NOVEMBER);
+        let (kept, others) = keep_opened(rows.clone(), &["a"], NOVEMBER);
+        assert_eq!(kept.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["a"]);
+        assert_eq!(others.boxes, 2, "d was created before the month began, so it is not counted");
+        assert!((others.cpu_hours - 1.0).abs() < 1e-9, "b has no figure, c is 1 h");
+        assert!((others.compute_usd - 0.25).abs() < 1e-9);
+        assert_eq!(keep_opened(rows.clone(), &[], NOVEMBER).0, vec![], "nothing opened lists nothing");
+        assert_eq!(keep_opened(rows.clone(), &["a", "b", "c"], NOVEMBER).1, OtherBoxes::default(), "an earlier month's box is not an other box");
+        assert_eq!(keep_opened(rows, &["a"], 0).1.boxes, 3, "with no month limit every unlisted box counts");
     }
 
     #[test]
