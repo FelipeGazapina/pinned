@@ -40,10 +40,13 @@ const ADDRESS_SIGNUPS: usize = 5;
 /// Sign ups the whole hub takes within `ATTEMPT_WINDOW`, whichever addresses they come from: a burst of
 /// invited testers fits, a client that keeps changing its address does not get past it.
 const HUB_SIGNUPS: usize = 50;
-/// Keys the limiter holds at most, under 20 MB when filled by one-off keys of the longest email. Rotating
-/// addresses or emails can't grow it past this; when it is full a request that needs a new key is refused,
-/// and no live key is dropped.
+/// Keys the limiter holds at most for addresses and emails a stranger can make up, about 45 MB at worst
+/// (each key the longest email holding 30 stamps). Rotating addresses or emails can't grow it past this.
+/// When it is full, a request's new keys count against the one `OVERFLOW` key instead, and no live key
+/// is dropped. Keys a stranger can't make up are held past it: see `Limiter::attempt`.
 const ATTEMPT_KEYS: usize = 50_000;
+/// The key a full limiter counts new keys against, with `ADDRESS_ATTEMPTS`.
+const OVERFLOW: &str = "overflow:";
 /// Addresses an account signed in from that the limiter remembers at most, and for how long.
 const KNOWN_ADDRESSES: usize = 10_000;
 const KNOWN_FOR: Duration = Duration::from_secs(30 * 24 * 60 * 60);
@@ -359,7 +362,7 @@ async fn signup(State(server): State<Arc<Server>>, ConnectInfo(peer): ConnectInf
         return Err(Error(StatusCode::FORBIDDEN, "this hub already has its account, so sign in with it instead".into()));
     }
     let keys = [(format!("signup:{}", server.client_address(peer, &headers)), ADDRESS_SIGNUPS), ("hub:signup".to_owned(), HUB_SIGNUPS)];
-    if !server.attempt(&keys) {
+    if server.attempt(&keys).is_none() {
         return Err(Error(StatusCode::TOO_MANY_REQUESTS, "too many sign ups; try again in 15 minutes".into()));
     }
     // After the limiter, so a full hub's answer costs a counted attempt before it costs a query.
@@ -409,13 +412,20 @@ impl Server {
         client_address(trusted, peer, headers)
     }
 
-    /// Counts an attempt against each key and its limit, unless one is spent. The attempt counts
-    /// before the password is checked, so a burst of parallel requests can't all slip under the limit.
-    pub(crate) fn attempt(&self, keys: &[(String, usize)]) -> bool {
-        self.attempts.lock().unwrap().attempt(keys, Instant::now())
+    /// Counts an attempt against each key and its limit, unless one is spent, and returns the keys it
+    /// counted. The attempt counts before the password is checked, so a burst of parallel requests can't
+    /// all slip under the limit.
+    pub(crate) fn attempt(&self, keys: &[(String, usize)]) -> Option<Vec<(String, usize)>> {
+        self.attempts.lock().unwrap().attempt(keys, false, Instant::now())
     }
 
-    /// Takes back the attempts of a sign in that succeeded.
+    /// `attempt` for keys a stranger can't make up: a signed-in login's or account's, or an address its
+    /// account signed in from. A full limiter still counts them against their own keys.
+    pub(crate) fn attempt_own(&self, keys: &[(String, usize)]) -> Option<Vec<(String, usize)>> {
+        self.attempts.lock().unwrap().attempt(keys, true, Instant::now())
+    }
+
+    /// Takes back the attempts of a sign in that succeeded, given the keys `attempt` counted.
     pub(crate) fn succeeded(&self, keys: &[(String, usize)]) {
         self.attempts.lock().unwrap().succeeded(keys);
     }
@@ -437,19 +447,24 @@ impl Limiter {
         Limiter { keys: HashMap::new(), cap, swept: None, known: HashMap::new(), full_logged: None }
     }
 
-    /// A key holds at most its limit of stamps: one at its limit takes no more.
-    fn attempt(&mut self, keys: &[(String, usize)], now: Instant) -> bool {
+    /// A key holds at most its limit of stamps: one at its limit takes no more. `own` keys, the hub-wide
+    /// `hub:` keys and `OVERFLOW` are held past the cap: the hub's logins, accounts and remembered
+    /// addresses bound the first, and the others are a handful. When the rest are full, a request's new
+    /// keys count against `OVERFLOW` while its keys the limiter holds count as usual.
+    fn attempt(&mut self, keys: &[(String, usize)], own: bool, now: Instant) -> Option<Vec<(String, usize)>> {
         let live = |at: &Instant| now.saturating_duration_since(*at) < ATTEMPT_WINDOW;
         for (key, _) in keys {
             if let Some(at) = self.keys.get_mut(key) {
                 at.retain(live);
             }
         }
-        if keys.iter().any(|(key, limit)| self.keys.get(key).is_some_and(|at| at.len() >= *limit)) {
-            return false;
+        let spent = |limiter: &Limiter, keys: &[(String, usize)]| keys.iter().any(|(key, limit)| limiter.keys.get(key).is_some_and(|at| at.len() >= *limit));
+        if spent(self, keys) {
+            return None;
         }
-        let new = |limiter: &Limiter| keys.iter().filter(|(key, _)| !limiter.keys.contains_key(key)).count();
-        let full = |limiter: &Limiter| limiter.keys.len() + new(limiter) > limiter.cap;
+        let held = |key: &str| own || key.starts_with("hub:") || key == OVERFLOW;
+        let new = |limiter: &Limiter| keys.iter().filter(|(key, _)| !held(key) && !limiter.keys.contains_key(key)).count();
+        let full = |limiter: &Limiter| new(limiter) > 0 && limiter.keys.len() + new(limiter) > limiter.cap;
         let since = |at: Option<Instant>| at.map_or(Duration::MAX, |at| now.saturating_duration_since(at));
         // A whole sweep at most once a second when full, else once a minute.
         if since(self.swept) >= Duration::from_secs(60) || (full(self) && since(self.swept) >= Duration::from_secs(1)) {
@@ -459,17 +474,25 @@ impl Limiter {
             });
             self.swept = Some(now);
         }
+        let mut counted = keys.to_vec();
         if full(self) {
             if since(self.full_logged) >= Duration::from_secs(60 * 60) {
-                eprintln!("pinned-server: the attempt limiter holds {} keys, its most; requests that need a new key are refused until old ones expire", self.cap);
+                eprintln!("pinned-server: the attempt limiter holds {} keys, its most; requests that need a new key share one overflow limit until old ones expire", self.cap);
                 self.full_logged = Some(now);
             }
-            return false;
+            counted.retain(|(key, _)| held(key) || self.keys.contains_key(key));
+            counted.push((OVERFLOW.to_owned(), ADDRESS_ATTEMPTS));
+            if let Some(at) = self.keys.get_mut(OVERFLOW) {
+                at.retain(live);
+            }
+            if spent(self, &counted) {
+                return None;
+            }
         }
-        for (key, _) in keys {
+        for (key, _) in &counted {
             self.keys.entry(key.clone()).or_default().push(now);
         }
-        true
+        Some(counted)
     }
 
     /// Whether `key`, an email and an address, signed in within `KNOWN_FOR`.
@@ -504,12 +527,16 @@ async fn login(State(server): State<Arc<Server>>, ConnectInfo(peer): ConnectInfo
     // doesn't buy more of them; the owner's own address is held only by its own limit.
     let known = format!("{email}\n{address}");
     let mut keys = vec![(format!("address:{address}"), ADDRESS_ATTEMPTS)];
-    if !server.attempts.lock().unwrap().known(&known, Instant::now()) {
+    // The owner's own address is never refused for a full limiter: the remembered addresses bound it.
+    let counted = if server.attempts.lock().unwrap().known(&known, Instant::now()) {
+        server.attempt_own(&keys)
+    } else {
         keys.push((format!("email:{email}"), EMAIL_ATTEMPTS));
-    }
-    if !server.attempt(&keys) {
+        server.attempt(&keys)
+    };
+    let Some(keys) = counted else {
         return Err(Error(StatusCode::TOO_MANY_REQUESTS, "too many failed sign ins; try again in 15 minutes".into()));
-    }
+    };
     // An unknown email takes the same path, hash included, to the same answer as a wrong password.
     let (account, hash) = server.hub.db.account_by_email(&email).await.map_err(internal)?.unzip();
     let matches = password_matches(&server, body.password, hash).await;
@@ -530,10 +557,9 @@ async fn logout(State(server): State<Arc<Server>>, headers: HeaderMap) -> Result
 async fn change_password(State(server): State<Arc<Server>>, headers: HeaderMap, Json(body): Json<NewPassword>) -> Answer<AccountView> {
     let account = signed_in(&server, &headers).await?.account;
     new_password(&body.password)?;
-    let keys = [(format!("password:{account}"), ADDRESS_ATTEMPTS)];
-    if !server.attempt(&keys) {
+    let Some(keys) = server.attempt_own(&[(format!("password:{account}"), ADDRESS_ATTEMPTS)]) else {
         return Err(Error(StatusCode::TOO_MANY_REQUESTS, "too many wrong passwords; try again in 15 minutes".into()));
-    }
+    };
     let (view, hash) = server.hub.db.account(account).await.map_err(internal)?.ok_or_else(|| Error(StatusCode::UNAUTHORIZED, "sign in first".into()))?;
     if !password_matches(&server, body.current, Some(hash)).await {
         return Err(Error(StatusCode::FORBIDDEN, "the current password is wrong".into()));
@@ -666,9 +692,9 @@ async fn unlock(server: &Server, account: &Account, client: u64, password: Strin
     // Per login, so whatever guesses with a login read off a disk locks out only that login; the
     // owner's other devices still unlock.
     let keys = [(format!("unlock:{login}"), ADDRESS_ATTEMPTS), (format!("unlock:{}", account.id), ACCOUNT_UNLOCKS)];
-    if !server.attempt(&keys) {
+    let Some(keys) = server.attempt_own(&keys) else {
         return Err("too many wrong passwords; try again in 15 minutes".into());
-    }
+    };
     let (_, hash) = server.hub.db.account(account.id).await?.ok_or("this account no longer exists")?;
     if !password_matches(server, password, Some(hash)).await {
         return Err("that is not this account's password".into());
@@ -1125,10 +1151,10 @@ mod tests {
         let now = std::time::Instant::now();
         let key = |real: &str| [(format!("address:{}", railway(real)), 10)];
         for n in 0..10 {
-            assert!(limiter.attempt(&key(&format!("2606:4700:10:20::{n:x}")), now), "attempt {n}");
+            assert!(limiter.attempt(&key(&format!("2606:4700:10:20::{n:x}")), false, now).is_some(), "attempt {n}");
         }
-        assert!(!limiter.attempt(&key("2606:4700:10:20:abcd::1"), now), "the same /64 is spent");
-        assert!(limiter.attempt(&key("2606:4700:10:21::1"), now), "another /64 is not");
+        assert!(limiter.attempt(&key("2606:4700:10:20:abcd::1"), false, now).is_none(), "the same /64 is spent");
+        assert!(limiter.attempt(&key("2606:4700:10:21::1"), false, now).is_some(), "another /64 is not");
     }
 
     #[test]
@@ -1146,19 +1172,109 @@ mod tests {
         let mut limiter = Limiter::new(4);
         let now = std::time::Instant::now();
         let guess = |address: u32| [("email:owner@example.invalid".to_owned(), 3), (format!("address:203.0.113.{address}"), 10)];
-        assert!(limiter.attempt(&guess(1), now));
-        assert!(limiter.attempt(&guess(2), now));
+        assert!(limiter.attempt(&guess(1), false, now).is_some());
+        assert!(limiter.attempt(&guess(2), false, now).is_some());
         for address in 3..50 {
-            limiter.attempt(&[(format!("address:198.51.100.{address}"), 10)], now);
+            limiter.attempt(&[(format!("address:198.51.100.{address}"), 10)], false, now);
         }
-        assert!(limiter.keys.len() <= 4, "{} keys", limiter.keys.len());
+        assert!(limiter.keys.len() <= 4 + 1, "{} keys, past the cap only by the overflow key", limiter.keys.len());
         assert_eq!(limiter.keys["email:owner@example.invalid"].len(), 2, "a full limiter keeps the account's count");
-        assert!(!limiter.attempt(&[("address:192.0.2.1".to_owned(), 10)], now), "a full limiter refuses a new key");
-        assert!(limiter.attempt(&guess(1), now), "and still takes a request whose keys it holds");
-        assert!(!limiter.attempt(&guess(2), now), "whose limit still holds");
+        assert!(limiter.attempt(&[("address:192.0.2.1".to_owned(), 10)], false, now).is_none(), "a full limiter with its overflow spent refuses a new key");
+        assert!(limiter.attempt(&guess(1), false, now).is_some(), "and still takes a request whose keys it holds");
+        assert!(limiter.attempt(&guess(2), false, now).is_none(), "whose limit still holds");
         let later = now + super::ATTEMPT_WINDOW;
-        assert!(limiter.attempt(&[("address:192.0.2.1".to_owned(), 10)], later), "a window later the old keys are gone");
-        assert!(limiter.keys.len() <= 4);
+        assert!(limiter.attempt(&[("address:192.0.2.1".to_owned(), 10)], false, later).is_some(), "a window later the old keys are gone");
+        assert!(limiter.keys.len() <= 4 + 1);
+    }
+
+    /// A limiter of `cap` keys, full of strangers' addresses stamped at `now`.
+    fn full(cap: usize, now: std::time::Instant) -> Limiter {
+        let mut limiter = Limiter::new(cap);
+        for n in 0..cap {
+            assert!(limiter.attempt(&[(format!("address:198.51.100.{n}"), 10)], false, now).is_some());
+        }
+        limiter
+    }
+
+    fn address(n: usize) -> [(String, usize); 1] {
+        [(format!("address:203.0.113.{n}"), super::ADDRESS_ATTEMPTS)]
+    }
+
+    #[test]
+    fn a_full_limiter_counts_a_new_key_against_one_overflow_key_until_it_is_spent() {
+        let now = std::time::Instant::now();
+        let mut limiter = full(4, now);
+        for n in 0..super::ADDRESS_ATTEMPTS {
+            let counted = limiter.attempt(&address(n), false, now).expect("a new address is let through the overflow");
+            assert_eq!(counted, [(super::OVERFLOW.to_owned(), super::ADDRESS_ATTEMPTS)], "attempt {n}");
+        }
+        assert!(limiter.attempt(&address(99), false, now).is_none(), "refused once the overflow is spent");
+        assert_eq!(limiter.keys.len(), 4 + 1, "no new address took a key of its own");
+    }
+
+    #[test]
+    fn a_full_limiter_drops_expired_keys_before_it_uses_the_overflow() {
+        let now = std::time::Instant::now();
+        let mut limiter = full(4, now);
+        let later = now + super::ATTEMPT_WINDOW;
+        assert_eq!(limiter.attempt(&address(1), false, later), Some(address(1).to_vec()), "counted against its own key");
+        assert!(!limiter.keys.contains_key(super::OVERFLOW), "the overflow was not used");
+        assert_eq!(limiter.keys.len(), 1, "the expired keys are gone");
+    }
+
+    #[test]
+    fn a_full_limiter_with_its_overflow_spent_still_counts_a_known_address_and_a_signed_in_users_keys_on_their_own() {
+        let now = std::time::Instant::now();
+        let mut limiter = full(4, now);
+        while limiter.attempt(&address(7), false, now).is_some() {}
+        assert!(limiter.attempt(&address(8), false, now).is_none(), "the overflow is spent");
+        // A sign in from an address the owner signed in from: `login` sends only the address's own key.
+        let known = [("address:192.0.2.10".to_owned(), super::ADDRESS_ATTEMPTS)];
+        for n in 0..super::ADDRESS_ATTEMPTS {
+            assert_eq!(limiter.attempt(&known, true, now), Some(known.to_vec()), "the owner's attempt {n} counts against its own key");
+        }
+        assert!(limiter.attempt(&known, true, now).is_none(), "and its own 10 still hold");
+        let unlock = [("unlock:00ff".to_owned(), super::ADDRESS_ATTEMPTS), ("unlock:account".to_owned(), super::ACCOUNT_UNLOCKS)];
+        let password = [("password:account".to_owned(), super::ADDRESS_ATTEMPTS)];
+        for n in 0..super::ADDRESS_ATTEMPTS {
+            assert_eq!(limiter.attempt(&unlock, true, now), Some(unlock.to_vec()), "unlock {n}");
+            assert_eq!(limiter.attempt(&password, true, now), Some(password.to_vec()), "password change {n}");
+        }
+        assert!(limiter.attempt(&unlock, true, now).is_none(), "an unlock still runs its own limit");
+        assert!(limiter.attempt(&password, true, now).is_none(), "a password change still runs its own limit");
+    }
+
+    #[test]
+    fn the_account_bound_and_the_hub_wide_ceilings_hold_through_the_overflow() {
+        use super::{ADDRESS_ATTEMPTS, EMAIL_ATTEMPTS, HUB_SIGNUPS};
+        let now = std::time::Instant::now();
+        let mut limiter = Limiter::new(4);
+        let email = ("email:owner@example.invalid".to_owned(), EMAIL_ATTEMPTS);
+        let hub = ("hub:signup".to_owned(), HUB_SIGNUPS);
+        for n in 0..EMAIL_ATTEMPTS - 3 {
+            assert!(limiter.attempt(&[email.clone()], false, now).is_some(), "guess {n}");
+        }
+        for n in 0..HUB_SIGNUPS - 2 {
+            assert!(limiter.attempt(&[hub.clone()], false, now).is_some(), "sign up {n}");
+        }
+        for n in 0..4 {
+            limiter.attempt(&[(format!("address:198.51.100.{n}"), ADDRESS_ATTEMPTS)], false, now);
+        }
+        let guess = |n: usize| [(format!("address:203.0.113.{n}"), ADDRESS_ATTEMPTS), email.clone()];
+        for n in 0..3 {
+            let counted = limiter.attempt(&guess(n), false, now).expect("through the overflow");
+            assert!(counted.contains(&email) && counted.iter().any(|(key, _)| key == super::OVERFLOW), "guess {n}: {counted:?}");
+        }
+        assert!(limiter.attempt(&guess(3), false, now).is_none(), "the account's 30 hold with the overflow not spent");
+        let signup = |n: usize| [(format!("signup:203.0.113.{n}"), 5), hub.clone()];
+        for n in 0..2 {
+            assert!(limiter.attempt(&signup(n), false, now).is_some(), "sign up {n} through the overflow");
+        }
+        assert!(limiter.attempt(&signup(2), false, now).is_none(), "the hub's 50 sign ups hold with the overflow not spent");
+        assert!(limiter.keys[super::OVERFLOW].len() < ADDRESS_ATTEMPTS);
+        let register = [("agent-register:203.0.113.9".to_owned(), 20), ("hub:agent-register".to_owned(), 100)];
+        let counted = limiter.attempt(&register, false, now).expect("a full limiter still counts the hub's registrations");
+        assert!(counted.contains(&register[1]), "against the hub-wide key, held past the cap: {counted:?}");
     }
 
     #[test]

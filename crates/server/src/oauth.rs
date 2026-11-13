@@ -179,7 +179,7 @@ pub async fn server_metadata(State(server): State<Arc<Server>>) -> Response {
 
 pub async fn register(State(server): State<Arc<Server>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, Json(body): Json<Value>) -> Response {
     let keys = [(format!("agent-register:{}", server.client_address(peer, &headers)), REGISTRATIONS), ("hub:agent-register".to_owned(), HUB_REGISTRATIONS)];
-    if !server.attempt(&keys) {
+    if server.attempt(&keys).is_none() {
         return oauth_error(StatusCode::TOO_MANY_REQUESTS, "invalid_client_metadata", "too many registrations; try again in 15 minutes");
     }
     let uris: Vec<String> = match body.get("redirect_uris").and_then(Value::as_array) {
@@ -287,9 +287,9 @@ fn tokens(access: String, refresh: String, scopes: &[String]) -> Response {
 
 pub async fn token(State(server): State<Arc<Server>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
     let limit = [(format!("agent-token:{}", server.client_address(peer, &headers)), TOKEN_FAILURES)];
-    if !server.attempt(&limit) {
+    let Some(limit) = server.attempt(&limit) else {
         return oauth_error(StatusCode::TOO_MANY_REQUESTS, "invalid_request", "too many failed token requests; try again in 15 minutes");
-    }
+    };
     let params = form(&headers, &body);
     let answer = exchange(&server.hub, &params).await;
     if answer.status().is_success() {
