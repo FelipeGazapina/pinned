@@ -123,3 +123,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:06:25Z #55 a_dropped_machine_link_is_nudged_again_once_the_client_names_its_tabs START / avail=15073M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:06:29Z #55 a_dropped_machine_link_is_nudged_again_once_the_client_names_its_tabs ok / avail=15073M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:06:30Z #56 a_client_that_disconnects_ends_its_watch_on_the_machine START / avail=15073M /workspace avail=19374M node_stat=Ssl
+2026-11-13T04:06:34Z #56 a_client_that_disconnects_ends_its_watch_on_the_machine ok / avail=15073M /workspace avail=19374M node_stat=Ssl node_tcp=1
