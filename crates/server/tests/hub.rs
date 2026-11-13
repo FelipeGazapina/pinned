@@ -5826,6 +5826,21 @@ fn an_agents_workflow_step_whose_permission_the_runner_would_read_as_bypass_is_r
     let error = ana.client.hub(own).unwrap_err();
     assert!(error.starts_with("\"Fix\"") && error.contains("permission"), "the owner's own save names the step and the field: {error}");
     assert_eq!(count(&mut ana.client), 0);
+
+    // A session that skips its own prompts passes the agent check, and the save itself refuses the step.
+    let wide = ana.node.machine.open_tab(Some(folder.clone()), true).unwrap();
+    ana.client.wait("the bypass tab at the hub", |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == wide.as_str() && t["bypass"] == true));
+    let failed = act(&ana.dir, &wide, "save_connector", workflow(" bypassPermissions ")).unwrap_err();
+    assert!(failed.starts_with("\"Fix\"") && failed.contains("permission"), "{failed}");
+    assert_eq!(count(&mut ana.client), 0);
+    let trail = ana.client.hub(json!({ "cmd": "agent_audit" })).unwrap();
+    let rows: Vec<(&str, &str, &str, &str)> = trail.as_array().unwrap().iter().map(|r| (r["tab"].as_str().unwrap(), r["action"].as_str().unwrap(), r["outcome"].as_str().unwrap(), r["detail"].as_str().unwrap())).collect();
+    let refused = refused.unwrap_err();
+    assert_eq!(
+        rows,
+        [(wide.as_str(), "save_connector", "failed", failed.as_str()), (ana.tab.as_str(), "save_connector", "refused", refused.as_str()), (ana.tab.as_str(), "save_connector", "refused", refused.as_str())],
+        "both refusals of the session that asks for prompts, and the failed save of the one that skips them, are on the trail"
+    );
 }
 
 #[test]
