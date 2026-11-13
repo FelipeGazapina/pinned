@@ -372,10 +372,6 @@ pub fn owner_only(side: Side, cmd: &str, locked: bool) -> bool {
     if side == Side::Hub && matches!(cmd, "decide_confirmation" | "set_release_protection") {
         return true;
     }
-    // The app's own Extend button is the owner; only an agent's extend_box waits, as a Confirm.
-    if side == Side::Hub && cmd == "extend_box" {
-        return false;
-    }
     locked && of_cmd(side, cmd).is_some_and(|action| action.class == Confirm)
 }
 
@@ -1050,29 +1046,30 @@ mod tests {
         assert!(!needs(Side::Hub, "machines", true) && !needs(Side::Hub, "rename_machine", true) && !needs(Side::Node, "write_input", true));
         assert!(!needs(Side::Hub, "unlock", true), "unlocking needs no unlock");
         assert!(!needs(Side::Node, "decide_confirmation", true), "no machine call is a decision");
-        assert!(!needs(Side::Hub, "answer_box", true) && !needs(Side::Hub, "extend_box", true), "a box follows its access setting and Box budget, never the password");
+        assert!(!needs(Side::Hub, "answer_box", true), "a box follows its access setting, never the password");
+        assert!(needs(Side::Hub, "extend_box", true) && !needs(Side::Hub, "extend_box", false), "extending a box is money: a locked login asks the password, an older app's login keeps its call");
         for cmd in ["set_box_access", "connect_upstash", "disconnect_upstash", "set_box_claude_token", "remove_box_claude_token", "connect_convex", "set_convex_repos", "disconnect_convex"] {
             assert!(needs(Side::Hub, cmd, true), "changing who may use a box, or its credentials, still needs the password: {cmd}");
         }
         let confirm: Vec<&str> = ACTIONS.iter().filter(|a| needs(a.side, a.cmd, true)).map(|a| a.name).collect();
-        assert!(confirm.contains(&"decide_confirmation") && !confirm.contains(&"extend_box"), "the decision needs the unlock, the app's own Extend does not: {confirm:?}");
-        assert_eq!(confirm.len(), ACTIONS.iter().filter(|a| a.class == Confirm).count() + 1, "every confirm action but extend_box, the decision and the release-protection switch: {confirm:?}");
+        assert!(confirm.contains(&"decide_confirmation") && confirm.contains(&"extend_box"), "the decision and the Extend need the unlock: {confirm:?}");
+        assert_eq!(confirm.len(), ACTIONS.iter().filter(|a| a.class == Confirm).count() + 2, "every confirm action, the decision and the release-protection switch: {confirm:?}");
         assert!(include_str!("../../../ui/hub.js").contains(&format!("const LOCKED = \"{LOCKED}\";")), "the app asks for the password on this exact refusal");
     }
 
     #[test]
-    fn an_agents_extend_box_waits_for_the_owner_and_the_apps_own_extend_asks_no_password() {
+    fn an_agents_extend_box_waits_for_the_owner_and_the_apps_own_extend_asks_the_password_on_a_locked_login() {
         let extend = find("extend_box").unwrap();
         assert!(held_for_owner(extend), "an agent's extend_box is held for the owner's approval, never run at once");
-        assert!(!owner_only(Side::Hub, "extend_box", true), "the app's own Extend button runs on a locked login with no password");
-        assert!(!owner_only(Side::Hub, "extend_box", false));
+        assert!(owner_only(Side::Hub, "extend_box", true), "the app's own Extend on a locked login asks for the password");
+        assert!(!owner_only(Side::Hub, "extend_box", false), "an unlocked app, or an older app's login, extends as before");
     }
 
     #[test]
     fn the_extend_box_exception_in_owner_only_never_reaches_an_agents_act() {
         let extend = find("extend_box").unwrap();
         for locked in [false, true] {
-            assert!(!owner_only(Side::Hub, "extend_box", locked), "the app's own Extend asks no password, locked: {locked}");
+            assert_eq!(owner_only(Side::Hub, "extend_box", locked), locked, "the app's own Extend asks the password only on a locked login: {locked}");
             assert!(held_for_owner(extend), "an agent's extend_box is held whether the app is locked or not: {locked}");
         }
         let act = include_str!("../../server/src/surface.rs");

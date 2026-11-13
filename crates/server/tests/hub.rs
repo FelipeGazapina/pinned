@@ -6170,6 +6170,7 @@ fn an_agent_holding_what_its_machine_keeps_readable_cannot_approve_or_run_a_conf
         assert_eq!(agent.hub(decide.clone()), Err(LOCKED.into()), "the agent approves nothing");
         assert_eq!(agent.hub(json!({ "cmd": "remove_machine", "id": spare.id })), Err(LOCKED.into()), "nor runs the confirm action itself");
         assert_eq!(agent.hub(json!({ "cmd": "create_invite" })), Err(LOCKED.into()));
+        assert_eq!(agent.hub(json!({ "cmd": "extend_box", "machine": spare.id, "extra_usd": 1.0 })), Err(LOCKED.into()), "extending a box is money: a login read from disk never extends");
         assert_eq!(agent.call(&ana.machine, json!({ "cmd": "update_self" })), Err(LOCKED.into()), "nor a confirm-class call on a machine");
     }
     assert_eq!(logins, 1, "the app's login is the one login on the machine");
@@ -7669,7 +7670,11 @@ fn a_session_box_follows_only_its_setting_and_budget_and_only_its_owner_answers_
     let asked = act(&bob.dir, &bob.tab, "extend_box", json!({ "machine": machine, "extra_usd": 0.5 })).unwrap();
     assert_eq!(decide(&mut bobs_app, &asked)["outcome"].as_str(), Some("failed: this machine is no box"));
     assert_eq!(bobs_app.hub(json!({ "cmd": "extend_box", "machine": machine, "extra_usd": 0.5 })), Err("this machine is no box".into()));
-    assert_eq!(owner.hub(json!({ "cmd": "extend_box", "machine": machine, "extra_usd": 0.5 })).unwrap()["budget_usd"].as_f64(), Some(3.0), "the owner's extend needs no password");
+    let mut locked_app = Client::app(&url, &token);
+    let extend = json!({ "cmd": "extend_box", "machine": machine, "extra_usd": 0.5 });
+    assert_eq!(locked_app.hub(extend.clone()), Err(LOCKED.into()), "a locked app asks for the password before it extends");
+    locked_app.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    assert_eq!(locked_app.hub(extend).unwrap()["budget_usd"].as_f64(), Some(3.0), "once unlocked the app's own extend goes through");
     // Only the agents' extends were ever confirmations, and the owner decided each: no open or answer became one.
     for app in [&mut owner, &mut bobs_app] {
         let all = app.hub(json!({ "cmd": "confirmations" })).unwrap();
@@ -7745,7 +7750,7 @@ fn a_captain_box_follows_only_its_access_setting_and_the_owner_answers_its_ask_o
 }
 
 #[test]
-fn a_locked_app_still_needs_the_password_for_every_confirm_action_and_never_for_a_box_answer_or_budget() {
+fn a_locked_app_still_needs_the_password_for_every_confirm_action_and_never_for_a_box_answer() {
     use pinned_core::surface::{self, Class, Parsed};
     let hub = TestHub::start("locked_confirms");
     let (token, _) = account::signup(&hub.url, "ana@acme.dev", "correct horse").unwrap();
@@ -7790,6 +7795,7 @@ fn a_locked_app_still_needs_the_password_for_every_confirm_action_and_never_for_
         ("connect_convex", json!({ "repos": ["github.com/acme/site"] })),
         ("set_convex_repos", json!({ "id": "quick-lemur-789", "repos": [] })),
         ("disconnect_convex", json!({ "id": "quick-lemur-789" })),
+        ("extend_box", json!({ "machine": machine, "extra_usd": 1.0 })),
     ]
     .into_iter()
     .collect();
@@ -7804,7 +7810,6 @@ fn a_locked_app_still_needs_the_password_for_every_confirm_action_and_never_for_
         assert_eq!(answer, Err(LOCKED.into()), "{} still needs the password on a locked app", action.name);
     }
     assert_eq!(app.hub(json!({ "cmd": "answer_box", "id": "q-1", "allow": true })), Err("that box question is gone".into()), "a box question's answer needs no password");
-    assert_eq!(app.hub(json!({ "cmd": "extend_box", "machine": machine, "extra_usd": 1.0 })), Err("this machine is no box".into()), "nor does a box's budget");
 }
 
 const BLOOM_TOKEN: &str = "sk-ant-oat01-bloomtoken";
