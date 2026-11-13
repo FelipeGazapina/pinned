@@ -609,18 +609,18 @@ const boxFigureHtml = (label, figures, note) => `<div class="limit-card box-figu
 function boxFiguresHtml(u) {
   const up = u.error ? null : u.upstash;
   const from = up ? boxFigureHtml("From Upstash", [[boxHours(up.cpu_hours), "CPU hours"], [usd(up.compute_usd), "compute cost"]],
-    `Upstash's numbers for the ${up.boxes} box${up.boxes === 1 ? "" : "es"} it still lists on this whole key, whoever opened them. Deleted boxes may be missing.`) : "";
+    `Upstash's numbers for the ${esc(String(up.boxes))} box${up.boxes === 1 ? "" : "es"} it still lists on this whole key, whoever opened them. Deleted boxes may be missing.`) : "";
   const p = u.pinned ?? { box_hours: 0, tasks: 0 };
   const own = boxFigureHtml("pinned's count", [[p.box_hours.toFixed(1), "box hours"], [p.tasks.toLocaleString("en-US"), p.tasks === 1 ? "task" : "tasks"]],
     "Box time pinned recorded for its delegated tasks; not a bill.");
   return `<div class="box-figures">${from}${own}</div>`;
 }
-/** The boxes on the key that this account did not open, as one line: a count and sums, never a name. */
+/** This month's other boxes on the key, as one line: a count and sums, never a name or a claim about who opened them. */
 function boxOthersHtml(others) {
   if (!(others?.boxes > 0)) return "";
   const n = esc(String(others.boxes));
   const sums = `${boxNum(others.cpu_hours, boxHours)} CPU h, ${boxNum(others.compute_usd, usd)} compute`;
-  return `<p class="muted note box-others-count">${n} other box${others.boxes === 1 ? "" : "es"} on this Upstash key, not opened by this account: ${esc(sums)}</p>`;
+  return `<p class="muted note box-others-count">${n} other box${others.boxes === 1 ? "" : "es"} on this Upstash key (ended, opened outside pinned, or by another account): ${esc(sums)}</p>`;
 }
 function boxListsHtml(boxes, now, open) {
   const live = boxes.filter((b) => BOX_LIVE.includes(b.status));

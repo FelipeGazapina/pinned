@@ -74,12 +74,17 @@ test("state a: Upstash's numbers, pinned's count, the running box and the other 
 test("the boxes this account did not open show as one count line, as text, with no name", () => {
   const others = { boxes: 3, cpu_hours: 1.2, compute_usd: 0.5 };
   const html = show({ ...A, boxes: [A.boxes[0]], others });
-  assert.match(text(html), /3 other boxes on this Upstash key, not opened by this account: 1\.20 CPU h, \$0\.50 compute/);
+  assert.match(text(html), /3 other boxes on this Upstash key \(ended, opened outside pinned, or by another account\): 1\.20 CPU h, \$0\.50 compute/);
+  assert.doesNotMatch(text(html), /not opened by this account/, "the line blames no one: an owner alone on the key sees its own ended boxes here");
   assert.match(text(html), /on this whole key, whoever opened them/, "the key-wide totals say they cover the whole key");
   assert.equal((html.match(/box-others-count/g) ?? []).length, 1, "one line, not a list");
-  assert.equal(text(show({ ...A, others: { ...others, boxes: 1 } })).match(/1 other box on this[^:]*:/)?.[0], "1 other box on this Upstash key, not opened by this account:");
+  assert.equal(text(show({ ...A, others: { ...others, boxes: 1 } })).match(/1 other box on this[^:]*:/)?.[0], "1 other box on this Upstash key (ended, opened outside pinned, or by another account):");
   assert.doesNotMatch(text(show({ ...A, others: { boxes: 0, cpu_hours: 0, compute_usd: 0 } })), /other box/);
   assert.doesNotMatch(text(show({ ...A, others: undefined })), /other box on|other boxes on/, "an older hub's answer has no line");
+  const note = (boxes) => text(show({ ...A, upstash: { ...A.upstash, boxes } })).match(/Upstash's numbers for the (.*?) it still lists/)?.[1];
+  assert.equal(note(1), "1 box");
+  assert.equal(note(3), "3 boxes");
+  assert.doesNotMatch(show({ ...A, upstash: { ...A.upstash, boxes: "<img src=x onerror=alert(1)>" } }), /<img/, "a markup count in the From Upstash note stays text");
   const hostile = show({ ...A, others: { boxes: "<img src=x onerror=alert(1)>", cpu_hours: "<img src=x>", compute_usd: 0 } });
   assert.doesNotMatch(hostile, /<img/, "a markup value stays text");
 });

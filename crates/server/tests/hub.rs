@@ -8526,7 +8526,7 @@ fn box_usage_lists_what_upstash_lists_and_marks_the_box_pinned_opened() {
                   "pinned": { "project": "site", "role": "worker", "machine": "ana-mac" } }
             ],
             "upstash": { "cpu_hours": 2.0, "compute_usd": 1.5, "boxes": 1 },
-            "others": { "boxes": 1, "cpu_hours": 1.0, "compute_usd": 0.5 },
+            "others": { "boxes": 0, "cpu_hours": 0.0, "compute_usd": 0.0 },
             "pinned": { "box_hours": 2.0, "tasks": 2, "since": month }
         })
     );
@@ -8731,6 +8731,38 @@ fn ana_state(hub: &TestHub, rows: &AnaRows) -> String {
             session = rows.session
         ),
     )
+}
+
+#[test]
+fn an_account_alone_on_its_key_counts_its_own_ended_boxes_as_other_boxes_with_no_name_and_only_this_months() {
+    let hub = TestHub::start("usage_single_owner");
+    let key = "box_testkey-usage-single";
+    let (token, ana, mut client) = usage_account(&hub.url, "ana@example.test", key);
+    let (machine, _) = account::register_machine(&hub.url, &token, "ana-mac", "linux").unwrap();
+    let month = month_start();
+    upstash_answers(
+        key,
+        Some((
+            200,
+            json!([
+                { "id": "u-open", "name": "ana-site-worker-aaaaaa", "status": "running", "created_at": month + 10, "updated_at": month + 20, "total_cpu_ns": 3.6e12, "total_compute_cost_usd": 1.0 },
+                // Ended by pinned, so its row is gone, and Upstash still lists it.
+                { "id": "u-ended", "name": "ana-site-worker-endedx", "status": "stopped", "created_at": month + 11, "updated_at": month + 21, "total_cpu_ns": 7.2e12, "total_compute_cost_usd": 2.0 },
+                // Last month's: the key totals leave it out, and so does the count of other boxes.
+                { "id": "u-last-month", "name": "ana-site-worker-lastmo", "status": "stopped", "created_at": month - 86_400, "updated_at": month - 80_000, "total_cpu_ns": 36e12, "total_compute_cost_usd": 20.0 }
+            ]),
+        )),
+    );
+    opened_box(&hub, &ana, &machine.id, "box-a1", "u-open", "git@github.com:example/ana-site.git");
+
+    let usage = client.hub(json!({ "cmd": "box_usage" })).unwrap();
+    assert_eq!(usage["boxes"].as_array().unwrap().iter().map(|x| x["id"].clone()).collect::<Vec<_>>(), [json!("u-open")]);
+    assert_eq!(usage["others"], json!({ "boxes": 1, "cpu_hours": 2.0, "compute_usd": 2.0 }), "the ended box is the one other box; last month's is not counted");
+    assert_eq!(usage["upstash"]["boxes"], json!(2), "the key totals and the count of other boxes cover the same month");
+    let shown = usage.to_string();
+    for leaked in ["u-ended", "endedx", "u-last-month", "lastmo"] {
+        assert!(!shown.contains(leaked), "a box that is not in the list showed as {leaked}: {shown}");
+    }
 }
 
 #[test]

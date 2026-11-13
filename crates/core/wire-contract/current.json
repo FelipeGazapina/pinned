@@ -37990,7 +37990,7 @@
             ]
           },
           "OtherBoxes": {
-            "description": "The boxes on the account's Upstash key that the account did not open through pinned, folded\ninto figures. Another account may share the key, so no name, id or detail of these is kept.",
+            "description": "The boxes on the account's Upstash key created this UTC month that the account has no box row\nfor, folded into figures, as the key totals count them. That is the account's own boxes pinned\nended (the row goes with the box, Upstash may still list it), boxes made outside pinned, and\nboxes another account opened on a shared key. The count does not tell which, and no name, id\nor detail of these is kept.",
             "type": "object",
             "properties": {
               "boxes": {
@@ -38268,7 +38268,7 @@
             }
           },
           "OtherBoxes": {
-            "description": "The boxes on the account's Upstash key that the account did not open through pinned, folded\ninto figures. Another account may share the key, so no name, id or detail of these is kept.",
+            "description": "The boxes on the account's Upstash key created this UTC month that the account has no box row\nfor, folded into figures, as the key totals count them. That is the account's own boxes pinned\nended (the row goes with the box, Upstash may still list it), boxes made outside pinned, and\nboxes another account opened on a shared key. The count does not tell which, and no name, id\nor detail of these is kept.",
             "type": "object",
             "properties": {
               "boxes": {
