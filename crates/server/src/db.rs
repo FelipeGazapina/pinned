@@ -12,7 +12,6 @@ use pinned_core::account::{DictationEngine, DictationFeedback, DictationRating};
 use pinned_core::agent::Subject;
 use pinned_core::delegate::TaskRecord;
 use pinned_core::ideas::{Idea, IdeaStatus};
-use pinned_core::schedule::Actor;
 use pinned_core::marks::{self, MarkChange, SessionMarks};
 use pinned_core::schedule::{Actor, Task, TaskRun};
 use pinned_core::sync;
