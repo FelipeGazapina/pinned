@@ -630,11 +630,14 @@ const boxNotice = (text, ids = "") => `<div class="limit-notices" role="alert">$
 /** A stuck box with no `unconfirmed` flag is one pinned knows is on Upstash; one with it is a row that never recorded a box id. */
 const stuckSplit = (stuck) => [(stuck ?? []).filter((b) => !b.unconfirmed), (stuck ?? []).filter((b) => b.unconfirmed)];
 const stuckCount = (n) => `${n} ${n === 1 ? "box" : "boxes"}`;
-const stillRunning = (n) => `${n === 1 ? "It is" : "They are"} still running on Upstash and can be deleted in the Upstash console.`;
+const stillRunning = (n) => `${n === 1 ? "It is" : "They are"} still running, and may still be billed, on Upstash. ${n === 1 ? "It" : "They"} can be deleted in the Upstash console.`;
 /** What pinned says of a row with no Upstash id when its delete failed: it does not know a box exists. */
 const unconfirmedTail = (n) => n === 1
   ? "pinned could not confirm whether a box exists on Upstash for it. Check the Upstash console and delete it there if it does."
   : "pinned could not confirm whether a box exists on Upstash for any of them. Check the Upstash console and delete any you find there.";
+/** The reason the hub gives when it has no Upstash key; reconnecting the key is the way out. */
+const NOT_CONNECTED = "Upstash is not connected";
+const reconnectTail = (why, n, verb) => (why === NOT_CONNECTED ? ` Reconnecting the Upstash key lets pinned ${verb} ${n === 1 ? "it" : "them"} on its next pass.` : "");
 const STUCK_IDS_SHOWN = 3;
 /** What lets the owner find each box on Upstash: its id where pinned has it, else the label it lists the box by. Long lists stop after a few. */
 function stuckIdsHtml(boxes) {
@@ -650,8 +653,8 @@ function stuckBoxesHtml(stuck) {
   const notices = [];
   const [known, unconfirmed] = stuckSplit(stuck);
   for (const [list, line] of [
-    [known, (n, why) => `${stuckCount(n)} pinned could not delete: ${reasonEnd(why)} ${stillRunning(n)}`],
-    [unconfirmed, (n, why) => `${stuckCount(n)} pinned could not end: ${reasonEnd(why)} ${unconfirmedTail(n)}`],
+    [known, (n, why) => `${stuckCount(n)} pinned could not delete: ${reasonEnd(why)} ${stillRunning(n)}${reconnectTail(why, n, "delete")}`],
+    [unconfirmed, (n, why) => `${stuckCount(n)} pinned could not end: ${reasonEnd(why)} ${unconfirmedTail(n)}${reconnectTail(why, n, "try to end")}`],
   ]) {
     const byWhy = new Map();
     for (const b of list) byWhy.set(b.why, [...(byWhy.get(b.why) ?? []), b]);

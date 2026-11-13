@@ -244,8 +244,8 @@ test("boxes pinned could not delete show as one notice per reason, also when Ups
   const stuck = [{ id: "r1", why: "Upstash answered 503" }, { id: "r2", why: "Upstash answered 503" }, { id: "r3", why: "Upstash answered 500" }];
   const off = html({ connected: false, stuck });
   assert.match(off, /2 boxes pinned could not delete: Upstash answered 503/);
-  assert.match(off, /1 box pinned could not delete: Upstash answered 500\. It is still running on Upstash and can be deleted in the Upstash console\./);
-  assert.match(off, /2 boxes pinned could not delete: Upstash answered 503\. They are still running on Upstash and can be deleted in the Upstash console\./);
+  assert.match(off, /1 box pinned could not delete: Upstash answered 500\. It is still running, and may still be billed, on Upstash\. It can be deleted in the Upstash console\./);
+  assert.match(off, /2 boxes pinned could not delete: Upstash answered 503\. They are still running, and may still be billed, on Upstash\. They can be deleted in the Upstash console\./);
   assert.match(off, /Connect Upstash in Settings/);
   assert.equal(off.match(/limit-notices/g).length, 2);
   const on = html({ connected: true, stuck: [stuck[2]], boxes: [], upstash: { cpu_hours: 0, compute_usd: 0, boxes: 0 }, pinned: PINNED });
@@ -261,7 +261,7 @@ test("a reason that ends in a full stop gets no second one, and a reason the hub
   assert.match(dotted, /1 box pinned could not end: Upstash gave up\. pinned could not confirm/);
   assert.doesNotMatch(dotted, /\.\./);
   const cut = html([{ id: "r3", why: `${"x".repeat(299)}…` }]);
-  assert.match(cut, /x…\s+It is still running on Upstash/);
+  assert.match(cut, /x…\s+It is still running, and may still be billed/);
   assert.doesNotMatch(cut, /…\./);
 });
 
@@ -321,7 +321,7 @@ test("a row with no Upstash id says pinned could not confirm a box exists, and d
 test("a row with its Upstash id keeps saying it is still running on Upstash", () => {
   const page = boxPage({ answer: async () => ({}) });
   const known = text(page.boxUsageHtml({ data: { connected: false, stuck: [KNOWN] }, error: "", loading: false, open: {} }, NOW));
-  assert.match(known, /1 box pinned could not delete: Upstash answered 503\. It is still running on Upstash and can be deleted in the Upstash console\./);
+  assert.match(known, /1 box pinned could not delete: Upstash answered 503\. It is still running, and may still be billed, on Upstash\. It can be deleted in the Upstash console\./);
   assert.doesNotMatch(known, /could not confirm/);
 });
 
@@ -330,7 +330,7 @@ test("known and unconfirmed boxes with the same reason show as two notices, each
   const same = { ...UNCONFIRMED, why: KNOWN.why };
   const html = page.boxUsageHtml({ data: { connected: true, stuck: [same, KNOWN, { ...KNOWN, id: "fake-row-4" }], boxes: [], upstash: { cpu_hours: 0, compute_usd: 0, boxes: 0 }, pinned: PINNED }, error: "", loading: false, open: {} }, NOW);
   assert.equal(html.match(/limit-notices/g).length, 2);
-  assert.match(text(html), /2 boxes pinned could not delete: Upstash answered 503\. They are still running on Upstash and can be deleted in the Upstash console\./);
+  assert.match(text(html), /2 boxes pinned could not delete: Upstash answered 503\. They are still running, and may still be billed, on Upstash\. They can be deleted in the Upstash console\./);
   assert.match(text(html), new RegExp(`1 box pinned could not end: Upstash answered 503\. ${CONFIRM.replace(/\./g, "\\.")}`));
 });
 
@@ -361,11 +361,22 @@ test("each notice lists which boxes: the Upstash id of a known row, the label to
   assert.match(html([{ ...KNOWN, upstash: "<i>x</i>" }]), /<code>&lt;i&gt;x&lt;\/i&gt;<\/code>/);
 });
 
+test("when Upstash is not connected the notice says reconnecting the Upstash key lets pinned delete or try to end it on its next pass, and no other reason says it", () => {
+  const page = boxPage({ answer: async () => ({}) });
+  const notices = (stuck) => text(page.boxUsageHtml({ data: { connected: false, stuck }, error: "", loading: false, open: {} }, NOW));
+  const known = notices([{ ...KNOWN, why: "Upstash is not connected" }]);
+  assert.match(known, /It is still running, and may still be billed, on Upstash\. It can be deleted in the Upstash console\. Reconnecting the Upstash key lets pinned delete it on its next pass\./);
+  assert.match(notices([{ ...KNOWN, why: "Upstash is not connected" }, { ...KNOWN, id: "fake-row-5", why: "Upstash is not connected" }]), /Reconnecting the Upstash key lets pinned delete them on its next pass\./);
+  assert.ok(notices([UNCONFIRMED]).includes(`${CONFIRM} Reconnecting the Upstash key lets pinned try to end it on its next pass.`), notices([UNCONFIRMED]));
+  assert.doesNotMatch(notices([KNOWN]), /Reconnecting/);
+  assert.doesNotMatch(notices([{ ...KNOWN, why: "Upstash answered 503" }]), /Reconnecting/);
+});
+
 test("the mark's title follows the notice: known, unconfirmed, and both", () => {
   const page = boxPage({ answer: async () => ({}) });
   const known = drawMark(page, [KNOWN]);
   assert.equal(known.hidden, false);
-  assert.equal(known.title, "pinned could not delete 1 Upstash box. It is still running on Upstash and can be deleted in the Upstash console. Open Usage.");
+  assert.equal(known.title, "pinned could not delete 1 Upstash box. It is still running, and may still be billed, on Upstash. It can be deleted in the Upstash console. Open Usage.");
   const unconfirmed = drawMark(page, [UNCONFIRMED]);
   assert.equal(unconfirmed.hidden, false, "a row with no Upstash id is not hidden");
   assert.equal(unconfirmed.title, `pinned could not end 1 box. ${CONFIRM} Open Usage.`);
@@ -374,7 +385,7 @@ test("the mark's title follows the notice: known, unconfirmed, and both", () => 
   assert.equal(two.title, "pinned could not end 2 boxes. pinned could not confirm whether a box exists on Upstash for any of them. Check the Upstash console and delete any you find there. Open Usage.");
   const mix = drawMark(page, [KNOWN, { ...KNOWN, id: "fake-row-4" }, UNCONFIRMED]);
   assert.equal(mix.hidden, false);
-  assert.equal(mix.title, `pinned could not delete 2 Upstash boxes. They are still running on Upstash and can be deleted in the Upstash console. Separately, pinned could not end 1 more box. ${CONFIRM} Open Usage.`);
+  assert.equal(mix.title, `pinned could not delete 2 Upstash boxes. They are still running, and may still be billed, on Upstash. They can be deleted in the Upstash console. Separately, pinned could not end 1 more box. ${CONFIRM} Open Usage.`);
   assert.equal(drawMark(page, []).hidden, true);
 });
 
@@ -395,7 +406,7 @@ test("the sidebar's Usage entry is marked from the hub's own look, and redrawn o
   };
   const marked = draw(page.usageState.stuck);
   assert.equal(marked.hidden, false);
-  assert.match(marked.title, /could not delete 1 Upstash box\. It is still running on Upstash and can be deleted in the Upstash console\. Open Usage\./);
+  assert.match(marked.title, /could not delete 1 Upstash box\. It is still running, and may still be billed, on Upstash\. It can be deleted in the Upstash console\. Open Usage\./);
   assert.equal(draw([]).hidden, true);
 });
 
