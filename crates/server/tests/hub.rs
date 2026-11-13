@@ -8279,3 +8279,17 @@ fn an_agent_saves_and_lists_ideas_through_act_and_its_role_is_kept() {
     assert_eq!(deleted["outcome"], "done");
     assert_eq!(act(&ana.dir, &ana.tab, "list_ideas", json!({})).unwrap()["result"], json!([]));
 }
+
+#[test]
+fn a_failing_ideas_read_still_answers_get_settings_with_no_ideas() {
+    let hub = TestHub::start_with("ideas_down", Signup::Open);
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = Client::app(&url, &token);
+    ana.hub(json!({ "cmd": "save_idea", "title": "An iPad app" })).unwrap();
+    admin_on(&hub.database, "alter table ideas rename to ideas_away");
+
+    assert!(ana.hub(json!({ "cmd": "list_ideas" })).is_err(), "the ideas read itself fails");
+    let settings = ana.hub(json!({ "cmd": "get_settings" })).expect("the settings every app loads still answer");
+    assert!(settings.is_object() && settings.get("ideas").is_none(), "and they hold no ideas: {settings}");
+}
