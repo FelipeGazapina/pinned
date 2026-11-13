@@ -200,3 +200,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:09:49Z #91 a_box_the_hub_ends_fails_its_task_on_the_machine_that_delegated_it START / avail=15059M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:09:52Z #91 a_box_the_hub_ends_fails_its_task_on_the_machine_that_delegated_it ok / avail=15059M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:09:54Z #92 a_worker_box_that_never_connects_fails_its_task_even_when_the_hub_restarts_mid_boot START / avail=15059M /workspace avail=19374M node_stat=Ssl
+2026-11-13T04:10:05Z #92 a_worker_box_that_never_connects_fails_its_task_even_when_the_hub_restarts_mid_boot ok / avail=15059M /workspace avail=19374M node_stat=Ssl node_tcp=1
