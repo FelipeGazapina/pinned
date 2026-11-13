@@ -42,7 +42,9 @@ pub struct Questionnaire {
     pub at: u64,
 }
 
+/// One question of a questionnaire.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+#[schemars(rename = "QuestionnaireQuestion")]
 pub struct Question {
     /// A short chip label, such as `Branch`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

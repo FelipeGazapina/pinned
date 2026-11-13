@@ -474,6 +474,31 @@
                 ]
               },
               {
+                "description": "`null`, once `reply` closes the questionnaire `id` open on the tab. Refused when it is\nclosed already, or the reply does not fit its questions.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "answer_questions"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "reply": {
+                    "$ref": "#/$defs/QuestionsReply"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "id",
+                  "reply"
+                ]
+              },
+              {
                 "description": "The tab's new folder, canonical. Stands in for the folder dialog on a remote machine;\nthe client then sends `StartClaude`.",
                 "type": "object",
                 "properties": {
@@ -3352,6 +3377,62 @@
                 ]
               }
             ]
+          },
+          "QuestionsReply": {
+            "description": "How the user closed a questionnaire.\n\n`{\"kind\":\"answered\",\"answers\":[{\"chosen\":[\"main\"]}]}`, `{\"kind\":\"skipped\"}`",
+            "oneOf": [
+              {
+                "description": "One answer per question, in the questions' order.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "answered"
+                  },
+                  "answers": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/Answer"
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "answers"
+                ]
+              },
+              {
+                "description": "The agent goes on with its recommendations and states its assumptions.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "skipped"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Answer": {
+            "description": "The answer to one question: the labels of the options chosen, what the user typed, or both.",
+            "type": "object",
+            "properties": {
+              "chosen": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "text": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
           },
           "RunSpec": {
             "description": "A connector's session, the same on any machine.\n\n`{\"folder\":\"/repo\",\"repo\":\"git@github.com:o/r.git\",\"args\":[\"--name\",\"ENG-7\"],\"env\":[[\"PINNED_CONNECTOR\",\"c1\"]]}`",
@@ -10576,6 +10657,31 @@
                 ]
               },
               {
+                "description": "`null`, once `reply` closes the questionnaire `id` open on the tab. Refused when it is\nclosed already, or the reply does not fit its questions.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "answer_questions"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "reply": {
+                    "$ref": "#/$defs/QuestionsReply"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "id",
+                  "reply"
+                ]
+              },
+              {
                 "description": "The tab's new folder, canonical. Stands in for the folder dialog on a remote machine;\nthe client then sends `StartClaude`.",
                 "type": "object",
                 "properties": {
@@ -13432,6 +13538,62 @@
                 ]
               }
             ]
+          },
+          "QuestionsReply": {
+            "description": "How the user closed a questionnaire.\n\n`{\"kind\":\"answered\",\"answers\":[{\"chosen\":[\"main\"]}]}`, `{\"kind\":\"skipped\"}`",
+            "oneOf": [
+              {
+                "description": "One answer per question, in the questions' order.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "answered"
+                  },
+                  "answers": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/Answer"
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "answers"
+                ]
+              },
+              {
+                "description": "The agent goes on with its recommendations and states its assumptions.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "skipped"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Answer": {
+            "description": "The answer to one question: the labels of the options chosen, what the user typed, or both.",
+            "type": "object",
+            "properties": {
+              "chosen": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "text": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
           },
           "RunSpec": {
             "description": "A connector's session, the same on any machine.\n\n`{\"folder\":\"/repo\",\"repo\":\"git@github.com:o/r.git\",\"args\":[\"--name\",\"ENG-7\"],\"env\":[[\"PINNED_CONNECTOR\",\"c1\"]]}`",
@@ -20759,6 +20921,17 @@
                   "string",
                   "null"
                 ]
+              },
+              "questions": {
+                "description": "The questionnaire the session waits on the user to answer, which `Call::AnswerQuestions`\nanswers. While it is open the tab reads as a question mid-turn, so an app that predates it\nstill shows the tab waiting.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Questionnaire"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -20925,6 +21098,103 @@
               "usd",
               "unknown",
               "workers"
+            ]
+          },
+          "Questionnaire": {
+            "description": "The questions an agent asks the user in one go.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "`q-7`, unique on its machine.",
+                "type": "string"
+              },
+              "title": {
+                "description": "What the questions are about, in a few words.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "questions": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/QuestionnaireQuestion"
+                }
+              },
+              "projects": {
+                "description": "The project keys whose message from the global orchestrator waits on the answers.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "at": {
+                "description": "Unix seconds it was asked.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "id",
+              "questions",
+              "at"
+            ]
+          },
+          "QuestionnaireQuestion": {
+            "description": "One question of a questionnaire.",
+            "type": "object",
+            "properties": {
+              "header": {
+                "description": "A short chip label, such as `Branch`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "question": {
+                "type": "string"
+              },
+              "changes": {
+                "description": "What the agent does differently depending on the answer.",
+                "type": "string"
+              },
+              "options": {
+                "description": "The agent's recommendation first.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/QOption"
+                }
+              },
+              "multi_select": {
+                "description": "The user may choose more than one option.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "question",
+              "options"
+            ]
+          },
+          "QOption": {
+            "type": "object",
+            "properties": {
+              "label": {
+                "type": "string"
+              },
+              "description": {
+                "description": "One line: what choosing it leads to.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "recommended": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "label"
             ]
           },
           "AgentEvent": {
@@ -27601,6 +27871,17 @@
                   "string",
                   "null"
                 ]
+              },
+              "questions": {
+                "description": "The questionnaire the session waits on the user to answer, which `Call::AnswerQuestions`\nanswers. While it is open the tab reads as a question mid-turn, so an app that predates it\nstill shows the tab waiting.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Questionnaire"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -27760,6 +28041,103 @@
               "usd",
               "unknown",
               "workers"
+            ]
+          },
+          "Questionnaire": {
+            "description": "The questions an agent asks the user in one go.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "`q-7`, unique on its machine.",
+                "type": "string"
+              },
+              "title": {
+                "description": "What the questions are about, in a few words.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "questions": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/QuestionnaireQuestion"
+                }
+              },
+              "projects": {
+                "description": "The project keys whose message from the global orchestrator waits on the answers.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "at": {
+                "description": "Unix seconds it was asked.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "id",
+              "questions",
+              "at"
+            ]
+          },
+          "QuestionnaireQuestion": {
+            "description": "One question of a questionnaire.",
+            "type": "object",
+            "properties": {
+              "header": {
+                "description": "A short chip label, such as `Branch`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "question": {
+                "type": "string"
+              },
+              "changes": {
+                "description": "What the agent does differently depending on the answer.",
+                "type": "string"
+              },
+              "options": {
+                "description": "The agent's recommendation first.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/QOption"
+                }
+              },
+              "multi_select": {
+                "description": "The user may choose more than one option.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "question",
+              "options"
+            ]
+          },
+          "QOption": {
+            "type": "object",
+            "properties": {
+              "label": {
+                "type": "string"
+              },
+              "description": {
+                "description": "One line: what choosing it leads to.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "recommended": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "label"
             ]
           },
           "AgentEvent": {
@@ -40766,6 +41144,13 @@
                 ],
                 "format": "uint64",
                 "minimum": 0
+              },
+              "questions": {
+                "description": "The id of the questionnaire a `question` waits on, which `TabView::questions` holds. Its\n`ask` stays `question`, which every node reads.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -41382,6 +41767,13 @@
                 ],
                 "format": "uint64",
                 "minimum": 0
+              },
+              "questions": {
+                "description": "The id of the questionnaire a `question` waits on, which `TabView::questions` holds. Its\n`ask` stays `question`, which every node reads.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -47845,6 +48237,17 @@
               "string",
               "null"
             ]
+          },
+          "questions": {
+            "description": "The questionnaire the session waits on the user to answer, which `Call::AnswerQuestions`\nanswers. While it is open the tab reads as a question mid-turn, so an app that predates it\nstill shows the tab waiting.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Questionnaire"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -48011,6 +48414,103 @@
               "usd",
               "unknown",
               "workers"
+            ]
+          },
+          "Questionnaire": {
+            "description": "The questions an agent asks the user in one go.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "`q-7`, unique on its machine.",
+                "type": "string"
+              },
+              "title": {
+                "description": "What the questions are about, in a few words.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "questions": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/QuestionnaireQuestion"
+                }
+              },
+              "projects": {
+                "description": "The project keys whose message from the global orchestrator waits on the answers.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "at": {
+                "description": "Unix seconds it was asked.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "id",
+              "questions",
+              "at"
+            ]
+          },
+          "QuestionnaireQuestion": {
+            "description": "One question of a questionnaire.",
+            "type": "object",
+            "properties": {
+              "header": {
+                "description": "A short chip label, such as `Branch`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "question": {
+                "type": "string"
+              },
+              "changes": {
+                "description": "What the agent does differently depending on the answer.",
+                "type": "string"
+              },
+              "options": {
+                "description": "The agent's recommendation first.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/QOption"
+                }
+              },
+              "multi_select": {
+                "description": "The user may choose more than one option.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "question",
+              "options"
+            ]
+          },
+          "QOption": {
+            "type": "object",
+            "properties": {
+              "label": {
+                "type": "string"
+              },
+              "description": {
+                "description": "One line: what choosing it leads to.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "recommended": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "label"
             ]
           }
         }
@@ -48232,6 +48732,17 @@
               "string",
               "null"
             ]
+          },
+          "questions": {
+            "description": "The questionnaire the session waits on the user to answer, which `Call::AnswerQuestions`\nanswers. While it is open the tab reads as a question mid-turn, so an app that predates it\nstill shows the tab waiting.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Questionnaire"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -48391,6 +48902,103 @@
               "usd",
               "unknown",
               "workers"
+            ]
+          },
+          "Questionnaire": {
+            "description": "The questions an agent asks the user in one go.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "`q-7`, unique on its machine.",
+                "type": "string"
+              },
+              "title": {
+                "description": "What the questions are about, in a few words.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "questions": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/QuestionnaireQuestion"
+                }
+              },
+              "projects": {
+                "description": "The project keys whose message from the global orchestrator waits on the answers.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "at": {
+                "description": "Unix seconds it was asked.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "id",
+              "questions",
+              "at"
+            ]
+          },
+          "QuestionnaireQuestion": {
+            "description": "One question of a questionnaire.",
+            "type": "object",
+            "properties": {
+              "header": {
+                "description": "A short chip label, such as `Branch`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "question": {
+                "type": "string"
+              },
+              "changes": {
+                "description": "What the agent does differently depending on the answer.",
+                "type": "string"
+              },
+              "options": {
+                "description": "The agent's recommendation first.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/QOption"
+                }
+              },
+              "multi_select": {
+                "description": "The user may choose more than one option.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "question",
+              "options"
+            ]
+          },
+          "QOption": {
+            "type": "object",
+            "properties": {
+              "label": {
+                "type": "string"
+              },
+              "description": {
+                "description": "One line: what choosing it leads to.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "recommended": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "label"
             ]
           }
         }
@@ -50178,6 +50786,17 @@
                   "string",
                   "null"
                 ]
+              },
+              "questions": {
+                "description": "The questionnaire the session waits on the user to answer, which `Call::AnswerQuestions`\nanswers. While it is open the tab reads as a question mid-turn, so an app that predates it\nstill shows the tab waiting.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Questionnaire"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -50344,6 +50963,103 @@
               "usd",
               "unknown",
               "workers"
+            ]
+          },
+          "Questionnaire": {
+            "description": "The questions an agent asks the user in one go.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "`q-7`, unique on its machine.",
+                "type": "string"
+              },
+              "title": {
+                "description": "What the questions are about, in a few words.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "questions": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/QuestionnaireQuestion"
+                }
+              },
+              "projects": {
+                "description": "The project keys whose message from the global orchestrator waits on the answers.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "at": {
+                "description": "Unix seconds it was asked.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "id",
+              "questions",
+              "at"
+            ]
+          },
+          "QuestionnaireQuestion": {
+            "description": "One question of a questionnaire.",
+            "type": "object",
+            "properties": {
+              "header": {
+                "description": "A short chip label, such as `Branch`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "question": {
+                "type": "string"
+              },
+              "changes": {
+                "description": "What the agent does differently depending on the answer.",
+                "type": "string"
+              },
+              "options": {
+                "description": "The agent's recommendation first.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/QOption"
+                }
+              },
+              "multi_select": {
+                "description": "The user may choose more than one option.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "question",
+              "options"
+            ]
+          },
+          "QOption": {
+            "type": "object",
+            "properties": {
+              "label": {
+                "type": "string"
+              },
+              "description": {
+                "description": "One line: what choosing it leads to.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "recommended": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "label"
             ]
           },
           "Reply": {
@@ -53446,6 +54162,17 @@
                   "string",
                   "null"
                 ]
+              },
+              "questions": {
+                "description": "The questionnaire the session waits on the user to answer, which `Call::AnswerQuestions`\nanswers. While it is open the tab reads as a question mid-turn, so an app that predates it\nstill shows the tab waiting.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Questionnaire"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": [
@@ -53605,6 +54332,103 @@
               "usd",
               "unknown",
               "workers"
+            ]
+          },
+          "Questionnaire": {
+            "description": "The questions an agent asks the user in one go.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "description": "`q-7`, unique on its machine.",
+                "type": "string"
+              },
+              "title": {
+                "description": "What the questions are about, in a few words.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "questions": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/QuestionnaireQuestion"
+                }
+              },
+              "projects": {
+                "description": "The project keys whose message from the global orchestrator waits on the answers.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "at": {
+                "description": "Unix seconds it was asked.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "id",
+              "questions",
+              "at"
+            ]
+          },
+          "QuestionnaireQuestion": {
+            "description": "One question of a questionnaire.",
+            "type": "object",
+            "properties": {
+              "header": {
+                "description": "A short chip label, such as `Branch`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "question": {
+                "type": "string"
+              },
+              "changes": {
+                "description": "What the agent does differently depending on the answer.",
+                "type": "string"
+              },
+              "options": {
+                "description": "The agent's recommendation first.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/QOption"
+                }
+              },
+              "multi_select": {
+                "description": "The user may choose more than one option.",
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "question",
+              "options"
+            ]
+          },
+          "QOption": {
+            "type": "object",
+            "properties": {
+              "label": {
+                "type": "string"
+              },
+              "description": {
+                "description": "One line: what choosing it leads to.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "recommended": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "label"
             ]
           },
           "Reply": {
@@ -56701,6 +57525,31 @@
                 ]
               },
               {
+                "description": "`null`, once `reply` closes the questionnaire `id` open on the tab. Refused when it is\nclosed already, or the reply does not fit its questions.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "answer_questions"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "reply": {
+                    "$ref": "#/$defs/QuestionsReply"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "id",
+                  "reply"
+                ]
+              },
+              {
                 "description": "The tab's new folder, canonical. Stands in for the folder dialog on a remote machine;\nthe client then sends `StartClaude`.",
                 "type": "object",
                 "properties": {
@@ -59580,6 +60429,62 @@
               }
             ]
           },
+          "QuestionsReply": {
+            "description": "How the user closed a questionnaire.\n\n`{\"kind\":\"answered\",\"answers\":[{\"chosen\":[\"main\"]}]}`, `{\"kind\":\"skipped\"}`",
+            "oneOf": [
+              {
+                "description": "One answer per question, in the questions' order.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "answered"
+                  },
+                  "answers": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/Answer"
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "answers"
+                ]
+              },
+              {
+                "description": "The agent goes on with its recommendations and states its assumptions.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "skipped"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Answer": {
+            "description": "The answer to one question: the labels of the options chosen, what the user typed, or both.",
+            "type": "object",
+            "properties": {
+              "chosen": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "text": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
           "RunSpec": {
             "description": "A connector's session, the same on any machine.\n\n`{\"folder\":\"/repo\",\"repo\":\"git@github.com:o/r.git\",\"args\":[\"--name\",\"ENG-7\"],\"env\":[[\"PINNED_CONNECTOR\",\"c1\"]]}`",
             "type": "object",
@@ -62174,6 +63079,31 @@
                 "required": [
                   "cmd",
                   "tab"
+                ]
+              },
+              {
+                "description": "`null`, once `reply` closes the questionnaire `id` open on the tab. Refused when it is\nclosed already, or the reply does not fit its questions.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "answer_questions"
+                  },
+                  "tab": {
+                    "type": "string"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "reply": {
+                    "$ref": "#/$defs/QuestionsReply"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "tab",
+                  "id",
+                  "reply"
                 ]
               },
               {
@@ -65033,6 +65963,62 @@
                 ]
               }
             ]
+          },
+          "QuestionsReply": {
+            "description": "How the user closed a questionnaire.\n\n`{\"kind\":\"answered\",\"answers\":[{\"chosen\":[\"main\"]}]}`, `{\"kind\":\"skipped\"}`",
+            "oneOf": [
+              {
+                "description": "One answer per question, in the questions' order.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "answered"
+                  },
+                  "answers": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/Answer"
+                    }
+                  }
+                },
+                "required": [
+                  "kind",
+                  "answers"
+                ]
+              },
+              {
+                "description": "The agent goes on with its recommendations and states its assumptions.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "skipped"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Answer": {
+            "description": "The answer to one question: the labels of the options chosen, what the user typed, or both.",
+            "type": "object",
+            "properties": {
+              "chosen": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "text": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
           },
           "RunSpec": {
             "description": "A connector's session, the same on any machine.\n\n`{\"folder\":\"/repo\",\"repo\":\"git@github.com:o/r.git\",\"args\":[\"--name\",\"ENG-7\"],\"env\":[[\"PINNED_CONNECTOR\",\"c1\"]]}`",
