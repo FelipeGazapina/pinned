@@ -34,6 +34,9 @@ const START_WAIT: Duration = Duration::from_secs(5);
 const REST_AFTER: Duration = Duration::from_secs(2 * 60);
 const REST_LOOK_EVERY: Duration = Duration::from_secs(15);
 /// About when a parent should hear that its worker can't start without the user.
+/// How long a headless `claude -p` may take: under the hub's wait for a machine's answer, so the
+/// caller hears why instead of the hub giving up.
+pub const HEADLESS_WAIT: Duration = Duration::from_secs(240);
 const FIRST_RUN_WAIT: Duration = Duration::from_secs(60);
 /// How many times the first-run watch reads a starting session's screen before it stops.
 const FIRST_RUN_LOOKS: u32 = 10;
@@ -256,6 +259,57 @@ pub(crate) const INHERITED_SESSION_ENV: [&str; 12] = [
 pub struct Headless<'a> {
     pub env: &'a [(String, String)],
     pub strip: &'a [&'a str],
+}
+
+impl Headless<'_> {
+    /// Runs `claude -p` with `args`, `prompt` on its stdin, and answers its stdout. Past `wait` it
+    /// kills claude, since a wedged one would hold the call forever.
+    pub fn run(&self, claude: &Path, cwd: &Path, path: Option<&str>, args: &[&str], prompt: &str, wait: Duration) -> Result<String, String> {
+        use std::io::{Read, Write};
+        let mut command = process::command(claude);
+        command.arg("-p").args(args).current_dir(cwd).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        for key in INHERITED_SESSION_ENV.iter().chain(self.strip) {
+            command.env_remove(key);
+        }
+        command.envs(self.env.iter().cloned());
+        if let Some(path) = path {
+            command.env("PATH", path);
+        }
+        let mut child = command.spawn().map_err(|e| format!("couldn't run claude: {e}"))?;
+        let mut stdin = child.stdin.take().expect("piped");
+        let prompt = prompt.to_owned();
+        std::thread::spawn(move || stdin.write_all(prompt.as_bytes()));
+        let drain = |mut pipe: Box<dyn Read + Send>| {
+            std::thread::spawn(move || {
+                let mut bytes = vec![];
+                let _ = pipe.read_to_end(&mut bytes);
+                String::from_utf8_lossy(&bytes).into_owned()
+            })
+        };
+        let stdout = drain(Box::new(child.stdout.take().expect("piped")));
+        let stderr = drain(Box::new(child.stderr.take().expect("piped")));
+        let deadline = Instant::now() + wait;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+                Ok(None) => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    // Not joined: a grandchild may still hold the pipes open.
+                    return Err("claude did not answer in time".into());
+                }
+                Err(e) => return Err(format!("couldn't run claude: {e}")),
+            }
+        };
+        let stdout = stdout.join().unwrap_or_default();
+        if !status.success() {
+            let stderr = stderr.join().unwrap_or_default();
+            let why = if stderr.trim().is_empty() { stdout.trim() } else { stderr.trim() };
+            return Err(format!("claude: {why}"));
+        }
+        Ok(stdout)
+    }
 }
 
 /// Appends `bytes` to `kept` and keeps its last `limit` bytes. Room is made before the bytes go
