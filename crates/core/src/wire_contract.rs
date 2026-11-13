@@ -107,6 +107,7 @@ pub fn current(version: &str, routes: &[&str]) -> Contract {
     outbound.insert("DelegationStats".into(), schemas::<crate::delegate::DelegationStats>());
     outbound.insert("BoxUsage".into(), schemas::<upstash::BoxUsage>());
     outbound.insert("StuckBox".into(), schemas::<upstash::StuckBox>());
+    outbound.insert("UnclaimedEnd".into(), schemas::<crate::delegate::UnclaimedEnd>());
     outbound.insert("SessionMarks".into(), schemas::<crate::marks::SessionMarks>());
     outbound.insert("ActAnswer".into(), schemas::<crate::surface::ActAnswer>());
     outbound.insert("AuditEntry".into(), schemas::<crate::surface::AuditEntry>());

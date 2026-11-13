@@ -3635,6 +3635,9 @@ enum RawReply {
     Err(String),
     /// Reads the call, then drops the connection without answering, as a machine that crashed mid-call.
     Hangup,
+    /// Answers from a thread of its own once the closure returns, while the socket goes on reading,
+    /// as a node answers a call that waits.
+    Later(Box<dyn FnOnce() -> Value + Send>),
 }
 
 /// A machine socket the test scripts, which reconnects after a hangup and logs every call it got.
@@ -3695,6 +3698,13 @@ impl RawMachine {
                     match answer(&frame["call"]) {
                         RawReply::Ok(value) => ws.send(Message::text(json!({ "type": "reply", "id": frame["id"], "ok": value }).to_string())).unwrap(),
                         RawReply::Err(err) => ws.send(Message::text(json!({ "type": "reply", "id": frame["id"], "err": err }).to_string())).unwrap(),
+                        RawReply::Later(answer) => {
+                            let (queued, id) = (queued.clone(), frame["id"].clone());
+                            std::thread::spawn(move || {
+                                let value = answer();
+                                queued.lock().unwrap().push(json!({ "type": "reply", "id": id, "ok": value }));
+                            });
+                        }
                         RawReply::Hangup => {
                             if let MaybeTlsStream::Plain(stream) = ws.get_mut() {
                                 let _ = stream.shutdown(Shutdown::Both);
@@ -8588,6 +8598,1470 @@ fn box_usage_never_shows_one_account_the_boxes_or_tasks_of_another() {
     for leaked in ["site", "ana-mac", "worker", "ghp_"] {
         assert!(!b.to_string().contains(leaked), "ana's {leaked} reached bob: {b}");
     }
+}
+
+// ---- Scheduled tasks (0.18.2 Ideas+Tasks PR 4): stored and edited, nothing fires them yet ----
+
+/// A task body as an app or an agent sends it: a weekday-morning prompt to the Orchestrator in São Paulo.
+fn task_body(title: &str) -> Value {
+    json!({
+        "id": "", "title": title, "schedule": { "kind": "cron", "expr": "0 9 * * 1-5" }, "tz": "America/Sao_Paulo",
+        "target": { "kind": "orchestrator" }, "action": { "kind": "prompt", "text": "Summarise yesterday" },
+        "enabled": true, "created_by": { "kind": "user" }, "created_at": 0, "updated_at": 0
+    })
+}
+
+fn save_schedule(client: &mut Client, task: Value) -> Result<Value, String> {
+    client.hub(json!({ "cmd": "save_schedule", "task": task }))
+}
+
+struct Schedules {
+    _hub: TestHub,
+    ana: Client,
+    bob: Client,
+    raw: RawMachine,
+    machine: String,
+}
+
+impl Schedules {
+    fn start(name: &str) -> Schedules {
+        let hub = TestHub::start(name);
+        let url = hub.url.clone();
+        let (ana_token, _, mut ana) = signed_in(&url, "ana@example.test");
+        let (_, _, bob) = signed_in(&url, "bob@example.test");
+        let tab = json!({ "id": "tab-agent", "cwd": "/a/app", "bypass": false, "running": true, "status": "working", "title": "Planner", "message": null, "resume_at": null, "opened": 1, "session": "agent-conv" });
+        let (machine, machine_token) = account::register_machine(&url, &ana_token, "ana-mac", "linux").unwrap();
+        let raw = RawMachine::start_with(&url, &machine_token, vec![json!({ "kind": "tabs", "tabs": [tab] })], |_| RawReply::Ok(Value::Null));
+        ana.wait("ana-mac's tabs", |f| f["type"] == "event" && f["event"]["kind"] == "tabs");
+        Schedules { _hub: hub, ana, bob, raw, machine: machine.id }
+    }
+
+    fn act(&self, action: &str, args: Value) -> Result<Value, String> {
+        self.raw.ask(json!({ "cmd": "act", "act": { "tab": "tab-agent", "action": action, "args": args } }))
+    }
+
+    /// The user unlocks and approves the confirmation `held` answered, and the outcome.
+    fn approve(&mut self, held: &Value) -> Value {
+        assert_eq!(held["outcome"], "pending", "{held}");
+        self.ana.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+        self.ana.hub(json!({ "cmd": "decide_confirmation", "id": held["id"], "approve": true })).unwrap()["outcome"].clone()
+    }
+
+    /// Why the confirmation `held` answered waits, as the user's app shows it.
+    fn about(&mut self, held: &Value) -> String {
+        let all = self.ana.hub(json!({ "cmd": "confirmations" })).unwrap();
+        all.as_array().unwrap().iter().find(|c| c["id"] == held["id"]).map(|c| c["about"].as_str().unwrap().to_owned()).unwrap_or_default()
+    }
+
+    /// The account's task `id` as the user's app lists it.
+    fn task(&mut self, id: &str) -> Value {
+        self.ana.hub(json!({ "cmd": "list_schedules" })).unwrap().as_array().unwrap().iter().find(|t| t["id"] == id).cloned().unwrap_or(Value::Null)
+    }
+
+    fn titles(&mut self) -> Vec<String> {
+        self.ana.hub(json!({ "cmd": "list_schedules" })).unwrap().as_array().unwrap().iter().map(|t| t["title"].as_str().unwrap().to_owned()).collect()
+    }
+}
+
+#[test]
+fn a_task_is_created_listed_edited_paused_and_deleted_and_a_dry_run_stores_nothing() {
+    let mut s = Schedules::start("sched_crud");
+    // A dry run answers the next three runs in the task's zone, 09:00 in São Paulo being 12:00 UTC, and stores nothing.
+    let dry = s.ana.hub(json!({ "cmd": "save_schedule", "task": task_body("Digest"), "dry_run": true })).unwrap();
+    assert_eq!(dry["task"], Value::Null);
+    let next = dry["next"].as_array().unwrap();
+    assert_eq!(next.len(), 3);
+    for run in next {
+        assert!(run["local"].as_str().unwrap().ends_with("09:00 -03"), "{run}");
+        assert_eq!(run["at"].as_i64().unwrap() % 86400, 12 * 3600, "{run}");
+    }
+    assert_eq!(s.titles(), Vec::<String>::new(), "a dry run stored nothing");
+    assert_eq!(s.ana.hub(json!({ "cmd": "get_settings" })).unwrap().get("schedules"), None, "and none ride the settings");
+
+    let saved = save_schedule(&mut s.ana, task_body("Digest")).unwrap();
+    let task = &saved["task"];
+    let id = task["id"].as_str().unwrap().to_owned();
+    assert!(uuid::Uuid::parse_str(&id).is_ok(), "the hub gives a new task its id");
+    assert_eq!(task["next_at"], next[0]["at"], "next_at is computed with next_after on the save");
+    assert_eq!(task["created_by"], json!({ "kind": "user" }));
+    assert_eq!(saved["next"].as_array().unwrap().len(), 3);
+    assert_eq!(s.ana.hub(json!({ "cmd": "get_settings" })).unwrap()["schedules"][0]["id"], id.as_str(), "the settings push carries it");
+
+    // An edit keeps the creator and the creation time, and recomputes next_at.
+    let created_at = task["created_at"].clone();
+    let edited = save_schedule(&mut s.ana, json!({ "id": id, "title": "Morning digest", "schedule": { "kind": "cron", "expr": "30 10 * * *" }, "tz": "America/Sao_Paulo",
+        "target": { "kind": "orchestrator" }, "action": { "kind": "prompt", "text": "Summarise" }, "enabled": true, "grace_mins": 5,
+        "created_by": { "kind": "agent", "role": "captain" }, "created_at": 1, "updated_at": 1 })).unwrap();
+    assert_eq!((&edited["task"]["id"], &edited["task"]["title"], &edited["task"]["created_by"], &edited["task"]["created_at"]), (&json!(id), &json!("Morning digest"), &json!({ "kind": "user" }), &created_at));
+    assert_eq!(edited["task"]["grace_mins"], 5);
+    assert_eq!(edited["task"]["next_at"].as_i64().unwrap() % 86400, 13 * 3600 + 30 * 60, "10:30 in São Paulo");
+    assert_eq!(s.titles(), ["Morning digest"], "an edit replaces, never adds");
+
+    let paused = s.ana.hub(json!({ "cmd": "pause_schedule", "id": id, "paused": true })).unwrap();
+    assert_eq!((&paused["enabled"], &paused["next_at"]), (&json!(false), &Value::Null));
+    let resumed = s.ana.hub(json!({ "cmd": "pause_schedule", "id": id, "paused": false })).unwrap();
+    assert_eq!(resumed["enabled"], true);
+    assert!(resumed["next_at"].as_i64().is_some());
+    assert_eq!(s.ana.hub(json!({ "cmd": "schedule_runs", "id": id, "limit": 5 })), Ok(json!([])), "nothing fires it yet");
+
+    assert_eq!(s.ana.hub(json!({ "cmd": "delete_schedule", "id": id })), Ok(Value::Null));
+    assert_eq!(s.titles(), Vec::<String>::new());
+    assert_eq!(s.ana.hub(json!({ "cmd": "delete_schedule", "id": id })), Err(format!("this account has no task {id}")));
+
+    // The refusals are readable.
+    let mut bad = task_body("Bad");
+    bad["schedule"] = json!({ "kind": "cron", "expr": "every day" });
+    assert!(save_schedule(&mut s.ana, bad).unwrap_err().contains("cron"));
+    let mut past = task_body("Past");
+    past["schedule"] = json!({ "kind": "once", "at": "2001-01-01T09:00" });
+    assert!(save_schedule(&mut s.ana, past).unwrap_err().contains("already passed"));
+    let mut zone = task_body("Zone");
+    zone["tz"] = json!("Mars/Base");
+    assert!(save_schedule(&mut s.ana, zone).unwrap_err().contains("time zone"));
+}
+
+#[test]
+fn an_older_settings_json_without_schedules_still_loads() {
+    let mut s = Schedules::start("sched_old_settings");
+    let mut settings = s.ana.hub(json!({ "cmd": "get_settings" })).unwrap();
+    settings.as_object_mut().unwrap().remove("schedules");
+    let loaded: pinned_core::connectors::Settings = serde_json::from_value(settings).unwrap();
+    assert!(loaded.schedules.is_empty());
+    save_schedule(&mut s.ana, task_body("Digest")).unwrap();
+    let with: pinned_core::connectors::Settings = serde_json::from_value(s.ana.hub(json!({ "cmd": "get_settings" })).unwrap()).unwrap();
+    assert_eq!(with.schedules.len(), 1);
+}
+
+#[test]
+fn an_agent_task_is_active_at_once_with_a_notice_and_audit_rows_carry_its_creator() {
+    let mut s = Schedules::start("sched_agent");
+    let done = s.act("save_schedule", json!({ "task": task_body("Agent digest") })).unwrap();
+    assert_eq!(done["outcome"], "done", "no OK is needed");
+    let task = &done["result"]["task"];
+    assert_eq!(task["enabled"], true);
+    assert!(task["next_at"].as_i64().is_some(), "active at once");
+    assert_eq!(task["created_by"], json!({ "kind": "agent", "role": "session", "machine": s.machine, "tab": "tab-agent", "session_title": "Planner" }));
+    assert!(task["fyi"].as_i64().is_some(), "the Inbox FYI row waits for the user to look");
+    let id = task["id"].as_str().unwrap();
+    assert_eq!(s.ana.hub(json!({ "cmd": "list_schedules" })).unwrap()[0]["fyi"], task["fyi"], "the user's app sees it");
+
+    // The user's own edit counts as looking.
+    let mut seen = s.ana.hub(json!({ "cmd": "list_schedules" })).unwrap()[0].clone();
+    seen["title"] = json!("Agent digest, looked at");
+    assert_eq!(save_schedule(&mut s.ana, seen).unwrap()["task"]["fyi"], Value::Null);
+
+    s.act("pause_schedule", json!({ "id": id, "paused": true })).unwrap();
+    let trail = s.ana.hub(json!({ "cmd": "agent_audit" })).unwrap();
+    let rows: Vec<&Value> = trail.as_array().unwrap().iter().filter(|e| e["task"] == id).collect();
+    assert_eq!(rows.iter().map(|e| e["action"].as_str().unwrap()).collect::<Vec<_>>(), ["pause_schedule", "save_schedule"]);
+    for row in &rows {
+        assert_eq!((&row["tab"], &row["role"], &row["machine"]), (&json!("tab-agent"), &json!("session"), &json!(s.machine)), "who: {row}");
+    }
+    assert!(rows[1]["detail"].as_str().unwrap().contains("Agent digest") && rows[1]["detail"].as_str().unwrap().contains("-03"), "{}", rows[1]);
+
+    // An older audit row without the field still reads.
+    assert!(trail.as_array().unwrap().iter().all(|e| e.get("task").is_none() || e["task"].is_string()));
+}
+
+#[test]
+fn an_agent_save_with_approvals_waits_for_the_user_and_is_not_saved() {
+    let mut s = Schedules::start("sched_approvals");
+    let mut body = task_body("Nightly install");
+    body["approvals"] = json!([{ "item": "network-install", "must_contain": "npm ci", "repo": "github.com/acme/app" }]);
+    let held = s.act("save_schedule", json!({ "task": body })).unwrap();
+    assert_eq!(held["outcome"], "pending");
+    assert_eq!(s.titles(), Vec::<String>::new(), "nothing is saved before the user decides");
+    let id = held["id"].as_str().unwrap();
+    s.ana.wait("the confirmation", |f| f["type"] == "confirmations" && f["items"][0]["id"] == id && f["items"][0]["action"] == "save_schedule");
+    // Approving runs the save, as the agent who asked.
+    s.ana.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    let decided = s.ana.hub(json!({ "cmd": "decide_confirmation", "id": id, "approve": true })).unwrap();
+    assert_eq!(decided["outcome"], "done", "{decided}");
+    let tasks = s.ana.hub(json!({ "cmd": "list_schedules" })).unwrap();
+    assert_eq!(tasks[0]["approvals"][0]["must_contain"], "npm ci");
+    assert_eq!(tasks[0]["created_by"]["kind"], "agent", "an approval makes the user the approver, not the creator");
+    assert_eq!(tasks[0]["created_by"]["tab"], "tab-agent");
+}
+
+#[test]
+fn an_agent_may_not_repeat_every_five_minutes_nor_hold_more_than_twenty_tasks() {
+    let mut s = Schedules::start("sched_caps");
+    let mut fast = task_body("Fast");
+    fast["schedule"] = json!({ "kind": "cron", "expr": "*/5 * * * *" });
+    let refused = s.act("save_schedule", json!({ "task": fast.clone() })).unwrap_err();
+    assert!(refused.contains("every 5 minutes") && refused.contains("15"), "{refused}");
+    assert_eq!(s.titles(), Vec::<String>::new());
+    assert!(save_schedule(&mut s.ana, fast).is_ok(), "the user has no such floor");
+    let fast_id = s.ana.hub(json!({ "cmd": "list_schedules" })).unwrap()[0]["id"].clone();
+    s.ana.hub(json!({ "cmd": "delete_schedule", "id": fast_id })).unwrap();
+
+    // An edit of an hourly task to every 5 minutes is refused too, and leaves it hourly.
+    let mut hourly = task_body("Hourly");
+    hourly["schedule"] = json!({ "kind": "cron", "expr": "0 * * * *" });
+    let hourly = s.act("save_schedule", json!({ "task": hourly })).unwrap()["result"]["task"].clone();
+    let mut faster = hourly.clone();
+    faster["schedule"] = json!({ "kind": "cron", "expr": "*/5 * * * *" });
+    let refused = s.act("save_schedule", json!({ "task": faster })).unwrap_err();
+    assert!(refused.contains("every 5 minutes"), "{refused}");
+    assert_eq!(s.task(hourly["id"].as_str().unwrap())["schedule"]["expr"], "0 * * * *");
+
+    // The user's own tasks do not count toward the agents' 20.
+    for n in 0..2 {
+        save_schedule(&mut s.ana, task_body(&format!("User {n}"))).unwrap();
+    }
+    for n in 0..17 {
+        let mut task = task_body(&format!("Task {n}"));
+        task["schedule"] = json!({ "kind": "cron", "expr": format!("{n} 9 * * *") });
+        assert_eq!(s.act("save_schedule", json!({ "task": task })).unwrap()["outcome"], "done", "task {n}");
+    }
+    // 18 agents' tasks: of five saves at once, two pass.
+    let raced: Vec<Result<Value, String>> = std::thread::scope(|scope| {
+        let saves: Vec<_> = (0..5).map(|n| {
+            let s = &s;
+            scope.spawn(move || {
+                let mut task = task_body(&format!("Raced {n}"));
+                task["schedule"] = json!({ "kind": "cron", "expr": format!("{n} 10 * * *") });
+                s.act("save_schedule", json!({ "task": task }))
+            })
+        }).collect();
+        saves.into_iter().map(|save| save.join().unwrap()).collect()
+    });
+    assert_eq!(raced.iter().filter(|r| r.is_ok()).count(), 2, "{raced:?}");
+    assert!(raced.iter().filter_map(|r| r.as_ref().err()).all(|e| e.contains("at most 20")), "{raced:?}");
+    let refused = s.act("save_schedule", json!({ "task": task_body("One too many") })).unwrap_err();
+    assert!(refused.contains("at most 20") && refused.contains("20 exist"), "{refused}");
+    assert_eq!(s.titles().len(), 22, "20 of the agents' and 2 of the user's");
+    assert!(save_schedule(&mut s.ana, task_body("The user's own")).is_ok(), "the cap is on agents");
+    assert_eq!(s.titles().len(), 23);
+}
+
+#[test]
+fn an_agent_deleting_the_users_task_waits_but_its_own_goes_at_once() {
+    let mut s = Schedules::start("sched_delete");
+    let users = save_schedule(&mut s.ana, task_body("Users")).unwrap()["task"]["id"].as_str().unwrap().to_owned();
+    let own = s.act("save_schedule", json!({ "task": task_body("Own") })).unwrap()["result"]["task"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(s.act("delete_schedule", json!({ "id": own })).unwrap()["outcome"], "done");
+    let held = s.act("delete_schedule", json!({ "id": users })).unwrap();
+    assert_eq!(held["outcome"], "pending");
+    assert_eq!(s.titles(), ["Users"], "still there");
+    s.ana.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    assert_eq!(s.ana.hub(json!({ "cmd": "decide_confirmation", "id": held["id"], "approve": true })).unwrap()["outcome"], "done");
+    assert_eq!(s.titles(), Vec::<String>::new());
+    let rows = s.ana.hub(json!({ "cmd": "agent_audit" })).unwrap();
+    assert!(rows.as_array().unwrap().iter().any(|e| e["action"] == "delete_schedule" && e["outcome"] == "pending" && e["task"] == users.as_str()), "the held delete names its task");
+}
+
+#[test]
+fn an_agent_deleting_the_users_task_by_a_padded_wrong_or_missing_id_waits_or_is_refused() {
+    let mut s = Schedules::start("sched_delete_ids");
+    let users = save_schedule(&mut s.ana, task_body("Users")).unwrap()["task"]["id"].as_str().unwrap().to_owned();
+    // A padded id names the same task the delete would, so it waits for the user like the plain one.
+    for padded in [format!(" {users}"), format!("{users} "), format!(" {users}\t")] {
+        let held = s.act("delete_schedule", json!({ "id": padded })).unwrap();
+        assert_eq!(held["outcome"], "pending", "{padded:?}: {held}");
+        assert_eq!(s.titles(), ["Users"], "{padded:?} deleted nothing");
+    }
+    // An id that is no task id, of the wrong type, or missing is refused before anything runs.
+    for args in [json!({ "id": 42 }), json!({}), json!({ "id": "not-a-task" }), json!({ "id": format!("{users}x") }), json!({ "id": uuid::Uuid::new_v4().to_string() })] {
+        let refused = s.act("delete_schedule", args.clone());
+        assert!(refused.is_err(), "{args}: {refused:?}");
+        assert_eq!(s.titles(), ["Users"], "{args} deleted nothing");
+    }
+    for (action, args) in [("pause_schedule", json!({ "id": 42, "paused": true })), ("pause_schedule", json!({ "id": "nope", "paused": true })), ("pause_schedule", json!({ "id": users })), ("schedule_runs", json!({ "id": "nope" }))] {
+        assert!(s.act(action, args.clone()).is_err(), "{action} {args}");
+    }
+    let mut odd = task_body("Odd");
+    odd["id"] = json!(" not-a-task ");
+    assert!(s.act("save_schedule", json!({ "task": odd })).is_err());
+    assert_eq!(s.titles(), ["Users"]);
+    assert_eq!(s.ana.hub(json!({ "cmd": "list_schedules" })).unwrap()[0]["enabled"], true, "and nothing paused it");
+    let rows = s.ana.hub(json!({ "cmd": "agent_audit" })).unwrap();
+    let refused = rows.as_array().unwrap().iter().filter(|e| e["action"] == "delete_schedule" && e["outcome"] == "refused").count();
+    assert_eq!(refused, 5, "each refusal has its audit row");
+}
+
+/// A task body with one approval that needs no release protection.
+fn approved_body(title: &str) -> Value {
+    let mut body = task_body(title);
+    body["approvals"] = json!([{ "item": "network-install", "must_contain": "npm ci", "repo": "github.com/acme/app" }]);
+    body
+}
+
+#[test]
+fn an_agent_starting_a_task_with_approvals_again_waits_and_it_stays_paused_until_approved() {
+    let mut s = Schedules::start("sched_unpause_approvals");
+    // The agent's own task, approved by the user once.
+    let saved = s.act("save_schedule", json!({ "task": approved_body("Nightly install") })).unwrap();
+    assert_eq!(s.approve(&saved), "done");
+    let id = s.ana.hub(json!({ "cmd": "list_schedules" })).unwrap()[0]["id"].as_str().unwrap().to_owned();
+    // Pausing its own task goes at once; starting it again would run the approved steps, so it waits.
+    assert_eq!(s.act("pause_schedule", json!({ "id": id, "paused": true })).unwrap()["outcome"], "done");
+    let held = s.act("pause_schedule", json!({ "id": id, "paused": false })).unwrap();
+    assert_eq!(held["outcome"], "pending", "{held}");
+    assert!(s.about(&held).contains("npm ci"), "the Confirm says why: {}", s.about(&held));
+    assert_eq!(s.task(&id)["enabled"], false, "still paused until the user approves");
+    assert_eq!(s.approve(&held), "done");
+    assert_eq!(s.task(&id)["enabled"], true);
+}
+
+#[test]
+fn an_agent_pausing_or_starting_the_users_task_waits() {
+    let mut s = Schedules::start("sched_pause_users");
+    let id = save_schedule(&mut s.ana, task_body("Users")).unwrap()["task"]["id"].as_str().unwrap().to_owned();
+    let held = s.act("pause_schedule", json!({ "id": id, "paused": true })).unwrap();
+    assert_eq!(held["outcome"], "pending", "{held}");
+    assert!(s.about(&held).contains("pause \"Users\", a task the user created"), "{}", s.about(&held));
+    assert_eq!(s.task(&id)["enabled"], true, "still running until the user approves");
+    assert_eq!(s.approve(&held), "done");
+    assert_eq!(s.task(&id)["enabled"], false);
+    let held = s.act("pause_schedule", json!({ "id": id, "paused": false })).unwrap();
+    assert_eq!(held["outcome"], "pending", "starting it again waits too");
+    assert_eq!(s.task(&id)["enabled"], false);
+}
+
+#[test]
+fn starting_a_one_time_task_whose_time_passed_is_refused() {
+    let mut s = Schedules::start("sched_unpause_past");
+    let mut once = task_body("Once");
+    once["schedule"] = json!({ "kind": "once", "at": "2099-01-01T09:00" });
+    let id = save_schedule(&mut s.ana, once).unwrap()["task"]["id"].as_str().unwrap().to_owned();
+    s.ana.hub(json!({ "cmd": "pause_schedule", "id": id, "paused": true })).unwrap();
+    admin_on(&s._hub.database, "update tasks set task = jsonb_set(task, '{schedule,at}', '\"2001-01-01T09:00\"')");
+    let refused = s.ana.hub(json!({ "cmd": "pause_schedule", "id": id, "paused": false })).unwrap_err();
+    assert!(refused.contains("already passed"), "{refused}");
+    assert_eq!((&s.task(&id)["enabled"], &s.task(&id)["next_at"]), (&json!(false), &Value::Null), "it stays paused, not on with no next run");
+}
+
+#[test]
+fn an_agent_editing_the_users_task_waits_and_it_is_unchanged_until_approved() {
+    let mut s = Schedules::start("sched_edit_users");
+    let id = save_schedule(&mut s.ana, task_body("Users")).unwrap()["task"]["id"].as_str().unwrap().to_owned();
+    let mut edit = task_body("Taken over");
+    edit["id"] = json!(format!(" {id} "));
+    edit["action"] = json!({ "kind": "prompt", "text": "Something else" });
+    let held = s.act("save_schedule", json!({ "task": edit })).unwrap();
+    assert_eq!(held["outcome"], "pending", "{held}");
+    assert!(s.about(&held).contains("edit \"Users\", a task the user created"), "{}", s.about(&held));
+    assert_eq!((&s.task(&id)["title"], &s.task(&id)["action"]["text"]), (&json!("Users"), &json!("Summarise yesterday")), "unchanged until the user approves");
+    assert_eq!(s.approve(&held), "done");
+    assert_eq!((&s.task(&id)["title"], &s.task(&id)["created_by"]), (&json!("Taken over"), &json!({ "kind": "user" })), "an approved edit keeps the creator");
+}
+
+#[test]
+fn an_agent_edits_its_own_task_at_once() {
+    let mut s = Schedules::start("sched_edit_own");
+    let id = s.act("save_schedule", json!({ "task": task_body("Own") })).unwrap()["result"]["task"]["id"].as_str().unwrap().to_owned();
+    let mut edit = task_body("Own, renamed");
+    edit["id"] = json!(id);
+    let done = s.act("save_schedule", json!({ "task": edit })).unwrap();
+    assert_eq!(done["outcome"], "done", "{done}");
+    assert_eq!(s.titles(), ["Own, renamed"]);
+    assert_eq!(s.ana.hub(json!({ "cmd": "confirmations" })), Ok(json!([])), "nothing waits");
+}
+
+#[test]
+fn an_agent_dry_run_with_approvals_holds_nothing_and_stores_nothing() {
+    let mut s = Schedules::start("sched_dry_approvals");
+    let dry = s.act("save_schedule", json!({ "task": approved_body("Nightly install"), "dry_run": true })).unwrap();
+    assert_eq!(dry["outcome"], "done", "{dry}");
+    assert_eq!((dry["result"]["task"].clone(), dry["result"]["next"].as_array().map(Vec::len)), (Value::Null, Some(3)));
+    assert_eq!(s.ana.hub(json!({ "cmd": "confirmations" })), Ok(json!([])), "no confirmation");
+    assert_eq!(s.titles(), Vec::<String>::new(), "nothing stored");
+}
+
+#[test]
+fn changing_what_a_task_does_or_where_it_goes_takes_its_approvals_away() {
+    let mut s = Schedules::start("sched_approvals_clear");
+    let saved = save_schedule(&mut s.ana, approved_body("Install")).unwrap()["task"].clone();
+    let id = saved["id"].as_str().unwrap().to_owned();
+    let approvals = saved["approvals"].clone();
+    assert_eq!(approvals.as_array().map(Vec::len), Some(1));
+    // A new title keeps them.
+    let mut renamed = saved.clone();
+    renamed["title"] = json!("Install, renamed");
+    assert_eq!(save_schedule(&mut s.ana, renamed.clone()).unwrap()["task"]["approvals"], approvals);
+    // Another prompt with the same approvals takes them away.
+    let mut other = renamed.clone();
+    other["action"] = json!({ "kind": "prompt", "text": "Install and publish" });
+    assert_eq!(save_schedule(&mut s.ana, other.clone()).unwrap()["task"]["approvals"], json!([]), "a new action");
+    assert_eq!(s.task(&id)["approvals"], json!([]));
+    // Granting them again on the new action keeps them; then another target takes them away.
+    assert_eq!(save_schedule(&mut s.ana, other.clone()).unwrap()["task"]["approvals"], approvals, "granted again");
+    let mut moved = other;
+    moved["target"] = json!({ "kind": "captain", "project": "github.com/acme/app" });
+    assert_eq!(save_schedule(&mut s.ana, moved).unwrap()["task"]["approvals"], json!([]), "a new target");
+}
+
+#[test]
+fn an_agents_task_is_stored_with_secrets_masked_and_the_users_as_typed() {
+    let mut s = Schedules::start("sched_secrets");
+    let fake = "sk-ant-api03-FAKEFAKEFAKEFAKE0000";
+    let mut body = task_body(&format!("Use {fake}"));
+    body["action"] = json!({ "kind": "prompt", "text": format!("Call the API with {fake} and report") });
+    let done = s.act("save_schedule", json!({ "task": body.clone() })).unwrap();
+    assert_eq!(done["outcome"], "done", "{done}");
+    let listed = s.ana.hub(json!({ "cmd": "list_schedules" })).unwrap();
+    assert!(listed[0]["action"]["text"].as_str().unwrap().contains("[hidden]") && listed[0]["title"].as_str().unwrap().contains("[hidden]"), "{listed}");
+    assert!(!listed.to_string().contains("FAKEFAKE"), "{listed}");
+    // With approvals it waits, and once approved its must_contain is masked too.
+    let mut approved = approved_body("Install");
+    approved["approvals"][0]["must_contain"] = json!(format!("npm ci --token {fake}"));
+    let held = s.act("save_schedule", json!({ "task": approved })).unwrap();
+    assert!(!s.about(&held).contains("FAKEFAKE"), "the Confirm's reason is masked");
+    assert_eq!(s.approve(&held), "done");
+    let rows = s._hub.runtime.block_on(async {
+        let (client, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), s._hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        client.query("select task::text from tasks", &[]).await.unwrap().iter().map(|r| r.get::<_, String>(0)).collect::<Vec<_>>()
+    });
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| !row.contains("FAKEFAKE")), "no stored row holds the token: {rows:?}");
+    let trail = s.ana.hub(json!({ "cmd": "agent_audit" })).unwrap();
+    assert!(trail.as_array().unwrap().iter().all(|e| !e["detail"].as_str().unwrap_or_default().contains("FAKEFAKE")), "nor an audit detail: {trail}");
+    // The user's own save is stored as typed.
+    let mine = save_schedule(&mut s.ana, body).unwrap();
+    assert!(mine["task"]["action"]["text"].as_str().unwrap().contains(fake));
+}
+
+#[test]
+fn a_held_schedule_save_lists_its_arguments_masked_and_the_approved_task_is_stored_masked_once() {
+    let mut s = Schedules::start("sched_held_args");
+    let fake = "sk-ant-api03-FAKEFAKEFAKEFAKE0000";
+    let mut body = approved_body(&format!("Use {fake}"));
+    body["action"] = json!({ "kind": "prompt", "text": format!("Call the API with {fake} and report") });
+    let held = s.act("save_schedule", json!({ "task": body })).unwrap();
+    assert_eq!(held["outcome"], "pending", "{held}");
+    // What every app of the account (and its machine sockets) is told about the held act.
+    let listed = s.ana.hub(json!({ "cmd": "confirmations" })).unwrap();
+    let waiting = listed.as_array().unwrap().iter().find(|c| c["id"] == held["id"]).expect("the act is listed");
+    let (title, text) = (waiting["args"]["task"]["title"].as_str().unwrap(), waiting["args"]["task"]["action"]["text"].as_str().unwrap());
+    assert!(!title.contains("FAKEFAKEFAKEFAKE0000"), "the held title: {title}");
+    assert!(!text.contains("FAKEFAKEFAKEFAKE0000"), "the held prompt text: {text}");
+    assert!(!waiting.to_string().contains("FAKEFAKE"), "nothing of the held act holds the key: {waiting}");
+    // Approving runs what the user saw: one stored task, masked.
+    assert_eq!(s.approve(&held), "done");
+    let rows = s._hub.runtime.block_on(async {
+        let (client, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), s._hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        client.query("select task::text from tasks", &[]).await.unwrap().iter().map(|r| r.get::<_, String>(0)).collect::<Vec<_>>()
+    });
+    assert_eq!(rows.len(), 1, "the act ran once: {rows:?}");
+    assert!(rows[0].contains("[hidden]") && !rows[0].contains("FAKEFAKE"), "the stored task is masked: {rows:?}");
+}
+
+#[test]
+fn an_unreadable_task_or_run_leaves_the_settings_and_the_other_tasks_readable() {
+    let mut s = Schedules::start("sched_unreadable");
+    for title in ["Kept", "Broken", "Also kept"] {
+        save_schedule(&mut s.ana, task_body(title)).unwrap();
+    }
+    let broken = s.ana.hub(json!({ "cmd": "list_schedules" })).unwrap().as_array().unwrap().iter().find(|t| t["title"] == "Broken").unwrap()["id"].as_str().unwrap().to_owned();
+    let kept = s.ana.hub(json!({ "cmd": "list_schedules" })).unwrap().as_array().unwrap().iter().find(|t| t["title"] == "Kept").unwrap()["id"].as_str().unwrap().to_owned();
+    admin_on(&s._hub.database, &format!("update tasks set task = task - 'schedule' where id = '{broken}'"));
+    admin_on(&s._hub.database, &format!("insert into task_runs (task, account, due_at, state, run) select id, account, 1, 'due', '{{\"not\": \"a run\"}}' from tasks where id = '{kept}'"));
+    let settings = s.ana.hub(json!({ "cmd": "get_settings" }));
+    let mut titles: Vec<String> = settings.expect("the settings still load")["schedules"].as_array().unwrap().iter().map(|t| t["title"].as_str().unwrap().to_owned()).collect();
+    titles.sort();
+    assert_eq!(titles, ["Also kept", "Kept"], "the readable tasks, without the broken one");
+    let mut listed = s.titles();
+    listed.sort();
+    assert_eq!(listed, ["Also kept", "Kept"]);
+}
+
+#[test]
+fn an_agent_reading_one_unreadable_task_gets_a_fixed_error_with_no_account_or_stored_text() {
+    let mut s = Schedules::start("sched_unreadable_one");
+    let id = save_schedule(&mut s.ana, task_body("Broken")).unwrap()["task"]["id"].as_str().unwrap().to_owned();
+    // A stored value that serde would quote in its message.
+    admin_on(&s._hub.database, &format!("update tasks set task = '{{\"schedule\": \"STOREDTEXTMARK\"}}' where id = '{id}'"));
+    let account = s._hub.runtime.block_on(async {
+        let (client, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), s._hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        client.query_one("select account::text from tasks", &[]).await.unwrap().get::<_, String>(0)
+    });
+    let fixed = format!("task {id} could not be read");
+    for (action, args) in [("schedule_runs", json!({ "id": id })), ("delete_schedule", json!({ "id": id })), ("pause_schedule", json!({ "id": id, "paused": true }))] {
+        assert_eq!(s.act(action, args), Err(fixed.clone()), "{action}");
+    }
+    let trail = s.ana.hub(json!({ "cmd": "agent_audit" })).unwrap().to_string();
+    assert!(trail.contains(&fixed), "the audit row holds the fixed error: {trail}");
+    for leaked in [account.as_str(), "STOREDTEXTMARK", "invalid type"] {
+        assert!(!trail.contains(leaked), "the audit trail holds {leaked}: {trail}");
+    }
+}
+
+#[test]
+fn another_account_neither_sees_nor_touches_the_tasks() {
+    let mut s = Schedules::start("sched_isolation");
+    let id = save_schedule(&mut s.ana, task_body("Ana's")).unwrap()["task"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(s.bob.hub(json!({ "cmd": "list_schedules" })), Ok(json!([])));
+    let none = Err(format!("this account has no task {id}"));
+    assert_eq!(s.bob.hub(json!({ "cmd": "pause_schedule", "id": id, "paused": true })), none);
+    assert_eq!(s.bob.hub(json!({ "cmd": "delete_schedule", "id": id })), none);
+    assert_eq!(s.bob.hub(json!({ "cmd": "schedule_runs", "id": id })), none);
+    let mut take = task_body("Bob's edit");
+    take["id"] = json!(id);
+    assert_eq!(save_schedule(&mut s.bob, take), none, "a save with ana's id writes nothing of hers");
+    assert_eq!(s.titles(), ["Ana's"]);
+    assert_eq!(s.ana.hub(json!({ "cmd": "list_schedules" })).unwrap()[0]["enabled"], true);
+    assert_eq!(s.bob.hub(json!({ "cmd": "get_settings" })).unwrap().get("schedules"), None);
+}
+
+#[test]
+fn a_release_approval_is_refused_until_the_user_turns_protection_on_and_no_agent_turns_it_on() {
+    let mut s = Schedules::start("sched_protection");
+    let release = |text: &str, item: &str| {
+        let mut body = task_body("Release");
+        body["approvals"] = json!([{ "item": item, "must_contain": text, "repo": "github.com/acme/app" }]);
+        body
+    };
+    let reason = "pre-approving a release needs tag and main protection; until the user turns that on, a release always stops for them";
+    for (item, text) in [("release", "gh release create"), ("deploy", "railway up"), ("push-to-main", "origin main"), ("network-install", "git push origin v1.2.3")] {
+        assert_eq!(save_schedule(&mut s.ana, release(text, item)), Err(reason.into()), "{item} off");
+    }
+    assert_eq!(s.titles(), Vec::<String>::new());
+    assert_eq!(s.ana.hub(json!({ "cmd": "save_schedule", "task": release("v1.2.3", "release"), "dry_run": true })), Err(reason.into()), "a dry run says so too");
+    assert!(save_schedule(&mut s.ana, release("npm ci", "network-install")).is_ok(), "an approval that is no release needs no protection");
+    for item in ["secrets", "self-grant", "payment"] {
+        assert!(save_schedule(&mut s.ana, release("x", item)).is_err(), "{item} is never granted ahead");
+    }
+
+    // No agent action sets the switch.
+    let agent = s.act("set_release_protection", json!({ "on": true })).unwrap_err();
+    assert!(agent.contains("not open to agents"), "{agent}");
+    assert_eq!(save_schedule(&mut s.ana, release("gh release create v1.2.3", "release")), Err(reason.into()), "still off");
+    // Another account's switch is its own.
+    s.bob.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    assert_eq!(s.bob.hub(json!({ "cmd": "set_release_protection", "on": true })), Ok(json!(true)));
+    assert_eq!(save_schedule(&mut s.ana, release("gh release create v1.2.3", "release")), Err(reason.into()), "bob's switch is bob's");
+
+    s.ana.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    assert_eq!(s.ana.hub(json!({ "cmd": "set_release_protection", "on": true })), Ok(json!(true)));
+    let on = save_schedule(&mut s.ana, release("gh release create v1.2.3", "release")).unwrap();
+    assert_eq!(on["task"]["approvals"][0]["must_contain"], "gh release create v1.2.3");
+    // An agent still needs the user's OK for it.
+    assert_eq!(s.act("save_schedule", json!({ "task": release("railway up", "deploy") })).unwrap()["outcome"], "pending");
+    assert_eq!(s.ana.hub(json!({ "cmd": "set_release_protection", "on": false })), Ok(json!(false)));
+    assert_eq!(save_schedule(&mut s.ana, release("railway up", "deploy")), Err(reason.into()), "off again");
+}
+
+#[test]
+fn release_protection_needs_the_unlock_and_each_change_has_an_audit_row() {
+    let mut s = Schedules::start("sched_protection_unlock");
+    let mut release = task_body("Release");
+    release["approvals"] = json!([{ "item": "release", "must_contain": "gh release create", "repo": "github.com/acme/app" }]);
+    // A login read off the disk is not the user: without the password nothing changes.
+    assert_eq!(s.ana.hub(json!({ "cmd": "set_release_protection", "on": true })), Err(pinned_core::surface::LOCKED.into()));
+    assert!(save_schedule(&mut s.ana, release.clone()).is_err(), "still off");
+    let audited = |s: &mut Schedules| -> Vec<(String, String)> {
+        let rows = s.ana.hub(json!({ "cmd": "agent_audit" })).unwrap();
+        rows.as_array().unwrap().iter().filter(|e| e["action"] == "set_release_protection").map(|e| (e["args"].as_str().unwrap().to_owned(), e["detail"].as_str().unwrap().to_owned())).collect()
+    };
+    assert_eq!(audited(&mut s), Vec::<(String, String)>::new(), "a refused change writes no row");
+
+    s.ana.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    assert_eq!(s.ana.hub(json!({ "cmd": "set_release_protection", "on": true })), Ok(json!(true)));
+    assert!(save_schedule(&mut s.ana, release).is_ok(), "on");
+    assert_eq!(s.ana.hub(json!({ "cmd": "set_release_protection", "on": false })), Ok(json!(false)));
+    assert_eq!(audited(&mut s), [
+        (r#"{"on":false}"#.to_owned(), "the user's app turned release protection off".to_owned()),
+        (r#"{"on":true}"#.to_owned(), "the user's app turned release protection on".to_owned()),
+    ], "who and on or off, newest first");
+}
+
+#[test]
+fn a_worker_target_is_refused_until_held_steps_land() {
+    let mut s = Schedules::start("sched_worker");
+    let mut body = task_body("Worker");
+    body["target"] = json!({ "kind": "worker", "project": "github.com/acme/app" });
+    let refused = save_schedule(&mut s.ana, body.clone()).unwrap_err();
+    assert!(refused.contains("cannot start a new worker yet"), "{refused}");
+    assert!(s.act("save_schedule", json!({ "task": body })).is_err());
+    assert_eq!(s.titles(), Vec::<String>::new());
+    for target in [json!({ "kind": "me" }), json!({ "kind": "captain", "project": "github.com/acme/app" }), json!({ "kind": "session", "session": "agent-conv" })] {
+        let mut ok = task_body("Elsewhere");
+        ok["target"] = target;
+        assert!(save_schedule(&mut s.ana, ok).is_ok());
+    }
+}
+
+/// How many ends the hub holds, for every account or only `account`, as Postgres has them.
+fn held_ends(hub: &TestHub, account: Option<uuid::Uuid>) -> i64 {
+    hub.runtime.block_on(async {
+        let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        db.query_one("select count(*) from held_ends where $1::uuid is null or account = $1", &[&account]).await.unwrap().get(0)
+    })
+}
+
+/// mac, paired to ana's account with a Captain on the `site` checkout and its credentials, so it can go
+/// offline and come back as a laptop that sleeps does: the link drops, the process stays.
+fn sleepy_mac(hub: &TestHub, ana: &mut BoxAccount, dir: &Path) -> (Node, Credentials, String) {
+    hub.boxes.state.lock().unwrap().checkout = Some(("site".into(), SITE.into()));
+    let creds = pair(&hub.url, &mut ana.client, "mac", dir);
+    let mac = Node::start(dir, creds.clone());
+    mac.machine.listen(|_| Err("not in this test".into())).unwrap();
+    ana.client.wait_machines(&[("mac", true)]);
+    origin(&dir.join("site"), SITE);
+    let site = mac.machine.open_project(dir.join("site")).display().to_string();
+    let captain = ana.client.call(&creds.machine_id, json!({ "cmd": "open_orchestrator", "path": site })).unwrap().as_str().unwrap().to_owned();
+    let fresh = json!({ "workflow": { "mode": "fresh" }, "session": { "mode": "off" }, "worker": { "mode": "fresh" }, "orchestrator": { "mode": "fresh" } });
+    ana.client.hub(json!({ "cmd": "set_box_access", "access": fresh })).unwrap();
+    (mac, creds, captain)
+}
+
+/// A box worker for mac's Captain, running: its task id and its tab on the box.
+fn box_worker(hub: &TestHub, ana: &mut BoxAccount, mac_dir: &Path, captain: &str) -> (String, pinned_core::wire::TabView) {
+    let started = delegate_from(mac_dir, captain, json!({ "task": "Run the slow suite.", "title": "Slow suite", "target": { "box": true } })).unwrap();
+    wait_for("the worker thread running on the box", || box_tabs(&hub.boxes).iter().any(|t| t.role == Some(Role::Worker) && t.running));
+    ana.client.wait_machines(&[("mac", true), ("Box · Slow suite", true)]);
+    hub.boxes.with_node(|node| node.machine.listen(|_| Err("not in this test".into())).unwrap());
+    let child = box_tabs(&hub.boxes).into_iter().find(|t| t.role == Some(Role::Worker)).unwrap();
+    (started["taskId"].as_str().unwrap().to_owned(), child)
+}
+
+#[test]
+fn a_worker_box_end_reaches_a_parent_that_was_offline_and_the_box_ends_done_at_once() {
+    let hub = TestHub::start_with_boxes("held_main", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let mac_dir = temp("held-main-mac");
+    let (mut mac, creds, captain) = sleepy_mac(&hub, &mut ana, &mac_dir);
+    let (task, child) = box_worker(&hub, &mut ana, &mac_dir, &captain);
+    let box_dir = hub.boxes.root.join(&hub.boxes.live()[0]);
+
+    eprintln!("scenario: mac's link drops, as a laptop that sleeps");
+    mac.link.take().unwrap().stop();
+    ana.client.wait_machines(&[("mac", false), ("Box · Slow suite", true)]);
+    eprintln!("scenario: the worker on the box ends while mac is offline");
+    let ended_at = Instant::now();
+    hook(&box_dir, json!({ "kind": "agent", "status": "working", "tab": child.id, "session": "s-suite" }));
+    hook(&box_dir, json!({ "kind": "agent", "status": "done", "tab": child.id, "session": "s-suite", "reply": "Suite green; 412 tests pass." }));
+    // Idle and Exited are an hour here: only a delivered or held end ends the box this soon.
+    wait_for("the box to go once the hub held its end", || hub.boxes.live().is_empty() && ana.rows(&hub) == 0);
+    eprintln!("scenario: the box is gone {} ms after its worker ended; held ends: {}", ended_at.elapsed().as_millis(), held_ends(&hub, Some(ana.id)));
+    assert_eq!(held_ends(&hub, Some(ana.id)), 1, "the end outlives the box");
+    assert_eq!(task_status(&mac_dir, &captain, &task)["workState"], "working", "mac, asleep, heard nothing yet");
+
+    eprintln!("scenario: mac comes back");
+    mac.link = Some(link::spawn(creds.clone(), mac.machine.clone(), "0.0.0-test"));
+    wait_for("mac to hear how its worker ended", || task_status(&mac_dir, &captain, &task)["workState"] == "result_available");
+    let status = task_status(&mac_dir, &captain, &task);
+    eprintln!("scenario: mac's task {task}: {} \"{}\"", status["workState"], status["summary"].as_str().unwrap_or_default());
+    assert_eq!(status["summary"].as_str(), Some("Suite green; 412 tests pass."), "{status}");
+    assert!(status["usage"]["box_ms"].as_u64().is_some_and(|ms| ms > 0), "with the box's time: {status}");
+    wait_for("the held row to go once mac answered it", || held_ends(&hub, None) == 0);
+    eprintln!("scenario: held ends after mac took it: {}", held_ends(&hub, None));
+
+    // Once more: the link drops and comes back, and nothing is delivered again.
+    mac.link.take().unwrap().stop();
+    ana.client.wait_machines(&[("mac", false)]);
+    eprintln!("scenario: mac reconnects a second time");
+    let again = RawMachine::start(&hub.url, &creds.machine_token, |_| RawReply::Ok(json!(true)));
+    ana.client.wait_machines(&[("mac", true)]);
+    std::thread::sleep(Duration::from_millis(800));
+    eprintln!("scenario: remote_ended calls on the second reconnect: {}", again.calls("remote_ended"));
+    assert_eq!(again.calls("remote_ended"), 0, "delivered once");
+}
+
+#[test]
+fn a_worker_box_whose_end_the_hub_cannot_keep_unclaimed_keeps_running_and_sends_it_again() {
+    let hub = TestHub::start_with_boxes("held_unkept", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let mac_dir = temp("held-unkept-mac");
+    let (mut mac, creds, captain) = sleepy_mac(&hub, &mut ana, &mac_dir);
+    let (_task, child) = box_worker(&hub, &mut ana, &mac_dir, &captain);
+    let box_dir = hub.boxes.root.join(&hub.boxes.live()[0]);
+
+    // mac is online and answers each end it is passed: first "unknown", then with an error, then true.
+    mac.link.take().unwrap().stop();
+    ana.client.wait_machines(&[("mac", false), ("Box · Slow suite", true)]);
+    let answer = Arc::new(AtomicU64::new(0));
+    let answers = answer.clone();
+    let mac_raw = RawMachine::start(&hub.url, &creds.machine_token, move |call| match (call["cmd"].as_str().unwrap(), answers.load(Ordering::SeqCst)) {
+        ("remote_ended", 0) => RawReply::Ok(json!("unknown")),
+        ("remote_ended", 1) => RawReply::Err("not now".into()),
+        ("remote_ended", _) => RawReply::Ok(json!(true)),
+        _ => RawReply::Ok(Value::Null),
+    });
+    ana.client.wait_machines(&[("mac", true), ("Box · Slow suite", true)]);
+    admin_on(&hub.database, "create function refuse_held() returns trigger language plpgsql as $$ begin raise exception 'disk full'; end $$;
+        create trigger refuse_held before insert on held_ends for each row execute function refuse_held()");
+
+    hook(&box_dir, json!({ "kind": "agent", "status": "working", "tab": child.id, "session": "s-suite" }));
+    hook(&box_dir, json!({ "kind": "agent", "status": "done", "tab": child.id, "session": "s-suite", "reply": "Suite green." }));
+    for (arm, what) in [(0, "mac answered unknown"), (1, "mac answered with an error")] {
+        answer.store(arm, Ordering::SeqCst);
+        let before = mac_raw.calls("remote_ended");
+        // The worker sends its end again only when the hub answered it with an error.
+        wait_for(&format!("{what}, and the worker to send its end again"), || mac_raw.calls("remote_ended") >= before + 2);
+        assert_eq!((hub.boxes.live().len(), ana.rows(&hub)), (1, 1), "{what} and the end is not kept: the box keeps running");
+        assert_eq!(held_ends(&hub, None), 0);
+    }
+
+    admin_on(&hub.database, "drop trigger refuse_held on held_ends");
+    answer.store(2, Ordering::SeqCst);
+    wait_for("the box to go once mac took its end", || hub.boxes.live().is_empty() && ana.rows(&hub) == 0);
+}
+
+#[test]
+fn a_parent_that_looks_before_its_held_end_is_delivered_reads_the_end_not_a_gone_box() {
+    let hub = TestHub::start_with_boxes("held_look_first", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let mac_dir = temp("held-look-first-mac");
+    let (mut mac, creds, captain) = sleepy_mac(&hub, &mut ana, &mac_dir);
+    let (task, child) = box_worker(&hub, &mut ana, &mac_dir, &captain);
+    let box_dir = hub.boxes.root.join(&hub.boxes.live()[0]);
+    let machine = ana.box_machine();
+
+    mac.link.take().unwrap().stop();
+    ana.client.wait_machines(&[("mac", false), ("Box · Slow suite", true)]);
+    hook(&box_dir, json!({ "kind": "agent", "status": "working", "tab": child.id, "session": "s-suite" }));
+    hook(&box_dir, json!({ "kind": "agent", "status": "done", "tab": child.id, "session": "s-suite", "reply": "Suite green; 412 tests pass." }));
+    wait_for("the box, its row and its machine to go", || {
+        hub.boxes.live().is_empty() && ana.rows(&hub) == 0 && hub.runtime.block_on(hub.hub().db.machine_name(ana.id, uuid::Uuid::parse_str(&machine).unwrap())).unwrap().is_none()
+    });
+    assert_eq!(held_ends(&hub, Some(ana.id)), 1);
+
+    // mac is back, and its remote check runs before the hub's delivery got through: the delivery
+    // is refused here, so the look is the first thing mac hears.
+    let busy = RawMachine::start(&hub.url, &creds.machine_token, |call| match call["cmd"].as_str().unwrap() {
+        "remote_ended" => RawReply::Err("not now".into()),
+        _ => RawReply::Ok(Value::Null),
+    });
+    wait_for("the hub to offer mac the held end", || busy.calls("remote_ended") == 1);
+    let look = busy.ask(remote_task_call(&machine, &task, None)).unwrap();
+    assert_eq!((look["workState"].as_str(), look["summary"].as_str()), (Some("result_available"), Some("Suite green; 412 tests pass.")), "the held end, not 'this account has no machine': {look}");
+    drop(busy);
+
+    // The real mac reconnects: its check and the delivery race, and the task ends with the held result.
+    mac.link = Some(link::spawn(creds, mac.machine.clone(), "0.0.0-test"));
+    wait_for("mac's task to end", || task_status(&mac_dir, &captain, &task)["workState"] != "working");
+    let status = task_status(&mac_dir, &captain, &task);
+    assert_eq!((status["workState"].as_str(), status["summary"].as_str()), (Some("result_available"), Some("Suite green; 412 tests pass.")), "not gone from this account: {status}");
+    wait_for("the held row to go", || held_ends(&hub, None) == 0);
+    assert_eq!(ana.client.hub(json!({ "cmd": "unclaimed_ends" })), Ok(json!([])), "mac had it, so it is not listed unclaimed");
+}
+
+#[test]
+fn a_held_end_its_parent_read_by_status_goes_when_the_delivery_finds_it_settled() {
+    let hub = TestHub::start("held_read");
+    let (mut ana, _mac, mac_token, mini, _mini_raw, _) = held_for_offline_mac(&hub);
+    ana.hub(json!({ "cmd": "remove_machine", "id": mini.id })).unwrap();
+    let busy = RawMachine::start(&hub.url, &mac_token, |call| match call["cmd"].as_str().unwrap() {
+        "remote_ended" => RawReply::Err("not now".into()),
+        _ => RawReply::Ok(Value::Null),
+    });
+    wait_for("the hub to offer mac the held end", || busy.calls("remote_ended") == 1);
+    assert_eq!(busy.ask(remote_task_call(&mini.id, "task-1", None)).unwrap()["summary"], "Suite green.", "mac settles the task from its status");
+    drop(busy);
+    // Settled already, mac answers the delivery with not taken: a repeat, not a forgotten task.
+    let settled = RawMachine::start(&hub.url, &mac_token, |call| match call["cmd"].as_str().unwrap() {
+        "remote_ended" => RawReply::Ok(json!(false)),
+        _ => RawReply::Ok(Value::Null),
+    });
+    wait_for("the hub to offer mac the held end again", || settled.calls("remote_ended") == 1);
+    wait_for("the held row to go", || held_ends(&hub, None) == 0);
+    assert_eq!(ana.hub(json!({ "cmd": "unclaimed_ends" })), Ok(json!([])), "nor is it listed unclaimed");
+}
+
+#[test]
+fn a_box_ended_notice_its_parent_missed_is_held_and_told_once_it_is_back() {
+    let hub = TestHub::start_with_boxes("held_notice", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let mac_dir = temp("held-notice-mac");
+    let (mut mac, creds, captain) = sleepy_mac(&hub, &mut ana, &mac_dir);
+    let (task, _) = box_worker(&hub, &mut ana, &mac_dir, &captain);
+    let machine = ana.box_machine();
+
+    mac.link.take().unwrap().stop();
+    ana.client.wait_machines(&[("mac", false), ("Box · Slow suite", true)]);
+    ana.client.hub(json!({ "cmd": "remove_machine", "id": machine })).unwrap();
+    wait_for("the box to go", || hub.boxes.live().is_empty() && ana.rows(&hub) == 0);
+    assert_eq!(held_ends(&hub, Some(ana.id)), 1, "the notice mac could not hear is held");
+
+    mac.link = Some(link::spawn(creds, mac.machine.clone(), "0.0.0-test"));
+    wait_for("mac to hear its box ended", || task_status(&mac_dir, &captain, &task)["workState"] == "failed");
+    let status = task_status(&mac_dir, &captain, &task);
+    assert_eq!(status["error"].as_str(), Some("Upstash Box: the box ended before its task did: someone removed its machine"), "not gone from this account: {status}");
+    wait_for("the held row to go", || held_ends(&hub, None) == 0);
+}
+
+/// ana with an offline mac and a worker machine mini, whose end of mac's task-1 the hub holds.
+fn held_for_offline_mac(hub: &TestHub) -> (Client, MachineView, String, MachineView, RawMachine, uuid::Uuid) {
+    let (token, ana_id, mut ana) = signed_in(&hub.url, "ana@acme.dev");
+    let (mac, mac_token) = account::register_machine(&hub.url, &token, "ana-mac", "linux").unwrap();
+    let (mini, mini_token) = account::register_machine(&hub.url, &token, "ana-mini", "linux").unwrap();
+    let mini_raw = RawMachine::start(&hub.url, &mini_token, |_| RawReply::Ok(Value::Null));
+    wait_for("mini online", || ana.machines().contains(&("ana-mini".into(), true)));
+    let end = json!({ "state": "result_available", "summary": "Suite green.", "usage": { "tokens_in": 1200, "tokens_out": 30, "cost_usd": 0.42, "wall_ms": 90000 } });
+    assert_eq!(mini_raw.ask(json!({ "cmd": "remote_ended", "to": mac.id, "tab": "tab-1", "task": "task-1", "end": end })), Ok(json!(true)), "taken for mac, which is offline");
+    (ana, mac, mac_token, mini, mini_raw, uuid::Uuid::parse_str(&ana_id).unwrap())
+}
+
+/// Every held report as Postgres stores it, as text.
+fn held_reports(hub: &TestHub) -> Vec<String> {
+    hub.runtime.block_on(async {
+        let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        db.query("select report::text from held_ends order by task", &[]).await.unwrap().iter().map(|r| r.get(0)).collect()
+    })
+}
+
+#[test]
+fn a_held_end_is_stored_delivered_and_listed_with_its_keys_masked() {
+    let hub = TestHub::start("held_masked");
+    let (token, _, mut ana) = signed_in(&hub.url, "ana@acme.dev");
+    let (mac, mac_token) = account::register_machine(&hub.url, &token, "ana-mac", "linux").unwrap();
+    let (_, mini_token) = account::register_machine(&hub.url, &token, "ana-mini", "linux").unwrap();
+    let mini_raw = RawMachine::start(&hub.url, &mini_token, |_| RawReply::Ok(Value::Null));
+    wait_for("mini online", || ana.machines().contains(&("ana-mini".into(), true)));
+    let fake = "sk-ant-api03-FAKEFAKEFAKEFAKE0000";
+    let end = json!({ "state": "failed", "summary": format!("Used {fake} to deploy."), "error": format!("401 for key {fake}") });
+    assert_eq!(mini_raw.ask(json!({ "cmd": "remote_ended", "to": mac.id, "tab": "tab-1", "task": "task-1", "end": end })), Ok(json!(true)), "held for mac, which is offline");
+    let stored = held_reports(&hub);
+    assert_eq!(stored.len(), 1);
+    assert!(!stored[0].contains("FAKEFAKE") && stored[0].matches("[hidden]").count() == 2, "the hub keeps no unmasked copy: {}", stored[0]);
+
+    // mac restarted and forgot the task: it is handed the masked end, and it stays listed, masked.
+    let mac_raw = RawMachine::start(&hub.url, &mac_token, |call| match call["cmd"].as_str().unwrap() {
+        "remote_ended" => RawReply::Ok(json!(false)),
+        _ => RawReply::Ok(Value::Null),
+    });
+    wait_for("the hub to offer mac the held end", || mac_raw.calls("remote_ended") == 1);
+    let got = mac_raw.calls.lock().unwrap().iter().find(|c| c["cmd"] == "remote_ended").cloned().unwrap();
+    assert_eq!((got["end"]["summary"].as_str(), got["end"]["error"].as_str()), (Some("Used [hidden] to deploy."), Some("401 for key [hidden]")), "{got}");
+    wait_for("the end to be listed unclaimed", || ana.hub(json!({ "cmd": "unclaimed_ends" })).unwrap().as_array().is_some_and(|l| l.len() == 1));
+    let listed = ana.hub(json!({ "cmd": "unclaimed_ends" })).unwrap();
+    assert!(!listed.to_string().contains("FAKEFAKE"), "{listed}");
+    assert_eq!((listed[0]["end"]["summary"].as_str(), listed[0]["end"]["error"].as_str()), (Some("Used [hidden] to deploy."), Some("401 for key [hidden]")), "{listed}");
+}
+
+#[test]
+fn a_held_end_with_a_nul_character_is_held_and_comes_back_without_it() {
+    let hub = TestHub::start("held_nul");
+    let (token, _, mut ana) = signed_in(&hub.url, "ana@acme.dev");
+    let (mac, mac_token) = account::register_machine(&hub.url, &token, "ana-mac", "linux").unwrap();
+    let (_, mini_token) = account::register_machine(&hub.url, &token, "ana-mini", "linux").unwrap();
+    let mini_raw = RawMachine::start(&hub.url, &mini_token, |_| RawReply::Ok(Value::Null));
+    wait_for("mini online", || ana.machines().contains(&("ana-mini".into(), true)));
+    let end = json!({ "state": "result_available", "summary": "Suite\u{0} green." });
+    assert_eq!(mini_raw.ask(json!({ "cmd": "remote_ended", "to": mac.id, "tab": "tab-1", "task": "task-1", "end": end })), Ok(json!(true)), "Postgres jsonb refuses \\u0000, so the hub drops it");
+    let mac_raw = RawMachine::start(&hub.url, &mac_token, |_| RawReply::Ok(json!(true)));
+    wait_for("mac to get it", || mac_raw.calls("remote_ended") == 1);
+    let got = mac_raw.calls.lock().unwrap().iter().find(|c| c["cmd"] == "remote_ended").cloned().unwrap();
+    assert_eq!(got["end"]["summary"].as_str(), Some("Suite green."), "{got}");
+}
+
+#[test]
+fn a_held_end_whose_key_a_nul_character_splits_is_stored_and_answered_masked() {
+    let hub = TestHub::start("held_nul_key");
+    let (token, _, mut ana) = signed_in(&hub.url, "ana@acme.dev");
+    let (mac, mac_token) = account::register_machine(&hub.url, &token, "ana-mac", "linux").unwrap();
+    let (mini, mini_token) = account::register_machine(&hub.url, &token, "ana-mini", "linux").unwrap();
+    let mini_raw = RawMachine::start(&hub.url, &mini_token, |_| RawReply::Ok(Value::Null));
+    wait_for("mini online", || ana.machines().contains(&("ana-mini".into(), true)));
+    let split = "sk-ant-api03-FAKE\u{0}FAKEFAKE0000";
+    let end = json!({ "state": "failed", "summary": format!("Used {split} to deploy."), "error": format!("401 for key {split}") });
+    assert_eq!(mini_raw.ask(json!({ "cmd": "remote_ended", "to": mac.id, "tab": "tab-1", "task": "task-1", "end": end })), Ok(json!(true)), "held for mac, which is offline");
+    let stored = held_reports(&hub);
+    assert_eq!(stored.len(), 1);
+    assert!(!stored[0].contains("FAKEFAKE") && stored[0].matches("[hidden]").count() == 2, "the NUL goes before the mask: {}", stored[0]);
+
+    let mac_raw = RawMachine::start(&hub.url, &mac_token, |call| match call["cmd"].as_str().unwrap() {
+        "remote_ended" => RawReply::Err("not now".into()),
+        _ => RawReply::Ok(Value::Null),
+    });
+    wait_for("the hub to offer mac the held end", || mac_raw.calls("remote_ended") == 1);
+    let got = mac_raw.calls.lock().unwrap().iter().find(|c| c["cmd"] == "remote_ended").cloned().unwrap();
+    assert!(!got.to_string().contains("FAKEFAKE"), "{got}");
+    assert_eq!((got["end"]["summary"].as_str(), got["end"]["error"].as_str()), (Some("Used [hidden] to deploy."), Some("401 for key [hidden]")), "{got}");
+    let status = mac_raw.ask(remote_task_call(&mini.id, "task-1", None)).unwrap();
+    assert!(!status.to_string().contains("FAKEFAKE"), "{status}");
+    assert_eq!(status["error"].as_str(), Some("401 for key [hidden]"), "{status}");
+}
+
+#[test]
+fn the_hub_holds_no_end_whose_task_or_state_is_not_one_pinned_makes() {
+    let hub = TestHub::start("held_checked");
+    let (token, _, mut ana) = signed_in(&hub.url, "ana@acme.dev");
+    let (mac, _) = account::register_machine(&hub.url, &token, "ana-mac", "linux").unwrap();
+    let (_, mini_token) = account::register_machine(&hub.url, &token, "ana-mini", "linux").unwrap();
+    let mini_raw = RawMachine::start(&hub.url, &mini_token, |_| RawReply::Ok(Value::Null));
+    wait_for("mini online", || ana.machines().contains(&("ana-mini".into(), true)));
+    let end = |task: &str, state: &str| json!({ "cmd": "remote_ended", "to": mac.id, "tab": "tab-1", "task": task, "end": { "state": state, "summary": "Suite green." } });
+    let long = format!("task-{}", "a".repeat(124));
+    let bad = [
+        ("", "result_available"),
+        (long.as_str(), "result_available"),
+        ("task-1\nforged line", "result_available"),
+        ("task-1\u{7}", "result_available"),
+        ("task-1\u{0}", "result_available"),
+        ("task-1", ""),
+        ("task-1", "done"),
+        ("task-1", "failed\nforged line"),
+    ];
+    for (task, state) in bad {
+        let refused = mini_raw.ask(end(task, state));
+        assert_eq!(refused, Err("the hub refuses this end: its task id or state is not one pinned makes".into()), "{task:?} {state:?}");
+        assert_eq!(held_ends(&hub, None), 0, "{task:?} {state:?}: nothing is stored");
+    }
+    assert_eq!(long.len(), 129);
+    let longest = format!("task-{}", "a".repeat(123));
+    for (task, state) in [("task-1a2b3c4d", "result_available"), ("task-2", "failed"), ("task-3", "cancelled"), (longest.as_str(), "failed")] {
+        assert_eq!(mini_raw.ask(end(task, state)), Ok(json!(true)), "{task} {state}: held for mac, which is offline");
+    }
+    assert_eq!(held_ends(&hub, None), 4);
+}
+
+#[test]
+fn the_hub_holds_no_end_whose_tab_is_not_one_pinned_makes() {
+    let hub = TestHub::start("held_tab_checked");
+    let (token, _, mut ana) = signed_in(&hub.url, "ana@acme.dev");
+    let (mac, _) = account::register_machine(&hub.url, &token, "ana-mac", "linux").unwrap();
+    let (_, mini_token) = account::register_machine(&hub.url, &token, "ana-mini", "linux").unwrap();
+    let mini_raw = RawMachine::start(&hub.url, &mini_token, |_| RawReply::Ok(Value::Null));
+    wait_for("mini online", || ana.machines().contains(&("ana-mini".into(), true)));
+    let end = |tab: &str| json!({ "cmd": "remote_ended", "to": mac.id, "tab": tab, "task": "task-1", "end": { "state": "result_available", "summary": "Suite green." } });
+    let long = format!("tab-{}", "a".repeat(125));
+    for tab in ["", long.as_str(), "tab-1\nforged line", "tab-1\u{7}", "tab-1\u{0}"] {
+        let refused = mini_raw.ask(end(tab));
+        assert_eq!(refused, Err("the hub refuses this end: its task id or state is not one pinned makes".into()), "{tab:?}");
+        assert_eq!(held_ends(&hub, None), 0, "{tab:?}: nothing is stored");
+    }
+    assert_eq!(long.len(), 129);
+    assert_eq!(mini_raw.ask(end(&format!("tab-{}", "a".repeat(124)))), Ok(json!(true)), "the longest tab is held for mac, which is offline");
+    assert_eq!(held_ends(&hub, None), 1);
+}
+
+#[test]
+fn a_worker_whose_end_the_hub_cannot_look_up_a_machine_for_hears_no_database_text() {
+    let hub = TestHub::start("held_lookup_error");
+    let (token, _, mut ana) = signed_in(&hub.url, "ana@acme.dev");
+    let (offline, _) = account::register_machine(&hub.url, &token, "ana-old", "linux").unwrap();
+    let (online, online_token) = account::register_machine(&hub.url, &token, "ana-mac", "linux").unwrap();
+    let (_, mini_token) = account::register_machine(&hub.url, &token, "ana-mini", "linux").unwrap();
+    let mini_raw = RawMachine::start(&hub.url, &mini_token, |_| RawReply::Ok(Value::Null));
+    let mac_raw = RawMachine::start(&hub.url, &online_token, |_| RawReply::Ok(json!("unknown")));
+    wait_for("mac and mini online", || ana.machines().iter().filter(|(_, up)| *up).count() == 2);
+    // The machine lookup now fails in Postgres, as a lost connection or a schema change would.
+    admin_on(&hub.database, "alter table machines rename column name to label");
+    let end = |to: &str| json!({ "cmd": "remote_ended", "to": to, "tab": "tab-1", "task": "task-1", "end": { "state": "result_available", "summary": "Suite green." } });
+    assert_eq!(
+        mini_raw.ask(end(&offline.id)),
+        Err("the hub could not keep the end of task task-1 for its machine, which is offline; it is sent again".into()),
+        "an offline machine"
+    );
+    assert_eq!(
+        mini_raw.ask(end(&online.id)),
+        Err("the hub could not keep the end of task task-1 that its machine did not take; it is sent again".into()),
+        "an online machine that did not take it"
+    );
+    assert_eq!(mac_raw.calls("remote_ended"), 1);
+    assert_eq!(held_ends(&hub, None), 0);
+}
+
+#[test]
+fn a_machine_that_answers_a_held_end_with_an_error_is_offered_no_more_until_it_connects_again() {
+    let hub = TestHub::start("held_error_stops");
+    let (_ana, mac, mac_token, _mini, mini_raw, _) = held_for_offline_mac(&hub);
+    let end = json!({ "cmd": "remote_ended", "to": mac.id, "tab": "tab-1", "task": "task-2", "end": { "state": "result_available", "summary": "Newer." } });
+    assert_eq!(mini_raw.ask(end), Ok(json!(true)));
+    let busy = RawMachine::start(&hub.url, &mac_token, |call| match call["cmd"].as_str().unwrap() {
+        "remote_ended" => RawReply::Err("not now".into()),
+        _ => RawReply::Ok(Value::Null),
+    });
+    wait_for("the hub to offer mac a held end", || busy.calls("remote_ended") >= 1);
+    std::thread::sleep(Duration::from_millis(800));
+    assert_eq!(busy.calls("remote_ended"), 1, "after an error the hub stops, as each try can wait on a silent machine");
+    assert_eq!(held_ends(&hub, None), 2, "both still wait");
+    drop(busy);
+    let back = RawMachine::start(&hub.url, &mac_token, |_| RawReply::Ok(json!(true)));
+    wait_for("mac to get both on its next connection", || back.calls("remote_ended") == 2);
+    wait_for("the rows to go", || held_ends(&hub, None) == 0);
+}
+
+#[test]
+fn a_machine_gets_every_waiting_held_end_once_across_pages_and_none_unclaimed() {
+    let hub = TestHub::start("held_pages");
+    let (token, ana, mut ana_client) = signed_in(&hub.url, "ana@acme.dev");
+    let (mac, mac_token) = account::register_machine(&hub.url, &token, "ana-mac", "linux").unwrap();
+    let page = pinned_server::db::HELD_PAGE;
+    let rows = |prefix: &str, n: i64, unclaimed: &str| {
+        format!("insert into held_ends (account, origin_machine, task, origin_tab, from_machine, report, unclaimed_at)
+            select '{ana}', '{}', '{prefix}-' || lpad(i::text, 4, '0'), 'tab-1', gen_random_uuid(), '{{\"state\": \"result_available\", \"summary\": \"Done.\"}}', {unclaimed} from generate_series(1, {n}) i;", mac.id)
+    };
+    // One statement, so every waiting row has the same `held_at`: the pages turn on the task id.
+    admin_on(&hub.database, &[rows("wait", page + 3, "null"), rows("gone", 2, "now()")].concat());
+    let (ana_id, mac_id) = (uuid::Uuid::parse_str(&ana).unwrap(), uuid::Uuid::parse_str(&mac.id).unwrap());
+    let first = hub.runtime.block_on(hub.hub().db.waiting_held_tasks(ana_id, mac_id, None)).unwrap();
+    assert_eq!(first.len(), page as usize, "one page at a time");
+    assert!(first.iter().all(|(_, task)| task.starts_with("wait-")), "no unclaimed one");
+    let next = hub.runtime.block_on(hub.hub().db.waiting_held_tasks(ana_id, mac_id, first.last().cloned())).unwrap();
+    assert_eq!(next.iter().map(|(_, task)| task.as_str()).collect::<Vec<_>>(), ["wait-0501", "wait-0502", "wait-0503"]);
+
+    let mac_raw = RawMachine::start(&hub.url, &mac_token, |_| RawReply::Ok(json!(true)));
+    wait_for("mac online", || ana_client.machines().contains(&("ana-mac".into(), true)));
+    wait_for("mac to get every waiting end", || held_ends(&hub, None) == 2);
+    std::thread::sleep(Duration::from_millis(500));
+    let offered: Vec<String> = mac_raw.calls.lock().unwrap().iter().filter(|c| c["cmd"] == "remote_ended").map(|c| c["task"].as_str().unwrap().to_owned()).collect();
+    let mut once = offered.clone();
+    once.sort();
+    once.dedup();
+    assert_eq!((offered.len(), once.len()), (page as usize + 3, page as usize + 3), "each once");
+    assert!(offered.iter().all(|task| task.starts_with("wait-")), "the unclaimed ones are not offered");
+}
+
+#[test]
+fn the_unclaimed_list_holds_at_most_a_bound_of_ends_newest_first() {
+    let hub = TestHub::start("held_unclaimed_bound");
+    let (_, ana, mut ana_client) = signed_in(&hub.url, "ana@acme.dev");
+    let bound = pinned_server::db::HELD_UNCLAIMED_LIST;
+    admin_on(&hub.database, &format!("insert into held_ends (account, origin_machine, task, origin_tab, from_machine, report, unclaimed_at)
+        select '{ana}', gen_random_uuid(), 'task-' || lpad(i::text, 4, '0'), 'tab-1', gen_random_uuid(), '{{\"state\": \"failed\", \"error\": \"Tests failed.\"}}', now() - i * interval '1 second'
+        from generate_series(1, {}) i", bound + 3));
+    let listed = ana_client.hub(json!({ "cmd": "unclaimed_ends" })).unwrap();
+    let tasks: Vec<&str> = listed.as_array().unwrap().iter().map(|e| e["task"].as_str().unwrap()).collect();
+    assert_eq!(tasks.len(), bound as usize, "at most the bound");
+    let newest: Vec<String> = (1..=bound).map(|i| format!("task-{i:04}")).collect();
+    assert_eq!(tasks, newest, "the newest first");
+}
+
+#[test]
+fn a_held_end_answers_its_tasks_status_after_its_worker_is_gone_and_stays_until_answered() {
+    let hub = TestHub::start("held_status");
+    let (mut ana, mac, mac_token, mini, _mini_raw, _) = held_for_offline_mac(&hub);
+    ana.hub(json!({ "cmd": "remove_machine", "id": mini.id })).unwrap();
+    let mac_raw = RawMachine::start(&hub.url, &mac_token, |call| match call["cmd"].as_str().unwrap() {
+        "remote_ended" => RawReply::Err("not now".into()),
+        _ => RawReply::Ok(Value::Null),
+    });
+    wait_for("the hub to offer mac the held end", || mac_raw.calls("remote_ended") == 1);
+    let status = mac_raw.ask(remote_task_call(&mini.id, "task-1", None)).unwrap();
+    assert_eq!(
+        (status["workState"].as_str(), status["summary"].as_str(), status["usage"]["tokens_in"].as_u64()),
+        (Some("result_available"), Some("Suite green."), Some(1200)),
+        "answered from the held end, not 'this account has no machine': {status}"
+    );
+    assert_eq!(held_ends(&hub, None), 1, "a machine that did not take it keeps it held");
+    assert_eq!(mac_raw.ask(remote_task_call(&mini.id, "task-2", None)), Err(format!("this account has no machine {}", mini.id)), "another task of a gone machine is still gone");
+    let _ = mac;
+}
+
+#[test]
+fn another_account_neither_reads_nor_receives_a_held_end() {
+    let hub = TestHub::start("held_iso");
+    let (_ana, mac, _mac_token, mini, _mini_raw, ana_id) = held_for_offline_mac(&hub);
+    let (bob_token, bob_account, mut bob) = signed_in(&hub.url, "bob@acme.dev");
+    let (_, bob_machine_token) = account::register_machine(&hub.url, &bob_token, "bob-mac", "linux").unwrap();
+    let bob_raw = RawMachine::start(&hub.url, &bob_machine_token, |_| RawReply::Ok(json!(true)));
+    bob.wait_machines(&[("bob-mac", true)]);
+    assert_eq!(bob_raw.ask(remote_task_call(&mini.id, "task-1", None)), Err(format!("this account has no machine {}", mini.id)), "bob reads nothing of ana's held end");
+    let forged = json!({ "cmd": "remote_ended", "to": mac.id, "tab": "tab-1", "task": "task-9", "end": { "state": "failed", "error": "forged" } });
+    assert_eq!(bob_raw.ask(forged), Err(format!("this account has no machine {}", mac.id)), "nor holds an end for ana's offline machine");
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(bob_raw.calls("remote_ended"), 0, "bob's machine is handed none of ana's");
+    let bob_id = uuid::Uuid::parse_str(&bob_account).unwrap();
+    assert_eq!((held_ends(&hub, Some(bob_id)), held_ends(&hub, Some(ana_id))), (0, 1));
+    let read = hub.runtime.block_on(hub.hub().db.held_ends(bob_id, uuid::Uuid::parse_str(&mac.id).unwrap(), Some("task-1"))).unwrap();
+    assert!(read.is_empty(), "keyed by account: bob's id reads nothing for ana's machine and task");
+}
+
+#[test]
+fn a_held_end_expires_after_30_days_unread() {
+    let hub = TestHub::start("held_expiry");
+    let (mut ana, mac, mac_token, mini, mini_raw, _) = held_for_offline_mac(&hub);
+    let end = json!({ "state": "result_available", "summary": "Newer." });
+    assert_eq!(mini_raw.ask(json!({ "cmd": "remote_ended", "to": mac.id, "tab": "tab-1", "task": "task-2", "end": end })), Ok(json!(true)));
+    admin_on(&hub.database, "update held_ends set held_at = now() - interval '31 days' where task = 'task-1';
+        update held_ends set held_at = now() - interval '29 days' where task = 'task-2'");
+    ana.hub(json!({ "cmd": "remove_machine", "id": mini.id })).unwrap();
+    let mac_raw = RawMachine::start(&hub.url, &mac_token, |_| RawReply::Ok(json!(true)));
+    wait_for("the 29-day end to reach mac", || mac_raw.calls("remote_ended") == 1);
+    std::thread::sleep(Duration::from_millis(500));
+    let delivered: Vec<Value> = mac_raw.calls.lock().unwrap().iter().filter(|c| c["cmd"] == "remote_ended").map(|c| c["task"].clone()).collect();
+    assert_eq!(delivered, vec![json!("task-2")], "the 31-day one is never delivered");
+    assert_eq!(held_ends(&hub, None), 0, "and is deleted");
+    assert_eq!(mac_raw.ask(remote_task_call(&mini.id, "task-1", None)), Err(format!("this account has no machine {}", mini.id)), "nor answers a status");
+}
+
+#[test]
+fn the_hub_answers_a_held_end_only_once_its_row_is_written() {
+    let hub = TestHub::start("held_durable");
+    let (token, _, mut ana) = signed_in(&hub.url, "ana@acme.dev");
+    let (mac, mac_token) = account::register_machine(&hub.url, &token, "ana-mac", "linux").unwrap();
+    let (_, mini_token) = account::register_machine(&hub.url, &token, "ana-mini", "linux").unwrap();
+    let mini_raw = RawMachine::start(&hub.url, &mini_token, |_| RawReply::Ok(Value::Null));
+    wait_for("mini online", || ana.machines().contains(&("ana-mini".into(), true)));
+    admin_on(&hub.database, "create function refuse_held() returns trigger language plpgsql as $$ begin raise exception 'disk full'; end $$;
+        create trigger refuse_held before insert on held_ends for each row execute function refuse_held()");
+    let end = json!({ "cmd": "remote_ended", "to": mac.id, "tab": "tab-1", "task": "task-1", "end": { "state": "result_available", "summary": "Suite green." } });
+    assert_eq!(
+        mini_raw.ask(end.clone()),
+        Err("the hub could not keep the end of task task-1 for its machine, which is offline; it is sent again".into()),
+        "a write that failed is no taken end: the worker keeps it and sends it again"
+    );
+    assert_eq!(held_ends(&hub, None), 0);
+    admin_on(&hub.database, "drop trigger refuse_held on held_ends");
+    assert_eq!(mini_raw.ask(end), Ok(json!(true)), "the retry is held");
+    assert_eq!(held_ends(&hub, None), 1);
+    let mac_raw = RawMachine::start(&hub.url, &mac_token, |_| RawReply::Ok(json!(true)));
+    wait_for("mac to get it", || mac_raw.calls("remote_ended") == 1);
+    let got = mac_raw.calls.lock().unwrap().iter().find(|c| c["cmd"] == "remote_ended").cloned().unwrap();
+    assert_eq!((got["task"].as_str(), got["end"]["summary"].as_str()), (Some("task-1"), Some("Suite green.")), "{got}");
+}
+
+#[test]
+fn a_held_end_reaches_its_machine_once_however_often_it_reconnects_or_is_delivered() {
+    let hub = TestHub::start("held_once");
+    let (_ana, mac, mac_token, _mini, mini_raw, ana_id) = held_for_offline_mac(&hub);
+    let first = RawMachine::start(&hub.url, &mac_token, |_| RawReply::Ok(json!(true)));
+    wait_for("mac to get it", || first.calls("remote_ended") == 1);
+    wait_for("the row to go", || held_ends(&hub, None) == 0);
+    drop(first);
+    let second = RawMachine::start(&hub.url, &mac_token, |_| RawReply::Ok(json!(true)));
+    std::thread::sleep(Duration::from_millis(800));
+    assert_eq!(second.calls("remote_ended"), 0, "a reconnect does not deliver it again");
+    drop(second);
+
+    // Held again while mac is away, then delivered by its connection and two more flushes at once.
+    std::thread::sleep(Duration::from_millis(300));
+    let end = json!({ "cmd": "remote_ended", "to": mac.id, "tab": "tab-1", "task": "task-2", "end": { "state": "result_available", "summary": "Two." } });
+    assert_eq!(mini_raw.ask(end), Ok(json!(true)));
+    let slow = RawMachine::start(&hub.url, &mac_token, |call| {
+        if call["cmd"] == "remote_ended" {
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        RawReply::Ok(json!(true))
+    });
+    let account = hub.runtime.block_on(hub.hub().account(ana_id)).unwrap();
+    wait_for("mac online", || account.is_online(&mac.id));
+    let flushes: Vec<_> = (0..2).map(|_| hub.runtime.spawn(pinned_server::remote::deliver_held(hub.hub().clone(), account.clone(), mac.id.clone()))).collect();
+    for flush in flushes {
+        hub.runtime.block_on(flush).unwrap();
+    }
+    wait_for("the row to go", || held_ends(&hub, None) == 0);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(slow.calls("remote_ended"), 1, "three deliveries at once pass it once");
+}
+
+#[test]
+fn a_captain_box_whose_worker_hangs_is_not_idle_reaped_and_still_meets_its_max_life_and_budget() {
+    for limit in ["max_life", "budget"] {
+        let max_life = if limit == "max_life" { Duration::from_secs(6) } else { Duration::from_secs(3600) };
+        let policy = Policy { idle: Duration::from_millis(300), exited: Duration::from_millis(300), done: Duration::from_millis(300), max_life, ..fast() };
+        let hub = TestHub::start_with_boxes(&format!("held_reap_{limit}"), Signup::Open, policy);
+        let mut ana = BoxAccount::new(&hub);
+        hub.boxes.state.lock().unwrap().checkout = Some(("site".into(), SITE.into()));
+        let mini_dir = temp(&format!("held-reap-{limit}-mini"));
+        let creds = pair(&hub.url, &mut ana.client, "mini", &mini_dir);
+        let mini = Node::start(&mini_dir, creds.clone());
+        mini.machine.listen(|_| Err("not in this test".into())).unwrap();
+        ana.client.wait_machines(&[("mini", true)]);
+        let fresh = json!({ "workflow": { "mode": "fresh" }, "session": { "mode": "off" }, "worker": { "mode": "fresh" }, "orchestrator": { "mode": "fresh" } });
+        ana.client.hub(json!({ "cmd": "set_box_access", "access": fresh })).unwrap();
+        ana.client.call(&creds.machine_id, json!({ "cmd": "set_global_orchestrator_settings", "settings": { "host": true } })).unwrap();
+        let global = ana.client.call(&creds.machine_id, json!({ "cmd": "open_global_orchestrator" })).unwrap().as_str().unwrap().to_owned();
+        session_tool(&mini_dir, &global, json!({ "name": "send_to_captain", "project": "github.com/acme/site", "message": "Ship the form.", "request_id": "r-1", "box": true })).unwrap();
+        wait_for("a Captain on a box", || box_tabs(&hub.boxes).iter().any(|t| t.role == Some(Role::Orchestrator) && t.running));
+        let captain_box = hub.boxes.live()[0].clone();
+        let captain = box_tabs(&hub.boxes).into_iter().find(|t| t.role == Some(Role::Orchestrator)).unwrap();
+        let captain_dir = hub.boxes.root.join(&captain_box);
+        let node_of = |id: &str| hub.boxes.state.lock().unwrap().boxes.get(id).and_then(|b| b.node.clone());
+        node_of(&captain_box).unwrap().machine.listen(|_| Err("not in this test".into())).unwrap();
+        let captain_machine = ana.box_machine();
+        if limit == "budget" {
+            // 0.0001 USD lasts 3.6 s at the box rate.
+            let budget = ana.client.hub(json!({ "cmd": "extend_box", "machine": captain_machine, "extra_usd": 0.0001 }));
+            assert!(budget.is_ok(), "{budget:?}");
+        }
+        delegate_from(&captain_dir, &captain.id, json!({ "task": "Hang.", "title": "Hung", "target": { "box": true } })).unwrap();
+        wait_for("the worker box", || hub.boxes.live().len() == 2);
+        let worker_box = hub.boxes.live().into_iter().find(|id| *id != captain_box).unwrap();
+        let worker_dir = hub.boxes.root.join(&worker_box);
+        wait_for("the worker running", || node_of(&worker_box).is_some_and(|node| node.machine.tabs().iter().any(|t| t.role == Some(Role::Worker) && t.running)));
+        let node = node_of(&worker_box).unwrap();
+        node.machine.listen(|_| Err("not in this test".into())).unwrap();
+        let worker = node.machine.tabs().into_iter().find(|t| t.role == Some(Role::Worker)).unwrap();
+        // It works and never ends.
+        hook(&worker_dir, json!({ "kind": "agent", "status": "working", "tab": worker.id }));
+
+        std::thread::sleep(Duration::from_millis(2000));
+        assert!(hub.boxes.live().contains(&captain_box), "{limit}: the quiet Captain box outlived Idle and Exited (300 ms) while its worker runs");
+        let started = Instant::now();
+        while hub.boxes.live().contains(&captain_box) {
+            assert!(started.elapsed() < Duration::from_secs(15), "{limit}: the Captain box never ended");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(hub.boxes.live().contains(&worker_box), "{limit}: it ended for its own {limit} while its worker still hangs");
+        drop(mini);
+    }
+}
+
+#[test]
+fn a_held_end_its_restarted_parent_does_not_take_stays_readable_through_status_and_the_unclaimed_list() {
+    let hub = TestHub::start("held_unclaimed");
+    // mac is offline when mini's worker ends: the hub holds mini's end of task-1 for it.
+    let (mut ana, mac, mac_token, mini, mini_raw, _) = held_for_offline_mac(&hub);
+    assert_eq!(ana.hub(json!({ "cmd": "unclaimed_ends" })), Ok(json!([])), "held for mac, not yet unclaimed");
+
+    // mac restarted meanwhile and forgot the task: it answers that it does not know it.
+    let forgot = |call: &Value| match call["cmd"].as_str().unwrap() {
+        "remote_ended" => RawReply::Ok(json!("unknown")),
+        _ => RawReply::Ok(Value::Null),
+    };
+    let mac_raw = RawMachine::start(&hub.url, &mac_token, forgot);
+    wait_for("the hub to offer mac the held end", || mac_raw.calls("remote_ended") == 1);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(held_ends(&hub, None), 1, "not taken is not deleted");
+
+    let status = mac_raw.ask(remote_task_call(&mini.id, "task-1", None)).unwrap();
+    assert_eq!((status["workState"].as_str(), status["summary"].as_str()), (Some("result_available"), Some("Suite green.")), "status answers from the row: {status}");
+    let listed = ana.hub(json!({ "cmd": "unclaimed_ends" })).unwrap();
+    let listed = listed.as_array().unwrap();
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(
+        (listed[0]["task"].as_str(), listed[0]["origin_machine"].as_str(), listed[0]["origin_tab"].as_str(), listed[0]["from_machine"].as_str()),
+        (Some("task-1"), Some(mac.id.as_str()), Some("tab-1"), Some(mini.id.as_str()))
+    );
+    assert_eq!((listed[0]["end"]["summary"].as_str(), listed[0]["end"]["usage"]["tokens_in"].as_u64()), (Some("Suite green."), Some(1200)));
+    assert!(listed[0]["unclaimed_at"].as_u64() >= listed[0]["held_at"].as_u64() && listed[0]["held_at"].as_u64() > Some(0), "{listed:?}");
+
+    drop(mac_raw);
+    let again = RawMachine::start(&hub.url, &mac_token, forgot);
+    std::thread::sleep(Duration::from_millis(800));
+    assert_eq!(again.calls("remote_ended"), 0, "an unclaimed end is not offered again on the next connection");
+    assert_eq!(held_ends(&hub, None), 1, "it stays for its 30 days");
+
+    // Online and forgetful: an end mac answers it does not know is kept unclaimed too.
+    let end = json!({ "cmd": "remote_ended", "to": mac.id, "tab": "tab-1", "task": "task-2", "end": { "state": "failed", "error": "Tests failed." } });
+    assert_eq!(mini_raw.ask(end), Ok(json!(false)), "the sender hears not taken, as before");
+    let listed = ana.hub(json!({ "cmd": "unclaimed_ends" })).unwrap();
+    let tasks: Vec<&str> = listed.as_array().unwrap().iter().map(|e| e["task"].as_str().unwrap()).collect();
+    assert_eq!(tasks.len(), 2, "{listed}");
+    assert!(tasks.contains(&"task-2") && tasks.contains(&"task-1"), "{listed}");
+
+    // Another account lists none of it.
+    let (_, _, mut bob) = signed_in(&hub.url, "bob@acme.dev");
+    assert_eq!(bob.hub(json!({ "cmd": "unclaimed_ends" })), Ok(json!([])));
+}
+
+#[test]
+fn an_origins_answer_to_an_end_decides_whether_the_hub_drops_it_or_lists_it_unclaimed() {
+    let hub = TestHub::start("held_answers");
+    let (token, _, mut ana) = signed_in(&hub.url, "ana@acme.dev");
+    let (mac, mac_token) = account::register_machine(&hub.url, &token, "ana-mac", "linux").unwrap();
+    let (_, mini_token) = account::register_machine(&hub.url, &token, "ana-mini", "linux").unwrap();
+    let mini_raw = RawMachine::start(&hub.url, &mini_token, |_| RawReply::Ok(Value::Null));
+    wait_for("mini online", || ana.machines().contains(&("ana-mini".into(), true)));
+    let end = |task: &str| json!({ "cmd": "remote_ended", "to": mac.id, "tab": "tab-1", "task": task, "end": { "state": "result_available", "summary": format!("{task} done.") } });
+    let listed = |ana: &mut Client| -> Vec<String> {
+        let mut tasks: Vec<String> = ana.hub(json!({ "cmd": "unclaimed_ends" })).unwrap().as_array().unwrap().iter().map(|e| e["task"].as_str().unwrap().to_owned()).collect();
+        tasks.sort();
+        tasks
+    };
+    // Held while mac is offline, then delivered on its connection.
+    for task in ["held-took", "held-settled", "held-unknown"] {
+        assert_eq!(mini_raw.ask(end(task)), Ok(json!(true)), "{task}: held for mac, which is offline");
+    }
+    // mac answers by task: a 0.18.2 node says true, settled or unknown, a 0.18.1 one a bare false,
+    // and a 0.17 one, which predates the call, an error.
+    let mac_raw = RawMachine::start(&hub.url, &mac_token, |call| match (call["cmd"].as_str().unwrap(), call["task"].as_str().unwrap_or_default()) {
+        ("remote_ended", task) if task.ends_with("-took") => RawReply::Ok(json!(true)),
+        ("remote_ended", task) if task.ends_with("-settled") => RawReply::Ok(json!("settled")),
+        ("remote_ended", task) if task.ends_with("-unknown") => RawReply::Ok(json!("unknown")),
+        ("remote_ended", task) if task.ends_with("-false") => RawReply::Ok(json!(false)),
+        ("remote_ended", task) if task.ends_with("-error") => RawReply::Err("this machine runs pinned 0.17.20, which can't answer that: unknown variant `remote_ended`".into()),
+        _ => RawReply::Ok(Value::Null),
+    });
+    wait_for("the hub to deliver the three held ends", || mac_raw.calls("remote_ended") == 3);
+    wait_for("the taken and settled rows to go", || held_ends(&hub, None) == 1);
+    assert_eq!(listed(&mut ana), ["held-unknown"], "a held end mac took or settled already goes; one it does not know is listed");
+
+    // Live, with mac online. The worker always hears a bool.
+    assert_eq!(mini_raw.ask(end("live-took")), Ok(json!(true)));
+    assert_eq!(mini_raw.ask(end("live-settled")), Ok(json!(true)), "settled reads as taken");
+    assert_eq!(mini_raw.ask(end("live-unknown")), Ok(json!(false)));
+    assert_eq!(mini_raw.ask(end("live-false")), Ok(json!(false)), "a 0.18.1 origin's false, as before");
+    assert_eq!(mini_raw.ask(end("live-error")), Ok(json!(false)), "an origin's error, as before");
+    assert_eq!(listed(&mut ana), ["held-unknown", "live-error", "live-unknown"], "taken, settled and a bare false keep nothing; unknown and an error are listed");
+    assert_eq!(held_ends(&hub, None), 3);
+    let reports = held_reports(&hub);
+    assert!(!reports.iter().any(|r| r.contains("live-false") || r.contains("live-settled") || r.contains("-took")), "{reports:?}");
+}
+
+#[test]
+fn a_remote_task_its_parent_settled_from_a_status_look_is_not_listed_when_its_end_arrives() {
+    let hub = TestHub::start_with_boxes("held_settled_first", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let mac_dir = temp("held-settled-first-mac");
+    let (_mac, mac_id, captain) = mac_with_captain(&hub, &mut ana, &mac_dir);
+    let code = ana.client.hub(json!({ "cmd": "pair_code" })).unwrap();
+    let mini = account::pair(&hub.url, code["code"].as_str().unwrap(), "mini", "linux").unwrap();
+    let worker = RawMachine::start(&hub.url, &mini.machine_token, |call| match call["cmd"].as_str().unwrap() {
+        "delegate" => RawReply::Ok(json!({ "taskId": "task-m", "tabId": "tab-w", "workState": "working" })),
+        "remote_task" => RawReply::Ok(json!({ "workState": "result_available", "summary": "Suite green." })),
+        _ => RawReply::Ok(Value::Null),
+    });
+    ana.client.wait_machines(&[("mac", true), ("mini", true)]);
+    let started = delegate_from(&mac_dir, &captain, json!({ "task": "Run the slow suite.", "title": "Slow suite", "target": { "machine": "mini" } })).unwrap();
+    let task = started["taskId"].as_str().unwrap().to_owned();
+    wait_for("mac's status look to settle the task", || task_status(&mac_dir, &captain, &task)["workState"] == "result_available");
+
+    // The worker's own end arrives after: mac holds this same end, so it is no unclaimed report.
+    let ended = json!({ "cmd": "remote_ended", "to": mac_id, "tab": captain, "task": task, "end": { "state": "result_available", "summary": "Suite green." } });
+    assert_eq!(worker.ask(ended), Ok(json!(true)), "settled reads as taken");
+    assert_eq!(ana.client.hub(json!({ "cmd": "unclaimed_ends" })), Ok(json!([])));
+    assert_eq!(held_ends(&hub, None), 0);
+}
+
+#[test]
+fn a_status_look_waits_while_the_hub_passes_its_tasks_end_so_the_end_is_not_listed() {
+    let hub = TestHub::start("held_lock");
+    let (mut ana, mac, mac_token, mini, mini_raw, _) = held_for_offline_mac(&hub);
+    // mac answers its first delivery with an error, so the row stays waiting. The next end it is
+    // passed waits up to 2 s for its own status look's reply: it answers a bare false if that came
+    // (it settled the task from it), else true.
+    let looked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen = looked.clone();
+    let passes = Arc::new(AtomicU64::new(0));
+    let mac_raw = RawMachine::start(&hub.url, &mac_token, move |call| match call["cmd"].as_str().unwrap() {
+        "remote_ended" if passes.fetch_add(1, Ordering::SeqCst) == 0 => RawReply::Err("not now".into()),
+        "remote_ended" => {
+            let seen = seen.clone();
+            RawReply::Later(Box::new(move || {
+                let start = Instant::now();
+                while !seen.load(Ordering::SeqCst) && start.elapsed() < Duration::from_secs(2) {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                json!(!seen.load(Ordering::SeqCst))
+            }))
+        }
+        _ => RawReply::Ok(Value::Null),
+    });
+    wait_for("the hub to offer mac the held end", || mac_raw.calls("remote_ended") == 1);
+    assert_eq!(held_ends(&hub, None), 1, "still waiting");
+    std::thread::scope(|scope| {
+        let resent = scope.spawn(|| mini_raw.ask(json!({ "cmd": "remote_ended", "to": mac.id, "tab": "tab-1", "task": "task-1", "end": { "state": "result_available", "summary": "Suite green." } })));
+        wait_for("the hub to pass mac the resent end", || mac_raw.calls("remote_ended") == 2);
+        let look = mac_raw.ask(remote_task_call(&mini.id, "task-1", None));
+        looked.store(true, Ordering::SeqCst);
+        eprintln!("the look answered {look:?}");
+        assert_eq!(resent.join().unwrap(), Ok(json!(true)), "mac took it before its look ran");
+    });
+    assert_eq!(held_ends(&hub, None), 0, "the row went with the end mac took");
+    assert_eq!(ana.hub(json!({ "cmd": "unclaimed_ends" })), Ok(json!([])));
+}
+
+#[test]
+fn a_removed_machines_held_ends_stay_listed_unclaimed_and_the_machine_is_gone() {
+    let hub = TestHub::start("held_removed");
+    let (mut ana, mac, _mac_token, _mini, mini_raw, ana_id) = held_for_offline_mac(&hub);
+    let end = json!({ "cmd": "remote_ended", "to": mac.id, "tab": "tab-1", "task": "task-2", "end": { "state": "failed", "error": "Tests failed." } });
+    assert_eq!(mini_raw.ask(end), Ok(json!(true)));
+    // task-1 still waits for mac; task-2 mac answered it did not know an hour ago.
+    admin_on(&hub.database, "update held_ends set unclaimed_at = now() - interval '1 hour' where task = 'task-2'");
+    let before = ana.hub(json!({ "cmd": "unclaimed_ends" })).unwrap();
+    assert_eq!(before.as_array().unwrap().len(), 1, "{before}");
+
+    ana.hub(json!({ "cmd": "remove_machine", "id": mac.id })).unwrap();
+    let mac_id = uuid::Uuid::parse_str(&mac.id).unwrap();
+    assert_eq!(hub.runtime.block_on(hub.hub().db.machine_name(ana_id, mac_id)).unwrap(), None, "the machine is gone");
+    assert!(!ana.machines().iter().any(|(name, _)| name == "ana-mac"));
+    let listed = ana.hub(json!({ "cmd": "unclaimed_ends" })).unwrap();
+    let mut tasks: Vec<&str> = listed.as_array().unwrap().iter().map(|e| e["task"].as_str().unwrap()).collect();
+    tasks.sort();
+    assert_eq!(tasks, ["task-1", "task-2"], "the waiting one turned unclaimed, and the unclaimed one stayed: {listed}");
+    let task2 = listed.as_array().unwrap().iter().find(|e| e["task"] == "task-2").unwrap();
+    assert_eq!(task2["unclaimed_at"], before[0]["unclaimed_at"], "an unclaimed row keeps when it was unclaimed");
+    assert_eq!(held_ends(&hub, None), 2);
+}
+
+#[test]
+fn held_ends_older_than_30_days_expire_for_every_account_at_most_a_bound_per_run() {
+    let hub = TestHub::start("held_expiry_all");
+    let (_, ana, _ana_client) = signed_in(&hub.url, "ana@acme.dev");
+    let (_, bob, _bob_client) = signed_in(&hub.url, "bob@acme.dev");
+    let row = |account: &str, task: &str, days: u32, unclaimed: bool| {
+        let unclaimed = if unclaimed { "now()" } else { "null" };
+        format!("insert into held_ends (account, origin_machine, task, origin_tab, from_machine, report, held_at, unclaimed_at)
+            values ('{account}', gen_random_uuid(), '{task}', 'tab-1', gen_random_uuid(), '{{}}', now() - interval '{days} days', {unclaimed});")
+    };
+    admin_on(&hub.database, &[row(&ana, "ana-waiting-29", 29, false), row(&ana, "ana-waiting-31", 31, false), row(&ana, "ana-unclaimed-29", 29, true), row(&ana, "ana-unclaimed-31", 31, true), row(&bob, "bob-waiting-29", 29, false), row(&bob, "bob-unclaimed-31", 31, true)].concat());
+    let tasks = || -> Vec<String> {
+        hub.runtime.block_on(async {
+            let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), hub.database), tokio_postgres::NoTls).await.unwrap();
+            tokio::spawn(connection);
+            db.query("select task from held_ends where task not like 'bulk-%' order by task", &[]).await.unwrap().iter().map(|r| r.get(0)).collect()
+        })
+    };
+
+    // A failed run deletes nothing, returns, and the next one waits its hour.
+    admin_on(&hub.database, "create function refuse_expiry() returns trigger language plpgsql as $$ begin raise exception 'disk full'; end $$;
+        create trigger refuse_expiry before delete on held_ends for each row execute function refuse_expiry()");
+    assert_eq!(hub.runtime.block_on(hub.hub().expire_held_ends()), 0, "the failure is logged, not raised");
+    assert_eq!(held_ends(&hub, None), 6);
+    admin_on(&hub.database, "drop trigger refuse_expiry on held_ends");
+    assert_eq!(hub.runtime.block_on(hub.hub().expire_held_ends()), 0, "at most once an hour");
+    assert_eq!(held_ends(&hub, None), 6);
+
+    let expire = || hub.runtime.block_on(hub.hub().db.expire_all_held_ends(pinned_server::db::HELD_EXPIRY_BATCH)).unwrap();
+    assert_eq!(expire(), 3);
+    assert_eq!(tasks(), ["ana-unclaimed-29", "ana-waiting-29", "bob-waiting-29"], "31 days go, waiting or unclaimed; 29 days stay, in any account");
+
+    let bound = pinned_server::db::HELD_EXPIRY_BATCH;
+    admin_on(&hub.database, &format!("insert into held_ends (account, origin_machine, task, origin_tab, from_machine, report, held_at)
+        select '{bob}', gen_random_uuid(), 'bulk-' || i, 'tab-1', gen_random_uuid(), '{{}}', now() - interval '40 days' from generate_series(1, {}) i", bound + 5));
+    assert_eq!(expire(), bound as u64, "one run deletes exactly the bound");
+    assert_eq!(expire(), 5, "the rest go on the next run");
+    assert_eq!(tasks(), ["ana-unclaimed-29", "ana-waiting-29", "bob-waiting-29"]);
+    assert_eq!(held_ends(&hub, None), 3);
+    let indexed = hub.runtime.block_on(async {
+        let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        db.query("select indexdef from pg_indexes where tablename = 'held_ends'", &[]).await.unwrap().iter().map(|r| r.get::<_, String>(0)).collect::<Vec<_>>()
+    });
+    assert!(indexed.iter().any(|def| def.ends_with("(held_at)")), "the hourly delete finds old rows by an index: {indexed:?}");
+
+    // A run that deleted a full batch runs again on the next tick, not an hour later; then it waits.
+    let full = TestHub::start("held_expiry_full");
+    let (_, carl, _carl_client) = signed_in(&full.url, "carl@acme.dev");
+    let old = |n: i64| format!("insert into held_ends (account, origin_machine, task, origin_tab, from_machine, report, held_at)
+        select '{carl}', gen_random_uuid(), 'bulk-' || gen_random_uuid(), 'tab-1', gen_random_uuid(), '{{}}', now() - interval '40 days' from generate_series(1, {n}) i");
+    admin_on(&full.database, &old(bound + 5));
+    let run = || full.runtime.block_on(full.hub().expire_held_ends());
+    assert_eq!(run(), bound as u64);
+    assert_eq!(run(), 5, "a full batch leaves more, so the next tick runs again");
+    admin_on(&full.database, &old(1));
+    assert_eq!(run(), 0, "a run that was not full waits its hour");
+    assert_eq!(held_ends(&full, None), 1);
+}
+
+#[test]
+fn a_machine_connection_expires_at_most_a_bound_of_its_accounts_held_ends_and_none_of_another_account() {
+    let hub = TestHub::start("held_expiry_connect");
+    let (token, ana, mut ana_client) = signed_in(&hub.url, "ana@acme.dev");
+    let (_, bob, _bob_client) = signed_in(&hub.url, "bob@acme.dev");
+    let (_, mac_token) = account::register_machine(&hub.url, &token, "ana-mac", "linux").unwrap();
+    let bound = pinned_server::db::HELD_EXPIRY_BATCH;
+    let old = |account: &str, prefix: &str, n: i64| {
+        format!("insert into held_ends (account, origin_machine, task, origin_tab, from_machine, report, held_at)
+            select '{account}', gen_random_uuid(), '{prefix}-' || i, 'tab-1', gen_random_uuid(), '{{}}', now() - interval '40 days' from generate_series(1, {n}) i;")
+    };
+    admin_on(&hub.database, &[old(&ana, "ana", bound + 5), old(&bob, "bob", 7)].concat());
+    let (ana_id, bob_id) = (uuid::Uuid::parse_str(&ana).unwrap(), uuid::Uuid::parse_str(&bob).unwrap());
+
+    let first = RawMachine::start(&hub.url, &mac_token, |_| RawReply::Ok(json!(true)));
+    wait_for("mac online", || ana_client.machines().contains(&("ana-mac".into(), true)));
+    wait_for("the first connection's expiry", || held_ends(&hub, Some(ana_id)) < bound + 5);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(held_ends(&hub, Some(ana_id)), 5, "one connection deletes exactly one batch of the account's expired rows");
+    assert_eq!(held_ends(&hub, Some(bob_id)), 7, "another account's rows are untouched");
+    drop(first);
+    wait_for("mac offline", || ana_client.machines().contains(&("ana-mac".into(), false)));
+
+    let _second = RawMachine::start(&hub.url, &mac_token, |_| RawReply::Ok(json!(true)));
+    wait_for("the next connection to expire the rest", || held_ends(&hub, Some(ana_id)) == 0);
+    assert_eq!(held_ends(&hub, Some(bob_id)), 7, "another account's rows are untouched");
 }
 
 #[test]

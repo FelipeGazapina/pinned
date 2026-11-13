@@ -120,7 +120,7 @@
                 "const": "attach"
               }
             },
-            "$ref": "#/$defs/Target3",
+            "$ref": "#/$defs/Target4",
             "required": [
               "type"
             ]
@@ -133,7 +133,7 @@
                 "const": "detach"
               }
             },
-            "$ref": "#/$defs/Target3",
+            "$ref": "#/$defs/Target4",
             "required": [
               "type"
             ]
@@ -5707,6 +5707,122 @@
                 ]
               },
               {
+                "description": "`Vec<schedule::Task>`: the account's scheduled tasks, soonest first, each with its next run\nand its last run.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "list_schedules"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`schedule::SaveAnswer`. A task with no id is new; the hub gives it one. The hub validates it,\ncomputes `next_at`, and keeps who created it. With `dry_run` it only answers the next three run\ntimes in the task's zone, and stores nothing.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "save_schedule"
+                  },
+                  "task": {
+                    "$ref": "#/$defs/Task"
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "task",
+                  "dry_run"
+                ]
+              },
+              {
+                "description": "The task as stored: paused (`enabled` false) or running again.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "pause_schedule"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "paused": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id",
+                  "paused"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "delete_schedule"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
+                "description": "`Vec<schedule::TaskRun>`: the task's runs, newest first. No `limit` answers 20.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "schedule_runs"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "limit": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0,
+                    "default": null
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id",
+                  "limit"
+                ]
+              },
+              {
+                "description": "The account's release-protection switch: tag and main protection exist, so a task may be\npre-approved for a release. Only the user's app sets it; no agent action does. Answers `on`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_release_protection"
+                  },
+                  "on": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "on"
+                ]
+              },
+              {
                 "description": "`RunStarted`: a session of the saved workflow `id`, started now with no trigger behind it,\non the machine the workflow names and under the limits of its project there.",
                 "type": "object",
                 "properties": {
@@ -6833,6 +6949,19 @@
                 "required": [
                   "cmd",
                   "days"
+                ]
+              },
+              {
+                "description": "`Vec<delegate::UnclaimedEnd>`: the account's worker ends that the machine whose tab delegated\nthe task answered it did not take, as a machine that restarted and forgot the task does.\nThe hub keeps each for 30 days, newest first.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "unclaimed_ends"
+                  }
+                },
+                "required": [
+                  "cmd"
                 ]
               },
               {
@@ -8809,6 +8938,500 @@
               "to"
             ]
           },
+          "Task": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "schedule": {
+                "$ref": "#/$defs/Schedule"
+              },
+              "tz": {
+                "description": "IANA name, as `America/Sao_Paulo`; set from the creator's device.",
+                "type": "string"
+              },
+              "target": {
+                "$ref": "#/$defs/Target3"
+              },
+              "action": {
+                "$ref": "#/$defs/Action2"
+              },
+              "enabled": {
+                "description": "False means paused.",
+                "type": "boolean"
+              },
+              "grace_mins": {
+                "description": "Minutes after `due_at` during which a run still counts as on time. None = [`DEFAULT_GRACE_MINS`].",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "on_missed": {
+                "description": "What to do with a run that was not delivered within grace. None = `OnMissed::default_for(schedule)`.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OnMissed"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "pickup_mins": {
+                "description": "Minutes a delivered run may wait for its target to start it. None = [`DEFAULT_PICKUP_MINS`].",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "approvals": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Approval"
+                },
+                "default": []
+              },
+              "fallback": {
+                "$ref": "#/$defs/Fallback2",
+                "default": "wait"
+              },
+              "idea": {
+                "description": "The idea it came from.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "created_by": {
+                "$ref": "#/$defs/Actor"
+              },
+              "created_at": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "updated_at": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "next_at": {
+                "description": "Hub-computed, read-only.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "default": null
+              },
+              "last_run": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TaskRun"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "fyi": {
+                "description": "Hub-computed, read-only: when an agent created the task and the user has not looked yet. The\nInbox shows a row for it. Unix seconds.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "schedule",
+              "tz",
+              "target",
+              "action",
+              "enabled",
+              "approvals",
+              "fallback",
+              "idea",
+              "created_by",
+              "created_at",
+              "updated_at",
+              "next_at",
+              "last_run"
+            ]
+          },
+          "Schedule": {
+            "oneOf": [
+              {
+                "description": "A wall-clock date and time in the task's zone: `2026-11-13T09:00`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "once"
+                  },
+                  "at": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "at"
+                ]
+              },
+              {
+                "description": "Five-field cron, evaluated in the task's zone.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "cron"
+                  },
+                  "expr": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "expr"
+                ]
+              }
+            ]
+          },
+          "Target3": {
+            "oneOf": [
+              {
+                "description": "The user: a notification on every device, with no agent run.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "me"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "The global Orchestrator, on the machine that hosts it.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "orchestrator"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "A project's Captain, by repo key; an empty machine means wherever `send_to_captain` would pick.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "captain"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "machine": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "project",
+                  "machine"
+                ]
+              },
+              {
+                "description": "An existing conversation, by Claude session id, so it survives tab restarts.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "session"
+                  },
+                  "session": {
+                    "type": "string"
+                  },
+                  "machine": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "session",
+                  "machine"
+                ]
+              },
+              {
+                "description": "A new worker in a project, placed like `delegate_task`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "worker"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "model": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "project",
+                  "model"
+                ]
+              }
+            ]
+          },
+          "Action2": {
+            "oneOf": [
+              {
+                "description": "Text the target receives as one prompt.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "prompt"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "text"
+                ]
+              },
+              {
+                "description": "Run now of a saved workflow. The target is ignored: the workflow's own `runs_on` decides.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "workflow"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id"
+                ]
+              }
+            ]
+          },
+          "OnMissed": {
+            "oneOf": [
+              {
+                "description": "The run becomes `missed` and the user decides: Run now or Skip.",
+                "type": "string",
+                "const": "ask"
+              },
+              {
+                "description": "Record the run as `skipped`; the next occurrence comes as usual.",
+                "type": "string",
+                "const": "skip"
+              },
+              {
+                "description": "Run as soon as a path opens, whenever that is.",
+                "type": "string",
+                "const": "run-late"
+              }
+            ]
+          },
+          "Approval": {
+            "description": "A step the task may take without asking: that item, in that repo, when the command contains the text.",
+            "type": "object",
+            "properties": {
+              "item": {
+                "$ref": "#/$defs/NeverItem"
+              },
+              "must_contain": {
+                "type": "string"
+              },
+              "repo": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "item",
+              "must_contain",
+              "repo"
+            ]
+          },
+          "NeverItem": {
+            "description": "The items of the never list, in the order of the design's table.",
+            "type": "string",
+            "enum": [
+              "delete-outside",
+              "force-push",
+              "push-to-main",
+              "release",
+              "deploy",
+              "production",
+              "secrets",
+              "payment",
+              "write-outside",
+              "self-grant",
+              "network-install",
+              "machine-wide"
+            ]
+          },
+          "Fallback2": {
+            "description": "Where a run goes when its target's machine is not there.",
+            "oneOf": [
+              {
+                "description": "Wait within the grace window. A box costs money, so this is the default.",
+                "type": "string",
+                "const": "wait"
+              },
+              {
+                "description": "Open a box, for the targets that allow it.",
+                "type": "string",
+                "const": "box"
+              }
+            ]
+          },
+          "Actor": {
+            "description": "Who created a task or an idea: the user, or an agent by the part it plays.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "user"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "agent"
+                  },
+                  "role": {
+                    "$ref": "#/$defs/ActorRole"
+                  },
+                  "machine": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "tab": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "session_title": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "role",
+                  "machine",
+                  "tab",
+                  "session_title"
+                ]
+              }
+            ]
+          },
+          "ActorRole": {
+            "description": "The part the session that acted plays, as its tab shows it.",
+            "type": "string",
+            "enum": [
+              "global_orchestrator",
+              "captain",
+              "worker",
+              "taste_chat",
+              "workflow",
+              "session"
+            ]
+          },
+          "TaskRun": {
+            "type": "object",
+            "properties": {
+              "task": {
+                "type": "string"
+              },
+              "due_at": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "started_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "default": null
+              },
+              "state": {
+                "$ref": "#/$defs/RunState"
+              },
+              "machine": {
+                "type": "string",
+                "default": ""
+              },
+              "tab": {
+                "type": "string",
+                "default": ""
+              },
+              "detail": {
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "task",
+              "due_at",
+              "started_at",
+              "state",
+              "machine",
+              "tab",
+              "detail"
+            ]
+          },
+          "RunState": {
+            "type": "string",
+            "enum": [
+              "due",
+              "delivered",
+              "queued",
+              "held",
+              "done",
+              "failed",
+              "missed",
+              "skipped",
+              "lost"
+            ]
+          },
           "Need": {
             "description": "What a worker needs from the machine that runs it.",
             "type": "object",
@@ -10295,7 +10918,7 @@
               }
             ]
           },
-          "Target3": {
+          "Target4": {
             "type": "object",
             "properties": {
               "machine": {
@@ -10403,7 +11026,7 @@
                 "const": "attach"
               }
             },
-            "$ref": "#/$defs/Target3",
+            "$ref": "#/$defs/Target4",
             "required": [
               "type"
             ]
@@ -10416,7 +11039,7 @@
                 "const": "detach"
               }
             },
-            "$ref": "#/$defs/Target3",
+            "$ref": "#/$defs/Target4",
             "required": [
               "type"
             ]
@@ -15917,6 +16540,120 @@
                 ]
               },
               {
+                "description": "`Vec<schedule::Task>`: the account's scheduled tasks, soonest first, each with its next run\nand its last run.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "list_schedules"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`schedule::SaveAnswer`. A task with no id is new; the hub gives it one. The hub validates it,\ncomputes `next_at`, and keeps who created it. With `dry_run` it only answers the next three run\ntimes in the task's zone, and stores nothing.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "save_schedule"
+                  },
+                  "task": {
+                    "$ref": "#/$defs/Task"
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "task"
+                ]
+              },
+              {
+                "description": "The task as stored: paused (`enabled` false) or running again.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "pause_schedule"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "paused": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id",
+                  "paused"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "delete_schedule"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
+                "description": "`Vec<schedule::TaskRun>`: the task's runs, newest first. No `limit` answers 20.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "schedule_runs"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "limit": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0,
+                    "default": null
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
+                "description": "The account's release-protection switch: tag and main protection exist, so a task may be\npre-approved for a release. Only the user's app sets it; no agent action does. Answers `on`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_release_protection"
+                  },
+                  "on": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "on"
+                ]
+              },
+              {
                 "description": "`RunStarted`: a session of the saved workflow `id`, started now with no trigger behind it,\non the machine the workflow names and under the limits of its project there.",
                 "type": "object",
                 "properties": {
@@ -17033,6 +17770,19 @@
                 "required": [
                   "cmd",
                   "days"
+                ]
+              },
+              {
+                "description": "`Vec<delegate::UnclaimedEnd>`: the account's worker ends that the machine whose tab delegated\nthe task answered it did not take, as a machine that restarted and forgot the task does.\nThe hub keeps each for 30 days, newest first.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "unclaimed_ends"
+                  }
+                },
+                "required": [
+                  "cmd"
                 ]
               },
               {
@@ -18950,6 +19700,485 @@
               "to"
             ]
           },
+          "Task": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "schedule": {
+                "$ref": "#/$defs/Schedule"
+              },
+              "tz": {
+                "description": "IANA name, as `America/Sao_Paulo`; set from the creator's device.",
+                "type": "string"
+              },
+              "target": {
+                "$ref": "#/$defs/Target3"
+              },
+              "action": {
+                "$ref": "#/$defs/Action2"
+              },
+              "enabled": {
+                "description": "False means paused.",
+                "type": "boolean"
+              },
+              "grace_mins": {
+                "description": "Minutes after `due_at` during which a run still counts as on time. None = [`DEFAULT_GRACE_MINS`].",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "on_missed": {
+                "description": "What to do with a run that was not delivered within grace. None = `OnMissed::default_for(schedule)`.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OnMissed"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "pickup_mins": {
+                "description": "Minutes a delivered run may wait for its target to start it. None = [`DEFAULT_PICKUP_MINS`].",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "approvals": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Approval"
+                },
+                "default": []
+              },
+              "fallback": {
+                "$ref": "#/$defs/Fallback2",
+                "default": "wait"
+              },
+              "idea": {
+                "description": "The idea it came from.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "created_by": {
+                "$ref": "#/$defs/Actor"
+              },
+              "created_at": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "updated_at": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "next_at": {
+                "description": "Hub-computed, read-only.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "default": null
+              },
+              "last_run": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TaskRun"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "fyi": {
+                "description": "Hub-computed, read-only: when an agent created the task and the user has not looked yet. The\nInbox shows a row for it. Unix seconds.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "schedule",
+              "tz",
+              "target",
+              "action",
+              "enabled",
+              "created_by",
+              "created_at",
+              "updated_at"
+            ]
+          },
+          "Schedule": {
+            "oneOf": [
+              {
+                "description": "A wall-clock date and time in the task's zone: `2026-11-13T09:00`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "once"
+                  },
+                  "at": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "at"
+                ]
+              },
+              {
+                "description": "Five-field cron, evaluated in the task's zone.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "cron"
+                  },
+                  "expr": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "expr"
+                ]
+              }
+            ]
+          },
+          "Target3": {
+            "oneOf": [
+              {
+                "description": "The user: a notification on every device, with no agent run.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "me"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "The global Orchestrator, on the machine that hosts it.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "orchestrator"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "A project's Captain, by repo key; an empty machine means wherever `send_to_captain` would pick.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "captain"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "machine": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "project"
+                ]
+              },
+              {
+                "description": "An existing conversation, by Claude session id, so it survives tab restarts.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "session"
+                  },
+                  "session": {
+                    "type": "string"
+                  },
+                  "machine": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "session"
+                ]
+              },
+              {
+                "description": "A new worker in a project, placed like `delegate_task`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "worker"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "model": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "project"
+                ]
+              }
+            ]
+          },
+          "Action2": {
+            "oneOf": [
+              {
+                "description": "Text the target receives as one prompt.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "prompt"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "text"
+                ]
+              },
+              {
+                "description": "Run now of a saved workflow. The target is ignored: the workflow's own `runs_on` decides.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "workflow"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id"
+                ]
+              }
+            ]
+          },
+          "OnMissed": {
+            "oneOf": [
+              {
+                "description": "The run becomes `missed` and the user decides: Run now or Skip.",
+                "type": "string",
+                "const": "ask"
+              },
+              {
+                "description": "Record the run as `skipped`; the next occurrence comes as usual.",
+                "type": "string",
+                "const": "skip"
+              },
+              {
+                "description": "Run as soon as a path opens, whenever that is.",
+                "type": "string",
+                "const": "run-late"
+              }
+            ]
+          },
+          "Approval": {
+            "description": "A step the task may take without asking: that item, in that repo, when the command contains the text.",
+            "type": "object",
+            "properties": {
+              "item": {
+                "$ref": "#/$defs/NeverItem"
+              },
+              "must_contain": {
+                "type": "string"
+              },
+              "repo": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "item",
+              "must_contain",
+              "repo"
+            ]
+          },
+          "NeverItem": {
+            "description": "The items of the never list, in the order of the design's table.",
+            "type": "string",
+            "enum": [
+              "delete-outside",
+              "force-push",
+              "push-to-main",
+              "release",
+              "deploy",
+              "production",
+              "secrets",
+              "payment",
+              "write-outside",
+              "self-grant",
+              "network-install",
+              "machine-wide"
+            ]
+          },
+          "Fallback2": {
+            "description": "Where a run goes when its target's machine is not there.",
+            "oneOf": [
+              {
+                "description": "Wait within the grace window. A box costs money, so this is the default.",
+                "type": "string",
+                "const": "wait"
+              },
+              {
+                "description": "Open a box, for the targets that allow it.",
+                "type": "string",
+                "const": "box"
+              }
+            ]
+          },
+          "Actor": {
+            "description": "Who created a task or an idea: the user, or an agent by the part it plays.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "user"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "agent"
+                  },
+                  "role": {
+                    "$ref": "#/$defs/ActorRole"
+                  },
+                  "machine": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "tab": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "session_title": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "role"
+                ]
+              }
+            ]
+          },
+          "ActorRole": {
+            "description": "The part the session that acted plays, as its tab shows it.",
+            "type": "string",
+            "enum": [
+              "global_orchestrator",
+              "captain",
+              "worker",
+              "taste_chat",
+              "workflow",
+              "session"
+            ]
+          },
+          "TaskRun": {
+            "type": "object",
+            "properties": {
+              "task": {
+                "type": "string"
+              },
+              "due_at": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "started_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "default": null
+              },
+              "state": {
+                "$ref": "#/$defs/RunState"
+              },
+              "machine": {
+                "type": "string",
+                "default": ""
+              },
+              "tab": {
+                "type": "string",
+                "default": ""
+              },
+              "detail": {
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "task",
+              "due_at",
+              "state"
+            ]
+          },
+          "RunState": {
+            "type": "string",
+            "enum": [
+              "due",
+              "delivered",
+              "queued",
+              "held",
+              "done",
+              "failed",
+              "missed",
+              "skipped",
+              "lost"
+            ]
+          },
           "Need": {
             "description": "What a worker needs from the machine that runs it.",
             "type": "object",
@@ -20391,7 +21620,7 @@
               }
             ]
           },
-          "Target3": {
+          "Target4": {
             "type": "object",
             "properties": {
               "machine": {
@@ -22356,6 +23585,122 @@
                 ]
               },
               {
+                "description": "`Vec<schedule::Task>`: the account's scheduled tasks, soonest first, each with its next run\nand its last run.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "list_schedules"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`schedule::SaveAnswer`. A task with no id is new; the hub gives it one. The hub validates it,\ncomputes `next_at`, and keeps who created it. With `dry_run` it only answers the next three run\ntimes in the task's zone, and stores nothing.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "save_schedule"
+                  },
+                  "task": {
+                    "$ref": "#/$defs/Task"
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "task",
+                  "dry_run"
+                ]
+              },
+              {
+                "description": "The task as stored: paused (`enabled` false) or running again.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "pause_schedule"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "paused": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id",
+                  "paused"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "delete_schedule"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
+                "description": "`Vec<schedule::TaskRun>`: the task's runs, newest first. No `limit` answers 20.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "schedule_runs"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "limit": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0,
+                    "default": null
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id",
+                  "limit"
+                ]
+              },
+              {
+                "description": "The account's release-protection switch: tag and main protection exist, so a task may be\npre-approved for a release. Only the user's app sets it; no agent action does. Answers `on`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_release_protection"
+                  },
+                  "on": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "on"
+                ]
+              },
+              {
                 "description": "`RunStarted`: a session of the saved workflow `id`, started now with no trigger behind it,\non the machine the workflow names and under the limits of its project there.",
                 "type": "object",
                 "properties": {
@@ -23482,6 +24827,19 @@
                 "required": [
                   "cmd",
                   "days"
+                ]
+              },
+              {
+                "description": "`Vec<delegate::UnclaimedEnd>`: the account's worker ends that the machine whose tab delegated\nthe task answered it did not take, as a machine that restarted and forgot the task does.\nThe hub keeps each for 30 days, newest first.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "unclaimed_ends"
+                  }
+                },
+                "required": [
+                  "cmd"
                 ]
               },
               {
@@ -25467,6 +26825,500 @@
               "to"
             ]
           },
+          "Task": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "schedule": {
+                "$ref": "#/$defs/Schedule"
+              },
+              "tz": {
+                "description": "IANA name, as `America/Sao_Paulo`; set from the creator's device.",
+                "type": "string"
+              },
+              "target": {
+                "$ref": "#/$defs/Target"
+              },
+              "action": {
+                "$ref": "#/$defs/Action"
+              },
+              "enabled": {
+                "description": "False means paused.",
+                "type": "boolean"
+              },
+              "grace_mins": {
+                "description": "Minutes after `due_at` during which a run still counts as on time. None = [`DEFAULT_GRACE_MINS`].",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "on_missed": {
+                "description": "What to do with a run that was not delivered within grace. None = `OnMissed::default_for(schedule)`.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OnMissed"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "pickup_mins": {
+                "description": "Minutes a delivered run may wait for its target to start it. None = [`DEFAULT_PICKUP_MINS`].",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "approvals": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Approval"
+                },
+                "default": []
+              },
+              "fallback": {
+                "$ref": "#/$defs/Fallback2",
+                "default": "wait"
+              },
+              "idea": {
+                "description": "The idea it came from.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "created_by": {
+                "$ref": "#/$defs/Actor"
+              },
+              "created_at": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "updated_at": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "next_at": {
+                "description": "Hub-computed, read-only.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "default": null
+              },
+              "last_run": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TaskRun"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "fyi": {
+                "description": "Hub-computed, read-only: when an agent created the task and the user has not looked yet. The\nInbox shows a row for it. Unix seconds.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "schedule",
+              "tz",
+              "target",
+              "action",
+              "enabled",
+              "approvals",
+              "fallback",
+              "idea",
+              "created_by",
+              "created_at",
+              "updated_at",
+              "next_at",
+              "last_run"
+            ]
+          },
+          "Schedule": {
+            "oneOf": [
+              {
+                "description": "A wall-clock date and time in the task's zone: `2026-11-13T09:00`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "once"
+                  },
+                  "at": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "at"
+                ]
+              },
+              {
+                "description": "Five-field cron, evaluated in the task's zone.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "cron"
+                  },
+                  "expr": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "expr"
+                ]
+              }
+            ]
+          },
+          "Target": {
+            "oneOf": [
+              {
+                "description": "The user: a notification on every device, with no agent run.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "me"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "The global Orchestrator, on the machine that hosts it.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "orchestrator"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "A project's Captain, by repo key; an empty machine means wherever `send_to_captain` would pick.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "captain"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "machine": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "project",
+                  "machine"
+                ]
+              },
+              {
+                "description": "An existing conversation, by Claude session id, so it survives tab restarts.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "session"
+                  },
+                  "session": {
+                    "type": "string"
+                  },
+                  "machine": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "session",
+                  "machine"
+                ]
+              },
+              {
+                "description": "A new worker in a project, placed like `delegate_task`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "worker"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "model": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "project",
+                  "model"
+                ]
+              }
+            ]
+          },
+          "Action": {
+            "oneOf": [
+              {
+                "description": "Text the target receives as one prompt.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "prompt"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "text"
+                ]
+              },
+              {
+                "description": "Run now of a saved workflow. The target is ignored: the workflow's own `runs_on` decides.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "workflow"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id"
+                ]
+              }
+            ]
+          },
+          "OnMissed": {
+            "oneOf": [
+              {
+                "description": "The run becomes `missed` and the user decides: Run now or Skip.",
+                "type": "string",
+                "const": "ask"
+              },
+              {
+                "description": "Record the run as `skipped`; the next occurrence comes as usual.",
+                "type": "string",
+                "const": "skip"
+              },
+              {
+                "description": "Run as soon as a path opens, whenever that is.",
+                "type": "string",
+                "const": "run-late"
+              }
+            ]
+          },
+          "Approval": {
+            "description": "A step the task may take without asking: that item, in that repo, when the command contains the text.",
+            "type": "object",
+            "properties": {
+              "item": {
+                "$ref": "#/$defs/NeverItem"
+              },
+              "must_contain": {
+                "type": "string"
+              },
+              "repo": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "item",
+              "must_contain",
+              "repo"
+            ]
+          },
+          "NeverItem": {
+            "description": "The items of the never list, in the order of the design's table.",
+            "type": "string",
+            "enum": [
+              "delete-outside",
+              "force-push",
+              "push-to-main",
+              "release",
+              "deploy",
+              "production",
+              "secrets",
+              "payment",
+              "write-outside",
+              "self-grant",
+              "network-install",
+              "machine-wide"
+            ]
+          },
+          "Fallback2": {
+            "description": "Where a run goes when its target's machine is not there.",
+            "oneOf": [
+              {
+                "description": "Wait within the grace window. A box costs money, so this is the default.",
+                "type": "string",
+                "const": "wait"
+              },
+              {
+                "description": "Open a box, for the targets that allow it.",
+                "type": "string",
+                "const": "box"
+              }
+            ]
+          },
+          "Actor": {
+            "description": "Who created a task or an idea: the user, or an agent by the part it plays.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "user"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "agent"
+                  },
+                  "role": {
+                    "$ref": "#/$defs/ActorRole"
+                  },
+                  "machine": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "tab": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "session_title": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "role",
+                  "machine",
+                  "tab",
+                  "session_title"
+                ]
+              }
+            ]
+          },
+          "ActorRole": {
+            "description": "The part the session that acted plays, as its tab shows it.",
+            "type": "string",
+            "enum": [
+              "global_orchestrator",
+              "captain",
+              "worker",
+              "taste_chat",
+              "workflow",
+              "session"
+            ]
+          },
+          "TaskRun": {
+            "type": "object",
+            "properties": {
+              "task": {
+                "type": "string"
+              },
+              "due_at": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "started_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "default": null
+              },
+              "state": {
+                "$ref": "#/$defs/RunState"
+              },
+              "machine": {
+                "type": "string",
+                "default": ""
+              },
+              "tab": {
+                "type": "string",
+                "default": ""
+              },
+              "detail": {
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "task",
+              "due_at",
+              "started_at",
+              "state",
+              "machine",
+              "tab",
+              "detail"
+            ]
+          },
+          "RunState": {
+            "type": "string",
+            "enum": [
+              "due",
+              "delivered",
+              "queued",
+              "held",
+              "done",
+              "failed",
+              "missed",
+              "skipped",
+              "lost"
+            ]
+          },
           "Need": {
             "description": "What a worker needs from the machine that runs it.",
             "type": "object",
@@ -26424,7 +28276,7 @@
                 "type": "string"
               },
               "target": {
-                "$ref": "#/$defs/Target"
+                "$ref": "#/$defs/Target2"
               },
               "isolation": {
                 "$ref": "#/$defs/Isolation"
@@ -26509,7 +28361,7 @@
               "interaction"
             ]
           },
-          "Target": {
+          "Target2": {
             "type": "object",
             "properties": {
               "account": {
@@ -29426,6 +31278,120 @@
                 ]
               },
               {
+                "description": "`Vec<schedule::Task>`: the account's scheduled tasks, soonest first, each with its next run\nand its last run.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "list_schedules"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "`schedule::SaveAnswer`. A task with no id is new; the hub gives it one. The hub validates it,\ncomputes `next_at`, and keeps who created it. With `dry_run` it only answers the next three run\ntimes in the task's zone, and stores nothing.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "save_schedule"
+                  },
+                  "task": {
+                    "$ref": "#/$defs/Task"
+                  },
+                  "dry_run": {
+                    "type": "boolean",
+                    "default": false
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "task"
+                ]
+              },
+              {
+                "description": "The task as stored: paused (`enabled` false) or running again.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "pause_schedule"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "paused": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id",
+                  "paused"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "delete_schedule"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
+                "description": "`Vec<schedule::TaskRun>`: the task's runs, newest first. No `limit` answers 20.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "schedule_runs"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "limit": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "uint32",
+                    "minimum": 0,
+                    "default": null
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "id"
+                ]
+              },
+              {
+                "description": "The account's release-protection switch: tag and main protection exist, so a task may be\npre-approved for a release. Only the user's app sets it; no agent action does. Answers `on`.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "set_release_protection"
+                  },
+                  "on": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "on"
+                ]
+              },
+              {
                 "description": "`RunStarted`: a session of the saved workflow `id`, started now with no trigger behind it,\non the machine the workflow names and under the limits of its project there.",
                 "type": "object",
                 "properties": {
@@ -30542,6 +32508,19 @@
                 "required": [
                   "cmd",
                   "days"
+                ]
+              },
+              {
+                "description": "`Vec<delegate::UnclaimedEnd>`: the account's worker ends that the machine whose tab delegated\nthe task answered it did not take, as a machine that restarted and forgot the task does.\nThe hub keeps each for 30 days, newest first.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "unclaimed_ends"
+                  }
+                },
+                "required": [
+                  "cmd"
                 ]
               },
               {
@@ -32468,6 +34447,485 @@
               "to"
             ]
           },
+          "Task": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "schedule": {
+                "$ref": "#/$defs/Schedule"
+              },
+              "tz": {
+                "description": "IANA name, as `America/Sao_Paulo`; set from the creator's device.",
+                "type": "string"
+              },
+              "target": {
+                "$ref": "#/$defs/Target"
+              },
+              "action": {
+                "$ref": "#/$defs/Action"
+              },
+              "enabled": {
+                "description": "False means paused.",
+                "type": "boolean"
+              },
+              "grace_mins": {
+                "description": "Minutes after `due_at` during which a run still counts as on time. None = [`DEFAULT_GRACE_MINS`].",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "on_missed": {
+                "description": "What to do with a run that was not delivered within grace. None = `OnMissed::default_for(schedule)`.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OnMissed"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "pickup_mins": {
+                "description": "Minutes a delivered run may wait for its target to start it. None = [`DEFAULT_PICKUP_MINS`].",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "approvals": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Approval"
+                },
+                "default": []
+              },
+              "fallback": {
+                "$ref": "#/$defs/Fallback2",
+                "default": "wait"
+              },
+              "idea": {
+                "description": "The idea it came from.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "created_by": {
+                "$ref": "#/$defs/Actor"
+              },
+              "created_at": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "updated_at": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "next_at": {
+                "description": "Hub-computed, read-only.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "default": null
+              },
+              "last_run": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TaskRun"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "fyi": {
+                "description": "Hub-computed, read-only: when an agent created the task and the user has not looked yet. The\nInbox shows a row for it. Unix seconds.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "schedule",
+              "tz",
+              "target",
+              "action",
+              "enabled",
+              "created_by",
+              "created_at",
+              "updated_at"
+            ]
+          },
+          "Schedule": {
+            "oneOf": [
+              {
+                "description": "A wall-clock date and time in the task's zone: `2026-11-13T09:00`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "once"
+                  },
+                  "at": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "at"
+                ]
+              },
+              {
+                "description": "Five-field cron, evaluated in the task's zone.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "cron"
+                  },
+                  "expr": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "expr"
+                ]
+              }
+            ]
+          },
+          "Target": {
+            "oneOf": [
+              {
+                "description": "The user: a notification on every device, with no agent run.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "me"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "The global Orchestrator, on the machine that hosts it.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "orchestrator"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "A project's Captain, by repo key; an empty machine means wherever `send_to_captain` would pick.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "captain"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "machine": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "project"
+                ]
+              },
+              {
+                "description": "An existing conversation, by Claude session id, so it survives tab restarts.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "session"
+                  },
+                  "session": {
+                    "type": "string"
+                  },
+                  "machine": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "session"
+                ]
+              },
+              {
+                "description": "A new worker in a project, placed like `delegate_task`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "worker"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "model": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "project"
+                ]
+              }
+            ]
+          },
+          "Action": {
+            "oneOf": [
+              {
+                "description": "Text the target receives as one prompt.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "prompt"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "text"
+                ]
+              },
+              {
+                "description": "Run now of a saved workflow. The target is ignored: the workflow's own `runs_on` decides.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "workflow"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id"
+                ]
+              }
+            ]
+          },
+          "OnMissed": {
+            "oneOf": [
+              {
+                "description": "The run becomes `missed` and the user decides: Run now or Skip.",
+                "type": "string",
+                "const": "ask"
+              },
+              {
+                "description": "Record the run as `skipped`; the next occurrence comes as usual.",
+                "type": "string",
+                "const": "skip"
+              },
+              {
+                "description": "Run as soon as a path opens, whenever that is.",
+                "type": "string",
+                "const": "run-late"
+              }
+            ]
+          },
+          "Approval": {
+            "description": "A step the task may take without asking: that item, in that repo, when the command contains the text.",
+            "type": "object",
+            "properties": {
+              "item": {
+                "$ref": "#/$defs/NeverItem"
+              },
+              "must_contain": {
+                "type": "string"
+              },
+              "repo": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "item",
+              "must_contain",
+              "repo"
+            ]
+          },
+          "NeverItem": {
+            "description": "The items of the never list, in the order of the design's table.",
+            "type": "string",
+            "enum": [
+              "delete-outside",
+              "force-push",
+              "push-to-main",
+              "release",
+              "deploy",
+              "production",
+              "secrets",
+              "payment",
+              "write-outside",
+              "self-grant",
+              "network-install",
+              "machine-wide"
+            ]
+          },
+          "Fallback2": {
+            "description": "Where a run goes when its target's machine is not there.",
+            "oneOf": [
+              {
+                "description": "Wait within the grace window. A box costs money, so this is the default.",
+                "type": "string",
+                "const": "wait"
+              },
+              {
+                "description": "Open a box, for the targets that allow it.",
+                "type": "string",
+                "const": "box"
+              }
+            ]
+          },
+          "Actor": {
+            "description": "Who created a task or an idea: the user, or an agent by the part it plays.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "user"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "agent"
+                  },
+                  "role": {
+                    "$ref": "#/$defs/ActorRole"
+                  },
+                  "machine": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "tab": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "session_title": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "role"
+                ]
+              }
+            ]
+          },
+          "ActorRole": {
+            "description": "The part the session that acted plays, as its tab shows it.",
+            "type": "string",
+            "enum": [
+              "global_orchestrator",
+              "captain",
+              "worker",
+              "taste_chat",
+              "workflow",
+              "session"
+            ]
+          },
+          "TaskRun": {
+            "type": "object",
+            "properties": {
+              "task": {
+                "type": "string"
+              },
+              "due_at": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "started_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "default": null
+              },
+              "state": {
+                "$ref": "#/$defs/RunState"
+              },
+              "machine": {
+                "type": "string",
+                "default": ""
+              },
+              "tab": {
+                "type": "string",
+                "default": ""
+              },
+              "detail": {
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "task",
+              "due_at",
+              "state"
+            ]
+          },
+          "RunState": {
+            "type": "string",
+            "enum": [
+              "due",
+              "delivered",
+              "queued",
+              "held",
+              "done",
+              "failed",
+              "missed",
+              "skipped",
+              "lost"
+            ]
+          },
           "Need": {
             "description": "What a worker needs from the machine that runs it.",
             "type": "object",
@@ -33389,7 +35847,7 @@
                 "type": "string"
               },
               "target": {
-                "$ref": "#/$defs/Target"
+                "$ref": "#/$defs/Target2"
               },
               "isolation": {
                 "$ref": "#/$defs/Isolation"
@@ -33471,7 +35929,7 @@
               "timeout_ms"
             ]
           },
-          "Target": {
+          "Target2": {
             "type": "object",
             "properties": {
               "account": {
@@ -35117,6 +37575,13 @@
               "string",
               "null"
             ]
+          },
+          "task": {
+            "description": "The scheduled task the act is about: one it saved, paused or deleted, or later one a run did it for.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -35201,6 +37666,13 @@
             "default": ""
           },
           "request_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "task": {
+            "description": "The scheduled task the act is about: one it saved, paused or deleted, or later one a run did it for.",
             "type": [
               "string",
               "null"
@@ -44689,6 +47161,13 @@
           "repo_insight": {
             "description": "Absent on the wire while it is off.",
             "$ref": "#/$defs/RepoInsight"
+          },
+          "schedules": {
+            "description": "The account's scheduled tasks. The hub fills it; a node's own store has none.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Task"
+            }
           }
         },
         "required": [
@@ -46423,6 +48902,440 @@
             "required": [
               "on"
             ]
+          },
+          "Task": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "schedule": {
+                "$ref": "#/$defs/Schedule"
+              },
+              "tz": {
+                "description": "IANA name, as `America/Sao_Paulo`; set from the creator's device.",
+                "type": "string"
+              },
+              "target": {
+                "$ref": "#/$defs/Target"
+              },
+              "action": {
+                "$ref": "#/$defs/Action"
+              },
+              "enabled": {
+                "description": "False means paused.",
+                "type": "boolean"
+              },
+              "grace_mins": {
+                "description": "Minutes after `due_at` during which a run still counts as on time. None = [`DEFAULT_GRACE_MINS`].",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "on_missed": {
+                "description": "What to do with a run that was not delivered within grace. None = `OnMissed::default_for(schedule)`.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OnMissed"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "pickup_mins": {
+                "description": "Minutes a delivered run may wait for its target to start it. None = [`DEFAULT_PICKUP_MINS`].",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "approvals": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Approval"
+                },
+                "default": []
+              },
+              "fallback": {
+                "$ref": "#/$defs/Fallback2",
+                "default": "wait"
+              },
+              "idea": {
+                "description": "The idea it came from.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "created_by": {
+                "$ref": "#/$defs/Actor"
+              },
+              "created_at": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "updated_at": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "next_at": {
+                "description": "Hub-computed, read-only.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "default": null
+              },
+              "last_run": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TaskRun"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "fyi": {
+                "description": "Hub-computed, read-only: when an agent created the task and the user has not looked yet. The\nInbox shows a row for it. Unix seconds.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "schedule",
+              "tz",
+              "target",
+              "action",
+              "enabled",
+              "approvals",
+              "fallback",
+              "idea",
+              "created_by",
+              "created_at",
+              "updated_at",
+              "next_at",
+              "last_run"
+            ]
+          },
+          "Schedule": {
+            "oneOf": [
+              {
+                "description": "A wall-clock date and time in the task's zone: `2026-11-13T09:00`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "once"
+                  },
+                  "at": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "at"
+                ]
+              },
+              {
+                "description": "Five-field cron, evaluated in the task's zone.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "cron"
+                  },
+                  "expr": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "expr"
+                ]
+              }
+            ]
+          },
+          "Target": {
+            "oneOf": [
+              {
+                "description": "The user: a notification on every device, with no agent run.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "me"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "The global Orchestrator, on the machine that hosts it.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "orchestrator"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "A project's Captain, by repo key; an empty machine means wherever `send_to_captain` would pick.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "captain"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "machine": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "project",
+                  "machine"
+                ]
+              },
+              {
+                "description": "An existing conversation, by Claude session id, so it survives tab restarts.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "session"
+                  },
+                  "session": {
+                    "type": "string"
+                  },
+                  "machine": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "session",
+                  "machine"
+                ]
+              },
+              {
+                "description": "A new worker in a project, placed like `delegate_task`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "worker"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "model": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "project",
+                  "model"
+                ]
+              }
+            ]
+          },
+          "Action": {
+            "oneOf": [
+              {
+                "description": "Text the target receives as one prompt.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "prompt"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "text"
+                ]
+              },
+              {
+                "description": "Run now of a saved workflow. The target is ignored: the workflow's own `runs_on` decides.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "workflow"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id"
+                ]
+              }
+            ]
+          },
+          "OnMissed": {
+            "oneOf": [
+              {
+                "description": "The run becomes `missed` and the user decides: Run now or Skip.",
+                "type": "string",
+                "const": "ask"
+              },
+              {
+                "description": "Record the run as `skipped`; the next occurrence comes as usual.",
+                "type": "string",
+                "const": "skip"
+              },
+              {
+                "description": "Run as soon as a path opens, whenever that is.",
+                "type": "string",
+                "const": "run-late"
+              }
+            ]
+          },
+          "Approval": {
+            "description": "A step the task may take without asking: that item, in that repo, when the command contains the text.",
+            "type": "object",
+            "properties": {
+              "item": {
+                "$ref": "#/$defs/NeverItem"
+              },
+              "must_contain": {
+                "type": "string"
+              },
+              "repo": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "item",
+              "must_contain",
+              "repo"
+            ]
+          },
+          "NeverItem": {
+            "description": "The items of the never list, in the order of the design's table.",
+            "type": "string",
+            "enum": [
+              "delete-outside",
+              "force-push",
+              "push-to-main",
+              "release",
+              "deploy",
+              "production",
+              "secrets",
+              "payment",
+              "write-outside",
+              "self-grant",
+              "network-install",
+              "machine-wide"
+            ]
+          },
+          "Fallback2": {
+            "description": "Where a run goes when its target's machine is not there.",
+            "oneOf": [
+              {
+                "description": "Wait within the grace window. A box costs money, so this is the default.",
+                "type": "string",
+                "const": "wait"
+              },
+              {
+                "description": "Open a box, for the targets that allow it.",
+                "type": "string",
+                "const": "box"
+              }
+            ]
+          },
+          "TaskRun": {
+            "type": "object",
+            "properties": {
+              "task": {
+                "type": "string"
+              },
+              "due_at": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "started_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "default": null
+              },
+              "state": {
+                "$ref": "#/$defs/RunState"
+              },
+              "machine": {
+                "type": "string",
+                "default": ""
+              },
+              "tab": {
+                "type": "string",
+                "default": ""
+              },
+              "detail": {
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "task",
+              "due_at",
+              "started_at",
+              "state",
+              "machine",
+              "tab",
+              "detail"
+            ]
+          },
+          "RunState": {
+            "type": "string",
+            "enum": [
+              "due",
+              "delivered",
+              "queued",
+              "held",
+              "done",
+              "failed",
+              "missed",
+              "skipped",
+              "lost"
+            ]
           }
         }
       },
@@ -46541,6 +49454,13 @@
           "repo_insight": {
             "description": "Absent on the wire while it is off.",
             "$ref": "#/$defs/RepoInsight"
+          },
+          "schedules": {
+            "description": "The account's scheduled tasks. The hub fills it; a node's own store has none.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Task"
+            }
           }
         },
         "required": [
@@ -48199,6 +51119,428 @@
                 "default": false
               }
             }
+          },
+          "Task": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "schedule": {
+                "$ref": "#/$defs/Schedule"
+              },
+              "tz": {
+                "description": "IANA name, as `America/Sao_Paulo`; set from the creator's device.",
+                "type": "string"
+              },
+              "target": {
+                "$ref": "#/$defs/Target"
+              },
+              "action": {
+                "$ref": "#/$defs/Action"
+              },
+              "enabled": {
+                "description": "False means paused.",
+                "type": "boolean"
+              },
+              "grace_mins": {
+                "description": "Minutes after `due_at` during which a run still counts as on time. None = [`DEFAULT_GRACE_MINS`].",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "on_missed": {
+                "description": "What to do with a run that was not delivered within grace. None = `OnMissed::default_for(schedule)`.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OnMissed"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "pickup_mins": {
+                "description": "Minutes a delivered run may wait for its target to start it. None = [`DEFAULT_PICKUP_MINS`].",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "approvals": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Approval"
+                },
+                "default": []
+              },
+              "fallback": {
+                "$ref": "#/$defs/Fallback2",
+                "default": "wait"
+              },
+              "idea": {
+                "description": "The idea it came from.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "created_by": {
+                "$ref": "#/$defs/Actor"
+              },
+              "created_at": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "updated_at": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "next_at": {
+                "description": "Hub-computed, read-only.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "default": null
+              },
+              "last_run": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TaskRun"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "fyi": {
+                "description": "Hub-computed, read-only: when an agent created the task and the user has not looked yet. The\nInbox shows a row for it. Unix seconds.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "schedule",
+              "tz",
+              "target",
+              "action",
+              "enabled",
+              "created_by",
+              "created_at",
+              "updated_at"
+            ]
+          },
+          "Schedule": {
+            "oneOf": [
+              {
+                "description": "A wall-clock date and time in the task's zone: `2026-11-13T09:00`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "once"
+                  },
+                  "at": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "at"
+                ]
+              },
+              {
+                "description": "Five-field cron, evaluated in the task's zone.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "cron"
+                  },
+                  "expr": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "expr"
+                ]
+              }
+            ]
+          },
+          "Target": {
+            "oneOf": [
+              {
+                "description": "The user: a notification on every device, with no agent run.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "me"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "The global Orchestrator, on the machine that hosts it.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "orchestrator"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "A project's Captain, by repo key; an empty machine means wherever `send_to_captain` would pick.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "captain"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "machine": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "project"
+                ]
+              },
+              {
+                "description": "An existing conversation, by Claude session id, so it survives tab restarts.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "session"
+                  },
+                  "session": {
+                    "type": "string"
+                  },
+                  "machine": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "session"
+                ]
+              },
+              {
+                "description": "A new worker in a project, placed like `delegate_task`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "worker"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "model": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "project"
+                ]
+              }
+            ]
+          },
+          "Action": {
+            "oneOf": [
+              {
+                "description": "Text the target receives as one prompt.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "prompt"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "text"
+                ]
+              },
+              {
+                "description": "Run now of a saved workflow. The target is ignored: the workflow's own `runs_on` decides.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "workflow"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id"
+                ]
+              }
+            ]
+          },
+          "OnMissed": {
+            "oneOf": [
+              {
+                "description": "The run becomes `missed` and the user decides: Run now or Skip.",
+                "type": "string",
+                "const": "ask"
+              },
+              {
+                "description": "Record the run as `skipped`; the next occurrence comes as usual.",
+                "type": "string",
+                "const": "skip"
+              },
+              {
+                "description": "Run as soon as a path opens, whenever that is.",
+                "type": "string",
+                "const": "run-late"
+              }
+            ]
+          },
+          "Approval": {
+            "description": "A step the task may take without asking: that item, in that repo, when the command contains the text.",
+            "type": "object",
+            "properties": {
+              "item": {
+                "$ref": "#/$defs/NeverItem"
+              },
+              "must_contain": {
+                "type": "string"
+              },
+              "repo": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "item",
+              "must_contain",
+              "repo"
+            ]
+          },
+          "NeverItem": {
+            "description": "The items of the never list, in the order of the design's table.",
+            "type": "string",
+            "enum": [
+              "delete-outside",
+              "force-push",
+              "push-to-main",
+              "release",
+              "deploy",
+              "production",
+              "secrets",
+              "payment",
+              "write-outside",
+              "self-grant",
+              "network-install",
+              "machine-wide"
+            ]
+          },
+          "Fallback2": {
+            "description": "Where a run goes when its target's machine is not there.",
+            "oneOf": [
+              {
+                "description": "Wait within the grace window. A box costs money, so this is the default.",
+                "type": "string",
+                "const": "wait"
+              },
+              {
+                "description": "Open a box, for the targets that allow it.",
+                "type": "string",
+                "const": "box"
+              }
+            ]
+          },
+          "TaskRun": {
+            "type": "object",
+            "properties": {
+              "task": {
+                "type": "string"
+              },
+              "due_at": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "started_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "default": null
+              },
+              "state": {
+                "$ref": "#/$defs/RunState"
+              },
+              "machine": {
+                "type": "string",
+                "default": ""
+              },
+              "tab": {
+                "type": "string",
+                "default": ""
+              },
+              "detail": {
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "task",
+              "due_at",
+              "state"
+            ]
+          },
+          "RunState": {
+            "type": "string",
+            "enum": [
+              "due",
+              "delivered",
+              "queued",
+              "held",
+              "done",
+              "failed",
+              "missed",
+              "skipped",
+              "lost"
+            ]
           }
         }
       }
@@ -52695,6 +56037,13 @@
               "repo_insight": {
                 "description": "Absent on the wire while it is off.",
                 "$ref": "#/$defs/RepoInsight"
+              },
+              "schedules": {
+                "description": "The account's scheduled tasks. The hub fills it; a node's own store has none.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Task"
+                }
               }
             },
             "required": [
@@ -54393,6 +57742,440 @@
             },
             "required": [
               "on"
+            ]
+          },
+          "Task": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "schedule": {
+                "$ref": "#/$defs/Schedule"
+              },
+              "tz": {
+                "description": "IANA name, as `America/Sao_Paulo`; set from the creator's device.",
+                "type": "string"
+              },
+              "target": {
+                "$ref": "#/$defs/Target"
+              },
+              "action": {
+                "$ref": "#/$defs/Action"
+              },
+              "enabled": {
+                "description": "False means paused.",
+                "type": "boolean"
+              },
+              "grace_mins": {
+                "description": "Minutes after `due_at` during which a run still counts as on time. None = [`DEFAULT_GRACE_MINS`].",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "on_missed": {
+                "description": "What to do with a run that was not delivered within grace. None = `OnMissed::default_for(schedule)`.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OnMissed"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "pickup_mins": {
+                "description": "Minutes a delivered run may wait for its target to start it. None = [`DEFAULT_PICKUP_MINS`].",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "approvals": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Approval"
+                },
+                "default": []
+              },
+              "fallback": {
+                "$ref": "#/$defs/Fallback2",
+                "default": "wait"
+              },
+              "idea": {
+                "description": "The idea it came from.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "created_by": {
+                "$ref": "#/$defs/Actor"
+              },
+              "created_at": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "updated_at": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "next_at": {
+                "description": "Hub-computed, read-only.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "default": null
+              },
+              "last_run": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TaskRun"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "fyi": {
+                "description": "Hub-computed, read-only: when an agent created the task and the user has not looked yet. The\nInbox shows a row for it. Unix seconds.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "schedule",
+              "tz",
+              "target",
+              "action",
+              "enabled",
+              "approvals",
+              "fallback",
+              "idea",
+              "created_by",
+              "created_at",
+              "updated_at",
+              "next_at",
+              "last_run"
+            ]
+          },
+          "Schedule": {
+            "oneOf": [
+              {
+                "description": "A wall-clock date and time in the task's zone: `2026-11-13T09:00`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "once"
+                  },
+                  "at": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "at"
+                ]
+              },
+              {
+                "description": "Five-field cron, evaluated in the task's zone.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "cron"
+                  },
+                  "expr": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "expr"
+                ]
+              }
+            ]
+          },
+          "Target": {
+            "oneOf": [
+              {
+                "description": "The user: a notification on every device, with no agent run.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "me"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "The global Orchestrator, on the machine that hosts it.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "orchestrator"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "A project's Captain, by repo key; an empty machine means wherever `send_to_captain` would pick.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "captain"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "machine": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "project",
+                  "machine"
+                ]
+              },
+              {
+                "description": "An existing conversation, by Claude session id, so it survives tab restarts.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "session"
+                  },
+                  "session": {
+                    "type": "string"
+                  },
+                  "machine": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "session",
+                  "machine"
+                ]
+              },
+              {
+                "description": "A new worker in a project, placed like `delegate_task`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "worker"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "model": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "project",
+                  "model"
+                ]
+              }
+            ]
+          },
+          "Action": {
+            "oneOf": [
+              {
+                "description": "Text the target receives as one prompt.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "prompt"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "text"
+                ]
+              },
+              {
+                "description": "Run now of a saved workflow. The target is ignored: the workflow's own `runs_on` decides.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "workflow"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id"
+                ]
+              }
+            ]
+          },
+          "OnMissed": {
+            "oneOf": [
+              {
+                "description": "The run becomes `missed` and the user decides: Run now or Skip.",
+                "type": "string",
+                "const": "ask"
+              },
+              {
+                "description": "Record the run as `skipped`; the next occurrence comes as usual.",
+                "type": "string",
+                "const": "skip"
+              },
+              {
+                "description": "Run as soon as a path opens, whenever that is.",
+                "type": "string",
+                "const": "run-late"
+              }
+            ]
+          },
+          "Approval": {
+            "description": "A step the task may take without asking: that item, in that repo, when the command contains the text.",
+            "type": "object",
+            "properties": {
+              "item": {
+                "$ref": "#/$defs/NeverItem"
+              },
+              "must_contain": {
+                "type": "string"
+              },
+              "repo": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "item",
+              "must_contain",
+              "repo"
+            ]
+          },
+          "NeverItem": {
+            "description": "The items of the never list, in the order of the design's table.",
+            "type": "string",
+            "enum": [
+              "delete-outside",
+              "force-push",
+              "push-to-main",
+              "release",
+              "deploy",
+              "production",
+              "secrets",
+              "payment",
+              "write-outside",
+              "self-grant",
+              "network-install",
+              "machine-wide"
+            ]
+          },
+          "Fallback2": {
+            "description": "Where a run goes when its target's machine is not there.",
+            "oneOf": [
+              {
+                "description": "Wait within the grace window. A box costs money, so this is the default.",
+                "type": "string",
+                "const": "wait"
+              },
+              {
+                "description": "Open a box, for the targets that allow it.",
+                "type": "string",
+                "const": "box"
+              }
+            ]
+          },
+          "TaskRun": {
+            "type": "object",
+            "properties": {
+              "task": {
+                "type": "string"
+              },
+              "due_at": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "started_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "default": null
+              },
+              "state": {
+                "$ref": "#/$defs/RunState"
+              },
+              "machine": {
+                "type": "string",
+                "default": ""
+              },
+              "tab": {
+                "type": "string",
+                "default": ""
+              },
+              "detail": {
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "task",
+              "due_at",
+              "started_at",
+              "state",
+              "machine",
+              "tab",
+              "detail"
+            ]
+          },
+          "RunState": {
+            "type": "string",
+            "enum": [
+              "due",
+              "delivered",
+              "queued",
+              "held",
+              "done",
+              "failed",
+              "missed",
+              "skipped",
+              "lost"
             ]
           },
           "SessionMarks": {
@@ -56223,6 +60006,13 @@
               "repo_insight": {
                 "description": "Absent on the wire while it is off.",
                 "$ref": "#/$defs/RepoInsight"
+              },
+              "schedules": {
+                "description": "The account's scheduled tasks. The hub fills it; a node's own store has none.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Task"
+                }
               }
             },
             "required": [
@@ -57846,6 +61636,428 @@
                 "default": false
               }
             }
+          },
+          "Task": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "title": {
+                "type": "string"
+              },
+              "schedule": {
+                "$ref": "#/$defs/Schedule"
+              },
+              "tz": {
+                "description": "IANA name, as `America/Sao_Paulo`; set from the creator's device.",
+                "type": "string"
+              },
+              "target": {
+                "$ref": "#/$defs/Target"
+              },
+              "action": {
+                "$ref": "#/$defs/Action"
+              },
+              "enabled": {
+                "description": "False means paused.",
+                "type": "boolean"
+              },
+              "grace_mins": {
+                "description": "Minutes after `due_at` during which a run still counts as on time. None = [`DEFAULT_GRACE_MINS`].",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "on_missed": {
+                "description": "What to do with a run that was not delivered within grace. None = `OnMissed::default_for(schedule)`.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/OnMissed"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "pickup_mins": {
+                "description": "Minutes a delivered run may wait for its target to start it. None = [`DEFAULT_PICKUP_MINS`].",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint32",
+                "minimum": 0
+              },
+              "approvals": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Approval"
+                },
+                "default": []
+              },
+              "fallback": {
+                "$ref": "#/$defs/Fallback2",
+                "default": "wait"
+              },
+              "idea": {
+                "description": "The idea it came from.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "created_by": {
+                "$ref": "#/$defs/Actor"
+              },
+              "created_at": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "updated_at": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "next_at": {
+                "description": "Hub-computed, read-only.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "default": null
+              },
+              "last_run": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TaskRun"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "fyi": {
+                "description": "Hub-computed, read-only: when an agent created the task and the user has not looked yet. The\nInbox shows a row for it. Unix seconds.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64"
+              }
+            },
+            "required": [
+              "id",
+              "title",
+              "schedule",
+              "tz",
+              "target",
+              "action",
+              "enabled",
+              "created_by",
+              "created_at",
+              "updated_at"
+            ]
+          },
+          "Schedule": {
+            "oneOf": [
+              {
+                "description": "A wall-clock date and time in the task's zone: `2026-11-13T09:00`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "once"
+                  },
+                  "at": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "at"
+                ]
+              },
+              {
+                "description": "Five-field cron, evaluated in the task's zone.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "cron"
+                  },
+                  "expr": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "expr"
+                ]
+              }
+            ]
+          },
+          "Target": {
+            "oneOf": [
+              {
+                "description": "The user: a notification on every device, with no agent run.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "me"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "The global Orchestrator, on the machine that hosts it.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "orchestrator"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "A project's Captain, by repo key; an empty machine means wherever `send_to_captain` would pick.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "captain"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "machine": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "project"
+                ]
+              },
+              {
+                "description": "An existing conversation, by Claude session id, so it survives tab restarts.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "session"
+                  },
+                  "session": {
+                    "type": "string"
+                  },
+                  "machine": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "session"
+                ]
+              },
+              {
+                "description": "A new worker in a project, placed like `delegate_task`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "worker"
+                  },
+                  "project": {
+                    "type": "string"
+                  },
+                  "model": {
+                    "type": "string",
+                    "default": ""
+                  }
+                },
+                "required": [
+                  "kind",
+                  "project"
+                ]
+              }
+            ]
+          },
+          "Action": {
+            "oneOf": [
+              {
+                "description": "Text the target receives as one prompt.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "prompt"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "text"
+                ]
+              },
+              {
+                "description": "Run now of a saved workflow. The target is ignored: the workflow's own `runs_on` decides.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "workflow"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id"
+                ]
+              }
+            ]
+          },
+          "OnMissed": {
+            "oneOf": [
+              {
+                "description": "The run becomes `missed` and the user decides: Run now or Skip.",
+                "type": "string",
+                "const": "ask"
+              },
+              {
+                "description": "Record the run as `skipped`; the next occurrence comes as usual.",
+                "type": "string",
+                "const": "skip"
+              },
+              {
+                "description": "Run as soon as a path opens, whenever that is.",
+                "type": "string",
+                "const": "run-late"
+              }
+            ]
+          },
+          "Approval": {
+            "description": "A step the task may take without asking: that item, in that repo, when the command contains the text.",
+            "type": "object",
+            "properties": {
+              "item": {
+                "$ref": "#/$defs/NeverItem"
+              },
+              "must_contain": {
+                "type": "string"
+              },
+              "repo": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "item",
+              "must_contain",
+              "repo"
+            ]
+          },
+          "NeverItem": {
+            "description": "The items of the never list, in the order of the design's table.",
+            "type": "string",
+            "enum": [
+              "delete-outside",
+              "force-push",
+              "push-to-main",
+              "release",
+              "deploy",
+              "production",
+              "secrets",
+              "payment",
+              "write-outside",
+              "self-grant",
+              "network-install",
+              "machine-wide"
+            ]
+          },
+          "Fallback2": {
+            "description": "Where a run goes when its target's machine is not there.",
+            "oneOf": [
+              {
+                "description": "Wait within the grace window. A box costs money, so this is the default.",
+                "type": "string",
+                "const": "wait"
+              },
+              {
+                "description": "Open a box, for the targets that allow it.",
+                "type": "string",
+                "const": "box"
+              }
+            ]
+          },
+          "TaskRun": {
+            "type": "object",
+            "properties": {
+              "task": {
+                "type": "string"
+              },
+              "due_at": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "started_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "default": null
+              },
+              "state": {
+                "$ref": "#/$defs/RunState"
+              },
+              "machine": {
+                "type": "string",
+                "default": ""
+              },
+              "tab": {
+                "type": "string",
+                "default": ""
+              },
+              "detail": {
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "task",
+              "due_at",
+              "state"
+            ]
+          },
+          "RunState": {
+            "type": "string",
+            "enum": [
+              "due",
+              "delivered",
+              "queued",
+              "held",
+              "done",
+              "failed",
+              "missed",
+              "skipped",
+              "lost"
+            ]
           },
           "SessionMarks": {
             "description": "One conversation's marks, under Claude Code's id for it, which outlives tabs and restarts.",
@@ -69165,6 +73377,280 @@
                   "err"
                 ]
               }
+            ]
+          }
+        }
+      }
+    },
+    "UnclaimedEnd": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "UnclaimedEnd",
+        "description": "An end the hub keeps for 30 days from when the worker ended because the machine whose tab\ndelegated the task did not take it: it forgot the task, as a restart does, ended it otherwise,\nanswered with an error, or was removed. Its summary and error show keys as `[hidden]`.\n`HubCall::UnclaimedEnds` lists them, and the task's status still answers from one.",
+        "type": "object",
+        "properties": {
+          "task": {
+            "description": "The task id the delegating machine gave it.",
+            "type": "string"
+          },
+          "origin_machine": {
+            "description": "The machine whose tab delegated it, and that tab.",
+            "type": "string"
+          },
+          "origin_tab": {
+            "type": "string"
+          },
+          "from_machine": {
+            "description": "The machine that ran it.",
+            "type": "string"
+          },
+          "end": {
+            "$ref": "#/$defs/RemoteEnd"
+          },
+          "held_at": {
+            "description": "When the hub took the end, and when the delegating machine answered it did not take it,\nunix milliseconds.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "unclaimed_at": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "task",
+          "origin_machine",
+          "origin_tab",
+          "from_machine",
+          "end",
+          "held_at",
+          "unclaimed_at"
+        ],
+        "$defs": {
+          "RemoteEnd": {
+            "description": "How a task that runs on another machine ended, as that machine reports it.",
+            "type": "object",
+            "properties": {
+              "state": {
+                "description": "`result_available`, `failed` or `cancelled`.",
+                "type": "string"
+              },
+              "summary": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "usage": {
+                "description": "What the worker used, its box's time included: the delegating task shows it. An older\nmachine sends none. The machine that ran the task records the run, so this is for display.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TaskUsage"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "TaskUsage": {
+            "description": "What a delegated worker has used so far. The limits enforce `cost_usd`; the metrics keep the rest.",
+            "type": "object",
+            "properties": {
+              "tokens_in": {
+                "description": "Input tokens, cache reads and cache writes included.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "tokens_out": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "cost_usd": {
+                "description": "The tokens priced as the Usage page prices them. None while a model the worker used has no price.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "wall_ms": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "box_usd": {
+                "description": "What the worker's Upstash Box cost, for box work.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "box_ms": {
+                "description": "The box time `box_usd` pays for: since the box's previous task ended, or since it was made.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "tokens_in",
+              "tokens_out",
+              "wall_ms"
+            ]
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "UnclaimedEnd",
+        "description": "An end the hub keeps for 30 days from when the worker ended because the machine whose tab\ndelegated the task did not take it: it forgot the task, as a restart does, ended it otherwise,\nanswered with an error, or was removed. Its summary and error show keys as `[hidden]`.\n`HubCall::UnclaimedEnds` lists them, and the task's status still answers from one.",
+        "type": "object",
+        "properties": {
+          "task": {
+            "description": "The task id the delegating machine gave it.",
+            "type": "string"
+          },
+          "origin_machine": {
+            "description": "The machine whose tab delegated it, and that tab.",
+            "type": "string"
+          },
+          "origin_tab": {
+            "type": "string"
+          },
+          "from_machine": {
+            "description": "The machine that ran it.",
+            "type": "string"
+          },
+          "end": {
+            "$ref": "#/$defs/RemoteEnd"
+          },
+          "held_at": {
+            "description": "When the hub took the end, and when the delegating machine answered it did not take it,\nunix milliseconds.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "unclaimed_at": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "task",
+          "origin_machine",
+          "origin_tab",
+          "from_machine",
+          "end",
+          "held_at",
+          "unclaimed_at"
+        ],
+        "$defs": {
+          "RemoteEnd": {
+            "description": "How a task that runs on another machine ended, as that machine reports it.",
+            "type": "object",
+            "properties": {
+              "state": {
+                "description": "`result_available`, `failed` or `cancelled`.",
+                "type": "string"
+              },
+              "summary": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "usage": {
+                "description": "What the worker used, its box's time included: the delegating task shows it. An older\nmachine sends none. The machine that ran the task records the run, so this is for display.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TaskUsage"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "TaskUsage": {
+            "description": "What a delegated worker has used so far. The limits enforce `cost_usd`; the metrics keep the rest.",
+            "type": "object",
+            "properties": {
+              "tokens_in": {
+                "description": "Input tokens, cache reads and cache writes included.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "tokens_out": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "cost_usd": {
+                "description": "The tokens priced as the Usage page prices them. None while a model the worker used has no price.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "wall_ms": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "box_usd": {
+                "description": "What the worker's Upstash Box cost, for box work.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "box_ms": {
+                "description": "The box time `box_usd` pays for: since the box's previous task ended, or since it was made.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "tokens_in",
+              "tokens_out",
+              "wall_ms"
             ]
           }
         }
