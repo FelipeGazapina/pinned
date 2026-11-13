@@ -1,8 +1,8 @@
-//! The never list: what only Felipe may approve, whatever a pre-approval rule says.
+//! The never list: what only the user may approve, whatever a pre-approval rule says.
 //!
 //! `never` is a pure function of the ask and the task's context. It runs in the hook process, so it
 //! needs neither the node nor the hub. A hit means "show the normal prompt and record that the ask
-//! was held for Felipe". This is a deny list, so every doubt resolves toward a hit: a line the
+//! was held for the user". This is a deny list, so every doubt resolves toward a hit: a line the
 //! parser only half understands is still checked word by word.
 //!
 //! One line can hit several items. `never` returns the one that comes first in [`NeverItem`]'s
@@ -78,7 +78,7 @@ pub enum NeverItem {
 }
 
 impl NeverItem {
-    /// For "held for Felipe: <label>".
+    /// For "held for the user: <label>".
     pub fn label(self) -> &'static str {
         match self {
             NeverItem::DeleteOutside => "delete outside the worktree",
@@ -104,7 +104,7 @@ pub struct NeverHit {
     pub why: String,
 }
 
-/// Whether only Felipe may approve `ask`, and why.
+/// Whether only the user may approve `ask`, and why.
 pub fn never(ctx: &AskCtx, ask: &Ask) -> Option<NeverHit> {
     let mut scan = Scan::new(ctx);
     match ask {
