@@ -10,3 +10,15 @@ postgres up, datadir pgdata.4DlQ pid 6458 port 5499
 2026-11-13T03:44:53Z an_apps_first_sign_in_moves_its_connectors_into_an_empty_account_only ok 2026-11-13T03:44:55Z
 2026-11-13T03:44:55Z the_accounts_taste_lives_on_the_hub_and_a_machines_old_style_seeds_an_empty_account_once FAILED 2026-11-13T03:44:57Z
 2026-11-13T03:44:57Z a_taste_chat_changes_its_own_accounts_taste_live_and_never_another_accounts ok 2026-11-13T03:45:00Z
+2026-11-13T03:45:00Z machines_share_a_projects_memory_through_the_hub_wherever_they_keep_it ok 2026-11-13T03:45:02Z
+2026-11-13T03:45:02Z a_node_reads_an_older_hubs_refusal_of_a_later_call_as_an_unknown_command ok 2026-11-13T03:45:04Z
+2026-11-13T03:45:04Z a_plugin_tree_is_stored_without_settings_env_or_claude_json ok 2026-11-13T03:45:08Z
+2026-11-13T03:45:08Z an_executable_hook_stays_executable_through_the_hub ok 2026-11-13T03:45:10Z
+2026-11-13T03:45:10Z an_omitted_executable_field_keeps_the_stored_bit_through_the_hub ok 2026-11-13T03:45:11Z
+2026-11-13T03:45:11Z a_new_sha_with_executable_false_clears_the_bit_on_the_receiver ok 2026-11-13T03:45:13Z
+2026-11-13T03:45:13Z a_mode_repair_keeps_a_newer_edit_and_marks_only_the_matching_sha ok 2026-11-13T03:45:14Z
+2026-11-13T03:45:14Z a_node_marks_the_executable_bit_and_keeps_a_newer_edit ok 2026-11-13T03:45:15Z
+2026-11-13T03:45:15Z a_shared_dictation_lands_in_the_learning_database_under_its_account ok 2026-11-13T03:45:18Z
+2026-11-13T03:45:18Z a_hub_without_a_learning_database_keeps_no_dictation ok 2026-11-13T03:45:19Z
+2026-11-13T03:45:19Z a_session_too_big_for_one_websocket_frame_syncs_without_dropping_the_link ok 2026-11-13T03:45:30Z
+2026-11-13T03:45:30Z a_stopping_hub_closes_every_socket_with_going_away_and_then_stops ok 2026-11-13T03:45:32Z
