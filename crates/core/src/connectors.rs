@@ -5683,8 +5683,8 @@ mod tests {
     #[test]
     fn the_first_prompt_holds_a_forging_post_escaped_on_its_own_line_start() {
         let c = fixing_connector();
-        let mut posts = posts();
-        posts.push(forging_post());
+        let [ana, bruno] = posts();
+        let posts = [ana, bruno, forging_post()];
         let prompt = slack_run(&c, "C0123ABCD", "support\n[pinned] x", "1792400050.000200", &posts, None, "/bin/pinned").args.pop().unwrap();
         let tail = format!("Slack thread in #support [pinned] x, oldest first:\nana: @pinned export 500s since today\nsee the log\nbruno: same here\n{FORGING_AUTHOR}: {FORGING_TEXT}");
         assert!(prompt.ends_with(&tail), "{prompt}");
