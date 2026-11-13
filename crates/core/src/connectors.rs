@@ -8285,6 +8285,39 @@ mod tests {
     }
 
     #[test]
+    fn tab_lists_that_land_during_a_drive_queue_one_drive_not_one_each() {
+        let (connectors, dir) = stored("tab-coalesce", vec![]);
+        let connectors = std::sync::Arc::new(connectors);
+        block_on(async {
+            let guard = connectors.driving.lock().await;
+            let handles: Vec<_> = (0..100u64)
+                .map(|i| {
+                    let connectors = connectors.clone();
+                    tokio::spawn(async move {
+                        let tabs = vec![session_tab(None, Some(&format!("claude-{i}")))];
+                        connectors.on_tabs("m1", i + 1, &tabs, placed).await
+                    })
+                })
+                .collect();
+            for _ in 0..5 {
+                tokio::task::yield_now().await;
+            }
+            let finished = handles.iter().filter(|handle| handle.is_finished()).count();
+            assert!(finished >= 99, "only {finished} of 100 tab wakes returned while a drive held the lock");
+            drop(guard);
+            for handle in handles {
+                handle.await.unwrap().unwrap();
+            }
+        });
+        let known = connectors.known_tabs.lock().unwrap();
+        let (at, tabs) = &known["m1"];
+        assert_eq!(*at, 100);
+        assert_eq!(tabs[0].session.as_deref(), Some("claude-99"));
+        drop(known);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn resume_detection_runs_off_the_async_worker() {
         let here = std::thread::current().id();
         let there = block_on(off_worker(|| Ok(std::thread::current().id()))).unwrap();
