@@ -4443,7 +4443,6 @@ fn an_agent_files_restarts_and_archives_threads_as_the_user_but_a_delete_waits_f
 
     let restarts = [
         ("stop_turn", json!({ "tab": "tab-t" })),
-        ("set_bypass", json!({ "tab": "tab-t", "on": true, "cols": 120, "rows": 32 })),
         ("set_model", json!({ "tab": "tab-t", "model": "claude-sonnet-5-5", "cols": 120, "rows": 32 })),
         ("restart_claude", json!({ "tab": "tab-t", "cols": 120, "rows": 32 })),
         ("set_folder", json!({ "tab": "tab-t", "path": "/a/app/web" })),
@@ -4465,8 +4464,16 @@ fn an_agent_files_restarts_and_archives_threads_as_the_user_but_a_delete_waits_f
         .collect();
     assert_eq!(ran, asked, "each ran on the agent's machine for the agent's session, as the app sends it");
     let audit = ana.hub(json!({ "cmd": "agent_audit" })).unwrap();
+    let skip = json!({ "tab": "tab-t", "on": true, "cols": 120, "rows": 32 });
+    assert_eq!(act(&raw, "tab-agent", "set_bypass", skip.clone()).unwrap()["outcome"], "pending", "loosening a session waits for the user");
+    assert!(!calls(&raw, "act_for").iter().any(|c| c["call"]["cmd"] == "set_bypass"), "nothing reached the machine");
+    let audit = ana.hub(json!({ "cmd": "agent_audit" })).unwrap();
     let bypass: Vec<(Value, Value)> = audit.as_array().unwrap().iter().filter(|e| e["action"] == "set_bypass").map(|e| (serde_json::from_str(e["args"].as_str().unwrap()).unwrap(), e["outcome"].clone())).collect();
-    assert_eq!(bypass, [(restarts[1].1.clone(), json!("done"))], "loosening to bypass is on the audit trail");
+    assert_eq!(bypass, [(skip, json!("pending"))], "the ask to loosen to bypass is on the audit trail");
+    let waiting = ana.hub(json!({ "cmd": "confirmations" })).unwrap();
+    let bypass_id = waiting.as_array().unwrap().iter().find(|c| c["action"] == "set_bypass").unwrap()["id"].clone();
+    ana.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    assert_eq!(ana.hub(json!({ "cmd": "decide_confirmation", "id": bypass_id, "approve": false })).unwrap()["outcome"], "denied");
 
     let archived = act(&raw, "tab-agent", "archive_session", json!({ "machine": machine, "tab": "tab-t" })).unwrap();
     assert_eq!(archived["result"]["archived"]["name"], "Fix login");
@@ -6773,7 +6780,11 @@ fn an_agent_manages_its_accounts_workflows_projects_sessions_settings_and_usage_
     // Memory, settings, usage and skills: Ana's own machine answers, Bob reaches none of it.
     assert_eq!(ran(act(&ana.dir, &ana.tab, "memory_save", json!({ "path": docs, "title": "Deploys", "text": "Docs deploy from tags." })))["title"], "Deploys");
     assert_eq!(ran(act(&ana.dir, &ana.tab, "memory_status", json!({ "path": docs })))["count"], 1);
-    let almirante = ran(act(&ana.dir, &ana.tab, "set_global_orchestrator_settings", json!({ "settings": { "name": "Almirante", "host": true } })));
+    let asked = act(&ana.dir, &ana.tab, "set_global_orchestrator_settings", json!({ "settings": { "name": "Almirante", "host": true } })).unwrap();
+    assert_eq!(asked["outcome"], "pending", "the user approves a change of the orchestrator's settings");
+    let decided = approve(&mut ana.client, &asked["id"], json!({})).unwrap();
+    assert_eq!(decided["outcome"], "done", "{decided}");
+    let almirante = decided["result"].clone();
     assert_eq!(almirante["name"], "Almirante");
     assert_eq!(ran(act(&ana.dir, &ana.tab, "global_orchestrator_settings", json!({}))), almirante);
     assert_ne!(ran(act(&bob.dir, &bob.tab, "global_orchestrator_settings", json!({})))["name"], "Almirante", "Bob's machine keeps its own settings");
@@ -6883,6 +6894,120 @@ fn trail_of(client: &mut Client) -> Vec<(String, String, String, String)> {
     let rows = client.hub(json!({ "cmd": "agent_audit", "limit": 200 })).unwrap();
     let text = |row: &Value, field: &str| row[field].as_str().unwrap().to_owned();
     rows.as_array().unwrap().iter().map(|r| (text(r, "action"), text(r, "outcome"), text(r, "args"), text(r, "detail"))).collect()
+}
+
+/// The account's confirmation `id`, as the app gets it.
+fn confirmation_of(client: &mut Client, id: &Value) -> Value {
+    let all = client.hub(json!({ "cmd": "confirmations" })).unwrap();
+    all.as_array().unwrap().iter().find(|c| c["id"] == *id).cloned().unwrap_or_else(|| panic!("no confirmation {id} in {all}"))
+}
+
+/// Waits until the hub has `tab` of the agent's machine as `pred` reads it.
+fn hub_has(agent: &mut Agent, tab: &str, pred: impl Fn(&Value) -> bool) {
+    agent.client.wait(&format!("{tab} at the hub"), |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == tab && pred(t)));
+}
+
+#[test]
+fn an_agents_set_bypass_waits_for_its_owner_and_then_loosens_only_a_worker_of_its_own_project() {
+    let hub = TestHub::start("act_bypass");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &token, "ana@acme.dev", "bypass-mac");
+    ana.client.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    let (site, docs) = (ana.dir.join("site").display().to_string(), ana.dir.join("docs").display().to_string());
+    // The asking session skips its own prompts, so only the user's approval and its seat stand in the way.
+    let lead = ana.node.machine.open_tab(Some(site.clone()), true).unwrap();
+    hub_has(&mut ana, &lead, |_| true);
+    let worker = ran(act(&ana.dir, &lead, "open_tab", json!({ "path": site, "bypass": false }))).as_str().unwrap().to_owned();
+    ran(act(&ana.dir, &lead, "start_claude", json!({ "tab": worker, "cols": 80, "rows": 24 })));
+    let other = ana.node.machine.open_tab(Some(docs), false).unwrap();
+    let captain = ana.node.machine.open_orchestrator(&site).unwrap();
+    let global = ana.node.machine.open_global_orchestrator().unwrap();
+    for tab in [&other, &captain, &global] {
+        ana.node.machine.start_claude(tab, 80, 24).unwrap();
+    }
+    hub_has(&mut ana, &worker, |t| t["role"] == "worker" && t["running"] == true);
+    for tab in [&other, &captain, &global] {
+        hub_has(&mut ana, tab, |t| t["running"] == true);
+    }
+    let skip = |tab: &str| act(&ana.dir, &lead, "set_bypass", json!({ "tab": tab, "on": true, "cols": 80, "rows": 24 })).unwrap();
+
+    let asked = skip(&worker);
+    assert_eq!(asked["outcome"], "pending", "{asked}");
+    assert!(!ana.node.machine.view(&worker).unwrap().bypass, "nothing reached the machine before the user approved");
+    let trail = trail_of(&mut ana.client);
+    assert_eq!(trail.iter().filter(|(action, outcome, ..)| action == "set_bypass" && outcome == "pending").count(), 1, "{trail:?}");
+    let shown = confirmation_of(&mut ana.client, &asked["id"]);
+    let lines: Vec<String> = serde_json::from_value(shown["changes"].clone()).unwrap();
+    assert!(lines[0].starts_with("Session: \u{201c}") && lines[0].ends_with(&format!("({worker})")), "{lines:?}");
+    assert!(lines[1].starts_with("Project: site ("), "{lines:?}");
+    assert_eq!(lines[2..], ["Seat: worker", "Machine: bypass-mac", "It restarts on its own conversation and skips its permission prompts."]);
+    assert!(shown["about"].as_str().unwrap().ends_with(&lines.join("\n")), "an older app shows them over the title: {shown}");
+    let decided = approve(&mut ana.client, &asked["id"], json!({})).unwrap();
+    assert_eq!(decided["outcome"], "done", "{decided}");
+    wait_for("the worker to restart skipping its prompts", || ana.node.machine.view(&worker).is_ok_and(|v| v.bypass && v.running));
+
+    for (tab, seat, why) in [
+        (&other, "Seat: session", "outside your project"),
+        (&captain, "Seat: Captain", "is a Captain, the global orchestrator or a taste chat"),
+        (&global, "Seat: global orchestrator", "is a Captain, the global orchestrator or a taste chat"),
+    ] {
+        let asked = skip(tab);
+        assert_eq!(asked["outcome"], "pending", "{tab}: {asked}");
+        assert!(confirmation_of(&mut ana.client, &asked["id"])["changes"].as_array().unwrap().iter().any(|line| line == seat), "{tab}");
+        let decided = approve(&mut ana.client, &asked["id"], json!({})).unwrap();
+        let outcome = decided["outcome"].as_str().unwrap();
+        assert!(outcome.starts_with("failed: ") && outcome.contains(why), "{tab}, approved, is still refused by its machine: {outcome}");
+        assert!(!ana.node.machine.view(tab).unwrap().bypass, "{tab} still asks for its prompts");
+    }
+}
+
+#[test]
+fn an_agents_change_of_orchestrator_settings_waits_for_its_owner_shows_old_and_new_and_keeps_what_it_leaves_out() {
+    use pinned_core::global_orchestrator::{BusyPolicy, ReportPolicy, Settings};
+    let hub = TestHub::start("act_global_settings");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &token, "ana@acme.dev", "settings-mac");
+    ana.client.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    let mut spare = agent_of(&url, &token, "ana@acme.dev", "settings-spare");
+    let before = Settings { name: "Orchestrator".into(), host: false, busy: BusyPolicy::Refuse, reports: ReportPolicy::ToolOnly, group_reports: false, read_aloud: true };
+    for agent in [&ana, &spare] {
+        agent.node.machine.set_global_settings(before.clone()).unwrap();
+    }
+    let ask = |on: Option<&str>, settings: Value| match on {
+        None => act(&ana.dir, &ana.tab, "set_global_orchestrator_settings", json!({ "settings": settings })),
+        Some(machine) => act_on(&ana.dir, &ana.tab, machine, "set_global_orchestrator_settings", json!({ "settings": settings })),
+    };
+
+    for (on, name) in [(None, "settings-mac"), (Some("settings-spare"), "settings-spare")] {
+        let node = if on.is_none() { &ana.node } else { &spare.node };
+        let asked = ask(on, json!({ "name": "Almirante" })).unwrap();
+        assert_eq!(asked["outcome"], "pending", "{name}: {asked}");
+        assert_eq!(node.machine.global_settings(), before, "{name}: nothing changes before the user approves");
+        let shown = confirmation_of(&mut ana.client, &asked["id"]);
+        assert_eq!(shown["changes"], json!([format!("Machine: {name}"), "name: \"Orchestrator\" → \"Almirante\""]), "{name}");
+        let decided = approve(&mut ana.client, &asked["id"], json!({})).unwrap();
+        assert_eq!(decided["outcome"], "done", "{name}: {decided}");
+        let named = Settings { name: "Almirante".into(), ..before.clone() };
+        assert_eq!(node.machine.global_settings(), named, "{name}: host, busy, reports, group_reports and read_aloud keep their values");
+
+        let asked = ask(on, json!({ "host": true })).unwrap();
+        let shown = confirmation_of(&mut ana.client, &asked["id"]);
+        assert_eq!(
+            shown["changes"],
+            json!([format!("Machine: {name}"), "host: false → true", format!("This moves Captain reports and the Orchestrator's rights to {name}.")]),
+            "{name}"
+        );
+        assert_eq!(approve(&mut ana.client, &asked["id"], json!({})).unwrap()["outcome"], "done", "{name}");
+        assert_eq!(node.machine.global_settings(), Settings { host: true, ..named }, "{name}");
+    }
+
+    spare.node.kill();
+    ana.client.wait_machines(&[("settings-mac", true), ("settings-spare", false)]);
+    let offline = ask(Some("settings-spare"), json!({ "read_aloud": false }));
+    assert!(offline.as_ref().is_err_and(|e| e.contains("settings-spare")), "a prompt without the old values is refused: {offline:?}");
+    assert!(!waiting_actions(&mut ana.client).contains(&"set_global_orchestrator_settings".to_owned()), "and nothing waits");
 }
 
 #[test]

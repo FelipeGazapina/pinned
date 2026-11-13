@@ -11785,6 +11785,25 @@ while True:
     }
 
     #[test]
+    fn a_partial_save_of_the_global_orchestrator_settings_keeps_the_fields_it_leaves_out() {
+        let dir = temp("global-settings-partial");
+        let m = Machine::new(launch(), Some(dir.clone()), None, |_| {});
+        let before = global::Settings { name: "Almirante".into(), host: true, busy: BusyPolicy::Refuse, reports: global::ReportPolicy::ToolOnly, group_reports: false, read_aloud: true };
+        m.set_global_settings(before.clone()).unwrap();
+        let partial: Call = serde_json::from_value(json!({ "cmd": "set_global_orchestrator_settings", "settings": { "name": "Capitania" } })).unwrap();
+        let kept = global::Settings { name: "Capitania".into(), ..before.clone() };
+        assert_eq!(m.call(partial), Ok(serde_json::to_value(&kept).unwrap()), "only the name changes");
+        assert_eq!(m.global_settings(), kept);
+        let blank: Call = serde_json::from_value(json!({ "cmd": "set_global_orchestrator_settings", "settings": { "host": false, "name": " " } })).unwrap();
+        m.call(blank).unwrap();
+        assert_eq!(m.global_settings(), global::Settings { name: "Orchestrator".into(), host: false, ..before.clone() }, "a blank name is the default one");
+        let act = json!({ "cmd": "set_global_orchestrator_settings", "settings": { "read_aloud": false } });
+        m.call(Call::ActFor { caller: String::new(), call: act }).unwrap();
+        assert_eq!(m.global_settings(), global::Settings { name: "Orchestrator".into(), host: false, read_aloud: false, ..before }, "through act_for too");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     #[cfg(unix)]
     fn an_orchestrator_cannot_edit_and_starts_with_one_prompt() {
         let dir = temp("orchestrator-args");
