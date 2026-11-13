@@ -8792,6 +8792,32 @@ fn an_agents_task_is_stored_with_secrets_masked_and_the_users_as_typed() {
 }
 
 #[test]
+fn a_held_schedule_save_lists_its_arguments_masked_and_the_approved_task_is_stored_masked_once() {
+    let mut s = Schedules::start("sched_held_args");
+    let fake = "sk-ant-api03-FAKEFAKEFAKEFAKE0000";
+    let mut body = approved_body(&format!("Use {fake}"));
+    body["action"] = json!({ "kind": "prompt", "text": format!("Call the API with {fake} and report") });
+    let held = s.act("save_schedule", json!({ "task": body })).unwrap();
+    assert_eq!(held["outcome"], "pending", "{held}");
+    // What every app of the account (and its machine sockets) is told about the held act.
+    let listed = s.ana.hub(json!({ "cmd": "confirmations" })).unwrap();
+    let waiting = listed.as_array().unwrap().iter().find(|c| c["id"] == held["id"]).expect("the act is listed");
+    let (title, text) = (waiting["args"]["task"]["title"].as_str().unwrap(), waiting["args"]["task"]["action"]["text"].as_str().unwrap());
+    assert!(!title.contains("FAKEFAKEFAKEFAKE0000"), "the held title: {title}");
+    assert!(!text.contains("FAKEFAKEFAKEFAKE0000"), "the held prompt text: {text}");
+    assert!(!waiting.to_string().contains("FAKEFAKE"), "nothing of the held act holds the key: {waiting}");
+    // Approving runs what the user saw: one stored task, masked.
+    assert_eq!(s.approve(&held), "done");
+    let rows = s._hub.runtime.block_on(async {
+        let (client, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), s._hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        client.query("select task::text from tasks", &[]).await.unwrap().iter().map(|r| r.get::<_, String>(0)).collect::<Vec<_>>()
+    });
+    assert_eq!(rows.len(), 1, "the act ran once: {rows:?}");
+    assert!(rows[0].contains("[hidden]") && !rows[0].contains("FAKEFAKE"), "the stored task is masked: {rows:?}");
+}
+
+#[test]
 fn an_unreadable_task_or_run_leaves_the_settings_and_the_other_tasks_readable() {
     let mut s = Schedules::start("sched_unreadable");
     for title in ["Kept", "Broken", "Also kept"] {

@@ -135,6 +135,9 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
             about: why.as_deref().map(surface::mask_secrets).unwrap_or_default(),
             args: match surface::without_asked(admitted.action, &act.args) {
                 Value::Null => Value::Object(Default::default()),
+                // The held copy is listed to every app of the account, and an approval runs it, so a
+                // schedule act holds what the user sees: the stored task is masked the same way.
+                args if matches!(&admitted.call, Parsed::Hub(call) if schedule::is_schedule_call(call)) => surface::mask_values(args),
                 args => args,
             },
             target: (!admitted.on_origin).then(|| admitted.target.clone()),

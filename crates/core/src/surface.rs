@@ -955,6 +955,16 @@ pub fn mask_secrets(text: &str) -> String {
     out
 }
 
+/// `value` with every string in it, however deep, passed through `mask_secrets`. Keys stay.
+pub fn mask_values(value: Value) -> Value {
+    match value {
+        Value::String(text) => Value::String(mask_secrets(&text)),
+        Value::Array(items) => Value::Array(items.into_iter().map(mask_values).collect()),
+        Value::Object(fields) => Value::Object(fields.into_iter().map(|(key, value)| (key, mask_values(value))).collect()),
+        other => other,
+    }
+}
+
 /// A Convex deploy key: `dev:`, `prod:` or `preview:`, a name, `|` and a token of 16 characters or
 /// more. With no prefix the name must read as a deployment's and the token be 40 characters or
 /// more, so a shell pipe, a regex alternation or a table rule is not taken for a key.
@@ -1507,6 +1517,12 @@ mod tests {
         for text in kept {
             assert_eq!(mask_secrets(text), text);
         }
+    }
+
+    #[test]
+    fn every_string_of_a_value_is_masked_and_the_keys_stay() {
+        let held = json!({ "task": { "title": "Use sk-ant-api03-abcdefghijklmnop1234", "approvals": [{ "must_contain": "ghp_ABCDEFGHIJKLMNOP1234" }], "enabled": true }, "n": 3 });
+        assert_eq!(mask_values(held), json!({ "task": { "title": "Use [hidden]", "approvals": [{ "must_contain": "[hidden]" }], "enabled": true }, "n": 3 }));
     }
 
     #[test]
