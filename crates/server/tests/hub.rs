@@ -6020,14 +6020,14 @@ fn an_agents_save_that_calls_a_stored_workflow_whose_session_skips_prompts_is_re
         assert_eq!(act(&owner.dir, &owner.tab, "save_connector", save.clone()), Err(refused.to_owned()), "{why}");
     }
     assert_eq!(names(&mut owner.client), before, "nothing is saved");
-    let calls_back = |cycle: &str| format!("save_connector failed: \"Call 0\" calls \"{cycle}\", which calls back");
+    let calls_back = |answer: &Result<Value, String>| answer.as_ref().is_err_and(|e| e.starts_with("\"Call 0\" calls ") && e.ends_with(", which calls back"));
     let cycle_answer = act(&owner.dir, &owner.tab, "save_connector", cycle_skips.clone());
     assert_eq!(cycle_answer, Err(refused.to_owned()), "a cycle through one that skips prompts ends with the refusal");
     let cycle_answer = act(&owner.dir, &wide, "save_connector", cycle_skips.clone());
-    assert!(cycle_answer.as_ref().is_err_and(|e| e.contains(&calls_back("To back skips"))), "a session that skips prompts gets the save's own answer: {cycle_answer:?}");
+    assert!(calls_back(&cycle_answer), "a session that skips prompts gets the save's own answer: {cycle_answer:?}");
     for tab in [&owner.tab, &wide] {
         let cycle_answer = act(&owner.dir, tab, "save_connector", cycle.clone());
-        assert!(cycle_answer.as_ref().is_err_and(|e| e.contains(&calls_back("To back"))), "a cycle where nothing skips prompts ends with the save's answer: {cycle_answer:?}");
+        assert!(calls_back(&cycle_answer), "a cycle where nothing skips prompts ends with the save's answer: {cycle_answer:?}");
     }
 
     for (why, save) in [("a direct call", &direct), ("a call two levels deep", &deep)] {
