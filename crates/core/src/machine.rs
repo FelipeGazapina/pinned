@@ -12488,6 +12488,27 @@ Have another model review a risky change before it goes ahead.";
     }
 
     #[test]
+    fn a_box_that_connected_and_went_offline_keeps_its_task_past_the_connect_window() {
+        let m = machine();
+        let id = delegated_elsewhere(&m, "tab-1", "m-box", "Box · Slow suite");
+        let cancels = Arc::new(Mutex::new(vec![]));
+        let told = cancels.clone();
+        m.set_hub(Arc::new(move |call| match call {
+            HubCall::RemoteTask { cancel: Some(reason), .. } => {
+                told.lock().unwrap().push(reason);
+                Ok(json!({ "workState": "cancelled" }))
+            }
+            HubCall::RemoteTask { .. } => Err(crate::delegate::BOX_OFFLINE.into()),
+            _ => Err("not this test's".into()),
+        }));
+        let begun = Instant::now();
+        m.check_remotes(begun + crate::delegate::BOX_CONNECT_WAIT + Duration::from_secs(1));
+        m.check_remotes(begun + 3 * crate::delegate::BOX_CONNECT_WAIT);
+        assert_eq!(state_of(&m, &id).0, "working", "its box may come back, and the hub ends one that stays offline");
+        assert!(cancels.lock().unwrap().is_empty(), "nothing tells the hub to delete it");
+    }
+
+    #[test]
     #[cfg(unix)]
     fn a_start_the_hub_did_not_answer_stays_starting_and_a_repeat_returns_the_same_task() {
         let (m, dir, captain) = limited_captain("start-timeout", TastePatch::default());

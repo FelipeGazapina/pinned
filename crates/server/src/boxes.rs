@@ -1880,6 +1880,42 @@ mod tests {
     }
 
     #[test]
+    fn a_worker_box_that_never_connected_is_booting_and_one_that_connected_is_offline() {
+        assert_eq!((offline_answer(&Phase::Creating), offline_answer(&Phase::Booting)), (BOX_BOOTING, BOX_BOOTING));
+        assert_eq!((offline_answer(&Phase::Running), offline_answer(&Phase::Ending(End::Offline))), (BOX_OFFLINE, BOX_OFFLINE));
+    }
+
+    #[test]
+    fn a_box_whose_link_blinks_keeps_running_and_one_that_stays_offline_ends() {
+        let p = Policy::default();
+        let (start, mut t) = (Instant::now(), Timers::default());
+        let working = Seen::Tab { running: true, quiet: false };
+        assert_eq!(verdict(30 * MIN, working, &mut t, start, &p), None);
+        assert_eq!(verdict(31 * MIN, Seen::Offline, &mut t, start + MIN, &p), None);
+        assert_eq!(verdict(40 * MIN, Seen::Offline, &mut t, start + 10 * MIN, &p), None, "offline for 9 of 10 minutes");
+        assert_eq!(verdict(41 * MIN, working, &mut t, start + 11 * MIN, &p), None, "back within the grace");
+        assert_eq!(verdict(42 * MIN, Seen::Offline, &mut t, start + 12 * MIN, &p), None);
+        assert_eq!(verdict(51 * MIN, Seen::Offline, &mut t, start + 21 * MIN, &p), None, "a blink restarts the grace");
+        assert_eq!(verdict(53 * MIN, Seen::Offline, &mut t, start + 23 * MIN, &p), Some(End::Offline));
+    }
+
+    #[test]
+    fn a_flapping_box_still_ends_at_its_max_life_and_its_budget() {
+        let p = Policy::default();
+        let (start, mut t) = (Instant::now(), Timers::default());
+        let working = Seen::Tab { running: true, quiet: false };
+        let mut minute = 0;
+        // Offline 9 minutes, back 1, over and over: never offline for the whole grace.
+        while minute < 4 * 60 {
+            let seen = if minute % 10 == 9 { working } else { Seen::Offline };
+            assert_eq!(verdict(minute * MIN, seen, &mut t, start + minute * MIN, &p), None, "minute {minute}");
+            minute += 1;
+        }
+        assert_eq!(verdict(4 * 60 * MIN, Seen::Offline, &mut t, start + 4 * 60 * MIN, &p), Some(End::Expired));
+        assert!(over_budget(&spec_with(Some(BOX_USD_PER_HOUR)), 60 * MIN), "a budget ends it sooner whatever it is seen as");
+    }
+
+    #[test]
     fn phases_survive_the_database() {
         for phase in [
             Phase::Creating,
