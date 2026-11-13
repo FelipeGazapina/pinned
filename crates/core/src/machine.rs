@@ -13421,6 +13421,46 @@ Have another model review a risky change before it goes ahead.";
 
     #[test]
     #[cfg(unix)]
+    fn open_questions_pause_the_time_limit_show_as_a_question_and_close_with_the_users_answer() {
+        use crate::questions::{Answer, QOption, Question, QuestionsReply};
+        let (m, dir, _captain, task, child, transcript) = captain_with_thread_child("thread-questions");
+        m.record_event(hook_event(&child, "working", &transcript, Some("Board check")));
+        let question = Question {
+            header: Some("Branch".into()),
+            question: "Base the fix on main or on release/0.18?".into(),
+            changes: "which branch the PR targets".into(),
+            options: vec![QOption { label: "main".into(), description: None, recommended: true }, QOption { label: "release/0.18".into(), description: None, recommended: false }],
+            multi_select: false,
+        };
+        let id = m.questions.lock().unwrap().open(&child, Some("s-child".into()), None, Some("Checkout".into()), vec![question], vec![], unix_now()).unwrap();
+        let asked = Instant::now();
+        m.note_user_waits(asked);
+        assert_eq!(m.delegates.get(&task).unwrap().run.user_wait, Some(asked), "the time limit paused while the hooks say the turn works");
+        let view = m.view(&child).unwrap();
+        assert_eq!((view.status, view.interrupted, view.message.as_deref(), view.questions.as_ref().map(|q| q.id.as_str())), (Some(AgentStatus::NeedsInput), true, Some("Claude has questions"), Some(id.as_str())));
+        assert_eq!(global::waiting_kind(&view), Some(global::WaitingKind::NeedsInput));
+        assert_eq!(m.tabs().iter().find(|t| t.id == child).and_then(|t| t.questions.clone()), view.questions);
+
+        let reloaded = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        assert_eq!(reloaded.questions.lock().unwrap().open_on(&child).map(|q| q.id.clone()), Some(id.clone()), "open questions outlive a restart");
+        drop(reloaded);
+
+        let reply = |answers| Call::AnswerQuestions { tab: child.clone(), id: id.clone(), reply: QuestionsReply::Answered { answers } };
+        assert_eq!(m.call(reply(vec![Answer { chosen: vec!["develop".into()], text: None }])), Err("question 1 has no option \"develop\"".into()));
+        assert_eq!(m.call(Call::AnswerQuestions { tab: "tab-none".into(), id: id.clone(), reply: QuestionsReply::Skipped }), Err("no tab tab-none".into()));
+        assert_eq!(m.call(reply(vec![Answer { chosen: vec!["main".into()], text: None }])), Ok(Value::Null));
+        let view = m.view(&child).unwrap();
+        assert_eq!((view.status, view.questions), (Some(AgentStatus::Working), None), "answered: the tab shows the turn at work again");
+        let answered = asked + Duration::from_secs(90);
+        m.note_user_waits(answered);
+        let run = m.delegates.get(&task).unwrap().run;
+        assert_eq!((run.user_wait, run.paused), (None, answered - asked), "the clock runs again from the answer");
+        assert_eq!(m.call(Call::AnswerQuestions { tab: child.clone(), id: id.clone(), reply: QuestionsReply::Skipped }), Err(format!("questions {id} are already closed")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn an_answered_approval_clears_the_wait_while_the_turn_runs_and_the_time_limit_counts_again() {
         let (m, dir, _captain, task, child, transcript) = captain_with_thread_child("thread-approval-answered");
         let screen = m.tab(&child, |t| t.screen.clone()).unwrap();
