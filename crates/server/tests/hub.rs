@@ -8727,6 +8727,37 @@ fn a_machine_that_answers_a_held_end_with_an_error_is_offered_no_more_until_it_c
 }
 
 #[test]
+fn a_machine_gets_every_waiting_held_end_once_across_pages_and_none_unclaimed() {
+    let hub = TestHub::start("held_pages");
+    let (token, ana, mut ana_client) = signed_in(&hub.url, "ana@acme.dev");
+    let (mac, mac_token) = account::register_machine(&hub.url, &token, "ana-mac", "linux").unwrap();
+    let page = pinned_server::db::HELD_PAGE;
+    let rows = |prefix: &str, n: i64, unclaimed: &str| {
+        format!("insert into held_ends (account, origin_machine, task, origin_tab, from_machine, report, unclaimed_at)
+            select '{ana}', '{}', '{prefix}-' || lpad(i::text, 4, '0'), 'tab-1', gen_random_uuid(), '{{\"state\": \"result_available\", \"summary\": \"Done.\"}}', {unclaimed} from generate_series(1, {n}) i;", mac.id)
+    };
+    // One statement, so every waiting row has the same `held_at`: the pages turn on the task id.
+    admin_on(&hub.database, &[rows("wait", page + 3, "null"), rows("gone", 2, "now()")].concat());
+    let (ana_id, mac_id) = (uuid::Uuid::parse_str(&ana).unwrap(), uuid::Uuid::parse_str(&mac.id).unwrap());
+    let first = hub.runtime.block_on(hub.hub().db.waiting_held_tasks(ana_id, mac_id, None)).unwrap();
+    assert_eq!(first.len(), page as usize, "one page at a time");
+    assert!(first.iter().all(|(_, task)| task.starts_with("wait-")), "no unclaimed one");
+    let next = hub.runtime.block_on(hub.hub().db.waiting_held_tasks(ana_id, mac_id, first.last().cloned())).unwrap();
+    assert_eq!(next.iter().map(|(_, task)| task.as_str()).collect::<Vec<_>>(), ["wait-0501", "wait-0502", "wait-0503"]);
+
+    let mac_raw = RawMachine::start(&hub.url, &mac_token, |_| RawReply::Ok(json!(true)));
+    wait_for("mac online", || ana_client.machines().contains(&("ana-mac".into(), true)));
+    wait_for("mac to get every waiting end", || held_ends(&hub, None) == 2);
+    std::thread::sleep(Duration::from_millis(500));
+    let offered: Vec<String> = mac_raw.calls.lock().unwrap().iter().filter(|c| c["cmd"] == "remote_ended").map(|c| c["task"].as_str().unwrap().to_owned()).collect();
+    let mut once = offered.clone();
+    once.sort();
+    once.dedup();
+    assert_eq!((offered.len(), once.len()), (page as usize + 3, page as usize + 3), "each once");
+    assert!(offered.iter().all(|task| task.starts_with("wait-")), "the unclaimed ones are not offered");
+}
+
+#[test]
 fn a_held_end_answers_its_tasks_status_after_its_worker_is_gone_and_stays_until_answered() {
     let hub = TestHub::start("held_status");
     let (mut ana, mac, mac_token, mini, _mini_raw, _) = held_for_offline_mac(&hub);

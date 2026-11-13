@@ -137,6 +137,8 @@ create index if not exists ideas_by_account on ideas (account, updated_at desc);
 const HELD_FOR: &str = "interval '30 days'";
 /// The most held ends one hub-wide expiry run deletes.
 pub const HELD_EXPIRY_BATCH: i64 = 1000;
+/// The most waiting held ends of one machine the hub reads at once when it connects.
+pub const HELD_PAGE: i64 = 500;
 const LEARNING_SCHEMA: &str = "
 create table if not exists dictation_feedback (id uuid primary key, account uuid not null,
   created_at timestamptz not null default now(), rating text not null, raw text not null, cleaned text not null,
@@ -782,6 +784,28 @@ impl Db {
             .iter()
             .map(|r| HeldEnd { task: r.get(0), tab: r.get(1), from: r.get(2), end: r.get(3), unclaimed_at: r.get::<_, Option<i64>>(4).map(|ms| ms.max(0) as u64), read: r.get(5) })
             .collect())
+    }
+
+    /// One page of the tasks whose ends wait for `origin`, younger than `HELD_FOR`, by `held_at`
+    /// and task: up to `HELD_PAGE` after `after`, as the last of the page before gave it. Only the
+    /// tasks, not their reports, and none `origin` answered already (unclaimed).
+    pub async fn waiting_held_tasks(&self, account: Uuid, origin: Uuid, after: Option<(String, String)>) -> Result<Vec<(String, String)>, String> {
+        let (held_at, task) = after.unzip();
+        let rows = self
+            .client()
+            .await?
+            .query(
+                &format!(
+                    "select held_at::text, task from held_ends
+                     where account = $1 and origin_machine = $2 and unclaimed_at is null and held_at > now() - {HELD_FOR}
+                       and ($3::text is null or (held_at, task) > ($3::text::timestamptz, $4::text))
+                     order by held_at, task limit $5"
+                ),
+                &[&account, &origin, &held_at, &task, &HELD_PAGE],
+            )
+            .await
+            .map_err(err)?;
+        Ok(rows.iter().map(|r| (r.get(0), r.get(1))).collect())
     }
 
     /// `origin`'s own status look of `task` was answered from its held end.
