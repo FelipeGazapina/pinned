@@ -4,7 +4,7 @@
 //! only among that account's own, so a machine reaches no machine, box or task of another account.
 
 use crate::hub::{Account, Hub, Unanswered, RUN_WAIT};
-use pinned_core::delegate::{Origin, RemoteAsk, RemoteEnd, Request};
+use pinned_core::delegate::{Origin, RemoteAsk, RemoteEnd, Request, END_SETTLED, END_UNKNOWN};
 use pinned_core::github;
 use pinned_core::link::is_unknown_command;
 use pinned_core::placement::{Need, Seen};
@@ -12,6 +12,7 @@ use pinned_core::wire::{Call, HubCall, TabId};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
+use uuid::Uuid;
 
 const LOOK_WAIT: Duration = Duration::from_secs(30);
 
@@ -117,8 +118,24 @@ pub(crate) async fn resolve(hub: &Hub, account: &Account, asked: &str) -> Result
 
 /// The status of the task `from`'s tab delegated to `machine`, or its state once cancelled. A
 /// worker box whose node is offline has no node to ask: a cancel deletes it, and a look says it
-/// still boots, or that it is offline once it had connected.
+/// still boots, or that it is offline once it had connected. A task whose end the hub holds for
+/// `from` answers from it first, as its box and machine may be gone.
 async fn remote_task(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, machine: &str, tab: TabId, task: String, cancel: Option<String>) -> Result<Value, String> {
+    // After a delivery of that end that runs now, as on the reconnect of `from`: a look never
+    // overtakes it, so while the hub holds an end, `from` reads it, never a gone worker.
+    let delivering = match Uuid::parse_str(from) {
+        Ok(origin) => Some(hub.hold_delivery(account, origin, &task).await),
+        Err(_) => None,
+    };
+    if let Some(end) = held_end(hub, account, from, &task).await? {
+        if cancel.is_none() {
+            if let Ok(origin) = Uuid::parse_str(from) {
+                let _ = hub.db.read_held_end(account.id, origin, &task).await;
+            }
+        }
+        return Ok(json!({ "workState": end.state, "summary": end.summary, "error": end.error, "usage": end.usage }));
+    }
+    drop(delivering);
     let worker_box = hub.boxes.delegate_box(hub, account, machine).await?;
     let asked = Call::RemoteTask { origin_machine: from.to_owned(), tab, task, cancel: cancel.clone() };
     let offline = match worker_box.as_ref().filter(|_| !account.is_online(machine)) {
@@ -151,24 +168,284 @@ async fn remote_task(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, machine
 }
 
 /// Passes the end of a task `from` ran to the machine `to` whose tab delegated it. Answers whether
-/// that machine took it; only a machine the hub could not reach is an error, which `from` sends
-/// again. A worker box goes once its end got through.
+/// that machine took it, always as a bool. With `to` offline the hub holds the end for it and
+/// answers taken once the row is written; only an end that is neither passed on nor held is an
+/// error, which `from` sends again. `to` answers `true` when it took it, and `"settled"` when the
+/// task had ended already with this same end, as from a status look: both drop a held copy and
+/// read as taken. `"unknown"` (a task it does not know, as after a restart, or one that ended
+/// otherwise), or an error from `to`, keeps the end unclaimed, so `unclaimed_ends` lists it. A bare
+/// `false` comes from a machine before 0.18.2, which answers it for both a settled and an unknown
+/// task, so nothing is kept, as before. A worker box goes once its end got through or is held.
 async fn ended(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, to: &str, tab: TabId, task: String, end: RemoteEnd) -> Result<Value, String> {
     let worker_box = hub.boxes.delegate_box(hub, account, from).await?;
     let mut end = end;
     if let Some(row) = &worker_box {
         hub.boxes.add_end_box_usage(hub, account, row, &mut end).await;
     }
-    let taken = match hub.call_machine(account, to, Call::RemoteEnded { from: from.to_owned(), tab, task, end }, LOOK_WAIT).await {
-        Ok(taken) => taken,
-        Err(Unanswered::Refused(e)) if !account.is_online(to) => return Err(e),
-        Err(Unanswered::Refused(_)) => Value::Bool(false),
+    // One delivery of the task's end at a time, as `deliver_held` and a status look take it, so this
+    // end's write never overtakes theirs.
+    let delivering = match Uuid::parse_str(to) {
+        Ok(origin) => Some(hub.hold_delivery(account, origin, &task).await),
+        Err(_) => None,
+    };
+    let passed = Call::RemoteEnded { from: from.to_owned(), tab: tab.clone(), task: task.clone(), end: end.clone() };
+    let taken = match hub.call_machine(account, to, passed, LOOK_WAIT).await {
+        Ok(answer) => match Answer::of(&answer) {
+            Answer::Took | Answer::Settled => {
+                // A copy held while `to` was offline has nothing left to tell.
+                if let Ok(origin) = Uuid::parse_str(to) {
+                    let _ = hub.db.drop_held_end(account.id, origin, &task).await;
+                }
+                true
+            }
+            Answer::Unknown => {
+                keep_unclaimed(hub, account, to, from, &tab, &task, end).await?;
+                false
+            }
+            Answer::NotTaken => false,
+        },
+        Err(Unanswered::Refused(e)) if !account.is_online(to) => {
+            if !hold_end(hub, account, to, from, &tab, &task, end, false).await? {
+                return Err(e);
+            }
+            // The machine may have come back between the refusal and the write, after its own flush.
+            if account.is_online(to) {
+                tokio::spawn(deliver_held(hub.clone(), account.clone(), to.to_owned()));
+            }
+            true
+        }
+        Err(Unanswered::Refused(_)) => {
+            eprintln!("{}", refused_line(to, &task));
+            keep_unclaimed(hub, account, to, from, &tab, &task, end).await?;
+            false
+        }
         Err(Unanswered::Lost(e)) => return Err(e),
     };
+    drop(delivering);
     if let Some(row) = worker_box {
+        eprintln!("{}", box_done_line(&row.id, account.id, &task));
         hub.boxes.end_delegate(hub, account, row, crate::boxes::End::Done).await?;
     }
-    Ok(taken)
+    Ok(Value::Bool(taken))
+}
+
+/// What a machine answered to a `Call::RemoteEnded` the hub passed it.
+#[derive(Debug, PartialEq)]
+enum Answer {
+    /// `true`: it took the end.
+    Took,
+    /// `"settled"`: its task had ended already with this same end.
+    Settled,
+    /// `"unknown"`: a task it does not know, or one that ended otherwise.
+    Unknown,
+    /// Anything else, as the bare `false` of a machine before 0.18.2.
+    NotTaken,
+}
+
+impl Answer {
+    fn of(answer: &Value) -> Answer {
+        match answer {
+            Value::Bool(true) => Answer::Took,
+            Value::String(s) if s == END_SETTLED => Answer::Settled,
+            Value::String(s) if s == END_UNKNOWN => Answer::Unknown,
+            _ => Answer::NotTaken,
+        }
+    }
+}
+
+/// Keeps an end `to` did not take as unclaimed, so neither its task's status nor the user loses it.
+/// An error when the row could not be written: the worker then hears it, keeps its end and sends it
+/// again, and its box keeps running.
+async fn keep_unclaimed(hub: &Hub, account: &Account, to: &str, from: &str, tab: &str, task: &str, end: RemoteEnd) -> Result<(), String> {
+    hold_end(hub, account, to, from, tab, task, end, true).await.map(drop).inspect_err(|_| {
+        eprintln!("pinned-server: an end that machine {to} did not take is not kept; it is sent again");
+    })
+}
+
+/// The longest task id the hub holds an end for. pinned's own are `task-` and 8 hex digits.
+const HELD_TASK_MAX: usize = 128;
+/// The states a worker's end can have: a task's terminal `delegate::WorkState`.
+const HELD_STATES: [&str; 3] = ["result_available", "failed", "cancelled"];
+
+/// Whether `task` is a task id, or a tab id, the hub holds an end for: not empty, at most `HELD_TASK_MAX` bytes,
+/// and no newline or other control character, so it is safe to store and to log.
+fn held_task_ok(task: &str) -> bool {
+    !task.is_empty() && task.len() <= HELD_TASK_MAX && !task.chars().any(char::is_control)
+}
+
+/// `task` as the hub logs it: the id when it is one pinned makes, else a fixed word, as a machine
+/// chooses the text and it could hold a newline.
+fn logged(task: &str) -> &str {
+    if held_task_ok(task) { task } else { "(unreadable id)" }
+}
+
+/// The log line for an end whose machine `to` answered with an error. `task` is the sender's text.
+fn refused_line(to: &str, task: &str) -> String {
+    let task = logged(task);
+    format!("pinned-server: machine {to} answered the end of task {task} with an error; it is kept unclaimed")
+}
+
+/// The log line for a worker box that ended done. `task` is the sender's text.
+fn box_done_line(box_id: &str, account: Uuid, task: &str) -> String {
+    let task = logged(task);
+    format!("pinned-server: worker box {box_id} of account {account} ends done: its end of task {task} got through or is held")
+}
+
+/// The most of a held end's summary or error the hub keeps: 256 KiB. A worker's summary is its last
+/// reply, a few KiB at most in practice; this keeps one runaway reply from parking megabytes per task
+/// in Postgres for `HELD_FOR`, and keeps the delivery one small socket frame.
+pub const HELD_TEXT_MAX: usize = 256 * 1024;
+
+/// `text` cut to `HELD_TEXT_MAX` bytes on a character boundary, with a marker that says how much went.
+pub fn clamp_held(text: String) -> String {
+    if text.len() <= HELD_TEXT_MAX {
+        return text;
+    }
+    let mut cut = HELD_TEXT_MAX;
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}…[truncated by pinned: {} bytes]", &text[..cut], text.len() - cut)
+}
+
+/// `text` as the hub stores it: NUL characters dropped, as Postgres `jsonb` refuses `\u0000`, then
+/// keys and tokens masked, so a NUL inside a key cannot hide it from the mask. The hub keeps no
+/// unmasked copy, so a late report shows `[hidden]` where a live one shows the text. It runs before
+/// `clamp_held`, so a cut never leaves a token's prefix. The node's `delegate::registry::stored`
+/// does the same, to tell a repeat of an end it holds.
+pub fn scrub_held(text: &str) -> String {
+    pinned_core::surface::mask_secrets(&text.replace('\0', ""))
+}
+
+/// Holds `end` for the machine `origin` of the account, which is offline, until it comes back, or,
+/// `unclaimed`, as one it answered it did not take. Its summary and error are stored masked
+/// (`scrub_held`) and cut (`clamp_held`). False when `origin` is no machine of the
+/// account, which leaves the end to its sender. An error when the row could not be written: the
+/// sender then keeps it and sends it again. Logs ids and sizes, never the end's text.
+#[allow(clippy::too_many_arguments)]
+pub async fn hold_end(hub: &Hub, account: &Account, origin: &str, from: &str, tab: &str, task: &str, mut end: RemoteEnd, unclaimed: bool) -> Result<bool, String> {
+    let (Ok(origin_id), Ok(from_id)) = (Uuid::parse_str(origin), Uuid::parse_str(from)) else { return Ok(false) };
+    if !held_task_ok(task) || !held_task_ok(tab) || !HELD_STATES.contains(&end.state.as_str()) {
+        eprintln!("pinned-server: the hub refuses an end from {from_id} for machine {origin_id}: its task id or state is not one pinned makes");
+        return Err("the hub refuses this end: its task id or state is not one pinned makes".into());
+    }
+    let not_kept = || match unclaimed {
+        true => format!("the hub could not keep the end of task {task} that its machine did not take; it is sent again"),
+        false => format!("the hub could not keep the end of task {task} for its machine, which is offline; it is sent again"),
+    };
+    let known = hub.db.machine_name(account.id, origin_id).await.map_err(|e| {
+        eprintln!("pinned-server: could not look up machine {origin_id} to hold the end of task {task} from {from_id}: {e}");
+        not_kept()
+    })?;
+    if known.is_none() {
+        return Ok(false);
+    }
+    let size = end.summary.as_ref().map_or(0, String::len) + end.error.as_ref().map_or(0, String::len);
+    end.summary = end.summary.map(|text| clamp_held(scrub_held(&text)));
+    end.error = end.error.map(|text| clamp_held(scrub_held(&text)));
+    let report = serde_json::to_value(&end).map_err(|e| e.to_string())?;
+    match hub.db.hold_end(account.id, origin_id, task, tab, from_id, &report, unclaimed).await {
+        Ok(fresh) => {
+            let kept = if fresh { "holds" } else { "already held" };
+            let why = if unclaimed { "unclaimed by" } else { "for offline" };
+            eprintln!("pinned-server: the hub {kept} the end of task {task} from {from} {why} machine {origin} of account {} ({size} bytes)", account.id);
+        }
+        Err(e) => {
+            eprintln!("pinned-server: could not hold the end of task {task} from {from_id} for machine {origin_id}: {e}");
+            return Err(not_kept());
+        }
+    }
+    Ok(true)
+}
+
+/// The end the hub holds for `origin`'s task `task`, when it holds one.
+async fn held_end(hub: &Hub, account: &Account, origin: &str, task: &str) -> Result<Option<RemoteEnd>, String> {
+    let Ok(origin) = Uuid::parse_str(origin) else { return Ok(None) };
+    let Some(held) = hub.db.held_ends(account.id, origin, Some(task)).await?.into_iter().next() else { return Ok(None) };
+    Ok(serde_json::from_value(held.end).ok())
+}
+
+/// Passes every end the hub holds for `machine`, which just connected, as the `Call::RemoteEnded` it
+/// missed. A row goes once the machine took it (`true`) or had settled the task with it already
+/// (`"settled"`); one it did not answer stays for its next connection, and its status answers from
+/// the row meanwhile. One it answered `"unknown"`, as a machine that restarted and forgot the task
+/// does, stays unclaimed for `HELD_FOR` and is not offered again. A machine before 0.18.2 answers a
+/// bare `false` for both: the row goes when a status look read it, else it stays unclaimed. One
+/// delivery of a row runs at a time and sends only a row still waiting, and a machine takes one end
+/// per task, so a repeat is a no-op there. The waiting tasks are read a page (`db::HELD_PAGE`) at a
+/// time, and each report only as it is passed.
+pub async fn deliver_held(hub: Arc<Hub>, account: Arc<Account>, machine: String) {
+    let Ok(origin) = Uuid::parse_str(&machine) else { return };
+    match hub.db.expire_held_ends(account.id).await {
+        Ok(0) => {}
+        Ok(n) => eprintln!("pinned-server: {n} held ends of account {} expired unread", account.id),
+        Err(e) => eprintln!("pinned-server: could not expire account {}'s held ends: {e}", account.id),
+    }
+    let mut after = None;
+    loop {
+        let page = match hub.db.waiting_held_tasks(account.id, origin, after.clone()).await {
+            Ok(page) => page,
+            Err(e) => return eprintln!("pinned-server: could not read the ends held for machine {machine}: {e}"),
+        };
+        let Some(last) = page.last().cloned() else { return };
+        for (_, task) in page {
+            if !pass_held(&hub, &account, &machine, origin, task).await {
+                return;
+            }
+        }
+        after = Some(last);
+    }
+}
+
+/// Passes the held end of `task` to `machine`, `origin`, when it still waits. False when the
+/// machine answered with an error, so the rest wait for its next connection.
+async fn pass_held(hub: &Hub, account: &Arc<Account>, machine: &str, origin: Uuid, task: String) -> bool {
+    // A delivery that ran meanwhile, from another connection of the machine, dropped or unclaimed
+    // the row, and a status look meanwhile may have read it.
+    let _delivering = hub.hold_delivery(account, origin, &task).await;
+    let held = match hub.db.held_ends(account.id, origin, Some(&task)).await {
+        Ok(rows) => match rows.into_iter().find(|row| row.unclaimed_at.is_none()) {
+            Some(row) => row,
+            None => return true,
+        },
+        Err(_) => return true,
+    };
+    let Ok(end) = serde_json::from_value::<RemoteEnd>(held.end) else {
+        eprintln!("pinned-server: the held end of task {task} for machine {machine} is unreadable; it is dropped");
+        let _ = hub.db.drop_held_end(account.id, origin, &task).await;
+        return true;
+    };
+    let ended = Call::RemoteEnded { from: held.from.to_string(), tab: held.tab, task: task.clone(), end };
+    match hub.call_machine(account, machine, ended, LOOK_WAIT).await.map(|answer| Answer::of(&answer)) {
+        Ok(Answer::Took | Answer::Settled) => {
+            if let Err(e) = hub.db.drop_held_end(account.id, origin, &task).await {
+                eprintln!("pinned-server: could not drop the delivered end of task {task}: {e}");
+            }
+            eprintln!("pinned-server: passed the held end of task {task} to machine {machine} (taken: true)");
+        }
+        Ok(Answer::NotTaken) if held.read => {
+            // A machine before 0.18.2 settled the task from the status it read, so its bare
+            // `false` is a repeat.
+            if let Err(e) = hub.db.drop_held_end(account.id, origin, &task).await {
+                eprintln!("pinned-server: could not drop the read end of task {task}: {e}");
+            }
+            eprintln!("pinned-server: machine {machine} had the held end of task {task} from its status already");
+        }
+        Ok(_) => {
+            // `"unknown"`, or a bare `false` before any status read it.
+            if let Err(e) = hub.db.unclaim_held_end(account.id, origin, &task).await {
+                eprintln!("pinned-server: could not mark the held end of task {task} unclaimed: {e}");
+            }
+            eprintln!("pinned-server: machine {machine} did not take the held end of task {task} (taken: false); it stays unclaimed");
+        }
+        Err(_) => {
+            // Its text is the machine's own, so only ids are logged. The rest wait for its next
+            // connection: each try can wait `LOOK_WAIT` on a machine that does not answer.
+            eprintln!("pinned-server: machine {machine} answered the held end of task {task} with an error; the rest wait for its next connection");
+            return false;
+        }
+    }
+    true
 }
 
 /// Passes what a task `from` runs waits on the user for, or that it waits on nothing, to the
@@ -190,5 +467,53 @@ async fn call(hub: &Hub, account: &Account, machine: &str, call: Call, wait: Dur
         Err(Unanswered::Refused(e)) if is_unknown_command(&e) => Err(format!("{} needs to update pinned to take a worker from another machine", name())),
         Err(Unanswered::Refused(e)) => Err(e),
         Err(Unanswered::Lost(e)) => Err(format!("{e}, so the worker may have started there: look at {}'s threads before starting it again", name())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_log_line_about_an_end_carries_no_control_character_from_its_task_id() {
+        for task in ["task-1\nforged line", "task-1\u{7}", "task-1\r\u{1b}[31m", ""] {
+            for line in [refused_line("mac", task), box_done_line("box-1", Uuid::nil(), task)] {
+                assert!(!line.chars().any(char::is_control), "{line:?}");
+                assert!(line.contains("(unreadable id)"), "{line:?}");
+            }
+        }
+        let good = "task-1a2b3c4d";
+        assert!(refused_line("mac", good).contains(good) && box_done_line("box-1", Uuid::nil(), good).contains(good));
+    }
+
+    #[test]
+    fn a_held_text_past_the_cap_is_cut_with_a_marker_and_never_dropped() {
+        assert_eq!(clamp_held("Footer fixed.".into()), "Footer fixed.");
+        let exact = "a".repeat(HELD_TEXT_MAX);
+        assert_eq!(clamp_held(exact.clone()), exact);
+        let long = "a".repeat(HELD_TEXT_MAX + 10);
+        assert_eq!(clamp_held(long), format!("{}…[truncated by pinned: 10 bytes]", "a".repeat(HELD_TEXT_MAX)));
+        // A cut inside a character backs off to its start.
+        let wide = format!("{}é{}", "a".repeat(HELD_TEXT_MAX - 1), "b".repeat(5));
+        assert_eq!(clamp_held(wide), format!("{}…[truncated by pinned: 7 bytes]", "a".repeat(HELD_TEXT_MAX - 1)));
+    }
+
+    #[test]
+    fn a_held_text_is_masked_before_its_cut_and_loses_its_nul_characters() {
+        let fake = "sk-ant-api03-FAKEFAKEFAKEFAKE0000";
+        assert_eq!(scrub_held(&format!("key {fake} done")), "key [hidden] done");
+        assert_eq!(scrub_held("tests\0 pass"), "tests pass");
+        // A token that straddles the cap is masked whole first, so no prefix of it is kept.
+        let straddling = format!("{} {fake}", "a".repeat(HELD_TEXT_MAX - 10));
+        assert!(clamp_held(straddling.clone()).contains("sk-ant"), "cut first, it would keep a prefix");
+        let held = clamp_held(scrub_held(&straddling));
+        assert!(!held.contains("sk-ant") && held.ends_with("[hidden]"), "{}", &held[held.len() - 40..]);
+    }
+
+    #[test]
+    fn a_key_split_by_a_nul_character_is_masked_whole() {
+        let held = scrub_held("key sk-ant-api03-FAKE\0FAKEFAKE0000 done");
+        assert!(!held.contains("FAKEFAKE") && !held.contains('\0'), "{held}");
+        assert_eq!(held, "key [hidden] done");
     }
 }

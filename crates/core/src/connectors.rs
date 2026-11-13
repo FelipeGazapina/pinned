@@ -8967,4 +8967,134 @@ mod tests {
             let _ = std::fs::remove_dir_all(dir);
         }
     }
+
+    /// An in-memory `Storage` that hands out a saved store and runs file and keeps what is saved
+    /// back, so a test sees the bytes the code writes.
+    #[derive(Clone, Default)]
+    struct SavedStorage {
+        store: std::sync::Arc<Mutex<Option<Vec<u8>>>>,
+        runs: std::sync::Arc<Mutex<Option<Vec<u8>>>>,
+        keys: std::sync::Arc<Mutex<BTreeMap<String, String>>>,
+    }
+
+    impl Storage for SavedStorage {
+        fn load(&self) -> Option<Vec<u8>> {
+            self.store.lock().unwrap().clone()
+        }
+        fn save(&self, store: &[u8]) -> Result<(), String> {
+            *self.store.lock().unwrap() = Some(store.to_vec());
+            Ok(())
+        }
+        fn key(&self, name: &str) -> Option<String> {
+            self.keys.lock().unwrap().get(name).cloned()
+        }
+        fn write_key(&self, name: &str, key: &str) -> Result<(), String> {
+            self.keys.lock().unwrap().insert(name.into(), key.into());
+            Ok(())
+        }
+        fn remove_key(&self, name: &str) {
+            self.keys.lock().unwrap().remove(name);
+        }
+        fn load_runs(&self) -> Option<Vec<u8>> {
+            self.runs.lock().unwrap().clone()
+        }
+        fn save_runs(&self, bytes: &[u8]) -> Result<(), String> {
+            *self.runs.lock().unwrap() = Some(bytes.to_vec());
+            Ok(())
+        }
+    }
+
+    /// Values a release changes on purpose when it loads and saves a store from before it, by JSON
+    /// path (`$` is the file, array items are `[n]`), each with why. A path listed here is not
+    /// compared. Empty for v0.18.1: `migrate_slack` only acts on a store with a `slack` account and no
+    /// `slack_bots`, which v0.18.1 never writes, so a v0.18.1 store passes through it untouched.
+    const MIGRATED: &[(&str, &str)] = &[];
+
+    /// Every path in `old` whose key or value is not in `new`. `new` may hold more keys than `old`
+    /// (a new field with a default), but an array must keep its length and an old value its value.
+    fn lost(old: &Value, new: &Value, path: &str, out: &mut Vec<String>) {
+        if MIGRATED.iter().any(|(migrated, _)| *migrated == path) {
+            return;
+        }
+        match (old, new) {
+            (Value::Object(old), Value::Object(new)) => {
+                for (key, old) in old {
+                    match new.get(key) {
+                        Some(new) => lost(old, new, &format!("{path}.{key}"), out),
+                        None => out.push(format!("{path}.{key}: dropped (was {})", short(old))),
+                    }
+                }
+            }
+            (Value::Array(old), Value::Array(new)) => {
+                if old.len() != new.len() {
+                    out.push(format!("{path}: {} items became {}", old.len(), new.len()));
+                }
+                for (i, (old, new)) in old.iter().zip(new).enumerate() {
+                    lost(old, new, &format!("{path}[{i}]"), out);
+                }
+            }
+            (old, new) if old == new => {}
+            (old, new) => out.push(format!("{path}: changed from {} to {}", short(old), short(new))),
+        }
+    }
+
+    fn short(value: &Value) -> String {
+        let text = value.to_string();
+        match text.char_indices().nth(80) {
+            Some((end, _)) => format!("{}…", &text[..end]),
+            None => text,
+        }
+    }
+
+    /// Loads `store` (and `runs`) through `Connectors::new`, saves them again through the code's own
+    /// save path, and lists every path of the saved file that was lost.
+    fn upgrade_losses(name: &str, store: &[u8], runs: Option<&[u8]>, ids: &[&str], run_ids: &[&str]) -> Vec<String> {
+        let storage = SavedStorage::default();
+        *storage.store.lock().unwrap() = Some(store.to_vec());
+        *storage.runs.lock().unwrap() = runs.map(<[u8]>::to_vec);
+        let connectors = Connectors::new(storage.clone(), "/bin/pinned".into());
+
+        // A store the code cannot decode becomes the empty default with no error, so what loaded is checked first.
+        let loaded: Vec<String> = connectors.store.lock().unwrap().connectors.iter().map(|c| c.id.clone()).collect();
+        assert_eq!(loaded, ids, "{name}: the store fell back to the default or lost workflows");
+        let loaded_runs: Vec<String> = connectors.runs.lock().unwrap().iter().map(|run| run.id.0.clone()).collect();
+        assert_eq!(loaded_runs, run_ids, "{name}: the runs file fell back to nothing or lost runs");
+        assert_eq!(*connectors.runs_broken.lock().unwrap(), None, "{name}: the runs file did not parse");
+        assert!(connectors.checked.lock().unwrap().is_none(), "{name}: loading recorded an error");
+
+        let mut losses = Vec::new();
+        let old: Value = serde_json::from_slice(store).unwrap();
+        connectors.save(&connectors.store.lock().unwrap()).unwrap();
+        let saved: Value = serde_json::from_slice(&storage.store.lock().unwrap().clone().unwrap()).unwrap();
+        lost(&old, &saved, "$", &mut losses);
+        losses = losses.into_iter().map(|path| format!("{name} {path}")).collect();
+        if let Some(runs) = runs {
+            connectors.save_runs().unwrap();
+            let old: Value = serde_json::from_slice(runs).unwrap();
+            let saved: Value = serde_json::from_slice(&storage.runs.lock().unwrap().clone().unwrap()).unwrap();
+            let mut run_losses = Vec::new();
+            lost(&old, &saved, "$", &mut run_losses);
+            losses.extend(run_losses.into_iter().map(|path| format!("runs.json {path}")));
+        }
+        losses
+    }
+
+    /// The hub upgrade over a store v0.18.1 saved: `Connectors::new` reads it without a default
+    /// fallback, and saving it again keeps every key and value, so no account, workflow, Slack bot,
+    /// box choice, MCP server, Convex connection or run is dropped or reset.
+    #[test]
+    fn a_store_saved_by_v0_18_1_loads_with_nothing_dropped_or_reset() {
+        const DIR: &str = "../tests/fixtures/store/v0.18.1";
+        let store = include_bytes!("../tests/fixtures/store/v0.18.1/connectors.json");
+        let boxes = include_bytes!("../tests/fixtures/store/v0.18.1/connectors-box-variants.json");
+        let runs = include_bytes!("../tests/fixtures/store/v0.18.1/runs.json");
+        let workflows: Vec<String> = (1..=6).map(|n| format!("fake-workflow-{n:04}")).collect();
+        let workflows: Vec<&str> = workflows.iter().map(String::as_str).collect();
+        let run_ids: Vec<String> = (1..=12).map(|n| format!("fake-run-{n:04}")).collect();
+        let run_ids: Vec<&str> = run_ids.iter().map(String::as_str).collect();
+
+        let mut losses = upgrade_losses(&format!("{DIR}/connectors.json"), store, Some(runs), &workflows, &run_ids);
+        losses.extend(upgrade_losses(&format!("{DIR}/connectors-box-variants.json"), boxes, None, &[], &[]));
+        assert!(losses.is_empty(), "a store saved by v0.18.1 loses {} values when it loads and saves again:\n{}", losses.len(), losses.join("\n"));
+    }
 }
