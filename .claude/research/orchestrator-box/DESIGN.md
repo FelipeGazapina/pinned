@@ -295,11 +295,15 @@ online, that `send_to_captain` opens Captains on boxes by itself, and that remin
 
 ## 7. Lifetime and idle delete
 
-- The row runs under the same `reap_once` and `verdict` as Captain boxes, with one extra hold.
-  The idle timer of an Orchestrator box does not run while any `BoxWork::Captain` row of the
-  account is open (not Ending) or any Captain turn the Orchestrator started is in flight.
-  Without this hold, a Captain box could report to an Orchestrator that was already deleted.
-  `seat()` would then have no host, and the report would fail.
+- The row runs under the same `reap_once` and `verdict` as Captain boxes. The design relies on the
+  hub's held end reports (the fix on `fix/held-remote-ends`, below), not on a box staying idle-alive to
+  receive a report. Two plain rules:
+  - **A box Captain is not collected while its workers run.** The reaper does not apply the
+    Idle and Exited rules to a box while tasks run on its behalf.
+  - **The Orchestrator box is not collected while Captain boxes or their workers run.** The same hold
+    covers any open `BoxWork::Captain` row of the account and any Captain turn the Orchestrator started.
+  - Max life and the Box budget still end any box, hold or not. A report that arrives after that is
+    held on the hub (section 5), not lost.
 - Every other rule stays as it is: idle 10 min, exited 5 min, offline 10 min, max life 4 h, and
   the budget. The tab starts at boot (3.3), so the exited rule never fires on an Orchestrator
   that waits for its first message. (Open questions 2 and 3.)
