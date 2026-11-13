@@ -205,3 +205,24 @@
   log: pinned: synced plugins: 0 up, 2337 down
   log: pinned: synced github.com/felipegazapina/pinned: 0 up, 239 down
   test: test a_file_a_client_attaches_lands_in_the_nodes_private_uploads_folder ... 
+== 2026-11-13T03:45:44Z node=288 alive
+  tcp ESTAB 172.18.0.71:38452 153.52.255.120:443
+  mem.current=6783729664 oom_kill=0
+  log: pinned: connected to https://pinned-hub-production.up.railway.app
+  log: pinned: synced plugins: 0 up, 2337 down
+  log: pinned: synced github.com/felipegazapina/pinned: 0 up, 239 down
+  test: test a_client_that_connects_later_sees_the_usage_a_machine_reported_before ... 
+== 2026-11-13T03:45:54Z node=288 alive
+  tcp ESTAB 172.18.0.71:38452 153.52.255.120:443
+  mem.current=6810877952 oom_kill=0
+  log: pinned: connected to https://pinned-hub-production.up.railway.app
+  log: pinned: synced plugins: 0 up, 2337 down
+  log: pinned: synced github.com/felipegazapina/pinned: 0 up, 239 down
+  test: test a_closed_hub_takes_only_its_first_account_whose_password_can_change ... 
+== 2026-11-13T03:46:04Z node=288 alive
+  tcp ESTAB 172.18.0.71:38452 153.52.255.120:443
+  mem.current=6793908224 oom_kill=0
+  log: pinned: connected to https://pinned-hub-production.up.railway.app
+  log: pinned: synced plugins: 0 up, 2337 down
+  log: pinned: synced github.com/felipegazapina/pinned: 0 up, 239 down
+  test: === 2026-11-13T03:46:04Z guessing_invite_codes_hits_the_sign_up_limit

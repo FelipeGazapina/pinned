@@ -22,3 +22,8 @@ postgres up, datadir pgdata.4DlQ pid 6458 port 5499
 2026-11-13T03:45:18Z a_hub_without_a_learning_database_keeps_no_dictation ok 2026-11-13T03:45:19Z
 2026-11-13T03:45:19Z a_session_too_big_for_one_websocket_frame_syncs_without_dropping_the_link ok 2026-11-13T03:45:30Z
 2026-11-13T03:45:30Z a_stopping_hub_closes_every_socket_with_going_away_and_then_stops ok 2026-11-13T03:45:32Z
+2026-11-13T03:45:32Z a_file_a_client_attaches_lands_in_the_nodes_private_uploads_folder ok 2026-11-13T03:45:43Z
+2026-11-13T03:45:43Z a_client_that_connects_later_sees_the_usage_a_machine_reported_before ok 2026-11-13T03:45:46Z
+2026-11-13T03:45:46Z sign_in_rejects_wrong_passwords_duplicates_and_logged_out_tokens ok 2026-11-13T03:45:52Z
+2026-11-13T03:45:53Z a_closed_hub_takes_only_its_first_account_whose_password_can_change ok 2026-11-13T03:45:56Z
+2026-11-13T03:45:56Z an_invite_hub_takes_its_first_account_then_only_single_use_codes ok 2026-11-13T03:46:04Z

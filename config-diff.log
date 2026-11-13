@@ -3,3 +3,8 @@
 > drwxr-xr-x 2026-11-13 03:44:54.814382535 .
 < -rw-r--r-- 2026-11-13 03:43:54.352020079 tasks.json
 > -rw-r--r-- 2026-11-13 03:44:54.814382535 tasks.json
+--- after a_closed_hub_takes_only_its_first_account_whose_password_can_change (2026-11-13T03:45:56Z)
+< drwxr-xr-x 2026-11-13 03:44:54.814382535 .
+> drwxr-xr-x 2026-11-13 03:45:55.261718580 .
+< -rw-r--r-- 2026-11-13 03:44:54.814382535 tasks.json
+> -rw-r--r-- 2026-11-13 03:45:55.261718580 tasks.json
