@@ -147,6 +147,15 @@ impl Asked {
     pub fn is_open(&self) -> bool {
         self.outcome.is_none()
     }
+
+    /// Whether the call of tab `tab`, or with no tab of task `task`, is the one that asked.
+    fn is_callers(&self, tab: &str, task: Option<&str>) -> bool {
+        if tab.is_empty() {
+            task.is_some() && self.task.as_deref() == task
+        } else {
+            self.tab == tab
+        }
+    }
 }
 
 /// Every questionnaire on this machine, oldest first.
@@ -244,8 +253,12 @@ impl Questions {
 
     /// How the questionnaire `id` stands, for the `question_user` call that waits on it:
     /// `{"outcome":"open"}` while it waits, else the call's result, which then counts as delivered.
-    pub fn status(&mut self, id: &str, now: Instant) -> Result<serde_json::Value, String> {
-        let asked = self.asked.iter_mut().find(|a| a.questionnaire.id == id).ok_or_else(|| format!("no questions {id}"))?;
+    ///
+    /// Only the questionnaire's own caller may read it: a call on its tab, or, with no tab (a
+    /// headless child), a call of its task. Anyone else gets the error an unknown id gets, so ids
+    /// cannot be probed, and a stray poll cannot swallow the late notice.
+    pub fn status(&mut self, id: &str, tab: &str, task: Option<&str>, now: Instant) -> Result<serde_json::Value, String> {
+        let asked = self.asked.iter_mut().find(|a| a.questionnaire.id == id && a.is_callers(tab, task)).ok_or_else(|| format!("no questions {id}"))?;
         if asked.is_open() {
             self.polled.insert(id.to_owned(), now);
             return Ok(serde_json::json!({ "outcome": "open", "id": id }));
@@ -643,13 +656,13 @@ mod tests {
             let mut q = Questions::default();
             let id = q.open("tab-1", None, Some("task-1".into()), None, vec![question("One?", &["yes", "no"])], vec![], 0).unwrap();
             assert!(q.cancel_tasks(&["task-1".into()], by.clone()));
-            let result = q.status(&id, Instant::now()).unwrap();
+            let result = q.status(&id, "tab-1", None, Instant::now()).unwrap();
             assert_eq!((result["outcome"].as_str(), result["next"].as_str()), (Some("cancelled"), Some(format!("{wording} {STOP}").as_str())), "{by:?}");
         }
         let mut q = Questions::default();
         let id = q.open("tab-1", None, None, None, vec![question("One?", &["yes", "no"])], vec![], 0).unwrap();
         assert!(q.cancel_tab("tab-1", Canceller::Turn));
-        assert_eq!(q.status(&id, Instant::now()).unwrap()["next"], format!("The user stopped this turn. {STOP}"), "cancel_tab names who it was");
+        assert_eq!(q.status(&id, "tab-1", None, Instant::now()).unwrap()["next"], format!("The user stopped this turn. {STOP}"), "cancel_tab names who it was");
     }
 
     #[test]

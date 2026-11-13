@@ -190,8 +190,13 @@ pub enum ProjectTool {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         task: Option<String>,
     },
-    /// How the questionnaire `id` stands: `{"outcome":"open"}` while it waits, else the tool's result.
-    QuestionStatus { id: String },
+    /// How the questionnaire `id` stands: `{"outcome":"open"}` while it waits, else the tool's
+    /// result. Only the caller that asked may read it; a headless child sends its `task`.
+    QuestionStatus {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task: Option<String>,
+    },
     /// Everyone's: one action of `surface::ACTIONS`, run by the hub as the user's account and audited.
     Act {
         action: String,

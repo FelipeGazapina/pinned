@@ -3506,7 +3506,7 @@ impl Machine {
     /// names its task: the questions go on the tab that shows that task, else on its parent's.
     fn question_tool(&self, tab: &str, tool: ProjectTool) -> Result<String, String> {
         let (title, questions, projects, task) = match tool {
-            ProjectTool::QuestionStatus { id } => return Ok(self.questions.lock().unwrap().status(&id, Instant::now())?.to_string()),
+            ProjectTool::QuestionStatus { id, task } => return Ok(self.questions.lock().unwrap().status(&id, tab, task.as_deref(), Instant::now())?.to_string()),
             ProjectTool::QuestionUser { title, questions, projects, task } => (title, questions, projects, task),
             _ => return Err("not a question tool".into()),
         };
@@ -13998,7 +13998,7 @@ Have another model review a risky change before it goes ahead.";
         let claude = Account::builtin(Provider::Claude);
         let [stopped, closed, archived] = ["stop", "close", "archive"].map(|name| typing_tab(&m, claude.clone(), &root.join(format!("{name}.bin"))));
         let ids = [&stopped, &closed, &archived].map(|tab| m.project_tool(tab, branch_questions(None)).unwrap());
-        let status = |id: &str| m.project_tool(&stopped, ProjectTool::QuestionStatus { id: id.into() }).map(|text| serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone());
+        let status = |id: &str| m.project_tool(&stopped, ProjectTool::QuestionStatus { id: id.into(), task: None }).map(|text| serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone());
         assert_eq!(status(&ids[0]), Ok(json!("open")), "the call waits");
 
         assert_eq!(m.call(Call::StopTurn { tab: stopped.clone() }), Ok(Value::Null));
@@ -14025,7 +14025,7 @@ Have another model review a risky change before it goes ahead.";
         let (m, dir, captain, task, child, _transcript) = captain_with_thread_child("thread-cancel-asks");
         m.record_event(AgentEvent { session: Some("s-child".into()), ..hook(&child, AgentStatus::Working) });
         let id = m.project_tool("", branch_questions(Some(&task))).unwrap();
-        let status = || m.project_tool(&child, ProjectTool::QuestionStatus { id: id.clone() }).map(|text| serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone());
+        let status = || m.project_tool(&child, ProjectTool::QuestionStatus { id: id.clone(), task: None }).map(|text| serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone());
         assert_eq!((status(), m.view(&child).unwrap().questions.map(|q| q.id)), (Ok(json!("open")), Some(id.clone())), "the tab asks");
 
         m.task_cancel(Some(captain), None, &task, "no longer needed").unwrap();
@@ -14083,7 +14083,8 @@ Have another model review a risky change before it goes ahead.";
 
     /// The result the `question_user` call that waits on `id` reads.
     fn question_result(m: &Machine, id: &str) -> Value {
-        serde_json::from_str(&m.project_tool("", ProjectTool::QuestionStatus { id: id.into() }).unwrap()).unwrap()
+        let tab = m.questions.lock().unwrap().get(id).map(|asked| asked.tab.clone()).unwrap();
+        serde_json::from_str(&m.project_tool(&tab, ProjectTool::QuestionStatus { id: id.into(), task: None }).unwrap()).unwrap()
     }
 
     /// What a cancelled worker reads: `wording`, then that it must not go on.
@@ -14151,6 +14152,44 @@ Have another model review a risky change before it goes ahead.";
         let id = m.questions.lock().unwrap().open(&shown, None, Some(task.to_owned()), None, vec![crate::questions::Question { header: None, question: "Base on main?".into(), changes: "the PR target".into(), options: vec![], multi_select: false }], vec![], 1).unwrap();
         assert!(m.view(&shown).unwrap().questions.is_some(), "the tab asks");
         (shown, id)
+    }
+
+    #[test]
+    fn question_status_reads_only_the_callers_own_questionnaire() {
+        use crate::questions::Outcome;
+        let m = machine();
+        let [owner, other] = [(); 2].map(|_| m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, None));
+        let poll = |tab: &str, task: Option<&str>, id: &str| m.project_tool(tab, ProjectTool::QuestionStatus { id: id.into(), task: task.map(str::to_owned) }).map(|text| serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone());
+        let id = m.project_tool(&owner, branch_questions(None)).unwrap();
+        m.call(Call::AnswerQuestions { tab: owner.clone(), id: id.clone(), reply: crate::questions::QuestionsReply::Skipped }).unwrap();
+
+        // Another tab's poll reads the error an unknown id gets, and leaves the late notice alone.
+        assert_eq!(poll(&other, None, &id), Err(format!("no questions {id}")), "another tab is refused");
+        assert_eq!(poll(&other, None, "q-99"), Err("no questions q-99".into()), "the error an unknown id gets");
+        assert_eq!(poll("", None, &id), Err(format!("no questions {id}")), "a caller with no tab and no task is refused");
+        assert_eq!(poll("", Some("task-9"), &id), Err(format!("no questions {id}")), "so is another task's");
+        assert!(!m.questions.lock().unwrap().get(&id).unwrap().notified, "a stray poll did not swallow the late notice");
+        assert_eq!(poll(&owner, None, &id), Ok(json!("skipped")), "the owner still gets the outcome");
+        assert_eq!(m.questions.lock().unwrap().get(&id).unwrap().outcome, Some(Outcome::Skipped));
+
+        // The questionnaire follows its session to the tab that resumed it.
+        m.questions.lock().unwrap().open(&owner, Some("s-1".into()), None, None, vec![crate::questions::Question { header: None, question: "Base on main?".into(), changes: "the PR target".into(), options: vec![], multi_select: false }], vec![], 1).unwrap();
+        assert!(m.questions.lock().unwrap().rekey("s-1", &other));
+        assert_eq!(poll(&owner, None, "q-2"), Err("no questions q-2".into()), "the old tab is no longer its caller");
+        assert_eq!(poll(&other, None, "q-2"), Ok(json!("open")), "the tab that resumed the session is");
+    }
+
+    #[test]
+    fn question_status_of_a_headless_child_is_read_by_its_task() {
+        let m = machine();
+        let parent = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let task = headless_task(&m, crate::delegate::Parent::Tab(parent.clone()));
+        let poll = |tab: &str, task: Option<&str>, id: &str| m.project_tool(tab, ProjectTool::QuestionStatus { id: id.into(), task: task.map(str::to_owned) }).map(|text| serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone());
+        let id = m.project_tool("", branch_questions(Some(&task))).unwrap();
+        assert_eq!(m.questions.lock().unwrap().get(&id).unwrap().tab, parent, "the questions are on the parent's tab");
+        assert_eq!(poll("", Some(&task), &id), Ok(json!("open")), "the child polls by its task");
+        assert_eq!(poll("", None, &id), Err(format!("no questions {id}")), "a call with no task is refused");
+        assert_eq!(poll("", Some("task-9"), &id), Err(format!("no questions {id}")), "so is another task's");
     }
 
     #[test]
@@ -14253,7 +14292,7 @@ Have another model review a risky change before it goes ahead.";
         assert!(m.questions.lock().unwrap().open_on(&tab).is_some(), "with no limit it waits");
 
         // A call still waits on it: the call answers skipped.
-        let status = |id: &str| m.project_tool(&tab, ProjectTool::QuestionStatus { id: id.into() }).map(|text| serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone());
+        let status = |id: &str| m.project_tool(&tab, ProjectTool::QuestionStatus { id: id.into(), task: None }).map(|text| serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone());
         assert_eq!(status(&waited), Ok(json!("open")));
         m.questions.lock().unwrap().set_wait_limit(&waited, Some(0));
         m.expire_questions();

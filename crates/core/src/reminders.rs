@@ -903,6 +903,10 @@ fn question_call(params: &Value, output: &Mutex<impl Write>) -> Value {
         }
     }
     let tab = tab.unwrap_or_default();
+    let task = match &ask {
+        ProjectTool::QuestionUser { task, .. } => task.clone(),
+        _ => None,
+    };
     let id = match send(&Message::Project { tab: tab.clone(), tool: ask }) {
         Ok(id) => id,
         Err(error) => return tool_result(Err(error)),
@@ -920,7 +924,7 @@ fn question_call(params: &Value, output: &Mutex<impl Write>) -> Value {
             let _ = write_msg(output, &note);
             next_note = Instant::now() + progress_every();
         }
-        match send(&Message::Project { tab: tab.clone(), tool: ProjectTool::QuestionStatus { id: id.clone() } }) {
+        match send(&Message::Project { tab: tab.clone(), tool: ProjectTool::QuestionStatus { id: id.clone(), task: task.clone() } }) {
             Ok(text) if serde_json::from_str::<Value>(&text).is_ok_and(|status| status["outcome"] == "open") => {}
             answer => return tool_result(answer),
         }
@@ -1655,7 +1659,7 @@ fn restore_var(name: &str, value: Option<String>) {
         // A headless child has no tab: it names its task, and the node finds the tab that shows it.
         let (_, heard) = over_socket_timed(None, Some("task-4"), (20, 1000, None), std::slice::from_ref(&call), vec![Ok("q-2".into()), Ok(r#"{"outcome":"skipped","id":"q-2"}"#.into())]);
         assert!(heard[0].starts_with(r#"{"kind":"project","tab":"","tool":{"name":"question_user","#) && heard[0].ends_with(r#""task":"task-4"}}"#), "{heard:?}");
-        assert_eq!(heard[1], r#"{"kind":"project","tab":"","tool":{"name":"question_status","id":"q-2"}}"#);
+        assert_eq!(heard[1], r#"{"kind":"project","tab":"","tool":{"name":"question_status","id":"q-2","task":"task-4"}}"#, "the status names the task too, so the node knows whose call it is");
     }
 
     #[test]
