@@ -50,3 +50,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:03:19Z #21 a_shared_dictation_lands_in_the_learning_database_under_its_account START / avail=15123M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:03:23Z #21 a_shared_dictation_lands_in_the_learning_database_under_its_account ok / avail=15123M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:03:24Z #22 a_hub_without_a_learning_database_keeps_no_dictation START / avail=15123M /workspace avail=19374M node_stat=Ssl
+2026-11-13T04:03:27Z #22 a_hub_without_a_learning_database_keeps_no_dictation ok / avail=15123M /workspace avail=19374M node_stat=Ssl node_tcp=1
