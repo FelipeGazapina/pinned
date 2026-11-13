@@ -122,7 +122,7 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
             return Err(refusal);
         }
     };
-    if admitted.action.class == Class::Confirm || why.is_some() {
+    if surface::held_for_owner(admitted.action) || why.is_some() {
         let asked = Confirmation {
             id: String::new(),
             at: 0,

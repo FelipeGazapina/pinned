@@ -6307,6 +6307,7 @@ fn an_agent_holding_what_its_machine_keeps_readable_cannot_approve_or_run_a_conf
         assert_eq!(agent.hub(decide.clone()), Err(LOCKED.into()), "the agent approves nothing");
         assert_eq!(agent.hub(json!({ "cmd": "remove_machine", "id": spare.id })), Err(LOCKED.into()), "nor runs the confirm action itself");
         assert_eq!(agent.hub(json!({ "cmd": "create_invite" })), Err(LOCKED.into()));
+        assert_eq!(agent.hub(json!({ "cmd": "extend_box", "machine": spare.id, "extra_usd": 1.0 })), Err(LOCKED.into()), "extending a box is money: a login read from disk never extends");
         assert_eq!(agent.call(&ana.machine, json!({ "cmd": "update_self" })), Err(LOCKED.into()), "nor a confirm-class call on a machine");
     }
     assert_eq!(logins, 1, "the app's login is the one login on the machine");
@@ -7100,7 +7101,7 @@ fn another_accounts_agent_reaches_none_of_an_accounts_machines_connections_invit
     };
     assert_eq!(bob_decides(&mut bob, "revoke_invite", json!({ "id": anas_invite })), format!("failed: this account has no unused invite {anas_invite}"));
     assert_eq!(bob_decides(&mut bob, "revoke_agent", json!({ "id": grant })), format!("failed: this account has no agent {grant}"));
-    assert_eq!(act(&bob.dir, &bob.tab, "extend_box", json!({ "machine": mini, "extra_usd": 5.0 })), Err("this machine is no box".into()));
+    assert_eq!(bob_decides(&mut bob, "extend_box", json!({ "machine": mini, "extra_usd": 5.0 })), "failed: this machine is no box");
     assert_eq!(act(&bob.dir, &bob.tab, "answer_box", json!({ "id": "q-ana", "allow": true })), Err(format!("answer_box is not open to agents: {ANSWER_BOX_CLOSED}")));
     let bobs_token = act(&bob.dir, &bob.tab, "set_box_claude_token", json!({ "name": "bloom" })).unwrap()["id"].clone();
     assert_eq!(approve(&mut bob.client, &bobs_token, json!({ "token": "sk-ant-oat01-bobsown" })), Err("connect Upstash Box first".into()), "bob's key goes to bob's own connection");
@@ -7788,18 +7789,35 @@ fn a_session_box_follows_only_its_setting_and_budget_and_only_its_owner_answers_
     wait_for("four boxes", || created(&hub) == 4);
 
     let machine = fresh["result"]["machine"].as_str().unwrap().to_owned();
-    let extended = act(&ana.dir, &ana.tab, "extend_box", json!({ "machine": machine, "extra_usd": 1.5 })).unwrap();
-    assert_eq!((extended["outcome"].as_str(), extended["result"]["budget_usd"].as_f64()), (Some("done"), Some(2.5)), "within the Box budget an agent's extend runs at once: {extended}");
+    // The decision is the owner's, made in the app after it unlocks with the password; an agent's connection never decides.
+    let decide = |app: &mut Client, asked: &Value| app.hub(json!({ "cmd": "decide_confirmation", "id": asked["id"], "approve": true })).unwrap();
+    assert_eq!(owner.hub(json!({ "cmd": "decide_confirmation", "id": "none", "approve": true })), Err("unlock with your password in the app to do this".into()), "a locked app cannot decide");
+    owner.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    bobs_app.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    let asked = act(&ana.dir, &ana.tab, "extend_box", json!({ "machine": machine, "extra_usd": 1.5 })).unwrap();
+    assert_eq!(asked["outcome"], "pending", "an agent's extend waits for the owner: {asked}");
+    let extended = decide(&mut owner, &asked);
+    assert_eq!((extended["outcome"].as_str(), extended["result"]["budget_usd"].as_f64()), (Some("done"), Some(2.5)), "within the Box budget the owner's yes extends it: {extended}");
+    let asked = act(&ana.dir, &ana.tab, "extend_box", json!({ "machine": machine, "extra_usd": 1.0 })).unwrap();
     assert_eq!(
-        act(&ana.dir, &ana.tab, "extend_box", json!({ "machine": machine, "extra_usd": 1.0 })),
-        Err("a box may spend at most US$ 3.00; name less, or raise Box budget in Settings › Way of working".into()),
+        decide(&mut owner, &asked)["outcome"].as_str(),
+        Some("failed: a box may spend at most US$ 3.00; name less, or raise Box budget in Settings › Way of working"),
         "past the Box budget it is refused"
     );
-    assert_eq!(act(&bob.dir, &bob.tab, "extend_box", json!({ "machine": machine, "extra_usd": 0.5 })), Err("this machine is no box".into()));
+    let asked = act(&bob.dir, &bob.tab, "extend_box", json!({ "machine": machine, "extra_usd": 0.5 })).unwrap();
+    assert_eq!(decide(&mut bobs_app, &asked)["outcome"].as_str(), Some("failed: this machine is no box"));
     assert_eq!(bobs_app.hub(json!({ "cmd": "extend_box", "machine": machine, "extra_usd": 0.5 })), Err("this machine is no box".into()));
-    assert_eq!(owner.hub(json!({ "cmd": "extend_box", "machine": machine, "extra_usd": 0.5 })).unwrap()["budget_usd"].as_f64(), Some(3.0), "the owner's extend needs no password");
-    nothing_waits_on(&mut owner);
-    nothing_waits_on(&mut bobs_app);
+    let mut locked_app = Client::app(&url, &token);
+    let extend = json!({ "cmd": "extend_box", "machine": machine, "extra_usd": 0.5 });
+    assert_eq!(locked_app.hub(extend.clone()), Err(LOCKED.into()), "a locked app asks for the password before it extends");
+    locked_app.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    assert_eq!(locked_app.hub(extend).unwrap()["budget_usd"].as_f64(), Some(3.0), "once unlocked the app's own extend goes through");
+    // Only the agents' extends were ever confirmations, and the owner decided each: no open or answer became one.
+    for (app, expected) in [(&mut owner, 2), (&mut bobs_app, 1)] {
+        let all = app.hub(json!({ "cmd": "confirmations" })).unwrap();
+        assert!(all.as_array().unwrap().iter().all(|c| c["action"] == "extend_box" && c["decision"] == "approved"), "{all}");
+        assert_eq!(all.as_array().unwrap().len(), expected, "exactly the extends this account's agents asked for: {all}");
+    }
 }
 
 #[test]
@@ -7870,7 +7888,7 @@ fn a_captain_box_follows_only_its_access_setting_and_the_owner_answers_its_ask_o
 }
 
 #[test]
-fn a_locked_app_still_needs_the_password_for_every_confirm_action_and_never_for_a_box_answer_or_budget() {
+fn a_locked_app_still_needs_the_password_for_every_confirm_action_and_never_for_a_box_answer() {
     use pinned_core::surface::{self, Class, Parsed};
     let hub = TestHub::start("locked_confirms");
     let (token, _) = account::signup(&hub.url, "ana@acme.dev", "correct horse").unwrap();
@@ -7905,6 +7923,7 @@ fn a_locked_app_still_needs_the_password_for_every_confirm_action_and_never_for_
         ("revoke_agent", json!({ "id": "g1" })),
         ("set_taste", json!({ "scope": { "kind": "captains" }, "patch": { "box_budget_cents": 100 } })),
         ("reset_taste_field", json!({ "scope": { "kind": "captains" }, "field": "box_budget_cents" })),
+        ("set_box_size", json!({ "size": "small" })),
         ("set_box_claude_token", json!({ "name": "bloom" })),
         ("remove_box_claude_token", json!({ "name": "bloom" })),
         ("mint_box_claude_token", json!({ "machine": machine, "account": "bloom" })),
@@ -7915,6 +7934,7 @@ fn a_locked_app_still_needs_the_password_for_every_confirm_action_and_never_for_
         ("connect_convex", json!({ "repos": ["github.com/acme/site"] })),
         ("set_convex_repos", json!({ "id": "quick-lemur-789", "repos": [] })),
         ("disconnect_convex", json!({ "id": "quick-lemur-789" })),
+        ("extend_box", json!({ "machine": machine, "extra_usd": 1.0 })),
     ]
     .into_iter()
     .collect();
@@ -7929,7 +7949,35 @@ fn a_locked_app_still_needs_the_password_for_every_confirm_action_and_never_for_
         assert_eq!(answer, Err(LOCKED.into()), "{} still needs the password on a locked app", action.name);
     }
     assert_eq!(app.hub(json!({ "cmd": "answer_box", "id": "q-1", "allow": true })), Err("that box question is gone".into()), "a box question's answer needs no password");
-    assert_eq!(app.hub(json!({ "cmd": "extend_box", "machine": machine, "extra_usd": 1.0 })), Err("this machine is no box".into()), "nor does a box's budget");
+    assert_eq!(
+        app.hub(json!({ "cmd": "extend_box", "machine": machine, "extra_usd": 1.0 })),
+        Err(LOCKED.into()),
+        "a locked login cannot extend a box"
+    );
+}
+
+#[test]
+fn a_locked_login_cannot_extend_a_box_until_it_unlocks() {
+    let hub = TestHub::start_with_boxes("locked_extend", Signup::Open, fast());
+    hub.boxes.state.lock().unwrap().checkout = Some(("site".into(), SITE.into()));
+    let mut ana = BoxAccount::new(&hub);
+    ana.client.hub(json!({ "cmd": "set_box_access", "access": { "session": { "mode": "fresh" } } })).unwrap();
+    ana.client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": { "box_budget_cents": 500 } })).unwrap();
+    let opened = ana.client.hub(json!({ "cmd": "open_box", "repo": "acme/site", "size": "small", "budget_usd": 1.0 })).unwrap();
+    assert_eq!(opened["budget_usd"].as_f64(), Some(1.0));
+    let machine = opened["machine"].as_str().unwrap().to_owned();
+    let budget_of = |client: &mut Client| client.hub(json!({ "cmd": "box_status", "machine": machine })).unwrap()["budget_usd"].as_f64();
+    let before = budget_of(&mut ana.client);
+    assert_eq!(before, Some(1.0), "the box's budget, read back before");
+
+    let mut app = Client::app(&hub.url, &ana.token);
+    let extend = json!({ "cmd": "extend_box", "machine": machine, "extra_usd": 2.0 });
+    assert_eq!(app.hub(extend.clone()), Err(LOCKED.into()), "a locked login cannot extend a box");
+    assert_eq!(budget_of(&mut ana.client), before, "the refused call changed nothing");
+
+    app.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    assert_eq!(app.hub(extend).unwrap()["budget_usd"].as_f64(), Some(3.0), "once unlocked the same call goes through");
+    assert_eq!(budget_of(&mut ana.client), Some(3.0), "the budget rose by exactly the amount");
 }
 
 const BLOOM_TOKEN: &str = "sk-ant-oat01-bloomtoken";
