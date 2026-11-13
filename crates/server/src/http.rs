@@ -47,6 +47,8 @@ const ATTEMPT_KEYS: usize = 50_000;
 /// Addresses an account signed in from that the limiter remembers at most, and for how long.
 const KNOWN_ADDRESSES: usize = 10_000;
 const KNOWN_FOR: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+/// How often the log names the kind of address the limiter keys on, after the first request of a hub's run.
+const CLASS_EVERY: Duration = Duration::from_secs(60 * 60);
 /// The one answer to a sign up at a hub that holds as many accounts as it was told to.
 const NOT_TAKING: &str = "This hub is not taking new accounts.";
 /// The one answer to a sign up without a good code, so it tells nobody which codes or accounts exist.
@@ -102,6 +104,8 @@ pub struct Server {
     signups: tokio::sync::Mutex<()>,
     downloads: PathBuf,
     attempts: Mutex<Limiter>,
+    /// When the log last named the kind of address the limiter keys on.
+    class_said: Mutex<Option<Instant>>,
     hashing: tokio::sync::Semaphore,
     learning: Option<db::Learning>,
 }
@@ -141,7 +145,7 @@ fn route(spec: &str) -> &str {
 }
 
 pub fn router(hub: Arc<Hub>, ui: PathBuf, downloads: PathBuf, learning: Option<db::Learning>, access: Access) -> Router {
-    let server = Arc::new(Server { hub, access, signups: tokio::sync::Mutex::new(()), downloads, attempts: Mutex::new(Limiter::new(ATTEMPT_KEYS)), hashing: tokio::sync::Semaphore::new(CONCURRENT_HASHES), learning });
+    let server = Arc::new(Server { hub, access, signups: tokio::sync::Mutex::new(()), downloads, attempts: Mutex::new(Limiter::new(ATTEMPT_KEYS)), class_said: Mutex::default(), hashing: tokio::sync::Semaphore::new(CONCURRENT_HASHES), learning });
     Router::new()
         .route(route("POST /api/signup"), post(signup))
         // The app's sign-in form reads it from whichever hub the user types, so any origin may.
@@ -225,20 +229,52 @@ async fn signed_in(server: &Server, headers: &HeaderMap) -> Result<db::Login, Er
 /// missing or is not one address (a list, text) leaves the peer, the proxy, as the key.
 pub(crate) fn client_address(trusted: TrustedProxy, peer: SocketAddr, headers: &HeaderMap) -> String {
     if trusted == TrustedProxy::Railway {
-        let real = headers.get("x-real-ip").and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<std::net::IpAddr>().ok());
-        return real.map_or_else(|| peer.ip().to_string(), |ip| ip.to_canonical().to_string());
+        return real_ip(headers).map_or_else(|| peer.ip().to_string(), |ip| ip.to_string());
     }
-    let forwarded = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()).and_then(|v| v.rsplit(',').next()).map(str::trim);
-    match forwarded {
-        Some(hop) if peer.ip().is_loopback() && !hop.is_empty() => hop.to_owned(),
-        _ => peer.ip().to_string(),
-    }
+    loopback_hop(peer, headers).map_or_else(|| peer.ip().to_string(), str::to_owned)
+}
+
+/// Railway's `X-Real-IP` when it is one address.
+fn real_ip(headers: &HeaderMap) -> Option<std::net::IpAddr> {
+    let real = headers.get("x-real-ip")?.to_str().ok()?.trim().parse::<std::net::IpAddr>().ok()?;
+    Some(real.to_canonical())
+}
+
+/// The last `X-Forwarded-For` hop of a request from a proxy on this host.
+fn loopback_hop(peer: SocketAddr, headers: &HeaderMap) -> Option<&str> {
+    let hop = headers.get("x-forwarded-for")?.to_str().ok()?.rsplit(',').next()?.trim();
+    (peer.ip().is_loopback() && !hop.is_empty()).then_some(hop)
 }
 
 /// Which kind of address `client_address` keys on, never the address: what the hub's log may say.
 pub(crate) fn address_class(trusted: TrustedProxy, peer: SocketAddr, headers: &HeaderMap) -> &'static str {
-    let _ = (trusted, peer, headers);
-    "direct peer"
+    use std::net::IpAddr;
+    if trusted == TrustedProxy::Railway {
+        return match real_ip(headers) {
+            None => "header missing or unusable, proxy peer",
+            Some(IpAddr::V4(ip)) => {
+                let [a, b, c, _] = ip.octets();
+                let shared = a == 100 && (64..128).contains(&b);
+                let reserved = (a == 192 && b == 0 && c == 0) || (a == 198 && (18..20).contains(&b)) || a >= 224 || a == 0;
+                if ip.is_private() || ip.is_loopback() || ip.is_link_local() || ip.is_documentation() || shared || reserved {
+                    "edge header, private, shared or reserved range"
+                } else {
+                    "edge header, public IPv4"
+                }
+            }
+            Some(IpAddr::V6(ip)) => {
+                let [first, second, ..] = ip.segments();
+                let local = (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80;
+                let documentation = first == 0x2001 && second == 0x0db8;
+                if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() || local || documentation {
+                    "edge header, private, shared or reserved range"
+                } else {
+                    "edge header, public IPv6"
+                }
+            }
+        };
+    }
+    if loopback_hop(peer, headers).is_some() { "loopback forwarded hop" } else { "direct peer" }
 }
 
 fn new_password(password: &str) -> Result<(), Error> {
@@ -351,7 +387,13 @@ async fn signup(State(server): State<Arc<Server>>, ConnectInfo(peer): ConnectInf
 
 impl Server {
     pub(crate) fn client_address(&self, peer: SocketAddr, headers: &HeaderMap) -> String {
-        client_address(self.access.trusted_proxy, peer, headers)
+        let trusted = self.access.trusted_proxy;
+        let mut said = self.class_said.lock().unwrap();
+        if said.is_none_or(|at| at.elapsed() >= CLASS_EVERY) {
+            *said = Some(Instant::now());
+            eprintln!("pinned-server: the attempt limiter keyed a request on: {} (trusted proxy {trusted:?}; said at most once an hour)", address_class(trusted, peer, headers));
+        }
+        client_address(trusted, peer, headers)
     }
 
     /// Counts an attempt against each key and its limit, unless one is spent. The attempt counts
@@ -1019,7 +1061,8 @@ mod tests {
         assert_eq!(railway(&[("x-real-ip", " 203.0.113.5 "), ("x-forwarded-for", "6.6.6.6, 203.0.113.9")]), "203.0.113.5", "X-Forwarded-For is not read");
         assert_eq!(railway(&[("x-real-ip", "2001:db8::1")]), "2001:db8::1");
         assert_eq!(railway(&[("x-real-ip", "::ffff:203.0.113.5")]), "203.0.113.5", "a mapped v4 address is the v4 address");
-        for unusable in ["", "unknown", "203.0.113.5, 6.6.6.6", "203.0.113.5:80", "<script>"] {
+        // One IPv6 address is a client; one with brackets, a port or a zone is not one address.
+        for unusable in ["", " ", "unknown", "203.0.113.5, 6.6.6.6", "203.0.113.5 203.0.113.6", "203.0.113.5:80", "<script>", "[2001:db8::1]", "[2001:db8::1]:443", "fe80::1%eth0", "2001:db8::1, 2001:db8::2"] {
             assert_eq!(railway(&[("x-real-ip", unusable), ("x-forwarded-for", "6.6.6.6")]), "100.64.0.7", "{unusable:?} leaves the proxy's own address");
         }
         assert_eq!(railway(&[]), "100.64.0.7");
