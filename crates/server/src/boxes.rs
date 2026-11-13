@@ -1356,7 +1356,7 @@ impl Boxes {
     }
 
     /// A worker box ended before its task did: the machine whose tab delegated the task hears it
-    /// failed, so it does not wait on it. A box that ends for its task's end, `Done`, has nothing to tell.
+    /// failed, so it does not wait on it. One that can't hear it now gets it from the hub's held ends. A box that ends for its task's end, `Done`, has nothing to tell.
     async fn tell_origin(&self, hub: &Hub, account: &Account, row: &BoxRow, why: &End) {
         let BoxWork::Delegate { origin, .. } = &row.work else { return };
         let error = match why {
@@ -1366,9 +1366,15 @@ impl Boxes {
         };
         let mut end = RemoteEnd { state: "failed".into(), summary: None, error: Some(error), usage: None };
         self.add_end_box_usage(hub, account, row, &mut end).await;
-        let ended = Call::RemoteEnded { from: row.machine.to_string(), tab: origin.tab.clone(), task: origin.task.clone(), end };
+        let ended = Call::RemoteEnded { from: row.machine.to_string(), tab: origin.tab.clone(), task: origin.task.clone(), end: end.clone() };
         if let Err(e) = hub.call_machine(account, &origin.machine, ended, ORIGIN_WAIT).await {
             eprintln!("pinned-server: could not tell {} that box {} ended: {}", origin.machine, row.id, String::from(e));
+            // Held for it, unless the worker's own end is held already: that one stays.
+            match crate::remote::hold_end(hub, account, &origin.machine, &row.machine.to_string(), &origin.tab, &origin.task, end).await {
+                Ok(true) => {}
+                Ok(false) => eprintln!("pinned-server: {} is no machine of account {} any more, so box {}'s end goes untold", origin.machine, account.id, row.id),
+                Err(e) => eprintln!("pinned-server: box {}'s end goes untold: {e}", row.id),
+            }
         }
     }
 
@@ -1506,6 +1512,14 @@ impl Boxes {
             _ => None,
         };
         let rows = hub.db.boxes(account.id).await?;
+        // The machines whose tabs delegated a task that still runs in a worker box.
+        let delegating: HashSet<String> = rows
+            .iter()
+            .filter_map(|row| match row {
+                Ok(BoxRow { phase, work: BoxWork::Delegate { origin, .. }, .. }) if !matches!(phase, Phase::Ending(_)) => Some(origin.machine.clone()),
+                _ => None,
+            })
+            .collect();
         let now = Instant::now();
         for row in rows {
             let row = match row {
@@ -1566,6 +1580,13 @@ impl Boxes {
                                 (INTERACTIVE_CONNECTOR, Seen::Tab { running, .. }) => Seen::Tab { running, quiet: false },
                                 _ => seen,
                             };
+                            // A box whose tab waits on workers in other boxes is quiet, or done with
+                            // its own turn, while they run: only its max life and budget end it then,
+                            // so their ends find it.
+                            if delegating.contains(&machine) {
+                                slot.quiet_since = None;
+                                slot.exited_since = None;
+                            }
                             let verdict = verdict(row.age, seen, slot, now, &self.policy);
                             if gone { Some(End::Vanished) } else { verdict }
                         }

@@ -12,6 +12,7 @@ use pinned_core::wire::{Call, HubCall, TabId};
 use serde_json::{json, Value};
 use std::sync::Arc;
 use std::time::Duration;
+use uuid::Uuid;
 
 const LOOK_WAIT: Duration = Duration::from_secs(30);
 
@@ -116,8 +117,12 @@ pub(crate) async fn resolve(hub: &Hub, account: &Account, asked: &str) -> Result
 }
 
 /// The status of the task `from`'s tab delegated to `machine`, or its state once cancelled. A
-/// worker box still booting has no node to ask: a cancel deletes it, and a look says it boots.
+/// worker box still booting has no node to ask: a cancel deletes it, and a look says it boots. A
+/// task whose end the hub holds for `from` answers from it, as its box may be gone.
 async fn remote_task(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, machine: &str, tab: TabId, task: String, cancel: Option<String>) -> Result<Value, String> {
+    if let Some(end) = held_end(hub, account, from, &task).await? {
+        return Ok(json!({ "workState": end.state, "summary": end.summary, "error": end.error, "usage": end.usage }));
+    }
     let worker_box = hub.boxes.delegate_box(hub, account, machine).await?;
     let asked = Call::RemoteTask { origin_machine: from.to_owned(), tab, task, cancel: cancel.clone() };
     let answer = match (&worker_box, account.is_online(machine)) {
@@ -141,17 +146,34 @@ async fn remote_task(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, machine
 }
 
 /// Passes the end of a task `from` ran to the machine `to` whose tab delegated it. Answers whether
-/// that machine took it; only a machine the hub could not reach is an error, which `from` sends
-/// again. A worker box goes once its end got through.
+/// that machine took it. With `to` offline the hub holds the end for it and answers taken once the
+/// row is written; only an end that is neither passed on nor held is an error, which `from` sends
+/// again. A worker box goes once its end got through or is held.
 async fn ended(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, to: &str, tab: TabId, task: String, end: RemoteEnd) -> Result<Value, String> {
     let worker_box = hub.boxes.delegate_box(hub, account, from).await?;
     let mut end = end;
     if let Some(row) = &worker_box {
         hub.boxes.add_end_box_usage(hub, account, row, &mut end).await;
     }
-    let taken = match hub.call_machine(account, to, Call::RemoteEnded { from: from.to_owned(), tab, task, end }, LOOK_WAIT).await {
-        Ok(taken) => taken,
-        Err(Unanswered::Refused(e)) if !account.is_online(to) => return Err(e),
+    let passed = Call::RemoteEnded { from: from.to_owned(), tab: tab.clone(), task: task.clone(), end: end.clone() };
+    let taken = match hub.call_machine(account, to, passed, LOOK_WAIT).await {
+        Ok(taken) => {
+            // A copy held while `to` was offline has nothing left to tell.
+            if let Ok(origin) = Uuid::parse_str(to) {
+                let _ = hub.db.drop_held_end(account.id, origin, &task).await;
+            }
+            taken
+        }
+        Err(Unanswered::Refused(e)) if !account.is_online(to) => {
+            if !hold_end(hub, account, to, from, &tab, &task, end).await? {
+                return Err(e);
+            }
+            // The machine may have come back between the refusal and the write, after its own flush.
+            if account.is_online(to) {
+                tokio::spawn(deliver_held(hub.clone(), account.clone(), to.to_owned()));
+            }
+            Value::Bool(true)
+        }
         Err(Unanswered::Refused(_)) => Value::Bool(false),
         Err(Unanswered::Lost(e)) => return Err(e),
     };
@@ -159,6 +181,96 @@ async fn ended(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, to: &str, tab
         hub.boxes.end_delegate(hub, account, row).await?;
     }
     Ok(taken)
+}
+
+/// The most of a held end's summary or error the hub keeps: 256 KiB. A worker's summary is its last
+/// reply, a few KiB at most in practice; this keeps one runaway reply from parking megabytes per task
+/// in Postgres for `HELD_FOR`, and keeps the delivery one small socket frame.
+pub const HELD_TEXT_MAX: usize = 256 * 1024;
+
+/// `text` cut to `HELD_TEXT_MAX` bytes on a character boundary, with a marker that says how much went.
+pub fn clamp_held(text: String) -> String {
+    if text.len() <= HELD_TEXT_MAX {
+        return text;
+    }
+    let mut cut = HELD_TEXT_MAX;
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}…[truncated by pinned: {} bytes]", &text[..cut], text.len() - cut)
+}
+
+/// Holds `end` for the machine `origin` of the account, which is offline, until it comes back.
+/// False when `origin` is no machine of the account, which leaves the end to its sender. An error
+/// when the row could not be written: the sender then keeps it and sends it again. Logs ids and
+/// sizes, never the end's text.
+pub async fn hold_end(hub: &Hub, account: &Account, origin: &str, from: &str, tab: &str, task: &str, mut end: RemoteEnd) -> Result<bool, String> {
+    let (Ok(origin_id), Ok(from_id)) = (Uuid::parse_str(origin), Uuid::parse_str(from)) else { return Ok(false) };
+    if hub.db.machine_name(account.id, origin_id).await?.is_none() {
+        return Ok(false);
+    }
+    let size = end.summary.as_ref().map_or(0, String::len) + end.error.as_ref().map_or(0, String::len);
+    end.summary = end.summary.map(clamp_held);
+    end.error = end.error.map(clamp_held);
+    let report = serde_json::to_value(&end).map_err(|e| e.to_string())?;
+    match hub.db.hold_end(account.id, origin_id, task, tab, from_id, &report).await {
+        Ok(fresh) => {
+            let kept = if fresh { "holds" } else { "already held" };
+            eprintln!("pinned-server: the hub {kept} the end of task {task} from {from} for offline machine {origin} of account {} ({size} bytes)", account.id);
+        }
+        Err(e) => {
+            eprintln!("pinned-server: could not hold the end of task {task} from {from} for machine {origin}: {e}");
+            return Err(format!("the hub could not keep the end of task {task} for its machine, which is offline; it is sent again"));
+        }
+    }
+    Ok(true)
+}
+
+/// The end the hub holds for `origin`'s task `task`, when it holds one.
+async fn held_end(hub: &Hub, account: &Account, origin: &str, task: &str) -> Result<Option<RemoteEnd>, String> {
+    let Ok(origin) = Uuid::parse_str(origin) else { return Ok(None) };
+    let Some(held) = hub.db.held_ends(account.id, origin, Some(task)).await?.into_iter().next() else { return Ok(None) };
+    Ok(serde_json::from_value(held.end).ok())
+}
+
+/// Passes every end the hub holds for `machine`, which just connected, as the `Call::RemoteEnded` it
+/// missed. A row goes only once the machine answered it; one it did not answer stays for its next
+/// connection, and its status answers from the row meanwhile. One delivery of a row runs at a time
+/// and sends only a row still there, and a machine takes one end per task, so a repeat is a no-op there.
+pub async fn deliver_held(hub: Arc<Hub>, account: Arc<Account>, machine: String) {
+    let Ok(origin) = Uuid::parse_str(&machine) else { return };
+    match hub.db.expire_held_ends(account.id).await {
+        Ok(0) => {}
+        Ok(n) => eprintln!("pinned-server: {n} held ends of account {} expired unread", account.id),
+        Err(e) => eprintln!("pinned-server: could not expire account {}'s held ends: {e}", account.id),
+    }
+    let held = match hub.db.held_ends(account.id, origin, None).await {
+        Ok(held) => held,
+        Err(e) => return eprintln!("pinned-server: could not read the ends held for machine {machine}: {e}"),
+    };
+    for held in held {
+        // A delivery that ran meanwhile, from another connection of the machine, dropped the row.
+        let _delivering = hub.hold_delivery(&account, origin, &held.task).await;
+        match hub.db.held_ends(account.id, origin, Some(&held.task)).await {
+            Ok(rows) if !rows.is_empty() => {}
+            _ => continue,
+        }
+        let Ok(end) = serde_json::from_value::<RemoteEnd>(held.end) else {
+            eprintln!("pinned-server: the held end of task {} for machine {machine} is unreadable; it is dropped", held.task);
+            let _ = hub.db.drop_held_end(account.id, origin, &held.task).await;
+            continue;
+        };
+        let ended = Call::RemoteEnded { from: held.from.to_string(), tab: held.tab, task: held.task.clone(), end };
+        match hub.call_machine(&account, &machine, ended, LOOK_WAIT).await {
+            Ok(taken) => {
+                if let Err(e) = hub.db.drop_held_end(account.id, origin, &held.task).await {
+                    eprintln!("pinned-server: could not drop the delivered end of task {}: {e}", held.task);
+                }
+                eprintln!("pinned-server: passed the held end of task {} to machine {machine} (taken: {taken})", held.task);
+            }
+            Err(e) => eprintln!("pinned-server: machine {machine} did not take the held end of task {}: {}", held.task, String::from(e)),
+        }
+    }
 }
 
 /// Passes what a task `from` runs waits on the user for, or that it waits on nothing, to the

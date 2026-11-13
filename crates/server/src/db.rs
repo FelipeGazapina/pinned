@@ -111,13 +111,31 @@ create table if not exists agent_confirmations (id uuid primary key, account uui
 -- `started` is unix milliseconds.
 create table if not exists agent_boxes (box text primary key, account uuid not null references accounts on delete cascade,
   machine uuid not null, tab text not null, role text not null, started bigint not null);
+-- The end of a task a worker ran for `origin_machine`, which the hub took while that machine was
+-- offline, or a worker box's it-ended notice it could not pass on. The row goes once
+-- `origin_machine` answered it, when that machine is removed, or after `HELD_FOR`.
+create table if not exists held_ends (account uuid not null references accounts on delete cascade,
+  origin_machine uuid not null, task text not null, origin_tab text not null, from_machine uuid not null,
+  report jsonb not null, held_at timestamptz not null default now(),
+  primary key (account, origin_machine, task));
 ";
+/// How long the hub keeps an end that its machine never came back for.
+const HELD_FOR: &str = "interval '30 days'";
 const LEARNING_SCHEMA: &str = "
 create table if not exists dictation_feedback (id uuid primary key, account uuid not null,
   created_at timestamptz not null default now(), rating text not null, raw text not null, cleaned text not null,
   final_text text not null, locale text not null, engine text not null, app_version text not null,
   platform text not null, duration_ms bigint not null);
 ";
+/// An end the hub keeps for the machine whose tab delegated the task, as `held_ends` stores it.
+pub struct HeldEnd {
+    pub task: String,
+    pub tab: String,
+    pub from: Uuid,
+    /// The `RemoteEnd`.
+    pub end: Value,
+}
+
 /// A box row of the account, as the Usage page joins it to what Upstash lists.
 pub struct OpenedBox {
     pub upstash: String,
@@ -639,8 +657,63 @@ impl Db {
     }
 
     pub async fn remove_machine(&self, account: Uuid, machine: Uuid) -> Result<bool, String> {
-        let n = self.client().await?.execute("delete from machines where id = $1 and account = $2", &[&machine, &account]).await.map_err(err)?;
+        let client = self.client().await?;
+        let n = client.execute("delete from machines where id = $1 and account = $2", &[&machine, &account]).await.map_err(err)?;
+        // Nothing can read the ends held for it any more.
+        client.execute("delete from held_ends where account = $1 and origin_machine = $2", &[&account, &machine]).await.map_err(err)?;
         Ok(n == 1)
+    }
+
+    /// Keeps the end of task `task` that `from` ran for `origin`'s tab `tab`, unless one is kept for
+    /// it already: the first one stays. Returns once the row is committed.
+    pub async fn hold_end(&self, account: Uuid, origin: Uuid, task: &str, tab: &str, from: Uuid, end: &Value) -> Result<bool, String> {
+        let n = self
+            .client()
+            .await?
+            .execute(
+                "insert into held_ends (account, origin_machine, task, origin_tab, from_machine, report) values ($1, $2, $3, $4, $5, $6)
+                 on conflict (account, origin_machine, task) do nothing",
+                &[&account, &origin, &task, &tab, &from, end],
+            )
+            .await
+            .map_err(err)?;
+        Ok(n == 1)
+    }
+
+    /// The ends the account holds for `origin`, or only the one of `task`, younger than `HELD_FOR`.
+    pub async fn held_ends(&self, account: Uuid, origin: Uuid, task: Option<&str>) -> Result<Vec<HeldEnd>, String> {
+        let rows = self
+            .client()
+            .await?
+            .query(
+                &format!(
+                    "select task, origin_tab, from_machine, report from held_ends
+                     where account = $1 and origin_machine = $2 and ($3::text is null or task = $3) and held_at > now() - {HELD_FOR} order by held_at"
+                ),
+                &[&account, &origin, &task],
+            )
+            .await
+            .map_err(err)?;
+        Ok(rows.iter().map(|r| HeldEnd { task: r.get(0), tab: r.get(1), from: r.get(2), end: r.get(3) }).collect())
+    }
+
+    /// `origin` answered the held end of `task`.
+    pub async fn drop_held_end(&self, account: Uuid, origin: Uuid, task: &str) -> Result<(), String> {
+        self.client()
+            .await?
+            .execute("delete from held_ends where account = $1 and origin_machine = $2 and task = $3", &[&account, &origin, &task])
+            .await
+            .map_err(err)
+            .map(drop)
+    }
+
+    /// Deletes the account's held ends older than `HELD_FOR`, and returns how many.
+    pub async fn expire_held_ends(&self, account: Uuid) -> Result<u64, String> {
+        self.client()
+            .await?
+            .execute(&format!("delete from held_ends where account = $1 and held_at <= now() - {HELD_FOR}"), &[&account])
+            .await
+            .map_err(err)
     }
 
     /// Gives the machine `id` of the account a fresh token, adding it when it is new. The hub adds a

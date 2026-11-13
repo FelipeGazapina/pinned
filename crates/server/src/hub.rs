@@ -245,6 +245,11 @@ impl Hub {
         self.hold(format!("start:{}:{machine}:{tab}:{task}", account.id)).await
     }
 
+    /// One delivery of the end the hub holds for `origin`'s task `task` at a time.
+    pub async fn hold_delivery(&self, account: &Account, origin: Uuid, task: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        self.hold(format!("held:{}:{origin}:{task}", account.id)).await
+    }
+
     async fn hold(&self, key: String) -> tokio::sync::OwnedMutexGuard<()> {
         let lock = {
             let mut locks = self.agent_locks.lock().unwrap();
