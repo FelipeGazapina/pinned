@@ -35547,6 +35547,10 @@
               "why": {
                 "type": "string",
                 "default": ""
+              },
+              "unconfirmed": {
+                "description": "The row never recorded an Upstash box id and the delete failed before pinned knew whether a\nbox exists for it: it may or may not be running. Absent when pinned knows the box is there.",
+                "type": "boolean"
               }
             },
             "required": [
@@ -35766,6 +35770,10 @@
               "why": {
                 "type": "string",
                 "default": ""
+              },
+              "unconfirmed": {
+                "description": "The row never recorded an Upstash box id and the delete failed before pinned knew whether a\nbox exists for it: it may or may not be running. Absent when pinned knows the box is there.",
+                "type": "boolean"
               }
             }
           }
@@ -48547,6 +48555,10 @@
           "why": {
             "type": "string",
             "default": ""
+          },
+          "unconfirmed": {
+            "description": "The row never recorded an Upstash box id and the delete failed before pinned knew whether a\nbox exists for it: it may or may not be running. Absent when pinned knows the box is there.",
+            "type": "boolean"
           }
         },
         "required": [
@@ -48567,6 +48579,10 @@
           "why": {
             "type": "string",
             "default": ""
+          },
+          "unconfirmed": {
+            "description": "The row never recorded an Upstash box id and the delete failed before pinned knew whether a\nbox exists for it: it may or may not be running. Absent when pinned knows the box is there.",
+            "type": "boolean"
           }
         }
       }
