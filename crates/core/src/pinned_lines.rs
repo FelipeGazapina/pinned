@@ -139,7 +139,7 @@ pub fn field(text: &str) -> String {
 /// characters that look like one turned into single quotes, and a trailing backslash dropped, so it
 /// cannot add a line, end the quote, or seem to escape the closing quote.
 pub fn quoted(text: &str, max: usize) -> String {
-    let line: String = flat(text, max).chars().map(|c| if matches!(c, '"' | '\u{201C}' | '\u{201D}' | '\u{FF02}' | '\u{2033}') { '\'' } else { c }).collect();
+    let line: String = flat(text, max).chars().map(|c| if matches!(c, '"' | '\u{201C}' | '\u{201D}' | '\u{FF02}' | '\u{2033}' | '\u{201E}' | '\u{201F}' | '\u{02BA}' | '\u{301D}' | '\u{301E}' | '\u{301F}') { '\'' } else { c }).collect();
     format!("\"{}\"", line.trim_end_matches(|c: char| c == '\\' || c.is_whitespace()))
 }
 
@@ -253,6 +253,9 @@ mod tests {
     #[test]
     fn field_turns_look_alike_quotes_and_drops_a_trailing_backslash() {
         assert_eq!(field("a\u{201C}b\u{201D}c\u{FF02}d\u{2033}e\"f"), "\"a'b'c'd'e'f\"");
+        for (look_alike, name) in [('\u{201E}', "double low-9"), ('\u{201F}', "double high-reversed-9"), ('\u{02BA}', "modifier double prime"), ('\u{301D}', "reversed double prime"), ('\u{301E}', "double prime"), ('\u{301F}', "low double prime")] {
+            assert_eq!(field(&format!("a{look_alike}b")), "\"a'b\"", "{name} U+{:04X}", look_alike as u32);
+        }
         assert_eq!(field("ends in \\"), "\"ends in\"");
         assert_eq!(field("ends in \\\\\u{200B}\n"), "\"ends in\"");
         assert_eq!(field("a \\ \\"), "\"a\"");
