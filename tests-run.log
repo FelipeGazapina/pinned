@@ -264,3 +264,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:20:41Z #118 a_single_bot_slack_import_becomes_the_default_bot_and_replies_still_use_its_key ok / avail=15051M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:20:42Z #119 the_reads_of_linear_slack_github_and_vercel_answer_from_the_callers_account_or_refuse_cleanly START / avail=15051M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:20:48Z #119 the_reads_of_linear_slack_github_and_vercel_answer_from_the_callers_account_or_refuse_cleanly ok / avail=15051M /workspace avail=19374M node_stat=Ssl node_tcp=1
+2026-11-13T04:20:49Z #120 an_agents_box_token_removal_forgets_only_its_own_accounts_token START / avail=15051M /workspace avail=19374M node_stat=Ssl
