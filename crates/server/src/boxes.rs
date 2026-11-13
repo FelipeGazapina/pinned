@@ -1638,15 +1638,7 @@ impl Boxes {
                 Phase::Ending(_) => None,
             };
             let finished = match ended {
-                Some(why) => {
-                    // A workflow's session that lives in this box is waiting on a node that is gone.
-                    let session_box = matches!(row.work, BoxWork::Run).then(|| row.machine.to_string());
-                    let finished = self.finish(hub, account, row, why, key.as_deref()).await;
-                    if let Some(machine) = session_box {
-                        tab_gone(hub, account, machine);
-                    }
-                    finished
-                }
+                Some(why) => self.finish(hub, account, row, why, key.as_deref()).await,
                 None if matches!(row.phase, Phase::Ending(_)) => {
                     // A hub that stopped between ending the row and recording it records it now.
                     self.record_agent_box(hub, account, &row).await;
@@ -1666,22 +1658,6 @@ impl Boxes {
         }
         Ok(())
     }
-}
-
-/// Tells the account's workflow runs that the tabs of `machine`, a box that just ended, are gone,
-/// as a closed tab would. A run waits on its session's turn or tab and learns of either only from
-/// its machine's tab list; a box that ends with a node that no longer reports (Upstash pausing it,
-/// a crash) would otherwise leave that run waiting, and holding its issue, for good. The wake waits
-/// for any drive in progress, so it runs apart from the reaper.
-fn tab_gone(hub: &Arc<Hub>, account: &Arc<Account>, machine: String) {
-    let (hub, account) = (hub.clone(), account.clone());
-    tokio::spawn(async move {
-        let Ok(connectors) = hub.connectors(&account).await else { return };
-        let id = account.id;
-        if let Err(e) = connectors.on_tabs(&machine, unix_millis(), &[], |work| hub.open_placed(id, work)).await {
-            eprintln!("pinned-server: could not wake the workflow run of box machine {machine}: {e}");
-        }
-    });
 }
 
 /// Deletes the listed boxes no row names. Every orphan is tried: one that will not delete, or whose
