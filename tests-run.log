@@ -27,3 +27,15 @@ postgres up, datadir pgdata.4DlQ pid 6458 port 5499
 2026-11-13T03:45:46Z sign_in_rejects_wrong_passwords_duplicates_and_logged_out_tokens ok 2026-11-13T03:45:52Z
 2026-11-13T03:45:53Z a_closed_hub_takes_only_its_first_account_whose_password_can_change ok 2026-11-13T03:45:56Z
 2026-11-13T03:45:56Z an_invite_hub_takes_its_first_account_then_only_single_use_codes ok 2026-11-13T03:46:04Z
+2026-11-13T03:46:04Z guessing_invite_codes_hits_the_sign_up_limit ok 2026-11-13T03:46:07Z
+2026-11-13T03:46:07Z only_an_invite_hub_makes_invite_codes ok 2026-11-13T03:46:10Z
+2026-11-13T03:46:10Z two_invited_accounts_see_nothing_of_each_others_machines_projects_or_memory ok 2026-11-13T03:46:14Z
+2026-11-13T03:46:14Z a_limit_one_accounts_provider_hit_shows_on_its_machines_and_never_on_another_accounts ok 2026-11-13T03:46:17Z
+2026-11-13T03:46:17Z a_burst_of_parallel_sign_ins_counts_against_the_limit ok 2026-11-13T03:46:20Z
+2026-11-13T03:46:20Z the_hub_reconnects_when_postgres_drops_it ok 2026-11-13T03:46:22Z
+2026-11-13T03:46:22Z integration_keys_reach_postgres_sealed ok 2026-11-13T03:46:24Z
+2026-11-13T03:46:24Z a_box_run_boots_its_own_node_and_the_box_goes_when_its_tab_closes FAILED 2026-11-13T03:46:25Z
+2026-11-13T03:46:25Z other_workflows_never_run_on_a_box_but_its_thread_reaches_it ok 2026-11-13T03:46:28Z
+2026-11-13T03:46:28Z a_failed_boot_cleans_up_and_cools_down ok 2026-11-13T03:46:30Z
+2026-11-13T03:46:30Z a_hub_restarted_mid_boot_finishes_the_run_with_one_box ok 2026-11-13T03:46:31Z
+2026-11-13T03:46:31Z the_sweep_deletes_this_hubs_unrecorded_boxes_only ok 2026-11-13T03:46:33Z
