@@ -2240,7 +2240,7 @@ mod tests {
         let left = tokio::time::timeout(Duration::from_secs(3600), crate::box_exit::refused_in_box(in_box, refused)).await.is_ok();
         let quit = std::cell::Cell::new(0);
         if left {
-            crate::box_exit::leave(&run.dir, || quit.set(quit.get() + 1), |_| {});
+            crate::box_exit::leave(&run.dir, "fake-machine-token", || quit.set(quit.get() + 1), |_| {});
         }
         (left, quit.get(), pinned_core::account::Credentials::load(&run.dir).is_some())
     }
@@ -2271,7 +2271,7 @@ mod tests {
         pair_fake(&run.dir);
         assert_eq!(run.start().as_deref(), Some("1"));
         // The node leaves for good and, in a restart, the pid file's number belongs to nothing.
-        crate::box_exit::leave(&run.dir, || {}, |_| {});
+        crate::box_exit::leave(&run.dir, "fake-machine-token", || {}, |_| {});
         let _ = std::fs::remove_file(run.dir.join("node.pid"));
         assert_eq!(run.start(), None, "the start script relaunched a node that left for good");
         assert!(!run.dir.join("node.pid").exists());

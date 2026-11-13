@@ -181,6 +181,7 @@ fn node(args: &[String]) -> Result<(), String> {
     let machine = Machine::new(launch, Some(dir.clone()), None, |_| {});
     machine.set_installer(Arc::new(pinned_server::self_update::NodeUpdate::production()));
     let version = running_version();
+    let machine_token = creds.machine_token.clone();
     let link = Arc::new(link::spawn(creds, machine.clone(), &version));
     let forward = link.clone();
     machine.listen(move |message| forward.forward(message)).map_err(|e| format!("could not listen for claude's hooks: {e}"))?;
@@ -205,7 +206,7 @@ fn node(args: &[String]) -> Result<(), String> {
     })?;
     if refused {
         // A box the hub ended but could not delete: no session runs on, and no start script relaunches the node.
-        pinned_server::box_exit::leave(&dir, || machine.quit(), |line| eprintln!("{line}"));
+        pinned_server::box_exit::leave(&dir, &machine_token, || machine.quit(), |line| eprintln!("{line}"));
     } else {
         // The sessions stay saved, so the next start resumes them.
         machine.quit();

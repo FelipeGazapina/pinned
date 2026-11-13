@@ -50,10 +50,18 @@ pub fn reason() -> String {
 /// Leaves for good: logs why, runs `quit` to end every session, then removes `account.json` from
 /// `dir`, so a start script that finds no account does not launch the node again. The caller
 /// returns from `main` after it.
-pub fn leave(dir: &Path, quit: impl FnOnce(), mut log: impl FnMut(&str)) {
+///
+/// The file goes only if it still holds `machine_token`, this node's own. A re-boot of the box
+/// writes a new token there while this node still runs, and that file belongs to the node the
+/// re-boot starts: it stays, and one more line says so.
+pub fn leave(dir: &Path, machine_token: &str, quit: impl FnOnce(), mut log: impl FnMut(&str)) {
     log(&reason());
     quit();
-    Credentials::remove(dir);
+    match Credentials::load(dir) {
+        Some(creds) if creds.machine_token == machine_token => Credentials::remove(dir),
+        Some(_) => log("pinned-server: account.json holds another machine token than this node's, so it stays for the node that wrote it"),
+        None => {}
+    }
 }
 
 #[cfg(test)]
@@ -90,7 +98,7 @@ mod tests {
         let left = tokio::time::timeout(hour, refused_in_box(is_box(None), refused)).await.is_ok();
         // As in `node()`: when the wait ends the node leaves, and then the checks below fail.
         if left {
-            leave(dir.path(), || *quit.borrow_mut() += 1, |_| {});
+            leave(dir.path(), "fake-machine-token", || *quit.borrow_mut() += 1, |_| {});
         }
         assert_eq!(*quit.borrow(), 0, "a node outside a box ended its sessions");
         assert!(Credentials::load(dir.path()).is_some(), "a node outside a box lost its account.json");
@@ -115,6 +123,7 @@ mod tests {
         let account = dir.path().join("account.json");
         leave(
             dir.path(),
+            "fake-machine-token",
             || steps.borrow_mut().push(format!("quit, account.json present: {}", account.exists())),
             |line| steps.borrow_mut().push(format!("log: {}", line.starts_with("pinned-server: the hub has refused"))),
         );
@@ -127,7 +136,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         paired(dir.path(), "fake-machine-token");
         assert!(Credentials::load(dir.path()).is_some());
-        leave(dir.path(), || {}, |_| {});
+        leave(dir.path(), "fake-machine-token", || {}, |_| {});
         assert_eq!(Credentials::load(dir.path()), None);
     }
 
@@ -137,7 +146,7 @@ mod tests {
         let token = "fake-token-7f3a91c2e5";
         paired(dir.path(), token);
         let lines = RefCell::new(Vec::new());
-        leave(dir.path(), || {}, |line| lines.borrow_mut().push(line.to_owned()));
+        leave(dir.path(), token, || {}, |line| lines.borrow_mut().push(line.to_owned()));
         let lines = lines.into_inner();
         assert_eq!(lines.len(), 1, "{lines:?}");
         for line in &lines {
@@ -145,6 +154,32 @@ mod tests {
             assert!(!line.contains("hub.example") && !line.contains("://") && !line.contains('@'), "{line}");
             assert!(line.contains("15 minutes"), "{line}");
             assert!(line.contains("stays on Upstash until it is deleted"), "{line}");
+        }
+    }
+
+    #[test]
+    fn an_account_file_with_the_nodes_own_token_is_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        paired(dir.path(), "fake-old-token");
+        let lines = RefCell::new(Vec::new());
+        leave(dir.path(), "fake-old-token", || {}, |line| lines.borrow_mut().push(line.to_owned()));
+        assert!(!dir.path().join("account.json").exists());
+        assert_eq!(lines.borrow().len(), 1, "{:?}", lines.borrow());
+    }
+
+    #[test]
+    fn an_account_file_a_re_boot_rewrote_with_a_newer_token_stays_and_the_log_names_no_token() {
+        let dir = tempfile::tempdir().unwrap();
+        paired(dir.path(), "fake-new-token");
+        let (quit, lines) = (RefCell::new(0), RefCell::new(Vec::new()));
+        leave(dir.path(), "fake-old-token", || *quit.borrow_mut() += 1, |line| lines.borrow_mut().push(line.to_owned()));
+        assert_eq!(*quit.borrow(), 1, "the node still ends its sessions");
+        assert_eq!(Credentials::load(dir.path()).unwrap().machine_token, "fake-new-token");
+        let lines = lines.into_inner();
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[1].contains("account.json"), "{}", lines[1]);
+        for line in &lines {
+            assert!(!line.contains("fake-"), "{line}");
         }
     }
 }
