@@ -4656,6 +4656,39 @@ fn a_box_permission_naming_another_accounts_box_opens_a_box_of_its_own() {
 }
 
 #[test]
+fn a_box_row_id_another_account_is_driving_is_unknown_to_this_account_not_still_booting() {
+    let hub = TestHub::start_with_boxes("drive_lock", Signup::Open, fast());
+    // The first box script to run hangs, so the row ana's hub drives stays driven for the whole test.
+    hub.boxes.state.lock().unwrap().hanging = true;
+    let ana = BoxAccount::new(&hub);
+    let mut bob = BoxAccount::named(&hub, "bob@example.test");
+    admin_on(&hub.database, &format!(
+        "insert into boxes (id, account, machine, upstash, connector, subject, spec, size, phase) values ('shared-id', '{}', '{}', null, 'c-ana', '{{\"issue\":\"a1\"}}', '{{\"folder\":\"/w\",\"args\":[]}}', 'small', 'creating')",
+        ana.id, uuid::Uuid::new_v4(),
+    ));
+    let started = Instant::now();
+    while !hub.boxes.state.lock().unwrap().scripts.iter().any(|s| s.contains("start.sh")) {
+        assert!(started.elapsed() < Duration::from_secs(10), "ana's row was never driven");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(created(&hub), 1, "ana's row has its box, and its drive hangs on the start script");
+
+    // Bob's settings, which his client writes, name ana's row id.
+    bob.client.hub(json!({ "cmd": "set_box_access", "access": { "workflow": { "mode": "fixed", "row": "shared-id" } } })).unwrap();
+    let answer = hub.runtime.block_on(hub.hub().open(bob.id, bob.box_run(issue("uuid-1"))));
+    assert_eq!(answer, Ok(()), "bob got the answer for a row he does not have (a box of his own), not ana's lock");
+    assert_eq!(created(&hub), 2, "bob's run opened a box of his own");
+    assert_eq!(bob.rows(&hub), 1);
+
+    // Ana's drive is untouched: her row is still hers, still creating or booting, and still the one row.
+    let rows = hub.runtime.block_on(hub.hub().db.boxes(ana.id)).unwrap();
+    assert_eq!(rows.len(), 1);
+    let row = rows.into_iter().next().unwrap().unwrap();
+    assert_eq!(row.id, "shared-id");
+    assert!(matches!(row.phase, pinned_server::boxes::Phase::Creating | pinned_server::boxes::Phase::Booting), "{:?}", row.phase);
+}
+
+#[test]
 fn an_accounts_tastes_are_read_written_and_imported_only_by_that_account() {
     let hub = TestHub::start("iso_taste");
     let url = hub.url.clone();
