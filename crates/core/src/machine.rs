@@ -145,6 +145,7 @@ impl Launch {
         let settings = files.join("claude-settings.json");
         hooks::write_settings(&settings, exe)?;
         hooks::write_global_settings(&files.join(hooks::GLOBAL_SETTINGS), exe)?;
+        hooks::write_budget_settings(&files.join(hooks::BUDGET_SETTINGS), exe)?;
         let mcp_config = files.join("claude-mcp.json");
         reminders::write_mcp_config(&mcp_config, exe, true)?;
         let plugin_dir = files.join("plugin");
@@ -171,7 +172,7 @@ impl Launch {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn command(&self, program: Program, account: &Account, tab: &str, cwd: &Path, bypass: bool, args: Vec<String>, env: &[(String, String)], plugin_dirs: &[PathBuf], mcp: Option<&mcp::SessionFiles>) -> CommandBuilder {
+    fn command(&self, program: Program, account: &Account, tab: &str, cwd: &Path, bypass: bool, args: Vec<String>, env: &[(String, String)], plugin_dirs: &[PathBuf], mcp: Option<&mcp::SessionFiles>, budgeted: bool) -> CommandBuilder {
         let provider = account.provider;
         let spec = provider.spec();
         let mut cmd = CommandBuilder::new(self.bin(provider));
@@ -194,7 +195,14 @@ impl Launch {
                     }
                     cmd.arg("--settings");
                     // The global orchestrator's own: no Bash, and its file tools held to its folders.
-                    cmd.arg(if global::is_global(env) { self.settings.with_file_name(hooks::GLOBAL_SETTINGS) } else { self.settings.clone() });
+                    // A worker held to a budget gets the hook that brings it the budget's warnings.
+                    cmd.arg(if global::is_global(env) {
+                        self.settings.with_file_name(hooks::GLOBAL_SETTINGS)
+                    } else if budgeted {
+                        self.settings.with_file_name(hooks::BUDGET_SETTINGS)
+                    } else {
+                        self.settings.clone()
+                    });
                     cmd.arg("--plugin-dir");
                     cmd.arg(&self.plugin_dir);
                     for dir in plugin_dirs {
@@ -2172,7 +2180,8 @@ impl Machine {
         if first_run {
             self.seed_first_run(&account, &cwd);
         }
-        let cmd = self.launch.command(program, &account, tab, &cwd, bypass, args, &env, &plugin_dirs, mcp.as_ref());
+        let budgeted = self.holds_to_budget(tab);
+        let cmd = self.launch.command(program, &account, tab, &cwd, bypass, args, &env, &plugin_dirs, mcp.as_ref(), budgeted);
         if let Err(error) = self.spawn_with(tab, cmd, pty::size(cols, rows), mcp) {
             // The next start asks for the same again: with its arguments gone it would open a new
             // conversation in place of this one.
@@ -4463,6 +4472,7 @@ impl Machine {
                 Message::DelegationStats { days } => machine.delegation_stats(days),
                 Message::Project { tab, tool } => machine.project_tool(&tab, tool),
                 Message::Guard { tab, tool, input } => machine.guard(&tab, &tool, &input),
+                Message::Budget { tab } => Ok(machine.hand_budget_lines(&tab, "post_tool_use")),
                 message => other(message),
             }
         })
@@ -6262,15 +6272,48 @@ impl Machine {
     }
 
     /// The notices the hook adds to the session's context, and the orchestrator requests among them.
+    /// A worker's turn end also carries the budget lines no PostToolUse hook has claimed.
     fn take_notices(&self, event: &AgentEvent) -> (String, Vec<String>) {
         let Some(tab) = event.tab.as_deref() else { return Default::default() };
         let wants = event.status == AgentStatus::Done || (event.status == AgentStatus::Working && event.prompt.is_some());
         if !wants {
             return Default::default();
         }
-        let Some((text, _)) = self.delegates.claim_notice(tab) else { return Default::default() };
-        let typed = self.delegates.drop_claimed_reports(tab);
+        let (mut text, typed) = match self.delegates.claim_notice(tab) {
+            Some((text, _)) => (text, self.delegates.drop_claimed_reports(tab)),
+            None => Default::default(),
+        };
+        if event.status == AgentStatus::Done {
+            let budget = self.hand_budget_lines(tab, "stop");
+            if !budget.is_empty() {
+                text = if text.is_empty() { budget } else { format!("{text}\n{budget}") };
+            }
+        }
         (text, typed)
+    }
+
+    /// Whether the session in `tab` is a worker whose task has a budget: the only one that runs the
+    /// PostToolUse hook for it.
+    fn holds_to_budget(&self, tab: &str) -> bool {
+        let Some(task) = self.tab(tab, |t| t.task.clone()).ok().flatten() else { return false };
+        self.delegates.get(&task).is_some_and(|task| !task.state.terminal() && task.limits.budget_cents > 0)
+    }
+
+    /// The budget lines waiting for `tab`, claimed once by the hook `via` names (`post_tool_use` or
+    /// `stop`), joined one to a line, and one debug line on stderr for each: the ids and the step,
+    /// never the text. Empty when nothing waits.
+    fn hand_budget_lines(&self, tab: &str, via: &str) -> String {
+        let (text, logs) = self.claim_budget(tab, via);
+        for line in logs {
+            eprintln!("{line}");
+        }
+        text
+    }
+
+    fn claim_budget(&self, tab: &str, via: &str) -> (String, Vec<String>) {
+        let claimed = self.delegates.claim_budget_lines(tab);
+        let logs = claimed.iter().map(|(task, step, _)| format!("pinned: budget line {step} of {task} handed to {tab} by the {via} hook")).collect();
+        (claimed.into_iter().map(|(.., line)| line).collect::<Vec<_>>().join("\n"), logs)
     }
 
     fn stamp_parent_sessions(&self) {
@@ -9006,7 +9049,7 @@ pub(crate) mod tests {
     fn claude_does_not_inherit_the_session_pinned_was_started_from() {
         std::env::set_var("CLAUDE_CODE_SESSION_ID", "outer-session");
         std::env::set_var("CLAUDECODE", "1");
-        let cmd = launch().command(Program::Agent, &Account::builtin(Provider::Claude), "tab-1", Path::new("/repo"), false, vec![], &[], &[], None);
+        let cmd = launch().command(Program::Agent, &Account::builtin(Provider::Claude), "tab-1", Path::new("/repo"), false, vec![], &[], &[], None, false);
         assert_eq!(cmd.get_env("CLAUDE_CODE_SESSION_ID"), None);
         assert_eq!(cmd.get_env("CLAUDECODE"), None);
         assert_eq!(cmd.get_env("PINNED_TAB").and_then(|v| v.to_str()), Some("tab-1"));
@@ -9018,7 +9061,7 @@ pub(crate) mod tests {
         let plugin = dir.join("toy@demo");
         std::fs::create_dir_all(plugin.join(".claude-plugin")).unwrap();
         std::fs::write(plugin.join(".claude-plugin/plugin.json"), r#"{"name":"toy"}"#).unwrap();
-        let cmd = launch().command(Program::Agent, &Account::builtin(Provider::Claude), "tab-1", Path::new("/repo"), false, vec![], &[], std::slice::from_ref(&plugin), None);
+        let cmd = launch().command(Program::Agent, &Account::builtin(Provider::Claude), "tab-1", Path::new("/repo"), false, vec![], &[], std::slice::from_ref(&plugin), None, false);
         let args: Vec<String> = cmd.get_argv().iter().map(|a| a.to_string_lossy().into_owned()).collect();
         let flags: Vec<_> = args.windows(2).filter(|w| w[0] == "--plugin-dir").map(|w| w[1].as_str()).collect();
         assert_eq!(flags, vec!["p", plugin.to_str().unwrap()]);
@@ -13426,6 +13469,148 @@ Have another model review a risky change before it goes ahead.";
             (ended["workState"].as_str(), ended["error"].as_str(), ended["usage"]["tokens_out"].as_u64()),
             (Some("cancelled"), Some("pinned stopped it after it spent US$ 0.60, its budget of US$ 0.50"), Some(40_000))
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A worker of the project `app` on a machine whose Captains have a budget of `cents`, priced
+    /// at US$ 15 per million output tokens. Returns the machine, its folder, the Captain's tab, the
+    /// task, the worker's tab and its transcript, which holds no spend yet.
+    #[cfg(unix)]
+    fn budgeted_worker(name: &str, cents: u32) -> (Arc<Machine>, PathBuf, String, String, String, PathBuf) {
+        let (m, dir, captain) = limited_captain(name, TastePatch { budget_cents: Some(cents), ..TastePatch::default() });
+        let config = dir.join("config");
+        std::fs::write(config.join("usage-model-rates.json"), "{}").unwrap();
+        std::fs::write(config.join("usage-prices.json"), r#"{"prices":{"claude-sonnet-5-5":{"input":3,"output":15}}}"#).unwrap();
+        let reply = delegate_task(&m, &captain, work(Some("claude-sonnet-5-5"), None));
+        let (task, child) = (reply["taskId"].as_str().unwrap().to_owned(), reply["tabId"].as_str().unwrap().to_owned());
+        let transcripts = config.join("accounts/work/projects/app");
+        std::fs::create_dir_all(&transcripts).unwrap();
+        let transcript = transcripts.join("s-child.jsonl");
+        std::fs::write(&transcript, "").unwrap();
+        m.record_event(hook_event(&child, "working", &transcript, Some("Parser")));
+        (m, dir, captain, task, child, transcript)
+    }
+
+    /// Adds a priced message of `output` tokens (US$ 15 per million) to the worker's transcript.
+    #[cfg(unix)]
+    fn spend(transcript: &Path, id: &str, output: u64) {
+        append(transcript, &[json!({ "type": "assistant", "requestId": id, "message": { "id": id, "model": "claude-sonnet-5-5", "content": [], "usage": { "input_tokens": 0, "output_tokens": output } } })]);
+    }
+
+    const WARN_80: &str = "[pinned] You have used US$ 0.42 of your US$ 0.50 budget. Push your work now, write your proof and PR text as you go, and plan to report soon.";
+    const WARN_95: &str = "[pinned] US$ 0.48 of US$ 0.50. pinned stops you at US$ 0.50. Push now, write your report, and end your turn.";
+
+    #[test]
+    #[cfg(unix)]
+    fn a_worker_is_warned_once_at_80_and_once_at_95_of_its_budget() {
+        let (m, dir, _, _, child, transcript) = budgeted_worker("budget-warn", 50);
+        let claim = || m.claim_budget(&child, "post_tool_use").0;
+        spend(&transcript, "m1", 10_000);
+        m.meter_workers();
+        assert_eq!(claim(), "", "US$ 0.15 of US$ 0.50 is below 80%");
+        spend(&transcript, "m2", 18_000);
+        m.meter_workers();
+        assert_eq!(claim(), WARN_80, "US$ 0.42 is 84%");
+        m.meter_workers();
+        assert_eq!(claim(), "", "the 80% line comes once");
+        spend(&transcript, "m3", 4_000);
+        m.meter_workers();
+        assert_eq!(claim(), WARN_95, "US$ 0.48 is 96%");
+        m.meter_workers();
+        spend(&transcript, "m4", 100);
+        m.meter_workers();
+        assert_eq!(claim(), "", "the 95% line comes once");
+        assert_eq!(m.delegates.get(&m.tab(&child, |t| t.task.clone()).unwrap().unwrap()).unwrap().state, crate::delegate::WorkState::Working, "a warning stops nothing");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_worker_with_no_budget_gets_no_hook_and_no_line() {
+        let (m, dir, _, _, child, transcript) = budgeted_worker("budget-none", 0);
+        assert!(!m.holds_to_budget(&child), "no budget, no hook");
+        spend(&transcript, "m1", 1_000_000);
+        m.meter_workers();
+        assert_eq!(m.claim_budget(&child, "post_tool_use"), (String::new(), vec![]));
+        let (budgeted, _dir2, _, _, with, _) = budgeted_worker("budget-some", 50);
+        assert!(budgeted.holds_to_budget(&with), "a budget installs it");
+        assert!(!budgeted.holds_to_budget(&budgeted.open_tab(None, false).unwrap()), "a tab that runs no task has none");
+        let settings_of = |budgeted: bool| {
+            let cmd = launch().command(Program::Agent, &Account::builtin(Provider::Claude), "tab-1", Path::new("/repo"), false, vec![], &[], &[], None, budgeted);
+            let args: Vec<String> = cmd.get_argv().iter().map(|a| a.to_string_lossy().into_owned()).collect();
+            args.windows(2).find(|w| w[0] == "--settings").map(|w| w[1].clone()).unwrap()
+        };
+        assert_eq!(settings_of(false), "claude-settings.json");
+        assert_eq!(settings_of(true), hooks::BUDGET_SETTINGS);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_budget_line_goes_to_the_hook_that_claims_it_first_and_never_to_both() {
+        let (m, dir, _, _, child, transcript) = budgeted_worker("budget-either", 50);
+        spend(&transcript, "m1", 28_000);
+        m.meter_workers();
+        assert_eq!(m.claim_budget(&child, "post_tool_use").0, WARN_80);
+        assert_eq!(m.take_notices(&turn_done(&child, "s-child")).0, "", "the PostToolUse hook took it; the Stop hook gives nothing");
+
+        spend(&transcript, "m2", 4_000);
+        m.meter_workers();
+        let (context, _) = m.take_notices(&turn_done(&child, "s-child"));
+        assert_eq!(context, WARN_95, "a line no tool call took rides the Stop hook");
+        assert_eq!(m.claim_budget(&child, "post_tool_use").0, "", "and the PostToolUse hook finds it gone");
+        assert_eq!(m.take_notices(&turn_done(&child, "s-child")).0, "");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn handing_a_budget_line_to_a_hook_logs_the_ids_and_the_step_and_never_the_text() {
+        let (m, dir, _, task, child, transcript) = budgeted_worker("budget-log", 50);
+        spend(&transcript, "m1", 32_000);
+        m.meter_workers();
+        let (text, logs) = m.claim_budget(&child, "post_tool_use");
+        let both = "[pinned] You have used US$ 0.48 of your US$ 0.50 budget. Push your work now, write your proof and PR text as you go, and plan to report soon.\n[pinned] US$ 0.48 of US$ 0.50. pinned stops you at US$ 0.50. Push now, write your report, and end your turn.";
+        assert_eq!(text, both, "both lines wait when one pass crosses both");
+        assert_eq!(
+            logs,
+            vec![
+                format!("pinned: budget line 80 of {task} handed to {child} by the post_tool_use hook"),
+                format!("pinned: budget line 95 of {task} handed to {child} by the post_tool_use hook"),
+            ]
+        );
+        assert!(logs.iter().all(|line| !line.contains("Push") && !line.contains("Parser") && !line.contains("US$") && !line.contains('\n')), "{logs:?}");
+        assert_eq!(m.claim_budget(&child, "stop"), (String::new(), vec![]), "nothing handed, nothing logged");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_budget_warnings_leave_the_hard_stop_at_the_same_crossing_with_the_same_text() {
+        let (m, dir, captain, task, child, transcript) = budgeted_worker("budget-stop", 50);
+        assert!(m.holds_to_budget(&child), "the hook is installed for this worker");
+        let status = || serde_json::from_str::<Value>(&m.task_status(Some(captain.clone()), None, &task).unwrap()).unwrap();
+        spend(&transcript, "m1", 28_000);
+        m.meter_workers();
+        spend(&transcript, "m2", 4_000);
+        m.meter_workers();
+        assert_eq!(status()["workState"].as_str(), Some("working"), "US$ 0.48 is warned, not stopped");
+        spend(&transcript, "m3", 2_000);
+        m.meter_workers();
+        let ended = status();
+        assert_eq!((ended["workState"].as_str(), ended["error"].as_str()), (Some("cancelled"), Some("pinned stopped it after it spent US$ 0.51, its budget of US$ 0.50")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_pass_that_stops_a_worker_does_not_warn_it_first() {
+        let (m, dir, captain, task, child, transcript) = budgeted_worker("budget-jump", 50);
+        spend(&transcript, "m1", 34_000);
+        m.meter_workers();
+        let ended = serde_json::from_str::<Value>(&m.task_status(Some(captain.clone()), None, &task).unwrap()).unwrap();
+        assert_eq!((ended["workState"].as_str(), ended["error"].as_str()), (Some("cancelled"), Some("pinned stopped it after it spent US$ 0.51, its budget of US$ 0.50")));
+        assert_eq!(m.claim_budget(&child, "post_tool_use"), (String::new(), vec![]));
         let _ = std::fs::remove_dir_all(dir);
     }
 

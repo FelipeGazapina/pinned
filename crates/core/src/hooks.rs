@@ -18,8 +18,11 @@ pub const LINEAR_SUBCOMMAND: &str = "linear";
 pub const RUN_SUBCOMMAND: &str = "run";
 pub const STATUSLINE_SUBCOMMAND: &str = "statusline";
 pub const GUARD_SUBCOMMAND: &str = "guard";
+pub const BUDGET_SUBCOMMAND: &str = "budget";
 /// The global orchestrator's own settings file, beside the one every other session loads.
 pub const GLOBAL_SETTINGS: &str = "claude-settings-global.json";
+/// A budgeted worker's settings: every session's, and a PostToolUse hook that asks for its budget line.
+pub const BUDGET_SETTINGS: &str = "claude-settings-budget.json";
 /// The file tools the global orchestrator keeps, each held to its folders by the guard hook.
 const GUARDED: &str = "Read|Write|Edit|MultiEdit|Grep|Glob|LS";
 
@@ -34,6 +37,10 @@ const RECALL_WAIT: Duration = Duration::from_millis(300);
 /// there as delivered, and the turn ends without it when the hook stops waiting first.
 const HAND_OVER_WAIT: Duration = Duration::from_secs(10);
 
+/// How long a worker's PostToolUse hook waits for its budget line, all told. Past this the tool
+/// result goes on without one: the hook never holds the worker up, and the hard stop never waits on it.
+const BUDGET_WAIT: Duration = Duration::from_millis(400);
+
 /// Claude Code settings layered onto the harnessed session via `--settings`, so the user's
 /// own ~/.claude/settings.json stays untouched.
 pub fn write_settings(path: &Path, exe: &Path) -> std::io::Result<()> {
@@ -47,6 +54,13 @@ pub fn write_global_settings(path: &Path, exe: &Path) -> std::io::Result<()> {
     let mut settings = settings(exe);
     settings["permissions"]["deny"] = serde_json::json!(["Bash", "NotebookEdit"]);
     settings["hooks"]["PreToolUse"] = serde_json::json!([{ "matcher": GUARDED, "hooks": [subcommand(exe, GUARD_SUBCOMMAND)] }]);
+    std::fs::write(path, serde_json::to_vec_pretty(&settings)?)
+}
+
+/// The settings of a worker held to a budget. Only these sessions run a process after each tool call.
+pub fn write_budget_settings(path: &Path, exe: &Path) -> std::io::Result<()> {
+    let mut settings = settings(exe);
+    settings["hooks"]["PostToolUse"] = serde_json::json!([{ "hooks": [subcommand(exe, BUDGET_SUBCOMMAND)] }]);
     std::fs::write(path, serde_json::to_vec_pretty(&settings)?)
 }
 
@@ -87,6 +101,40 @@ pub fn guard() {
     if let Some(output) = guard_output(asked) {
         println!("{output}");
     }
+}
+
+/// Runs as a budgeted worker's PostToolUse hook: asks the machine over the socket for the budget
+/// line waiting for this tab, and prints it as the hook's `additionalContext`. It fails open: with
+/// no socket, no answer within `BUDGET_WAIT` or nothing waiting it prints nothing and exits 0.
+pub fn budget() {
+    if let (Ok(sock), Ok(tab)) = (std::env::var(SOCK_ENV), std::env::var(TAB_ENV)) {
+        if let Some(output) = budget_output(&sock, &tab, BUDGET_WAIT) {
+            println!("{output}");
+        }
+    }
+}
+
+/// What the budget hook prints for `tab`: one PostToolUse JSON object holding the machine's line,
+/// or nothing. The exchange runs on its own thread, so that even a socket that accepts and never
+/// answers, or a connect that blocks, costs `wait` at most.
+fn budget_output(sock: &str, tab: &str, wait: Duration) -> Option<String> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let (sock, tab) = (sock.to_owned(), tab.to_owned());
+    std::thread::spawn(move || {
+        let _ = sender.send(ask_budget(&sock, &tab, wait));
+    });
+    let line = receiver.recv_timeout(wait).ok().flatten()?;
+    Some(serde_json::json!({ "hookSpecificOutput": { "hookEventName": "PostToolUse", "additionalContext": line } }).to_string())
+}
+
+fn ask_budget(sock: &str, tab: &str, wait: Duration) -> Option<String> {
+    let mut stream = UnixStream::connect(sock).ok()?;
+    let _ = stream.set_write_timeout(Some(wait));
+    let _ = stream.set_read_timeout(Some(wait));
+    writeln!(stream, "{}", serde_json::to_string(&Message::Budget { tab: tab.to_owned() }).unwrap()).ok()?;
+    let mut reply = String::new();
+    BufReader::new(stream).read_line(&mut reply).ok()?;
+    serde_json::from_str::<Reply>(&reply).ok()?.ok().filter(|line| !line.is_empty())
 }
 
 /// Nothing for a call the machine lets run, so Claude Code's own permissions decide; else a deny.
@@ -787,6 +835,76 @@ mod tests {
         assert_eq!(settings["hooks"]["Stop"], serde_json::json!([{ "hooks": [{ "type": "command", "command": "'/Applications/pinned.app/Contents/MacOS/pinned' hook done" }] }]), "its turns still report");
         assert_eq!(settings["permissions"]["allow"], serde_json::json!(reminders::permissions()));
         let _ = std::fs::remove_file(file);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_a_budgeted_workers_settings_add_the_post_tool_use_hook() {
+        let exe = Path::new("/Applications/pinned.app/Contents/MacOS/pinned");
+        let dir = tempfile::tempdir().unwrap();
+        let read = |name: &str| serde_json::from_slice::<serde_json::Value>(&std::fs::read(dir.path().join(name)).unwrap()).unwrap();
+        write_settings(&dir.path().join("plain.json"), exe).unwrap();
+        write_global_settings(&dir.path().join("global.json"), exe).unwrap();
+        write_budget_settings(&dir.path().join("budget.json"), exe).unwrap();
+        for plain in ["plain.json", "global.json"] {
+            assert_eq!(read(plain)["hooks"]["PostToolUse"], serde_json::Value::Null, "{plain} pays no process per tool call");
+        }
+        let budget = read("budget.json");
+        assert_eq!(budget["hooks"]["PostToolUse"], serde_json::json!([{ "hooks": [{ "type": "command", "command": "'/Applications/pinned.app/Contents/MacOS/pinned' budget" }] }]));
+        let mut rest = budget.clone();
+        rest["hooks"].as_object_mut().unwrap().remove("PostToolUse");
+        assert_eq!(rest, read("plain.json"), "it is every session's settings and one hook more");
+    }
+
+    #[test]
+    fn the_budget_hook_prints_one_post_tool_use_object_for_a_pending_line_and_nothing_otherwise() {
+        let line = "[pinned] US$ 0.48 of US$ 0.50. pinned stops you at US$ 0.50. Push now, write your report, and end your turn.";
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("pinned.sock");
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(vec![]));
+        let seen = asked.clone();
+        let answer = std::sync::Arc::new(std::sync::Mutex::new(Ok(line.to_owned())));
+        let reply = answer.clone();
+        listen(sock.clone(), move |message| {
+            seen.lock().unwrap().push(serde_json::to_value(&message).unwrap());
+            reply.lock().unwrap().clone()
+        })
+        .unwrap();
+        let sock = sock.display().to_string();
+
+        let printed = budget_output(&sock, "tab-7", BUDGET_WAIT).expect("a pending line is printed");
+        let json: serde_json::Value = serde_json::from_str(&printed).unwrap();
+        assert!(!printed.contains('\n'), "one object on one line");
+        assert_eq!(json, serde_json::json!({ "hookSpecificOutput": { "hookEventName": "PostToolUse", "additionalContext": line } }));
+        assert_eq!(json.as_object().unwrap().len(), 1);
+        assert_eq!(json["hookSpecificOutput"].as_object().unwrap().len(), 2);
+        assert_eq!(*asked.lock().unwrap(), vec![serde_json::json!({ "kind": "budget", "tab": "tab-7" })], "it asks for its own tab's line");
+
+        *answer.lock().unwrap() = Ok(String::new());
+        assert_eq!(budget_output(&sock, "tab-7", BUDGET_WAIT), None, "nothing pending prints nothing");
+        *answer.lock().unwrap() = Err("no such tab".into());
+        assert_eq!(budget_output(&sock, "tab-7", BUDGET_WAIT), None, "a refusal prints nothing");
+    }
+
+    #[test]
+    fn the_budget_hook_fails_open_on_a_dead_socket_and_on_one_that_never_answers() {
+        let dir = tempfile::tempdir().unwrap();
+        let started = std::time::Instant::now();
+        assert_eq!(budget_output(&dir.path().join("missing.sock").display().to_string(), "tab-7", BUDGET_WAIT), None);
+        assert!(started.elapsed() < Duration::from_millis(500), "a missing socket is answered at once, not in {:?}", started.elapsed());
+
+        let silent = dir.path().join("silent.sock");
+        let listener = UnixListener::bind(&silent).unwrap();
+        let held = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            std::thread::sleep(Duration::from_secs(2));
+            drop(stream);
+        });
+        let started = std::time::Instant::now();
+        assert_eq!(budget_output(&silent.display().to_string(), "tab-7", BUDGET_WAIT), None);
+        assert!(started.elapsed() < Duration::from_millis(500), "a machine that never answers costs the bound, not {:?}", started.elapsed());
+        assert!(BUDGET_WAIT <= Duration::from_millis(500));
+        held.join().unwrap();
     }
 
     #[test]

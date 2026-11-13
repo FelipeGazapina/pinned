@@ -17,6 +17,10 @@ pub fn dispatch(args: &[String]) -> Option<i32> {
             hooks::guard();
             return Some(0);
         }
+        hooks::BUDGET_SUBCOMMAND => {
+            hooks::budget();
+            return Some(0);
+        }
         hooks::STATUSLINE_SUBCOMMAND => {
             hooks::statusline();
             return Some(0);

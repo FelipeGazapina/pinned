@@ -409,6 +409,9 @@ pub enum Message {
     /// Claude Code's PreToolUse hook in the global orchestrator's session: may tool `tool` run
     /// with `input`? Ok("") lets it, Err says why not.
     Guard { tab: String, tool: String, input: serde_json::Value },
+    /// A budgeted worker's PostToolUse hook: the budget line waiting for the tab, claimed once.
+    /// Ok("") when none waits.
+    Budget { tab: String },
     Usage {
         #[serde(flatten)]
         usage: Usage,

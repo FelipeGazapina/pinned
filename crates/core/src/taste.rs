@@ -531,6 +531,15 @@ impl Limits {
         (self.budget_cents > 0 && spent * 100.0 >= f64::from(self.budget_cents)).then(|| format!("pinned stopped it after it spent US$ {spent:.2}, its budget of {}", usd(self.budget_cents)))
     }
 
+    /// Whether a worker that spent `cost_usd` has used `percent` of its budget: its spend and its
+    /// budget in USD, or none when it has no budget or no price. It is a warning's test, and
+    /// never the stop's: `over_budget` alone decides that.
+    pub fn used_percent(&self, cost_usd: Option<f64>, percent: u32) -> Option<(f64, f64)> {
+        let spent = cost_usd?;
+        let budget = f64::from(self.budget_cents);
+        (self.budget_cents > 0 && spent * 100.0 * 100.0 >= budget * f64::from(percent)).then_some((spent, budget / 100.0))
+    }
+
     /// A box's budget in USD: the one asked for, at most the box budget, which is also the default.
     pub fn box_budget_usd(&self, asked: Option<f64>) -> Result<Option<f64>, String> {
         if self.box_budget_cents == 0 {

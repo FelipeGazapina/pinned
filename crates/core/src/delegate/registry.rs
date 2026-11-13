@@ -330,7 +330,12 @@ impl Delegates {
                 .filter_map(|(id, usage)| {
                     let task = tasks.iter_mut().find(|task| &task.id == id && task.state == WorkState::Working)?;
                     task.usage = *usage;
-                    task.limits.over_budget(usage.cost_usd).map(|reason| (id.clone(), reason))
+                    let over = task.limits.over_budget(usage.cost_usd);
+                    // A worker this pass stops is not warned: the stop is its word.
+                    if over.is_none() {
+                        warn_worker(task);
+                    }
+                    over.map(|reason| (id.clone(), reason))
                 })
                 .collect()
         };
@@ -340,6 +345,16 @@ impl Delegates {
         if !over.is_empty() {
             self.persist();
         }
+    }
+
+    /// Hands the budget lines waiting for the worker that runs in `tab` to a hook, once each:
+    /// (task, step, line). Only the hook that claims a line delivers it.
+    pub fn claim_budget_lines(&self, tab: &str) -> Vec<(String, u8, String)> {
+        let mut tasks = self.tasks.lock().unwrap();
+        let Some(task) = tasks.iter_mut().find(|task| task.state == WorkState::Working && task.thread.as_ref().is_some_and(|thread| thread.runs && thread.tab == tab)) else {
+            return vec![];
+        };
+        std::mem::take(&mut task.run.budget_lines).into_iter().map(|(step, line)| (task.id.clone(), step, line)).collect()
     }
 
     /// Stops a task and its descendants because it passed `limit` (`time` or `budget`). Its record
@@ -1765,6 +1780,27 @@ fn who(task: &Task) -> String {
     match &task.model {
         Some(model) => format!("{} · {model}", task.provider.spec().name),
         None => task.provider.spec().name.to_owned(),
+    }
+}
+
+/// Queues, for the worker's own tab, a line at each of 80% and 95% of its budget it has newly
+/// crossed. The lines hold pinned's own numbers and nothing else: no title, no outside text.
+fn warn_worker(task: &mut Task) {
+    if !task.thread.as_ref().is_some_and(|thread| thread.runs) {
+        return;
+    }
+    let cost = task.usage.cost_usd;
+    if !task.run.told_80 {
+        if let Some((spent, budget)) = task.limits.used_percent(cost, 80) {
+            task.run.told_80 = true;
+            task.run.budget_lines.push((80, format!("[pinned] You have used US$ {spent:.2} of your US$ {budget:.2} budget. Push your work now, write your proof and PR text as you go, and plan to report soon.")));
+        }
+    }
+    if !task.run.told_95 {
+        if let Some((spent, budget)) = task.limits.used_percent(cost, 95) {
+            task.run.told_95 = true;
+            task.run.budget_lines.push((95, format!("[pinned] US$ {spent:.2} of US$ {budget:.2}. pinned stops you at US$ {budget:.2}. Push now, write your report, and end your turn.")));
+        }
     }
 }
 

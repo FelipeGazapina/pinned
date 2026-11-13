@@ -516,6 +516,11 @@ pub struct Run {
     pub limit_ms: u64,
     pub told_late: bool,
     pub told_pending: bool,
+    /// The worker's own warnings at 80% and 95% of its budget were queued, each once.
+    pub told_80: bool,
+    pub told_95: bool,
+    /// Budget warnings (step, line) queued for the worker's own tab until a hook claims them.
+    pub budget_lines: Vec<(u8, String)>,
     pub open_turns: u32,
     pub last_error: Option<String>,
     pub background: Vec<Background>,
@@ -539,6 +544,9 @@ impl Default for Run {
             limit_ms: DEFAULT_LIMIT_MS,
             told_late: false,
             told_pending: false,
+            told_80: false,
+            told_95: false,
+            budget_lines: vec![],
             open_turns: 0,
             last_error: None,
             background: vec![],
