@@ -151,3 +151,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:07:36Z #69 the_global_orchestrator_reaches_no_machine_project_or_capitao_of_another_account START / avail=15072M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:07:40Z #69 the_global_orchestrator_reaches_no_machine_project_or_capitao_of_another_account ok / avail=15072M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:07:41Z #70 synced_files_skills_and_shared_projects_stay_in_their_account START / avail=15072M /workspace avail=19374M node_stat=Ssl
+2026-11-13T04:07:46Z #70 synced_files_skills_and_shared_projects_stay_in_their_account ok / avail=15072M /workspace avail=19374M node_stat=Ssl node_tcp=1
