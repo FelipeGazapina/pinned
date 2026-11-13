@@ -5247,6 +5247,55 @@ fn a_worker_box_offline_past_the_grace_ends_and_fails_its_task_with_that_reason(
     wait_for("the row to go", || ana.rows(&hub) == 0);
 }
 
+/// A box whose budget runs out while a questionnaire holds it: `reap_once` checks the budget before
+/// the idle verdict, so the money ends it however long its worker waits on the user. Only the budget
+/// can end this box here: its node is online, its tab is there, and `max_life` is an hour away.
+#[test]
+fn a_box_whose_money_runs_out_while_a_question_holds_it_still_ends_over_budget() {
+    use pinned_core::questions::{self, QOption, Question, Questionnaire};
+    use pinned_server::boxes::Seen;
+    let hub = TestHub::start_with_boxes("box_budget_question", Signup::Open, Policy { offline: Duration::from_secs(3600), tab_gone: Duration::from_secs(3600), ..fast() });
+    let url = hub.url.clone();
+    let (token, account) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &token, "ana@acme.dev", "ana-mac");
+    hub.boxes.state.lock().unwrap().checkout = Some(("site".into(), SITE.into()));
+    ana.client.hub(json!({ "cmd": "connect_upstash", "key": BOX_KEY, "claude_token": CLAUDE_TOKEN })).unwrap();
+    box_mode(&mut ana.client, "session", "fresh");
+    ana.client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": { "box_budget_cents": 100 } })).unwrap();
+    // One cent is six minutes of a box at US$ 0.10 an hour.
+    let opened = act(&ana.dir, &ana.tab, "open_box", json!({ "repo": "acme/site", "size": "small", "budget_usd": 0.01 })).unwrap();
+    assert_eq!(opened["result"]["budget_usd"].as_f64(), Some(0.01), "{opened}");
+    let box_machine = opened["result"]["machine"].as_str().unwrap().to_owned();
+    wait_for("the agent's box session", || box_tabs(&hub.boxes).iter().any(|t| t.running));
+
+    // The box's machine reports its tab with a questionnaire open, as a node does once its worker
+    // calls `question_user`. No node of this tree opens one yet, so a raw machine with the box's own
+    // token reports the tab the node showed.
+    let mut tab = box_tabs(&hub.boxes)[0].clone();
+    let question = Question { header: None, question: "Base the fix on main?".into(), changes: "which branch the PR targets".into(), options: vec![QOption { label: "main".into(), description: None, recommended: true }], multi_select: false };
+    tab = questions::shown(tab, &Questionnaire { id: "q-1".into(), title: None, questions: vec![question], projects: vec![], at: 1_794_240_000 });
+    tab.running = true;
+    let machine_token = hub.boxes.state.lock().unwrap().accounts[0].machine_token.clone();
+    drop_box_node(&hub.boxes, &hub.boxes.live()[0]);
+    let raw = RawMachine::start_with(&url, &machine_token, vec![json!({ "kind": "tabs", "tabs": [tab] })], |_| RawReply::Ok(Value::Null));
+    let live = hub.runtime.block_on(hub.hub().account(account.id.parse().unwrap())).unwrap();
+    wait_for("the hub to see the questionnaire hold the box", || live.seen_any(&box_machine) == Seen::Tab { running: true, quiet: false });
+
+    // Budget left, so the questionnaire holds it: the reaper has looked many times by now.
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(live.seen_any(&box_machine), Seen::Tab { running: true, quiet: false });
+    let rows = || hub.runtime.block_on(hub.hub().db.boxes(live.id)).unwrap().len();
+    assert_eq!((hub.boxes.live().len(), rows()), (1, 1), "the box stays while it has money and an open question");
+
+    // Seven minutes spent of a six-minute budget.
+    admin_on(&hub.database, "update boxes set created_at = now() - interval '7 minutes'");
+    wait_for("the box to go", || hub.boxes.live().is_empty() && rows() == 0);
+    let stats = act(&ana.dir, &ana.tab, "delegation_stats", json!({ "days": 1 })).unwrap()["result"].clone();
+    let ended = &stats["slowest"][0];
+    assert_eq!((ended["outcome"].as_str(), ended["limit"].as_str()), (Some("limit"), Some("budget")), "it ended as over budget, not by time or idleness: {stats}");
+    drop(raw);
+}
+
 /// A raw machine paired to `ana`'s account, which asks the hub for what a node's thread asks.
 fn raw_caller(hub: &TestHub, client: &mut Client, name: &str, machines: &[(&str, bool)]) -> RawMachine {
     let code = client.hub(json!({ "cmd": "pair_code" })).unwrap();
