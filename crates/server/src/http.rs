@@ -35,6 +35,8 @@ const ADDRESS_ATTEMPTS: usize = 10;
 const EMAIL_ATTEMPTS: usize = 100;
 const ADDRESS_SIGNUPS: usize = 5;
 /// The one answer to a sign up without a good code, so it tells nobody which codes or accounts exist.
+/// The one answer to a sign up at a hub that holds as many accounts as it was told to.
+const NOT_TAKING: &str = "This hub is not taking new accounts.";
 const INVITE_NEEDED: &str = "this hub needs a valid invite code to create an account";
 const ATTEMPT_WINDOW: Duration = Duration::from_secs(15 * 60);
 /// Each argon2 hash holds about 19 MiB, so only this many run at once whatever arrives.
@@ -200,9 +202,19 @@ async fn signed_in(server: &Server, headers: &HeaderMap) -> Result<db::Login, Er
     server.hub.db.login(token, false).await.map_err(internal)?.ok_or_else(unauthorized)
 }
 
-/// The address a request came from: nginx's last `X-Forwarded-For` hop when it came through a
-/// proxy on this host, else the peer itself.
-pub(crate) fn client_address(_trusted: TrustedProxy, peer: SocketAddr, headers: &HeaderMap) -> String {
+/// The address a request came from. Behind a proxy the hub is told to trust, the address that proxy
+/// puts in its own header; else nginx's last `X-Forwarded-For` hop when the request came through a
+/// proxy on this host; else the peer itself.
+///
+/// Railway's edge overwrites `X-Real-IP` with the address it accepted the connection from, on every
+/// request, so the whole header is the client and there is no hop to pick. `X-Forwarded-For` is not
+/// read for it: its hop count is not fixed and its left part may be the client's own. A header that is
+/// missing or is not one address (a list, text) leaves the peer, the proxy, as the key.
+pub(crate) fn client_address(trusted: TrustedProxy, peer: SocketAddr, headers: &HeaderMap) -> String {
+    if trusted == TrustedProxy::Railway {
+        let real = headers.get("x-real-ip").and_then(|v| v.to_str().ok()).and_then(|v| v.trim().parse::<std::net::IpAddr>().ok());
+        return real.map_or_else(|| peer.ip().to_string(), |ip| ip.to_canonical().to_string());
+    }
     let forwarded = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()).and_then(|v| v.rsplit(',').next()).map(str::trim);
     match forwarded {
         Some(hop) if peer.ip().is_loopback() && !hop.is_empty() => hop.to_owned(),
@@ -247,6 +259,12 @@ async fn password_matches(server: &Server, password: String, hash: String) -> bo
     .unwrap_or(false)
 }
 
+/// Whether the hub holds as many accounts as `--max-accounts` lets it. The first account counts like any other.
+async fn at_cap(server: &Server) -> Result<bool, Error> {
+    let Some(cap) = server.access.max_accounts else { return Ok(false) };
+    Ok(server.hub.db.account_count().await.map_err(internal)? >= i64::from(cap))
+}
+
 async fn signup(State(server): State<Arc<Server>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, Json(body): Json<SignIn>) -> Answer<Session> {
     let email = email(&body.email)?;
     new_password(&body.password)?;
@@ -254,6 +272,9 @@ async fn signup(State(server): State<Arc<Server>>, ConnectInfo(peer): ConnectInf
     let first = !server.hub.db.has_accounts().await.map_err(internal)?;
     if server.hub.signup == Signup::First && !first {
         return Err(Error(StatusCode::FORBIDDEN, "this hub already has its account, so sign in with it instead".into()));
+    }
+    if at_cap(&server).await? {
+        return Err(Error(StatusCode::FORBIDDEN, NOT_TAKING.into()));
     }
     if !server.attempt(&[(format!("signup:{}", server.client_address(peer, &headers)), ADDRESS_SIGNUPS)]) {
         return Err(Error(StatusCode::TOO_MANY_REQUESTS, "too many sign ups; try again in 15 minutes".into()));
@@ -268,6 +289,14 @@ async fn signup(State(server): State<Arc<Server>>, ConnectInfo(peer): ConnectInf
         _ => None,
     };
     let hash = hash_password(&server, body.password).await?;
+    // Counted again with the account made under one lock, so signups racing at the cap can't pass it.
+    let _slot = match server.access.max_accounts {
+        Some(_) => Some(server.signups.lock().await),
+        None => None,
+    };
+    if at_cap(&server).await? {
+        return Err(Error(StatusCode::FORBIDDEN, NOT_TAKING.into()));
+    }
     let account = match invite {
         Some(code) => match server.hub.db.create_invited_account(&code, &email, &hash).await.map_err(internal)? {
             db::Invited::Created(account) => Some(account),
@@ -870,7 +899,37 @@ async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: 
 
 #[cfg(test)]
 mod tests {
-    use super::ROUTES;
+    use super::{client_address, TrustedProxy, ROUTES};
+    use axum::http::HeaderMap;
+    use std::net::SocketAddr;
+
+    fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
+        pairs.iter().map(|(name, value)| (axum::http::HeaderName::from_static(name), value.parse().unwrap())).collect()
+    }
+
+    #[test]
+    fn behind_railway_the_client_is_the_edges_x_real_ip_alone() {
+        let peer: SocketAddr = "100.64.0.7:41000".parse().unwrap();
+        let railway = |pairs: &[(&'static str, &str)]| client_address(TrustedProxy::Railway, peer, &headers(pairs));
+        assert_eq!(railway(&[("x-real-ip", "203.0.113.5")]), "203.0.113.5");
+        assert_eq!(railway(&[("x-real-ip", " 203.0.113.5 "), ("x-forwarded-for", "6.6.6.6, 203.0.113.9")]), "203.0.113.5", "X-Forwarded-For is not read");
+        assert_eq!(railway(&[("x-real-ip", "2001:db8::1")]), "2001:db8::1");
+        assert_eq!(railway(&[("x-real-ip", "::ffff:203.0.113.5")]), "203.0.113.5", "a mapped v4 address is the v4 address");
+        for unusable in ["", "unknown", "203.0.113.5, 6.6.6.6", "203.0.113.5:80", "<script>"] {
+            assert_eq!(railway(&[("x-real-ip", unusable), ("x-forwarded-for", "6.6.6.6")]), "100.64.0.7", "{unusable:?} leaves the proxy's own address");
+        }
+        assert_eq!(railway(&[]), "100.64.0.7");
+    }
+
+    #[test]
+    fn with_the_proxy_off_only_a_loopback_peers_last_forwarded_hop_counts() {
+        let from = |peer: &str, pairs: &[(&'static str, &str)]| client_address(TrustedProxy::Off, peer.parse().unwrap(), &headers(pairs));
+        let forwarded = [("x-forwarded-for", "6.6.6.6, 203.0.113.9"), ("x-real-ip", "198.51.100.1")];
+        assert_eq!(from("127.0.0.1:5000", &forwarded), "203.0.113.9");
+        assert_eq!(from("100.64.0.7:5000", &forwarded), "100.64.0.7", "a peer off this host is the address, whatever it forwards");
+        assert_eq!(from("10.1.2.3:5000", &forwarded), "10.1.2.3");
+        assert_eq!(from("127.0.0.1:5000", &[]), "127.0.0.1");
+    }
 
     #[test]
     fn the_router_serves_each_published_route() {

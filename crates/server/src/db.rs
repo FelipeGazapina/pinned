@@ -453,6 +453,11 @@ impl Db {
         Ok(row.get(0))
     }
 
+    pub async fn account_count(&self) -> Result<i64, String> {
+        let row = self.client().await?.query_one("select count(*) from accounts", &[]).await.map_err(err)?;
+        Ok(row.get(0))
+    }
+
     pub async fn account(&self, account: Uuid) -> Result<Option<(AccountView, String)>, String> {
         let row = self.client().await?.query_opt("select email, password_hash from accounts where id = $1", &[&account]).await.map_err(err)?;
         Ok(row.map(|r| (AccountView { id: account.to_string(), email: r.get(0) }, r.get(1))))
