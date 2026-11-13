@@ -1623,37 +1623,43 @@ impl Boxes {
         }
         if let (Some(listed), Some(key)) = (listed, &key) {
             let named = |row: String| -> BoxFuture<'_, Result<bool, String>> { Box::pin(async move { hub.db.box_exists(&row).await }) };
-            delete_orphans(self.api.as_ref(), key, listed, named).await?;
+            for failed in delete_orphans(self.api.as_ref(), key, listed, named).await {
+                eprintln!("pinned-server: {failed}");
+            }
         }
         Ok(())
     }
 }
 
-/// Deletes the listed boxes no row names. Every orphan is tried: one that will not delete is logged,
-/// the pass goes on, and the first failure is the pass's error once it ends. Neither the log nor the
-/// error carries the key.
+/// Deletes the listed boxes no row names. Every orphan is tried: one that will not delete, or whose
+/// row could not be looked up (it is then kept), is reported and the pass goes on. Returns one line
+/// per failure, for the caller to log once. No line carries the key, even when the error text does.
 async fn delete_orphans<'a>(
     api: &dyn BoxApi,
     key: &str,
     listed: Vec<Listed>,
     named: impl Fn(String) -> BoxFuture<'a, Result<bool, String>>,
-) -> Result<(), String> {
-    let mut first = None;
+) -> Vec<String> {
+    let scrubbed = |text: String| if key.is_empty() { text } else { text.replace(key, "…") };
+    let mut failures = Vec::new();
     for orphan in listed {
         let row = orphan.labels.iter().find_map(|l| l.strip_prefix("p:"));
         if let Some(row) = row {
-            if named(row.to_owned()).await? {
-                continue;
+            match named(row.to_owned()).await {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(e) => {
+                    failures.push(scrubbed(format!("could not look up the row of box {}, so it stays: {e}", orphan.id)));
+                    continue;
+                }
             }
         }
         eprintln!("pinned-server: deleting box {} that no row of this hub names", orphan.id);
         if let Err(e) = api.delete(key, &orphan.id).await {
-            let failed = format!("could not delete box {} that no row of this hub names: {e}", orphan.id);
-            eprintln!("pinned-server: {failed}");
-            first.get_or_insert(failed);
+            failures.push(scrubbed(format!("could not delete box {} that no row of this hub names: {e}", orphan.id)));
         }
     }
-    first.map_or(Ok(()), Err)
+    failures
 }
 
 #[cfg(test)]
@@ -1687,7 +1693,7 @@ mod tests {
         fn delete<'a>(&'a self, key: &'a str, id: &'a BoxId) -> BoxFuture<'a, Result<(), String>> {
             Box::pin(async move {
                 self.asked.lock().unwrap().push((key.to_owned(), id.0.clone()));
-                if self.refuse.contains(&id.0.as_str()) { Err(format!("Upstash Box answered 500: {} would not go", id.0)) } else { Ok(()) }
+                if self.refuse.contains(&id.0.as_str()) { Err(format!("Upstash Box answered 500: {} would not go for {key}", id.0)) } else { Ok(()) }
             })
         }
     }
@@ -1696,19 +1702,30 @@ mod tests {
         Listed { id: BoxId(id.into()), labels: vec!["hub:000000000000".into(), "p:ffffffffffffffff".into()] }
     }
 
-    fn sweep(api: &Deleting, listed: Vec<Listed>, named: &'static [&'static str]) -> Result<(), String> {
-        let named = move |row: String| -> BoxFuture<'static, Result<bool, String>> { Box::pin(async move { Ok(named.contains(&row.as_str())) }) };
-        tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(delete_orphans(api, "box_fake-key-0000", listed, named))
+    const KEY: &str = "box_fake-key-0000";
+
+    /// Runs the sweep. A row in `named` is named; a row in `unreadable` fails its lookup; any other is an orphan's.
+    fn sweep_with(api: &Deleting, listed: Vec<Listed>, named: &'static [&'static str], unreadable: &'static [&'static str]) -> Vec<String> {
+        let lookup = move |row: String| -> BoxFuture<'static, Result<bool, String>> {
+            Box::pin(async move { if unreadable.contains(&row.as_str()) { Err(format!("database says no ({KEY})")) } else { Ok(named.contains(&row.as_str())) } })
+        };
+        tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(delete_orphans(api, KEY, listed, lookup))
+    }
+
+    fn sweep(api: &Deleting, listed: Vec<Listed>, named: &'static [&'static str]) -> Vec<String> {
+        sweep_with(api, listed, named, &[])
+    }
+
+    fn asked(api: &Deleting) -> Vec<String> {
+        api.asked.lock().unwrap().iter().map(|(_, id)| id.clone()).collect()
     }
 
     #[test]
     fn the_orphan_sweep_deletes_the_next_orphan_after_one_fails() {
         let api = Deleting { refuse: vec!["box_first"], ..Deleting::default() };
-        let listed = vec![orphan("box_first"), orphan("box_second")];
-        let failed = sweep(&api, listed, &[]).unwrap_err();
-        assert_eq!(failed, "could not delete box box_first that no row of this hub names: Upstash Box answered 500: box_first would not go");
-        let asked: Vec<String> = api.asked.lock().unwrap().iter().map(|(_, id)| id.clone()).collect();
-        assert_eq!(asked, ["box_first", "box_second"], "the failed delete does not stop the pass");
+        let failed = sweep(&api, vec![orphan("box_first"), orphan("box_second")], &[]);
+        assert_eq!(failed, ["could not delete box box_first that no row of this hub names: Upstash Box answered 500: box_first would not go for …"]);
+        assert_eq!(asked(&api), ["box_first", "box_second"], "the failed delete does not stop the pass");
     }
 
     #[test]
@@ -1716,18 +1733,36 @@ mod tests {
         let api = Deleting::default();
         let mut kept = orphan("box_kept");
         kept.labels = vec!["p:eeeeeeeeeeeeeeee".into()];
-        assert_eq!(sweep(&api, vec![kept, orphan("box_gone")], &["eeeeeeeeeeeeeeee"]), Ok(()));
-        let asked: Vec<String> = api.asked.lock().unwrap().iter().map(|(_, id)| id.clone()).collect();
-        assert_eq!(asked, ["box_gone"]);
+        assert_eq!(sweep(&api, vec![kept, orphan("box_gone")], &["eeeeeeeeeeeeeeee"]), Vec::<String>::new());
+        assert_eq!(asked(&api), ["box_gone"]);
     }
 
     #[test]
     fn the_orphan_sweep_error_carries_no_key() {
         let api = Deleting { refuse: vec!["box_first", "box_second"], ..Deleting::default() };
-        let failed = sweep(&api, vec![orphan("box_first"), orphan("box_second")], &[]).unwrap_err();
-        assert!(!failed.contains("fake-key-0000"), "{failed}");
-        let asked = api.asked.lock().unwrap().clone();
-        assert!(asked.iter().all(|(key, _)| key == "box_fake-key-0000"), "the key goes to the API, and only there");
+        let failed = sweep_with(&api, vec![orphan("box_first"), orphan("box_second"), unreadable_orphan("box_third")], &[], &["dddddddddddddddd"]);
+        assert_eq!(failed.len(), 3, "{failed:?}");
+        assert!(failed.iter().all(|f| !f.contains(KEY)), "{failed:?}");
+        assert!(api.asked.lock().unwrap().iter().all(|(key, _)| key == KEY), "the key goes to the API, and only there");
+    }
+
+    fn unreadable_orphan(id: &str) -> Listed {
+        Listed { id: BoxId(id.into()), labels: vec!["hub:000000000000".into(), "p:dddddddddddddddd".into()] }
+    }
+
+    #[test]
+    fn an_orphan_whose_row_lookup_fails_stays_and_does_not_stop_the_pass() {
+        let api = Deleting { refuse: vec!["box_first"], ..Deleting::default() };
+        let listed = vec![orphan("box_first"), unreadable_orphan("box_unreadable"), orphan("box_last")];
+        let failed = sweep_with(&api, listed, &[], &["dddddddddddddddd"]);
+        assert_eq!(
+            failed,
+            [
+                "could not delete box box_first that no row of this hub names: Upstash Box answered 500: box_first would not go for …",
+                "could not look up the row of box box_unreadable, so it stays: database says no (…)",
+            ]
+        );
+        assert_eq!(asked(&api), ["box_first", "box_last"], "the box whose row lookup failed is never deleted, and the pass reaches the next one");
     }
 
     #[test]
