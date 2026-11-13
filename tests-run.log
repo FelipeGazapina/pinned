@@ -204,3 +204,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:10:15Z #93 a_box_start_asked_again_returns_the_box_it_started_and_makes_no_second START / avail=15059M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:10:18Z #93 a_box_start_asked_again_returns_the_box_it_started_and_makes_no_second ok / avail=15059M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:10:19Z #94 a_remote_start_asked_again_while_the_first_still_starts_finds_the_one_worker START / avail=15059M /workspace avail=19374M node_stat=Ssl
+2026-11-13T04:10:22Z #94 a_remote_start_asked_again_while_the_first_still_starts_finds_the_one_worker ok / avail=15059M /workspace avail=19374M node_stat=Ssl node_tcp=1
