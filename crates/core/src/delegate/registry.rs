@@ -601,6 +601,10 @@ impl Delegates {
 
     /// Notes the machine that runs the task. A later answer that names the thread there fills it in.
     pub fn set_remote(&self, id: &str, mut remote: RemoteTarget) {
+        // The machine's name (a box is named after its task's title) and the tab id come from the
+        // hub's answer; both sit in notices, so both are one line.
+        remote.name = crate::pinned_lines::flat(&remote.name, 100);
+        remote.tab = remote.tab.map(|tab| crate::pinned_lines::flat(&tab, 100));
         if let Some(task) = self.tasks.lock().unwrap().iter_mut().find(|task| task.id == id) {
             remote.waiting = remote.waiting.or_else(|| task.remote.as_ref().and_then(|was| was.waiting.clone()));
             if let (Parent::Tab(tab), None) = (&task.parent, &task.remote_tab) {
@@ -1936,7 +1940,9 @@ fn fresh(new: NewTask) -> Task {
         id: format!("task-{:02x}{:02x}{:02x}{:02x}", dig[0], dig[1], dig[2], dig[3]),
         parent: new.parent,
         tool: new.tool,
-        title: new.title,
+        // A task made some other way than `parse_request` (a remote machine takes the delegating
+        // node's title as sent) still carries one line.
+        title: crate::pinned_lines::flat(&new.title, 80),
         account: new.account,
         provider: new.provider,
         model: new.model,

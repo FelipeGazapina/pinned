@@ -8,20 +8,17 @@ pub fn parse_request(args: &Value) -> Result<Request, String> {
         .filter(|task| !task.is_empty())
         .ok_or("task is required")?
         .to_owned();
-    let title = match args["title"]
+    // One line from here on: the title goes into notices, a box's machine name and listings.
+    let title = args["title"]
         .as_str()
-        .map(str::trim)
+        .map(|title| crate::pinned_lines::flat(title, 80))
         .filter(|title| !title.is_empty())
-    {
-        Some(title) => thread::clip(title, 80),
-        None => thread::clip(
+        .or_else(|| {
             task.lines()
-                .find(|line| !line.trim().is_empty())
-                .unwrap_or("task")
-                .trim(),
-            80,
-        ),
-    };
+                .map(|line| crate::pinned_lines::flat(line, 80))
+                .find(|line| !line.is_empty())
+        })
+        .unwrap_or_else(|| "task".to_owned());
     let target = &args["target"];
     let (account, driver_kind) = account_from(target)?;
     let model = optional_str(&target["model"]);
