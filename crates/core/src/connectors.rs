@@ -4869,16 +4869,26 @@ impl Connectors {
 
     /// Whether a save of `incoming` reaches, through its Call steps to any depth, a stored workflow
     /// `skips` holds for, or one the store does not have. The graph walked is the one `library`
-    /// holds for this workflow after the save: `settle_graph` stores it as `save_connector` does,
-    /// and `run_graph` builds it, so a save with no graph is walked on what `migrate` builds (a
-    /// slack-message router's categories become Call steps). A called workflow opens its own
-    /// session from its own stored setup, so a check that reads only the save must read these too.
+    /// holds for this workflow after the save. A save that sends a graph is walked on that graph as
+    /// sent: `settle_graph` stores it as itself, or as `None` when it equals `migrate`, and then
+    /// `run_graph` builds the same graph. It is not settled here, because this runs before the save
+    /// validates anything and `settle_graph` projects the graph, which needs a trigger. A save with
+    /// no graph is settled, as `save_connector` does, and walked on `run_graph` of that: a stored
+    /// graph, else what `migrate` builds (a slack-message router's categories become Call steps).
+    /// A called workflow opens its own session from its own stored setup, so a check that reads
+    /// only the save must read these too.
     pub fn calls_any(&self, incoming: &Connector, skips: impl Fn(&Connector) -> bool) -> bool {
         let mut library = self.library();
         let store = self.store.lock().unwrap();
-        let mut saved = incoming.clone();
-        settle_graph(&store, &mut saved, incoming.graph.clone());
-        library.insert(incoming.id.clone(), run_graph(&saved));
+        let walked = match &incoming.graph {
+            Some(sent) => sent.clone(),
+            None => {
+                let mut saved = incoming.clone();
+                settle_graph(&store, &mut saved, None);
+                run_graph(&saved)
+            }
+        };
+        library.insert(incoming.id.clone(), walked);
         let store = store.connectors.clone();
         reach_calls(&library, &incoming.id, |id, graph| {
             let called = (id != incoming.id).then(|| store.iter().find(|c| c.id == id));
