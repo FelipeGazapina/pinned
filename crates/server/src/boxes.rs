@@ -68,8 +68,9 @@ fn hide_box_keys(text: &str) -> String {
 }
 
 /// A delete error for the Usage page: the fixed reason for a missing Box API key; otherwise the
-/// error with the key and anything shaped like a Box key or a token replaced, and cut short.
-/// Deleting a box never sends the Claude token, so it cannot be in the error.
+/// error with the key and anything shaped like a Box key or a token replaced, and cut short at
+/// `WHY_MAX` characters, the last of them `…` when it was cut. Deleting a box never sends the
+/// Claude token, so it cannot be in the error.
 fn stuck_reason(e: &str, key: Option<&str>) -> String {
     if key.is_none() && e.starts_with(NOT_CONNECTED_END) {
         return NO_KEYS.into();
@@ -78,7 +79,13 @@ fn stuck_reason(e: &str, key: Option<&str>) -> String {
     if let Some(key) = key.filter(|k| !k.is_empty()) {
         why = why.replace(key, "…");
     }
-    pinned_core::surface::mask_secrets(&hide_box_keys(&why)).chars().take(WHY_MAX).collect()
+    let why = pinned_core::surface::mask_secrets(&hide_box_keys(&why));
+    if why.chars().count() <= WHY_MAX {
+        return why;
+    }
+    let mut cut: String = why.chars().take(WHY_MAX - 1).collect();
+    cut.push('…');
+    cut
 }
 
 /// The step of `Boxes::end_steps` that failed. Only a failure at the box, or before it, leaves it
@@ -2409,6 +2416,18 @@ mod tests {
         // Also with no key configured: the shape alone hides it.
         assert_eq!(stuck_reason(&format!("sent {other}"), None), "sent …");
         assert_eq!(stuck_reason("box_usage_this_month is slow", None), "box_usage_this_month is slow");
+    }
+
+    #[tokio::test]
+    async fn a_stuck_reason_over_the_limit_is_cut_to_it_and_ends_in_an_ellipsis_and_one_at_the_limit_is_left_whole() {
+        let at_limit = "a".repeat(WHY_MAX);
+        assert_eq!(stuck_reason(&at_limit, Some(FAKE_KEY)), at_limit);
+        let cut = stuck_reason(&"a".repeat(WHY_MAX + 40), Some(FAKE_KEY));
+        assert_eq!(cut.chars().count(), WHY_MAX);
+        assert!(cut.ends_with("aa…") && !cut.ends_with("…."), "{cut}");
+        // The cut counts characters, not bytes: a multi-byte reason is not split inside one.
+        let wide = stuck_reason(&"é".repeat(WHY_MAX + 1), None);
+        assert_eq!((wide.chars().count(), wide.chars().last()), (WHY_MAX, Some('…')));
     }
 
     #[tokio::test]

@@ -621,6 +621,11 @@ function boxListsHtml(boxes, now, open) {
   return `<div class="breakdown"><h3>Running now</h3>${live.length ? boxTableHtml(live, "Running boxes", "Up for", now) : `<p class="muted note">No boxes right now.</p>`}</div>
     ${others.length ? `<details class="box-others"${open ? " open" : ""}><summary>Other boxes (${others.length})</summary>${boxTableHtml(others, "Other boxes", "Status", now)}</details>` : ""}`;
 }
+/** A reason as the end of a sentence: one that already ends in `.` gets no second one, and one the hub cut short ends in `…`, which closes it. */
+const reasonEnd = (why) => {
+  const text = String(why).replace(/\.+$/, "");
+  return text.endsWith("…") ? text : `${text}.`;
+};
 const boxNotice = (text) => `<div class="limit-notices" role="alert">${icon("triangle-alert")}<div><p>${esc(text)}</p></div></div>`;
 /** A stuck box with no `unconfirmed` flag is one pinned knows is on Upstash; one with it is a row that never recorded a box id. */
 const stuckSplit = (stuck) => [(stuck ?? []).filter((b) => !b.unconfirmed), (stuck ?? []).filter((b) => b.unconfirmed)];
@@ -635,8 +640,8 @@ function stuckBoxesHtml(stuck) {
   const notices = [];
   const [known, unconfirmed] = stuckSplit(stuck);
   for (const [list, line] of [
-    [known, (n, why) => `${stuckCount(n)} pinned could not delete: ${why}. ${stillRunning(n)}`],
-    [unconfirmed, (n, why) => `${stuckCount(n)} pinned could not end: ${why}. ${unconfirmedTail(n)}`],
+    [known, (n, why) => `${stuckCount(n)} pinned could not delete: ${reasonEnd(why)} ${stillRunning(n)}`],
+    [unconfirmed, (n, why) => `${stuckCount(n)} pinned could not end: ${reasonEnd(why)} ${unconfirmedTail(n)}`],
   ]) {
     const byWhy = new Map();
     for (const { why } of list) byWhy.set(why, (byWhy.get(why) ?? 0) + 1);

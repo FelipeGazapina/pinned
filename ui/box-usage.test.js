@@ -253,6 +253,18 @@ test("boxes pinned could not delete show as one notice per reason, also when Ups
   assert.doesNotMatch(html({ connected: false }), /could not delete/);
 });
 
+test("a reason that ends in a full stop gets no second one, and a reason the hub cut short closes on its ellipsis", () => {
+  const page = boxPage({ answer: async () => ({}) });
+  const html = (stuck) => page.boxUsageHtml({ data: { connected: false, stuck }, error: "", loading: false, open: {} }, NOW);
+  const dotted = html([{ id: "r1", why: "Upstash said: no such box." }, { id: "r2", why: "Upstash gave up...", unconfirmed: true }]);
+  assert.match(dotted, /1 box pinned could not delete: Upstash said: no such box\. It is still running/);
+  assert.match(dotted, /1 box pinned could not end: Upstash gave up\. pinned could not confirm/);
+  assert.doesNotMatch(dotted, /\.\./);
+  const cut = html([{ id: "r3", why: `${"x".repeat(299)}…` }]);
+  assert.match(cut, /x…\s+It is still running on Upstash/);
+  assert.doesNotMatch(cut, /…\./);
+});
+
 test("a stuck reason is escaped", () => {
   const page = boxPage({ answer: async () => ({}) });
   const html = page.boxUsageHtml({ data: { connected: false, stuck: [{ id: "r1", why: "<b>bold</b> & more" }] }, error: "", loading: false, open: {} }, NOW);
