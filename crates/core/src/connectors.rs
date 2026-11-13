@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -375,7 +375,7 @@ fn reject_call_cycle(origin: &str, origin_graph: &Graph, store: &Store) -> Resul
     if !origin.is_empty() {
         stack.push(origin.to_owned());
     }
-    walk_calls(origin_graph, &mut stack, origin, origin_graph, store)
+    walk_calls(origin_graph, &mut stack, &mut BTreeSet::new(), origin, origin_graph, store)
 }
 
 fn graph_of(store: &Store, workflow: &str) -> Option<Graph> {
@@ -406,23 +406,30 @@ fn settle_graph(store: &Store, connector: &mut Connector, graph: Option<Graph>) 
     }
 }
 
-fn walk_calls(graph: &Graph, stack: &mut Vec<String>, origin: &str, origin_graph: &Graph, store: &Store) -> Result<(), String> {
+/// Walks the Call steps of `graph` depth first. `stack` is the path from the origin, which is where a
+/// cycle shows; `done` holds the workflows whose walk already ended with no cycle, so one reached
+/// by two branches is walked once, not once per branch.
+fn walk_calls(graph: &Graph, stack: &mut Vec<String>, done: &mut BTreeSet<String>, origin: &str, origin_graph: &Graph, store: &Store) -> Result<(), String> {
     for node in &graph.nodes {
         let NodeKind::Call { workflow } = &node.kind else { continue };
         if stack.iter().any(|seen| seen == workflow) {
             let called = store.connectors.iter().find(|c| &c.id == workflow).map_or(workflow.as_str(), |c| c.name.as_str());
             return Err(format!("\"{}\" calls \"{called}\", which calls back", node.name));
         }
+        if done.contains(workflow) {
+            continue;
+        }
         stack.push(workflow.clone());
         let result = if workflow == origin {
-            walk_calls(origin_graph, stack, origin, origin_graph, store)
+            walk_calls(origin_graph, stack, done, origin, origin_graph, store)
         } else if let Some(owned) = graph_of(store, workflow) {
-            walk_calls(&owned, stack, origin, origin_graph, store)
+            walk_calls(&owned, stack, done, origin, origin_graph, store)
         } else {
             Ok(())
         };
         stack.pop();
         result?;
+        done.insert(workflow.clone());
     }
     Ok(())
 }
@@ -6931,6 +6938,80 @@ mod tests {
         let mut renamed = called();
         renamed.name = "Answer v2".into();
         assert_eq!(within_a_bound(renamed).map(|saved| saved.name), Ok("Answer v2".to_owned()), "the next ordinary save works");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A called workflow's graph: a trigger and one Call step per target, in order.
+    fn calls_in_order(targets: &[&str]) -> crate::graph::Graph {
+        let mut nodes = vec![node("trigger", "Trigger", NodeKind::Trigger { watch: Watch::Called })];
+        let mut edges = vec![];
+        for (index, target) in targets.iter().enumerate() {
+            let id = format!("call-{index}");
+            nodes.push(node(&id, &format!("Call {index}"), NodeKind::Call { workflow: (*target).into() }));
+            edges.push(edge("trigger", "out", &id));
+        }
+        crate::graph::Graph { nodes, edges }
+    }
+
+    fn called_with(id: &str, name: &str, targets: &[&str]) -> Connector {
+        let graph = (!targets.is_empty()).then(|| calls_in_order(targets));
+        Connector { id: id.into(), name: name.into(), graph, ..called() }
+    }
+
+    /// Saves `connector` on its own thread, so a save that does not end fails in 5 seconds, not by hanging the run.
+    fn save_within_5_seconds(connectors: &std::sync::Arc<Connectors>, connector: Connector) -> Result<Connector, String> {
+        let (done, result) = std::sync::mpsc::channel();
+        let connectors = connectors.clone();
+        std::thread::spawn(move || {
+            let _ = done.send(connectors.save_connector(connector));
+        });
+        result.recv_timeout(std::time::Duration::from_secs(5)).expect("the save answered within 5 seconds")
+    }
+
+    #[test]
+    fn a_save_of_a_chain_of_workflows_that_each_call_the_next_twice_answers_and_is_accepted() {
+        const LENGTH: usize = 30;
+        let id = |index: usize| format!("w{index}");
+        let chain = (1..=LENGTH)
+            .map(|index| if index == LENGTH { called_with(&id(index), "Last", &[]) } else { called_with(&id(index), &format!("Link {index}"), &[&id(index + 1), &id(index + 1)]) })
+            .collect();
+        let (connectors, dir) = stored("chain-graph", chain);
+        let connectors = std::sync::Arc::new(connectors);
+        let first = called_with(&id(1), "Link 1 renamed", &[&id(2), &id(2)]);
+        assert_eq!(save_within_5_seconds(&connectors, first).map(|saved| saved.name), Ok("Link 1 renamed".to_owned()));
+        let newcomer = called_with("", "Entry", &[&id(1), &id(1)]);
+        assert_eq!(save_within_5_seconds(&connectors, newcomer).map(|saved| saved.name), Ok("Entry".to_owned()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_cycle_reached_only_through_a_second_call_step_is_still_refused() {
+        // x calls a clean workflow first, then y, and y calls back to x. The save of o walks d, then x (skipping d), then y.
+        let stored_workflows = vec![called_with("d", "Clean", &[]), called_with("x", "Cross", &["d", "y"]), called_with("y", "Back", &["x"]), called_with("o", "Origin", &[])];
+        let (connectors, dir) = stored("cycle-second-call", stored_workflows);
+        let connectors = std::sync::Arc::new(connectors);
+        let refused = save_within_5_seconds(&connectors, called_with("o", "Origin", &["d", "x"]));
+        assert_eq!(refused.err().as_deref(), Some("\"Call 0\" calls \"Cross\", which calls back"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_cycle_back_through_the_unsaved_graph_of_the_workflow_being_saved_is_still_refused() {
+        // The stored o has no Call step; the save adds the one that closes the loop o -> p -> o.
+        let stored_workflows = vec![called_with("d", "Clean", &[]), called_with("p", "Middle", &["d", "o"]), called_with("o", "Origin", &[])];
+        let (connectors, dir) = stored("cycle-via-origin", stored_workflows);
+        let connectors = std::sync::Arc::new(connectors);
+        let refused = save_within_5_seconds(&connectors, called_with("o", "Origin", &["d", "p"]));
+        assert_eq!(refused.err().as_deref(), Some("\"Call 1\" calls \"Origin\", which calls back"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_diamond_of_workflows_that_share_a_callee_is_accepted() {
+        let stored_workflows = vec![called_with("d", "Shared", &[]), called_with("b", "Left", &["d"]), called_with("c", "Right", &["d"]), called_with("a", "Top", &[])];
+        let (connectors, dir) = stored("diamond-graph", stored_workflows);
+        let connectors = std::sync::Arc::new(connectors);
+        assert_eq!(save_within_5_seconds(&connectors, called_with("a", "Top", &["b", "c"])).map(|saved| saved.name), Ok("Top".to_owned()));
         let _ = std::fs::remove_dir_all(dir);
     }
 
