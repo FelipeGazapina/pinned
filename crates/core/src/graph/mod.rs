@@ -503,6 +503,22 @@ mod tests {
     }
 
     #[test]
+    fn a_session_step_whose_permission_is_not_a_known_name_is_refused() {
+        let trigger = node("trigger", "Start", NodeKind::Trigger { watch: Watch::Called });
+        let graph = |permission: &str| {
+            let step = node("s", "Fix", NodeKind::Session(SessionSetup { permission: permission.into(), ..SessionSetup::default() }));
+            Graph { nodes: vec![trigger.clone(), step], edges: vec![edge("trigger", "out", "s")] }
+        };
+        for kept in ["", "manual", "acceptEdits", "auto", "dontAsk", "bypassPermissions", "plan"] {
+            assert_eq!(graph(kept).validate(&|_| true), Ok(()), "{kept:?}");
+        }
+        for refused in [" bypassPermissions ", "Plan", "nonsense"] {
+            let error = graph(refused).validate(&|_| true).unwrap_err();
+            assert!(error.starts_with("\"Fix\"") && error.contains("permission"), "{refused:?}: {error}");
+        }
+    }
+
+    #[test]
     fn validate_names_the_node() {
         let talk = node("talk", "Talk", NodeKind::Talk { prompt: String::new() });
         let trigger = node("trigger", "Start", NodeKind::Trigger { watch: Watch::Called });

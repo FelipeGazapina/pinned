@@ -6789,6 +6789,31 @@ mod tests {
     }
 
     #[test]
+    fn a_stored_step_whose_permission_is_not_an_exact_name_never_opens_a_session_that_skips_prompts() {
+        let mut connector = linear_connector();
+        let mut graph = talks(&[]);
+        let step = SessionSetup { permission: " bypassPermissions ".into(), ..SessionSetup::default() };
+        graph.nodes.push(node("s", "Fix", NodeKind::Session(step)));
+        graph.edges.push(edge("t", "out", "s"));
+        connector.graph = Some(graph);
+        // Written as an older save would have kept it, past today's check at save.
+        let (connectors, dir) = stored("odd-permission", vec![connector]);
+        connectors.begin("c1".into(), Subject::LinearIssue { issue: "uuid".into() }, issue_trigger(), "2026-10-29T12:00:00Z").unwrap();
+        let opened = std::sync::Mutex::new(Vec::<Vec<String>>::new());
+        let open = |work: Work| {
+            if let Work::Run(run) = &work {
+                opened.lock().unwrap().push(run.args.clone());
+            }
+            placed(work)
+        };
+        let _ = block_on(connectors.drive(&open));
+        let opened = opened.into_inner().unwrap();
+        assert!(!opened.iter().any(|args| args.windows(2).any(|pair| pair[0] == "--permission-mode" && pair[1] == "bypassPermissions")), "{opened:?}");
+        assert!(opened.is_empty(), "a step whose permission is not a known name opens no session: {opened:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_waiting_run_wakes_when_the_first_tab_list_lacks_its_tab() {
         let mut connector = linear_connector();
         connector.graph = Some(talks(&["one", "two"]));
