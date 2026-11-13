@@ -1220,6 +1220,102 @@ mod tests {
         assert!(sign_ins.load(Ordering::SeqCst) >= 3);
     }
 
+    /// What the fake hub on the test's runtime does with a connection.
+    #[derive(Clone, Copy)]
+    enum Answer {
+        /// Reads the sign in and closes the socket with this code instead of a hello.
+        Close(u16),
+        /// Takes the socket and never reads it, as a hub too busy to look at the sign in.
+        Silent,
+    }
+
+    /// A hub on a real socket, spawned on the test's own runtime so the paused clock moves only once
+    /// both ends are idle. It answers its `n`th connection, from 0, with `answer(n)`, and counts the
+    /// connections it answered.
+    async fn a_hub_on_this_runtime(answer: impl Fn(usize) -> Answer + Send + 'static) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let answered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = answered.clone();
+        tokio::spawn(async move {
+            let mut unread = Vec::new();
+            for n in 0.. {
+                let (socket, _) = listener.accept().await.unwrap();
+                let Ok(mut socket) = tokio_tungstenite::accept_async(socket).await else { continue };
+                match answer(n) {
+                    Answer::Silent => unread.push(socket),
+                    Answer::Close(code) => {
+                        socket.next().await;
+                        let close = tokio_tungstenite::tungstenite::protocol::CloseFrame { code: code.into(), reason: "".into() };
+                        let _ = socket.send(Frame::Close(Some(close))).await;
+                    }
+                }
+                counted.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        (url, answered)
+    }
+
+    /// Runs the link's own `run` loop against `hub` with the production span, for at most
+    /// `for_at_most` on the paused clock. How long `refused_for` took to resolve, or None if it did not.
+    async fn the_wait_against(hub: String, for_at_most: Duration, name: &str) -> Option<Duration> {
+        let dir = std::env::temp_dir().join(format!("pinned-link-{}-paused-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let machine = Machine::new(crate::machine::tests::launch(), Some(dir.clone()), None, |_| {});
+        let shared = Arc::new(Shared::default());
+        let (_stop, stopped) = watch::channel(false);
+        let started = tokio::time::Instant::now();
+        let ended = tokio::select! {
+            _ = run(shared.clone(), creds(hub), machine, "0.0.0-test".into(), stopped, 0) => panic!("the link's run loop ended"),
+            _ = wait_refused(shared.refusals.subscribe()) => Some(started.elapsed()),
+            _ = tokio::time::sleep(for_at_most) => None,
+        };
+        let _ = std::fs::remove_dir_all(dir);
+        ended
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hub_that_never_reads_the_sign_in_for_twenty_minutes_never_ends_the_wait() {
+        let (hub, answered) = a_hub_on_this_runtime(|_| Answer::Silent).await;
+        assert_eq!(the_wait_against(hub, 20 * MINUTE, "silent").await, None);
+        let answered = answered.load(Ordering::SeqCst);
+        assert!(answered >= 10, "the link dialed only {answered} times in 20 minutes");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hub_that_closes_every_sign_in_with_1013_for_twenty_minutes_never_ends_the_wait() {
+        let (hub, answered) = a_hub_on_this_runtime(|_| Answer::Close(1013)).await;
+        assert_eq!(the_wait_against(hub, 20 * MINUTE, "1013").await, None);
+        let answered = answered.load(Ordering::SeqCst);
+        assert!(answered >= 10, "the hub read only {answered} sign ins in 20 minutes");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hub_that_answers_every_sign_in_with_4001_for_fifteen_minutes_ends_the_wait_on_the_next_one() {
+        let (hub, answered) = a_hub_on_this_runtime(|_| Answer::Close(UNAUTHORIZED)).await;
+        let ended = the_wait_against(hub, 20 * MINUTE, "4001").await.expect("15 minutes of unknown token and one more did not end the wait");
+        assert!(ended >= BOX_REFUSED_FOR, "ended after {ended:?}, before the span");
+        assert!(ended <= BOX_REFUSED_FOR + BACKOFF_MAX + Duration::from_secs(1), "ended after {ended:?}, long after the first refusal past the span");
+        let answered = answered.load(Ordering::SeqCst);
+        assert!(answered >= 10, "the hub read only {answered} sign ins");
+    }
+
+    /// A hub outage: the hub says "unknown token" once, then for 20 minutes it either never reads
+    /// the sign in or closes it with 1013. The node stays.
+    #[tokio::test(start_paused = true)]
+    async fn a_hub_outage_after_one_4001_never_ends_the_wait() {
+        let answer = |n: usize| match n {
+            0 => Answer::Close(UNAUTHORIZED),
+            n if n % 2 == 1 => Answer::Silent,
+            _ => Answer::Close(1013),
+        };
+        let (hub, answered) = a_hub_on_this_runtime(answer).await;
+        assert_eq!(the_wait_against(hub, 20 * MINUTE + BOX_REFUSED_FOR, "outage").await, None);
+        let answered = answered.load(Ordering::SeqCst);
+        assert!(answered >= 10, "the hub answered only {answered} sign ins");
+    }
+
     struct ArmsRestart {
         restarted: Arc<std::sync::atomic::AtomicBool>,
     }
