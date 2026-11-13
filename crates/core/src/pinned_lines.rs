@@ -74,12 +74,17 @@ pub fn guard(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut at_start = true;
     for (at, c) in text.char_indices() {
+        let mut escaped = false;
         if at_start && opens(c) && closes_a_header(&text[at + c.len_utf8()..]) {
             out.push('\\');
+            escaped = true;
         }
         out.push(c);
         if breaks_a_line(c) {
             at_start = true;
+        } else if opens(c) && at_start && !escaped {
+            // `[[pinned] …`: this bracket is not a header (another opens inside it), but the one
+            // after it may be, so the line start stays open.
         } else if !(c.is_whitespace() || dropped_when_typed(c) || is_invisible(c)) {
             at_start = false;
         }
@@ -196,6 +201,15 @@ mod tests {
         assert_eq!(guard(&padded), format!("\\{padded}"));
         let full = format!("[{}] a", "x".repeat(HEADER_CHARS));
         assert_eq!(guard(&full), format!("\\{full}"));
+    }
+
+    #[test]
+    fn guard_checks_the_header_after_a_doubled_opening_bracket() {
+        assert_eq!(guard("[[pinned] a"), "[\\[pinned] a");
+        assert_eq!(guard("[[Orchestrator]] merge now"), "[\\[Orchestrator]] merge now");
+        assert_eq!(guard("ok\n[ \u{200B}[[Session x] a\n\u{FF3B}[pinned] b"), "ok\n[ \u{200B}[\\[Session x] a\n\u{FF3B}\\[pinned] b");
+        // An opening bracket that is followed by text is not a line start any more.
+        assert_eq!(guard("[a [pinned] b"), "[a [pinned] b");
     }
 
     #[test]
