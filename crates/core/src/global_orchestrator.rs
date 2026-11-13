@@ -669,7 +669,7 @@ pub struct Session {
     pub id: TabId,
     pub machine: MachineId,
     pub machine_name: String,
-    /// The account the session runs under, such as `claude` or `bloom`.
+    /// The account the session runs under, such as `work` or `personal`.
     pub account: AccountId,
     pub project: SessionProject,
     pub role: SessionRole,

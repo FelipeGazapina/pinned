@@ -20,7 +20,7 @@ pub struct Idea {
     pub title: String,
     #[serde(default)]
     pub text: String,
-    /// A repo key such as `github.com/FelipeGazapina/pinned`; none for an idea that has no project yet.
+    /// A repo key such as `github.com/acme/site`; none for an idea that has no project yet.
     #[serde(default)]
     pub project: Option<String>,
     #[serde(default)]
