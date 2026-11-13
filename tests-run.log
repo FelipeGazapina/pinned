@@ -245,3 +245,7 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:18:05Z #113 an_agent_pairs_machines_and_connects_services_only_with_what_its_owner_types_in_the_app ok / avail=15044M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:18:06Z #114 another_accounts_agent_reaches_none_of_an_accounts_machines_connections_invites_agents_or_files START / avail=15044M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:18:14Z #114 another_accounts_agent_reaches_none_of_an_accounts_machines_connections_invites_agents_or_files ok / avail=15043M /workspace avail=19374M node_stat=Ssl node_tcp=1
+2026-11-13T04:19:35Z NOTE #107 hung (alarm at 300 s): the test binary sat in do_wait on node.wait() (hub.rs:6026) because 'kill -KILL -<pgid>' (hub.rs:6024) left its child 'pinned-server node' alive.
+  Verified on a dummy 'setsid sleep': procps-ng 4.0.2 '/bin/kill -KILL -<pgid>' exits 0 and kills nothing; 'kill -s KILL -- -<pgid>' kills the group.
+  The orphans (test binary ppid 1, its node on 127.0.0.1 only, HOME/config under /tmp/pinned-server-node-login-<pid>) were started by this driver; I ended the node's group at 04:19:35Z. No box process was touched; node 288 stayed Ssl with its link up throughout.
+  cgroup memory at that point: current≈6.5 GB (anon≈0.67 GB, file≈5.7 GB), memory.events max=660 oom_kill=0.
