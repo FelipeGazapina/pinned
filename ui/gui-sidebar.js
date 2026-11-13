@@ -2384,6 +2384,10 @@ function drawNav() {
     usage.querySelector(".bar > span").style.width = `${Math.min(100, Math.max(0, percent))}%`;
     usage.title = `${counts.usage.account}: ${percent}% of the 5-hour window, resets ${new Date(counts.usage.resetsAt).toLocaleTimeString(APP_LOCALE, { hour: "numeric", minute: "2-digit" })}`;
   }
+  const stuck = typeof usageState === "undefined" ? 0 : (usageState.stuck?.length ?? 0);
+  const stuckMark = navRow("usage").querySelector(".stuck-box");
+  stuckMark.hidden = !stuck;
+  stuckMark.title = stuck ? stuckMarkTitle(usageState.stuck) : "";
   for (const name of ["needs-you", "pull-requests", "usage"]) navRow(name).classList.toggle("active", page === name);
   setText(document.getElementById("machines-online"), `${counts.machinesOnline} ${counts.machinesOnline === 1 ? "machine" : "machines"} online`);
   accountButton.classList.toggle("offline", !counts.machinesOnline);
