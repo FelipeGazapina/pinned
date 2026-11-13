@@ -235,6 +235,12 @@ pub(crate) fn client_address(trusted: TrustedProxy, peer: SocketAddr, headers: &
     }
 }
 
+/// Which kind of address `client_address` keys on, never the address: what the hub's log may say.
+pub(crate) fn address_class(trusted: TrustedProxy, peer: SocketAddr, headers: &HeaderMap) -> &'static str {
+    let _ = (trusted, peer, headers);
+    "direct peer"
+}
+
 fn new_password(password: &str) -> Result<(), Error> {
     if password.chars().count() < MIN_PASSWORD {
         return Err(Error(StatusCode::BAD_REQUEST, format!("the password needs at least {MIN_PASSWORD} characters")));
@@ -997,7 +1003,7 @@ async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: 
 
 #[cfg(test)]
 mod tests {
-    use super::{client_address, Limiter, TrustedProxy, ROUTES};
+    use super::{address_class, client_address, Limiter, TrustedProxy, ROUTES};
     use axum::http::HeaderMap;
     use std::net::SocketAddr;
 
@@ -1017,6 +1023,26 @@ mod tests {
             assert_eq!(railway(&[("x-real-ip", unusable), ("x-forwarded-for", "6.6.6.6")]), "100.64.0.7", "{unusable:?} leaves the proxy's own address");
         }
         assert_eq!(railway(&[]), "100.64.0.7");
+    }
+
+    #[test]
+    fn the_log_names_the_kind_of_address_the_limiter_keyed_on_never_the_address() {
+        let class = |trusted, peer: &str, pairs: &[(&'static str, &str)]| address_class(trusted, peer.parse().unwrap(), &headers(pairs));
+        let edge = "100.64.0.7:41000";
+        let railway = |real: &str| class(TrustedProxy::Railway, edge, &[("x-real-ip", real)]);
+        assert_eq!(railway("8.8.4.4"), "edge header, public IPv4");
+        assert_eq!(railway("::ffff:8.8.4.4"), "edge header, public IPv4");
+        assert_eq!(railway("2606:4700::1111"), "edge header, public IPv6");
+        for reserved in ["10.1.2.3", "172.16.0.1", "192.168.1.1", "100.64.0.9", "127.0.0.1", "169.254.1.1", "0.0.0.0", "203.0.113.5", "198.51.100.1", "192.0.2.1", "::1", "fd00::1", "fe80::1", "2001:db8::1"] {
+            assert_eq!(railway(reserved), "edge header, private, shared or reserved range", "{reserved}");
+        }
+        for unusable in ["", "unknown", "8.8.4.4, 8.8.8.8", "8.8.4.4:80"] {
+            assert_eq!(railway(unusable), "header missing or unusable, proxy peer", "{unusable:?}");
+        }
+        assert_eq!(class(TrustedProxy::Railway, edge, &[]), "header missing or unusable, proxy peer");
+        assert_eq!(class(TrustedProxy::Off, "127.0.0.1:5000", &[("x-forwarded-for", "8.8.4.4")]), "loopback forwarded hop");
+        assert_eq!(class(TrustedProxy::Off, "127.0.0.1:5000", &[]), "direct peer");
+        assert_eq!(class(TrustedProxy::Off, edge, &[("x-forwarded-for", "8.8.4.4"), ("x-real-ip", "8.8.4.4")]), "direct peer");
     }
 
     #[test]
