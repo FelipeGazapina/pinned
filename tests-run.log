@@ -92,3 +92,14 @@ postgres up, datadir pgdata.4DlQ pid 6458 port 5499
 2026-11-13T03:49:17Z a_worker_box_that_never_connects_fails_its_task_even_when_the_hub_restarts_mid_boot ok 2026-11-13T03:49:28Z
 2026-11-13T03:49:28Z a_box_start_asked_again_returns_the_box_it_started_and_makes_no_second ok 2026-11-13T03:49:30Z
 2026-11-13T03:49:30Z a_remote_start_asked_again_while_the_first_still_starts_finds_the_one_worker ok 2026-11-13T03:49:32Z
+2026-11-13T03:49:32Z a_remote_workers_usage_reaches_the_task_that_asked_and_is_recorded_once ok 2026-11-13T03:49:41Z
+2026-11-13T03:49:41Z delegation_stats_counts_the_stored_records_it_cannot_read ok 2026-11-13T03:49:43Z
+2026-11-13T03:49:43Z task_cancel_ends_a_remote_task_here_when_its_machine_left_the_account ok 2026-11-13T03:49:46Z
+2026-11-13T03:49:46Z the_global_orchestrator_opens_a_captain_in_a_box_with_the_accounts_connection ok 2026-11-13T03:49:48Z
+2026-11-13T03:49:48Z a_worker_reaches_no_machine_box_or_task_of_another_account ok 2026-11-13T03:49:52Z
+2026-11-13T03:49:52Z a_remote_workers_ask_reaches_the_machine_that_delegated_it_stamped_with_the_machine_that_sent_it ok 2026-11-13T03:49:54Z
+2026-11-13T03:49:54Z an_accounts_delegated_task_records_and_totals_reach_only_that_account ok 2026-11-13T03:49:57Z
+2026-11-13T03:49:57Z a_task_on_a_box_is_billed_the_box_time_since_the_previous_task_on_that_box ok 2026-11-13T03:49:59Z
+2026-11-13T03:49:59Z overlapping_tasks_on_one_box_each_pay_for_their_own_span_however_their_records_arrive ok 2026-11-13T03:50:01Z
+2026-11-13T03:50:01Z an_agent_cannot_add_or_widen_a_workflows_convex_step ok 2026-11-13T03:50:04Z
+2026-11-13T03:50:04Z a_session_reads_convex_through_the_hub_and_the_key_never_leaves_it ok 2026-11-13T03:50:07Z

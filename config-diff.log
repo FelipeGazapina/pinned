@@ -23,3 +23,8 @@
 > drwxr-xr-x 2026-11-13 03:48:56.664754069 .
 < -rw-r--r-- 2026-11-13 03:47:56.192410598 tasks.json
 > -rw-r--r-- 2026-11-13 03:48:56.664754069 tasks.json
+--- after an_accounts_delegated_task_records_and_totals_reach_only_that_account (2026-11-13T03:49:57Z)
+< drwxr-xr-x 2026-11-13 03:48:56.664754069 .
+> drwxr-xr-x 2026-11-13 03:49:57.130099538 .
+< -rw-r--r-- 2026-11-13 03:48:56.664754069 tasks.json
+> -rw-r--r-- 2026-11-13 03:49:57.130099538 tasks.json
