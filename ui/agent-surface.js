@@ -61,6 +61,16 @@ const AGENT_MCP_COPY = {
   enable_mcp_server: (a) => `Turn ${a.enabled ? "on" : "off"} MCP server ${agentMcpName(a.id)}`,
   remove_mcp_server: (a) => `Remove MCP server ${agentMcpName(a.id)}`,
 };
+/** What a box action does, in words. Only the action's known fields are read, the box by the name the app knows and the amount in US$; any other key an agent sent is dropped, never shown. */
+const AGENT_BOX_COPY = {
+  extend_box: (a) => {
+    const usd = typeof a.extra_usd === "number" && Number.isFinite(a.extra_usd) && a.extra_usd > 0 ? `US$ ${a.extra_usd.toFixed(2)}` : "funds";
+    const name = agentMachineName(a.machine);
+    return `Add ${usd} to the budget of ${name ? `box ${name}` : "a box"}`;
+  },
+};
+/** Actions whose title says everything the card shows of their arguments, so the card lists none. */
+const AGENT_TITLE_ONLY = new Set(Object.keys(AGENT_BOX_COPY));
 const agentMcpName = (id) => (typeof mcpUi !== "undefined" && mcpUi.list.find((entry) => entry.id === id)?.server.name) || id;
 const AGENT_NAMES = { linear: "Linear", slack: "Slack", github: "GitHub", vercel: "Vercel", upstash: "Upstash", convex: "Convex" };
 /** `remove_machine` as "Remove machine", `connect_github` as "Connect GitHub". */
@@ -141,7 +151,7 @@ function agentActionTitle(action, args, machine) {
       args = null;
     }
   }
-  const said = AGENT_MCP_COPY[action]?.(args ?? {}) ?? agentSessionCopy(action, args ?? {}, machine);
+  const said = AGENT_MCP_COPY[action]?.(args ?? {}) ?? AGENT_BOX_COPY[action]?.(args ?? {}) ?? agentSessionCopy(action, args ?? {}, machine);
   if (said) return said;
   const named = Object.values(args ?? {}).map(agentMachineName).find(Boolean);
   return named ? `${agentWords(action)} ${named}` : agentWords(action);
@@ -157,7 +167,7 @@ function agentConfirmationHtml(c) {
     <span class="dot"></span>
     <div class="texts">
       <b class="title" title="${esc(c.about)}">${esc(agentActionTitle(c.action, c.args, c.machine))}${c.target ? ` on ${esc(agentMachineName(c.target) || c.target)}` : ""}</b>
-      ${Object.keys(c.args ?? {}).length ? `<pre class="args">${esc(JSON.stringify(c.args, null, 2))}</pre>` : ""}
+      ${Object.keys(c.args ?? {}).length && !AGENT_TITLE_ONLY.has(c.action) ? `<pre class="args">${esc(JSON.stringify(c.args, null, 2))}</pre>` : ""}
       <span class="who">${esc(who)}</span>
       <div class="actions start"><button type="button" class="primary" data-agent="approve"${busy}>Approve</button><button type="button" class="outline" data-agent="deny"${busy}>Deny</button></div>
     </div>
