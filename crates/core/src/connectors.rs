@@ -2826,15 +2826,18 @@ Every node may carry a "group" name; steps of one concern share it. Answer with 
 
 const NOT_A_MAP: &str = "the model did not answer with a workflow map";
 
-/// The draft in a model's text answer, which may wrap the JSON object in a fence or prose.
+/// The draft in a model's text answer: the first JSON object with nodes, wherever a fence or
+/// prose puts it. Prose may quote a `{{trigger.text}}` before the object starts.
 fn draft_in(answer: &str) -> Result<DraftGraph, String> {
-    let whole = answer.find('{').zip(answer.rfind('}')).filter(|(a, b)| a < b).map(|(a, b)| &answer[a..=b]);
-    let value: Value = whole.and_then(|json| serde_json::from_str(json).ok()).ok_or(NOT_A_MAP)?;
-    // Every draft field defaults, so any object would parse as an empty map.
-    if !value.get("nodes").is_some_and(Value::is_array) {
-        return Err(NOT_A_MAP.into());
-    }
-    serde_json::from_value(value).map_err(|_| NOT_A_MAP.into())
+    answer
+        .match_indices('{')
+        .find_map(|(start, _)| {
+            // Every draft field defaults, so any object would parse as an empty map.
+            let value = serde_json::Deserializer::from_str(&answer[start..]).into_iter::<Value>().next()?.ok()?;
+            value.get("nodes").is_some_and(Value::is_array).then_some(value)
+        })
+        .and_then(|value| serde_json::from_value(value).ok())
+        .ok_or_else(|| NOT_A_MAP.into())
 }
 
 /// The graph a model's text answer drafts, built as `build_generated` builds one. `called` says
@@ -5337,7 +5340,7 @@ mod tests {
     fn a_text_answer_drafts_its_map_through_fences_and_prose() {
         let map = r#"{"nodes":[{"name":"Message","type":"trigger","watch":{"kind":"slack-mention","channel":"support"}},{"name":"Reply","type":"reply","text":"hi"}],"edges":[{"from":"Message","to":"Reply"}]}"#;
         let nobody = |_: &str| false;
-        for answer in [map.to_owned(), format!("```json\n{map}\n```"), format!("Here is the workflow:\n\n{map}\n\nReview it before saving.")] {
+        for answer in [map.to_owned(), format!("```json\n{map}\n```"), format!("Here is the workflow:\n\n{map}\n\nReview it before saving."), format!("It replies with {{{{trigger.text}}}}:\n```json\n{map}\n```\nThe {{{{answers.kind}}}} span fills in.")] {
             let graph = graph_from_answer(&answer, &nobody).unwrap_or_else(|e| panic!("{e}: {answer}"));
             assert_eq!(graph.nodes.len(), 2, "{answer}");
             assert_eq!(graph.edges.len(), 1, "{answer}");
