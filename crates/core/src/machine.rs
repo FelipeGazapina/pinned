@@ -1,11 +1,11 @@
 use crate::accounts::{self, Account, Accounts, Auth, Provider};
 use crate::agent::{role_env, role_of, session_of, AgentEvent, AgentStatus, LimitWindow, Message, ProjectTool, Role, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV, TASK_ENV};
 use crate::stats::{ThreadStats, Tally};
-use crate::wire::{Call, HubCall, MachineEvent, Program, ProjectView, RunSpec, TabId, TabView, ThreadMatch, ThreadPage, UpdateStatus, EXE_PLACEHOLDER};
+use crate::wire::{CutBySleep, Call, HubCall, MachineEvent, Program, ProjectView, RunSpec, TabId, TabView, ThreadMatch, ThreadPage, UpdateStatus, EXE_PLACEHOLDER};
 use crate::global_orchestrator::{self as global, BusyPolicy, CaptainReport, Handoff, Progress};
 use crate::taste::{self, TasteField, TastePatch, TasteScope, Tastes};
 use crate::panel::{DeviceHub, FileServer, Shells};
-use crate::{branches, commands, favicon, files, github, history, hooks, mcp, memory, model2vec, panel, plugin, process, projects, pty, pulls, reading, reminders, scaffold, scripts, sessions, skills, subagents, surface, sync, thread, titles, uploads, usage, workspace};
+use crate::{sleep, branches, commands, favicon, files, github, history, hooks, mcp, memory, model2vec, panel, plugin, process, projects, pty, pulls, reading, reminders, scaffold, scripts, sessions, skills, subagents, surface, sync, thread, titles, uploads, usage, workspace};
 use portable_pty::{CommandBuilder, PtySize};
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -435,6 +435,10 @@ struct Tab {
     interrupted: bool,
     /// Unix time a usage limit that stopped the turn lifts; the session then continues by itself.
     resume_at: Option<u64>,
+    /// The turn died on an API error inside a sleep window; cleared by the next turn or typing.
+    cut_by_sleep: Option<CutBySleep>,
+    /// The last failure was an API error, which a sleep window found later may still claim.
+    api_error: bool,
     /// The session doesn't continue by itself when its usage limit lifts.
     held_at_limit: bool,
     /// The model every start of this tab passes as `--model`, picked for its conversation alone.
@@ -499,6 +503,7 @@ impl Tab {
             interrupted: self.interrupted,
             resume_at: self.resume_at,
             held: self.held_at_limit,
+            cut_by_sleep: self.cut_by_sleep,
             account: self.account.id.clone(),
             model: self.model.clone(),
             permission_mode: self.permission_mode.clone().filter(|_| !self.permission_unknown),
@@ -543,6 +548,7 @@ impl Tab {
             updated: self.updated,
             session: self.claude_session.clone(),
             interrupted: self.interrupted,
+            cut_by_sleep: self.cut_by_sleep,
             stats: Some(self.tally.stats()).filter(|s| *s != ThreadStats::default()),
             branch: self.tally.branch.clone(),
             pr: self.tally.pr.clone(),
@@ -644,6 +650,8 @@ pub struct Machine {
     boot: u64,
     next_tab: AtomicU32,
     sessions_file: Option<PathBuf>,
+    /// The last time the machine slept, found from a jump between ticks, and saved beside the sessions.
+    sleeps: Mutex<sleep::Watch>,
     sync_file: Option<PathBuf>,
     sync_loop_holds_state: AtomicBool,
     projects: Mutex<Vec<projects::Project>>,
@@ -862,6 +870,7 @@ impl Machine {
             boot: fresh_boot(),
             next_tab: AtomicU32::new(1),
             sessions_file: dir.as_ref().map(|d| d.join("sessions.json")),
+            sleeps: Mutex::new(sleep::Watch::with_window(dir.as_ref().and_then(|d| sleep::load(&d.join("sleep.json"))))),
             sync_file: dir.as_ref().map(|d| d.join("sync.json")),
             sync_loop_holds_state: AtomicBool::new(false),
             projects: Mutex::new(projects),
@@ -2557,8 +2566,11 @@ impl Machine {
             return self.shells.write(tab, data);
         }
         self.awake(tab)?;
+        let mut cleared = false;
         let (submitted, mode_unknown) = self.tab(tab, |t| {
             let submitted = note_draft(&mut t.draft, data);
+            // The terminal's own replies to the screen start with an escape and are not the user.
+            cleared = !data.starts_with(b"\x1b") && t.cut_by_sleep.take().is_some();
             if submitted {
                 t.note_submit();
             }
@@ -2582,8 +2594,11 @@ impl Machine {
             }
             Ok::<_, String>((submitted, mode_unknown))
         })??;
-        if mode_unknown {
+        if mode_unknown || cleared {
             self.save_sessions();
+        }
+        if cleared {
+            self.emit_tabs();
         }
         if submitted {
             self.arm_delegate_pass();
@@ -4168,7 +4183,7 @@ impl Machine {
                 let account = self.account_for(Some(&s.account), &s.cwd).ok()?;
                 let (launch, resume_at) = s.reopen(now, account.provider);
                 let id = self.add_tab(s.cwd, account, launch, s.env, s.bypass, Some(s.session));
-                let _ = self.tab(&id, |t| (t.interrupted, t.resume_at, t.held_at_limit, t.model, t.permission_mode, t.asleep) = (s.interrupted, resume_at, s.held, s.model, s.permission_mode, !s.interrupted));
+                let _ = self.tab(&id, |t| (t.interrupted, t.resume_at, t.held_at_limit, t.model, t.permission_mode, t.asleep, t.cut_by_sleep) = (s.interrupted, resume_at, s.held, s.model, s.permission_mode, !s.interrupted, s.cut_by_sleep));
                 Some((id, s.spawned_by))
             })
             .collect();
@@ -5668,6 +5683,26 @@ impl Machine {
         })?
     }
 
+    /// One tick of the sleep watch. A sleep it finds is saved, and claims the failed turns whose
+    /// error landed before the tick noticed it.
+    fn watch_sleep(&self, now: u64) {
+        let Some(window) = self.sleeps.lock().unwrap().tick(now) else { return };
+        if let Some(file) = self.sessions_file.as_ref() {
+            sleep::save(&file.with_file_name("sleep.json"), window);
+        }
+        let flagged = self.tabs.lock().unwrap().values_mut().fold(false, |any, t| {
+            let hit = t.status == Some(AgentStatus::Failed) && t.cut_by_sleep.is_none() && sleep::cut_by(Some(window), t.api_error, t.resume_at, t.updated.unwrap_or(0)).is_some();
+            if hit {
+                t.cut_by_sleep = Some(window);
+            }
+            any || hit
+        });
+        if flagged {
+            self.save_sessions();
+            self.emit_tabs();
+        }
+    }
+
     fn arm_delegate_pass(&self) {
         if self.delegate_pass_armed.swap(true, Ordering::Relaxed) {
             return;
@@ -5686,6 +5721,7 @@ impl Machine {
                 machine.look_after_remotes(stopped);
                 machine.send_remote_ends(Instant::now());
                 machine.send_remote_asks(Instant::now());
+                machine.watch_sleep(unix_now());
                 machine.meter_workers();
                 if !machine.delegates.unrecorded(1).is_empty() {
                     machine.send_records();
@@ -5988,6 +6024,8 @@ impl Machine {
             last_found_transcript: None,
             interrupted: false,
             resume_at: None,
+            cut_by_sleep: None,
+            api_error: false,
             held_at_limit: false,
             model: None,
             made: None,
@@ -6149,17 +6187,22 @@ impl Machine {
         let was_done = self.tab(tab, |t| t.status == Some(AgentStatus::Done)).unwrap_or(false);
         let detail = (event.status == AgentStatus::NeedsInput && !was_done).then(|| self.pending_ask(tab)).flatten();
         let changed = self.tab(tab, |t| {
-            let before = (t.interrupted, t.resume_at, t.held_at_limit);
+            let before = (t.interrupted, t.resume_at, t.held_at_limit, t.cut_by_sleep);
+            let window = self.sleeps.lock().unwrap().window();
             match event.status {
                 AgentStatus::Working | AgentStatus::Done => {
                     t.interrupted = event.status == AgentStatus::Working;
                     t.resume_at = None;
                     t.held_at_limit = false;
+                    t.cut_by_sleep = None;
+                    t.api_error = false;
                 }
                 AgentStatus::Failed => {
                     t.interrupted = true;
                     t.held_at_limit &= t.resume_at == event.resume_at;
                     t.resume_at = event.resume_at;
+                    t.api_error = event.message.as_deref().is_some_and(sleep::is_api_error);
+                    t.cut_by_sleep = sleep::cut_by(window, t.api_error, t.resume_at, unix_now());
                 }
                 AgentStatus::NeedsInput => {}
             }
@@ -6198,7 +6241,7 @@ impl Machine {
                 t.permission_unknown = false;
                 t.mode_live = true;
             }
-            before != (t.interrupted, t.resume_at, t.held_at_limit) || mode_before != (t.permission_unknown, t.permission_mode.clone())
+            before != (t.interrupted, t.resume_at, t.held_at_limit, t.cut_by_sleep) || mode_before != (t.permission_unknown, t.permission_mode.clone())
         });
         if changed == Ok(true) {
             self.save_sessions();
@@ -8330,6 +8373,127 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// An event as the hooks report it, ending a turn with `message`.
+    fn ended(tab: &str, status: AgentStatus, message: Option<&str>, resume_at: Option<u64>) -> AgentEvent {
+        AgentEvent { status, cwd: None, message: message.map(str::to_owned), tab: Some(tab.to_owned()), session: None, title: None, resume_at, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false, reply: None }
+    }
+
+    /// Makes the machine see a sleep of `[unix_now() - before, unix_now() + after]` on a fake clock.
+    fn slept_around_now(m: &Machine, before: u64, after: u64) {
+        let start = unix_now() - before;
+        m.watch_sleep(start);
+        m.watch_sleep(start + before + after);
+    }
+
+    const API_ERROR: &str = "API Error: Unable to connect to API (ECONNRESET)";
+
+    #[test]
+    fn an_api_error_inside_the_sleep_window_is_cut_by_the_sleep() {
+        let m = machine();
+        let tab = m.open_tab(None, false).unwrap();
+        m.record_status(&tab, &ended(&tab, AgentStatus::Working, None, None));
+        slept_around_now(&m, 3600, 5);
+        m.record_status(&tab, &ended(&tab, AgentStatus::Failed, Some(API_ERROR), None));
+        let view = m.view(&tab).unwrap();
+        let window = view.cut_by_sleep.expect("flagged");
+        assert_eq!(window.woke_at - window.slept_at, 3605);
+        assert!(view.interrupted);
+    }
+
+    #[test]
+    fn the_same_error_outside_the_window_is_not_cut_by_the_sleep() {
+        let m = machine();
+        let tab = m.open_tab(None, false).unwrap();
+        m.watch_sleep(unix_now() - 100_000);
+        m.watch_sleep(unix_now() - 90_000);
+        m.record_status(&tab, &ended(&tab, AgentStatus::Failed, Some(API_ERROR), None));
+        assert_eq!(m.view(&tab).unwrap().cut_by_sleep, None);
+        let none_seen = machine();
+        let other = none_seen.open_tab(None, false).unwrap();
+        none_seen.record_status(&other, &ended(&other, AgentStatus::Failed, Some(API_ERROR), None));
+        assert_eq!(none_seen.view(&other).unwrap().cut_by_sleep, None, "no sleep seen");
+        let text = machine();
+        let plain = text.open_tab(None, false).unwrap();
+        slept_around_now(&text, 3600, 5);
+        text.record_status(&plain, &ended(&plain, AgentStatus::Failed, Some("rate_limit"), None));
+        assert_eq!(text.view(&plain).unwrap().cut_by_sleep, None, "not an API error");
+    }
+
+    #[test]
+    fn a_usage_limit_in_the_window_keeps_its_own_path() {
+        let m = machine();
+        let tab = m.open_tab(None, false).unwrap();
+        slept_around_now(&m, 3600, 5);
+        m.record_status(&tab, &ended(&tab, AgentStatus::Failed, Some(API_ERROR), Some(unix_now() + 3600)));
+        let view = m.view(&tab).unwrap();
+        assert_eq!(view.cut_by_sleep, None);
+        assert!(view.resume_at.is_some());
+    }
+
+    #[test]
+    fn a_done_turn_in_the_window_is_not_flagged() {
+        let m = machine();
+        let tab = m.open_tab(None, false).unwrap();
+        slept_around_now(&m, 3600, 5);
+        m.record_status(&tab, &ended(&tab, AgentStatus::Done, Some(API_ERROR), None));
+        let view = m.view(&tab).unwrap();
+        assert_eq!((view.cut_by_sleep, view.interrupted), (None, false));
+    }
+
+    #[test]
+    fn a_new_turn_clears_the_flag() {
+        let m = machine();
+        let tab = m.open_tab(None, false).unwrap();
+        slept_around_now(&m, 3600, 5);
+        m.record_status(&tab, &ended(&tab, AgentStatus::Failed, Some(API_ERROR), None));
+        assert!(m.view(&tab).unwrap().cut_by_sleep.is_some());
+        m.record_status(&tab, &ended(&tab, AgentStatus::Working, None, None));
+        assert_eq!(m.view(&tab).unwrap().cut_by_sleep, None);
+    }
+
+    #[test]
+    fn typing_clears_the_flag_but_the_terminals_own_replies_do_not() {
+        let m = machine();
+        let tab = m.open_tab(None, false).unwrap();
+        slept_around_now(&m, 3600, 5);
+        m.record_status(&tab, &ended(&tab, AgentStatus::Failed, Some(API_ERROR), None));
+        let _ = m.write_input(&tab, b"\x1b[I");
+        assert!(m.view(&tab).unwrap().cut_by_sleep.is_some(), "a focus report is not the user");
+        let _ = m.write_input(&tab, b"go");
+        assert_eq!(m.view(&tab).unwrap().cut_by_sleep, None);
+    }
+
+    #[test]
+    fn a_sleep_found_after_the_error_still_claims_it() {
+        let m = machine();
+        let tab = m.open_tab(None, false).unwrap();
+        m.watch_sleep(unix_now() - 3600);
+        m.record_status(&tab, &ended(&tab, AgentStatus::Failed, Some(API_ERROR), None));
+        assert_eq!(m.view(&tab).unwrap().cut_by_sleep, None, "the tick had not noticed the sleep yet");
+        m.watch_sleep(unix_now() + 2);
+        assert!(m.view(&tab).unwrap().cut_by_sleep.is_some());
+    }
+
+    #[test]
+    fn the_flag_and_the_window_survive_a_reload() {
+        let root = temp("cut-by-sleep-reload");
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(root.join("config")).unwrap();
+        let before = accounts_machine(&root);
+        let tab = before.add_tab(app, Account::builtin(Provider::Claude), vec![], vec![], false, Some("s1".into()));
+        slept_around_now(&before, 3600, 5);
+        before.record_status(&tab, &ended(&tab, AgentStatus::Failed, Some(API_ERROR), None));
+        let window = before.view(&tab).unwrap().cut_by_sleep.expect("flagged");
+        let saved = sessions::load(&root.join("config/sessions.json"));
+        assert_eq!(saved.iter().map(|s| s.cut_by_sleep).collect::<Vec<_>>(), [Some(window)]);
+        let after = accounts_machine(&root);
+        assert_eq!(after.sleeps.lock().unwrap().window(), Some(window));
+        let tabs = after.restore_tabs();
+        assert_eq!(after.view(&tabs[0]).unwrap().cut_by_sleep, Some(window));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn a_session_held_at_its_usage_limit_stays_held_until_the_next_turn() {
         let m = machine();
@@ -9694,6 +9858,7 @@ echo '{"type":"result","result":"ok"}'
                 account: "claude".into(),
                 model: None,
                 permission_mode: Some("plan".into()),
+                cut_by_sleep: None,
                 spawned_by: None,
             }],
         )
