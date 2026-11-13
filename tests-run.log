@@ -1,1 +1,12 @@
 postgres up, datadir pgdata.4DlQ pid 6458 port 5499
+2026-11-13T03:44:35Z a_client_drives_a_tab_on_a_paired_node_through_the_hub ok 2026-11-13T03:44:39Z
+2026-11-13T03:44:39Z a_restarted_node_does_not_reuse_tab_ids_and_the_client_gets_that_list ok 2026-11-13T03:44:41Z
+2026-11-13T03:44:41Z a_reconnected_node_does_not_wipe_the_tabs_the_client_already_has ok 2026-11-13T03:44:44Z
+2026-11-13T03:44:44Z a_restarted_node_reports_the_restored_session ok 2026-11-13T03:44:47Z
+2026-11-13T03:44:47Z quitting_through_the_hub_sends_an_empty_tab_list_before_disconnect ok 2026-11-13T03:44:49Z
+2026-11-13T03:44:49Z a_remote_project_with_no_thread_is_still_in_list_projects ok 2026-11-13T03:44:50Z
+2026-11-13T03:44:50Z the_hub_serves_the_install_script_binaries_and_the_web_app ok 2026-11-13T03:44:51Z
+2026-11-13T03:44:51Z a_connector_run_goes_to_its_machine_else_another_online_one ok 2026-11-13T03:44:53Z
+2026-11-13T03:44:53Z an_apps_first_sign_in_moves_its_connectors_into_an_empty_account_only ok 2026-11-13T03:44:55Z
+2026-11-13T03:44:55Z the_accounts_taste_lives_on_the_hub_and_a_machines_old_style_seeds_an_empty_account_once FAILED 2026-11-13T03:44:57Z
+2026-11-13T03:44:57Z a_taste_chat_changes_its_own_accounts_taste_live_and_never_another_accounts ok 2026-11-13T03:45:00Z

@@ -1,0 +1,5 @@
+--- after an_apps_first_sign_in_moves_its_connectors_into_an_empty_account_only (2026-11-13T03:44:55Z)
+< drwxr-xr-x 2026-11-13 03:43:54.352020079 .
+> drwxr-xr-x 2026-11-13 03:44:54.814382535 .
+< -rw-r--r-- 2026-11-13 03:43:54.352020079 tasks.json
+> -rw-r--r-- 2026-11-13 03:44:54.814382535 tasks.json

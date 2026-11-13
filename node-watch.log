@@ -163,3 +163,24 @@
   log: pinned: synced plugins: 0 up, 2337 down
   log: pinned: synced github.com/felipegazapina/pinned: 0 up, 239 down
   test:   Executable tests/hub.rs (target/debug/build/pinned-server/d3d2d3cbddb62ab3/out/hub-d3d2d3cbddb62ab3)
+== 2026-11-13T03:44:41Z node=288 alive
+  tcp ESTAB 172.18.0.71:38452 153.52.255.120:443
+  mem.current=6646571008 oom_kill=0
+  log: pinned: connected to https://pinned-hub-production.up.railway.app
+  log: pinned: synced plugins: 0 up, 2337 down
+  log: pinned: synced github.com/felipegazapina/pinned: 0 up, 239 down
+  test: === 2026-11-13T03:44:41Z a_reconnected_node_does_not_wipe_the_tabs_the_client_already_has
+== 2026-11-13T03:44:51Z node=288 alive
+  tcp ESTAB 172.18.0.71:38452 153.52.255.120:443
+  mem.current=6704197632 oom_kill=0
+  log: pinned: connected to https://pinned-hub-production.up.railway.app
+  log: pinned: synced plugins: 0 up, 2337 down
+  log: pinned: synced github.com/felipegazapina/pinned: 0 up, 239 down
+  test: test a_connector_run_goes_to_its_machine_else_another_online_one ... 
+== 2026-11-13T03:45:01Z node=288 alive
+  tcp ESTAB 172.18.0.71:38452 153.52.255.120:443
+  mem.current=6714560512 oom_kill=0
+  log: pinned: connected to https://pinned-hub-production.up.railway.app
+  log: pinned: synced plugins: 0 up, 2337 down
+  log: pinned: synced github.com/felipegazapina/pinned: 0 up, 239 down
+  test: test machines_share_a_projects_memory_through_the_hub_wherever_they_keep_it ... 
