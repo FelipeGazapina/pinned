@@ -1,0 +1,8 @@
+=== start 2026-11-13T03:30:28Z
+nproc: 64
+               total        used        free      shared  buff/cache   available
+Mem:          253148       70197       34502        1247      151774      182950
+Swap:              0           0           0
+cgroup memory.max: 17179869184
+box pinned-server node pid 292 oom_score_adj: 0
+logger: /tmp/claude-1002/-home-boxuser-pinned-pinned--claude-worktrees-pinned-b7d6f15c/266e4858-d0c7-4fc3-8dc5-63ee00c6c15b/scratchpad/memlogger.sh, every 10 s
