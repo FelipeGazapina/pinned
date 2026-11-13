@@ -33,7 +33,7 @@ pub struct Load {
 /// One agent account of a machine, as far as a caller needs to choose it.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
 pub struct AccountState {
-    /// The `providerInstanceId` of `orchestrator_capabilities`, such as `claude` or `bloom`.
+    /// The `providerInstanceId` of `orchestrator_capabilities`, such as `work` or `personal`.
     pub id: String,
     /// `claude`, `codex` or `cursor`.
     pub driver_kind: String,
