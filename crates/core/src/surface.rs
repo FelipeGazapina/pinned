@@ -268,6 +268,12 @@ pub const ACTIONS: &[Action] = &[
     h("vercel_models", Read, "The chat and decision models a workflow may use.").wired(),
     h("connect_upstash", Confirm, "Connects Upstash for boxes. The user enters the keys in the app; an agent never sends one.").wired().asks(&["key", "claude_token"]),
     h("disconnect_upstash", Confirm, "Deletes the account's boxes and disconnects Upstash.").wired(),
+    h("list_schedules", Read, "Every scheduled task of the account as JSON, soonest first, with its next run (next_at) and last run.").wired(),
+    h("save_schedule", Write, "Saves a scheduled task: leave id empty to create one, or send an existing task whole to edit it. schedule is {\"kind\":\"once\",\"at\":\"2026-11-13T09:00\"} or {\"kind\":\"cron\",\"expr\":\"0 9 * * 1-5\"} in tz, an IANA zone such as America/Sao_Paulo. target is {\"kind\":\"me\"}, orchestrator, captain {project}, or session {session}; action is {\"kind\":\"prompt\",\"text\":...} or workflow {id}. dry_run: true answers the next three run times in tz and stores nothing: read them back to the user. A task you create is active at once and the user is told; it may not repeat more often than every 15 minutes, and you may hold 20. A task that carries approvals (steps it may take without asking), or an edit of a task the user created, waits for the user's approval.").wired().checks(crate::schedule::agent_check),
+    h("pause_schedule", Write, "Pauses a scheduled task (paused: true) or starts it again, and answers it. Pausing or starting one the user created, or starting one that carries approvals, waits for the user's approval.").wired(),
+    h("delete_schedule", Write, "Deletes a scheduled task and its run history. Deleting one the user created waits for the user's approval.").wired(),
+    h("schedule_runs", Read, "The runs of scheduled task id, newest first, up to limit (20 when left out).").wired(),
+    h("set_release_protection", Excluded, "whether tag and main protection exist, which only the user says: until then a task may not be pre-approved for a release"),
     h("set_box_access", Confirm, "Sets what the account's boxes may reach.").wired(),
     h("set_repo_insight", Confirm, "Turns on or off whether the account's global orchestrator may read its repositories with repo_overview, repo_read and repo_search.").wired(),
     h("answer_box", Excluded, "the user's yes or no to a box's question, which only they give, on the Upstash card in the app"),
@@ -359,10 +365,11 @@ pub const ACTIONS: &[Action] = &[
 pub const LOCKED: &str = "unlock with your password in the app to do this";
 
 /// Whether a signed-in client must have unlocked with the password to run `cmd` on `side`: a
-/// decision always, and a `confirm` action on a `locked` login. The app keeps its login on disk,
-/// where any process of the same user reads it; the unlock lives in the app's memory only.
+/// decision and the release-protection switch always, and a `confirm` action on a `locked` login.
+/// The app keeps its login on disk, where any process of the same user reads it; the unlock lives
+/// in the app's memory only.
 pub fn owner_only(side: Side, cmd: &str, locked: bool) -> bool {
-    if side == Side::Hub && cmd == "decide_confirmation" {
+    if side == Side::Hub && matches!(cmd, "decide_confirmation" | "set_release_protection") {
         return true;
     }
     locked && of_cmd(side, cmd).is_some_and(|action| action.class == Confirm)
@@ -713,6 +720,9 @@ pub struct AuditEntry {
     pub detail: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    /// The scheduled task the act is about: one it saved, paused or deleted, or later one a run did it for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
@@ -947,6 +957,16 @@ pub fn mask_secrets(text: &str) -> String {
     out
 }
 
+/// `value` with every string in it, however deep, passed through `mask_secrets`. Keys stay.
+pub fn mask_values(value: Value) -> Value {
+    match value {
+        Value::String(text) => Value::String(mask_secrets(&text)),
+        Value::Array(items) => Value::Array(items.into_iter().map(mask_values).collect()),
+        Value::Object(fields) => Value::Object(fields.into_iter().map(|(key, value)| (key, mask_values(value))).collect()),
+        other => other,
+    }
+}
+
 /// A Convex deploy key: `dev:`, `prod:` or `preview:`, a name, `|` and a token of 16 characters or
 /// more. With no prefix the name must read as a deployment's and the token be 40 characters or
 /// more, so a shell pipe, a regex alternation or a table rule is not taken for a key.
@@ -1015,6 +1035,7 @@ mod tests {
     fn a_decision_always_needs_the_unlock_and_a_confirm_action_needs_it_on_a_locked_login() {
         let needs = |side, cmd, locked| owner_only(side, cmd, locked);
         assert!(needs(Side::Hub, "decide_confirmation", false) && needs(Side::Hub, "decide_confirmation", true));
+        assert!(needs(Side::Hub, "set_release_protection", false) && needs(Side::Hub, "set_release_protection", true), "pre-approving releases needs the password");
         assert!(needs(Side::Hub, "remove_machine", true) && !needs(Side::Hub, "remove_machine", false), "an older app's login keeps its calls");
         assert!(needs(Side::Node, "update_self", true) && needs(Side::Hub, "approve_agent", true) && needs(Side::Hub, "set_taste", true));
         assert!(!needs(Side::Hub, "machines", true) && !needs(Side::Hub, "rename_machine", true) && !needs(Side::Node, "write_input", true));
@@ -1025,7 +1046,7 @@ mod tests {
             assert!(needs(Side::Hub, cmd, true), "changing who may use a box, or its credentials, still needs the password: {cmd}");
         }
         let confirm: Vec<&str> = ACTIONS.iter().filter(|a| needs(a.side, a.cmd, true)).map(|a| a.name).collect();
-        assert_eq!(confirm.len(), ACTIONS.iter().filter(|a| a.class == Confirm).count() + 1, "every confirm action and the decision: {confirm:?}");
+        assert_eq!(confirm.len(), ACTIONS.iter().filter(|a| a.class == Confirm).count() + 2, "every confirm action, the decision and the release-protection switch: {confirm:?}");
         assert!(include_str!("../../../ui/hub.js").contains(&format!("const LOCKED = \"{LOCKED}\";")), "the app asks for the password on this exact refusal");
     }
 
@@ -1066,7 +1087,7 @@ mod tests {
                 "switch_account", "prompt", "regenerate_title", "save_skill", "set_usage_prices", "save_project_scripts", "set_workspace",
                 "device_hub", "device_agents", "device", "rewind", "fork", "update_self", "connect_linear", "disconnect_linear", "connect_slack",
                 "disconnect_slack", "connect_github", "disconnect_github", "connect_vercel", "disconnect_vercel", "connect_upstash",
-                "disconnect_upstash", "set_box_access", "set_repo_insight", "clone", "share_project", "save_connector", "delete_connector",
+                "disconnect_upstash", "save_schedule", "pause_schedule", "delete_schedule", "set_box_access", "set_repo_insight", "clone", "share_project", "save_connector", "delete_connector",
                 "run_workflow", "open_box", "extend_box", "rename_machine", "remove_machine", "pair_code", "create_invite", "revoke_invite",
                 "stage", "slack_reply", "linear_create", "linear_take", "approve_agent", "deny_agent", "revoke_agent", "set_taste",
                 "reset_taste_field", "set_box_size", "set_box_claude_token", "remove_box_claude_token", "mint_box_claude_token", "cancel_box_claude_token", "mark_sessions", "archive_session", "unarchive_session",
@@ -1079,6 +1100,12 @@ mod tests {
         for name in ["set_taste", "reset_taste_field", "set_box_size", "delete_connector"] {
             assert_eq!(find(name).map(|a| a.class), Some(Confirm), "{name} carries limits or deletes, so the user approves it");
         }
+        assert_eq!(find("list_schedules").map(|a| a.class), Some(Read));
+        assert_eq!(find("schedule_runs").map(|a| a.class), Some(Read));
+        for name in ["save_schedule", "pause_schedule", "delete_schedule"] {
+            assert_eq!(find(name).map(|a| (a.class, a.wired)), Some((Write, true)), "{name}: Write, and the server turns a save with approvals or a delete of the user's task into a confirmation");
+        }
+        assert_eq!(find("set_release_protection").map(|a| a.class), Some(Excluded), "no agent turns tag and main protection on");
         assert!(find("enqueue").is_some_and(|a| a.starts_work), "a message that starts a Captain goes through the limits");
         assert!(find("run_workflow").is_some_and(|a| a.starts_work && a.class == Write), "a Run now goes through the limits, with no approval");
         assert_eq!(find("run_now").map(|a| a.class), Some(Excluded), "only the hub starts a Run now on a machine");
@@ -1499,6 +1526,12 @@ mod tests {
         for text in kept {
             assert_eq!(mask_secrets(text), text);
         }
+    }
+
+    #[test]
+    fn every_string_of_a_value_is_masked_and_the_keys_stay() {
+        let held = json!({ "task": { "title": "Use sk-ant-api03-abcdefghijklmnop1234", "approvals": [{ "must_contain": "ghp_ABCDEFGHIJKLMNOP1234" }], "enabled": true }, "n": 3 });
+        assert_eq!(mask_values(held), json!({ "task": { "title": "Use [hidden]", "approvals": [{ "must_contain": "[hidden]" }], "enabled": true }, "n": 3 }));
     }
 
     #[test]

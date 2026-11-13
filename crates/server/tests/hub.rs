@@ -8480,6 +8480,591 @@ fn box_usage_never_shows_one_account_the_boxes_or_tasks_of_another() {
     }
 }
 
+// ---- Scheduled tasks (0.18.2 Ideas+Tasks PR 4): stored and edited, nothing fires them yet ----
+
+/// A task body as an app or an agent sends it: a weekday-morning prompt to the Orchestrator in São Paulo.
+fn task_body(title: &str) -> Value {
+    json!({
+        "id": "", "title": title, "schedule": { "kind": "cron", "expr": "0 9 * * 1-5" }, "tz": "America/Sao_Paulo",
+        "target": { "kind": "orchestrator" }, "action": { "kind": "prompt", "text": "Summarise yesterday" },
+        "enabled": true, "created_by": { "kind": "user" }, "created_at": 0, "updated_at": 0
+    })
+}
+
+fn save_schedule(client: &mut Client, task: Value) -> Result<Value, String> {
+    client.hub(json!({ "cmd": "save_schedule", "task": task }))
+}
+
+struct Schedules {
+    _hub: TestHub,
+    ana: Client,
+    bob: Client,
+    raw: RawMachine,
+    machine: String,
+}
+
+impl Schedules {
+    fn start(name: &str) -> Schedules {
+        let hub = TestHub::start(name);
+        let url = hub.url.clone();
+        let (ana_token, _, mut ana) = signed_in(&url, "ana@example.test");
+        let (_, _, bob) = signed_in(&url, "bob@example.test");
+        let tab = json!({ "id": "tab-agent", "cwd": "/a/app", "bypass": false, "running": true, "status": "working", "title": "Planner", "message": null, "resume_at": null, "opened": 1, "session": "agent-conv" });
+        let (machine, machine_token) = account::register_machine(&url, &ana_token, "ana-mac", "linux").unwrap();
+        let raw = RawMachine::start_with(&url, &machine_token, vec![json!({ "kind": "tabs", "tabs": [tab] })], |_| RawReply::Ok(Value::Null));
+        ana.wait("ana-mac's tabs", |f| f["type"] == "event" && f["event"]["kind"] == "tabs");
+        Schedules { _hub: hub, ana, bob, raw, machine: machine.id }
+    }
+
+    fn act(&self, action: &str, args: Value) -> Result<Value, String> {
+        self.raw.ask(json!({ "cmd": "act", "act": { "tab": "tab-agent", "action": action, "args": args } }))
+    }
+
+    /// The user unlocks and approves the confirmation `held` answered, and the outcome.
+    fn approve(&mut self, held: &Value) -> Value {
+        assert_eq!(held["outcome"], "pending", "{held}");
+        self.ana.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+        self.ana.hub(json!({ "cmd": "decide_confirmation", "id": held["id"], "approve": true })).unwrap()["outcome"].clone()
+    }
+
+    /// Why the confirmation `held` answered waits, as the user's app shows it.
+    fn about(&mut self, held: &Value) -> String {
+        let all = self.ana.hub(json!({ "cmd": "confirmations" })).unwrap();
+        all.as_array().unwrap().iter().find(|c| c["id"] == held["id"]).map(|c| c["about"].as_str().unwrap().to_owned()).unwrap_or_default()
+    }
+
+    /// The account's task `id` as the user's app lists it.
+    fn task(&mut self, id: &str) -> Value {
+        self.ana.hub(json!({ "cmd": "list_schedules" })).unwrap().as_array().unwrap().iter().find(|t| t["id"] == id).cloned().unwrap_or(Value::Null)
+    }
+
+    fn titles(&mut self) -> Vec<String> {
+        self.ana.hub(json!({ "cmd": "list_schedules" })).unwrap().as_array().unwrap().iter().map(|t| t["title"].as_str().unwrap().to_owned()).collect()
+    }
+}
+
+#[test]
+fn a_task_is_created_listed_edited_paused_and_deleted_and_a_dry_run_stores_nothing() {
+    let mut s = Schedules::start("sched_crud");
+    // A dry run answers the next three runs in the task's zone, 09:00 in São Paulo being 12:00 UTC, and stores nothing.
+    let dry = s.ana.hub(json!({ "cmd": "save_schedule", "task": task_body("Digest"), "dry_run": true })).unwrap();
+    assert_eq!(dry["task"], Value::Null);
+    let next = dry["next"].as_array().unwrap();
+    assert_eq!(next.len(), 3);
+    for run in next {
+        assert!(run["local"].as_str().unwrap().ends_with("09:00 -03"), "{run}");
+        assert_eq!(run["at"].as_i64().unwrap() % 86400, 12 * 3600, "{run}");
+    }
+    assert_eq!(s.titles(), Vec::<String>::new(), "a dry run stored nothing");
+    assert_eq!(s.ana.hub(json!({ "cmd": "get_settings" })).unwrap().get("schedules"), None, "and none ride the settings");
+
+    let saved = save_schedule(&mut s.ana, task_body("Digest")).unwrap();
+    let task = &saved["task"];
+    let id = task["id"].as_str().unwrap().to_owned();
+    assert!(uuid::Uuid::parse_str(&id).is_ok(), "the hub gives a new task its id");
+    assert_eq!(task["next_at"], next[0]["at"], "next_at is computed with next_after on the save");
+    assert_eq!(task["created_by"], json!({ "kind": "user" }));
+    assert_eq!(saved["next"].as_array().unwrap().len(), 3);
+    assert_eq!(s.ana.hub(json!({ "cmd": "get_settings" })).unwrap()["schedules"][0]["id"], id.as_str(), "the settings push carries it");
+
+    // An edit keeps the creator and the creation time, and recomputes next_at.
+    let created_at = task["created_at"].clone();
+    let edited = save_schedule(&mut s.ana, json!({ "id": id, "title": "Morning digest", "schedule": { "kind": "cron", "expr": "30 10 * * *" }, "tz": "America/Sao_Paulo",
+        "target": { "kind": "orchestrator" }, "action": { "kind": "prompt", "text": "Summarise" }, "enabled": true, "grace_mins": 5,
+        "created_by": { "kind": "agent", "role": "captain" }, "created_at": 1, "updated_at": 1 })).unwrap();
+    assert_eq!((&edited["task"]["id"], &edited["task"]["title"], &edited["task"]["created_by"], &edited["task"]["created_at"]), (&json!(id), &json!("Morning digest"), &json!({ "kind": "user" }), &created_at));
+    assert_eq!(edited["task"]["grace_mins"], 5);
+    assert_eq!(edited["task"]["next_at"].as_i64().unwrap() % 86400, 13 * 3600 + 30 * 60, "10:30 in São Paulo");
+    assert_eq!(s.titles(), ["Morning digest"], "an edit replaces, never adds");
+
+    let paused = s.ana.hub(json!({ "cmd": "pause_schedule", "id": id, "paused": true })).unwrap();
+    assert_eq!((&paused["enabled"], &paused["next_at"]), (&json!(false), &Value::Null));
+    let resumed = s.ana.hub(json!({ "cmd": "pause_schedule", "id": id, "paused": false })).unwrap();
+    assert_eq!(resumed["enabled"], true);
+    assert!(resumed["next_at"].as_i64().is_some());
+    assert_eq!(s.ana.hub(json!({ "cmd": "schedule_runs", "id": id, "limit": 5 })), Ok(json!([])), "nothing fires it yet");
+
+    assert_eq!(s.ana.hub(json!({ "cmd": "delete_schedule", "id": id })), Ok(Value::Null));
+    assert_eq!(s.titles(), Vec::<String>::new());
+    assert_eq!(s.ana.hub(json!({ "cmd": "delete_schedule", "id": id })), Err(format!("this account has no task {id}")));
+
+    // The refusals are readable.
+    let mut bad = task_body("Bad");
+    bad["schedule"] = json!({ "kind": "cron", "expr": "every day" });
+    assert!(save_schedule(&mut s.ana, bad).unwrap_err().contains("cron"));
+    let mut past = task_body("Past");
+    past["schedule"] = json!({ "kind": "once", "at": "2001-01-01T09:00" });
+    assert!(save_schedule(&mut s.ana, past).unwrap_err().contains("already passed"));
+    let mut zone = task_body("Zone");
+    zone["tz"] = json!("Mars/Base");
+    assert!(save_schedule(&mut s.ana, zone).unwrap_err().contains("time zone"));
+}
+
+#[test]
+fn an_older_settings_json_without_schedules_still_loads() {
+    let mut s = Schedules::start("sched_old_settings");
+    let mut settings = s.ana.hub(json!({ "cmd": "get_settings" })).unwrap();
+    settings.as_object_mut().unwrap().remove("schedules");
+    let loaded: pinned_core::connectors::Settings = serde_json::from_value(settings).unwrap();
+    assert!(loaded.schedules.is_empty());
+    save_schedule(&mut s.ana, task_body("Digest")).unwrap();
+    let with: pinned_core::connectors::Settings = serde_json::from_value(s.ana.hub(json!({ "cmd": "get_settings" })).unwrap()).unwrap();
+    assert_eq!(with.schedules.len(), 1);
+}
+
+#[test]
+fn an_agent_task_is_active_at_once_with_a_notice_and_audit_rows_carry_its_creator() {
+    let mut s = Schedules::start("sched_agent");
+    let done = s.act("save_schedule", json!({ "task": task_body("Agent digest") })).unwrap();
+    assert_eq!(done["outcome"], "done", "no OK is needed");
+    let task = &done["result"]["task"];
+    assert_eq!(task["enabled"], true);
+    assert!(task["next_at"].as_i64().is_some(), "active at once");
+    assert_eq!(task["created_by"], json!({ "kind": "agent", "role": "session", "machine": s.machine, "tab": "tab-agent", "session_title": "Planner" }));
+    assert!(task["fyi"].as_i64().is_some(), "the Inbox FYI row waits for the user to look");
+    let id = task["id"].as_str().unwrap();
+    assert_eq!(s.ana.hub(json!({ "cmd": "list_schedules" })).unwrap()[0]["fyi"], task["fyi"], "the user's app sees it");
+
+    // The user's own edit counts as looking.
+    let mut seen = s.ana.hub(json!({ "cmd": "list_schedules" })).unwrap()[0].clone();
+    seen["title"] = json!("Agent digest, looked at");
+    assert_eq!(save_schedule(&mut s.ana, seen).unwrap()["task"]["fyi"], Value::Null);
+
+    s.act("pause_schedule", json!({ "id": id, "paused": true })).unwrap();
+    let trail = s.ana.hub(json!({ "cmd": "agent_audit" })).unwrap();
+    let rows: Vec<&Value> = trail.as_array().unwrap().iter().filter(|e| e["task"] == id).collect();
+    assert_eq!(rows.iter().map(|e| e["action"].as_str().unwrap()).collect::<Vec<_>>(), ["pause_schedule", "save_schedule"]);
+    for row in &rows {
+        assert_eq!((&row["tab"], &row["role"], &row["machine"]), (&json!("tab-agent"), &json!("session"), &json!(s.machine)), "who: {row}");
+    }
+    assert!(rows[1]["detail"].as_str().unwrap().contains("Agent digest") && rows[1]["detail"].as_str().unwrap().contains("-03"), "{}", rows[1]);
+
+    // An older audit row without the field still reads.
+    assert!(trail.as_array().unwrap().iter().all(|e| e.get("task").is_none() || e["task"].is_string()));
+}
+
+#[test]
+fn an_agent_save_with_approvals_waits_for_the_user_and_is_not_saved() {
+    let mut s = Schedules::start("sched_approvals");
+    let mut body = task_body("Nightly install");
+    body["approvals"] = json!([{ "item": "network-install", "must_contain": "npm ci", "repo": "github.com/acme/app" }]);
+    let held = s.act("save_schedule", json!({ "task": body })).unwrap();
+    assert_eq!(held["outcome"], "pending");
+    assert_eq!(s.titles(), Vec::<String>::new(), "nothing is saved before the user decides");
+    let id = held["id"].as_str().unwrap();
+    s.ana.wait("the confirmation", |f| f["type"] == "confirmations" && f["items"][0]["id"] == id && f["items"][0]["action"] == "save_schedule");
+    // Approving runs the save, as the agent who asked.
+    s.ana.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    let decided = s.ana.hub(json!({ "cmd": "decide_confirmation", "id": id, "approve": true })).unwrap();
+    assert_eq!(decided["outcome"], "done", "{decided}");
+    let tasks = s.ana.hub(json!({ "cmd": "list_schedules" })).unwrap();
+    assert_eq!(tasks[0]["approvals"][0]["must_contain"], "npm ci");
+    assert_eq!(tasks[0]["created_by"]["kind"], "agent", "an approval makes the user the approver, not the creator");
+    assert_eq!(tasks[0]["created_by"]["tab"], "tab-agent");
+}
+
+#[test]
+fn an_agent_may_not_repeat_every_five_minutes_nor_hold_more_than_twenty_tasks() {
+    let mut s = Schedules::start("sched_caps");
+    let mut fast = task_body("Fast");
+    fast["schedule"] = json!({ "kind": "cron", "expr": "*/5 * * * *" });
+    let refused = s.act("save_schedule", json!({ "task": fast.clone() })).unwrap_err();
+    assert!(refused.contains("every 5 minutes") && refused.contains("15"), "{refused}");
+    assert_eq!(s.titles(), Vec::<String>::new());
+    assert!(save_schedule(&mut s.ana, fast).is_ok(), "the user has no such floor");
+    let fast_id = s.ana.hub(json!({ "cmd": "list_schedules" })).unwrap()[0]["id"].clone();
+    s.ana.hub(json!({ "cmd": "delete_schedule", "id": fast_id })).unwrap();
+
+    // An edit of an hourly task to every 5 minutes is refused too, and leaves it hourly.
+    let mut hourly = task_body("Hourly");
+    hourly["schedule"] = json!({ "kind": "cron", "expr": "0 * * * *" });
+    let hourly = s.act("save_schedule", json!({ "task": hourly })).unwrap()["result"]["task"].clone();
+    let mut faster = hourly.clone();
+    faster["schedule"] = json!({ "kind": "cron", "expr": "*/5 * * * *" });
+    let refused = s.act("save_schedule", json!({ "task": faster })).unwrap_err();
+    assert!(refused.contains("every 5 minutes"), "{refused}");
+    assert_eq!(s.task(hourly["id"].as_str().unwrap())["schedule"]["expr"], "0 * * * *");
+
+    // The user's own tasks do not count toward the agents' 20.
+    for n in 0..2 {
+        save_schedule(&mut s.ana, task_body(&format!("User {n}"))).unwrap();
+    }
+    for n in 0..17 {
+        let mut task = task_body(&format!("Task {n}"));
+        task["schedule"] = json!({ "kind": "cron", "expr": format!("{n} 9 * * *") });
+        assert_eq!(s.act("save_schedule", json!({ "task": task })).unwrap()["outcome"], "done", "task {n}");
+    }
+    // 18 agents' tasks: of five saves at once, two pass.
+    let raced: Vec<Result<Value, String>> = std::thread::scope(|scope| {
+        let saves: Vec<_> = (0..5).map(|n| {
+            let s = &s;
+            scope.spawn(move || {
+                let mut task = task_body(&format!("Raced {n}"));
+                task["schedule"] = json!({ "kind": "cron", "expr": format!("{n} 10 * * *") });
+                s.act("save_schedule", json!({ "task": task }))
+            })
+        }).collect();
+        saves.into_iter().map(|save| save.join().unwrap()).collect()
+    });
+    assert_eq!(raced.iter().filter(|r| r.is_ok()).count(), 2, "{raced:?}");
+    assert!(raced.iter().filter_map(|r| r.as_ref().err()).all(|e| e.contains("at most 20")), "{raced:?}");
+    let refused = s.act("save_schedule", json!({ "task": task_body("One too many") })).unwrap_err();
+    assert!(refused.contains("at most 20") && refused.contains("20 exist"), "{refused}");
+    assert_eq!(s.titles().len(), 22, "20 of the agents' and 2 of the user's");
+    assert!(save_schedule(&mut s.ana, task_body("The user's own")).is_ok(), "the cap is on agents");
+    assert_eq!(s.titles().len(), 23);
+}
+
+#[test]
+fn an_agent_deleting_the_users_task_waits_but_its_own_goes_at_once() {
+    let mut s = Schedules::start("sched_delete");
+    let users = save_schedule(&mut s.ana, task_body("Users")).unwrap()["task"]["id"].as_str().unwrap().to_owned();
+    let own = s.act("save_schedule", json!({ "task": task_body("Own") })).unwrap()["result"]["task"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(s.act("delete_schedule", json!({ "id": own })).unwrap()["outcome"], "done");
+    let held = s.act("delete_schedule", json!({ "id": users })).unwrap();
+    assert_eq!(held["outcome"], "pending");
+    assert_eq!(s.titles(), ["Users"], "still there");
+    s.ana.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    assert_eq!(s.ana.hub(json!({ "cmd": "decide_confirmation", "id": held["id"], "approve": true })).unwrap()["outcome"], "done");
+    assert_eq!(s.titles(), Vec::<String>::new());
+    let rows = s.ana.hub(json!({ "cmd": "agent_audit" })).unwrap();
+    assert!(rows.as_array().unwrap().iter().any(|e| e["action"] == "delete_schedule" && e["outcome"] == "pending" && e["task"] == users.as_str()), "the held delete names its task");
+}
+
+#[test]
+fn an_agent_deleting_the_users_task_by_a_padded_wrong_or_missing_id_waits_or_is_refused() {
+    let mut s = Schedules::start("sched_delete_ids");
+    let users = save_schedule(&mut s.ana, task_body("Users")).unwrap()["task"]["id"].as_str().unwrap().to_owned();
+    // A padded id names the same task the delete would, so it waits for the user like the plain one.
+    for padded in [format!(" {users}"), format!("{users} "), format!(" {users}\t")] {
+        let held = s.act("delete_schedule", json!({ "id": padded })).unwrap();
+        assert_eq!(held["outcome"], "pending", "{padded:?}: {held}");
+        assert_eq!(s.titles(), ["Users"], "{padded:?} deleted nothing");
+    }
+    // An id that is no task id, of the wrong type, or missing is refused before anything runs.
+    for args in [json!({ "id": 42 }), json!({}), json!({ "id": "not-a-task" }), json!({ "id": format!("{users}x") }), json!({ "id": uuid::Uuid::new_v4().to_string() })] {
+        let refused = s.act("delete_schedule", args.clone());
+        assert!(refused.is_err(), "{args}: {refused:?}");
+        assert_eq!(s.titles(), ["Users"], "{args} deleted nothing");
+    }
+    for (action, args) in [("pause_schedule", json!({ "id": 42, "paused": true })), ("pause_schedule", json!({ "id": "nope", "paused": true })), ("pause_schedule", json!({ "id": users })), ("schedule_runs", json!({ "id": "nope" }))] {
+        assert!(s.act(action, args.clone()).is_err(), "{action} {args}");
+    }
+    let mut odd = task_body("Odd");
+    odd["id"] = json!(" not-a-task ");
+    assert!(s.act("save_schedule", json!({ "task": odd })).is_err());
+    assert_eq!(s.titles(), ["Users"]);
+    assert_eq!(s.ana.hub(json!({ "cmd": "list_schedules" })).unwrap()[0]["enabled"], true, "and nothing paused it");
+    let rows = s.ana.hub(json!({ "cmd": "agent_audit" })).unwrap();
+    let refused = rows.as_array().unwrap().iter().filter(|e| e["action"] == "delete_schedule" && e["outcome"] == "refused").count();
+    assert_eq!(refused, 5, "each refusal has its audit row");
+}
+
+/// A task body with one approval that needs no release protection.
+fn approved_body(title: &str) -> Value {
+    let mut body = task_body(title);
+    body["approvals"] = json!([{ "item": "network-install", "must_contain": "npm ci", "repo": "github.com/acme/app" }]);
+    body
+}
+
+#[test]
+fn an_agent_starting_a_task_with_approvals_again_waits_and_it_stays_paused_until_approved() {
+    let mut s = Schedules::start("sched_unpause_approvals");
+    // The agent's own task, approved by the user once.
+    let saved = s.act("save_schedule", json!({ "task": approved_body("Nightly install") })).unwrap();
+    assert_eq!(s.approve(&saved), "done");
+    let id = s.ana.hub(json!({ "cmd": "list_schedules" })).unwrap()[0]["id"].as_str().unwrap().to_owned();
+    // Pausing its own task goes at once; starting it again would run the approved steps, so it waits.
+    assert_eq!(s.act("pause_schedule", json!({ "id": id, "paused": true })).unwrap()["outcome"], "done");
+    let held = s.act("pause_schedule", json!({ "id": id, "paused": false })).unwrap();
+    assert_eq!(held["outcome"], "pending", "{held}");
+    assert!(s.about(&held).contains("npm ci"), "the Confirm says why: {}", s.about(&held));
+    assert_eq!(s.task(&id)["enabled"], false, "still paused until the user approves");
+    assert_eq!(s.approve(&held), "done");
+    assert_eq!(s.task(&id)["enabled"], true);
+}
+
+#[test]
+fn an_agent_pausing_or_starting_the_users_task_waits() {
+    let mut s = Schedules::start("sched_pause_users");
+    let id = save_schedule(&mut s.ana, task_body("Users")).unwrap()["task"]["id"].as_str().unwrap().to_owned();
+    let held = s.act("pause_schedule", json!({ "id": id, "paused": true })).unwrap();
+    assert_eq!(held["outcome"], "pending", "{held}");
+    assert!(s.about(&held).contains("pause \"Users\", a task the user created"), "{}", s.about(&held));
+    assert_eq!(s.task(&id)["enabled"], true, "still running until the user approves");
+    assert_eq!(s.approve(&held), "done");
+    assert_eq!(s.task(&id)["enabled"], false);
+    let held = s.act("pause_schedule", json!({ "id": id, "paused": false })).unwrap();
+    assert_eq!(held["outcome"], "pending", "starting it again waits too");
+    assert_eq!(s.task(&id)["enabled"], false);
+}
+
+#[test]
+fn starting_a_one_time_task_whose_time_passed_is_refused() {
+    let mut s = Schedules::start("sched_unpause_past");
+    let mut once = task_body("Once");
+    once["schedule"] = json!({ "kind": "once", "at": "2099-01-01T09:00" });
+    let id = save_schedule(&mut s.ana, once).unwrap()["task"]["id"].as_str().unwrap().to_owned();
+    s.ana.hub(json!({ "cmd": "pause_schedule", "id": id, "paused": true })).unwrap();
+    admin_on(&s._hub.database, "update tasks set task = jsonb_set(task, '{schedule,at}', '\"2001-01-01T09:00\"')");
+    let refused = s.ana.hub(json!({ "cmd": "pause_schedule", "id": id, "paused": false })).unwrap_err();
+    assert!(refused.contains("already passed"), "{refused}");
+    assert_eq!((&s.task(&id)["enabled"], &s.task(&id)["next_at"]), (&json!(false), &Value::Null), "it stays paused, not on with no next run");
+}
+
+#[test]
+fn an_agent_editing_the_users_task_waits_and_it_is_unchanged_until_approved() {
+    let mut s = Schedules::start("sched_edit_users");
+    let id = save_schedule(&mut s.ana, task_body("Users")).unwrap()["task"]["id"].as_str().unwrap().to_owned();
+    let mut edit = task_body("Taken over");
+    edit["id"] = json!(format!(" {id} "));
+    edit["action"] = json!({ "kind": "prompt", "text": "Something else" });
+    let held = s.act("save_schedule", json!({ "task": edit })).unwrap();
+    assert_eq!(held["outcome"], "pending", "{held}");
+    assert!(s.about(&held).contains("edit \"Users\", a task the user created"), "{}", s.about(&held));
+    assert_eq!((&s.task(&id)["title"], &s.task(&id)["action"]["text"]), (&json!("Users"), &json!("Summarise yesterday")), "unchanged until the user approves");
+    assert_eq!(s.approve(&held), "done");
+    assert_eq!((&s.task(&id)["title"], &s.task(&id)["created_by"]), (&json!("Taken over"), &json!({ "kind": "user" })), "an approved edit keeps the creator");
+}
+
+#[test]
+fn an_agent_edits_its_own_task_at_once() {
+    let mut s = Schedules::start("sched_edit_own");
+    let id = s.act("save_schedule", json!({ "task": task_body("Own") })).unwrap()["result"]["task"]["id"].as_str().unwrap().to_owned();
+    let mut edit = task_body("Own, renamed");
+    edit["id"] = json!(id);
+    let done = s.act("save_schedule", json!({ "task": edit })).unwrap();
+    assert_eq!(done["outcome"], "done", "{done}");
+    assert_eq!(s.titles(), ["Own, renamed"]);
+    assert_eq!(s.ana.hub(json!({ "cmd": "confirmations" })), Ok(json!([])), "nothing waits");
+}
+
+#[test]
+fn an_agent_dry_run_with_approvals_holds_nothing_and_stores_nothing() {
+    let mut s = Schedules::start("sched_dry_approvals");
+    let dry = s.act("save_schedule", json!({ "task": approved_body("Nightly install"), "dry_run": true })).unwrap();
+    assert_eq!(dry["outcome"], "done", "{dry}");
+    assert_eq!((dry["result"]["task"].clone(), dry["result"]["next"].as_array().map(Vec::len)), (Value::Null, Some(3)));
+    assert_eq!(s.ana.hub(json!({ "cmd": "confirmations" })), Ok(json!([])), "no confirmation");
+    assert_eq!(s.titles(), Vec::<String>::new(), "nothing stored");
+}
+
+#[test]
+fn changing_what_a_task_does_or_where_it_goes_takes_its_approvals_away() {
+    let mut s = Schedules::start("sched_approvals_clear");
+    let saved = save_schedule(&mut s.ana, approved_body("Install")).unwrap()["task"].clone();
+    let id = saved["id"].as_str().unwrap().to_owned();
+    let approvals = saved["approvals"].clone();
+    assert_eq!(approvals.as_array().map(Vec::len), Some(1));
+    // A new title keeps them.
+    let mut renamed = saved.clone();
+    renamed["title"] = json!("Install, renamed");
+    assert_eq!(save_schedule(&mut s.ana, renamed.clone()).unwrap()["task"]["approvals"], approvals);
+    // Another prompt with the same approvals takes them away.
+    let mut other = renamed.clone();
+    other["action"] = json!({ "kind": "prompt", "text": "Install and publish" });
+    assert_eq!(save_schedule(&mut s.ana, other.clone()).unwrap()["task"]["approvals"], json!([]), "a new action");
+    assert_eq!(s.task(&id)["approvals"], json!([]));
+    // Granting them again on the new action keeps them; then another target takes them away.
+    assert_eq!(save_schedule(&mut s.ana, other.clone()).unwrap()["task"]["approvals"], approvals, "granted again");
+    let mut moved = other;
+    moved["target"] = json!({ "kind": "captain", "project": "github.com/acme/app" });
+    assert_eq!(save_schedule(&mut s.ana, moved).unwrap()["task"]["approvals"], json!([]), "a new target");
+}
+
+#[test]
+fn an_agents_task_is_stored_with_secrets_masked_and_the_users_as_typed() {
+    let mut s = Schedules::start("sched_secrets");
+    let fake = "sk-ant-api03-FAKEFAKEFAKEFAKE0000";
+    let mut body = task_body(&format!("Use {fake}"));
+    body["action"] = json!({ "kind": "prompt", "text": format!("Call the API with {fake} and report") });
+    let done = s.act("save_schedule", json!({ "task": body.clone() })).unwrap();
+    assert_eq!(done["outcome"], "done", "{done}");
+    let listed = s.ana.hub(json!({ "cmd": "list_schedules" })).unwrap();
+    assert!(listed[0]["action"]["text"].as_str().unwrap().contains("[hidden]") && listed[0]["title"].as_str().unwrap().contains("[hidden]"), "{listed}");
+    assert!(!listed.to_string().contains("FAKEFAKE"), "{listed}");
+    // With approvals it waits, and once approved its must_contain is masked too.
+    let mut approved = approved_body("Install");
+    approved["approvals"][0]["must_contain"] = json!(format!("npm ci --token {fake}"));
+    let held = s.act("save_schedule", json!({ "task": approved })).unwrap();
+    assert!(!s.about(&held).contains("FAKEFAKE"), "the Confirm's reason is masked");
+    assert_eq!(s.approve(&held), "done");
+    let rows = s._hub.runtime.block_on(async {
+        let (client, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), s._hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        client.query("select task::text from tasks", &[]).await.unwrap().iter().map(|r| r.get::<_, String>(0)).collect::<Vec<_>>()
+    });
+    assert_eq!(rows.len(), 2);
+    assert!(rows.iter().all(|row| !row.contains("FAKEFAKE")), "no stored row holds the token: {rows:?}");
+    let trail = s.ana.hub(json!({ "cmd": "agent_audit" })).unwrap();
+    assert!(trail.as_array().unwrap().iter().all(|e| !e["detail"].as_str().unwrap_or_default().contains("FAKEFAKE")), "nor an audit detail: {trail}");
+    // The user's own save is stored as typed.
+    let mine = save_schedule(&mut s.ana, body).unwrap();
+    assert!(mine["task"]["action"]["text"].as_str().unwrap().contains(fake));
+}
+
+#[test]
+fn a_held_schedule_save_lists_its_arguments_masked_and_the_approved_task_is_stored_masked_once() {
+    let mut s = Schedules::start("sched_held_args");
+    let fake = "sk-ant-api03-FAKEFAKEFAKEFAKE0000";
+    let mut body = approved_body(&format!("Use {fake}"));
+    body["action"] = json!({ "kind": "prompt", "text": format!("Call the API with {fake} and report") });
+    let held = s.act("save_schedule", json!({ "task": body })).unwrap();
+    assert_eq!(held["outcome"], "pending", "{held}");
+    // What every app of the account (and its machine sockets) is told about the held act.
+    let listed = s.ana.hub(json!({ "cmd": "confirmations" })).unwrap();
+    let waiting = listed.as_array().unwrap().iter().find(|c| c["id"] == held["id"]).expect("the act is listed");
+    let (title, text) = (waiting["args"]["task"]["title"].as_str().unwrap(), waiting["args"]["task"]["action"]["text"].as_str().unwrap());
+    assert!(!title.contains("FAKEFAKEFAKEFAKE0000"), "the held title: {title}");
+    assert!(!text.contains("FAKEFAKEFAKEFAKE0000"), "the held prompt text: {text}");
+    assert!(!waiting.to_string().contains("FAKEFAKE"), "nothing of the held act holds the key: {waiting}");
+    // Approving runs what the user saw: one stored task, masked.
+    assert_eq!(s.approve(&held), "done");
+    let rows = s._hub.runtime.block_on(async {
+        let (client, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), s._hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        client.query("select task::text from tasks", &[]).await.unwrap().iter().map(|r| r.get::<_, String>(0)).collect::<Vec<_>>()
+    });
+    assert_eq!(rows.len(), 1, "the act ran once: {rows:?}");
+    assert!(rows[0].contains("[hidden]") && !rows[0].contains("FAKEFAKE"), "the stored task is masked: {rows:?}");
+}
+
+#[test]
+fn an_unreadable_task_or_run_leaves_the_settings_and_the_other_tasks_readable() {
+    let mut s = Schedules::start("sched_unreadable");
+    for title in ["Kept", "Broken", "Also kept"] {
+        save_schedule(&mut s.ana, task_body(title)).unwrap();
+    }
+    let broken = s.ana.hub(json!({ "cmd": "list_schedules" })).unwrap().as_array().unwrap().iter().find(|t| t["title"] == "Broken").unwrap()["id"].as_str().unwrap().to_owned();
+    let kept = s.ana.hub(json!({ "cmd": "list_schedules" })).unwrap().as_array().unwrap().iter().find(|t| t["title"] == "Kept").unwrap()["id"].as_str().unwrap().to_owned();
+    admin_on(&s._hub.database, &format!("update tasks set task = task - 'schedule' where id = '{broken}'"));
+    admin_on(&s._hub.database, &format!("insert into task_runs (task, account, due_at, state, run) select id, account, 1, 'due', '{{\"not\": \"a run\"}}' from tasks where id = '{kept}'"));
+    let settings = s.ana.hub(json!({ "cmd": "get_settings" }));
+    let mut titles: Vec<String> = settings.expect("the settings still load")["schedules"].as_array().unwrap().iter().map(|t| t["title"].as_str().unwrap().to_owned()).collect();
+    titles.sort();
+    assert_eq!(titles, ["Also kept", "Kept"], "the readable tasks, without the broken one");
+    let mut listed = s.titles();
+    listed.sort();
+    assert_eq!(listed, ["Also kept", "Kept"]);
+}
+
+#[test]
+fn an_agent_reading_one_unreadable_task_gets_a_fixed_error_with_no_account_or_stored_text() {
+    let mut s = Schedules::start("sched_unreadable_one");
+    let id = save_schedule(&mut s.ana, task_body("Broken")).unwrap()["task"]["id"].as_str().unwrap().to_owned();
+    // A stored value that serde would quote in its message.
+    admin_on(&s._hub.database, &format!("update tasks set task = '{{\"schedule\": \"STOREDTEXTMARK\"}}' where id = '{id}'"));
+    let account = s._hub.runtime.block_on(async {
+        let (client, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), s._hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        client.query_one("select account::text from tasks", &[]).await.unwrap().get::<_, String>(0)
+    });
+    let fixed = format!("task {id} could not be read");
+    for (action, args) in [("schedule_runs", json!({ "id": id })), ("delete_schedule", json!({ "id": id })), ("pause_schedule", json!({ "id": id, "paused": true }))] {
+        assert_eq!(s.act(action, args), Err(fixed.clone()), "{action}");
+    }
+    let trail = s.ana.hub(json!({ "cmd": "agent_audit" })).unwrap().to_string();
+    assert!(trail.contains(&fixed), "the audit row holds the fixed error: {trail}");
+    for leaked in [account.as_str(), "STOREDTEXTMARK", "invalid type"] {
+        assert!(!trail.contains(leaked), "the audit trail holds {leaked}: {trail}");
+    }
+}
+
+#[test]
+fn another_account_neither_sees_nor_touches_the_tasks() {
+    let mut s = Schedules::start("sched_isolation");
+    let id = save_schedule(&mut s.ana, task_body("Ana's")).unwrap()["task"]["id"].as_str().unwrap().to_owned();
+    assert_eq!(s.bob.hub(json!({ "cmd": "list_schedules" })), Ok(json!([])));
+    let none = Err(format!("this account has no task {id}"));
+    assert_eq!(s.bob.hub(json!({ "cmd": "pause_schedule", "id": id, "paused": true })), none);
+    assert_eq!(s.bob.hub(json!({ "cmd": "delete_schedule", "id": id })), none);
+    assert_eq!(s.bob.hub(json!({ "cmd": "schedule_runs", "id": id })), none);
+    let mut take = task_body("Bob's edit");
+    take["id"] = json!(id);
+    assert_eq!(save_schedule(&mut s.bob, take), none, "a save with ana's id writes nothing of hers");
+    assert_eq!(s.titles(), ["Ana's"]);
+    assert_eq!(s.ana.hub(json!({ "cmd": "list_schedules" })).unwrap()[0]["enabled"], true);
+    assert_eq!(s.bob.hub(json!({ "cmd": "get_settings" })).unwrap().get("schedules"), None);
+}
+
+#[test]
+fn a_release_approval_is_refused_until_the_user_turns_protection_on_and_no_agent_turns_it_on() {
+    let mut s = Schedules::start("sched_protection");
+    let release = |text: &str, item: &str| {
+        let mut body = task_body("Release");
+        body["approvals"] = json!([{ "item": item, "must_contain": text, "repo": "github.com/acme/app" }]);
+        body
+    };
+    let reason = "pre-approving a release needs tag and main protection; until the user turns that on, a release always stops for them";
+    for (item, text) in [("release", "gh release create"), ("deploy", "railway up"), ("push-to-main", "origin main"), ("network-install", "git push origin v1.2.3")] {
+        assert_eq!(save_schedule(&mut s.ana, release(text, item)), Err(reason.into()), "{item} off");
+    }
+    assert_eq!(s.titles(), Vec::<String>::new());
+    assert_eq!(s.ana.hub(json!({ "cmd": "save_schedule", "task": release("v1.2.3", "release"), "dry_run": true })), Err(reason.into()), "a dry run says so too");
+    assert!(save_schedule(&mut s.ana, release("npm ci", "network-install")).is_ok(), "an approval that is no release needs no protection");
+    for item in ["secrets", "self-grant", "payment"] {
+        assert!(save_schedule(&mut s.ana, release("x", item)).is_err(), "{item} is never granted ahead");
+    }
+
+    // No agent action sets the switch.
+    let agent = s.act("set_release_protection", json!({ "on": true })).unwrap_err();
+    assert!(agent.contains("not open to agents"), "{agent}");
+    assert_eq!(save_schedule(&mut s.ana, release("gh release create v1.2.3", "release")), Err(reason.into()), "still off");
+    // Another account's switch is its own.
+    s.bob.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    assert_eq!(s.bob.hub(json!({ "cmd": "set_release_protection", "on": true })), Ok(json!(true)));
+    assert_eq!(save_schedule(&mut s.ana, release("gh release create v1.2.3", "release")), Err(reason.into()), "bob's switch is bob's");
+
+    s.ana.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    assert_eq!(s.ana.hub(json!({ "cmd": "set_release_protection", "on": true })), Ok(json!(true)));
+    let on = save_schedule(&mut s.ana, release("gh release create v1.2.3", "release")).unwrap();
+    assert_eq!(on["task"]["approvals"][0]["must_contain"], "gh release create v1.2.3");
+    // An agent still needs the user's OK for it.
+    assert_eq!(s.act("save_schedule", json!({ "task": release("railway up", "deploy") })).unwrap()["outcome"], "pending");
+    assert_eq!(s.ana.hub(json!({ "cmd": "set_release_protection", "on": false })), Ok(json!(false)));
+    assert_eq!(save_schedule(&mut s.ana, release("railway up", "deploy")), Err(reason.into()), "off again");
+}
+
+#[test]
+fn release_protection_needs_the_unlock_and_each_change_has_an_audit_row() {
+    let mut s = Schedules::start("sched_protection_unlock");
+    let mut release = task_body("Release");
+    release["approvals"] = json!([{ "item": "release", "must_contain": "gh release create", "repo": "github.com/acme/app" }]);
+    // A login read off the disk is not the user: without the password nothing changes.
+    assert_eq!(s.ana.hub(json!({ "cmd": "set_release_protection", "on": true })), Err(pinned_core::surface::LOCKED.into()));
+    assert!(save_schedule(&mut s.ana, release.clone()).is_err(), "still off");
+    let audited = |s: &mut Schedules| -> Vec<(String, String)> {
+        let rows = s.ana.hub(json!({ "cmd": "agent_audit" })).unwrap();
+        rows.as_array().unwrap().iter().filter(|e| e["action"] == "set_release_protection").map(|e| (e["args"].as_str().unwrap().to_owned(), e["detail"].as_str().unwrap().to_owned())).collect()
+    };
+    assert_eq!(audited(&mut s), Vec::<(String, String)>::new(), "a refused change writes no row");
+
+    s.ana.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    assert_eq!(s.ana.hub(json!({ "cmd": "set_release_protection", "on": true })), Ok(json!(true)));
+    assert!(save_schedule(&mut s.ana, release).is_ok(), "on");
+    assert_eq!(s.ana.hub(json!({ "cmd": "set_release_protection", "on": false })), Ok(json!(false)));
+    assert_eq!(audited(&mut s), [
+        (r#"{"on":false}"#.to_owned(), "the user's app turned release protection off".to_owned()),
+        (r#"{"on":true}"#.to_owned(), "the user's app turned release protection on".to_owned()),
+    ], "who and on or off, newest first");
+}
+
+#[test]
+fn a_worker_target_is_refused_until_held_steps_land() {
+    let mut s = Schedules::start("sched_worker");
+    let mut body = task_body("Worker");
+    body["target"] = json!({ "kind": "worker", "project": "github.com/acme/app" });
+    let refused = save_schedule(&mut s.ana, body.clone()).unwrap_err();
+    assert!(refused.contains("cannot start a new worker yet"), "{refused}");
+    assert!(s.act("save_schedule", json!({ "task": body })).is_err());
+    assert_eq!(s.titles(), Vec::<String>::new());
+    for target in [json!({ "kind": "me" }), json!({ "kind": "captain", "project": "github.com/acme/app" }), json!({ "kind": "session", "session": "agent-conv" })] {
+        let mut ok = task_body("Elsewhere");
+        ok["target"] = target;
+        assert!(save_schedule(&mut s.ana, ok).is_ok());
+    }
+}
+
 /// How many ends the hub holds, for every account or only `account`, as Postgres has them.
 fn held_ends(hub: &TestHub, account: Option<uuid::Uuid>) -> i64 {
     hub.runtime.block_on(async {

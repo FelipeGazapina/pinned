@@ -202,7 +202,7 @@ async fn repo_look(hub: &Hub, account: &Account, from: Source<'_>, tab: &str, pr
         let args = act_surface::summary(&args);
         let action = look.action();
         async move {
-            let row = crate::db::Audit { account: account.id, machine: asker, tab, role: ActorRole::GlobalOrchestrator, action, args: &args, outcome, detail: &detail, request_id: None };
+            let row = crate::db::Audit { account: account.id, machine: asker, tab, role: ActorRole::GlobalOrchestrator, action, args: &args, outcome, detail: &detail, request_id: None, task: None };
             if let Err(e) = hub.db.audit(&row).await {
                 eprintln!("pinned-server: account {}'s {action} audit row was not written: {e}", account.id);
             }
