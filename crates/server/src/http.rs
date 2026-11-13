@@ -658,7 +658,7 @@ async fn serve_machine(hub: Arc<Hub>, mut socket: WebSocket) {
     }
     let _ = sink.close().await;
     if account.went_offline(&machine, Some(socket_id)) {
-        if let Err(e) = hub.db.machine_seen(row.id).await {
+        if let Err(e) = hub.db.machine_seen(account.id, row.id).await {
             eprintln!("pinned-server: could not record when machine {machine} was last seen: {e}");
         }
         hub.push_machines(&account).await;

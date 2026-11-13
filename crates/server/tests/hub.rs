@@ -8499,6 +8499,127 @@ fn two_accounts_on_one_upstash_key_list_only_their_own_boxes_and_count_the_rest(
     }
 }
 
+/// The first column of the first row of `sql` as text, or "none" when it has no row, as Postgres has it.
+fn first_text(hub: &TestHub, sql: &str) -> String {
+    hub.runtime.block_on(async {
+        let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        db.query_opt(sql, &[]).await.unwrap().map_or("none".to_owned(), |row| row.get::<_, Option<String>>(0).unwrap_or_else(|| "null".into()))
+    })
+}
+
+/// Ana's rows of every kind the id-only writes touch, and the ids bob would have to guess.
+struct AnaRows {
+    machine: uuid::Uuid,
+    grant: uuid::Uuid,
+    session: uuid::Uuid,
+    confirmation: uuid::Uuid,
+}
+
+fn ana_rows(hub: &TestHub, ana: &str, machine: &str) -> AnaRows {
+    let rows = AnaRows { machine: machine.parse().unwrap(), grant: uuid::Uuid::new_v4(), session: uuid::Uuid::new_v4(), confirmation: uuid::Uuid::new_v4() };
+    opened_box(hub, ana, machine, "box-run", "u-ana", "git@github.com:example/site.git");
+    admin_on(
+        &hub.database,
+        &format!(
+            "update boxes set phase = 'running' where id = 'box-run';
+             insert into boxes (id, account, machine, upstash, connector, subject, spec, size, phase) values ('box-new', '{ana}', '{machine}', null, 'c2', '{{\"issue\":\"ISSUE-2\"}}', '{{}}', 'small', 'creating');
+             update machines set last_seen = now() - interval '1 day' where id = '{machine}';
+             insert into agent_clients (id, name, redirect_uris) values ('client-1', 'fake agent', '[]');
+             insert into agent_grants (id, account, client, scopes, projects) values ('{grant}', '{ana}', 'client-1', '[]', '[]');
+             insert into agent_sessions (id, grant_id, machine, project, title) values ('{session}', '{grant}', '{machine}', 'site', 'a session');
+             insert into agent_confirmations (id, account, machine, tab, role, action, args) values ('{confirmation}', '{ana}', '{machine}', 'tab-1', 'worker', 'fake.action', '{{}}')",
+            grant = rows.grant,
+            session = rows.session,
+            confirmation = rows.confirmation
+        ),
+    );
+    rows
+}
+
+/// What ana's rows say now, one line: any change to a row an id-only write may touch shows in it.
+fn ana_state(hub: &TestHub, rows: &AnaRows) -> String {
+    first_text(
+        hub,
+        &format!(
+            "select concat_ws('|',
+               (select extract(epoch from last_seen)::bigint::text from machines where id = '{machine}'),
+               (select concat_ws(',', id, phase, coalesce(upstash, '-'), spec::text) from boxes where id = 'box-run'),
+               (select concat_ws(',', id, phase, coalesce(upstash, '-')) from boxes where id = 'box-new'),
+               (select count(*)::text from boxes),
+               (select concat_ws(',', coalesce(outcome, '-'), notified::text, coalesce(result::text, '-')) from agent_confirmations where id = '{confirmation}'),
+               (select count(*)::text from agent_sessions where id = '{session}'))",
+            machine = rows.machine,
+            confirmation = rows.confirmation,
+            session = rows.session
+        ),
+    )
+}
+
+#[test]
+fn an_id_only_write_with_another_accounts_id_changes_no_row() {
+    use pinned_core::upstash::BoxId;
+    use pinned_server::boxes::{End, Phase};
+    let hub = TestHub::start("id_only_writes");
+    let (token_a, ana, _client_a) = signed_in(&hub.url, "ana@example.test");
+    let (_, bob, _client_b) = signed_in(&hub.url, "bob@example.test");
+    let (machine, _) = account::register_machine(&hub.url, &token_a, "ana-mac", "linux").unwrap();
+    let rows = ana_rows(&hub, &ana, &machine.id);
+    let (ana_id, bob_id) = (uuid::Uuid::parse_str(&ana).unwrap(), uuid::Uuid::parse_str(&bob).unwrap());
+    let bob_grant = uuid::Uuid::new_v4();
+    admin_on(&hub.database, &format!("insert into agent_grants (id, account, client, scopes, projects) values ('{bob_grant}', '{bob}', 'client-1', '[]', '[]')"));
+    let db = &hub.hub().db;
+    let before = ana_state(&hub, &rows);
+    println!("before: {before}");
+
+    // Bob's account, ana's ids: every call is a no-op.
+    hub.runtime.block_on(async {
+        db.machine_seen(bob_id, rows.machine).await.unwrap();
+        db.set_box_budget(bob_id, "box-run", 99.0).await.unwrap();
+        assert!(!db.set_box_phase(bob_id, "box-run", &Phase::Running, &Phase::Ending(End::Exited)).await.unwrap(), "set_box_phase moved ana's row");
+        assert!(!db.box_created(bob_id, "box-new", &BoxId("u-stolen".into())).await.unwrap(), "box_created took ana's row");
+        db.delete_box(bob_id, "box-run").await.unwrap();
+        db.finish_confirmation(bob_id, rows.confirmation, "done", &json!({ "by": "bob" })).await.unwrap();
+        db.notified(bob_id, rows.confirmation).await.unwrap();
+        db.drop_agent_session(bob_grant, rows.session).await.unwrap();
+    });
+    assert_eq!(ana_state(&hub, &rows), before, "a write with bob's id changed one of ana's rows");
+
+    // The same calls with ana's own ids do change them, so the check above is not vacuous.
+    hub.runtime.block_on(async {
+        db.machine_seen(ana_id, rows.machine).await.unwrap();
+        db.set_box_budget(ana_id, "box-run", 99.0).await.unwrap();
+        assert!(db.set_box_phase(ana_id, "box-run", &Phase::Running, &Phase::Ending(End::Exited)).await.unwrap());
+        assert!(db.box_created(ana_id, "box-new", &BoxId("u-new".into())).await.unwrap());
+        db.finish_confirmation(ana_id, rows.confirmation, "done", &json!({ "by": "ana" })).await.unwrap();
+        db.notified(ana_id, rows.confirmation).await.unwrap();
+        db.drop_agent_session(rows.grant, rows.session).await.unwrap();
+    });
+    let after = ana_state(&hub, &rows);
+    println!("after: {after}");
+    for (changed, what) in [("|box-run,", "box-run"), ("budget_usd", "the budget"), ("box-new,booting,u-new", "box_created"), ("done,true", "the confirmation"), ("|0", "the session")] {
+        assert!(after.contains(changed), "ana's own call did not change {what}: {after}");
+    }
+    hub.runtime.block_on(db.delete_box(ana_id, "box-run")).unwrap();
+    assert_eq!(first_text(&hub, "select count(*)::text from boxes where id = 'box-run'"), "0", "the owner's delete_box deletes");
+}
+
+#[test]
+fn another_accounts_box_row_never_joins_an_accounts_machine() {
+    let hub = TestHub::start("machine_join");
+    let (token_a, ana, _client_a) = signed_in(&hub.url, "ana@example.test");
+    let (_, bob, _client_b) = signed_in(&hub.url, "bob@example.test");
+    let (machine, machine_token) = account::register_machine(&hub.url, &token_a, "ana-mac", "linux").unwrap();
+    // A box row of bob's that names ana's machine: no caller writes one, but nothing in the schema stops it.
+    opened_box(&hub, &bob, &machine.id, "box-bob", "u-bob", "git@github.com:example/bobproject.git");
+    let db = &hub.hub().db;
+    let listed = hub.runtime.block_on(db.machines(uuid::Uuid::parse_str(&ana).unwrap())).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].upstash_box, None, "bob's box id showed on ana's machine");
+    let row = hub.runtime.block_on(db.machine_connected(&machine_token, "linux", "0.0.0")).unwrap().unwrap();
+    assert!(!row.dedicated, "bob's box row made ana's machine a box's");
+}
+
 /// How many ends the hub holds, for every account or only `account`, as Postgres has them.
 fn held_ends(hub: &TestHub, account: Option<uuid::Uuid>) -> i64 {
     hub.runtime.block_on(async {

@@ -1031,7 +1031,7 @@ impl Boxes {
         }
         let total = row.spec.budget_usd.unwrap_or(0.0) + extra_usd;
         box_budget(hub, account, row.spec.repo.as_deref(), Some(total)).await?;
-        hub.db.set_box_budget(&row.id, total).await?;
+        hub.db.set_box_budget(account.id, &row.id, total).await?;
         self.box_status(hub, account, machine).await
     }
 
@@ -1220,14 +1220,14 @@ impl Boxes {
         };
         if booted.is_ok() {
             // Another hub may have moved it on already, which is just as good.
-            hub.db.set_box_phase(&row.id, &Phase::Booting, &Phase::Running).await?;
+            hub.db.set_box_phase(account.id, &row.id, &Phase::Booting, &Phase::Running).await?;
         }
         if let Err(e) = &booted {
             eprintln!("pinned-server: box {} of account {} failed: {e}", row.id, account.id);
             self.cooling.lock().unwrap().insert((account.id, row.connector.clone()), Instant::now());
             let failed = Phase::Ending(End::Failed(e.clone()));
             for from in [Phase::Creating, Phase::Booting] {
-                if hub.db.set_box_phase(&row.id, &from, &failed).await? {
+                if hub.db.set_box_phase(account.id, &row.id, &from, &failed).await? {
                     let mut row = row.clone();
                     row.phase = failed.clone();
                     self.tell_origin(hub, account, &row, &End::Failed(e.clone())).await;
@@ -1268,7 +1268,7 @@ impl Boxes {
                     }
                 },
             };
-            if !hub.db.box_created(&row.id, &id).await? {
+            if !hub.db.box_created(account.id, &row.id, &id).await? {
                 // The row ended or another hub created its own box meanwhile, so nothing else
                 // knows of this one; once its key is disconnected no sweep can find it either.
                 if made {
@@ -1386,7 +1386,7 @@ impl Boxes {
                 }
             }
         }
-        hub.db.delete_box(&row.id).await?;
+        hub.db.delete_box(account.id, &row.id).await?;
         self.timers.lock().unwrap().remove(&row.id);
         eprintln!("pinned-server: deleted box {} of account {} ({})", row.id, account.id, row.why);
         Ok(())
@@ -1463,7 +1463,7 @@ impl Boxes {
         let failed = matches!(why, End::Failed(_));
         if !matches!(row.phase, Phase::Ending(_)) {
             let ending = Phase::Ending(why.clone());
-            if !hub.db.set_box_phase(&row.id, &row.phase, &ending).await? {
+            if !hub.db.set_box_phase(account.id, &row.id, &row.phase, &ending).await? {
                 return Err(format!("box {} changed while pinned ended it; it ends on the next check", row.id));
             }
             row.phase = ending;
