@@ -8457,6 +8457,46 @@ fn a_worker_box_end_reaches_a_parent_that_was_offline_and_the_box_ends_done_at_o
 }
 
 #[test]
+fn a_worker_box_whose_end_the_hub_cannot_keep_unclaimed_keeps_running_and_sends_it_again() {
+    let hub = TestHub::start_with_boxes("held_unkept", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let mac_dir = temp("held-unkept-mac");
+    let (mut mac, creds, captain) = sleepy_mac(&hub, &mut ana, &mac_dir);
+    let (_task, child) = box_worker(&hub, &mut ana, &mac_dir, &captain);
+    let box_dir = hub.boxes.root.join(&hub.boxes.live()[0]);
+
+    // mac is online and answers each end it is passed: first "unknown", then with an error, then true.
+    mac.link.take().unwrap().stop();
+    ana.client.wait_machines(&[("mac", false), ("Box · Slow suite", true)]);
+    let answer = Arc::new(AtomicU64::new(0));
+    let answers = answer.clone();
+    let mac_raw = RawMachine::start(&hub.url, &creds.machine_token, move |call| match (call["cmd"].as_str().unwrap(), answers.load(Ordering::SeqCst)) {
+        ("remote_ended", 0) => RawReply::Ok(json!("unknown")),
+        ("remote_ended", 1) => RawReply::Err("not now".into()),
+        ("remote_ended", _) => RawReply::Ok(json!(true)),
+        _ => RawReply::Ok(Value::Null),
+    });
+    ana.client.wait_machines(&[("mac", true), ("Box · Slow suite", true)]);
+    admin_on(&hub.database, "create function refuse_held() returns trigger language plpgsql as $$ begin raise exception 'disk full'; end $$;
+        create trigger refuse_held before insert on held_ends for each row execute function refuse_held()");
+
+    hook(&box_dir, json!({ "kind": "agent", "status": "working", "tab": child.id, "session": "s-suite" }));
+    hook(&box_dir, json!({ "kind": "agent", "status": "done", "tab": child.id, "session": "s-suite", "reply": "Suite green." }));
+    for (arm, what) in [(0, "mac answered unknown"), (1, "mac answered with an error")] {
+        answer.store(arm, Ordering::SeqCst);
+        let before = mac_raw.calls("remote_ended");
+        // The worker sends its end again only when the hub answered it with an error.
+        wait_for(&format!("{what}, and the worker to send its end again"), || mac_raw.calls("remote_ended") >= before + 2);
+        assert_eq!((hub.boxes.live().len(), ana.rows(&hub)), (1, 1), "{what} and the end is not kept: the box keeps running");
+        assert_eq!(held_ends(&hub, None), 0);
+    }
+
+    admin_on(&hub.database, "drop trigger refuse_held on held_ends");
+    answer.store(2, Ordering::SeqCst);
+    wait_for("the box to go once mac took its end", || hub.boxes.live().is_empty() && ana.rows(&hub) == 0);
+}
+
+#[test]
 fn a_parent_that_looks_before_its_held_end_is_delivered_reads_the_end_not_a_gone_box() {
     let hub = TestHub::start_with_boxes("held_look_first", Signup::Open, fast());
     let mut ana = BoxAccount::new(&hub);

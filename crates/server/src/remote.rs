@@ -199,7 +199,7 @@ async fn ended(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, to: &str, tab
                 true
             }
             Answer::Unknown => {
-                keep_unclaimed(hub, account, to, from, &tab, &task, end).await;
+                keep_unclaimed(hub, account, to, from, &tab, &task, end).await?;
                 false
             }
             Answer::NotTaken => false,
@@ -216,7 +216,7 @@ async fn ended(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, to: &str, tab
         }
         Err(Unanswered::Refused(_)) => {
             eprintln!("pinned-server: machine {to} answered the end of task {task} with an error; it is kept unclaimed");
-            keep_unclaimed(hub, account, to, from, &tab, &task, end).await;
+            keep_unclaimed(hub, account, to, from, &tab, &task, end).await?;
             false
         }
         Err(Unanswered::Lost(e)) => return Err(e),
@@ -254,10 +254,13 @@ impl Answer {
 }
 
 /// Keeps an end `to` did not take as unclaimed, so neither its task's status nor the user loses it.
-async fn keep_unclaimed(hub: &Hub, account: &Account, to: &str, from: &str, tab: &str, task: &str, end: RemoteEnd) {
-    if let Err(e) = hold_end(hub, account, to, from, tab, task, end, true).await {
-        eprintln!("pinned-server: the end of task {task} that machine {to} did not take is not kept: {e}");
-    }
+/// An error when the row could not be written: the worker then hears it, keeps its end and sends it
+/// again, and its box keeps running.
+async fn keep_unclaimed(hub: &Hub, account: &Account, to: &str, from: &str, tab: &str, task: &str, end: RemoteEnd) -> Result<(), String> {
+    hold_end(hub, account, to, from, tab, task, end, true).await.map(drop).map_err(|_| {
+        eprintln!("pinned-server: the end of task {task} that machine {to} did not take is not kept; it is sent again");
+        format!("the hub could not keep the end of task {task} that its machine did not take; it is sent again")
+    })
 }
 
 /// The most of a held end's summary or error the hub keeps: 256 KiB. A worker's summary is its last
