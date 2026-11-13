@@ -80,3 +80,9 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:04:59Z #36 integration_keys_reach_postgres_sealed START / avail=15075M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:05:01Z #36 integration_keys_reach_postgres_sealed ok / avail=15075M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:05:02Z #37 a_box_run_boots_its_own_node_and_the_box_goes_when_its_tab_closes START / avail=15075M /workspace avail=19374M node_stat=Ssl
+2026-11-13T04:05:05Z #37 a_box_run_boots_its_own_node_and_the_box_goes_when_its_tab_closes FAILED(rc=101) / avail=15074M /workspace avail=19374M node_stat=Ssl node_tcp=1
+    thread 'a_box_run_boots_its_own_node_and_the_box_goes_when_its_tab_closes' (18338) panicked at crates/server/tests/hub.rs:2386:5:
+    assertion `left == right` failed
+    pinned-server: Postgres connection ended: db error
+    pinned-server: could not look after account 24beea57-bd80-4ca4-bbdd-b70cdc9a2ac8's boxes: could not connect to Postgres: db error
+    pinned: hub link: WebSocket protocol error: Connection reset without closing handshake; retrying
