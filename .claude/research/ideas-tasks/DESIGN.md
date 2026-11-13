@@ -98,6 +98,8 @@ pub struct Task {
     #[serde(default)] pub on_missed: OnMissed,
     #[serde(default)] pub approvals: Vec<Approval>,   // section 4
     #[serde(default)] pub fallback: Fallback,         // section 3
+    #[serde(default)] pub grace_min: Option<u32>,     // 3.3; None = 15
+    #[serde(default)] pub pickup_min: Option<u32>,    // 3.4; None = 10
     #[serde(default)] pub idea: Option<String>,       // the idea it came from
     pub created_by: Actor,          // user, or role + machine + tab + session title
     pub created_at: i64, pub updated_at: i64,
@@ -138,7 +140,9 @@ pub enum Action {
 
 pub struct TaskRun {          // one row per occurrence, table `task_runs`
     pub task: String, pub due_at: i64, pub started_at: Option<i64>,
-    pub state: RunState,      // due | delivered | queued | held | done | failed | missed | skipped | lost
+    pub state: RunState,      // due | delivered | queued | started | stalled | held | done | failed | missed | skipped | lost
+    #[serde(default)] pub delivered_at: Option<i64>,  // 3.4: the pickup clock starts here
+    #[serde(default)] pub last_activity: Option<i64>, // 3.4: last time the target's transcript moved
     pub machine: String, pub tab: String, pub detail: String,
 }
 ```
@@ -202,8 +206,9 @@ Everything is additive:
 
 - **No machine online at all.** `Me` and box-placed runs still go. Everything else waits. When the grace window ends, the run is `missed` and `on_missed` applies (3.3). The scheduler never invents a box for a target that did not opt in: a box costs money and clones a repo, so `fallback: Fallback::{Wait, Box}` defaults to `Wait`, and `Box` is offered only for `Captain`, `Worker` and workflow runs.
 - **Limits.** A task run is work an agent started, so it goes through the same limits as Run now and `delegate_task` (`starts_work`): workers at once, tier, effort, time limit, budget. A refusal for a limit retries until grace ends and then is `failed` with the refusal text. It never bypasses a limit.
-- **What the target sees.** The prompt starts with one line: `Scheduled task "Release pinned 0.18.2" (created by you / by the Captain of pinned, 12 Nov). Nobody is watching this run; steps that need Felipe will wait for him.` Then the text. The session knows it runs unattended.
-- **Result.** A run is `done` when the target's first turn after delivery ends. The hub reads the last reply (`read_session`) into `TaskRun.detail`, and the Tasks page links to the session. A one-time task then disables itself. It stays listed until deleted, so its history is not lost.
+- **What the target sees.** The prompt starts with one line: `Scheduled task "Release pinned 0.18.2" (created by you / by the Captain of pinned, 12 Nov) [task:<id>:<due_at>]. Nobody is watching this run; steps that need Felipe will wait for him.` Then the text. The bracketed `request_id` sits inside the first 400 characters on purpose: that is what the hooks keep of a prompt (3.4). The session knows it runs unattended.
+- **Busy is a routing hint, never proof.** The Busy column above only picks how the message is handed over. Whether the target actually took it is decided by 3.4, from signals that do not come from pinned's own busy flag.
+- **Result.** A run is `done` when the target's first turn after pickup (3.4) ends. The hub reads the last reply (`read_session`) into `TaskRun.detail`, and the Tasks page links to the session. A one-time task then disables itself. It stays listed until deleted, so its history is not lost.
 
 ### 3.3 Missed runs and hub restarts
 
@@ -215,6 +220,78 @@ Everything is additive:
 - **Never a burst.** Missed occurrences are coalesced: after a week offline, a daily task with `RunLate` runs once, not seven times. Older occurrences are recorded `skipped`.
 - **Hub restart / deploy.** State is all in Postgres (`tasks.next_at`, `task_runs`). On boot the scheduler loads every enabled task and treats each occurrence with `due_at < now` and no row as missed (via `on_missed`). Rows left in `due` or `delivered` stay as they are. Because the `request_id` is stable, the target's dedupe ledger answers "already have it". A delivery whose answer was lost (`Unanswered::Lost`) is marked `lost`, exactly as a workflow run is, and is **never** resent to a second machine. The Tasks page shows it with "Run now" for Felipe to decide.
 - **The task changed while due.** Editing a task deletes its unclaimed future and recomputes `next_at`. Runs already claimed keep the version they started with: the run row stores a copy of the action.
+
+### 3.4 Pickup: a delivered run that never starts
+
+**Why.** On 12 Nov the Captain of pinned showed `trabalhando` from 17:38 to 22:25 after its turn had ended, and everything sent to it sat in its queue (draft PR #228, `.claude/research/captain-queue-stuck/REPORT.md` on `fix/captain-queue-stuck`). A Stop hook hand-over timed out on the hook side after 300 ms, but the machine had already set `Tab::turn_pending` and marked the message in flight, so `notice_idle()` stayed false and `CaptainState::of` answered `Working`. #228 fixes that path. This design must not depend on it. A task run handed to a target that pinned *thinks* is busy is `Queued` behind that belief (3.2), and any similar bug would silently eat scheduled runs. So a run is only `started` when the hub sees the target take the message, from a signal that pinned's busy state does not produce.
+
+**Signals, today and new** (line numbers on `main` at 5af27835):
+
+| Signal | Where it exists | Counts as pickup? | New in PR 5 |
+|---|---|---|---|
+| `TabView.status` / `CaptainState::of` (`Working` when `orchestrator_turn` or status `Working`) | `global_orchestrator.rs:405`, `machine.rs:549` | **No.** This is the busy flag that lied for five hours. Used only to choose Queued vs typed | — |
+| Ledger `Progress::InFlight` | `global_orchestrator.rs:155`, set by `Ledger::typed` (`:215`) from `mark_typed` (`machine.rs:5622`) | **No.** Set when pinned *hands the text over*, before Claude Code has it. In the bug it was `InFlight` the whole time | — |
+| Ledger `Progress::Answered` | set when a Captain turn ends, `captain_turn_ended` (`machine.rs:3254`) | Proof of a finished turn, so it implies pickup. Too late to be the pickup signal | — |
+| UserPromptSubmit hook → `AgentEvent { status: Working, prompt }` | `hooks.rs:204` keeps the prompt cut to 400 chars (`history::clip_prompt`, `history.rs:190`); hook name in `agent.rs:223`; handled by `record_event` (`machine.rs:5903`) | **Yes**, when the prompt holds the run's `[task:<id>:<due_at>]`. Claude Code fires it only when a turn really starts from that text | The machine matches the marker against the runs it was handed and sends `ScheduleEvent::PickedUp { request_id, at }` to the hub |
+| The session transcript (`.jsonl` Claude Code writes) | `Machine::transcript` (`machine.rs:1390`) → `find_transcript` (`machine.rs:1462`) | **Yes**, when a `user` line or a `hook_additional_context` attachment after `delivered_at` holds the marker. Written by Claude Code, not by pinned. This also covers the hand-over path, where the text arrives as Stop/UserPromptSubmit `additionalContext` (`hooks.rs:231`) and no prompt event carries it | A tail scan from the last offset, every 30 s for each run in `delivered`/`queued`/`stalled`, and the file's size/mtime kept as `last_activity` |
+| A delegated worker's first stream event | `delegates.turn_started(task)` (`machine.rs:5924` → `delegate/registry.rs:402`) | **Yes** for `Target::Worker` | Map the task id back to the run |
+| `Target::Me`, `Action::Workflow` | — | `Me` needs no pickup (a push). A workflow has its own run states; pickup applies to its first step's session | — |
+
+**The pickup deadline.** `Task.pickup_min`, default 10 minutes, set per task like grace (`grace_min`). It is stored, not a constant, so a task that targets a Captain known for long turns can carry 60. The clock starts at `delivered_at`, which is when the handoff answered `Delivered`, `Queued` or `Started`. When it passes with no pickup signal, the run goes to **`stalled`**. Then:
+
+- Nothing is delivered anywhere else. No second machine, no box, no new tab. The queued copy stays where it is, so a late pickup still works.
+- Felipe decides, from a row (below). A pickup that comes after `stalled` (someone typed "read your queue") moves the run to `started` and closes the row with "started late, 22:25".
+- **Skip** withdraws the queued copy from the target's queue (new `Call::WithdrawRequest { request_id }`; the ledger marks it answered without typing), so it does not fire hours later as hook context. If the target already took it, the answer says so and the run follows the pickup.
+- **Deliver again** goes to the same target on the same machine only. It first withdraws the queued copy, then types the prompt into the tab whatever pinned's busy flag says (a new `BusyPolicy::TypeNow`; Claude Code queues typed text itself while a real turn runs, so typing is safe), with `request_id = task:<id>:<due_at>:again<n>`. There is never more than one live copy.
+- **Open** opens the tab (`open_run`) so Felipe can look.
+
+**Busy that is real but long.** A 2-hour turn and a stuck flag look the same to the busy flag. They do not look the same in the transcript: a working turn writes a line for every tool call and every reply, so its file grows. At the deadline the hub compares `last_activity` with now:
+
+- **Alive** (the transcript moved within the last `pickup_min`): the run stays `queued` (not `stalled`), and an FYI row goes to the Inbox only: "waiting behind a running turn, last activity 40 s ago". No push. It clears itself on pickup. If the wait outlives the grace window of a `Once` task, `on_missed` applies as in 3.3 (`Ask`: "still busy; run when it finishes, or skip?"), because a release three hours late is Felipe's call even when nothing is broken.
+- **Silent** (the flag says working, the transcript has not moved for `pickup_min`): `stalled`, a Needs you row and a push. In the 12 Nov case the transcript was still from 17:38, so the row would have come at 17:48 instead of nobody knowing until 22:25.
+- A turn that is waiting on a long tool (a 40-minute `cargo build` in the foreground) writes nothing while it waits. It looks silent. pinned does not guess: the row says what it saw, and Felipe opens the tab. A false alarm costs a look; a missed stall cost five hours.
+
+**What Felipe sees.**
+
+Desktop, Needs you (and the run's line on the Tasks page):
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ ⏱  Release pinned 0.18.2                                         stalled     │
+│ Delivered 09:00 to the Captain of pinned on pinned-mac. It has not started   │
+│ after 10 min. pinned shows it working, but its conversation has not moved    │
+│ since 08:41.                                                                 │
+│                                       [ Open ]  [ Deliver again ]  [ Skip ]  │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+Desktop, Inbox FYI (alive busy):
+
+```
+│ ⏱  Daily digest — waiting behind a running turn of the Captain of pinned    │
+│    (turn running 1 h 52 min, last activity 40 s ago).        [ Open ] [ Skip ]│
+```
+
+Phone (≤ 768 px), Needs you card; buttons stack full width, Skip last:
+
+```
+┌────────────────────────────────┐
+│ ⏱ Release pinned 0.18.2        │
+│ stalled · 09:00 · pinned-mac   │
+│ Delivered to the Captain of    │
+│ pinned. Not started after      │
+│ 10 min; no activity since 08:41│
+│ ┌────────────────────────────┐ │
+│ │            Open            │ │
+│ ├────────────────────────────┤ │
+│ │        Deliver again       │ │
+│ ├────────────────────────────┤ │
+│ │            Skip            │ │
+│ └────────────────────────────┘ │
+└────────────────────────────────┘
+```
+
+**A target that went away.** The machine goes offline after `Delivered`: the run is `lost` as in 3.3, never resent elsewhere. The tab closed before pickup: `stalled` with "the tab closed before it started"; Deliver again reopens it on the same machine.
 
 ---
 
@@ -404,7 +481,7 @@ Each PR runs `cargo run -p pinned-server --bin wire-contract -- snapshot current
 | 2 | `hub: ideas store and calls` | Tables `ideas`; `HubCall::{ListIdeas, SaveIdea, DeleteIdea}`; `Settings.ideas` push field; `surface::ACTIONS` rows `list_ideas`/`save_idea`/`delete_idea` (Read/Write/Write, wired); the idea tools for the Orchestrator and every session; Orchestrator prompt split memory vs idea (`global_orchestrator.rs:802`) | `crates/server/tests/hub.rs`: save, list by project, edit, delete, another account cannot see; `surface.rs` tests (`every_wire_call_has_one_action`); wire-contract check additive | **sonnet** |
 | 3 | `ui: Ideas page` | Shell page `ideas`, sidebar nav row, More row on phone, quick-add, editor, filters | `ui/ideas.test.js` (render, filters, quick-add sends `save_idea`); tutorial video: sidebar → Ideas → add → edit → delete, then the same at phone width via More | **sonnet** |
 | 4 | `hub: schedule store and calls` | Tables `tasks`, `task_runs` (`unique (task, due_at)`); `HubCall::{ListSchedules, SaveSchedule{dry_run}, PauseSchedule, DeleteSchedule, ScheduleRuns}`; `Settings.schedules`; actions `list_schedules` (Read), `save_schedule` (Write; **Confirm** when it carries approvals, through a `.checks()` like `marks::agent_check`), `pause_schedule`, `delete_schedule` (Confirm for a user-created task); agent caps (15-min interval, 20 tasks) | Hub tests: CRUD; dry-run answers next 3 times in tz; agent with approvals → confirmation, not saved; caps refused; audit rows carry the creator | **sonnet** |
-| 5 | `hub: the scheduler` | `schedule::Scheduler` loop in `Hub::watch_all`; claim-once insert; delivery per target (`Me` push, `Orchestrator`, `Captain` via the `send_to_captain` handoff, `Session` via `prompt` with wait-for-idle / unarchive, `Worker` via delegate placement, `Workflow` via `run_workflow`); `request_id = task:<id>:<due>`; grace, `OnMissed`, coalescing; restart recovery; `RunScheduleNow` + `run_schedule_now` action (`starts_work`) | Hub tests with a paused tokio clock: fires once; two schedulers on one DB fire once; host offline → waits → delivered in grace / missed after; `Ask` creates a Needs-you row; `Skip` and coalescing after a 7-day gap; hub restart mid-run does not resend (`Lost`); busy Captain → queued; limits refusal → retried then failed | **opus** |
+| 5 | `hub: the scheduler` | `schedule::Scheduler` loop in `Hub::watch_all`; claim-once insert; delivery per target (`Me` push, `Orchestrator`, `Captain` via the `send_to_captain` handoff, `Session` via `prompt` with wait-for-idle / unarchive, `Worker` via delegate placement, `Workflow` via `run_workflow`); `request_id = task:<id>:<due>`; grace, `OnMissed`, coalescing; restart recovery; `RunScheduleNow` + `run_schedule_now` action (`starts_work`); pickup (3.4): the `[task:…]` marker in the first line, `ScheduleEvent::PickedUp` from the UserPromptSubmit prompt and from a transcript tail scan, `last_activity`, `pickup_min`, `stalled`, `Call::WithdrawRequest`, `BusyPolicy::TypeNow` for Deliver again | Hub tests with a paused tokio clock: fires once; two schedulers on one DB fire once; host offline → waits → delivered in grace / missed after; `Ask` creates a Needs-you row; `Skip` and coalescing after a 7-day gap; hub restart mid-run does not resend (`Lost`); busy Captain → queued; limits refusal → retried then failed. **Pickup (3.4), machine + hub:** (a) *stuck flag*: Captain tab `status = Done` with `turn_pending` set and the ledger `InFlight` (so `CaptainState::of` = `Working`), handoff `Queued`, transcript unchanged → at +10 min the run is `stalled`, one Needs-you row with the 3.4 text, one push, and exactly one delivery recorded on any machine; (b) ledger `InFlight` alone never counts as pickup; (c) *alive busy*: status `Working`, transcript appended every minute → at +10 min still `queued`, Inbox FYI row, no push; Done + next prompt with the marker → `started`, row closed; (d) pickup through a UserPromptSubmit prompt; pickup through a Stop-hook hand-over seen only in the transcript; (e) late pickup after `stalled` → `started`, row says "started late"; (f) Deliver again withdraws the queued copy, types once on the same machine, a later Stop hook hands over nothing; (g) Skip withdraws the queued copy; (h) `pickup_min = 2` honored, missing field = 10 (serde default); (i) `Once` task alive-busy past grace → `Ask` row; (j) `Worker` with no `turn_started` in time → `stalled` | **opus** |
 | 6 | `safety: held steps in task runs` | `PINNED_SCHEDULE` env; PreToolUse guard on task-run sessions calling `preauth::never`; `Confirmation.held` (`serde(default)`); `HubCall::DecideHeld` via the existing decision path; one-shot allowance; approvals match (item + repo + `must_contain`); 24 h expiry; never-coverable items | Unit tests on the matcher (exact version only; Secrets never covered); hook tests (`hooks.rs` style: hit → deny + confirmation; approved → passes once; second time held again); hub test end to end with a fake session; wire check | **opus** |
 | 7 | `ui: Tasks page` | Shell page `tasks`, nav row with next run and held count, cards, editor (dry-run Next line, tz picker, approvals only in the user's UI), history, Pause all; Needs you rows for held and missed; More row on phone | `ui/tasks.test.js` (card sentences, editor builds `Schedule`, held row buttons); tutorial video: create "release at 09:00" task with an approval, Run now, see it held for an unapproved deploy, approve from Needs you; phone width via More | **sonnet** |
 | 8 | `ui+hub: workflows ↔ tasks, ideas → tasks` | Schedule… on workflow cards/editor, "⏱ next" line; Schedule… on ideas (`task.idea`), idea `Done` when its one-time task finishes | UI tests; hub test idea status follows its task; tutorial video: schedule a workflow, schedule an idea | **sonnet** |
