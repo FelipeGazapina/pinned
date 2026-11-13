@@ -148,7 +148,9 @@ async fn remote_task(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, machine
 /// Passes the end of a task `from` ran to the machine `to` whose tab delegated it. Answers whether
 /// that machine took it. With `to` offline the hub holds the end for it and answers taken once the
 /// row is written; only an end that is neither passed on nor held is an error, which `from` sends
-/// again. A worker box goes once its end got through or is held.
+/// again. One `to` answered it did not take, as a machine that restarted and forgot the task does,
+/// the hub keeps unclaimed, so `unclaimed_ends` lists it. A worker box goes once its end got through
+/// or is held.
 async fn ended(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, to: &str, tab: TabId, task: String, end: RemoteEnd) -> Result<Value, String> {
     let worker_box = hub.boxes.delegate_box(hub, account, from).await?;
     let mut end = end;
@@ -157,15 +159,22 @@ async fn ended(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, to: &str, tab
     }
     let passed = Call::RemoteEnded { from: from.to_owned(), tab: tab.clone(), task: task.clone(), end: end.clone() };
     let taken = match hub.call_machine(account, to, passed, LOOK_WAIT).await {
-        Ok(taken) => {
+        Ok(taken) if taken == Value::Bool(true) => {
             // A copy held while `to` was offline has nothing left to tell.
             if let Ok(origin) = Uuid::parse_str(to) {
                 let _ = hub.db.drop_held_end(account.id, origin, &task).await;
             }
             taken
         }
+        Ok(taken) => {
+            // Not taken: kept, so neither its task's status nor the user loses it.
+            if let Err(e) = hold_end(hub, account, to, from, &tab, &task, end, true).await {
+                eprintln!("pinned-server: the end of task {task} that machine {to} did not take is not kept: {e}");
+            }
+            taken
+        }
         Err(Unanswered::Refused(e)) if !account.is_online(to) => {
-            if !hold_end(hub, account, to, from, &tab, &task, end).await? {
+            if !hold_end(hub, account, to, from, &tab, &task, end, false).await? {
                 return Err(e);
             }
             // The machine may have come back between the refusal and the write, after its own flush.
@@ -200,11 +209,12 @@ pub fn clamp_held(text: String) -> String {
     format!("{}…[truncated by pinned: {} bytes]", &text[..cut], text.len() - cut)
 }
 
-/// Holds `end` for the machine `origin` of the account, which is offline, until it comes back.
-/// False when `origin` is no machine of the account, which leaves the end to its sender. An error
-/// when the row could not be written: the sender then keeps it and sends it again. Logs ids and
-/// sizes, never the end's text.
-pub async fn hold_end(hub: &Hub, account: &Account, origin: &str, from: &str, tab: &str, task: &str, mut end: RemoteEnd) -> Result<bool, String> {
+/// Holds `end` for the machine `origin` of the account, which is offline, until it comes back, or,
+/// `unclaimed`, as one it answered it did not take. False when `origin` is no machine of the
+/// account, which leaves the end to its sender. An error when the row could not be written: the
+/// sender then keeps it and sends it again. Logs ids and sizes, never the end's text.
+#[allow(clippy::too_many_arguments)]
+pub async fn hold_end(hub: &Hub, account: &Account, origin: &str, from: &str, tab: &str, task: &str, mut end: RemoteEnd, unclaimed: bool) -> Result<bool, String> {
     let (Ok(origin_id), Ok(from_id)) = (Uuid::parse_str(origin), Uuid::parse_str(from)) else { return Ok(false) };
     if hub.db.machine_name(account.id, origin_id).await?.is_none() {
         return Ok(false);
@@ -213,10 +223,11 @@ pub async fn hold_end(hub: &Hub, account: &Account, origin: &str, from: &str, ta
     end.summary = end.summary.map(clamp_held);
     end.error = end.error.map(clamp_held);
     let report = serde_json::to_value(&end).map_err(|e| e.to_string())?;
-    match hub.db.hold_end(account.id, origin_id, task, tab, from_id, &report).await {
+    match hub.db.hold_end(account.id, origin_id, task, tab, from_id, &report, unclaimed).await {
         Ok(fresh) => {
             let kept = if fresh { "holds" } else { "already held" };
-            eprintln!("pinned-server: the hub {kept} the end of task {task} from {from} for offline machine {origin} of account {} ({size} bytes)", account.id);
+            let why = if unclaimed { "unclaimed by" } else { "for offline" };
+            eprintln!("pinned-server: the hub {kept} the end of task {task} from {from} {why} machine {origin} of account {} ({size} bytes)", account.id);
         }
         Err(e) => {
             eprintln!("pinned-server: could not hold the end of task {task} from {from} for machine {origin}: {e}");
@@ -234,9 +245,11 @@ async fn held_end(hub: &Hub, account: &Account, origin: &str, task: &str) -> Res
 }
 
 /// Passes every end the hub holds for `machine`, which just connected, as the `Call::RemoteEnded` it
-/// missed. A row goes only once the machine answered it; one it did not answer stays for its next
-/// connection, and its status answers from the row meanwhile. One delivery of a row runs at a time
-/// and sends only a row still there, and a machine takes one end per task, so a repeat is a no-op there.
+/// missed. A row goes only once the machine took it; one it did not answer stays for its next
+/// connection, and its status answers from the row meanwhile. One it answered it did not take, as
+/// a machine that restarted and forgot the task does, stays unclaimed for `HELD_FOR` and is not
+/// offered again. One delivery of a row runs at a time and sends only a row still waiting, and a
+/// machine takes one end per task, so a repeat is a no-op there.
 pub async fn deliver_held(hub: Arc<Hub>, account: Arc<Account>, machine: String) {
     let Ok(origin) = Uuid::parse_str(&machine) else { return };
     match hub.db.expire_held_ends(account.id).await {
@@ -248,11 +261,11 @@ pub async fn deliver_held(hub: Arc<Hub>, account: Arc<Account>, machine: String)
         Ok(held) => held,
         Err(e) => return eprintln!("pinned-server: could not read the ends held for machine {machine}: {e}"),
     };
-    for held in held {
-        // A delivery that ran meanwhile, from another connection of the machine, dropped the row.
+    for held in held.into_iter().filter(|held| held.unclaimed_at.is_none()) {
+        // A delivery that ran meanwhile, from another connection of the machine, dropped or unclaimed the row.
         let _delivering = hub.hold_delivery(&account, origin, &held.task).await;
         match hub.db.held_ends(account.id, origin, Some(&held.task)).await {
-            Ok(rows) if !rows.is_empty() => {}
+            Ok(rows) if rows.iter().any(|row| row.unclaimed_at.is_none()) => {}
             _ => continue,
         }
         let Ok(end) = serde_json::from_value::<RemoteEnd>(held.end) else {
@@ -262,11 +275,17 @@ pub async fn deliver_held(hub: Arc<Hub>, account: Arc<Account>, machine: String)
         };
         let ended = Call::RemoteEnded { from: held.from.to_string(), tab: held.tab, task: held.task.clone(), end };
         match hub.call_machine(&account, &machine, ended, LOOK_WAIT).await {
-            Ok(taken) => {
+            Ok(taken) if taken == Value::Bool(true) => {
                 if let Err(e) = hub.db.drop_held_end(account.id, origin, &held.task).await {
                     eprintln!("pinned-server: could not drop the delivered end of task {}: {e}", held.task);
                 }
-                eprintln!("pinned-server: passed the held end of task {} to machine {machine} (taken: {taken})", held.task);
+                eprintln!("pinned-server: passed the held end of task {} to machine {machine} (taken: true)", held.task);
+            }
+            Ok(taken) => {
+                if let Err(e) = hub.db.unclaim_held_end(account.id, origin, &held.task).await {
+                    eprintln!("pinned-server: could not mark the held end of task {} unclaimed: {e}", held.task);
+                }
+                eprintln!("pinned-server: machine {machine} did not take the held end of task {} (answered {taken}); it stays unclaimed", held.task);
             }
             Err(e) => eprintln!("pinned-server: machine {machine} did not take the held end of task {}: {}", held.task, String::from(e)),
         }

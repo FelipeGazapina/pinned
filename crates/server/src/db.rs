@@ -113,11 +113,14 @@ create table if not exists agent_boxes (box text primary key, account uuid not n
   machine uuid not null, tab text not null, role text not null, started bigint not null);
 -- The end of a task a worker ran for `origin_machine`, which the hub took while that machine was
 -- offline, or a worker box's it-ended notice it could not pass on. The row goes once
--- `origin_machine` answered it, when that machine is removed, or after `HELD_FOR`.
+-- `origin_machine` took it, when that machine is removed, or after `HELD_FOR`. `unclaimed_at` is
+-- when `origin_machine` answered that it did not take it, as one that restarted and forgot the
+-- task does: the row then stays for `HELD_FOR`, is not offered again, and `unclaimed_ends` lists it.
 create table if not exists held_ends (account uuid not null references accounts on delete cascade,
   origin_machine uuid not null, task text not null, origin_tab text not null, from_machine uuid not null,
   report jsonb not null, held_at timestamptz not null default now(),
   primary key (account, origin_machine, task));
+alter table held_ends add column if not exists unclaimed_at timestamptz;
 ";
 /// How long the hub keeps an end that its machine never came back for.
 const HELD_FOR: &str = "interval '30 days'";
@@ -134,6 +137,8 @@ pub struct HeldEnd {
     pub from: Uuid,
     /// The `RemoteEnd`.
     pub end: Value,
+    /// When `origin` answered it did not take it, unix milliseconds; `None` while it waits to be offered.
+    pub unclaimed_at: Option<u64>,
 }
 
 /// A box row of the account, as the Usage page joins it to what Upstash lists.
@@ -665,19 +670,73 @@ impl Db {
     }
 
     /// Keeps the end of task `task` that `from` ran for `origin`'s tab `tab`, unless one is kept for
-    /// it already: the first one stays. Returns once the row is committed.
-    pub async fn hold_end(&self, account: Uuid, origin: Uuid, task: &str, tab: &str, from: Uuid, end: &Value) -> Result<bool, String> {
-        let n = self
+    /// it already: the first one stays. `unclaimed` keeps it as one `origin` answered it did not
+    /// take, and marks one kept already so. Returns whether the row is new, once it is committed.
+    pub async fn hold_end(&self, account: Uuid, origin: Uuid, task: &str, tab: &str, from: Uuid, end: &Value, unclaimed: bool) -> Result<bool, String> {
+        let row = self
             .client()
             .await?
-            .execute(
-                "insert into held_ends (account, origin_machine, task, origin_tab, from_machine, report) values ($1, $2, $3, $4, $5, $6)
-                 on conflict (account, origin_machine, task) do nothing",
-                &[&account, &origin, &task, &tab, &from, end],
+            .query_one(
+                "insert into held_ends (account, origin_machine, task, origin_tab, from_machine, report, unclaimed_at)
+                 values ($1, $2, $3, $4, $5, $6, case when $7 then now() end)
+                 on conflict (account, origin_machine, task) do update set unclaimed_at = coalesce(held_ends.unclaimed_at, excluded.unclaimed_at)
+                 returning xmax = 0",
+                &[&account, &origin, &task, &tab, &from, end, &unclaimed],
             )
             .await
             .map_err(err)?;
-        Ok(n == 1)
+        Ok(row.get(0))
+    }
+
+    /// `origin` answered the held end of `task` and did not take it: it stays, unclaimed, for `HELD_FOR`.
+    pub async fn unclaim_held_end(&self, account: Uuid, origin: Uuid, task: &str) -> Result<(), String> {
+        self.client()
+            .await?
+            .execute(
+                "update held_ends set unclaimed_at = coalesce(unclaimed_at, now()) where account = $1 and origin_machine = $2 and task = $3",
+                &[&account, &origin, &task],
+            )
+            .await
+            .map_err(err)
+            .map(drop)
+    }
+
+    /// Every end of the account that its machine did not take, younger than `HELD_FOR`, newest first.
+    pub async fn unclaimed_ends(&self, account: Uuid) -> Result<Vec<pinned_core::delegate::UnclaimedEnd>, String> {
+        let rows = self
+            .client()
+            .await?
+            .query(
+                &format!(
+                    "select task, origin_machine, origin_tab, from_machine, report,
+                       (extract(epoch from held_at) * 1000)::bigint, (extract(epoch from unclaimed_at) * 1000)::bigint
+                     from held_ends where account = $1 and unclaimed_at is not null and held_at > now() - {HELD_FOR}
+                     order by unclaimed_at desc, task"
+                ),
+                &[&account],
+            )
+            .await
+            .map_err(err)?;
+        let mut ends = Vec::new();
+        for r in rows {
+            let task: String = r.get(0);
+            let Ok(end) = serde_json::from_value(r.get(4)) else {
+                eprintln!("pinned-server: the unclaimed end of task {task} of account {account} is unreadable; it is left out");
+                continue;
+            };
+            let (origin, from): (Uuid, Uuid) = (r.get(1), r.get(3));
+            let (held_at, unclaimed_at): (i64, i64) = (r.get(5), r.get(6));
+            ends.push(pinned_core::delegate::UnclaimedEnd {
+                task,
+                origin_machine: origin.to_string(),
+                origin_tab: r.get(2),
+                from_machine: from.to_string(),
+                end,
+                held_at: held_at.max(0) as u64,
+                unclaimed_at: unclaimed_at.max(0) as u64,
+            });
+        }
+        Ok(ends)
     }
 
     /// The ends the account holds for `origin`, or only the one of `task`, younger than `HELD_FOR`.
@@ -687,17 +746,20 @@ impl Db {
             .await?
             .query(
                 &format!(
-                    "select task, origin_tab, from_machine, report from held_ends
+                    "select task, origin_tab, from_machine, report, (extract(epoch from unclaimed_at) * 1000)::bigint from held_ends
                      where account = $1 and origin_machine = $2 and ($3::text is null or task = $3) and held_at > now() - {HELD_FOR} order by held_at"
                 ),
                 &[&account, &origin, &task],
             )
             .await
             .map_err(err)?;
-        Ok(rows.iter().map(|r| HeldEnd { task: r.get(0), tab: r.get(1), from: r.get(2), end: r.get(3) }).collect())
+        Ok(rows
+            .iter()
+            .map(|r| HeldEnd { task: r.get(0), tab: r.get(1), from: r.get(2), end: r.get(3), unclaimed_at: r.get::<_, Option<i64>>(4).map(|ms| ms.max(0) as u64) })
+            .collect())
     }
 
-    /// `origin` answered the held end of `task`.
+    /// `origin` took the held end of `task`.
     pub async fn drop_held_end(&self, account: Uuid, origin: Uuid, task: &str) -> Result<(), String> {
         self.client()
             .await?

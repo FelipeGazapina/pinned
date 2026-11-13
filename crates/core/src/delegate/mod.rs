@@ -252,6 +252,25 @@ impl Origin {
     }
 }
 
+/// An end the hub keeps for 30 days because the machine whose tab delegated the task answered that
+/// it did not take it: it forgot the task, as a restart does, or had it already. `HubCall::UnclaimedEnds`
+/// lists them, and the task's status still answers from one.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct UnclaimedEnd {
+    /// The task id the delegating machine gave it.
+    pub task: String,
+    /// The machine whose tab delegated it, and that tab.
+    pub origin_machine: String,
+    pub origin_tab: String,
+    /// The machine that ran it.
+    pub from_machine: String,
+    pub end: RemoteEnd,
+    /// When the hub took the end, and when the delegating machine answered it did not take it,
+    /// unix milliseconds.
+    pub held_at: u64,
+    pub unclaimed_at: u64,
+}
+
 /// How a task that runs on another machine ended, as that machine reports it.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct RemoteEnd {

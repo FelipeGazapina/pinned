@@ -8462,3 +8462,51 @@ fn a_captain_box_whose_worker_hangs_is_not_idle_reaped_and_still_meets_its_max_l
         drop(mini);
     }
 }
+
+#[test]
+fn a_held_end_its_restarted_parent_does_not_take_stays_readable_through_status_and_the_unclaimed_list() {
+    let hub = TestHub::start("held_unclaimed");
+    // mac is offline when mini's worker ends: the hub holds mini's end of task-1 for it.
+    let (mut ana, mac, mac_token, mini, mini_raw, _) = held_for_offline_mac(&hub);
+    assert_eq!(ana.hub(json!({ "cmd": "unclaimed_ends" })), Ok(json!([])), "held for mac, not yet unclaimed");
+
+    // mac restarted meanwhile and forgot the task: it answers that it did not take the end.
+    let forgot = |call: &Value| match call["cmd"].as_str().unwrap() {
+        "remote_ended" => RawReply::Ok(json!(false)),
+        _ => RawReply::Ok(Value::Null),
+    };
+    let mac_raw = RawMachine::start(&hub.url, &mac_token, forgot);
+    wait_for("the hub to offer mac the held end", || mac_raw.calls("remote_ended") == 1);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(held_ends(&hub, None), 1, "not taken is not deleted");
+
+    let status = mac_raw.ask(remote_task_call(&mini.id, "task-1")).unwrap();
+    assert_eq!((status["workState"].as_str(), status["summary"].as_str()), (Some("result_available"), Some("Suite green.")), "status answers from the row: {status}");
+    let listed = ana.hub(json!({ "cmd": "unclaimed_ends" })).unwrap();
+    let listed = listed.as_array().unwrap();
+    assert_eq!(listed.len(), 1, "{listed:?}");
+    assert_eq!(
+        (listed[0]["task"].as_str(), listed[0]["origin_machine"].as_str(), listed[0]["origin_tab"].as_str(), listed[0]["from_machine"].as_str()),
+        (Some("task-1"), Some(mac.id.as_str()), Some("tab-1"), Some(mini.id.as_str()))
+    );
+    assert_eq!((listed[0]["end"]["summary"].as_str(), listed[0]["end"]["usage"]["tokens_in"].as_u64()), (Some("Suite green."), Some(1200)));
+    assert!(listed[0]["unclaimed_at"].as_u64() >= listed[0]["held_at"].as_u64() && listed[0]["held_at"].as_u64() > Some(0), "{listed:?}");
+
+    drop(mac_raw);
+    let again = RawMachine::start(&hub.url, &mac_token, forgot);
+    std::thread::sleep(Duration::from_millis(800));
+    assert_eq!(again.calls("remote_ended"), 0, "an unclaimed end is not offered again on the next connection");
+    assert_eq!(held_ends(&hub, None), 1, "it stays for its 30 days");
+
+    // Online and forgetful: an end mac answers it did not take is kept unclaimed too.
+    let end = json!({ "cmd": "remote_ended", "to": mac.id, "tab": "tab-1", "task": "task-2", "end": { "state": "failed", "error": "Tests failed." } });
+    assert_eq!(mini_raw.ask(end), Ok(json!(false)), "the sender hears not taken, as before");
+    let listed = ana.hub(json!({ "cmd": "unclaimed_ends" })).unwrap();
+    let tasks: Vec<&str> = listed.as_array().unwrap().iter().map(|e| e["task"].as_str().unwrap()).collect();
+    assert_eq!(tasks.len(), 2, "{listed}");
+    assert!(tasks.contains(&"task-2") && tasks.contains(&"task-1"), "{listed}");
+
+    // Another account lists none of it.
+    let (_, _, mut bob) = signed_in(&hub.url, "bob@acme.dev");
+    assert_eq!(bob.hub(json!({ "cmd": "unclaimed_ends" })), Ok(json!([])));
+}

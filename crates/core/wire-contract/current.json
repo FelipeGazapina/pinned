@@ -6755,6 +6755,19 @@
                 ]
               },
               {
+                "description": "`Vec<delegate::UnclaimedEnd>`: the account's worker ends that the machine whose tab delegated\nthe task answered it did not take, as a machine that restarted and forgot the task does.\nThe hub keeps each for 30 days, newest first.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "unclaimed_ends"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
                 "description": "`upstash::BoxUsage`: the account's Upstash Box usage, and pinned's count of the box time its\ndelegated tasks used this UTC month. The Upstash key stays on the hub.",
                 "type": "object",
                 "properties": {
@@ -16775,6 +16788,19 @@
                 ]
               },
               {
+                "description": "`Vec<delegate::UnclaimedEnd>`: the account's worker ends that the machine whose tab delegated\nthe task answered it did not take, as a machine that restarted and forgot the task does.\nThe hub keeps each for 30 days, newest first.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "unclaimed_ends"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
                 "description": "`upstash::BoxUsage`: the account's Upstash Box usage, and pinned's count of the box time its\ndelegated tasks used this UTC month. The Upstash key stays on the hub.",
                 "type": "object",
                 "properties": {
@@ -22962,6 +22988,19 @@
                 "required": [
                   "cmd",
                   "days"
+                ]
+              },
+              {
+                "description": "`Vec<delegate::UnclaimedEnd>`: the account's worker ends that the machine whose tab delegated\nthe task answered it did not take, as a machine that restarted and forgot the task does.\nThe hub keeps each for 30 days, newest first.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "unclaimed_ends"
+                  }
+                },
+                "required": [
+                  "cmd"
                 ]
               },
               {
@@ -29764,6 +29803,19 @@
                 "required": [
                   "cmd",
                   "days"
+                ]
+              },
+              {
+                "description": "`Vec<delegate::UnclaimedEnd>`: the account's worker ends that the machine whose tab delegated\nthe task answered it did not take, as a machine that restarted and forgot the task does.\nThe hub keeps each for 30 days, newest first.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "unclaimed_ends"
+                  }
+                },
+                "required": [
+                  "cmd"
                 ]
               },
               {
@@ -66828,6 +66880,280 @@
                   "err"
                 ]
               }
+            ]
+          }
+        }
+      }
+    },
+    "UnclaimedEnd": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "UnclaimedEnd",
+        "description": "An end the hub keeps for 30 days because the machine whose tab delegated the task answered that\nit did not take it: it forgot the task, as a restart does, or had it already. `HubCall::UnclaimedEnds`\nlists them, and the task's status still answers from one.",
+        "type": "object",
+        "properties": {
+          "task": {
+            "description": "The task id the delegating machine gave it.",
+            "type": "string"
+          },
+          "origin_machine": {
+            "description": "The machine whose tab delegated it, and that tab.",
+            "type": "string"
+          },
+          "origin_tab": {
+            "type": "string"
+          },
+          "from_machine": {
+            "description": "The machine that ran it.",
+            "type": "string"
+          },
+          "end": {
+            "$ref": "#/$defs/RemoteEnd"
+          },
+          "held_at": {
+            "description": "When the hub took the end, and when the delegating machine answered it did not take it,\nunix milliseconds.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "unclaimed_at": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "task",
+          "origin_machine",
+          "origin_tab",
+          "from_machine",
+          "end",
+          "held_at",
+          "unclaimed_at"
+        ],
+        "$defs": {
+          "RemoteEnd": {
+            "description": "How a task that runs on another machine ended, as that machine reports it.",
+            "type": "object",
+            "properties": {
+              "state": {
+                "description": "`result_available`, `failed` or `cancelled`.",
+                "type": "string"
+              },
+              "summary": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "usage": {
+                "description": "What the worker used, its box's time included: the delegating task shows it. An older\nmachine sends none. The machine that ran the task records the run, so this is for display.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TaskUsage"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "TaskUsage": {
+            "description": "What a delegated worker has used so far. The limits enforce `cost_usd`; the metrics keep the rest.",
+            "type": "object",
+            "properties": {
+              "tokens_in": {
+                "description": "Input tokens, cache reads and cache writes included.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "tokens_out": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "cost_usd": {
+                "description": "The tokens priced as the Usage page prices them. None while a model the worker used has no price.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "wall_ms": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "box_usd": {
+                "description": "What the worker's Upstash Box cost, for box work.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "box_ms": {
+                "description": "The box time `box_usd` pays for: since the box's previous task ended, or since it was made.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "tokens_in",
+              "tokens_out",
+              "wall_ms"
+            ]
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "UnclaimedEnd",
+        "description": "An end the hub keeps for 30 days because the machine whose tab delegated the task answered that\nit did not take it: it forgot the task, as a restart does, or had it already. `HubCall::UnclaimedEnds`\nlists them, and the task's status still answers from one.",
+        "type": "object",
+        "properties": {
+          "task": {
+            "description": "The task id the delegating machine gave it.",
+            "type": "string"
+          },
+          "origin_machine": {
+            "description": "The machine whose tab delegated it, and that tab.",
+            "type": "string"
+          },
+          "origin_tab": {
+            "type": "string"
+          },
+          "from_machine": {
+            "description": "The machine that ran it.",
+            "type": "string"
+          },
+          "end": {
+            "$ref": "#/$defs/RemoteEnd"
+          },
+          "held_at": {
+            "description": "When the hub took the end, and when the delegating machine answered it did not take it,\nunix milliseconds.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "unclaimed_at": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "task",
+          "origin_machine",
+          "origin_tab",
+          "from_machine",
+          "end",
+          "held_at",
+          "unclaimed_at"
+        ],
+        "$defs": {
+          "RemoteEnd": {
+            "description": "How a task that runs on another machine ended, as that machine reports it.",
+            "type": "object",
+            "properties": {
+              "state": {
+                "description": "`result_available`, `failed` or `cancelled`.",
+                "type": "string"
+              },
+              "summary": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "error": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "usage": {
+                "description": "What the worker used, its box's time included: the delegating task shows it. An older\nmachine sends none. The machine that ran the task records the run, so this is for display.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/TaskUsage"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "TaskUsage": {
+            "description": "What a delegated worker has used so far. The limits enforce `cost_usd`; the metrics keep the rest.",
+            "type": "object",
+            "properties": {
+              "tokens_in": {
+                "description": "Input tokens, cache reads and cache writes included.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "tokens_out": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "cost_usd": {
+                "description": "The tokens priced as the Usage page prices them. None while a model the worker used has no price.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "wall_ms": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "box_usd": {
+                "description": "What the worker's Upstash Box cost, for box work.",
+                "type": [
+                  "number",
+                  "null"
+                ],
+                "format": "double"
+              },
+              "box_ms": {
+                "description": "The box time `box_usd` pays for: since the box's previous task ended, or since it was made.",
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "tokens_in",
+              "tokens_out",
+              "wall_ms"
             ]
           }
         }

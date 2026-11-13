@@ -1374,7 +1374,7 @@ impl Boxes {
         if let Err(e) = hub.call_machine(account, &origin.machine, ended, ORIGIN_WAIT).await {
             eprintln!("pinned-server: could not tell {} that box {} ended: {}", origin.machine, row.id, String::from(e));
             // Held for it, unless the worker's own end is held already: that one stays.
-            match crate::remote::hold_end(hub, account, &origin.machine, &row.machine.to_string(), &origin.tab, &origin.task, end).await {
+            match crate::remote::hold_end(hub, account, &origin.machine, &row.machine.to_string(), &origin.tab, &origin.task, end, false).await {
                 Ok(true) => {}
                 Ok(false) => eprintln!("pinned-server: {} is no machine of account {} any more, so box {}'s end goes untold", origin.machine, account.id, row.id),
                 Err(e) => eprintln!("pinned-server: box {}'s end goes untold: {e}", row.id),
