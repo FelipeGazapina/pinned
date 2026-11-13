@@ -2046,7 +2046,7 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     fn pair_fake(dir: &std::path::Path) {
         let creds = pinned_core::account::Credentials {
             hub: "https://hub.example".into(),

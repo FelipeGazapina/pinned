@@ -3,8 +3,9 @@
 //! The hub ends a box by deleting it on Upstash. When it cannot (Upstash is disconnected or its API
 //! is down), the box keeps running, the hub answers its node with close code 4001 and the node would
 //! retry for ever, with a Claude session in the box still using the plan. A box's node that the hub
-//! has refused for `BOX_REFUSED_FOR`, with no hello accepted in between, ends its sessions, removes
-//! its `account.json` so the box's start script does not launch it again, and exits.
+//! has refused for `BOX_REFUSED_FOR`, with no hello accepted in between, and refuses once more at or
+//! after that span, ends its sessions, removes its `account.json` so the box's start script does not
+//! launch it again, and exits. A hub that is only unreachable never makes it leave.
 //!
 //! This does not stop the Upstash charge: the box stays on Upstash until someone deletes it.
 //!
@@ -75,8 +76,8 @@ mod tests {
         }
     }
 
-    /// The hub refuses for 60 virtual minutes. `refusal` ends after the span, as `Link::refused_for`
-    /// does. Without `PINNED_BOX` the node must stay up, paired, with its sessions untouched.
+    /// The hub refuses for 60 virtual minutes: the wait `Link::refused_for` stands for would end
+    /// after the span. Without `PINNED_BOX` the node must stay up, paired, with its sessions untouched.
     #[tokio::test(start_paused = true)]
     async fn a_node_outside_a_box_refused_for_an_hour_stays_running_and_paired() {
         let dir = tempfile::tempdir().unwrap();
@@ -87,7 +88,7 @@ mod tests {
             tokio::time::sleep(BOX_REFUSED_FOR).await;
         };
         let left = tokio::time::timeout(hour, refused_in_box(is_box(None), refused)).await.is_ok();
-        assert!(!left, "a node outside a box left after the hub refused it");
+        // As in `node()`: when the wait ends the node leaves, and then the checks below fail.
         if left {
             leave(dir.path(), || *quit.borrow_mut() += 1, |_| {});
         }
@@ -131,7 +132,7 @@ mod tests {
     }
 
     #[test]
-    fn the_exit_log_line_holds_no_token_and_says_the_box_still_costs() {
+    fn the_exit_log_line_holds_no_token_and_says_the_box_stays_on_upstash() {
         let dir = tempfile::tempdir().unwrap();
         let token = "fake-token-7f3a91c2e5";
         paired(dir.path(), token);
