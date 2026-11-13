@@ -1350,10 +1350,7 @@ grok-4.7-high - Grok 4.7  High
     impl Drop for Leftover {
         fn drop(&mut self) {
             if let Some(pid) = std::fs::read_to_string(&self.0).ok().and_then(|text| text.trim().parse::<i32>().ok()) {
-                unsafe {
-                    libc::kill(-pid, libc::SIGKILL);
-                    libc::kill(pid, libc::SIGKILL);
-                }
+                super::drivers::signal(&[-pid, pid]);
             }
         }
     }
