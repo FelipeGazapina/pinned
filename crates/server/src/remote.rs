@@ -257,10 +257,20 @@ impl Answer {
 /// An error when the row could not be written: the worker then hears it, keeps its end and sends it
 /// again, and its box keeps running.
 async fn keep_unclaimed(hub: &Hub, account: &Account, to: &str, from: &str, tab: &str, task: &str, end: RemoteEnd) -> Result<(), String> {
-    hold_end(hub, account, to, from, tab, task, end, true).await.map(drop).map_err(|_| {
-        eprintln!("pinned-server: the end of task {task} that machine {to} did not take is not kept; it is sent again");
-        format!("the hub could not keep the end of task {task} that its machine did not take; it is sent again")
+    hold_end(hub, account, to, from, tab, task, end, true).await.map(drop).inspect_err(|_| {
+        eprintln!("pinned-server: an end that machine {to} did not take is not kept; it is sent again");
     })
+}
+
+/// The longest task id the hub holds an end for. pinned's own are `task-` and 8 hex digits.
+const HELD_TASK_MAX: usize = 128;
+/// The states a worker's end can have: a task's terminal `delegate::WorkState`.
+const HELD_STATES: [&str; 3] = ["result_available", "failed", "cancelled"];
+
+/// Whether `task` is a task id the hub holds an end for: not empty, at most `HELD_TASK_MAX` bytes,
+/// and no newline or other control character, so it is safe to store and to log.
+fn held_task_ok(task: &str) -> bool {
+    !task.is_empty() && task.len() <= HELD_TASK_MAX && !task.chars().any(char::is_control)
 }
 
 /// The most of a held end's summary or error the hub keeps: 256 KiB. A worker's summary is its last
@@ -297,6 +307,10 @@ pub fn scrub_held(text: &str) -> String {
 #[allow(clippy::too_many_arguments)]
 pub async fn hold_end(hub: &Hub, account: &Account, origin: &str, from: &str, tab: &str, task: &str, mut end: RemoteEnd, unclaimed: bool) -> Result<bool, String> {
     let (Ok(origin_id), Ok(from_id)) = (Uuid::parse_str(origin), Uuid::parse_str(from)) else { return Ok(false) };
+    if !held_task_ok(task) || !HELD_STATES.contains(&end.state.as_str()) {
+        eprintln!("pinned-server: the hub refuses an end from {from_id} for machine {origin_id}: its task id or state is not one pinned makes");
+        return Err("the hub refuses this end: its task id or state is not one pinned makes".into());
+    }
     if hub.db.machine_name(account.id, origin_id).await?.is_none() {
         return Ok(false);
     }
@@ -312,7 +326,10 @@ pub async fn hold_end(hub: &Hub, account: &Account, origin: &str, from: &str, ta
         }
         Err(e) => {
             eprintln!("pinned-server: could not hold the end of task {task} from {from} for machine {origin}: {e}");
-            return Err(format!("the hub could not keep the end of task {task} for its machine, which is offline; it is sent again"));
+            return Err(match unclaimed {
+                true => format!("the hub could not keep the end of task {task} that its machine did not take; it is sent again"),
+                false => format!("the hub could not keep the end of task {task} for its machine, which is offline; it is sent again"),
+            });
         }
     }
     Ok(true)

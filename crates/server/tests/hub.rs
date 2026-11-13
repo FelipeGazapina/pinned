@@ -8674,6 +8674,39 @@ fn a_held_end_whose_key_a_nul_character_splits_is_stored_and_answered_masked() {
 }
 
 #[test]
+fn the_hub_holds_no_end_whose_task_or_state_is_not_one_pinned_makes() {
+    let hub = TestHub::start("held_checked");
+    let (token, _, mut ana) = signed_in(&hub.url, "ana@acme.dev");
+    let (mac, _) = account::register_machine(&hub.url, &token, "ana-mac", "linux").unwrap();
+    let (_, mini_token) = account::register_machine(&hub.url, &token, "ana-mini", "linux").unwrap();
+    let mini_raw = RawMachine::start(&hub.url, &mini_token, |_| RawReply::Ok(Value::Null));
+    wait_for("mini online", || ana.machines().contains(&("ana-mini".into(), true)));
+    let end = |task: &str, state: &str| json!({ "cmd": "remote_ended", "to": mac.id, "tab": "tab-1", "task": task, "end": { "state": state, "summary": "Suite green." } });
+    let long = format!("task-{}", "a".repeat(124));
+    let bad = [
+        ("", "result_available"),
+        (long.as_str(), "result_available"),
+        ("task-1\nforged line", "result_available"),
+        ("task-1\u{7}", "result_available"),
+        ("task-1\u{0}", "result_available"),
+        ("task-1", ""),
+        ("task-1", "done"),
+        ("task-1", "failed\nforged line"),
+    ];
+    for (task, state) in bad {
+        let refused = mini_raw.ask(end(task, state));
+        assert_eq!(refused, Err("the hub refuses this end: its task id or state is not one pinned makes".into()), "{task:?} {state:?}");
+        assert_eq!(held_ends(&hub, None), 0, "{task:?} {state:?}: nothing is stored");
+    }
+    assert_eq!(long.len(), 129);
+    let longest = format!("task-{}", "a".repeat(123));
+    for (task, state) in [("task-1a2b3c4d", "result_available"), ("task-2", "failed"), ("task-3", "cancelled"), (longest.as_str(), "failed")] {
+        assert_eq!(mini_raw.ask(end(task, state)), Ok(json!(true)), "{task} {state}: held for mac, which is offline");
+    }
+    assert_eq!(held_ends(&hub, None), 4);
+}
+
+#[test]
 fn a_held_end_answers_its_tasks_status_after_its_worker_is_gone_and_stays_until_answered() {
     let hub = TestHub::start("held_status");
     let (mut ana, mac, mac_token, mini, _mini_raw, _) = held_for_offline_mac(&hub);
