@@ -69018,7 +69018,7 @@
       "send": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "UnclaimedEnd",
-        "description": "An end the hub keeps for 30 days because the machine whose tab delegated the task answered that\nit did not take it: it forgot the task, as a restart does, or had it already. `HubCall::UnclaimedEnds`\nlists them, and the task's status still answers from one.",
+        "description": "An end the hub keeps for 30 days from when the worker ended because the machine whose tab\ndelegated the task did not take it: it forgot the task, as a restart does, ended it otherwise,\nanswered with an error, or was removed. Its summary and error show keys as `[hidden]`.\n`HubCall::UnclaimedEnds` lists them, and the task's status still answers from one.",
         "type": "object",
         "properties": {
           "task": {
@@ -69154,7 +69154,7 @@
       "accept": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "UnclaimedEnd",
-        "description": "An end the hub keeps for 30 days because the machine whose tab delegated the task answered that\nit did not take it: it forgot the task, as a restart does, or had it already. `HubCall::UnclaimedEnds`\nlists them, and the task's status still answers from one.",
+        "description": "An end the hub keeps for 30 days from when the worker ended because the machine whose tab\ndelegated the task did not take it: it forgot the task, as a restart does, ended it otherwise,\nanswered with an error, or was removed. Its summary and error show keys as `[hidden]`.\n`HubCall::UnclaimedEnds` lists them, and the task's status still answers from one.",
         "type": "object",
         "properties": {
           "task": {
