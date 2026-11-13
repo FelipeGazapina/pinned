@@ -183,3 +183,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
     pinned-server: Postgres connection ended: db error
     pinned-server: could not look after account 6706ab1f-9c4e-4308-bcf4-0f751cc7d638's boxes: could not connect to Postgres: db error
     error: test failed, to rerun pass `-p pinned-server --test hub`
+2026-11-13T04:09:02Z #84 the_global_orchestrator_lists_every_session_of_every_machine_and_account_and_reads_one_to_its_end START / avail=15071M /workspace avail=19374M node_stat=Ssl
