@@ -1,0 +1,25 @@
+{
+  "linear": null,
+  "slack": null,
+  "github": null,
+  "vercel": null,
+  "upstash": null,
+  "boxes": {
+    "workflow": {
+      "mode": "fixed"
+    },
+    "session": {
+      "mode": "off"
+    },
+    "worker": {
+      "mode": "fixed",
+      "row": "fake-box-row-0002"
+    },
+    "orchestrator": {
+      "mode": "fresh"
+    }
+  },
+  "box_asks": [],
+  "box_grants": [],
+  "connectors": []
+}

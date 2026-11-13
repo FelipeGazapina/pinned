@@ -1,0 +1,1128 @@
+{
+  "linear": {
+    "name": "Fake Linear User",
+    "email": "fake-linear-user-0001",
+    "organization": "Fake Linear Org"
+  },
+  "slack": {
+    "team": "Fake team 1",
+    "userId": "FAKEBOT0001",
+    "name": "fake-bot-1"
+  },
+  "slack_bots": [
+    {
+      "id": "FAKEBOT0001",
+      "teamId": "FAKETEAM0001",
+      "team": "Fake team 1",
+      "userId": "FAKEBOT0001",
+      "name": "fake-bot-1",
+      "appId": "FAKEAPP0001",
+      "keyHint": "…fk01"
+    },
+    {
+      "id": "FAKEBOT0002",
+      "teamId": "FAKETEAM0002",
+      "team": "Fake team 2",
+      "userId": "FAKEBOT0002",
+      "name": "fake-bot-2",
+      "appId": "FAKEAPP0002",
+      "keyHint": "…fk02"
+    }
+  ],
+  "slack_threads": {
+    "fake-channel-0002:1700000000.000200": "FAKEBOT0002",
+    "fake-channel-0003:1700000000.000300": "FAKEBOT0001"
+  },
+  "github": {
+    "login": "fake-github-login",
+    "name": "Fake GitHub Name"
+  },
+  "vercel": {
+    "key_hint": "…vc01"
+  },
+  "upstash": {
+    "key_hint": "…up01",
+    "claude_hint": "…cl01"
+  },
+  "box_claude_tokens": {
+    "fake-account-0001": "…tk01",
+    "fake-account-0002": "…tk02"
+  },
+  "boxes": {
+    "workflow": {
+      "mode": "fixed",
+      "row": "fake-box-row-0001"
+    },
+    "session": {
+      "mode": "ask"
+    },
+    "worker": {
+      "mode": "fresh"
+    },
+    "orchestrator": {
+      "mode": "off"
+    }
+  },
+  "box_asks": [
+    {
+      "id": "e9094fa8594e83a3",
+      "connector": "fake-workflow-0002",
+      "subject": {
+        "issue": "fake-issue-id-0001"
+      }
+    },
+    {
+      "id": "dc14561e637a9d01",
+      "connector": "fake-workflow-0002",
+      "subject": {
+        "channel": "fake-channel-0002",
+        "thread": "1700000000.000200"
+      }
+    }
+  ],
+  "box_grants": [
+    {
+      "connector": "fake-workflow-0001",
+      "subject": {
+        "issue": "fake-issue-id-0001"
+      },
+      "allow": true
+    },
+    {
+      "connector": "fake-workflow-0002",
+      "subject": {
+        "channel": "fake-channel-0002",
+        "thread": "1700000000.000200"
+      },
+      "allow": false
+    }
+  ],
+  "repo_insight": {
+    "on": true
+  },
+  "mcp_servers": [
+    {
+      "id": "fake-mcp-0001",
+      "enabled": true,
+      "server": {
+        "name": "fake-stdio-server",
+        "project": "fake-host.invalid/fake-owner/fake-repo-0001",
+        "transport": {
+          "type": "stdio",
+          "command": "fake-command",
+          "args": [
+            "--fake-flag",
+            "fake-arg"
+          ],
+          "env": [
+            "FAKE_ENV_NAME"
+          ]
+        }
+      }
+    },
+    {
+      "id": "fake-mcp-0002",
+      "enabled": false,
+      "server": {
+        "name": "fake-http-server",
+        "transport": {
+          "type": "http",
+          "url": "https://fake-host.invalid/mcp",
+          "headers": [
+            "Fake-Header"
+          ]
+        }
+      }
+    },
+    {
+      "id": "fake-mcp-0003",
+      "enabled": true,
+      "server": {
+        "name": "fake-sse-server",
+        "project": "fake-host.invalid/fake-owner/fake-repo-0002",
+        "transport": {
+          "type": "sse",
+          "url": "https://fake-host.invalid/sse",
+          "headers": [
+            "Fake-Header-A",
+            "Fake-Header-B"
+          ]
+        }
+      }
+    }
+  ],
+  "convex": [
+    {
+      "id": "fake-deployment-0001",
+      "kind": "dev",
+      "url": "https://fake-deployment-0001.invalid",
+      "team": "fake-team-0",
+      "project": "fake-project-0",
+      "key_hint": "…cx00",
+      "repos": [
+        "fake-host.invalid/fake-owner/fake-repo-0"
+      ]
+    },
+    {
+      "id": "fake-deployment-0002",
+      "kind": "prod",
+      "url": "https://fake-deployment-0002.invalid",
+      "team": "fake-team-1",
+      "project": "fake-project-1",
+      "key_hint": "…cx01",
+      "repos": [
+        "fake-host.invalid/fake-owner/fake-repo-1"
+      ]
+    },
+    {
+      "id": "fake-deployment-0003",
+      "kind": "preview",
+      "url": "https://fake-deployment-0003.invalid",
+      "team": "fake-team-2",
+      "project": "fake-project-2",
+      "key_hint": "…cx02",
+      "repos": [
+        "fake-host.invalid/fake-owner/fake-repo-2"
+      ]
+    }
+  ],
+  "connectors": [
+    {
+      "id": "fake-workflow-0001",
+      "name": "Fake workflow 0001",
+      "enabled": false,
+      "trigger": {
+        "kind": "linear-label",
+        "label": "fake-trigger-label"
+      },
+      "folder": "fake-folder-0001",
+      "model": "fake-claude-model-0001",
+      "effort": "low",
+      "permissionMode": "manual",
+      "worktree": true,
+      "instructions": "fake instructions 0001",
+      "columns": {
+        "picked": "Fake picked",
+        "coding": "Fake coding",
+        "review": "Fake review"
+      },
+      "since": "2026-01-02T03:04:05+00:00",
+      "handled": [
+        "FAKE-1",
+        "fake-channel-0001:1700000000.000100"
+      ],
+      "team": "FAKE",
+      "label": "fake-label-0001",
+      "fix": "off",
+      "created": {
+        "fake-channel-0001:1700000000.000100": {
+          "id": "fake-issue-id-0001",
+          "identifier": "FAKE-1",
+          "url": "https://fake-host.invalid/issue/FAKE-1"
+        }
+      },
+      "followed": {
+        "fake-channel-0001:1700000000.000100": {
+          "cursor": "1700000001.000100",
+          "seen": "1700000002.000200",
+          "replied": true
+        },
+        "fake-channel-0001:1700000009.000900": {
+          "cursor": "1700000003.000300",
+          "replied": false
+        }
+      },
+      "paged": {
+        "fake-channel-0001:1700000000.000100": {
+          "at": "2026-01-02T03:04:05+00:00",
+          "ping": true
+        },
+        "fake-channel-0001:1700000009.000900": {
+          "at": "2026-01-02T04:05:06+00:00",
+          "ping": false
+        }
+      },
+      "proof": false,
+      "ask": {
+        "model": "fake-vendor/fake-ask-model",
+        "instructions": "fake ask instructions",
+        "questions": [
+          {
+            "name": "fake-question-a",
+            "ask": "fake ask a",
+            "choices": [
+              "yes",
+              "no"
+            ],
+            "stopOn": [
+              "no"
+            ]
+          },
+          {
+            "name": "fake-question-b",
+            "ask": "fake ask b",
+            "choices": [],
+            "stopOn": []
+          }
+        ]
+      },
+      "machine": "",
+      "repo": "fake-host.invalid/fake-owner/fake-repo-0001",
+      "account": "fake-account-0001",
+      "slackBot": "fake-bot-0001",
+      "graph": {
+        "nodes": [
+          {
+            "id": "n-trigger",
+            "name": "Fake trigger",
+            "position": [
+              0,
+              0
+            ],
+            "group_name": null,
+            "type": "trigger",
+            "watch": {
+              "kind": "linear-label",
+              "label": "fake-trigger-label"
+            }
+          },
+          {
+            "id": "n-talk",
+            "name": "Fake talk",
+            "position": [
+              10,
+              20
+            ],
+            "group_name": null,
+            "type": "talk",
+            "prompt": "fake-small-prompt"
+          },
+          {
+            "id": "n-convex",
+            "name": "Fake convex all",
+            "position": [
+              20,
+              40
+            ],
+            "group_name": null,
+            "type": "convex-data",
+            "connection": "fake-deployment-0002"
+          }
+        ],
+        "edges": [
+          {
+            "from": "n-trigger",
+            "port": "out",
+            "to": "n-talk"
+          },
+          {
+            "from": "n-talk",
+            "port": "out",
+            "to": "n-convex"
+          }
+        ]
+      }
+    },
+    {
+      "id": "fake-workflow-0002",
+      "name": "Fake workflow 0002",
+      "enabled": true,
+      "trigger": {
+        "kind": "slack-mention",
+        "channel": "fake-channel-0002"
+      },
+      "folder": "fake-folder-0002",
+      "model": "fake-claude-model-0002",
+      "effort": "medium",
+      "permissionMode": "acceptEdits",
+      "worktree": false,
+      "instructions": "fake instructions 0002",
+      "columns": {
+        "picked": "Fake picked",
+        "coding": "Fake coding",
+        "review": "Fake review"
+      },
+      "since": "2026-01-02T03:04:05+00:00",
+      "handled": [
+        "FAKE-2",
+        "fake-channel-0002:1700000000.000200"
+      ],
+      "team": "FAKE",
+      "label": "fake-label-0002",
+      "fix": "ask",
+      "created": {
+        "fake-channel-0002:1700000000.000200": {
+          "id": "fake-issue-id-0002",
+          "identifier": "FAKE-2",
+          "url": "https://fake-host.invalid/issue/FAKE-2"
+        }
+      },
+      "followed": {
+        "fake-channel-0002:1700000000.000200": {
+          "cursor": "1700000001.000100",
+          "seen": "1700000002.000200",
+          "replied": true
+        },
+        "fake-channel-0002:1700000009.000900": {
+          "cursor": "1700000003.000300",
+          "replied": false
+        }
+      },
+      "paged": {
+        "fake-channel-0002:1700000000.000200": {
+          "at": "2026-01-02T03:04:05+00:00",
+          "ping": true
+        },
+        "fake-channel-0002:1700000009.000900": {
+          "at": "2026-01-02T04:05:06+00:00",
+          "ping": false
+        }
+      },
+      "proof": true,
+      "machine": "fake-machine-0002",
+      "repo": "fake-host.invalid/fake-owner/fake-repo-0002",
+      "account": "fake-account-0002",
+      "slackBot": "fake-bot-0002",
+      "graph": {
+        "nodes": [
+          {
+            "id": "n-trigger",
+            "name": "Fake trigger",
+            "position": [
+              0,
+              0
+            ],
+            "group_name": null,
+            "type": "trigger",
+            "watch": {
+              "kind": "slack-mention",
+              "channel": "fake-channel-0001"
+            }
+          },
+          {
+            "id": "n-direct",
+            "name": "Fake classify",
+            "position": [
+              10,
+              20
+            ],
+            "group_name": "fake-group-a",
+            "type": "classify",
+            "model": "fake-vendor/fake-model-1",
+            "instructions": "fake-classify-instructions",
+            "questions": [
+              {
+                "name": "kind",
+                "ask": "fake-ask-kind",
+                "choices": [
+                  {
+                    "id": "bug",
+                    "label": "Bug",
+                    "description": "fake bug description"
+                  },
+                  {
+                    "id": "ask",
+                    "label": "Ask",
+                    "description": ""
+                  }
+                ]
+              },
+              {
+                "name": "note",
+                "ask": "fake-ask-note",
+                "choices": []
+              }
+            ],
+            "branchOn": "kind",
+            "gate": {
+              "kind": "direct"
+            },
+            "fallback": {
+              "kind": "none"
+            }
+          },
+          {
+            "id": "n-decide",
+            "name": "Fake decide",
+            "position": [
+              20,
+              40
+            ],
+            "group_name": "fake-group-a",
+            "type": "classify",
+            "model": "fake-vendor/fake-model-2",
+            "instructions": "fake-decide-instructions",
+            "questions": [
+              {
+                "name": "route",
+                "ask": "fake-ask-route",
+                "choices": [
+                  {
+                    "id": "a",
+                    "label": "A",
+                    "description": "fake a"
+                  },
+                  {
+                    "id": "b",
+                    "label": "B",
+                    "description": "fake b"
+                  }
+                ]
+              }
+            ],
+            "branchOn": "route",
+            "gate": {
+              "kind": "decide",
+              "unsureBelow": 0.6,
+              "pageAt": 0.85
+            },
+            "fallback": {
+              "kind": "extra"
+            }
+          },
+          {
+            "id": "n-existing",
+            "name": "Fake existing",
+            "position": [
+              30,
+              60
+            ],
+            "group_name": null,
+            "type": "classify",
+            "model": "fake-vendor/fake-model-3",
+            "instructions": "fake-existing-instructions",
+            "questions": [
+              {
+                "name": "pick",
+                "ask": "fake-ask-pick",
+                "choices": [
+                  {
+                    "id": "x",
+                    "label": "X",
+                    "description": "fake x"
+                  },
+                  {
+                    "id": "y",
+                    "label": "Y",
+                    "description": "fake y"
+                  }
+                ]
+              }
+            ],
+            "branchOn": null,
+            "gate": {
+              "kind": "direct"
+            },
+            "fallback": {
+              "kind": "existing",
+              "port": "y"
+            }
+          },
+          {
+            "id": "n-switch",
+            "name": "Fake switch",
+            "position": [
+              40,
+              80
+            ],
+            "group_name": null,
+            "type": "switch",
+            "classify": "n-direct",
+            "question": "kind",
+            "cases": [
+              {
+                "id": "is-bug",
+                "equals": "bug"
+              },
+              {
+                "id": "is-ask",
+                "equals": "ask"
+              }
+            ]
+          },
+          {
+            "id": "n-talk",
+            "name": "Fake talk",
+            "position": [
+              50,
+              100
+            ],
+            "group_name": null,
+            "type": "talk",
+            "prompt": "fake-talk-prompt"
+          },
+          {
+            "id": "n-session",
+            "name": "Fake session",
+            "position": [
+              60,
+              120
+            ],
+            "group_name": "fake-group-b",
+            "type": "session",
+            "prompt": "fake-session-prompt",
+            "folder": "fake-folder-session",
+            "repo": "fake-host.invalid/fake-owner/fake-repo-session",
+            "model": "fake-model-session",
+            "effort": "high",
+            "permission": "acceptEdits",
+            "account": "fake-account-session",
+            "worktree": true,
+            "instructions": "fake-session-instructions"
+          },
+          {
+            "id": "n-page",
+            "name": "Fake page",
+            "position": [
+              70,
+              140
+            ],
+            "group_name": null,
+            "type": "page",
+            "group": "fake-group-handle"
+          },
+          {
+            "id": "n-stage",
+            "name": "Fake stage",
+            "position": [
+              80,
+              160
+            ],
+            "group_name": null,
+            "type": "stage-picked"
+          },
+          {
+            "id": "n-reply",
+            "name": "Fake reply",
+            "position": [
+              90,
+              180
+            ],
+            "group_name": null,
+            "type": "reply",
+            "text": "fake reply text"
+          },
+          {
+            "id": "n-file",
+            "name": "Fake file",
+            "position": [
+              100,
+              200
+            ],
+            "group_name": null,
+            "type": "file-issue",
+            "team": "FAKE",
+            "label": "fake-label",
+            "assignee": "fake-assignee",
+            "title": "fake title",
+            "description": "fake description"
+          },
+          {
+            "id": "n-take",
+            "name": "Fake take",
+            "position": [
+              110,
+              220
+            ],
+            "group_name": null,
+            "type": "take-issue",
+            "issue": "FAKE-1"
+          },
+          {
+            "id": "n-move",
+            "name": "Fake move",
+            "position": [
+              120,
+              240
+            ],
+            "group_name": null,
+            "type": "move-column",
+            "column": "Fake column"
+          },
+          {
+            "id": "n-proof",
+            "name": "Fake proof",
+            "position": [
+              130,
+              260
+            ],
+            "group_name": null,
+            "type": "proof"
+          },
+          {
+            "id": "n-convex",
+            "name": "Fake convex",
+            "position": [
+              140,
+              280
+            ],
+            "group_name": null,
+            "type": "convex-data",
+            "connection": "fake-deployment-0001",
+            "tables": [
+              "fake_table_a",
+              "fake_table_b"
+            ]
+          },
+          {
+            "id": "n-call",
+            "name": "Fake call",
+            "position": [
+              150,
+              300
+            ],
+            "group_name": null,
+            "type": "call",
+            "workflow": "fake-workflow-called"
+          },
+          {
+            "id": "n-stop",
+            "name": "Fake stop",
+            "position": [
+              160,
+              320
+            ],
+            "group_name": null,
+            "type": "stop"
+          }
+        ],
+        "edges": [
+          {
+            "from": "n-trigger",
+            "port": "out",
+            "to": "n-direct"
+          },
+          {
+            "from": "n-direct",
+            "port": "bug",
+            "to": "n-switch"
+          },
+          {
+            "from": "n-direct",
+            "port": "ask",
+            "to": "n-decide"
+          },
+          {
+            "from": "n-decide",
+            "port": "a",
+            "to": "n-existing"
+          },
+          {
+            "from": "n-decide",
+            "port": "fallback",
+            "to": "n-stop"
+          },
+          {
+            "from": "n-decide",
+            "port": "nowhere",
+            "to": "n-stop"
+          },
+          {
+            "from": "n-existing",
+            "port": "out",
+            "to": "n-talk"
+          },
+          {
+            "from": "n-switch",
+            "port": "is-bug",
+            "to": "n-session"
+          },
+          {
+            "from": "n-switch",
+            "port": "is-ask",
+            "to": "n-page"
+          },
+          {
+            "from": "n-switch",
+            "port": "out",
+            "to": "n-stage"
+          },
+          {
+            "from": "n-talk",
+            "port": "out",
+            "to": "n-reply"
+          },
+          {
+            "from": "n-talk",
+            "port": "error",
+            "to": "n-file"
+          },
+          {
+            "from": "n-session",
+            "port": "out",
+            "to": "n-take"
+          },
+          {
+            "from": "n-session",
+            "port": "error",
+            "to": "n-move"
+          },
+          {
+            "from": "n-page",
+            "port": "out",
+            "to": "n-proof"
+          },
+          {
+            "from": "n-stage",
+            "port": "out",
+            "to": "n-convex"
+          },
+          {
+            "from": "n-reply",
+            "port": "out",
+            "to": "n-call"
+          },
+          {
+            "from": "n-call",
+            "port": "out",
+            "to": "n-stop"
+          }
+        ]
+      }
+    },
+    {
+      "id": "fake-workflow-0003",
+      "name": "Fake workflow 0003",
+      "enabled": false,
+      "trigger": {
+        "kind": "slack-message",
+        "channel": "fake-channel-0003",
+        "decide": {
+          "model": "fake-vendor/fake-decision-model",
+          "instructions": "fake decide instructions",
+          "categories": [
+            {
+              "name": "fake-category-a",
+              "description": "fake a",
+              "workflow": "fake-workflow-0002",
+              "mention": "fake-user-group"
+            },
+            {
+              "name": "fake-category-b",
+              "description": "fake b",
+              "workflow": null,
+              "mention": null
+            }
+          ],
+          "fallback": "fake-category-b"
+        }
+      },
+      "folder": "fake-folder-0003",
+      "model": "fake-claude-model-0003",
+      "effort": "high",
+      "permissionMode": "auto",
+      "worktree": true,
+      "instructions": "fake instructions 0003",
+      "columns": {
+        "picked": "Fake picked",
+        "coding": "Fake coding",
+        "review": "Fake review"
+      },
+      "since": "2026-01-02T03:04:05+00:00",
+      "handled": [
+        "FAKE-3",
+        "fake-channel-0003:1700000000.000300"
+      ],
+      "team": "FAKE",
+      "label": "fake-label-0003",
+      "fix": "auto",
+      "created": {
+        "fake-channel-0003:1700000000.000300": {
+          "id": "fake-issue-id-0003",
+          "identifier": "FAKE-3",
+          "url": "https://fake-host.invalid/issue/FAKE-3"
+        }
+      },
+      "followed": {
+        "fake-channel-0003:1700000000.000300": {
+          "cursor": "1700000001.000100",
+          "seen": "1700000002.000200",
+          "replied": true
+        },
+        "fake-channel-0003:1700000009.000900": {
+          "cursor": "1700000003.000300",
+          "replied": false
+        }
+      },
+      "paged": {
+        "fake-channel-0003:1700000000.000300": {
+          "at": "2026-01-02T03:04:05+00:00",
+          "ping": true
+        },
+        "fake-channel-0003:1700000009.000900": {
+          "at": "2026-01-02T04:05:06+00:00",
+          "ping": false
+        }
+      },
+      "proof": false,
+      "machine": {
+        "kind": "upstash-box"
+      },
+      "repo": "fake-host.invalid/fake-owner/fake-repo-0003",
+      "account": "fake-account-0003",
+      "slackBot": "fake-bot-0003",
+      "graph": {
+        "nodes": [
+          {
+            "id": "n-trigger",
+            "name": "Fake trigger",
+            "position": [
+              0,
+              0
+            ],
+            "group_name": null,
+            "type": "trigger",
+            "watch": {
+              "kind": "slack-message",
+              "channel": "fake-channel-0003"
+            }
+          },
+          {
+            "id": "n-talk",
+            "name": "Fake talk",
+            "position": [
+              10,
+              20
+            ],
+            "group_name": null,
+            "type": "talk",
+            "prompt": "fake-small-prompt"
+          }
+        ],
+        "edges": [
+          {
+            "from": "n-trigger",
+            "port": "out",
+            "to": "n-talk"
+          }
+        ]
+      }
+    },
+    {
+      "id": "fake-workflow-0004",
+      "name": "Fake workflow 0004",
+      "enabled": true,
+      "trigger": {
+        "kind": "called"
+      },
+      "folder": "fake-folder-0004",
+      "model": "fake-claude-model-0004",
+      "effort": "xhigh",
+      "permissionMode": "dontAsk",
+      "worktree": false,
+      "instructions": "fake instructions 0004",
+      "columns": {
+        "picked": "Fake picked",
+        "coding": "Fake coding",
+        "review": "Fake review"
+      },
+      "since": "2026-01-02T03:04:05+00:00",
+      "handled": [
+        "FAKE-4",
+        "fake-channel-0004:1700000000.000400"
+      ],
+      "team": "FAKE",
+      "label": "fake-label-0004",
+      "fix": "off",
+      "created": {
+        "fake-channel-0004:1700000000.000400": {
+          "id": "fake-issue-id-0004",
+          "identifier": "FAKE-4",
+          "url": "https://fake-host.invalid/issue/FAKE-4"
+        }
+      },
+      "followed": {
+        "fake-channel-0004:1700000000.000400": {
+          "cursor": "1700000001.000100",
+          "seen": "1700000002.000200",
+          "replied": true
+        },
+        "fake-channel-0004:1700000009.000900": {
+          "cursor": "1700000003.000300",
+          "replied": false
+        }
+      },
+      "paged": {
+        "fake-channel-0004:1700000000.000400": {
+          "at": "2026-01-02T03:04:05+00:00",
+          "ping": true
+        },
+        "fake-channel-0004:1700000009.000900": {
+          "at": "2026-01-02T04:05:06+00:00",
+          "ping": false
+        }
+      },
+      "proof": true,
+      "machine": {
+        "kind": "upstash-box",
+        "size": "small"
+      },
+      "repo": "fake-host.invalid/fake-owner/fake-repo-0004",
+      "account": "fake-account-0004",
+      "slackBot": "fake-bot-0004",
+      "graph": {
+        "nodes": [
+          {
+            "id": "n-trigger",
+            "name": "Fake trigger",
+            "position": [
+              0,
+              0
+            ],
+            "group_name": null,
+            "type": "trigger",
+            "watch": {
+              "kind": "called"
+            }
+          },
+          {
+            "id": "n-talk",
+            "name": "Fake talk",
+            "position": [
+              10,
+              20
+            ],
+            "group_name": null,
+            "type": "talk",
+            "prompt": "fake-small-prompt"
+          }
+        ],
+        "edges": [
+          {
+            "from": "n-trigger",
+            "port": "out",
+            "to": "n-talk"
+          }
+        ]
+      }
+    },
+    {
+      "id": "fake-workflow-0005",
+      "name": "Fake workflow 0005",
+      "enabled": false,
+      "trigger": {
+        "kind": "slack-mention",
+        "channel": "fake-channel-0005"
+      },
+      "folder": "fake-folder-0005",
+      "model": "fake-claude-model-0005",
+      "effort": "max",
+      "permissionMode": "bypassPermissions",
+      "worktree": true,
+      "instructions": "fake instructions 0005",
+      "columns": {
+        "picked": "Fake picked",
+        "coding": "Fake coding",
+        "review": "Fake review"
+      },
+      "since": "2026-01-02T03:04:05+00:00",
+      "handled": [
+        "FAKE-5",
+        "fake-channel-0005:1700000000.000500"
+      ],
+      "team": "FAKE",
+      "label": "fake-label-0005",
+      "fix": "ask",
+      "created": {
+        "fake-channel-0005:1700000000.000500": {
+          "id": "fake-issue-id-0005",
+          "identifier": "FAKE-5",
+          "url": "https://fake-host.invalid/issue/FAKE-5"
+        }
+      },
+      "followed": {
+        "fake-channel-0005:1700000000.000500": {
+          "cursor": "1700000001.000100",
+          "seen": "1700000002.000200",
+          "replied": true
+        },
+        "fake-channel-0005:1700000009.000900": {
+          "cursor": "1700000003.000300",
+          "replied": false
+        }
+      },
+      "paged": {
+        "fake-channel-0005:1700000000.000500": {
+          "at": "2026-01-02T03:04:05+00:00",
+          "ping": true
+        },
+        "fake-channel-0005:1700000009.000900": {
+          "at": "2026-01-02T04:05:06+00:00",
+          "ping": false
+        }
+      },
+      "proof": false,
+      "machine": {
+        "kind": "upstash-box",
+        "size": "medium"
+      },
+      "repo": "fake-host.invalid/fake-owner/fake-repo-0005",
+      "account": "fake-account-0005",
+      "slackBot": "fake-bot-0005"
+    },
+    {
+      "id": "fake-workflow-0006",
+      "name": "Fake workflow 0006",
+      "enabled": true,
+      "trigger": {
+        "kind": "linear-label",
+        "label": "fake-trigger-label-6"
+      },
+      "folder": "fake-folder-0006",
+      "model": "fake-claude-model-0006",
+      "effort": "medium",
+      "permissionMode": "plan",
+      "worktree": false,
+      "instructions": "fake instructions 0006",
+      "columns": {
+        "picked": "Fake picked",
+        "coding": "Fake coding",
+        "review": "Fake review"
+      },
+      "since": "2026-01-02T03:04:05+00:00",
+      "handled": [
+        "FAKE-6",
+        "fake-channel-0006:1700000000.000600"
+      ],
+      "team": "FAKE",
+      "label": "fake-label-0006",
+      "fix": "auto",
+      "created": {
+        "fake-channel-0006:1700000000.000600": {
+          "id": "fake-issue-id-0006",
+          "identifier": "FAKE-6",
+          "url": "https://fake-host.invalid/issue/FAKE-6"
+        }
+      },
+      "followed": {
+        "fake-channel-0006:1700000000.000600": {
+          "cursor": "1700000001.000100",
+          "seen": "1700000002.000200",
+          "replied": true
+        },
+        "fake-channel-0006:1700000009.000900": {
+          "cursor": "1700000003.000300",
+          "replied": false
+        }
+      },
+      "paged": {
+        "fake-channel-0006:1700000000.000600": {
+          "at": "2026-01-02T03:04:05+00:00",
+          "ping": true
+        },
+        "fake-channel-0006:1700000009.000900": {
+          "at": "2026-01-02T04:05:06+00:00",
+          "ping": false
+        }
+      },
+      "proof": true,
+      "machine": {
+        "kind": "upstash-box",
+        "size": "large"
+      },
+      "repo": "fake-host.invalid/fake-owner/fake-repo-0006",
+      "account": "fake-account-0006",
+      "slackBot": "fake-bot-0006"
+    }
+  ]
+}
