@@ -49052,66 +49052,6 @@
               }
             ]
           },
-          "Actor": {
-            "description": "Who created a task or an idea: the user, or an agent by the part it plays.",
-            "oneOf": [
-              {
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "user"
-                  }
-                },
-                "required": [
-                  "kind"
-                ]
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "agent"
-                  },
-                  "role": {
-                    "$ref": "#/$defs/ActorRole"
-                  },
-                  "machine": {
-                    "type": "string",
-                    "default": ""
-                  },
-                  "tab": {
-                    "type": "string",
-                    "default": ""
-                  },
-                  "session_title": {
-                    "type": "string",
-                    "default": ""
-                  }
-                },
-                "required": [
-                  "kind",
-                  "role",
-                  "machine",
-                  "tab",
-                  "session_title"
-                ]
-              }
-            ]
-          },
-          "ActorRole": {
-            "description": "The part the session that acted plays, as its tab shows it.",
-            "type": "string",
-            "enum": [
-              "global_orchestrator",
-              "captain",
-              "worker",
-              "taste_chat",
-              "workflow",
-              "session"
-            ]
-          },
           "TaskRun": {
             "type": "object",
             "properties": {
@@ -51319,63 +51259,6 @@
                 "type": "string",
                 "const": "box"
               }
-            ]
-          },
-          "Actor": {
-            "description": "Who created a task or an idea: the user, or an agent by the part it plays.",
-            "oneOf": [
-              {
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "user"
-                  }
-                },
-                "required": [
-                  "kind"
-                ]
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "agent"
-                  },
-                  "role": {
-                    "$ref": "#/$defs/ActorRole"
-                  },
-                  "machine": {
-                    "type": "string",
-                    "default": ""
-                  },
-                  "tab": {
-                    "type": "string",
-                    "default": ""
-                  },
-                  "session_title": {
-                    "type": "string",
-                    "default": ""
-                  }
-                },
-                "required": [
-                  "kind",
-                  "role"
-                ]
-              }
-            ]
-          },
-          "ActorRole": {
-            "description": "The part the session that acted plays, as its tab shows it.",
-            "type": "string",
-            "enum": [
-              "global_orchestrator",
-              "captain",
-              "worker",
-              "taste_chat",
-              "workflow",
-              "session"
             ]
           },
           "TaskRun": {
@@ -57874,66 +57757,6 @@
               }
             ]
           },
-          "Actor": {
-            "description": "Who created a task or an idea: the user, or an agent by the part it plays.",
-            "oneOf": [
-              {
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "user"
-                  }
-                },
-                "required": [
-                  "kind"
-                ]
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "agent"
-                  },
-                  "role": {
-                    "$ref": "#/$defs/ActorRole"
-                  },
-                  "machine": {
-                    "type": "string",
-                    "default": ""
-                  },
-                  "tab": {
-                    "type": "string",
-                    "default": ""
-                  },
-                  "session_title": {
-                    "type": "string",
-                    "default": ""
-                  }
-                },
-                "required": [
-                  "kind",
-                  "role",
-                  "machine",
-                  "tab",
-                  "session_title"
-                ]
-              }
-            ]
-          },
-          "ActorRole": {
-            "description": "The part the session that acted plays, as its tab shows it.",
-            "type": "string",
-            "enum": [
-              "global_orchestrator",
-              "captain",
-              "worker",
-              "taste_chat",
-              "workflow",
-              "session"
-            ]
-          },
           "TaskRun": {
             "type": "object",
             "properties": {
@@ -61797,63 +61620,6 @@
                 "type": "string",
                 "const": "box"
               }
-            ]
-          },
-          "Actor": {
-            "description": "Who created a task or an idea: the user, or an agent by the part it plays.",
-            "oneOf": [
-              {
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "user"
-                  }
-                },
-                "required": [
-                  "kind"
-                ]
-              },
-              {
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "agent"
-                  },
-                  "role": {
-                    "$ref": "#/$defs/ActorRole"
-                  },
-                  "machine": {
-                    "type": "string",
-                    "default": ""
-                  },
-                  "tab": {
-                    "type": "string",
-                    "default": ""
-                  },
-                  "session_title": {
-                    "type": "string",
-                    "default": ""
-                  }
-                },
-                "required": [
-                  "kind",
-                  "role"
-                ]
-              }
-            ]
-          },
-          "ActorRole": {
-            "description": "The part the session that acted plays, as its tab shows it.",
-            "type": "string",
-            "enum": [
-              "global_orchestrator",
-              "captain",
-              "worker",
-              "taste_chat",
-              "workflow",
-              "session"
             ]
           },
           "TaskRun": {
