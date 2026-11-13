@@ -5387,7 +5387,7 @@ mod tests {
 
     #[test]
     fn an_import_keeps_the_accounts_upstash() {
-        kept_on_import("import-keeps-upstash", "upstash", serde_json::json!({ "key_hint": "…up01", "claude_hint": "…cl01" }), serde_json::json!({ "key_hint": "…up99" }));
+        kept_on_import("import-keeps-upstash", "upstash", serde_json::json!({ "key_hint": "…up01", "claude_hint": "…cl01" }), serde_json::json!({ "key_hint": "…up99", "claude_hint": "…cl99" }));
     }
 
     #[test]
