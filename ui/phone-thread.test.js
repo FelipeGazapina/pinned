@@ -193,6 +193,7 @@ test("Message all skips the workers waiting on you, says how many, and keeps the
   const sent = [];
   const told = [];
   let works = true;
+  const main = readFileSync(new URL("./main.js", import.meta.url), "utf8");
   const context = {
     workersOf: () => rows,
     waitsOnUser: (tab) => !!tab.waiting,
@@ -201,7 +202,7 @@ test("Message all skips the workers waiting on you, says how many, and keeps the
     esc: (text) => text,
   };
   vm.createContext(context);
-  vm.runInContext(`${src.slice(src.indexOf("function messageAllSaid"), src.indexOf("function onWorkersSheetClick"))}\nglobalThis.messageAllWorkers = messageAllWorkers;`, context);
+  vm.runInContext(`${main.slice(main.indexOf("const aliveOf"), main.indexOf("const stoppedOf"))}\n${src.slice(src.indexOf("function messageAllSaid"), src.indexOf("function onWorkersSheetClick"))}\nglobalThis.messageAllWorkers = messageAllWorkers;`, context);
   const form = { hidden: false };
   const input = { value: " Rebase on main ", closest: () => form };
   works = false;

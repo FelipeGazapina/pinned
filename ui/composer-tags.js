@@ -204,7 +204,7 @@ function tagCatalog({ groups, directory, phase, repoAt, name = "Orchestrator", w
     for (const { machine } of group.checkouts) {
       if (hosts.some((m) => m.id === machine)) continue;
       const captains = group.tabs.filter((tab) => tab.machine === machine && tab.view.role === "orchestrator");
-      const busy = captains.some((tab) => !["done", "idle"].includes(phase(tab)));
+      const busy = captains.some((tab) => !["done", "idle", "stopped"].includes(phase(tab)));
       const host = { id: machine, ...machineOf(machine), captain: !captains.length ? "none" : busy ? "working" : "idle" };
       if (workers) host.workers = captains.reduce((n, tab) => n + (Number(workers(tab)) || 0), 0);
       hosts.push(host);

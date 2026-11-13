@@ -6,7 +6,7 @@ if (TAURI) {
   listen("opacity", applyOpacity);
 }
 
-const STATUS_TEXT = { idle: "", working: "working…", done: "done", "needs-input": "needs you", failed: "stopped" };
+const STATUS_TEXT = { idle: "", working: "working…", done: "done", "needs-input": "needs you", failed: "failed", stopped: "stopped" };
 const ALERTS = ["done", "needs-input", "failed"];
 const EDGES = ["top", "bottom", "left", "right"];
 const LOCAL = "local";
@@ -66,7 +66,18 @@ const callOn = async (machine, call) => {
 };
 const IS_MAC = /Mac/.test(navigator.platform);
 const COMPUTER = IS_MAC ? "Mac" : "PC";
-const statusOf = (tab) => tab.view.status ?? "idle";
+/** Whether a process runs behind the tab. `running` also holds for a sleeping tab, which has none, so a
+ * current machine sends `alive`; an older one sends `running` alone, and `asleep` when it knows. */
+const aliveOf = (view) => view.alive ?? (view.asleep ? false : view.running);
+/** A turn that died with its process: the stored status is still working or needs-input, nothing is
+ * alive, and the tab is not a headless child (its watch thread has no session while the child works).
+ * An older machine sends no `alive`, and nothing else in its view tells a headless child from a dead
+ * tab, so it never reads stopped: it keeps what its status says. */
+const stoppedOf = (view) => view.alive === false && !view.headless && (view.status === "working" || view.status === "needs-input");
+/** Whether the tab is at work now: a process runs behind it, or it is a headless child still working.
+ * A stored status never counts alone, except from an older machine, which cannot say better. */
+const atWork = (view) => (view.headless ? view.status === "working" : view.alive === undefined ? !view.asleep && (view.running || view.status === "working") : view.alive);
+const statusOf = (tab) => (stoppedOf(tab.view) ? "stopped" : tab.view.status ?? "idle");
 const machineName = (id) => (id === LOCAL ? `This ${COMPUTER}` : machines.get(id)?.view.name ?? "machine");
 function machineDirectory() {
   const names = {};

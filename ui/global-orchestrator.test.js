@@ -109,6 +109,7 @@ function page({ settings = {}, older = false, offline = false } = {}) {
   const listeners = {};
   const context = {
     machines,
+    IS_MAC: false,
     LOCAL: "local",
     machineName: (id) => ({ mm: "Mac mini", mb: "MacBook", vps: "Linux VPS", local: "This Mac" })[id] ?? "machine",
     callOn: async (machine, call) => {
@@ -156,7 +157,9 @@ function page({ settings = {}, older = false, offline = false } = {}) {
     tell: (message) => told.push(message),
   };
   vm.createContext(context);
-  vm.runInContext(`${read("global-orchestrator.js")}\n${read("composer-tags.js")}\n${read("gui-global-orchestrator.js")}`, context);
+  const main = read("main.js");
+  const liveRules = main.slice(main.indexOf("const COMPUTER"), main.indexOf("const machineName"));
+  vm.runInContext(`${liveRules}\n${read("global-orchestrator.js")}\n${read("composer-tags.js")}\n${read("gui-global-orchestrator.js")}`, context);
   return { context, element, elements, calls, events, activated, surfaces, told, pages, click: (e) => listeners.click(e) };
 }
 
@@ -344,6 +347,38 @@ test("the projects page leaves out the workers whose turn ended, as projects() d
   const html = pages.at(-1);
   assert.match(html, /<span class="gp-workers">3 workers<\/span>/);
   assert.match(html, /data-project="site" data-machine="mm">Mac mini<span class="gp-captain working">Working<\/span><span class="gp-count">3 workers<\/span><\/button>/);
+});
+
+// #236: `running` is "takes input", so a tab killed mid-turn keeps `status: "working"` and an asleep
+// tab keeps `running: true`. A worker counts when a process is alive behind it, or when it is a
+// headless child at work (no session by design). Uses the page's real `statusOf` rule from main.js.
+test("the projects page counts workers by what is alive, not by a stored status", () => {
+  const { context, pages } = projectsPage();
+  const sliceOf = (name, start, end) => {
+    const src = readFileSync(new URL(`./${name}`, import.meta.url), "utf8");
+    return src.slice(src.indexOf(start), src.indexOf(end, src.indexOf(start)));
+  };
+  const worker = (view) => ({ machine: "mm", view: { role: "worker", ...view } });
+  const tabs = [
+    { machine: "mm", view: { id: "cap-1", role: "orchestrator", running: true, alive: true, status: "done" } },
+    worker({ running: false, alive: false, status: "working", stopped: "cancelled at its time limit" }),
+    worker({ running: false, alive: false, headless: true, status: "working" }),
+    worker({ running: true, alive: false, asleep: true, status: null }),
+    worker({ running: true, alive: true, status: "working" }),
+  ];
+  Object.assign(context, { busyUnder: () => 0, unseenDone: () => false });
+  vm.runInContext(
+    [
+      sliceOf("global-chat.js", "function waitingKindOf", "/** What a thread blocked"),
+      sliceOf("gui.js", "function hookPhase", "const turnLive"),
+      sliceOf("redesign-model.js", "function threadState", "const answerChoice"),
+    ].join("\n"),
+    context,
+  );
+  context.projectGroups = () => [{ name: "site", tabs, checkouts: [] }];
+  context.renderGlobalProjectsPage();
+  const html = pages.at(-1);
+  assert.match(html, /<span class="gp-workers">2 workers<\/span>/, "the headless child and the live worker, not the stopped or the asleep one");
 });
 
 test("a project's machine opens its Captain tab when one is open", () => {

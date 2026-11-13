@@ -7,6 +7,7 @@ const read = (name) => readFileSync(new URL(`./${name}`, import.meta.url), "utf8
 const gui = read("gui.js");
 const agents = read("gui-agents.js");
 const sidebar = read("gui-sidebar.js");
+const main = read("main.js");
 const composer = read("gui-composer.js");
 const chat = read("global-chat.js");
 const between = (src, start, end) => {
@@ -98,7 +99,12 @@ function page(world) {
     machines: world.machines ?? new Map(),
     agentConfirmations: world.agents ?? [],
     DEFAULT_ACCOUNT: "claude",
-    statusOf: (tab) => tab.view.status ?? "idle",
+    IS_MAC: false,
+    document: { createElement: () => ({ dataset: {}, classList: { toggle() {} } }) },
+    projectIcon: () => "",
+    icon: () => "",
+    isOrchestrator: (tab) => tab.view.role === "orchestrator",
+    projectCostLabel: () => "",
     threadOf: (tab) => tab.thread,
     threadKey: (tab) => tab.key,
     threadTitle: (tab) => tab.title,
@@ -139,6 +145,7 @@ function page(world) {
   vm.runInContext(
     [
       read("terminal-menu.js"),
+      between(main, "const COMPUTER", "const machineName"),
       line(chat, "const REPORT_HEADER"),
       decl(chat, "function reportBlocks"),
       decl(chat, "function waitingKindOf"),
@@ -147,6 +154,8 @@ function page(world) {
       between(agents, "const agentsOf", "function agentSteps"),
       decl(agents, "function stepLine"),
       line(sidebar, "const unixOf"),
+      line(sidebar, "const projectMachinesHtml"),
+      decl(sidebar, "function projectHead"),
       line(sidebar, "const lastPrompt"),
       line(sidebar, "const nowS"),
       line(sidebar, "const canSnooze"),
@@ -608,4 +617,86 @@ test("glyphHtml draws each state's dot at its size", () => {
   const p = page({ tabs: [] });
   assert.equal(p.run("glyphHtml('working', 8)"), `<span class="status-glyph" data-glyph="working" style="--glyph-size: 8px" aria-hidden="true"></span>`);
   assert.deepEqual(["needs", "unread", "done", "idle", "failed", "stopped", "bogus"].map((s) => p.run(`glyphHtml(${JSON.stringify(s)})`).match(/data-glyph="(\w+)" style="--glyph-size: (\d+)px"/).slice(1).join(" ")), ["needs 10", "unread 10", "done 10", "idle 10", "failed 10", "idle 10", "idle 10"]);
+});
+
+// #236: `running` means "takes input" (a session, or asleep), not "a process is alive". A current
+// machine also sends `alive`, `asleep`, `headless` and `stopped`; the page counts from those.
+const STOPPED = "cancelled at its time limit";
+const deadWorker = (over = {}) => tab("Rebase the branch", { status: "working", role: "worker", spawned_by: "cap", running: false, alive: false, asleep: false, headless: false, stopped: STOPPED, ...over });
+const captainOf = () => tab("Release", { id: "cap", status: "done", role: "orchestrator", alive: true, asleep: false, headless: false });
+/** The head of the project whose threads are `tabs`, with its "N running" text. */
+const headOf = (p, tabs) => {
+  p.context.tabs = tabs;
+  p.context.kids = new Map([[tabs[0].key, tabs.slice(1)]]);
+  p.context.roots = [tabs[0]];
+  return p.run("projectHead('site', roots, kids).innerHTML");
+};
+
+/** A Captain with a dead worker and one asking for input, whose process died with them. */
+function deadWorld() {
+  const cap = captainOf();
+  const dead = deadWorker();
+  const asking = deadWorker({ status: "needs-input", message: "Claude needs your permission to use Bash" });
+  const p = page({ tabs: [cap, dead, asking], active: cap });
+  Object.assign(p.context, { cap, dead, asking });
+  return { p, cap, dead, asking };
+}
+
+test("a tab whose process died mid-turn reads stopped, working or asking", () => {
+  const { p } = deadWorld();
+  assert.deepEqual([...p.run("[statusOf(dead), phaseOf(dead), statusOf(asking), phaseOf(asking)]")], ["stopped", "stopped", "stopped", "stopped"]);
+  const row = p.run("threadWorker(dead)");
+  assert.deepEqual([row.state, row.step], ["stopped", STOPPED], "the card row says why it stopped");
+  assert.equal(p.run("threadState(dead)"), "idle", "the sidebar does not file it under Working or Needs you");
+});
+
+test("a dead worker is not busy under its Captain, so the Captain is not delegating", () => {
+  const { p } = deadWorld();
+  assert.equal(p.run("busyUnder(cap)"), 0);
+  assert.equal(p.run("phaseOf(cap)"), "done");
+  assert.deepEqual({ ...p.run("workersSummary(workersOf(cap))") }, { total: 2, done: 0, working: 0, needs: 0, since: null });
+});
+
+test("the project head does not count a dead worker as running", () => {
+  const { p, cap, dead, asking } = deadWorld();
+  assert.doesNotMatch(headOf(p, [cap, dead, asking]), /running/);
+});
+
+test("a headless child at work still counts and never reads stopped", () => {
+  const cap = captainOf();
+  const child = deadWorker({ headless: true, stopped: null, role: "worker" });
+  const p = page({ tabs: [cap, child], active: cap });
+  p.context.child = child;
+  p.context.cap = cap;
+  assert.deepEqual([...p.run("[statusOf(child), phaseOf(child)]")], ["working", "working"]);
+  assert.equal(p.run("busyUnder(cap)"), 1);
+  assert.equal(p.run("phaseOf(cap)"), "delegating");
+  assert.match(headOf(p, [cap, child]), /2 running/, "the child, and the Captain that delegates it");
+  assert.equal(p.run("threadWorker(child)").state, "working");
+});
+
+test("an older machine sends no alive or headless, so nothing proves a working tab dead and it keeps reading working", () => {
+  const cap = captainOf();
+  const old = tab("Old", { status: "working", role: "worker", spawned_by: "cap", running: false });
+  const p = page({ tabs: [cap, old], active: cap });
+  p.context.old = old;
+  p.context.cap = cap;
+  assert.equal(p.run("statusOf(old)"), "working");
+  assert.equal(p.run("busyUnder(cap)"), 1);
+});
+
+test("an asleep worker with no status reads idle and is not counted", () => {
+  const cap = captainOf();
+  const asleep = tab("Resumed", { status: null, role: "worker", spawned_by: "cap", running: true, alive: false, asleep: true, headless: false });
+  const olderAsleep = tab("Older", { status: null, role: "worker", spawned_by: "cap", running: true, asleep: true });
+  for (const sleeper of [asleep, olderAsleep]) {
+    const p = page({ tabs: [cap, sleeper], active: cap });
+    p.context.sleeper = sleeper;
+    p.context.cap = cap;
+    assert.equal(p.run("phaseOf(sleeper)"), "idle");
+    assert.equal(p.run("threadWorker(sleeper).state"), "idle");
+    assert.equal(p.run("busyUnder(cap)"), 0);
+    assert.equal(p.run("workersSummary(workersOf(cap)).working"), 0);
+    assert.doesNotMatch(headOf(p, [cap, sleeper]), /running/);
+  }
 });

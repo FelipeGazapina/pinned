@@ -294,7 +294,7 @@ function messageAllSaid(sent, skipped, failed) {
  * in its field unless every send went out. */
 async function messageAllWorkers(tab, input) {
   const text = input.value.trim();
-  const running = workersOf(tab).filter((r) => r.tab?.view.running);
+  const running = workersOf(tab).filter((r) => r.tab && aliveOf(r.tab.view));
   if (!text || !running.length) return;
   const targets = running.filter((r) => !waitsOnUser(r.tab));
   const sent = await Promise.all(targets.map((r) => sayToWorker(r.key, text, true)));

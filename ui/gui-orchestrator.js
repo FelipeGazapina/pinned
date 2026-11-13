@@ -36,7 +36,7 @@ const captainFacts = perTask(() => {
   const reports = lastReports();
   const workers = runningWorkers();
   const online = (id) => machines.get(id)?.view.online === true;
-  const busy = (tab) => !["done", "idle"].includes(phaseOf(tab));
+  const busy = (tab) => !["done", "idle", "stopped"].includes(phaseOf(tab));
   const facts = [];
   for (const group of projectGroups(true)) {
     if (group.tabs.length && !group.tabs.some(hasProject)) continue;
