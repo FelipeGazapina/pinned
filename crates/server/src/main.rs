@@ -199,7 +199,7 @@ fn node(args: &[String]) -> Result<(), String> {
             _ = tokio::signal::ctrl_c() => false,
             _ = terminate.recv() => false,
             _ = pinned_server::self_update::roll_back_if_refused(&machine) => false,
-            _ = pinned_server::box_exit::refused_in_box(in_box, link.refused_for(link::BOX_REFUSED_FOR)) => true,
+            _ = pinned_server::box_exit::refused_in_box(in_box, link.refused_for()) => true,
         };
         Ok::<_, String>(refused)
     })?;
