@@ -15056,6 +15056,37 @@ Have another model review a risky change before it goes ahead.";
 
     #[test]
     #[cfg(unix)]
+    fn a_worker_another_machine_sent_under_a_tier_cap_is_checked_here_against_this_machines_claude_list() {
+        // This machine sets no ceiling of its own: the one in the request is the only cap.
+        let (m, dir, _captain) = limited_captain("remote-unlisted", TastePatch::default());
+        let repo = "https://github.com/acme/app.git";
+        for args in [&["init", "-q"][..], &["remote", "add", "origin", repo]] {
+            assert!(std::process::Command::new("git").args(args).current_dir(dir.join("app")).status().unwrap().success());
+        }
+        let capped = taste::Limits { tier: taste::Tier::Mid, ..Default::default() };
+        let sent = |task: &str, args: Value| {
+            let origin = crate::delegate::Origin { machine: "m-book".into(), machine_name: "MacBook".into(), tab: "tab-1".into(), task: task.into(), access: crate::delegate::Access::Auto, delegator: Default::default(), limits: capped };
+            let request = crate::delegate::parse_request(&args).unwrap();
+            m.call(Call::Delegate { origin, request: Box::new(request), repo: Some(repo.into()), token: None })
+        };
+        let spawned = || std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().starts_with("claude.")).count();
+        let before = spawned();
+
+        let error = sent("t1", work(Some("claude-nova-9-9"), None)).unwrap_err();
+        assert!(error.starts_with("claude-nova-9-9 is not in this machine's list of Claude models"), "a Claude id this machine does not list is refused here: {error}");
+        let error = sent("t2", json!({ "task": "Fix the parser.", "title": "Parser", "target": { "providerInstanceId": "away-account", "model": "claude-sonnet-5-5" } })).unwrap_err();
+        assert_eq!(error, "no account away-account on this machine");
+        assert!(m.delegates.running().is_empty(), "a refused worker claimed no task: {:?}", m.delegates.running());
+        assert_eq!(spawned(), before, "a refused worker spawned no child");
+
+        // The same request with a listed model starts, so the refusals were the check, not the setup.
+        assert_eq!(sent("t3", work(Some("claude-sonnet-5-5"), None)).unwrap()["workState"], "working");
+        assert_eq!(m.delegates.running().len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn a_machine_reports_its_accounts_workers_and_workers_at_once_and_never_a_token_or_email() {
         let (m, dir, captain) = limited_captain("reports-state", TastePatch { parallel: Some(4), ..TastePatch::default() });
         delegate_task(&m, &captain, work(Some("claude-sonnet-5-5"), None));
