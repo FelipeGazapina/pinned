@@ -14213,6 +14213,7 @@ Have another model review a risky change before it goes ahead.";
     }
 
     #[test]
+    #[cfg(unix)]
     fn question_status_reads_only_the_callers_own_questionnaire() {
         use crate::questions::Outcome;
         let m = machine();
@@ -14238,6 +14239,7 @@ Have another model review a risky change before it goes ahead.";
     }
 
     #[test]
+    #[cfg(unix)]
     fn question_status_of_a_headless_child_is_read_by_its_task() {
         let m = machine();
         let parent = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
