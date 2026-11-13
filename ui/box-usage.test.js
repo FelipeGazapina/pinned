@@ -271,14 +271,14 @@ function drawMark(page, stuck) {
 }
 
 const KNOWN = { id: "fake-row-1", why: "Upstash answered 503" };
-const UNCONFIRMED = { id: "fake-row-2", why: "Upstash is not connected, or its Claude token is missing", unconfirmed: true };
+const UNCONFIRMED = { id: "fake-row-2", why: "Upstash is not connected", unconfirmed: true };
 const CONFIRM = "pinned could not confirm whether a box exists on Upstash for it. Check the Upstash console and delete it there if it does.";
 
 test("a row with no Upstash id says pinned could not confirm a box exists, and does not say it is still running", () => {
   const page = boxPage({ answer: async () => ({}) });
   const html = (stuck, connected = false) => page.boxUsageHtml({ data: { connected, stuck }, error: "", loading: false, open: {} }, NOW);
   const notice = text(html([UNCONFIRMED]));
-  assert.ok(notice.includes(`1 box pinned could not end: Upstash is not connected, or its Claude token is missing. ${CONFIRM}`), notice);
+  assert.ok(notice.includes(`1 box pinned could not end: Upstash is not connected. ${CONFIRM}`), notice);
   assert.doesNotMatch(notice, /still running/);
   assert.equal(html([UNCONFIRMED]).match(/limit-notices/g).length, 1);
   const many = text(html([UNCONFIRMED, { ...UNCONFIRMED, id: "fake-row-3" }]));
