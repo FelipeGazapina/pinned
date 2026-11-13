@@ -103,6 +103,21 @@ pub enum Outcome {
     Cancelled,
 }
 
+/// Who cancelled a questionnaire, when the node knows: the cancelled worker reads it in the
+/// `cancelled` result and acts on it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Canceller {
+    /// The user stopped the turn.
+    Turn,
+    /// The user cancelled the task or closed the tab.
+    User,
+    /// The task's parent, a thread or another task, cancelled it.
+    Parent,
+    /// The machine that sent the worker here cancelled it.
+    Machine,
+}
+
 /// One questionnaire on this machine, open or closed.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Asked {
@@ -120,6 +135,9 @@ pub struct Asked {
     /// The outcome reached the session that asked.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub notified: bool,
+    /// Who cancelled it, when it was cancelled by someone known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cancelled_by: Option<Canceller>,
     /// Seconds the wait may last, None for no limit. Off unless the task sets one.
     #[serde(default = "default_wait_limit", skip_serializing_if = "Option::is_none")]
     pub wait_limit_secs: Option<u64>,
@@ -160,7 +178,7 @@ impl Questions {
         let next = self.asked.iter().filter_map(|a| a.questionnaire.id.strip_prefix("q-")?.parse::<u64>().ok()).max().unwrap_or(0) + 1;
         let id = format!("q-{next}");
         let questionnaire = Questionnaire { id: id.clone(), title, questions, projects, at };
-        self.asked.push(Asked { tab: tab.to_owned(), session, task, questionnaire, outcome: None, notified: false, wait_limit_secs: default_wait_limit() });
+        self.asked.push(Asked { tab: tab.to_owned(), session, task, questionnaire, outcome: None, notified: false, cancelled_by: None, wait_limit_secs: default_wait_limit() });
         self.save();
         Ok(id)
     }
@@ -197,10 +215,11 @@ impl Questions {
         Ok(())
     }
 
-    /// Closes the questionnaire open on `tab` as cancelled. Whether one was.
-    pub fn cancel_tab(&mut self, tab: &str) -> bool {
+    /// Closes the questionnaire open on `tab` as cancelled by `by`. Whether one was.
+    pub fn cancel_tab(&mut self, tab: &str, by: Canceller) -> bool {
         let Some(asked) = self.asked.iter_mut().find(|a| a.tab == tab && a.is_open()) else { return false };
         asked.outcome = Some(Outcome::Cancelled);
+        asked.cancelled_by = Some(by);
         // A call that still waits hears it; a gone one gets no notice.
         asked.notified = true;
         self.closed();
@@ -208,11 +227,12 @@ impl Questions {
     }
 
     /// Closes as cancelled every questionnaire open for one of `tasks`, a cancelled task and its
-    /// descendants. Whether any was.
-    pub fn cancel_tasks(&mut self, tasks: &[String]) -> bool {
+    /// descendants. `by` is who cancelled, when known. Whether any was.
+    pub fn cancel_tasks(&mut self, tasks: &[String], by: Option<Canceller>) -> bool {
         let mut any = false;
         for asked in self.asked.iter_mut().filter(|a| a.is_open() && a.task.as_ref().is_some_and(|task| tasks.contains(task))) {
             asked.outcome = Some(Outcome::Cancelled);
+            asked.cancelled_by = by.clone();
             asked.notified = true;
             any = true;
         }
@@ -442,7 +462,18 @@ fn result(asked: &Asked) -> serde_json::Value {
             serde_json::json!({ "outcome": "answered", "id": id, "answers": answers, "next": "Go on with these answers." })
         }
         Some(Outcome::Skipped) => serde_json::json!({ "outcome": "skipped", "id": id, "next": "The user skipped these questions. Go on without them: take your recommended option for each and state every assumption you made where your work is read. Skipping can lead to wrong actions, so keep the assumptions easy to undo." }),
-        Some(Outcome::Cancelled) => serde_json::json!({ "outcome": "cancelled", "id": id, "next": "The user stopped this turn. Do not go on with the work these questions were about." }),
+        Some(Outcome::Cancelled) => serde_json::json!({ "outcome": "cancelled", "id": id, "next": format!("{} Do not go on with the work these questions were about.", cancelled_by(asked.cancelled_by.as_ref())) }),
+    }
+}
+
+/// Who cancelled, in the words the cancelled worker reads. Neutral when nobody is known.
+fn cancelled_by(by: Option<&Canceller>) -> String {
+    match by {
+        Some(Canceller::Turn) => "The user stopped this turn.".into(),
+        Some(Canceller::User) => "The user cancelled this task.".into(),
+        Some(Canceller::Parent) => "The parent that sent this task cancelled it.".into(),
+        Some(Canceller::Machine) => "The machine that sent this worker cancelled its task.".into(),
+        None => "This task was cancelled.".into(),
     }
 }
 
@@ -571,7 +602,7 @@ mod tests {
         let mut q = Questions::load(Some(&dir));
         let id = q.open("tab-1", Some("sess-1".into()), Some("task-1".into()), Some("Checkout".into()), vec![question("Base?", &["main", "release"])], vec!["github.com/o/site".into()], 7).unwrap();
         q.open("tab-2", None, None, None, vec![question("Other?", &["yes", "no"])], vec![], 8).unwrap();
-        q.cancel_tab("tab-2");
+        q.cancel_tab("tab-2", Canceller::User);
         let asked = q.get(&id).unwrap().clone();
         drop(q);
 
@@ -590,12 +621,35 @@ mod tests {
         q.open("tab-1", None, Some("task-1".into()), None, vec![question("One?", &["yes", "no"])], vec![], 0).unwrap();
         q.open("tab-2", None, Some("task-2".into()), None, vec![question("Two?", &["yes", "no"])], vec![], 0).unwrap();
         q.open("tab-3", None, None, None, vec![question("Three?", &["yes", "no"])], vec![], 0).unwrap();
-        assert!(!q.cancel_tasks(&["task-9".into()]));
-        assert!(q.cancel_tasks(&["task-1".into(), "task-3".into()]));
+        assert!(!q.cancel_tasks(&["task-9".into()], None));
+        assert!(q.cancel_tasks(&["task-1".into(), "task-3".into()], None));
         assert!(q.open_on("tab-1").is_none(), "its worker's task was cancelled");
         assert!(q.open_on("tab-2").is_some() && q.open_on("tab-3").is_some(), "another task's, and one with no task, stay open");
         assert_eq!(q.get("q-1").map(|a| (a.outcome.clone(), a.notified)), Some((Some(Outcome::Cancelled), true)));
-        assert!(!q.cancel_tasks(&["task-1".into()]), "a closed one is not closed again");
+        assert!(!q.cancel_tasks(&["task-1".into()], None), "a closed one is not closed again");
+    }
+
+    #[test]
+    fn a_cancelled_result_says_who_cancelled_when_it_is_known() {
+        const STOP: &str = "Do not go on with the work these questions were about.";
+        let cases = [
+            (Some(Canceller::Turn), "The user stopped this turn."),
+            (Some(Canceller::User), "The user cancelled this task."),
+            (Some(Canceller::Parent), "The parent that sent this task cancelled it."),
+            (Some(Canceller::Machine), "The machine that sent this worker cancelled its task."),
+            (None, "This task was cancelled."),
+        ];
+        for (by, wording) in cases {
+            let mut q = Questions::default();
+            let id = q.open("tab-1", None, Some("task-1".into()), None, vec![question("One?", &["yes", "no"])], vec![], 0).unwrap();
+            assert!(q.cancel_tasks(&["task-1".into()], by.clone()));
+            let result = q.status(&id, Instant::now()).unwrap();
+            assert_eq!((result["outcome"].as_str(), result["next"].as_str()), (Some("cancelled"), Some(format!("{wording} {STOP}").as_str())), "{by:?}");
+        }
+        let mut q = Questions::default();
+        let id = q.open("tab-1", None, None, None, vec![question("One?", &["yes", "no"])], vec![], 0).unwrap();
+        assert!(q.cancel_tab("tab-1", Canceller::Turn));
+        assert_eq!(q.status(&id, Instant::now()).unwrap()["next"], format!("The user stopped this turn. {STOP}"), "cancel_tab names who it was");
     }
 
     #[test]
@@ -605,7 +659,7 @@ mod tests {
         for n in 0..CLOSED_KEEP + 5 {
             let tab = format!("tab-{n}");
             q.open(&tab, None, None, None, vec![question("Done?", &["yes", "no"])], vec![], 0).unwrap();
-            q.cancel_tab(&tab);
+            q.cancel_tab(&tab, Canceller::Turn);
         }
         assert_eq!(q.asked.len(), CLOSED_KEEP + 1);
         assert!(q.open_on("tab-open").is_some());

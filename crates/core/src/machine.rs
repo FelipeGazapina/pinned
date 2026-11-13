@@ -1,5 +1,6 @@
 use crate::accounts::{self, Account, Accounts, Auth, Provider};
 use crate::agent::{role_env, role_of, session_of, AgentEvent, AgentStatus, LimitWindow, Message, ProjectTool, Role, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV, TASK_ENV};
+use crate::questions::Canceller;
 use crate::stats::{ThreadStats, Tally};
 use crate::wire::{CutBySleep, Call, HubCall, MachineEvent, Program, ProjectView, RunSpec, TabId, TabView, ThreadMatch, ThreadPage, UpdateStatus, EXE_PLACEHOLDER};
 use crate::global_orchestrator::{self as global, BusyPolicy, CaptainReport, Handoff, Progress};
@@ -1412,15 +1413,7 @@ impl Machine {
             }
             Call::OpenTask { tab, task } => json(self.open_delegated(&tab, &task)?),
             Call::DeliverTask { tab, task } => json(self.deliver_task(&tab, &task)?),
-            Call::CancelTask { tab, task } => {
-                let path = self.launch.path_env.clone();
-                json(self.delegates.cancel(
-                    &crate::delegate::Caller { tab: Some(tab), task: None },
-                    &task,
-                    CARD_CANCEL,
-                    path.as_deref(),
-                )?)
-            }
+            Call::CancelTask { tab, task } => json(self.cancel_with_questions(&crate::delegate::Caller { tab: Some(tab), task: None }, &task, CARD_CANCEL, Some(Canceller::User))?),
             Call::Rewind { tab, before, files, cols, rows } => json(self.rewind(&tab, &before, files, cols, rows)?),
             Call::Fork { tab, through } => json(self.fork(&tab, &through)?),
             Call::SaveFile { tab, path, text } => json(save_file(&self.tab(&tab, |t| t.cwd.clone())?, &path, &text)?),
@@ -2647,7 +2640,7 @@ impl Machine {
     pub fn stop_turn(&self, tab: &str) -> Result<(), String> {
         const KILL_AGENTS: &[u8] = b"\x18\x0b";
         // Stopping the turn drops what it asked: the call that waits answers cancelled.
-        if self.questions.lock().unwrap().cancel_tab(tab) {
+        if self.questions.lock().unwrap().cancel_tab(tab, Canceller::Turn) {
             self.emit_tabs();
         }
         // A session that sleeps runs no turn, and the keys would start it.
@@ -2724,10 +2717,10 @@ impl Machine {
     pub fn close_tab(&self, tab: &str) -> bool {
         let path = self.launch.path_env.clone();
         for id in self.delegates.running_under(tab) {
-            let _ = self.delegates.cancel_tree(&id, "the parent tab closed", path.as_deref());
+            let _ = self.cancel_tree_with_questions(&id, "the parent tab closed", Some(Canceller::User));
         }
         if let Some(task) = self.thread_task(tab, false) {
-            let _ = self.delegates.cancel_tree(&task, "its thread was closed", path.as_deref());
+            let _ = self.cancel_tree_with_questions(&task, "its thread was closed", Some(Canceller::User));
         }
         let (closed, owned, last) = {
             let mut tabs = self.tabs.lock().unwrap();
@@ -2738,7 +2731,7 @@ impl Machine {
         let made = closed.as_ref().and_then(|t| t.made.clone());
         drop(closed);
         // Closed or archived: its questions go, with no notice.
-        self.questions.lock().unwrap().cancel_tab(tab);
+        self.questions.lock().unwrap().cancel_tab(tab, Canceller::User);
         self.delegates.drop_kept_worktrees(tab, &owned, path.as_deref());
         if let Some(made) = made {
             if !owned.iter().any(|dir| dir == &made) {
@@ -3518,7 +3511,14 @@ impl Machine {
             _ => return Err("not a question tool".into()),
         };
         let (tab, task) = match task.filter(|_| tab.is_empty()) {
-            Some(task) => (self.task_tab(&task)?, Some(task)),
+            Some(task) => {
+                // A call in flight when its worker was cancelled or killed has no one to ask for.
+                let info = self.delegates.get(&task).ok_or_else(|| format!("no task {task}"))?;
+                if info.state.terminal() {
+                    return Err(format!("task {task} is no longer working: nobody is waiting for these questions"));
+                }
+                (self.task_tab(&task)?, Some(task))
+            }
             None => (tab.to_owned(), None),
         };
         let (global, session, own) = self.tab(&tab, |t| (global::is_global(&t.env), t.claude_session.clone(), t.task.clone()))?;
@@ -4737,7 +4737,7 @@ impl Machine {
                 }
             }
         }
-        let mut body = self.cancel_with_questions(&caller, id, reason)?;
+        let mut body = self.cancel_with_questions(&caller, id, reason, Some(Canceller::Parent))?;
         if let Some(note) = note {
             body["note"] = json!(note);
         }
@@ -4745,12 +4745,23 @@ impl Machine {
     }
 
     /// Cancels task `id` and its working descendants, and closes the questions their workers had
-    /// open as cancelled, with no notice: nobody waits on them any more. Stopping a turn, closing
-    /// a tab and archiving drop a tab's questions the same way.
-    fn cancel_with_questions(&self, caller: &crate::delegate::Caller, id: &str, reason: &str) -> Result<Value, String> {
+    /// open as cancelled by `by`, with no notice: nobody waits on them any more. Stopping a turn,
+    /// closing a tab and archiving drop a tab's questions the same way.
+    fn cancel_with_questions(&self, caller: &crate::delegate::Caller, id: &str, reason: &str, by: Option<Canceller>) -> Result<Value, String> {
+        self.cancelling(id, by, || self.delegates.cancel(caller, id, reason, self.launch.path_env.as_deref()))
+    }
+
+    /// `cancel_with_questions` for a cancel no caller asks for: a closed tab, a quit, a parent gone.
+    fn cancel_tree_with_questions(&self, id: &str, reason: &str, by: Option<Canceller>) -> Result<Value, String> {
+        self.cancelling(id, by, || self.delegates.cancel_tree(id, reason, self.launch.path_env.as_deref()))
+    }
+
+    /// Runs `cancel`, which ends task `id` and its working descendants, and closes their questions
+    /// when it did. The tasks are read first: it ends them.
+    fn cancelling(&self, id: &str, by: Option<Canceller>, cancel: impl FnOnce() -> Result<Value, String>) -> Result<Value, String> {
         let tree = self.delegates.working_tree(id);
-        let body = self.delegates.cancel(caller, id, reason, self.launch.path_env.as_deref())?;
-        if self.questions.lock().unwrap().cancel_tasks(&tree) {
+        let body = cancel()?;
+        if self.questions.lock().unwrap().cancel_tasks(&tree, by) {
             self.emit_tabs();
         }
         Ok(body)
@@ -5095,7 +5106,7 @@ impl Machine {
         let id = self.delegates.for_origin(&key, task).ok_or_else(|| format!("no task {task} of that thread runs here"))?;
         let caller = crate::delegate::Caller { tab: Some(key), task: None };
         if let Some(reason) = cancel {
-            return self.cancel_with_questions(&caller, &id, reason);
+            return self.cancel_with_questions(&caller, &id, reason, Some(Canceller::Machine));
         }
         let mut status = self.delegates.status(&caller, &id)?;
         if let Some(thread) = self.delegates.get(&id).and_then(|t| t.thread.filter(|thread| thread.runs && !t.state.terminal())) {
@@ -5145,7 +5156,7 @@ impl Machine {
             branches::drop_worktree(dir, self.launch.path_env.as_deref());
         }
         if !self.delegates.is_terminal(id) {
-            let _ = self.delegates.cancel_tree(id, "pinned is shutting down", self.launch.path_env.as_deref());
+            let _ = self.cancel_tree_with_questions(id, "pinned is shutting down", None);
         }
         true
     }
@@ -5159,7 +5170,7 @@ impl Machine {
         }
         if let Some(id) = task {
             if !self.delegates.is_terminal(id) {
-                let _ = self.delegates.cancel_tree(id, "the parent tab closed", self.launch.path_env.as_deref());
+                let _ = self.cancel_tree_with_questions(id, "the parent tab closed", None);
             }
         }
         Err(format!("no tab {tab}"))
@@ -13992,6 +14003,7 @@ Have another model review a risky change before it goes ahead.";
 
         assert_eq!(m.call(Call::StopTurn { tab: stopped.clone() }), Ok(Value::Null));
         assert_eq!(status(&ids[0]), Ok(json!("cancelled")), "the waiting call answers cancelled");
+        assert_eq!(question_result(&m, &ids[0]), cancelled(&ids[0], "The user stopped this turn."));
         assert_eq!(m.view(&stopped).unwrap().questions, None);
 
         assert!(!m.close_tab(&closed));
@@ -14003,6 +14015,7 @@ Have another model review a risky change before it goes ahead.";
             assert_eq!((&asked.outcome, asked.notified), (&Some(crate::questions::Outcome::Cancelled), true), "dropped with no notice");
         }
         drop(questions);
+        assert_eq!(question_result(&m, &ids[1]), cancelled(&ids[1], "The user cancelled this task."));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -14022,35 +14035,157 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(status(), Ok(json!("cancelled")), "the call that waits answers cancelled");
         let asked = m.questions.lock().unwrap().get(&id).cloned().unwrap();
         assert!(asked.notified, "no notice follows");
+        assert_eq!(question_result(&m, &id), cancelled(&id, "The parent that sent this task cancelled it."));
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
+    #[cfg(unix)]
+    fn the_task_cards_cancel_closes_the_open_questions_of_a_thread_child_and_its_tab_stops_asking() {
+        let (m, dir, captain, task, child, _transcript) = captain_with_thread_child("thread-card-cancel-asks");
+        m.record_event(AgentEvent { session: Some("s-child".into()), ..hook(&child, AgentStatus::Working) });
+        let id = m.project_tool("", branch_questions(Some(&task))).unwrap();
+        assert_eq!(m.view(&child).unwrap().questions.map(|q| q.id), Some(id.clone()), "the tab asks");
+
+        m.call(Call::CancelTask { tab: captain, task: task.clone() }).unwrap();
+        assert_eq!(m.delegates.get(&task).map(|t| t.state), Some(crate::delegate::WorkState::Cancelled));
+        assert_eq!(m.view(&child).unwrap().questions, None, "the tab stops asking");
+        assert_eq!(question_result(&m, &id), cancelled(&id, "The user cancelled this task."), "the waiting call answers cancelled");
+        assert!(m.questions.lock().unwrap().get(&id).unwrap().notified, "no notice follows");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A working task under `parent` that has no thread, as a headless child is.
+    fn headless_task(m: &Machine, parent: crate::delegate::Parent) -> String {
+        let account = Account::builtin(Provider::Claude);
+        let caller_key = match &parent {
+            crate::delegate::Parent::Tab(tab) => format!("tab:{tab}"),
+            crate::delegate::Parent::Task(task) => format!("task:{task}"),
+        };
+        m.delegates
+            .begin(crate::delegate::NewTask {
+                parent,
+                tool: None,
+                title: "Look".into(),
+                account: account.id.clone(),
+                provider: Provider::Claude,
+                model: None,
+                cwd: "/repo".into(),
+                mode: crate::delegate::Mode::Async,
+                access: crate::delegate::Access::Auto,
+                isolated: false,
+                caller_key,
+                client_request_id: None,
+                role: None,
+            })
+            .id
+    }
+
+    /// The result the `question_user` call that waits on `id` reads.
+    fn question_result(m: &Machine, id: &str) -> Value {
+        serde_json::from_str(&m.project_tool("", ProjectTool::QuestionStatus { id: id.into() }).unwrap()).unwrap()
+    }
+
+    /// What a cancelled worker reads: `wording`, then that it must not go on.
+    fn cancelled(id: &str, wording: &str) -> Value {
+        json!({ "outcome": "cancelled", "id": id, "next": format!("{wording} Do not go on with the work these questions were about.") })
+    }
+
+    /// A tab that shows `task`'s questions as a headless child's tab does: the tab of a task
+    /// that is working.
+    fn showing_task(m: &Machine, task: &str) -> String {
+        let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        m.tab(&tab, |t| (t.task, t.status) = (Some(task.to_owned()), Some(AgentStatus::Working))).unwrap();
+        tab
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn task_cancel_closes_the_questions_a_headless_child_left_on_its_parents_tab() {
         let m = machine();
-        let account = Account::builtin(Provider::Claude);
-        let parent = m.add_tab("/repo".into(), account.clone(), vec![], vec![], false, None);
-        let task = m.delegates.begin(crate::delegate::NewTask {
-            parent: crate::delegate::Parent::Tab(parent.clone()),
-            tool: None,
-            title: "Look".into(),
-            account: account.id.clone(),
-            provider: Provider::Claude,
-            model: None,
-            cwd: "/repo".into(),
-            mode: crate::delegate::Mode::Async,
-            access: crate::delegate::Access::Auto,
-            isolated: false,
-            caller_key: format!("tab:{parent}"),
-            client_request_id: None,
-            role: None,
-        });
-        let question = || vec![crate::questions::Question { header: None, question: "Base on main?".into(), changes: "the PR target".into(), options: vec![], multi_select: false }];
-        let id = m.questions.lock().unwrap().open(&parent, None, Some(task.id.clone()), None, question(), vec![], 1).unwrap();
-        m.task_cancel(Some(parent.clone()), None, &task.id, "no longer needed").unwrap();
+        let parent = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let task = headless_task(&m, crate::delegate::Parent::Tab(parent.clone()));
+        // Sent with the task alone, as a headless child sends it: it lands on its parent's tab.
+        let id = m.project_tool("", branch_questions(Some(&task))).unwrap();
+        assert_eq!(m.questions.lock().unwrap().open_on(&parent).map(|q| q.id.clone()), Some(id.clone()), "the call is routed to the parent's tab");
+        m.task_cancel(Some(parent.clone()), None, &task, "no longer needed").unwrap();
         let questions = m.questions.lock().unwrap();
         assert!(questions.open_on(&parent).is_none(), "the parent's tab keeps no questions of a cancelled child");
         assert_eq!(questions.get(&id).map(|asked| (asked.outcome.clone(), asked.notified)), Some((Some(crate::questions::Outcome::Cancelled), true)));
+        drop(questions);
+        assert_eq!(question_result(&m, &id), cancelled(&id, "The parent that sent this task cancelled it."), "the call that waits hears who");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn task_cancel_closes_the_questions_a_grandchild_opened() {
+        let m = machine();
+        let parent = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let child = headless_task(&m, crate::delegate::Parent::Tab(parent.clone()));
+        let grandchild = headless_task(&m, crate::delegate::Parent::Task(child.clone()));
+        let id = m.project_tool("", branch_questions(Some(&grandchild))).unwrap();
+        assert_eq!(m.questions.lock().unwrap().open_on(&parent).map(|q| q.id.clone()), Some(id.clone()), "the grandchild asks on the nearest tab up its parents");
+        m.task_cancel(Some(parent.clone()), None, &child, "no longer needed").unwrap();
+        assert_eq!(m.delegates.get(&grandchild).map(|t| t.state), Some(crate::delegate::WorkState::Cancelled), "cancelling the child ends the grandchild");
+        assert!(m.questions.lock().unwrap().open_on(&parent).is_none(), "its questions close with it");
+        assert_eq!(question_result(&m, &id), cancelled(&id, "The parent that sent this task cancelled it."));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn question_user_from_a_task_that_is_no_longer_working_is_refused() {
+        let m = machine();
+        let parent = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let task = headless_task(&m, crate::delegate::Parent::Tab(parent.clone()));
+        m.task_cancel(Some(parent.clone()), None, &task, "no longer needed").unwrap();
+        // A call that was in flight when its worker was cancelled lands after it.
+        assert_eq!(m.project_tool("", branch_questions(Some(&task))), Err(format!("task {task} is no longer working: nobody is waiting for these questions")));
+        assert_eq!(m.project_tool("", branch_questions(Some("task-404"))), Err("no task task-404".into()));
+        assert!(m.questions.lock().unwrap().open_on(&parent).is_none(), "nothing landed on the parent's tab");
+    }
+
+    /// The task cancel that no one asks for: a closed tab, a quit, a parent gone. The questionnaire
+    /// of the cancelled task sits on `shown`, a tab the cancel does not close.
+    fn open_for_task_on_another_tab(m: &Machine, task: &str) -> (String, String) {
+        let shown = showing_task(m, task);
+        let id = m.questions.lock().unwrap().open(&shown, None, Some(task.to_owned()), None, vec![crate::questions::Question { header: None, question: "Base on main?".into(), changes: "the PR target".into(), options: vec![], multi_select: false }], vec![], 1).unwrap();
+        assert!(m.view(&shown).unwrap().questions.is_some(), "the tab asks");
+        (shown, id)
+    }
+
+    #[test]
+    fn closing_the_parent_tab_closes_the_questions_of_the_tasks_it_cancels() {
+        let m = machine();
+        let parent = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let task = headless_task(&m, crate::delegate::Parent::Tab(parent.clone()));
+        let (shown, id) = open_for_task_on_another_tab(&m, &task);
+        m.close_tab(&parent);
+        assert_eq!(m.delegates.get(&task).map(|t| t.state), Some(crate::delegate::WorkState::Cancelled));
+        assert_eq!(m.view(&shown).unwrap().questions, None, "the tab stops asking");
+        assert_eq!(question_result(&m, &id), cancelled(&id, "The user cancelled this task."), "the waiting call answers cancelled");
+    }
+
+    #[test]
+    fn a_quit_before_a_worker_starts_closes_the_questions_of_its_task() {
+        let m = machine();
+        let parent = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let task = headless_task(&m, crate::delegate::Parent::Tab(parent));
+        let (shown, id) = open_for_task_on_another_tab(&m, &task);
+        m.quitting.store(true, Ordering::SeqCst);
+        assert!(m.startup_stopped(&task, None));
+        assert_eq!(m.view(&shown).unwrap().questions, None, "the tab stops asking");
+        assert_eq!(question_result(&m, &id), cancelled(&id, "This task was cancelled."), "nobody is known to have cancelled it");
+    }
+
+    #[test]
+    fn a_task_claimed_for_a_parent_tab_that_closed_has_its_questions_closed() {
+        let m = machine();
+        let task = headless_task(&m, crate::delegate::Parent::Tab("tab-gone".into()));
+        let (shown, id) = open_for_task_on_another_tab(&m, &task);
+        assert_eq!(m.ensure_parent(Some("tab-gone"), Some(&task)), Err("no tab tab-gone".into()));
+        assert_eq!(m.delegates.get(&task).map(|t| t.state), Some(crate::delegate::WorkState::Cancelled));
+        assert_eq!(m.view(&shown).unwrap().questions, None, "the tab stops asking");
+        assert_eq!(question_result(&m, &id), cancelled(&id, "This task was cancelled."));
     }
 
     #[test]
@@ -14073,8 +14208,9 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(body["workState"], "cancelled");
         let questions = m.questions.lock().unwrap();
         assert!(questions.waiting_tasks().next().is_none(), "nothing waits on the user any more");
-        assert_eq!(questions.get(&id).map(|asked| asked.outcome.clone()), Some(Some(crate::questions::Outcome::Cancelled)));
+        assert_eq!(questions.get(&id).map(|asked| (asked.outcome.clone(), asked.notified)), Some((Some(crate::questions::Outcome::Cancelled), true)), "closed, and no notice follows");
         drop(questions);
+        assert_eq!(question_result(&m, &id), cancelled(&id, "The machine that sent this worker cancelled its task."));
         let _ = std::fs::remove_dir_all(dir);
     }
 
