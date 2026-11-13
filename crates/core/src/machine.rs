@@ -4881,7 +4881,8 @@ impl Machine {
 
     /// Asks after each task delegated elsewhere that no one asked after for `REMOTE_CHECK`. One
     /// whose end got lost ends as its machine answers; one whose machine left the account, or
-    /// whose box did not connect within `BOX_CONNECT_WAIT`, fails here.
+    /// whose box did not connect within `BOX_CONNECT_WAIT`, fails here. One whose box connected
+    /// and went offline waits: its link may come back, and the hub ends a box that stays offline.
     fn check_remotes(&self, now: Instant) {
         use crate::delegate::{machine_gone, wait_span, BOX_BOOTING, BOX_CONNECT_WAIT};
         for (tab, id, remote, ran) in self.delegates.remotes_due(now, REMOTE_CHECK) {
@@ -12684,6 +12685,27 @@ Have another model review a risky change before it goes ahead.";
         m.check_remotes(begun + crate::delegate::BOX_CONNECT_WAIT + Duration::from_secs(1));
         assert_eq!(state_of(&m, &id), ("failed".into(), Some("the box did not connect within 5 min".into())));
         assert_eq!(*cancels.lock().unwrap(), vec!["the box did not connect within 5 min".to_owned()], "the hub is told, so it deletes the box");
+    }
+
+    #[test]
+    fn a_box_that_connected_and_went_offline_keeps_its_task_past_the_connect_window() {
+        let m = machine();
+        let id = delegated_elsewhere(&m, "tab-1", "m-box", "Box · Slow suite");
+        let cancels = Arc::new(Mutex::new(vec![]));
+        let told = cancels.clone();
+        m.set_hub(Arc::new(move |call| match call {
+            HubCall::RemoteTask { cancel: Some(reason), .. } => {
+                told.lock().unwrap().push(reason);
+                Ok(json!({ "workState": "cancelled" }))
+            }
+            HubCall::RemoteTask { .. } => Err(crate::delegate::BOX_OFFLINE.into()),
+            _ => Err("not this test's".into()),
+        }));
+        let begun = Instant::now();
+        m.check_remotes(begun + crate::delegate::BOX_CONNECT_WAIT + Duration::from_secs(1));
+        m.check_remotes(begun + 3 * crate::delegate::BOX_CONNECT_WAIT);
+        assert_eq!(state_of(&m, &id).0, "working", "its box may come back, and the hub ends one that stays offline");
+        assert!(cancels.lock().unwrap().is_empty(), "nothing tells the hub to delete it");
     }
 
     #[test]
