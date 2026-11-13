@@ -1657,6 +1657,39 @@
                 ]
               },
               {
+                "description": "`graph::Graph`: a workflow map `claude -p` drafts from `description` under `account`, else\nthe built-in Claude Code login, in the machine's scratch folder. Its call steps may run only\nthe `workflows` that answer threads.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "draft_workflow"
+                  },
+                  "account": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "workflows": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/WorkflowRef"
+                    },
+                    "default": []
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "account",
+                  "description",
+                  "workflows"
+                ]
+              },
+              {
                 "description": "What `gh pr list` answers in the tab's folder: number, title, state, isDraft, url, headRefName.",
                 "type": "object",
                 "properties": {
@@ -4274,6 +4307,28 @@
                   "case"
                 ]
               }
+            ]
+          },
+          "WorkflowRef": {
+            "description": "A saved workflow a drafted map's call step may name.\n\n`{\"id\":\"c1\",\"name\":\"Fix bugs\",\"answers_threads\":true}`",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "answers_threads": {
+                "description": "Whether it answers a Slack thread, which a call hands it.",
+                "type": "boolean",
+                "default": false
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "answers_threads"
             ]
           },
           "PrAction": {
@@ -11757,6 +11812,37 @@
                 ]
               },
               {
+                "description": "`graph::Graph`: a workflow map `claude -p` drafts from `description` under `account`, else\nthe built-in Claude Code login, in the machine's scratch folder. Its call steps may run only\nthe `workflows` that answer threads.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "draft_workflow"
+                  },
+                  "account": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "workflows": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/WorkflowRef"
+                    },
+                    "default": []
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "description"
+                ]
+              },
+              {
                 "description": "What `gh pr list` answers in the tab's folder: number, title, state, isDraft, url, headRefName.",
                 "type": "object",
                 "properties": {
@@ -14325,6 +14411,27 @@
                   "look"
                 ]
               }
+            ]
+          },
+          "WorkflowRef": {
+            "description": "A saved workflow a drafted map's call step may name.\n\n`{\"id\":\"c1\",\"name\":\"Fix bugs\",\"answers_threads\":true}`",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "answers_threads": {
+                "description": "Whether it answers a Slack thread, which a call hands it.",
+                "type": "boolean",
+                "default": false
+              }
+            },
+            "required": [
+              "id",
+              "name"
             ]
           },
           "PrAction": {
@@ -57884,6 +57991,39 @@
                 ]
               },
               {
+                "description": "`graph::Graph`: a workflow map `claude -p` drafts from `description` under `account`, else\nthe built-in Claude Code login, in the machine's scratch folder. Its call steps may run only\nthe `workflows` that answer threads.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "draft_workflow"
+                  },
+                  "account": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "workflows": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/WorkflowRef"
+                    },
+                    "default": []
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "account",
+                  "description",
+                  "workflows"
+                ]
+              },
+              {
                 "description": "What `gh pr list` answers in the tab's folder: number, title, state, isDraft, url, headRefName.",
                 "type": "object",
                 "properties": {
@@ -60501,6 +60641,28 @@
                   "case"
                 ]
               }
+            ]
+          },
+          "WorkflowRef": {
+            "description": "A saved workflow a drafted map's call step may name.\n\n`{\"id\":\"c1\",\"name\":\"Fix bugs\",\"answers_threads\":true}`",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "answers_threads": {
+                "description": "Whether it answers a Slack thread, which a call hands it.",
+                "type": "boolean",
+                "default": false
+              }
+            },
+            "required": [
+              "id",
+              "name",
+              "answers_threads"
             ]
           },
           "PrAction": {
@@ -63358,6 +63520,37 @@
                 ]
               },
               {
+                "description": "`graph::Graph`: a workflow map `claude -p` drafts from `description` under `account`, else\nthe built-in Claude Code login, in the machine's scratch folder. Its call steps may run only\nthe `workflows` that answer threads.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "draft_workflow"
+                  },
+                  "account": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "workflows": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/$defs/WorkflowRef"
+                    },
+                    "default": []
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "description"
+                ]
+              },
+              {
                 "description": "What `gh pr list` answers in the tab's folder: number, title, state, isDraft, url, headRefName.",
                 "type": "object",
                 "properties": {
@@ -65926,6 +66119,27 @@
                   "look"
                 ]
               }
+            ]
+          },
+          "WorkflowRef": {
+            "description": "A saved workflow a drafted map's call step may name.\n\n`{\"id\":\"c1\",\"name\":\"Fix bugs\",\"answers_threads\":true}`",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "answers_threads": {
+                "description": "Whether it answers a Slack thread, which a call hands it.",
+                "type": "boolean",
+                "default": false
+              }
+            },
+            "required": [
+              "id",
+              "name"
             ]
           },
           "PrAction": {
