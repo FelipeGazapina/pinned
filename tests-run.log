@@ -268,3 +268,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:20:58Z #120 an_agents_box_token_removal_forgets_only_its_own_accounts_token ok / avail=15050M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:20:59Z #121 a_workflow_box_follows_only_its_access_setting_and_its_ask_takes_one_plain_click_on_a_locked_app START / avail=15050M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:21:04Z #121 a_workflow_box_follows_only_its_access_setting_and_its_ask_takes_one_plain_click_on_a_locked_app ok / avail=15050M /workspace avail=19374M node_stat=Ssl node_tcp=1
+2026-11-13T04:21:05Z #122 a_session_box_follows_only_its_setting_and_budget_and_only_its_owner_answers_its_ask_with_no_password START / avail=15050M /workspace avail=19374M node_stat=Ssl
