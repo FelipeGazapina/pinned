@@ -437,7 +437,7 @@ pub fn check_save(task: &Task, protected: bool) -> Result<(), String> {
             return Err(format!("{} can never be approved ahead of time: it always stops for the user", approval.item.label()));
         }
         if !protected && needs_protection(approval) {
-            return Err("pre-approving a release needs tag and main protection; until Felipe turns that on, a release always stops for him".into());
+            return Err("pre-approving a release needs tag and main protection; until the user turns that on, a release always stops for them".into());
         }
     }
     Ok(())

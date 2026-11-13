@@ -8861,7 +8861,7 @@ fn a_release_approval_is_refused_until_the_user_turns_protection_on_and_no_agent
         body["approvals"] = json!([{ "item": item, "must_contain": text, "repo": "github.com/acme/app" }]);
         body
     };
-    let reason = "pre-approving a release needs tag and main protection; until Felipe turns that on, a release always stops for him";
+    let reason = "pre-approving a release needs tag and main protection; until the user turns that on, a release always stops for them";
     for (item, text) in [("release", "gh release create"), ("deploy", "railway up"), ("push-to-main", "origin main"), ("network-install", "git push origin v1.2.3")] {
         assert_eq!(save_schedule(&mut s.ana, release(text, item)), Err(reason.into()), "{item} off");
     }
