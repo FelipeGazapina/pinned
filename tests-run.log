@@ -254,3 +254,9 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:20:08Z #116 an_agents_box_is_held_to_the_box_budget_and_cap_and_counts_as_its_task_once_it_ends START / avail=15051M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:20:13Z #116 an_agents_box_is_held_to_the_box_budget_and_cap_and_counts_as_its_task_once_it_ends ok / avail=15051M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:20:14Z #117 an_agents_connect_and_disconnect_of_linear_slack_github_and_vercel_wait_for_their_owner_and_leave_another_account_alone START / avail=15051M /workspace avail=19374M node_stat=Ssl
+2026-11-13T04:20:35Z #117 an_agents_connect_and_disconnect_of_linear_slack_github_and_vercel_wait_for_their_owner_and_leave_another_account_alone FAILED(rc=101) / avail=15051M /workspace avail=19374M node_stat=Ssl node_tcp=1
+    pinned-server: client 1's hub call failed: Linear unreachable: error sending request for url (https://api.linear.app/graphql)
+    pinned-server: client 3's hub call failed: Linear unreachable: error sending request for url (https://api.linear.app/graphql)
+    pinned-server: client 1's hub call failed: Slack unreachable: error sending request for url (https://slack.com/api/auth.test?)
+    pinned-server: client 3's hub call failed: Slack unreachable: error sending request for url (https://slack.com/api/auth.test?)
+    pinned-server: client 1's hub call failed: GitHub unreachable: error sending request for url (https://api.github.com/user)
