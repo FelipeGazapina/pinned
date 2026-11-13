@@ -2556,7 +2556,9 @@ fn a_box_ends_with_only_the_upstash_key_stored() {
 
 #[test]
 fn a_box_stays_while_the_upstash_key_itself_is_missing() {
-    let mut hub = TestHub::start_with_boxes("box_no_key", Signup::Open, Policy { tab_gone: Duration::from_secs(3600), offline: Duration::from_secs(3600), ..fast() });
+    // A slow tick, so the reaper's retries do not flood the client with machine lists.
+    let hub = Policy { tab_gone: Duration::from_secs(3600), offline: Duration::from_secs(3600), tick: Duration::from_secs(3600), ..fast() };
+    let mut hub = TestHub::start_with_boxes("box_no_key", Signup::Open, hub);
     let mut ana = BoxAccount::new(&hub);
     assert_eq!(hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-1")))), Ok(()));
     ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
