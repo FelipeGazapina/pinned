@@ -292,8 +292,12 @@ pub fn after_sign_in(_link: &Link, _creds: &Credentials) {}
 pub struct Restart;
 
 /// Records the account this computer signs in as next, or none, in `space`. It links nothing.
-pub fn switch(_space: &Space, _to: Option<Credentials>, _delegates: &Delegates) -> Result<Restart, String> {
-    Err("not yet".into())
+pub fn switch(space: &Space, to: Option<Credentials>, _delegates: &Delegates) -> Result<Restart, String> {
+    match to {
+        Some(creds) => creds.save(&space.dir)?,
+        None => Credentials::remove(&space.dir),
+    }
+    Ok(Restart)
 }
 
 pub fn hostname() -> String {

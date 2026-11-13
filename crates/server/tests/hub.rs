@@ -886,6 +886,7 @@ fn signed_up(url: &str, email: &str, machine: &str) -> (String, Credentials) {
 
 #[test]
 fn a_test_machine_reads_agent_spend_only_under_its_user_home() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let dir = temp("spend-user-home");
     let transcripts = dir.join("home/.claude/projects/-repo");
     std::fs::create_dir_all(&transcripts).unwrap();

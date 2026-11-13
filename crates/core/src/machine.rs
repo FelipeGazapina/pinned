@@ -6579,7 +6579,9 @@ fn copy_dir(from: &Path, into: &Path) -> std::io::Result<()> {
 /// `$HOME`. This crate's own tests count wherever their binary is copied; another crate's tests
 /// count by running from cargo's `deps` folder.
 pub(crate) fn test_binary() -> bool {
-    cfg!(test) || std::env::current_exe().ok().is_some_and(|exe| exe.components().any(|part| part.as_os_str() == "deps"))
+    // A newer cargo keeps a test binary in `build/<package>/<hash>/out`, not in `deps`.
+    let in_build_out = |exe: &Path| exe.parent().is_some_and(|dir| dir.file_name().is_some_and(|name| name == "out")) && exe.ancestors().nth(4).and_then(Path::file_name).is_some_and(|name| name == "build");
+    cfg!(test) || std::env::current_exe().ok().is_some_and(|exe| exe.components().any(|part| part.as_os_str() == "deps") || in_build_out(&exe))
 }
 
 impl Machine {
