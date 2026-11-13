@@ -42,6 +42,7 @@ static API_ROOT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 async fn query(key: &str, query: &str, variables: Value) -> Result<Value, String> {
     let response = reqwest::Client::new()
         .post(api())
+        .timeout(crate::connectors::CALL_TIMEOUT)
         .header("Authorization", key)
         .json(&json!({ "query": query, "variables": variables }))
         .send()

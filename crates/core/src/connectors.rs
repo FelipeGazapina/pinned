@@ -1725,6 +1725,9 @@ pub enum BoxEndRelease {
     Once,
 }
 
+/// How long a Slack, Linear or GitHub call may take, so a stalled one cannot hold the drive lock.
+pub(crate) const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Clears a flag when dropped.
 struct ClearOnDrop<'a>(&'a AtomicBool);
 

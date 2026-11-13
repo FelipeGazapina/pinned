@@ -139,6 +139,7 @@ async fn call(token: &str, method: &str, params: &[(&str, &str)]) -> Result<Valu
     let response = reqwest::Client::new()
         .get(url)
         .bearer_auth(token)
+        .timeout(crate::connectors::CALL_TIMEOUT)
         .send()
         .await
         .map_err(|e| format!("Slack unreachable: {e}"))?;
@@ -150,6 +151,7 @@ async fn write(token: &str, method: &str, body: Value) -> Result<Value, String> 
     let response = reqwest::Client::new()
         .post(format!("{}{method}", api_root()))
         .bearer_auth(token)
+        .timeout(crate::connectors::CALL_TIMEOUT)
         .json(&body)
         .send()
         .await
