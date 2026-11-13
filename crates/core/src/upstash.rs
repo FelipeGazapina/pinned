@@ -413,6 +413,27 @@ mod tests {
         assert_eq!(refusal(key, 500, &json!({})), "Upstash Box answered 500: request failed with status 500");
     }
 
+    #[test]
+    fn a_2xx_body_that_is_not_what_was_expected_does_not_carry_the_key_into_the_error() {
+        let key = "box_fake-key-0000";
+        let echoing = |field: &str| json!({ field: key });
+        let errors = [
+            parse_id(&echoing("note")).unwrap_err(),
+            parse_list(&echoing("note")).unwrap_err(),
+            parse_list(&json!([echoing("note")])).unwrap_err(),
+            parse_all(&echoing("note")).unwrap_err(),
+            parse_all(&json!([{ "id": "b", "created_at": key }])).unwrap_err(),
+            parse_exec(&echoing("note")).unwrap_err(),
+        ];
+        for message in &errors {
+            assert!(!message.contains(key), "{message}");
+            assert!(message.contains('…'), "the key is replaced, not dropped: {message}");
+        }
+        let long = json!({ "note": format!("{key}{}", "x".repeat(10_000)) });
+        let message = parse_id(&long).unwrap_err();
+        assert!(!message.contains(key) && message.chars().count() < 500, "a body is echoed in part: {} chars", message.chars().count());
+    }
+
     fn fixture(name: &str) -> Value {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/upstash").join(name);
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap()
