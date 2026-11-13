@@ -897,7 +897,7 @@ mod tests {
         let listener = UnixListener::bind(&silent).unwrap();
         let held = std::thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
-            std::thread::sleep(Duration::from_secs(2));
+            std::thread::sleep(Duration::from_secs(1));
             drop(stream);
         });
         let started = std::time::Instant::now();

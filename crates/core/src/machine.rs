@@ -13540,7 +13540,7 @@ Have another model review a risky change before it goes ahead.";
             let args: Vec<String> = cmd.get_argv().iter().map(|a| a.to_string_lossy().into_owned()).collect();
             args.windows(2).find(|w| w[0] == "--settings").map(|w| w[1].clone()).unwrap()
         };
-        assert_eq!(settings_of(false), "claude-settings.json");
+        assert_eq!(settings_of(false), "s", "the test launch's own settings file");
         assert_eq!(settings_of(true), hooks::BUDGET_SETTINGS);
         let _ = std::fs::remove_dir_all(dir);
     }
