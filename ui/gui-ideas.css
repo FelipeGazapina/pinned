@@ -3,7 +3,7 @@
 .ideas-intro { margin: 0; color: var(--g-muted); }
 .ideas-filters { display: flex; flex-wrap: wrap; gap: 8px; margin: 0; }
 .ideas-filters input[type="search"] { flex: 1; min-width: 140px; }
-.ideas-filters :is(select, input), .ideas-add input, .idea-editor :is(input, select, textarea) { box-sizing: border-box; height: 36px; padding: 0 10px; border: 1px solid var(--g-border); border-radius: 10px;
+.ideas-filters :is(select, input), .ideas-add input, .idea-editor :is(input, textarea) { box-sizing: border-box; height: 36px; padding: 0 10px; border: 1px solid var(--g-border); border-radius: 10px;
   background: transparent; color: var(--g-fg); font: inherit; }
 .ideas-filters select { max-width: 100%; }
 .ideas-add { display: flex; gap: 8px; margin: 0; }
@@ -28,8 +28,8 @@
 .idea-editor .idea-edit-title { font-weight: 600; }
 .idea-editor textarea { height: auto; min-height: 120px; padding: 8px 10px; resize: vertical; line-height: 1.4; }
 .idea-edit-foot { display: flex; align-items: center; gap: 10px; }
-.idea-edit-foot select { min-width: 0; max-width: 50%; }
 .idea-saving { flex: 1; min-width: 0; font-size: 13px; color: var(--g-muted); }
+.idea-saving[data-state="error"] { color: var(--g-error); }
 
 /* On a phone the quick-add sits at the foot of the page, above the keyboard and the tab bar. */
 @media (max-width: 768px) {

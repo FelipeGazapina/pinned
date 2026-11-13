@@ -32,11 +32,51 @@ const SEED = () => (n = 0, [
   idea("Rewrite the installer", { status: "dropped", updated_at: NOW - 400 }),
 ]);
 
-/** A page element that keeps what the script sets on it, with children it is handed. */
-const el = (extra = {}) => ({ focus() {}, hidden: false, textContent: "", innerHTML: "", value: "", children: [], dataset: {}, replaceChildren(...c) { this.children = c; }, ...extra });
+const doc = { activeElement: null };
+/** Puts `nodes` among `parent`'s children from `index`, taking each out of where it was, as the DOM does. */
+const attach = (parent, nodes, index) => {
+  for (const node of nodes) node.remove?.();
+  parent.children.splice(index, 0, ...nodes);
+  for (const node of nodes) node.parentNode = parent;
+};
+/** A page element that keeps what the script sets on it, and a small DOM: a node taken out of its parent
+ * loses the focus it had and counts a `removal`, as in a browser, so a test can tell an element that was
+ * redrawn from one that stayed. */
+const el = (extra = {}) => ({
+  focus() {
+    doc.activeElement = this;
+  },
+  hidden: false,
+  textContent: "",
+  innerHTML: "",
+  value: "",
+  children: [],
+  dataset: {},
+  parentNode: null,
+  removals: 0,
+  remove() {
+    if (!this.parentNode) return;
+    this.parentNode.children = this.parentNode.children.filter((c) => c !== this);
+    this.parentNode = null;
+    this.removals += 1;
+    if (doc.activeElement === this) doc.activeElement = null;
+  },
+  after(...nodes) {
+    attach(this.parentNode, nodes, this.parentNode.children.indexOf(this) + 1);
+  },
+  prepend(...nodes) {
+    attach(this, nodes, 0);
+  },
+  replaceChildren(...nodes) {
+    for (const child of [...this.children]) child.remove();
+    attach(this, nodes, 0);
+  },
+  ...extra,
+});
 
 /** gui-ideas.js in a page whose hub holds `rows`. `calls` lists what the page sent, in order. */
 function page(rows = SEED(), { signedIn = true } = {}) {
+  doc.activeElement = null;
   const calls = [];
   const store = { rows: [...rows] };
   const handlers = {};
@@ -61,14 +101,24 @@ function page(rows = SEED(), { signedIn = true } = {}) {
     shellPage: () => "ideas",
     pageView: { addEventListener: (type, f) => (handlers[type] = f), querySelector: (sel) => part(sel) },
     document: {
-      activeElement: null,
+      get activeElement() {
+        return doc.activeElement;
+      },
+      set activeElement(node) {
+        doc.activeElement = node;
+      },
       createElement: (tag) => (tag === "template" ? { set innerHTML(h) { this.content = { firstElementChild: el({ html: h, dataset: { id: /data-id="([^"]+)"/.exec(h)?.[1] } }) }; } } : editorEl(tag)),
     },
-    setTimeout: (f, ms) => timers.push({ f, ms }),
-    clearTimeout: () => {},
+    setTimeout: (f, ms) => {
+      const timer = { f, ms, cancelled: false };
+      timers.push(timer);
+      return timer;
+    },
+    clearTimeout: (timer) => {
+      if (timer) timer.cancelled = true;
+    },
     modelChanged: () => (context.changed += 1),
     changed: 0,
-    projectRepos: new Map([["mini:/work/site", SITE]]),
     hub: signedIn ? {} : null,
     connectorCall: async (cmd, args = {}) => {
       calls.push({ cmd, ...args });
@@ -97,16 +147,23 @@ function page(rows = SEED(), { signedIn = true } = {}) {
   };
   function editorEl() {
     const fields = {};
-    return {
-      dataset: {},
-      set innerHTML(h) {
+    const node = el();
+    Object.defineProperty(node, "innerHTML", {
+      set(h) {
         this.html = h;
         fields.title = el({ value: /name="title" value="([^"]*)"/.exec(h)?.[1] ?? "" });
         fields.text = el({ value: />([^<]*)<\/textarea>/.exec(h)?.[1] ?? "" });
-        fields.project = el({ value: /<option value="([^"]+)" selected/.exec(h)?.[1] ?? "" });
       },
-      querySelector: (sel) => fields[/name="(\w+)"/.exec(sel)?.[1]] ?? (fields[sel] ??= el({ focus() {} })),
+    });
+    node.querySelector = (sel) => fields[/name="(\w+)"/.exec(sel)?.[1] ?? /idea-edit-(\w+)/.exec(sel)?.[1]] ?? (fields[sel] ??= el());
+    // A field inside an editor that leaves the page loses the focus with it.
+    const leave = node.remove;
+    node.remove = function () {
+      const had = this.parentNode;
+      leave.call(this);
+      if (had && Object.values(fields).includes(doc.activeElement)) doc.activeElement = null;
     };
+    return node;
   }
   vm.createContext(context);
   vm.runInContext(ideasSrc, context);
@@ -149,6 +206,7 @@ function page(rows = SEED(), { signedIn = true } = {}) {
       await flush();
       await flush();
     },
+    onEditor: (type, editor, extra = {}) => send(type, { target: { closest: (sel) => (sel === ".idea-editor" ? editor : null) }, relatedTarget: null, ...extra }),
     type: (editor, field, value) => {
       editor.querySelector(`[name="${field}"]`).value = value;
       send("input", { target: { closest: (sel) => (sel === ".idea-editor" ? editor : null) } });
@@ -371,25 +429,285 @@ test("closing the editor saves what is typed at once", async () => {
   assert.equal(p.titles()[0], "Cheaper box tier, Pro", "the edited idea is now the most recent");
 });
 
-test("a settings push, which carries no ideas, makes the page read them again", async () => {
+const reads = (p) => p.calls.filter((c) => c.cmd === "list_ideas").length;
+const typed = (p, field) => p.run("ideasUi.editor").querySelector(`[name="${field}"]`);
+
+test("an ideas_changed signal makes the page read them again, a burst of five reading once", async () => {
   const p = page();
   await p.show();
   assert.equal(p.titles().length, 2);
   p.store.rows.unshift(idea("Added by an agent meanwhile", { created_by: orchestrator, updated_at: NOW }));
-  p.run("ideasRefresh()");
-  p.run("ideasRefresh()");
-  assert.equal(p.timers.length, 2, "each push waits a moment, so a burst reads once");
-  await p.timers.at(-1).f();
+  const before = reads(p);
+  for (let i = 0; i < 5; i += 1) p.run("ideasRefresh()");
+  const live = p.timers.filter((t) => !t.cancelled);
+  assert.equal(live.length, 1, "each signal replaces the wait of the one before");
+  await live[0].f();
   await flush();
+  assert.equal(reads(p) - before, 1, "five signals, one read");
   assert.equal(p.titles()[0], "Added by an agent meanwhile");
-  assert.equal(p.calls.filter((c) => c.cmd === "list_ideas").length, 2);
 });
 
-test("the settings handler asks the Ideas script to read again, and the push keeps no list", () => {
+test("a signal that arrives while the page is reading queues one more read, however many arrive", async () => {
+  const p = page();
+  await p.show();
+  const before = reads(p);
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const call = p.context.connectorCall;
+  p.context.connectorCall = async (cmd, args) => (cmd === "list_ideas" ? (await gate, call(cmd, args)) : call(cmd, args));
+  const first = p.run("ideasLoad()");
+  p.run("ideasLoad()");
+  p.run("ideasLoad()");
+  p.run("ideasLoad()");
+  release();
+  await first;
+  await flush();
+  assert.equal(reads(p) - before, 2, "the read in flight, and one after it");
+});
+
+test("a settings push alone reads no ideas", async () => {
+  const p = page();
+  await p.show();
+  const before = reads(p);
+  // What the app does for a settings push, whatever it is wired to.
   const settings = read("settings.js");
-  assert.match(fn(settings, "onHubSettings"), /if \(typeof ideasRefresh === "function"\) ideasRefresh\(\);/);
+  const context = { settings: null, settingsOpen: () => false, ideasRefresh: () => p.run("ideasRefresh()") };
+  vm.createContext(context);
+  vm.runInContext(fn(settings, "onHubSettings"), context);
+  for (let i = 0; i < 3; i += 1) vm.runInContext(`onHubSettings({ connectors: [] })`, context);
+  assert.deepEqual(p.timers.filter((t) => !t.cancelled), [], "no read is scheduled");
+  await flush();
+  assert.equal(reads(p) - before, 0);
+  assert.ok(!/ideas/.test(fn(settings, "onHubSettings")), "the settings handler knows nothing of ideas");
   const rust = readFileSync(new URL("../crates/core/src/connectors.rs", import.meta.url), "utf8");
   assert.ok(!/pub ideas: Vec/.test(rust), "ideas ride on list_ideas, so the settings push stays bounded");
+});
+
+test("the app reads ideas once after the hub says hello and on ideas_changed, and a push wires to neither", () => {
+  const main = read("main.js");
+  const hello = main.slice(main.indexOf("    hello(frame) {"), main.indexOf("    machines: (list, tabs)"));
+  assert.match(hello, /if \(typeof ideasLoad === "function"\) ideasLoad\(\);/);
+  assert.match(main, /ideasChanged: \(\) => typeof ideasRefresh === "function" && ideasRefresh\(\),/);
+  assert.match(main, /settings: \(latest\) => onHubSettings\(latest\),/);
+});
+
+test("opening a second idea saves the first and leaves the second open", async () => {
+  const p = page();
+  await p.show();
+  await p.click("edit", "i1");
+  p.type(p.run("ideasUi.editor"), "text", "Typed but not yet saved");
+  await p.click("edit", "i2");
+  assert.equal(p.run("ideasUi.editing"), "i2");
+  assert.equal(p.run("ideasUi.editor.dataset.id"), "i2");
+  assert.deepEqual(sent(p), [{ cmd: "save_idea", id: "i1", title: "iPad layout for the sidebar", text: "Typed but not yet saved", project: SITE }]);
+  assert.equal(p.store.rows.find((i) => i.id === "i1").text, "Typed but not yet saved");
+  assert.deepEqual(p.list().map((h) => h ?? "editor").length, 2, "its editor is in the list");
+  assert.equal(p.part(".ideas-list").children.some((c) => c === p.run("ideasUi.editor")), true);
+});
+
+test("a draft that cannot be saved on close keeps the editor open with its text and says why, offline", async () => {
+  const p = page();
+  await p.show();
+  await p.click("edit", "i1");
+  const editor = p.run("ideasUi.editor");
+  p.type(editor, "text", "Draft that must not be lost");
+  p.context.connectorCall = async () => {
+    throw "not connected to the hub";
+  };
+  await p.click("close", "i1");
+  assert.equal(p.run("ideasUi.editing"), "i1", "still open");
+  assert.equal(p.run("ideasUi.editor"), editor, "the same editor");
+  assert.equal(editor.querySelector('[name="text"]').value, "Draft that must not be lost");
+  assert.equal(p.part(".idea-saving").textContent, "not connected to the hub");
+  assert.equal(p.part(".idea-saving").dataset.state, "error");
+  await p.click("edit", "i2");
+  assert.equal(p.run("ideasUi.editing"), "i1", "another idea does not open over a draft that is not saved");
+});
+
+test("a draft with an emptied title keeps the editor open on close, and a fixed title closes it", async () => {
+  const p = page();
+  await p.show();
+  await p.click("edit", "i2");
+  const editor = p.run("ideasUi.editor");
+  p.type(editor, "title", "   ");
+  p.type(editor, "text", "Notes I wrote");
+  await p.click("close", "i2");
+  assert.equal(p.run("ideasUi.editing"), "i2");
+  assert.equal(editor.querySelector('[name="text"]').value, "Notes I wrote");
+  assert.equal(p.part(".idea-saving").textContent, "A title is needed");
+  assert.equal(p.part(".idea-saving").dataset.state, "error");
+  assert.deepEqual(sent(p), []);
+  p.type(editor, "title", "Cheaper box tier, Pro");
+  await p.click("close", "i2");
+  assert.equal(p.run("ideasUi.editing"), null);
+  assert.deepEqual(sent(p), [{ cmd: "save_idea", id: "i2", title: "Cheaper box tier, Pro", text: "Notes I wrote" }]);
+});
+
+test("the open editor stays the same element, with its focus, through every redraw", async () => {
+  const p = page();
+  await p.show();
+  await p.click("edit", "i2");
+  const editor = p.run("ideasUi.editor");
+  const field = typed(p, "text");
+  assert.equal(p.run("document.activeElement"), field, "the text field has the focus");
+  p.type(editor, "text", "first part");
+  await p.timers.at(-1).f(); // the autosave: a redraw when it starts and one when it ends
+  p.type(editor, "text", "first part, second part");
+  assert.equal(p.run("document.activeElement"), field, "focus kept after the autosave");
+  // An agent saves an idea that sorts above the open one, and the page reads it.
+  p.store.rows.unshift(idea("Added above", { created_by: orchestrator, updated_at: NOW + 5 }));
+  p.run("ideasLoad()");
+  await flush();
+  assert.equal(p.titles()[0], "Added above");
+  assert.equal(p.run("ideasUi.editor"), editor);
+  assert.equal(p.part(".ideas-list").children.indexOf(editor), 2, "it sits after the new card and the one above it");
+  assert.equal(editor.removals, 0, "the editor was never taken out of the page");
+  assert.equal(p.run("document.activeElement"), field);
+  assert.equal(field.value, "first part, second part", "the text typed during the save is still there");
+  p.filter("status", "all");
+  assert.equal(editor.removals, 0, "a filter change does not take it out either");
+});
+
+test("closing an editor the user did not touch sends nothing, and an agent's edit stays", async () => {
+  const p = page();
+  await p.show();
+  await p.click("edit", "i2");
+  const row = p.store.rows.find((i) => i.id === "i2");
+  p.store.rows = p.store.rows.map((i) => (i.id === "i2" ? { ...row, title: "Cheaper box tier (agent)", text: "The agent added a note.", updated_at: NOW + 9 } : i));
+  p.run("ideasLoad()");
+  await flush();
+  await p.click("close", "i2");
+  assert.deepEqual(sent(p), [], "no save_idea");
+  assert.equal(p.store.rows.find((i) => i.id === "i2").text, "The agent added a note.");
+  assert.equal(p.run("ideasUi.editing"), null);
+});
+
+test("a change in one field keeps the other field as the agent last edited it", async () => {
+  const p = page();
+  await p.show();
+  await p.click("edit", "i2");
+  const row = p.store.rows.find((i) => i.id === "i2");
+  p.store.rows = p.store.rows.map((i) => (i.id === "i2" ? { ...row, text: "The agent added a note.", updated_at: NOW + 9 } : i));
+  p.run("ideasLoad()");
+  await flush();
+  p.type(p.run("ideasUi.editor"), "title", "A better title");
+  await p.click("close", "i2");
+  assert.deepEqual(sent(p), [{ cmd: "save_idea", id: "i2", title: "A better title", text: "The agent added a note." }]);
+});
+
+test("a status change goes out on the idea as it is now, not as the menu saw it", async () => {
+  const p = page();
+  await p.show();
+  const items = await p.menu("i1");
+  p.store.rows = p.store.rows.map((i) => (i.id === "i1" ? { ...i, title: "iPad layout (agent rename)", text: "Agent text.", updated_at: NOW + 9 } : i));
+  p.run("ideasLoad()");
+  await flush();
+  await items.find((i) => i.label === "Mark done").run();
+  assert.deepEqual(sent(p), [{ cmd: "save_idea", id: "i1", title: "iPad layout (agent rename)", text: "Agent text.", project: SITE, status: "done" }]);
+});
+
+test("one change in a field sends one save, though the change, the blur and Done all ask", async () => {
+  const p = page();
+  await p.show();
+  await p.click("edit", "i1");
+  const editor = p.run("ideasUi.editor");
+  p.type(editor, "title", "iPad layout, wider");
+  p.onEditor("change", editor);
+  p.onEditor("focusout", editor);
+  await p.click("close", "i1");
+  assert.deepEqual(sent(p).map((c) => c.cmd), ["save_idea"], "exactly one");
+  assert.equal(sent(p)[0].title, "iPad layout, wider");
+  assert.equal(p.run("ideasUi.editing"), null);
+});
+
+test("a save that failed is not sent again by the blur that follows it, but Done tries once more", async () => {
+  const p = page();
+  await p.show();
+  await p.click("edit", "i1");
+  const editor = p.run("ideasUi.editor");
+  p.type(editor, "text", "Draft");
+  let down = true;
+  const call = p.context.connectorCall;
+  p.context.connectorCall = async (cmd, args) => {
+    if (cmd === "save_idea" && down) {
+      p.calls.push({ cmd, ...args });
+      throw "not connected to the hub";
+    }
+    return call(cmd, args);
+  };
+  p.onEditor("change", editor);
+  p.onEditor("focusout", editor);
+  await flush();
+  assert.equal(sent(p).length, 1);
+  down = false;
+  await p.click("close", "i1");
+  assert.equal(sent(p).length, 2, "Done sends the draft again");
+  assert.equal(p.run("ideasUi.editing"), null, "and closes once it is saved");
+  assert.equal(p.store.rows.find((i) => i.id === "i1").text, "Draft");
+});
+
+test("the editor has no project picker, and a save keeps the idea's project", async () => {
+  const p = page();
+  await p.show();
+  await p.click("edit", "i1");
+  assert.doesNotMatch(p.run("ideasUi.editor").html, /<select|name="project"/);
+  assert.doesNotMatch(ideasSrc, /ideaProjectOptions/);
+  assert.doesNotMatch(read("gui-ideas.css"), /idea-edit-foot select|idea-editor :is\(input, select/);
+  p.type(p.run("ideasUi.editor"), "title", "iPad layout, wider");
+  await p.click("close", "i1");
+  assert.equal(sent(p)[0].project, SITE);
+  assert.equal(p.store.rows.find((i) => i.id === "i1").project, SITE);
+});
+
+test("the project filter's options are written once, not on every draw", async () => {
+  const p = page();
+  let writes = 0;
+  const select = p.part('.ideas-filters [name="project"]');
+  let html = "";
+  Object.defineProperty(select, "innerHTML", { get: () => html.replace(' selected', ' selected=""'), set: (v) => ((html = v), (writes += 1)) });
+  await p.show();
+  p.filter("project", SITE);
+  p.search("ipad");
+  p.search("");
+  p.run("drawIdeas()");
+  p.run("drawIdeas()");
+  assert.equal(writes, 3, "when the page opens, when the list arrives, and when a project is chosen; no draw after that writes them");
+});
+
+test("Reopen on a done idea sends save_idea with status open, and it returns to the Open list", async () => {
+  const p = page();
+  await p.show();
+  p.filter("status", "done");
+  assert.deepEqual(p.titles(), ["Café menu for the demo"]);
+  await (await p.menu("i3")).find((i) => i.label === "Reopen").run();
+  assert.deepEqual(sent(p), [{ cmd: "save_idea", id: "i3", title: "Café menu for the demo", text: "", project: API, status: "open" }]);
+  assert.deepEqual(p.titles(), [], "it left the Done list");
+  p.filter("status", "open");
+  assert.ok(p.titles().includes("Café menu for the demo"), "it is in the Open list");
+  assert.equal(p.run("ideasOpenText()"), "3 open");
+});
+
+test("⌘K lists Open Ideas for “ideas”, and running it opens the Ideas page", () => {
+  const shell = read("gui-shell.js");
+  const opened = [];
+  const context = {
+    active: null,
+    contextProject: () => null,
+    paletteProjects: () => [],
+    onlineMachines: () => [],
+    promptLinkItems: () => [],
+    themeActionItems: () => [],
+    openPage: (name) => opened.push(name),
+    esc: (t) => t,
+    icon: () => "",
+    document: { createElement: () => ({ set innerHTML(h) { this.content = { textContent: h.replace(/<[^>]*>/g, "") }; } }) },
+  };
+  vm.createContext(context);
+  vm.runInContext([line(shell, "const normalize"), fn(shell, "searchFields"), fn(shell, "rankItem"), fn(shell, "filterGroups"), fn(shell, "actionItems"), shell.slice(shell.indexOf("const startsWord"), shell.indexOf("\n};\n", shell.indexOf("const startsWord")) + 4)].join("\n"), context);
+  const groups = vm.runInContext(`filterGroups([{ label: "Actions", items: actionItems() }], "ideas")`, context);
+  assert.deepEqual(here(groups.map((g) => g.items.map((i) => i.title))), [["Open Ideas"]]);
+  groups[0].items[0].run();
+  assert.deepEqual(opened, ["ideas"]);
 });
 
 /** drawNav on a page whose Ideas script holds `rows`, with every other part stubbed. */

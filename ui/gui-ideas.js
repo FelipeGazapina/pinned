@@ -1,6 +1,7 @@
 /** The Ideas page (0.18.2): things the user might do, kept on the hub. The page, the sidebar's "N open"
  * and More's hint all read `ideasUi.rows`, which is `list_ideas`. The hub's settings push carries no
- * ideas, so it stays small however many there are; each push only tells this script to read again. */
+ * ideas, so it stays small however many there are. The hub sends `ideas_changed` after an idea is saved
+ * or deleted, and the app reads again then and once after it connects; a settings push reads nothing. */
 
 const IDEA_STATUSES = [["open", "Open"], ["done", "Done"], ["dropped", "Dropped"], ["all", "All"]];
 const IDEA_INTRO = "Things you might do. Agents read them only when asked; facts you want agents to always know go in memory instead.";
@@ -16,12 +17,17 @@ const ideasUi = {
   query: "",
   editing: null, // the id of the idea open in the editor
   editor: null, // the editor's card
-  saving: null, // "saving" | "saved" | an error, for the open editor
+  base: null, // the title and text the editor showed when it opened, or as last saved from it: what "typed" is measured against
+  saving: null, // "saving" | "saved" | `{ error }`, for the open editor
+  queue: Promise.resolve(true), // the editor's saves, one after another
+  failed: null, // what the last failed save sent, so a blur does not send it again
+  opening: 0,
   adding: false,
   loading: false,
   again: false,
   timer: 0,
   refreshTimer: 0,
+  filterHtml: null, // the project filter's options as last written
 };
 
 const ideasHub = () => typeof hub !== "undefined" && !!hub;
@@ -37,6 +43,7 @@ function ideasShown() {
   const { status, project, query } = ideasUi;
   const words = ideaFold(query).split(/\s+/).filter(Boolean);
   return (ideasUi.rows ?? []).filter((i) => {
+    if (i.id === ideasUi.editing) return true; // an idea being edited does not vanish under the filters
     if (status !== "all" && i.status !== status) return false;
     if (project && i.project !== project) return false;
     const hay = ideaFold(`${i.title} ${i.text} ${ideaProjectName(i.project)}`);
@@ -67,7 +74,7 @@ async function ideasLoad() {
   ideasChanged();
 }
 
-/** A settings push means something may have changed, an agent saving an idea among it. */
+/** The hub says ideas changed (`ideas_changed`): read again after a moment, so a burst of signals reads once. */
 function ideasRefresh() {
   clearTimeout(ideasUi.refreshTimer);
   ideasUi.refreshTimer = setTimeout(ideasLoad, IDEA_REFRESH_AFTER_MS);
@@ -89,19 +96,13 @@ function ideaCardHtml(idea) {
     <button type="button" class="icon idea-more" data-idea="menu" aria-label="${esc(`Actions for ${idea.title}`)}" aria-haspopup="menu">${icon("ellipsis")}</button></article>`;
 }
 
-function ideaProjectOptions(current) {
-  const repos = new Set([...(typeof projectRepos !== "undefined" ? projectRepos.values() : []), ...(ideasUi.rows ?? []).map((i) => i.project), current].filter(Boolean));
-  return [...repos].sort().map((r) => `<option value="${esc(r)}"${r === current ? " selected" : ""}>${esc(ideaProjectName(r))}</option>`).join("");
-}
-
 function ideaEditorEl(idea) {
   const el = document.createElement("article");
   el.className = "idea-card idea-editor";
   el.dataset.id = idea.id;
   el.innerHTML = `<input type="text" class="idea-edit-title" name="title" value="${esc(idea.title)}" aria-label="Title" autocomplete="off">
     <textarea class="idea-edit-text" name="text" rows="6" aria-label="Text" placeholder="Details, links, why it matters…">${esc(idea.text)}</textarea>
-    <div class="idea-edit-foot"><select name="project" aria-label="Project"><option value="">No project</option>${ideaProjectOptions(idea.project)}</select>
-      <span class="idea-saving" role="status"></span><button type="button" class="idea-close" data-idea="close">Done</button></div>`;
+    <div class="idea-edit-foot"><span class="idea-saving" role="status"></span><button type="button" class="idea-close" data-idea="close">Done</button></div>`;
   return el;
 }
 
@@ -126,6 +127,8 @@ function showIdeas() {
   </div></div>`);
   ideasUi.editor = null;
   ideasUi.editing = null;
+  ideasUi.base = null;
+  ideasUi.filterHtml = null;
   drawIdeas();
   ideasLoad();
 }
@@ -134,9 +137,11 @@ function showIdeas() {
 function drawIdeas() {
   const list = pageView.querySelector(".ideas-list");
   if (!list) return;
+  if (ideasUi.editing && !ideasUi.rows?.some((i) => i.id === ideasUi.editing)) ideasUi.editing = ideasUi.editor = ideasUi.base = null; // deleted elsewhere
   const project = pageView.querySelector('.ideas-filters [name="project"]');
   const options = ideasProjectFilterHtml();
-  if (project.innerHTML !== options) project.innerHTML = options;
+  // The options are kept as written, not read back: the browser serializes `selected` as `selected=""`.
+  if (ideasUi.filterHtml !== options) project.innerHTML = ideasUi.filterHtml = options;
   const filters = pageView.querySelector(".ideas-filters");
   for (const [name, value] of [["project", ideasUi.project], ["status", ideasUi.status], ["query", ideasUi.query]]) if (filters.elements[name].value !== value && filters.elements[name] !== document.activeElement) filters.elements[name].value = value;
   const add = pageView.querySelector(".ideas-add");
@@ -148,7 +153,7 @@ function drawIdeas() {
     holder.innerHTML = ideaCardHtml(idea);
     return holder.content.firstElementChild;
   });
-  list.replaceChildren(...cards);
+  placeCards(list, cards);
   const error = pageView.querySelector(".ideas-error");
   error.hidden = !ideasUi.error;
   error.textContent = ideasUi.error ?? "";
@@ -161,7 +166,22 @@ function drawIdeas() {
   empty.hidden = !none;
   empty.textContent = none;
   const saving = pageView.querySelector(".idea-saving");
-  if (saving) saving.textContent = ideasUi.saving === "saving" ? "Saving…" : ideasUi.saving === "saved" ? "Saved" : (ideasUi.saving ?? "");
+  if (saving) {
+    const state = ideasUi.saving;
+    saving.textContent = state === "saving" ? "Saving…" : state === "saved" ? "Saved" : (state?.error ?? "");
+    saving.dataset.state = state?.error ? "error" : (state ?? "");
+  }
+}
+
+/** Puts `cards` in the list. The open editor is never taken out and put back, which would drop its
+ * focus and caret: the other cards go around it. */
+function placeCards(list, cards) {
+  const editor = ideasUi.editor;
+  const at = cards.indexOf(editor);
+  if (at < 0 || editor.parentNode !== list) return list.replaceChildren(...cards);
+  for (const child of [...list.children]) if (child !== editor) child.remove();
+  list.prepend(...cards.slice(0, at));
+  editor.after(...cards.slice(at + 1));
 }
 
 function ideaPut(idea) {
@@ -172,10 +192,14 @@ function ideaPut(idea) {
 
 /** An edit as the hub takes it: it sets the title, text and project as sent, and the status when sent. */
 const ideaEdit = (idea, changes = {}) => ({ id: idea.id, title: idea.title, text: idea.text, ...(idea.project ? { project: idea.project } : {}), ...changes });
+const ideaRow = (id) => ideasUi.rows?.find((i) => i.id === id);
 
-async function ideaSetStatus(idea, status) {
+/** Sets the status of the idea as it is now, not as it was when its menu opened: an agent may have edited it since. */
+async function ideaSetStatus(id, status) {
+  const idea = ideaRow(id);
+  if (!idea) return;
   try {
-    ideaPut(await ideasCall("save_idea", ideaEdit(idea, { status })));
+    ideaPut(await ideasCall("save_idea", ideaEdit(ideaRow(id) ?? idea, { status })));
     ideasUi.error = null;
   } catch (e) {
     ideasUi.error = String(e?.message ?? e);
@@ -188,7 +212,7 @@ async function ideaDelete(idea) {
   try {
     await ideasCall("delete_idea", { id: idea.id });
     ideasUi.rows = ideasUi.rows.filter((i) => i.id !== idea.id);
-    if (ideasUi.editing === idea.id) ideasUi.editing = ideasUi.editor = null;
+    if (ideasUi.editing === idea.id) ideasUi.editing = ideasUi.editor = ideasUi.base = null;
     ideasUi.error = null;
   } catch (e) {
     ideasUi.error = String(e?.message ?? e);
@@ -218,57 +242,95 @@ async function ideaAdd(title) {
   return saved;
 }
 
-/** Opens `idea` in the editor in place of its card. */
-function ideaOpenEditor(idea) {
-  if (ideasUi.editing && ideasUi.editing !== idea.id) ideaCloseEditor();
-  ideasUi.editing = idea.id;
+/** Opens the idea in the editor in place of its card. The idea being edited, if any, is saved and closed
+ * first; if that save fails it stays open, with its error, and this one does not open. */
+async function ideaOpenEditor(id) {
+  if (ideasUi.editing === id) return;
+  const turn = ++ideasUi.opening;
+  if (ideasUi.editing && !(await ideaCloseEditor())) return;
+  const idea = ideaRow(id);
+  if (!idea || turn !== ideasUi.opening) return;
+  ideasUi.editing = id;
   ideasUi.editor = ideaEditorEl(idea);
+  ideasUi.base = { title: idea.title, text: idea.text };
   ideasUi.saving = null;
+  ideasUi.failed = null;
   drawIdeas();
   ideasUi.editor.querySelector(".idea-edit-text").focus();
 }
 
-/** Saves the editor's fields as typed. An empty title is not an idea, so it waits. */
-async function ideaSaveDraft() {
-  clearTimeout(ideasUi.timer);
-  const el = ideasUi.editor;
-  const idea = ideasUi.rows?.find((i) => i.id === ideasUi.editing);
-  if (!el || !idea) return;
+/** What the editor holds that the user changed since it opened (or since its last save), as the hub would keep it. */
+function ideaTyped(el) {
   const title = el.querySelector('[name="title"]').value.trim();
   const text = el.querySelector('[name="text"]').value;
-  const project = el.querySelector('[name="project"]').value || null;
-  if (!title) {
-    ideasUi.saving = "A title is needed";
-    return drawIdeas();
+  const { base } = ideasUi;
+  return { title, text, titleChanged: title !== base.title, textChanged: text.trim() !== base.text };
+}
+
+/** Saves what the user typed in the editor, one save at a time: a change, the blur that follows it and
+ * Done each ask, and the first sends it. Resolves to false when the draft is not saved. */
+function ideaSaveDraft(retry = false) {
+  clearTimeout(ideasUi.timer);
+  return (ideasUi.queue = ideasUi.queue.then(() => ideaSaveNow(retry)));
+}
+
+async function ideaSaveNow(retry) {
+  const el = ideasUi.editor;
+  const id = ideasUi.editing;
+  if (!el || !ideaRow(id)) return true;
+  const typed = ideaTyped(el);
+  if (!typed.titleChanged && !typed.textChanged) {
+    if (ideasUi.saving?.error) ideasUi.saving = null;
+    return true;
   }
-  if (title === idea.title && text.trim() === idea.text && project === (idea.project ?? null)) return;
+  if (!typed.title) {
+    ideasUi.saving = { error: "A title is needed" };
+    drawIdeas();
+    return false;
+  }
+  const sig = JSON.stringify([typed.title, typed.text]);
+  if (!retry && ideasUi.failed === sig) return false; // a blur does not send again what just failed
+  // The field the user did not change keeps what the hub holds now, which an agent may have edited.
+  const row = ideaRow(id);
   ideasUi.saving = "saving";
   drawIdeas();
+  let ok = false;
   try {
-    const saved = await ideasCall("save_idea", { id: idea.id, title, text, ...(project ? { project } : {}) });
-    ideaPut(saved);
-    ideasUi.saving = ideasUi.editor === el && el.querySelector('[name="title"]').value.trim() === title && el.querySelector('[name="text"]').value === text ? "saved" : null;
+    ideaPut(await ideasCall("save_idea", ideaEdit(row, { ...(typed.titleChanged ? { title: typed.title } : {}), ...(typed.textChanged ? { text: typed.text } : {}) })));
+    if (ideasUi.editor === el) {
+      if (typed.titleChanged) ideasUi.base.title = typed.title;
+      if (typed.textChanged) ideasUi.base.text = typed.text.trim();
+      const now = ideaTyped(el);
+      ideasUi.saving = now.titleChanged || now.textChanged ? null : "saved";
+    }
+    ideasUi.failed = null;
+    ok = true;
   } catch (e) {
-    ideasUi.saving = String(e?.message ?? e);
+    ideasUi.failed = sig;
+    if (ideasUi.editor === el) ideasUi.saving = { error: String(e?.message ?? e) };
   }
   if (ideasUi.editor === el) drawIdeas();
   modelChanged();
+  return ok;
 }
 
+/** Closes the editor after saving it. A draft that cannot be saved keeps the editor open, with the error beside Done. */
 async function ideaCloseEditor() {
-  await ideaSaveDraft();
-  ideasUi.editing = ideasUi.editor = null;
+  if (!ideasUi.editing) return true;
+  if (!(await ideaSaveDraft(true))) return false;
+  ideasUi.editing = ideasUi.editor = ideasUi.base = null;
   ideasUi.saving = null;
   if (ideasUi.rows) ideasUi.rows = [...ideasUi.rows].sort((a, b) => b.updated_at - a.updated_at);
   drawIdeas();
+  return true;
 }
 
 function ideaMenu(idea, at) {
   openSideMenu([
-    { label: "Edit", icon: "pencil", run: () => ideaOpenEditor(idea) },
-    ...(idea.status === "done" ? [] : [{ label: "Mark done", icon: "check", run: () => ideaSetStatus(idea, "done") }]),
-    ...(idea.status === "dropped" ? [] : [{ label: "Drop", icon: "x", run: () => ideaSetStatus(idea, "dropped") }]),
-    ...(idea.status === "open" ? [] : [{ label: "Reopen", icon: "rotate-ccw", run: () => ideaSetStatus(idea, "open") }]),
+    { label: "Edit", icon: "pencil", run: () => ideaOpenEditor(idea.id) },
+    ...(idea.status === "done" ? [] : [{ label: "Mark done", icon: "check", run: () => ideaSetStatus(idea.id, "done") }]),
+    ...(idea.status === "dropped" ? [] : [{ label: "Drop", icon: "x", run: () => ideaSetStatus(idea.id, "dropped") }]),
+    ...(idea.status === "open" ? [] : [{ label: "Reopen", icon: "rotate-ccw", run: () => ideaSetStatus(idea.id, "open") }]),
     { label: "Delete", icon: "trash", danger: true, sep: true, run: () => ideaDelete(idea) },
   ], at);
 }
@@ -280,7 +342,7 @@ pageView.addEventListener("click", (e) => {
   const idea = ideasUi.rows?.find((i) => i.id === button.closest("[data-id]")?.dataset.id);
   if (button.dataset.idea === "close") return ideaCloseEditor();
   if (!idea) return;
-  if (button.dataset.idea === "edit") ideaOpenEditor(idea);
+  if (button.dataset.idea === "edit") ideaOpenEditor(idea.id);
   else if (button.dataset.idea === "menu") ideaMenu(idea, button);
 });
 pageView.addEventListener("input", (e) => {
