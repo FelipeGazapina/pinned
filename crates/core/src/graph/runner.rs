@@ -232,6 +232,9 @@ pub enum Wake {
         error_to: Vec<NodeId>,
     },
     TabGone,
+    /// The box the run's session ran in ended before the run did. The run fails with `why`, and
+    /// nothing reopens its session.
+    BoxEnded { why: String },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -362,6 +365,7 @@ pub fn push(run: &mut Run, wake: Wake, at: &str) {
     match wake {
         Wake::TabGone => detach(run, at),
         Wake::TurnEnded { claude, failed, error_to } => turn_ended(run, claude, failed, error_to),
+        Wake::BoxEnded { why } => box_ended(run, why, at),
     }
 }
 
@@ -1183,6 +1187,14 @@ fn detach(run: &mut Run, at: &str) {
             }
         }
     }
+}
+
+fn box_ended(run: &mut Run, why: String, at: &str) {
+    if let Ok(node) = front_node(run) {
+        let connector = run.stack.last().map_or_else(|| run.connector.clone(), |frame| frame.connector.clone());
+        record(run, &connector, &node, json!({ "box-ended": why.clone() }), at);
+    }
+    fail_status(run, why);
 }
 
 fn turn_ended(run: &mut Run, claude: Option<String>, failed: bool, error_to: Vec<NodeId>) {

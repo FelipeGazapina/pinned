@@ -257,13 +257,16 @@ function confirmBox({ input, repository, remoteUrl }) {
   renderPalette();
 }
 const BOX_SIZE_CHOICES = [["small", "Small"], ["medium", "Medium"], ["large", "Large"]];
-/** The most a box may spend, in USD. Boxes bill $0.10 an hour, so $1 is ten hours. */
-const parseBoxBudget = (query) => {
+/** What an hour on a box costs in USD, by size: the hub's `box_usd_per_hour`. A ceiling, since Upstash bills a box's active CPU time. */
+const BOX_RATE_BY_SIZE = { small: 0.1, medium: 0.2, large: 0.4 };
+const boxRate = (size) => BOX_RATE_BY_SIZE[size] ?? BOX_RATE_BY_SIZE.medium;
+/** The most a box may spend, in USD. At least an hour on its size: $0.10 Small, $0.20 Medium, $0.40 Large. */
+const parseBoxBudget = (query, size) => {
   const n = Number(query.trim().replace(/^\$/, ""));
-  return Number.isFinite(n) && n >= BOX_USD_PER_HOUR ? Math.round(n * 100) / 100 : null;
+  return Number.isFinite(n) && n >= boxRate(size) ? Math.round(n * 100) / 100 : null;
 };
-const boxHoursText = (usd) => {
-  const hours = usd / BOX_USD_PER_HOUR;
+const boxHoursText = (usd, size) => {
+  const hours = usd / boxRate(size);
   return hours < 10 ? `${+hours.toFixed(1)}h` : `${Math.round(hours)}h`;
 };
 PALETTE_VIEWS["add-box-budget"] = {
@@ -272,12 +275,12 @@ PALETTE_VIEWS["add-box-budget"] = {
   unhighlighted: true,
   summary(query) {
     const { repository, input, size } = palette.adding;
-    const usd = parseBoxBudget(query);
-    const funds = usd == null ? "Name the most this box may spend" : `$${usd.toFixed(2)} ≈ ${boxHoursText(usd)} at $0.10/h`;
+    const usd = parseBoxBudget(query, size);
+    const funds = usd == null ? "Name the most this box may spend" : `$${usd.toFixed(2)} ≈ ${boxHoursText(usd, size)} at $${boxRate(size).toFixed(2)}/h`;
     return `<div class="summary-head">Box session</div><div class="summary"><span class="ic">${icon("server")}</span><span class="text"><span class="title"><span class="name">${esc(repository?.nameWithOwner ?? input)}</span></span><span class="sub">${esc(`${size} box · ${funds}`)}</span></span></div>`;
   },
   accessory() {
-    const usd = parseBoxBudget(paletteView().query);
+    const usd = parseBoxBudget(paletteView().query, palette.adding.size);
     const label = palette.adding.creating ? "Creating box" : usd == null ? "Create box" : `Create box · $${usd.toFixed(2)}`;
     return submitButton(label, "Enter", usd == null || palette.adding.creating);
   },
@@ -290,7 +293,7 @@ PALETTE_VIEWS["add-box-budget"] = {
 };
 async function createBox(query) {
   const flow = palette.adding;
-  const usd = parseBoxBudget(query);
+  const usd = parseBoxBudget(query, flow.size);
   if (usd == null || flow.creating) return;
   if (!hub) return tell("<b>Sign in first</b> Boxes belong to an account.", 6000);
   flow.creating = true;

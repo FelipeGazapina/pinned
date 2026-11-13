@@ -806,11 +806,16 @@ pub fn widening(call: &Parsed) -> Option<String> {
 }
 
 /// Whether `call` saves a workflow with a session that skips its permission prompts. It runs later,
-/// outside the saving session, so a session that asks for its own prompts may not save one.
+/// outside the saving session, so a session that asks for its own prompts may not save one. A
+/// permission the runner's parse does not read counts too: the check never reads a value as safe
+/// that another layer could read as a mode.
 pub fn skips_prompts(call: &Parsed) -> bool {
+    fn skips(field: &Value) -> bool {
+        field.as_str().is_some_and(|name| matches!(crate::connectors::parse_permission(name), Ok(Some(crate::connectors::PermissionMode::BypassPermissions)) | Err(_)))
+    }
     fn walk(value: &Value) -> bool {
         match value {
-            Value::Object(fields) => fields.iter().any(|(name, field)| (matches!(name.as_str(), "permissionMode" | "permission") && field == "bypassPermissions") || walk(field)),
+            Value::Object(fields) => fields.iter().any(|(name, field)| (matches!(name.as_str(), "permissionMode" | "permission") && skips(field)) || walk(field)),
             Value::Array(items) => items.iter().any(walk),
             _ => false,
         }
@@ -1459,6 +1464,24 @@ mod tests {
         assert!(skips_prompts(&parsed(workflow("manual", "bypassPermissions"))), "a step's own setting counts");
         assert_eq!(widening(&parsed(workflow("bypassPermissions", ""))).as_deref(), Some("loosened permissions: the saved workflow runs a session that skips its permission prompts"));
         assert_eq!(widening(&parsed(workflow("auto", ""))), None);
+    }
+
+    #[test]
+    fn a_step_permission_that_is_not_an_exact_name_is_noted_as_skipping_prompts() {
+        let workflow = |step: &str| {
+            json!({
+                "connector": {
+                    "name": "Fix", "enabled": true, "trigger": { "kind": "called" }, "folder": "/w/site", "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false, "instructions": "",
+                    "graph": { "nodes": [{ "id": "s", "name": "Fix", "position": [0, 0], "type": "session", "permission": step }], "edges": [] }
+                }
+            })
+        };
+        let parsed = |args: Value| parse(find("save_connector").unwrap(), &args).unwrap();
+        for step in [" bypassPermissions ", "bypassPermissions\n"] {
+            assert!(skips_prompts(&parsed(workflow(step))), "{step:?}");
+            assert_eq!(widening(&parsed(workflow(step))).as_deref(), Some("loosened permissions: the saved workflow runs a session that skips its permission prompts"), "{step:?}");
+        }
+        assert!(!skips_prompts(&parsed(workflow(""))), "an empty step inherits the workflow's own");
     }
 
     #[test]

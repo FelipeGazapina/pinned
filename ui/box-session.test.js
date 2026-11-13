@@ -12,11 +12,10 @@ function runSlice(source, startAt, endAt, extra = "") {
   const context = {
     console,
     icon: (name) => `<i data-icon="${name}"></i>`,
-    BOX_USD_PER_HOUR: 0.1,
   };
   vm.createContext(context);
   // Top-level consts don't attach to the sandbox; export the helpers under test.
-  const exportHelpers = `;Object.assign(globalThis, { ...(typeof boxAgeText !== "undefined" ? { boxAgeText, boxChipHtml, boxSpent } : {}), ...(typeof parseBoxBudget !== "undefined" ? { parseBoxBudget, boxHoursText } : {}) });`;
+  const exportHelpers = `;Object.assign(globalThis, { ...(typeof boxAgeText !== "undefined" ? { boxAgeText, boxChipHtml, boxSpent } : {}), ...(typeof parseBoxBudget !== "undefined" ? { parseBoxBudget, boxHoursText, boxRate } : {}) });`;
   vm.runInContext(`${source.slice(start, end)}\n${exportHelpers}\n${extra}`, context);
   return context;
 }
@@ -41,12 +40,26 @@ test("the sidebar chip shows age and spend against the budget", () => {
 
 test("budgets parse to cents and preview hours", () => {
   const context = runSlice(adding, "const BOX_SIZE_CHOICES", 'PALETTE_VIEWS["add-box-budget"]');
-  assert.equal(context.parseBoxBudget("2"), 2);
-  assert.equal(context.parseBoxBudget("$2.50"), 2.5);
-  assert.equal(context.parseBoxBudget("0.05"), null, "below an hour");
-  assert.equal(context.parseBoxBudget("much"), null);
-  assert.equal(context.boxHoursText(2), "20h");
-  assert.equal(context.boxHoursText(0.5), "5h");
+  assert.equal(context.parseBoxBudget("2", "small"), 2);
+  assert.equal(context.parseBoxBudget("$2.50", "small"), 2.5);
+  assert.equal(context.parseBoxBudget("0.05", "small"), null, "below an hour");
+  assert.equal(context.parseBoxBudget("much", "small"), null);
+  assert.equal(context.parseBoxBudget("0.15", "small"), 0.15);
+  assert.equal(context.boxHoursText(2, "small"), "20h");
+  assert.equal(context.boxHoursText(0.5, "small"), "5h");
+});
+
+test("a budget needs an hour on its size and previews the hours at that size's rate", () => {
+  const context = runSlice(adding, "const BOX_SIZE_CHOICES", 'PALETTE_VIEWS["add-box-budget"]');
+  assert.deepEqual(["small", "medium", "large"].map(context.boxRate), [0.1, 0.2, 0.4]);
+  assert.equal(context.parseBoxBudget("0.15", "medium"), null, "under an hour of Medium");
+  assert.equal(context.parseBoxBudget("0.2", "medium"), 0.2);
+  assert.equal(context.parseBoxBudget("0.3", "large"), null, "under an hour of Large");
+  assert.equal(context.parseBoxBudget("0.4", "large"), 0.4);
+  assert.equal(context.boxHoursText(2, "medium"), "10h");
+  assert.equal(context.boxHoursText(2, "large"), "5h");
+  assert.equal(context.parseBoxBudget("0.2"), 0.2, "no size yet reads as the default Medium");
+  assert.equal(context.parseBoxBudget("0.15"), null);
 });
 
 test("the sources list a box once upstash is connected", () => {

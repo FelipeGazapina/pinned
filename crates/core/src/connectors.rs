@@ -379,8 +379,31 @@ fn reject_call_cycle(origin: &str, origin_graph: &Graph, store: &Store) -> Resul
 }
 
 fn graph_of(store: &Store, workflow: &str) -> Option<Graph> {
-    let connector = store.connectors.iter().find(|connector| connector.id == workflow)?;
-    Some(connector.graph.clone().unwrap_or_else(|| migrate(connector)))
+    store.connectors.iter().find(|connector| connector.id == workflow).map(run_graph)
+}
+
+/// The graph a run of `connector` walks: its stored graph, else the one `migrate` builds.
+fn run_graph(connector: &Connector) -> Graph {
+    connector.graph.clone().unwrap_or_else(|| migrate(connector))
+}
+
+/// Sets the graph and legacy fields `connector` is stored with when a save sends `graph`, as
+/// `save_connector` stores it: a sent graph equal to `migrate` is stored as `None`; with no graph
+/// sent, an edited stored graph stays and one equal to `migrate` of the stored copy is dropped.
+fn settle_graph(store: &Store, connector: &mut Connector, graph: Option<Graph>) {
+    if let Some(graph) = graph {
+        refresh_legacy(connector, &graph);
+        connector.graph = (graph != migrate(connector)).then_some(graph);
+    } else if let Some(existing) = store.connectors.iter().find(|existing| existing.id == connector.id && !connector.id.is_empty()) {
+        if let Some(stored) = existing.graph.clone() {
+            if stored == migrate(existing) {
+                connector.graph = None;
+            } else {
+                refresh_legacy(connector, &stored);
+                connector.graph = Some(stored);
+            }
+        }
+    }
 }
 
 fn walk_calls(graph: &Graph, stack: &mut Vec<String>, origin: &str, origin_graph: &Graph, store: &Store) -> Result<(), String> {
@@ -473,6 +496,13 @@ pub enum BoxPermission {
 }
 
 impl BoxPermission {
+    fn without_row(&self) -> Self {
+        match self {
+            BoxPermission::Fixed { .. } => BoxPermission::Fixed { row: None },
+            other => other.clone(),
+        }
+    }
+
     pub fn fixed_row(&self) -> Option<&str> {
         match self {
             BoxPermission::Fixed { row: Some(row) } => Some(row),
@@ -505,8 +535,17 @@ impl Default for BoxAccess {
 }
 
 impl BoxAccess {
+    /// Only the workflow kind (the box a run uses) has a fixed row: the hub names none for a
+    /// session, a worker or the orchestrator, so one a stored file or an old app carries there is
+    /// ignored, and the box it names keeps the normal timers.
     pub fn owns_row(&self, id: &str) -> bool {
-        [self.workflow.fixed_row(), self.session.fixed_row(), self.worker.fixed_row(), self.orchestrator.fixed_row()].into_iter().flatten().any(|row| row == id)
+        self.workflow.fixed_row() == Some(id)
+    }
+
+    /// As the hub and the apps read it: the session, worker and orchestrator kinds carry no row.
+    /// The stored file keeps what an earlier release wrote there.
+    fn without_unnamed_rows(&self) -> Self {
+        Self { workflow: self.workflow.clone(), session: self.session.without_row(), worker: self.worker.without_row(), orchestrator: self.orchestrator.without_row() }
     }
 }
 
@@ -553,10 +592,14 @@ fn box_ask_id(connector: &str, subject: &Subject) -> String {
     hasher.finalize()[..8].iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Only the hub names the fixed row, through `claim_fixed_row`, `retake_fixed_row` and
+/// `release_fixed_row`, and only for the workflow kind. A save that still asks for Fixed keeps the stored row, as an older app sends
+/// back the row it read, and any other row it names becomes none: a row named there is exempt from
+/// every box timer, so a client must not pick one.
 fn keep_fixed_row(incoming: BoxPermission, stored: &BoxPermission) -> BoxPermission {
-    match (incoming, stored) {
-        (BoxPermission::Fixed { row: None }, BoxPermission::Fixed { row: Some(kept) }) => BoxPermission::Fixed { row: Some(kept.clone()) },
-        (incoming, _) => incoming,
+    match incoming {
+        BoxPermission::Fixed { .. } => BoxPermission::Fixed { row: stored.fixed_row().map(str::to_owned) },
+        incoming => incoming,
     }
 }
 
@@ -803,6 +846,14 @@ struct Store {
     /// The connected Convex deployments. Their keys are keys, under `convex::key_name`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     convex: Vec<convex::Connection>,
+    /// The subjects a box end freed, by workflow id and then `subject_key`, with the unix millis it
+    /// did. A later failed boot or offline end of the same subject keeps it handled while the mark
+    /// is within `BOX_RELEASE_WINDOW_MS`. A mark is dropped when it is older than that or its
+    /// workflow is deleted (`prune_thread_bots`), whoever still tracks the subject. Not named
+    /// `box_released`: earlier commits of this release saved that key as a list of subjects, which
+    /// this shape cannot read, so the old key is ignored and its mark dropped.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    box_released_at: BTreeMap<String, BTreeMap<String, u64>>,
     connectors: Vec<Connector>,
 }
 
@@ -863,15 +914,38 @@ impl Store {
         }
     }
 
-    /// Drops the bots of threads no workflow handles or follows and no run works on anymore.
-    fn prune_thread_bots(&mut self, runs: &[runner::Run], starting: &[String]) -> bool {
-        let before = self.slack_threads.len();
+    /// Drops the bots of threads no workflow handles or follows and no run works on anymore, and
+    /// the box-end marks older than `BOX_RELEASE_WINDOW_MS` at `now` or of a deleted workflow.
+    fn prune_thread_bots(&mut self, runs: &[runner::Run], starting: &[String], now: u64) -> bool {
+        let before = (self.slack_threads.len(), self.box_released_at.values().map(|keys| keys.len()).sum::<usize>());
         let connectors = &self.connectors;
-        self.slack_threads.retain(|key, _| {
+        let tracked = |key: &String| {
             connectors.iter().any(|c| c.handled.iter().any(|h| h == key) || c.followed.contains_key(key)) || runs.iter().any(|run| subject_key(&run.subject) == *key)
                 || starting.contains(key)
-        });
-        self.slack_threads.len() != before
+        };
+        self.slack_threads.retain(|key, _| tracked(key));
+        self.box_released_at.retain(|workflow, _| connectors.iter().any(|c| c.id == *workflow));
+        for keys in self.box_released_at.values_mut() {
+            keys.retain(|_, at| box_release_is_live(Some(*at), now));
+        }
+        self.box_released_at.retain(|_, keys| !keys.is_empty());
+        (self.slack_threads.len(), self.box_released_at.values().map(|keys| keys.len()).sum::<usize>()) != before
+    }
+
+    /// Frees `subject` of workflow `connector` after its run's box ended, as `release` allows:
+    /// never for `Keep`, and for `Once` only when no box end freed it in the last
+    /// `BOX_RELEASE_WINDOW_MS` before `now`. Answers whether it did.
+    fn release_after_box_end(&mut self, connector: &str, subject: &Subject, release: BoxEndRelease, now: u64) -> bool {
+        let key = subject_key(subject);
+        if release == BoxEndRelease::Keep || box_release_is_live(self.box_released_at.get(connector).and_then(|keys| keys.get(&key)).copied(), now) {
+            return false;
+        }
+        self.box_released_at.entry(connector.to_owned()).or_default().insert(key.clone(), now);
+        if let Some(c) = self.connectors.iter_mut().find(|c| c.id == connector) {
+            c.unclaim(subject);
+        }
+        self.slack_threads.remove(&key);
+        true
     }
 
     /// The workflows, paused ones too, that watch Slack with the bot `id` today. A called workflow
@@ -1087,7 +1161,7 @@ impl Store {
             }
         }
         let starting: Vec<String> = settled.starts.iter().map(|start| subject_key(&start.subject)).collect();
-        settled.needs_save |= self.prune_thread_bots(runs, &starting);
+        settled.needs_save |= self.prune_thread_bots(runs, &starting, unix_millis());
         settled
     }
 }
@@ -1574,6 +1648,16 @@ fn read_runs(bytes: Option<Vec<u8>>) -> (Vec<runner::Run>, Option<String>) {
     }
 }
 
+/// How long a box-end release mark keeps its subject from being freed by another box end: a
+/// subject is freed at most once per this long, 30 days in millis.
+const BOX_RELEASE_WINDOW_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+
+/// Whether a release mark written at `at` still counts at `now`: it does until it is older than
+/// `BOX_RELEASE_WINDOW_MS`. No mark never counts.
+fn box_release_is_live(at: Option<u64>, now: u64) -> bool {
+    at.is_some_and(|at| now.saturating_sub(at) <= BOX_RELEASE_WINDOW_MS)
+}
+
 /// Unix millis now. A machine's tab list is stamped with this when it arrives.
 pub fn unix_millis() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
@@ -1610,6 +1694,22 @@ pub struct Connectors {
     known_tabs: Mutex<HashMap<String, (u64, Vec<TabView>)>>,
     /// The Slack bots `fill_bots` already asked Slack about, so it asks once per bot.
     bots_filled: Mutex<std::collections::HashSet<String>>,
+    /// Why runs failed when their box ended, for the next check to report on the workflows card.
+    box_failures: Mutex<Vec<String>>,
+    /// Subjects, by `subject_key`, whose box failed to boot while a run opened it: that open's
+    /// failure frees the subject once per 30 days (`BoxEndRelease::Once`).
+    boot_failed: Mutex<std::collections::HashSet<String>>,
+}
+
+/// What a box's end does to the subject of the run it failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoxEndRelease {
+    /// It ran out of budget or reached its max life, or the owner removed its machine or
+    /// disconnected Upstash: the subject stays handled, and only its owner runs it again.
+    Keep,
+    /// It failed to boot, went offline, or vanished from Upstash without being asked: the subject
+    /// is freed for its next trigger once per subject per 30 days (`BOX_RELEASE_WINDOW_MS`), and stays handled for the rest of that time.
+    Once,
 }
 
 /// A Slack bot with its token, as a read or a post uses it.
@@ -1644,6 +1744,8 @@ impl Connectors {
             runs_broken: Mutex::new(runs_broken),
             known_tabs: Mutex::new(HashMap::new()),
             bots_filled: Mutex::new(std::collections::HashSet::new()),
+            box_failures: Mutex::new(vec![]),
+            boot_failed: Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -1819,9 +1921,25 @@ impl Connectors {
         self.save(&store)
     }
 
+    /// The hub's box for `subject` failed to boot while a run opened it. That open's failure frees
+    /// the subject only if no box end freed it in the last 30 days.
+    pub fn box_boot_failed(&self, subject: &Subject) {
+        self.boot_failed.lock().unwrap().insert(subject_key(subject));
+    }
+
     fn unclaim(&self, connector: &str, subject: &Subject, folder: &Path, why: &str) -> String {
-        let error = format!("could not open a session in {}: {why}; the next check tries again", folder.display());
+        let booted = self.boot_failed.lock().unwrap().remove(&subject_key(subject));
+        let mut error = format!("could not open a session in {}: {why}; the next check tries again", folder.display());
         let mut store = self.store.lock().unwrap();
+        if booted {
+            if !store.release_after_box_end(connector, subject, BoxEndRelease::Once, unix_millis()) {
+                error = format!("could not open a session in {}: {why}; its box failed before, so it starts again only when you run it", folder.display());
+            }
+            return match self.save(&store) {
+                Ok(()) => error,
+                Err(e) => format!("{error}; {e}"),
+            };
+        }
         let Some(c) = store.connectors.iter_mut().find(|c| c.id == connector) else { return error };
         c.unclaim(subject);
         store.slack_threads.remove(&subject_key(subject));
@@ -2465,6 +2583,12 @@ fn trigger_posts(posts: &[slack::Post]) -> Vec<TriggerPost> {
     posts.iter().map(|post| TriggerPost { ts: post.ts.clone(), author: post.author.clone(), text: post.text.clone() }).collect()
 }
 
+/// True unless `run` started after `at_ms` (unix millis). A run's first log entry is its trigger, written when it
+/// started; a run with no readable one counts as started.
+fn started_by(run: &runner::Run, at_ms: u64) -> bool {
+    run.log.first().and_then(|entry| DateTime::parse_from_rfc3339(&entry.at).ok()).is_none_or(|started| started.timestamp_millis() <= i64::try_from(at_ms).unwrap_or(i64::MAX))
+}
+
 fn subject_key(subject: &Subject) -> String {
     match subject {
         Subject::LinearIssue { issue } => issue.clone(),
@@ -2744,23 +2868,64 @@ fn parse_effort(name: &str) -> Option<Effort> {
     }
 }
 
-/// Parses a session node's permission name. Unknown names inherit the owner's mode.
-fn parse_permission(name: &str) -> Option<PermissionMode> {
-    match name.trim() {
-        "manual" => Some(PermissionMode::Manual),
-        "acceptEdits" => Some(PermissionMode::AcceptEdits),
-        "auto" => Some(PermissionMode::Auto),
-        "dontAsk" => Some(PermissionMode::DontAsk),
-        "bypassPermissions" => Some(PermissionMode::BypassPermissions),
-        "plan" => Some(PermissionMode::Plan),
-        _ => None,
+/// Parses a session node's permission name: empty inherits the owner's mode, and only the exact
+/// names count. Saving, the agent check, the audit line and the runner all read it here, so no
+/// layer reads a value as a mode another layer does not.
+pub fn parse_permission(name: &str) -> Result<Option<PermissionMode>, String> {
+    match name {
+        "" => Ok(None),
+        "manual" => Ok(Some(PermissionMode::Manual)),
+        "acceptEdits" => Ok(Some(PermissionMode::AcceptEdits)),
+        "auto" => Ok(Some(PermissionMode::Auto)),
+        "dontAsk" => Ok(Some(PermissionMode::DontAsk)),
+        "bypassPermissions" => Ok(Some(PermissionMode::BypassPermissions)),
+        "plan" => Ok(Some(PermissionMode::Plan)),
+        _ => Err("its permission must be manual, acceptEdits, auto, dontAsk, bypassPermissions or plan, or empty to use the workflow's own".into()),
     }
+}
+
+/// Walks `connector` and each workflow it reaches through its Call steps, to any depth, itself
+/// first. Each is visited once, so a cycle ends. `visit` gets the workflow's graph, or `None` when
+/// the library has none, and the walk stops at its first answer.
+fn reach_calls<T>(library: &runner::Library, connector: &str, mut visit: impl FnMut(&str, Option<&Graph>) -> Option<T>) -> Option<T> {
+    let (mut todo, mut seen) = (vec![connector.to_owned()], std::collections::BTreeSet::new());
+    while let Some(id) = todo.pop() {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        let graph = library.get(&id);
+        if let Some(found) = visit(&id, graph) {
+            return Some(found);
+        }
+        for node in graph.iter().flat_map(|graph| &graph.nodes) {
+            if let NodeKind::Call { workflow } = &node.kind {
+                todo.push(workflow.clone());
+            }
+        }
+    }
+    None
+}
+
+/// Why `connector` must start no run: the first session step, in its graph or a graph it calls,
+/// whose permission the parse cannot read, named with its workflow.
+fn unreadable_step(library: &runner::Library, names: &BTreeMap<String, String>, connector: &str) -> Option<String> {
+    let name = |id: &str| names.get(id).cloned().unwrap_or_else(|| id.to_owned());
+    reach_calls(library, connector, |id, graph| {
+        graph?.nodes.iter().find_map(|node| match &node.kind {
+            NodeKind::Session(setup) => parse_permission(&setup.permission).err().map(|e| {
+                let holder = if id == connector { String::new() } else { format!(" of workflow {:?}, which it calls,", name(id)) };
+                format!("workflow {:?} starts no run: step {:?}{holder} has a permission pinned cannot read: {e}", name(connector), node.name)
+            }),
+            _ => None,
+        })
+    })
 }
 
 /// A session node's setup over the session owner's own settings: every field it names wins,
 /// empty text fields inherit. The merged connector builds the opening prompt and spec exactly
-/// as the owner's would, so a bare node behaves like today's talk.
-fn merge_session(owner: &Connector, setup: &SessionSetup) -> Connector {
+/// as the owner's would, so a bare node behaves like today's talk. A permission that is not an exact
+/// name opens no session, whatever the owner's mode.
+fn merge_session(owner: &Connector, setup: &SessionSetup) -> Result<Connector, String> {
     let mut merged = owner.clone();
     if !setup.folder.trim().is_empty() {
         merged.folder = setup.folder.trim().into();
@@ -2774,7 +2939,7 @@ fn merge_session(owner: &Connector, setup: &SessionSetup) -> Connector {
     if let Some(effort) = parse_effort(&setup.effort) {
         merged.effort = effort;
     }
-    if let Some(permission) = parse_permission(&setup.permission) {
+    if let Some(permission) = parse_permission(&setup.permission)? {
         merged.permission_mode = permission;
     }
     if !setup.account.trim().is_empty() {
@@ -2786,7 +2951,7 @@ fn merge_session(owner: &Connector, setup: &SessionSetup) -> Connector {
     if !setup.instructions.trim().is_empty() {
         merged.instructions = setup.instructions.clone();
     }
-    merged
+    Ok(merged)
 }
 
 /// The session `Effect::Open` starts for `owner`: the trigger as today's builders read it, the
@@ -2977,23 +3142,46 @@ impl Connectors {
         R: Taken,
     {
         loop {
-            let _guard = self.driving.lock().await;
-            let (work, mut error) = self.poll().await;
-            for work in work {
-                if let Err(e) = self.hand_over(work, &open).await {
-                    error.get_or_insert(e);
-                }
-            }
-            if let Err(e) = self.drive_locked(&open).await {
-                error.get_or_insert(e);
-            }
-            drop(_guard);
-            let error = merge_error(error, self.runs_broken.lock().unwrap().clone());
-            let check = Check { at: chrono::Utc::now().to_rfc3339(), error };
-            *self.checked.lock().unwrap() = Some(check.clone());
+            let check = self.check_once(&open).await;
             on_check(&check);
             let _ = tokio::time::timeout(INTERVAL, self.wake.notified()).await;
         }
+    }
+
+    /// One check of `watch`. While an enabled workflow holds a step whose permission the parse
+    /// cannot read, every check names it, because its trigger starts no run until the step is fixed.
+    #[doc(hidden)]
+    pub async fn check_once<F, Fut, R>(&self, open: &F) -> Check
+    where
+        F: Fn(Work) -> Fut,
+        Fut: Future<Output = R>,
+        R: Taken,
+    {
+        let _guard = self.driving.lock().await;
+        let (work, mut error) = self.poll().await;
+        for work in work {
+            if let Err(e) = self.hand_over(work, open).await {
+                error.get_or_insert(e);
+            }
+        }
+        if let Err(e) = self.drive_locked(open).await {
+            error.get_or_insert(e);
+        }
+        drop(_guard);
+        let error = self.unreadable().into_iter().fold(error, |error, why| merge_error(error, Some(why)));
+        let error = merge_error(error, self.runs_broken.lock().unwrap().clone());
+        let check = Check { at: chrono::Utc::now().to_rfc3339(), error };
+        *self.checked.lock().unwrap() = Some(check.clone());
+        check
+    }
+
+    /// Why each enabled workflow starts no run: a step, in its graph or one it calls, whose
+    /// permission the parse cannot read. Stored values are left as they are: trimming one could
+    /// turn it into a mode that skips prompts.
+    fn unreadable(&self) -> Vec<String> {
+        let (library, names) = (self.library(), self.names());
+        let enabled: Vec<String> = self.store.lock().unwrap().connectors.iter().filter(|c| c.enabled).map(|c| c.id.clone()).collect();
+        enabled.iter().filter_map(|id| unreadable_step(&library, &names, id)).collect()
     }
 
     /// True while a run of `subject` is still going and its session belongs to `connector`.
@@ -3004,6 +3192,69 @@ impl Connectors {
                 && &run.subject == subject
                 && run.session_owner.as_deref().unwrap_or(run.connector.as_str()) == connector
         })
+    }
+
+    /// The box on `machine` ended before its run did. Every live run whose session is on that
+    /// machine fails with `why`, and so does a run of `holder`'s subject that no other machine has
+    /// and that started no later than `holder`'s third part, the unix millis its box row was written:
+    /// a run the box held began before the box existed, so a newer run of the same subject, on
+    /// another machine or not placed yet, is never failed by a retried end. Its subject is freed
+    /// (no longer `handled`, followed or tied to a Slack bot, so the next trigger may start it
+    /// again) only as `release` allows: never for `Keep`, once per subject per 30 days for `Once`. Nothing
+    /// reopens the session. Answers how many runs failed. When their save fails, the runs are left
+    /// as they were, so a retry fails them once.
+    pub async fn box_ended(&self, machine: &str, holder: Option<(&str, &Subject, u64)>, why: &str, release: BoxEndRelease) -> Result<usize, String> {
+        let _guard = self.driving.lock().await;
+        let at = Utc::now().to_rfc3339();
+        let released = self.store.lock().unwrap().box_released_at.clone();
+        let now = unix_millis();
+        let mut whys = vec![];
+        let mut before = vec![];
+        let failed: Vec<(String, Subject)> = {
+            let mut runs = self.runs.lock().unwrap();
+            let mut failed = vec![];
+            for run in runs.iter_mut().filter(|run| matches!(run.status, Status::Running | Status::Waiting)) {
+                let owner = run.session_owner.clone().unwrap_or_else(|| run.connector.clone());
+                let on_box = matches!(&run.session, Session::Live { machine: live, .. } if live == machine);
+                let holds = holder.is_some_and(|(connector, subject, row_written)| {
+                    &run.subject == subject && owner == connector && !matches!(&run.session, Session::Live { machine: live, .. } if live != machine) && started_by(run, row_written)
+                });
+                if on_box || holds {
+                    let frees = release == BoxEndRelease::Once && !box_release_is_live(released.get(&owner).and_then(|keys| keys.get(&subject_key(&run.subject))).copied(), now);
+                    let then = if frees { "its next trigger may start it once more" } else { "it starts again only when you run it" };
+                    let why = format!("{why}; the run stopped, and {then}");
+                    before.push(run.clone());
+                    runner::push(run, Wake::BoxEnded { why: why.clone() }, &at);
+                    whys.push(why);
+                    failed.push((owner, run.subject.clone()));
+                }
+            }
+            failed
+        };
+        if failed.is_empty() {
+            return Ok(0);
+        }
+        if let Err(e) = self.save_runs() {
+            // Undone, so the hub's retry finds the runs still going and fails them then.
+            let mut runs = self.runs.lock().unwrap();
+            for was in before {
+                if let Some(slot) = runs.iter_mut().find(|run| run.id == was.id) {
+                    *slot = was;
+                }
+            }
+            return Err(e);
+        }
+        {
+            let mut store = self.store.lock().unwrap();
+            for (owner, subject) in &failed {
+                store.release_after_box_end(owner, subject, release, now);
+            }
+            self.save(&store)?;
+        }
+        self.box_failures.lock().unwrap().extend(whys);
+        // The next check reports it now, not a whole interval later.
+        self.wake.notify_one();
+        Ok(failed.len())
     }
 
     /// Tab statuses changed on `machine`. Waiting runs wake, then every running graph continues.
@@ -3042,6 +3293,9 @@ impl Connectors {
     /// because it has no Linear or Slack network.
     #[doc(hidden)]
     pub fn begin(&self, connector: String, subject: Subject, input: TriggerInput, at: &str) -> Result<(), String> {
+        if let Some(why) = unreadable_step(&self.library(), &self.names(), &connector) {
+            return Err(why);
+        }
         if run_open(&self.runs.lock().unwrap(), &connector, &subject) {
             return Ok(());
         }
@@ -3063,7 +3317,7 @@ impl Connectors {
     }
 
     fn library(&self) -> runner::Library {
-        self.store.lock().unwrap().connectors.iter().map(|c| (c.id.clone(), c.graph.clone().unwrap_or_else(|| migrate(c)))).collect()
+        self.store.lock().unwrap().connectors.iter().map(|c| (c.id.clone(), run_graph(c))).collect()
     }
 
     fn names(&self) -> BTreeMap<String, String> {
@@ -3178,6 +3432,7 @@ impl Connectors {
         self.reconcile_known()?;
         let library = self.library();
         let mut failed = self.triage_inbox(&library).await;
+        failed.append(&mut self.box_failures.lock().unwrap());
         for _ in 0..256 {
             let index = self.runs.lock().unwrap().iter().position(|run| matches!(run.status, Status::Running));
             let Some(index) = index else { break };
@@ -3487,6 +3742,9 @@ impl Connectors {
         if !edited || item.mentioned.is_empty() {
             return Ok(false);
         }
+        if let Some(why) = unreadable_step(library, &self.names(), &run.connector) {
+            return Err(why);
+        }
         let Some((node, classify)) = runner::routing_classify(library, &run.connector) else { return Ok(false) };
         let Ok(TriggerInput::Slack { channel, channel_name, thread, mut posts, .. }) = trigger_of(&run) else { return Ok(false) };
         if matches!((&run.status, &run.session), (Status::Done, Session::None)) {
@@ -3567,7 +3825,9 @@ impl Connectors {
         Fut: Future<Output = R>,
         R: Taken,
     {
-        let mut owner_c = merge_session(&self.store.lock().unwrap().connector(owner).cloned()?, session);
+        // A step stored before the save check read its permission as the runner does.
+        let merged = merge_session(&self.store.lock().unwrap().connector(owner).cloned()?, session);
+        let mut owner_c = merged.inspect_err(|e| eprintln!("pinned: workflow {} opened no session for a step: {e}", run.connector))?;
         // A proof step requires the video like the connector's proof flag does. The session
         // still records it; this only appends the instructions to its opening prompt.
         if !owner_c.proof && self.graph_has_proof(owner) {
@@ -3805,7 +4065,7 @@ impl Connectors {
             box_claude_tokens: store.box_claude_tokens.clone(),
             connectors: store.connectors.iter().cloned().map(presented).collect(),
             checked: self.checked.lock().unwrap().clone(),
-            boxes: store.boxes.clone(),
+            boxes: store.boxes.without_unnamed_rows(),
             box_asks: store.box_asks.clone(),
             convex: store.convex.clone(),
             ideas: Vec::new(),
@@ -4203,7 +4463,7 @@ impl Connectors {
     }
 
     pub fn box_access(&self) -> BoxAccess {
-        self.store.lock().unwrap().boxes.clone()
+        self.store.lock().unwrap().boxes.without_unnamed_rows()
     }
 
     /// Saves the account's box permissions.
@@ -4211,9 +4471,9 @@ impl Connectors {
         let mut store = self.store.lock().unwrap();
         let kept = BoxAccess {
             workflow: keep_fixed_row(access.workflow, &store.boxes.workflow),
-            session: keep_fixed_row(access.session, &store.boxes.session),
-            worker: keep_fixed_row(access.worker, &store.boxes.worker),
-            orchestrator: keep_fixed_row(access.orchestrator, &store.boxes.orchestrator),
+            session: access.session.without_row(),
+            worker: access.worker.without_row(),
+            orchestrator: access.orchestrator.without_row(),
         };
         store.boxes = kept.clone();
         self.save(&store)?;
@@ -4345,26 +4605,10 @@ impl Connectors {
     /// untouched case stays derivable. What this returns still carries a graph, as `get_settings` does.
     pub fn save_connector(&self, mut connector: Connector) -> Result<Connector, String> {
         let mut store = self.store.lock().unwrap();
-        if let Some(graph) = connector.graph.take() {
-            {
-                let called = |id: &str| call_target(&store, connector.id.as_str(), &graph, id);
-                graph.validate(&called)?;
-            }
-            reject_call_cycle(connector.id.as_str(), &graph, &store)?;
-            let had = store.connectors.iter().find(|c| !connector.id.is_empty() && c.id == connector.id).and_then(convex_step);
-            check_convex_step(&graph, &store.convex, had.as_ref().map(|step| step.connection.as_str()))?;
-            refresh_legacy(&mut connector, &graph);
-            connector.graph = (graph != migrate(&connector)).then_some(graph);
-        } else if let Some(existing) = store.connectors.iter().find(|existing| existing.id == connector.id && !connector.id.is_empty()) {
-            if let Some(stored) = existing.graph.clone() {
-                if stored == migrate(existing) {
-                    connector.graph = None;
-                } else {
-                    refresh_legacy(&mut connector, &stored);
-                    connector.graph = Some(stored);
-                }
-            }
-        }
+        let graph = connector.graph.take();
+        let had = store.connectors.iter().find(|c| !connector.id.is_empty() && c.id == connector.id).and_then(convex_step);
+        save_checks(&store, &connector, graph.as_ref(), &store.convex, had.as_ref().map(|step| step.connection.as_str())).map_err(|refused| refused.error)?;
+        settle_graph(&store, &mut connector, graph);
         match store.connectors.iter_mut().find(|c| c.id == connector.id && !c.id.is_empty()) {
             Some(existing) => {
                 connector.since = existing.since.clone();
@@ -4409,8 +4653,12 @@ impl Connectors {
     pub fn import(&self, store: serde_json::Value, keys: Keys) -> Result<bool, String> {
         let mut imported: Store = serde_json::from_value(store).map_err(|e| format!("not a connectors store: {e}"))?;
         let mut current = self.store.lock().unwrap();
-        if current.linear.is_some() || current.slack.is_some() || !current.slack_bots.is_empty() || current.github.is_some() || current.vercel.is_some() || !current.connectors.is_empty() {
+        let integrated = current.linear.is_some() || current.slack.is_some() || !current.slack_bots.is_empty() || current.github.is_some() || current.vercel.is_some();
+        if integrated || !current.convex.is_empty() || !current.connectors.is_empty() {
             return Ok(false);
+        }
+        for connector in &imported.connectors {
+            save_checks(&imported, connector, connector.graph.as_ref(), &current.convex, None).map_err(|_| import_refusal(&imported, connector, &current.convex))?;
         }
         let present = |key: Option<String>| key.map(|k| k.trim().to_owned()).filter(|k| !k.is_empty());
         let (linear_key, slack_key, github_key, vercel_key) = (present(keys.linear), present(keys.slack), present(keys.github), present(keys.vercel));
@@ -4450,6 +4698,16 @@ impl Connectors {
             }
         }
         self.channels.lock().unwrap().clear();
+        // What the account set up itself stays its own: a file never replaces it. Its Upstash
+        // account, Claude token hints and Slack thread claims also stand for keys and bots of this
+        // account that the file does not carry.
+        imported.upstash = current.upstash.take();
+        imported.box_claude_tokens = std::mem::take(&mut current.box_claude_tokens);
+        imported.boxes = std::mem::take(&mut current.boxes);
+        imported.box_asks = std::mem::take(&mut current.box_asks);
+        imported.box_grants = std::mem::take(&mut current.box_grants);
+        imported.repo_insight = std::mem::take(&mut current.repo_insight);
+        imported.slack_threads = std::mem::take(&mut current.slack_threads);
         imported.mcp_servers = std::mem::take(&mut current.mcp_servers);
         imported.convex = std::mem::take(&mut current.convex);
         *current = imported;
@@ -4610,7 +4868,7 @@ impl Connectors {
             Trigger::LinearLabel { .. } | Trigger::SlackMention { .. } => {}
         }
         let (owner, setup, proof) = manual_start(&self.library(), &self.names(), id)?;
-        let mut owner = merge_session(&self.store.lock().unwrap().connector(&owner).cloned()?, &setup);
+        let mut owner = merge_session(&self.store.lock().unwrap().connector(&owner).cloned()?, &setup).map_err(|e| format!("the workflow's session step can't run: {e}"))?;
         owner.proof |= proof || self.graph_has_proof(&owner.id);
         let title: String = format!("{} · Run now", workflow.name).chars().take(TAB_NAME_CHARS).collect();
         let mut run = manual_run(&owner, id, &title, &setup.prompt, by, Utc::now(), &self.exe);
@@ -4619,6 +4877,58 @@ impl Connectors {
         }
         Ok(run)
     }
+}
+
+/// Which save check refused a workflow, and why.
+struct Refused {
+    check: &'static str,
+    error: String,
+}
+
+/// How long a name from an imported file may be in a refusal, before it is cut with "…".
+const IMPORT_NAME_CHARS: usize = 80;
+/// How long the reason after the workflow's name may be, for ids and other text the file sets.
+const IMPORT_WHY_CHARS: usize = 300;
+
+/// `text` from an imported file as a refusal shows it: control characters removed, cut at `chars`.
+fn in_refusal(text: &str, chars: usize) -> String {
+    crate::thread::clip(&text.chars().filter(|c| !c.is_control()).collect::<String>(), chars)
+}
+
+/// Why an import of `imported` is refused for `connector`, one line of bounded length. The checks
+/// run again on a copy whose workflow and step names are cut, so a name the file sets reaches the
+/// message cut, and the reason is cut once more for the ids it can carry.
+fn import_refusal(imported: &Store, connector: &Connector, connected: &[convex::Connection]) -> String {
+    let named = |c: &Connector| {
+        let mut c = c.clone();
+        c.name = in_refusal(&c.name, IMPORT_NAME_CHARS);
+        for node in c.graph.iter_mut().flat_map(|graph| graph.nodes.iter_mut()) {
+            node.name = in_refusal(&node.name, IMPORT_NAME_CHARS);
+        }
+        c
+    };
+    let shown = Store { connectors: imported.connectors.iter().map(named).collect(), ..Store::default() };
+    let workflow = named(connector);
+    let (check, why) = match save_checks(&shown, &workflow, workflow.graph.as_ref(), connected, None) {
+        Err(refused) => (refused.check, refused.error),
+        Ok(()) => ("save", "it fails a check a save runs".into()),
+    };
+    format!("nothing was imported: workflow \"{}\" fails the {check} check: {}", workflow.name, in_refusal(&why, IMPORT_WHY_CHARS))
+}
+
+/// The checks a workflow passes before it is stored, by `save_connector` and by `import` alike.
+/// `store` is the store it joins, which its Call steps and cycles are read against; `connected` is
+/// the account's Convex deployments, and `had` the one the stored workflow already named.
+fn save_checks(store: &Store, connector: &Connector, graph: Option<&Graph>, connected: &[convex::Connection], had: Option<&str>) -> Result<(), Refused> {
+    let refused = |check| move |error| Refused { check, error };
+    if connector.model.trim().starts_with('-') {
+        return Err(refused("model")("the workflow's model may not start with -, which claude could read as an option".into()));
+    }
+    let Some(graph) = graph else { return Ok(()) };
+    let called = |id: &str| call_target(store, connector.id.as_str(), graph, id);
+    graph.validate(&called).map_err(refused("graph"))?;
+    reject_call_cycle(connector.id.as_str(), graph, store).map_err(refused("call cycle"))?;
+    check_convex_step(graph, connected, had).map_err(refused("Convex step"))
 }
 
 /// The workflow's Convex step, anywhere in its own stored graph.
@@ -4744,6 +5054,49 @@ impl Connectors {
         }
         let key = convex::DeployKey::kept(&*self.storage, &grant.connection.id)?;
         convex::client::read(http, &key, &grant, ask).await.map(Value::String)
+    }
+
+    /// The graph a save of `incoming` keeps from the store: the stored one, when the save carries
+    /// none and names a workflow that has one. Checks that read the incoming call read this too.
+    pub fn kept_graph(&self, incoming: &Connector) -> Option<crate::graph::Graph> {
+        if incoming.graph.is_some() || incoming.id.is_empty() {
+            return None;
+        }
+        self.store.lock().unwrap().connectors.iter().find(|c| c.id == incoming.id).and_then(|c| c.graph.clone())
+    }
+
+    /// Whether a save of `incoming` reaches, through its Call steps to any depth, a stored workflow
+    /// `skips` holds for, or one the store does not have. The graph walked is the one `library`
+    /// holds for this workflow after the save. A save that sends a graph is walked on that graph as
+    /// sent: `settle_graph` stores it as itself, or as `None` when it equals `migrate`, and then
+    /// `run_graph` builds the same graph. It is not settled here, because this runs before the save
+    /// validates anything and `settle_graph` projects the graph, which needs a trigger. A save with
+    /// no graph is settled, as `save_connector` does, and walked on `run_graph` of that: a stored
+    /// graph, else what `migrate` builds (a slack-message router's categories become Call steps).
+    /// A called workflow opens its own session from its own stored setup, so a check that reads
+    /// only the save must read these too.
+    pub fn calls_any(&self, incoming: &Connector, skips: impl Fn(&Connector) -> bool) -> bool {
+        let mut library = self.library();
+        let store = self.store.lock().unwrap();
+        let walked = match &incoming.graph {
+            Some(sent) => sent.clone(),
+            None => {
+                let mut saved = incoming.clone();
+                settle_graph(&store, &mut saved, None);
+                run_graph(&saved)
+            }
+        };
+        library.insert(incoming.id.clone(), walked);
+        let store = store.connectors.clone();
+        reach_calls(&library, &incoming.id, |id, graph| {
+            let called = (id != incoming.id).then(|| store.iter().find(|c| c.id == id));
+            match called {
+                None => None,
+                Some(Some(target)) if graph.is_some() && !skips(target) => None,
+                Some(_) => Some(()),
+            }
+        })
+        .is_some()
     }
 
     /// Whether saving `incoming` would let its workflow read more of Convex than the stored one
@@ -4973,13 +5326,14 @@ mod tests {
     #[test]
     fn a_session_step_overrides_only_the_fields_it_names() {
         let owner = linear_connector();
-        let merged = merge_session(&owner, &SessionSetup::default());
+        let merged = merge_session(&owner, &SessionSetup::default()).unwrap();
         assert_eq!(merged.folder, owner.folder);
         assert_eq!(merged.effort, owner.effort);
         let merged = merge_session(
             &owner,
             &SessionSetup { folder: " /work ".into(), model: "haiku".into(), effort: "low".into(), permission: "auto".into(), account: "work".into(), worktree: true, instructions: "Be quick.".into(), ..Default::default() },
-        );
+        )
+        .unwrap();
         assert_eq!(merged.folder, PathBuf::from("/work"));
         assert_eq!(merged.model, "haiku");
         assert_eq!(merged.effort, Effort::Low);
@@ -4988,9 +5342,10 @@ mod tests {
         assert!(merged.worktree);
         assert_eq!(merged.instructions, "Be quick.");
         assert_eq!(merged.repo, owner.repo);
-        let merged = merge_session(&owner, &SessionSetup { effort: "nonsense".into(), permission: "nonsense".into(), ..Default::default() });
+        let merged = merge_session(&owner, &SessionSetup { effort: "nonsense".into(), ..Default::default() }).unwrap();
         assert_eq!(merged.effort, owner.effort);
         assert_eq!(merged.permission_mode, owner.permission_mode);
+        assert!(merge_session(&owner, &SessionSetup { permission: "nonsense".into(), ..Default::default() }).is_err(), "a permission that is not a name opens nothing");
     }
 
     #[test]
@@ -5037,6 +5392,378 @@ mod tests {
         assert_eq!(serde_json::to_value(&named).unwrap()["account"], " work ");
         assert_eq!(old.ask, None, "a connector stored before the ask step has none");
         assert!(serde_json::to_value(&old).unwrap().get("ask").is_none());
+    }
+
+    /// A run of `subject` that waits on its session on box machine `machine`, having handed `sent` on.
+    fn held_run(connector: &str, subject: &Subject, machine: &str, sent: &[String]) -> runner::Run {
+        serde_json::from_value(serde_json::json!({
+            "id": format!("run-{machine}"), "connector": connector, "subject": subject, "status": "waiting", "session_owner": connector,
+            "session": { "state": "live", "machine": machine, "tab": "t1", "claude": null, "since": 1, "saw_working": false, "await_working": false },
+            "log": [], "context": {}, "stack": [], "pending": null, "ready": null, "claimed": true, "sent": sent,
+        }))
+        .unwrap()
+    }
+
+    /// How many sessions the next check starts for issue `uuid`, still labelled.
+    fn next_check_starts(connectors: &Connectors) -> usize {
+        let runs = connectors.runs.lock().unwrap().clone();
+        let settled = connectors.store.lock().unwrap().settle(&["c1".into()], vec![("c1".into(), Found::Issue(issue()))], checked_at(), "/bin/pinned", &runs);
+        settled.work.len() + settled.starts.len()
+    }
+
+    /// The subjects each workflow holds a release mark for, without their times.
+    fn marked_subjects(connectors: &Connectors) -> BTreeMap<String, Vec<String>> {
+        connectors.store.lock().unwrap().box_released_at.iter().map(|(workflow, keys)| (workflow.clone(), keys.keys().cloned().collect())).collect()
+    }
+
+    /// A check that finds no labelled issue, so nothing claims `uuid` and only the prune looks at marks.
+    fn check_finding_nothing(connectors: &Connectors) {
+        let runs = connectors.runs.lock().unwrap().clone();
+        connectors.store.lock().unwrap().settle(&["c1".into()], vec![], checked_at(), "/bin/pinned", &runs);
+    }
+
+    fn handled_of(connectors: &Connectors) -> Vec<String> {
+        connectors.store.lock().unwrap().connectors[0].handled.clone()
+    }
+
+    fn failed_why(connectors: &Connectors, machine: &str) -> String {
+        let runs = connectors.runs.lock().unwrap();
+        match &runs.iter().find(|run| run.id.0 == format!("run-{machine}")).unwrap().status {
+            Status::Failed { why } => why.clone(),
+            other => panic!("the run is {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_box_that_ends_for_its_budget_or_max_life_keeps_a_labelled_issue_handled() {
+        let subject = Subject::LinearIssue { issue: "uuid".into() };
+        let linear = Connector { handled: vec!["uuid".into()], ..linear_connector() };
+        let (connectors, dir) = stored("box-end-keep", vec![linear]);
+        // The hub ends a box for its budget and for its max life both as `End::Expired`, which it
+        // passes as `Keep`; one end of each here.
+        for machine in ["box-budget", "box-max-life"] {
+            connectors.runs.lock().unwrap().push(held_run("c1", &subject, machine, &[]));
+            assert_eq!(block_on(connectors.box_ended(machine, None, "Upstash Box: the box ended before its task did: it ran out of time or budget", BoxEndRelease::Keep)), Ok(1));
+            assert_eq!(
+                failed_why(&connectors, machine),
+                "Upstash Box: the box ended before its task did: it ran out of time or budget; the run stopped, and it starts again only when you run it"
+            );
+            assert_eq!(handled_of(&connectors), ["uuid"], "the issue stays handled");
+            assert_eq!(next_check_starts(&connectors), 0, "the next check starts no run for the still-labelled issue");
+        }
+        let reloaded = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into());
+        assert_eq!(handled_of(&reloaded), ["uuid"]);
+        assert!(reloaded.store.lock().unwrap().box_released_at.is_empty(), "a kept subject spends no release");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Earlier commits of this release saved the release mark as `"box_released_at": {"c1": ["uuid"]}`,
+    /// a list of subjects. The mark has a new key and shape, so such a store still parses: the
+    /// workflow and what it handled stay, and only the old mark is dropped.
+    #[test]
+    fn a_store_with_the_old_release_mark_shape_keeps_its_workflows() {
+        let linear = Connector { handled: vec!["uuid".into()], ..linear_connector() };
+        let mut store = serde_json::to_value(Store { connectors: vec![linear], ..Store::default() }).unwrap();
+        store["box_released"] = json!({ "c1": ["uuid"] });
+        let dir = temp_dir("old-release-mark");
+        let storage = FileStorage::new(dir.clone());
+        storage.save(&serde_json::to_vec(&store).unwrap()).unwrap();
+        let connectors = Connectors::new(storage, "/bin/pinned".into());
+        assert_eq!(connectors.store.lock().unwrap().connectors.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["c1"], "the store loaded empty");
+        assert_eq!(handled_of(&connectors), ["uuid"], "the workflow keeps what it handled");
+        assert!(marked_subjects(&connectors).is_empty(), "the old mark is dropped");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_offline_box_end_frees_its_issue_once_and_a_second_keeps_it_handled() {
+        let subject = Subject::LinearIssue { issue: "uuid".into() };
+        let linear = Connector { handled: vec!["uuid".into()], ..linear_connector() };
+        let (connectors, dir) = stored("box-end-once", vec![linear]);
+        connectors.runs.lock().unwrap().push(held_run("c1", &subject, "box-1", &[]));
+        assert_eq!(block_on(connectors.box_ended("box-1", None, "Upstash Box: its box went offline", BoxEndRelease::Once)), Ok(1));
+        assert_eq!(failed_why(&connectors, "box-1"), "Upstash Box: its box went offline; the run stopped, and its next trigger may start it once more");
+        assert!(handled_of(&connectors).is_empty());
+        assert_eq!(next_check_starts(&connectors), 1, "the one release starts one new run");
+        assert_eq!(handled_of(&connectors), ["uuid"], "which claims the issue again");
+
+        connectors.runs.lock().unwrap().push(held_run("c1", &subject, "box-2", &[]));
+        assert_eq!(block_on(connectors.box_ended("box-2", None, "Upstash Box: its box went offline", BoxEndRelease::Once)), Ok(1));
+        assert_eq!(failed_why(&connectors, "box-2"), "Upstash Box: its box went offline; the run stopped, and it starts again only when you run it");
+        assert_eq!(handled_of(&connectors), ["uuid"], "a second box end keeps it handled");
+        assert_eq!(next_check_starts(&connectors), 0);
+
+        let reloaded = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into());
+        assert_eq!(marked_subjects(&reloaded), BTreeMap::from([("c1".to_owned(), vec!["uuid".to_owned()])]), "the mark is stored");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_second_failed_boot_does_not_release_after_the_failed_run_is_dropped() {
+        let subject = Subject::LinearIssue { issue: "uuid".into() };
+        let linear = Connector { handled: vec!["uuid".into()], ..linear_connector() };
+        let (connectors, dir) = stored("boot-twice-run-dropped", vec![linear]);
+        connectors.runs.lock().unwrap().push(held_run("c1", &subject, "box-1", &[]));
+        assert_eq!(block_on(connectors.box_ended("box-1", None, "Upstash Box: its box went offline", BoxEndRelease::Once)), Ok(1));
+        assert!(handled_of(&connectors).is_empty(), "the first end frees the issue");
+        assert_eq!(marked_subjects(&connectors).len(), 1);
+
+        // The failed run is dropped before anything claims the issue again, and a check prunes.
+        connectors.runs.lock().unwrap().clear();
+        check_finding_nothing(&connectors);
+        assert_eq!(marked_subjects(&connectors), BTreeMap::from([("c1".to_owned(), vec!["uuid".to_owned()])]), "the mark outlives the run");
+        assert_eq!(next_check_starts(&connectors), 1, "the trigger claims the issue again");
+        assert_eq!(handled_of(&connectors), ["uuid"]);
+
+        let refuse = |_: Work| async { Err::<(), String>("Upstash Box: the box did not connect within 5 min".to_owned()) };
+        connectors.box_boot_failed(&subject);
+        assert_eq!(
+            block_on(connectors.hand_over(Work::Run(run(&linear_connector(), &issue(), "/bin/pinned")), &refuse)),
+            Err("could not open a session in /repo: Upstash Box: the box did not connect within 5 min; its box failed before, so it starts again only when you run it".into())
+        );
+        assert_eq!(handled_of(&connectors), ["uuid"], "a second failed boot keeps it handled");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_release_mark_older_than_thirty_days_is_dropped_and_a_newer_one_is_kept() {
+        const DAY_MS: u64 = 24 * 60 * 60 * 1000;
+        let (connectors, dir) = stored("release-mark-age", vec![linear_connector()]);
+        let now = 1_800_000_000_000_u64;
+        let mut store = connectors.store.lock().unwrap();
+        store.box_released_at.insert("c1".into(), BTreeMap::from([("older".into(), now - 30 * DAY_MS - 1), ("newer".into(), now - 30 * DAY_MS + 1)]));
+        store.box_released_at.insert("deleted".into(), BTreeMap::from([("fresh".into(), now)]));
+        assert!(store.prune_thread_bots(&[], &[], now), "the prune changes the store");
+        assert_eq!(store.box_released_at, BTreeMap::from([("c1".to_owned(), BTreeMap::from([("newer".to_owned(), now - 30 * DAY_MS + 1)]))]), "30 days and 1 ms goes, 30 days less 1 ms stays, and a deleted workflow's mark goes");
+        // A mark of a subject nothing tracks stays, however long ago nobody did.
+        assert!(!store.prune_thread_bots(&[], &[], now), "nothing more to prune");
+        // The one that stayed counts as a release until it is old, and an old one counts as none.
+        let subject = Subject::LinearIssue { issue: "newer".into() };
+        assert!(!store.release_after_box_end("c1", &subject, BoxEndRelease::Once, now), "a young mark: already released once");
+        assert!(store.release_after_box_end("c1", &subject, BoxEndRelease::Once, now + 2 * DAY_MS), "an old mark counts as none, and the release is written again");
+        assert_eq!(store.box_released_at["c1"]["newer"], now + 2 * DAY_MS, "with its new time");
+        drop(store);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_failed_boot_frees_its_issue_once_and_a_second_keeps_it_handled() {
+        let subject = Subject::LinearIssue { issue: "uuid".into() };
+        let linear = Connector { handled: vec!["uuid".into()], ..linear_connector() };
+        let (connectors, dir) = stored("boot-once", vec![linear]);
+        let refuse = |_: Work| async { Err::<(), String>("Upstash Box: the box did not connect within 5 min".to_owned()) };
+        connectors.box_boot_failed(&subject);
+        assert_eq!(
+            block_on(connectors.hand_over(Work::Run(run(&linear_connector(), &issue(), "/bin/pinned")), &refuse)),
+            Err("could not open a session in /repo: Upstash Box: the box did not connect within 5 min; the next check tries again".into())
+        );
+        assert!(handled_of(&connectors).is_empty());
+        assert_eq!(next_check_starts(&connectors), 1, "one new run starts");
+
+        connectors.box_boot_failed(&subject);
+        assert_eq!(
+            block_on(connectors.hand_over(Work::Run(run(&linear_connector(), &issue(), "/bin/pinned")), &refuse)),
+            Err("could not open a session in /repo: Upstash Box: the box did not connect within 5 min; its box failed before, so it starts again only when you run it".into())
+        );
+        assert_eq!(handled_of(&connectors), ["uuid"], "a second failed boot keeps it handled");
+        assert_eq!(next_check_starts(&connectors), 0);
+
+        // An open that fails without a box end still frees the issue, as before.
+        assert!(block_on(connectors.hand_over(Work::Run(run(&linear_connector(), &issue(), "/bin/pinned")), &refuse)).is_err());
+        assert!(handled_of(&connectors).is_empty());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_one_retry_after_a_box_end_repeats_no_slack_reply_and_no_linear_write() {
+        const THREAD: &str = "1792400050.000200";
+        let subject = Subject::SlackThread { channel: "C0123ABCD".into(), thread: THREAD.into() };
+        let key = format!("C0123ABCD:{THREAD}");
+        let mut slack = slack_connector();
+        slack.handled = vec![key.clone()];
+        // The first run's session filed this issue; Linear is not connected, so any Linear call fails.
+        slack.created.insert(key.clone(), Filed { id: "uuid-9".into(), identifier: "ENG-9".into(), url: "https://linear.example/ENG-9".into() });
+        let (connectors, dir) = stored("box-end-retry", vec![slack]);
+        let reply = Connectors::reply_key("C0123ABCD", THREAD, "On it");
+        connectors.runs.lock().unwrap().push(held_run("c2", &subject, "box-1", std::slice::from_ref(&reply)));
+        assert_eq!(block_on(connectors.box_ended("box-1", None, "Upstash Box: its box went offline", BoxEndRelease::Once)), Ok(1));
+        assert!(connectors.store.lock().unwrap().connectors[0].handled.is_empty(), "the thread is free for one retry");
+
+        let mut lib = runner::Library::new();
+        lib.insert("c2".into(), migrate(&slack_connector()));
+        let mut retry = runner::start(&lib, "c2", subject, serde_json::json!({}), "2026-01-01T00:00:00Z");
+        // Slack has no bot here, so a post would fail: Ok means nothing was posted.
+        assert_eq!(block_on(connectors.perform_reply(&mut retry, "c2", "On it")), Ok(Supplied::Done), "the reply already posted is not posted again");
+        assert_eq!(block_on(connectors.slack_reply("c2", "C0123ABCD", THREAD, "On it")), Ok("that reply is already posted by the workflow run".into()));
+        assert_eq!(
+            block_on(connectors.perform_file_issue(&mut retry, "c2", "ENG", "", "", "Broken button", "D")),
+            Ok(Supplied::Done),
+            "the issue the first run filed is answered, and Linear gets no second write"
+        );
+        assert_eq!(connectors.store.lock().unwrap().connectors[0].created.len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Runs that fail to save once, then save into `saved`.
+    #[derive(Clone, Default)]
+    struct RunsFailOnce {
+        inner: MemStorage,
+        failed: std::sync::Arc<Mutex<bool>>,
+        saved: std::sync::Arc<Mutex<Option<Vec<u8>>>>,
+    }
+
+    impl Storage for RunsFailOnce {
+        fn load(&self) -> Option<Vec<u8>> {
+            self.inner.load()
+        }
+        fn save(&self, store: &[u8]) -> Result<(), String> {
+            self.inner.save(store)
+        }
+        fn key(&self, name: &str) -> Option<String> {
+            self.inner.key(name)
+        }
+        fn write_key(&self, name: &str, key: &str) -> Result<(), String> {
+            self.inner.write_key(name, key)
+        }
+        fn remove_key(&self, name: &str) {
+            self.inner.remove_key(name)
+        }
+        fn load_runs(&self) -> Option<Vec<u8>> {
+            None
+        }
+        fn save_runs(&self, bytes: &[u8]) -> Result<(), String> {
+            if !std::mem::replace(&mut *self.failed.lock().unwrap(), true) {
+                return Err("could not save the runs: disk full".into());
+            }
+            *self.saved.lock().unwrap() = Some(bytes.to_vec());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_box_end_whose_run_save_fails_is_retried_and_fails_the_run_once() {
+        let subject = Subject::LinearIssue { issue: "uuid".into() };
+        let storage = RunsFailOnce::default();
+        storage.inner.save(&serde_json::to_vec(&Store { connectors: vec![Connector { handled: vec!["uuid".into()], ..linear_connector() }], ..Store::default() }).unwrap()).unwrap();
+        let connectors = Connectors::new(storage.clone(), "/bin/pinned".into());
+        connectors.runs.lock().unwrap().push(held_run("c1", &subject, "box-1", &[]));
+
+        assert_eq!(block_on(connectors.box_ended("box-1", None, "Upstash Box: its box went offline", BoxEndRelease::Once)), Err("could not save the runs: disk full".into()));
+        assert!(matches!(connectors.runs.lock().unwrap()[0].status, Status::Waiting), "the run is left going for the retry");
+        assert_eq!(handled_of(&connectors), ["uuid"], "and its issue is not freed yet");
+
+        assert_eq!(block_on(connectors.box_ended("box-1", None, "Upstash Box: its box went offline", BoxEndRelease::Once)), Ok(1), "the retry fails it");
+        let saved: Vec<runner::Run> = serde_json::from_slice(&storage.saved.lock().unwrap().clone().unwrap()).unwrap();
+        assert!(matches!(&saved[0].status, Status::Failed { .. }), "and saves it failed");
+        assert!(handled_of(&connectors).is_empty());
+        assert_eq!(block_on(connectors.box_ended("box-1", None, "Upstash Box: its box went offline", BoxEndRelease::Once)), Ok(0), "a third pass finds nothing to fail");
+        assert_eq!(connectors.box_failures.lock().unwrap().len(), 1, "the card hears of it once");
+    }
+
+    /// A run of `subject` for `connector` that started at `started` (RFC 3339), whose session is `session`.
+    fn run_started(id: &str, connector: &str, subject: &Subject, started: &str, session: serde_json::Value) -> runner::Run {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "connector": connector, "subject": subject, "status": "waiting", "session_owner": connector, "session": session,
+            "log": [{ "at": started, "connector": connector, "node": "n0", "what": {} }],
+            "context": {}, "stack": [], "pending": null, "ready": null, "claimed": true, "sent": [],
+        }))
+        .unwrap()
+    }
+
+    fn status_of(connectors: &Connectors, id: &str) -> Status {
+        connectors.runs.lock().unwrap().iter().find(|run| run.id.0 == id).unwrap().status.clone()
+    }
+
+    #[test]
+    fn a_retried_box_end_fails_only_the_run_its_box_held() {
+        let subject = Subject::LinearIssue { issue: "uuid".into() };
+        let linear = Connector { handled: vec!["uuid".into()], ..linear_connector() };
+        let (connectors, dir) = stored("box-end-retry-newer", vec![linear]);
+        let row_written = u64::try_from(DateTime::parse_from_rfc3339("2026-01-01T10:01:00Z").unwrap().timestamp_millis()).unwrap();
+        let why = "Upstash Box: its box went offline";
+        let end = |connectors: &Connectors| block_on(connectors.box_ended("box-1", Some(("c1", &subject, row_written)), why, BoxEndRelease::Once));
+        // The old run's box is still booting: its session is not placed, so only its subject finds it.
+        connectors.runs.lock().unwrap().push(run_started("old", "c1", &subject, "2026-01-01T10:00:00Z", serde_json::json!({ "state": "none" })));
+        assert_eq!(end(&connectors), Ok(1), "the first pass fails the run the box held");
+        assert!(handled_of(&connectors).is_empty(), "and frees its issue once");
+
+        // The workflow moved off boxes: a newer run of the same subject works on this machine, and another has no session yet.
+        let live = serde_json::json!({ "state": "live", "machine": "local", "tab": "t1", "claude": null, "since": 1, "saw_working": false, "await_working": false });
+        connectors.runs.lock().unwrap().push(run_started("newer-live", "c1", &subject, "2026-01-01T11:00:00Z", live));
+        // Production starts a run `Running` with no session until its box is placed; it is never `Waiting` without one.
+        let mut unplaced = run_started("newer-unplaced", "c1", &subject, "2026-01-01T11:00:05Z", serde_json::json!({ "state": "none" }));
+        unplaced.status = Status::Running;
+        connectors.runs.lock().unwrap().push(unplaced);
+        connectors.store.lock().unwrap().connectors[0].handled = vec!["uuid".into()];
+        for retry in 0..3 {
+            assert_eq!(end(&connectors), Ok(0), "retry {retry} fails nothing");
+        }
+        assert_eq!(status_of(&connectors, "newer-live"), Status::Waiting);
+        assert_eq!(status_of(&connectors, "newer-unplaced"), Status::Running);
+        assert_eq!(handled_of(&connectors), ["uuid"], "the newer runs' subject stays handled by them");
+        assert!(matches!(status_of(&connectors, "old"), Status::Failed { .. }));
+        assert_eq!(connectors.box_failures.lock().unwrap().len(), 1, "the old run is failed, and the card told, once");
+        assert_eq!(marked_subjects(&connectors), BTreeMap::from([("c1".to_owned(), vec!["uuid".to_owned()])]), "one release");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A run `begin`s `Running` with no session; the next `drive` opens its session. The box row it
+    /// is meant for was written at `row_written`, before the run existed.
+    fn run_began_after_its_row(name: &str) -> (Connectors, PathBuf, Subject, u64) {
+        let subject = Subject::LinearIssue { issue: "uuid".into() };
+        let mut connector = Connector { handled: vec!["uuid".into()], ..linear_connector() };
+        connector.graph = Some(talks(&["one"]));
+        let (connectors, dir) = stored(name, vec![connector]);
+        connectors.begin("c1".into(), subject.clone(), issue_trigger(), "2026-10-29T12:00:00Z").unwrap();
+        let row_written = u64::try_from(DateTime::parse_from_rfc3339("2026-10-29T11:59:00Z").unwrap().timestamp_millis()).unwrap();
+        (connectors, dir, subject, row_written)
+    }
+
+    const BOX_ENDED: &str = "Upstash Box: its box went offline";
+
+    /// Round 3's reuse case: a box's end skips a run that began after the box's row was written, and
+    /// that run's own open then fails (its subject's last box is still being deleted). The run is
+    /// failed by that open, so nothing is left `Running` or `Waiting` with nothing to wake it.
+    #[test]
+    fn a_run_a_box_end_skipped_fails_when_its_own_open_fails() {
+        let (connectors, dir, subject, row_written) = run_began_after_its_row("reuse-open-fails");
+        assert_eq!(block_on(connectors.box_ended("box-1", Some(("c1", &subject, row_written)), BOX_ENDED, BoxEndRelease::Once)), Ok(0), "the newer, unplaced run is not the box's run");
+        assert_eq!(connectors.runs.lock().unwrap()[0].status, Status::Running, "and it goes on running");
+
+        let open = |_: Work| async { Err::<Option<Placement>, String>("Upstash Box: the last box for this is still being deleted; the next check tries again".into()) };
+        let driven = block_on(connectors.drive(&open));
+        assert!(driven.as_ref().is_err_and(|e| e.contains("still being deleted")), "the check reports it: {driven:?}");
+        let runs = connectors.runs.lock().unwrap().clone();
+        assert_eq!(runs.len(), 1);
+        match &runs[0].status {
+            Status::Failed { why } => assert!(why.contains("still being deleted"), "{why}"),
+            other => panic!("the run is {other:?}"),
+        }
+        assert!(!runs.iter().any(|run| matches!(run.status, Status::Running | Status::Waiting)), "no run is left going");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The same run whose open works: it waits on the new box's session, and when that box ends the
+    /// end fails it with the box's reason, though it began after the row it was written for.
+    #[test]
+    fn a_run_a_box_end_skipped_is_failed_by_the_end_of_the_box_it_opened() {
+        let (connectors, dir, subject, row_written) = run_began_after_its_row("reuse-open-works");
+        assert_eq!(block_on(connectors.box_ended("box-1", Some(("c1", &subject, row_written)), BOX_ENDED, BoxEndRelease::Once)), Ok(0));
+
+        let open = |_: Work| async { Ok::<Option<Placement>, String>(Some(Placement { machine: "box-1".into(), tab: "tab-1".into() })) };
+        block_on(connectors.drive(&open)).unwrap();
+        let runs = connectors.runs.lock().unwrap().clone();
+        assert!(matches!(runs[0].status, Status::Waiting), "{:?}", runs[0].status);
+        assert!(matches!(&runs[0].session, Session::Live { machine, .. } if machine == "box-1"), "{:?}", runs[0].session);
+
+        assert_eq!(block_on(connectors.box_ended("box-1", Some(("c1", &subject, row_written)), BOX_ENDED, BoxEndRelease::Once)), Ok(1), "the box it opened ended");
+        let runs = connectors.runs.lock().unwrap().clone();
+        match &runs[0].status {
+            Status::Failed { why } => assert!(why.starts_with(BOX_ENDED), "{why}"),
+            other => panic!("the run is {other:?}"),
+        }
+        assert!(!runs.iter().any(|run| matches!(run.status, Status::Running | Status::Waiting)), "no run is left going");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -5233,6 +5960,134 @@ mod tests {
         let reloaded = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into()).get_settings().connectors;
         assert_eq!(reloaded[0].followed["C0123ABCD:1792400050.000200"].cursor, "1792400090.000000", "the cursor moved all the same");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Imports `workflow` into the empty account in `dir` and expects a refusal that names the
+    /// workflow and `check`, with nothing written: the store on disk stays as it was and no key lands.
+    fn refused_import(connectors: &Connectors, dir: &std::path::Path, workflow: Connector, check: &str, why: &str) {
+        let before = std::fs::read(dir.join("connectors.json")).unwrap();
+        let name = workflow.name.clone();
+        let store = serde_json::json!({ "connectors": [serde_json::to_value(workflow).unwrap()] });
+        let keys = Keys { linear: Some("lin_api_fake".into()), ..Keys::default() };
+        let error = connectors.import(store, keys).expect_err("the import is refused");
+        assert!(error.contains(&format!("workflow {name:?} fails the {check} check")), "{error}");
+        assert!(error.contains(why), "{error}");
+        assert_eq!(std::fs::read(dir.join("connectors.json")).unwrap(), before, "the store is unchanged");
+        assert!(!dir.join("linear-key").exists(), "no key was written");
+        assert!(connectors.export().0["connectors"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_import_refusal_names_the_workflow_and_step_on_one_bounded_line() {
+        let (connectors, dir) = stored("import-long-names", vec![]);
+        let long = |head: &str| format!("{head}\n{}", "x".repeat(500));
+        let mut graph = talks(&["go"]);
+        graph.nodes[1].name = long("Step");
+        graph.nodes[1].kind = NodeKind::Session(SessionSetup { permission: "everything".into(), ..SessionSetup::default() });
+        let workflow = Connector { id: "c9".into(), name: long("Nightly"), graph: Some(graph), ..linear_connector() };
+        let store = serde_json::json!({ "connectors": [serde_json::to_value(workflow).unwrap()] });
+        let error = connectors.import(store, Keys::default()).expect_err("the import is refused");
+        assert!(!error.chars().any(char::is_control), "one line: {error:?}");
+        assert!(error.chars().count() <= 450, "{} characters: {error}", error.chars().count());
+        let cut = |head: &str| format!("{head}{}…", "x".repeat(80 - head.len()));
+        assert!(error.contains(&format!("workflow \"{}\" fails the graph check", cut("Nightly"))), "{error}");
+        assert!(error.contains(&format!("\"{}\": its permission must be manual", cut("Step"))), "{error}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_import_refuses_a_workflow_whose_step_permission_pinned_cannot_read() {
+        let (connectors, dir) = stored("import-permission", vec![]);
+        let mut graph = talks(&["go"]);
+        graph.nodes[1].kind = NodeKind::Session(SessionSetup { permission: "everything".into(), ..SessionSetup::default() });
+        let workflow = Connector { id: "c9".into(), name: "Nightly".into(), graph: Some(graph), ..linear_connector() };
+        refused_import(&connectors, &dir, workflow, "graph", "its permission must be manual");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_import_refuses_a_workflow_whose_model_starts_with_a_dash() {
+        let (connectors, dir) = stored("import-model", vec![]);
+        let workflow = Connector { id: "c9".into(), name: "Nightly".into(), model: " --dangerously-skip-permissions".into(), ..linear_connector() };
+        refused_import(&connectors, &dir, workflow, "model", "may not start with -");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_import_refuses_a_workflow_with_an_invalid_graph() {
+        let (connectors, dir) = stored("import-graph", vec![]);
+        let graph = crate::graph::Graph { nodes: vec![], edges: vec![] };
+        let workflow = Connector { id: "c9".into(), name: "Nightly".into(), graph: Some(graph), ..linear_connector() };
+        refused_import(&connectors, &dir, workflow, "graph", "a workflow needs a trigger");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// An empty account whose `field` is `account` imports a store whose `field` is `incoming`:
+    /// the account's own value stays, as stored before the import.
+    fn kept_on_import(name: &str, field: &str, account: serde_json::Value, incoming: serde_json::Value) {
+        let dir = temp_dir(name);
+        let storage = FileStorage::new(dir.clone());
+        let own: Store = serde_json::from_value(serde_json::json!({ "connectors": [], field: account })).unwrap();
+        storage.save(&serde_json::to_vec(&own).unwrap()).unwrap();
+        let connectors = Connectors::new(storage, "/bin/pinned".into());
+        let before = on_disk(&dir)[field].clone();
+        assert!(!before.is_null(), "the account has {field} set");
+        let exported = serde_json::json!({ "connectors": [serde_json::to_value(Connector { id: "c9".into(), ..linear_connector() }).unwrap()], field: incoming });
+        assert_eq!(connectors.import(exported, Keys::default()), Ok(true));
+        let after = on_disk(&dir);
+        assert_eq!(after["connectors"][0]["id"], "c9", "the workflows came in");
+        assert_eq!(after[field], before, "the import kept the account's own {field}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_import_keeps_the_accounts_upstash() {
+        kept_on_import("import-keeps-upstash", "upstash", serde_json::json!({ "key_hint": "…up01", "claude_hint": "…cl01" }), serde_json::json!({ "key_hint": "…up99", "claude_hint": "…cl99" }));
+    }
+
+    #[test]
+    fn an_import_keeps_the_accounts_box_claude_tokens() {
+        kept_on_import("import-keeps-box-tokens", "box_claude_tokens", serde_json::json!({ "fake-account-0001": "…tk01" }), serde_json::json!({ "fake-account-0009": "…tk99" }));
+    }
+
+    #[test]
+    fn an_import_keeps_the_accounts_box_permissions() {
+        kept_on_import(
+            "import-keeps-boxes",
+            "boxes",
+            serde_json::json!({ "workflow": { "mode": "fixed", "row": "fake-box-row-0001" }, "session": { "mode": "ask" }, "worker": { "mode": "fresh" }, "orchestrator": { "mode": "off" } }),
+            serde_json::json!({ "workflow": { "mode": "fresh" }, "session": { "mode": "fresh" }, "worker": { "mode": "fresh" }, "orchestrator": { "mode": "fresh" } }),
+        );
+    }
+
+    #[test]
+    fn an_import_keeps_the_accounts_box_asks() {
+        kept_on_import(
+            "import-keeps-box-asks",
+            "box_asks",
+            serde_json::json!([{ "id": "e9094fa8594e83a3", "connector": "fake-workflow-0002", "subject": { "issue": "fake-issue-id-0001" } }]),
+            serde_json::json!([{ "id": "0000000000000099", "connector": "c9", "subject": { "issue": "fake-issue-id-0099" } }]),
+        );
+    }
+
+    #[test]
+    fn an_import_keeps_the_accounts_box_grants() {
+        kept_on_import(
+            "import-keeps-box-grants",
+            "box_grants",
+            serde_json::json!([{ "connector": "fake-workflow-0001", "subject": { "issue": "fake-issue-id-0001" }, "allow": false }]),
+            serde_json::json!([{ "connector": "c9", "subject": { "issue": "fake-issue-id-0099" }, "allow": true }]),
+        );
+    }
+
+    #[test]
+    fn an_import_keeps_the_accounts_repo_insight() {
+        kept_on_import("import-keeps-repo-insight", "repo_insight", serde_json::json!({ "on": true }), serde_json::json!({ "on": false }));
+    }
+
+    #[test]
+    fn an_import_keeps_the_accounts_slack_threads() {
+        kept_on_import("import-keeps-slack-threads", "slack_threads", serde_json::json!({ "fake-channel-0002:1700000000.000200": "FAKEBOT0002" }), serde_json::json!({ "fake-channel-0002:1700000000.000200": "FAKEBOT0099" }));
     }
 
     #[test]
@@ -6480,6 +7335,102 @@ mod tests {
     }
 
     #[test]
+    fn a_saved_box_permission_cannot_name_the_fixed_row() {
+        let dir = temp_dir("fixed-row-named");
+        std::fs::create_dir_all(&dir).unwrap();
+        let connectors = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into());
+        let fixed = |row: &str| BoxPermission::Fixed { row: Some(row.into()) };
+        let named = connectors.set_box_access(BoxAccess { workflow: fixed("another-row"), session: fixed("row-x"), ..BoxAccess::default() }).unwrap();
+        assert_eq!((&named.workflow, &named.session), (&BoxPermission::Fixed { row: None }, &BoxPermission::Fixed { row: None }), "no stored row: the named one is dropped");
+        assert!(!connectors.box_access().owns_row("another-row") && !connectors.box_access().owns_row("row-x"), "the named boxes keep the normal timers");
+        connectors.claim_fixed_row("row-1").unwrap();
+        let named = connectors.set_box_access(BoxAccess { workflow: fixed("another-row"), ..BoxAccess::default() }).unwrap();
+        assert_eq!(named.workflow, fixed("row-1"), "the stored row stays");
+        assert!(!connectors.box_access().owns_row("another-row"));
+        let resent = connectors.set_box_access(connectors.box_access()).unwrap();
+        assert_eq!(resent.workflow, fixed("row-1"), "an older app sending back the row it read changes nothing");
+        assert_eq!(connectors.set_box_access(BoxAccess { workflow: BoxPermission::Fresh, ..BoxAccess::default() }).unwrap().workflow, BoxPermission::Fresh);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A box permission of every kind, each naming its own fixed row.
+    fn fixed_rows(prefix: &str) -> serde_json::Value {
+        serde_json::json!({
+            "workflow": { "mode": "fixed", "row": format!("{prefix}-run") },
+            "session": { "mode": "fixed", "row": format!("{prefix}-session") },
+            "worker": { "mode": "fixed", "row": format!("{prefix}-worker") },
+            "orchestrator": { "mode": "fixed", "row": format!("{prefix}-orchestrator") },
+        })
+    }
+
+    /// An account whose own `boxes` is `own` imports a file whose `boxes` is `incoming`: the file's
+    /// never come in, so the account's stay exactly as they were, none of the rows the file named
+    /// is owned, and the stored file says the same after a reload.
+    fn import_leaves_boxes(name: &str, own: serde_json::Value, incoming: serde_json::Value, file_rows: &[&str]) {
+        let dir = temp_dir(name);
+        let storage = FileStorage::new(dir.clone());
+        let store: Store = serde_json::from_value(serde_json::json!({ "connectors": [], "boxes": own })).unwrap();
+        storage.save(&serde_json::to_vec(&store).unwrap()).unwrap();
+        let connectors = Connectors::new(storage, "/bin/pinned".into());
+        let (access, stored_before) = (connectors.box_access(), on_disk(&dir)["boxes"].clone());
+        assert_eq!(connectors.import(serde_json::json!({ "connectors": [], "boxes": incoming }), Keys::default()), Ok(true));
+        assert_eq!(connectors.box_access(), access, "the import left the account's own boxes as they were");
+        for row in file_rows {
+            assert!(!connectors.box_access().owns_row(row), "{row}: owns_row answers false");
+        }
+        assert_eq!(on_disk(&dir)["boxes"], stored_before, "the stored file kept them");
+        let reloaded = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into());
+        assert_eq!(reloaded.box_access(), access, "and says the same after a reload");
+        assert_eq!(on_disk(&dir)["boxes"], stored_before);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    fn own_boxes(workflow: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "workflow": workflow, "session": { "mode": "ask" }, "worker": { "mode": "fresh" }, "orchestrator": { "mode": "off" } })
+    }
+
+    /// Since an import keeps the account's own `boxes`, a file naming a fixed row on every kind
+    /// names none of them here.
+    #[test]
+    fn an_imported_store_names_no_fixed_row() {
+        let file_rows = ["imported-run", "imported-session", "imported-worker", "imported-orchestrator"];
+        import_leaves_boxes("import-fixed-rows-fresh", own_boxes(serde_json::json!({ "mode": "fresh" })), fixed_rows("imported"), &file_rows);
+        import_leaves_boxes("import-fixed-rows-fixed", own_boxes(serde_json::json!({ "mode": "fixed", "row": "hub-named-row" })), fixed_rows("imported"), &file_rows);
+    }
+
+    /// The workflow kind's fixed box is exempt from every box timer but vanishing, so only the
+    /// owner chooses it, in the app: a file (which any machine of the account can send) never sets
+    /// it, whatever the account's own kind is.
+    #[test]
+    fn an_import_brings_a_fixed_workflow_box_as_fresh() {
+        let boxes = serde_json::json!({ "workflow": { "mode": "fixed", "row": "imported-run" }, "worker": { "mode": "fixed" }, "orchestrator": { "mode": "off" } });
+        import_leaves_boxes("import-fixed-workflow-fresh", own_boxes(serde_json::json!({ "mode": "fresh" })), boxes.clone(), &["imported-run"]);
+        import_leaves_boxes("import-fixed-workflow-fixed", own_boxes(serde_json::json!({ "mode": "fixed", "row": "hub-named-row" })), boxes, &["imported-run"]);
+    }
+
+    #[test]
+    fn a_store_saved_with_fixed_rows_on_session_worker_and_orchestrator_loads_with_none_there() {
+        let dir = temp_dir("load-fixed-rows");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("connectors.json"), serde_json::json!({ "connectors": [], "boxes": fixed_rows("saved") }).to_string()).unwrap();
+        let connectors = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into());
+        let none = BoxPermission::Fixed { row: None };
+        for access in [connectors.box_access(), connectors.get_settings().boxes] {
+            assert_eq!(access.workflow, BoxPermission::Fixed { row: Some("saved-run".into()) }, "the run kind's row, which the hub named, stays");
+            assert_eq!((&access.session, &access.worker, &access.orchestrator), (&none, &none, &none), "the other kinds carry none");
+            assert!(access.owns_row("saved-run"));
+            for kind in ["session", "worker", "orchestrator"] {
+                assert!(!access.owns_row(&format!("saved-{kind}")), "{kind}: owns_row ignores it");
+            }
+        }
+        // The file keeps what an earlier release saved (nothing is dropped from disk by a load).
+        connectors.save(&connectors.store.lock().unwrap()).unwrap();
+        let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("connectors.json")).unwrap()).unwrap();
+        assert_eq!(saved["boxes"], fixed_rows("saved"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn an_account_stored_before_box_permissions_still_runs_a_box_workflow() {
         let dir = temp_dir("legacy-box");
         std::fs::create_dir_all(&dir).unwrap();
@@ -6588,6 +7539,29 @@ mod tests {
         let sent = connectors.get_settings().connectors;
         assert_eq!(sent[0].graph, Some(migrate(&slack_connector())));
         assert!(on_disk(&dir)["connectors"][0].get("graph").is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_save_with_no_graph_is_walked_on_the_graph_its_run_builds() {
+        let skips = |connector: &Connector| connector.permission_mode == PermissionMode::BypassPermissions;
+        let skipping = Connector { id: "c7".into(), name: "Skips".into(), permission_mode: PermissionMode::BypassPermissions, ..called() };
+        // The stored router's graph is its own `migrate`, so a save without a graph drops it.
+        let mut kept = router();
+        kept.graph = Some(migrate(&router()));
+        let (connectors, dir) = stored("graphless-calls", vec![kept, slack_connector(), called(), skipping]);
+        let naming = |id: &str, workflow: &str| {
+            let mut connector = router();
+            connector.id = id.into();
+            if let Trigger::SlackMessage { decide, .. } = &mut connector.trigger {
+                decide.categories[1].workflow = Some(workflow.into());
+            }
+            connector
+        };
+        assert!(connectors.calls_any(&naming("", "c7"), skips), "a new router whose category names a workflow that skips prompts");
+        assert!(connectors.calls_any(&naming("c5", "c7"), skips), "a save that drops the stored graph runs the router it sends");
+        assert!(!connectors.calls_any(&naming("", "c6"), skips), "a router whose categories name workflows that ask");
+        assert!(!connectors.calls_any(&naming("c5", "c6"), skips));
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -6875,6 +7849,7 @@ mod tests {
             headless: false,
             stopped: None,
             questions: None,
+            read_only: false,
         }
     }
 
@@ -6961,6 +7936,101 @@ mod tests {
         let settled = settle(&mut store, vec![("c1", Found::Issue(issue())), ("c2", Found::Issue(issue()))]);
         let started: Vec<_> = settled.starts.iter().map(|start| start.connector.clone()).collect();
         assert_eq!(started, vec!["c1".to_owned()]);
+    }
+
+    #[test]
+    fn a_stored_step_whose_permission_is_not_an_exact_name_never_opens_a_session_that_skips_prompts() {
+        let mut connector = linear_connector();
+        let mut graph = talks(&[]);
+        let step = SessionSetup { permission: " bypassPermissions ".into(), ..SessionSetup::default() };
+        graph.nodes.push(node("s", "Fix", NodeKind::Session(step)));
+        graph.edges.push(edge("t", "out", "s"));
+        connector.graph = Some(graph);
+        // Written as an older save would have kept it, past today's check at save.
+        let (connectors, dir) = stored("odd-permission", vec![connector]);
+        let subject = Subject::LinearIssue { issue: "uuid".into() };
+        assert!(connectors.begin("c1".into(), subject.clone(), issue_trigger(), "2026-10-29T12:00:00Z").is_err(), "its trigger starts no run");
+        // A run that started before that check still opens no session.
+        let run = runner::start(&connectors.library(), "c1", subject, serde_json::to_value(issue_trigger()).unwrap(), "2026-10-29T12:00:00Z");
+        connectors.runs.lock().unwrap().push(run);
+        let opened = std::sync::Mutex::new(Vec::<Vec<String>>::new());
+        let open = |work: Work| {
+            if let Work::Run(run) = &work {
+                opened.lock().unwrap().push(run.args.clone());
+            }
+            placed(work)
+        };
+        let _ = block_on(connectors.drive(&open));
+        let opened = opened.into_inner().unwrap();
+        assert!(!opened.iter().any(|args| args.windows(2).any(|pair| pair[0] == "--permission-mode" && pair[1] == "bypassPermissions")), "{opened:?}");
+        assert!(opened.is_empty(), "a step whose permission is not a known name opens no session: {opened:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_workflow_with_a_step_whose_permission_is_unreadable_starts_no_run_and_every_check_names_it() {
+        let with_step = |id: &str, name: &str, permission: &str| {
+            let mut connector = linear_connector();
+            connector.id = id.into();
+            connector.name = name.into();
+            let mut graph = talks(&[]);
+            let step = SessionSetup { permission: permission.into(), ..SessionSetup::default() };
+            graph.nodes.push(node("s", "Fix", NodeKind::Session(step)));
+            graph.edges.push(edge("t", "out", "s"));
+            connector.graph = Some(graph);
+            connector
+        };
+        // Written as an older save would have kept it, past today's check at save.
+        let (connectors, dir) = stored("unreadable-step", vec![with_step("c1", "Odd", " bypassPermissions "), with_step("c2", "Fine", "acceptEdits")]);
+        let odd = Subject::LinearIssue { issue: "odd".into() };
+        let fine = Subject::LinearIssue { issue: "fine".into() };
+        let refused = connectors.begin("c1".into(), odd.clone(), issue_trigger(), "2026-10-29T12:00:00Z").unwrap_err();
+        assert!(refused.contains("\"Odd\"") && refused.contains("\"Fix\""), "{refused}");
+        connectors.begin("c2".into(), fine.clone(), issue_trigger(), "2026-10-29T12:00:00Z").unwrap();
+        let opened = std::sync::Mutex::new(Vec::<Vec<String>>::new());
+        let open = |work: Work| {
+            if let Work::Run(run) = &work {
+                opened.lock().unwrap().push(run.args.clone());
+            }
+            placed(work)
+        };
+        for _ in 0..2 {
+            let check = block_on(connectors.check_once(&open));
+            let error = check.error.unwrap_or_default();
+            assert!(error.contains("workflow \"Odd\"") && error.contains("step \"Fix\""), "every check names the workflow and the step: {error}");
+            assert!(!error.contains("\"Fine\""), "{error}");
+        }
+        assert!(connectors.runs.lock().unwrap().iter().all(|run| run.connector == "c2"), "the unreadable workflow starts no run");
+        let store = connectors.store.lock().unwrap();
+        assert!(!store.handled(&subject_key(&odd)), "its subject is not claimed");
+        assert!(store.handled(&subject_key(&fine)), "the readable workflow claims its own");
+        drop(store);
+        let opened = opened.into_inner().unwrap();
+        assert_eq!(opened.len(), 1, "the readable workflow still runs: {opened:?}");
+        assert!(opened[0].windows(2).any(|pair| pair[0] == "--permission-mode" && pair[1] == "acceptEdits"), "{opened:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_model_that_starts_with_a_dash_is_refused_at_save_so_it_never_reaches_claude_as_an_option() {
+        let (connectors, dir) = stored("dash-model", vec![]);
+        let mut own = linear_connector();
+        own.model = "--dangerously-skip-permissions".into();
+        let error = connectors.save_connector(own).err().unwrap();
+        assert!(error.contains("model") && error.contains("start with -"), "{error}");
+        let mut stepped = linear_connector();
+        let mut graph = talks(&[]);
+        let step = SessionSetup { model: " -x".into(), ..SessionSetup::default() };
+        graph.nodes.push(node("s", "Fix", NodeKind::Session(step)));
+        graph.edges.push(edge("t", "out", "s"));
+        stepped.graph = Some(graph);
+        let error = connectors.save_connector(stepped).err().unwrap();
+        assert!(error.starts_with("\"Fix\"") && error.contains("model"), "{error}");
+        assert!(connectors.store.lock().unwrap().connectors.is_empty(), "neither was saved");
+        let mut plain = linear_connector();
+        plain.model = "claude-sonnet-5-5".into();
+        assert_eq!(claude_args(&plain, "w", "n".into())[..2], ["--model", "claude-sonnet-5-5"], "a model is the value after --model");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -8428,8 +9498,9 @@ mod tests {
         fn an_import_keeps_the_connections_and_their_keys() {
             let (connectors, storage) = hub();
             connect(&connectors, KEY, &[SITE]).unwrap();
-            let imported = connectors.import(json!({ "linear": null, "connectors": [] }), Keys::default()).unwrap();
-            assert!(imported);
+            // A connected deployment makes the account not empty, so the import leaves it alone.
+            let imported = connectors.import(json!({ "linear": null, "connectors": [], "convex": [] }), Keys::default()).unwrap();
+            assert!(!imported);
             assert_eq!(repos(&connectors), [("quick-lemur-789".to_owned(), vec![SITE.to_owned()])]);
             assert_eq!(storage.keys.lock().unwrap().get("convex-key-quick-lemur-789").map(String::as_str), Some(KEY));
         }
@@ -8530,6 +9601,45 @@ mod tests {
             let prompts = opened.lock().unwrap().clone();
             assert_eq!(prompts.len(), 1);
             assert!(prompts[0].contains("\n\nYou may read the tables invoices of Convex deployment quick-lemur-789 (dev) with the tools convex_tables and convex_data."), "{}", prompts[0]);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn an_import_refuses_a_convex_step_the_accounts_connections_do_not_allow() {
+            let (connectors, dir) = stored("convex-import-refused", vec![]);
+            let mut graph = talks(&["go"]);
+            graph.nodes.push(reads("gone-deployment-1", None));
+            let workflow = Connector { id: "c9".into(), name: "Invoices".into(), graph: Some(graph), ..linear_connector() };
+            refused_import(&connectors, &dir, workflow, "Convex step", "reads Convex deployment gone-deployment-1, which is not connected");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn an_import_whose_workflows_pass_the_save_checks_is_stored() {
+            // An account with a Convex deployment is not empty, so an import that passes carries no Convex step.
+            let (connectors, dir) = stored("convex-import-clean", vec![]);
+            let workflow = Connector { id: "c9".into(), name: "Invoices".into(), graph: Some(talks(&["go"])), ..linear_connector() };
+            let store = serde_json::json!({ "connectors": [serde_json::to_value(workflow).unwrap()] });
+            assert_eq!(connectors.import(store, Keys::default()), Ok(true));
+            let stored = connectors.get_settings().connectors;
+            assert_eq!(stored.len(), 1);
+            assert_eq!(stored[0].graph, Some(talks(&["go"])));
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn an_import_into_an_account_with_only_convex_connected_is_refused() {
+            let (connectors, dir) = with_convex("convex-import-not-empty", vec![]);
+            let before = std::fs::read(dir.join("connectors.json")).unwrap();
+            let mut graph = talks(&["go"]);
+            graph.nodes.push(reads("quick-lemur-789", Some(&["invoices"])));
+            let workflow = Connector { id: "c9".into(), name: "Invoices".into(), graph: Some(graph), ..linear_connector() };
+            let store = serde_json::json!({ "connectors": [serde_json::to_value(workflow).unwrap()] });
+            let keys = Keys { linear: Some("lin_api_fake".into()), ..Keys::default() };
+            assert_eq!(connectors.import(store, keys), Ok(false), "the account is not empty");
+            assert_eq!(std::fs::read(dir.join("connectors.json")).unwrap(), before, "the store is unchanged");
+            assert!(!dir.join("linear-key").exists(), "no key was written");
+            assert!(connectors.get_settings().connectors.is_empty());
             let _ = std::fs::remove_dir_all(dir);
         }
 

@@ -35,7 +35,15 @@ pub const SCOPES: [(&str, &str); 2] = [
 const MAX_REDIRECTS: usize = 5;
 const MAX_PROJECTS: usize = 20;
 const REGISTRATIONS: usize = 20;
+/// Registrations the whole hub takes within the limiter's window, whichever addresses they come from.
+/// Only a registration whose body passed validation counts.
+const HUB_REGISTRATIONS: usize = 100;
 const TOKEN_FAILURES: usize = 30;
+/// Failed token requests the whole hub takes within the limiter's window, whichever addresses they come
+/// from: ten addresses' worth of `TOKEN_FAILURES`. A success gives its stamps back, so only failures and
+/// requests still in flight hold it, and a burst of the owner's real agents fits: 50 agents refreshing at
+/// once after a revoke or a hub restart, each failing and retrying up to 6 times, is 300.
+pub(crate) const HUB_TOKEN_FAILURES: usize = 300;
 /// How long the approval waits for a machine to list its projects.
 const LIST_WAIT: Duration = Duration::from_secs(20);
 /// The path the web app shows a pending authorization on.
@@ -176,8 +184,9 @@ pub async fn server_metadata(State(server): State<Arc<Server>>) -> Response {
 }
 
 pub async fn register(State(server): State<Arc<Server>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, Json(body): Json<Value>) -> Response {
-    if !server.attempt(&[(format!("agent-register:{}", crate::http::client_address(peer, &headers)), REGISTRATIONS)]) {
-        return oauth_error(StatusCode::TOO_MANY_REQUESTS, "invalid_client_metadata", "too many registrations; try again in 15 minutes");
+    let too_many = || oauth_error(StatusCode::TOO_MANY_REQUESTS, "invalid_client_metadata", "too many registrations; try again in 15 minutes");
+    if server.attempt(&[(format!("agent-register:{}", server.client_address(peer, &headers)), REGISTRATIONS)]).is_none() {
+        return too_many();
     }
     let uris: Vec<String> = match body.get("redirect_uris").and_then(Value::as_array) {
         Some(uris) => uris.iter().filter_map(Value::as_str).map(str::to_owned).collect(),
@@ -195,6 +204,10 @@ pub async fn register(State(server): State<Arc<Server>>, ConnectInfo(peer): Conn
     }
     let name: String = body.get("client_name").and_then(Value::as_str).unwrap_or("").chars().filter(|c| !c.is_control()).take(80).collect();
     let name = if name.trim().is_empty() { "An MCP client".to_owned() } else { name.trim().to_owned() };
+    // Only a body that passed the checks above counts against the hub's window, so bad ones can't spend it.
+    if server.attempt(&[("hub:agent-register".to_owned(), HUB_REGISTRATIONS)]).is_none() {
+        return too_many();
+    }
     match server.hub.db.register_agent_client(&name, &uris).await {
         Ok(id) => no_store(
             (
@@ -283,35 +296,63 @@ fn tokens(access: String, refresh: String, scopes: &[String]) -> Response {
 }
 
 pub async fn token(State(server): State<Arc<Server>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
-    let limit = [(format!("agent-token:{}", crate::http::client_address(peer, &headers)), TOKEN_FAILURES)];
-    if !server.attempt(&limit) {
-        return oauth_error(StatusCode::TOO_MANY_REQUESTS, "invalid_request", "too many failed token requests; try again in 15 minutes");
-    }
+    let address = server.client_address(peer, &headers);
     let params = form(&headers, &body);
-    let answer = exchange(&server.hub, &params).await;
-    if answer.status().is_success() {
-        server.succeeded(&limit);
+    // The hub-wide ceiling refuses only unknown callers: an address an agent got a token from, or a
+    // refresh with a live token never used, counts against its address's key alone.
+    let own = token_limit(&address)[..1].to_vec();
+    let limit = if server.known_agent_address(&address) {
+        server.attempt_own(&own)
+    } else if server.has_room(&own) && refresh_is_current(&server.hub, &params).await {
+        server.attempt(&own)
+    } else {
+        server.attempt(&token_limit(&address))
+    };
+    let Some(limit) = limit else {
+        return oauth_error(StatusCode::TOO_MANY_REQUESTS, "invalid_request", "too many failed token requests; try again in 15 minutes");
+    };
+    match exchange(&server.hub, &params).await {
+        Ok((account, answer)) => {
+            server.succeeded(&limit);
+            server.remember_agent_address(account, address);
+            answer
+        }
+        Err(answer) => answer,
     }
-    answer
 }
 
-async fn exchange(hub: &Hub, params: &HashMap<String, String>) -> Response {
+/// The keys a token request from an unknown caller counts against: its address's, and the hub's, held
+/// past the limiter's cap like the other `hub:` keys. A known caller counts against the first alone.
+pub(crate) fn token_limit(address: &str) -> Vec<(String, usize)> {
+    vec![(format!("agent-token:{address}"), TOKEN_FAILURES), ("hub:agent-token".to_owned(), HUB_TOKEN_FAILURES)]
+}
+
+/// Whether the request refreshes with a live refresh token of its client's that was never used. It only
+/// reads the token, by its hash, so `exchange` still spends and rotates it.
+async fn refresh_is_current(hub: &Hub, params: &HashMap<String, String>) -> bool {
+    let param = |k: &str| params.get(k).map(String::as_str).filter(|v| !v.is_empty());
+    let (Some("refresh_token"), Some(token), Some(client)) = (param("grant_type"), param("refresh_token"), param("client_id")) else { return false };
+    hub.db.agent_refresh_current(token, client).await.unwrap_or(false)
+}
+
+/// Trades a code or a refresh token for tokens: the grant's account and the answer, or the error answer.
+async fn exchange(hub: &Hub, params: &HashMap<String, String>) -> Result<(Uuid, Response), Response> {
     let db = &hub.db;
     let param = |k: &str| params.get(k).map(String::as_str).filter(|v| !v.is_empty());
-    let Some(client_id) = param("client_id") else { return oauth_error(StatusCode::UNAUTHORIZED, "invalid_client", "client_id is required") };
+    let Some(client_id) = param("client_id") else { return Err(oauth_error(StatusCode::UNAUTHORIZED, "invalid_client", "client_id is required")) };
     if let Some(given) = param("resource") {
         if !resource_matches(&hub.public_url, given) {
-            return oauth_error(StatusCode::BAD_REQUEST, "invalid_target", "this hub only issues tokens for its MCP endpoint");
+            return Err(oauth_error(StatusCode::BAD_REQUEST, "invalid_target", "this hub only issues tokens for its MCP endpoint"));
         }
     }
     let grant = match param("grant_type") {
         Some("authorization_code") => {
             let (Some(code), Some(verifier)) = (param("code"), param("code_verifier")) else {
-                return oauth_error(StatusCode::BAD_REQUEST, "invalid_request", "code and code_verifier are required");
+                return Err(oauth_error(StatusCode::BAD_REQUEST, "invalid_request", "code and code_verifier are required"));
             };
             let spent = match db.take_agent_code(code).await {
                 Ok(spent) => spent,
-                Err(e) => return crate::http::internal_response(e),
+                Err(e) => return Err(crate::http::internal_response(e)),
             };
             let code = match spent {
                 Spent::Fresh(code) => code,
@@ -319,47 +360,47 @@ async fn exchange(hub: &Hub, params: &HashMap<String, String>) -> Response {
                 Spent::Replayed(grant) => {
                     let _ = db.revoke_agent_grant(grant, None).await;
                     eprintln!("pinned-server: an authorization code was reused; revoked agent grant {grant}");
-                    return oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "the code was already used or expired");
+                    return Err(oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "the code was already used or expired"));
                 }
-                Spent::Unknown => return oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "unknown code"),
+                Spent::Unknown => return Err(oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "unknown code")),
             };
             if code.client != client_id {
-                return oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "the code was issued to another client");
+                return Err(oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "the code was issued to another client"));
             }
             if param("redirect_uri").is_some_and(|uri| uri != code.redirect_uri) {
-                return oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "redirect_uri does not match the authorization request");
+                return Err(oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "redirect_uri does not match the authorization request"));
             }
             if !pkce_matches(verifier, &code.code_challenge) {
-                return oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "the code_verifier does not match the code_challenge");
+                return Err(oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "the code_verifier does not match the code_challenge"));
             }
             code.grant
         }
         Some("refresh_token") => {
-            let Some(refresh) = param("refresh_token") else { return oauth_error(StatusCode::BAD_REQUEST, "invalid_request", "refresh_token is required") };
+            let Some(refresh) = param("refresh_token") else { return Err(oauth_error(StatusCode::BAD_REQUEST, "invalid_request", "refresh_token is required")) };
             match db.take_agent_refresh(refresh).await {
                 Ok(Spent::Fresh((grant, client))) if client == client_id => grant,
-                Ok(Spent::Fresh(_)) => return oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "the refresh token was issued to another client"),
+                Ok(Spent::Fresh(_)) => return Err(oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "the refresh token was issued to another client")),
                 // A rotated refresh token came back: someone holds a copy, so the grant ends (OAuth 2.1 4.3.1).
                 Ok(Spent::Replayed(grant)) => {
                     let _ = db.revoke_agent_grant(grant, None).await;
                     eprintln!("pinned-server: a rotated refresh token was reused; revoked agent grant {grant}");
-                    return oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "the refresh token was already used");
+                    return Err(oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "the refresh token was already used"));
                 }
-                Ok(Spent::Unknown) => return oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "unknown or expired refresh token"),
-                Err(e) => return crate::http::internal_response(e),
+                Ok(Spent::Unknown) => return Err(oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "unknown or expired refresh token")),
+                Err(e) => return Err(crate::http::internal_response(e)),
             }
         }
-        _ => return oauth_error(StatusCode::BAD_REQUEST, "unsupported_grant_type", "use authorization_code or refresh_token"),
+        _ => return Err(oauth_error(StatusCode::BAD_REQUEST, "unsupported_grant_type", "use authorization_code or refresh_token")),
     };
-    let scopes = match db.agent_grant_scopes(grant).await {
-        Ok(Some(scopes)) => scopes,
-        Ok(None) => return oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "the access was revoked"),
-        Err(e) => return crate::http::internal_response(e),
+    let (scopes, account) = match db.agent_grant_scopes(grant).await {
+        Ok(Some(found)) => found,
+        Ok(None) => return Err(oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "the access was revoked")),
+        Err(e) => return Err(crate::http::internal_response(e)),
     };
     match db.issue_agent_tokens(grant).await {
-        Ok(Some((access, refresh))) => tokens(access, refresh, &scopes),
-        Ok(None) => oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "the access was revoked"),
-        Err(e) => crate::http::internal_response(e),
+        Ok(Some((access, refresh))) => Ok((account, tokens(access, refresh, &scopes))),
+        Ok(None) => Err(oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "the access was revoked")),
+        Err(e) => Err(crate::http::internal_response(e)),
     }
 }
 
