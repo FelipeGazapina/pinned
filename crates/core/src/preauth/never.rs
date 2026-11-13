@@ -60,7 +60,7 @@ impl<'a> Ask<'a> {
 }
 
 /// The items of the never list, in the order of the design's table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum NeverItem {
     DeleteOutside,
