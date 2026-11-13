@@ -2794,7 +2794,9 @@ fn default_out_port() -> String {
     crate::graph::PortId::OUT.into()
 }
 
-fn generate_instructions(workflows: &str) -> String {
+/// What a generation model is told, listing at most 20 of the `(name, id)` workflows a call step may run.
+pub(crate) fn generate_instructions<'a>(workflows: impl IntoIterator<Item = (&'a str, &'a str)>) -> String {
+    let workflows = workflows.into_iter().take(20).map(|(name, id)| format!("- {name} ({id})")).collect::<Vec<_>>().join("\n");
     format!(
         r#"You translate an automation description into a pinned workflow map as JSON, nothing else.
 
@@ -2822,10 +2824,29 @@ Every node may carry a "group" name; steps of one concern share it. Answer with 
     )
 }
 
+const NOT_A_MAP: &str = "the model did not answer with a workflow map";
+
+/// The draft in a model's text answer, which may wrap the JSON object in a fence or prose.
+fn draft_in(answer: &str) -> Result<DraftGraph, String> {
+    let whole = answer.find('{').zip(answer.rfind('}')).filter(|(a, b)| a < b).map(|(a, b)| &answer[a..=b]);
+    let value: Value = whole.and_then(|json| serde_json::from_str(json).ok()).ok_or(NOT_A_MAP)?;
+    // Every draft field defaults, so any object would parse as an empty map.
+    if !value.get("nodes").is_some_and(Value::is_array) {
+        return Err(NOT_A_MAP.into());
+    }
+    serde_json::from_value(value).map_err(|_| NOT_A_MAP.into())
+}
+
+/// The graph a model's text answer drafts, built as `build_generated` builds one. `called` says
+/// whether a workflow id answers threads, so a call step may run it.
+pub(crate) fn graph_from_answer(answer: &str, called: &dyn Fn(&str) -> bool) -> Result<Graph, String> {
+    build_generated(called, draft_in(answer)?)
+}
+
 /// Turns a generated draft into a laid-out graph: unique ids, edges by node name, switch
 /// references by node name, columns left to right from the trigger, then the same validation
 /// a save runs.
-fn build_generated(store: &Store, draft: DraftGraph) -> Result<Graph, String> {
+fn build_generated(called: &dyn Fn(&str) -> bool, draft: DraftGraph) -> Result<Graph, String> {
     use crate::graph::{Case, Choice, Classify, Edge, Gate, NodeId, NodeKind, PortId, Question as GraphQuestion, SessionSetup, Switch, Watch};
     fn slug(name: &str, used: &mut std::collections::BTreeSet<String>) -> String {
         let mut base: String = name.to_lowercase().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect::<String>().trim_matches('-').into();
@@ -3033,8 +3054,7 @@ fn build_generated(store: &Store, draft: DraftGraph) -> Result<Graph, String> {
             .collect(),
         edges,
     };
-    let called = |id: &str| call_target(store, "", &graph, id);
-    graph.validate(&called)?;
+    graph.validate(called)?;
     Ok(graph)
 }
 
@@ -4645,20 +4665,14 @@ impl Connectors {
             return Err("pick a chat model".into());
         }
         let key = self.key(VERCEL_KEY).ok_or("Vercel AI Gateway is not connected: connect it in pinned's Connectors settings")?;
-        let workflows = self
-            .store
-            .lock()
-            .unwrap()
-            .connectors
-            .iter()
-            .take(20)
-            .map(|c| format!("- {} ({})", c.name, c.id))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let answer = vercel::chat_json(&key, model.trim(), &generate_instructions(&workflows), description.trim()).await?;
-        let draft: DraftGraph = serde_json::from_value(answer).map_err(|_| "the model did not answer with a workflow map".to_owned())?;
+        let instructions = {
+            let store = self.store.lock().unwrap();
+            generate_instructions(store.connectors.iter().map(|c| (c.name.as_str(), c.id.as_str())))
+        };
+        let answer = vercel::chat_json(&key, model.trim(), &instructions, description.trim()).await?;
+        let draft: DraftGraph = serde_json::from_value(answer).map_err(|_| NOT_A_MAP.to_owned())?;
         let store = self.store.lock().unwrap();
-        build_generated(&store, draft)
+        build_generated(&|id| store.connectors.iter().any(|c| c.id == id && answers_threads(c)), draft)
     }
 
     /// Takes exported connectors and keys, as when a signed-out app's connectors move to its account,
@@ -5312,9 +5326,32 @@ mod tests {
     fn generated(name: &str, nodes: serde_json::Value) -> Result<Graph, String> {
         let (connectors, dir) = stored(name, vec![]);
         let draft: DraftGraph = serde_json::from_value(json!({ "nodes": nodes, "edges": [{ "from": "Message", "port": "out", "to": "Reply" }] })).unwrap();
-        let graph = build_generated(&connectors.store.lock().unwrap(), draft);
+        let store = connectors.store.lock().unwrap();
+        let graph = build_generated(&|id| store.connectors.iter().any(|c| c.id == id && answers_threads(c)), draft);
+        drop(store);
         let _ = std::fs::remove_dir_all(dir);
         graph
+    }
+
+    #[test]
+    fn a_text_answer_drafts_its_map_through_fences_and_prose() {
+        let map = r#"{"nodes":[{"name":"Message","type":"trigger","watch":{"kind":"slack-mention","channel":"support"}},{"name":"Reply","type":"reply","text":"hi"}],"edges":[{"from":"Message","to":"Reply"}]}"#;
+        let nobody = |_: &str| false;
+        for answer in [map.to_owned(), format!("```json\n{map}\n```"), format!("Here is the workflow:\n\n{map}\n\nReview it before saving.")] {
+            let graph = graph_from_answer(&answer, &nobody).unwrap_or_else(|e| panic!("{e}: {answer}"));
+            assert_eq!(graph.nodes.len(), 2, "{answer}");
+            assert_eq!(graph.edges.len(), 1, "{answer}");
+        }
+        for garbage in ["I can't help with that.", "{not json}", r#"{"title":"Triage"}"#, ""] {
+            assert_eq!(graph_from_answer(garbage, &nobody).err().as_deref(), Some(NOT_A_MAP), "{garbage}");
+        }
+    }
+
+    #[test]
+    fn a_text_answer_calls_only_the_workflows_the_caller_says_answer_threads() {
+        let answer = r#"{"nodes":[{"name":"Message","type":"trigger","watch":{"kind":"slack-mention","channel":"support"}},{"name":"Hand off","type":"call","workflow":"fixer"}],"edges":[{"from":"Message","to":"Hand off"}]}"#;
+        assert!(graph_from_answer(answer, &|id| id == "fixer").is_ok());
+        assert!(graph_from_answer(answer, &|_| false).is_err(), "a call to a workflow that answers no thread fails as a save would");
     }
 
     #[test]
@@ -8696,7 +8733,7 @@ mod tests {
 
         #[test]
         fn the_workflow_generator_never_offers_the_step() {
-            assert!(!generate_instructions("").to_lowercase().contains("convex"));
+            assert!(!generate_instructions([]).to_lowercase().contains("convex"));
             let drafted = generated("convex-generated", json!([{ "name": "Message", "type": "trigger", "watch": { "kind": "slack-mention", "channel": "support" } }, { "name": "Reply", "type": "convex-data", "connection": "quick-lemur-789" }]));
             assert_eq!(drafted.unwrap_err(), "step \"Reply\" is a \"convex-data\" step, which new maps do not use");
         }
