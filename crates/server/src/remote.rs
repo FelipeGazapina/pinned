@@ -267,7 +267,7 @@ const HELD_TASK_MAX: usize = 128;
 /// The states a worker's end can have: a task's terminal `delegate::WorkState`.
 const HELD_STATES: [&str; 3] = ["result_available", "failed", "cancelled"];
 
-/// Whether `task` is a task id the hub holds an end for: not empty, at most `HELD_TASK_MAX` bytes,
+/// Whether `task` is a task id, or a tab id, the hub holds an end for: not empty, at most `HELD_TASK_MAX` bytes,
 /// and no newline or other control character, so it is safe to store and to log.
 fn held_task_ok(task: &str) -> bool {
     !task.is_empty() && task.len() <= HELD_TASK_MAX && !task.chars().any(char::is_control)
@@ -325,7 +325,7 @@ pub fn scrub_held(text: &str) -> String {
 #[allow(clippy::too_many_arguments)]
 pub async fn hold_end(hub: &Hub, account: &Account, origin: &str, from: &str, tab: &str, task: &str, mut end: RemoteEnd, unclaimed: bool) -> Result<bool, String> {
     let (Ok(origin_id), Ok(from_id)) = (Uuid::parse_str(origin), Uuid::parse_str(from)) else { return Ok(false) };
-    if !held_task_ok(task) || !HELD_STATES.contains(&end.state.as_str()) {
+    if !held_task_ok(task) || !held_task_ok(tab) || !HELD_STATES.contains(&end.state.as_str()) {
         eprintln!("pinned-server: the hub refuses an end from {from_id} for machine {origin_id}: its task id or state is not one pinned makes");
         return Err("the hub refuses this end: its task id or state is not one pinned makes".into());
     }
