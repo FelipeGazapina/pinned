@@ -201,9 +201,9 @@ impl Questions {
         self.asked.iter().find(|a| a.questionnaire.id == id)
     }
 
-    /// The tasks whose worker waits on open questions.
-    pub fn waiting_tasks(&self) -> impl Iterator<Item = &str> {
-        self.asked.iter().filter(|a| a.is_open()).filter_map(|a| a.task.as_deref())
+    /// The tasks whose worker waits on open questions that `asks` says its tab shows.
+    pub fn waiting_tasks<'a>(&'a self, asks: impl Fn(&str) -> bool + 'a) -> impl Iterator<Item = &'a str> {
+        self.asked.iter().filter(move |a| a.is_open() && asks(&a.tab)).filter_map(|a| a.task.as_deref())
     }
 
     /// Closes the questionnaire `id` open on `tab` with the user's reply, after checking the reply
@@ -652,7 +652,7 @@ mod tests {
         assert_eq!(again.get(&id), Some(&asked));
         assert_eq!(again.open_on("tab-1").map(|q| q.title.as_deref()), Some(Some("Checkout")));
         assert_eq!(again.get("q-2").unwrap().outcome, Some(Outcome::Cancelled));
-        assert_eq!(again.waiting_tasks().collect::<Vec<_>>(), ["task-1"]);
+        assert_eq!(again.waiting_tasks(|_| true).collect::<Vec<_>>(), ["task-1"]);
         assert_eq!(asked.wait_limit_secs, None, "no wait limit unless a task sets one");
         let _ = std::fs::remove_dir_all(dir);
     }

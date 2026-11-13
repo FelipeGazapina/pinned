@@ -5768,16 +5768,19 @@ impl Machine {
     /// Pauses the time limit of each task whose thread here waits on the user mid-turn, and
     /// resumes the others'. A task on another machine pauses on that machine's word.
     fn note_user_waits(&self, now: Instant) {
-        let (mut waiting, tasks): (Vec<String>, Vec<(String, String)>) = {
+        let (mut waiting, tasks, asking_tabs): (Vec<String>, Vec<(String, String)>, HashSet<String>) = {
             let tabs = self.tabs.lock().unwrap();
             let asking = tabs.values().filter(|t| t.status == Some(AgentStatus::NeedsInput) && t.interrupted).filter_map(|t| t.task.clone()).collect();
-            (asking, tabs.iter().filter_map(|(id, t)| Some((id.clone(), t.task.clone()?))).collect())
+            // Open questions wait on the user only on a tab that asks: one whose session exited keeps
+            // an invisible questionnaire, and a task whose limit never runs.
+            let asking_tabs: HashSet<String> = tabs.iter().filter(|(_, t)| t.asks()).map(|(id, _)| id.clone()).collect();
+            (asking, tabs.iter().filter(|(id, _)| asking_tabs.contains(*id)).filter_map(|(id, t)| Some((id.clone(), t.task.clone()?))).collect(), asking_tabs)
         };
         // Open questions wait on the user however the session's hooks report it.
         {
             let questions = self.questions.lock().unwrap();
             waiting.extend(tasks.into_iter().filter(|(tab, _)| questions.open_on(tab).is_some()).map(|(_, task)| task));
-            waiting.extend(questions.waiting_tasks().map(str::to_owned));
+            waiting.extend(questions.waiting_tasks(|tab| asking_tabs.contains(tab)).map(str::to_owned));
         }
         self.delegates.note_user_waits(&waiting, now);
     }
@@ -14031,7 +14034,7 @@ Have another model review a risky change before it goes ahead.";
         m.task_cancel(Some(captain), None, &task, "no longer needed").unwrap();
         assert_eq!(m.delegates.get(&task).map(|t| t.state), Some(crate::delegate::WorkState::Cancelled));
         assert_eq!(m.view(&child).unwrap().questions, None, "the tab has no open questions");
-        assert!(m.questions.lock().unwrap().open_on(&child).is_none() && m.questions.lock().unwrap().waiting_tasks().next().is_none());
+        assert!(m.questions.lock().unwrap().open_on(&child).is_none() && m.questions.lock().unwrap().waiting_tasks(|_| true).next().is_none());
         assert_eq!(status(), Ok(json!("cancelled")), "the call that waits answers cancelled");
         let asked = m.questions.lock().unwrap().get(&id).cloned().unwrap();
         assert!(asked.notified, "no notice follows");
@@ -14241,12 +14244,12 @@ Have another model review a risky change before it goes ahead.";
         m.call(Call::Delegate { origin, request: Box::new(request), repo: Some("https://github.com/acme/app.git".into()), token: None }).unwrap();
         let task = m.delegates.for_origin(&crate::delegate::Origin::key("m-book", "tab-1"), "t1").unwrap();
         let id = m.project_tool("", branch_questions(Some(&task))).unwrap();
-        assert!(m.questions.lock().unwrap().waiting_tasks().any(|t| t == task), "the worker here waits on the user");
+        assert!(m.questions.lock().unwrap().waiting_tasks(|_| true).any(|t| t == task), "the worker here waits on the user");
 
         let body = m.call(Call::RemoteTask { origin_machine: "m-book".into(), tab: "tab-1".into(), task: "t1".into(), cancel: Some("no longer needed".into()) }).unwrap();
         assert_eq!(body["workState"], "cancelled");
         let questions = m.questions.lock().unwrap();
-        assert!(questions.waiting_tasks().next().is_none(), "nothing waits on the user any more");
+        assert!(questions.waiting_tasks(|_| true).next().is_none(), "nothing waits on the user any more");
         assert_eq!(questions.get(&id).map(|asked| (asked.outcome.clone(), asked.notified)), Some((Some(crate::questions::Outcome::Cancelled), true)), "closed, and no notice follows");
         drop(questions);
         assert_eq!(question_result(&m, &id), cancelled(&id, "The machine that sent this worker cancelled its task."));
@@ -14346,6 +14349,34 @@ Have another model review a risky change before it goes ahead.";
         assert!(!m.tab(&tab, |t| t.asks()).unwrap(), "a task that is not working does not make it ask");
         m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
         assert!(!m.tab(&tab, |t| t.asks()).unwrap(), "nor does a finished one");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn only_a_tab_that_asks_pauses_its_tasks_time_limit() {
+        let m = machine();
+        let parent = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        let task = headless_task(&m, crate::delegate::Parent::Tab(parent));
+        // A worker tab whose process exited, with a questionnaire its view no longer shows.
+        let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, Some("s-dead".into()));
+        m.tab(&tab, |t| (t.task, t.status) = (Some(task.clone()), Some(AgentStatus::Done))).unwrap();
+        m.questions.lock().unwrap().open(&tab, Some("s-dead".into()), Some(task.clone()), None, vec![crate::questions::Question { header: None, question: "Base on main?".into(), changes: "the PR target".into(), options: vec![], multi_select: false }], vec![], 1).unwrap();
+        assert_eq!(m.view(&tab).unwrap().questions, None, "the view does not show it");
+        let run = || m.delegates.get(&task).unwrap().run;
+        let dead = Instant::now();
+        m.note_user_waits(dead);
+        assert_eq!(run().user_wait, None, "a tab whose process exited does not pause the limit");
+
+        // A live one does, and the clock runs again once it is dead.
+        m.tab(&tab, |t| t.asleep = true).unwrap();
+        assert!(m.view(&tab).unwrap().questions.is_some());
+        let live = dead + Duration::from_secs(5);
+        m.note_user_waits(live);
+        assert_eq!(run().user_wait, Some(live), "a live one pauses it");
+        m.tab(&tab, |t| t.asleep = false).unwrap();
+        let again = live + Duration::from_secs(60);
+        m.note_user_waits(again);
+        assert_eq!((run().user_wait, run().paused), (None, again - live), "the clock runs again");
     }
 
     #[test]
