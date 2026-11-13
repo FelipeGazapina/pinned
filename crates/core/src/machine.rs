@@ -14072,6 +14072,24 @@ Have another model review a risky change before it goes ahead.";
     }
 
     #[test]
+    fn a_stopped_tab_does_not_ask() {
+        let m = machine();
+        let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, Some("s-stopped".into()));
+        m.tab(&tab, |t| (t.session, t.status, t.stopped) = (None, None, Some("killed".into()))).unwrap();
+        assert!(!m.tab(&tab, |t| t.asks()).unwrap(), "no session, no task: it does not ask");
+        let id = m.questions.lock().unwrap().open(&tab, Some("s-stopped".into()), None, None, vec![crate::questions::Question { header: None, question: "Base on main?".into(), changes: "the PR target".into(), options: vec![], multi_select: false }], vec![], 1).unwrap();
+        let view = m.view(&tab).unwrap();
+        assert_eq!((view.running, view.status, view.stopped.as_deref(), view.questions), (false, None, Some("killed"), None), "it reads stopped, not needs-input");
+        assert_eq!(global::waiting_kind(&view), None, "waiting() does not list it");
+        assert!(m.questions.lock().unwrap().get(&id).is_some_and(|asked| asked.is_open()), "its questions stay open for the tab that resumes the session");
+
+        m.tab(&tab, |t| t.task = Some("task-1".into())).unwrap();
+        assert!(!m.tab(&tab, |t| t.asks()).unwrap(), "a task that is not working does not make it ask");
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
+        assert!(!m.tab(&tab, |t| t.asks()).unwrap(), "nor does a finished one");
+    }
+
+    #[test]
     #[cfg(unix)]
     fn a_dead_tab_with_open_questions_does_not_read_as_needs_input() {
         let m = machine();
