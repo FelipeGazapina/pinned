@@ -3,7 +3,7 @@ use pinned_core::account::{self, Credentials, DictationEngine, DictationFeedback
 use pinned_core::accounts::Provider;
 use pinned_core::agent::{self, Role, Stage, Subject};
 use pinned_core::delegate::BOX_OFFLINE;
-use pinned_core::connectors::{BoxSize, BoxStep, Delivery, Run, RunsOn, Work};
+use pinned_core::connectors::{BoxSize, BoxStep, Delivery, Run, RunsOn, TriggerInput, Work};
 use pinned_core::convex::client::Replay;
 use pinned_core::global_orchestrator::{CaptainReport, RelayTo};
 use pinned_core::link::{self, Link};
@@ -2399,6 +2399,7 @@ fn a_box_run_boots_its_own_node_and_the_box_goes_when_its_tab_closes() {
     project.truncate(40 - tail.len());
     assert_eq!(created[0].name, format!("{}{tail}", project.trim_matches('-')));
     assert_eq!((created[0].size, created[0].init_command.as_str()), (BoxSize::Small, "sh /workspace/home/.pinned/start.sh || true"));
+    assert!(!created[0].keep_alive, "a temporary box is a standard box: Upstash pauses it when idle and bills its CPU time");
     ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
     let machine = ana.box_machine();
     assert_eq!(hub.boxes.file(&format!("{BOX_DIR}/box.env")), Some(format!("CLAUDE_CODE_OAUTH_TOKEN='{CLAUDE_TOKEN}'\nPINNED_BOX=1\n")), "no GitHub token without GitHub");
@@ -2692,9 +2693,34 @@ fn a_fixed_workflow_permission_reuses_one_box_across_two_runs() {
     ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
     assert_eq!(open(ana.box_run(issue("uuid-2"))), Ok(()));
     assert_eq!(created(&hub), 1, "the second run uses the box the first run opened");
+    assert!(hub.boxes.state.lock().unwrap().created[0].keep_alive, "the fixed box keeps running while idle, so the runs after the first still find its node");
     // The reaper never ends the fixed box while Upstash lists it, so its node must not leave on refusals.
     let env = hub.boxes.file(&format!("{BOX_DIR}/box.env")).expect("the boot wrote no box.env");
     assert!(!env.contains("PINNED_BOX"), "{env}");
+}
+
+/// Upstash pauses an idle standard box (after 6 h on a paid plan, 1 h on the free plan) and its node stops with it.
+/// The run's own session is the box's only holder, so no idle or offline bound ends the box before its max life.
+#[test]
+fn a_workflow_run_waiting_on_a_box_whose_node_stopped_is_woken_once_the_box_ends() {
+    let hub = TestHub::start_with_boxes("box_paused", Signup::Open, Policy { max_life: Duration::from_secs(6), ..fast() });
+    let mut ana = BoxAccount::new(&hub);
+    let account = hub.runtime.block_on(hub.hub().account(ana.id)).unwrap();
+    let connectors = hub.runtime.block_on(hub.hub().connectors(&account)).unwrap();
+    let trigger = TriggerInput::Issue { id: "uuid-1".into(), identifier: "ENG-7".into(), title: "Fix login".into(), description: None, url: "https://linear.app/acme/issue/ENG-7".into() };
+    connectors.begin(ana.connector.clone(), issue("uuid-1"), trigger, "2026-11-13T12:00:00Z").unwrap();
+    let id = ana.id;
+    let open = |work| hub.hub().open_placed(id, work);
+    hub.runtime.block_on(connectors.drive(&open)).unwrap();
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    assert!(connectors.holds_box(&ana.connector, &issue("uuid-1")), "the run waits on its session in the box");
+
+    let nodes: Vec<_> = hub.boxes.state.lock().unwrap().boxes.values_mut().filter_map(|b| b.node.take()).collect();
+    drop(nodes);
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", false)]);
+    wait_for("the box to be deleted at its max life", || hub.boxes.live().is_empty());
+    wait_for("the run to be woken, not left waiting on a box that is gone", || !connectors.holds_box(&ana.connector, &issue("uuid-1")));
+    wait_for("the row to go", || ana.rows(&hub) == 0);
 }
 
 #[test]
@@ -5236,6 +5262,7 @@ fn a_box_worker_signs_in_with_the_named_token_nests_under_its_caller_and_goes_wh
     wait_for("the worker thread running on the box", || box_tabs(&hub.boxes).iter().any(|t| t.role == Some(Role::Worker) && t.running));
     assert_eq!(hub.boxes.file(&format!("{BOX_DIR}/box.env")), Some("CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-bloomtoken'\nPINNED_BOX=1\n".into()), "bloom's token, and no GitHub token without GitHub");
     assert_eq!(hub.boxes.state.lock().unwrap().created[0].size, BoxSize::Small);
+    assert!(!hub.boxes.state.lock().unwrap().created[0].keep_alive, "a worker's box is temporary: it is not kept running while idle");
     let child = box_tabs(&hub.boxes).into_iter().find(|t| t.role == Some(Role::Worker)).unwrap();
     assert_eq!(
         (child.spawned_by.as_deref(), child.spawned_on.as_deref(), child.title.as_deref(), child.running),
