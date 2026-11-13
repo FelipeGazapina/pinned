@@ -8229,7 +8229,7 @@ pub(crate) mod tests {
         assert_eq!(
             *heard.lock().unwrap(),
             [json!({ "kind": "tabs", "tabs": [{
-                "id": tab, "cwd": "/repo", "account": "claude", "program": "agent", "bypass": false, "running": false, "status": null,
+                "id": tab, "cwd": "/repo", "account": "claude", "program": "agent", "bypass": false, "running": false, "alive": false, "status": null,
                 "title": null, "message": null, "resume_at": null, "connector": null, "opened": 1,
             }] })]
         );
@@ -8304,7 +8304,7 @@ pub(crate) mod tests {
         assert_eq!(
             m.call(Call::Tabs),
             Ok(json!([{
-                "id": id, "cwd": "/repo", "account": "claude", "program": "agent", "bypass": true, "running": false, "status": null,
+                "id": id, "cwd": "/repo", "account": "claude", "program": "agent", "bypass": true, "running": false, "alive": false, "status": null,
                 "title": null, "message": null, "resume_at": null, "connector": null, "opened": 1,
             }]))
         );
