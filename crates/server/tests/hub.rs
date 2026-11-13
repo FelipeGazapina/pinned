@@ -5984,6 +5984,14 @@ fn an_agent_holding_what_its_machine_keeps_readable_cannot_approve_or_run_a_conf
 
 const BIN: &str = env!("CARGO_BIN_EXE_pinned-server");
 
+/// A node or login started by a test must never reach the real app's socket, tab or account.
+fn without_app_env(command: &mut std::process::Command) -> &mut std::process::Command {
+    for name in ["PINNED_SOCK", "PINNED_TAB", "PINNED_PROJECT", "PINNED_ROLE", "PINNED_ACCOUNT", "PINNED_TUTORIAL_HELPER"] {
+        command.env_remove(name);
+    }
+    command
+}
+
 #[test]
 fn a_node_keeps_only_its_machine_token_and_ends_a_login_an_older_pinned_kept() {
     let hub = TestHub::start("node_login");
@@ -5992,7 +6000,10 @@ fn a_node_keeps_only_its_machine_token_and_ends_a_login_an_older_pinned_kept() {
     let mut app = Client::app(&url, &ana_token);
     let dir = temp("node-login");
     let config = dir.to_str().unwrap();
-    let login = std::process::Command::new(BIN).args(["login", &url, "ana@acme.dev", "--name", "ana-mini", "--config-dir", config]).env("PINNED_PASSWORD", "correct horse").output().unwrap();
+    let login = without_app_env(std::process::Command::new(BIN).args(["login", &url, "ana@acme.dev", "--name", "ana-mini", "--config-dir", config]))
+        .env("PINNED_PASSWORD", "correct horse")
+        .output()
+        .unwrap();
     assert!(login.status.success(), "{}", String::from_utf8_lossy(&login.stderr));
     let creds = Credentials::load(&dir).unwrap();
     let machine_token = creds.machine_token.clone();
@@ -6005,8 +6016,7 @@ fn a_node_keeps_only_its_machine_token_and_ends_a_login_an_older_pinned_kept() {
     let shell = dir.join("shell");
     std::fs::write(&shell, "#!/bin/sh\nprintf '\\n__PINNED_PATH__/usr/bin:/bin__PINNED_PATH__\\n'\n").unwrap();
     std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
-    let node = std::process::Command::new(BIN)
-        .args(["node", "--config-dir", config])
+    let node = without_app_env(std::process::Command::new(BIN).args(["node", "--config-dir", config]))
         .env("HOME", &dir)
         .env("SHELL", &shell)
         .stdin(std::process::Stdio::null())
@@ -6021,9 +6031,16 @@ fn a_node_keeps_only_its_machine_token_and_ends_a_login_an_older_pinned_kept() {
         wait_for("the hub to end it", || Client::connect(&url, &older).signed_in().is_none());
         app.wait_machines(&[("ana-mini", true)]);
     }));
-    let _ = std::process::Command::new("kill").args(["-KILL", &format!("-{pid}")]).output();
+    // `/bin/kill -KILL -<pid>` exits 0 and kills nothing on procps-ng 4.0.2, so signal the group directly.
+    unsafe {
+        libc::kill(-(pid as i32), libc::SIGKILL);
+    }
     let mut node = node;
-    let _ = node.wait();
+    let start = Instant::now();
+    while node.try_wait().unwrap().is_none() {
+        assert!(start.elapsed() < Duration::from_secs(10), "the node (pid {pid}) was still running 10 s after its process group got SIGKILL");
+        std::thread::sleep(Duration::from_millis(50));
+    }
     if let Err(panic) = ended {
         eprintln!("{}", std::fs::read_to_string(dir.join("stderr")).unwrap_or_default());
         std::panic::resume_unwind(panic);

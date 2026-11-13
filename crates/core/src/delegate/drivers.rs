@@ -747,9 +747,7 @@ pub fn spawn(
 
 pub fn kill(pid: u32) {
     #[cfg(unix)]
-    unsafe {
-        libc::kill(-(pid as i32), libc::SIGKILL);
-    }
+    send_kill(-i64::from(pid));
     #[cfg(not(unix))]
     {
         let _ = crate::process::command("taskkill")
@@ -819,12 +817,34 @@ pub fn kill_seen(seen: &[Process]) {
     let _ = seen;
 }
 
+/// The one place that decides what a SIGKILL may name. A positive target is a pid, a negative one is a process group.
+/// `kill(0)` is the caller's own group and `kill(-1)` is every process the user owns, so 0, 1, -1, `i32::MIN` and anything
+/// that does not fit an `i32` (a `u32` pid above `i32::MAX` wraps negative) are refused, as are the caller's own pid and group.
 #[cfg(unix)]
-fn signal(targets: &[i32]) {
-    for &target in targets {
-        unsafe {
+fn may_signal(target: i64, own_pid: i32, own_pgid: i32) -> bool {
+    let Ok(target) = i32::try_from(target) else { return false };
+    if target == i32::MIN || target.abs() <= 1 {
+        return false;
+    }
+    target.abs() != own_pid && target != -own_pgid
+}
+
+/// Every SIGKILL in the delegate code goes through here.
+#[cfg(unix)]
+pub(super) fn send_kill(target: i64) {
+    let (own_pid, own_pgid) = unsafe { (libc::getpid(), libc::getpgrp()) };
+    match i32::try_from(target) {
+        Ok(target) if may_signal(i64::from(target), own_pid, own_pgid) => unsafe {
             libc::kill(target, libc::SIGKILL);
-        }
+        },
+        _ => eprintln!("pinned: refused to SIGKILL target {target}: it is pid 0 or 1, out of range, or this process or its group"),
+    }
+}
+
+#[cfg(unix)]
+pub(super) fn signal(targets: &[i32]) {
+    for &target in targets {
+        send_kill(i64::from(target));
     }
 }
 
@@ -927,6 +947,35 @@ mod tests {
         true
     }
 
+    // Only the decision is tested. Never call the real kill with 0, 1, -1 or this process's own group here.
+    #[test]
+    #[cfg(unix)]
+    fn a_kill_never_names_pid_0_1_every_process_or_the_caller() {
+        let (own_pid, own_pgid) = (4242, 4200);
+        let may = |target: i64| super::may_signal(target, own_pid, own_pgid);
+        let refused = [
+            0,
+            1,
+            -1,
+            i64::from(i32::MIN),
+            i64::from(u32::MAX),
+            i64::from(i32::MAX) + 1,
+            -i64::from(u32::MAX),
+            i64::from(i32::MIN) - 1,
+            i64::from(own_pid),
+            -i64::from(own_pid),
+            -i64::from(own_pgid),
+        ];
+        assert_eq!(refused.iter().copied().filter(|target| may(*target)).collect::<Vec<_>>(), Vec::<i64>::new(), "refused targets that were allowed");
+        let allowed = [2, 4300, -2, -4300, i64::from(i32::MAX), -i64::from(i32::MAX), i64::from(own_pgid)];
+        assert_eq!(allowed.iter().copied().filter(|target| !may(*target)).collect::<Vec<_>>(), Vec::<i64>::new(), "other pids and groups were refused");
+        let real = unsafe { (i64::from(libc::getpid()), i64::from(libc::getpgrp())) };
+        assert!(
+            !super::may_signal(real.0, real.0 as i32, real.1 as i32) && !super::may_signal(-real.1, real.0 as i32, real.1 as i32),
+            "this test process and its own group are refused"
+        );
+    }
+
     #[test]
     #[cfg(unix)]
     fn a_recorded_pid_is_killed_only_while_it_names_the_same_process() {
@@ -968,10 +1017,7 @@ mod tests {
         let second = super::seen_under(root, &first);
         super::kill_seen(&second);
         let killed = stopped(shell);
-        unsafe {
-            libc::kill(-(root as i32), libc::SIGKILL);
-            libc::kill(shell, libc::SIGKILL);
-        }
+        super::signal(&[-(root as i32), shell]);
         let _ = agent.wait();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!((reparented, killed), (true, true), "(the shell left the agent's tree, kill_seen stopped it)");
