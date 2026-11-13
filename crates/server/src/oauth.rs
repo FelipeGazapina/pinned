@@ -308,9 +308,10 @@ pub async fn token(State(server): State<Arc<Server>>, ConnectInfo(peer): Connect
     answer
 }
 
-/// The keys a token request counts against.
+/// The keys a token request counts against: its address's, and the hub's, held past the limiter's cap
+/// like the other `hub:` keys.
 pub(crate) fn token_limit(address: &str) -> Vec<(String, usize)> {
-    vec![(format!("agent-token:{address}"), TOKEN_FAILURES)]
+    vec![(format!("agent-token:{address}"), TOKEN_FAILURES), ("hub:agent-token".to_owned(), HUB_TOKEN_FAILURES)]
 }
 
 async fn exchange(hub: &Hub, params: &HashMap<String, String>) -> Response {
