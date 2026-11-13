@@ -8578,8 +8578,9 @@ mod tests {
         fn an_import_keeps_the_connections_and_their_keys() {
             let (connectors, storage) = hub();
             connect(&connectors, KEY, &[SITE]).unwrap();
-            let imported = connectors.import(json!({ "linear": null, "connectors": [] }), Keys::default()).unwrap();
-            assert!(imported);
+            // A connected deployment makes the account not empty, so the import leaves it alone.
+            let imported = connectors.import(json!({ "linear": null, "connectors": [], "convex": [] }), Keys::default()).unwrap();
+            assert!(!imported);
             assert_eq!(repos(&connectors), [("quick-lemur-789".to_owned(), vec![SITE.to_owned()])]);
             assert_eq!(storage.keys.lock().unwrap().get("convex-key-quick-lemur-789").map(String::as_str), Some(KEY));
         }
