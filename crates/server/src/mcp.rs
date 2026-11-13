@@ -437,7 +437,7 @@ fn title_of(args: &Value, task: &str) -> String {
 
 /// Text typed into a session says who sent it, so the session and the user can tell it from the user's own.
 fn from_agent(name: &str, text: &str) -> String {
-    format!("External agent \"{name}\" via MCP:\n\n{text}")
+    format!("External agent \"{name}\" via MCP:\n\n{}", pinned_core::pinned_lines::guard(text))
 }
 
 fn started(session: Uuid, project: &AgentProject) -> Value {

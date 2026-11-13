@@ -1,6 +1,7 @@
 use crate::accounts::{self, Account, Accounts, Auth, Provider};
 use crate::agent::{role_env, role_of, session_of, AgentEvent, AgentStatus, LimitWindow, Message, ProjectTool, Role, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV, TASK_ENV};
 use crate::stats::{ThreadStats, Tally};
+use crate::pinned_lines;
 use crate::wire::{CutBySleep, Call, HubCall, MachineEvent, Program, ProjectView, RunSpec, TabId, TabView, ThreadMatch, ThreadPage, UpdateStatus, EXE_PLACEHOLDER};
 use crate::global_orchestrator::{self as global, BusyPolicy, CaptainReport, Handoff, Progress};
 use crate::taste::{self, TasteField, TastePatch, TasteScope, Tastes};
@@ -2965,7 +2966,7 @@ impl Machine {
         let tab = self.open_orchestrator(path)?;
         let project = canonical(path);
         let sender = if sender.trim().is_empty() { settings.name } else { global::Settings { name: sender.to_owned(), ..global::Settings::default() }.cleaned().name };
-        let handoff = self.hand_to(&tab, &format!("[{sender}] {text}"), request_id, busy.unwrap_or(settings.busy), &sent)?;
+        let handoff = self.hand_to(&tab, &format!("[{sender}] {}", pinned_lines::guard(text)), request_id, busy.unwrap_or(settings.busy), &sent)?;
         let progress = match handoff {
             Handoff::Busy { .. } => return Ok(handoff),
             Handoff::Queued { .. } => Progress::Queued,
@@ -3883,7 +3884,7 @@ impl Machine {
         }
         let title = self.tab(worker, |t| t.title.clone()).ok().flatten().unwrap_or_else(|| "untitled".into());
         let what = match event.status {
-            AgentStatus::Done => format!("finished. Its last message:\n\n{}", truncate(&self.reply_of(worker, event).unwrap_or_else(|| "(none)".into()), REPORT_CHARS, "the whole message is in the worker's thread")),
+            AgentStatus::Done => format!("finished. Its last message:\n\n{}", pinned_lines::guard(&truncate(&self.reply_of(worker, event).unwrap_or_else(|| "(none)".into()), REPORT_CHARS, "the whole message is in the worker's thread"))),
             // Claude says it waits for input a while after every finished turn too.
             AgentStatus::NeedsInput if before == Some(AgentStatus::Done) => return,
             AgentStatus::NeedsInput => format!("needs input: {}", event.message.as_deref().unwrap_or("it is waiting")),

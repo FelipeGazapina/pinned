@@ -314,7 +314,7 @@ impl CaptainReport {
         let clean = |text: &str| text.chars().map(|c| if matches!(c, '(' | ')' | '[' | ']' | ':') || c.is_control() { ' ' } else { c }).collect::<String>().split_whitespace().collect::<Vec<_>>().join(" ");
         let id = |text: &str| Some(text.trim()).filter(|t| !t.is_empty() && !t.contains(char::is_whitespace) && !t.contains(']')).unwrap_or("-").to_owned();
         let project = Some(clean(&self.project)).filter(|p| !p.is_empty()).unwrap_or_else(|| "?".into());
-        format!("[pinned] Capitão {project} ({}) [{} {}]: {}", clean(&self.machine_name), id(&self.machine), id(&self.tab), self.text)
+        format!("[pinned] Capitão {project} ({}) [{} {}]: {}", clean(&self.machine_name), id(&self.machine), id(&self.tab), crate::pinned_lines::guard(&self.text))
     }
 }
 
