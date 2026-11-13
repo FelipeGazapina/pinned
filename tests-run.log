@@ -90,3 +90,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:05:09Z #38 other_workflows_never_run_on_a_box_but_its_thread_reaches_it ok / avail=15074M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:05:10Z #39 a_failed_boot_cleans_up_and_cools_down START / avail=15074M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:05:13Z #39 a_failed_boot_cleans_up_and_cools_down ok / avail=15074M /workspace avail=19374M node_stat=Ssl node_tcp=1
+2026-11-13T04:05:14Z #40 a_hub_restarted_mid_boot_finishes_the_run_with_one_box START / avail=15074M /workspace avail=19374M node_stat=Ssl
