@@ -113,3 +113,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:05:59Z #50 a_denied_ask_opens_nothing START / avail=15074M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:06:02Z #50 a_denied_ask_opens_nothing ok / avail=15074M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:06:03Z #51 a_fixed_box_stays_after_its_session_ends_so_the_next_run_reuses_it START / avail=15074M /workspace avail=19374M node_stat=Ssl
+2026-11-13T04:06:07Z #51 a_fixed_box_stays_after_its_session_ends_so_the_next_run_reuses_it ok / avail=15074M /workspace avail=19374M node_stat=Ssl node_tcp=1
