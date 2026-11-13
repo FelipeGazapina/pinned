@@ -2192,6 +2192,64 @@ fn rotating_the_edge_header_does_not_pass_the_hub_wide_agent_token_ceiling() {
 }
 
 #[test]
+fn the_hub_wide_agent_token_ceiling_refuses_only_callers_that_proved_nothing() {
+    let hub = TestHub::start_behind_proxy("hubtoken_known", Signup::Open, behind(pinned_server::http::TrustedProxy::Railway, None));
+    let url = hub.url.clone();
+    let http = agent_http();
+    let (token, _) = account::signup(&url, "owner@example.invalid", "correct horse").unwrap();
+    let mut client = signed_in_client(&url, &token);
+    let (machine, machine_token) = account::register_machine(&url, &token, "box", "linux").unwrap();
+    let _raw = RawMachine::start(&url, &machine_token, |call| match call["cmd"].as_str() {
+        Some("list_projects") => RawReply::Ok(json!([{ "path": "/w/app", "name": "app", "account": "claude" }])),
+        _ => RawReply::Ok(Value::Null),
+    });
+    client.wait_machines(&[("box", true)]);
+    let client_id = register_agent(&url, &http);
+    let token_from = |address: &str, form: &[(&str, &str)]| {
+        let body = url::form_urlencoded::Serializer::new(String::new()).extend_pairs(form).finish();
+        let response = http.post(format!("{url}/oauth/token")).header("x-real-ip", address).header("content-type", "application/x-www-form-urlencoded").body(body).send().unwrap();
+        let status = response.status().as_u16();
+        (status, response.json::<Value>().unwrap())
+    };
+    let code = |client: &mut Client| {
+        let (verifier, challenge) = pkce();
+        // Without `resource`: this hub's public URL is its listen address, not the one the test reaches.
+        let query = [("response_type", "code"), ("client_id", &client_id), ("redirect_uri", AGENT_REDIRECT), ("code_challenge", &challenge), ("code_challenge_method", "S256"), ("state", "st-1"), ("scope", "sessions")];
+        let started = http.get(with_query(&format!("{url}/oauth/authorize"), &query)).send().unwrap();
+        let location = started.headers()["location"].to_str().unwrap().to_owned();
+        let request = location.strip_prefix("/connect-agent?request=").unwrap_or_else(|| panic!("{location}")).to_owned();
+        let approved = client.hub(json!({ "cmd": "approve_agent", "request": request, "scopes": ["sessions"], "projects": [{ "machine": machine.id, "path": "/w/app" }] })).unwrap();
+        (query_of(approved["redirect"].as_str().unwrap())["code"].clone(), verifier)
+    };
+    let by_code = |address: &str, (code, verifier): (String, String)| {
+        token_from(address, &[("grant_type", "authorization_code"), ("client_id", &client_id), ("code", &code), ("code_verifier", &verifier), ("redirect_uri", AGENT_REDIRECT)])
+    };
+    let refresh = |address: &str, token: &Value| token_from(address, &[("grant_type", "refresh_token"), ("client_id", &client_id), ("refresh_token", token.as_str().unwrap())]);
+    let unknown = |address: &str| token_from(address, &[("grant_type", "refresh_token"), ("client_id", &client_id), ("refresh_token", "not-a-token")]);
+    let refused = (429, json!("too many failed token requests; try again in 15 minutes"));
+
+    let remembered = "192.0.2.10";
+    let (status, first) = by_code(remembered, code(&mut client));
+    assert_eq!(status, 200, "{first}");
+    for n in 0..300 {
+        assert_ne!(unknown(&format!("203.0.{}.{}", n / 250, n % 250)).0, 429, "failure {n} from its own address");
+    }
+    let (status, body) = unknown("198.51.100.1");
+    assert_eq!((status, body["error_description"].clone()), refused, "an unknown address finds the hub's ceiling spent");
+
+    let (status, second) = by_code(remembered, code(&mut client));
+    assert_eq!(status, 200, "a code from the remembered address: {second}");
+    let (status, body) = refresh(remembered, &second["refresh_token"]);
+    assert_eq!(status, 200, "a refresh from the remembered address: {body}");
+    let (status, body) = refresh("198.51.100.7", &first["refresh_token"]);
+    assert_eq!(status, 200, "a live refresh token never used, from a new address: {body}");
+    let (status, body) = refresh("198.51.100.8", &first["refresh_token"]);
+    assert_eq!((status, body["error_description"].clone()), refused, "a used refresh token proves nothing");
+    let (status, body) = unknown("198.51.100.2");
+    assert_eq!((status, body["error_description"].clone()), refused, "one more unknown address is still refused");
+}
+
+#[test]
 fn at_its_cap_a_hub_counts_a_signup_against_its_address_before_it_counts_the_accounts() {
     let hub = TestHub::start_behind_proxy("caporder", Signup::Open, behind(pinned_server::http::TrustedProxy::Off, Some(0)));
     for n in 0..5 {

@@ -15,7 +15,7 @@ use pinned_core::surface::{self, Side};
 use pinned_core::sync;
 use pinned_core::wire::{AccountView, Call, ClientFrame, HubCall, MachineEvent, MachineFrame, MachineView, Reply, ToClient, ToMachine, UpdateStatus};
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -48,7 +48,8 @@ const HUB_SIGNUPS: usize = 50;
 const ATTEMPT_KEYS: usize = 50_000;
 /// The key a full limiter counts new keys against, with `ADDRESS_ATTEMPTS`.
 const OVERFLOW: &str = "overflow:";
-/// Addresses an account signed in from that the limiter remembers at most, and for how long.
+/// Addresses the limiter remembers at most, and for how long, in each of its two sets: emails' sign-in
+/// addresses and accounts' agent addresses.
 const KNOWN_ADDRESSES: usize = 10_000;
 const KNOWN_FOR: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// How often the log names the kind of address the limiter keys on, after the first request of a hub's run.
@@ -436,26 +437,43 @@ impl Server {
         self.attempts.lock().unwrap().attempt(keys, true, Instant::now())
     }
 
+    /// Whether none of `keys` is spent. It counts nothing.
+    pub(crate) fn has_room(&self, keys: &[(String, usize)]) -> bool {
+        !self.attempts.lock().unwrap().spent(keys, Instant::now())
+    }
+
+    /// Whether an agent of any account got a token from `address` within `KNOWN_FOR`.
+    pub(crate) fn known_agent_address(&self, address: &str) -> bool {
+        self.attempts.lock().unwrap().agents.knows_address(address, Instant::now())
+    }
+
+    /// Notes that an agent of `account` got a token from `address`.
+    pub(crate) fn remember_agent_address(&self, account: Uuid, address: String) {
+        self.attempts.lock().unwrap().agents.remember(account.to_string(), address, Instant::now());
+    }
+
     /// Takes back the attempts of a sign in that succeeded, given the keys `attempt` counted.
     pub(crate) fn succeeded(&self, keys: &[(String, usize)]) {
         self.attempts.lock().unwrap().succeeded(keys);
     }
 }
 
-/// Attempts within `ATTEMPT_WINDOW`, per key, and the addresses each email signed in from.
+/// Attempts within `ATTEMPT_WINDOW`, per key, the addresses each email signed in from, and the addresses
+/// each account's agents got a token from.
 struct Limiter {
     keys: HashMap<String, Vec<Instant>>,
     cap: usize,
     /// When the expired keys were last dropped, so a full limiter is not swept on every request.
     swept: Option<Instant>,
-    known: HashMap<String, Instant>,
+    known: Remembered,
+    agents: Remembered,
     /// When a full limiter last said so.
     full_logged: Option<Instant>,
 }
 
 impl Limiter {
     fn new(cap: usize) -> Limiter {
-        Limiter { keys: HashMap::new(), cap, swept: None, known: HashMap::new(), full_logged: None }
+        Limiter { keys: HashMap::new(), cap, swept: None, known: Remembered::default(), agents: Remembered::default(), full_logged: None }
     }
 
     /// A key holds at most its limit of stamps: one at its limit takes no more. `own` keys, the hub-wide
@@ -470,6 +488,7 @@ impl Limiter {
             }
         }
         let spent = |limiter: &Limiter, keys: &[(String, usize)]| keys.iter().any(|(key, limit)| limiter.keys.get(key).is_some_and(|at| at.len() >= *limit));
+        // Nothing is counted until every key has room, so a request one key refuses spends no other.
         if spent(self, keys) {
             return None;
         }
@@ -506,20 +525,9 @@ impl Limiter {
         Some(counted)
     }
 
-    /// Whether `key`, an email and an address, signed in within `KNOWN_FOR`.
-    fn known(&self, key: &str, now: Instant) -> bool {
-        self.known.get(key).is_some_and(|at| now.saturating_duration_since(*at) < KNOWN_FOR)
-    }
-
-    /// Notes a sign in, unless the limiter already holds as many as it keeps: then an address is not
-    /// remembered, and only loses the way past the email's bound.
-    fn remember(&mut self, key: String, now: Instant) {
-        if self.known.len() >= KNOWN_ADDRESSES && !self.known.contains_key(&key) {
-            self.known.retain(|_, at| now.saturating_duration_since(*at) < KNOWN_FOR);
-        }
-        if self.known.len() < KNOWN_ADDRESSES || self.known.contains_key(&key) {
-            self.known.insert(key, now);
-        }
+    /// Whether any of `keys` is at its limit within `ATTEMPT_WINDOW`.
+    fn spent(&self, keys: &[(String, usize)], now: Instant) -> bool {
+        keys.iter().any(|(key, limit)| self.keys.get(key).is_some_and(|at| at.iter().filter(|at| now.saturating_duration_since(**at) < ATTEMPT_WINDOW).count() >= *limit))
     }
 
     fn succeeded(&mut self, keys: &[(String, usize)]) {
@@ -531,15 +539,80 @@ impl Limiter {
     }
 }
 
+/// Addresses each owner proved itself from within `KNOWN_FOR`: an email that signed in, or an account
+/// whose agent got a token. At most `KNOWN_ADDRESSES` pairs.
+#[derive(Default)]
+struct Remembered {
+    by_owner: HashMap<String, HashMap<String, Instant>>,
+    /// The owners of each address, for a lookup by address alone.
+    by_address: HashMap<String, HashSet<String>>,
+    len: usize,
+}
+
+impl Remembered {
+    fn live(at: Instant, now: Instant) -> bool {
+        now.saturating_duration_since(at) < KNOWN_FOR
+    }
+
+    fn knows(&self, owner: &str, address: &str, now: Instant) -> bool {
+        self.by_owner.get(owner).and_then(|addresses| addresses.get(address)).is_some_and(|at| Self::live(*at, now))
+    }
+
+    /// Whether any owner proved itself from `address`.
+    fn knows_address(&self, address: &str, now: Instant) -> bool {
+        self.by_address.get(address).is_some_and(|owners| owners.iter().any(|owner| self.knows(owner, address, now)))
+    }
+
+    /// Notes the pair, or refreshes its time. When it holds as many as it keeps it first drops the expired
+    /// ones; if it is still full the address is not remembered, and only loses the way past the bound.
+    fn remember(&mut self, owner: String, address: String, now: Instant) {
+        if let Some(at) = self.by_owner.get_mut(&owner).and_then(|addresses| addresses.get_mut(&address)) {
+            *at = now;
+            return;
+        }
+        if self.len >= KNOWN_ADDRESSES {
+            let expired: Vec<(String, String)> = self
+                .by_owner
+                .iter()
+                .flat_map(|(owner, addresses)| addresses.iter().filter(|(_, at)| !Self::live(**at, now)).map(|(address, _)| (owner.clone(), address.clone())))
+                .collect();
+            for (owner, address) in expired {
+                self.forget(&owner, &address);
+            }
+        }
+        if self.len < KNOWN_ADDRESSES {
+            self.by_address.entry(address.clone()).or_default().insert(owner.clone());
+            self.by_owner.entry(owner).or_default().insert(address, now);
+            self.len += 1;
+        }
+    }
+
+    fn forget(&mut self, owner: &str, address: &str) {
+        let Some(addresses) = self.by_owner.get_mut(owner) else { return };
+        if addresses.remove(address).is_none() {
+            return;
+        }
+        if addresses.is_empty() {
+            self.by_owner.remove(owner);
+        }
+        if let Some(owners) = self.by_address.get_mut(address) {
+            owners.remove(owner);
+            if owners.is_empty() {
+                self.by_address.remove(address);
+            }
+        }
+        self.len -= 1;
+    }
+}
+
 async fn login(State(server): State<Arc<Server>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, Json(body): Json<SignIn>) -> Answer<Session> {
     let email = email(&body.email)?;
     let address = server.client_address(peer, &headers);
     // Guesses from addresses that never signed in to this email share one bound, so changing address
     // doesn't buy more of them; the owner's own address is held only by its own limit.
-    let known = format!("{email}\n{address}");
     let mut keys = vec![(format!("address:{address}"), ADDRESS_ATTEMPTS)];
     // The owner's own address is never refused for a full limiter: the remembered addresses bound it.
-    let counted = if server.attempts.lock().unwrap().known(&known, Instant::now()) {
+    let counted = if server.attempts.lock().unwrap().known.knows(&email, &address, Instant::now()) {
         server.attempt_own(&keys)
     } else {
         keys.push((format!("email:{email}"), EMAIL_ATTEMPTS));
@@ -553,7 +626,7 @@ async fn login(State(server): State<Arc<Server>>, ConnectInfo(peer): ConnectInfo
     let matches = password_matches(&server, body.password, hash).await;
     let Some(account) = account.filter(|_| matches) else { return Err(Error(StatusCode::UNAUTHORIZED, "wrong email or password".into())) };
     server.succeeded(&keys);
-    server.attempts.lock().unwrap().remember(known, Instant::now());
+    server.attempts.lock().unwrap().known.remember(email, address, Instant::now());
     let token = server.hub.db.create_login(Uuid::parse_str(&account.id).unwrap()).await.map_err(internal)?;
     Ok(Json(Session { token, account }))
 }
@@ -1316,6 +1389,22 @@ mod tests {
         assert!(limiter.attempt(&token_limit("198.51.100.1"), false, now).is_none(), "a new address finds the hub's ceiling spent");
         let later = now + super::ATTEMPT_WINDOW;
         assert!(limiter.attempt(&token_limit("198.51.100.1"), false, later).is_some(), "the ceiling opens again after the window");
+    }
+
+    #[test]
+    fn a_token_request_the_hub_wide_ceiling_refuses_spends_nothing_of_its_address() {
+        use crate::oauth::{token_limit, HUB_TOKEN_FAILURES};
+        let now = std::time::Instant::now();
+        let mut limiter = Limiter::new(super::ATTEMPT_KEYS);
+        for n in 0..HUB_TOKEN_FAILURES {
+            assert!(limiter.attempt(&token_limit(&format!("203.0.{}.{}", n / 250, n % 250)), false, now).is_some(), "failure {n}");
+        }
+        let refused = token_limit("198.51.100.1");
+        limiter.attempt(&refused[..1], false, now).expect("an earlier request from the address, while it was known");
+        let before = limiter.keys[&refused[0].0].clone();
+        assert!(limiter.attempt(&refused, false, now).is_none(), "the hub's ceiling is spent");
+        assert_eq!(limiter.keys[&refused[0].0], before, "the refused request left its address's key as it was");
+        assert!(!limiter.spent(&refused[..1], now), "the address keeps its own room");
     }
 
     #[test]
