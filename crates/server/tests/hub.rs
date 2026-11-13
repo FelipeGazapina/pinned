@@ -8341,8 +8341,8 @@ fn an_account_saves_lists_edits_and_deletes_its_ideas_and_no_other_account_sees_
 fn a_saved_or_deleted_idea_sends_ideas_changed_to_the_accounts_apps_and_a_settings_push_alone_does_not() {
     let hub = TestHub::start_with("ideas_signal", Signup::Open);
     let url = hub.url.clone();
-    let (ana_token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
-    let (bob_token, _) = account::signup(&url, "bob@acme.dev", "correct horse").unwrap();
+    let (ana_token, _) = account::signup(&url, "ana@example.test", "correct horse").unwrap();
+    let (bob_token, _) = account::signup(&url, "bob@example.test", "correct horse").unwrap();
     // The first app is one that has not locked its login, which may turn Repo insight on; the second is as an app signs in now.
     let mut ana = Client::connect(&url, &ana_token);
     ana.wait("hello", |f| f["type"] == "hello");
@@ -8415,10 +8415,10 @@ fn an_agent_saves_and_lists_ideas_through_act_and_its_role_is_kept() {
 }
 
 #[test]
-fn a_failing_ideas_read_still_answers_get_settings_with_no_ideas() {
+fn get_settings_answers_without_reading_ideas() {
     let hub = TestHub::start_with("ideas_down", Signup::Open);
     let url = hub.url.clone();
-    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let (token, _) = account::signup(&url, "ana@example.test", "correct horse").unwrap();
     let mut ana = Client::app(&url, &token);
     ana.hub(json!({ "cmd": "save_idea", "title": "An iPad app" })).unwrap();
     admin_on(&hub.database, "alter table ideas rename to ideas_away");
