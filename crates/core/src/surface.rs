@@ -368,6 +368,12 @@ pub fn owner_only(side: Side, cmd: &str, locked: bool) -> bool {
     locked && of_cmd(side, cmd).is_some_and(|action| action.class == Confirm)
 }
 
+/// Whether an agent's `act` of `action` waits for the owner's approval instead of running. The
+/// server's `act` decides by this and by nothing else: no unlock state, no `owner_only`.
+pub fn held_for_owner(action: &Action) -> bool {
+    action.class == Confirm
+}
+
 /// Hub actions that start work and that the hub holds to the limits itself: the server's `act`
 /// runs each through its own limits path, and refuses one it has no path for.
 pub const HUB_LIMITS: &[&str] = &["open_box", "run_workflow"];
@@ -1026,6 +1032,26 @@ mod tests {
         let confirm: Vec<&str> = ACTIONS.iter().filter(|a| needs(a.side, a.cmd, true)).map(|a| a.name).collect();
         assert_eq!(confirm.len(), ACTIONS.iter().filter(|a| a.class == Confirm).count() + 1, "every confirm action and the decision: {confirm:?}");
         assert!(include_str!("../../../ui/hub.js").contains(&format!("const LOCKED = \"{LOCKED}\";")), "the app asks for the password on this exact refusal");
+    }
+
+    #[test]
+    fn an_agents_extend_box_waits_for_the_owner_and_the_apps_own_extend_asks_no_password() {
+        let extend = find("extend_box").unwrap();
+        assert!(held_for_owner(extend), "an agent's extend_box is held for the owner's approval, never run at once");
+        assert!(!owner_only(Side::Hub, "extend_box", true), "the app's own Extend button runs on a locked login with no password");
+        assert!(!owner_only(Side::Hub, "extend_box", false));
+    }
+
+    #[test]
+    fn the_extend_box_exception_in_owner_only_never_reaches_an_agents_act() {
+        let extend = find("extend_box").unwrap();
+        for locked in [false, true] {
+            assert!(!owner_only(Side::Hub, "extend_box", locked), "the app's own Extend asks no password, locked: {locked}");
+            assert!(held_for_owner(extend), "an agent's extend_box is held whether the app is locked or not: {locked}");
+        }
+        let act = include_str!("../../server/src/surface.rs");
+        assert!(act.contains("if surface::held_for_owner(admitted.action) {"), "an agent's act holds an action by held_for_owner alone");
+        assert!(!act.contains("owner_only"), "an agent's act never asks owner_only, which only the app's own connection meets");
     }
 
     #[test]
