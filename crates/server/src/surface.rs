@@ -111,6 +111,13 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
         }
     };
     if admitted.action.class == Class::Confirm {
+        let changes = match changes(hub, account, &admitted).await {
+            Ok(changes) => changes,
+            Err(refusal) => {
+                trail.write(AuditOutcome::Refused, &refusal).await?;
+                return Err(refusal);
+            }
+        };
         let asked = Confirmation {
             id: String::new(),
             at: 0,
@@ -125,6 +132,7 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
                 Value::Null => Value::Object(Default::default()),
                 args => args,
             },
+            changes,
             target: (!admitted.on_origin).then(|| admitted.target.clone()),
             request_id: request_id.map(str::to_owned),
             decision: None,
@@ -219,6 +227,53 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
         return Err(format!("{name} starts work only on this session's own machine for now"));
     }
     Ok(Admitted { action, call, target, on_origin })
+}
+
+/// What a confirmation changes, one line each, as its prompt shows it: the session `set_bypass`
+/// restarts, or each field of the global orchestrator's settings that a save changes, read from the
+/// machine it lands on. With that machine offline it is refused: the user approves no change
+/// whose old values the prompt cannot show.
+async fn changes(hub: &Arc<Hub>, account: &Account, admitted: &Admitted) -> Result<Vec<String>, String> {
+    let machine = account.name_of(&admitted.target).unwrap_or_else(|| admitted.target.clone());
+    match &admitted.call {
+        Parsed::Node(Call::SetBypass { tab, on, .. }) => {
+            let view = account.tab(&admitted.target, tab).ok_or_else(|| format!("{machine} runs no session {tab}"))?;
+            let title = view.title.clone().or_else(|| view.prompt_title.clone()).unwrap_or_else(|| tab.clone());
+            let project = pinned_core::history::project_of(std::path::Path::new(&view.cwd));
+            let name = project.file_name().map_or_else(|| project.display().to_string(), |name| name.to_string_lossy().into_owned());
+            let seat = ActorRole::of(&view).label().trim_start_matches("the ");
+            let verb = if *on { "skips its permission prompts" } else { "asks for its permission prompts again" };
+            Ok(vec![
+                format!("Session: \u{201c}{title}\u{201d} ({tab})"),
+                format!("Project: {name} ({})", project.display()),
+                format!("Seat: {seat}"),
+                format!("Machine: {machine}"),
+                format!("It restarts on its own conversation and {verb}."),
+            ])
+        }
+        Parsed::Node(Call::SetGlobalOrchestratorSettings { settings }) => {
+            let old = global_settings(hub, account, &admitted.target).await.map_err(|e| format!("{machine} did not answer with its global orchestrator settings, so the prompt could not show what changes: {e}"))?;
+            let new = old.clone().patched(settings);
+            let mut lines = vec![format!("Machine: {machine}")];
+            match old.changes_to(&new) {
+                fields if fields.is_empty() => lines.push("Nothing changes: every field it names already has that value.".into()),
+                fields => lines.extend(fields),
+            }
+            match (old.host, new.host) {
+                (false, true) => lines.push(format!("This moves Captain reports and the Orchestrator's rights to {machine}.")),
+                (true, false) => lines.push(format!("This takes Captain reports and the Orchestrator's rights off {machine}.")),
+                _ => {}
+            }
+            Ok(lines)
+        }
+        _ => Ok(Vec::new()),
+    }
+}
+
+/// The global orchestrator settings `machine` has now.
+async fn global_settings(hub: &Hub, account: &Account, machine: &str) -> Result<pinned_core::global_orchestrator::Settings, String> {
+    let settings = hub.call_machine(account, machine, Call::GlobalOrchestratorSettings, ACT_WAIT).await.map_err(String::from)?;
+    serde_json::from_value(settings).map_err(|e| e.to_string())
 }
 
 /// Runs the call as the app runs it: a `HubCall` through the hub's own path, a `Call` on its
@@ -372,6 +427,14 @@ async fn rerun(hub: &Arc<Hub>, account: &Arc<Account>, action: &'static Action, 
     let target = match asked.target.as_deref() {
         Some(named) => crate::remote::resolve(hub, account, named).await?.0,
         None => asked.machine.clone(),
+    };
+    let call = match call {
+        // A machine older than `Patch` replaces every field, so it gets them all, the asked ones changed.
+        Parsed::Node(Call::SetGlobalOrchestratorSettings { settings }) => {
+            let now = global_settings(hub, account, &target).await?;
+            Parsed::Node(Call::SetGlobalOrchestratorSettings { settings: now.patched(&settings).into() })
+        }
+        call => call,
     };
     let on_origin = target == asked.machine;
     let actor = Actor::Agent { role: asked.role, machine: asked.machine.clone(), tab: asked.tab.clone(), session_title: asked.title.clone() };

@@ -741,6 +741,10 @@ pub struct Confirmation {
     pub about: String,
     /// The exact arguments it runs with.
     pub args: Value,
+    /// What it changes, one line each, as `name: old → new` or the session it touches, so the
+    /// prompt shows it. Empty for an action whose arguments say it all.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<String>,
     /// The machine `act` named for an action on a machine, an id or a name; the asking session's own
     /// machine when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1539,7 +1543,7 @@ mod tests {
         assert_eq!(serde_json::to_value(ActAnswer::Done { result: json!([1]) }).unwrap(), json!({ "outcome": "done", "result": [1] }));
         assert_eq!(serde_json::to_value(ActAnswer::Pending { id: "c1".into(), next: PENDING_NEXT.into() }).unwrap()["outcome"], "pending");
         assert_eq!(serde_json::to_value(ActAnswer::Repeat { earlier: AuditOutcome::Done, at: 5 }).unwrap(), json!({ "outcome": "repeat", "earlier": "done", "at": 5 }));
-        let confirmation = Confirmation { id: "c1".into(), at: 1, machine: "m1".into(), machine_name: "MacBook".into(), tab: "tab-1".into(), title: "Clean up".into(), role: ActorRole::Worker, action: "remove_machine".into(), about: String::new(), args: json!({ "id": "m2" }), target: None, request_id: None, decision: Some(Decision::Approved), decided_at: Some(2), outcome: Some("done".into()) };
+        let confirmation = Confirmation { id: "c1".into(), at: 1, machine: "m1".into(), machine_name: "MacBook".into(), tab: "tab-1".into(), title: "Clean up".into(), role: ActorRole::Worker, action: "remove_machine".into(), about: String::new(), args: json!({ "id": "m2" }), changes: Vec::new(), target: None, request_id: None, decision: Some(Decision::Approved), decided_at: Some(2), outcome: Some("done".into()) };
         assert_eq!(notice_text(&confirmation, &Value::Null), "[pinned] The user approved your remove_machine request (c1): done.");
         let denied = Confirmation { decision: Some(Decision::Denied), outcome: None, ..confirmation };
         assert_eq!(notice_text(&denied, &Value::Null), "[pinned] The user denied your remove_machine request (c1). It did not run.");
