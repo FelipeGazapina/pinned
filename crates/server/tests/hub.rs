@@ -8880,6 +8880,47 @@ fn a_removed_machines_held_ends_stay_listed_unclaimed_and_the_machine_is_gone() 
 }
 
 #[test]
+fn held_ends_older_than_30_days_expire_for_every_account_at_most_a_bound_per_run() {
+    let hub = TestHub::start("held_expiry_all");
+    let (_, ana, _ana_client) = signed_in(&hub.url, "ana@acme.dev");
+    let (_, bob, _bob_client) = signed_in(&hub.url, "bob@acme.dev");
+    let row = |account: &str, task: &str, days: u32, unclaimed: bool| {
+        let unclaimed = if unclaimed { "now()" } else { "null" };
+        format!("insert into held_ends (account, origin_machine, task, origin_tab, from_machine, report, held_at, unclaimed_at)
+            values ('{account}', gen_random_uuid(), '{task}', 'tab-1', gen_random_uuid(), '{{}}', now() - interval '{days} days', {unclaimed});")
+    };
+    admin_on(&hub.database, &[row(&ana, "ana-waiting-29", 29, false), row(&ana, "ana-waiting-31", 31, false), row(&ana, "ana-unclaimed-29", 29, true), row(&ana, "ana-unclaimed-31", 31, true), row(&bob, "bob-waiting-29", 29, false)].concat());
+    let tasks = || -> Vec<String> {
+        hub.runtime.block_on(async {
+            let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), hub.database), tokio_postgres::NoTls).await.unwrap();
+            tokio::spawn(connection);
+            db.query("select task from held_ends where task not like 'bulk-%' order by task", &[]).await.unwrap().iter().map(|r| r.get(0)).collect()
+        })
+    };
+
+    // A failed run deletes nothing, returns, and the next one waits its hour.
+    admin_on(&hub.database, "create function refuse_expiry() returns trigger language plpgsql as $$ begin raise exception 'disk full'; end $$;
+        create trigger refuse_expiry before delete on held_ends for each row execute function refuse_expiry()");
+    assert_eq!(hub.runtime.block_on(hub.hub().expire_held_ends()), 0, "the failure is logged, not raised");
+    assert_eq!(held_ends(&hub, None), 5);
+    admin_on(&hub.database, "drop trigger refuse_expiry on held_ends");
+    assert_eq!(hub.runtime.block_on(hub.hub().expire_held_ends()), 0, "at most once an hour");
+    assert_eq!(held_ends(&hub, None), 5);
+
+    let expire = || hub.runtime.block_on(hub.hub().db.expire_all_held_ends(pinned_server::db::HELD_EXPIRY_BATCH)).unwrap();
+    assert_eq!(expire(), 2);
+    assert_eq!(tasks(), ["ana-unclaimed-29", "ana-waiting-29", "bob-waiting-29"], "31 days go, waiting or unclaimed; 29 days stay, in any account");
+
+    let bound = pinned_server::db::HELD_EXPIRY_BATCH;
+    admin_on(&hub.database, &format!("insert into held_ends (account, origin_machine, task, origin_tab, from_machine, report, held_at)
+        select '{bob}', gen_random_uuid(), 'bulk-' || i, 'tab-1', gen_random_uuid(), '{{}}', now() - interval '40 days' from generate_series(1, {}) i", bound + 5));
+    assert_eq!(expire(), bound as u64, "one run deletes exactly the bound");
+    assert_eq!(expire(), 5, "the rest go on the next run");
+    assert_eq!(tasks(), ["ana-unclaimed-29", "ana-waiting-29", "bob-waiting-29"]);
+    assert_eq!(held_ends(&hub, None), 3);
+}
+
+#[test]
 fn an_account_saves_lists_edits_and_deletes_its_ideas_and_no_other_account_sees_or_changes_one() {
     let hub = TestHub::start_with("ideas_store", Signup::Open);
     let url = hub.url.clone();

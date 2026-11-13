@@ -135,6 +135,8 @@ create index if not exists ideas_by_account on ideas (account, updated_at desc);
 ";
 /// How long the hub keeps an end that its machine never came back for.
 const HELD_FOR: &str = "interval '30 days'";
+/// The most held ends one hub-wide expiry run deletes.
+pub const HELD_EXPIRY_BATCH: i64 = 1000;
 const LEARNING_SCHEMA: &str = "
 create table if not exists dictation_feedback (id uuid primary key, account uuid not null,
   created_at timestamptz not null default now(), rating text not null, raw text not null, cleaned text not null,
@@ -803,6 +805,22 @@ impl Db {
             .await
             .map_err(err)
             .map(drop)
+    }
+
+    /// Deletes up to `limit` held ends of any account, waiting or unclaimed, whose `held_at` is older
+    /// than `HELD_FOR`, and returns how many. Only `held_ends` rows; the rest go on the next run.
+    pub async fn expire_all_held_ends(&self, limit: i64) -> Result<u64, String> {
+        self.client()
+            .await?
+            .execute(
+                &format!(
+                    "delete from held_ends where ctid in (select ctid from held_ends where held_at <= now() - {HELD_FOR} limit $1)
+                     and held_at <= now() - {HELD_FOR}"
+                ),
+                &[&limit],
+            )
+            .await
+            .map_err(err)
     }
 
     /// Deletes the account's held ends older than `HELD_FOR`, and returns how many.
