@@ -306,16 +306,16 @@ A scheduled run has no one watching. The rule, as the Orchestrator proposes it t
 Two existing lists, and nothing new to invent:
 
 1. **`act` actions of class `Confirm`** (`surface.rs`: `delete_session`, `remove_machine`, `update_self`, `disconnect_*`, …). These already wait for the user's decision in the app, whether or not anyone is watching. No change, except that the confirmation carries the task id, so Needs you can say "from scheduled task Release pinned 0.18.2".
-2. **The never list** (`preauth::never::NeverItem`): `DeleteOutside`, `ForcePush`, `PushToMain`, `Release`, `Deploy`, `Production`, `Secrets`, `Payment`, `WriteOutside`, `SelfGrant`, `NetworkInstall`, `MachineWide`. Release and deploy are shell commands (`gh release create`, `git push origin v*`, `railway up`, `vercel --prod`), not `act` calls, so this list is the only thing that catches them. It already parses Bash lines word by word and leans toward a hit when in doubt.
+2. **The never list** (`preauth::never::NeverItem`): `DeleteOutside`, `ForcePush`, `PushToMain`, `Release`, `Deploy`, `Production`, `Secrets`, `Payment`, `WriteOutside`, `SelfGrant`, `NetworkInstall`, `MachineWide`. Release and deploy are shell commands (`gh release create`, `git push origin v*`, `railway up`, `vercel --prod`), not `act` calls, so this list is the only thing in pinned that catches them (4.5 lists what it misses and the server-side backstops). It already parses Bash lines word by word and leans toward a hit when in doubt.
 
 ### 4.2 The held step
 
-- While a session works on a task run (`PINNED_SCHEDULE=<task>:<due_at>` in its environment, the way `PINNED_TASK` marks a delegated task), its PreToolUse hook (`hooks.rs`; the Orchestrator's `GUARDED` hook today, extended to every session pinned starts for a task) calls `never()` on each Bash, Write and Edit.
+- While a session works on a task run (`PINNED_SCHEDULE=<task>:<due_at>` in its environment, the way `PINNED_TASK` marks a delegated task), its PreToolUse hook (`pinned hook pre-tool` from draft PR #190, on every tool; 4.5 says why a hook, how it fails closed, and what it cannot see) calls `never()` on each tool call: Bash, Write, Edit, Read, WebFetch and MCP.
 - **A hit** that no approval covers: the hook answers `deny` with the reason `held for Felipe: release (gh release create v0.18.2) — pinned asked him; wait for the notice, do not work around it`. The machine creates a `Confirmation` with `held: Held { task, item: NeverItem, command }`, and the run goes to `held`. Felipe gets a push notification and a Needs you row: **Approve** · **Deny**.
 - **Approve** records a one-shot allowance for that exact normalized command in that session and sends the existing `notice` ("approved: run it again now"). The hook lets that one command through once.
 - **Deny** sends "denied: stop and report". After 24 hours with no decision, the run is `failed` ("held step expired"), and the session is told to stop.
 - This is the same "show the normal prompt and record that the ask was held for Felipe" that `never.rs` was written for (DESIGN-preauth-approvals). A task run is its first caller.
-- **The bypass setting does not change this.** A Captain that normally runs with permissions skipped still has its never-list hits held during a task run. The never list applies to the run, not to the session's own permission mode.
+- **The bypass setting does not change this.** A Captain that normally runs with permissions skipped still has its never-list hits held during a task run: Claude Code applies a hook's `deny` before the permission mode (evidence in 4.5). The never list applies to the run, not to the session's own permission mode. What bypass mode does not decide, the hook's presence does: 4.5 covers a session turning hooks off, headless workers that have no hook today, and Codex/Cursor.
 
 ### 4.3 Approving at creation
 
@@ -334,6 +334,152 @@ Two existing lists, and nothing new to invent:
   - a task run may create tasks, but one created inside a task run cannot itself create more (`depth ≤ 1`, carried in the environment), so a task cannot keep rescheduling itself;
   - an agent may edit, pause or delete any task, as the user can. Felipe asked for that, and the audit trail shows it. Deleting a task Felipe created is `Confirm`.
 - **One switch.** "Pause all tasks" on the Tasks page and as `pause_schedule { all: true }` (that one is `Confirm` for agents: a stuck agent must not silence everything).
+
+### 4.5 Where the never list is enforced, and what it cannot see
+
+Captains, Orchestrator tabs and box workers all start with `--dangerously-skip-permissions` (`machine.rs:425`; `accounts.rs:66`). Headless `delegate_task` workers do too with `Access::Full` (`delegate/drivers.rs:61`). So the never list cannot live in Claude Code's permission prompts. It lives in a **PreToolUse command hook**, and the facts below decide how far that holds.
+
+**What pinned passes today.** Every harnessed tab gets `--settings <config>/claude-settings.json` (`machine.rs:187`, written by `hooks::write_settings`, `hooks.rs:35`). The global Orchestrator gets `claude-settings-global.json` with `permissions.deny: ["Bash","NotebookEdit"]` and the `GUARDED` PreToolUse hook (`hooks.rs:24`, `:42`). No other session has a PreToolUse hook on `main`. Draft PR #190 (`fix-0.17.24/preauth-hook`) adds `write_agent_settings` with a `pinned hook pre-tool` PreToolUse hook on every tool for agent sessions (`preauth/hook.rs`). In slice 1 it answers `ask` to an asking session and **only logs in bypass mode**, and it prints nothing on any error (fail open). Task runs need it to deny, and to fail closed.
+
+**Evidence from Claude Code 2.1.293** (the bundle in this box, `claude-agent-sdk-linux-arm64/claude`; names are minified):
+
+1. *A hook `deny` blocks in bypass mode.* In the tool-permission step, `if(e?.behavior==="deny")return t(\`Hook denied tool use for ${n.name}\`),mpe(e,…)` runs **before** `canUseTool` (`return{decision:await g(n,r,s,h,S)…}`), which is where the permission mode, bypass included, is applied. A hook `allow` is still overridden by a deny rule (`Hook returned '${D}' … but deny rule overrides`). The `permissions.deny` comment in `hooks.rs:39` ("a deny rule holds in bypass mode too") agrees.
+2. *Sub-agents go through the same hook.* The hook input is built with `agent_id: s?.agentId, agent_type: g` for every tool event, so a Task sub-agent's Bash call fires the session's PreToolUse hooks with `agent_id` set. The never hook does not need to treat it differently. PR 6 checks this once with a real sub-agent (manual note in the PR); agent-team teammates that run as separate processes are not covered by this evidence, and a task run starts none.
+3. *The session can turn the hook off.* The hooks loader returns only managed (policy) hooks when the merged settings say so: `let t=Qn();if(t.disableAllHooks===!0)return o?.hooks??{}`, where `o` is `policySettings`. So `"disableAllHooks": true` in the checkout's `.claude/settings.json` or `.claude/settings.local.json` drops pinned's `--settings` hooks. Only hooks in managed settings (`/etc/claude-code/managed-settings.json` on Linux, `/Library/Application Support/ClaudeCode/managed-settings.json` on macOS) survive it. A session could also edit pinned's own settings file in `~/.config/pinned/`.
+4. *Not instantly.* The hooks snapshot is taken at start (`setup_hooks_snapshot_ms`) and again on `EnterWorktree`/`ExitWorktree`. No other caller re-reads it in 2.1.293. A disabling edit takes effect on the next start, `--resume` or worktree switch. pinned resumes sessions (after a restart, after unarchive), so this is real, but it is not a same-turn bypass unless the session also switches worktree.
+
+**The rule for task runs (PR 6):**
+
+- **Enforcement point:** the `pinned hook pre-tool` PreToolUse hook from #190, matching every tool. With `PINNED_SCHEDULE` set it answers `deny` on a hit (the 4.2 hold), whatever `permission_mode` the payload carries. **It fails closed:** with `PINNED_SCHEDULE` set, any error (unreadable payload, no repo, a panic caught at the top) answers `deny` with "pinned's guard could not check this; held for Felipe". Without `PINNED_SCHEDULE`, #190's slice-1 behavior is unchanged.
+- **The hook is proven present at every turn.** pickup (3.4) already needs the UserPromptSubmit hook, which is in the same settings file. pinned adds a cheap check: each PreToolUse call of a task-run session sends `GuardSeen { tab, tool_use_id }` to the node, and the 30 s transcript scan of 3.4 compares the transcript's `tool_use` ids with those it saw. A `tool_use` with no `GuardSeen` means the hooks are off: the run goes `failed` ("pinned's guard stopped running"), the tab is interrupted (Esc to the PTY), and Felipe gets a Needs you row. It detects within 30 s instead of preventing, which is why the next two points matter too.
+- **Before delivery** the machine refuses a task run to a checkout whose `.claude/settings.json` or `.claude/settings.local.json` sets `disableAllHooks`, and to a session not started with pinned's agent settings (`run is refused: hooks disabled in <file>`).
+- **Writes that would turn it off are never items already:** Write/Edit of `.claude/settings*.json` and `.git/hooks/*` hit `SelfGrant`; `echo … > .claude/settings.local.json` hits `SelfGrant`; `sed -i … ~/.config/pinned/claude-settings.json` hits `Secrets`. An interpreter write (`python3 -c "open('.claude/settings.local.json','w')…"`) is not caught; the `GuardSeen` check is its backstop.
+- **Recommended, Felipe's choice:** on boxes, pinned owns the image, so the never hook goes into the box's managed settings, where `disableAllHooks` in the checkout cannot remove it. On his Mac that needs one admin install of a managed-settings file. The hook does nothing without `PINNED_SCHEDULE`, so his own sessions are unaffected. Offered in Settings, not required.
+
+**Headless workers have no hook today.** `claude_args` (`delegate/drivers.rs:45`) builds `claude -p … --dangerously-skip-permissions` with `--mcp-config` but **no `--settings`**, so a `delegate_task` worker runs no pinned hook at all. PR 6 adds `--settings <agent settings>` to `claude_args` when the spawn carries `PINNED_SCHEDULE`. Until PR 6 lands, PR 5 refuses `Target::Worker` (the refusal says "workers can't hold a step for Felipe until 0.18.2's held steps ship").
+
+**Codex and Cursor.** Both are `harness: false` (`accounts.rs:78`, `:92`): no pinned hooks, statusline or settings. Codex with `Access::Full` passes `--dangerously-bypass-approvals-and-sandbox` (`drivers.rs:86`), Cursor runs with `--force` (`accounts.rs:93`). pinned can see neither's tool calls before they run. So:
+
+- **Cursor is refused** as the target of any task run (`Worker { model: cursor… }`, or a `Session` whose tab runs Cursor): "Cursor sessions cannot hold a step for Felipe; pick Claude".
+- **Codex is allowed only with `Access::Auto`** (`--full-auto`, Codex's workspace-write sandbox, which by Codex's documentation has no network unless configured), never `Full`. Without network there is no push, release or deploy, and the sandbox keeps writes inside the checkout. PR 6 verifies the no-network default with one real `codex exec --full-auto "git ls-remote origin"` run and records the result; if it has network, Codex is refused like Cursor.
+
+**What a scheduled box holds.** A box opened for a task run (`fallback = box`) gets only what the hub gives it: the repo clone and the account's GitHub token. It must not get Railway, Vercel or any secret from the hub (the box connection already scopes this; PR 6 asserts the env list the hub sends for a task-run box contains no `*_TOKEN` but the GitHub one).
+
+#### Scratch run of today's `never()` (main at 5af27835)
+
+A throwaway `#[cfg(test)]` module in `preauth/never.rs` on a local branch (deleted, never pushed) ran `never()` with the worktree as cwd, `default_branch = "main"`, once on a feature branch and once on `main`. `—` = no hit. Names in *italics* are shapes added beyond the brief.
+
+| # | Shape | On `feature/x` | On `main` |
+|---|---|---|---|
+| 1 | `gh release create v0.18.2 --title v0.18.2 --notes x` | Release | Release |
+| 2 | `git push origin main` | PushToMain | PushToMain |
+| 3 | `git push` | — (correct: pushes the feature branch) | PushToMain ("push from main") |
+| 4 | `git push origin HEAD:main` | PushToMain | PushToMain |
+| 5 | `git push --force-with-lease` | ForcePush | ForcePush |
+| 6 | `git tag v0.18.2 && git push origin v0.18.2` | Release (push tag) | Release |
+| 7 | `git push --tags` | Release | PushToMain (first item wins; also a release) |
+| 8 | `railway up` | Deploy | Deploy |
+| 9 | `railway redeploy` | Deploy | Deploy |
+| 10 | `vercel --prod` | Deploy | Deploy |
+| 11 | `rm -rf ../other` | DeleteOutside | DeleteOutside |
+| 12 | `rm -rf /` | DeleteOutside | DeleteOutside |
+| 13 | `rm -rf ~/x` | DeleteOutside | DeleteOutside |
+| 14 | `cd .. && rm -rf x` | DeleteOutside (follows the `cd`) | DeleteOutside |
+| 15 | `bash release.sh` | **—** | **—** |
+| 16 | `./scripts/release.sh` | Release (only because the file name says "release") | Release |
+| 17 | `sh -c "gh release create v1"` | Release | Release |
+| 18 | `env X=1 gh release create v1` | Release | Release |
+| 19 | `echo Z2ggcmVsZWFzZSBjcmVhdGUgdjE= \| base64 -d \| sh` | **—** | **—** |
+| 20 | `python -c "import subprocess; subprocess.run(['gh','release','create','v1'])"` | **—** | **—** |
+| 21 | `gh api -X POST repos/o/r/releases` | Deploy (any `gh api` write) | Deploy |
+| 22 | `curl -X POST https://api.github.com/repos/o/r/releases` | **—** | **—** |
+| 23 | `make release` | **—** | **—** |
+| 24 | `npm run release` | **—** | **—** |
+| 25 | Write `scripts/rel.sh`, then `bash scripts/rel.sh` | — / **—** | — / **—** |
+| 26 | *`git -C . push origin main`* | PushToMain | PushToMain |
+| 27 | *`git push origin +main`* | ForcePush | ForcePush |
+| 28 | *`git push origin refs/tags/v0.18.2`* | Release | Release |
+| 29 | *`git push origin v0.18.2:refs/tags/v0.18.2`* | Release | Release |
+| 30 | *`git push origin --follow-tags`* | Release | PushToMain |
+| 31 | *`git push origin HEAD`* | — (correct) | PushToMain |
+| 32 | *`git push -f origin feature`* | ForcePush | ForcePush |
+| 33 | *`x=release; gh $x create v1`* | **—** | **—** |
+| 34 | *`eval "gh release create v1"`* | Release | Release |
+| 35 | *`echo gh release create v1 \| bash`* | **—** | **—** |
+| 36 | *`gh release create "$(cat VERSION)"`* | Release | Release |
+| 37 | *`GH_TOKEN=fake gh release create v1`* | Release | Release |
+| 38 | *`gh workflow run hub-deploy.yml`* | Deploy | Deploy |
+| 39 | *`gh pr merge 223 --admin --merge`* | PushToMain | PushToMain |
+| 40 | *`gh api -X PUT repos/o/r/environments/hub-breaking-change`* | Deploy | Deploy |
+| 41 | *`cargo publish`* / *`npm publish`* | Release | Release |
+| 42 | *`node -e "require('child_process').execSync('gh release create v1')"`* | **—** | **—** |
+| 43 | *`git config --global core.hooksPath /dev/null`* | SelfGrant | SelfGrant |
+| 44 | *`cat ~/.config/gh/hosts.yml`* / *`gh auth token`* | Secrets | Secrets |
+| 45 | *Write `.claude/settings.json` / `.claude/settings.local.json`* | SelfGrant | SelfGrant |
+| 46 | *`echo '{"disableAllHooks":true}' > .claude/settings.local.json`* | SelfGrant | SelfGrant |
+| 47 | *`python3 -c "open('.claude/settings.local.json','w').write('{}')"`* | **—** | **—** |
+| 48 | *Write `~/.claude/settings.json`* | WriteOutside | WriteOutside |
+| 49 | *`sed -i s/pre-tool/x/ ~/.config/pinned/claude-settings.json`* | Secrets | Secrets |
+| 50 | *Write `.git/hooks/pre-push`* | SelfGrant | SelfGrant |
+| 51 | *Write `.github/workflows/hub-deploy.yml`* | **—** | **—** |
+| 52 | *`rm crates/core/wire-contract/v0.18.1.json`* / *Write it* | **—** | **—** |
+
+The parser is good at what it was built for: every direct spelling of push, tag, release, deploy and delete is caught, through `sh -c`, `eval`, `env`, `-C`, `$(…)`, refspecs and `cd`. It cannot follow code it does not see.
+
+#### What the matcher cannot catch, and the backstop for each
+
+| Gap | Shapes | Why the matcher can't | Backstop (recommended; nothing changed) |
+|---|---|---|---|
+| Scripts and build targets | 15, 23, 24, 25 | The command is `bash`/`make`/`npm` with a file; the release is inside the file | PR 6 improvement: for `bash|sh|zsh <file>`, `./<file>`, `make <target>`, `npm|pnpm|yarn run <script>`, read the file / Makefile recipe / `package.json` script inside the checkout and run the scanner over its text (best effort, one level). Then the server-side rules below |
+| Interpreters and pipes into shells | 19, 20, 33, 35, 42, 47 | Code in another language, encoded, or built at run time | Server-side rules and credentials (below). `GuardSeen` covers 47 |
+| Raw HTTP to an API | 22 | `curl` to `api.github.com` is not a git or gh command | Credentials and server-side rules. PR 6 improvement: a `curl`/`wget`/`http` with `-X POST|PUT|PATCH|DELETE` (or `--data`) to `api.github.com`, `backboard.railway.app`, `api.vercel.com` hits `Deploy` (cheap, same doubt-means-hit rule) |
+| In-checkout files that change what CI does | 51, 52 | Writes inside the worktree are allowed | Workflow edits only reach CI through a push to `main` or a tag, both held. Snapshot edits: the `hub-compat.yml` check, and AGENTS.md (agents must not). PR 6 improvement: Write/Edit/`rm` under `.github/workflows/` and `crates/core/wire-contract/` in a task run hits `SelfGrant` |
+| Another tool | Codex, Cursor | No hook | Cursor refused; Codex only sandboxed (above) |
+| Hooks turned off | 47, resume after a settings edit | Interpreter write; effect lands after a restart | Pre-delivery `disableAllHooks` check, `GuardSeen` watchdog, managed settings on boxes |
+| Sub-agents | any | — | Not a gap: same hook (evidence 2) |
+
+**Server-side backstops, as the repo stands today** (read with `gh api`, nothing changed): `main` has **no branch protection** (`Branch not protected`), there are **no rulesets** (no tag rules), and the only environment with a reviewer is `hub-breaking-change`. Pushing a `v*` tag runs `release.yml` and `hub-deploy.yml`, which deploys the hub when the compatibility gate passes. A Captain on Felipe's Mac runs with his `gh` login. So today, a release that slips past the matcher (rows 15, 19–25, 33, 35, 42) **would ship**: the matcher is the only line. Recommendations for Felipe, strongest first:
+
+1. **A tag ruleset on `v*`**: creation and deletion restricted, bypass only for a release GitHub App / the Actions bot, **not** for repository admins, and release tags created by a `workflow_dispatch` job that needs a `release` environment with Felipe as required reviewer. Then no command spelled any way, with his token, makes a release without his click in GitHub.
+2. **Branch protection or a ruleset on `main`**: pull request required, no bypass for admins, force-push and deletion blocked. That covers rows 2–4, 31 and every API spelling of them.
+3. **Deploy credentials stay off sessions**: Railway and Vercel tokens only in GitHub secrets / the hub; no `railway login` on machines that run Captains. Then rows 8–10 fail even if not held.
+4. **Task-run boxes** get a fine-grained token: contents read/write on that one repo, no admin, no workflows scope. With 1 and 2 in place, such a token can push branches only.
+
+None of this is done by this design or by an agent; Felipe decides. The AGENTS.md rules (no agent approves `hub-breaking-change`, no snapshot edits) stay as they are, and 4.3 already says no approval covers them.
+
+#### PR 6 test list from the table
+
+`crates/core/src/preauth/hook.rs` tests, with `PINNED_SCHEDULE` set and `permission_mode: "bypassPermissions"` in the payload. **Held** = the hook answers `deny` with "held for Felipe: <item>" and sends the confirmation. **Not held** = no answer (the call goes on). **Cannot catch** = asserted not held, so the test fails loudly the day the matcher learns it, and the backstop is named in the test's comment.
+
+| Shapes (row numbers above) | Expected | Backstop named in the test |
+|---|---|---|
+| 1, 6, 17, 18, 28, 29, 34, 36, 37, 41 | Held: Release | — |
+| 2, 4, 26, 39; 3, 7, 30, 31 on `main` | Held: PushToMain | — |
+| 5, 27, 32 | Held: ForcePush | — |
+| 8, 9, 10, 21, 38, 40 | Held: Deploy | — |
+| 7, 30 on a feature branch | Held: Release | — |
+| 11, 12, 13, 14 | Held: DeleteOutside | — |
+| 43, 45, 46, 50 | Held: SelfGrant | — |
+| 44, 49 | Held: Secrets; an approval for it is refused (4.3) | — |
+| 48 | Held: WriteOutside | — |
+| 3, 31 on a feature branch | Not held | — |
+| 16 | Held: Release (by the file name); a test with the same script named `scripts/ship.sh` is the "script" case below | — |
+| 15, 23, 24, 25 (script contains `gh release create v1`) | **Held after PR 6's script read** (Release). A script outside the checkout, or two levels deep: Cannot catch | Tag ruleset + `release` environment (rec. 1) |
+| 22 | **Held after PR 6's HTTP rule** (Deploy) | Rulesets (rec. 1–2), credentials |
+| 51, 52 | **Held after PR 6's path rule** (SelfGrant) | Branch protection on `main` (rec. 2); `hub-compat.yml` |
+| 19, 20, 33, 35, 42 | Cannot catch | Tag ruleset and `main` protection (rec. 1–2); deploy tokens off sessions (rec. 3); task-run box token (rec. 4) |
+| 47 | Cannot catch | `GuardSeen` watchdog test below; pre-delivery `disableAllHooks` refusal |
+| Every row with `PINNED_SCHEDULE` unset, bypass | #190's slice-1 behavior (log only), unchanged | — |
+
+Plus these hook and machine tests:
+
+- **Fail closed:** with `PINNED_SCHEDULE` set, a payload that is not JSON, a missing `tool_input`, and a cwd outside any repo each answer `deny` ("could not check"). Without it, each prints nothing.
+- **Bypass does not matter:** the same hit answers the same `deny` for `permission_mode` `bypassPermissions`, `default`, `acceptEdits`, `auto`.
+- **Sub-agent:** a payload with `agent_id` and `agent_type` set is held the same way; the confirmation says "from a sub-agent of the Captain of pinned".
+- **Approved once:** an approved command passes once; the same command again is held again (4.2); an approval for `v0.18.2` does not cover `v0.18.3`.
+- **Settings:** `claude_args` with `PINNED_SCHEDULE` contains `--settings <agent settings>` (headless worker); a task run to a checkout whose `.claude/settings.local.json` has `disableAllHooks` is refused before delivery; a Cursor target is refused at `save_schedule`; a Codex target with `Access::Full` is refused, with `Auto` accepted.
+- **Watchdog:** a transcript with a `tool_use` id that never sent `GuardSeen` → run `failed`, tab interrupted, one Needs you row.
+- **Manual, recorded in the PR:** a real bypass-mode Claude session with the agent settings runs `gh release create v0.0.0-test` from the main thread and from a Task sub-agent against a scratch repo, and both are held; `codex exec --full-auto "git ls-remote origin"` result.
 
 ---
 
@@ -482,7 +628,7 @@ Each PR runs `cargo run -p pinned-server --bin wire-contract -- snapshot current
 | 3 | `ui: Ideas page` | Shell page `ideas`, sidebar nav row, More row on phone, quick-add, editor, filters | `ui/ideas.test.js` (render, filters, quick-add sends `save_idea`); tutorial video: sidebar → Ideas → add → edit → delete, then the same at phone width via More | **sonnet** |
 | 4 | `hub: schedule store and calls` | Tables `tasks`, `task_runs` (`unique (task, due_at)`); `HubCall::{ListSchedules, SaveSchedule{dry_run}, PauseSchedule, DeleteSchedule, ScheduleRuns}`; `Settings.schedules`; actions `list_schedules` (Read), `save_schedule` (Write; **Confirm** when it carries approvals, through a `.checks()` like `marks::agent_check`), `pause_schedule`, `delete_schedule` (Confirm for a user-created task); agent caps (15-min interval, 20 tasks) | Hub tests: CRUD; dry-run answers next 3 times in tz; agent with approvals → confirmation, not saved; caps refused; audit rows carry the creator | **sonnet** |
 | 5 | `hub: the scheduler` | `schedule::Scheduler` loop in `Hub::watch_all`; claim-once insert; delivery per target (`Me` push, `Orchestrator`, `Captain` via the `send_to_captain` handoff, `Session` via `prompt` with wait-for-idle / unarchive, `Worker` via delegate placement, `Workflow` via `run_workflow`); `request_id = task:<id>:<due>`; grace, `OnMissed`, coalescing; restart recovery; `RunScheduleNow` + `run_schedule_now` action (`starts_work`); pickup (3.4): the `[task:…]` marker in the first line, `ScheduleEvent::PickedUp` from the UserPromptSubmit prompt and from a transcript tail scan, `last_activity`, `pickup_min`, `stalled`, `Call::WithdrawRequest`, `BusyPolicy::TypeNow` for Deliver again | Hub tests with a paused tokio clock: fires once; two schedulers on one DB fire once; host offline → waits → delivered in grace / missed after; `Ask` creates a Needs-you row; `Skip` and coalescing after a 7-day gap; hub restart mid-run does not resend (`Lost`); busy Captain → queued; limits refusal → retried then failed. **Pickup (3.4), machine + hub:** (a) *stuck flag*: Captain tab `status = Done` with `turn_pending` set and the ledger `InFlight` (so `CaptainState::of` = `Working`), handoff `Queued`, transcript unchanged → at +10 min the run is `stalled`, one Needs-you row with the 3.4 text, one push, and exactly one delivery recorded on any machine; (b) ledger `InFlight` alone never counts as pickup; (c) *alive busy*: status `Working`, transcript appended every minute → at +10 min still `queued`, Inbox FYI row, no push; Done + next prompt with the marker → `started`, row closed; (d) pickup through a UserPromptSubmit prompt; pickup through a Stop-hook hand-over seen only in the transcript; (e) late pickup after `stalled` → `started`, row says "started late"; (f) Deliver again withdraws the queued copy, types once on the same machine, a later Stop hook hands over nothing; (g) Skip withdraws the queued copy; (h) `pickup_min = 2` honored, missing field = 10 (serde default); (i) `Once` task alive-busy past grace → `Ask` row; (j) `Worker` with no `turn_started` in time → `stalled` | **opus** |
-| 6 | `safety: held steps in task runs` | `PINNED_SCHEDULE` env; PreToolUse guard on task-run sessions calling `preauth::never`; `Confirmation.held` (`serde(default)`); `HubCall::DecideHeld` via the existing decision path; one-shot allowance; approvals match (item + repo + `must_contain`); 24 h expiry; never-coverable items | Unit tests on the matcher (exact version only; Secrets never covered); hook tests (`hooks.rs` style: hit → deny + confirmation; approved → passes once; second time held again); hub test end to end with a fake session; wire check | **opus** |
+| 6 | `safety: held steps in task runs` | Builds on #190's `pinned hook pre-tool`. `PINNED_SCHEDULE` env; the hook denies on a hit in any permission mode and **fails closed** in task runs; `--settings` for headless `claude -p` workers (`drivers.rs`); `GuardSeen` watchdog against the transcript; pre-delivery refusal when `disableAllHooks` is set; Cursor refused, Codex only `Access::Auto`; matcher additions: one-level script/Makefile/`package.json` read, `curl -X POST` to GitHub/Railway/Vercel APIs, writes under `.github/workflows/` and `wire-contract/`; `Confirmation.held` (`serde(default)`); `HubCall::DecideHeld` via the existing decision path; one-shot allowance; approvals match (item + repo + `must_contain`); 24 h expiry; never-coverable items | The 4.5 test list: every shape of the scratch table as held / not held / cannot catch with its backstop, in bypass mode; fail-closed cases; sub-agent payload; approved once then held again; v0.18.2 approval does not cover v0.18.3; headless worker gets `--settings`; `disableAllHooks` refusal; Cursor/Codex refusals; watchdog; hub test end to end with a fake session; manual bypass-mode run (main thread + sub-agent) recorded in the PR; wire check | **opus** |
 | 7 | `ui: Tasks page` | Shell page `tasks`, nav row with next run and held count, cards, editor (dry-run Next line, tz picker, approvals only in the user's UI), history, Pause all; Needs you rows for held and missed; More row on phone | `ui/tasks.test.js` (card sentences, editor builds `Schedule`, held row buttons); tutorial video: create "release at 09:00" task with an approval, Run now, see it held for an unapproved deploy, approve from Needs you; phone width via More | **sonnet** |
 | 8 | `ui+hub: workflows ↔ tasks, ideas → tasks` | Schedule… on workflow cards/editor, "⏱ next" line; Schedule… on ideas (`task.idea`), idea `Done` when its one-time task finishes | UI tests; hub test idea status follows its task; tutorial video: schedule a workflow, schedule an idea | **sonnet** |
 | 9 | `reminders → tasks` | `remind_me`/`list_reminders`/`cancel_reminder` become aliases over `Target::Me` tasks; `reminders.json` migration on first signed-in start; nodes offer them; `Target::Me` push to desktop + web push | `crates/core/tests/delegate_mcp.rs` updated: same tool names and arguments, now land on the hub; migration test (file → tasks → `.migrated`); desktop notification still shows (manual note in PR) | **sonnet** |
@@ -499,3 +645,6 @@ Order and parallelism: 1 → (2, 4) in parallel → 3 after 2 → 5 after 4 → 
 2. When an agent creates a task, should it need his OK (a Confirm), or is the FYI row enough? This design says FYI, because scheduling gives an agent no power it does not already have.
 3. Should a `Once` task's `Ask` row also send a push notification at the missed time, or only show in Needs you?
 4. Ideas: should a project's Captain see its project's ideas in its opening context, or only on request? This design says on request only, to keep ideas apart from memory.
+5. Pickup deadline (3.4): 10 minutes by default, and "alive" means the transcript moved within that window. Right numbers?
+6. Server-side backstops (4.5): today `main` is unprotected and `v*` tags have no rule, so the never list is the only thing between a scheduled run and a release. Add the tag ruleset with a `release` environment, and protect `main`? This design recommends both and changes neither.
+7. Managed settings for the never hook on boxes (pinned's image), and as an opt-in admin install on the Mac?
