@@ -186,6 +186,8 @@ impl Launch {
                         cmd.arg("--mcp-config");
                         cmd.args(configs);
                     }
+                    // A question_user call waits on the user for up to a day.
+                    cmd.env("MCP_TOOL_TIMEOUT", MCP_TOOL_TIMEOUT_MS);
                     cmd.arg("--settings");
                     // The global orchestrator's own: no Bash, and its file tools held to its folders.
                     cmd.arg(if global::is_global(env) { self.settings.with_file_name(hooks::GLOBAL_SETTINGS) } else { self.settings.clone() });
@@ -233,6 +235,10 @@ impl Launch {
         cmd
     }
 }
+
+/// How long Claude Code lets a pinned MCP tool call run, in milliseconds: a day, since
+/// `question_user` waits on the user. The call itself answers `pending` at 23 hours.
+const MCP_TOOL_TIMEOUT_MS: &str = "86400000";
 
 /// What a Claude Code session or a parent shell can leak into a pinned session. pinned strips
 /// them before it applies the account's own env, so a nested Claude session is not mistaken for
@@ -3307,6 +3313,9 @@ impl Machine {
     }
 
     fn project_tool(&self, tab: &str, tool: ProjectTool) -> Result<String, String> {
+        if let ProjectTool::QuestionUser { .. } | ProjectTool::QuestionStatus { .. } = tool {
+            return self.question_tool(tab, tool);
+        }
         let global = self.tab(tab, |t| global::is_global(&t.env))?;
         let only_global = || if global { Ok(()) } else { Err("only the global orchestrator has this tool".to_owned()) };
         match tool {
@@ -3399,6 +3408,7 @@ impl Machine {
             ProjectTool::MemoryForget { id } => self.memories.forget(&self.project_of_tab(tab)?, id).map(|m| format!("Forgot #{} \"{}\".", m.id, m.title)),
             ProjectTool::Actions { search } => text_json(json!({ "actions": surface::listing(search.as_deref()) })),
             ProjectTool::Convex { ask } => self.convex(tab, ask),
+            ProjectTool::QuestionUser { .. } | ProjectTool::QuestionStatus { .. } => self.question_tool(tab, tool),
             ProjectTool::Act { action, args, request_id, machine } => {
                 let act = surface::AgentAct { tab: tab.to_owned(), action, args, request_id, machine };
                 match self.call_hub(HubCall::Act { act }) {
@@ -3407,6 +3417,47 @@ impl Machine {
                 }
             }
         }
+    }
+
+    /// `question_user`, and the status its waiting call polls. A headless child has no tab and
+    /// names its task: the questions go on the tab that shows that task, else on its parent's.
+    fn question_tool(&self, tab: &str, tool: ProjectTool) -> Result<String, String> {
+        let (title, questions, projects, task) = match tool {
+            ProjectTool::QuestionStatus { id } => return Ok(self.questions.lock().unwrap().status(&id, Instant::now())?.to_string()),
+            ProjectTool::QuestionUser { title, questions, projects, task } => (title, questions, projects, task),
+            _ => return Err("not a question tool".into()),
+        };
+        let (tab, task) = match task.filter(|_| tab.is_empty()) {
+            Some(task) => (self.task_tab(&task)?, Some(task)),
+            None => (tab.to_owned(), None),
+        };
+        let (global, session, own) = self.tab(&tab, |t| (global::is_global(&t.env), t.claude_session.clone(), t.task.clone()))?;
+        if !projects.is_empty() && !global {
+            return Err("projects is the global orchestrator's: leave it out".into());
+        }
+        let (title, questions) = crate::questions::checked(title, questions)?;
+        let id = self.questions.lock().unwrap().open(&tab, session, task.or(own), title, questions, projects, unix_now())?;
+        self.emit_tabs();
+        self.arm_delegate_pass();
+        Ok(id)
+    }
+
+    /// The tab that shows task `task`: its thread, else the tab of the nearest parent here.
+    fn task_tab(&self, task: &str) -> Result<TabId, String> {
+        let mut id = task.to_owned();
+        for _ in 0..16 {
+            let info = self.delegates.get(&id).ok_or_else(|| format!("no task {id}"))?;
+            let tabs = self.tabs.lock().unwrap();
+            if let Some(thread) = info.thread.filter(|thread| tabs.contains_key(&thread.tab)) {
+                return Ok(thread.tab);
+            }
+            match info.parent {
+                crate::delegate::Parent::Tab(tab) if tabs.contains_key(&tab) => return Ok(tab),
+                crate::delegate::Parent::Task(parent) => id = parent,
+                crate::delegate::Parent::Tab(_) => break,
+            }
+        }
+        Err(format!("task {task} has no thread on this machine to ask the user in"))
     }
 
     /// A Convex tool's ask, which the hub answers for the project of the tab's checkout, by its
@@ -8731,6 +8782,7 @@ pub(crate) mod tests {
         assert_eq!(cmd.get_env("CLAUDE_CODE_SESSION_ID"), None);
         assert_eq!(cmd.get_env("CLAUDECODE"), None);
         assert_eq!(cmd.get_env("PINNED_TAB").and_then(|v| v.to_str()), Some("tab-1"));
+        assert_eq!(cmd.get_env("MCP_TOOL_TIMEOUT").and_then(|v| v.to_str()), Some("86400000"), "question_user may wait a day");
     }
 
     #[test]

@@ -3,7 +3,9 @@
 //! so every surface that shows a session waiting on the user shows it. Saved to `questions.json`
 //! in the config dir with each change, so an open questionnaire outlives a restart.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -134,14 +136,20 @@ impl Asked {
 pub struct Questions {
     file: Option<PathBuf>,
     asked: Vec<Asked>,
+    /// When the `question_user` call that waits on each questionnaire last asked how it stands.
+    /// Not saved: after a restart no call waits.
+    polled: HashMap<String, Instant>,
 }
+
+/// A `question_user` call that has not asked for this long is gone: its answer goes as a notice.
+const CALL_GONE: Duration = Duration::from_secs(5);
 
 impl Questions {
     /// The questionnaires saved in `dir`, none without one.
     pub fn load(dir: Option<&Path>) -> Self {
         let file = dir.map(|d| d.join(FILE));
         let asked = file.as_ref().and_then(|f| std::fs::read(f).ok()).and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
-        Questions { file, asked }
+        Questions { file, asked, polled: HashMap::new() }
     }
 
     /// Opens a questionnaire on `tab` and answers its id. A tab holds one open questionnaire at a time.
@@ -193,8 +201,91 @@ impl Questions {
     pub fn cancel_tab(&mut self, tab: &str) -> bool {
         let Some(asked) = self.asked.iter_mut().find(|a| a.tab == tab && a.is_open()) else { return false };
         asked.outcome = Some(Outcome::Cancelled);
+        // A call that still waits hears it; a gone one gets no notice.
+        asked.notified = true;
         self.closed();
         true
+    }
+
+    /// How the questionnaire `id` stands, for the `question_user` call that waits on it:
+    /// `{"outcome":"open"}` while it waits, else the call's result, which then counts as delivered.
+    pub fn status(&mut self, id: &str, now: Instant) -> Result<serde_json::Value, String> {
+        let asked = self.asked.iter_mut().find(|a| a.questionnaire.id == id).ok_or_else(|| format!("no questions {id}"))?;
+        if asked.is_open() {
+            self.polled.insert(id.to_owned(), now);
+            return Ok(serde_json::json!({ "outcome": "open", "id": id }));
+        }
+        let result = result(asked);
+        if !asked.notified {
+            asked.notified = true;
+            self.save();
+        }
+        self.polled.remove(id);
+        Ok(result)
+    }
+
+    /// Moves the questionnaires of Claude session `session` that still wait on the user, or whose
+    /// outcome has not reached it, to `tab`, the tab that resumed that session. Whether any moved.
+    pub fn rekey(&mut self, session: &str, tab: &str) -> bool {
+        let open_here = self.open_on(tab).is_some();
+        let mut moved = false;
+        for asked in self.asked.iter_mut().filter(|a| a.session.as_deref() == Some(session) && a.tab != tab) {
+            let waits = (asked.is_open() && !open_here) || (!asked.is_open() && !asked.notified);
+            if waits {
+                asked.tab = tab.to_owned();
+                moved = true;
+            }
+        }
+        if moved {
+            self.save();
+        }
+        moved
+    }
+
+    /// The notice that carries a closed questionnaire's outcome to `tab`, when no `question_user`
+    /// call waits on it any more and the session has not had it: its id and its text.
+    pub fn late_notice(&self, tab: &str, now: Instant) -> Option<(String, String)> {
+        self.asked
+            .iter()
+            .filter(|a| a.tab == tab && !a.notified)
+            .filter(|a| self.polled.get(&a.questionnaire.id).is_none_or(|at| now.saturating_duration_since(*at) >= CALL_GONE))
+            .find_map(|a| Some((a.questionnaire.id.clone(), notice(a)?)))
+    }
+
+    /// The outcome of `id` reached its session.
+    pub fn notified(&mut self, id: &str) {
+        if let Some(asked) = self.asked.iter_mut().find(|a| a.questionnaire.id == id) {
+            asked.notified = true;
+            self.save();
+        }
+    }
+
+    /// Closes as skipped each open questionnaire whose wait limit passed by `now`, in Unix seconds.
+    /// Whether any closed.
+    pub fn expire(&mut self, now: u64) -> bool {
+        let mut closed = false;
+        for asked in self.asked.iter_mut().filter(|a| a.is_open()) {
+            if asked.wait_limit_secs.is_some_and(|limit| asked.questionnaire.at.saturating_add(limit) <= now) {
+                asked.outcome = Some(Outcome::Skipped);
+                closed = true;
+            }
+        }
+        if closed {
+            self.closed();
+        }
+        closed
+    }
+
+    /// Whether any questionnaire waits on the user, or on delivering its outcome.
+    pub fn unsettled(&self) -> bool {
+        self.asked.iter().any(|a| a.is_open() || !a.notified)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_wait_limit(&mut self, id: &str, secs: Option<u64>) {
+        if let Some(asked) = self.asked.iter_mut().find(|a| a.questionnaire.id == id) {
+            asked.wait_limit_secs = secs;
+        }
     }
 
     fn closed(&mut self) {
@@ -242,6 +333,139 @@ fn fits(questionnaire: &Questionnaire, answers: &[Answer]) -> Result<(), String>
         }
     }
     Ok(())
+}
+
+/// The longest each text of a questionnaire is kept, in characters.
+const HEADER_MAX: usize = 16;
+const QUESTION_MAX: usize = 300;
+const CHANGES_MAX: usize = 200;
+const LABEL_MAX: usize = 60;
+const DESCRIPTION_MAX: usize = 160;
+const TITLE_MAX: usize = 80;
+
+fn cut(text: &str, max: usize) -> String {
+    let text = text.trim();
+    match text.char_indices().nth(max) {
+        Some((at, _)) => text[..at].trim_end().to_owned(),
+        None => text.to_owned(),
+    }
+}
+
+/// `questions` as an agent may ask them: 1-4 questions of 2-4 options, each with something it
+/// changes, its labels unique, and exactly one recommended option, the first. Texts are cut to
+/// their lengths. The error says what to fix.
+pub fn checked(title: Option<String>, questions: Vec<Question>) -> Result<(Option<String>, Vec<Question>), String> {
+    if !(1..=4).contains(&questions.len()) {
+        return Err(format!("ask 1 to 4 questions in one call, not {}", questions.len()));
+    }
+    let questions = questions
+        .into_iter()
+        .enumerate()
+        .map(|(n, q)| {
+            let n = n + 1;
+            if q.question.trim().is_empty() {
+                return Err(format!("question {n} has no text"));
+            }
+            if q.changes.trim().is_empty() {
+                return Err(format!("question {n} does not say what its answer changes: a question whose answer changes nothing is not asked"));
+            }
+            if !(2..=4).contains(&q.options.len()) {
+                return Err(format!("question {n} has {} options: give 2 to 4", q.options.len()));
+            }
+            let options: Vec<QOption> = q.options.into_iter().map(|o| QOption { label: cut(&o.label, LABEL_MAX), description: o.description.map(|d| cut(&d, DESCRIPTION_MAX)).filter(|d| !d.is_empty()), recommended: o.recommended }).collect();
+            if options.iter().any(|o| o.label.is_empty()) {
+                return Err(format!("question {n} has an option with no label"));
+            }
+            if options.iter().enumerate().any(|(i, o)| options[..i].iter().any(|p| p.label == o.label)) {
+                return Err(format!("question {n} has two options with the same label"));
+            }
+            match options.iter().filter(|o| o.recommended).count() {
+                0 => return Err(format!("question {n} has no recommended option: put your recommended option first and mark it recommended")),
+                1 if options[0].recommended => {}
+                1 => return Err(format!("question {n} recommends an option that is not first: put your recommended option first and mark it recommended")),
+                _ => return Err(format!("question {n} recommends more than one option: mark only your recommendation, and put it first")),
+            }
+            Ok(Question {
+                header: q.header.map(|h| cut(&h, HEADER_MAX)).filter(|h| !h.is_empty()),
+                question: cut(&q.question, QUESTION_MAX),
+                changes: cut(&q.changes, CHANGES_MAX),
+                options,
+                multi_select: q.multi_select,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok((title.map(|t| cut(&t, TITLE_MAX)).filter(|t| !t.is_empty()), questions))
+}
+
+/// What the `question_user` call answers once `asked` closed.
+fn result(asked: &Asked) -> serde_json::Value {
+    let id = &asked.questionnaire.id;
+    match &asked.outcome {
+        None => serde_json::json!({ "outcome": "open", "id": id }),
+        Some(Outcome::Answered { answers }) => {
+            let answers: Vec<serde_json::Value> = asked
+                .questionnaire
+                .questions
+                .iter()
+                .zip(answers)
+                .map(|(q, a)| {
+                    let mut answer = serde_json::json!({ "question": q.question, "chosen": a.chosen });
+                    if let Some(header) = &q.header {
+                        answer["header"] = header.clone().into();
+                    }
+                    if accepted(q, a) {
+                        answer["recommended"] = true.into();
+                    }
+                    if let Some(text) = a.text.as_deref().filter(|t| !t.trim().is_empty()) {
+                        answer["text"] = text.into();
+                    }
+                    answer
+                })
+                .collect();
+            serde_json::json!({ "outcome": "answered", "id": id, "answers": answers, "next": "Go on with these answers." })
+        }
+        Some(Outcome::Skipped) => serde_json::json!({ "outcome": "skipped", "id": id, "next": "The user skipped these questions. Go on without them: take your recommended option for each and state every assumption you made where your work is read. Skipping can lead to wrong actions, so keep the assumptions easy to undo." }),
+        Some(Outcome::Cancelled) => serde_json::json!({ "outcome": "cancelled", "id": id, "next": "The user stopped this turn. Do not go on with the work these questions were about." }),
+    }
+}
+
+/// What the `question_user` call answers when its wait ends before the user does.
+pub fn pending(id: &str) -> serde_json::Value {
+    serde_json::json!({ "outcome": "pending", "id": id, "next": format!("The questions are still open. End your turn now; the answers arrive as a message that starts with [pinned] Answers to {id}.") })
+}
+
+/// The answer chose the recommended option, and only it.
+fn accepted(question: &Question, answer: &Answer) -> bool {
+    question.options.first().is_some_and(|o| o.recommended && answer.chosen == [o.label.clone()])
+}
+
+/// The notice typed into the session when its `question_user` call is gone. None for a
+/// cancelled questionnaire, whose turn the user stopped.
+fn notice(asked: &Asked) -> Option<String> {
+    let q = &asked.questionnaire;
+    let about = q.title.as_deref().map(|t| format!(" ({t})")).unwrap_or_default();
+    match asked.outcome.as_ref()? {
+        Outcome::Answered { answers } => {
+            let lines: Vec<String> = q
+                .questions
+                .iter()
+                .zip(answers)
+                .map(|(question, answer)| {
+                    let mut parts: Vec<String> = answer.chosen.clone();
+                    if accepted(question, answer) {
+                        parts[0] = format!("{} (your recommendation)", parts[0]);
+                    }
+                    if let Some(text) = answer.text.as_deref().filter(|t| !t.trim().is_empty()) {
+                        parts.push(format!("{:?}", text.trim()));
+                    }
+                    format!("- {}: {}", question.header.as_deref().unwrap_or(&question.question), parts.join("; "))
+                })
+                .collect();
+            Some(format!("[pinned] Answers to {}{about}:\n{}", q.id, lines.join("\n")))
+        }
+        Outcome::Skipped => Some(format!("[pinned] The user skipped {}{about}. Go on with your recommended options and state your assumptions.", q.id)),
+        Outcome::Cancelled => None,
+    }
 }
 
 /// `view` as it shows while `questionnaire` is open on its tab: a question mid-turn, as Claude
