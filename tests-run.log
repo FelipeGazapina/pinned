@@ -3,3 +3,4 @@ Diagnostic 2 tests-run.log (box 799c2e...; times UTC)
 env per test: env -u PINNED_PROJECT -u PINNED_ROLE -u PINNED_TAB -u PINNED_SOCK -u PINNED_ACCOUNT -u PINNED_TUTORIAL_HELPER HOME=<fresh mktemp -d> CARGO_HOME=/home/boxuser/.cargo RUSTUP_HOME=/home/boxuser/.rustup
 node 288: ppid 1 pgid 288 sid 288 (own session, as in run 1); logger pid 8311 ppid 1 own session
 order: suspect first, then all other hub tests in file order (run 1 order)
+2026-11-13T04:01:36Z #1 an_agent_acts_as_its_own_account_audited_and_a_confirm_runs_once_its_owner_approves START / avail=15141M /workspace avail=19374M node_stat=Ssl
