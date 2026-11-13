@@ -2184,6 +2184,25 @@ mod tests {
     }
 
     #[test]
+    fn a_held_box_that_is_offline_at_its_max_life_ends_expired_not_offline() {
+        let p = Policy::default();
+        let t0 = Instant::now();
+        // Offline for as long as the wait, and at its max life: the max life wins, so the run's subject stays handled.
+        let mut t = Timers::default();
+        assert_eq!(held_verdict(p.max_life - Duration::from_secs(1), Seen::Offline, &mut t, t0, &p), None, "one second short of its max life, offline just now");
+        assert_eq!(held_verdict(p.max_life, Seen::Offline, &mut t, t0 + p.offline, &p), Some(End::Expired), "offline past the wait and at its max life");
+        assert_eq!(release_for(&End::Expired), BoxEndRelease::Keep, "which keeps its subject");
+
+        // One second short of its max life it ends Offline, and only after the offline wait.
+        let mut t = Timers::default();
+        let short = p.max_life - Duration::from_secs(1);
+        assert_eq!(held_verdict(short, Seen::Offline, &mut t, t0, &p), None, "offline just now");
+        assert_eq!(held_verdict(short, Seen::Offline, &mut t, t0 + p.offline - Duration::from_secs(1), &p), None, "not yet past the wait");
+        assert_eq!(held_verdict(short, Seen::Offline, &mut t, t0 + p.offline, &p), Some(End::Offline), "past the wait");
+        assert_eq!(release_for(&End::Offline), BoxEndRelease::Once);
+    }
+
+    #[test]
     fn a_box_that_ends_as_done_while_its_run_goes_fails_the_run() {
         let error = run_end_error(&Policy::default(), &End::Done);
         assert_eq!(error, "Upstash Box: the box ended before its run did: its work was done");
