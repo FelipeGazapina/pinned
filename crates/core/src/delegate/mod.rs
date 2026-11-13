@@ -2806,7 +2806,7 @@ exec '{real}' "$@"
         assert_eq!(delegates.settle_remote(&task.id, "tab-1", "m-mini", &end), Some("tab-1".into()));
         assert!(delegates.settle_remote(&task.id, "tab-1", "m-mini", &end).is_none(), "an end lands once");
         let (text, _) = delegates.claim_notice("tab-1").unwrap();
-        assert_eq!(text, format!("[pinned] Delegated task {} \"Slow suite\" (Claude Code) finished: result available. It ran on mini, in thread tab-9. Call task_status with taskId \"{}\".", task.id, task.id));
+        assert_eq!(text, format!("[pinned] Delegated task {} \"Slow suite\" (Claude Code) finished: result available. It ran on \"mini\", in thread \"tab-9\". Call task_status with taskId \"{}\".", task.id, task.id));
         assert_eq!(delegates.records(), vec![], "mini, which ran it, keeps its record");
 
         let on_mini = Delegates::default();
@@ -2859,7 +2859,7 @@ exec '{real}' "$@"
         let end = RemoteEnd { state: "result_available".into(), summary: Some("Green.".into()), error: None, usage: None };
         assert_eq!(delegates.settle_remote(&task.id, "tab-1", "m-mini", &end), Some("tab-1".into()));
         let (text, _) = delegates.claim_notice("tab-1").unwrap();
-        assert_eq!(text, format!("[pinned] Delegated task {} \"{flat}\" (Claude Code) finished: result available. It ran on mini, in thread tab-9. Call task_status with taskId \"{}\".", task.id, task.id));
+        assert_eq!(text, format!("[pinned] Delegated task {} \"{flat}\" (Claude Code) finished: result available. It ran on \"mini\", in thread \"tab-9\". Call task_status with taskId \"{}\".", task.id, task.id));
         // A task made some other way than `parse_request` (a remote machine takes the title as sent)
         // is flattened when it begins.
         let sent = delegates.begin(NewTask {
@@ -2893,7 +2893,7 @@ exec '{real}' "$@"
             let (text, _) = delegates.claim_notice("tab-1").unwrap();
             assert_eq!(
                 text,
-                format!("[pinned] Delegated task {id} \"Fix\" (Claude Code) finished: {word}: {QUOTED}. It ran on mini, in thread tab-9. Call task_status with taskId \"{id}\".", id = task.id)
+                format!("[pinned] Delegated task {id} \"Fix\" (Claude Code) finished: {word}: {QUOTED}. It ran on \"mini\", in thread \"tab-9\". Call task_status with taskId \"{id}\".", id = task.id)
             );
         }
     }
