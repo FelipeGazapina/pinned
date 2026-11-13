@@ -622,11 +622,18 @@ function boxListsHtml(boxes, now, open) {
     ${others.length ? `<details class="box-others"${open ? " open" : ""}><summary>Other boxes (${others.length})</summary>${boxTableHtml(others, "Other boxes", "Status", now)}</details>` : ""}`;
 }
 const boxNotice = (text) => `<div class="limit-notices" role="alert">${icon("triangle-alert")}<div><p>${esc(text)}</p></div></div>`;
+/** One notice per distinct reason: the boxes pinned could not delete, which may still be running. */
+function stuckBoxesHtml(stuck) {
+  const byWhy = new Map();
+  for (const { why } of stuck ?? []) byWhy.set(why, (byWhy.get(why) ?? 0) + 1);
+  return [...byWhy].map(([why, n]) => boxNotice(`${n} ${n === 1 ? "box" : "boxes"} pinned could not delete: ${why}`)).join("");
+}
 function boxBodyHtml(box, now) {
   const u = box.data;
   if (!u) return box.error ? boxNotice(`Could not read Upstash Box usage: ${box.error}`) : `<p class="muted note" role="status">Loading…</p>`;
-  if (!u.connected) return `<p class="muted note">Connect Upstash in Settings › Connectors to see box usage.</p>`;
-  return `${u.error ? boxNotice(u.error) : ""}${boxFiguresHtml(u)}${u.error ? "" : boxListsHtml(u.boxes ?? [], now, box.open)}`;
+  const stuck = stuckBoxesHtml(u.stuck);
+  if (!u.connected) return `${stuck}<p class="muted note">Connect Upstash in Settings › Connectors to see box usage.</p>`;
+  return `${stuck}${u.error ? boxNotice(u.error) : ""}${boxFiguresHtml(u)}${u.error ? "" : boxListsHtml(u.boxes ?? [], now, box.open)}`;
 }
 function boxUsageHtml(box, now) {
   return `<section class="box-usage" aria-busy="${box.loading}"><div class="box-title"><h2>Upstash Box</h2><span class="muted sub-title">This month</span></div>${boxBodyHtml(box, now)}</section>`;

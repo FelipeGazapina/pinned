@@ -233,3 +233,24 @@ test("opening the page and the refresh button reload the box section, and a slow
     assert.equal(page.usageState.refreshing, false, "refresh finished while box_usage is still pending");
   }
 });
+
+test("boxes pinned could not delete show as one notice per reason, also when Upstash is not connected", () => {
+  const page = boxPage({ answer: async () => ({}) });
+  const html = (data) => page.boxUsageHtml({ data, error: "", loading: false, open: {} }, NOW);
+  const stuck = [{ id: "r1", why: "Upstash answered 503" }, { id: "r2", why: "Upstash answered 503" }, { id: "r3", why: "still being deleted" }];
+  const off = html({ connected: false, stuck });
+  assert.match(off, /2 boxes pinned could not delete: Upstash answered 503/);
+  assert.match(off, /1 box pinned could not delete: still being deleted/);
+  assert.match(off, /Connect Upstash in Settings/);
+  assert.equal(off.match(/limit-notices/g).length, 2);
+  const on = html({ connected: true, stuck: [stuck[2]], boxes: [], upstash: { cpu_hours: 0, compute_usd: 0, boxes: 0 }, pinned: PINNED });
+  assert.match(on, /1 box pinned could not delete/);
+  assert.doesNotMatch(html({ connected: false }), /could not delete/);
+});
+
+test("a stuck reason is escaped", () => {
+  const page = boxPage({ answer: async () => ({}) });
+  const html = page.boxUsageHtml({ data: { connected: false, stuck: [{ id: "r1", why: "<b>bold</b> & more" }] }, error: "", loading: false, open: {} }, NOW);
+  assert.ok(!html.includes("<b>"));
+  assert.match(html, /&lt;b&gt;bold&lt;\/b&gt; &amp; more/);
+});
