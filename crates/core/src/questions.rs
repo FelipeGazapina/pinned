@@ -350,6 +350,25 @@ mod tests {
     }
 
     #[test]
+    fn a_questionnaire_whose_worker_ended_closes_as_ended_and_survives_a_restart_closed() {
+        let dir = temp("ended");
+        let mut q = Questions::load(Some(&dir));
+        let own = q.open("tab-1", None, Some("task-1".into()), None, vec![question("Which database?", &["postgres", "mysql"])], vec![], 1).unwrap();
+        let by_tab = q.open("tab-2", None, None, None, vec![question("Which region?", &["eu", "us"])], vec![], 2).unwrap();
+        q.open("tab-3", None, None, None, vec![question("No task?", &["yes", "no"])], vec![], 3).unwrap();
+        let tab_task = |tab: &str| (tab == "tab-2").then(|| "task-2".to_owned());
+        assert_eq!(q.open_tasks(tab_task), [(own.clone(), "task-1".to_owned()), (by_tab.clone(), "task-2".to_owned())], "a questionnaire with no task of its own has its tab's");
+        assert!(q.end(&own) && q.end(&by_tab));
+        assert!(!q.end(&own), "already closed");
+        assert_eq!(q.get(&own).unwrap().outcome, Some(Outcome::Ended));
+        assert_eq!((q.open_on("tab-1"), q.waiting_tasks().count()), (None, 0));
+        assert!(q.open_on("tab-3").is_some(), "another tab's questionnaire stays open");
+        let again = Questions::load(Some(&dir));
+        assert_eq!(again.get(&by_tab).unwrap().outcome, Some(Outcome::Ended), "the outcome is saved");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn closed_questionnaires_are_kept_up_to_a_limit_and_open_ones_always() {
         let mut q = Questions::default();
         q.open("tab-open", None, None, None, vec![question("Open?", &["yes", "no"])], vec![], 0).unwrap();

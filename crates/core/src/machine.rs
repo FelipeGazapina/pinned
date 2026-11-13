@@ -13831,7 +13831,7 @@ Have another model review a risky change before it goes ahead.";
 
     #[test]
     #[cfg(unix)]
-    fn a_task_that_ends_with_an_open_questionnaire_closes_it_as_ended_and_it_no_longer_pauses_its_time_limit() {
+    fn open_questions_close_as_ended_when_their_task_ends_and_no_longer_pause_its_time_limit() {
         use crate::questions::{Outcome, QOption, Question};
         let (m, dir, _captain, task, child, transcript) = captain_with_thread_child("thread-questions-ended");
         m.record_event(hook_event(&child, "working", &transcript, Some("Board check")));
