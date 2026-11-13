@@ -35,8 +35,8 @@ const REST_AFTER: Duration = Duration::from_secs(2 * 60);
 const REST_LOOK_EVERY: Duration = Duration::from_secs(15);
 /// About when a parent should hear that its worker can't start without the user.
 const FIRST_RUN_WAIT: Duration = Duration::from_secs(60);
-/// How many times the first-run watch reads a starting session's screen before it stops.
-const FIRST_RUN_LOOKS: u32 = 10;
+/// Why a task the user cancelled from its card stopped.
+const CARD_CANCEL: &str = "cancelled from the card";
 /// How long a fresh session may start without reporting before its start fails.
 const STARTING_LIMIT: Duration = Duration::from_secs(10 * 60);
 /// Claude logs a turn's duration only after its Stop hook returns, within a second in practice.
@@ -370,6 +370,27 @@ enum Sent {
 }
 
 /// `delegate_task`'s answer when the project already runs as many workers as it allows.
+/// Why a session ended mid-turn: how the task it ran was cancelled, or how its process exited.
+fn stop_reason(task: Option<&crate::delegate::Task>, code: Option<u32>) -> String {
+    let Some(task) = task.filter(|task| task.state == crate::delegate::WorkState::Cancelled) else {
+        return code.map_or_else(|| "crashed".to_owned(), |code| format!("exited with code {code}"));
+    };
+    match (task.limit.as_deref(), task.error.as_deref()) {
+        (Some(limit), _) => format!("cancelled at its {limit} limit"),
+        (None, Some(CARD_CANCEL)) => "stopped by you".into(),
+        (None, Some(error)) => format!("cancelled: {error}"),
+        (None, None) => "cancelled".into(),
+    }
+}
+
+/// How long `limit` is, in the words a stop reason uses.
+fn wait_text(limit: Duration) -> String {
+    match limit.as_secs() {
+        secs if secs >= 60 && secs % 60 == 0 => format!("{} min", secs / 60),
+        secs => format!("{secs} s"),
+    }
+}
+
 fn workers_full(working: usize) -> String {
     let working = if working == 1 { "1 worker already runs".to_owned() } else { format!("{working} workers already run") };
     format!("{working} in this project, the most it allows at once. Wait for one to finish, or raise Workers at once in Settings › Way of working.")
@@ -488,6 +509,11 @@ struct Tab {
     /// Shared with the session's reader thread, which never takes the tabs lock. Never lock it
     /// while holding the tabs lock: a sink may call back into the machine.
     screen: Arc<Mutex<Screen>>,
+    /// The tab shows a headless child, which works with no session of the tab's own, until the
+    /// tab starts one.
+    headless: bool,
+    /// Why the last session ended mid-turn, until a new session or input.
+    stopped: Option<String>,
 }
 
 impl Tab {
@@ -564,10 +590,10 @@ impl Tab {
             work: work.get(id).map(|cost| cost.clone().with_own(self.tally.stats().cost_usd).total()),
             question: self.question.clone(),
             ask_detail: self.ask_detail.clone().filter(|_| self.status == Some(AgentStatus::NeedsInput)),
-            alive: false,
-            asleep: false,
-            headless: false,
-            stopped: None,
+            alive: self.session.is_some(),
+            asleep: self.asleep,
+            headless: self.headless && self.session.is_none(),
+            stopped: self.stopped.clone().filter(|_| !self.live()),
         }
     }
 
@@ -616,6 +642,7 @@ impl Tab {
 
     fn note_submit(&mut self) {
         self.turn_pending = Some(Instant::now());
+        self.stopped = None;
     }
 
     /// Types a local slash command. Unlike a prompt it leaves `turn_pending` alone: a local
@@ -1359,7 +1386,7 @@ impl Machine {
                 json(self.delegates.cancel(
                     &crate::delegate::Caller { tab: Some(tab), task: None },
                     &task,
-                    "cancelled from the card",
+                    CARD_CANCEL,
                     path.as_deref(),
                 )?)
             }
@@ -2148,12 +2175,16 @@ impl Machine {
     fn watch_first_run(&self, tab: &str) {
         let Ok(screen) = self.tab(tab, |t| t.screen.clone()) else { return };
         let session = screen.lock().unwrap().session;
-        let (me, tab, wait) = (self.me.clone(), tab.to_owned(), self.launch.first_run_wait);
+        let (me, tab, wait, limit) = (self.me.clone(), tab.to_owned(), self.launch.first_run_wait, self.launch.starting_limit);
+        let begun = Instant::now();
         std::thread::spawn(move || {
             let mut answered = vec![];
             let mut pause = wait;
-            for _ in 0..FIRST_RUN_LOOKS {
-                std::thread::sleep(pause);
+            loop {
+                std::thread::sleep(pause.min(limit.saturating_sub(begun.elapsed())));
+                if begun.elapsed() >= limit {
+                    break;
+                }
                 pause = wait;
                 let Some(machine) = me.upgrade() else { return };
                 if screen.lock().unwrap().session != session {
@@ -2180,6 +2211,14 @@ impl Machine {
                     Err(reason) => return machine.end_start(&tab, reason),
                 }
             }
+            // A fresh start that never reported, at its limit. A resume at its prompt fires no hook
+            // until a turn, but has its conversation's id.
+            let Some(machine) = me.upgrade() else { return };
+            if screen.lock().unwrap().session != session || !machine.tab(&tab, |t| t.status.is_none() && t.session.is_some() && t.claude_session.is_none()).unwrap_or(false) {
+                return;
+            }
+            let shown = crate::setup_token::last_line(machine.screen_text(&tab).as_bytes());
+            machine.end_start(&tab, format!("it did not start within {}; its screen shows: {shown}", wait_text(limit)));
         });
     }
 
@@ -2407,9 +2446,9 @@ impl Machine {
             cmd,
             size,
             move |bytes| screen.lock().unwrap().push(session, &bytes),
-            move || {
+            move |code| {
                 if let Some(machine) = me.upgrade() {
-                    machine.exited(&exited, session);
+                    machine.exited(&exited, session, code);
                 }
             },
         )?;
@@ -2419,6 +2458,7 @@ impl Machine {
             t.starting = false;
             t.started = Some(started);
             (t.status, t.title, t.message) = (None, None, None);
+            (t.headless, t.stopped) = (false, None);
             t.turn_pending = None;
             t.shells_left = false;
             t.draft = Draft::default();
@@ -3745,9 +3785,13 @@ impl Machine {
         let is_worker = |id: &str| workers.iter().any(|w| w.id == id);
         let top = |w: &TabView| if everyone { !w.spawned_by.as_deref().is_some_and(is_worker) } else { w.spawned_by.as_deref() == Some(from) };
         let state = |w: &TabView| match (w.running, w.status) {
-            (false, _) => "stopped",
-            (true, None) => "starting",
-            (true, Some(status)) => AgentStatus::ALL.iter().find(|(s, ..)| *s == status).map_or("", |(_, name, _)| name),
+            // A headless child works with no session of the tab's own.
+            (false, Some(AgentStatus::Working)) if w.headless => "working".to_owned(),
+            (false, _) => w.stopped.as_ref().map_or_else(|| "stopped".to_owned(), |why| format!("stopped ({why})")),
+            // A conversation that sleeps, or was resumed and sits at its prompt, fires no hook until a turn.
+            (true, None) if w.asleep || w.session.is_some() => "idle".to_owned(),
+            (true, None) => "starting".to_owned(),
+            (true, Some(status)) => AgentStatus::ALL.iter().find(|(s, ..)| *s == status).map_or("", |(_, name, _)| name).to_owned(),
         };
         let mut lines = vec![];
         let mut seen = HashSet::new();
@@ -5382,7 +5426,7 @@ impl Machine {
     /// the child works; it then resumes the child's conversation, when there is one.
     fn watch_thread(&self, child: ThreadChild, account: Account) {
         let id = self.add_child_tab(&child, account, vec![], false);
-        let _ = self.tab(&id, |t| t.status = Some(AgentStatus::Working));
+        let _ = self.tab(&id, |t| (t.status, t.headless) = (Some(AgentStatus::Working), true));
         self.delegates.link_thread(child.task, crate::delegate::Thread { tab: id, runs: false });
         self.emit_tabs();
     }
@@ -5587,9 +5631,6 @@ impl Machine {
 
     /// A headless child's thread follows its task: it shows the end, then resumes the child's
     /// conversation when opened. Its worktree becomes the thread's.
-    /// Ends the session of each worker thread whose task was stopped, with why.
-    fn stop_cancelled_threads(&self) {}
-
     fn follow_headless_threads(&self) {
         let watched: Vec<(String, String)> = self.tabs.lock().unwrap().iter().filter(|(_, t)| t.status == Some(AgentStatus::Working) && t.session.is_none()).filter_map(|(id, t)| Some((id.clone(), t.task.clone()?))).collect();
         let mut changed = false;
@@ -5988,6 +6029,8 @@ impl Machine {
             starting: false,
             started: None,
             launch,
+            headless: false,
+            stopped: None,
             asleep: false,
             bare: false,
             waking: false,
@@ -6041,16 +6084,25 @@ impl Machine {
         self.emit(Event::Tabs { tabs: self.tabs() });
     }
 
-    fn exited(&self, tab: &str, session: u64) {
-        let Ok((screen, signing_in)) = self.tab(tab, |t| (t.screen.clone(), (t.program == Program::SignIn).then(|| t.account.id.clone()))) else { return };
+    /// The tab's session ended by itself with exit `code`, or was killed: a cancel of the task
+    /// the tab runs records why on the task before it kills the session. A turn it was in reads
+    /// stopped, with that reason, rather than working on with nothing behind it.
+    fn exited(&self, tab: &str, session: u64, code: Option<u32>) {
+        let Ok((screen, signing_in, task)) = self.tab(tab, |t| (t.screen.clone(), (t.program == Program::SignIn).then(|| t.account.id.clone()), t.task.clone())) else { return };
         if screen.lock().unwrap().session != session {
             return;
         }
         if let Some(account) = signing_in {
             self.sign_in_changed(&account);
         }
+        let reason = stop_reason(task.and_then(|task| self.delegates.get(&task)).as_ref(), code);
         self.end_session(tab);
-        let _ = self.tab(tab, |t| (t.session, t.background_wait, t.mcp) = (None, None, None));
+        let _ = self.tab(tab, |t| {
+            (t.session, t.background_wait, t.mcp) = (None, None, None);
+            if !t.headless && matches!(t.status, Some(AgentStatus::Working | AgentStatus::NeedsInput)) {
+                (t.status, t.stopped) = (None, Some(reason));
+            }
+        });
         if let Some(task) = self.thread_task(tab, true) {
             self.delegates.fail(&task, "its thread's session ended".into(), self.launch.path_env.as_deref());
         }
@@ -12297,7 +12349,7 @@ Have another model review a risky change before it goes ahead.";
         wait_for("the worker's session", || m.tab(&tab, |t| t.session.is_some()).unwrap());
         m.record_event(hook(&tab, AgentStatus::Working));
         m.delegates.enforce_limits(Instant::now() + Duration::from_secs(1801), None);
-        m.stop_cancelled_threads();
+        wait_for("the killed session's exit", || !m.view(&tab).unwrap().running);
         let view = m.view(&tab).unwrap();
         let reason = "cancelled at its time limit";
         assert_eq!((view.running, view.alive, view.status, view.stopped.as_deref()), (false, false, None, Some(reason)), "the killed turn no longer reads working");
@@ -12330,7 +12382,6 @@ Have another model review a risky change before it goes ahead.";
         });
         m.watch_thread(ThreadChild { from: &parent, origin: None, task: &task.id, title: "Child", cwd: &cwd, made: None, model: None }, Account::builtin(Provider::Claude));
         let tab = m.delegates.get(&task.id).and_then(|t| t.thread).unwrap().tab;
-        m.stop_cancelled_threads();
         let view = m.view(&tab).unwrap();
         assert_eq!((view.headless, view.alive, view.status, view.stopped.as_deref()), (true, false, Some(AgentStatus::Working), None));
         assert_eq!(crate::reading::state_of(&view).0, "working", "a headless child at work is not a stopped session");

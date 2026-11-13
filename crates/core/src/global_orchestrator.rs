@@ -572,7 +572,8 @@ pub fn overview_at(machines: &[MachineSnapshot], now: u64) -> Overview {
         let tabs = if machine.online { machine.tabs } else { &[] };
         for project in machine.projects {
             let captain = captain_tab(tabs, &project.path);
-            let workers = tabs.iter().filter(|t| (t.running || t.status == Some(AgentStatus::Working)) && !finished(t) && t.role == Some(Role::Worker) && history::project_of(Path::new(&t.cwd)) == Path::new(&project.path)).count();
+            // A stored status never counts alone: a worker needs a live process, or is a headless child at work.
+            let workers = tabs.iter().filter(|t| ((t.alive && !finished(t)) || (t.headless && t.status == Some(AgentStatus::Working))) && t.role == Some(Role::Worker) && history::project_of(Path::new(&t.cwd)) == Path::new(&project.path)).count();
             let checkout = OverviewCheckout {
                 machine: machine.id.to_owned(),
                 machine_name: machine.name.to_owned(),
