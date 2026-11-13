@@ -8348,7 +8348,7 @@ fn box_usage_without_an_upstash_connection_is_empty() {
     let answer = ana.hub(json!({ "cmd": "box_usage" })).unwrap();
     assert_eq!(
         answer,
-        json!({ "connected": false, "error": null, "boxes": [], "upstash": { "cpu_hours": 0.0, "compute_usd": 0.0, "boxes": 0 }, "pinned": { "box_hours": 0.0, "tasks": 0, "since": 0 } })
+        json!({ "connected": false, "error": null, "boxes": [], "upstash": { "cpu_hours": 0.0, "compute_usd": 0.0, "boxes": 0 }, "others": { "boxes": 0, "cpu_hours": 0.0, "compute_usd": 0.0 }, "pinned": { "box_hours": 0.0, "tasks": 0, "since": 0 } })
     );
 }
 
@@ -8386,10 +8386,10 @@ fn box_usage_lists_what_upstash_lists_and_marks_the_box_pinned_opened() {
             "error": null,
             "boxes": [
                 { "id": "u-web", "name": "web", "size": "large", "status": "running", "created": month + 10, "last_activity": month + 30, "cpu_hours": 2.0, "compute_usd": 1.5,
-                  "pinned": { "project": "site", "role": "worker", "machine": "ana-mac" } },
-                { "id": "u-old", "name": "last month", "size": null, "status": "deleted", "created": month - 86_400, "last_activity": null, "cpu_hours": 1.0, "compute_usd": 0.5, "pinned": null }
+                  "pinned": { "project": "site", "role": "worker", "machine": "ana-mac" } }
             ],
             "upstash": { "cpu_hours": 2.0, "compute_usd": 1.5, "boxes": 1 },
+            "others": { "boxes": 1, "cpu_hours": 1.0, "compute_usd": 0.5 },
             "pinned": { "box_hours": 2.0, "tasks": 2, "since": month }
         })
     );
@@ -8419,6 +8419,7 @@ fn box_usage_reports_an_upstash_that_fails_and_still_counts_pinneds_own() {
             "error": "Upstash did not answer: Upstash Box answered 500: boom",
             "boxes": [],
             "upstash": { "cpu_hours": 0.0, "compute_usd": 0.0, "boxes": 0 },
+            "others": { "boxes": 0, "cpu_hours": 0.0, "compute_usd": 0.0 },
             "pinned": { "box_hours": 2.0, "tasks": 1, "since": month }
         })
     );
@@ -8449,10 +8450,52 @@ fn box_usage_never_shows_one_account_the_boxes_or_tasks_of_another() {
     let a = ana.hub(json!({ "cmd": "box_usage" })).unwrap();
     assert_eq!((a["boxes"][0]["id"].clone(), a["boxes"][0]["pinned"]["project"].clone(), a["pinned"]["box_hours"].clone(), a["pinned"]["tasks"].clone()), (json!("a-1"), json!("site"), json!(1.0), json!(1)));
     let b = bob.hub(json!({ "cmd": "box_usage" })).unwrap();
-    assert_eq!(b["boxes"].as_array().unwrap().iter().map(|x| (x["id"].clone(), x["pinned"].clone())).collect::<Vec<_>>(), [(json!("a-1"), Value::Null), (json!("b-1"), Value::Null)], "a box row of ana's names no box of bob's, even under the same Upstash id");
+    assert_eq!((b["boxes"].clone(), b["others"]["boxes"].clone()), (json!([]), json!(2)), "a box row of ana's names no box of bob's, even under the same Upstash id, and bob opened neither");
     assert_eq!(b["pinned"], json!({ "box_hours": 0.0, "tasks": 0, "since": month }));
     for leaked in ["site", "ana-mac", "worker", "ghp_"] {
         assert!(!b.to_string().contains(leaked), "ana's {leaked} reached bob: {b}");
+    }
+}
+
+#[test]
+fn two_accounts_on_one_upstash_key_list_only_their_own_boxes_and_count_the_rest() {
+    let hub = TestHub::start("usage_shared_key");
+    let key = "box_testkey-usage-shared";
+    let (token_a, id_a, mut ana) = usage_account(&hub.url, "ana@example.test", key);
+    let (token_b, id_b, mut bob) = usage_account(&hub.url, "bob@example.test", key);
+    let (machine_a, _) = account::register_machine(&hub.url, &token_a, "ana-mac", "linux").unwrap();
+    let (machine_b, _) = account::register_machine(&hub.url, &token_b, "bob-mac", "linux").unwrap();
+    let month = month_start();
+    upstash_answers(
+        key,
+        Some((
+            200,
+            json!([
+                { "id": "u-ana", "name": "ana-site-worker-aaaaaa", "status": "running", "created_at": month + 10, "updated_at": month + 20, "total_cpu_ns": 3.6e12, "total_compute_cost_usd": 1.0 },
+                { "id": "u-bob", "name": "bobproject-worker-bbbbbb", "status": "running", "created_at": month + 11, "updated_at": month + 21, "total_cpu_ns": 7.2e12, "total_compute_cost_usd": 2.0 },
+                { "id": "u-hand", "name": "made-by-hand", "status": "idle", "created_at": month + 12, "updated_at": month + 22, "total_cpu_ns": 3.6e12, "total_compute_cost_usd": 0.5 }
+            ]),
+        )),
+    );
+    opened_box(&hub, &id_a, &machine_a.id, "box-a1", "u-ana", "git@github.com:example/ana-site.git");
+    opened_box(&hub, &id_b, &machine_b.id, "box-b1", "u-bob", "git@github.com:example/bobproject.git");
+
+    let a = ana.hub(json!({ "cmd": "box_usage" })).unwrap();
+    assert_eq!(a["boxes"].as_array().unwrap().iter().map(|x| x["id"].clone()).collect::<Vec<_>>(), [json!("u-ana")], "ana's page lists only the box ana opened");
+    assert_eq!(a["boxes"][0]["pinned"]["project"], json!("ana-site"));
+    assert_eq!(a["others"], json!({ "boxes": 2, "cpu_hours": 3.0, "compute_usd": 2.5 }), "bob's box and the hand-made one are one count with their sums");
+    assert_eq!(a["upstash"], json!({ "cpu_hours": 4.0, "compute_usd": 3.5, "boxes": 3 }), "the key-wide totals still cover the whole key");
+    let shown = a.to_string();
+    for leaked in ["u-bob", "bobproject", "bbbbbb", "bob-mac", "u-hand", "made-by-hand", id_b.as_str()] {
+        assert!(!shown.contains(leaked), "bob's {leaked} reached ana: {shown}");
+    }
+
+    let b = bob.hub(json!({ "cmd": "box_usage" })).unwrap();
+    assert_eq!(b["boxes"].as_array().unwrap().iter().map(|x| x["id"].clone()).collect::<Vec<_>>(), [json!("u-bob")]);
+    assert_eq!(b["others"], json!({ "boxes": 2, "cpu_hours": 2.0, "compute_usd": 1.5 }));
+    let shown = b.to_string();
+    for leaked in ["u-ana", "ana-site", "aaaaaa", "ana-mac", "u-hand", "made-by-hand", id_a.as_str()] {
+        assert!(!shown.contains(leaked), "ana's {leaked} reached bob: {shown}");
     }
 }
 

@@ -135,12 +135,16 @@ pub struct BoxUsage {
     /// Why Upstash gave no boxes, in plain text. `boxes` is empty then; `pinned` is still filled.
     #[serde(default)]
     pub error: Option<String>,
-    /// Every box the key lists, newest first.
+    /// Every box on the key that this account opened through pinned, newest first.
     #[serde(default)]
     pub boxes: Vec<UsageBox>,
-    /// The listed boxes created this UTC month.
+    /// The boxes created this UTC month, over the whole key: the figures cover every box the key
+    /// lists, not only those in `boxes`.
     #[serde(default)]
     pub upstash: Totals,
+    /// The other boxes on the key, which this account did not open: a count and sums, no names.
+    #[serde(default)]
+    pub others: OtherBoxes,
     #[serde(default)]
     pub pinned: PinnedCount,
 }
@@ -191,6 +195,18 @@ pub struct Totals {
     pub compute_usd: f64,
     #[serde(default)]
     pub boxes: u32,
+}
+
+/// The boxes on the account's Upstash key that the account did not open through pinned, folded
+/// into figures. Another account may share the key, so no name, id or detail of these is kept.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, schemars::JsonSchema)]
+pub struct OtherBoxes {
+    #[serde(default)]
+    pub boxes: u32,
+    #[serde(default)]
+    pub cpu_hours: f64,
+    #[serde(default)]
+    pub compute_usd: f64,
 }
 
 /// pinned's count of the box time its delegated tasks ended with this UTC month. It has no price.
@@ -245,6 +261,23 @@ pub fn usage_boxes(boxes: &[BoxData], since: u64) -> (Vec<UsageBox>, Totals) {
         totals.boxes += 1;
     }
     (rows, totals)
+}
+
+/// `rows` that `opened` names by id, and the rest folded into one count with their sums. A row
+/// not in `opened` is dropped whole: its name, id and detail go no further.
+pub fn keep_opened(rows: Vec<UsageBox>, opened: &[&str]) -> (Vec<UsageBox>, OtherBoxes) {
+    let mut others = OtherBoxes::default();
+    let mut kept = Vec::new();
+    for row in rows {
+        if opened.contains(&row.id.as_str()) {
+            kept.push(row);
+        } else {
+            others.boxes += 1;
+            others.cpu_hours += row.cpu_hours.unwrap_or(0.0);
+            others.compute_usd += row.compute_usd.unwrap_or(0.0);
+        }
+    }
+    (kept, others)
 }
 
 #[derive(Clone, Debug, PartialEq)]

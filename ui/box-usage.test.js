@@ -57,7 +57,7 @@ test("state a: Upstash's numbers, pinned's count, the running box and the other 
   const html = show(A);
   assert.equal(
     text(html),
-    "Upstash Box This month From Upstash 2.00 CPU hours $1.50 compute cost Upstash's numbers for the 1 box it still lists. Deleted boxes may be missing. " +
+    "Upstash Box This month From Upstash 2.00 CPU hours $1.50 compute cost Upstash's numbers for the 1 box it still lists on this whole key, whoever opened them. Deleted boxes may be missing. " +
       "pinned's count 2.0 box hours 2 tasks Box time pinned recorded for its delegated tasks; not a bill. " +
       "Running now Box Size Belongs to Up for CPU hours Cost web site · worker Large site · worker 2 h 5 min 2.00 $1.50 " +
       "Other boxes (1) Box Size Belongs to Status CPU hours Cost last month Not opened by pinned — Not opened by pinned Deleted 1.00 $0.50",
@@ -65,6 +65,19 @@ test("state a: Upstash's numbers, pinned's count, the running box and the other 
   assert.match(html, /<details class="box-others"><summary>Other boxes \(1\)<\/summary>/);
   assert.doesNotMatch(html, /<details[^>]* open/);
   assert.doesNotMatch(text(html.split("pinned's count")[1].split("</div></div>")[0]), /\$/, "no dollar figure for pinned's count");
+});
+
+test("the boxes this account did not open show as one count line, as text, with no name", () => {
+  const others = { boxes: 3, cpu_hours: 1.2, compute_usd: 0.5 };
+  const html = show({ ...A, boxes: [A.boxes[0]], others });
+  assert.match(text(html), /3 other boxes on this Upstash key, not opened by this account: 1\.20 CPU h, \$0\.50 compute/);
+  assert.match(text(html), /on this whole key, whoever opened them/, "the key-wide totals say they cover the whole key");
+  assert.equal((html.match(/box-others-count/g) ?? []).length, 1, "one line, not a list");
+  assert.equal(text(show({ ...A, others: { ...others, boxes: 1 } })).match(/1 other box on this[^:]*:/)?.[0], "1 other box on this Upstash key, not opened by this account:");
+  assert.doesNotMatch(text(show({ ...A, others: { boxes: 0, cpu_hours: 0, compute_usd: 0 } })), /other box/);
+  assert.doesNotMatch(text(show({ ...A, others: undefined })), /other box on|other boxes on/, "an older hub's answer has no line");
+  const hostile = show({ ...A, others: { boxes: "<img src=x onerror=alert(1)>", cpu_hours: "<img src=x>", compute_usd: 0 } });
+  assert.doesNotMatch(hostile, /<img/, "a markup value stays text");
 });
 
 test("Other boxes stays open when the page redraws while it was open", () => {
@@ -130,7 +143,7 @@ test("state d: no boxes says so beside both figures", () => {
   const html = show({ connected: true, error: null, boxes: [], upstash: { cpu_hours: 0, compute_usd: 0, boxes: 0 }, pinned: { box_hours: 0.25, tasks: 1, since: 1 } });
   assert.equal(
     text(html),
-    "Upstash Box This month From Upstash 0.00 CPU hours $0.00 compute cost Upstash's numbers for the 0 boxes it still lists. Deleted boxes may be missing. " +
+    "Upstash Box This month From Upstash 0.00 CPU hours $0.00 compute cost Upstash's numbers for the 0 boxes it still lists on this whole key, whoever opened them. Deleted boxes may be missing. " +
       "pinned's count 0.3 box hours 1 task Box time pinned recorded for its delegated tasks; not a bill. Running now No boxes right now.",
   );
 });

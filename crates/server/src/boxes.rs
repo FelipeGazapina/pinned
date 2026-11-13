@@ -578,6 +578,8 @@ pub async fn usage(hub: &Hub, account: &Arc<Account>) -> Result<BoxUsage, String
         Ok(listed) => {
             let (mut boxes, totals) = upstash::usage_boxes(&listed, since);
             let opened = hub.db.opened_boxes(account.id).await?;
+            let ids: Vec<&str> = opened.iter().map(|o| o.upstash.as_str()).collect();
+            (boxes, usage.others) = upstash::keep_opened(boxes, &ids);
             for row in &mut boxes {
                 row.pinned = opened.iter().find(|o| o.upstash == row.id).map(|o| PinnedBox { project: Some(project_name(o.folder.as_deref(), o.repo.as_deref())), role: o.role.clone(), machine: o.machine.clone() });
             }

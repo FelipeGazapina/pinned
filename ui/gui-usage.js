@@ -609,11 +609,18 @@ const boxFigureHtml = (label, figures, note) => `<div class="limit-card box-figu
 function boxFiguresHtml(u) {
   const up = u.error ? null : u.upstash;
   const from = up ? boxFigureHtml("From Upstash", [[boxHours(up.cpu_hours), "CPU hours"], [usd(up.compute_usd), "compute cost"]],
-    `Upstash's numbers for the ${up.boxes} box${up.boxes === 1 ? "" : "es"} it still lists. Deleted boxes may be missing.`) : "";
+    `Upstash's numbers for the ${up.boxes} box${up.boxes === 1 ? "" : "es"} it still lists on this whole key, whoever opened them. Deleted boxes may be missing.`) : "";
   const p = u.pinned ?? { box_hours: 0, tasks: 0 };
   const own = boxFigureHtml("pinned's count", [[p.box_hours.toFixed(1), "box hours"], [p.tasks.toLocaleString("en-US"), p.tasks === 1 ? "task" : "tasks"]],
     "Box time pinned recorded for its delegated tasks; not a bill.");
   return `<div class="box-figures">${from}${own}</div>`;
+}
+/** The boxes on the key that this account did not open, as one line: a count and sums, never a name. */
+function boxOthersHtml(others) {
+  if (!(others?.boxes > 0)) return "";
+  const n = esc(String(others.boxes));
+  const sums = `${boxNum(others.cpu_hours, boxHours)} CPU h, ${boxNum(others.compute_usd, usd)} compute`;
+  return `<p class="muted note box-others-count">${n} other box${others.boxes === 1 ? "" : "es"} on this Upstash key, not opened by this account: ${esc(sums)}</p>`;
 }
 function boxListsHtml(boxes, now, open) {
   const live = boxes.filter((b) => BOX_LIVE.includes(b.status));
@@ -626,7 +633,7 @@ function boxBodyHtml(box, now) {
   const u = box.data;
   if (!u) return box.error ? boxNotice(`Could not read Upstash Box usage: ${box.error}`) : `<p class="muted note" role="status">Loading…</p>`;
   if (!u.connected) return `<p class="muted note">Connect Upstash in Settings › Connectors to see box usage.</p>`;
-  return `${u.error ? boxNotice(u.error) : ""}${boxFiguresHtml(u)}${u.error ? "" : boxListsHtml(u.boxes ?? [], now, box.open)}`;
+  return `${u.error ? boxNotice(u.error) : ""}${boxFiguresHtml(u)}${u.error ? "" : `${boxOthersHtml(u.others)}${boxListsHtml(u.boxes ?? [], now, box.open)}`}`;
 }
 function boxUsageHtml(box, now) {
   return `<section class="box-usage" aria-busy="${box.loading}"><div class="box-title"><h2>Upstash Box</h2><span class="muted sub-title">This month</span></div>${boxBodyHtml(box, now)}</section>`;
