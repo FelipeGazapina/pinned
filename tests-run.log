@@ -300,3 +300,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:22:13Z #134 box_usage_without_an_upstash_connection_is_empty ok / avail=15049M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:22:14Z #135 box_usage_lists_what_upstash_lists_and_marks_the_box_pinned_opened START / avail=15049M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:22:17Z #135 box_usage_lists_what_upstash_lists_and_marks_the_box_pinned_opened ok / avail=15049M /workspace avail=19374M node_stat=Ssl node_tcp=1
+2026-11-13T04:22:18Z #136 box_usage_reports_an_upstash_that_fails_and_still_counts_pinneds_own START / avail=15049M /workspace avail=19374M node_stat=Ssl
