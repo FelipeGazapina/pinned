@@ -5957,9 +5957,9 @@ fn a_session_that_skips_prompts_in_plan_mode_is_refused_a_workflow_that_skips_th
     let (token, _) = account::signup(&url, "owner@example.com", "correct horse").unwrap();
     let mut owner = agent_of(&url, &token, "owner@example.com", "plan-bypass-mac");
     let folder = owner.dir.join("site").canonicalize().unwrap().display().to_string();
-    let workflow = |id: Option<&str>, label: &str, permission: Option<&str>| {
+    let workflow = |id: Option<&str>, label: &str, enabled: bool, permission: Option<&str>| {
         let mut connector = json!({
-            "name": "Fix", "enabled": false, "trigger": { "kind": "linear-label", "label": label },
+            "name": "Fix", "enabled": enabled, "trigger": { "kind": "linear-label", "label": label },
             "folder": folder, "model": "claude-sonnet-5-5", "effort": "medium", "permissionMode": "acceptEdits", "worktree": false, "instructions": "Fix it.",
         });
         if let Some(permission) = permission {
@@ -5976,12 +5976,12 @@ fn a_session_that_skips_prompts_in_plan_mode_is_refused_a_workflow_that_skips_th
         }
         json!({ "connector": connector })
     };
-    let mut own = workflow(None, "idle", Some("bypassPermissions"));
+    let mut own = workflow(None, "idle", false, Some("bypassPermissions"));
     own["cmd"] = json!("save_connector");
     let id = owner.client.hub(own).unwrap()["id"].as_str().unwrap().to_owned();
     let labels = |client: &mut Client| {
         let settings = client.hub(json!({ "cmd": "get_settings" })).unwrap();
-        let mut labels: Vec<String> = settings["connectors"].as_array().unwrap().iter().map(|c| format!("{}:{}", c["trigger"]["label"].as_str().unwrap(), c["graph"]["nodes"][1]["permission"].as_str().unwrap())).collect();
+        let mut labels: Vec<String> = settings["connectors"].as_array().unwrap().iter().map(|c| format!("{}:{}:{}", c["enabled"], c["trigger"]["label"].as_str().unwrap(), c["graph"]["nodes"][1]["permission"].as_str().unwrap())).collect();
         labels.sort();
         labels
     };
@@ -5992,15 +5992,15 @@ fn a_session_that_skips_prompts_in_plan_mode_is_refused_a_workflow_that_skips_th
     owner.client.wait("plan mode at the hub", |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == wide.as_str() && t["read_only"] == true));
     let runs = "save_connector would run a session that skips its permission prompts, and your own session asks for them";
     let keeps = "save_connector would keep this workflow's session that skips its permission prompts, and your own session asks for them";
-    assert_eq!(act(&owner.dir, &wide, "save_connector", workflow(None, "plan", Some("bypassPermissions"))), Err(runs.to_owned()), "a graph that skips prompts");
-    assert_eq!(act(&owner.dir, &wide, "save_connector", workflow(Some(&id), "plan", None)), Err(keeps.to_owned()), "no graph, so the stored one is kept");
-    assert_eq!(labels(&mut owner.client), ["idle:bypassPermissions"], "nothing is saved");
+    assert_eq!(act(&owner.dir, &wide, "save_connector", workflow(None, "plan", false, Some("bypassPermissions"))), Err(runs.to_owned()), "a graph that skips prompts");
+    assert_eq!(act(&owner.dir, &wide, "save_connector", workflow(Some(&id), "plan", true, None)), Err(keeps.to_owned()), "no graph, so the stored one is kept");
+    assert_eq!(labels(&mut owner.client), ["false:idle:bypassPermissions"], "nothing is saved");
 
     report_mode(&owner.dir, &wide, "bypassPermissions");
     owner.client.wait("bypass mode at the hub", |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == wide.as_str() && t["bypass"] == true && t["read_only"].is_null()));
-    assert_eq!(act(&owner.dir, &wide, "save_connector", workflow(None, "new", Some("bypassPermissions"))).unwrap()["outcome"], "done", "a graph that skips prompts");
-    assert_eq!(act(&owner.dir, &wide, "save_connector", workflow(Some(&id), "kept", None)).unwrap()["outcome"], "done", "no graph");
-    assert_eq!(labels(&mut owner.client), ["kept:bypassPermissions", "new:bypassPermissions"]);
+    assert_eq!(act(&owner.dir, &wide, "save_connector", workflow(None, "new", false, Some("bypassPermissions"))).unwrap()["outcome"], "done", "a graph that skips prompts");
+    assert_eq!(act(&owner.dir, &wide, "save_connector", workflow(Some(&id), "idle", true, None)).unwrap()["outcome"], "done", "no graph");
+    assert_eq!(labels(&mut owner.client), ["false:new:bypassPermissions", "true:idle:bypassPermissions"], "both saved; the save with no graph turned the stored one on");
 }
 
 /// The `cmd` of every call the hub sends the raw machine socket `ws` within `limit`.

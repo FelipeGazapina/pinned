@@ -21135,6 +21135,10 @@
                     "type": "null"
                   }
                 ]
+              },
+              "read_only": {
+                "description": "The session acts read-only whatever `bypass` says: its permission mode is plan, or a key\npress left the mode unknown until a hook reports it. An older node never sends it.",
+                "type": "boolean"
               }
             },
             "required": [
@@ -28223,6 +28227,10 @@
                     "type": "null"
                   }
                 ]
+              },
+              "read_only": {
+                "description": "The session acts read-only whatever `bypass` says: its permission mode is plan, or a key\npress left the mode unknown until a hook reports it. An older node never sends it.",
+                "type": "boolean"
               }
             },
             "required": [
@@ -48983,6 +48991,10 @@
                 "type": "null"
               }
             ]
+          },
+          "read_only": {
+            "description": "The session acts read-only whatever `bypass` says: its permission mode is plan, or a key\npress left the mode unknown until a hook reports it. An older node never sends it.",
+            "type": "boolean"
           }
         },
         "required": [
@@ -49530,6 +49542,10 @@
                 "type": "null"
               }
             ]
+          },
+          "read_only": {
+            "description": "The session acts read-only whatever `bypass` says: its permission mode is plan, or a key\npress left the mode unknown until a hook reports it. An older node never sends it.",
+            "type": "boolean"
           }
         },
         "required": [
@@ -51635,6 +51651,10 @@
                     "type": "null"
                   }
                 ]
+              },
+              "read_only": {
+                "description": "The session acts read-only whatever `bypass` says: its permission mode is plan, or a key\npress left the mode unknown until a hook reports it. An older node never sends it.",
+                "type": "boolean"
               }
             },
             "required": [
@@ -55183,6 +55203,10 @@
                     "type": "null"
                   }
                 ]
+              },
+              "read_only": {
+                "description": "The session acts read-only whatever `bypass` says: its permission mode is plan, or a key\npress left the mode unknown until a hook reports it. An older node never sends it.",
+                "type": "boolean"
               }
             },
             "required": [
