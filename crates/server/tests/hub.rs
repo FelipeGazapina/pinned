@@ -3379,6 +3379,9 @@ enum RawReply {
     Err(String),
     /// Reads the call, then drops the connection without answering, as a machine that crashed mid-call.
     Hangup,
+    /// Answers from a thread of its own once the closure returns, while the socket goes on reading,
+    /// as a node answers a call that waits.
+    Later(Box<dyn FnOnce() -> Value + Send>),
 }
 
 /// A machine socket the test scripts, which reconnects after a hangup and logs every call it got.
@@ -3439,6 +3442,13 @@ impl RawMachine {
                     match answer(&frame["call"]) {
                         RawReply::Ok(value) => ws.send(Message::text(json!({ "type": "reply", "id": frame["id"], "ok": value }).to_string())).unwrap(),
                         RawReply::Err(err) => ws.send(Message::text(json!({ "type": "reply", "id": frame["id"], "err": err }).to_string())).unwrap(),
+                        RawReply::Later(answer) => {
+                            let (queued, id) = (queued.clone(), frame["id"].clone());
+                            std::thread::spawn(move || {
+                                let value = answer();
+                                queued.lock().unwrap().push(json!({ "type": "reply", "id": id, "ok": value }));
+                            });
+                        }
                         RawReply::Hangup => {
                             if let MaybeTlsStream::Plain(stream) = ws.get_mut() {
                                 let _ = stream.shutdown(Shutdown::Both);
@@ -8699,9 +8709,9 @@ fn a_held_end_its_restarted_parent_does_not_take_stays_readable_through_status_a
     let (mut ana, mac, mac_token, mini, mini_raw, _) = held_for_offline_mac(&hub);
     assert_eq!(ana.hub(json!({ "cmd": "unclaimed_ends" })), Ok(json!([])), "held for mac, not yet unclaimed");
 
-    // mac restarted meanwhile and forgot the task: it answers that it did not take the end.
+    // mac restarted meanwhile and forgot the task: it answers that it does not know it.
     let forgot = |call: &Value| match call["cmd"].as_str().unwrap() {
-        "remote_ended" => RawReply::Ok(json!(false)),
+        "remote_ended" => RawReply::Ok(json!("unknown")),
         _ => RawReply::Ok(Value::Null),
     };
     let mac_raw = RawMachine::start(&hub.url, &mac_token, forgot);
@@ -8727,7 +8737,7 @@ fn a_held_end_its_restarted_parent_does_not_take_stays_readable_through_status_a
     assert_eq!(again.calls("remote_ended"), 0, "an unclaimed end is not offered again on the next connection");
     assert_eq!(held_ends(&hub, None), 1, "it stays for its 30 days");
 
-    // Online and forgetful: an end mac answers it did not take is kept unclaimed too.
+    // Online and forgetful: an end mac answers it does not know is kept unclaimed too.
     let end = json!({ "cmd": "remote_ended", "to": mac.id, "tab": "tab-1", "task": "task-2", "end": { "state": "failed", "error": "Tests failed." } });
     assert_eq!(mini_raw.ask(end), Ok(json!(false)), "the sender hears not taken, as before");
     let listed = ana.hub(json!({ "cmd": "unclaimed_ends" })).unwrap();
@@ -8738,6 +8748,111 @@ fn a_held_end_its_restarted_parent_does_not_take_stays_readable_through_status_a
     // Another account lists none of it.
     let (_, _, mut bob) = signed_in(&hub.url, "bob@acme.dev");
     assert_eq!(bob.hub(json!({ "cmd": "unclaimed_ends" })), Ok(json!([])));
+}
+
+#[test]
+fn an_origins_answer_to_an_end_decides_whether_the_hub_drops_it_or_lists_it_unclaimed() {
+    let hub = TestHub::start("held_answers");
+    let (token, _, mut ana) = signed_in(&hub.url, "ana@acme.dev");
+    let (mac, mac_token) = account::register_machine(&hub.url, &token, "ana-mac", "linux").unwrap();
+    let (_, mini_token) = account::register_machine(&hub.url, &token, "ana-mini", "linux").unwrap();
+    let mini_raw = RawMachine::start(&hub.url, &mini_token, |_| RawReply::Ok(Value::Null));
+    wait_for("mini online", || ana.machines().contains(&("ana-mini".into(), true)));
+    let end = |task: &str| json!({ "cmd": "remote_ended", "to": mac.id, "tab": "tab-1", "task": task, "end": { "state": "result_available", "summary": format!("{task} done.") } });
+    let listed = |ana: &mut Client| -> Vec<String> {
+        let mut tasks: Vec<String> = ana.hub(json!({ "cmd": "unclaimed_ends" })).unwrap().as_array().unwrap().iter().map(|e| e["task"].as_str().unwrap().to_owned()).collect();
+        tasks.sort();
+        tasks
+    };
+    // Held while mac is offline, then delivered on its connection.
+    for task in ["held-settled", "held-unknown"] {
+        assert_eq!(mini_raw.ask(end(task)), Ok(json!(true)), "{task}: held for mac, which is offline");
+    }
+    // mac answers by task: a 0.18.2 node says settled or unknown, a 0.18.1 one a bare false, and a
+    // 0.17 one, which predates the call, an error.
+    let mac_raw = RawMachine::start(&hub.url, &mac_token, |call| match (call["cmd"].as_str().unwrap(), call["task"].as_str().unwrap_or_default()) {
+        ("remote_ended", task) if task.ends_with("-settled") => RawReply::Ok(json!("settled")),
+        ("remote_ended", task) if task.ends_with("-unknown") => RawReply::Ok(json!("unknown")),
+        ("remote_ended", task) if task.ends_with("-false") => RawReply::Ok(json!(false)),
+        ("remote_ended", task) if task.ends_with("-error") => RawReply::Err("this machine runs pinned 0.17.20, which can't answer that: unknown variant `remote_ended`".into()),
+        _ => RawReply::Ok(Value::Null),
+    });
+    wait_for("the hub to deliver both held ends", || mac_raw.calls("remote_ended") == 2);
+    wait_for("the settled row to go", || held_ends(&hub, None) == 1);
+    assert_eq!(listed(&mut ana), ["held-unknown"], "a held end mac settled already goes; one it does not know is listed");
+
+    // Live, with mac online. The worker always hears a bool.
+    assert_eq!(mini_raw.ask(end("live-settled")), Ok(json!(true)), "settled reads as taken");
+    assert_eq!(mini_raw.ask(end("live-unknown")), Ok(json!(false)));
+    assert_eq!(mini_raw.ask(end("live-false")), Ok(json!(false)), "a 0.18.1 origin's false, as before");
+    assert_eq!(mini_raw.ask(end("live-error")), Ok(json!(false)), "an origin's error, as before");
+    assert_eq!(listed(&mut ana), ["held-unknown", "live-error", "live-unknown"], "settled and a bare false keep nothing; unknown and an error are listed");
+    assert_eq!(held_ends(&hub, None), 3);
+    let reports = held_reports(&hub);
+    assert!(!reports.iter().any(|r| r.contains("live-false") || r.contains("live-settled")), "{reports:?}");
+}
+
+#[test]
+fn a_remote_task_its_parent_settled_from_a_status_look_is_not_listed_when_its_end_arrives() {
+    let hub = TestHub::start_with_boxes("held_settled_first", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let mac_dir = temp("held-settled-first-mac");
+    let (_mac, mac_id, captain) = mac_with_captain(&hub, &mut ana, &mac_dir);
+    let code = ana.client.hub(json!({ "cmd": "pair_code" })).unwrap();
+    let mini = account::pair(&hub.url, code["code"].as_str().unwrap(), "mini", "linux").unwrap();
+    let worker = RawMachine::start(&hub.url, &mini.machine_token, |call| match call["cmd"].as_str().unwrap() {
+        "delegate" => RawReply::Ok(json!({ "taskId": "task-m", "tabId": "tab-w", "workState": "working" })),
+        "remote_task" => RawReply::Ok(json!({ "workState": "result_available", "summary": "Suite green." })),
+        _ => RawReply::Ok(Value::Null),
+    });
+    ana.client.wait_machines(&[("mac", true), ("mini", true)]);
+    let started = delegate_from(&mac_dir, &captain, json!({ "task": "Run the slow suite.", "title": "Slow suite", "target": { "machine": "mini" } })).unwrap();
+    let task = started["taskId"].as_str().unwrap().to_owned();
+    wait_for("mac's status look to settle the task", || task_status(&mac_dir, &captain, &task)["workState"] == "result_available");
+
+    // The worker's own end arrives after: mac holds this same end, so it is no unclaimed report.
+    let ended = json!({ "cmd": "remote_ended", "to": mac_id, "tab": captain, "task": task, "end": { "state": "result_available", "summary": "Suite green." } });
+    assert_eq!(worker.ask(ended), Ok(json!(true)), "settled reads as taken");
+    assert_eq!(ana.client.hub(json!({ "cmd": "unclaimed_ends" })), Ok(json!([])));
+    assert_eq!(held_ends(&hub, None), 0);
+}
+
+#[test]
+fn a_status_look_waits_while_the_hub_passes_its_tasks_end_so_the_end_is_not_listed() {
+    let hub = TestHub::start("held_lock");
+    let (mut ana, mac, mac_token, mini, mini_raw, _) = held_for_offline_mac(&hub);
+    // mac answers its first delivery with an error, so the row stays waiting. The next end it is
+    // passed waits up to 2 s for its own status look's reply: it answers a bare false if that came
+    // (it settled the task from it), else true.
+    let looked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen = looked.clone();
+    let passes = Arc::new(AtomicU64::new(0));
+    let mac_raw = RawMachine::start(&hub.url, &mac_token, move |call| match call["cmd"].as_str().unwrap() {
+        "remote_ended" if passes.fetch_add(1, Ordering::SeqCst) == 0 => RawReply::Err("not now".into()),
+        "remote_ended" => {
+            let seen = seen.clone();
+            RawReply::Later(Box::new(move || {
+                let start = Instant::now();
+                while !seen.load(Ordering::SeqCst) && start.elapsed() < Duration::from_secs(2) {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                json!(!seen.load(Ordering::SeqCst))
+            }))
+        }
+        _ => RawReply::Ok(Value::Null),
+    });
+    wait_for("the hub to offer mac the held end", || mac_raw.calls("remote_ended") == 1);
+    assert_eq!(held_ends(&hub, None), 1, "still waiting");
+    std::thread::scope(|scope| {
+        let resent = scope.spawn(|| mini_raw.ask(json!({ "cmd": "remote_ended", "to": mac.id, "tab": "tab-1", "task": "task-1", "end": { "state": "result_available", "summary": "Suite green." } })));
+        wait_for("the hub to pass mac the resent end", || mac_raw.calls("remote_ended") == 2);
+        let look = mac_raw.ask(remote_task_call(&mini.id, "task-1", None));
+        looked.store(true, Ordering::SeqCst);
+        eprintln!("the look answered {look:?}");
+        assert_eq!(resent.join().unwrap(), Ok(json!(true)), "mac took it before its look ran");
+    });
+    assert_eq!(held_ends(&hub, None), 0, "the row went with the end mac took");
+    assert_eq!(ana.hub(json!({ "cmd": "unclaimed_ends" })), Ok(json!([])));
 }
 
 #[test]

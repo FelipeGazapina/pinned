@@ -30,6 +30,12 @@ pub const BOX_BOOTING: &str = "the box is still booting";
 /// The hub's answer about a worker box whose node connected and then dropped its link. Its task
 /// waits: the node may come back, and the hub ends a box that stays offline.
 pub const BOX_OFFLINE: &str = "the box is offline";
+/// A machine's answer to `Call::RemoteEnded` for a task that had ended already with that same end,
+/// as from a status look that read it first. The hub drops a held copy and tells the worker taken.
+pub const END_SETTLED: &str = "settled";
+/// A machine's answer to `Call::RemoteEnded` for a task it does not know, or one that ended
+/// otherwise. The hub keeps the end unclaimed, and `unclaimed_ends` lists it.
+pub const END_UNKNOWN: &str = "unknown";
 
 /// Whether the hub answered that the account has no such machine any more: a box that ended, or
 /// a machine someone removed.

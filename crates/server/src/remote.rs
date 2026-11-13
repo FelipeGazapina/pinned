@@ -4,7 +4,7 @@
 //! only among that account's own, so a machine reaches no machine, box or task of another account.
 
 use crate::hub::{Account, Hub, Unanswered, RUN_WAIT};
-use pinned_core::delegate::{Origin, RemoteAsk, RemoteEnd, Request};
+use pinned_core::delegate::{Origin, RemoteAsk, RemoteEnd, Request, END_SETTLED, END_UNKNOWN};
 use pinned_core::github;
 use pinned_core::link::is_unknown_command;
 use pinned_core::placement::{Need, Seen};
@@ -168,33 +168,42 @@ async fn remote_task(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, machine
 }
 
 /// Passes the end of a task `from` ran to the machine `to` whose tab delegated it. Answers whether
-/// that machine took it. With `to` offline the hub holds the end for it and answers taken once the
-/// row is written; only an end that is neither passed on nor held is an error, which `from` sends
-/// again. One `to` answered it did not take, as a machine that restarted and forgot the task does,
-/// the hub keeps unclaimed, so `unclaimed_ends` lists it. A worker box goes once its end got through
-/// or is held.
+/// that machine took it, always as a bool. With `to` offline the hub holds the end for it and
+/// answers taken once the row is written; only an end that is neither passed on nor held is an
+/// error, which `from` sends again. `to` answers `true` when it took it, and `"settled"` when the
+/// task had ended already with this same end, as from a status look: both drop a held copy and
+/// read as taken. `"unknown"` (a task it does not know, as after a restart, or one that ended
+/// otherwise), or an error from `to`, keeps the end unclaimed, so `unclaimed_ends` lists it. A bare
+/// `false` comes from a machine before 0.18.2, which answers it for both a settled and an unknown
+/// task, so nothing is kept, as before. A worker box goes once its end got through or is held.
 async fn ended(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, to: &str, tab: TabId, task: String, end: RemoteEnd) -> Result<Value, String> {
     let worker_box = hub.boxes.delegate_box(hub, account, from).await?;
     let mut end = end;
     if let Some(row) = &worker_box {
         hub.boxes.add_end_box_usage(hub, account, row, &mut end).await;
     }
+    // One delivery of the task's end at a time, as `deliver_held` and a status look take it, so this
+    // end's write never overtakes theirs.
+    let delivering = match Uuid::parse_str(to) {
+        Ok(origin) => Some(hub.hold_delivery(account, origin, &task).await),
+        Err(_) => None,
+    };
     let passed = Call::RemoteEnded { from: from.to_owned(), tab: tab.clone(), task: task.clone(), end: end.clone() };
     let taken = match hub.call_machine(account, to, passed, LOOK_WAIT).await {
-        Ok(taken) if taken == Value::Bool(true) => {
-            // A copy held while `to` was offline has nothing left to tell.
-            if let Ok(origin) = Uuid::parse_str(to) {
-                let _ = hub.db.drop_held_end(account.id, origin, &task).await;
+        Ok(answer) => match Answer::of(&answer) {
+            Answer::Took | Answer::Settled => {
+                // A copy held while `to` was offline has nothing left to tell.
+                if let Ok(origin) = Uuid::parse_str(to) {
+                    let _ = hub.db.drop_held_end(account.id, origin, &task).await;
+                }
+                true
             }
-            taken
-        }
-        Ok(taken) => {
-            // Not taken: kept, so neither its task's status nor the user loses it.
-            if let Err(e) = hold_end(hub, account, to, from, &tab, &task, end, true).await {
-                eprintln!("pinned-server: the end of task {task} that machine {to} did not take is not kept: {e}");
+            Answer::Unknown => {
+                keep_unclaimed(hub, account, to, from, &tab, &task, end).await;
+                false
             }
-            taken
-        }
+            Answer::NotTaken => false,
+        },
         Err(Unanswered::Refused(e)) if !account.is_online(to) => {
             if !hold_end(hub, account, to, from, &tab, &task, end, false).await? {
                 return Err(e);
@@ -203,16 +212,52 @@ async fn ended(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, to: &str, tab
             if account.is_online(to) {
                 tokio::spawn(deliver_held(hub.clone(), account.clone(), to.to_owned()));
             }
-            Value::Bool(true)
+            true
         }
-        Err(Unanswered::Refused(_)) => Value::Bool(false),
+        Err(Unanswered::Refused(e)) => {
+            eprintln!("pinned-server: machine {to} answered the end of task {task} with an error: {e}");
+            keep_unclaimed(hub, account, to, from, &tab, &task, end).await;
+            false
+        }
         Err(Unanswered::Lost(e)) => return Err(e),
     };
+    drop(delivering);
     if let Some(row) = worker_box {
         eprintln!("pinned-server: worker box {} of account {} ends done: its end of task {task} got through or is held", row.id, account.id);
         hub.boxes.end_delegate(hub, account, row, crate::boxes::End::Done).await?;
     }
-    Ok(taken)
+    Ok(Value::Bool(taken))
+}
+
+/// What a machine answered to a `Call::RemoteEnded` the hub passed it.
+#[derive(Debug, PartialEq)]
+enum Answer {
+    /// `true`: it took the end.
+    Took,
+    /// `"settled"`: its task had ended already with this same end.
+    Settled,
+    /// `"unknown"`: a task it does not know, or one that ended otherwise.
+    Unknown,
+    /// Anything else, as the bare `false` of a machine before 0.18.2.
+    NotTaken,
+}
+
+impl Answer {
+    fn of(answer: &Value) -> Answer {
+        match answer {
+            Value::Bool(true) => Answer::Took,
+            Value::String(s) if s == END_SETTLED => Answer::Settled,
+            Value::String(s) if s == END_UNKNOWN => Answer::Unknown,
+            _ => Answer::NotTaken,
+        }
+    }
+}
+
+/// Keeps an end `to` did not take as unclaimed, so neither its task's status nor the user loses it.
+async fn keep_unclaimed(hub: &Hub, account: &Account, to: &str, from: &str, tab: &str, task: &str, end: RemoteEnd) {
+    if let Err(e) = hold_end(hub, account, to, from, tab, task, end, true).await {
+        eprintln!("pinned-server: the end of task {task} that machine {to} did not take is not kept: {e}");
+    }
 }
 
 /// The most of a held end's summary or error the hub keeps: 256 KiB. A worker's summary is its last
@@ -276,10 +321,11 @@ async fn held_end(hub: &Hub, account: &Account, origin: &str, task: &str) -> Res
 }
 
 /// Passes every end the hub holds for `machine`, which just connected, as the `Call::RemoteEnded` it
-/// missed. A row goes only once the machine took it; one it did not answer stays for its next
-/// connection, and its status answers from the row meanwhile. One it answered it did not take, as
-/// a machine that restarted and forgot the task does, stays unclaimed for `HELD_FOR` and is not
-/// offered again. One delivery of a row runs at a time and sends only a row still waiting, and a
+/// missed. A row goes once the machine took it (`true`) or had settled the task with it already
+/// (`"settled"`); one it did not answer stays for its next connection, and its status answers from
+/// the row meanwhile. One it answered `"unknown"`, as a machine that restarted and forgot the task
+/// does, stays unclaimed for `HELD_FOR` and is not offered again. A machine before 0.18.2 answers a
+/// bare `false` for both: the row goes when a status look read it, else it stays unclaimed. One delivery of a row runs at a time and sends only a row still waiting, and a
 /// machine takes one end per task, so a repeat is a no-op there.
 pub async fn deliver_held(hub: Arc<Hub>, account: Arc<Account>, machine: String) {
     let Ok(origin) = Uuid::parse_str(&machine) else { return };
@@ -309,25 +355,28 @@ pub async fn deliver_held(hub: Arc<Hub>, account: Arc<Account>, machine: String)
             continue;
         };
         let ended = Call::RemoteEnded { from: held.from.to_string(), tab: held.tab, task: held.task.clone(), end };
-        match hub.call_machine(&account, &machine, ended, LOOK_WAIT).await {
-            Ok(taken) if taken == Value::Bool(true) => {
+        let answer = hub.call_machine(&account, &machine, ended, LOOK_WAIT).await.map(|answer| Answer::of(&answer));
+        match answer {
+            Ok(Answer::Took | Answer::Settled) => {
                 if let Err(e) = hub.db.drop_held_end(account.id, origin, &held.task).await {
                     eprintln!("pinned-server: could not drop the delivered end of task {}: {e}", held.task);
                 }
                 eprintln!("pinned-server: passed the held end of task {} to machine {machine} (taken: true)", held.task);
             }
-            Ok(_) if read => {
-                // It settled the task from the status it read, so its not-taken is a repeat.
+            Ok(Answer::NotTaken) if read => {
+                // A machine before 0.18.2 settled the task from the status it read, so its bare
+                // `false` is a repeat.
                 if let Err(e) = hub.db.drop_held_end(account.id, origin, &held.task).await {
                     eprintln!("pinned-server: could not drop the read end of task {}: {e}", held.task);
                 }
                 eprintln!("pinned-server: machine {machine} had the held end of task {} from its status already", held.task);
             }
             Ok(taken) => {
+                // `"unknown"`, or a bare `false` before any status read it.
                 if let Err(e) = hub.db.unclaim_held_end(account.id, origin, &held.task).await {
                     eprintln!("pinned-server: could not mark the held end of task {} unclaimed: {e}", held.task);
                 }
-                eprintln!("pinned-server: machine {machine} did not take the held end of task {} (answered {taken}); it stays unclaimed", held.task);
+                eprintln!("pinned-server: machine {machine} did not take the held end of task {} ({taken:?}); it stays unclaimed", held.task);
             }
             Err(e) => eprintln!("pinned-server: machine {machine} did not take the held end of task {}: {}", held.task, String::from(e)),
         }
