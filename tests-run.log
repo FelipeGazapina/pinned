@@ -292,3 +292,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:21:56Z #130 a_delegate_to_a_machine_without_the_account_fails_up_front_and_never_reaches_it ok / avail=15049M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:21:57Z #131 one_account_never_sees_another_accounts_machines_load_or_accounts START / avail=15049M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:22:01Z #131 one_account_never_sees_another_accounts_machines_load_or_accounts ok / avail=15049M /workspace avail=19374M node_stat=Ssl node_tcp=1
+2026-11-13T04:22:02Z #132 projects_shows_the_load_of_the_machine_that_holds_each_checkout START / avail=15049M /workspace avail=19374M node_stat=Ssl
