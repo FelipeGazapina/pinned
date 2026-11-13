@@ -1481,21 +1481,23 @@ impl Boxes {
     /// subjects handled, so only their owner runs them again; any other end frees each subject for
     /// its next trigger once (`BoxEndRelease`). Nothing opens another box or session for them. For the fixed row, which many runs share, only the runs whose
     /// session is on its machine. A run that already finished holds nothing, so this does nothing.
-    async fn fail_held_runs(&self, hub: &Hub, account: &Account, row: &BoxRow, why: &End) {
+    /// An error leaves the runs as they were: the caller keeps the row `Ending`, so the reaper's
+    /// next pass tries again before it deletes the row.
+    async fn fail_held_runs(&self, hub: &Hub, account: &Account, row: &BoxRow, why: &End) -> Result<(), String> {
         if row.work != BoxWork::Run || row.connector == INTERACTIVE_CONNECTOR {
-            return;
+            return Ok(());
         }
         let error = run_end_error(&self.policy, why);
-        let connectors = match hub.connectors(account).await {
-            Ok(connectors) => connectors,
-            Err(e) => return eprintln!("pinned-server: could not fail the runs of box {}: {e}", row.id),
+        let failed = async {
+            let connectors = hub.connectors(account).await?;
+            let holder = (!connectors.box_access().owns_row(&row.id)).then_some((row.connector.as_str(), &row.subject));
+            connectors.box_ended(&row.machine.to_string(), holder, &error, release_for(why)).await
         };
-        let holder = (!connectors.box_access().owns_row(&row.id)).then_some((row.connector.as_str(), &row.subject));
-        match connectors.box_ended(&row.machine.to_string(), holder, &error, release_for(why)).await {
-            Ok(0) => {}
-            Ok(n) => eprintln!("pinned-server: box {} of account {} ended, so {n} workflow run(s) failed", row.id, account.id),
-            Err(e) => eprintln!("pinned-server: could not fail the runs of box {}: {e}", row.id),
+        let n = failed.await.map_err(|e| format!("could not fail the runs of box {}, so it stays until the next check: {e}", row.id))?;
+        if n > 0 {
+            eprintln!("pinned-server: box {} of account {} ended, so {n} workflow run(s) failed", row.id, account.id);
         }
+        Ok(())
     }
 
     /// The box time a worker box's task has used, in ms: once it ended, what the box's task
@@ -1553,7 +1555,7 @@ impl Boxes {
                 self.tell_origin(hub, account, &row, &why).await;
             }
         }
-        self.fail_held_runs(hub, account, &row, &why).await;
+        self.fail_held_runs(hub, account, &row, &why).await?;
         self.record_agent_box(hub, account, &row).await;
         self.end(hub, account, &row.remains(), key).await?;
         if !failed {
@@ -1734,7 +1736,7 @@ impl Boxes {
                     // A hub that stopped between ending the row and recording it records it now,
                     // and fails the runs it held.
                     if let Phase::Ending(why) = &row.phase {
-                        self.fail_held_runs(hub, account, &row, why).await;
+                        self.fail_held_runs(hub, account, &row, why).await?;
                     }
                     self.record_agent_box(hub, account, &row).await;
                     self.end(hub, account, &row.remains(), key.as_deref()).await
