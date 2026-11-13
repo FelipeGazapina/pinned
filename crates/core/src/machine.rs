@@ -1255,7 +1255,7 @@ impl Machine {
             Call::RemoteEnded { from, tab, task, end } => json(self.remote_ended(&from, &tab, &task, &end)),
             Call::RemoteAsked { from, tab, task, ask } => json(self.remote_asked(&from, &tab, &task, ask)),
             Call::GlobalOrchestratorSettings => json(self.global_settings()),
-            Call::SetGlobalOrchestratorSettings { settings } => json(self.set_global_settings(settings)?),
+            Call::SetGlobalOrchestratorSettings { settings } => json(self.patch_global_settings(&settings)?),
             Call::AutoArchiveSettings => json(self.auto_archive_settings()),
             Call::SetAutoArchiveSettings { settings } => json(self.set_auto_archive_settings(settings)?),
             Call::SetBackground { on } => json(self.set_background(on)?),
@@ -2873,6 +2873,15 @@ impl Machine {
         Ok(settings)
     }
 
+    /// Saves the fields `patch` names over the settings this machine has, and answers them all.
+    pub fn patch_global_settings(&self, patch: &global::Patch) -> Result<global::Settings, String> {
+        let mut global = self.global.lock().unwrap();
+        let settings = global.clone().patched(patch);
+        settings.save(self.orchestration_dir.as_deref())?;
+        *global = settings.clone();
+        Ok(settings)
+    }
+
     pub fn auto_archive_settings(&self) -> crate::auto_archive::Settings {
         *self.auto_archive.lock().unwrap()
     }
@@ -3541,10 +3550,46 @@ impl Machine {
                 return Err(format!("{cmd} restarts a running session, and {tab} runs none: start_claude starts it as your worker"));
             }
         }
-        if matches!(call, Call::SetBypass { on: true, .. }) && self.tab(caller, |t| t.child_access())? != crate::delegate::Access::Full {
-            return Err("set_bypass on skips a session's permission prompts, and your own session asks for them".into());
+        if let Call::SetBypass { tab, on: true, .. } = &call {
+            self.may_bypass(caller, tab)?;
         }
         self.call(call)
+    }
+
+    /// Whether the session in `caller` may have `tab` skip its permission prompts, once the user
+    /// approved it: a worker or a session in the caller's own project, at most the caller's own
+    /// seat, while the caller skips its own. A Captain, the global orchestrator and a taste chat
+    /// skip theirs only when the user sets it in the app. It holds whoever passed the call on.
+    fn may_bypass(&self, caller: &str, tab: &str) -> Result<(), String> {
+        // A worker sits under a session the user started, which sits under a Captain.
+        fn seat(t: &Tab) -> u8 {
+            match role_of(&t.env) {
+                Some((Role::Worker, _)) => 0,
+                Some((Role::Orchestrator, _)) => 2,
+                None => 1,
+            }
+        }
+        if caller.is_empty() {
+            return Err("set_bypass on skips the permission prompts of a session on your own machine only".into());
+        }
+        let (home, global, ceiling, mine) = self.tab(caller, |t| (history::project_of(&t.cwd), global::is_global(&t.env), t.child_access(), seat(t)))?;
+        if ceiling != crate::delegate::Access::Full {
+            return Err("set_bypass on skips a session's permission prompts, and your own session asks for them".into());
+        }
+        if global {
+            return Err("set_bypass on skips the permission prompts of a session in your own project, and the global orchestrator works in none".into());
+        }
+        let (ruled, project, theirs) = self.tab(tab, |t| (matches!(role_of(&t.env), Some((Role::Orchestrator, _))) || global::is_global(&t.env) || taste::is_chat(&t.env), history::project_of(&t.cwd), seat(t)))?;
+        if ruled {
+            return Err(format!("{tab} is a Captain, the global orchestrator or a taste chat, whose permission prompts only the user turns off"));
+        }
+        if project != home {
+            return Err(format!("{tab} works in {}, outside your project {}: set_bypass on skips the permission prompts of a session in your own project only", project.display(), home.display()));
+        }
+        if theirs > mine {
+            return Err(format!("{tab} is a session the user started, above your worker's seat: set_bypass on skips the permission prompts of a worker only"));
+        }
+        Ok(())
     }
 
     /// Whether the session in `caller` may type a prompt into `tab`: a session of another kind than
@@ -10812,7 +10857,7 @@ while True:
         let tab = idle_captain(&m, &path, &dir.join("typed.bin"));
         m.record_event(hook(&tab, AgentStatus::Working));
         let refuse = global::Settings { busy: BusyPolicy::Refuse, ..global::Settings::default() };
-        m.call(Call::SetGlobalOrchestratorSettings { settings: refuse }).unwrap();
+        m.call(Call::SetGlobalOrchestratorSettings { settings: refuse.into() }).unwrap();
 
         assert_eq!(enqueue(&m, &path, "Ship it.", "r-1"), Ok(json!({ "outcome": "ocupado", "tab": tab })));
         assert!(m.delegates.claim_notice(&tab).is_none(), "a refused message was queued");
@@ -11733,7 +11778,7 @@ while True:
         assert_eq!(m.call(Call::GlobalOrchestratorSettings), Ok(json!({ "name": "Orchestrator", "host": false, "busy": "queue", "reports": "auto", "group_reports": true, "read_aloud": false })));
         let settings = global::Settings { name: " Almirante ".into(), host: true, busy: BusyPolicy::Refuse, reports: global::ReportPolicy::ToolOnly, group_reports: false, read_aloud: true };
         let saved = json!({ "name": "Almirante", "host": true, "busy": "refuse", "reports": "tool_only", "group_reports": false, "read_aloud": true });
-        assert_eq!(m.call(Call::SetGlobalOrchestratorSettings { settings }), Ok(saved.clone()));
+        assert_eq!(m.call(Call::SetGlobalOrchestratorSettings { settings: settings.into() }), Ok(saved.clone()));
         let again = Machine::new(launch(), Some(dir.clone()), None, |_| {});
         assert_eq!(again.call(Call::GlobalOrchestratorSettings), Ok(saved));
         let _ = std::fs::remove_dir_all(dir);

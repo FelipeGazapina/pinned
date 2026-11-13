@@ -111,6 +111,52 @@ impl Settings {
         self.name = if name.is_empty() { default_name() } else { name.chars().take(NAME_MAX).collect() };
         self
     }
+
+    /// These settings with the fields `patch` names, cleaned as a save keeps them.
+    pub fn patched(mut self, patch: &Patch) -> Self {
+        let Patch { name, host, busy, reports, group_reports, read_aloud } = patch.clone();
+        self.name = name.unwrap_or(self.name);
+        self.host = host.unwrap_or(self.host);
+        self.busy = busy.unwrap_or(self.busy);
+        self.reports = reports.unwrap_or(self.reports);
+        self.group_reports = group_reports.unwrap_or(self.group_reports);
+        self.read_aloud = read_aloud.unwrap_or(self.read_aloud);
+        self.cleaned()
+    }
+
+    /// Each field that differs in `new`, as `field: old → new`, in the order the settings list them.
+    pub fn changes_to(&self, new: &Settings) -> Vec<String> {
+        let (old, new) = (serde_json::to_value(self).unwrap_or_default(), serde_json::to_value(new).unwrap_or_default());
+        FIELDS.iter().filter(|field| old[**field] != new[**field]).map(|field| format!("{field}: {} → {}", old[*field], new[*field])).collect()
+    }
+}
+
+/// `Settings`' fields, in order.
+const FIELDS: [&str; 6] = ["name", "host", "busy", "reports", "group_reports", "read_aloud"];
+
+/// A save of `Settings`: the fields it names change, and the others keep what the machine has. An
+/// older app sends every field, so its save replaces them all as before. On the wire it reads and
+/// writes as `Settings` with fields left out.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
+pub struct Patch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub busy: Option<BusyPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reports: Option<ReportPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_reports: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_aloud: Option<bool>,
+}
+
+impl From<Settings> for Patch {
+    fn from(s: Settings) -> Patch {
+        Patch { name: Some(s.name), host: Some(s.host), busy: Some(s.busy), reports: Some(s.reports), group_reports: Some(s.group_reports), read_aloud: Some(s.read_aloud) }
+    }
 }
 
 /// What became of a message handed to a Capitão, or of a report handed to the orchestrator.

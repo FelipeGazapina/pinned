@@ -6201,7 +6201,7 @@ fn an_agent_acts_as_its_own_account_audited_and_a_confirm_runs_once_its_owner_ap
     assert!(bobs_audit.as_array().unwrap().iter().all(|r| r["machine"] == bob.machine.as_str()));
 
     assert_eq!(ana.client.hub(json!({ "cmd": "confirmations" })).unwrap().as_array().unwrap().iter().map(|c| c["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>(), [remove_id.clone(), invite_id.clone()], "ana's waiting one, then her decided one; none of bob's");
-    ana.node.machine.call(Call::SetGlobalOrchestratorSettings { settings: pinned_core::global_orchestrator::Settings { host: true, ..Default::default() } }).unwrap();
+    ana.node.machine.call(Call::SetGlobalOrchestratorSettings { settings: pinned_core::global_orchestrator::Patch { host: Some(true), ..Default::default() } }).unwrap();
     let global = ana.node.machine.call(Call::OpenGlobalOrchestrator).unwrap().as_str().unwrap().to_owned();
     ana.client.wait("the global tab at the hub", |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == global.as_str()));
     let waiting = session_tool(&ana.dir, &global, json!({ "name": "waiting" })).unwrap();

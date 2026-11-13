@@ -403,8 +403,12 @@ pub enum Call {
     },
     /// `global_orchestrator::Settings` of this machine.
     GlobalOrchestratorSettings,
-    /// The `global_orchestrator::Settings` saved, with a blank name back to the default one.
-    SetGlobalOrchestratorSettings { settings: global::Settings },
+    /// The `global_orchestrator::Settings` saved, with a blank name back to the default one. Only
+    /// the fields `settings` names change; the answer is every field as saved.
+    SetGlobalOrchestratorSettings {
+        #[schemars(with = "global::Settings")]
+        settings: global::Patch,
+    },
     /// `auto_archive::Settings` of this machine: when it archives a finished session.
     AutoArchiveSettings,
     /// The `auto_archive::Settings` saved, answered as saved.
@@ -1850,7 +1854,10 @@ mod tests {
         round_trip(Call::OpenGlobalOrchestrator, json!({ "cmd": "open_global_orchestrator" }));
         round_trip(Call::GlobalOrchestratorSettings, json!({ "cmd": "global_orchestrator_settings" }));
         let partial: Call = serde_json::from_value(json!({ "cmd": "set_global_orchestrator_settings", "settings": { "name": "Almirante", "host": true } })).unwrap();
-        assert_eq!(partial, Call::SetGlobalOrchestratorSettings { settings: global::Settings { name: "Almirante".into(), host: true, ..global::Settings::default() } });
+        assert_eq!(partial, Call::SetGlobalOrchestratorSettings { settings: global::Patch { name: Some("Almirante".into()), host: Some(true), ..global::Patch::default() } });
+        assert_eq!(serde_json::to_value(&partial).unwrap(), json!({ "cmd": "set_global_orchestrator_settings", "settings": { "name": "Almirante", "host": true } }), "a hub passes on only the fields sent");
+        let whole = Call::SetGlobalOrchestratorSettings { settings: global::Settings::default().into() };
+        assert_eq!(serde_json::to_value(&whole).unwrap()["settings"], serde_json::to_value(global::Settings::default()).unwrap(), "a whole save reads as an older app sends it");
         let report = CaptainReport { machine: "m1".into(), machine_name: "MacBook".into(), project: "site".into(), path: "/w/site".into(), tab: "tab-1a-3".into(), text: "Done.".into(), answers: vec!["r-1".into()] };
         round_trip(
             Call::OrchestratorReport { request_id: "report-1".into(), report: report.clone() },
