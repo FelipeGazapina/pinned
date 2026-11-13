@@ -2,6 +2,10 @@
 
 ## 0.18.2 (Unreleased)
 
+### Added
+
+- Ideas: the Orchestrator and your sessions can now save things you might do someday with `save_idea`, list them with `list_ideas` and delete them with `delete_idea`. Ideas are kept on your account, apart from memory, and are never fed into a prompt on their own. The Ideas page comes in a later update.
+
 ### Removed
 
 - Workflows: Generate with AI is gone. Ask an agent, such as the Orchestrator, to create a workflow from a description; older apps that still press the button get a short message saying so.
