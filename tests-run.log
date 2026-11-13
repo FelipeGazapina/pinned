@@ -62,3 +62,12 @@ postgres up, datadir pgdata.4DlQ pid 6458 port 5499
 2026-11-13T03:47:28Z the_global_orchestrator_reaches_a_capitao_on_another_machine_and_hears_back ok 2026-11-13T03:47:31Z
 2026-11-13T03:47:31Z a_plain_session_still_cannot_reach_the_hub ok 2026-11-13T03:47:33Z
 2026-11-13T03:47:33Z a_machine_too_old_for_the_relay_is_named_for_an_update ok 2026-11-13T03:47:35Z
+2026-11-13T03:47:35Z the_overview_lists_a_repo_on_two_machines_once_and_an_old_or_offline_machine_without_failing ok 2026-11-13T03:47:38Z
+2026-11-13T03:47:38Z the_global_orchestrator_names_a_capitao_by_repo_and_machine_sees_it_working_at_once_and_reads_it ok 2026-11-13T03:47:40Z
+2026-11-13T03:47:40Z another_accounts_machine_takes_no_call_attach_watch_or_change_from_this_one ok 2026-11-13T03:47:44Z
+2026-11-13T03:47:44Z a_machines_tabs_usage_output_and_presence_reach_only_its_own_accounts_clients ok 2026-11-13T03:47:49Z
+2026-11-13T03:47:49Z the_global_orchestrator_reaches_no_machine_project_or_capitao_of_another_account ok 2026-11-13T03:47:53Z
+2026-11-13T03:47:53Z synced_files_skills_and_shared_projects_stay_in_their_account ok 2026-11-13T03:47:56Z
+2026-11-13T03:47:56Z a_session_mark_reaches_the_accounts_other_devices_live_and_a_clear_drops_it ok 2026-11-13T03:47:59Z
+2026-11-13T03:47:59Z every_device_ends_on_the_marks_the_hub_kept_after_a_burst_of_changes ok 2026-11-13T03:48:02Z
+2026-11-13T03:48:02Z another_accounts_marks_stay_its_own_even_on_the_same_session_id ok 2026-11-13T03:48:06Z

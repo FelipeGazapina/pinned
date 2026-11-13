@@ -289,3 +289,24 @@
   log: pinned: synced plugins: 0 up, 2337 down
   log: pinned: synced github.com/felipegazapina/pinned: 0 up, 239 down
   test: test the_overview_lists_a_repo_on_two_machines_once_and_an_old_or_offline_machine_without_failing ... 
+== 2026-11-13T03:47:48Z node=288 alive
+  tcp ESTAB 172.18.0.71:38452 153.52.255.120:443
+  mem.current=6855933952 oom_kill=0
+  log: pinned: connected to https://pinned-hub-production.up.railway.app
+  log: pinned: synced plugins: 0 up, 2337 down
+  log: pinned: synced github.com/felipegazapina/pinned: 0 up, 239 down
+  test: test a_machines_tabs_usage_output_and_presence_reach_only_its_own_accounts_clients ... 
+== 2026-11-13T03:47:58Z node=288 alive
+  tcp ESTAB 172.18.0.71:38452 153.52.255.120:443
+  mem.current=6843842560 oom_kill=0
+  log: pinned: connected to https://pinned-hub-production.up.railway.app
+  log: pinned: synced plugins: 0 up, 2337 down
+  log: pinned: synced github.com/felipegazapina/pinned: 0 up, 239 down
+  test: test a_session_mark_reaches_the_accounts_other_devices_live_and_a_clear_drops_it ... 
+== 2026-11-13T03:48:08Z node=288 alive
+  tcp ESTAB 172.18.0.71:38452 153.52.255.120:443
+  mem.current=6840954880 oom_kill=0
+  log: pinned: connected to https://pinned-hub-production.up.railway.app
+  log: pinned: synced plugins: 0 up, 2337 down
+  log: pinned: synced github.com/felipegazapina/pinned: 0 up, 239 down
+  test: test a_refused_mark_change_keeps_and_pushes_nothing_and_a_machine_may_not_mark ... 
