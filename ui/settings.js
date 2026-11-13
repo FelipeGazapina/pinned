@@ -1804,7 +1804,7 @@ function generateErrorHint(err) {
   if (raw.includes("did not answer with a workflow map")) return `${raw} Simplify the description into short steps and try again.`;
   if (raw.includes("which is no step")) return `${raw} Ask for fewer, simply linked steps and try again.`;
   if (raw.includes("did not answer in time")) return `${raw} Describe fewer steps, or try again in a moment.`;
-  if (/unknown variant|can't answer/.test(raw)) return `${raw} Update pinned on that machine to draft with Claude, or pick a Vercel model.`;
+  if (/unknown variant|can't answer/.test(raw)) return `${raw} Update pinned there to draft with Claude, or pick a Vercel model.`;
   if (/not logged in|\/login|log in/i.test(raw)) return `${raw} Sign in that Claude account in pinned's Accounts settings, then generate again.`;
   return raw;
 }
@@ -1821,10 +1821,10 @@ function draftMachine() {
   return online.includes(LOCAL) ? LOCAL : online[0];
 }
 
-/** The generate dialog's model choices: `machine`'s signed-in Claude Code logins, then the gateway's chat models. A value names its path, `claude:<account>` or `vercel:<model>`. */
+/** The generate dialog's model choices: `machine`'s signed-in Claude Code accounts, then the gateway's chat models. A value names its path, `claude:<account>` or `vercel:<model>`. */
 function generateModelOptions(machine, accounts, chats) {
   const where = machine && machine !== LOCAL ? ` on ${machineName(machine)}` : "";
-  const logins = (machine ? accounts ?? [] : []).filter((a) => a.provider === "claude" && (a.auth ?? "login") === "login" && a.signed_in);
+  const logins = (machine ? accounts ?? [] : []).filter((a) => a.provider === "claude" && a.signed_in);
   const options = [...logins.map((a) => ({ value: `claude:${a.id}`, label: `Claude · ${a.name}${where}` })), ...chats.map((m) => ({ value: `vercel:${m.id}`, label: m.id }))];
   return options.length ? options : [{ value: "", label: "Sign in a Claude account on a machine or connect the Vercel AI Gateway", disabled: true }];
 }

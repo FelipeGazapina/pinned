@@ -6289,7 +6289,7 @@ fn an_agent_manages_its_accounts_workflows_projects_sessions_settings_and_usage_
 
     let listed = session_tool(&ana.dir, &ana.tab, json!({ "name": "actions" })).unwrap();
     let class = |name: &str| listed["actions"].as_array().unwrap().iter().find(|a| a["name"] == name).map(|a| a["class"].as_str().unwrap().to_owned());
-    for (name, expected) in [("save_connector", "write"), ("delete_connector", "confirm"), ("generate_workflow", "write"), ("clone", "write"), ("share_project", "write"), ("prompt", "write"), ("enqueue", "write"), ("set_taste", "confirm"), ("reset_taste_field", "confirm"), ("save_skill", "write"), ("token_usage", "read"), ("delegation_stats", "read")] {
+    for (name, expected) in [("save_connector", "write"), ("delete_connector", "confirm"), ("generate_workflow", "write"), ("draft_workflow", "write"), ("clone", "write"), ("share_project", "write"), ("prompt", "write"), ("enqueue", "write"), ("set_taste", "confirm"), ("reset_taste_field", "confirm"), ("save_skill", "write"), ("token_usage", "read"), ("delegation_stats", "read")] {
         assert_eq!(class(name).as_deref(), Some(expected), "{name}");
     }
     assert_eq!(class("run_workflow").as_deref(), Some("write"), "a Run now is held to the caller's limits, with no approval");

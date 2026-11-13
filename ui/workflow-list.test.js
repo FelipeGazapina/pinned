@@ -63,7 +63,7 @@ test("generation errors tell what to change before retrying", () => {
   assert.match(context.generateErrorHint('step "Message" has no usable trigger'), /when mentioned in #support/);
   assert.match(context.generateErrorHint("the model did not answer with a workflow map"), /Simplify/);
   assert.match(context.generateErrorHint("claude did not answer in time"), /fewer steps/);
-  assert.match(context.generateErrorHint("this machine runs pinned 0.18.1, which can't answer that: unknown variant `draft_workflow`"), /Update pinned on that machine/);
+  assert.match(context.generateErrorHint("this machine runs pinned 0.18.1, which can't answer that: unknown variant `draft_workflow`"), /Update pinned there/);
   assert.match(context.generateErrorHint("claude: Not logged in · Please run /login"), /Sign in that Claude account/);
   assert.equal(context.generateErrorHint("boom"), "boom");
 });
@@ -86,7 +86,7 @@ function generateWorld({ machines = [], local = "local" } = {}) {
 
 const work = { id: "work", provider: "claude", name: "Work", auth: "login", signed_in: true };
 
-test("the generate dialog offers Claude logins first and the gateway's models after", () => {
+test("the generate dialog offers signed-in Claude Code accounts first and the gateway's models after", () => {
   const context = generateWorld({ machines: [{ id: "local" }] });
   const accounts = [
     work,
@@ -97,6 +97,7 @@ test("the generate dialog offers Claude logins first and the gateway's models af
   const options = context.generateModelOptions(context.draftMachine(), accounts, [{ id: "openai/gpt-5" }]);
   assert.deepEqual(JSON.parse(JSON.stringify(options)), [
     { value: "claude:work", label: "Claude · Work" },
+    { value: "claude:go", label: "Claude · Go" },
     { value: "vercel:openai/gpt-5", label: "openai/gpt-5" },
   ]);
 });

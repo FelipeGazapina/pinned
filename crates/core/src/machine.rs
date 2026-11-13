@@ -1708,7 +1708,7 @@ impl Machine {
         Ok(if account.auth == Auth::OpenCodeGo { &crate::opencode_go::STRIP_ENV } else { &[] })
     }
 
-    /// A workflow map drafted by `claude -p` under a Claude Code login. It runs in the scratch
+    /// A workflow map drafted by `claude -p` under a Claude Code account. It runs in the scratch
     /// folder: claude reads its whole working folder, and a project or home can be huge.
     fn draft_workflow(&self, account: Option<&str>, description: &str, workflows: &[crate::wire::WorkflowRef]) -> Result<crate::graph::Graph, String> {
         if description.trim().is_empty() {
@@ -1718,14 +1718,15 @@ impl Machine {
             Some(id) => self.accounts.get(id).ok_or_else(|| format!("no account {id} on this machine"))?,
             None => Account::builtin(Provider::Claude),
         };
-        if account.provider != Provider::Claude || account.auth != Auth::Login {
-            return Err(format!("{} is no Claude Code login, so it can't draft a workflow", account.name));
+        if account.provider != Provider::Claude {
+            return Err(format!("{} is no Claude Code account, so it can't draft a workflow", account.name));
         }
         std::fs::create_dir_all(&self.scratch).map_err(|e| format!("could not make {}: {e}", self.scratch.display()))?;
         let instructions = crate::connectors::generate_instructions(workflows.iter().map(|w| (w.name.as_str(), w.id.as_str())));
         let args = ["--no-session-persistence", "--model", "sonnet", "--system-prompt", &instructions, "--tools", "", "--settings", r#"{"disableAllHooks":true}"#];
         let env = self.accounts.env(&account);
-        let headless = Headless { env: &env, strip: &[] };
+        let strip: &[&str] = if account.auth == Auth::OpenCodeGo { &crate::opencode_go::STRIP_ENV } else { &[] };
+        let headless = Headless { env: &env, strip };
         let answer = headless.run(&self.launch.bin(Provider::Claude), &self.scratch, self.launch.path_env.as_deref(), &args, description.trim(), HEADLESS_WAIT)?;
         crate::connectors::graph_from_answer(&answer, &|id| workflows.iter().any(|w| w.id == id && w.answers_threads))
     }
@@ -9112,6 +9113,7 @@ printf 'Here is the map:\n```json\n{"nodes":[{"name":"Message","type":"trigger",
 "#;
         std::fs::write(&claude, script).unwrap();
         std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        write_go_account(&root);
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(root.join("config")), None, |_| {});
         m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
         m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into(), auth: None, key: None }).unwrap();
@@ -9122,8 +9124,9 @@ printf 'Here is the map:\n```json\n{"nodes":[{"name":"Message","type":"trigger",
         let scratch = std::fs::canonicalize(root.join("config").join("scratch")).unwrap();
         assert_eq!(reply, format!("work|{}|told|Triage support", scratch.display()), "claude ran in the scratch folder, as the account, with the instructions and the description");
         assert!(draft(None, fixer()).unwrap()["nodes"].to_string().contains("claude|"), "no account asks the built-in Claude Code login");
+        assert!(draft(Some("go"), fixer()).unwrap()["nodes"].to_string().contains("go|"), "an OpenCode Go account drafts through its gateway");
         assert!(draft(Some("work"), vec![]).is_err(), "a call step to a workflow the caller did not offer fails as a save would");
-        assert_eq!(draft(Some("side"), fixer()), Err("Side is no Claude Code login, so it can't draft a workflow".into()));
+        assert_eq!(draft(Some("side"), fixer()), Err("Side is no Claude Code account, so it can't draft a workflow".into()));
         assert_eq!(m.call(Call::DraftWorkflow { account: None, description: " ".into(), workflows: vec![] }), Err("describe the workflow first".into()));
         let _ = std::fs::remove_dir_all(root);
     }
