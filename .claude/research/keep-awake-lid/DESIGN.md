@@ -365,6 +365,86 @@ not a setting.
 Evaluation: on every tab status change (the node already emits events there) plus a 10 s tick; the
 result is debounced, so a flicker between two turns does not toggle the root helper.
 
+### 3.4 After a sleep anyway
+
+The switch cannot cover every sleep: it was off, the battery floor or heat guard released the
+hold (section 4), the Mac is on macOS 12 or an ad-hoc build where the switch is disabled (2.1), the
+Windows Modern Standby or Linux desktop case (1.2, 1.3) did not hold, or the lid closed in the
+seconds before a hold was taken. Then a turn can be cut in the middle.
+
+**What happens today** (checked in `machine.rs`): when the sleeping Mac wakes, its connection to the
+API is dead and Claude Code ends the turn with an API error, which its StopFailure hook reports as
+`Failed` (`agent.rs:226`). `record_status` marks the tab `interrupted`, clears `turn_pending` and
+sets `Failed` (`machine.rs:6157-6161`, `6169`, `6178`). `notice_idle()` is false for `Failed`
+(`machine.rs:601`), so nothing treats the tab as waiting to be woken. The only automatic continue is
+for a **usage limit** (`resume_at`, `continue_when_limit_lifts`, `machine.rs:6273`, which types
+`CONTINUE_PROMPT`, `sessions.rs:40`). An API error with no `resume_at` stays dead until the user
+types. In the UI such a tab does get a "Failed" card in Needs you (`ui/redesign-model.js:226`), but
+the card says nothing about the sleep, and for a Captain nobody is told that its box workers have
+no supervisor. (I did not verify whether that card showed on 2026-11-12.)
+
+**How pinned notices.** Two facts, both in the node, both cheap:
+
+1. **That the machine slept.** Record a sleep window `[slept_at, woke_at]`. Use the platform's own
+   signal where it exists (macOS `NSWorkspace.willSleepNotification` and `didWakeNotification`,
+   Windows `PBT_APMSUSPEND` and `PBT_APMRESUMEAUTOMATIC`, Linux logind `PrepareForSleep`), and as the
+   fallback that works everywhere, the 10 s tick of 3.3: a wall-clock jump of more than 60 s
+   between two ticks means a sleep, window = the jump. Persist the last window with the sessions
+   file, because a quit or crash may follow the wake.
+2. **That this turn's end belongs to it.** A `Failed` event is **cut by sleep** only when all of
+   these hold: the error text is an API error (the same test as `failure_text`, `agent.rs:307`:
+   `API Error`), it carries **no `resume_at`** (a usage limit has its own path), and its time
+   (`Tab::updated`, set at `machine.rs:6166`) is inside `[slept_at − 60 s, woke_at + 120 s]`. The
+   margins are there because the error can land seconds before the sleep (the network goes first)
+   or after the wake (the dead socket is only noticed on the first read). The tab gets a flag,
+   `cut_by_sleep: { slept_at, woke_at }`, kept in `sessions.json` next to `interrupted` and shown
+   on the wire as one new optional `TabView` field with `#[serde(default)]` (additive, section 5.3).
+
+**What pinned does.** Two options:
+
+- **A. Show it, one tap.** The tab's Needs you card reads "Stopped while the Mac slept
+  (00:30–07:12): API error" with a **Continue** button that types `CONTINUE_PROMPT`. A Captain's
+  card also says how many delegated tasks are still running, because those are the ones left
+  unsupervised. The wake also raises the app's normal notice, once per wake, not once per tab.
+- **B. Continue on its own.** On wake, once the hub link is back, type `CONTINUE_PROMPT` into each
+  tab flagged `cut_by_sleep`.
+
+**Recommendation: A for every tab, as the default.** Reasons:
+
+- Typing is an action as the user, into a session that was cut at an unknown point. A turn killed
+  mid-tool may have half-run a command (a push, a migration, a delete). "Continue from where you
+  left off" can repeat it. A person looking at the card sees what was cut; an automatic prompt
+  does not.
+- The Mac only wakes because someone opened the lid (or a scheduled wake), so a person is usually
+  there within seconds. The gain from B is small in the case Felipe hit, and the cost, a wrong
+  repeated action, is not.
+- It is the same answer pinned already gives for every other failed turn, and the card is
+  already built. B would be the first place pinned types for the user after an *unexplained*
+  error; the usage-limit continue is allowed because the cause is known and the user chose "held"
+  or not (`held_at_limit`).
+
+**B only as an opt-in, for Captains and the Orchestrator.** Their cut is the costly one, since
+box workers keep running with nobody to hear them. If Felipe turns on "Continue Captains on their
+own after a sleep" (open question 5), pinned types `CONTINUE_PROMPT` only when **all** hold:
+
+- the tab is flagged `cut_by_sleep` (so a turn that ended normally is never touched: a `Done`
+  turn, a `NeedsInput` wait, an idle prompt, and a `Failed` with any other error never qualify,
+  even if the machine slept in the middle of a different turn);
+- its draft is empty and no keys were typed since the wake (`Tab::draft.empty()`), so the user's own
+  typing is not mixed with it;
+- the hub link has been up for 20 s, so the first call does not fail the same way;
+- it has not already continued this tab for this same cut: one automatic continue per `cut_by_sleep`,
+  and if the continued turn fails with an API error again within 5 minutes the tab stays in Needs
+  you with Continue, no loop.
+
+**Must hold for both:** a turn that ended normally is never continued by pinned on its own, and the
+flag is cleared when a new turn starts (`Working`, `machine.rs:6153`) or the user types.
+
+**Tests (unit, fake clock, no real sleep):** a `Failed` API error inside the window is flagged; the
+same error outside it is not; a usage limit is not (it keeps its own path); a `Done` turn inside the
+window is not flagged and nothing is typed under either option; with the opt-in on, a cut Captain
+gets exactly one `CONTINUE_PROMPT`, and a second API error does not get another.
+
 ---
 
 ## 4. Heat guard
