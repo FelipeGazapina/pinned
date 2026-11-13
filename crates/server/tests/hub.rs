@@ -6146,6 +6146,50 @@ fn an_agents_save_that_calls_a_stored_workflow_whose_session_skips_prompts_is_re
     assert_eq!(names(&mut owner.client), after);
 }
 
+/// A save a session that asks for prompts sends with a graph that has no trigger is refused in one
+/// line, as the owner's own save is, and the account's store still answers afterwards.
+#[test]
+fn an_agents_save_whose_graph_has_no_trigger_is_refused_and_leaves_the_accounts_store_working() {
+    let hub = TestHub::start("no_trigger");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "owner@example.com", "correct horse").unwrap();
+    let mut owner = agent_of(&url, &token, "owner@example.com", "no-trigger-mac");
+    let folder = owner.dir.join("site").canonicalize().unwrap().display().to_string();
+    let workflow = |name: &str, graph: Value| {
+        json!({ "connector": {
+            "name": name, "enabled": false, "trigger": { "kind": "linear-label", "label": name },
+            "folder": folder, "model": "claude-sonnet-5-5", "effort": "medium", "permissionMode": "acceptEdits", "worktree": false, "instructions": "Fix it.",
+            "graph": graph,
+        } })
+    };
+    let session = json!({ "id": "n", "name": "Step", "position": [1, 0], "type": "session", "permission": "acceptEdits" });
+    let ordinary = |name: &str| {
+        let trigger = json!({ "id": "t", "name": "Trigger", "position": [0, 0], "type": "trigger", "watch": { "kind": "linear-label", "label": name } });
+        workflow(name, json!({ "nodes": [trigger, session.clone()], "edges": [{ "from": "t", "port": "out", "to": "n" }] }))
+    };
+    let mut own = ordinary("Before");
+    own["cmd"] = json!("save_connector");
+    let before = owner.client.hub(own).unwrap()["id"].as_str().unwrap().to_owned();
+
+    let triggerless = workflow("Headless", json!({ "nodes": [session.clone()], "edges": [] }));
+    let empty = workflow("Empty", json!({ "nodes": [], "edges": [] }));
+    let mut owns = triggerless.clone();
+    owns["cmd"] = json!("save_connector");
+    assert_eq!(owner.client.hub(owns), Err("a workflow needs a trigger".to_owned()), "the owner's own save answers this");
+    // Both saves ask for prompts, so the agent check walks them before the save validates anything.
+    let answers: Vec<_> = [&triggerless, &empty].map(|save| act(&owner.dir, &owner.tab, "save_connector", save.clone()).map(|done| done["outcome"].clone())).into();
+    assert_eq!(answers, [Err("a workflow needs a trigger".to_owned()), Err("a workflow needs a trigger".to_owned())]);
+
+    // The store lock is not poisoned: the same account saves, reads and runs as before.
+    assert_eq!(act(&owner.dir, &owner.tab, "save_connector", ordinary("After")).unwrap()["outcome"], "done", "the next ordinary save");
+    let settings = owner.client.hub(json!({ "cmd": "get_settings" })).unwrap();
+    let mut names: Vec<&str> = settings["connectors"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap()).collect();
+    names.sort();
+    assert_eq!(names, ["After", "Before"], "only the two ordinary saves are stored");
+    let started = owner.client.hub(json!({ "cmd": "run_workflow", "id": before }));
+    assert!(started.is_ok(), "the workflow check reads the store: {started:?}");
+}
+
 /// What a session's hook reports when its permission mode is `mode`.
 fn report_mode(dir: &Path, tab: &str, mode: &str) {
     let mut stream = std::os::unix::net::UnixStream::connect(dir.join("sock")).unwrap();
