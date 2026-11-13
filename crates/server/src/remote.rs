@@ -215,7 +215,7 @@ async fn ended(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, to: &str, tab
             true
         }
         Err(Unanswered::Refused(_)) => {
-            eprintln!("pinned-server: machine {to} answered the end of task {task} with an error; it is kept unclaimed");
+            eprintln!("{}", refused_line(to, &task));
             keep_unclaimed(hub, account, to, from, &tab, &task, end).await?;
             false
         }
@@ -223,7 +223,7 @@ async fn ended(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, to: &str, tab
     };
     drop(delivering);
     if let Some(row) = worker_box {
-        eprintln!("pinned-server: worker box {} of account {} ends done: its end of task {task} got through or is held", row.id, account.id);
+        eprintln!("{}", box_done_line(&row.id, account.id, &task));
         hub.boxes.end_delegate(hub, account, row, crate::boxes::End::Done).await?;
     }
     Ok(Value::Bool(taken))
@@ -267,10 +267,28 @@ const HELD_TASK_MAX: usize = 128;
 /// The states a worker's end can have: a task's terminal `delegate::WorkState`.
 const HELD_STATES: [&str; 3] = ["result_available", "failed", "cancelled"];
 
-/// Whether `task` is a task id the hub holds an end for: not empty, at most `HELD_TASK_MAX` bytes,
+/// Whether `task` is a task id, or a tab id, the hub holds an end for: not empty, at most `HELD_TASK_MAX` bytes,
 /// and no newline or other control character, so it is safe to store and to log.
 fn held_task_ok(task: &str) -> bool {
     !task.is_empty() && task.len() <= HELD_TASK_MAX && !task.chars().any(char::is_control)
+}
+
+/// `task` as the hub logs it: the id when it is one pinned makes, else a fixed word, as a machine
+/// chooses the text and it could hold a newline.
+fn logged(task: &str) -> &str {
+    if held_task_ok(task) { task } else { "(unreadable id)" }
+}
+
+/// The log line for an end whose machine `to` answered with an error. `task` is the sender's text.
+fn refused_line(to: &str, task: &str) -> String {
+    let task = logged(task);
+    format!("pinned-server: machine {to} answered the end of task {task} with an error; it is kept unclaimed")
+}
+
+/// The log line for a worker box that ended done. `task` is the sender's text.
+fn box_done_line(box_id: &str, account: Uuid, task: &str) -> String {
+    let task = logged(task);
+    format!("pinned-server: worker box {box_id} of account {account} ends done: its end of task {task} got through or is held")
 }
 
 /// The most of a held end's summary or error the hub keeps: 256 KiB. A worker's summary is its last
@@ -307,11 +325,19 @@ pub fn scrub_held(text: &str) -> String {
 #[allow(clippy::too_many_arguments)]
 pub async fn hold_end(hub: &Hub, account: &Account, origin: &str, from: &str, tab: &str, task: &str, mut end: RemoteEnd, unclaimed: bool) -> Result<bool, String> {
     let (Ok(origin_id), Ok(from_id)) = (Uuid::parse_str(origin), Uuid::parse_str(from)) else { return Ok(false) };
-    if !held_task_ok(task) || !HELD_STATES.contains(&end.state.as_str()) {
+    if !held_task_ok(task) || !held_task_ok(tab) || !HELD_STATES.contains(&end.state.as_str()) {
         eprintln!("pinned-server: the hub refuses an end from {from_id} for machine {origin_id}: its task id or state is not one pinned makes");
         return Err("the hub refuses this end: its task id or state is not one pinned makes".into());
     }
-    if hub.db.machine_name(account.id, origin_id).await?.is_none() {
+    let not_kept = || match unclaimed {
+        true => format!("the hub could not keep the end of task {task} that its machine did not take; it is sent again"),
+        false => format!("the hub could not keep the end of task {task} for its machine, which is offline; it is sent again"),
+    };
+    let known = hub.db.machine_name(account.id, origin_id).await.map_err(|e| {
+        eprintln!("pinned-server: could not look up machine {origin_id} to hold the end of task {task} from {from_id}: {e}");
+        not_kept()
+    })?;
+    if known.is_none() {
         return Ok(false);
     }
     let size = end.summary.as_ref().map_or(0, String::len) + end.error.as_ref().map_or(0, String::len);
@@ -326,10 +352,7 @@ pub async fn hold_end(hub: &Hub, account: &Account, origin: &str, from: &str, ta
         }
         Err(e) => {
             eprintln!("pinned-server: could not hold the end of task {task} from {from_id} for machine {origin_id}: {e}");
-            return Err(match unclaimed {
-                true => format!("the hub could not keep the end of task {task} that its machine did not take; it is sent again"),
-                false => format!("the hub could not keep the end of task {task} for its machine, which is offline; it is sent again"),
-            });
+            return Err(not_kept());
         }
     }
     Ok(true)
@@ -450,6 +473,18 @@ async fn call(hub: &Hub, account: &Account, machine: &str, call: Call, wait: Dur
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_log_line_about_an_end_carries_no_control_character_from_its_task_id() {
+        for task in ["task-1\nforged line", "task-1\u{7}", "task-1\r\u{1b}[31m", ""] {
+            for line in [refused_line("mac", task), box_done_line("box-1", Uuid::nil(), task)] {
+                assert!(!line.chars().any(char::is_control), "{line:?}");
+                assert!(line.contains("(unreadable id)"), "{line:?}");
+            }
+        }
+        let good = "task-1a2b3c4d";
+        assert!(refused_line("mac", good).contains(good) && box_done_line("box-1", Uuid::nil(), good).contains(good));
+    }
 
     #[test]
     fn a_held_text_past_the_cap_is_cut_with_a_marker_and_never_dropped() {
