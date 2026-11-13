@@ -1,0 +1,42 @@
+/* The Ideas page (gui-ideas.js): the Workflows cards' look (border, radius, tint, hover) in one column. */
+.ideas-wrap { display: flex; flex-direction: column; gap: 12px; max-width: 720px; margin: 0 auto; padding: 24px 16px 48px; color: var(--g-fg); font-size: 15px; line-height: 1.4; }
+.ideas-intro { margin: 0; color: var(--g-muted); }
+.ideas-filters { display: flex; flex-wrap: wrap; gap: 8px; margin: 0; }
+.ideas-filters input[type="search"] { flex: 1; min-width: 140px; }
+.ideas-filters :is(select, input), .ideas-add input, .idea-editor :is(input, select, textarea) { box-sizing: border-box; height: 36px; padding: 0 10px; border: 1px solid var(--g-border); border-radius: 10px;
+  background: transparent; color: var(--g-fg); font: inherit; }
+.ideas-filters select { max-width: 100%; }
+.ideas-add { display: flex; gap: 8px; margin: 0; }
+.ideas-add input { flex: 1; min-width: 0; }
+.ideas-add input::placeholder, .ideas-filters input::placeholder { color: var(--g-muted); }
+.ideas-save, .idea-close { flex: none; height: 36px; padding: 0 14px; border: 0; border-radius: 10px; background: var(--g-primary); color: var(--g-on-primary); font: inherit; font-weight: 600; }
+.ideas-error { margin: 0; color: var(--g-error); }
+.ideas-list { display: flex; flex-direction: column; gap: 10px; }
+.ideas-empty { margin: 0; padding: 32px 0; text-align: center; color: var(--g-muted); }
+
+.idea-card { display: flex; align-items: flex-start; gap: 10px; min-width: 0; padding: 14px 16px; border: 1px solid var(--g-border); border-radius: 12px; background: rgb(var(--g-ink-rgb) / 0.02); }
+.idea-card:hover { border-color: rgb(var(--g-ink-rgb) / 0.14); background: rgb(var(--g-ink-rgb) / 0.035); }
+.idea-card[data-status="dropped"] .idea-open { opacity: 0.55; }
+.idea-open { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.idea-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.idea-title { flex: 1; min-width: 0; font-weight: 600; overflow-wrap: anywhere; }
+.idea-state { flex: none; padding: 0 6px; border-radius: 6px; background: rgb(var(--g-ink-rgb) / 0.08); color: var(--g-muted); font-size: 12px; }
+.idea-meta { flex: none; max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--g-muted); }
+.idea-text { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; color: var(--g-muted); overflow-wrap: anywhere; }
+.idea-more { flex: none; margin-top: -4px; }
+.idea-editor { flex-direction: column; align-items: stretch; border-color: rgb(var(--g-primary-rgb) / 0.7); }
+.idea-editor .idea-edit-title { font-weight: 600; }
+.idea-editor textarea { height: auto; min-height: 120px; padding: 8px 10px; resize: vertical; line-height: 1.4; }
+.idea-edit-foot { display: flex; align-items: center; gap: 10px; }
+.idea-edit-foot select { min-width: 0; max-width: 50%; }
+.idea-saving { flex: 1; min-width: 0; font-size: 13px; color: var(--g-muted); }
+
+/* On a phone the quick-add sits at the foot of the page, above the keyboard and the tab bar. */
+@media (max-width: 768px) {
+  body[data-page="ideas"] #page-view .page-body { display: flex; flex-direction: column; }
+  .ideas-wrap { flex: 1; width: 100%; box-sizing: border-box; padding: 16px 12px 0; }
+  .ideas-list { flex: 1; }
+  .ideas-add { order: 99; position: sticky; bottom: 0; margin: 0 -12px; padding: 10px 12px calc(10px + env(safe-area-inset-bottom, 0px)); background: var(--g-canvas); border-top: 1px solid var(--g-border); }
+  .ideas-add input, .ideas-save { height: 44px; }
+  .ideas-filters :is(select, input) { height: 40px; }
+}

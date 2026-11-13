@@ -158,6 +158,8 @@ async function toggleSettings() {
 
 function onHubSettings(latest) {
   settings = latest;
+  // The push carries no ideas; it only says they may have changed.
+  if (typeof ideasRefresh === "function") ideasRefresh();
   if (!settingsOpen()) return;
   if (page === "integrations") {
     const asks = document.getElementById("box-asks");

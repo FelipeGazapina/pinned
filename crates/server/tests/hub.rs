@@ -8234,9 +8234,7 @@ fn an_account_saves_lists_edits_and_deletes_its_ideas_and_no_other_account_sees_
     assert_eq!((kept["status"].as_str(), kept["project"].is_null()), (Some("dropped"), true), "a status left out is kept; a project left out clears it");
     assert_eq!(ids(ana.hub(json!({ "cmd": "list_ideas" })).unwrap())[0], ipad_id, "the most recently changed comes first");
 
-    let settings = ana.hub(json!({ "cmd": "get_settings" })).unwrap();
-    assert_eq!(settings["ideas"].as_array().unwrap().len(), 2, "the settings carry the ideas");
-    assert!(bob.hub(json!({ "cmd": "get_settings" })).unwrap().get("ideas").is_none(), "an account with none gets no field");
+    assert!(ana.hub(json!({ "cmd": "get_settings" })).unwrap().get("ideas").is_none(), "the settings carry no ideas, however many there are: apps read them with list_ideas");
 
     assert_eq!(bob.hub(json!({ "cmd": "list_ideas" })).unwrap(), json!([]), "bob lists none of ana's");
     assert_eq!(bob.hub(json!({ "cmd": "list_ideas", "project": site })).unwrap(), json!([]));
@@ -8246,7 +8244,10 @@ fn an_account_saves_lists_edits_and_deletes_its_ideas_and_no_other_account_sees_
     let after = ana.hub(json!({ "cmd": "list_ideas", "project": site })).unwrap();
     assert_eq!(after.as_array().unwrap().iter().find(|i| i["id"] == json!(cache_id)).unwrap()["title"], "Cache the diff", "ana's idea is untouched");
 
+    ana.frames.clear();
     assert_eq!(ana.hub(json!({ "cmd": "delete_idea", "id": cache_id })).unwrap(), Value::Null);
+    let push = ana.wait("the settings push after a delete", |f| f["type"] == "settings");
+    assert!(push["settings"].get("ideas").is_none(), "the push that tells apps to read again holds no list: {push}");
     assert_eq!(ids(ana.hub(json!({ "cmd": "list_ideas" })).unwrap()), [ipad_id.clone()]);
     assert_eq!(ana.hub(json!({ "cmd": "delete_idea", "id": cache_id })), no_idea(&cache_id), "a second delete finds nothing");
     assert_eq!(ana.hub(json!({ "cmd": "delete_idea", "id": "not-an-id" })), no_idea("not-an-id"));

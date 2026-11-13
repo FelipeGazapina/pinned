@@ -4,7 +4,8 @@
 
 ### Added
 
-- Ideas: the Orchestrator and your sessions can now save things you might do someday with `save_idea`, list them with `list_ideas` and delete them with `delete_idea`. Ideas are kept on your account, apart from memory, and are never fed into a prompt on their own. The Ideas page comes in a later update.
+- Ideas: the Orchestrator and your sessions can now save things you might do someday with `save_idea`, list them with `list_ideas` and delete them with `delete_idea`. Ideas are kept on your account, apart from memory, and are never fed into a prompt on their own.
+- Ideas page: Ideas in the sidebar (under More on a phone) lists your ideas, with a quick-add, filters by project and status, search, and an editor that saves as you type, and the sidebar shows how many are open.
 
 ### Fixed
 
