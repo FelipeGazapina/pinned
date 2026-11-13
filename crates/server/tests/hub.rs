@@ -9161,6 +9161,25 @@ fn held_ends_older_than_30_days_expire_for_every_account_at_most_a_bound_per_run
     assert_eq!(expire(), 5, "the rest go on the next run");
     assert_eq!(tasks(), ["ana-unclaimed-29", "ana-waiting-29", "bob-waiting-29"]);
     assert_eq!(held_ends(&hub, None), 3);
+    let indexed = hub.runtime.block_on(async {
+        let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        db.query("select indexdef from pg_indexes where tablename = 'held_ends'", &[]).await.unwrap().iter().map(|r| r.get::<_, String>(0)).collect::<Vec<_>>()
+    });
+    assert!(indexed.iter().any(|def| def.ends_with("(held_at)")), "the hourly delete finds old rows by an index: {indexed:?}");
+
+    // A run that deleted a full batch runs again on the next tick, not an hour later; then it waits.
+    let full = TestHub::start("held_expiry_full");
+    let (_, carl, _carl_client) = signed_in(&full.url, "carl@acme.dev");
+    let old = |n: i64| format!("insert into held_ends (account, origin_machine, task, origin_tab, from_machine, report, held_at)
+        select '{carl}', gen_random_uuid(), 'bulk-' || gen_random_uuid(), 'tab-1', gen_random_uuid(), '{{}}', now() - interval '40 days' from generate_series(1, {n}) i");
+    admin_on(&full.database, &old(bound + 5));
+    let run = || full.runtime.block_on(full.hub().expire_held_ends());
+    assert_eq!(run(), bound as u64);
+    assert_eq!(run(), 5, "a full batch leaves more, so the next tick runs again");
+    admin_on(&full.database, &old(1));
+    assert_eq!(run(), 0, "a run that was not full waits its hour");
+    assert_eq!(held_ends(&full, None), 1);
 }
 
 #[test]

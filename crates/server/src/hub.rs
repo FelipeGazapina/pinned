@@ -300,8 +300,9 @@ impl Hub {
 
     /// Deletes up to `db::HELD_EXPIRY_BATCH` held ends of any account, waiting or unclaimed, held
     /// longer than 30 days, so an account whose machines never come back keeps none past them. Runs
-    /// at most once per `HELD_EXPIRY_EVERY`; a call before that, or one whose delete failed, deletes
-    /// nothing and returns 0. A failure is logged without any row's text.
+    /// at most once per `HELD_EXPIRY_EVERY`, or on the next tick after a run that deleted a full
+    /// batch; a call before that, or one whose delete failed, deletes nothing and returns 0. A
+    /// failure is logged without any row's text.
     pub async fn expire_held_ends(&self) -> u64 {
         {
             let mut last = self.held_expired.lock().unwrap();
@@ -314,6 +315,10 @@ impl Hub {
             Ok(0) => 0,
             Ok(n) => {
                 eprintln!("pinned-server: {n} held ends older than 30 days expired");
+                if n >= crate::db::HELD_EXPIRY_BATCH as u64 {
+                    // A full batch may leave more: the next tick runs again.
+                    *self.held_expired.lock().unwrap() = None;
+                }
                 n
             }
             Err(e) => {

@@ -126,6 +126,8 @@ create table if not exists held_ends (account uuid not null references accounts 
   primary key (account, origin_machine, task));
 alter table held_ends add column if not exists unclaimed_at timestamptz;
 alter table held_ends add column if not exists read_at timestamptz;
+-- The expiry deletes by age across every account.
+create index if not exists held_ends_by_held_at on held_ends (held_at);
 -- What might be done, as opposed to memory: an account's own list with an optional project (a repo key).
 -- `created_by` is a `schedule::Actor` as json; `created_at` and `updated_at` are unix seconds.
 create table if not exists ideas (id uuid primary key, account uuid not null references accounts on delete cascade,
