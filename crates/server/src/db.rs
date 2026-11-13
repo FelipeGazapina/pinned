@@ -109,6 +109,8 @@ create table if not exists agent_confirmations (id uuid primary key, account uui
   action text not null, args jsonb not null, request_id text, created_at timestamptz not null default now(),
   decided_at timestamptz, approved boolean, outcome text, notified boolean not null default false,
   target text, result jsonb, unique (account, machine, tab, action, request_id));
+-- What the confirmation changes, one line each, as its prompt shows it (`Confirmation.changes`).
+alter table agent_confirmations add column if not exists changes jsonb;
 -- A box an agent opened through act, until the box ends and is recorded as that session's task.
 -- `started` is unix milliseconds.
 create table if not exists agent_boxes (box text primary key, account uuid not null references accounts on delete cascade,
@@ -251,12 +253,16 @@ pub struct Held {
 }
 
 const CONFIRMATION_COLUMNS: &str = "c.id, extract(epoch from c.created_at)::bigint, c.machine, coalesce(m.name, ''), c.tab, c.title, c.role, c.action, c.args,
-  c.request_id, c.approved, extract(epoch from c.decided_at)::bigint, c.outcome, c.session, c.target, c.result";
+  c.request_id, c.approved, extract(epoch from c.decided_at)::bigint, c.outcome, c.session, c.target, c.result, c.changes";
 
 fn held(r: &tokio_postgres::Row) -> Held {
     let role: String = r.get(6);
     let action: String = r.get(7);
     let decided_at: Option<i64> = r.get(11);
+    let changes: Vec<String> = r.get::<_, Option<Value>>(16).and_then(|changes| serde_json::from_value(changes).ok()).unwrap_or_default();
+    // An older app knows no `changes` and shows `about` when the pointer rests on the title.
+    let about = pinned_core::surface::find(&action).map_or_else(String::new, |a| a.about.to_owned());
+    let about = if changes.is_empty() { about } else { format!("{about}\n\n{}", changes.join("\n")) };
     let confirmation = Confirmation {
         id: r.get::<_, Uuid>(0).to_string(),
         at: r.get(1),
@@ -265,7 +271,8 @@ fn held(r: &tokio_postgres::Row) -> Held {
         tab: r.get(4),
         title: r.get(5),
         role: serde_json::from_value(Value::String(role)).unwrap_or(ActorRole::Session),
-        about: pinned_core::surface::find(&action).map_or_else(String::new, |a| a.about.to_owned()),
+        about,
+        changes,
         action,
         args: r.get(8),
         target: r.get(14),
@@ -950,11 +957,12 @@ impl Db {
         let client = self.client().await?;
         let id = Uuid::new_v4();
         let request_id = asked.request_id.as_deref();
+        let changes = (!asked.changes.is_empty()).then(|| serde_json::json!(asked.changes));
         let inserted = client
             .query_opt(
-                "insert into agent_confirmations (id, account, machine, tab, session, role, title, action, args, request_id, target) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                "insert into agent_confirmations (id, account, machine, tab, session, role, title, action, args, request_id, target, changes) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                  on conflict (account, machine, tab, action, request_id) do nothing returning id",
-                &[&id, &account, &machine, &asked.tab, &session, &asked.role.name(), &asked.title, &asked.action, &asked.args, &request_id, &asked.target],
+                &[&id, &account, &machine, &asked.tab, &session, &asked.role.name(), &asked.title, &asked.action, &asked.args, &request_id, &asked.target, &changes],
             )
             .await
             .map_err(err)?;

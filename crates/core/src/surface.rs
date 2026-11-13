@@ -126,7 +126,7 @@ pub const ACTIONS: &[Action] = &[
     n("open_scratch", Write, "Opens a new session tab in the folder for threads without a project, not started, and answers its id.").wired(),
     n("auto_resume", Excluded, "a thread's own switch for continuing after a usage limit, which the user sets"),
     n("start_claude", Write, "Starts the session in tab and answers its folder. It becomes your worker: it counts against its project's workers-at-once limit, is held to the time limit and budget, its first finished turn ends it as a task, and you get its notice. cols and rows size its terminal; 120 and 32 suit.").wired().starts_work(),
-    n("set_bypass", Write, "Restarts a session with permissions skipped (on: true) or asked (on: false), resuming its conversation.").wired(),
+    n("set_bypass", Confirm, "Restarts a session with permissions skipped (on: true) or asked (on: false), resuming its conversation, once the user approves. on: true takes a worker or session in your own project, no higher than your own seat, while your own session skips its prompts.").wired(),
     n("set_model", Write, "Restarts a session's conversation on model, a slug from the models list_accounts gives its Claude Code account, optionally moving it to agent account first. A model above the tier its project allows is refused.").wired(),
     n("restart_claude", Write, "Restarts a session on its conversation, so its skills, plugins and MCP servers load again.").wired(),
     n("write_input", Excluded, TERMINAL),
@@ -164,7 +164,7 @@ pub const ACTIONS: &[Action] = &[
     n("open_global_orchestrator", Write, "Opens this machine's global orchestrator tab, not started, and answers its id. Only the global orchestrator's own session may call it.").wired(),
     n("open_taste_chat", Write, "Opens a thread that adjusts a scope's way of working by talking, not started, and answers its id."),
     n("global_orchestrator_settings", Read, "The machine's global orchestrator settings: its name, whether this machine hosts it, and its busy and report policies.").wired(),
-    n("set_global_orchestrator_settings", Write, "Saves the machine's global orchestrator settings.").wired(),
+    n("set_global_orchestrator_settings", Confirm, "Saves the machine's global orchestrator settings once the user approves. Only the fields settings names change; the others keep their values.").wired(),
     n("auto_archive_settings", Excluded, "the user's own setting for when finished threads archive themselves"),
     n("set_auto_archive_settings", Excluded, "the user's own setting for when finished threads archive themselves"),
     n("set_background", Excluded, "the user's own setting for whether the app on a machine keeps a window"),
@@ -741,6 +741,10 @@ pub struct Confirmation {
     pub about: String,
     /// The exact arguments it runs with.
     pub args: Value,
+    /// What it changes, one line each, as `name: old → new` or the session it touches, so the
+    /// prompt shows it. Empty for an action whose arguments say it all.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub changes: Vec<String>,
     /// The machine `act` named for an action on a machine, an id or a name; the asking session's own
     /// machine when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1085,6 +1089,14 @@ mod tests {
         assert!(find("enqueue").is_some_and(|a| a.starts_work), "a message that starts a Captain goes through the limits");
         assert!(find("run_workflow").is_some_and(|a| a.starts_work && a.class == Write), "a Run now goes through the limits, with no approval");
         assert_eq!(find("run_now").map(|a| a.class), Some(Excluded), "only the hub starts a Run now on a machine");
+    }
+
+    #[test]
+    fn set_bypass_and_global_orchestrator_settings_wait_for_the_user() {
+        for name in ["set_bypass", "set_global_orchestrator_settings"] {
+            let action = find(name).unwrap();
+            assert_eq!((action.class, action.wired), (Confirm, true), "{name} changes supervision or what the user set, so the user approves it");
+        }
     }
 
     #[test]
@@ -1531,7 +1543,7 @@ mod tests {
         assert_eq!(serde_json::to_value(ActAnswer::Done { result: json!([1]) }).unwrap(), json!({ "outcome": "done", "result": [1] }));
         assert_eq!(serde_json::to_value(ActAnswer::Pending { id: "c1".into(), next: PENDING_NEXT.into() }).unwrap()["outcome"], "pending");
         assert_eq!(serde_json::to_value(ActAnswer::Repeat { earlier: AuditOutcome::Done, at: 5 }).unwrap(), json!({ "outcome": "repeat", "earlier": "done", "at": 5 }));
-        let confirmation = Confirmation { id: "c1".into(), at: 1, machine: "m1".into(), machine_name: "MacBook".into(), tab: "tab-1".into(), title: "Clean up".into(), role: ActorRole::Worker, action: "remove_machine".into(), about: String::new(), args: json!({ "id": "m2" }), target: None, request_id: None, decision: Some(Decision::Approved), decided_at: Some(2), outcome: Some("done".into()) };
+        let confirmation = Confirmation { id: "c1".into(), at: 1, machine: "m1".into(), machine_name: "MacBook".into(), tab: "tab-1".into(), title: "Clean up".into(), role: ActorRole::Worker, action: "remove_machine".into(), about: String::new(), args: json!({ "id": "m2" }), changes: Vec::new(), target: None, request_id: None, decision: Some(Decision::Approved), decided_at: Some(2), outcome: Some("done".into()) };
         assert_eq!(notice_text(&confirmation, &Value::Null), "[pinned] The user approved your remove_machine request (c1): done.");
         let denied = Confirmation { decision: Some(Decision::Denied), outcome: None, ..confirmation };
         assert_eq!(notice_text(&denied, &Value::Null), "[pinned] The user denied your remove_machine request (c1). It did not run.");

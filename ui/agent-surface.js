@@ -157,6 +157,7 @@ function agentConfirmationHtml(c) {
     <span class="dot"></span>
     <div class="texts">
       <b class="title" title="${esc(c.about)}">${esc(agentActionTitle(c.action, c.args, c.machine))}${c.target ? ` on ${esc(agentMachineName(c.target) || c.target)}` : ""}</b>
+      ${c.changes?.length ? `<ul class="changes">${c.changes.map((line) => `<li>${esc(line)}</li>`).join("")}</ul>` : ""}
       ${Object.keys(c.args ?? {}).length ? `<pre class="args">${esc(JSON.stringify(c.args, null, 2))}</pre>` : ""}
       <span class="who">${esc(who)}</span>
       <div class="actions start"><button type="button" class="primary" data-agent="approve"${busy}>Approve</button><button type="button" class="outline" data-agent="deny"${busy}>Deny</button></div>
