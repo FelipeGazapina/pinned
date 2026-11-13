@@ -254,6 +254,11 @@ machine. A box only borrows the seat.
   so a turn is never cut. The UI shows "Orchestrator is on a box · Move back to MacBook".
   **Move back** sends `EndOrchestratorBox`: flush, then delete. On the machine, the stale-tab
   rule (4.4) restarts its tab on the box's conversation.
+- **No seat is online.** The box was deleted, or the host is asleep. Captain reports
+  (`RelayTo::Orchestrator`) are held on the hub, in the same table as held worker end reports, and
+  delivered when the next Orchestrator takes the seat. Delivery is at-least-once and de-duplicated.
+  This needs the follow-up PR after `fix/held-remote-ends`, which sends Captain reports through that
+  table (today `machine.rs:3274-3279` tries once and drops).
 - **An old app (0.18.1) holds the host setting.** The seat still goes to the box. The old app's
   own global tab gets "does not host" refusals from the hub, as a non-host does today. The old
   machine does not sync the share. So the UI says "<machine> needs pinned 0.18.2 to hand the
@@ -277,7 +282,7 @@ machine. A box only borrows the seat.
 | `waiting` | Works | It is hub overview data. |
 | `send_to_captain` | Needs a change | Today, with no online checkout, it fails (`route_remote`). On a box (`PINNED_BOX_ROLE=orchestrator`), a project with no online checkout goes as `box: true` automatically, through `send_to_captain_box`. `machine` still forces a machine. The `orchestrator` (Captains) box permission, the cap, the per-account Claude token and the Captain Box budget apply, as today. A project with no git origin (`<machine>:<path>` keys) can't move to a box, and the tool says so. |
 | `read_captain` | Works | It reads the Captain on any online machine or Captain box. |
-| `tell_orchestrator` (from Captains), Captain reports | Works | `RelayTo::Orchestrator` delivers to `host()`, which becomes `seat()`. |
+| `tell_orchestrator` (from Captains), Captain reports | Works | `RelayTo::Orchestrator` delivers to `host()`, which becomes `seat()`. With no seat online, the report is held on the hub and delivered to the next Orchestrator (section 5). |
 | `repo_overview`, `repo_read`, `repo_search` | Works when any online machine or Captain box has the checkout. Needs a change otherwise. | `relay::checkout` needs an online checkout. The fallback has the hub send the Orchestrator box `Call::Clone` with a `dest` under `~/.pinned/orquestrador/reads/`, which is a shallow, read-only clone that is not a project. Then it sends `Call::RepoLook` there. Rate limits, the repo insight switch and the audit stay. |
 | `memory_search`, `memory_save`, `memory_forget`, prompt recall | Works after the sync change | It uses local SQLite on the box, filled and drained by 4.2. |
 | Claude file memory (`MEMORY.md` through Read/Write/Edit) | Works after the sync change | The guard hook already allows the memory folder. |
