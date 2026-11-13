@@ -473,6 +473,13 @@ pub enum BoxPermission {
 }
 
 impl BoxPermission {
+    fn without_row(&self) -> Self {
+        match self {
+            BoxPermission::Fixed { .. } => BoxPermission::Fixed { row: None },
+            other => other.clone(),
+        }
+    }
+
     pub fn fixed_row(&self) -> Option<&str> {
         match self {
             BoxPermission::Fixed { row: Some(row) } => Some(row),
@@ -505,8 +512,22 @@ impl Default for BoxAccess {
 }
 
 impl BoxAccess {
+    /// Only the workflow kind (the box a run uses) has a fixed row: the hub names none for a
+    /// session, a worker or the orchestrator, so one a stored file or an old app carries there is
+    /// ignored, and the box it names keeps the normal timers.
     pub fn owns_row(&self, id: &str) -> bool {
-        [self.workflow.fixed_row(), self.session.fixed_row(), self.worker.fixed_row(), self.orchestrator.fixed_row()].into_iter().flatten().any(|row| row == id)
+        self.workflow.fixed_row() == Some(id)
+    }
+
+    /// As the hub and the apps read it: the session, worker and orchestrator kinds carry no row.
+    /// The stored file keeps what an earlier release wrote there.
+    fn without_unnamed_rows(&self) -> Self {
+        Self { workflow: self.workflow.clone(), session: self.session.without_row(), worker: self.worker.without_row(), orchestrator: self.orchestrator.without_row() }
+    }
+
+    /// No kind names a row, so the hub names one again when it opens a fixed box.
+    fn without_rows(&self) -> Self {
+        Self { workflow: self.workflow.without_row(), ..self.without_unnamed_rows() }
     }
 }
 
@@ -554,7 +575,7 @@ fn box_ask_id(connector: &str, subject: &Subject) -> String {
 }
 
 /// Only the hub names the fixed row, through `claim_fixed_row`, `retake_fixed_row` and
-/// `release_fixed_row`. A save that still asks for Fixed keeps the stored row, as an older app sends
+/// `release_fixed_row`, and only for the workflow kind. A save that still asks for Fixed keeps the stored row, as an older app sends
 /// back the row it read, and any other row it names becomes none: a row named there is exempt from
 /// every box timer, so a client must not pick one.
 fn keep_fixed_row(incoming: BoxPermission, stored: &BoxPermission) -> BoxPermission {
@@ -3904,7 +3925,7 @@ impl Connectors {
             box_claude_tokens: store.box_claude_tokens.clone(),
             connectors: store.connectors.iter().cloned().map(presented).collect(),
             checked: self.checked.lock().unwrap().clone(),
-            boxes: store.boxes.clone(),
+            boxes: store.boxes.without_unnamed_rows(),
             box_asks: store.box_asks.clone(),
             convex: store.convex.clone(),
             ideas: Vec::new(),
@@ -4302,7 +4323,7 @@ impl Connectors {
     }
 
     pub fn box_access(&self) -> BoxAccess {
-        self.store.lock().unwrap().boxes.clone()
+        self.store.lock().unwrap().boxes.without_unnamed_rows()
     }
 
     /// Saves the account's box permissions.
@@ -4310,9 +4331,9 @@ impl Connectors {
         let mut store = self.store.lock().unwrap();
         let kept = BoxAccess {
             workflow: keep_fixed_row(access.workflow, &store.boxes.workflow),
-            session: keep_fixed_row(access.session, &store.boxes.session),
-            worker: keep_fixed_row(access.worker, &store.boxes.worker),
-            orchestrator: keep_fixed_row(access.orchestrator, &store.boxes.orchestrator),
+            session: access.session.without_row(),
+            worker: access.worker.without_row(),
+            orchestrator: access.orchestrator.without_row(),
         };
         store.boxes = kept.clone();
         self.save(&store)?;
@@ -4549,6 +4570,7 @@ impl Connectors {
             }
         }
         self.channels.lock().unwrap().clear();
+        imported.boxes = imported.boxes.without_rows();
         imported.mcp_servers = std::mem::take(&mut current.mcp_servers);
         imported.convex = std::mem::take(&mut current.convex);
         *current = imported;
@@ -6722,6 +6744,53 @@ mod tests {
         let resent = connectors.set_box_access(connectors.box_access()).unwrap();
         assert_eq!(resent.workflow, fixed("row-1"), "an older app sending back the row it read changes nothing");
         assert_eq!(connectors.set_box_access(BoxAccess { workflow: BoxPermission::Fresh, ..BoxAccess::default() }).unwrap().workflow, BoxPermission::Fresh);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A box permission of every kind, each naming its own fixed row.
+    fn fixed_rows(prefix: &str) -> serde_json::Value {
+        serde_json::json!({
+            "workflow": { "mode": "fixed", "row": format!("{prefix}-run") },
+            "session": { "mode": "fixed", "row": format!("{prefix}-session") },
+            "worker": { "mode": "fixed", "row": format!("{prefix}-worker") },
+            "orchestrator": { "mode": "fixed", "row": format!("{prefix}-orchestrator") },
+        })
+    }
+
+    #[test]
+    fn an_imported_store_names_no_fixed_row() {
+        let (connectors, dir) = stored("import-fixed-rows", vec![]);
+        assert_eq!(connectors.import(serde_json::json!({ "connectors": [], "boxes": fixed_rows("imported") }), Keys::default()), Ok(true));
+        let none = BoxPermission::Fixed { row: None };
+        let access = connectors.box_access();
+        assert_eq!((&access.workflow, &access.session, &access.worker, &access.orchestrator), (&none, &none, &none, &none), "no kind keeps a row the client named");
+        for kind in ["run", "session", "worker", "orchestrator"] {
+            assert!(!access.owns_row(&format!("imported-{kind}")), "{kind}: owns_row answers false");
+        }
+        let reloaded = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into());
+        assert_eq!(reloaded.store.lock().unwrap().boxes.workflow, none, "and the stored file names none either");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_store_saved_with_fixed_rows_on_session_worker_and_orchestrator_loads_with_none_there() {
+        let dir = temp_dir("load-fixed-rows");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("connectors.json"), serde_json::json!({ "connectors": [], "boxes": fixed_rows("saved") }).to_string()).unwrap();
+        let connectors = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into());
+        let none = BoxPermission::Fixed { row: None };
+        for access in [connectors.box_access(), connectors.get_settings().boxes] {
+            assert_eq!(access.workflow, BoxPermission::Fixed { row: Some("saved-run".into()) }, "the run kind's row, which the hub named, stays");
+            assert_eq!((&access.session, &access.worker, &access.orchestrator), (&none, &none, &none), "the other kinds carry none");
+            assert!(access.owns_row("saved-run"));
+            for kind in ["session", "worker", "orchestrator"] {
+                assert!(!access.owns_row(&format!("saved-{kind}")), "{kind}: owns_row ignores it");
+            }
+        }
+        // The file keeps what an earlier release saved (nothing is dropped from disk by a load).
+        connectors.save(&connectors.store.lock().unwrap()).unwrap();
+        let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(dir.join("connectors.json")).unwrap()).unwrap();
+        assert_eq!(saved["boxes"], fixed_rows("saved"));
         let _ = std::fs::remove_dir_all(dir);
     }
 
