@@ -1,0 +1,5 @@
+Diagnostic 2 tests-run.log (box 799c2e...; times UTC)
+2026-11-13T04:01:31Z setup: rustup stable (cargo 1.100.0) in ~/.cargo ~/.rustup; postgres 15.18-0+deb12u1 arm64 (sha256 checked vs bookworm Packages) pid 9820 on 127.0.0.1:5499 tcp only, fresh mktemp data dir
+env per test: env -u PINNED_PROJECT -u PINNED_ROLE -u PINNED_TAB -u PINNED_SOCK -u PINNED_ACCOUNT -u PINNED_TUTORIAL_HELPER HOME=<fresh mktemp -d> CARGO_HOME=/home/boxuser/.cargo RUSTUP_HOME=/home/boxuser/.rustup
+node 288: ppid 1 pgid 288 sid 288 (own session, as in run 1); logger pid 8311 ppid 1 own session
+order: suspect first, then all other hub tests in file order (run 1 order)
