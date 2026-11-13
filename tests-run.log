@@ -18,3 +18,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:02:23Z #7 a_remote_project_with_no_thread_is_still_in_list_projects START / avail=15125M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:02:27Z #7 a_remote_project_with_no_thread_is_still_in_list_projects ok / avail=15125M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:02:28Z #8 the_hub_serves_the_install_script_binaries_and_the_web_app START / avail=15125M /workspace avail=19374M node_stat=Ssl
+2026-11-13T04:02:30Z #8 the_hub_serves_the_install_script_binaries_and_the_web_app ok / avail=15125M /workspace avail=19374M node_stat=Ssl node_tcp=1
