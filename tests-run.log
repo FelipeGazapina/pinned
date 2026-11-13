@@ -177,3 +177,9 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:08:51Z #82 an_accounts_tastes_are_read_written_and_imported_only_by_that_account START / avail=15071M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:08:56Z #82 an_accounts_tastes_are_read_written_and_imported_only_by_that_account ok / avail=15071M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:08:57Z #83 an_accounts_box_budget_bounds_only_its_own_boxes_and_shows_only_in_its_tastes START / avail=15071M /workspace avail=19374M node_stat=Ssl
+2026-11-13T04:09:01Z #83 an_accounts_box_budget_bounds_only_its_own_boxes_and_shows_only_in_its_tastes FAILED(rc=101) / avail=15071M /workspace avail=19374M node_stat=Ssl node_tcp=1
+    thread 'an_accounts_box_budget_bounds_only_its_own_boxes_and_shows_only_in_its_tastes' (26677) panicked at crates/server/tests/hub.rs:4552:5:
+    assertion `left == right` failed: adding funds stops at the box budget too
+    pinned-server: Postgres connection ended: db error
+    pinned-server: could not look after account 6706ab1f-9c4e-4308-bcf4-0f751cc7d638's boxes: could not connect to Postgres: db error
+    error: test failed, to rerun pass `-p pinned-server --test hub`
