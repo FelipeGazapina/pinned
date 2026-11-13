@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -1695,6 +1696,11 @@ pub struct Connectors {
     inbox: Mutex<Vec<GraphInbox>>,
     /// One drive at a time, so a tab wake cannot perform the effect a check is already performing.
     driving: tokio::sync::Mutex<()>,
+    /// True while a tab wake waits for `driving`. Later wakes only store their list: that waiter
+    /// drives on the newest lists, so tab wakes never pile up behind a slow check.
+    tab_drive_queued: AtomicBool,
+    /// How many calls wait for `driving`, for the hub's census.
+    drive_waiters: AtomicUsize,
     /// `runs.json` did not parse. Saves stay off so a later write does not replace the file with nothing.
     runs_broken: Mutex<Option<String>>,
     /// The latest tab list each machine has sent, with the unix millis it was observed.
@@ -1717,6 +1723,24 @@ pub enum BoxEndRelease {
     /// It failed to boot, went offline, or vanished from Upstash without being asked: the subject
     /// is freed for its next trigger once per subject per 30 days (`BOX_RELEASE_WINDOW_MS`), and stays handled for the rest of that time.
     Once,
+}
+
+/// Clears a flag when dropped.
+struct ClearOnDrop<'a>(&'a AtomicBool);
+
+impl Drop for ClearOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+/// Counts one waiter down when dropped.
+struct CountedWait<'a>(&'a AtomicUsize);
+
+impl Drop for CountedWait<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// A Slack bot with its token, as a read or a post uses it.
@@ -1748,6 +1772,8 @@ impl Connectors {
             runs: Mutex::new(runs),
             inbox: Mutex::new(vec![]),
             driving: tokio::sync::Mutex::new(()),
+            tab_drive_queued: AtomicBool::new(false),
+            drive_waiters: AtomicUsize::new(0),
             runs_broken: Mutex::new(runs_broken),
             known_tabs: Mutex::new(HashMap::new()),
             bots_filled: Mutex::new(std::collections::HashSet::new()),
@@ -3164,7 +3190,7 @@ impl Connectors {
         Fut: Future<Output = R>,
         R: Taken,
     {
-        let _guard = self.driving.lock().await;
+        let _guard = self.lock_driving().await;
         let (work, mut error) = self.poll().await;
         for work in work {
             if let Err(e) = self.hand_over(work, open).await {
@@ -3211,7 +3237,7 @@ impl Connectors {
     /// reopens the session. Answers how many runs failed. When their save fails, the runs are left
     /// as they were, so a retry fails them once.
     pub async fn box_ended(&self, machine: &str, holder: Option<(&str, &Subject, u64)>, why: &str, release: BoxEndRelease) -> Result<usize, String> {
-        let _guard = self.driving.lock().await;
+        let _guard = self.lock_driving().await;
         let at = Utc::now().to_rfc3339();
         let released = self.store.lock().unwrap().box_released_at.clone();
         let now = unix_millis();
@@ -3265,21 +3291,45 @@ impl Connectors {
     }
 
     /// Tab statuses changed on `machine`. Waiting runs wake, then every running graph continues.
-    /// `observed` is the unix millis the list arrived. Lists can queue behind a drive, so an older one never replaces a newer one.
+    /// `observed` is the unix millis the list arrived. Lists can arrive out of order, so an older one never replaces a newer one.
+    /// The list is stored before the drive lock. At most one tab wake waits for that lock: a wake that finds
+    /// one waiting returns, and the waiter's drive reads every list stored until it took the lock.
     pub async fn on_tabs<F, Fut, R>(&self, machine: &str, observed: u64, after: &[TabView], open: F) -> Result<(), String>
     where
         F: Fn(Work) -> Fut,
         Fut: Future<Output = R>,
         R: Taken,
     {
-        let _guard = self.driving.lock().await;
         {
             let mut known = self.known_tabs.lock().unwrap();
             if known.get(machine).is_none_or(|(at, _)| *at <= observed) {
                 known.insert(machine.to_owned(), (observed, after.to_vec()));
             }
         }
+        if self.tab_drive_queued.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
+        // Cleared once the lock is taken, before the drive reads `known_tabs`, so a list stored
+        // after this point queues a drive of its own. Cleared on drop too, so a cancelled wait never blocks tab wakes.
+        let queued = ClearOnDrop(&self.tab_drive_queued);
+        let _guard = self.lock_driving().await;
+        drop(queued);
         self.drive_locked(&open).await
+    }
+
+    /// Takes `driving`, counted in `drive_waiters` while it waits.
+    async fn lock_driving(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.drive_waiters.fetch_add(1, Ordering::Relaxed);
+        let waiting = CountedWait(&self.drive_waiters);
+        let guard = self.driving.lock().await;
+        drop(waiting);
+        guard
+    }
+
+    /// How many machines have a stored tab list, and how many calls wait for the drive lock. Counts
+    /// only, for the hub's census.
+    pub fn census(&self) -> (usize, usize) {
+        (self.known_tabs.lock().unwrap().len(), self.drive_waiters.load(Ordering::Relaxed))
     }
 
     fn reconcile_known(&self) -> Result<(), String> {
@@ -3403,7 +3453,7 @@ impl Connectors {
         Fut: Future<Output = R>,
         R: Taken,
     {
-        let _guard = self.driving.lock().await;
+        let _guard = self.lock_driving().await;
         self.drive_locked(open).await
     }
 
