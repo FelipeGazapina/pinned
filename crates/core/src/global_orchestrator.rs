@@ -1083,6 +1083,34 @@ mod tests {
     }
 
     #[test]
+    fn open_questions_wait_on_the_user_as_a_question_while_the_hooks_say_the_turn_works() {
+        let asked = crate::questions::Questionnaire {
+            id: "q-7".into(),
+            title: Some("Checkout redesign".into()),
+            questions: vec![crate::questions::Question {
+                header: Some("Branch".into()),
+                question: "Base the fix on main or on release/0.18?".into(),
+                changes: "which branch the PR targets".into(),
+                options: vec![crate::questions::QOption { label: "main".into(), description: None, recommended: true }, crate::questions::QOption { label: "release/0.18".into(), description: None, recommended: false }],
+                multi_select: false,
+            }],
+            projects: vec![],
+            at: 1794239000,
+        };
+        let working = TabView { updated: Some(1794239000), ..view("tab-c-2", "/w/site/.claude/worktrees/pinned-1", Some(Role::Worker), true, Some(AgentStatus::Working)) };
+        assert_eq!(waiting_kind(&working), None);
+        let tab = crate::questions::shown(working, &asked);
+        assert_eq!(waiting_kind(&tab), Some(WaitingKind::NeedsInput));
+        assert_eq!(ask_of(tab.message.as_deref()), (AskKind::Question, None));
+        let machines = [MachineSnapshot { id: "m-1", name: "MacBook", online: true, version: "0.18.2", projects: &[], tabs: std::slice::from_ref(&tab), problem: None }];
+        let waiting = overview_at(&machines, 1794240000).waiting;
+        assert_eq!(waiting.len(), 1);
+        assert_eq!((waiting[0].ask, waiting[0].detail.as_deref(), waiting[0].questions.as_deref()), (Some(AskKind::Question), Some("Base the fix on main or on release/0.18?"), Some("q-7")));
+        let own = crate::questions::shown(TabView { orchestrator_global: true, ..view("tab-c-4", "/home/f/.pinned/orquestrador", None, true, Some(AgentStatus::Working)) }, &asked);
+        assert_eq!((waiting_kind(&own), own.questions.map(|q| q.id)), (None, Some("q-7".into())), "the global orchestrator's own questions show in its chat, not in waiting()");
+    }
+
+    #[test]
     fn waiting_counts_exactly_the_cases_the_sidebar_shares() {
         let cases: serde_json::Value = serde_json::from_str(include_str!("waiting_cases.json")).unwrap();
         let now = cases["now"].as_u64().unwrap();
