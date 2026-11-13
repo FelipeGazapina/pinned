@@ -30,6 +30,12 @@ pub const BOX_BOOTING: &str = "the box is still booting";
 /// The hub's answer about a worker box whose node connected and then dropped its link. Its task
 /// waits: the node may come back, and the hub ends a box that stays offline.
 pub const BOX_OFFLINE: &str = "the box is offline";
+/// A machine's answer to `Call::RemoteEnded` for a task that had ended already with that same end,
+/// as from a status look that read it first. The hub drops a held copy and tells the worker taken.
+pub const END_SETTLED: &str = "settled";
+/// A machine's answer to `Call::RemoteEnded` for a task it does not know, or one that ended
+/// otherwise. The hub keeps the end unclaimed, and `unclaimed_ends` lists it.
+pub const END_UNKNOWN: &str = "unknown";
 
 /// Whether the hub answered that the account has no such machine any more: a box that ended, or
 /// a machine someone removed.
@@ -253,6 +259,26 @@ impl Origin {
     pub fn of_key(key: &str) -> Option<(&str, &str)> {
         key.strip_prefix("remote:")?.split_once(':')
     }
+}
+
+/// An end the hub keeps for 30 days from when the worker ended because the machine whose tab
+/// delegated the task did not take it: it forgot the task, as a restart does, ended it otherwise,
+/// answered with an error, or was removed. Its summary and error show keys as `[hidden]`.
+/// `HubCall::UnclaimedEnds` lists them, and the task's status still answers from one.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct UnclaimedEnd {
+    /// The task id the delegating machine gave it.
+    pub task: String,
+    /// The machine whose tab delegated it, and that tab.
+    pub origin_machine: String,
+    pub origin_tab: String,
+    /// The machine that ran it.
+    pub from_machine: String,
+    pub end: RemoteEnd,
+    /// When the hub took the end, and when the delegating machine answered it did not take it,
+    /// unix milliseconds.
+    pub held_at: u64,
+    pub unclaimed_at: u64,
 }
 
 /// How a task that runs on another machine ended, as that machine reports it.
