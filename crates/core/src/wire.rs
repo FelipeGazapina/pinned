@@ -163,6 +163,18 @@ pub struct TabView {
     /// it waits on, read from its transcript, such as the command a permission prompt shows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ask_detail: Option<String>,
+    /// A process runs the tab's session now. `running` also holds for a conversation that sleeps.
+    #[serde(default)]
+    pub alive: bool,
+    /// The conversation sleeps with no process: a message wakes it.
+    #[serde(default)]
+    pub asleep: bool,
+    /// The tab shows a headless child, which works with no session of the tab's own.
+    #[serde(default)]
+    pub headless: bool,
+    /// Why the tab's last process ended mid-turn, until a new turn or input starts it again.
+    #[serde(default)]
+    pub stopped: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
@@ -1700,6 +1712,10 @@ mod tests {
             work: None,
             question: None,
             ask_detail: None,
+            alive: true,
+            asleep: false,
+            headless: false,
+            stopped: None,
         }
     }
 

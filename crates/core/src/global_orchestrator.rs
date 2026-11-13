@@ -906,6 +906,7 @@ mod tests {
     fn view(id: &str, cwd: &str, role: Option<Role>, running: bool, status: Option<AgentStatus>) -> TabView {
         let mut tab: TabView = serde_json::from_value(serde_json::json!({ "id": id, "cwd": cwd, "bypass": false, "running": running, "status": status, "title": null, "message": null, "resume_at": null, "connector": null, "opened": id.rsplit('-').next().unwrap().parse::<u64>().unwrap() })).unwrap();
         tab.role = role;
+        tab.alive = running;
         tab
     }
 
@@ -948,6 +949,20 @@ mod tests {
                 ],
             })
         );
+    }
+
+    #[test]
+    fn projects_counts_no_stopped_worker_but_counts_a_headless_child() {
+        let site = [project("/w/site", Some("github.com/o/site"))];
+        let tabs = [
+            view("tab-e-1", "/w/site/.claude/worktrees/pinned-1", Some(Role::Worker), true, Some(AgentStatus::Working)),
+            TabView { stopped: Some("cancelled at its time limit".into()), ..view("tab-e-2", "/w/site/.claude/worktrees/pinned-2", Some(Role::Worker), false, Some(AgentStatus::Working)) },
+            TabView { headless: true, ..view("tab-e-3", "/w/site/.claude/worktrees/pinned-3", Some(Role::Worker), false, Some(AgentStatus::Working)) },
+            TabView { asleep: true, alive: false, ..view("tab-e-4", "/w/site", Some(Role::Worker), true, None) },
+        ];
+        let machines = [MachineSnapshot { id: "m", name: "Mac", online: true, version: "0.18.2", projects: &site, tabs: &tabs, problem: None }];
+        let counted = overview(&machines).projects[0].checkouts[0].workers;
+        assert_eq!(counted, 2, "the live worker and the headless child count; the stopped and the sleeping one do not");
     }
 
     #[test]

@@ -756,6 +756,10 @@ mod tests {
             work: None,
             question: None,
             ask_detail: None,
+            alive: running,
+            asleep: false,
+            headless: false,
+            stopped: None,
         }
     }
 
