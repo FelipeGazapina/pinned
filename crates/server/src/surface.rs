@@ -35,7 +35,8 @@ struct Caller {
     role: ActorRole,
     session: Option<String>,
     title: String,
-    /// Its session skips its own permission prompts.
+    /// Its session skips its own permission prompts, read as the node reads it for a child: a
+    /// session in plan mode, or in a mode its node does not know yet, does not.
     bypass: bool,
 }
 
@@ -53,7 +54,7 @@ impl Caller {
             known: view.is_some(),
             role: view.as_ref().map_or(ActorRole::Session, ActorRole::of),
             session: view.as_ref().and_then(|v| v.session.clone()),
-            bypass: view.as_ref().is_some_and(|v| v.bypass),
+            bypass: view.as_ref().is_some_and(|v| v.bypass && !v.read_only),
             title: view.and_then(|v| v.title.or(v.prompt_title)).unwrap_or_default(),
         })
     }
