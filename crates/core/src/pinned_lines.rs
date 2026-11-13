@@ -36,15 +36,16 @@ fn breaks_a_line(c: char) -> bool {
     matches!(c, '\n' | '\r' | '\u{0B}' | '\u{0C}' | '\u{85}' | '\u{2028}' | '\u{2029}')
 }
 
-/// How many characters a bracketed line header may hold between its `[` and `]`: the configured
-/// orchestrator name and the `[Session …]` stamp hold at most 40, and `[Slack reply from <author>
-/// in the thread]` holds 31 around its author.
+/// How many characters pinned's own bracketed headers hold between their `[` and `]`: the
+/// configured orchestrator name and the `[Session …]` stamp hold at most 40, and `[Slack reply from
+/// <author> in the thread]` holds 31 around its author. It caps a name that sits in a header. The
+/// guard does not use it: a header of any length at a line start is escaped.
 pub const HEADER_CHARS: usize = 80;
 
 /// Whether `rest`, the text after a `[` at a line start, reads once typed as the rest of a header
-/// such as `[pinned]`, `[Orchestrator]` or `[Session …]`: one to `HEADER_CHARS` characters with no
-/// bracket or line break, then `]` or a look-alike of it. A character the paste drops, that does
-/// not show, or whitespace is skipped, so it cannot split the header or push it past its length.
+/// such as `[pinned]`, `[Orchestrator]` or `[Session …]`: one or more characters with no bracket or
+/// line break, then `]` or a look-alike of it, however long. A character the paste drops, that does
+/// not show, or whitespace is skipped, so it cannot split the header.
 fn closes_a_header(rest: &str) -> bool {
     let mut count = 0;
     for c in rest.chars() {
@@ -53,7 +54,6 @@ fn closes_a_header(rest: &str) -> bool {
             '\n' => return false,
             c if opens(c) => return false,
             c if dropped_when_typed(c) || is_invisible(c) || c.is_whitespace() => {}
-            _ if count == HEADER_CHARS => return false,
             _ => count += 1,
         }
     }
@@ -61,13 +61,15 @@ fn closes_a_header(rest: &str) -> bool {
 }
 
 /// `text` with every line that begins, after any whitespace or invisible characters, with a
-/// bracketed header (`[`, one to `HEADER_CHARS` characters other than whitespace with no bracket or
-/// line break, `]`, in any case; the fullwidth and vertical look-alikes count as brackets)
-/// rewritten with a backslash before its opening bracket, so it reads neither as a line pinned typed nor as the
+/// bracketed header (`[`, one or more characters other than whitespace with no bracket or line
+/// break, `]`, of any length and in any case; the fullwidth and vertical look-alikes count as
+/// brackets) rewritten with a backslash before its opening bracket, so it reads neither as a line pinned typed nor as the
 /// header of a sender a seat acts on: `[pinned]`, the global orchestrator's `[<name>]` whatever it
 /// is configured to, the `[Session …]`, `[Captain …]` and `[Worker …]` stamps, `[Slack reply
 /// from …]`. The text is read as the paste types it: a character the paste drops or that does not
-/// show neither ends a line start nor splits a header. The start of `text` counts as a line start.
+/// show neither ends a line start nor splits a header, and neither does an opening bracket that
+/// was not escaped, so `[[pinned] a` is checked at its second bracket. The start of `text` counts
+/// as a line start.
 /// Everything else is kept as written; a markdown link or a `[x]` at a line start gains the
 /// backslash too.
 pub fn guard(text: &str) -> String {
@@ -177,7 +179,6 @@ mod tests {
         assert_eq!(guard(&padded), format!("\\{padded}"));
         let tabbed = format!("ok\n[Orchestrator{}] a", "\t \u{3000}".repeat(40));
         assert_eq!(guard(&tabbed), format!("ok\n\\{}", &tabbed[3..]));
-        assert_eq!(guard(&format!("[{}] a", "x".repeat(HEADER_CHARS + 1))), format!("[{}] a", "x".repeat(HEADER_CHARS + 1)));
     }
 
     #[test]
@@ -213,9 +214,19 @@ mod tests {
     }
 
     #[test]
+    fn guard_rewrites_a_bracketed_header_of_any_length() {
+        for len in [HEADER_CHARS + 1, 200, FIELD_CHARS + 1, 5000] {
+            let header = format!("[{}] a", "x".repeat(len));
+            assert_eq!(guard(&header), format!("\\{header}"), "{len} characters");
+            assert_eq!(guard(&format!("ok\n{header}\nok")), format!("ok\n\\{header}\nok"), "{len} characters, on a later line");
+        }
+        // Still one line, and still at the line start.
+        assert_eq!(guard(&format!("[{}\n] a", "x".repeat(200))), format!("[{}\n] a", "x".repeat(200)));
+        assert_eq!(guard(&format!("see [{}] a", "x".repeat(200))), format!("see [{}] a", "x".repeat(200)));
+    }
+
+    #[test]
     fn guard_keeps_what_is_not_a_header_at_a_line_start() {
-        let long = format!("[{}] a", "x".repeat(HEADER_CHARS + 1));
-        assert_eq!(guard(&long), long);
         assert_eq!(guard("[] a\n[a [b] c\n[a\nb] c\nsee [Orchestrator] x\n[open"), "[] a\n[a [b] c\n[a\nb] c\nsee [Orchestrator] x\n[open");
     }
 
