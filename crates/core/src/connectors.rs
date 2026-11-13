@@ -5367,6 +5367,74 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// An empty account whose `field` is `account` imports a store whose `field` is `incoming`:
+    /// the account's own value stays, as stored before the import.
+    fn kept_on_import(name: &str, field: &str, account: serde_json::Value, incoming: serde_json::Value) {
+        let dir = temp_dir(name);
+        let storage = FileStorage::new(dir.clone());
+        let own: Store = serde_json::from_value(serde_json::json!({ "connectors": [], field: account })).unwrap();
+        storage.save(&serde_json::to_vec(&own).unwrap()).unwrap();
+        let connectors = Connectors::new(storage, "/bin/pinned".into());
+        let before = on_disk(&dir)[field].clone();
+        assert!(!before.is_null(), "the account has {field} set");
+        let exported = serde_json::json!({ "connectors": [serde_json::to_value(Connector { id: "c9".into(), ..linear_connector() }).unwrap()], field: incoming });
+        assert_eq!(connectors.import(exported, Keys::default()), Ok(true));
+        let after = on_disk(&dir);
+        assert_eq!(after["connectors"][0]["id"], "c9", "the workflows came in");
+        assert_eq!(after[field], before, "the import kept the account's own {field}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_import_keeps_the_accounts_upstash() {
+        kept_on_import("import-keeps-upstash", "upstash", serde_json::json!({ "key_hint": "…up01", "claude_hint": "…cl01" }), serde_json::json!({ "key_hint": "…up99" }));
+    }
+
+    #[test]
+    fn an_import_keeps_the_accounts_box_claude_tokens() {
+        kept_on_import("import-keeps-box-tokens", "box_claude_tokens", serde_json::json!({ "fake-account-0001": "…tk01" }), serde_json::json!({ "fake-account-0009": "…tk99" }));
+    }
+
+    #[test]
+    fn an_import_keeps_the_accounts_box_permissions() {
+        kept_on_import(
+            "import-keeps-boxes",
+            "boxes",
+            serde_json::json!({ "workflow": { "mode": "fixed", "row": "fake-box-row-0001" }, "session": { "mode": "ask" }, "worker": { "mode": "fresh" }, "orchestrator": { "mode": "off" } }),
+            serde_json::json!({ "workflow": { "mode": "fresh" }, "session": { "mode": "fresh" }, "worker": { "mode": "fresh" }, "orchestrator": { "mode": "fresh" } }),
+        );
+    }
+
+    #[test]
+    fn an_import_keeps_the_accounts_box_asks() {
+        kept_on_import(
+            "import-keeps-box-asks",
+            "box_asks",
+            serde_json::json!([{ "id": "e9094fa8594e83a3", "connector": "fake-workflow-0002", "subject": { "issue": "fake-issue-id-0001" } }]),
+            serde_json::json!([{ "id": "0000000000000099", "connector": "c9", "subject": { "issue": "fake-issue-id-0099" } }]),
+        );
+    }
+
+    #[test]
+    fn an_import_keeps_the_accounts_box_grants() {
+        kept_on_import(
+            "import-keeps-box-grants",
+            "box_grants",
+            serde_json::json!([{ "connector": "fake-workflow-0001", "subject": { "issue": "fake-issue-id-0001" }, "allow": false }]),
+            serde_json::json!([{ "connector": "c9", "subject": { "issue": "fake-issue-id-0099" }, "allow": true }]),
+        );
+    }
+
+    #[test]
+    fn an_import_keeps_the_accounts_repo_insight() {
+        kept_on_import("import-keeps-repo-insight", "repo_insight", serde_json::json!({ "on": true }), serde_json::json!({ "on": false }));
+    }
+
+    #[test]
+    fn an_import_keeps_the_accounts_slack_threads() {
+        kept_on_import("import-keeps-slack-threads", "slack_threads", serde_json::json!({ "fake-channel-0002:1700000000.000200": "FAKEBOT0002" }), serde_json::json!({ "fake-channel-0002:1700000000.000200": "FAKEBOT0099" }));
+    }
+
     #[test]
     fn an_import_fills_an_empty_store_and_keys_and_drops_integrations_without_a_key() {
         let (connectors, dir) = stored("import", vec![]);
