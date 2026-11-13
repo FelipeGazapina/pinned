@@ -2641,6 +2641,7 @@ impl Machine {
         const KILL_AGENTS: &[u8] = b"\x18\x0b";
         // Stopping the turn drops what it asked: the call that waits answers cancelled.
         if self.questions.lock().unwrap().cancel_tab(tab, Canceller::Turn) {
+            self.end_task_held_for_questions(tab);
             self.emit_tabs();
         }
         // A session that sleeps runs no turn, and the keys would start it.
@@ -6164,6 +6165,34 @@ impl Machine {
         Ok(id)
     }
 
+    /// Ends a worker's turn: its thread task settles with the turn's reply, else the worker
+    /// reports home.
+    fn settle_worker_turn(&self, tab: &str, project: &Path, event: &AgentEvent, before: Option<AgentStatus>) {
+        if !self.settle_thread_task(tab, event) {
+            self.report_worker(tab, project, event, before);
+        }
+    }
+
+    /// The user stopped `tab` after its turn ended with questions open: the turn rule held its
+    /// task working for the answer's notice to start the next turn, and now nothing will. Ends the
+    /// task the way that turn would have ended it without the questions: its last reply, reported
+    /// to the parent. Without this the task stays working until its time limit stops it.
+    fn end_task_held_for_questions(&self, tab: &str) {
+        let Ok((role, task, status)) = self.tab(tab, |t| (role_of(&t.env), t.task.clone(), t.status)) else { return };
+        let worker = role.as_ref().is_some_and(|(role, _)| *role == Role::Worker);
+        let working = task.is_some_and(|task| self.delegates.get(&task).is_some_and(|info| !info.state.terminal()));
+        if !(working && (worker || role.is_none()) && status == Some(AgentStatus::Done)) {
+            return;
+        }
+        let event = AgentEvent { status: AgentStatus::Done, cwd: None, message: None, tab: Some(tab.to_owned()), session: None, title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false, reply: None };
+        match role {
+            Some((Role::Worker, project)) => self.settle_worker_turn(tab, &project, &event, status),
+            _ => {
+                self.settle_thread_task(tab, &event);
+            }
+        }
+    }
+
     fn record_event(&self, event: AgentEvent) {
         if let Some(tab) = &event.tab {
             let new_session = event.session.as_ref().is_some_and(|s| self.record_session(tab, s.clone(), event.cwd.as_deref()));
@@ -6198,11 +6227,7 @@ impl Machine {
             }
             match role {
                 Some((Role::Worker, _)) if held || asking => {}
-                Some((Role::Worker, project)) => {
-                    if !self.settle_thread_task(tab, &event) {
-                        self.report_worker(tab, &project, &event, before);
-                    }
-                }
+                Some((Role::Worker, project)) => self.settle_worker_turn(tab, &project, &event, before),
                 Some((Role::Orchestrator, project)) if matches!(event.status, AgentStatus::Done | AgentStatus::Failed) => self.captain_turn_ended(tab, &project, &event),
                 None if held || asking => {}
                 // A workflow's Run now is a task with no worker role: its turn ends it like a worker's.
@@ -13991,6 +14016,29 @@ Have another model review a risky change before it goes ahead.";
         m.record_event(AgentEvent { session: Some("s-child".into()), ..hook(&child, AgentStatus::Working) });
         m.record_event(AgentEvent { session: Some("s-child".into()), ..hook(&child, AgentStatus::Done) });
         assert!(m.delegates.get(&task).unwrap().state.terminal(), "the turn the answer started ends it");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn stop_after_pending_ends_the_task_the_finished_turn_would_have_ended() {
+        let (m, dir, captain, task, child, transcript) = captain_with_thread_child("thread-stop-pending");
+        m.record_event(AgentEvent { session: Some("s-child".into()), ..hook(&child, AgentStatus::Working) });
+        let id = m.project_tool("", branch_questions(Some(&task))).unwrap();
+        // The call answered pending after its wait; the worker ended its turn on its last reply.
+        append(&transcript, &[json!({ "type": "assistant", "message": { "role": "assistant", "content": [{ "type": "text", "text": "Waiting on the branch answer." }] } })]);
+        m.record_event(AgentEvent { session: Some("s-child".into()), ..hook(&child, AgentStatus::Done) });
+        assert!(!m.delegates.get(&task).unwrap().state.terminal(), "the turn rule holds the task for the answer");
+
+        assert_eq!(m.call(Call::StopTurn { tab: child.clone() }), Ok(Value::Null));
+        let info = m.delegates.get(&task).unwrap();
+        assert!(info.state.terminal(), "the task is over at once, not at its time limit: {:?}", info.state);
+        assert_eq!(m.questions.lock().unwrap().get(&id).map(|asked| asked.outcome.clone()), Some(Some(crate::questions::Outcome::Cancelled)));
+        let (notice, ids) = m.delegates.claim_notice(&captain).expect("the parent gets the report");
+        assert!(notice.contains(&task) && notice.contains("finished"), "{notice}");
+        assert_eq!(info.summary.as_deref(), Some("Waiting on the branch answer."), "it ends with its last reply");
+        assert_eq!(ids, [task.clone()]);
+        assert!(m.delegates.claim_notice(&captain).is_none(), "one report, not two");
         let _ = std::fs::remove_dir_all(dir);
     }
 
