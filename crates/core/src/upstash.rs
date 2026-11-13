@@ -143,6 +143,18 @@ pub struct BoxUsage {
     pub upstash: Totals,
     #[serde(default)]
     pub pinned: PinnedCount,
+    /// Boxes pinned could not delete yet, with why. Filled also when Upstash is not connected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stuck: Vec<StuckBox>,
+}
+
+/// A box whose delete failed, and the last reason, scrubbed of keys and tokens.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct StuckBox {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub why: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
