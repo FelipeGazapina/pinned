@@ -8373,10 +8373,7 @@ mod tests {
                     })
                 })
                 .collect();
-            for _ in 0..5 {
-                tokio::task::yield_now().await;
-            }
-            let finished = handles.iter().filter(|handle| handle.is_finished()).count();
+            let finished = until_finished(&handles, 99).await;
             assert!(finished >= 99, "only {finished} of 100 tab wakes returned while a drive held the lock");
             let census = connectors.census();
             assert_eq!((census.tab_drive_waiting, census.tab_drives_coalesced, census.drive_waiters), (1, 99, 1));
@@ -8392,6 +8389,166 @@ mod tests {
         assert_eq!(*at, 100);
         assert_eq!(tabs[0].session.as_deref(), Some("claude-99"));
         drop(known);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Yields until `want` of `handles` have finished, so a test does not lean on how many polls the scheduler takes.
+    async fn until_finished<T>(handles: &[tokio::task::JoinHandle<T>], want: usize) -> usize {
+        for _ in 0..100_000 {
+            let finished = handles.iter().filter(|handle| handle.is_finished()).count();
+            if finished >= want {
+                return finished;
+            }
+            tokio::task::yield_now().await;
+        }
+        handles.iter().filter(|handle| handle.is_finished()).count()
+    }
+
+    /// What a run's `open` was handed: `run` for a session it opened, `prompt <text>` for text it typed.
+    type Handed = std::sync::Arc<Mutex<Vec<String>>>;
+
+    fn handing(handed: &Handed) -> impl Fn(Work) -> std::pin::Pin<Box<dyn Future<Output = Result<Option<Placement>, String>> + Send>> + Clone + Send + Sync + 'static {
+        let handed = handed.clone();
+        move |work: Work| {
+            handed.lock().unwrap().push(match &work {
+                Work::Run(_) => "run".to_owned(),
+                Work::Prompt { text, .. } => format!("prompt {text}"),
+                Work::Delivery(_) => "delivery".to_owned(),
+            });
+            Box::pin(placed(work))
+        }
+    }
+
+    /// A run of three talks on tab-1 of m1, waiting on the second talk's turn: its prompt was typed,
+    /// so it waits for Working first, and no Working has been seen yet.
+    fn waiting_after_a_prompt(name: &str) -> (std::sync::Arc<Connectors>, PathBuf, Handed) {
+        let mut connector = linear_connector();
+        connector.graph = Some(talks(&["one", "two", "three"]));
+        let (connectors, dir) = stored(name, vec![connector]);
+        let connectors = std::sync::Arc::new(connectors);
+        connectors.begin("c1".into(), Subject::LinearIssue { issue: "uuid".into() }, issue_trigger(), "2026-10-29T12:00:00Z").unwrap();
+        let handed = Handed::default();
+        let open = handing(&handed);
+        block_on(connectors.drive(&open)).unwrap();
+        let done = session_tab(Some(AgentStatus::Done), Some("claude-1"));
+        block_on(connectors.on_tabs("m1", unix_millis(), std::slice::from_ref(&done), &open)).unwrap();
+        assert_eq!(*handed.lock().unwrap(), ["run", "prompt two"]);
+        let run = connectors.runs.lock().unwrap()[0].clone();
+        assert!(matches!(run.status, Status::Waiting));
+        assert!(matches!(run.session, Session::Live { saw_working: false, await_working: true, .. }), "{:?}", run.session);
+        (connectors, dir, handed)
+    }
+
+    /// Delivers `lists` from m1 while a drive holds the lock, the first as the waiting tab wake and
+    /// the rest as wakes that return at once, then lets the waiter drive.
+    fn deliver_during_a_drive(connectors: &std::sync::Arc<Connectors>, handed: &Handed, lists: Vec<Vec<TabView>>) {
+        let observed = unix_millis();
+        block_on(async {
+            let guard = connectors.driving.lock().await;
+            let count = lists.len();
+            let handles: Vec<_> = lists
+                .into_iter()
+                .map(|tabs| {
+                    let (connectors, open) = (connectors.clone(), handing(handed));
+                    tokio::spawn(async move { connectors.on_tabs("m1", observed, &tabs, open).await })
+                })
+                .collect();
+            assert_eq!(until_finished(&handles, count - 1).await, count - 1, "every wake but one returned while the drive held the lock");
+            assert_eq!(connectors.census().tab_drive_waiting, 1);
+            drop(guard);
+            for handle in handles {
+                handle.await.unwrap().unwrap();
+            }
+        });
+    }
+
+    #[test]
+    fn working_then_done_inside_one_drive_still_ends_the_wait_without_a_status_time() {
+        let (connectors, dir, handed) = waiting_after_a_prompt("tab-coalesce-working-done");
+        let working = session_tab(Some(AgentStatus::Working), Some("claude-1"));
+        let done = session_tab(Some(AgentStatus::Done), Some("claude-1"));
+        assert_eq!(done.updated, None, "an older app sends no status time");
+        deliver_during_a_drive(&connectors, &handed, vec![vec![working], vec![done]]);
+        assert_eq!(*handed.lock().unwrap(), ["run", "prompt two", "prompt three"], "Working then Done ended the second talk's turn, as it did when each list was reconciled in order");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn done_then_gone_inside_one_drive_ends_the_turn_and_does_not_repeat_the_step() {
+        let (connectors, dir, handed) = waiting_after_a_prompt("tab-coalesce-done-gone");
+        let working = session_tab(Some(AgentStatus::Working), Some("claude-1"));
+        let open = handing(&handed);
+        block_on(connectors.on_tabs("m1", unix_millis(), std::slice::from_ref(&working), &open)).unwrap();
+        assert!(matches!(connectors.runs.lock().unwrap()[0].session, Session::Live { saw_working: true, .. }));
+        let done = session_tab(Some(AgentStatus::Done), Some("claude-1"));
+        deliver_during_a_drive(&connectors, &handed, vec![vec![done], vec![]]);
+        assert_eq!(
+            *handed.lock().unwrap(),
+            ["run", "prompt two", "prompt three"],
+            "Done ended the second talk's turn before the tab closed, so the run goes on to the third talk instead of opening a session to repeat the second"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_done_list_from_a_returned_wake_and_a_list_from_during_the_drive_both_reach_the_run() {
+        let mut connector = linear_connector();
+        connector.graph = Some(talks(&["one", "two", "three"]));
+        let (connectors, dir) = stored("tab-coalesce-returned-wake", vec![connector]);
+        let connectors = std::sync::Arc::new(connectors);
+        connectors.begin("c1".into(), Subject::LinearIssue { issue: "uuid".into() }, issue_trigger(), "2026-10-29T12:00:00Z").unwrap();
+        let handed = Handed::default();
+        block_on(connectors.drive(&handing(&handed))).unwrap();
+        assert_eq!(*handed.lock().unwrap(), ["run"]);
+        // While the drive that types the second talk runs, the machine sends a list whose status time is past that wait.
+        let mut later = session_tab(Some(AgentStatus::Done), Some("claude-1"));
+        later.updated = Some(unix_millis() / 1000 + 3600);
+        let late_wake = std::sync::Arc::new(Mutex::new(None::<tokio::task::JoinHandle<Result<(), String>>>));
+        let open = {
+            let (connectors, handed, late_wake) = (connectors.clone(), handed.clone(), late_wake.clone());
+            move |work: Work| {
+                let typed_two = matches!(&work, Work::Prompt { text, .. } if text.ends_with("two"));
+                if typed_two {
+                    let (connectors, later, open) = (connectors.clone(), later.clone(), handing(&handed));
+                    *late_wake.lock().unwrap() = Some(tokio::spawn(async move { connectors.on_tabs("m1", unix_millis(), &[later], open).await }));
+                }
+                let handed = handing(&handed)(work);
+                async move {
+                    // Lets the late wake store its list while this drive still holds the lock.
+                    tokio::task::yield_now().await;
+                    handed.await
+                }
+            }
+        };
+        let working = session_tab(Some(AgentStatus::Working), Some("claude-1"));
+        let done = session_tab(Some(AgentStatus::Done), Some("claude-1"));
+        block_on(async {
+            let guard = connectors.driving.lock().await;
+            let waiter = {
+                let (connectors, open) = (connectors.clone(), open.clone());
+                tokio::spawn(async move { connectors.on_tabs("m1", unix_millis(), &[working], open).await })
+            };
+            let returned = {
+                let (connectors, open) = (connectors.clone(), open.clone());
+                tokio::spawn(async move { connectors.on_tabs("m1", unix_millis(), &[done], open).await })
+            };
+            let returned = [returned];
+            assert_eq!(until_finished(&returned, 1).await, 1, "the Done wake returned while the drive held the lock");
+            assert!(matches!(connectors.runs.lock().unwrap()[0].status, Status::Waiting), "nothing reconciled yet");
+            drop(guard);
+            waiter.await.unwrap().unwrap();
+            let [returned] = returned;
+            returned.await.unwrap().unwrap();
+            let late = late_wake.lock().unwrap().take().expect("the second talk was typed, so the late list was sent during that drive");
+            late.await.unwrap().unwrap();
+        });
+        assert_eq!(
+            *handed.lock().unwrap(),
+            ["run", "prompt two", "prompt three"],
+            "the returned wake's Done ended the first turn, and the list stored during that drive got a drive of its own"
+        );
+        let census = connectors.census();
+        assert_eq!((census.tab_drive_waiting, census.drive_waiters), (0, 0));
         let _ = std::fs::remove_dir_all(dir);
     }
 
