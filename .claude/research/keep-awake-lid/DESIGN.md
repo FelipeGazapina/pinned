@@ -547,6 +547,9 @@ All in `crates/core/src/wire.rs`, all new names, nothing renamed or removed:
   `enum StopReason { LowBattery, Heat, TimeCap, WaitingTooLong, NotApproved, Failed }`.
 - `MachineView::awake: Option<AwakeReport>` with
   `#[serde(default, skip_serializing_if = "Option::is_none")]`.
+- `TabView::cut_by_sleep: Option<CutBySleep { slept_at: i64, woke_at: i64 }>` with the same two
+  attributes (3.4). A new name; an old app never reads it, and an old hub drops it.
+- `awake::Settings` gains `continue_captains: bool`, `#[serde(default)]` = false (3.4, option B).
 
 An old app never sends the event and never reads the field. An old hub receiving
 `MachineEvent::Awake` from a new app: same situation as when `Background` was added; the hub
@@ -590,8 +593,9 @@ passwordless admin, so the real power-setting round trips run there, never on a 
 
 | # | PR | What | Proof | Model |
 |---|---|---|---|---|
-| 1 | `awake: busy rule and lid policy` | core, pure: `awake::busy()` (3.2), the hold state machine (grace 2 min, battery floor, 8 h cap, 30 min waiting cap, heat inputs), `awake::Settings` saved in the config dir. No platform code. | Unit tests with fake tabs/tasks and a fake clock: every row of 3.2, grace, floor, cap, heat. Runs on all three CI OSes and a Box. | Sonnet 5.5 |
+| 1 | `awake: busy rule and lid policy` | core, pure: `awake::busy()` (3.2), the hold state machine (grace 2 min, battery floor, 8 h cap, 30 min waiting cap, heat inputs), `awake::Settings` saved in the config dir. No platform code. | Unit tests with fake tabs/tasks and a fake clock: every row of 3.2, grace, floor, cap, heat. Two rows come from the case of 2026-11-12: a Captain with a streaming turn (`Working`, nothing else) is busy; a Captain at its prompt whose only live work is a `remote` box task is busy (`delegated = 1`), and that same task waiting on the user follows the 30-minute cap. Runs on all three CI OSes and a Box. | Sonnet 5.5 |
 | 2 | `wire: keep-awake settings and report` | 5.3 wire types, `surface.rs` entries (6), node answers `Call`s via `AppWindow` (refuses without the app), hub keeps `MachineView::awake` across offline. | `wire.rs` round-trip tests; `surface.rs` suite; hub test modeled on `a_machine_reports_run_in_the_background_on_its_view_while_it_is_online` (`hub.rs:1500`) plus "kept after offline"; `wire-contract check` exit 0, `snapshot current` committed. | Sonnet 5.5 |
+| 2b | `node: a turn cut by a sleep` | 3.4: the sleep window (tick-jump fallback, platform signals added in 4, 5 and 6), the `cut_by_sleep` flag on a `Failed` API error, the optional `TabView` field (`#[serde(default)]`, then `snapshot current` and `check`), the Needs you card text with Continue, and the opt-in continue for Captains behind `awake::Settings`. No power code, so it is useful even with the switch off. | Unit tests with a fake clock (3.4 list): in-window API error flagged, out-of-window, usage limit and `Done` not; no typing without the opt-in; one continue, no loop with it; a `ui/*.test.js` for the card in `needsYouItem`. | Sonnet 5.5 |
 | 3 | `macos: pinned-lid-helper` | The root daemon (2.1): socket + peer uid, lease/TTL, journal, restore at start and on SIGTERM, 24 h cap, its own battery/thermal check. Power-setting writes behind a trait. | Unit tests with a fake power backend (no root): lease ends on socket close, on TTL, restores at start from journal, refuses wrong uid, keeps a pre-existing `disablesleep 1`. **CI-only** job on macos-latest: run the helper under `sudo` with the real backend, hold, `pmset -g` shows `SleepDisabled 1`, kill the client, shows 0 within 2 s; `kill -9` the helper, restart it, journal restores. | Opus 5.5 (root code, security) |
 | 3b | optional: restore without the bundle | the system-binary one-shot of 2.1, only if SMAppService allows it cleanly. | CI macOS: delete the helper binary mid-hold, the one-shot restores. | Opus 5.5 |
 | 4 | `macos: lid switch in General` | `SMAppService` register/approve/unregister, `AppWindow` methods, lease client, App Nap activity, battery/thermal/lid readers, the switch and its lines in `gui-features.js`, the app notice after a stop. macOS 12 and ad-hoc builds show it disabled with the reason. | Rust unit tests (state → UI line); a `ui/*.test.js` like `settings-page.test.js` for every line of 5.2; CI macOS build of the bundle checks `Contents/Library/LaunchDaemons/*.plist` and the helper's signature. | Sonnet 5.5 |
@@ -600,8 +604,9 @@ passwordless admin, so the real power-setting round trips run there, never on a 
 | 7 | `hub/web: show the awake state` | Machines page and machine row lines of 5.2. | `ui/machine-load.test.js`-style tests per line; one Playwright web-sweep on a Box against a local hub with a fake machine reporting each state. | Sonnet 5.5 |
 | 8 | `docs + changelog` | Settings help, "turn it off before deleting pinned", CHANGELOG 0.18.2. | Review. | Haiku 5.5 |
 
-Order: 1 → 2 → (3, 5, 6 in parallel) → 4 → 7 → 8. Release once 1–4 and 7 are in; 5 and 6 can
-ship labeled beta.
+Order: 1 → 2 → (2b, 3, 5, 6 in parallel) → 4 → 7 → 8. Release once 1–4, 2b and 7 are in; 5 and 6 can
+ship labeled beta. 2b adds its own one optional field and does not wait for PR 2's types, so it can ship first on its own: it is the part that
+helps the next time the Mac sleeps whatever the switch says.
 
 ### Manual test list for Felipe (MacBook, signed build, on battery and on charger)
 
@@ -620,6 +625,19 @@ ship labeled beta.
    `SleepDisabled 0`.
 8. Turn the switch off. pinned leaves System Settings → Login Items, `SleepDisabled 0`, and a lid
    close with a worker running sleeps the Mac as before.
+9. **A Captain mid-response when the lid closes** (the case of 2026-11-12). Switch on. Give a
+   Captain a long answer to write (a review of a large diff, so it streams for a minute or more) and
+   have it delegate one box worker first, so a task is also running in the cloud.
+   - a. Close the lid **while the response is streaming**. Open it 5 minutes later: the response
+     finished or is still going, with **no API error** and no Failed card; `pmset -g` showed
+     `SleepDisabled 1` the whole time; the hub showed "Awake with the lid closed".
+   - b. Let the response end and the box worker keep running (a long task). With the Captain at its
+     prompt, close the lid: the Mac stays awake (rule 3 of 3.2), and when the worker finishes the
+     Captain answers from the phone with the lid still closed.
+   - c. **Control, switch off** (this is the case as it happened): same setup, close the lid while
+     it streams. On waking, the Captain's tab shows a Needs you card "Stopped while the Mac slept …
+     API error" with **Continue** (3.4), and nothing typed itself. A Captain whose turn had ended
+     normally before the lid closed shows no card.
 
 (Heat cannot be tested safely by hand; it is covered by unit tests with a fake thermal state.)
 
