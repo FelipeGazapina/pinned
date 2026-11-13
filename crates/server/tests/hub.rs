@@ -2556,6 +2556,32 @@ fn a_box_ends_with_only_the_upstash_key_stored() {
 }
 
 #[test]
+fn the_reaper_sweeps_and_ends_a_box_with_only_the_upstash_key_stored() {
+    let mut hub = TestHub::start_with_boxes("box_key_only_reaper", Signup::Open, Policy { offline: Duration::from_secs(3600), ..fast() });
+    let mut ana = BoxAccount::new(&hub);
+    assert_eq!(hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-1")))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    let machine = ana.box_machine();
+
+    // The Claude token is gone from the stored secrets, the Box key stays.
+    restart_with_secrets(&mut hub, "secrets - 'claude-oauth-token'");
+    let mut client = Client::connect(&hub.url, &ana.token);
+    client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+
+    // The sweep deletes this hub's box that no row names, and keeps the box a row names.
+    let label = pinned_server::boxes::hub_label(&hub.url);
+    hub.boxes.add("box_stray", &[&label, "p:ffffffffffffffff"]);
+    wait_for("the stray box to go", || !hub.boxes.live().contains(&"box_stray".to_owned()));
+    assert_eq!((hub.boxes.live(), ana.rows(&hub)), (vec!["box_1".to_owned()], 1));
+
+    // An end rule deletes the box whose session tab is gone.
+    let tabs = hub.boxes.with_node(|node| node.machine.tabs());
+    client.call(&machine, json!({ "cmd": "close_tab", "tab": &tabs[0].id })).unwrap();
+    wait_for("the box to be deleted", || hub.boxes.live().is_empty());
+    wait_for("the row to go", || ana.rows(&hub) == 0);
+}
+
+#[test]
 fn a_box_stays_while_the_upstash_key_itself_is_missing() {
     // A slow tick, so the reaper's retries do not flood the client with machine lists.
     let hub = Policy { tab_gone: Duration::from_secs(3600), offline: Duration::from_secs(3600), tick: Duration::from_secs(3600), ..fast() };
@@ -2565,7 +2591,8 @@ fn a_box_stays_while_the_upstash_key_itself_is_missing() {
     ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
     let machine = ana.box_machine();
 
-    restart_with_secrets(&mut hub, "'{}'::jsonb");
+    // Only the Box key is gone from the stored secrets, the Claude token stays.
+    restart_with_secrets(&mut hub, "secrets - 'upstash-box-key'");
     let mut client = Client::connect(&hub.url, &ana.token);
     client.wait("hello", |f| f["type"] == "hello");
     let refused = client.hub(json!({ "cmd": "remove_machine", "id": machine })).unwrap_err();
