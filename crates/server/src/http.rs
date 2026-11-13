@@ -250,9 +250,10 @@ fn address_key(ip: std::net::IpAddr) -> String {
     }
 }
 
-/// Railway's `X-Real-IP` when it is one address.
+/// Railway's `X-Real-IP` when it is one address. Of several header lines the last is read: if the edge
+/// appends its own after one the client sent, the last is the edge's.
 fn real_ip(headers: &HeaderMap) -> Option<std::net::IpAddr> {
-    let real = headers.get("x-real-ip")?.to_str().ok()?.trim().parse::<std::net::IpAddr>().ok()?;
+    let real = headers.get_all("x-real-ip").iter().last()?.to_str().ok()?.trim().parse::<std::net::IpAddr>().ok()?;
     Some(real.to_canonical())
 }
 
