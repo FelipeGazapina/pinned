@@ -35195,6 +35195,13 @@
               "tasks": 0,
               "since": 0
             }
+          },
+          "stuck": {
+            "description": "Boxes pinned could not delete yet, with why. Filled also when Upstash is not connected.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/StuckBox"
+            }
           }
         },
         "required": [
@@ -35373,6 +35380,24 @@
               "tasks",
               "since"
             ]
+          },
+          "StuckBox": {
+            "description": "A box whose delete failed, and the last reason, scrubbed of keys and tokens.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "default": ""
+              },
+              "why": {
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "id",
+              "why"
+            ]
           }
         }
       },
@@ -35418,6 +35443,13 @@
               "box_hours": 0.0,
               "tasks": 0,
               "since": 0
+            }
+          },
+          "stuck": {
+            "description": "Boxes pinned could not delete yet, with why. Filled also when Upstash is not connected.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/StuckBox"
             }
           }
         },
@@ -35565,6 +35597,20 @@
                 "format": "uint64",
                 "minimum": 0,
                 "default": 0
+              }
+            }
+          },
+          "StuckBox": {
+            "description": "A box whose delete failed, and the last reason, scrubbed of keys and tokens.",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "default": ""
+              },
+              "why": {
+                "type": "string",
+                "default": ""
               }
             }
           }
