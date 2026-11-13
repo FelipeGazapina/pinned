@@ -8334,6 +8334,24 @@ impl Schedules {
         self.raw.ask(json!({ "cmd": "act", "act": { "tab": "tab-agent", "action": action, "args": args } }))
     }
 
+    /// The user unlocks and approves the confirmation `held` answered, and the outcome.
+    fn approve(&mut self, held: &Value) -> Value {
+        assert_eq!(held["outcome"], "pending", "{held}");
+        self.ana.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+        self.ana.hub(json!({ "cmd": "decide_confirmation", "id": held["id"], "approve": true })).unwrap()["outcome"].clone()
+    }
+
+    /// Why the confirmation `held` answered waits, as the user's app shows it.
+    fn about(&mut self, held: &Value) -> String {
+        let all = self.ana.hub(json!({ "cmd": "confirmations" })).unwrap();
+        all.as_array().unwrap().iter().find(|c| c["id"] == held["id"]).map(|c| c["about"].as_str().unwrap().to_owned()).unwrap_or_default()
+    }
+
+    /// The account's task `id` as the user's app lists it.
+    fn task(&mut self, id: &str) -> Value {
+        self.ana.hub(json!({ "cmd": "list_schedules" })).unwrap().as_array().unwrap().iter().find(|t| t["id"] == id).cloned().unwrap_or(Value::Null)
+    }
+
     fn titles(&mut self) -> Vec<String> {
         self.ana.hub(json!({ "cmd": "list_schedules" })).unwrap().as_array().unwrap().iter().map(|t| t["title"].as_str().unwrap().to_owned()).collect()
     }
@@ -8526,6 +8544,118 @@ fn an_agent_deleting_the_users_task_by_a_padded_wrong_or_missing_id_waits_or_is_
     let rows = s.ana.hub(json!({ "cmd": "agent_audit" })).unwrap();
     let refused = rows.as_array().unwrap().iter().filter(|e| e["action"] == "delete_schedule" && e["outcome"] == "refused").count();
     assert_eq!(refused, 5, "each refusal has its audit row");
+}
+
+/// A task body with one approval that needs no release protection.
+fn approved_body(title: &str) -> Value {
+    let mut body = task_body(title);
+    body["approvals"] = json!([{ "item": "network-install", "must_contain": "npm ci", "repo": "github.com/acme/app" }]);
+    body
+}
+
+#[test]
+fn an_agent_starting_a_task_with_approvals_again_waits_and_it_stays_paused_until_approved() {
+    let mut s = Schedules::start("sched_unpause_approvals");
+    // The agent's own task, approved by the user once.
+    let saved = s.act("save_schedule", json!({ "task": approved_body("Nightly install") })).unwrap();
+    assert_eq!(s.approve(&saved), "done");
+    let id = s.ana.hub(json!({ "cmd": "list_schedules" })).unwrap()[0]["id"].as_str().unwrap().to_owned();
+    // Pausing its own task goes at once; starting it again would run the approved steps, so it waits.
+    assert_eq!(s.act("pause_schedule", json!({ "id": id, "paused": true })).unwrap()["outcome"], "done");
+    let held = s.act("pause_schedule", json!({ "id": id, "paused": false })).unwrap();
+    assert_eq!(held["outcome"], "pending", "{held}");
+    assert!(s.about(&held).contains("npm ci"), "the Confirm says why: {}", s.about(&held));
+    assert_eq!(s.task(&id)["enabled"], false, "still paused until the user approves");
+    assert_eq!(s.approve(&held), "done");
+    assert_eq!(s.task(&id)["enabled"], true);
+}
+
+#[test]
+fn an_agent_pausing_or_starting_the_users_task_waits() {
+    let mut s = Schedules::start("sched_pause_users");
+    let id = save_schedule(&mut s.ana, task_body("Users")).unwrap()["task"]["id"].as_str().unwrap().to_owned();
+    let held = s.act("pause_schedule", json!({ "id": id, "paused": true })).unwrap();
+    assert_eq!(held["outcome"], "pending", "{held}");
+    assert!(s.about(&held).contains("pause \"Users\", a task the user created"), "{}", s.about(&held));
+    assert_eq!(s.task(&id)["enabled"], true, "still running until the user approves");
+    assert_eq!(s.approve(&held), "done");
+    assert_eq!(s.task(&id)["enabled"], false);
+    let held = s.act("pause_schedule", json!({ "id": id, "paused": false })).unwrap();
+    assert_eq!(held["outcome"], "pending", "starting it again waits too");
+    assert_eq!(s.task(&id)["enabled"], false);
+}
+
+#[test]
+fn starting_a_one_time_task_whose_time_passed_is_refused() {
+    let mut s = Schedules::start("sched_unpause_past");
+    let mut once = task_body("Once");
+    once["schedule"] = json!({ "kind": "once", "at": "2099-01-01T09:00" });
+    let id = save_schedule(&mut s.ana, once).unwrap()["task"]["id"].as_str().unwrap().to_owned();
+    s.ana.hub(json!({ "cmd": "pause_schedule", "id": id, "paused": true })).unwrap();
+    admin_on(&s._hub.database, "update tasks set task = jsonb_set(task, '{schedule,at}', '\"2001-01-01T09:00\"')");
+    let refused = s.ana.hub(json!({ "cmd": "pause_schedule", "id": id, "paused": false })).unwrap_err();
+    assert!(refused.contains("already passed"), "{refused}");
+    assert_eq!((&s.task(&id)["enabled"], &s.task(&id)["next_at"]), (&json!(false), &Value::Null), "it stays paused, not on with no next run");
+}
+
+#[test]
+fn an_agent_editing_the_users_task_waits_and_it_is_unchanged_until_approved() {
+    let mut s = Schedules::start("sched_edit_users");
+    let id = save_schedule(&mut s.ana, task_body("Users")).unwrap()["task"]["id"].as_str().unwrap().to_owned();
+    let mut edit = task_body("Taken over");
+    edit["id"] = json!(format!(" {id} "));
+    edit["action"] = json!({ "kind": "prompt", "text": "Something else" });
+    let held = s.act("save_schedule", json!({ "task": edit })).unwrap();
+    assert_eq!(held["outcome"], "pending", "{held}");
+    assert!(s.about(&held).contains("edit \"Users\", a task the user created"), "{}", s.about(&held));
+    assert_eq!((&s.task(&id)["title"], &s.task(&id)["action"]["text"]), (&json!("Users"), &json!("Summarise yesterday")), "unchanged until the user approves");
+    assert_eq!(s.approve(&held), "done");
+    assert_eq!((&s.task(&id)["title"], &s.task(&id)["created_by"]), (&json!("Taken over"), &json!({ "kind": "user" })), "an approved edit keeps the creator");
+}
+
+#[test]
+fn an_agent_edits_its_own_task_at_once() {
+    let mut s = Schedules::start("sched_edit_own");
+    let id = s.act("save_schedule", json!({ "task": task_body("Own") })).unwrap()["result"]["task"]["id"].as_str().unwrap().to_owned();
+    let mut edit = task_body("Own, renamed");
+    edit["id"] = json!(id);
+    let done = s.act("save_schedule", json!({ "task": edit })).unwrap();
+    assert_eq!(done["outcome"], "done", "{done}");
+    assert_eq!(s.titles(), ["Own, renamed"]);
+    assert_eq!(s.ana.hub(json!({ "cmd": "confirmations" })), Ok(json!([])), "nothing waits");
+}
+
+#[test]
+fn an_agent_dry_run_with_approvals_holds_nothing_and_stores_nothing() {
+    let mut s = Schedules::start("sched_dry_approvals");
+    let dry = s.act("save_schedule", json!({ "task": approved_body("Nightly install"), "dry_run": true })).unwrap();
+    assert_eq!(dry["outcome"], "done", "{dry}");
+    assert_eq!((dry["result"]["task"].clone(), dry["result"]["next"].as_array().map(Vec::len)), (Value::Null, Some(3)));
+    assert_eq!(s.ana.hub(json!({ "cmd": "confirmations" })), Ok(json!([])), "no confirmation");
+    assert_eq!(s.titles(), Vec::<String>::new(), "nothing stored");
+}
+
+#[test]
+fn changing_what_a_task_does_or_where_it_goes_takes_its_approvals_away() {
+    let mut s = Schedules::start("sched_approvals_clear");
+    let saved = save_schedule(&mut s.ana, approved_body("Install")).unwrap()["task"].clone();
+    let id = saved["id"].as_str().unwrap().to_owned();
+    let approvals = saved["approvals"].clone();
+    assert_eq!(approvals.as_array().map(Vec::len), Some(1));
+    // A new title keeps them.
+    let mut renamed = saved.clone();
+    renamed["title"] = json!("Install, renamed");
+    assert_eq!(save_schedule(&mut s.ana, renamed.clone()).unwrap()["task"]["approvals"], approvals);
+    // Another prompt with the same approvals takes them away.
+    let mut other = renamed.clone();
+    other["action"] = json!({ "kind": "prompt", "text": "Install and publish" });
+    assert_eq!(save_schedule(&mut s.ana, other.clone()).unwrap()["task"]["approvals"], json!([]), "a new action");
+    assert_eq!(s.task(&id)["approvals"], json!([]));
+    // Granting them again on the new action keeps them; then another target takes them away.
+    assert_eq!(save_schedule(&mut s.ana, other.clone()).unwrap()["task"]["approvals"], approvals, "granted again");
+    let mut moved = other;
+    moved["target"] = json!({ "kind": "captain", "project": "github.com/acme/app" });
+    assert_eq!(save_schedule(&mut s.ana, moved).unwrap()["task"]["approvals"], json!([]), "a new target");
 }
 
 #[test]

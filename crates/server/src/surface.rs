@@ -114,15 +114,15 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
         }
     };
     // A schedule act whose task cannot be read is refused here, before anything runs.
-    let confirms = match schedule_needs_ok(hub, account, &admitted.call).await {
-        Ok(needs) => admitted.action.class == Class::Confirm || needs,
+    let why = match schedule_needs_ok(hub, account, &admitted.call).await {
+        Ok(why) => why,
         Err(refusal) => {
             let refusal = surface::mask_secrets(&refusal);
             trail.write(AuditOutcome::Refused, &refusal).await?;
             return Err(refusal);
         }
     };
-    if confirms {
+    if admitted.action.class == Class::Confirm || why.is_some() {
         let asked = Confirmation {
             id: String::new(),
             at: 0,
@@ -132,7 +132,7 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
             title: caller.title.clone(),
             role: caller.role,
             action: admitted.action.name.to_owned(),
-            about: String::new(),
+            about: why.as_deref().map(surface::mask_secrets).unwrap_or_default(),
             args: match surface::without_asked(admitted.action, &act.args) {
                 Value::Null => Value::Object(Default::default()),
                 args => args,
@@ -441,29 +441,47 @@ async fn waiting(hub: &Hub, account: &Account) -> Result<Vec<Confirmation>, Stri
     Ok(hub.db.confirmations(account.id).await?.into_iter().filter(|c| c.decision.is_none()).collect())
 }
 
-/// Whether an agent's `call` is a schedule act that waits for the user although its action is a
-/// Write: a save that carries approvals (`schedule::save_needs_ok`), or a delete of a task the user created.
+/// Why an agent's schedule act waits for the user although its action is a Write, or None when it
+/// runs at once. Every rule of when an agent's schedule act waits lives here:
+/// - a save that carries approvals (`schedule::save_needs_ok`), as a dry run never does;
+/// - an edit, a pause or a start again, or a delete of a task the user created;
+/// - starting a task that carries approvals again, whoever created it.
+///
 /// It fails closed: a task id it cannot read, or a task the account does not hold, is an error that
 /// refuses the act, never a "no". It reads ids with `hub::task_key`, as `Hub::schedule_call` does.
-async fn schedule_needs_ok(hub: &Hub, account: &Account, call: &Parsed) -> Result<bool, String> {
-    let Parsed::Hub(call) = call else { return Ok(false) };
+async fn schedule_needs_ok(hub: &Hub, account: &Account, call: &Parsed) -> Result<Option<String>, String> {
+    let Parsed::Hub(call) = call else { return Ok(None) };
     let stored = |id: &str| {
         let id = id.to_owned();
         async move { hub.db.task(account.id, crate::hub::task_key(&id)?).await?.ok_or_else(|| format!("this account has no task {id}")) }
     };
-    match call {
-        HubCall::ListSchedules => Ok(false),
-        HubCall::ScheduleRuns { id, .. } => stored(id).await.map(|_| false),
-        HubCall::DeleteSchedule { id } => Ok(stored(id).await?.created_by == Actor::User),
-        HubCall::PauseSchedule { id, .. } => stored(id).await.map(|_| false),
-        HubCall::SaveSchedule { task, dry_run } => {
-            if !task.id.trim().is_empty() {
-                stored(&task.id).await?;
+    let users = |task: &schedule::Task, what: &str| (task.created_by == Actor::User).then(|| format!("an agent wants to {what} \"{}\", a task the user created", task.title));
+    let why = match call {
+        HubCall::ListSchedules => Vec::new(),
+        HubCall::ScheduleRuns { id, .. } => stored(id).await.map(|_| Vec::new())?,
+        HubCall::DeleteSchedule { id } => users(&stored(id).await?, "delete, with its run history,").into_iter().collect(),
+        HubCall::PauseSchedule { id, paused } => {
+            let task = stored(id).await?;
+            let mut why: Vec<String> = users(&task, if *paused { "pause" } else { "start again" }).into_iter().collect();
+            if !paused {
+                why.extend(schedule::save_needs_ok(&task));
             }
-            Ok(!dry_run && schedule::save_needs_ok(task).is_some())
+            why
         }
-        _ => Ok(false),
-    }
+        HubCall::SaveSchedule { task, dry_run } => {
+            let mut why = Vec::new();
+            if !task.id.trim().is_empty() {
+                why.extend(users(&stored(&task.id).await?, "edit"));
+            }
+            if *dry_run {
+                return Ok(None);
+            }
+            why.extend(schedule::save_needs_ok(task));
+            why
+        }
+        _ => Vec::new(),
+    };
+    Ok((!why.is_empty()).then(|| why.join("; ")))
 }
 
 /// The task a schedule act was about, from the act's arguments and what it answered.

@@ -110,6 +110,8 @@ create table if not exists agent_confirmations (id uuid primary key, account uui
   action text not null, args jsonb not null, request_id text, created_at timestamptz not null default now(),
   decided_at timestamptz, approved boolean, outcome text, notified boolean not null default false,
   target text, result jsonb, unique (account, machine, tab, action, request_id));
+-- Why this act waits, when the hub says more than the action's own text: a schedule act's reason.
+alter table agent_confirmations add column if not exists about text;
 -- A scheduled task per row, as the `schedule::Task` it is (without its hub-computed last run), and
 -- the columns the scheduler reads. `next_at` is unix seconds, computed on every save.
 create table if not exists tasks (id uuid primary key, account uuid not null references accounts on delete cascade,
@@ -268,7 +270,7 @@ pub struct Held {
 }
 
 const CONFIRMATION_COLUMNS: &str = "c.id, extract(epoch from c.created_at)::bigint, c.machine, coalesce(m.name, ''), c.tab, c.title, c.role, c.action, c.args,
-  c.request_id, c.approved, extract(epoch from c.decided_at)::bigint, c.outcome, c.session, c.target, c.result";
+  c.request_id, c.approved, extract(epoch from c.decided_at)::bigint, c.outcome, c.session, c.target, c.result, c.about";
 
 fn held(r: &tokio_postgres::Row) -> Held {
     let role: String = r.get(6);
@@ -282,7 +284,7 @@ fn held(r: &tokio_postgres::Row) -> Held {
         tab: r.get(4),
         title: r.get(5),
         role: serde_json::from_value(Value::String(role)).unwrap_or(ActorRole::Session),
-        about: pinned_core::surface::find(&action).map_or_else(String::new, |a| a.about.to_owned()),
+        about: r.get::<_, Option<String>>(16).filter(|about| !about.is_empty()).unwrap_or_else(|| pinned_core::surface::find(&action).map_or_else(String::new, |a| a.about.to_owned())),
         action,
         args: r.get(8),
         target: r.get(14),
@@ -1048,9 +1050,9 @@ impl Db {
         let request_id = asked.request_id.as_deref();
         let inserted = client
             .query_opt(
-                "insert into agent_confirmations (id, account, machine, tab, session, role, title, action, args, request_id, target) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                "insert into agent_confirmations (id, account, machine, tab, session, role, title, action, args, request_id, target, about) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
                  on conflict (account, machine, tab, action, request_id) do nothing returning id",
-                &[&id, &account, &machine, &asked.tab, &session, &asked.role.name(), &asked.title, &asked.action, &asked.args, &request_id, &asked.target],
+                &[&id, &account, &machine, &asked.tab, &session, &asked.role.name(), &asked.title, &asked.action, &asked.args, &request_id, &asked.target, &Some(asked.about.as_str()).filter(|about| !about.is_empty())],
             )
             .await
             .map_err(err)?;

@@ -963,6 +963,9 @@ impl Hub {
                 task.enabled = !paused;
                 task.updated_at = schedule::now();
                 task.next_at = if task.enabled { schedule::next_after(&task.schedule, &task.tz, task.updated_at)? } else { None };
+                if task.enabled && task.next_at.is_none() {
+                    return Err("that time has already passed: edit the task to pick a time that is still ahead".into());
+                }
                 self.db.save_task(account.id, &task).await?;
                 self.push_settings(account).await;
                 json(task)
