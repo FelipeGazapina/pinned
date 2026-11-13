@@ -533,3 +533,20 @@ before `pinned evidence`.
    (typed into the Orchestrator chat when due) be planned as the follow-up?
 7. **Which account the box signs in as.** It uses the account the host's Orchestrator ran under,
    from the share, else the default account. Is that the right default?
+
+---
+
+## Decisions (Orchestrator, 2026-11-13)
+
+Felipe asked the Orchestrator to settle the open questions. Each is a default kept in one place.
+
+1. **Idle delete** after 10 min.
+2. **Maximum life** is 4 h, shown with a countdown and extendable by the user.
+3. **When a machine comes back online,** the box finishes its current turn, syncs memory, hands back and is deleted.
+4. **One seat per account,** as designed.
+5. **Box permission.** It reuses the existing Captains-box permission for now.
+6. **Global CLAUDE.md.** It is not copied to the box in 0.18.2, and the UI says so.
+7. **Reminders** are resolved by Tasks (#223).
+8. **Account.** The claude account, the same as other boxes today.
+
+**Implementation waits** for #233 (held end reports) and the Captain-report PR to merge, since it depends on them.
