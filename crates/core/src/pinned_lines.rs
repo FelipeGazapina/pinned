@@ -34,7 +34,6 @@ pub const HEADER_CHARS: usize = 80;
 /// such as `[pinned]`, `[Orchestrator]` or `[Session …]`: one to `HEADER_CHARS` characters with no
 /// bracket or line break, then `]`. A character the paste drops or that does not show is skipped,
 /// so it cannot split the header or push it past its length.
-#[allow(dead_code)]
 fn closes_a_header(rest: &str) -> bool {
     let mut count = 0;
     for c in rest.chars() {
@@ -47,27 +46,6 @@ fn closes_a_header(rest: &str) -> bool {
         }
     }
     false
-}
-
-/// Whether `rest`, the text after a `[` at a line start, reads once typed as the rest of the
-/// mark `[pinned]`, in any case. A character the paste drops or that does not show is skipped, so
-/// it cannot split the mark.
-fn closes_the_mark(rest: &str) -> bool {
-    let mut wanted = "pinned]".chars();
-    for c in rest.chars() {
-        if c == '\n' {
-            return false;
-        }
-        if dropped_when_typed(c) || is_invisible(c) {
-            continue;
-        }
-        match wanted.next() {
-            None => return true,
-            Some(w) if c.eq_ignore_ascii_case(&w) => {}
-            Some(_) => return false,
-        }
-    }
-    wanted.next().is_none()
 }
 
 /// `text` with every line that begins, after any whitespace or invisible characters, with a
@@ -83,7 +61,7 @@ pub fn guard(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut at_start = true;
     for (at, c) in text.char_indices() {
-        if at_start && c == '[' && closes_the_mark(&text[at + 1..]) {
+        if at_start && c == '[' && closes_a_header(&text[at + 1..]) {
             out.push('\\');
         }
         out.push(c);
