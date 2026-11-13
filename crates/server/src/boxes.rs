@@ -1480,7 +1480,8 @@ impl Boxes {
     /// holds fail with why. A box that ran out of budget or reached its max life keeps their
     /// subjects handled, so only their owner runs them again; any other end frees each subject for
     /// its next trigger once (`BoxEndRelease`). Nothing opens another box or session for them. For the fixed row, which many runs share, only the runs whose
-    /// session is on its machine. A run that already finished holds nothing, so this does nothing.
+    /// session is on its machine. For another row, a run of its subject that started after the row was written is not its run, so a retried end (the row stays `Ending`) never fails a newer
+    /// run of the subject that works elsewhere. A run that already finished holds nothing, so this does nothing.
     /// An error leaves the runs as they were: the caller keeps the row `Ending`, so the reaper's
     /// next pass tries again before it deletes the row.
     async fn fail_held_runs(&self, hub: &Hub, account: &Account, row: &BoxRow, why: &End) -> Result<(), String> {
@@ -1490,7 +1491,9 @@ impl Boxes {
         let error = run_end_error(&self.policy, why);
         let failed = async {
             let connectors = hub.connectors(account).await?;
-            let holder = (!connectors.box_access().owns_row(&row.id)).then_some((row.connector.as_str(), &row.subject));
+            // The run this box held started before its row was written (now less its age).
+            let written = unix_millis().saturating_sub(u64::try_from(row.age.as_millis()).unwrap_or(u64::MAX));
+            let holder = (!connectors.box_access().owns_row(&row.id)).then_some((row.connector.as_str(), &row.subject, written));
             connectors.box_ended(&row.machine.to_string(), holder, &error, release_for(why)).await
         };
         let n = failed.await.map_err(|e| format!("could not fail the runs of box {}, so it stays until the next check: {e}", row.id))?;

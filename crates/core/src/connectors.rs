@@ -2506,6 +2506,12 @@ fn trigger_posts(posts: &[slack::Post]) -> Vec<TriggerPost> {
     posts.iter().map(|post| TriggerPost { ts: post.ts.clone(), author: post.author.clone(), text: post.text.clone() }).collect()
 }
 
+/// True unless `run` started after `at_ms` (unix millis). A run's first log entry is its trigger, written when it
+/// started; a run with no readable one counts as started.
+fn started_by(run: &runner::Run, at_ms: u64) -> bool {
+    run.log.first().and_then(|entry| DateTime::parse_from_rfc3339(&entry.at).ok()).is_none_or(|started| started.timestamp_millis() <= i64::try_from(at_ms).unwrap_or(i64::MAX))
+}
+
 fn subject_key(subject: &Subject) -> String {
     match subject {
         Subject::LinearIssue { issue } => issue.clone(),
@@ -3047,12 +3053,15 @@ impl Connectors {
     }
 
     /// The box on `machine` ended before its run did. Every live run whose session is on that
-    /// machine, and every run `holds_box` finds for `holder`, fails with `why`. Its subject is freed
+    /// machine fails with `why`, and so does a run of `holder`'s subject that no other machine has
+    /// and that started no later than `holder`'s third part, the unix millis its box row was written:
+    /// a run the box held began before the box existed, so a newer run of the same subject, on
+    /// another machine or not placed yet, is never failed by a retried end. Its subject is freed
     /// (no longer `handled`, followed or tied to a Slack bot, so the next trigger may start it
     /// again) only as `release` allows: never for `Keep`, once per subject for `Once`. Nothing
     /// reopens the session. Answers how many runs failed. When their save fails, the runs are left
     /// as they were, so a retry fails them once.
-    pub async fn box_ended(&self, machine: &str, holder: Option<(&str, &Subject)>, why: &str, release: BoxEndRelease) -> Result<usize, String> {
+    pub async fn box_ended(&self, machine: &str, holder: Option<(&str, &Subject, u64)>, why: &str, release: BoxEndRelease) -> Result<usize, String> {
         let _guard = self.driving.lock().await;
         let at = Utc::now().to_rfc3339();
         let released = self.store.lock().unwrap().box_released.clone();
@@ -3064,7 +3073,9 @@ impl Connectors {
             for run in runs.iter_mut().filter(|run| matches!(run.status, Status::Running | Status::Waiting)) {
                 let owner = run.session_owner.clone().unwrap_or_else(|| run.connector.clone());
                 let on_box = matches!(&run.session, Session::Live { machine: live, .. } if live == machine);
-                let holds = holder.is_some_and(|(connector, subject)| &run.subject == subject && owner == connector);
+                let holds = holder.is_some_and(|(connector, subject, row_written)| {
+                    &run.subject == subject && owner == connector && !matches!(&run.session, Session::Live { machine: live, .. } if live != machine) && started_by(run, row_written)
+                });
                 if on_box || holds {
                     let frees = release == BoxEndRelease::Once && !released.get(&owner).is_some_and(|keys| keys.contains(&subject_key(&run.subject)));
                     let then = if frees { "its next trigger may start it once more" } else { "it starts again only when you run it" };
@@ -5314,6 +5325,50 @@ mod tests {
         assert!(handled_of(&connectors).is_empty());
         assert_eq!(block_on(connectors.box_ended("box-1", None, "Upstash Box: its box went offline", BoxEndRelease::Once)), Ok(0), "a third pass finds nothing to fail");
         assert_eq!(connectors.box_failures.lock().unwrap().len(), 1, "the card hears of it once");
+    }
+
+    /// A run of `subject` for `connector` that started at `started` (RFC 3339), whose session is `session`.
+    fn run_started(id: &str, connector: &str, subject: &Subject, started: &str, session: serde_json::Value) -> runner::Run {
+        serde_json::from_value(serde_json::json!({
+            "id": id, "connector": connector, "subject": subject, "status": "waiting", "session_owner": connector, "session": session,
+            "log": [{ "at": started, "connector": connector, "node": "n0", "what": {} }],
+            "context": {}, "stack": [], "pending": null, "ready": null, "claimed": true, "sent": [],
+        }))
+        .unwrap()
+    }
+
+    fn status_of(connectors: &Connectors, id: &str) -> Status {
+        connectors.runs.lock().unwrap().iter().find(|run| run.id.0 == id).unwrap().status.clone()
+    }
+
+    #[test]
+    fn a_retried_box_end_fails_only_the_run_its_box_held() {
+        let subject = Subject::LinearIssue { issue: "uuid".into() };
+        let linear = Connector { handled: vec!["uuid".into()], ..linear_connector() };
+        let (connectors, dir) = stored("box-end-retry-newer", vec![linear]);
+        let row_written = u64::try_from(DateTime::parse_from_rfc3339("2026-01-01T10:01:00Z").unwrap().timestamp_millis()).unwrap();
+        let why = "Upstash Box: its box went offline";
+        let end = |connectors: &Connectors| block_on(connectors.box_ended("box-1", Some(("c1", &subject, row_written)), why, BoxEndRelease::Once));
+        // The old run's box is still booting: its session is not placed, so only its subject finds it.
+        connectors.runs.lock().unwrap().push(run_started("old", "c1", &subject, "2026-01-01T10:00:00Z", serde_json::json!({ "state": "none" })));
+        assert_eq!(end(&connectors), Ok(1), "the first pass fails the run the box held");
+        assert!(handled_of(&connectors).is_empty(), "and frees its issue once");
+
+        // The workflow moved off boxes: a newer run of the same subject works on this machine, and another has no session yet.
+        let live = serde_json::json!({ "state": "live", "machine": "local", "tab": "t1", "claude": null, "since": 1, "saw_working": false, "await_working": false });
+        connectors.runs.lock().unwrap().push(run_started("newer-live", "c1", &subject, "2026-01-01T11:00:00Z", live));
+        connectors.runs.lock().unwrap().push(run_started("newer-unplaced", "c1", &subject, "2026-01-01T11:00:05Z", serde_json::json!({ "state": "none" })));
+        connectors.store.lock().unwrap().connectors[0].handled = vec!["uuid".into()];
+        for retry in 0..3 {
+            assert_eq!(end(&connectors), Ok(0), "retry {retry} fails nothing");
+        }
+        assert_eq!(status_of(&connectors, "newer-live"), Status::Waiting);
+        assert_eq!(status_of(&connectors, "newer-unplaced"), Status::Waiting);
+        assert_eq!(handled_of(&connectors), ["uuid"], "the newer runs' subject stays handled by them");
+        assert!(matches!(status_of(&connectors, "old"), Status::Failed { .. }));
+        assert_eq!(connectors.box_failures.lock().unwrap().len(), 1, "the old run is failed, and the card told, once");
+        assert_eq!(connectors.store.lock().unwrap().box_released, BTreeMap::from([("c1".to_owned(), ["uuid".to_owned()].into())]), "one release");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
