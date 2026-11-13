@@ -393,8 +393,8 @@ pub async fn create(key: &str, new: &NewBox) -> Result<BoxId, String> {
 fn finished(key: &str, id: BoxId, status: Status) -> Result<BoxId, String> {
     match status {
         Status::Ready => Ok(id),
-        Status::Creating => Err(format!("Upstash Box was still creating box {id} after {} minutes", CREATE_WAIT.as_secs() / 60)),
-        Status::Failed => Err(format!("Upstash Box could not create box {id}")),
+        Status::Creating => Err(echoed(key, &format!("Upstash Box was still creating box {id} after {} minutes", CREATE_WAIT.as_secs() / 60))),
+        Status::Failed => Err(echoed(key, &format!("Upstash Box could not create box {id}"))),
     }
 }
 
