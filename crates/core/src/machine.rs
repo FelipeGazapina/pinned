@@ -9992,21 +9992,25 @@ echo '{"type":"result","result":"ok"}'
     fn shift_tab_sends_a_tabs_frame_that_reads_read_only_at_once() {
         let root = temp("shift-tab-frame");
         let claude = claude_recording_argv(&root);
-        let frames = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Vec<TabView>>::new()));
+        // Each frame with the thread that emitted it. `emit` calls the callback on the emitting
+        // thread, so a frame from this thread while `write_input` runs is one `write_input` sent,
+        // never a frame the session's own threads send around it.
+        let frames = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(std::thread::ThreadId, Vec<TabView>)>::new()));
         let seen = frames.clone();
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, None, Some(root.clone()), move |event| {
             if let Event::Tabs { tabs } = event {
-                seen.lock().unwrap().push(tabs);
+                seen.lock().unwrap().push((std::thread::current().id(), tabs));
             }
         });
         let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], true, None);
         m.record_event(AgentEvent { permission_mode: Some("default".into()), ..done_event(&tab) });
         let read_only = |frame: &Vec<TabView>| frame.iter().find(|view| view.id == tab).map(|view| view.read_only);
-        assert_eq!(frames.lock().unwrap().last().and_then(read_only), Some(false), "a session that skips prompts reads as such");
+        let here = std::thread::current().id();
+        let last_here = |from: usize| frames.lock().unwrap()[from..].iter().filter(|(thread, _)| *thread == here).last().and_then(|(_, frame)| read_only(frame));
+        assert_eq!(last_here(0), Some(false), "a session that skips prompts reads as such");
         let sent = frames.lock().unwrap().len();
         m.write_input(&tab, b"\x1b[Z").unwrap();
-        let after = frames.lock().unwrap()[sent..].to_vec();
-        assert_eq!(after.last().and_then(read_only), Some(true), "Shift+Tab alone sends a tabs frame that reads read-only, {} frames after it", after.len());
+        assert_eq!(last_here(sent), Some(true), "Shift+Tab alone sends, from write_input itself, a tabs frame that reads read-only");
         let _ = std::fs::remove_dir_all(root);
     }
 
