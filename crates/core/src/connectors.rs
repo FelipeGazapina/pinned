@@ -6701,6 +6701,29 @@ mod tests {
     }
 
     #[test]
+    fn a_save_with_no_graph_is_walked_on_the_graph_its_run_builds() {
+        let skips = |connector: &Connector| connector.permission_mode == PermissionMode::BypassPermissions;
+        let skipping = Connector { id: "c7".into(), name: "Skips".into(), permission_mode: PermissionMode::BypassPermissions, ..called() };
+        // The stored router's graph is its own `migrate`, so a save without a graph drops it.
+        let mut kept = router();
+        kept.graph = Some(migrate(&router()));
+        let (connectors, dir) = stored("graphless-calls", vec![kept, slack_connector(), called(), skipping]);
+        let naming = |id: &str, workflow: &str| {
+            let mut connector = router();
+            connector.id = id.into();
+            if let Trigger::SlackMessage { decide, .. } = &mut connector.trigger {
+                decide.categories[1].workflow = Some(workflow.into());
+            }
+            connector
+        };
+        assert!(connectors.calls_any(&naming("", "c7"), skips), "a new router whose category names a workflow that skips prompts");
+        assert!(connectors.calls_any(&naming("c5", "c7"), skips), "a save that drops the stored graph runs the router it sends");
+        assert!(!connectors.calls_any(&naming("", "c6"), skips), "a router whose categories name workflows that ask");
+        assert!(!connectors.calls_any(&naming("c5", "c6"), skips));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_save_of_the_migrated_graph_stores_none_and_still_returns_one() {
         let (connectors, dir) = stored("collapse-graph", vec![router(), slack_connector(), called()]);
         let mut incoming = router();
