@@ -209,3 +209,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:10:33Z #95 a_remote_workers_usage_reaches_the_task_that_asked_and_is_recorded_once ok / avail=15059M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:10:34Z #96 delegation_stats_counts_the_stored_records_it_cannot_read START / avail=15059M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:10:37Z #96 delegation_stats_counts_the_stored_records_it_cannot_read ok / avail=15059M /workspace avail=19374M node_stat=Ssl node_tcp=1
+2026-11-13T04:10:38Z #97 task_cancel_ends_a_remote_task_here_when_its_machine_left_the_account START / avail=15059M /workspace avail=19374M node_stat=Ssl
