@@ -7725,7 +7725,7 @@ fn a_session_box_follows_only_its_setting_and_budget_and_only_its_owner_answers_
     ana.client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": { "box_budget_cents": 300 } })).unwrap();
     let mut owner = Client::app(&url, &token);
     let (bob_token, _) = account::signup(&url, "bob@acme.dev", "correct horse").unwrap();
-    let mut bob = agent_of(&url, &bob_token, "bob@acme.dev", "bob-mac");
+    let bob = agent_of(&url, &bob_token, "bob@acme.dev", "bob-mac");
     let mut bobs_app = Client::app(&url, &bob_token);
     let open = |budget: f64| act(&ana.dir, &ana.tab, "open_box", json!({ "repo": "acme/site", "size": "small", "budget_usd": budget }));
     let mine = json!({ "cmd": "open_box", "repo": "acme/site", "size": "small", "budget_usd": 1.0 });
