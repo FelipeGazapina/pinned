@@ -342,6 +342,8 @@ body.dragging-row .settled-head.drop-target { color: var(--g-primary); }
 .agent-confirm .title { font-size: 14px; font-weight: 500; overflow-wrap: anywhere; }
 .agent-confirm .args, .agent-once code { margin: 0; padding: 6px 8px; border-radius: 6px; background: rgb(var(--g-ink-rgb) / 0.05); color: inherit;
   font: 12px/1.45 var(--g-mono); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
+/* What the action changes, as the hub read it where it lands: `field: old → new`, or the session it restarts. */
+.agent-confirm .changes { margin: 0; padding: 0 0 0 16px; font-size: 13px; overflow-wrap: anywhere; user-select: text; -webkit-user-select: text; }
 .agent-confirm .who, .agent-once .hint { font-size: 12px; color: var(--g-side-muted); overflow-wrap: anywhere; }
 .agent-confirm .actions { margin-top: 2px; }
 .agent-confirm button:disabled { opacity: 0.5; cursor: progress; }

@@ -108,6 +108,16 @@ test("a waiting confirmation reads as the action, the machine it names, its exac
   );
 });
 
+test("a confirmation lists what it changes, one line each, above its arguments", () => {
+  const { context } = app();
+  const changes = ["Machine: MacBook", "name: \"Orchestrator\" → \"Almirante\"", "host: false → true", "This moves Captain reports and the Orchestrator's rights to MacBook."];
+  context.onAgentConfirmations([{ ...removeImac, action: "set_global_orchestrator_settings", args: { settings: { name: "Almirante", host: true } }, changes }]);
+  const html = tight(context.asksHtml());
+  assert.match(html, /<ul class="changes"><li>Machine: MacBook<\/li><li>name: &#34;Orchestrator&#34; → &#34;Almirante&#34;<\/li><li>host: false → true<\/li><li>This moves Captain reports and the Orchestrator&#39;s rights to MacBook\.<\/li><\/ul><pre class="args">/);
+  context.onAgentConfirmations([removeImac]);
+  assert.doesNotMatch(context.asksHtml(), /class="changes"/, "an older hub sends none, and the card is as before");
+});
+
 test("a title that ends in punctuation reads cleanly inside the quotes", () => {
   const { context } = app();
   context.onAgentConfirmations([{ ...removeImac, title: "Pair the new server and add my OpenCode Go account." }]);
