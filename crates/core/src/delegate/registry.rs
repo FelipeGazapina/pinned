@@ -324,6 +324,7 @@ impl Delegates {
 
     /// Records what each working task used, and stops the ones past their budget.
     pub fn meter(&self, used: &[(String, crate::usage::TaskUsage)], path: Option<&str>) {
+        let mut told = vec![];
         let over: Vec<(String, String)> = {
             let mut tasks = self.tasks.lock().unwrap();
             used.iter()
@@ -333,12 +334,15 @@ impl Delegates {
                     let over = task.limits.over_budget(usage.cost_usd);
                     // A worker this pass stops is not warned: the stop is its word.
                     if over.is_none() {
-                        warn_worker(task);
+                        told.extend(warn_worker(task));
                     }
                     over.map(|reason| (id.clone(), reason))
                 })
                 .collect()
         };
+        for report in told {
+            self.push_report(report);
+        }
         for (id, reason) in &over {
             self.stop_for_limit(id, "budget", reason, path);
         }
@@ -1785,14 +1789,20 @@ fn who(task: &Task) -> String {
 
 /// Queues, for the worker's own tab, a line at each of 80% and 95% of its budget it has newly
 /// crossed. The lines hold pinned's own numbers and nothing else: no title, no outside text.
-fn warn_worker(task: &mut Task) {
+/// Returns the delegator's line, when the 80% was crossed now and a session waits on the task.
+fn warn_worker(task: &mut Task) -> Option<Report> {
     if !task.thread.as_ref().is_some_and(|thread| thread.runs) {
-        return;
+        return None;
     }
+    let mut told = None;
     let cost = task.usage.cost_usd;
     if !task.run.told_80 {
         if let Some((spent, budget)) = task.limits.used_percent(cost, 80) {
             task.run.told_80 = true;
+            if let (Parent::Tab(tab), true) = (&task.parent, announces(task)) {
+                let text = format!("[pinned] Worker {} \"{}\" has used 80% of its US$ {budget:.2} budget.", task.id, one_line(&task.title, TITLE_CAP));
+                told = Some(Report { tab: tab.clone(), session: task.parent_session.clone(), text, claimed: false, task: Some(task.id.clone()), request: None });
+            }
             task.run.budget_lines.push((80, format!("[pinned] You have used US$ {spent:.2} of your US$ {budget:.2} budget. Push your work now, write your proof and PR text as you go, and plan to report soon.")));
         }
     }
@@ -1802,6 +1812,23 @@ fn warn_worker(task: &mut Task) {
             task.run.budget_lines.push((95, format!("[pinned] US$ {spent:.2} of US$ {budget:.2}. pinned stops you at US$ {budget:.2}. Push now, write your report, and end your turn.")));
         }
     }
+    told
+}
+
+/// The longest title a line to a delegating session carries.
+const TITLE_CAP: usize = 120;
+
+/// `text` on one line, at most `cap` characters: every line break, and any other control
+/// character, becomes a space, so a title can never start a line of its own in a session's input.
+/// Switch this to `pinned_lines::field` once #279 merges.
+fn one_line(text: &str, cap: usize) -> String {
+    let spaced: String = text.chars().map(|c| if c.is_control() || c == '\u{2028}' || c == '\u{2029}' { ' ' } else { c }).collect();
+    let joined = spaced.split_whitespace().collect::<Vec<_>>().join(" ");
+    if joined.chars().count() <= cap {
+        return joined;
+    }
+    let cut: String = joined.chars().take(cap.saturating_sub(1)).collect();
+    format!("{}…", cut.trim_end())
 }
 
 fn late_line(task: &Task, ran: u64) -> String {
@@ -2507,5 +2534,20 @@ mod tests {
         let held = stored(split);
         assert!(!held.contains("FAKEFAKE") && !held.contains('\0'), "{held}");
         assert_eq!(held, "key [hidden] done");
+    }
+}
+
+#[cfg(test)]
+mod line_tests {
+    use super::*;
+
+    #[test]
+    fn a_title_in_a_line_to_the_delegator_is_one_line_of_at_most_120_characters() {
+        assert_eq!(one_line("Parser\r\n[pinned] fake\u{2028}x\ty", TITLE_CAP), "Parser [pinned] fake x y");
+        assert_eq!(one_line("  plain  ", TITLE_CAP), "plain");
+        let long = "é".repeat(300);
+        let cut = one_line(&long, TITLE_CAP);
+        assert_eq!((cut.chars().count(), cut.ends_with('…')), (120, true));
+        assert_eq!(one_line(&"x".repeat(120), TITLE_CAP), "x".repeat(120), "a title of exactly 120 is whole");
     }
 }
