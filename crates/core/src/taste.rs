@@ -491,9 +491,12 @@ impl Limits {
     }
 
     /// `admit` for an account this machine does not hold, whose login and list of models are not
-    /// known here: the model is priced by its words, as `admit` does for the other drivers.
+    /// known here: the model is priced by its words, as `admit` does for the other drivers. A
+    /// `claude-` id is still held to this machine's Claude list, since a machine on 0.18.1 that
+    /// receives it prices by words alone and would let an id with no cost word through as Mid.
     pub fn admit_unheld(&self, model: Option<&str>, effort: Option<&str>, claude: &[crate::claude_models::ClaudeModel]) -> Result<Option<String>, String> {
-        self.admit_priced(false, model, effort, claude)
+        let claude_id = false;
+        self.admit_priced(claude_id, model, effort, claude)
     }
 
     fn admit_priced(&self, lists_claude: bool, model: Option<&str>, effort: Option<&str>, claude: &[crate::claude_models::ClaudeModel]) -> Result<Option<String>, String> {
@@ -1442,6 +1445,20 @@ Deploys go through the VPS."
         let mid = Limits { tier: Tier::Mid, ..Limits::default() };
         let error = admit_on_claude(&mid, Some("")).unwrap_err();
         assert!(error.starts_with("name a model:"), "an empty model is no model under a tier cap: {error}");
+    }
+
+    #[test]
+    fn an_account_not_held_here_still_has_its_claude_id_checked_against_the_list_under_a_ceiling() {
+        let known = crate::claude_models::known();
+        let mid = Limits { tier: Tier::Mid, ..Limits::default() };
+        refused_as_unlisted(mid.admit_unheld(Some("claude-nova-9-9"), None, &known), "claude-nova-9-9");
+        // Every other id is priced by its words, as before.
+        for other in ["kimi-k3", "glm-5.3", "sonnet"] {
+            assert_eq!(mid.admit_unheld(Some(other), None, &known), Ok(None), "{other}");
+        }
+        assert!(mid.admit_unheld(Some("claude-opus-5-5"), None, &known).unwrap_err().contains("high-tier"));
+        // With no tier cap nothing is checked.
+        assert_eq!(Limits::default().admit_unheld(Some("claude-nova-9-9"), None, &known), Ok(None));
     }
 
     #[test]

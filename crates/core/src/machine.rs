@@ -15301,7 +15301,7 @@ Have another model review a risky change before it goes ahead.";
 
     #[test]
     #[cfg(unix)]
-    fn a_remote_worker_under_a_tier_cap_is_checked_against_the_claude_list_only_for_an_account_held_here() {
+    fn a_remote_worker_under_a_tier_cap_holds_a_claude_id_to_the_list_whoever_holds_the_account() {
         let (m, dir, captain) = placing_captain("place-unheld");
         m.set_local_taste(&TasteScope::Captains, TastePatch { tier: Some(taste::Tier::Mid), ..TastePatch::default() }).unwrap();
         let calls = placing_hub(&m, vec![], &[]);
@@ -15314,6 +15314,19 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(placing_calls(&calls), vec!["delegate m-mini"], "the refused call reached no machine");
         let error = refused(&m, &captain, on("away-account", "claude-opus-5-5"));
         assert!(error.contains("high-tier"), "words that say high are still refused: {error}");
+        // The machine that runs it may be on 0.18.1 and price by words alone, so the sender holds a
+        // Claude id to its own list even for an account it does not hold.
+        let error = refused(&m, &captain, on("away-account", "claude-nova-9-9"));
+        assert!(error.starts_with("claude-nova-9-9 ") && error.contains("is not in this machine's list of Claude models"), "{error}");
+        assert_eq!(placing_calls(&calls), vec!["delegate m-mini"], "the refused call reached no machine");
+        let started = delegate_task(&m, &captain, on("away-account", "glm-5.3"));
+        assert_eq!(started["placement"]["machine"], "m-mini", "an alias or another driver's id is still priced by its words: {started}");
+        let started = delegate_task(&m, &captain, on("away-account", "sonnet"));
+        assert_eq!(started["placement"]["machine"], "m-mini", "{started}");
+        assert_eq!(placing_calls(&calls), vec!["delegate m-mini"; 3]);
+        m.set_local_taste(&TasteScope::Captains, TastePatch { tier: Some(taste::Tier::High), ..TastePatch::default() }).unwrap();
+        let started = delegate_task(&m, &captain, on("away-account", "claude-nova-9-9"));
+        assert_eq!(started["placement"]["machine"], "m-mini", "with no tier cap nothing is checked against the list: {started}");
         let _ = std::fs::remove_dir_all(dir);
     }
 
