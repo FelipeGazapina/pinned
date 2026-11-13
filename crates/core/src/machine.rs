@@ -4854,12 +4854,21 @@ impl Machine {
     }
 
     /// `Call::RemoteEnded`: the machine `from` ran this machine's task `task` for `tab`, and it ended.
-    fn remote_ended(&self, from: &str, tab: &str, task: &str, end: &crate::delegate::RemoteEnd) -> bool {
+    /// `true` when this machine took the end; `"settled"` when the task had ended already with this
+    /// same end, as from a status look that read it first, so the hub has nothing left to keep;
+    /// `"unknown"` for a task it does not know, or one that ended otherwise, which the hub keeps
+    /// unclaimed. A machine before 0.18.2 answers `false` for both.
+    fn remote_ended(&self, from: &str, tab: &str, task: &str, end: &crate::delegate::RemoteEnd) -> Value {
         // The tab that delegated it may have a new id since: a restart gives every tab one.
-        let Some(parent) = self.delegates.settle_remote(task, tab, from, end) else { return false };
-        self.maybe_deliver(&parent);
-        self.emit_tabs();
-        true
+        match self.delegates.settle_remote(task, tab, from, end) {
+            Some(parent) => {
+                self.maybe_deliver(&parent);
+                self.emit_tabs();
+                Value::Bool(true)
+            }
+            None if self.delegates.holds_remote_end(task, tab, from, end) => json!(crate::delegate::END_SETTLED),
+            None => json!(crate::delegate::END_UNKNOWN),
+        }
     }
 
     /// `Call::RemoteAsked`: the machine `from` runs this machine's task `task` for `tab`, and its
@@ -12828,8 +12837,8 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(*asked.lock().unwrap(), vec![tab.clone()], "the 60 s look asks after it by the tab id the other machine knows");
 
         let end = crate::delegate::RemoteEnd { state: "result_available".into(), summary: Some("Green.".into()), error: None, usage: None };
-        assert_eq!(after.remote_ended("m-other", &tab, &task, &end), false, "only the machine that runs it ends it");
-        assert!(after.remote_ended("m-mini", &tab, &task, &end), "the end the machine sends, naming the old tab id, is taken");
+        assert_eq!(after.remote_ended("m-other", &tab, &task, &end), json!("unknown"), "only the machine that runs it ends it");
+        assert_eq!(after.remote_ended("m-mini", &tab, &task, &end), json!(true), "the end the machine sends, naming the old tab id, is taken");
         let done = after.delegates.get(&task).unwrap();
         assert_eq!((done.state.as_str(), done.summary.as_deref()), ("result_available", Some("Green.")));
         let notice = after.delegates.claim_notice(&tabs[0]).map(|(text, _)| text).unwrap_or_default();
@@ -13019,7 +13028,7 @@ Have another model review a risky change before it goes ahead.";
             error: None,
             usage: Some(crate::usage::TaskUsage { tokens_in: 1200, tokens_out: 30, cost_usd: Some(0.42), wall_ms: 90_000, box_usd: Some(0.05), box_ms: Some(30 * 60_000) }),
         };
-        assert!(m.remote_ended("m-mini", "tab-1", &id, &end));
+        assert_eq!(m.remote_ended("m-mini", "tab-1", &id, &end), json!(true));
         let usage = m.delegates.get(&id).unwrap().usage;
         assert_eq!((usage.tokens_in, usage.cost_usd, usage.box_ms), (1200, Some(0.42), Some(30 * 60_000)));
         assert_eq!(m.delegates.records().len(), 0, "the machine that ran the task records it, so a run counts once");
@@ -13031,7 +13040,7 @@ Have another model review a risky change before it goes ahead.";
         let m = machine();
         let id = delegated_elsewhere(&m, "tab-1", "", "Box · Slow");
         let end = crate::delegate::RemoteEnd { state: "failed".into(), summary: None, error: Some("Upstash Box: the box ended before its task did".into()), usage: None };
-        assert!(m.remote_ended("m-box", "tab-1", &id, &end), "a start that never got its answer still hears how it ended");
+        assert_eq!(m.remote_ended("m-box", "tab-1", &id, &end), json!(true), "a start that never got its answer still hears how it ended");
         assert_eq!(state_of(&m, &id), ("failed".into(), Some("Upstash Box: the box ended before its task did".into())));
     }
 
@@ -13110,6 +13119,54 @@ Have another model review a risky change before it goes ahead.";
         *waiting.lock().unwrap() = Value::Null;
         m.check_remotes(now + Duration::from_secs(130));
         assert_eq!(status(&m)["waiting"], Value::Null, "a `null` from a machine that keeps count says it waits on nothing");
+    }
+
+    #[test]
+    fn a_remote_end_the_hub_passes_again_or_after_a_status_answered_it_settles_the_task_once() {
+        let m = machine();
+        let end = |summary: &str| crate::delegate::RemoteEnd { state: "result_available".into(), summary: Some(summary.into()), error: None, usage: None };
+        let status = |m: &Machine, id: &str| m.delegates.status(&crate::delegate::Caller { tab: Some("tab-1".into()), task: None }, id).unwrap();
+        let id = delegated_elsewhere(&m, "tab-1", "m-box", "box");
+        assert_eq!(m.call(Call::RemoteEnded { from: "m-box".into(), tab: "tab-1".into(), task: id.clone(), end: end("Suite green.") }).unwrap(), json!(true));
+        let ended = m.delegates.get(&id).unwrap().ended;
+        assert_eq!(m.call(Call::RemoteEnded { from: "m-box".into(), tab: "tab-1".into(), task: id.clone(), end: end("Suite green.") }).unwrap(), json!("settled"), "a repeat, as after a lost answer, is a no-op the hub may drop");
+        assert_eq!(m.call(Call::RemoteEnded { from: "m-box".into(), tab: "tab-1".into(), task: id.clone(), end: end("Suite green, again.") }).unwrap(), json!("unknown"), "another end of a settled task is not this one's");
+        assert_eq!((status(&m, &id)["summary"].as_str(), m.delegates.get(&id).unwrap().ended), (Some("Suite green."), ended));
+
+        // The hub's held end answered a status look first, then reaches the machine as RemoteEnded.
+        let id = delegated_elsewhere(&m, "tab-1", "m-box2", "box2");
+        m.set_hub(Arc::new(|call| match call {
+            HubCall::RemoteTask { .. } => Ok(json!({ "workState": "result_available", "summary": "From the hub." })),
+            _ => Err("not this test's".into()),
+        }));
+        m.check_remotes(Instant::now() + Duration::from_secs(61));
+        assert_eq!(status(&m, &id)["summary"].as_str(), Some("From the hub."));
+        assert_eq!(m.call(Call::RemoteEnded { from: "m-box2".into(), tab: "tab-1".into(), task: id.clone(), end: end("From the hub.") }).unwrap(), json!("settled"), "the status look settled it with this same end");
+        assert_eq!(status(&m, &id)["workState"].as_str(), Some("result_available"));
+    }
+
+    #[test]
+    fn a_remote_end_is_settled_when_a_status_look_took_it_first_and_unknown_for_a_task_this_machine_does_not_hold() {
+        let m = machine();
+        let fake = "sk-ant-api03-FAKEFAKEFAKEFAKE0000";
+        let end = |state: &str, summary: &str| crate::delegate::RemoteEnd { state: state.into(), summary: Some(summary.into()), error: None, usage: None };
+        let ended = |from: &str, task: &str, end: crate::delegate::RemoteEnd| m.call(Call::RemoteEnded { from: from.into(), tab: "tab-1".into(), task: task.into(), end }).unwrap();
+
+        // Status first: the live look read the worker's own text, and the end that follows is the hub's masked copy.
+        let id = delegated_elsewhere(&m, "tab-1", "m-box", "box");
+        let live = format!("Deployed with {fake}.");
+        m.set_hub(Arc::new(move |call| match call {
+            HubCall::RemoteTask { .. } => Ok(json!({ "workState": "result_available", "summary": live })),
+            _ => Err("not this test's".into()),
+        }));
+        m.check_remotes(Instant::now() + Duration::from_secs(61));
+        assert_eq!(m.delegates.get(&id).unwrap().state, crate::delegate::WorkState::ResultAvailable, "the status look settled it");
+        assert_eq!(ended("m-box", &id, end("result_available", "Deployed with [hidden].")), json!("settled"));
+        assert_eq!(ended("m-box", &id, end("failed", "Deployed with [hidden].")), json!("unknown"), "a terminal task holding another state");
+        assert_eq!(ended("m-box", &id, end("result_available", "Something else.")), json!("unknown"), "a terminal task holding another summary");
+        assert_eq!(ended("m-other", &id, end("result_available", "Deployed with [hidden].")), json!("unknown"), "from a machine that did not run it");
+
+        assert_eq!(ended("m-box", "task-nobody-made", end("result_available", "Suite green.")), json!("unknown"), "a task this machine does not know");
     }
 
     #[test]
@@ -13295,6 +13352,51 @@ Have another model review a risky change before it goes ahead.";
         let third = Machine::new(launch(), Some(config), None, |_| {});
         assert_eq!(third.delegates.remote_ends(), vec![], "an end the hub took is not sent again");
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_remote_end_a_0_18_1_hub_answers_with_a_string_is_sent_once_and_not_again() {
+        use crate::delegate::{Access, Mode, NewTask, Parent};
+        // A 0.18.1 hub passes the origin's answer through as it is, so a 0.18.2 origin's "settled" or
+        // "unknown" reaches the worker. Like a bare false, it is not taken, and the end is not sent again.
+        for answer in [json!(crate::delegate::END_SETTLED), json!(crate::delegate::END_UNKNOWN), json!(false)] {
+            let root = temp("remote-end-string");
+            let m = Machine::new(launch(), Some(root.join("config")), None, |_| {});
+            let sends = Arc::new(AtomicU64::new(0));
+            let (counted, reply) = (sends.clone(), answer.clone());
+            m.set_hub(Arc::new(move |call| match call {
+                HubCall::RemoteEnded { .. } => {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    Ok(reply.clone())
+                }
+                _ => Ok(Value::Null),
+            }));
+            let key = crate::delegate::Origin::key("m-mac", "tab-1");
+            let task = m.delegates.begin(NewTask {
+                parent: Parent::Tab(key.clone()),
+                tool: None,
+                title: "Slow suite".into(),
+                account: "claude".into(),
+                provider: Provider::Claude,
+                model: None,
+                cwd: std::env::temp_dir(),
+                mode: Mode::Async,
+                access: Access::Auto,
+                isolated: false,
+                caller_key: format!("tab:{key}"),
+                client_request_id: Some("task-mac".into()),
+                role: None,
+            });
+            m.delegates.fail(&task.id, "the suite broke".into(), None);
+            let now = Instant::now();
+            m.send_remote_ends(now);
+            m.send_remote_ends(now + REMOTE_LOOK * 2);
+            m.send_remote_ends(now + REMOTE_LOOK * 10);
+            assert_eq!(sends.load(Ordering::SeqCst), 1, "{answer}: sent once, then left");
+            assert_eq!(m.delegates.remote_ends(), vec![], "{answer}: nothing waits to be sent again");
+            drop(m);
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
 
     #[test]

@@ -317,6 +317,7 @@ pub const ACTIONS: &[Action] = &[
     h("record_tasks", Excluded, "machines send their delegated tasks' records by themselves"),
     h("delegation_stats", Read, "How the account's delegated tasks went over the last days (1, 7 or 30), per model.").wired(),
     h("box_usage", Read, "The account's Upstash Box usage: every box the key lists with its CPU hours and compute cost, the totals of this UTC month, and the box hours of pinned's own delegated tasks.").wired(),
+    h("unclaimed_ends", Read, "The account's worker reports that their delegating machine did not take, as one that restarted and forgot the task, or was removed, does: task, origin_machine, origin_tab, from_machine, the end (state, summary, error, usage; keys and tokens of a known shape show as [hidden]), held_at and unclaimed_at in unix ms. The hub keeps each for 30 days from when the worker ended.").wired(),
     h("delegate", Excluded, "a machine's way to run delegate_task on another machine or a box: call delegate_task"),
     h("remote_task", Excluded, "a machine's way to read its remote worker: call task_status"),
     h("remote_ended", Excluded, "a machine's way to report a remote worker's end"),
@@ -1207,6 +1208,13 @@ mod tests {
             remove_box_claude_token: Confirm on "hub" => { "name": "bloom" };
             mint_box_claude_token: Confirm on "hub" => { "machine": "m1", "account": "bloom" };
             cancel_box_claude_token: Write on "hub" => { "machine": "m1", "account": "bloom" };
+            unclaimed_ends: Read on "hub" => {};
+        }
+
+        #[test]
+        fn unclaimed_ends_says_the_mask_hides_keys_and_tokens_of_a_known_shape_only() {
+            let about = find("unclaimed_ends").unwrap().about;
+            assert!(about.contains("keys and tokens of a known shape show as [hidden]"), "{about}");
         }
 
         #[test]

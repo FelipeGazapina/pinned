@@ -1334,6 +1334,10 @@ pub enum HubCall {
     /// `delegate::DelegationStats` of the account's delegated tasks that ended in the last `days`
     /// (1, 7 or 30), on every machine.
     DelegationStats { days: u32 },
+    /// `Vec<delegate::UnclaimedEnd>`: the account's worker ends that the machine whose tab delegated
+    /// the task answered it did not take, as a machine that restarted and forgot the task does.
+    /// The hub keeps each for 30 days, newest first.
+    UnclaimedEnds,
     /// `upstash::BoxUsage`: the account's Upstash Box usage, and pinned's count of the box time its
     /// delegated tasks used this UTC month. The Upstash key stays on the hub.
     BoxUsage,
@@ -2201,6 +2205,7 @@ mod tests {
         assert_eq!(delegate["request"]["target"]["box"], json!({ "size": "large" }), "the box target keeps its own name on the wire");
         round_trip(HubCall::GetTastes, json!({ "cmd": "get_tastes" }));
         round_trip(HubCall::BoxUsage, json!({ "cmd": "box_usage" }));
+        round_trip(HubCall::UnclaimedEnds, json!({ "cmd": "unclaimed_ends" }));
         round_trip(HubCall::DelegationStats { days: 7 }, json!({ "cmd": "delegation_stats", "days": 7 }));
         round_trip(
             HubCall::SetTaste { scope: TasteScope::Project { repo: "github.com/acme/site".into() }, patch: TastePatch { parallel: Some(5), ..TastePatch::default() } },
