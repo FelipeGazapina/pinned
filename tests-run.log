@@ -194,3 +194,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:09:25Z #88 a_captain_delegates_to_another_machine_and_task_status_hears_how_it_ended START / avail=15060M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:09:32Z #88 a_captain_delegates_to_another_machine_and_task_status_hears_how_it_ended ok / avail=15060M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:09:33Z #89 a_remote_workers_approval_shows_on_the_captains_task_and_in_waiting_with_its_machine_and_clears_when_answered START / avail=15060M /workspace avail=19374M node_stat=Ssl
+2026-11-13T04:09:39Z #89 a_remote_workers_approval_shows_on_the_captains_task_and_in_waiting_with_its_machine_and_clears_when_answered ok / avail=15059M /workspace avail=19374M node_stat=Ssl node_tcp=1
