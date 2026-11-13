@@ -5247,6 +5247,55 @@ fn a_worker_box_offline_past_the_grace_ends_and_fails_its_task_with_that_reason(
     wait_for("the row to go", || ana.rows(&hub) == 0);
 }
 
+/// A box machine's tabs as its node reports them while its worker waits on `question`: one tab
+/// with the questionnaire open, as `question_user` leaves it.
+fn tabs_asking(question: &str) -> Value {
+    use pinned_core::questions::{QOption, Question, Questionnaire};
+    let tab: pinned_core::wire::TabView = serde_json::from_value(json!({
+        "id": "tab-w", "cwd": "/workspace/site", "bypass": true, "running": true, "opened": 1_794_240_000u64, "role": "worker",
+    }))
+    .unwrap();
+    let question = Question { header: None, question: question.into(), changes: "the schema".into(), options: vec![QOption { label: "postgres".into(), description: None, recommended: true }], multi_select: false };
+    let tab = pinned_core::questions::shown(tab, &Questionnaire { id: "q-1".into(), title: None, questions: vec![question], projects: vec![], at: 1_794_240_000 });
+    json!({ "kind": "tabs", "tabs": [tab] })
+}
+
+/// Goes through `reap_once` (which keeps what the box's machine asks while it is online) and
+/// `tell_origin` (which reads the kept copy once it is offline): remove either and the task's
+/// error loses the question.
+#[test]
+fn a_worker_box_whose_link_dropped_with_a_question_open_names_it_in_its_tasks_error() {
+    let policy = Policy { offline: Duration::from_secs(2), ..fast() };
+    let hub = TestHub::start_with_boxes("rbox_asked", Signup::Open, policy);
+    let mut ana = BoxAccount::new(&hub);
+    let mac_dir = temp("rbox-asked-mac");
+    let (_mac, _, captain) = mac_with_captain(&hub, &mut ana, &mac_dir);
+    let started = delegate_from(&mac_dir, &captain, json!({ "task": "Run the slow suite.", "title": "Slow suite", "target": { "box": true } })).unwrap();
+    let task = started["taskId"].as_str().unwrap().to_owned();
+    wait_for("the worker thread running on the box", || box_tabs(&hub.boxes).iter().any(|t| t.role == Some(Role::Worker) && t.running));
+    ana.client.wait_machines(&[("mac", true), ("Box · Slow suite", true)]);
+    let id = hub.boxes.live()[0].clone();
+
+    // The box's node goes, and the box's machine comes back showing a question open.
+    drop_box_node(&hub.boxes, &id);
+    let creds: Credentials = serde_json::from_str(&hub.boxes.file(&format!("{BOX_DIR}/account.json")).unwrap()).unwrap();
+    let asking = RawMachine::start_with(&hub.url, &creds.machine_token, vec![tabs_asking("Which \"database\"?\nPostgres or MySQL?")], |_| RawReply::Ok(Value::Null));
+    ana.client.wait_machines(&[("mac", true), ("Box · Slow suite", true)]);
+    // Many reaper passes (50 ms apart) see it online, which is what keeps it.
+    std::thread::sleep(Duration::from_millis(1000));
+    assert_eq!(task_status(&mac_dir, &captain, &task)["workState"], "working", "the box is online and holds its question: nothing ended it");
+
+    drop(asking);
+    wait_for("the box to go", || hub.boxes.live().is_empty());
+    let status = task_status(&mac_dir, &captain, &task);
+    assert_eq!(
+        (status["workState"].as_str(), status["error"].as_str()),
+        (Some("failed"), Some("Upstash Box: its box went offline and did not come back within 2 s, with 1 question unanswered: \"Which 'database'? Postgres or MySQL?\"")),
+        "{status}"
+    );
+    wait_for("the row to go", || ana.rows(&hub) == 0);
+}
+
 /// A raw machine paired to `ana`'s account, which asks the hub for what a node's thread asks.
 fn raw_caller(hub: &TestHub, client: &mut Client, name: &str, machines: &[(&str, bool)]) -> RawMachine {
     let code = client.hub(json!({ "cmd": "pair_code" })).unwrap();
