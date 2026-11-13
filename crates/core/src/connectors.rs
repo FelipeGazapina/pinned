@@ -2428,26 +2428,23 @@ fn slack_run(
     Run { cwd: c.folder.clone(), repo: c.repo(), args, connector: c.id.clone(), subject, mentioned: vec![], account: c.account(), runs_on: c.runs_on.clone(), input }
 }
 
-/// How many characters of a Slack author's name a session sees before the "…" `flat` adds: 49 at
-/// most with it. Any member sets their own name.
-const AUTHOR_CHARS: usize = 48;
-
 /// The thread a session on it opens with, one `author: text` post per line start. Slack text is
 /// third-party text, so its posts go through `pinned_lines` like an agent's.
 fn transcript(posts: &[slack::Post]) -> String {
-    posts.iter().map(|p| format!("{}: {}", pinned_lines::flat(&p.author, AUTHOR_CHARS), pinned_lines::guard(&p.text))).collect::<Vec<_>>().join("\n")
+    posts.iter().map(|p| format!("{}: {}", pinned_lines::author(&p.author), pinned_lines::guard(&p.text))).collect::<Vec<_>>().join("\n")
 }
 
-/// The header of a later message. Its 31 characters around an author `flat` cut to 49 characters
-/// (`AUTHOR_CHARS` and the "…") keep it within `pinned_lines::HEADER_CHARS` (80), so the guard
-/// escapes a forged copy of it in a post's text.
+/// The header of a later message. Its 31 characters around an author `pinned_lines::author` cut to
+/// 49 characters (`AUTHOR_CHARS` and the "…") keep it within `pinned_lines::HEADER_CHARS` (80), so
+/// the guard escapes a forged copy of it in a post's text. It takes the author as the post has it
+/// and cleans it itself, so no caller can put a raw one in.
 fn reply_header(author: &str) -> String {
-    format!("[Slack reply from {author} in the thread]")
+    format!("[Slack reply from {} in the thread]", pinned_lines::author(author))
 }
 
 /// A later message of the thread, as its session receives it.
 fn reply_block(post: &slack::Post) -> String {
-    format!("{}\n{}", reply_header(&pinned_lines::flat(&post.author, AUTHOR_CHARS)), pinned_lines::guard(&post.text))
+    format!("{}\n{}", reply_header(&post.author), pinned_lines::guard(&post.text))
 }
 
 fn routed_note(router: &str, category: &str) -> String {
@@ -2528,7 +2525,7 @@ fn without_bot<'a>(line: &'a str, bot: Option<&str>) -> &'a str {
 }
 
 fn post_lines(posts: &[TriggerPost]) -> String {
-    posts.iter().map(|post| format!("{}: {}", post.author, post.text)).collect::<Vec<_>>().join("\n")
+    posts.iter().map(|post| format!("{}: {}", pinned_lines::author(&post.author), post.text)).collect::<Vec<_>>().join("\n")
 }
 
 /// The thread before its request, and the posts from the request on, which are what a classify
