@@ -215,7 +215,7 @@ async fn ended(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, to: &str, tab
             true
         }
         Err(Unanswered::Refused(_)) => {
-            eprintln!("pinned-server: machine {to} answered the end of task {task} with an error; it is kept unclaimed");
+            eprintln!("{}", refused_line(to, &task));
             keep_unclaimed(hub, account, to, from, &tab, &task, end).await?;
             false
         }
@@ -223,7 +223,7 @@ async fn ended(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, to: &str, tab
     };
     drop(delivering);
     if let Some(row) = worker_box {
-        eprintln!("pinned-server: worker box {} of account {} ends done: its end of task {task} got through or is held", row.id, account.id);
+        eprintln!("{}", box_done_line(row.id, account.id, &task));
         hub.boxes.end_delegate(hub, account, row, crate::boxes::End::Done).await?;
     }
     Ok(Value::Bool(taken))
@@ -271,6 +271,16 @@ const HELD_STATES: [&str; 3] = ["result_available", "failed", "cancelled"];
 /// and no newline or other control character, so it is safe to store and to log.
 fn held_task_ok(task: &str) -> bool {
     !task.is_empty() && task.len() <= HELD_TASK_MAX && !task.chars().any(char::is_control)
+}
+
+/// The log line for an end whose machine `to` answered with an error. `task` is the sender's text.
+fn refused_line(to: &str, task: &str) -> String {
+    format!("pinned-server: machine {to} answered the end of task {task} with an error; it is kept unclaimed")
+}
+
+/// The log line for a worker box that ended done. `task` is the sender's text.
+fn box_done_line(box_id: impl std::fmt::Display, account: Uuid, task: &str) -> String {
+    format!("pinned-server: worker box {box_id} of account {account} ends done: its end of task {task} got through or is held")
 }
 
 /// The most of a held end's summary or error the hub keeps: 256 KiB. A worker's summary is its last
@@ -450,6 +460,18 @@ async fn call(hub: &Hub, account: &Account, machine: &str, call: Call, wait: Dur
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_log_line_about_an_end_carries_no_control_character_from_its_task_id() {
+        for task in ["task-1\nforged line", "task-1\u{7}", "task-1\r\u{1b}[31m", ""] {
+            for line in [refused_line("mac", task), box_done_line("box-1", Uuid::nil(), task)] {
+                assert!(!line.chars().any(char::is_control), "{line:?}");
+                assert!(line.contains("(unreadable id)"), "{line:?}");
+            }
+        }
+        let good = "task-1a2b3c4d";
+        assert!(refused_line("mac", good).contains(good) && box_done_line("box-1", Uuid::nil(), good).contains(good));
+    }
 
     #[test]
     fn a_held_text_past_the_cap_is_cut_with_a_marker_and_never_dropped() {
