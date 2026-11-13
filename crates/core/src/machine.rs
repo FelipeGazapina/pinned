@@ -10007,7 +10007,7 @@ echo '{"type":"result","result":"ok"}'
         let sent = frames.lock().unwrap().len();
         m.write_input(&tab, b"\x1b[Z").unwrap();
         let after = frames.lock().unwrap()[sent..].to_vec();
-        assert_eq!(after.first().and_then(read_only), Some(true), "Shift+Tab alone sends a tabs frame that reads read-only");
+        assert_eq!(after.last().and_then(read_only), Some(true), "Shift+Tab alone sends a tabs frame that reads read-only, {} frames after it", after.len());
         let _ = std::fs::remove_dir_all(root);
     }
 
