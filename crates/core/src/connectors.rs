@@ -5342,7 +5342,7 @@ mod tests {
         let name = workflow.name.clone();
         let store = serde_json::json!({ "connectors": [serde_json::to_value(workflow).unwrap()] });
         let keys = Keys { linear: Some("lin_api_fake".into()), ..Keys::default() };
-        let error = connectors.import(store, keys).err().expect("the import is refused");
+        let error = connectors.import(store, keys).expect_err("the import is refused");
         assert!(error.contains(&format!("workflow {name:?} fails the {check} check")), "{error}");
         assert!(error.contains(why), "{error}");
         assert_eq!(std::fs::read(dir.join("connectors.json")).unwrap(), before, "the store is unchanged");
