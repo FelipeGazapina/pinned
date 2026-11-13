@@ -52,6 +52,7 @@ pub mod scaffold;
 pub mod schedule;
 pub mod scripts;
 pub mod sessions;
+pub mod sleep;
 #[cfg(unix)]
 pub mod shell;
 pub mod setup_token;

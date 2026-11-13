@@ -439,6 +439,12 @@ function submit() {
       `Published ${file} at https://claude.ai/artifact/PgGFrq1LMW2iDhYZThVQcD (Version 1, version id 1792690604-cdcc) Icon: "flow".\n\nTo update: publish the same file path here.`);
     used("Artifact", { action: "quickstart", intent: "other" }, "Start from the Dashboard type.");
     wrote([{ type: "text", text: "Published the page." }]);
+  } else if (line === "cut") {
+    // The turn dies on a dropped connection, as it does when the machine wakes from a sleep.
+    wrote([{ type: "text", text: "Starting the migration now." }]);
+    hook("StopFailure", { last_assistant_message: "API Error: Unable to connect to API (ECONNRESET)", error: "unknown" });
+    line = "";
+    return prompt();
   } else if (line === "oops") {
     record({ type: "assistant", isApiErrorMessage: true, message: { role: "assistant", model: "<synthetic>", content: [{ type: "text", text: "API Error: 529 Overloaded\nThe service is busy. Try again in a moment." }] } });
   } else if (line === "fail") {
