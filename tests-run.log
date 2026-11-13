@@ -133,3 +133,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:06:48Z #60 an_external_agent_connects_through_oauth_and_works_only_where_it_was_let_in START / avail=15073M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:06:55Z #60 an_external_agent_connects_through_oauth_and_works_only_where_it_was_let_in ok / avail=15073M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:06:56Z #61 a_lost_answer_is_reported_as_unknown_and_never_acted_on_twice START / avail=15073M /workspace avail=19374M node_stat=Ssl
+2026-11-13T04:07:00Z #61 a_lost_answer_is_reported_as_unknown_and_never_acted_on_twice ok / avail=15073M /workspace avail=19374M node_stat=Ssl node_tcp=1
