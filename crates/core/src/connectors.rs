@@ -6389,6 +6389,7 @@ mod tests {
     #[test]
     fn a_saved_box_permission_cannot_name_the_fixed_row() {
         let dir = temp_dir("fixed-row-named");
+        std::fs::create_dir_all(&dir).unwrap();
         let connectors = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into());
         let fixed = |row: &str| BoxPermission::Fixed { row: Some(row.into()) };
         let named = connectors.set_box_access(BoxAccess { workflow: fixed("another-row"), session: fixed("row-x"), ..BoxAccess::default() }).unwrap();
