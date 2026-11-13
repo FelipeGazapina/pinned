@@ -2666,7 +2666,7 @@ fn a_box_row_with_no_upstash_id_is_listed_unconfirmed_through_the_real_end_and_a
     let mut client = Client::connect(&hub.url, &ana.token);
     client.wait("hello", |f| f["type"] == "hello");
     for row in [&unrecorded, &recorded] {
-        let refused = client.hub(json!({ "cmd": "remove_machine", "id": row.machine })).unwrap_err();
+        let refused = client.hub(json!({ "cmd": "remove_machine", "id": row.machine.to_string() })).unwrap_err();
         assert!(refused.contains("Invalid box API key"), "{refused}");
     }
     let stuck = client.hub(json!({ "cmd": "stuck_boxes" })).unwrap();
@@ -2684,7 +2684,7 @@ fn a_box_row_with_no_upstash_id_is_listed_unconfirmed_through_the_real_end_and_a
     let mut client = Client::connect(&hub.url, &ana.token);
     client.wait("hello", |f| f["type"] == "hello");
     for row in [&unrecorded, &recorded] {
-        let refused = client.hub(json!({ "cmd": "remove_machine", "id": row.machine })).unwrap_err();
+        let refused = client.hub(json!({ "cmd": "remove_machine", "id": row.machine.to_string() })).unwrap_err();
         assert!(refused.starts_with("Upstash Box is not connected, so box "), "{refused}");
     }
     let stuck = client.hub(json!({ "cmd": "stuck_boxes" })).unwrap();
