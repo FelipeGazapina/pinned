@@ -604,3 +604,15 @@ ship early.
 3. **Opções: stays** for end-of-turn offers; `question_user` is for anything that decides what is
    sent or done.
 4. **The hub's external MCP** (`crates/server/src/mcp.rs`) does not get the tool in 0.18.2.
+
+---
+
+## Decisions (Orchestrator, 2026-11-13)
+
+Felipe asked the Orchestrator to settle the open points. Each is a default kept in one place.
+
+1. **Who sees a worker's question.** It goes straight to the user. The Captain and the Orchestrator are shown a copy.
+2. **Unattended runs.** The run waits, shows in Needs you, and sends a push. It never skips by itself. A per-task time limit is optional and off by default.
+3. **Fallback.** The "Opções:" line stays as the fallback for clients without the tool.
+4. **External MCP clients** do not get the tool in 0.18.2.
+5. **Order.** The PRs start in the order of section 8.
