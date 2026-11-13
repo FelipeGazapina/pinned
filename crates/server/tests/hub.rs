@@ -2826,7 +2826,13 @@ fn hold_box(hub: &mut TestHub, ana: &mut BoxAccount, held: &str) -> String {
 /// first `boxes`.
 fn assert_run_failed(hub: &TestHub, ana: &mut BoxAccount, why: &str, boxes: usize, freed: bool) {
     wait_for("the run to fail", || account_store(hub, ana.id)["runs"][0]["status"]["failed"]["why"].is_string());
-    ana.client.wait("the check that says why", |f| f["type"] == "settings" && f["settings"]["checked"]["error"].as_str().is_some_and(|e| e.contains(why)));
+    // Read, not waited for: a check that ran before the client connected pushed its frame to no one.
+    let says = |ana: &mut BoxAccount| ana.client.hub(json!({ "cmd": "get_settings" })).unwrap()["checked"]["error"].as_str().is_some_and(|e| e.contains(why));
+    let start = Instant::now();
+    while !says(ana) {
+        assert!(start.elapsed() < WAIT, "timed out waiting for the check that says why");
+        std::thread::sleep(Duration::from_millis(100));
+    }
     let store = account_store(hub, ana.id);
     assert_eq!(store["runs"][0]["status"]["failed"]["why"], json!(why), "{store}");
     if freed {
