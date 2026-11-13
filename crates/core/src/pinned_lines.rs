@@ -5,13 +5,24 @@
 /// How many characters of agent text a one-line field keeps.
 pub const FIELD_CHARS: usize = 300;
 
-/// Whether `c` hides in a line: a control character, or an invisible format character such as a
-/// zero-width space, a bidirectional override or isolate, or the byte order mark. The list is
-/// `questions::is_unsafe_in_a_line` of PR #246 without its whitespace rule.
+/// Whether `c` hides in a line: a control character, or a character Unicode marks Default_Ignorable
+/// (a zero-width space, a bidirectional override or isolate, the byte order mark, a variation
+/// selector, a Hangul filler, a tag), or the braille blank U+2800, which shows as nothing. The
+/// list started as `questions::is_unsafe_in_a_line` of PR #246 without its whitespace rule.
 pub fn is_invisible(c: char) -> bool {
     c.is_control()
         || matches!(c,
-            '\u{AD}' | '\u{61C}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{206F}' | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}' | '\u{E0000}'..='\u{E007F}')
+            '\u{AD}' | '\u{34F}' | '\u{61C}' | '\u{115F}'..='\u{1160}' | '\u{17B4}'..='\u{17B5}' | '\u{180B}'..='\u{180F}' | '\u{200B}'..='\u{200F}' | '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{206F}' | '\u{2800}' | '\u{3164}' | '\u{FE00}'..='\u{FE0F}' | '\u{FEFF}' | '\u{FFA0}' | '\u{FFF0}'..='\u{FFFB}' | '\u{1BCA0}'..='\u{1BCA3}' | '\u{1D173}'..='\u{1D17A}' | '\u{E0000}'..='\u{E0FFF}')
+}
+
+/// Whether `c` reads as `[`: itself, the fullwidth `［` or the vertical `﹇`.
+pub fn opens(c: char) -> bool {
+    matches!(c, '[' | '\u{FF3B}' | '\u{FE47}')
+}
+
+/// Whether `c` reads as `]`: itself, the fullwidth `］` or the vertical `﹈`.
+pub fn closes(c: char) -> bool {
+    matches!(c, ']' | '\u{FF3D}' | '\u{FE48}')
 }
 
 /// Whether `paste` drops `c` when it types text into a session: every control character but a
@@ -32,15 +43,16 @@ pub const HEADER_CHARS: usize = 80;
 
 /// Whether `rest`, the text after a `[` at a line start, reads once typed as the rest of a header
 /// such as `[pinned]`, `[Orchestrator]` or `[Session …]`: one to `HEADER_CHARS` characters with no
-/// bracket or line break, then `]`. A character the paste drops or that does not show is skipped,
-/// so it cannot split the header or push it past its length.
+/// bracket or line break, then `]` or a look-alike of it. A character the paste drops, that does
+/// not show, or whitespace is skipped, so it cannot split the header or push it past its length.
 fn closes_a_header(rest: &str) -> bool {
     let mut count = 0;
     for c in rest.chars() {
         match c {
-            ']' => return count > 0,
-            '[' | '\n' => return false,
-            c if dropped_when_typed(c) || is_invisible(c) => {}
+            c if closes(c) => return count > 0,
+            '\n' => return false,
+            c if opens(c) => return false,
+            c if dropped_when_typed(c) || is_invisible(c) || c.is_whitespace() => {}
             _ if count == HEADER_CHARS => return false,
             _ => count += 1,
         }
@@ -49,8 +61,9 @@ fn closes_a_header(rest: &str) -> bool {
 }
 
 /// `text` with every line that begins, after any whitespace or invisible characters, with a
-/// bracketed header (`[`, one to `HEADER_CHARS` characters with no bracket or line break, `]`, in
-/// any case) rewritten to begin with `\[`, so it reads neither as a line pinned typed nor as the
+/// bracketed header (`[`, one to `HEADER_CHARS` characters other than whitespace with no bracket or
+/// line break, `]`, in any case; the fullwidth and vertical look-alikes count as brackets)
+/// rewritten with a backslash before its opening bracket, so it reads neither as a line pinned typed nor as the
 /// header of a sender a seat acts on: `[pinned]`, the global orchestrator's `[<name>]` whatever it
 /// is configured to, the `[Session …]`, `[Captain …]` and `[Worker …]` stamps, `[Slack reply
 /// from …]`. The text is read as the paste types it: a character the paste drops or that does not
@@ -61,7 +74,7 @@ pub fn guard(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut at_start = true;
     for (at, c) in text.char_indices() {
-        if at_start && c == '[' && closes_a_header(&text[at + 1..]) {
+        if at_start && opens(c) && closes_a_header(&text[at + c.len_utf8()..]) {
             out.push('\\');
         }
         out.push(c);

@@ -103,21 +103,31 @@ impl Settings {
         std::fs::write(dir.join(SETTINGS_FILE), serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
     }
 
-    /// The name on one line and at most 40 characters, the default one when blank or when it reads
-    /// as `pinned`, the mark of pinned's own lines. It sits inside `[` `]` in every prefix and
-    /// report, so brackets are dropped.
+    /// The name on one line and at most 40 characters, the default one when blank or when its
+    /// letters alone read as `pinned` (`p.i.n.n.e.d`, `pin ned`, fullwidth letters), the mark of
+    /// pinned's own lines. It sits inside `[` `]` in every prefix and
+    /// report, so brackets and their look-alikes are dropped.
     pub fn cleaned(mut self) -> Self {
         let name: String = self
             .name
             .chars()
-            .filter(|c| !matches!(c, '[' | ']'))
+            .filter(|c| !(crate::pinned_lines::opens(*c) || crate::pinned_lines::closes(*c)))
             .map(|c| if c.is_control() || c.is_whitespace() { ' ' } else { c })
             .filter(|c| !crate::pinned_lines::is_invisible(*c))
             .collect();
         let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
-        self.name = if name.is_empty() || name.eq_ignore_ascii_case("pinned") { default_name() } else { name.chars().take(NAME_MAX).collect() };
+        self.name = if name.is_empty() || reads_as_pinned(&name) { default_name() } else { name.chars().take(NAME_MAX).collect() };
         self
     }
+}
+
+/// Whether `name`'s letters alone, fullwidth Latin ones read as ASCII, spell `pinned` in any case.
+fn reads_as_pinned(name: &str) -> bool {
+    let ascii = |c: char| match c {
+        '\u{FF21}'..='\u{FF3A}' | '\u{FF41}'..='\u{FF5A}' => char::from_u32(c as u32 - 0xFEE0).unwrap_or(c),
+        c => c,
+    };
+    name.chars().map(ascii).filter(|c| c.is_alphabetic()).flat_map(char::to_lowercase).eq("pinned".chars())
 }
 
 /// What became of a message handed to a Capitão, or of a report handed to the orchestrator.
