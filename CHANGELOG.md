@@ -2,6 +2,10 @@
 
 ## 0.18.2 (Unreleased)
 
+### Added
+
+- A thread that stopped on an API error while the computer slept now shows a Needs you card saying when it slept, with a Continue button (for a Captain, also how many delegated tasks are still running). Nothing is typed for you.
+
 ### Fixed
 
 - Workflows: in New workflow, clicking Linear (or any Slack option) with that connector connected now continues the setup instead of opening Connectors. Since 0.17.10 every option sent you to Connectors and said "Connect Linear", whatever was connected. When the connector is missing, Connectors now says which workflow sent you there, and connecting it, or Back to the workflow, returns you to that workflow as you left it.

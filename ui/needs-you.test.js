@@ -215,6 +215,21 @@ test("the list puts asks first, newest first, then limits, failures, reviews and
   assert.equal(page({ items: [item(push, "failed")], agents: [{ id: "c", action: "x", args: {}, role: "worker", title: "t", at: S }] })("needsYouSummary(needsYouCards())"), "1 thread on 1 machine · 1 agent request");
 });
 
+test("a turn cut by a sleep says when the machine slept and offers Continue and Open; a Captain's says how many delegated tasks still run", async () => {
+  const solo = tab("Fix the form", { status: "failed", updated: S - 200 });
+  const captain = tab("Release v0.18.2", { status: "failed", role: "orchestrator", updated: S - 100 });
+  const sleep = (delegated) => ({ slept_at: S - 25_000, woke_at: S - 300, delegated, text: "Stopped while the Mac slept (00:30\u201307:12): API error" });
+  const run = page({ items: [item(solo, "sleep", { sleep: sleep(0) }), item(captain, "sleep", { sleep: sleep(2) })] });
+  const card = shown(run, `thread:${solo.key}`);
+  assert.deepEqual([card.head, card.line, card.buttons], ["Stopped pinned · mac-mini", "Stopped while the Mac slept (00:30\u201307:12): API error", ["continue Continue", "open Open"]]);
+  const lines = (key) => [...shown(run, key).html.matchAll(/<p class="ny-line">([\s\S]*?)<\/p>/g)].map((m) => text(m[1]));
+  assert.deepEqual(lines(`thread:${solo.key}`), ["Stopped while the Mac slept (00:30\u201307:12): API error"], "a plain thread says nothing of tasks");
+  assert.deepEqual(lines(`thread:${captain.key}`), ["Stopped while the Mac slept (00:30\u201307:12): API error", "2 delegated tasks still running with nobody to supervise them."]);
+  run("globalThis.typed = []; globalThis.typeInto = async (tab, data) => typed.push([tab.title, data]); globalThis.setTimeout = (f) => f();");
+  await run("needsYouContinue(needsYouCards()[0])");
+  assert.deepEqual(JSON.parse(JSON.stringify(run("typed"))), [["Release v0.18.2", "Continue from where you left off."], ["Release v0.18.2", "\r"]], "Continue types the prompt, then Enter, and nothing else");
+});
+
 test("a card answers the ask it drew, and says so when the thread asks something else by then", async () => {
   const push = tab("Tidy the README", { updated: S - 120 });
   const drawn = { kind: "approval", text: null, command: "git push", choices: [approve, decline], typed: true };
