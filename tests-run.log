@@ -236,3 +236,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:17:06Z #109 a_notice_missed_while_its_machine_was_offline_is_tried_again_after_it_reconnects_until_its_tab_is_back START / avail=15048M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:17:32Z #109 a_notice_missed_while_its_machine_was_offline_is_tried_again_after_it_reconnects_until_its_tab_is_back ok / avail=15048M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:17:33Z #110 a_notice_the_machine_took_but_the_hub_never_recorded_is_sent_again_without_reaching_the_session_twice START / avail=15048M /workspace avail=19374M node_stat=Ssl
+2026-11-13T04:17:41Z #110 a_notice_the_machine_took_but_the_hub_never_recorded_is_sent_again_without_reaching_the_session_twice ok / avail=15048M /workspace avail=19374M node_stat=Ssl node_tcp=1
