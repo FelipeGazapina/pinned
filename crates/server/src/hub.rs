@@ -99,7 +99,8 @@ pub(crate) fn work_of(call: &HubCall) -> Option<(String, Subject)> {
         _ => None,
     }
 }
-
+/// The call that starts `spec` on a machine. A Run now goes as `RunNow`, which the machine holds
+/// to the limits of the project it runs in.
 pub(crate) fn run_call(spec: RunSpec, subject: &Subject) -> Call {
     if pinned_core::connectors::is_run_now(subject) {
         let title = pinned_core::connectors::run_now_title(&spec);
