@@ -2137,6 +2137,8 @@ fn integration_keys_reach_postgres_sealed() {
 
 const BOX_KEY: &str = "box_testkey";
 const CLAUDE_TOKEN: &str = "sk-ant-oat01-testtoken";
+/// What opening a box answers while Upstash Box is not connected.
+const NOT_CONNECTED: &str = "Upstash Box is not connected: connect it in pinned's Connectors settings";
 const BOX_DIR: &str = "/workspace/home/.pinned";
 
 struct FakeBox {
@@ -2360,6 +2362,11 @@ impl BoxAccount {
         hub.runtime.block_on(hub.hub().db.boxes(self.id)).unwrap().len()
     }
 
+    /// How many tabs the hub last had from the box machine `machine`, or None while it is offline or has sent no tabs frame.
+    fn tabs_held(&self, hub: &TestHub, machine: &str) -> Option<usize> {
+        hub.runtime.block_on(hub.hub().account(self.id)).unwrap().tabs_of(machine).map(|tabs| tabs.len())
+    }
+
     fn box_machine(&mut self) -> String {
         self.client.pump();
         let latest = self.client.frames.iter().rev().find(|f| f["type"] == "machines").unwrap();
@@ -2525,6 +2532,97 @@ fn removing_a_box_machine_or_disconnecting_upstash_deletes_its_boxes() {
     ana.client.wait_machines(&[]);
     ana.client.wait("settings without Upstash", |f| f["type"] == "settings" && f["settings"]["upstash"].is_null());
     assert_eq!(open(ana.box_run(issue("uuid-3"))), Err("Upstash Box is not connected: connect it in pinned's Connectors settings".into()));
+}
+
+/// A hub restarted over secrets an outside edit changed, with a box running per call to `box_run`.
+fn restart_with_secrets(hub: &mut TestHub, edit: &str) {
+    admin_on(&hub.database, &format!("update accounts set secrets = {edit}"));
+    hub.restart();
+}
+
+#[test]
+fn a_box_ends_with_only_the_upstash_key_stored() {
+    let mut hub = TestHub::start_with_boxes("box_key_only", Signup::Open, Policy { tab_gone: Duration::from_secs(3600), offline: Duration::from_secs(3600), ..fast() });
+    let mut ana = BoxAccount::new(&hub);
+    let account = ana.id;
+    let open = |hub: &TestHub, work| hub.runtime.block_on(hub.hub().open(account, work));
+    assert_eq!(open(&hub, ana.box_run(issue("uuid-1"))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    let first = ana.box_machine();
+    assert_eq!(open(&hub, ana.box_run(issue("uuid-2"))), Ok(()));
+    assert_eq!((hub.boxes.live().len(), ana.rows(&hub)), (2, 2));
+
+    // The Claude token is gone from the stored secrets, the Box key stays.
+    restart_with_secrets(&mut hub, "secrets - 'claude-oauth-token'");
+    let mut client = Client::connect(&hub.url, &ana.token);
+    client.wait("hello", |f| f["type"] == "hello");
+    assert_eq!(open(&hub, ana.box_run(issue("uuid-3"))), Err(NOT_CONNECTED.into()), "the Claude token is really gone, so no box opens");
+    client.hub(json!({ "cmd": "remove_machine", "id": first })).unwrap();
+    assert_eq!((hub.boxes.live(), ana.rows(&hub)), (vec!["box_2".to_owned()], 1), "removing a box machine deletes its box");
+    assert_eq!(client.hub(json!({ "cmd": "disconnect_upstash" })), Ok(Value::Null));
+    assert_eq!((hub.boxes.live(), ana.rows(&hub)), (vec![], 0), "disconnecting Upstash deletes the rest");
+}
+
+#[test]
+fn the_reaper_sweeps_and_ends_a_box_with_only_the_upstash_key_stored() {
+    // A long tab_gone through the restarts: a node that is online with no tabs yet (before its first tabs frame) is not a box whose tab is gone.
+    let mut hub = TestHub::start_with_boxes("box_key_only_reaper", Signup::Open, Policy { tab_gone: Duration::from_secs(3600), offline: Duration::from_secs(3600), ..fast() });
+    let mut ana = BoxAccount::new(&hub);
+    assert_eq!(hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-1")))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    let machine = ana.box_machine();
+
+    // The Claude token is gone from the stored secrets, the Box key stays.
+    restart_with_secrets(&mut hub, "secrets - 'claude-oauth-token'");
+    let mut client = Client::connect(&hub.url, &ana.token);
+    client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    wait_for("the box's tabs frame", || ana.tabs_held(&hub, &machine).is_some_and(|held| held > 0));
+    assert_eq!(
+        hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-2")))),
+        Err(NOT_CONNECTED.into()),
+        "the Claude token is really gone, so no box opens"
+    );
+
+    // The sweep deletes this hub's box that no row names, and keeps the box a row names.
+    let label = pinned_server::boxes::hub_label(&hub.url);
+    hub.boxes.add("box_stray", &[&label, "p:ffffffffffffffff"]);
+    wait_for("the stray box to go", || !hub.boxes.live().contains(&"box_stray".to_owned()));
+    assert_eq!((hub.boxes.live(), ana.rows(&hub)), (vec!["box_1".to_owned()], 1));
+
+    // An end rule deletes the box whose session tab is gone. The tab closes while tab_gone is long, and a hub restarted with a short one finds the box online with no tab, so the end cannot race a first tabs frame.
+    let tabs = hub.boxes.with_node(|node| node.machine.tabs());
+    client.call(&machine, json!({ "cmd": "close_tab", "tab": &tabs[0].id })).unwrap();
+    wait_for("the tab to be reported gone", || ana.tabs_held(&hub, &machine) == Some(0));
+    assert_eq!((hub.boxes.live(), ana.rows(&hub)), (vec!["box_1".to_owned()], 1), "the box stays while tab_gone is long");
+    hub.policy.tab_gone = Duration::from_millis(400);
+    hub.restart();
+    assert_eq!(
+        hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-3")))),
+        Err(NOT_CONNECTED.into()),
+        "the Claude token is still gone after the last restart, so this open places no box"
+    );
+    wait_for("the box to be deleted", || hub.boxes.live().is_empty());
+    wait_for("the row to go", || ana.rows(&hub) == 0);
+}
+
+#[test]
+fn a_box_stays_while_the_upstash_key_itself_is_missing() {
+    // A slow tick, so the reaper's retries do not flood the client with machine lists.
+    let hub = Policy { tab_gone: Duration::from_secs(3600), offline: Duration::from_secs(3600), tick: Duration::from_secs(3600), ..fast() };
+    let mut hub = TestHub::start_with_boxes("box_no_key", Signup::Open, hub);
+    let mut ana = BoxAccount::new(&hub);
+    assert_eq!(hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-1")))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    let machine = ana.box_machine();
+
+    // Only the Box key is gone from the stored secrets, the Claude token stays.
+    restart_with_secrets(&mut hub, "secrets - 'upstash-box-key'");
+    let mut client = Client::connect(&hub.url, &ana.token);
+    client.wait("hello", |f| f["type"] == "hello");
+    let refused = client.hub(json!({ "cmd": "remove_machine", "id": machine })).unwrap_err();
+    assert_eq!(refused, "Upstash Box is not connected, so box box_1 stays until it is");
+    assert!(!refused.contains(BOX_KEY) && !refused.contains(CLAUDE_TOKEN), "{refused}");
+    assert_eq!((hub.boxes.live(), ana.rows(&hub)), (vec!["box_1".to_owned()], 1), "the row stays to be retried");
 }
 
 #[test]
