@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const USAGE: &str = "usage:
-  pinned-server hub --db <postgres url> --listen <addr> --ui <dir> --downloads <dir> [--public-url <url>] [--key-file <file>] [--signup first|open|invite] [--learning-db <postgres url>]
+  pinned-server hub --db <postgres url> --listen <addr> --ui <dir> --downloads <dir> [--public-url <url>] [--key-file <file>] [--signup first|open|invite] [--learning-db <postgres url>] [--trusted-proxy off|railway] [--max-accounts <n>]
   pinned-server pair <hub url> <code> [--name <name>] [--config-dir <dir>]
   pinned-server login <hub url> <email> [--name <name>] [--config-dir <dir>]   (password on stdin or in PINNED_PASSWORD)
   pinned-server node [--config-dir <dir>]";
@@ -85,13 +85,19 @@ impl Args {
 }
 
 fn hub(args: &[String]) -> Result<(), String> {
-    let args = Args::parse(args, &["db", "listen", "ui", "downloads", "public-url", "key-file", "signup", "learning-db"], 0)?;
+    let args = Args::parse(args, &["db", "listen", "ui", "downloads", "public-url", "key-file", "signup", "learning-db", "trusted-proxy", "max-accounts"], 0)?;
     let signup = match args.flags.get("signup").map(String::as_str) {
         None | Some("first") => Signup::First,
         Some("open") => Signup::Open,
         Some("invite") => Signup::Invite,
         Some(other) => return Err(format!("--signup takes first, open or invite, not {other}\n{USAGE}")),
     };
+    let trusted_proxy = args.flags.get("trusted-proxy").map_or(Ok(Default::default()), |name| name.parse())?;
+    let max_accounts = args
+        .flags
+        .get("max-accounts")
+        .map(|n| n.parse::<u32>().map_err(|_| format!("--max-accounts takes a number of accounts, not {n}\n{USAGE}")))
+        .transpose()?;
     let config = pinned_server::Config {
         db: args.required("db")?,
         listen: args.required("listen")?,
@@ -104,6 +110,7 @@ fn hub(args: &[String]) -> Result<(), String> {
         box_policy: pinned_server::boxes::Policy::default(),
         convex_http: std::sync::Arc::new(pinned_core::convex::client::Reqwest),
         learning_db: args.flags.get("learning-db").cloned(),
+        access: pinned_server::http::Access { trusted_proxy, max_accounts },
     };
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     runtime.block_on(async {

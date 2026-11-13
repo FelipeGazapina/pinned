@@ -47,6 +47,7 @@ struct TestHub {
     /// The learning database's name, when the hub runs with one.
     learning: Option<String>,
     signup: Signup,
+    access: pinned_server::http::Access,
 }
 
 impl TestHub {
@@ -68,6 +69,18 @@ impl TestHub {
     }
 
     fn start_full(name: &str, signup: Signup, policy: Policy, with_learning: bool) -> TestHub {
+        TestHub::start_all(name, signup, policy, with_learning, Default::default(), "127.0.0.1:0")
+    }
+
+    /// A hub that takes `access` and is reached at this machine's own address, so its peer is not loopback,
+    /// as when a proxy on another machine sends the requests.
+    fn start_behind_proxy(name: &str, signup: Signup, access: pinned_server::http::Access) -> TestHub {
+        let mut hub = TestHub::start_all(name, signup, Policy::default(), false, access, "0.0.0.0:0");
+        hub.url = format!("http://{}:{}", lan_address(), hub.running.as_ref().unwrap().addr.port());
+        hub
+    }
+
+    fn start_all(name: &str, signup: Signup, policy: Policy, with_learning: bool, access: pinned_server::http::Access, listen: &str) -> TestHub {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let database = format!("pinned_test_{name}_{}", std::process::id());
         admin(&format!("drop database if exists {database} with (force)"));
@@ -83,8 +96,8 @@ impl TestHub {
         std::fs::create_dir_all(dir.join("downloads")).unwrap();
         std::fs::write(dir.join("downloads/pinned-server-x86_64-unknown-linux-musl"), "ELF").unwrap();
         let boxes = FakeBoxes::new(dir.join("boxes"));
-        let mut hub = TestHub { runtime: tokio::runtime::Runtime::new().unwrap(), running: None, url: String::new(), database, dir, boxes, policy, learning, signup };
-        hub.serve("127.0.0.1:0");
+        let mut hub = TestHub { runtime: tokio::runtime::Runtime::new().unwrap(), running: None, url: String::new(), database, dir, boxes, policy, learning, signup, access };
+        hub.serve(listen);
         hub
     }
 
@@ -101,6 +114,7 @@ impl TestHub {
             box_policy: self.policy.clone(),
             convex_http: Arc::new(Replay::new(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../core/tests/fixtures/convex"), CONVEX_KEY).unwrap()),
             learning_db: self.learning.as_ref().map(|learning| format!("{}/{learning}", postgres())),
+            access: self.access,
         };
         let start = Instant::now();
         // A restarted hub takes its old address, which the dying runtime may not have let go of yet.
@@ -1865,6 +1879,160 @@ const INVITE_NEEDED: &str = "this hub needs a valid invite code to create an acc
 
 fn refused_signup() -> (u16, Value) {
     (403, json!({ "error": INVITE_NEEDED }))
+}
+
+const NOT_TAKING: &str = "This hub is not taking new accounts.";
+
+/// This machine's address on its network: a connection to the hub from here arrives from it, not from
+/// loopback, as one from a proxy on another machine does.
+fn lan_address() -> std::net::IpAddr {
+    let probe = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+    // Nothing is sent: connecting a UDP socket only picks the interface a packet to it would leave by.
+    probe.connect("192.0.2.1:9").unwrap();
+    let address = probe.local_addr().unwrap().ip();
+    assert!(!address.is_loopback(), "this test needs a machine with a non-loopback address, not {address}");
+    address
+}
+
+/// A JSON `POST` with these headers, as a proxy forwards a client's: the status and the body.
+fn post_with(url: &str, path: &str, headers: &[(&str, &str)], body: Value) -> (u16, Value) {
+    let mut request = reqwest::blocking::Client::new().post(format!("{url}{path}")).header("content-type", "application/json");
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let response = request.body(body.to_string()).send().unwrap();
+    let status = response.status().as_u16();
+    (status, serde_json::from_str(&response.text().unwrap()).unwrap())
+}
+
+fn new_account(n: usize) -> Value {
+    json!({ "email": format!("user{n}@example.invalid"), "password": "correct horse" })
+}
+
+fn behind(proxy: pinned_server::http::TrustedProxy, max_accounts: Option<u32>) -> pinned_server::http::Access {
+    pinned_server::http::Access { trusted_proxy: proxy, max_accounts }
+}
+
+const TOO_MANY_SIGNUPS: &str = "too many sign ups; try again in 15 minutes";
+
+#[test]
+fn an_open_hub_stops_taking_accounts_at_its_cap() {
+    let hub = TestHub::start_behind_proxy("cap", Signup::Open, behind(pinned_server::http::TrustedProxy::Off, Some(2)));
+    let url = hub.url.clone();
+    let (status, ana) = post_with(&url, "/api/signup", &[], new_account(1));
+    assert_eq!(status, 200, "{ana}");
+    assert_eq!(post_with(&url, "/api/signup", &[], new_account(2)).0, 200);
+    assert_eq!(post_with(&url, "/api/signup", &[], new_account(3)), (403, json!({ "error": NOT_TAKING })), "the third account is over the cap");
+    assert_eq!(post_with(&url, "/api/signup", &[], new_account(1)), (403, json!({ "error": NOT_TAKING })), "a full hub doesn't say which emails it has");
+    assert!(account::login(&url, "user1@example.invalid", "correct horse").is_ok(), "a full hub still lets its accounts in");
+    assert_eq!(account::signup(&url, "user4@example.invalid", "correct horse"), Err(NOT_TAKING.into()), "the app shows the hub's words");
+    assert_eq!(reqwest::blocking::get(format!("{url}/api/signup")).unwrap().text().unwrap(), r#"{"signup":"open"}"#, "the hub's mode is unchanged on the wire");
+}
+
+#[test]
+fn a_hub_without_a_cap_keeps_taking_accounts() {
+    let hub = TestHub::start_behind_proxy("nocap", Signup::Open, Default::default());
+    for n in 0..4 {
+        let (status, body) = post_with(&hub.url, "/api/signup", &[("x-forwarded-for", &format!("10.0.0.{n}"))], new_account(n));
+        assert_eq!(status, 200, "{body}");
+    }
+}
+
+#[test]
+fn a_cap_counts_the_first_account_and_a_full_hub_keeps_an_invite_unspent() {
+    let mut hub = TestHub::start_with("capinvite", Signup::Invite);
+    hub.access.max_accounts = Some(0);
+    hub.restart();
+    assert_eq!(post_with(&hub.url, "/api/signup", &[], new_account(1)), (403, json!({ "error": NOT_TAKING })), "a cap of none refuses even the first account");
+
+    hub.access.max_accounts = Some(2);
+    hub.restart();
+    let url = hub.url.clone();
+    let (status, ana) = post_with(&url, "/api/signup", &[], new_account(1));
+    assert_eq!(status, 200, "the first account of an invite hub needs no code: {ana}");
+    let mut ana_client = signed_in_client(&url, ana["token"].as_str().unwrap());
+    let first = ana_client.hub(json!({ "cmd": "create_invite" })).unwrap()["code"].as_str().unwrap().to_owned();
+    let second = ana_client.hub(json!({ "cmd": "create_invite" })).unwrap()["code"].as_str().unwrap().to_owned();
+    let mut bruno = new_account(2);
+    bruno["invite"] = json!(first);
+    assert_eq!(post_with(&url, "/api/signup", &[], bruno).0, 200, "an invite takes the second place");
+    let mut carla = new_account(3);
+    carla["invite"] = json!(second);
+    assert_eq!(post_with(&url, "/api/signup", &[], carla.clone()), (403, json!({ "error": NOT_TAKING })), "the hub is full, whatever the code");
+
+    hub.access.max_accounts = Some(3);
+    hub.restart();
+    assert_eq!(post_with(&hub.url, "/api/signup", &[], carla).0, 200, "the refused code was not spent");
+}
+
+#[test]
+fn signups_from_two_forwarded_addresses_count_apart() {
+    let hub = TestHub::start_behind_proxy("fwdsignup", Signup::Open, behind(pinned_server::http::TrustedProxy::Railway, None));
+    let url = hub.url.clone();
+    let from = |address: &str, n: usize| post_with(&url, "/api/signup", &[("x-real-ip", address)], new_account(n));
+    for n in 0..5 {
+        assert_eq!(from("203.0.113.10", n).0, 200, "five sign ups from one address fit the limit");
+    }
+    assert_eq!(from("203.0.113.10", 5), (429, json!({ "error": TOO_MANY_SIGNUPS })), "the sixth from it does not");
+    assert_eq!(from("203.0.113.11", 6).0, 200, "another address behind the same proxy has its own count");
+    // The edge overwrites X-Forwarded-For too, so the hub counts no part of it.
+    let spoofed = |left: &str, n: usize| post_with(&url, "/api/signup", &[("x-real-ip", "203.0.113.12"), ("x-forwarded-for", left)], new_account(n));
+    for n in 10..15 {
+        assert_eq!(spoofed(&format!("6.6.6.{n}"), n).0, 200);
+    }
+    assert_eq!(spoofed("7.7.7.7", 15).0, 429, "a changing X-Forwarded-For doesn't make a new address");
+    assert_eq!(post_with(&url, "/api/signup", &[("x-real-ip", "not an address"), ("x-forwarded-for", "1.2.3.4")], new_account(16)).0, 200, "an unreadable X-Real-IP counts as the proxy's own address");
+}
+
+#[test]
+fn failed_logins_from_one_forwarded_address_do_not_lock_out_another() {
+    let hub = TestHub::start_behind_proxy("fwdlogin", Signup::Open, behind(pinned_server::http::TrustedProxy::Railway, None));
+    let url = hub.url.clone();
+    assert_eq!(post_with(&url, "/api/signup", &[("x-real-ip", "203.0.113.1")], new_account(1)).0, 200);
+    let attempt = |address: &str, password: &str| {
+        post_with(&url, "/api/login", &[("x-real-ip", address)], json!({ "email": "user1@example.invalid", "password": password })).0
+    };
+    for _ in 0..10 {
+        assert_eq!(attempt("203.0.113.66", "wrong horse"), 401);
+    }
+    assert_eq!(attempt("203.0.113.66", "wrong horse"), 429, "the stranger is locked out");
+    assert_eq!(attempt("203.0.113.1", "correct horse"), 200, "the owner, at another address, is not");
+}
+
+#[test]
+fn a_forwarded_address_from_a_peer_nobody_trusts_does_not_change_what_the_limiter_counts() {
+    let hub = TestHub::start_behind_proxy("untrusted", Signup::Open, Default::default());
+    let url = hub.url.clone();
+    for n in 0..5 {
+        let address = format!("203.0.113.{n}");
+        let (status, body) = post_with(&url, "/api/signup", &[("x-forwarded-for", &address), ("x-real-ip", &address)], new_account(n));
+        assert_eq!(status, 200, "{body}");
+    }
+    let (status, body) = post_with(&url, "/api/signup", &[("x-forwarded-for", "203.0.113.99"), ("x-real-ip", "203.0.113.99")], new_account(5));
+    assert_eq!((status, body), (429, json!({ "error": TOO_MANY_SIGNUPS })), "six clients that only claim other addresses are the peer's one");
+}
+
+#[test]
+fn a_trusted_proxy_of_off_reads_no_forwarded_header_from_a_peer_off_this_host() {
+    // A hub told "off" and a hub told nothing agree.
+    let hub = TestHub::start_behind_proxy("proxyoff", Signup::Open, behind("off".parse().unwrap(), None));
+    for n in 0..5 {
+        assert_eq!(post_with(&hub.url, "/api/signup", &[("x-real-ip", &format!("203.0.113.{n}"))], new_account(n)).0, 200);
+    }
+    assert_eq!(post_with(&hub.url, "/api/signup", &[("x-real-ip", "203.0.113.50")], new_account(5)).0, 429);
+}
+
+#[test]
+fn with_no_trusted_proxy_a_loopback_proxys_last_forwarded_hop_still_counts() {
+    // Today's rule, for nginx on the hub's own host: the last X-Forwarded-For hop is the client, X-Real-IP is not read.
+    let hub = TestHub::start("loopbackproxy");
+    let url = hub.url.clone();
+    let from = |forwarded: &str, n: usize| post_with(&url, "/api/signup", &[("x-forwarded-for", forwarded), ("x-real-ip", &format!("198.51.100.{n}"))], new_account(n));
+    for n in 0..5 {
+        assert_eq!(from(&format!("6.6.6.{n}, 10.0.0.1"), n).0, 200, "a client's own left part and a changing X-Real-IP don't make new addresses");
+    }
+    assert_eq!(from("7.7.7.7, 10.0.0.1", 5).0, 429, "the last hop is the one that counts");
+    assert_eq!(from("7.7.7.7, 10.0.0.2", 6).0, 200, "another last hop is another address");
 }
 
 fn signed_in_client(url: &str, token: &str) -> Client {

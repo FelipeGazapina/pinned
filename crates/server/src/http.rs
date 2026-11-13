@@ -50,8 +50,41 @@ const DICTATION_TEXT_CHARS: usize = 20_000;
 const DICTATION_LABEL_CHARS: usize = 40;
 const DICTATION_LONGEST_MS: u64 = 24 * 60 * 60 * 1000;
 
+/// Which proxy in front of the hub the hub believes about a client's address. Off unless the hub is told.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TrustedProxy {
+    /// No proxy is believed, except one on this host: nginx on loopback, whose last `X-Forwarded-For` hop counts.
+    #[default]
+    Off,
+    /// Railway's edge, which sets `X-Real-IP` to the address it accepted the connection from.
+    Railway,
+}
+
+impl std::str::FromStr for TrustedProxy {
+    type Err = String;
+
+    fn from_str(name: &str) -> Result<TrustedProxy, String> {
+        match name {
+            "off" => Ok(TrustedProxy::Off),
+            "railway" => Ok(TrustedProxy::Railway),
+            other => Err(format!("--trusted-proxy takes off or railway, not {other}")),
+        }
+    }
+}
+
+/// Who and how many the hub lets in, beyond `--signup`.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Access {
+    pub trusted_proxy: TrustedProxy,
+    /// Accounts the hub holds at most; none means no limit.
+    pub max_accounts: Option<u32>,
+}
+
 pub struct Server {
     pub(crate) hub: Arc<Hub>,
+    access: Access,
+    /// Held from counting accounts to making one, so a hub with a cap can't pass it.
+    signups: tokio::sync::Mutex<()>,
     downloads: PathBuf,
     attempts: Mutex<HashMap<String, Vec<Instant>>>,
     hashing: tokio::sync::Semaphore,
@@ -92,8 +125,8 @@ fn route(spec: &str) -> &str {
     spec.split_once(' ').expect("METHOD /path").1
 }
 
-pub fn router(hub: Arc<Hub>, ui: PathBuf, downloads: PathBuf, learning: Option<db::Learning>) -> Router {
-    let server = Arc::new(Server { hub, downloads, attempts: Mutex::default(), hashing: tokio::sync::Semaphore::new(CONCURRENT_HASHES), learning });
+pub fn router(hub: Arc<Hub>, ui: PathBuf, downloads: PathBuf, learning: Option<db::Learning>, access: Access) -> Router {
+    let server = Arc::new(Server { hub, access, signups: tokio::sync::Mutex::new(()), downloads, attempts: Mutex::default(), hashing: tokio::sync::Semaphore::new(CONCURRENT_HASHES), learning });
     Router::new()
         .route(route("POST /api/signup"), post(signup))
         // The app's sign-in form reads it from whichever hub the user types, so any origin may.
@@ -169,7 +202,7 @@ async fn signed_in(server: &Server, headers: &HeaderMap) -> Result<db::Login, Er
 
 /// The address a request came from: nginx's last `X-Forwarded-For` hop when it came through a
 /// proxy on this host, else the peer itself.
-pub(crate) fn client_address(peer: SocketAddr, headers: &HeaderMap) -> String {
+pub(crate) fn client_address(_trusted: TrustedProxy, peer: SocketAddr, headers: &HeaderMap) -> String {
     let forwarded = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()).and_then(|v| v.rsplit(',').next()).map(str::trim);
     match forwarded {
         Some(hop) if peer.ip().is_loopback() && !hop.is_empty() => hop.to_owned(),
@@ -222,7 +255,7 @@ async fn signup(State(server): State<Arc<Server>>, ConnectInfo(peer): ConnectInf
     if server.hub.signup == Signup::First && !first {
         return Err(Error(StatusCode::FORBIDDEN, "this hub already has its account, so sign in with it instead".into()));
     }
-    if !server.attempt(&[(format!("signup:{}", client_address(peer, &headers)), ADDRESS_SIGNUPS)]) {
+    if !server.attempt(&[(format!("signup:{}", server.client_address(peer, &headers)), ADDRESS_SIGNUPS)]) {
         return Err(Error(StatusCode::TOO_MANY_REQUESTS, "too many sign ups; try again in 15 minutes".into()));
     }
     let invite_needed = || Error(StatusCode::FORBIDDEN, INVITE_NEEDED.into());
@@ -250,6 +283,10 @@ async fn signup(State(server): State<Arc<Server>>, ConnectInfo(peer): ConnectInf
 }
 
 impl Server {
+    pub(crate) fn client_address(&self, peer: SocketAddr, headers: &HeaderMap) -> String {
+        client_address(self.access.trusted_proxy, peer, headers)
+    }
+
     /// Counts an attempt against each key and its limit, unless one is spent. The attempt counts
     /// before the password is checked, so a burst of parallel requests can't all slip under the limit.
     pub(crate) fn attempt(&self, keys: &[(String, usize)]) -> bool {
@@ -280,7 +317,7 @@ impl Server {
 
 async fn login(State(server): State<Arc<Server>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, Json(body): Json<SignIn>) -> Answer<Session> {
     let email = email(&body.email)?;
-    let keys = [(format!("email:{email}"), EMAIL_ATTEMPTS), (format!("address:{}", client_address(peer, &headers)), ADDRESS_ATTEMPTS)];
+    let keys = [(format!("email:{email}"), EMAIL_ATTEMPTS), (format!("address:{}", server.client_address(peer, &headers)), ADDRESS_ATTEMPTS)];
     if !server.attempt(&keys) {
         return Err(Error(StatusCode::TOO_MANY_REQUESTS, "too many failed sign ins; try again in 15 minutes".into()));
     }

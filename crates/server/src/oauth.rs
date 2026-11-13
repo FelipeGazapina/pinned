@@ -176,7 +176,7 @@ pub async fn server_metadata(State(server): State<Arc<Server>>) -> Response {
 }
 
 pub async fn register(State(server): State<Arc<Server>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, Json(body): Json<Value>) -> Response {
-    if !server.attempt(&[(format!("agent-register:{}", crate::http::client_address(peer, &headers)), REGISTRATIONS)]) {
+    if !server.attempt(&[(format!("agent-register:{}", server.client_address(peer, &headers)), REGISTRATIONS)]) {
         return oauth_error(StatusCode::TOO_MANY_REQUESTS, "invalid_client_metadata", "too many registrations; try again in 15 minutes");
     }
     let uris: Vec<String> = match body.get("redirect_uris").and_then(Value::as_array) {
@@ -283,7 +283,7 @@ fn tokens(access: String, refresh: String, scopes: &[String]) -> Response {
 }
 
 pub async fn token(State(server): State<Arc<Server>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
-    let limit = [(format!("agent-token:{}", crate::http::client_address(peer, &headers)), TOKEN_FAILURES)];
+    let limit = [(format!("agent-token:{}", server.client_address(peer, &headers)), TOKEN_FAILURES)];
     if !server.attempt(&limit) {
         return oauth_error(StatusCode::TOO_MANY_REQUESTS, "invalid_request", "too many failed token requests; try again in 15 minutes");
     }

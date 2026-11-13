@@ -33,6 +33,8 @@ pub struct Config {
     pub convex_http: Arc<dyn pinned_core::convex::client::Http>,
     /// A second Postgres for what users share to improve the app; without it the hub keeps none.
     pub learning_db: Option<String>,
+    /// Which proxy's client address the hub believes, and how many accounts it takes.
+    pub access: http::Access,
 }
 
 /// How long the hub gives sockets to close once it is told to stop, before it drops them.
@@ -65,7 +67,7 @@ pub async fn start(config: Config) -> Result<Running, String> {
         }
     });
     hub.watch_all().await?;
-    let app = http::router(hub.clone(), config.ui, config.downloads, learning).into_make_service_with_connect_info::<SocketAddr>();
+    let app = http::router(hub.clone(), config.ui, config.downloads, learning, config.access).into_make_service_with_connect_info::<SocketAddr>();
     // `going_away` closes every socket with a close frame, which lets the graceful stop finish. A
     // socket that doesn't answer is dropped after the grace period.
     let (mut stopping, mut forced) = (hub.watch_going_away(), hub.watch_going_away());
