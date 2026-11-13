@@ -2423,6 +2423,9 @@ mod tests {
             json!({ "cmd": "remote_task", "origin_machine": "m2", "tab": "tab-1", "task": "task-1" }),
             json!({ "cmd": "remote_ended", "from": "m2", "tab": "tab-1", "task": "task-1", "end": { "state": "result_available" } }),
             json!({ "cmd": "remote_asked", "from": "m2", "tab": "tab-1", "task": "task-1" }),
+            json!({ "cmd": "repo_look", "path": "/w/site", "look": { "look": "overview" } }),
+            json!({ "cmd": "enqueue", "path": "/w/site", "text": "Ship it.", "request_id": "r-1", "sender": "Orchestrator" }),
+            json!({ "cmd": "cancel_setup_token", "account": "work" }),
         ];
         for call in &hub_only {
             let parsed: Call = serde_json::from_value(call.clone()).unwrap_or_else(|e| panic!("{call}: {e}"));

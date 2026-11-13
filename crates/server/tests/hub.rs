@@ -6164,6 +6164,9 @@ fn a_client_cannot_send_a_call_only_the_hub_sends_and_a_locked_login_still_needs
         json!({ "cmd": "remote_task", "origin_machine": machine.id, "tab": "tab-1", "task": "task-1", "cancel": "not now" }),
         json!({ "cmd": "remote_ended", "from": machine.id, "tab": "tab-1", "task": "task-1", "end": { "state": "result_available", "summary": "Done." } }),
         json!({ "cmd": "remote_asked", "from": machine.id, "tab": "tab-1", "task": "task-1" }),
+        json!({ "cmd": "repo_look", "path": "/w/site", "look": { "look": "overview" } }),
+        json!({ "cmd": "enqueue", "path": "/w/site", "text": "Ship it.", "request_id": "r-1", "sender": "Orchestrator" }),
+        json!({ "cmd": "cancel_setup_token", "account": "work" }),
     ];
     for call in &hub_only {
         assert_eq!(quick(&mut app, call.clone()), refused, "{call}");
