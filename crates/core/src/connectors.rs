@@ -525,9 +525,15 @@ impl BoxAccess {
         Self { workflow: self.workflow.clone(), session: self.session.without_row(), worker: self.worker.without_row(), orchestrator: self.orchestrator.without_row() }
     }
 
-    /// No kind names a row, so the hub names one again when it opens a fixed box.
-    fn without_rows(&self) -> Self {
-        Self { workflow: self.workflow.without_row(), ..self.without_unnamed_rows() }
+    /// As an import brings it: no kind names a row, and the workflow kind is never fixed, since its
+    /// box is exempt from every timer but vanishing and only the owner chooses that, in the app. A
+    /// fixed session, worker or orchestrator kind comes in as it is (it owns no box).
+    fn imported(&self) -> Self {
+        let workflow = match &self.workflow {
+            BoxPermission::Fixed { .. } => BoxPermission::Fresh,
+            other => other.clone(),
+        };
+        Self { workflow, ..self.without_unnamed_rows() }
     }
 }
 
@@ -4587,7 +4593,7 @@ impl Connectors {
             }
         }
         self.channels.lock().unwrap().clear();
-        imported.boxes = imported.boxes.without_rows();
+        imported.boxes = imported.boxes.imported();
         imported.mcp_servers = std::mem::take(&mut current.mcp_servers);
         imported.convex = std::mem::take(&mut current.convex);
         *current = imported;
@@ -6857,12 +6863,38 @@ mod tests {
         assert_eq!(connectors.import(serde_json::json!({ "connectors": [], "boxes": fixed_rows("imported") }), Keys::default()), Ok(true));
         let none = BoxPermission::Fixed { row: None };
         let access = connectors.box_access();
-        assert_eq!((&access.workflow, &access.session, &access.worker, &access.orchestrator), (&none, &none, &none, &none), "no kind keeps a row the client named");
+        assert_eq!((&access.workflow, &access.session, &access.worker, &access.orchestrator), (&BoxPermission::Fresh, &none, &none, &none), "no kind keeps a row the client named, and the workflow kind is not fixed");
         for kind in ["run", "session", "worker", "orchestrator"] {
             assert!(!access.owns_row(&format!("imported-{kind}")), "{kind}: owns_row answers false");
         }
         let reloaded = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into());
-        assert_eq!(reloaded.store.lock().unwrap().boxes.workflow, none, "and the stored file names none either");
+        assert_eq!(reloaded.store.lock().unwrap().boxes.workflow, BoxPermission::Fresh, "and the stored file names none either");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The workflow kind's fixed box is exempt from every box timer but vanishing, so only the
+    /// owner chooses it, in the app: an import (which any machine of the account can send) brings
+    /// that kind as a fresh box, and the hub names no row for it.
+    #[test]
+    fn an_import_brings_a_fixed_workflow_box_as_fresh() {
+        let (connectors, dir) = stored("import-fixed-workflow", vec![]);
+        let boxes = serde_json::json!({ "workflow": { "mode": "fixed", "row": "imported-run" }, "worker": { "mode": "fixed" }, "orchestrator": { "mode": "off" } });
+        assert_eq!(connectors.import(serde_json::json!({ "connectors": [], "boxes": boxes }), Keys::default()), Ok(true));
+        let access = connectors.box_access();
+        assert_eq!(access.workflow, BoxPermission::Fresh, "the workflow kind is no longer fixed");
+        assert_eq!(access.worker, BoxPermission::Fixed { row: None }, "another kind comes in as it was");
+        assert_eq!(access.orchestrator, BoxPermission::Off);
+        assert!(!access.owns_row("imported-run"));
+        assert!(matches!(connectors.claim_fixed_row("row-1"), Ok(FixedClaim::Create)), "the first run creates a box");
+        assert_eq!(connectors.box_access().workflow, BoxPermission::Fresh, "and nothing is stored as the fixed box");
+        assert_eq!(connectors.box_access().workflow.fixed_row(), None);
+        let reloaded = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into());
+        assert_eq!(reloaded.store.lock().unwrap().boxes.workflow, BoxPermission::Fresh, "the stored file says fresh too");
+        // Another mode of the workflow kind comes in as it is.
+        for mode in ["fresh", "off", "ask"] {
+            assert_eq!(connectors.import(serde_json::json!({ "connectors": [], "boxes": { "workflow": { "mode": mode } } }), Keys::default()), Ok(true));
+            assert_eq!(serde_json::to_value(connectors.box_access().workflow).unwrap()["mode"], mode);
+        }
         let _ = std::fs::remove_dir_all(dir);
     }
 

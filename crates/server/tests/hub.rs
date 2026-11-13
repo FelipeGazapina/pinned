@@ -3050,6 +3050,30 @@ fn a_box_row_that_cannot_fail_its_runs_does_not_stop_the_pass_for_the_next_row()
     assert_eq!(hub.boxes.live(), Vec::<String>::new());
 }
 
+/// A workflow kind set to a fixed box is exempt from every box timer but vanishing, so an agent
+/// never sets it: its act waits for the owner, changes nothing meanwhile, and once the owner
+/// approves, the kind is fixed with no row (the hub names one at the first run).
+#[test]
+fn an_agents_set_box_access_to_fixed_waits_for_its_owner_and_changes_nothing_until_then() {
+    let hub = TestHub::start_with_boxes("agent_fixed_box", Signup::Open, fast());
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &token, "ana@acme.dev", "ana-mac");
+    ana.client.hub(json!({ "cmd": "connect_upstash", "key": BOX_KEY, "claude_token": CLAUDE_TOKEN })).unwrap();
+    let workflow = |ana: &mut Agent| ana.client.hub(json!({ "cmd": "get_settings" })).unwrap()["boxes"]["workflow"].clone();
+    // Absent on the wire while it is the default: workflows fresh.
+    assert_eq!(workflow(&mut ana), Value::Null);
+
+    let held = act(&ana.dir, &ana.tab, "set_box_access", json!({ "access": { "workflow": { "mode": "fixed" } } })).unwrap();
+    assert_eq!(held["outcome"], "pending", "{held}");
+    assert_eq!(waiting_actions(&mut ana.client), ["set_box_access"]);
+    assert_eq!(workflow(&mut ana), Value::Null, "nothing changed while it waits");
+
+    ana.client.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    assert_eq!(approve(&mut ana.client, &held["id"], json!({})).unwrap()["outcome"], "done");
+    assert_eq!(workflow(&mut ana), json!({ "mode": "fixed" }), "fixed, naming no row");
+}
+
 #[test]
 fn a_fresh_permission_stops_at_the_accounts_box_limit() {
     let hub = TestHub::start_with_boxes("box_cap", Signup::Open, Policy { max_open: 1, ..fast() });
