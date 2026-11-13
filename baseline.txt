@@ -1,0 +1,93 @@
+baseline at 2026-11-13T03:53:57Z
+== ps (args cut to 200 chars)
+    PID    PPID    PGID     SID COMMAND
+      1       0       1       1 /sbin/docker-init -- docker-entrypoint.sh sh -c su boxuser -c 'B=/workspace/home/.box [ -f "$B/startup.sh" ] || exit 0 cd /workspace/home 2>/dev/null || exit 0 exec 9>>
+      7       1       7       1 tail -f /dev/null
+    288       1     288     288 /workspace/home/.pinned/pinned-server node --config-dir /workspace/home/.pinned
+    391     288     391     391 /opt/runner/node_modules/@anthropic-ai/claude-agent-sdk-linux-arm64/claude --mcp-config /tmp/pinned-288-FKJZ0g/claude-mcp.json /tmp/pinned-mcp-288-nQFyIE/servers.json -
+    470     391     391     391 /workspace/home/.pinned/pinned-server mcp --no-reminders
+    873     391     873     873 /bin/bash -c source /home/boxuser/.claude/shell-snapshots/snapshot-bash-1794542003752-kaj257.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && { \builti
+    875     873     875     873 ps -eo pid,ppid,pgid,sid,args
+    876     873     875     873 cut -c1-200
+    877     873     875     873 sed -E s/((key|token|secret|password|auth)[^ =:<cut> =:]+)[^ ]+/\1<cut>/Ig; s/([?&][^=& ]+=)[^& ]+/\1<cut>/g
+== node pid file
+288
+
+== hub ips
+153.52.255.120  pinned-hub-production.up.railway.app
+== ss -tnp to :443
+ESTAB 0      0       172.18.0.102:53544    153.52.255.9:443  users:(("claude",pid=391,fd=25))       
+ESTAB 0      0       172.18.0.102:53548    153.52.255.9:443  users:(("claude",pid=391,fd=28))       
+ESTAB 0      0       172.18.0.102:56144 185.199.108.133:443  users:(("claude",pid=391,fd=19))       
+ESTAB 0      0       172.18.0.102:37116   34.149.66.165:443  users:(("claude",pid=391,fd=30))       
+ESTAB 0      162     172.18.0.102:57904  153.52.255.120:443  users:(("pinned-server",pid=288,fd=15))
+ESTAB 0      0       172.18.0.102:41198    35.190.46.17:443  users:(("claude",pid=391,fd=34))       
+ESTAB 0      0       172.18.0.102:40728   160.79.104.10:443  users:(("claude",pid=391,fd=12))       
+ESTAB 0      0       172.18.0.102:40730   160.79.104.10:443  users:(("claude",pid=391,fd=14))       
+ESTAB 0      0       172.18.0.102:40740   160.79.104.10:443  users:(("claude",pid=391,fd=15))       
+ESTAB 0      0       172.18.0.102:40752   160.79.104.10:443  users:(("claude",pid=391,fd=17))       
+ESTAB 0      0       172.18.0.102:40758   160.79.104.10:443  users:(("claude",pid=391,fd=21))       
+ESTAB 0      0       172.18.0.102:40774   160.79.104.10:443  users:(("claude",pid=391,fd=23))       
+ESTAB 0      0       172.18.0.102:40788   160.79.104.10:443  users:(("claude",pid=391,fd=24))       
+ESTAB 0      0       172.18.0.102:40800   160.79.104.10:443  users:(("claude",pid=391,fd=27))       
+== /workspace/home/.pinned
+total 34776
+drwxr-xr-x 4 boxuser boxuser     4096 2026-11-13 03:53:57.777080748 +0000 .
+drwxr-xr-x 9 boxuser boxuser      144 2026-11-13 03:53:10.245656783 +0000 ..
+-rw------- 1 boxuser boxuser      238 2026-11-13 03:53:10.000000000 +0000 account.json
+drwxr-xr-x 2 boxuser boxuser        6 2026-11-13 03:53:10.246656749 +0000 bin
+-rw------- 1 boxuser boxuser      187 2026-11-13 03:53:11.000000000 +0000 box.env
+-rw-r--r-- 1 boxuser boxuser      102 2026-11-13 03:53:17.337419128 +0000 made-folders.json
+-rw-r--r-- 1 boxuser boxuser        4 2026-11-13 03:53:11.341620056 +0000 node.pid
+-rwxr-xr-x 1 boxuser boxuser 30723768 2026-11-13 03:53:11.261622737 +0000 pinned-server
+-rw-r--r-- 1 boxuser boxuser       84 2026-11-13 03:53:16.581444462 +0000 projects.json
+-rw-r--r-- 1 boxuser boxuser      486 2026-11-13 03:53:20.378334836 +0000 sessions.json
+-rw-r--r-- 1 boxuser boxuser     2077 2026-11-13 03:53:11.000000000 +0000 start.sh
+-rw------- 1 boxuser boxuser   770835 2026-11-13 03:53:57.768081043 +0000 sync.json
+drwxr-xr-x 4 boxuser boxuser       51 2026-11-13 03:53:16.626442954 +0000 synced-plugins
+-rw-r--r-- 1 boxuser boxuser     1845 2026-11-13 03:53:20.378291167 +0000 tasks.json
+-rw-r--r-- 1 boxuser boxuser     1507 2026-11-13 03:53:16.624443021 +0000 taste.json
+-rw-r--r-- 1 boxuser boxuser  4069847 2026-11-13 03:53:24.433183137 +0000 usage-model-rates.json
+== ~/.pinned
+ls: cannot access '/home/boxuser/.pinned': No such file or directory
+not a symlink
+== ~/.claude (symlink -> /workspace/home/.claude)
+total 44
+drwxr-xr-x 10 boxuser boxuser 4096 2026-11-13 03:53:28.158059289 +0000 .
+drwxr-xr-x  9 boxuser boxuser  144 2026-11-13 03:53:10.245656783 +0000 ..
+-rw-r--r--  1 boxuser boxuser  171 2026-11-13 03:53:28.156059355 +0000 .last-update-result.json
+drwxr-xr-x  2 boxuser boxuser   55 2026-11-13 03:53:11.595611544 +0000 backups
+drwxr-xr-x  2 boxuser boxuser   67 2026-11-13 03:53:20.252322147 +0000 cache
+-rw-------  1 boxuser boxuser 6679 2026-11-13 03:53:17.887400778 +0000 history.jsonl
+drwxr-xr-x  3 boxuser boxuser   69 2026-11-13 03:53:21.033296180 +0000 plugins
+-rw-------  1 boxuser boxuser  284 2026-11-13 03:53:17.613409888 +0000 policy-limits.json
+-rw-------  1 boxuser boxuser 3000 2026-11-13 03:53:17.613409888 +0000 policy-limits.json.signature.json
+-rw-------  1 boxuser boxuser  225 2026-11-13 03:53:17.614409854 +0000 policy-limits.json.stamp.json
+drwxr-xr-x  4 boxuser boxuser  122 2026-11-13 03:53:20.435316062 +0000 projects
+-rw-------  1 boxuser boxuser   29 2026-11-13 03:53:17.668990527 +0000 remote-settings.json
+-rw-------  1 boxuser boxuser 3082 2026-11-13 03:53:17.679407693 +0000 remote-settings.json.signature.json
+drwxr-xr-x  3 boxuser boxuser   58 2026-11-13 03:53:23.764205380 +0000 session-env
+drwx------  2 boxuser boxuser  114 2026-11-13 03:53:17.869401376 +0000 sessions
+-rw-r--r--  1 boxuser boxuser   47 2026-11-13 03:53:11.283621999 +0000 settings.json
+drwxr-xr-x  2 boxuser boxuser   59 2026-11-13 03:53:23.754205712 +0000 shell-snapshots
+drwxr-xr-x 54 boxuser boxuser 4096 2026-11-13 03:53:29.934000241 +0000 skills
+== ~/.claude.json mtime
+2026-11-13 03:53:52.538252242 +0000 /home/boxuser/.claude.json
+== tail -30 /tmp/pinned-node.log
+pinned: connected to https://pinned-hub-production.up.railway.app
+pinned: synced plugins: 0 up, 2337 down
+== env names
+CARGO_HTTP_CAINFO
+HOME
+PINNED_ACCOUNT
+PINNED_PROJECT
+PINNED_ROLE
+PINNED_SOCK
+PINNED_TAB
+PINNED_TUTORIAL_HELPER
+UPSTASH_BOX_ID
+UPSTASH_BOX_NAME
+UPSTASH_BOX_RUNTIME
+== PINNED_SOCK
+srwxr-xr-x 2026-11-13 03:53:11.348619821
+(sock path is under: /tmp/pinned-288-FKJZ0g)
