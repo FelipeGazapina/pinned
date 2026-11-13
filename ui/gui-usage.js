@@ -622,11 +622,11 @@ function boxListsHtml(boxes, now, open) {
     ${others.length ? `<details class="box-others"${open ? " open" : ""}><summary>Other boxes (${others.length})</summary>${boxTableHtml(others, "Other boxes", "Status", now)}</details>` : ""}`;
 }
 const boxNotice = (text) => `<div class="limit-notices" role="alert">${icon("triangle-alert")}<div><p>${esc(text)}</p></div></div>`;
-/** One notice per distinct reason: the boxes pinned could not delete, which may still be running. */
+/** One notice per distinct reason: the boxes pinned could not delete, still running on Upstash. */
 function stuckBoxesHtml(stuck) {
   const byWhy = new Map();
   for (const { why } of stuck ?? []) byWhy.set(why, (byWhy.get(why) ?? 0) + 1);
-  return [...byWhy].map(([why, n]) => boxNotice(`${n} ${n === 1 ? "box" : "boxes"} pinned could not delete: ${why}`)).join("");
+  return [...byWhy].map(([why, n]) => boxNotice(`${n} ${n === 1 ? "box" : "boxes"} pinned could not delete: ${why}. ${n === 1 ? "It is" : "They are"} still running on Upstash and can be deleted in the Upstash console.`)).join("");
 }
 function boxBodyHtml(box, now) {
   const u = box.data;

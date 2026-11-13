@@ -244,7 +244,8 @@ test("boxes pinned could not delete show as one notice per reason, also when Ups
   const stuck = [{ id: "r1", why: "Upstash answered 503" }, { id: "r2", why: "Upstash answered 503" }, { id: "r3", why: "still being deleted" }];
   const off = html({ connected: false, stuck });
   assert.match(off, /2 boxes pinned could not delete: Upstash answered 503/);
-  assert.match(off, /1 box pinned could not delete: still being deleted/);
+  assert.match(off, /1 box pinned could not delete: still being deleted\. It is still running on Upstash and can be deleted in the Upstash console\./);
+  assert.match(off, /2 boxes pinned could not delete: Upstash answered 503\. They are still running on Upstash and can be deleted in the Upstash console\./);
   assert.match(off, /Connect Upstash in Settings/);
   assert.equal(off.match(/limit-notices/g).length, 2);
   const on = html({ connected: true, stuck: [stuck[2]], boxes: [], upstash: { cpu_hours: 0, compute_usd: 0, boxes: 0 }, pinned: PINNED });
@@ -275,7 +276,7 @@ test("the sidebar's Usage entry is marked while a box is stuck, and redrawn once
   };
   const marked = draw(page.usageState.box);
   assert.equal(marked.hidden, false);
-  assert.match(marked.title, /could not delete 1 Upstash box\. It may still be running/);
+  assert.match(marked.title, /could not delete 1 Upstash box\. It is still running on Upstash and can be deleted in the Upstash console\. Open Usage\./);
   assert.equal(draw({ data: { connected: true, stuck: [] } }).hidden, true);
   assert.equal(draw({ data: null }).hidden, true);
 });
