@@ -1,0 +1,18 @@
+Real browser (Chromium), local hub, invented ideas. Type, pause 2 s past the autosave, keep typing in the same field.
+
+gui-ideas.js at c8e0f6bb (before):
+  field: "The charts keep light colors in dark mode. AAAA"        <- " BBBB", typed after the pause, was lost
+  active: BODY.                                                     <- the editor lost the focus
+
+gui-ideas.js after the fix:
+  field: "The charts keep light colors in dark mode. AAAA BBBB"
+  active: TEXTAREA.text
+
+The recording scripts also assert, on both the 1280 px and the 390 px runs:
+  PASS the text field still has the focus after the autosave
+  PASS every typed character landed in the field
+  PASS the text field is the same element as before the pause
+  PASS the second editor has the focus
+  PASS the second idea's editor stays open
+  PASS the first idea saved
+  PASS the deleted idea is gone

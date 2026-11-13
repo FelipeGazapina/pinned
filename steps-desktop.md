@@ -2,23 +2,35 @@
 2. [type] Type your email
 3. [type] Type your password
 4. [click] Press Sign in
-5. [show, in the navigation] The sidebar shows how many ideas are open
-6. [click, in the navigation] Open Ideas from the left sidebar
-7. [show] Ideas are things you might do; facts for agents go in memory
-8. [type] Type a quick idea
-9. [click] Press Save to add it
-10. [show] The new idea is at the top, and the sidebar count went up
-11. [click] Click the idea to edit it
-12. [type] Add some detail; it saves as you type
-13. [show] The editor says Saved
-14. [click] Press Done to close the editor
-15. [click] Open the ⋯ menu on another idea
-16. [click] Choose Mark done
-17. [show, in the navigation] It leaves the Open list and the count drops
-18. [show] Use the status filter to see Done ideas
-19. [show] Done ideas show under the Done filter
-20. [click] Open the ⋯ menu to delete an idea
-21. [click] Choose Delete
-22. [show] It asks once before deleting
-23. [click] Press Delete to confirm
-24. [show] The idea is gone
+5. [show] The sidebar shows how many ideas are open
+6. [click] Open Ideas from the left sidebar
+7. [type] Type a quick idea
+8. [click] Press Save to add it
+9. [show] The new idea is at the top of the list
+10. [click] Click an idea to edit it
+11. [type] Type some detail; it saves by itself
+12. [show] After a short pause the editor says Saved
+13. [type] Keep typing in the same field: the caret and focus are still there
+14. [type] Type a few more words without waiting
+15. [click] Open a second idea while the first still has unsaved words
+16. [show] The first idea was saved, and the second one stays open
+17. [click] Press Done to close the editor
+18. [click] Open the ⋯ menu of another idea
+19. [click] Choose Mark done
+20. [show] Use the Status filter to see the Done ideas
+21. [click] Choose Done in the Status list
+22. [show] It shows under Done
+23. [click] Open its ⋯ menu again
+24. [click] Choose Reopen
+25. [click] Choose Open in the Status list again
+26. [show] Back under Open: the idea is open again
+27. [click] Open the ⋯ menu to delete an idea
+28. [click] Choose Delete
+29. [show] It asks once before deleting
+30. [click] Press Delete to confirm
+31. [show] The idea is gone from the list
+32. [click] Go to another page, Needs you
+33. [show] Open the command palette with ⌘K (Ctrl+K here)
+34. [type] Type “ideas”
+35. [click] Run Open Ideas
+36. [show] The Ideas page opens

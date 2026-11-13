@@ -2,21 +2,30 @@
 2. [type] Type your email
 3. [type] Type your password
 4. [click] Press Sign in
-5. [click, in the navigation] Tap More in the bottom tab bar
-6. [show] Ideas is the first row, with how many are open
-7. [click] Tap Ideas
-8. [show] The quick-add stays at the bottom, above the keyboard
-9. [type] Type a quick idea
-10. [click] Tap Save
-11. [show] The new idea is at the top
-12. [click] Tap the idea to edit it
-13. [type] Add some detail; it saves as you type
-14. [show] The editor says Saved
-15. [click] Tap Done
-16. [click] Tap ⋯ on another idea
-17. [click] Choose Mark done
-18. [click] Tap ⋯ to delete an idea
-19. [click] Choose Delete
-20. [show] It asks once before deleting
-21. [click] Tap Delete to confirm
-22. [show] The idea is gone
+5. [click] Open More from the bottom bar
+6. [click] Open Ideas from the More list
+7. [type] Type a quick idea
+8. [click] Press Save to add it
+9. [show] The new idea is at the top of the list
+10. [click] Click an idea to edit it
+11. [type] Type some detail; it saves by itself
+12. [show] After a short pause the editor says Saved
+13. [type] Keep typing in the same field: the caret and focus are still there
+14. [type] Type a few more words without waiting
+15. [click] Open a second idea while the first still has unsaved words
+16. [show] The first idea was saved, and the second one stays open
+17. [click] Press Done to close the editor
+18. [click] Open the ⋯ menu of another idea
+19. [click] Choose Mark done
+20. [show] Use the Status filter to see the Done ideas
+21. [click] Choose Done in the Status list
+22. [show] It shows under Done
+23. [click] Open its ⋯ menu again
+24. [click] Choose Reopen
+25. [click] Choose Open in the Status list again
+26. [show] Back under Open: the idea is open again
+27. [click] Open the ⋯ menu to delete an idea
+28. [click] Choose Delete
+29. [show] It asks once before deleting
+30. [click] Press Delete to confirm
+31. [show] The idea is gone from the list
