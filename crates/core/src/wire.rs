@@ -62,6 +62,13 @@ impl JsonSchema for Bytes {
     }
 }
 
+/// When the machine slept: the last tick before it and the first after it, in unix seconds.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
+pub struct CutBySleep {
+    pub slept_at: u64,
+    pub woke_at: u64,
+}
+
 /// What a tab runs.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
@@ -108,6 +115,9 @@ pub struct TabView {
     /// A turn was running when pinned quit, so the tab has work left to continue.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub interrupted: bool,
+    /// The turn died on an API error while the machine slept, so it stopped where the sleep cut it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cut_by_sleep: Option<CutBySleep>,
     /// What the conversation's work came to so far, once its transcript holds any of it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stats: Option<ThreadStats>,
@@ -163,6 +173,18 @@ pub struct TabView {
     /// it waits on, read from its transcript, such as the command a permission prompt shows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ask_detail: Option<String>,
+    /// A process runs the tab's session now. `running` also holds for a conversation that sleeps.
+    #[serde(default)]
+    pub alive: bool,
+    /// The conversation sleeps with no process: a message wakes it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub asleep: bool,
+    /// The tab shows a headless child, which works with no session of the tab's own.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub headless: bool,
+    /// Why the tab's last process ended mid-turn, until a new turn or input starts it again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped: Option<String>,
     /// The questionnaire the session waits on the user to answer, which `Call::AnswerQuestions`
     /// answers. While it is open the tab reads as a question mid-turn, so an app that predates it
     /// still shows the tab waiting.
@@ -1087,7 +1109,7 @@ pub enum HubCall {
     /// `RunStarted`: a session of the saved workflow `id`, started now with no trigger behind it,
     /// on the machine the workflow names and under the limits of its project there.
     RunWorkflow { id: String },
-    /// `graph::Graph`: a workflow map drafted from a plain description by a chat model.
+    /// Kept for older apps, whose Generate with AI button still sends it. The hub answers an error: an agent creates a workflow with `save_connector`.
     GenerateWorkflow { model: String, description: String },
     /// Starts an interactive session on a new Upstash Box cloning `repo`. Returns `BoxStatus`.
     OpenBox {
@@ -1343,6 +1365,27 @@ pub enum HubCall {
     /// `Vec<mcp::Entry>`: the account's own MCP servers, which every session pinned starts loads
     /// while enabled, each with the names of its secrets and never their values.
     ListMcpServers,
+    /// `Vec<ideas::Idea>`: the account's ideas, the most recently changed first; with `project` (a repo key),
+    /// only that project's.
+    ListIdeas {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+    },
+    /// `ideas::Idea`: adds an idea, or with `id` changes that one (its title, text and project as sent, and its
+    /// status when sent). The hub sets who made it and the times.
+    SaveIdea {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        title: String,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<crate::ideas::IdeaStatus>,
+    },
+    /// Removes the account's idea `id`.
+    DeleteIdea { id: String },
     /// `mcp::Entry`: adds a server, enabled, or with `id` changes that one, keeping its enabled
     /// state. `secrets` holds what the user typed in the app; a name left out or blank keeps the
     /// value the server has, and a new name needs one.
@@ -1693,6 +1736,7 @@ mod tests {
             updated: Some(1792400000),
             session: Some("s1".into()),
             interrupted: false,
+            cut_by_sleep: None,
             stats: Some(ThreadStats { active_ms: Some(4_320_000), cost_usd: Some(3.42) }),
             branch: Some("felipe/forms".into()),
             pr: Some(PrLink { number: 92, url: "https://github.com/o/site/pull/92".into() }),
@@ -1708,6 +1752,10 @@ mod tests {
             work: None,
             question: None,
             ask_detail: None,
+            alive: true,
+            asleep: false,
+            headless: false,
+            stopped: None,
             questions: None,
         }
     }
@@ -1995,7 +2043,7 @@ mod tests {
         round_trip(
             MachineEvent::Tabs { tabs: vec![tab_view()] },
             json!({ "kind": "tabs", "tabs": [{
-                "id": "tab-3", "cwd": "/repo", "account": "work", "program": "agent", "bypass": false, "running": true, "status": "needs-input",
+                "id": "tab-3", "cwd": "/repo", "account": "work", "program": "agent", "bypass": false, "running": true, "alive": true, "status": "needs-input",
                 "title": "Fix the build", "message": "Claude needs your permission to use Bash",
                 "resume_at": null, "connector": "c1", "subject": { "issue": "uuid" }, "opened": 3, "updated": 1792400000, "session": "s1",
                 "stats": { "active_ms": 4320000, "cost_usd": 3.42 },
@@ -2188,7 +2236,7 @@ mod tests {
             }),
         );
         round_trip(
-            ToClient::Settings { settings: Settings { linear: None, slack: None, slack_bots: vec![], github: None, vercel: None, upstash: None, box_claude_tokens: BTreeMap::new(), connectors: vec![], checked: None, boxes: BoxAccess::default(), box_asks: vec![], convex: vec![], repo_insight: Default::default() } },
+            ToClient::Settings { settings: Settings { linear: None, slack: None, slack_bots: vec![], github: None, vercel: None, upstash: None, box_claude_tokens: BTreeMap::new(), connectors: vec![], checked: None, boxes: BoxAccess::default(), box_asks: vec![], convex: vec![], ideas: vec![], repo_insight: Default::default() } },
             json!({ "type": "settings", "settings": { "linear": null, "slack": null, "github": null, "vercel": null, "upstash": null, "connectors": [], "checked": null } }),
         );
         let old: ToClient = serde_json::from_value(json!({ "type": "machines", "machines": [] })).unwrap();
@@ -2267,6 +2315,14 @@ mod tests {
             json!({ "cmd": "import_mcp_server", "machine": "m1", "account": "claude", "name": "linear", "project": "github.com/a/b" }),
         );
         round_trip(HubCall::LoadMcpServers, json!({ "cmd": "load_mcp_servers" }));
+        round_trip(HubCall::ListIdeas { project: None }, json!({ "cmd": "list_ideas" }));
+        round_trip(HubCall::ListIdeas { project: Some("github.com/a/b".into()) }, json!({ "cmd": "list_ideas", "project": "github.com/a/b" }));
+        round_trip(HubCall::SaveIdea { id: None, title: "An iPad app".into(), text: String::new(), project: None, status: None }, json!({ "cmd": "save_idea", "title": "An iPad app" }));
+        round_trip(
+            HubCall::SaveIdea { id: Some("i1".into()), title: "An iPad app".into(), text: "Maybe.".into(), project: Some("github.com/a/b".into()), status: Some(crate::ideas::IdeaStatus::Dropped) },
+            json!({ "cmd": "save_idea", "id": "i1", "title": "An iPad app", "text": "Maybe.", "project": "github.com/a/b", "status": "dropped" }),
+        );
+        round_trip(HubCall::DeleteIdea { id: "i1".into() }, json!({ "cmd": "delete_idea", "id": "i1" }));
     }
 
     #[test]

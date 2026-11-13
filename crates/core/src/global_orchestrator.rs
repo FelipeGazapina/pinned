@@ -576,7 +576,16 @@ pub fn overview_at(machines: &[MachineSnapshot], now: u64) -> Overview {
         let tabs = if machine.online { machine.tabs } else { &[] };
         for project in machine.projects {
             let captain = captain_tab(tabs, &project.path);
-            let workers = tabs.iter().filter(|t| (t.running || t.status == Some(AgentStatus::Working)) && !finished(t) && t.role == Some(Role::Worker) && history::project_of(Path::new(&t.cwd)) == Path::new(&project.path)).count();
+            // From 0.18.2 a stored status never counts alone: a worker needs a live process, or is a headless child at work.
+            // An older machine never sends `alive`, so it keeps the rule that reads `running` and the status.
+            let reports_alive = reports_alive(machine.version);
+            let workers = tabs
+                .iter()
+                .filter(|t| {
+                    let counts = if reports_alive { (t.alive && !finished(t)) || (t.headless && t.status == Some(AgentStatus::Working)) } else { (t.running || t.status == Some(AgentStatus::Working)) && !finished(t) };
+                    counts && t.role == Some(Role::Worker) && history::project_of(Path::new(&t.cwd)) == Path::new(&project.path)
+                })
+                .count();
             let checkout = OverviewCheckout {
                 machine: machine.id.to_owned(),
                 machine_name: machine.name.to_owned(),
@@ -628,6 +637,23 @@ pub fn overview_at(machines: &[MachineSnapshot], now: u64) -> Overview {
         .map(|m| OverviewMachine { id: m.id.to_owned(), name: m.name.to_owned(), online: m.online, version: m.version.to_owned(), problem: m.problem.map(str::to_owned), state: None })
         .collect();
     Overview { projects, waiting, machines, sessions: Some(sessions) }
+}
+
+/// The first version that sends `TabView.alive` (and `asleep`, `headless`, `stopped`); an older machine leaves it `false`.
+const ALIVE_FROM: (u32, u32, u32) = (0, 18, 2);
+
+/// Whether a machine at `version` sends `TabView.alive`. A machine with no version reads as old; a
+/// version that does not parse (a dev build) does send it.
+fn reports_alive(version: &str) -> bool {
+    if version.trim().is_empty() {
+        return false;
+    }
+    let core = version.split(['-', '+']).next().unwrap_or_default();
+    let mut parts = core.split('.').map(|p| p.parse::<u32>());
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(Ok(major)), Some(Ok(minor)), Some(Ok(patch)), None) => (major, minor, patch) >= ALIVE_FROM,
+        _ => true,
+    }
 }
 
 /// Whether a tab's turn ended and nothing waits on it: idle with a status, unlike a session that
@@ -804,7 +830,9 @@ Quando uma ferramenta falha porque uma máquina ou o hub precisa atualizar, ou p
 Quando uma resposta termina com uma pergunta fechada ao Felipe, a última linha traz só as opções, separadas por \" | \", assim:
 Opções: Sim | Ainda não
 
-Guarde fatos duráveis sobre o Felipe e os projetos dele (preferências, decisões, qual máquina tem o quê) com memory_save, procure com memory_search antes de decidir e apague os errados com memory_forget."
+Guarde fatos duráveis sobre o Felipe e os projetos dele (preferências, decisões, qual máquina tem o quê) com memory_save, procure com memory_search antes de decidir e apague os errados com memory_forget.
+
+O que é verdade e vale lembrar (\"lembra que eu prefiro X\") vai para memory_save. O que talvez se faça um dia (\"anota essa ideia\") vai para save_idea, pela ferramenta act: uma ideia nunca volta para um prompt sozinha, e list_ideas só a lê quando alguém pede. Não mova memórias antigas para ideias por conta própria."
     )
 }
 
@@ -911,6 +939,7 @@ mod tests {
     fn view(id: &str, cwd: &str, role: Option<Role>, running: bool, status: Option<AgentStatus>) -> TabView {
         let mut tab: TabView = serde_json::from_value(serde_json::json!({ "id": id, "cwd": cwd, "bypass": false, "running": running, "status": status, "title": null, "message": null, "resume_at": null, "connector": null, "opened": id.rsplit('-').next().unwrap().parse::<u64>().unwrap() })).unwrap();
         tab.role = role;
+        tab.alive = running;
         tab
     }
 
@@ -953,6 +982,35 @@ mod tests {
                 ],
             })
         );
+    }
+
+    #[test]
+    fn projects_counts_no_stopped_worker_but_counts_a_headless_child() {
+        let site = [project("/w/site", Some("github.com/o/site"))];
+        let tabs = [
+            view("tab-e-1", "/w/site/.claude/worktrees/pinned-1", Some(Role::Worker), true, Some(AgentStatus::Working)),
+            TabView { stopped: Some("cancelled at its time limit".into()), ..view("tab-e-2", "/w/site/.claude/worktrees/pinned-2", Some(Role::Worker), false, Some(AgentStatus::Working)) },
+            TabView { headless: true, ..view("tab-e-3", "/w/site/.claude/worktrees/pinned-3", Some(Role::Worker), false, Some(AgentStatus::Working)) },
+            TabView { asleep: true, alive: false, ..view("tab-e-4", "/w/site", Some(Role::Worker), true, None) },
+        ];
+        let machines = [MachineSnapshot { id: "m", name: "Mac", online: true, version: "0.18.2", projects: &site, tabs: &tabs, problem: None }];
+        let counted = overview(&machines).projects[0].checkouts[0].workers;
+        assert_eq!(counted, 2, "the live worker and the headless child count; the stopped and the sleeping one do not");
+    }
+
+    #[test]
+    fn a_machine_before_0_18_2_counts_its_workers_by_running_and_status() {
+        let site = [project("/w/site", Some("github.com/o/site"))];
+        // What a 0.18.1 machine sends: no `alive`, `asleep`, `headless` or `stopped`.
+        let tab: TabView = serde_json::from_value(serde_json::json!({ "id": "tab-f-1", "cwd": "/w/site/.claude/worktrees/pinned-1", "bypass": false, "running": true, "status": "working", "role": "worker", "title": null, "message": null, "resume_at": null, "connector": null, "opened": 1 })).unwrap();
+        assert!(!tab.alive && tab.role == Some(Role::Worker), "the tab reads as a worker that is not alive");
+        let counted = |version| overview(&[MachineSnapshot { id: "m", name: "Mac", online: true, version, projects: &site, tabs: std::slice::from_ref(&tab), problem: None }]).projects[0].checkouts[0].workers;
+        assert_eq!(counted("0.18.1"), 1);
+        assert_eq!(counted("0.18.2"), 0);
+        assert_eq!(counted("0.18.2-rc.1+build.7"), 0);
+        assert_eq!(counted("dev"), 0, "a version that does not parse takes the new rule");
+        assert_eq!(counted(""), 1, "a machine with no version reads as old");
+        assert_eq!(counted("0.9.30"), 1);
     }
 
     #[test]

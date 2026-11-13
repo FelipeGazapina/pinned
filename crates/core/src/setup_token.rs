@@ -167,7 +167,7 @@ fn token_in(bytes: &[u8]) -> Option<String> {
 
 /// The last line the CLI printed, for a run that ended without a token, with anything shaped like
 /// a secret hidden.
-fn last_line(bytes: &[u8]) -> String {
+pub(crate) fn last_line(bytes: &[u8]) -> String {
     let text = plain(bytes);
     let line = text.lines().map(str::trim).rfind(|line| !line.is_empty()).unwrap_or("it printed nothing");
     crate::surface::mask_secrets(&line.chars().take(200).collect::<String>())

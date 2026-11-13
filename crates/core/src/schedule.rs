@@ -181,7 +181,7 @@ pub enum RunState {
 }
 
 /// Who created a task or an idea: the user, or an agent by the part it plays.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Actor {
     User,

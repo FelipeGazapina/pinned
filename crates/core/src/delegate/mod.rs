@@ -27,6 +27,9 @@ pub const BOX_CONNECT_WAIT: Duration = Duration::from_secs(5 * 60);
 pub const REMOTE_GRACE: Duration = Duration::from_secs(5 * 60);
 /// The hub's answer about a worker box whose node has not connected yet.
 pub const BOX_BOOTING: &str = "the box is still booting";
+/// The hub's answer about a worker box whose node connected and then dropped its link. Its task
+/// waits: the node may come back, and the hub ends a box that stays offline.
+pub const BOX_OFFLINE: &str = "the box is offline";
 
 /// Whether the hub answered that the account has no such machine any more: a box that ended, or
 /// a machine someone removed.

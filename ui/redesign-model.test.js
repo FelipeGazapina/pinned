@@ -363,6 +363,25 @@ test("needsYouItems lists what waits on the user, newest first, with each kind, 
   ]);
 });
 
+test("needsYouItem turns a failed turn cut by a sleep into a Stopped card with the span of the sleep and, for a Captain, its running delegated tasks", () => {
+  const two = (n) => String(n).padStart(2, "0");
+  const clock = (unix) => `${two(new Date(unix * 1000).getHours())}:${two(new Date(unix * 1000).getMinutes())}`;
+  const cut = { slept_at: S - 25_000, woke_at: S - 300 };
+  const span = `${clock(cut.slept_at)}\u2013${clock(cut.woke_at)}`;
+  const cutBySleep = { status: "failed", message: "API Error: Connection error", cut_by_sleep: cut, updated: S - 200 };
+  const plain = tab("Fix the form", cutBySleep);
+  const limit = tab("Limit", { ...cutBySleep, resume_at: S + 3000 });
+  const normal = tab("Flaky", { status: "failed", message: "API Error: 500", updated: S - 100 });
+  const { captain, ci, readme, changelog, stranger } = captainWorld();
+  captain.view = { ...captain.view, ...cutBySleep, id: "cap" };
+  const p = page({ tabs: [plain, limit, normal, captain, ci, readme, changelog, stranger] });
+  const sleeping = (t) => JSON.parse(JSON.stringify(p.run("needsYouItem(args.t)", { t })));
+  assert.deepEqual([sleeping(plain).kind, sleeping(plain).sleep], ["sleep", { slept_at: cut.slept_at, woke_at: cut.woke_at, delegated: 0, text: `Stopped while the Mac slept (${span}): API error` }]);
+  assert.equal(sleeping(limit).kind, "limit", "a usage limit keeps its own card");
+  assert.equal(sleeping(normal).kind, "failed", "an error with no sleep is a plain failure");
+  assert.deepEqual([sleeping(captain).kind, sleeping(captain).sleep.delegated], ["sleep", 3], "a Captain's card counts what its workers still run");
+});
+
 test("navCounts counts what waits, the unseen Captain reports, reviews once fetched, the usage window and the machines", async () => {
   const report = (machine, tabId, text) => `[pinned] Capitão pinned (mac-mini) [${machine} ${tabId}]: ${text}`;
   const global = tab("Orchestrator", { orchestrator_global: true, status: "done", updated: S - 30 }, {
