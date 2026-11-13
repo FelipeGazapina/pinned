@@ -8,6 +8,8 @@ use crate::connectors::{BoxAccess, BoxSize, Connector, Settings};
 /// What an hour on a box of `size` costs in USD: Upstash's price per active CPU hour for that
 /// size. The hub enforces budgets from it. It is a ceiling: Upstash bills a standard box for its
 /// active CPU time, not for the hours it exists, and the box's storage is not counted.
+/// The app's budget dialog keeps a copy, `BOX_RATE_BY_SIZE` in `ui/gui-add-project.js`, whose three
+/// rates `ui/box-session.test.js` pins: change all three places together.
 pub fn box_usd_per_hour(size: BoxSize) -> f64 {
     match size {
         BoxSize::Small => 0.10,

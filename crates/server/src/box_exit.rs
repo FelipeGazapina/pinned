@@ -61,7 +61,7 @@ pub fn leave(dir: &Path, machine_token: &str, quit: impl FnOnce(), mut log: impl
     match Credentials::load(dir) {
         Some(creds) if creds.machine_token == machine_token => Credentials::remove(dir),
         Some(_) => log("pinned-server: account.json holds another machine token than this node's, so it stays for the node that wrote it"),
-        None if dir.join("account.json").exists() => log("pinned-server: account.json could not be read, so it stays"),
+        None if Credentials::path(dir).exists() => log("pinned-server: account.json could not be read, so it stays"),
         None => {}
     }
 }
