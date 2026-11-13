@@ -4463,7 +4463,6 @@ fn an_agent_files_restarts_and_archives_threads_as_the_user_but_a_delete_waits_f
         })
         .collect();
     assert_eq!(ran, asked, "each ran on the agent's machine for the agent's session, as the app sends it");
-    let audit = ana.hub(json!({ "cmd": "agent_audit" })).unwrap();
     let skip = json!({ "tab": "tab-t", "on": true, "cols": 120, "rows": 32 });
     assert_eq!(act(&raw, "tab-agent", "set_bypass", skip.clone()).unwrap()["outcome"], "pending", "loosening a session waits for the user");
     assert!(!calls(&raw, "act_for").iter().any(|c| c["call"]["cmd"] == "set_bypass"), "nothing reached the machine");
