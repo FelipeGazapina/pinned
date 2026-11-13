@@ -5368,6 +5368,24 @@ mod tests {
     }
 
     #[test]
+    fn an_import_refusal_names_the_workflow_and_step_on_one_bounded_line() {
+        let (connectors, dir) = stored("import-long-names", vec![]);
+        let long = |head: &str| format!("{head}\n{}", "x".repeat(500));
+        let mut graph = talks(&["go"]);
+        graph.nodes[1].name = long("Step");
+        graph.nodes[1].kind = NodeKind::Session(SessionSetup { permission: "everything".into(), ..SessionSetup::default() });
+        let workflow = Connector { id: "c9".into(), name: long("Nightly"), graph: Some(graph), ..linear_connector() };
+        let store = serde_json::json!({ "connectors": [serde_json::to_value(workflow).unwrap()] });
+        let error = connectors.import(store, Keys::default()).expect_err("the import is refused");
+        assert!(!error.chars().any(char::is_control), "one line: {error:?}");
+        assert!(error.chars().count() <= 400, "{} characters: {error}", error.chars().count());
+        let cut = |head: &str| format!("{head}{}…", "x".repeat(80 - head.len()));
+        assert!(error.contains(&format!("workflow \"{}\" fails the graph check", cut("Nightly"))), "{error}");
+        assert!(error.contains(&format!("\"{}\": its permission must be manual", cut("Step"))), "{error}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn an_import_refuses_a_workflow_whose_step_permission_pinned_cannot_read() {
         let (connectors, dir) = stored("import-permission", vec![]);
         let mut graph = talks(&["go"]);
@@ -8637,7 +8655,7 @@ mod tests {
 
         #[test]
         fn an_import_refuses_a_convex_step_the_accounts_connections_do_not_allow() {
-            let (connectors, dir) = with_convex("convex-import-refused", vec![]);
+            let (connectors, dir) = stored("convex-import-refused", vec![]);
             let mut graph = talks(&["go"]);
             graph.nodes.push(reads("gone-deployment-1", None));
             let workflow = Connector { id: "c9".into(), name: "Invoices".into(), graph: Some(graph), ..linear_connector() };
@@ -8647,15 +8665,30 @@ mod tests {
 
         #[test]
         fn an_import_whose_workflows_pass_the_save_checks_is_stored() {
-            let (connectors, dir) = with_convex("convex-import-clean", vec![]);
-            let mut graph = talks(&["go"]);
-            graph.nodes.push(reads("quick-lemur-789", Some(&["invoices"])));
-            let workflow = Connector { id: "c9".into(), name: "Invoices".into(), graph: Some(graph), ..linear_connector() };
+            // An account with a Convex deployment is not empty, so an import that passes carries no Convex step.
+            let (connectors, dir) = stored("convex-import-clean", vec![]);
+            let workflow = Connector { id: "c9".into(), name: "Invoices".into(), graph: Some(talks(&["go"])), ..linear_connector() };
             let store = serde_json::json!({ "connectors": [serde_json::to_value(workflow).unwrap()] });
             assert_eq!(connectors.import(store, Keys::default()), Ok(true));
             let stored = connectors.get_settings().connectors;
             assert_eq!(stored.len(), 1);
-            assert_eq!(convex_step(&stored[0]).map(|step| step.connection), Some("quick-lemur-789".to_owned()));
+            assert_eq!(stored[0].graph, Some(talks(&["go"])));
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn an_import_into_an_account_with_only_convex_connected_is_refused() {
+            let (connectors, dir) = with_convex("convex-import-not-empty", vec![]);
+            let before = std::fs::read(dir.join("connectors.json")).unwrap();
+            let mut graph = talks(&["go"]);
+            graph.nodes.push(reads("quick-lemur-789", Some(&["invoices"])));
+            let workflow = Connector { id: "c9".into(), name: "Invoices".into(), graph: Some(graph), ..linear_connector() };
+            let store = serde_json::json!({ "connectors": [serde_json::to_value(workflow).unwrap()] });
+            let keys = Keys { linear: Some("lin_api_fake".into()), ..Keys::default() };
+            assert_eq!(connectors.import(store, keys), Ok(false), "the account is not empty");
+            assert_eq!(std::fs::read(dir.join("connectors.json")).unwrap(), before, "the store is unchanged");
+            assert!(!dir.join("linear-key").exists(), "no key was written");
+            assert!(connectors.get_settings().connectors.is_empty());
             let _ = std::fs::remove_dir_all(dir);
         }
 
