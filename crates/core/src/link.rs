@@ -1061,7 +1061,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn a_hub_that_refuses_for_fifteen_minutes_ends_the_wait_on_the_refusal_at_the_deadline_and_not_before() {
+    async fn a_hub_that_refuses_for_fifteen_minutes_ends_the_wait_and_not_before() {
         let shared = Shared::default();
         let started = tokio::time::Instant::now();
         let waiting = tokio::spawn(wait_refused(shared.refusals.subscribe()));
