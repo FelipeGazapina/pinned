@@ -486,12 +486,22 @@ impl Limits {
     /// list does not hold is refused under a tier cap: the words of an id are no proof of its cost.
     /// An effort outside the five levels, such as Cursor's `fast`, passes unranked.
     pub fn admit(&self, account: &crate::accounts::Account, model: Option<&str>, effort: Option<&str>, claude: &[crate::claude_models::ClaudeModel]) -> Result<Option<String>, String> {
+        let lists_claude = account.provider == crate::accounts::Provider::Claude && account.auth == crate::accounts::Auth::Login;
+        self.admit_priced(lists_claude, model, effort, claude)
+    }
+
+    /// `admit` for an account this machine does not hold, whose login and list of models are not
+    /// known here: the model is priced by its words, as `admit` does for the other drivers.
+    pub fn admit_unheld(&self, model: Option<&str>, effort: Option<&str>, claude: &[crate::claude_models::ClaudeModel]) -> Result<Option<String>, String> {
+        self.admit_priced(false, model, effort, claude)
+    }
+
+    fn admit_priced(&self, lists_claude: bool, model: Option<&str>, effort: Option<&str>, claude: &[crate::claude_models::ClaudeModel]) -> Result<Option<String>, String> {
         if self.tier < Tier::High {
             let tier = self.tier.name();
             let Some(model) = model.filter(|m| !m.is_empty()) else {
                 return Err(format!("name a model: this project allows models up to the {tier} tier, and a worker without one runs on its account's default. Pick a {tier} model from orchestrator_capabilities, or raise Tier {RAISE}"));
             };
-            let lists_claude = account.provider == crate::accounts::Provider::Claude && account.auth == crate::accounts::Auth::Login;
             if lists_claude && !claude.iter().any(|m| m.slug == model) {
                 return Err(format!("{model} is not in this machine's list of Claude models, so its tier is unknown and this project allows up to {tier}. Pick a model from orchestrator_capabilities or raise Tier {RAISE}"));
             }

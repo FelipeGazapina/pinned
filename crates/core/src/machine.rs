@@ -4685,14 +4685,22 @@ impl Machine {
         if repo.is_none() {
             return Err("this thread's folder has no git origin, so no other machine or box can find its project".into());
         }
-        let account = match request.target.account.clone().filter(|id| !id.is_empty()) {
-            Some(id) => self.accounts.get(&id).unwrap_or_else(|| Account { id, ..Account::builtin(Provider::Claude) }),
-            None => account,
+        let named = request.target.account.clone().filter(|id| !id.is_empty()).map(|id| self.accounts.get(&id).ok_or(id));
+        let (account, unheld) = match named {
+            Some(Ok(account)) => (account, false),
+            Some(Err(id)) => (Account { id, ..Account::builtin(Provider::Claude) }, true),
+            None => (account, false),
         };
         let provider = account.provider;
         let place = Some(placed.machine_name.clone()).filter(|name| !name.is_empty()).or_else(|| request.target.machine.clone()).unwrap_or_else(|| "an Upstash Box".into());
         // Held here to the caller's limits, and sent with them, so the worker there is held too.
-        let effort = limits.admit(&account, request.target.model.as_deref(), request.target.effort.as_deref(), &self.claude_models())?;
+        // An account this machine lacks is held by the machine that runs it, which checks the model
+        // again against that account's own login and list: here it is priced by its words.
+        let effort = if unheld {
+            limits.admit_unheld(request.target.model.as_deref(), request.target.effort.as_deref(), &self.claude_models())?
+        } else {
+            limits.admit(&account, request.target.model.as_deref(), request.target.effort.as_deref(), &self.claude_models())?
+        };
         let (budget_ms, limit_ms) = crate::delegate::run_limits(request.budget_ms, request.limit_ms, limits.time_limit_ms())?;
         (request.target.effort, request.budget_ms, request.limit_ms) = (effort.clone(), Some(budget_ms), Some(limit_ms));
         let held = taste::Limits { time_limit_min: limit_ms.div_ceil(60_000).try_into().unwrap_or(u32::MAX), ..limits };
@@ -15274,6 +15282,24 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!((&started["machine"], &started["placement"]), (&json!("mac-mini"), &json!({ "machine": "m-mini", "machineName": "mac-mini", "by": "policy", "reason": PREFERRED })));
         let status: Value = serde_json::from_str(&m.task_status(Some(captain), None, started["taskId"].as_str().unwrap()).unwrap()).unwrap();
         assert_eq!(status["placement"], started["placement"]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_remote_worker_under_a_tier_cap_is_checked_against_the_claude_list_only_for_an_account_held_here() {
+        let (m, dir, captain) = placing_captain("place-unheld");
+        m.set_local_taste(&TasteScope::Captains, TastePatch { tier: Some(taste::Tier::Mid), ..TastePatch::default() }).unwrap();
+        let calls = placing_hub(&m, vec![], &[]);
+        let on = |account: &str, model: &str| json!({ "task": "Fix the parser.", "title": "Parser", "target": { "machine": "m-mini", "providerInstanceId": account, "model": model } });
+        let started = delegate_task(&m, &captain, on("away-account", "kimi-k3"));
+        assert_eq!(started["placement"]["machine"], "m-mini", "an account only the other machine holds is priced by the words of its model: {started}");
+        assert_eq!(placing_calls(&calls), vec!["delegate m-mini"]);
+        let error = refused(&m, &captain, on("work", "claude-nova-9-9"));
+        assert!(error.starts_with("claude-nova-9-9 ") && error.contains("is not in this machine's list of Claude models"), "{error}");
+        assert_eq!(placing_calls(&calls), vec!["delegate m-mini"], "the refused call reached no machine");
+        let error = refused(&m, &captain, on("away-account", "claude-opus-5-5"));
+        assert!(error.contains("high-tier"), "words that say high are still refused: {error}");
         let _ = std::fs::remove_dir_all(dir);
     }
 
