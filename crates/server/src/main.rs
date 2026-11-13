@@ -178,9 +178,10 @@ fn node(args: &[String]) -> Result<(), String> {
     if let Some(config) = &launch.mcp_config {
         reminders::write_mcp_config(config, &exe, false).map_err(|e| format!("could not write claude's MCP config: {e}"))?;
     }
-    let machine = Machine::new(launch, Some(dir), None, |_| {});
+    let machine = Machine::new(launch, Some(dir.clone()), None, |_| {});
     machine.set_installer(Arc::new(pinned_server::self_update::NodeUpdate::production()));
     let version = running_version();
+    let machine_token = creds.machine_token.clone();
     let link = Arc::new(link::spawn(creds, machine.clone(), &version));
     let forward = link.clone();
     machine.listen(move |message| forward.forward(message)).map_err(|e| format!("could not listen for claude's hooks: {e}"))?;
@@ -191,18 +192,25 @@ fn node(args: &[String]) -> Result<(), String> {
         }
     }
 
+    let in_box = pinned_server::box_exit::in_box();
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|e| e.to_string())?;
-    runtime.block_on(async {
+    let refused = runtime.block_on(async {
         let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).map_err(|e| e.to_string())?;
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => {}
-            _ = terminate.recv() => {}
-            _ = pinned_server::self_update::roll_back_if_refused(&machine) => {}
-        }
-        Ok::<_, String>(())
+        let refused = tokio::select! {
+            _ = tokio::signal::ctrl_c() => false,
+            _ = terminate.recv() => false,
+            _ = pinned_server::self_update::roll_back_if_refused(&machine) => false,
+            _ = pinned_server::box_exit::refused_in_box(in_box, link.refused_for()) => true,
+        };
+        Ok::<_, String>(refused)
     })?;
-    // The sessions stay saved, so the next start resumes them.
-    machine.quit();
+    if refused {
+        // A box the hub ended but could not delete: no session runs on, and no start script relaunches the node.
+        pinned_server::box_exit::leave(&dir, &machine_token, || machine.quit(), |line| eprintln!("{line}"));
+    } else {
+        // The sessions stay saved, so the next start resumes them.
+        machine.quit();
+    }
     let _ = std::fs::remove_file(&machine.launch().sock);
     Ok(())
 }
