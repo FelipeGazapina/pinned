@@ -99,3 +99,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:05:29Z #43 a_box_goes_once_its_session_opened_its_pull_request_and_stopped START / avail=15074M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:05:32Z #43 a_box_goes_once_its_session_opened_its_pull_request_and_stopped ok / avail=15074M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:05:33Z #44 a_box_whose_row_this_hub_cannot_read_is_still_deleted START / avail=15074M /workspace avail=19374M node_stat=Ssl
+2026-11-13T04:05:36Z #44 a_box_whose_row_this_hub_cannot_read_is_still_deleted ok / avail=15074M /workspace avail=19374M node_stat=Ssl node_tcp=1
