@@ -436,7 +436,9 @@ fn title_of(args: &Value, task: &str) -> String {
 }
 
 /// Text typed into a session says who sent it, so the session and the user can tell it from the user's own.
+/// The client named itself, so its name stays one quoted field of the header line.
 fn from_agent(name: &str, text: &str) -> String {
+    let name = pinned_core::pinned_lines::flat(name, 80).replace('"', "'");
     format!("External agent \"{name}\" via MCP:\n\n{}", pinned_core::pinned_lines::guard(text))
 }
 

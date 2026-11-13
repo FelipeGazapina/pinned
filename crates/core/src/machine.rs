@@ -4885,7 +4885,7 @@ impl Machine {
             "[pinned] Worker \"{}\" on {place}{}{what}: {}. The user answers in its thread on {place}; it keeps its place, so do not cancel it for that.",
             task.title,
             crate::delegate::ASK_NOTICE,
-            ask.ask
+            pinned_lines::field(&ask.ask)
         );
         let session = self.tab(tab, |t| t.claude_session.clone()).ok().flatten();
         if self.delegates.queue_ask(&format!("ask:{id}:{}", ask.since), tab, session, line, id) {

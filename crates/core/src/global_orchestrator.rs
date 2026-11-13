@@ -103,8 +103,9 @@ impl Settings {
         std::fs::write(dir.join(SETTINGS_FILE), serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
     }
 
-    /// The name on one line and at most 40 characters, the default one when blank. It sits inside
-    /// `[` `]` in every prefix and report, so brackets are dropped.
+    /// The name on one line and at most 40 characters, the default one when blank or when it reads
+    /// as `pinned`, the mark of pinned's own lines. It sits inside `[` `]` in every prefix and
+    /// report, so brackets are dropped.
     pub fn cleaned(mut self) -> Self {
         let name: String = self
             .name
@@ -114,7 +115,7 @@ impl Settings {
             .filter(|c| !crate::pinned_lines::is_invisible(*c))
             .collect();
         let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
-        self.name = if name.is_empty() { default_name() } else { name.chars().take(NAME_MAX).collect() };
+        self.name = if name.is_empty() || name.eq_ignore_ascii_case("pinned") { default_name() } else { name.chars().take(NAME_MAX).collect() };
         self
     }
 }
