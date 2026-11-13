@@ -1405,17 +1405,44 @@ impl Boxes {
     /// failed, so it does not wait on it. A box that ends for its task's end, `Done`, has nothing to tell.
     async fn tell_origin(&self, hub: &Hub, account: &Account, row: &BoxRow, why: &End) {
         let BoxWork::Delegate { origin, .. } = &row.work else { return };
-        let error = match why {
-            End::Done => return,
-            End::Failed(e) => format!("Upstash Box: {e}"),
-            End::Offline => format!("Upstash Box: its box went offline and did not come back within {}", wait_span(self.policy.offline)),
-            why => format!("Upstash Box: the box ended before its task did: {}", ended_because(why)),
-        };
+        let Some(error) = self.box_end_error(why) else { return };
         let mut end = RemoteEnd { state: "failed".into(), summary: None, error: Some(error), usage: None };
         self.add_end_box_usage(hub, account, row, &mut end).await;
         let ended = Call::RemoteEnded { from: row.machine.to_string(), tab: origin.tab.clone(), task: origin.task.clone(), end };
         if let Err(e) = hub.call_machine(account, &origin.machine, ended, ORIGIN_WAIT).await {
             eprintln!("pinned-server: could not tell {} that box {} ended: {}", origin.machine, row.id, String::from(e));
+        }
+    }
+
+    /// Why a box's work failed when the box ended for `why`, or None when it ended for its work's end.
+    fn box_end_error(&self, why: &End) -> Option<String> {
+        Some(match why {
+            End::Done => return None,
+            End::Failed(e) => format!("Upstash Box: {e}"),
+            End::Offline => format!("Upstash Box: its box went offline and did not come back within {}", wait_span(self.policy.offline)),
+            why => format!("Upstash Box: the box ended before its task did: {}", ended_because(why)),
+        })
+    }
+
+    /// A workflow box ended before its run did, for any reason but that run's end: the runs it
+    /// holds fail with why, and their subjects are free for the next trigger. Nothing opens another
+    /// box or session for them. For the fixed row, which many runs share, only the runs whose
+    /// session is on its machine. A run that already finished holds nothing, so this does nothing.
+    async fn fail_held_runs(&self, hub: &Hub, account: &Account, row: &BoxRow, why: &End) {
+        if row.work != BoxWork::Run || row.connector == INTERACTIVE_CONNECTOR {
+            return;
+        }
+        let Some(error) = self.box_end_error(why) else { return };
+        let connectors = match hub.connectors(account).await {
+            Ok(connectors) => connectors,
+            Err(e) => return eprintln!("pinned-server: could not fail the runs of box {}: {e}", row.id),
+        };
+        let holder = (!connectors.box_access().owns_row(&row.id)).then_some((row.connector.as_str(), &row.subject));
+        let why = format!("{error}; the run stopped, and nothing starts it again until you or its next trigger do");
+        match connectors.box_ended(&row.machine.to_string(), holder, &why).await {
+            Ok(0) => {}
+            Ok(n) => eprintln!("pinned-server: box {} of account {} ended, so {n} workflow run(s) failed", row.id, account.id),
+            Err(e) => eprintln!("pinned-server: could not fail the runs of box {}: {e}", row.id),
         }
     }
 
@@ -1474,6 +1501,7 @@ impl Boxes {
                 self.tell_origin(hub, account, &row, &why).await;
             }
         }
+        self.fail_held_runs(hub, account, &row, &why).await;
         self.record_agent_box(hub, account, &row).await;
         self.end(hub, account, &row.remains(), key).await?;
         if !failed {
@@ -1608,11 +1636,21 @@ impl Boxes {
                         let mut timers = self.timers.lock().unwrap();
                         let slot = timers.entry(row.id.clone()).or_default();
                         if held {
-                            slot.quiet_since = None;
-                            slot.exited_since = None;
-                            slot.gone_since = None;
-                            slot.offline_since = None;
-                            (row.age >= self.policy.max_life || over_budget).then_some(End::Expired)
+                            // A run waits between its session's turns, so only its node going
+                            // missing, its max life, its budget or its box vanishing ends the box,
+                            // and `fail_held_runs` fails the run with it.
+                            let seen = match seen {
+                                Seen::Offline => Seen::Offline,
+                                _ => Seen::Tab { running: true, quiet: false },
+                            };
+                            let verdict = verdict(row.age, seen, slot, now, &self.policy);
+                            if over_budget {
+                                Some(End::Expired)
+                            } else if gone {
+                                Some(End::Vanished)
+                            } else {
+                                verdict
+                            }
                         } else if over_budget {
                             Some(End::Expired)
                         } else {
@@ -1640,7 +1678,11 @@ impl Boxes {
             let finished = match ended {
                 Some(why) => self.finish(hub, account, row, why, key.as_deref()).await,
                 None if matches!(row.phase, Phase::Ending(_)) => {
-                    // A hub that stopped between ending the row and recording it records it now.
+                    // A hub that stopped between ending the row and recording it records it now,
+                    // and fails the runs it held.
+                    if let Phase::Ending(why) = &row.phase {
+                        self.fail_held_runs(hub, account, &row, why).await;
+                    }
                     self.record_agent_box(hub, account, &row).await;
                     self.end(hub, account, &row.remains(), key.as_deref()).await
                 }

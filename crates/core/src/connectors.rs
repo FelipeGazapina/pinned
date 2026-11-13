@@ -1607,6 +1607,8 @@ pub struct Connectors {
     known_tabs: Mutex<HashMap<String, (u64, Vec<TabView>)>>,
     /// The Slack bots `fill_bots` already asked Slack about, so it asks once per bot.
     bots_filled: Mutex<std::collections::HashSet<String>>,
+    /// Why runs failed when their box ended, for the next check to report.
+    box_failures: Mutex<Vec<String>>,
 }
 
 /// A Slack bot with its token, as a read or a post uses it.
@@ -1641,6 +1643,7 @@ impl Connectors {
             runs_broken: Mutex::new(runs_broken),
             known_tabs: Mutex::new(HashMap::new()),
             bots_filled: Mutex::new(std::collections::HashSet::new()),
+            box_failures: Mutex::new(vec![]),
         }
     }
 
@@ -2980,6 +2983,45 @@ impl Connectors {
         })
     }
 
+    /// The box on `machine` ended before its run did. Every live run whose session is on that
+    /// machine, and every run `holds_box` finds for `holder`, fails with `why`, and its subject is
+    /// unclaimed: no longer `handled`, followed or tied to a Slack bot, so the next trigger may
+    /// start it again. Nothing reopens the session. Answers how many runs failed.
+    pub async fn box_ended(&self, machine: &str, holder: Option<(&str, &Subject)>, why: &str) -> Result<usize, String> {
+        let _guard = self.driving.lock().await;
+        let at = Utc::now().to_rfc3339();
+        let failed: Vec<(String, Subject)> = {
+            let mut runs = self.runs.lock().unwrap();
+            let mut failed = vec![];
+            for run in runs.iter_mut().filter(|run| matches!(run.status, Status::Running | Status::Waiting)) {
+                let owner = run.session_owner.clone().unwrap_or_else(|| run.connector.clone());
+                let on_box = matches!(&run.session, Session::Live { machine: live, .. } if live == machine);
+                let holds = holder.is_some_and(|(connector, subject)| &run.subject == subject && owner == connector);
+                if on_box || holds {
+                    runner::push(run, Wake::BoxEnded { why: why.to_owned() }, &at);
+                    failed.push((owner, run.subject.clone()));
+                }
+            }
+            failed
+        };
+        if failed.is_empty() {
+            return Ok(0);
+        }
+        self.save_runs()?;
+        {
+            let mut store = self.store.lock().unwrap();
+            for (owner, subject) in &failed {
+                if let Some(c) = store.connectors.iter_mut().find(|c| &c.id == owner) {
+                    c.unclaim(subject);
+                }
+                store.slack_threads.remove(&subject_key(subject));
+            }
+            self.save(&store)?;
+        }
+        self.box_failures.lock().unwrap().push(why.to_owned());
+        Ok(failed.len())
+    }
+
     /// Tab statuses changed on `machine`. Waiting runs wake, then every running graph continues.
     /// `observed` is the unix millis the list arrived. Lists can queue behind a drive, so an older one never replaces a newer one.
     pub async fn on_tabs<F, Fut, R>(&self, machine: &str, observed: u64, after: &[TabView], open: F) -> Result<(), String>
@@ -3152,6 +3194,7 @@ impl Connectors {
         self.reconcile_known()?;
         let library = self.library();
         let mut failed = self.triage_inbox(&library).await;
+        failed.append(&mut self.box_failures.lock().unwrap());
         for _ in 0..256 {
             let index = self.runs.lock().unwrap().iter().position(|run| matches!(run.status, Status::Running));
             let Some(index) = index else { break };
