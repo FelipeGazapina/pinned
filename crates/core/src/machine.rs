@@ -5681,11 +5681,17 @@ impl Machine {
 
     /// Closes as ended each open questionnaire whose task has ended, so a worker that stopped,
     /// by its time limit, a failure or its exit, does not leave it open to show as a question and
-    /// to pause that task's time limit.
+    /// to pause that task's time limit. Only one asked before the task ended: a thread keeps its
+    /// task after it, and a question someone asks in that thread later is the thread's own.
+    /// A question asked in the second the task ended counts as asked before it.
     fn end_questions_of_ended_tasks(&self) {
         let tab_tasks: HashMap<String, String> = self.tabs.lock().unwrap().iter().filter_map(|(id, t)| Some((id.clone(), t.task.clone()?))).collect();
         let open = self.questions.lock().unwrap().open_tasks(|tab| tab_tasks.get(tab).cloned());
-        let ended: Vec<String> = open.into_iter().filter(|(_, task)| self.delegates.get(task).is_some_and(|info| info.state.terminal())).map(|(id, _)| id).collect();
+        let ended: Vec<String> = open
+            .into_iter()
+            .filter(|(_, task, at)| self.delegates.get(task).is_some_and(|info| info.state.terminal() && info.ended.is_none_or(|ended| *at <= ended / 1000)))
+            .map(|(id, _, _)| id)
+            .collect();
         let closed = ended.iter().fold(false, |any, id| self.questions.lock().unwrap().end(id) | any);
         if closed {
             self.emit_tabs();
@@ -13851,6 +13857,28 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!((questions.open_on(&child), questions.waiting_tasks().count()), (None, 0), "nothing is left open, so nothing pauses the task");
         drop(questions);
         assert_eq!(m.view(&child).unwrap().questions, None, "the tab no longer shows it");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_question_asked_in_a_thread_after_its_task_ended_is_not_closed_with_it() {
+        use crate::questions::{Outcome, QOption, Question};
+        let (m, dir, _captain, task, child, transcript) = captain_with_thread_child("thread-questions-after-end");
+        m.record_event(hook_event(&child, "working", &transcript, Some("Board check")));
+        let question = |text: &str| Question { header: None, question: text.into(), changes: "the schema".into(), options: vec![QOption { label: "postgres".into(), description: None, recommended: true }], multi_select: false };
+        let before = m.questions.lock().unwrap().open(&child, Some("s-child".into()), Some(task.clone()), None, vec![question("Which database?")], vec![], unix_now() - 30).unwrap();
+        m.delegates.fail(&task, "the worker was cut off".into(), None);
+        let ended = m.delegates.get(&task).unwrap().ended.expect("a failed task records when it ended");
+        m.end_questions_of_ended_tasks();
+        assert_eq!(m.questions.lock().unwrap().get(&before).unwrap().outcome, Some(Outcome::Ended), "the question asked before the end closes with it");
+        // Someone continues the thread, whose tab keeps the finished task, and its worker asks again.
+        assert_eq!(m.tab(&child, |t| t.task.clone()).unwrap().as_deref(), Some(task.as_str()), "the thread's tab keeps the task after it ended");
+        let after = m.questions.lock().unwrap().open(&child, Some("s-child".into()), None, None, vec![question("Which region?")], vec![], ended / 1000 + 5).unwrap();
+        m.end_questions_of_ended_tasks();
+        let questions = m.questions.lock().unwrap();
+        assert_eq!(questions.open_on(&child).map(|q| q.id.clone()), Some(after), "the question asked after the end stays open");
+        drop(questions);
         let _ = std::fs::remove_dir_all(dir);
     }
 

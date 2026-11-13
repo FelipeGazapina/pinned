@@ -200,9 +200,9 @@ impl Questions {
     }
 
     /// The open questionnaires with the task whose worker asked each: its `task`, else the one its
-    /// tab runs, which `tab_task` answers. Each is (id, task).
-    pub fn open_tasks(&self, tab_task: impl Fn(&str) -> Option<String>) -> Vec<(String, String)> {
-        self.asked.iter().filter(|a| a.is_open()).filter_map(|a| Some((a.questionnaire.id.clone(), a.task.clone().or_else(|| tab_task(&a.tab))?))).collect()
+    /// tab runs, which `tab_task` answers. Each is (id, task, the second it was asked).
+    pub fn open_tasks(&self, tab_task: impl Fn(&str) -> Option<String>) -> Vec<(String, String, u64)> {
+        self.asked.iter().filter(|a| a.is_open()).filter_map(|a| Some((a.questionnaire.id.clone(), a.task.clone().or_else(|| tab_task(&a.tab))?, a.questionnaire.at))).collect()
     }
 
     /// Closes the open questionnaire `id` as ended: its worker's task ended with nobody having
@@ -357,7 +357,7 @@ mod tests {
         let by_tab = q.open("tab-2", None, None, None, vec![question("Which region?", &["eu", "us"])], vec![], 2).unwrap();
         q.open("tab-3", None, None, None, vec![question("No task?", &["yes", "no"])], vec![], 3).unwrap();
         let tab_task = |tab: &str| (tab == "tab-2").then(|| "task-2".to_owned());
-        assert_eq!(q.open_tasks(tab_task), [(own.clone(), "task-1".to_owned()), (by_tab.clone(), "task-2".to_owned())], "a questionnaire with no task of its own has its tab's");
+        assert_eq!(q.open_tasks(tab_task), [(own.clone(), "task-1".to_owned(), 1), (by_tab.clone(), "task-2".to_owned(), 2)], "a questionnaire with no task of its own has its tab's");
         assert!(q.end(&own) && q.end(&by_tab));
         assert!(!q.end(&own), "already closed");
         assert_eq!(q.get(&own).unwrap().outcome, Some(Outcome::Ended));
