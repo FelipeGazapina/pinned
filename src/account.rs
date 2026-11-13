@@ -1,12 +1,10 @@
 use pinned_core::account::{self, Credentials};
-use pinned_core::connectors::{self, Connectors, Keys};
+use pinned_core::connectors::{self, Connectors};
 use pinned_core::link::{self, Link};
 use pinned_core::login_store::{self, LoginStore};
 use pinned_core::machine::{Event, Listener, Machine};
-use pinned_core::wire::HubCall;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
 use tauri::async_runtime::JoinHandle;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -205,8 +203,8 @@ pub async fn sign_in(app: AppHandle, hub: String, email: String, password: Strin
             watcher.abort();
         }
         let link = connect(&creds, app.state::<Arc<Machine>>().inner().clone());
+        account::after_sign_in(&link, &creds);
         *state.signed_in.write().unwrap() = Some(SignedIn { creds, link });
-        import_when_empty(app.clone());
         Ok(state.view())
     })
     .await
@@ -249,15 +247,6 @@ pub async fn sign_out(app: AppHandle) -> Result<(), String> {
     })
     .await
     .map_err(|e| e.to_string())?
-}
-
-fn import_when_empty(app: AppHandle) {
-    std::thread::spawn(move || {
-        let state = app.state::<Account>();
-        let signed_in = state.signed_in.read().unwrap();
-        let Some(SignedIn { link, creds }) = signed_in.as_ref() else { return };
-        account::after_sign_in(&app.state::<Connectors>(), link, creds);
-    });
 }
 
 #[cfg(test)]

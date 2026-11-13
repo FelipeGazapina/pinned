@@ -845,30 +845,22 @@ fn a_connector_run_goes_to_its_machine_else_another_online_one() {
 
 #[test]
 fn an_apps_first_sign_in_moves_its_connectors_into_an_empty_account_only() {
+    // 0.18.2 itself sends no import; the hub's side stays for a later app, and a socket stands in.
     let hub = TestHub::start("import");
     let url = hub.url.clone();
-    let (token, account) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
-    let dir = temp("import-mac");
-    let (machine, machine_token) = account::register_machine(&url, &token, "macbook", "macos").unwrap();
-    let creds = Credentials { hub: url.clone(), email: account.email, user_token: token.clone(), machine_id: machine.id, machine_token };
-    creds.save(&dir).unwrap();
-    let mut node = Node::start(&dir, creds);
-    wait_for("macbook online", || node.online());
-    let link = node.link.as_ref().unwrap();
-    let local = json!({ "connectors": [{
-        "id": "c1", "name": "Bugs", "enabled": false, "trigger": { "kind": "linear-label", "label": "agent" },
-        "folder": "/repo", "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false, "instructions": "",
-    }] });
-    assert_eq!(link.call_hub(HubCall::Import { store: local, linear_key: Some("lin_api_1".into()), slack_key: None, slack_keys: Default::default(), github_key: None, vercel_key: None }), Ok(json!(true)));
+    let (token, creds) = signed_up(&url, "ana@acme.dev", "macbook");
+    let mut node = MachineSock::connect(&url, &creds.machine_token, "0.18.2");
     let mut client = Client::connect(&url, &token);
     client.wait("hello", |f| f["type"] == "hello");
+    let mut local = local_connector_store();
+    local["connectors"][0]["enabled"] = json!(false);
+    assert_eq!(ask(&mut node, 1, import_call(local, Some("lin_api_1"))), Ok(json!(true)));
     assert_eq!(client.hub(json!({ "cmd": "get_settings" })).unwrap()["connectors"][0]["name"], "Bugs");
 
-    let other = HubCall::Import { store: json!({ "connectors": [] }), linear_key: None, slack_key: Some("xoxb-2".into()), slack_keys: Default::default(), github_key: None, vercel_key: None };
-    assert_eq!(link.call_hub(other), Ok(json!(false)), "a later machine can't replace the account's connectors");
+    let other = json!({ "cmd": "import", "store": { "connectors": [] }, "linear_key": null, "slack_key": "xoxb-2", "slack_keys": {}, "github_key": null, "vercel_key": null });
+    assert_eq!(ask(&mut node, 2, other), Ok(json!(false)), "a later machine can't replace the account's connectors");
     assert_eq!(client.hub(json!({ "cmd": "get_settings" })).unwrap()["connectors"][0]["name"], "Bugs");
-    assert_eq!(link.call_hub(HubCall::GetSettings), Err("a machine may only forward a workflow session's callbacks".into()));
-    node.kill();
+    assert_eq!(ask(&mut node, 3, json!({ "cmd": "get_settings" })), Err("a machine may only forward a workflow session's callbacks".into()));
 }
 
 const UPDATE_TO_IMPORT: &str = "Update pinned on this computer to 0.18.2 or later. This version can't move its own connectors or way of working into an account.";
@@ -926,7 +918,8 @@ fn a_sign_in_moves_no_local_connectors_into_the_account() {
     let (token_b, creds_b) = signed_up(&url, "bob@acme.dev", "mac");
     let node = Node::start(&dir, creds_b.clone());
     wait_for("B online", || node.online());
-    account::after_sign_in(&connectors, node.link.as_ref().unwrap(), &creds_b);
+    account::after_sign_in(node.link.as_ref().unwrap(), &creds_b);
+    drop(connectors);
     let mut client = Client::connect(&url, &token_b);
     client.wait("hello", |f| f["type"] == "hello");
     let settings = client.hub(json!({ "cmd": "get_settings" })).unwrap();
@@ -984,20 +977,20 @@ fn the_accounts_taste_lives_on_the_hub_and_a_machines_old_style_seeds_an_empty_a
     assert_eq!(client.hub(get()).unwrap()["captains"]["strategy"], "escalate_on_failure", "an account with no taste reads the defaults");
 
     let dir = temp("taste-mac");
-    std::fs::write(dir.join("orchestration.json"), r#"{"style":"quality","max_workers":4}"#).unwrap();
     let (machine, machine_token) = account::register_machine(&url, &token, "macbook", "macos").unwrap();
     let creds = Credentials { hub: url.clone(), email: account.email, user_token: token.clone(), machine_id: machine.id, machine_token };
     creds.save(&dir).unwrap();
-    let node = Node::start(&dir, creds);
-    wait_for("the machine's old cost style to reach the account", || client.hub(get()).unwrap()["captains"]["strategy"] == "strongest_first");
     let opus = json!({ "model": "claude-opus-5-5" });
     let aggressive = json!({
         "strategy": "strongest_first", "ladder": [opus], "hard_model": opus, "parallel": 4, "autonomy": "report_at_end",
         "review_diffs": false, "second_opinion": true, "skills": [], "context": [],
         "tier": "high", "default_effort": null, "max_effort": "max", "budget_cents": 0, "time_limit_min": 480, "box_budget_cents": 0,
     });
-    assert_eq!(client.hub(get()).unwrap()["captains"], aggressive, "the old style's preset, with workers at once lowered to the old cap of 4");
-
+    // 0.18.2 sends no tastes itself; the hub's side stays for a later app, and a socket stands in.
+    let mut seed = MachineSock::connect(&url, &creds.machine_token, "0.18.2");
+    assert_eq!(ask(&mut seed, 1, json!({ "cmd": "import_tastes", "tastes": { "captains": aggressive } })), Ok(json!(true)));
+    let node = Node::start(&dir, creds);
+    assert_eq!(client.hub(get()).unwrap()["captains"], aggressive, "the style a machine offered, once, to an empty account");
     let site = json!({ "kind": "project", "repo": "github.com/acme/site" });
     let set = client.hub(json!({ "cmd": "set_taste", "scope": site, "patch": { "parallel": 5, "autonomy": "report_at_end" } })).unwrap();
     assert_eq!(set["projects"], json!({ "github.com/acme/site": { "parallel": 5 } }), "the Capitães already report at the end");

@@ -755,7 +755,6 @@ pub struct Machine {
     meter_rates: Mutex<Option<(Instant, Arc<usage::RateTable>)>>,
     /// Whether the hub has seen this machine's own tastes since the link last connected, so the
     /// account can take them.
-    tastes_shared: Arc<AtomicBool>,
     /// The account's enabled MCP servers as the hub last handed them, secrets and all, kept in
     /// memory only, for a session that starts while the hub is slow to answer.
     mcp_loaded: Mutex<Option<Vec<mcp::Load>>>,
@@ -956,7 +955,6 @@ impl Machine {
             orchestration_dir: dir.clone(),
             meters: Mutex::default(),
             meter_rates: Mutex::default(),
-            tastes_shared: Arc::default(),
             mcp_loaded: Mutex::default(),
             mcp_waited: AtomicBool::new(false),
             global: Mutex::new(global::Settings::load(dir.as_deref())),
@@ -4350,10 +4348,9 @@ impl Machine {
         let dir = self.orchestration_dir.clone();
         let hub = self.hub.lock().unwrap().clone();
         if let Some(hub) = hub {
-            let (shared, kept) = (self.tastes_shared.clone(), dir.clone());
+            let kept = dir.clone();
             let (answer, answered) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
-                share_tastes(&*hub, &shared, kept.as_deref());
                 let read = hub(HubCall::GetTastes).and_then(|value| serde_json::from_value::<Tastes>(value).map_err(|e| e.to_string()));
                 if let Ok(tastes) = &read {
                     if let Err(e) = taste::save(tastes, kept.as_deref()) {
@@ -4367,16 +4364,6 @@ impl Machine {
             }
         }
         taste::load(dir.as_deref()).unwrap_or_default()
-    }
-
-    /// The link to the hub is up, maybe for another account than before: offers this machine's
-    /// own tastes again. Never call it while holding a Machine lock.
-    pub(crate) fn share_tastes_again(&self) {
-        self.tastes_shared.store(false, Ordering::SeqCst);
-        let hub = self.hub.lock().unwrap().clone();
-        if let Some(hub) = hub {
-            share_tastes(&*hub, &self.tastes_shared, self.orchestration_dir.as_deref());
-        }
     }
 
     /// The account's tastes as they stand: the hub's while this machine is linked, else its own.
@@ -6822,19 +6809,6 @@ pub fn git_remote(dir: &Path) -> Option<String> {
 pub fn repo_name(repo: &str) -> Option<&str> {
     let name = repo.trim_end_matches('/').rsplit(['/', ':']).next()?.trim_end_matches(".git");
     (!name.is_empty() && name != "." && name != "..").then_some(name)
-}
-
-/// Offers the tastes in `dir`, a signed-out app's or the old cost style's seed, to the account,
-/// which takes them only while it has none. The defaults are not offered: the hub answers them to
-/// an account with none anyway, and taking them would refuse a later machine's own.
-fn share_tastes(hub: &dyn Fn(HubCall) -> Result<Value, String>, shared: &AtomicBool, dir: Option<&Path>) {
-    if shared.load(Ordering::SeqCst) {
-        return;
-    }
-    let Some(tastes) = taste::load(dir).filter(|own| *own != Tastes::default()) else { return };
-    if hub(HubCall::ImportTastes { tastes }).is_ok() {
-        shared.store(true, Ordering::SeqCst);
-    }
 }
 
 /// The taste a Capitão in `folder` follows: its project's, or every Capitão's when the folder has
@@ -11843,31 +11817,25 @@ Have another model review a risky change before it goes ahead.";
     }
 
     #[test]
-    fn a_machines_own_taste_goes_to_the_account_before_its_first_read_and_again_on_each_connect() {
+    fn a_machines_own_taste_is_never_offered_to_the_account_it_links_to() {
         let dir = temp("taste-share");
         let config = dir.join("config");
         std::fs::create_dir_all(&config).unwrap();
         std::fs::write(config.join("orchestration.json"), r#"{"style":"quality","max_workers":4}"#).unwrap();
+        std::fs::write(config.join("taste.json"), serde_json::to_vec(&Tastes { captains: taste::Profile::Economical.preset().unwrap(), ..Tastes::default() }).unwrap()).unwrap();
         let m = Machine::new(launch(), Some(config.clone()), None, |_| {});
         let calls = Arc::new(Mutex::new(vec![]));
         let seen = calls.clone();
         m.set_hub(Arc::new(move |call| {
             seen.lock().unwrap().push(serde_json::to_value(&call).unwrap()["cmd"].clone());
             match call {
-                HubCall::ImportTastes { tastes } => Ok(json!(tastes.captains.profile() == taste::Profile::Aggressive)),
                 HubCall::GetTastes => Ok(json!({})),
                 _ => Err("not this test's".into()),
             }
         }));
         assert_eq!(m.tastes(), Tastes::default(), "the account's answer wins");
         assert_eq!(m.tastes(), Tastes::default());
-        assert_eq!(*calls.lock().unwrap(), [json!("import_tastes"), json!("get_tastes"), json!("get_tastes")], "the seeded style went up once, before the first read");
-        m.share_tastes_again();
-        assert_eq!(calls.lock().unwrap().len(), 3, "the account's defaults, kept in taste.json, are not offered as this machine's own");
-
-        std::fs::write(config.join("taste.json"), serde_json::to_vec(&Tastes { captains: taste::Profile::Economical.preset().unwrap(), ..Tastes::default() }).unwrap()).unwrap();
-        m.share_tastes_again();
-        assert_eq!(calls.lock().unwrap().last(), Some(&json!("import_tastes")), "a new link offers this machine's own taste again");
+        assert_eq!(*calls.lock().unwrap(), [json!("get_tastes"), json!("get_tastes")], "this machine's own taste went nowhere");
         let _ = std::fs::remove_dir_all(dir);
     }
 

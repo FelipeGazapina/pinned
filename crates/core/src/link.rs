@@ -469,7 +469,6 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
     eprintln!("pinned: connected to {}", creds.hub);
     let (sharing, reporting) = (machine.clone(), shared.clone());
     std::thread::spawn(move || {
-        sharing.share_tastes_again();
         sharing.send_records();
         sharing.warm_statuses();
         report_state(&reporting, &sharing);
