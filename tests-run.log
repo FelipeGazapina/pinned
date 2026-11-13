@@ -96,3 +96,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:05:21Z #41 the_sweep_deletes_this_hubs_unrecorded_boxes_only ok / avail=15074M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:05:22Z #42 removing_a_box_machine_or_disconnecting_upstash_deletes_its_boxes START / avail=15074M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:05:26Z #42 removing_a_box_machine_or_disconnecting_upstash_deletes_its_boxes ok / avail=15074M /workspace avail=19374M node_stat=Ssl node_tcp=1
+2026-11-13T04:05:29Z #43 a_box_goes_once_its_session_opened_its_pull_request_and_stopped START / avail=15074M /workspace avail=19374M node_stat=Ssl
