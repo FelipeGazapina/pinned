@@ -17,11 +17,18 @@ const READ_CHARS: usize = 80_000;
 
 /// What a tab's session is doing, in the words the tools use, and what it asks the user or why it failed.
 pub fn state_of(tab: &TabView) -> (&'static str, Option<String>) {
-    if !tab.running {
-        return ("ended", None);
+    // A headless child works with no session of the tab's own.
+    let headless = tab.headless && tab.status == Some(AgentStatus::Working);
+    if !tab.running && !headless {
+        return match &tab.stopped {
+            Some(why) => ("stopped", Some(why.clone())),
+            None => ("ended", None),
+        };
     }
     let message = tab.message.clone();
     let state = match tab.status {
+        // A conversation that sleeps, or was resumed and sits at its prompt, fires no hook until a turn.
+        None if tab.asleep || tab.session.is_some() => "idle",
         None => "starting",
         Some(AgentStatus::Working) => "working",
         Some(AgentStatus::Done) => "done",
@@ -40,9 +47,9 @@ pub fn next_for(state: &str) -> &'static str {
     match state {
         "starting" => "it is starting, and may be showing the user a startup prompt; read again in a minute",
         "working" => "it is working; read again in a while",
-        "done" | "failed" => "it may take a message now",
+        "done" | "failed" | "idle" => "it may take a message now",
         "needs_permission" | "waiting_for_input" => "the user has to answer it in Pinned; tell them, then read again later",
-        "ended" => "the session ended; start a new one for more work",
+        "ended" | "stopped" => "the session ended; start a new one for more work",
         "offline" => "its machine is offline; try again later",
         "not_started" => "message it to start it",
         _ => "read it again later",
