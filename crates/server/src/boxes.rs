@@ -1837,9 +1837,20 @@ mod tests {
 
     #[test]
     fn a_hub_restart_between_offline_and_reaping_still_gives_the_end_reason_without_the_text() {
-        // The kept copy is memory only, so a restarted hub's timers for the box are new.
+        // The kept copy is memory only, so a restarted hub's timers for the box are new, and the
+        // box's machine is offline: the origin hears what it heard before the question was named.
         let asked = asked_at_end(None, Timers::default().asked.as_ref());
         assert_eq!(asked, None);
+        let main_says = |why: &End| match why {
+            End::Done => None,
+            End::Failed(e) => Some(format!("Upstash Box: {e}")),
+            End::Offline => Some(format!("Upstash Box: its box went offline and did not come back within {}", wait_span(10 * MIN))),
+            why => Some(format!("Upstash Box: the box ended before its task did: {}", ended_because(why))),
+        };
+        let failed = End::Failed("the bootstrap failed: no disk".into());
+        for why in ENDS.iter().map(|(why, _)| why).chain([&failed]) {
+            assert_eq!(origin_error(why, 10 * MIN, asked.as_ref()), main_says(why), "{why:?}");
+        }
         assert_eq!(origin_error(&End::Offline, 10 * MIN, asked.as_ref()).as_deref(), Some("Upstash Box: its box went offline and did not come back within 10 min"));
         assert_eq!(origin_error(&End::Expired, 10 * MIN, asked.as_ref()).as_deref(), Some(TASK_ENDED));
     }
