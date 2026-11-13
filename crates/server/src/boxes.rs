@@ -382,9 +382,10 @@ fn over_budget(spec: &RunSpec, age: Duration) -> bool {
 /// What the hub answers about the worker box on `machine` while its node is offline. A row turns
 /// `Running` once its node connected and took its task, so one before that never connected and still
 /// boots; one after it dropped its link, and the reaper ends it once it stays offline past
-/// `Policy::offline`. An ending row whose machine is `removed` already told its origin why it ended,
-/// and outlives that machine only while its box can't be deleted (as with Upstash disconnected), so
-/// it reads as gone, as it will once the row goes: an older parent would otherwise wait on it.
+/// `Policy::offline`. An ending row whose machine is `removed` outlives that machine only while its box
+/// can't be deleted (as with Upstash disconnected), so it reads as gone, as it will once the row
+/// goes: an older parent would otherwise wait on it. Its origin was told why it ended unless the tell
+/// failed, the hub restarted before it, or the origin cancelled it; then the origin reads it as gone.
 pub fn offline_answer(phase: &Phase, removed: bool, machine: &str) -> String {
     match phase {
         Phase::Creating | Phase::Booting => BOX_BOOTING.to_owned(),
