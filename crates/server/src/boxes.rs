@@ -5,7 +5,7 @@
 //! pass after a restart finishes whatever the last hub left halfway.
 
 use crate::hub::{Account, Hub, RUN_WAIT};
-use pinned_core::delegate::BOX_CONNECT_WAIT;
+use pinned_core::delegate::{wait_span, BOX_BOOTING, BOX_CONNECT_WAIT, BOX_OFFLINE};
 use futures_util::future::BoxFuture;
 use pinned_core::account::Credentials;
 use pinned_core::accounts::{self, Provider};
@@ -377,6 +377,16 @@ fn started_box(row: &BoxRow) -> serde_json::Value {
 /// Whether the spec's budget paid for `age` at the box hourly rate. None budgets run free.
 fn over_budget(spec: &RunSpec, age: Duration) -> bool {
     spec.budget_usd.is_some_and(|b| b > 0.0 && age.as_secs_f64() * BOX_USD_PER_HOUR / 3600.0 >= b)
+}
+
+/// What the hub answers about a worker box whose node is offline. A row turns `Running` once its
+/// node connected and took its task, so one before that never connected and still boots; one
+/// after it dropped its link, and the reaper ends it once it stays offline past `Policy::offline`.
+pub fn offline_answer(phase: &Phase) -> &'static str {
+    match phase {
+        Phase::Creating | Phase::Booting => BOX_BOOTING,
+        Phase::Running | Phase::Ending(_) => BOX_OFFLINE,
+    }
 }
 
 fn verdict(age: Duration, seen: Seen, t: &mut Timers, now: Instant, p: &Policy) -> Option<End> {
@@ -964,10 +974,11 @@ impl Boxes {
         Ok(hub.db.box_of(account.id, machine).await?.filter(|row| matches!(row.work, BoxWork::Delegate { .. })))
     }
 
-    /// The worker's task ended or was cancelled, so its box goes.
-    pub async fn end_delegate(&self, hub: &Hub, account: &Arc<Account>, row: BoxRow) -> Result<(), String> {
+    /// The worker's task ended or was cancelled, so its box goes for `why`: `Done`, or `Offline`
+    /// for a cancel while its node was offline. The machine that delegated the task knows already.
+    pub async fn end_delegate(&self, hub: &Hub, account: &Arc<Account>, row: BoxRow, why: End) -> Result<(), String> {
         let keys = hub.connectors(account).await?.box_keys();
-        self.finish(hub, account, row, End::Done, keys.as_ref()).await
+        self.finish_told(hub, account, row, why, keys.as_ref(), false).await
     }
 
     /// The box behind `machine`: its phase, age and budget, for its cost display.
@@ -1362,6 +1373,7 @@ impl Boxes {
         let error = match why {
             End::Done => return,
             End::Failed(e) => format!("Upstash Box: {e}"),
+            End::Offline => format!("Upstash Box: its box went offline and did not come back within {}", wait_span(self.policy.offline)),
             why => format!("Upstash Box: the box ended before its task did: {}", ended_because(why)),
         };
         let mut end = RemoteEnd { state: "failed".into(), summary: None, error: Some(error), usage: None };
@@ -1410,7 +1422,12 @@ impl Boxes {
     }
 
     /// Ends the row for `why`, unless it is ending already, and deletes its box.
-    async fn finish(&self, hub: &Hub, account: &Arc<Account>, mut row: BoxRow, why: End, keys: Option<&Keys>) -> Result<(), String> {
+    async fn finish(&self, hub: &Hub, account: &Arc<Account>, row: BoxRow, why: End, keys: Option<&Keys>) -> Result<(), String> {
+        self.finish_told(hub, account, row, why, keys, true).await
+    }
+
+    /// `finish`, telling a worker box's origin only when `tell`.
+    async fn finish_told(&self, hub: &Hub, account: &Arc<Account>, mut row: BoxRow, why: End, keys: Option<&Keys>, tell: bool) -> Result<(), String> {
         let failed = matches!(why, End::Failed(_));
         if !matches!(row.phase, Phase::Ending(_)) {
             let ending = Phase::Ending(why.clone());
@@ -1418,7 +1435,9 @@ impl Boxes {
                 return Err(format!("box {} changed while pinned ended it; it ends on the next check", row.id));
             }
             row.phase = ending;
-            self.tell_origin(hub, account, &row, &why).await;
+            if tell {
+                self.tell_origin(hub, account, &row, &why).await;
+            }
         }
         self.record_agent_box(hub, account, &row).await;
         self.end(hub, account, &row.remains(), keys).await?;
@@ -1566,7 +1585,15 @@ impl Boxes {
                                 (INTERACTIVE_CONNECTOR, Seen::Tab { running, .. }) => Seen::Tab { running, quiet: false },
                                 _ => seen,
                             };
+                            let was_offline = slot.offline_since;
                             let verdict = verdict(row.age, seen, slot, now, &self.policy);
+                            if matches!(row.work, BoxWork::Delegate { .. }) {
+                                match (was_offline, slot.offline_since) {
+                                    (None, Some(_)) => eprintln!("pinned-server: box {} of account {} went offline", row.id, account.id),
+                                    (Some(at), None) => eprintln!("pinned-server: box {} of account {} is back after {} s", row.id, account.id, now.duration_since(at).as_secs()),
+                                    _ => {}
+                                }
+                            }
                             if gone { Some(End::Vanished) } else { verdict }
                         }
                     }

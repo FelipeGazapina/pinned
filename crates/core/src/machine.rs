@@ -4841,9 +4841,10 @@ impl Machine {
 
     /// Asks after each task delegated elsewhere that no one asked after for `REMOTE_CHECK`. One
     /// whose end got lost ends as its machine answers; one whose machine left the account, or
-    /// whose box did not connect within `BOX_CONNECT_WAIT`, fails here.
+    /// whose box did not connect within `BOX_CONNECT_WAIT`, fails here. One whose box connected
+    /// and went offline waits: its link may come back, and the hub ends a box that stays offline.
     fn check_remotes(&self, now: Instant) {
-        use crate::delegate::{machine_gone, wait_span, BOX_BOOTING, BOX_CONNECT_WAIT};
+        use crate::delegate::{machine_gone, wait_span, BOX_BOOTING, BOX_CONNECT_WAIT, BOX_OFFLINE};
         for (tab, id, remote, ran) in self.delegates.remotes_due(now, REMOTE_CHECK) {
             let asked = HubCall::RemoteTask { machine: remote.machine.clone(), tab: self.delegates.remote_tab(&id, &tab), task: id.clone(), cancel: None };
             let failed = match self.call_hub(asked) {
@@ -4857,6 +4858,7 @@ impl Machine {
                     self.cancel_remote(&tab, &id, &remote, &failed);
                     failed
                 }
+                Err(e) if e == BOX_OFFLINE => continue,
                 Err(_) => continue,
             };
             self.delegates.fail(&id, failed, self.launch.path_env.as_deref());
