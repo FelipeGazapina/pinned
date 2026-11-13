@@ -650,3 +650,8 @@ helps the next time the Mac sleeps whatever the switch says.
    at all?
 3. Is the Developer ID signing on for releases? If not, the Mac switch needs it (2.1).
 4. Agents turning it **off** without asking: want that as a separate `Write` action?
+5. After a sleep that the switch did not prevent, a Captain's turn is cut by an API error. I
+   recommend a Needs you card with one **Continue** tap for every tab, and no typing on its own
+   (3.4: a cut turn may have half-run a command, and you are there when the lid opens). Do you want
+   Captains and the Orchestrator to continue **on their own** after a sleep (the opt-in, off by
+   default, once per cut, never for a turn that ended normally), or is the card enough?
