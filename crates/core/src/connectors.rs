@@ -807,6 +807,11 @@ struct Store {
     /// The connected Convex deployments. Their keys are keys, under `convex::key_name`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     convex: Vec<convex::Connection>,
+    /// The subjects a box end already freed once, by workflow id and then `subject_key`. A later
+    /// failed boot or offline end of the same subject keeps it handled. Marks of subjects no
+    /// workflow handles or follows and no run works on are dropped (`prune_thread_bots`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    box_released: BTreeMap<String, std::collections::BTreeSet<String>>,
     connectors: Vec<Connector>,
 }
 
@@ -867,15 +872,35 @@ impl Store {
         }
     }
 
-    /// Drops the bots of threads no workflow handles or follows and no run works on anymore.
+    /// Drops the bots of threads, and the box-end marks of subjects, no workflow handles or
+    /// follows and no run works on anymore.
     fn prune_thread_bots(&mut self, runs: &[runner::Run], starting: &[String]) -> bool {
-        let before = self.slack_threads.len();
+        let before = (self.slack_threads.len(), self.box_released.values().map(|keys| keys.len()).sum::<usize>());
         let connectors = &self.connectors;
-        self.slack_threads.retain(|key, _| {
+        let tracked = |key: &String| {
             connectors.iter().any(|c| c.handled.iter().any(|h| h == key) || c.followed.contains_key(key)) || runs.iter().any(|run| subject_key(&run.subject) == *key)
                 || starting.contains(key)
-        });
-        self.slack_threads.len() != before
+        };
+        self.slack_threads.retain(|key, _| tracked(key));
+        for keys in self.box_released.values_mut() {
+            keys.retain(|key| tracked(key));
+        }
+        self.box_released.retain(|_, keys| !keys.is_empty());
+        (self.slack_threads.len(), self.box_released.values().map(|keys| keys.len()).sum::<usize>()) != before
+    }
+
+    /// Frees `subject` of workflow `connector` after its run's box ended, as `release` allows:
+    /// never for `Keep`, and for `Once` only when no box end freed it before. Answers whether it did.
+    fn release_after_box_end(&mut self, connector: &str, subject: &Subject, release: BoxEndRelease) -> bool {
+        let key = subject_key(subject);
+        if release == BoxEndRelease::Keep || !self.box_released.entry(connector.to_owned()).or_default().insert(key.clone()) {
+            return false;
+        }
+        if let Some(c) = self.connectors.iter_mut().find(|c| c.id == connector) {
+            c.unclaim(subject);
+        }
+        self.slack_threads.remove(&key);
+        true
     }
 
     /// The workflows, paused ones too, that watch Slack with the bot `id` today. A called workflow
@@ -1613,6 +1638,20 @@ pub struct Connectors {
     bots_filled: Mutex<std::collections::HashSet<String>>,
     /// Why runs failed when their box ended, for the next check to report on the workflows card.
     box_failures: Mutex<Vec<String>>,
+    /// Subjects, by `subject_key`, whose box failed to boot while a run opened it: that open's
+    /// failure frees the subject at most once (`BoxEndRelease::Once`).
+    boot_failed: Mutex<std::collections::HashSet<String>>,
+}
+
+/// What a box's end does to the subject of the run it failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BoxEndRelease {
+    /// It ran out of budget or reached its max life: the subject stays handled, and only its
+    /// owner runs it again.
+    Keep,
+    /// It failed to boot, went offline, or ended for any other reason: the subject is freed for its
+    /// next trigger the first time, and stays handled after that.
+    Once,
 }
 
 /// A Slack bot with its token, as a read or a post uses it.
@@ -1648,6 +1687,7 @@ impl Connectors {
             known_tabs: Mutex::new(HashMap::new()),
             bots_filled: Mutex::new(std::collections::HashSet::new()),
             box_failures: Mutex::new(vec![]),
+            boot_failed: Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -1823,9 +1863,25 @@ impl Connectors {
         self.save(&store)
     }
 
+    /// The hub's box for `subject` failed to boot while a run opened it. That open's failure frees
+    /// the subject only if no box end freed it before.
+    pub fn box_boot_failed(&self, subject: &Subject) {
+        self.boot_failed.lock().unwrap().insert(subject_key(subject));
+    }
+
     fn unclaim(&self, connector: &str, subject: &Subject, folder: &Path, why: &str) -> String {
-        let error = format!("could not open a session in {}: {why}; the next check tries again", folder.display());
+        let booted = self.boot_failed.lock().unwrap().remove(&subject_key(subject));
+        let mut error = format!("could not open a session in {}: {why}; the next check tries again", folder.display());
         let mut store = self.store.lock().unwrap();
+        if booted {
+            if !store.release_after_box_end(connector, subject, BoxEndRelease::Once) {
+                error = format!("could not open a session in {}: {why}; its box failed before, so it starts again only when you run it", folder.display());
+            }
+            return match self.save(&store) {
+                Ok(()) => error,
+                Err(e) => format!("{error}; {e}"),
+            };
+        }
         let Some(c) = store.connectors.iter_mut().find(|c| c.id == connector) else { return error };
         c.unclaim(subject);
         store.slack_threads.remove(&subject_key(subject));
@@ -2988,12 +3044,15 @@ impl Connectors {
     }
 
     /// The box on `machine` ended before its run did. Every live run whose session is on that
-    /// machine, and every run `holds_box` finds for `holder`, fails with `why`, and its subject is
-    /// unclaimed: no longer `handled`, followed or tied to a Slack bot, so the next trigger may
-    /// start it again. Nothing reopens the session. Answers how many runs failed.
-    pub async fn box_ended(&self, machine: &str, holder: Option<(&str, &Subject)>, why: &str) -> Result<usize, String> {
+    /// machine, and every run `holds_box` finds for `holder`, fails with `why`. Its subject is freed
+    /// (no longer `handled`, followed or tied to a Slack bot, so the next trigger may start it
+    /// again) only as `release` allows: never for `Keep`, once per subject for `Once`. Nothing
+    /// reopens the session. Answers how many runs failed.
+    pub async fn box_ended(&self, machine: &str, holder: Option<(&str, &Subject)>, why: &str, release: BoxEndRelease) -> Result<usize, String> {
         let _guard = self.driving.lock().await;
         let at = Utc::now().to_rfc3339();
+        let released = self.store.lock().unwrap().box_released.clone();
+        let mut whys = vec![];
         let failed: Vec<(String, Subject)> = {
             let mut runs = self.runs.lock().unwrap();
             let mut failed = vec![];
@@ -3002,7 +3061,11 @@ impl Connectors {
                 let on_box = matches!(&run.session, Session::Live { machine: live, .. } if live == machine);
                 let holds = holder.is_some_and(|(connector, subject)| &run.subject == subject && owner == connector);
                 if on_box || holds {
-                    runner::push(run, Wake::BoxEnded { why: why.to_owned() }, &at);
+                    let frees = release == BoxEndRelease::Once && !released.get(&owner).is_some_and(|keys| keys.contains(&subject_key(&run.subject)));
+                    let then = if frees { "its next trigger may start it once more" } else { "it starts again only when you run it" };
+                    let why = format!("{why}; the run stopped, and {then}");
+                    runner::push(run, Wake::BoxEnded { why: why.clone() }, &at);
+                    whys.push(why);
                     failed.push((owner, run.subject.clone()));
                 }
             }
@@ -3015,14 +3078,11 @@ impl Connectors {
         {
             let mut store = self.store.lock().unwrap();
             for (owner, subject) in &failed {
-                if let Some(c) = store.connectors.iter_mut().find(|c| &c.id == owner) {
-                    c.unclaim(subject);
-                }
-                store.slack_threads.remove(&subject_key(subject));
+                store.release_after_box_end(owner, subject, release);
             }
             self.save(&store)?;
         }
-        self.box_failures.lock().unwrap().push(why.to_owned());
+        self.box_failures.lock().unwrap().extend(whys);
         // The next check reports it now, not a whole interval later.
         self.wake.notify_one();
         Ok(failed.len())

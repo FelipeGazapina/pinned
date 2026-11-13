@@ -10,7 +10,7 @@ use futures_util::future::BoxFuture;
 use pinned_core::account::Credentials;
 use pinned_core::accounts::{self, Provider};
 use pinned_core::agent::{session_env, Subject, CAPTAIN_CONNECTOR, DELEGATE_CONNECTOR, INTERACTIVE_CONNECTOR};
-use pinned_core::connectors::{unix_millis, BoxAccess, BoxPermission, BoxSize, BoxStep, Connectors, FixedClaim, Placement, Run};
+use pinned_core::connectors::{unix_millis, BoxAccess, BoxEndRelease, BoxPermission, BoxSize, BoxStep, Connectors, FixedClaim, Placement, Run};
 use pinned_core::delegate::{BoxTarget, Delegator, DelegatorKind, Origin, RemoteEnd, Request, RunTarget, TaskOutcome, TaskRecord, TaskUsage};
 use pinned_core::surface::ActorRole;
 use pinned_core::global_orchestrator::BusyPolicy;
@@ -1254,6 +1254,11 @@ impl Boxes {
                     let mut row = row.clone();
                     row.phase = failed.clone();
                     self.tell_origin(hub, account, &row, &End::Failed(e.clone())).await;
+                    if row.work == BoxWork::Run && row.connector != INTERACTIVE_CONNECTOR {
+                        if let Ok(connectors) = hub.connectors(account).await {
+                            connectors.box_boot_failed(&row.subject);
+                        }
+                    }
                     self.record_agent_box(hub, account, &row).await;
                     if let Err(e) = self.end(hub, account, &row.remains(), Some(&keys.api_key)).await {
                         eprintln!("pinned-server: could not delete box {}: {e}", row.id);
@@ -1435,8 +1440,9 @@ impl Boxes {
     }
 
     /// A workflow box ended before its run did, for any reason but that run's end: the runs it
-    /// holds fail with why, and their subjects are free for the next trigger. Nothing opens another
-    /// box or session for them. For the fixed row, which many runs share, only the runs whose
+    /// holds fail with why. A box that ran out of budget or reached its max life keeps their
+    /// subjects handled, so only their owner runs them again; any other end frees each subject for
+    /// its next trigger once (`BoxEndRelease`). Nothing opens another box or session for them. For the fixed row, which many runs share, only the runs whose
     /// session is on its machine. A run that already finished holds nothing, so this does nothing.
     async fn fail_held_runs(&self, hub: &Hub, account: &Account, row: &BoxRow, why: &End) {
         if row.work != BoxWork::Run || row.connector == INTERACTIVE_CONNECTOR {
@@ -1448,8 +1454,8 @@ impl Boxes {
             Err(e) => return eprintln!("pinned-server: could not fail the runs of box {}: {e}", row.id),
         };
         let holder = (!connectors.box_access().owns_row(&row.id)).then_some((row.connector.as_str(), &row.subject));
-        let why = format!("{error}; the run stopped, and nothing starts it again until you or its next trigger do");
-        match connectors.box_ended(&row.machine.to_string(), holder, &why).await {
+        let release = if *why == End::Expired { BoxEndRelease::Keep } else { BoxEndRelease::Once };
+        match connectors.box_ended(&row.machine.to_string(), holder, &error, release).await {
             Ok(0) => {}
             Ok(n) => eprintln!("pinned-server: box {} of account {} ended, so {n} workflow run(s) failed", row.id, account.id),
             Err(e) => eprintln!("pinned-server: could not fail the runs of box {}: {e}", row.id),
