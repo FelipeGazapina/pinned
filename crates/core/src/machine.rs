@@ -35,8 +35,10 @@ const REST_AFTER: Duration = Duration::from_secs(2 * 60);
 const REST_LOOK_EVERY: Duration = Duration::from_secs(15);
 /// About when a parent should hear that its worker can't start without the user.
 const FIRST_RUN_WAIT: Duration = Duration::from_secs(60);
-/// How many times the first-run watch reads a starting session's screen before it stops.
-const FIRST_RUN_LOOKS: u32 = 10;
+/// Why a task the user cancelled from its card stopped.
+const CARD_CANCEL: &str = "cancelled from the card";
+/// How long a fresh session may start without reporting before its start fails.
+const STARTING_LIMIT: Duration = Duration::from_secs(10 * 60);
 /// Claude logs a turn's duration only after its Stop hook returns, within a second in practice.
 const TURN_LOG_WAIT: (u32, Duration) = (25, Duration::from_millis(200));
 const THREAD_LOOK_EVERY: Duration = Duration::from_millis(40);
@@ -122,6 +124,9 @@ pub struct Launch {
     /// How long a Claude Code session may sit in "starting" before its screen is read for a
     /// first-run prompt.
     pub first_run_wait: Duration,
+    /// How long a fresh Claude Code session may sit in "starting" without reporting before its
+    /// start fails.
+    pub starting_limit: Duration,
 }
 
 impl Launch {
@@ -157,6 +162,7 @@ impl Launch {
             sock: files.join("pinned.sock"),
             vector_search: true,
             first_run_wait: FIRST_RUN_WAIT,
+            starting_limit: STARTING_LIMIT,
         })
     }
 
@@ -363,6 +369,33 @@ enum Sent {
     Refused(String),
 }
 
+/// Why a session ended mid-turn: how the task it ran was cancelled, or how its process exited.
+fn stop_reason(task: Option<&crate::delegate::Task>, code: Option<u32>) -> String {
+    let Some(task) = task.filter(|task| task.state == crate::delegate::WorkState::Cancelled) else {
+        return code.map_or_else(|| "crashed".to_owned(), |code| format!("exited with code {code}"));
+    };
+    cancel_reason(task.limit.as_deref(), task.error.as_deref())
+}
+
+/// How a cancelled task reads on the wire. A cancel's own reason is free text any caller wrote, so
+/// only reasons pinned itself names pass through.
+fn cancel_reason(limit: Option<&str>, error: Option<&str>) -> String {
+    match (limit, error) {
+        (Some(limit), _) => format!("cancelled at its {limit} limit"),
+        (None, Some(CARD_CANCEL)) => "stopped by you".into(),
+        (None, Some(crate::delegate::RESTART_ENDED)) => format!("cancelled: {}", crate::delegate::RESTART_ENDED),
+        (None, _) => "cancelled".into(),
+    }
+}
+
+/// How long `limit` is, in the words a stop reason uses.
+fn wait_text(limit: Duration) -> String {
+    match limit.as_secs() {
+        secs if secs >= 60 && secs % 60 == 0 => format!("{} min", secs / 60),
+        secs => format!("{secs} s"),
+    }
+}
+
 /// `delegate_task`'s answer when the project already runs as many workers as it allows.
 fn workers_full(working: usize) -> String {
     let working = if working == 1 { "1 worker already runs".to_owned() } else { format!("{working} workers already run") };
@@ -486,6 +519,11 @@ struct Tab {
     /// Shared with the session's reader thread, which never takes the tabs lock. Never lock it
     /// while holding the tabs lock: a sink may call back into the machine.
     screen: Arc<Mutex<Screen>>,
+    /// The tab shows a headless child, which works with no session of the tab's own, until the
+    /// tab starts one.
+    headless: bool,
+    /// Why the last session ended mid-turn, until a new session or input.
+    stopped: Option<String>,
 }
 
 impl Tab {
@@ -564,6 +602,10 @@ impl Tab {
             work: work.get(id).map(|cost| cost.clone().with_own(self.tally.stats().cost_usd).total()),
             question: self.question.clone(),
             ask_detail: self.ask_detail.clone().filter(|_| self.status == Some(AgentStatus::NeedsInput)),
+            alive: self.session.is_some(),
+            asleep: self.asleep,
+            headless: self.headless && self.session.is_none(),
+            stopped: self.stopped.clone().filter(|_| !self.live()),
             questions: None,
         }
     }
@@ -613,6 +655,7 @@ impl Tab {
 
     fn note_submit(&mut self) {
         self.turn_pending = Some(Instant::now());
+        self.stopped = None;
     }
 
     /// Types a local slash command. Unlike a prompt it leaves `turn_pending` alone: a local
@@ -1363,7 +1406,7 @@ impl Machine {
                 json(self.delegates.cancel(
                     &crate::delegate::Caller { tab: Some(tab), task: None },
                     &task,
-                    "cancelled from the card",
+                    CARD_CANCEL,
                     path.as_deref(),
                 )?)
             }
@@ -2169,12 +2212,16 @@ impl Machine {
     fn watch_first_run(&self, tab: &str) {
         let Ok(screen) = self.tab(tab, |t| t.screen.clone()) else { return };
         let session = screen.lock().unwrap().session;
-        let (me, tab, wait) = (self.me.clone(), tab.to_owned(), self.launch.first_run_wait);
+        let (me, tab, wait, limit) = (self.me.clone(), tab.to_owned(), self.launch.first_run_wait, self.launch.starting_limit);
+        let begun = Instant::now();
         std::thread::spawn(move || {
             let mut answered = vec![];
             let mut pause = wait;
-            for _ in 0..FIRST_RUN_LOOKS {
-                std::thread::sleep(pause);
+            loop {
+                std::thread::sleep(pause.min(limit.saturating_sub(begun.elapsed())));
+                if begun.elapsed() >= limit {
+                    break;
+                }
                 pause = wait;
                 let Some(machine) = me.upgrade() else { return };
                 if screen.lock().unwrap().session != session {
@@ -2201,6 +2248,14 @@ impl Machine {
                     Err(reason) => return machine.end_start(&tab, reason),
                 }
             }
+            // A fresh start that never reported, at its limit. A resume at its prompt fires no hook
+            // until a turn, but has its conversation's id.
+            let Some(machine) = me.upgrade() else { return };
+            if screen.lock().unwrap().session != session || !machine.tab(&tab, |t| t.status.is_none() && t.session.is_some() && t.claude_session.is_none()).unwrap_or(false) {
+                return;
+            }
+            let shown = crate::setup_token::last_line(machine.screen_text(&tab).as_bytes());
+            machine.end_start(&tab, format!("it did not start within {}; its screen shows: {shown}", wait_text(limit)));
         });
     }
 
@@ -2428,9 +2483,9 @@ impl Machine {
             cmd,
             size,
             move |bytes| screen.lock().unwrap().push(session, &bytes),
-            move || {
+            move |code| {
                 if let Some(machine) = me.upgrade() {
-                    machine.exited(&exited, session);
+                    machine.exited(&exited, session, code);
                 }
             },
         )?;
@@ -2440,6 +2495,7 @@ impl Machine {
             t.starting = false;
             t.started = Some(started);
             (t.status, t.title, t.message) = (None, None, None);
+            (t.headless, t.stopped) = (false, None);
             t.turn_pending = None;
             t.shells_left = false;
             t.draft = Draft::default();
@@ -3775,9 +3831,13 @@ impl Machine {
         let is_worker = |id: &str| workers.iter().any(|w| w.id == id);
         let top = |w: &TabView| if everyone { !w.spawned_by.as_deref().is_some_and(is_worker) } else { w.spawned_by.as_deref() == Some(from) };
         let state = |w: &TabView| match (w.running, w.status) {
-            (false, _) => "stopped",
-            (true, None) => "starting",
-            (true, Some(status)) => AgentStatus::ALL.iter().find(|(s, ..)| *s == status).map_or("", |(_, name, _)| name),
+            // A headless child works with no session of the tab's own.
+            (false, Some(AgentStatus::Working)) if w.headless => "working".to_owned(),
+            (false, _) => w.stopped.as_ref().map_or_else(|| "stopped".to_owned(), |why| format!("stopped ({why})")),
+            // A conversation that sleeps, or was resumed and sits at its prompt, fires no hook until a turn.
+            (true, None) if w.asleep || w.session.is_some() => "idle".to_owned(),
+            (true, None) => "starting".to_owned(),
+            (true, Some(status)) => AgentStatus::ALL.iter().find(|(s, ..)| *s == status).map_or("", |(_, name, _)| name).to_owned(),
         };
         let mut lines = vec![];
         let mut seen = HashSet::new();
@@ -5413,7 +5473,7 @@ impl Machine {
     /// the child works; it then resumes the child's conversation, when there is one.
     fn watch_thread(&self, child: ThreadChild, account: Account) {
         let id = self.add_child_tab(&child, account, vec![], false);
-        let _ = self.tab(&id, |t| t.status = Some(AgentStatus::Working));
+        let _ = self.tab(&id, |t| (t.status, t.headless) = (Some(AgentStatus::Working), true));
         self.delegates.link_thread(child.task, crate::delegate::Thread { tab: id, runs: false });
         self.emit_tabs();
     }
@@ -6047,6 +6107,8 @@ impl Machine {
             starting: false,
             started: None,
             launch,
+            headless: false,
+            stopped: None,
             asleep: false,
             bare: false,
             waking: false,
@@ -6102,16 +6164,25 @@ impl Machine {
         self.emit(Event::Tabs { tabs: self.tabs() });
     }
 
-    fn exited(&self, tab: &str, session: u64) {
-        let Ok((screen, signing_in)) = self.tab(tab, |t| (t.screen.clone(), (t.program == Program::SignIn).then(|| t.account.id.clone()))) else { return };
+    /// The tab's session ended by itself with exit `code`, or was killed: a cancel of the task
+    /// the tab runs records why on the task before it kills the session. A turn it was in reads
+    /// stopped, with that reason, rather than working on with nothing behind it.
+    fn exited(&self, tab: &str, session: u64, code: Option<u32>) {
+        let Ok((screen, signing_in, task)) = self.tab(tab, |t| (t.screen.clone(), (t.program == Program::SignIn).then(|| t.account.id.clone()), t.task.clone())) else { return };
         if screen.lock().unwrap().session != session {
             return;
         }
         if let Some(account) = signing_in {
             self.sign_in_changed(&account);
         }
+        let reason = stop_reason(task.and_then(|task| self.delegates.get(&task)).as_ref(), code);
         self.end_session(tab);
-        let _ = self.tab(tab, |t| (t.session, t.background_wait, t.mcp) = (None, None, None));
+        let _ = self.tab(tab, |t| {
+            (t.session, t.background_wait, t.mcp) = (None, None, None);
+            if !t.headless && matches!(t.status, Some(AgentStatus::Working | AgentStatus::NeedsInput)) {
+                (t.status, t.stopped) = (None, Some(reason));
+            }
+        });
         if let Some(task) = self.thread_task(tab, true) {
             self.delegates.fail(&task, "its thread's session ended".into(), self.launch.path_env.as_deref());
         }
@@ -6912,11 +6983,22 @@ pub(crate) mod tests {
             sock: "k".into(),
             vector_search: false,
             first_run_wait: Duration::from_millis(300),
+            starting_limit: Duration::from_secs(60),
         }
     }
 
     fn machine() -> Arc<Machine> {
         Machine::new(launch(), None, Some("/repo".into()), |_| {})
+    }
+
+    #[test]
+    fn a_cancel_reason_reaches_the_wire_only_when_pinned_wrote_it() {
+        let reason = super::cancel_reason;
+        assert_eq!(reason(Some("time"), Some("pinned stopped it after US$ 5.00")), "cancelled at its time limit");
+        assert_eq!(reason(None, Some(CARD_CANCEL)), "stopped by you");
+        assert_eq!(reason(None, Some(crate::delegate::RESTART_ENDED)), format!("cancelled: {}", crate::delegate::RESTART_ENDED));
+        assert_eq!(reason(None, Some("run: deploy --token fake-token-0000")), "cancelled");
+        assert_eq!(reason(None, None), "cancelled");
     }
 
     #[test]
@@ -7177,11 +7259,17 @@ pub(crate) mod tests {
     /// A machine whose saved sessions `sessions` all ended their last turn, and their tabs in that order.
     #[cfg(unix)]
     fn restored_idle(name: &str, sessions: &[&str]) -> (Arc<Machine>, PathBuf, PathBuf, Vec<TabId>) {
+        restored_idle_with(name, sessions, |_| vec![])
+    }
+
+    /// `restored_idle`, each session saved with the environment `env` gives for the app folder.
+    #[cfg(unix)]
+    fn restored_idle_with(name: &str, sessions: &[&str], env: impl Fn(&Path) -> Vec<(String, String)>) -> (Arc<Machine>, PathBuf, PathBuf, Vec<TabId>) {
         let dir = temp(name);
         let (app, config) = (dir.join("app"), dir.join("config"));
         std::fs::create_dir_all(&app).unwrap();
         std::fs::create_dir_all(&config).unwrap();
-        let saved: Vec<Value> = sessions.iter().map(|session| json!({ "cwd": app, "session": session, "env": [] })).collect();
+        let saved: Vec<Value> = sessions.iter().map(|session| json!({ "cwd": app, "session": session, "env": env(&app) })).collect();
         std::fs::write(config.join("sessions.json"), json!(saved).to_string()).unwrap();
         let claude = typed_claude(&dir);
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config), None, |_| {});
@@ -8236,7 +8324,7 @@ pub(crate) mod tests {
         assert_eq!(
             *heard.lock().unwrap(),
             [json!({ "kind": "tabs", "tabs": [{
-                "id": tab, "cwd": "/repo", "account": "claude", "program": "agent", "bypass": false, "running": false, "status": null,
+                "id": tab, "cwd": "/repo", "account": "claude", "program": "agent", "bypass": false, "running": false, "alive": false, "status": null,
                 "title": null, "message": null, "resume_at": null, "connector": null, "opened": 1,
             }] })]
         );
@@ -8311,7 +8399,7 @@ pub(crate) mod tests {
         assert_eq!(
             m.call(Call::Tabs),
             Ok(json!([{
-                "id": id, "cwd": "/repo", "account": "claude", "program": "agent", "bypass": true, "running": false, "status": null,
+                "id": id, "cwd": "/repo", "account": "claude", "program": "agent", "bypass": true, "running": false, "alive": false, "status": null,
                 "title": null, "message": null, "resume_at": null, "connector": null, "opened": 1,
             }]))
         );
@@ -12466,6 +12554,86 @@ Have another model review a risky change before it goes ahead.";
         m.delegates.enforce_limits(Instant::now() + Duration::from_secs(1801), None);
         let ended = status();
         assert_eq!((ended["workState"].as_str(), ended["error"].as_str()), (Some("cancelled"), Some("pinned stopped it after 30 min, its limit")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_session_killed_mid_turn_reads_stopped_with_its_reason() {
+        let (m, dir, captain) = limited_captain("stopped-mid-turn", TastePatch { time_limit_min: Some(30), ..TastePatch::default() });
+        let asked = json!({ "task": "Fix the parser.", "title": "Parser", "target": { "providerInstanceId": "work", "model": "claude-sonnet-5-5" } });
+        let task = delegate_task(&m, &captain, asked)["taskId"].as_str().unwrap().to_owned();
+        let tab = m.delegates.get(&task).and_then(|t| t.thread).unwrap().tab;
+        wait_for("the worker's session", || m.tab(&tab, |t| t.session.is_some()).unwrap());
+        m.record_event(hook(&tab, AgentStatus::Working));
+        m.delegates.enforce_limits(Instant::now() + Duration::from_secs(1801), None);
+        wait_for("the killed session's exit", || !m.view(&tab).unwrap().running);
+        let view = m.view(&tab).unwrap();
+        let reason = "cancelled at its time limit";
+        assert_eq!((view.running, view.alive, view.status, view.stopped.as_deref()), (false, false, None, Some(reason)), "the killed turn no longer reads working");
+        assert_eq!(crate::reading::state_of(&view), ("stopped", Some(reason.to_owned())));
+        let project = role_of(&m.tab(&tab, |t| t.env.clone()).unwrap()).unwrap().1;
+        assert!(m.workers(&captain, &project).contains(&format!("(stopped ({reason}))")), "{}", m.workers(&captain, &project));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_headless_child_that_is_working_is_never_stopped() {
+        use crate::delegate::{Access, Mode, NewTask, Parent};
+        let m = machine();
+        let parent = m.open_tab(None, false).unwrap();
+        let cwd = std::env::temp_dir();
+        let task = m.delegates.begin(NewTask {
+            parent: Parent::Tab(parent.clone()),
+            tool: None,
+            title: "Child".into(),
+            account: "claude".into(),
+            provider: Provider::Claude,
+            model: None,
+            cwd: cwd.clone(),
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: false,
+            caller_key: format!("tab:{parent}"),
+            client_request_id: None,
+            role: None,
+        });
+        m.watch_thread(ThreadChild { from: &parent, origin: None, task: &task.id, title: "Child", cwd: &cwd, made: None, model: None }, Account::builtin(Provider::Claude));
+        let tab = m.delegates.get(&task.id).and_then(|t| t.thread).unwrap().tab;
+        let view = m.view(&tab).unwrap();
+        assert_eq!((view.headless, view.alive, view.status, view.stopped.as_deref()), (true, false, Some(AgentStatus::Working), None));
+        assert_eq!(crate::reading::state_of(&view).0, "working", "a headless child at work is not a stopped session");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_start_that_never_reports_fails_after_the_starting_limit() {
+        let root = temp("starting-limit");
+        let (claude, _) = claude_on_screens(&root, &["Warming up the flux capacitor"]);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), starting_limit: Duration::from_secs(1), ..launch() }, Some(root.join("config")), None, |_| {});
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        let task = delegate_from(&m, &app, "shared");
+        wait_for("the start to fail", || m.delegates.get(&task).is_some_and(|t| t.state.terminal()));
+        let info = m.delegates.get(&task).unwrap();
+        let reason = "it did not start within 1 s; its screen shows: Warming up the flux capacitor";
+        assert_eq!((info.state.as_str(), info.error.as_deref()), ("failed", Some(reason)));
+        let thread = m.view(&info.thread.unwrap().tab).unwrap();
+        assert_eq!((thread.status, thread.message.as_deref()), (Some(AgentStatus::Failed), Some(reason)));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_restored_asleep_tab_reads_idle_not_starting() {
+        let (m, dir, _, tabs) = restored_idle_with("restored-reads-idle", &["s1"], |app| role_env(Role::Worker, app));
+        let app = dir.join("app");
+        let view = m.view(&tabs[0]).unwrap();
+        assert_eq!((view.running, view.asleep, view.alive, view.status), (true, true, false, None));
+        assert_eq!(crate::reading::state_of(&view).0, "idle");
+        let captain = m.add_tab(app.clone(), Account::builtin(Provider::Claude), vec![], role_env(Role::Orchestrator, &app), false, None);
+        let workers = m.workers(&captain, &app);
+        assert!(workers.contains("(idle)") && !workers.contains("starting"), "{workers}");
         let _ = std::fs::remove_dir_all(dir);
     }
 

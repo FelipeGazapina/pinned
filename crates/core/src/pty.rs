@@ -9,7 +9,8 @@ type Master = Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>;
 pub struct Session {
     master: Master,
     writer: Box<dyn Write + Send>,
-    child: Option<Box<dyn Child + Send + Sync>>,
+    /// Shared with the reader, which reaps a program that ended by itself to read its exit code.
+    child: Arc<Mutex<Option<Box<dyn Child + Send + Sync>>>>,
     killed: Arc<AtomicBool>,
     untouched: bool,
 }
@@ -64,7 +65,7 @@ impl Session {
         mut cmd: CommandBuilder,
         size: PtySize,
         mut on_output: impl FnMut(Vec<u8>) + Send + 'static,
-        on_exit: impl FnOnce() + Send + 'static,
+        on_exit: impl FnOnce(Option<u32>) + Send + 'static,
     ) -> Result<Self, String> {
         crate::process::fix_pty_env(&mut cmd);
         let pair = native_pty_system().openpty(size).map_err(|e| e.to_string())?;
@@ -80,6 +81,11 @@ impl Session {
 
         let killed = Arc::new(AtomicBool::new(false));
         let reader_killed = killed.clone();
+        let master = Arc::new(Mutex::new(Some(pair.master)));
+        #[cfg(windows)]
+        close_on_exit(&*child, master.clone());
+        let child = Arc::new(Mutex::new(Some(child)));
+        let reader_child = child.clone();
         std::thread::spawn(move || {
             let mut buf = [0u8; 16 * 1024];
             #[cfg(windows)]
@@ -93,14 +99,11 @@ impl Session {
             }
             // A session we dropped ourselves must not report an exit that the UI would pin on its replacement.
             if !reader_killed.load(Ordering::SeqCst) {
-                on_exit();
+                on_exit(exit_code(&reader_child, &reader_killed));
             }
         });
 
-        let master = Arc::new(Mutex::new(Some(pair.master)));
-        #[cfg(windows)]
-        close_on_exit(&*child, master.clone());
-        Ok(Self { master, writer, child: Some(child), killed, untouched: true })
+        Ok(Self { master, writer, child, killed, untouched: true })
     }
 
     pub fn write(&mut self, bytes: &[u8]) -> std::io::Result<()> {
@@ -115,7 +118,7 @@ impl Session {
     }
 
     pub fn pid(&self) -> Option<u32> {
-        self.child.as_ref()?.process_id()
+        self.child.lock().unwrap().as_ref()?.process_id()
     }
 
     /// Whether the program has taken the terminal out of canonical mode, as claude does once it
@@ -145,10 +148,31 @@ impl Session {
     }
 }
 
+/// The exit code of a program whose output ended, once it is gone, or None when it was ended by a
+/// signal or did not go within a moment. A program reaped here is taken out of the session.
+fn exit_code(child: &Mutex<Option<Box<dyn Child + Send + Sync>>>, killed: &AtomicBool) -> Option<u32> {
+    for _ in 0..100 {
+        {
+            let mut held = child.lock().unwrap();
+            if killed.load(Ordering::SeqCst) {
+                return None;
+            }
+            let status = held.as_mut()?.try_wait().ok()?;
+            if let Some(status) = status {
+                held.take();
+                return status.signal().is_none().then(|| status.exit_code());
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    None
+}
+
 impl Drop for Session {
     fn drop(&mut self) {
         self.killed.store(true, Ordering::SeqCst);
-        let Some(mut child) = self.child.take() else { return };
+        // None once the reader reaped a program that ended by itself: its pid may name another process now.
+        let Some(mut child) = self.child.lock().unwrap().take() else { return };
         // Before the app quitting can exit under it.
         #[cfg(unix)]
         if let Some(pid) = child.process_id() {
@@ -215,7 +239,7 @@ mod tests {
         let mut cmd = CommandBuilder::new("/bin/sh");
         cmd.args(["-c", "perl -e 'setpgrp(0, 0); print \"$$\\n\"; sleep 300' & wait"]);
         let (tx, rx) = mpsc::channel();
-        let session = Session::spawn(cmd, size(80, 24), move |bytes| _ = tx.send(bytes), || {}).unwrap();
+        let session = Session::spawn(cmd, size(80, 24), move |bytes| _ = tx.send(bytes), |_| {}).unwrap();
         let mut out = String::new();
         while !out.contains('\n') {
             out.push_str(&String::from_utf8_lossy(&rx.recv_timeout(Duration::from_secs(5)).unwrap()));
@@ -238,7 +262,7 @@ mod tests {
         for _ in 0..8 {
             let mut cmd = CommandBuilder::new("/bin/sleep");
             cmd.arg("30");
-            let session = Session::spawn(cmd, size(80, 24), |_| {}, || {}).unwrap();
+            let session = Session::spawn(cmd, size(80, 24), |_| {}, |_| {}).unwrap();
             let pid = session.pid().unwrap().to_string();
             drop(session);
             let stat = crate::process::command("ps").args(["-o", "stat=", "-p", &pid]).output().unwrap();
