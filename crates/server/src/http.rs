@@ -8,7 +8,6 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
-use pinned_core::agent::Subject;
 use pinned_core::account::{DictationFeedback, Failure, NewMachine, NewPassword, Paired, Pairing, Registered, Session, SignIn, Signup, SignupInfo};
 use pinned_core::link::UNAUTHORIZED;
 use pinned_core::surface::{self, Side};
