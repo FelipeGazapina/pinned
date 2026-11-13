@@ -7780,9 +7780,10 @@ fn a_session_box_follows_only_its_setting_and_budget_and_only_its_owner_answers_
     locked_app.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
     assert_eq!(locked_app.hub(extend).unwrap()["budget_usd"].as_f64(), Some(3.0), "once unlocked the app's own extend goes through");
     // Only the agents' extends were ever confirmations, and the owner decided each: no open or answer became one.
-    for app in [&mut owner, &mut bobs_app] {
+    for (app, expected) in [(&mut owner, 2), (&mut bobs_app, 1)] {
         let all = app.hub(json!({ "cmd": "confirmations" })).unwrap();
-        assert!(!all.as_array().unwrap().is_empty() && all.as_array().unwrap().iter().all(|c| c["action"] == "extend_box" && c["decision"] == "approved"), "{all}");
+        assert!(all.as_array().unwrap().iter().all(|c| c["action"] == "extend_box" && c["decision"] == "approved"), "{all}");
+        assert_eq!(all.as_array().unwrap().len(), expected, "exactly the extends this account's agents asked for: {all}");
     }
 }
 
