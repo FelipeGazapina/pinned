@@ -12152,6 +12152,24 @@ Have another model review a risky change before it goes ahead.";
 
     #[test]
     #[cfg(unix)]
+    fn a_model_id_the_machine_does_not_list_is_refused_under_a_tier_cap_by_a_worker_and_by_set_model() {
+        let (m, dir, captain) = limited_captain("limits-unlisted", TastePatch { tier: Some(taste::Tier::Mid), ..TastePatch::default() });
+        let unlisted = "is not in this machine's list of Claude models";
+        let error = refused(&m, &captain, work(Some("claude-nova-9-9"), None));
+        assert!(error.starts_with("claude-nova-9-9 ") && error.contains(unlisted), "{error}");
+        let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
+        let tab = m.open_tab(Some(path), false).unwrap();
+        let work = m.accounts.get("work").unwrap();
+        m.tab(&tab, |t| t.account = work).unwrap();
+        let set = m.call(Call::ActFor { caller: captain.clone(), call: json!({ "cmd": "set_model", "tab": tab, "model": "claude-nova-9-9", "cols": 80, "rows": 24 }) });
+        let error = set.unwrap_err();
+        assert!(error.starts_with("claude-nova-9-9 ") && error.contains(unlisted), "{error}");
+        assert_ne!(m.tab(&tab, |t| t.model.clone()).unwrap().as_deref(), Some("claude-nova-9-9"), "a refused model is not set");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn a_call_above_the_tier_or_the_most_effort_is_refused_and_one_without_effort_gets_the_default() {
         let limits = TastePatch { tier: Some(taste::Tier::Mid), default_effort: Some(taste::Effort::Low), max_effort: Some(taste::Effort::High), ..TastePatch::default() };
         let (m, dir, captain) = limited_captain("limits-tier", limits);
