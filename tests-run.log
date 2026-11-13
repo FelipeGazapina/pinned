@@ -146,3 +146,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:07:22Z #66 the_global_orchestrator_names_a_capitao_by_repo_and_machine_sees_it_working_at_once_and_reads_it ok / avail=15072M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:07:23Z #67 another_accounts_machine_takes_no_call_attach_watch_or_change_from_this_one START / avail=15072M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:07:28Z #67 another_accounts_machine_takes_no_call_attach_watch_or_change_from_this_one ok / avail=15072M /workspace avail=19374M node_stat=Ssl node_tcp=1
+2026-11-13T04:07:29Z #68 a_machines_tabs_usage_output_and_presence_reach_only_its_own_accounts_clients START / avail=15072M /workspace avail=19374M node_stat=Ssl
