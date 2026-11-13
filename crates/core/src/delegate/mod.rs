@@ -743,6 +743,8 @@ mod tests {
                 "-c",
                 "mcp_servers.pinned.args=[\"mcp\"]",
                 "-c",
+                "mcp_servers.pinned.tool_timeout_sec=86400",
+                "-c",
                 "mcp_servers.pinned.env.PINNED_SOCK=\"/tmp/pinned.sock\"",
                 "-c",
                 "mcp_servers.pinned.env.PINNED_TASK=\"task-1\"",

@@ -130,6 +130,10 @@ fn codex_resume(session: &str) -> Vec<String> {
     vec!["resume".into(), session.into()]
 }
 
+/// How long Codex lets a call to the pinned MCP server run, a day, so a tool that waits on a person
+/// outlasts its default of 300 seconds. Codex does not reset it on `notifications/progress`.
+const CODEX_TOOL_TIMEOUT_SECS: u32 = 86_400;
+
 /// Codex reads MCP servers from `-c` config, with the socket and tab written out. It does not
 /// expand a `${PINNED_SOCK}` the way Claude's mcp config does.
 pub fn codex_mcp_flags(
@@ -152,6 +156,8 @@ pub fn codex_mcp_flags(
         r#"["mcp","--no-reminders"]"#
     };
     args.extend(["-c".into(), format!("mcp_servers.pinned.args={mcp_args}")]);
+    // Codex gives a tool call 300 seconds by default, and a `question_user` waits on a person.
+    args.extend(["-c".into(), format!("mcp_servers.pinned.tool_timeout_sec={CODEX_TOOL_TIMEOUT_SECS}")]);
     args.extend([
         "-c".into(),
         format!(
