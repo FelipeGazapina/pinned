@@ -2,3 +2,4 @@ What a hub on v0.18.1 saves, with every field filled and every enum variant used
 
 - `connectors.json`: the whole store. `connectors-box-variants.json`: the `BoxPermission` values the first has no slot for. `runs.json`: the workflow runs, one per pending effect plus a finished one.
 - `linear.email` holds a placeholder, not an address.
+- `connectors-box-variants.json` is loaded with no workflow ids, so only the value comparison catches a silent fall back to the default store. Keep its values different from `BoxAccess::default()` (workflow `fresh`, the others `off`): today `workflow`, `worker` and `orchestrator` differ; `session` is `off` only to use that variant, and the other three still catch the fallback.
