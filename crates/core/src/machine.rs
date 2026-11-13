@@ -14079,7 +14079,7 @@ Have another model review a risky change before it goes ahead.";
         assert!(!m.tab(&tab, |t| t.asks()).unwrap(), "no session, no task: it does not ask");
         let id = m.questions.lock().unwrap().open(&tab, Some("s-stopped".into()), None, None, vec![crate::questions::Question { header: None, question: "Base on main?".into(), changes: "the PR target".into(), options: vec![], multi_select: false }], vec![], 1).unwrap();
         let view = m.view(&tab).unwrap();
-        assert_eq!((view.running, view.status, view.stopped.as_deref(), view.questions), (false, None, Some("killed"), None), "it reads stopped, not needs-input");
+        assert_eq!((view.running, view.status, view.stopped.as_deref(), view.questions.is_some()), (false, None, Some("killed"), false), "it reads stopped, not needs-input");
         assert_eq!(global::waiting_kind(&view), None, "waiting() does not list it");
         assert!(m.questions.lock().unwrap().get(&id).is_some_and(|asked| asked.is_open()), "its questions stay open for the tab that resumes the session");
 
