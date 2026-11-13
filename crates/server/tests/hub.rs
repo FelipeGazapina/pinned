@@ -8253,6 +8253,46 @@ fn box_usage_reports_an_upstash_that_fails_and_still_counts_pinneds_own() {
 }
 
 #[test]
+fn a_box_whose_delete_failed_is_listed_by_stuck_boxes_and_by_box_usage_without_upstash() {
+    let hub = TestHub::start("stuck_boxes");
+    let (token, id, mut ana) = signed_in(&hub.url, "ana@acme.dev");
+    let (_, _, mut bob) = signed_in(&hub.url, "bob@acme.dev");
+    let (machine, _) = account::register_machine(&hub.url, &token, "fake-machine", "linux").unwrap();
+    opened_box(&hub, &id, &machine.id, "fake-box-0001", "fake-upstash-0001", "git@github.com:acme/site.git");
+    assert_eq!(ana.hub(json!({ "cmd": "stuck_boxes" })).unwrap(), json!([]), "a box that is running is not stuck");
+
+    // No Upstash is connected, so ending the box cannot delete it: the delete fails and is recorded.
+    let ended = ana.hub(json!({ "cmd": "remove_machine", "id": machine.id }));
+    assert!(ended.as_ref().is_err_and(|e| e.contains("Upstash Box is not connected")), "{ended:?}");
+
+    let stuck = ana.hub(json!({ "cmd": "stuck_boxes" })).unwrap();
+    println!("stuck_boxes answer: {stuck}");
+    let listed = stuck.as_array().unwrap();
+    assert_eq!(listed.len(), 1, "{stuck}");
+    assert_eq!(listed[0]["id"], "fake-box-0001");
+    let why = listed[0]["why"].as_str().unwrap();
+    assert!(why.contains("Upstash"), "{why}");
+
+    let usage = ana.hub(json!({ "cmd": "box_usage" })).unwrap();
+    println!("box_usage answer: {usage}");
+    assert_eq!((usage["connected"].clone(), usage["stuck"].clone()), (json!(false), stuck.clone()));
+    assert_eq!(bob.hub(json!({ "cmd": "stuck_boxes" })).unwrap(), json!([]), "another account does not see it");
+    assert!(bob.hub(json!({ "cmd": "box_usage" })).unwrap().get("stuck").is_none());
+}
+
+#[test]
+fn stuck_boxes_does_not_wait_on_upstash() {
+    let hub = TestHub::start("stuck_boxes_quick");
+    let hang = "box_testkey-stuck-hang";
+    let (_, _, mut ana) = usage_account(&hub.url, "ana@acme.dev", hang);
+    upstash_answers(hang, None);
+    let started = Instant::now();
+    let answer = ana.request_within(Duration::from_secs(10), json!({ "type": "hub", "call": { "cmd": "stuck_boxes" } })).unwrap();
+    assert!(started.elapsed() < Duration::from_secs(10), "box_usage waits 15 s for this Upstash; stuck_boxes must not ask it at all");
+    assert_eq!(answer, json!([]));
+}
+
+#[test]
 fn box_usage_never_shows_one_account_the_boxes_or_tasks_of_another() {
     let hub = TestHub::start("usage_accounts");
     let (key_a, key_b) = ("box_testkey-usage-a", "box_testkey-usage-b");
