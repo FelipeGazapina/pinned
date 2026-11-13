@@ -4082,7 +4082,7 @@ impl Connectors {
         let name = name.trim();
         let named = !name.is_empty() && name.len() <= 40 && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"-._".contains(&b));
         if !named {
-            return Err("name the pinned account with letters, digits, dots, dashes or underscores, as in claude or bloom".into());
+            return Err("name the pinned account with letters, digits, dots, dashes or underscores, as in work or personal".into());
         }
         let token = upstash::claude_token(token)?;
         let mut store = self.store.lock().unwrap();
@@ -6376,7 +6376,7 @@ mod tests {
         let (connectors, dir) = stored("box-tokens", vec![]);
         assert_eq!(connectors.set_box_claude_token("bloom", "sk-ant-oat01-bb11"), Err("connect Upstash Box first".into()));
         connectors.connect_upstash(&upstash::Keys::parse("box_abcdA1b2", "sk-ant-oat01-default").unwrap()).unwrap();
-        assert_eq!(connectors.set_box_claude_token("bl oom", "sk-ant-oat01-bb11"), Err("name the pinned account with letters, digits, dots, dashes or underscores, as in claude or bloom".into()));
+        assert_eq!(connectors.set_box_claude_token("bl oom", "sk-ant-oat01-bb11"), Err("name the pinned account with letters, digits, dots, dashes or underscores, as in work or personal".into()));
         assert_eq!(connectors.set_box_claude_token("bloom", "nope"), Err("a Claude token from `claude setup-token` starts with sk-ant-oat01-".into()));
         let kept = connectors.set_box_claude_token(" bloom ", " sk-ant-oat01-bb11 ").unwrap();
         assert_eq!(kept, BTreeMap::from([("bloom".to_owned(), "…bb11".to_owned())]));

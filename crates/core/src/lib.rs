@@ -34,6 +34,7 @@ pub mod memory;
 pub mod menu_watch;
 pub mod model2vec;
 pub mod opencode_go;
+pub mod owner_text_guard;
 pub mod panel;
 pub mod plugin;
 pub mod preauth;
