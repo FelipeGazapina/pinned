@@ -274,3 +274,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:21:17Z #123 a_worker_box_follows_only_its_access_setting_and_the_owner_answers_its_ask_on_a_locked_app ok / avail=15050M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:21:18Z #124 a_captain_box_follows_only_its_access_setting_and_the_owner_answers_its_ask_on_a_locked_app START / avail=15050M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:21:23Z #124 a_captain_box_follows_only_its_access_setting_and_the_owner_answers_its_ask_on_a_locked_app ok / avail=15050M /workspace avail=19374M node_stat=Ssl node_tcp=1
+2026-11-13T04:21:23Z #125 a_locked_app_still_needs_the_password_for_every_confirm_action_and_never_for_a_box_answer_or_budget START / avail=15050M /workspace avail=19374M node_stat=Ssl
