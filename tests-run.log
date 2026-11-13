@@ -63,3 +63,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:04:10Z #27 sign_in_rejects_wrong_passwords_duplicates_and_logged_out_tokens ok / avail=15075M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:04:10Z #28 a_closed_hub_takes_only_its_first_account_whose_password_can_change START / avail=15075M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:04:15Z #28 a_closed_hub_takes_only_its_first_account_whose_password_can_change ok / avail=15075M /workspace avail=19374M node_stat=Ssl node_tcp=1
+2026-11-13T04:04:16Z #29 an_invite_hub_takes_its_first_account_then_only_single_use_codes START / avail=15075M /workspace avail=19374M node_stat=Ssl
