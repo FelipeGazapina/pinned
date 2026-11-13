@@ -31,6 +31,7 @@ tower-http = { version = "0.6", features = ["fs", "set-header"] }
 uuid = { version = "1", features = ["v4"] }
 url = "2"
 subtle = "2"
+unicode-properties = "0.1"
 
 [dev-dependencies]
 flate2 = "1"
