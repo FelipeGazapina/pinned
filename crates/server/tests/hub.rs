@@ -3038,7 +3038,7 @@ fn a_box_row_that_cannot_fail_its_runs_does_not_stop_the_pass_for_the_next_row()
     assert_eq!(ana.rows(&hub), 2);
 
     // The second box is past its budget. The first row is retried first in every pass and still fails.
-    hub.runtime.block_on(hub.hub().db.set_box_budget(&ids[1], 0.000_000_1)).unwrap();
+    hub.runtime.block_on(hub.hub().db.set_box_budget(ana.id, &ids[1], 0.000_000_1)).unwrap();
     wait_for("the second row, past its budget, to end in a pass the first row cannot finish", || ana.rows(&hub) == 1);
     assert_eq!(hub.boxes.live(), ["box_1"], "the first box stays while its run cannot be failed");
     assert!(account_store(&hub, ana.id)["runs"][0]["status"].get("failed").is_none(), "its run is not failed yet");
