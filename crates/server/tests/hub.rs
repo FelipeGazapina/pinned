@@ -8758,6 +8758,21 @@ fn a_machine_gets_every_waiting_held_end_once_across_pages_and_none_unclaimed() 
 }
 
 #[test]
+fn the_unclaimed_list_holds_at_most_a_bound_of_ends_newest_first() {
+    let hub = TestHub::start("held_unclaimed_bound");
+    let (_, ana, mut ana_client) = signed_in(&hub.url, "ana@acme.dev");
+    let bound = pinned_server::db::HELD_UNCLAIMED_LIST;
+    admin_on(&hub.database, &format!("insert into held_ends (account, origin_machine, task, origin_tab, from_machine, report, unclaimed_at)
+        select '{ana}', gen_random_uuid(), 'task-' || lpad(i::text, 4, '0'), 'tab-1', gen_random_uuid(), '{{\"state\": \"failed\", \"error\": \"Tests failed.\"}}', now() - i * interval '1 second'
+        from generate_series(1, {}) i", bound + 3));
+    let listed = ana_client.hub(json!({ "cmd": "unclaimed_ends" })).unwrap();
+    let tasks: Vec<&str> = listed.as_array().unwrap().iter().map(|e| e["task"].as_str().unwrap()).collect();
+    assert_eq!(tasks.len(), bound as usize, "at most the bound");
+    let newest: Vec<String> = (1..=bound).map(|i| format!("task-{i:04}")).collect();
+    assert_eq!(tasks, newest, "the newest first");
+}
+
+#[test]
 fn a_held_end_answers_its_tasks_status_after_its_worker_is_gone_and_stays_until_answered() {
     let hub = TestHub::start("held_status");
     let (mut ana, mac, mac_token, mini, _mini_raw, _) = held_for_offline_mac(&hub);

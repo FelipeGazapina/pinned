@@ -139,6 +139,8 @@ const HELD_FOR: &str = "interval '30 days'";
 pub const HELD_EXPIRY_BATCH: i64 = 1000;
 /// The most waiting held ends of one machine the hub reads at once when it connects.
 pub const HELD_PAGE: i64 = 500;
+/// The most unclaimed ends `unclaimed_ends` lists, the newest.
+pub const HELD_UNCLAIMED_LIST: i64 = 200;
 const LEARNING_SCHEMA: &str = "
 create table if not exists dictation_feedback (id uuid primary key, account uuid not null,
   created_at timestamptz not null default now(), rating text not null, raw text not null, cleaned text not null,
@@ -728,7 +730,8 @@ impl Db {
             .map(drop)
     }
 
-    /// Every end of the account that its machine did not take, younger than `HELD_FOR`, newest first.
+    /// The ends of the account that its machine did not take, younger than `HELD_FOR`, newest first:
+    /// at most `HELD_UNCLAIMED_LIST`.
     pub async fn unclaimed_ends(&self, account: Uuid) -> Result<Vec<pinned_core::delegate::UnclaimedEnd>, String> {
         let rows = self
             .client()
@@ -738,9 +741,9 @@ impl Db {
                     "select task, origin_machine, origin_tab, from_machine, report,
                        (extract(epoch from held_at) * 1000)::bigint, (extract(epoch from unclaimed_at) * 1000)::bigint
                      from held_ends where account = $1 and unclaimed_at is not null and held_at > now() - {HELD_FOR}
-                     order by unclaimed_at desc, task"
+                     order by unclaimed_at desc, task limit $2"
                 ),
-                &[&account],
+                &[&account, &HELD_UNCLAIMED_LIST],
             )
             .await
             .map_err(err)?;
