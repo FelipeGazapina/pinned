@@ -276,7 +276,8 @@ impl Phase {
 pub enum Seen {
     Offline,
     NoTab,
-    /// `quiet`: the session is not working.
+    /// `quiet`: nothing holds the box, so the session is neither working nor waiting on an open
+    /// questionnaire.
     Tab { running: bool, quiet: bool },
 }
 

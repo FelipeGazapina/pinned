@@ -1596,13 +1596,13 @@ mod tests {
 
     /// A box's account with one machine showing a single tab with `status`, laid over by an open
     /// questionnaire when `asked`, as the node shows a tab whose worker called `question_user`.
-    fn box_showing(status: AgentStatus, asked: bool) -> Account {
+    fn box_showing(status: AgentStatus, asked: bool, running: bool) -> Account {
         use pinned_core::questions::{self, QOption, Question, Questionnaire};
         let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() };
         let (out, _sent, _) = Outbox::new();
         account.came_online("box", 1, "box".into(), true, "0.18.2".into(), out);
         let mut tab: TabView = serde_json::from_value(serde_json::json!({
-            "id": "tab-1", "cwd": "/work/repo", "bypass": true, "running": true, "opened": 1_794_240_000u64,
+            "id": "tab-1", "cwd": "/work/repo", "bypass": true, "running": running, "opened": 1_794_240_000u64,
             "status": status, "connector": "delegate", "subject": { "issue": "FAKE-1" },
         }))
         .unwrap();
@@ -1626,7 +1626,7 @@ mod tests {
 
     #[test]
     fn a_box_waiting_on_an_open_question_is_not_idle() {
-        let account = box_showing(AgentStatus::NeedsInput, true);
+        let account = box_showing(AgentStatus::NeedsInput, true, true);
         let subject = Subject::LinearIssue { issue: "FAKE-1".into() };
         let looks: [(&str, Box<dyn Fn() -> Seen>); 2] = [("seen", Box::new(|| account.seen("box", "delegate", &subject))), ("seen_any", Box::new(|| account.seen_any("box")))];
         for (which, look) in looks {
@@ -1641,7 +1641,7 @@ mod tests {
     fn a_box_on_a_permission_prompt_or_idle_still_ends_as_idle() {
         let subject = Subject::LinearIssue { issue: "FAKE-1".into() };
         for status in [AgentStatus::NeedsInput, AgentStatus::Done] {
-            let account = box_showing(status, false);
+            let account = box_showing(status, false, true);
             let looks: [(&str, Box<dyn Fn() -> Seen>); 2] = [("seen", Box::new(|| account.seen("box", "delegate", &subject))), ("seen_any", Box::new(|| account.seen_any("box")))];
             for (which, look) in looks {
                 assert_eq!(look(), Seen::Tab { running: true, quiet: true }, "{which} {status:?}: no questionnaire, so it is quiet");
@@ -1652,8 +1652,20 @@ mod tests {
     }
 
     #[test]
+    fn a_box_whose_session_exited_with_a_question_open_still_ends_as_exited() {
+        let account = box_showing(AgentStatus::NeedsInput, true, false);
+        let subject = Subject::LinearIssue { issue: "FAKE-1".into() };
+        let looks: [(&str, Box<dyn Fn() -> Seen>); 2] = [("seen", Box::new(|| account.seen("box", "delegate", &subject))), ("seen_any", Box::new(|| account.seen_any("box")))];
+        for (which, look) in looks {
+            assert_eq!(look(), Seen::Tab { running: false, quiet: false }, "{which}: the question holds, the process does not");
+            assert_eq!(reaped(&look, 4 * MIN, 4 * MIN), None, "{which}: exited 4 of 5 minutes");
+            assert_eq!(reaped(&look, 6 * MIN, 6 * MIN), Some(boxes::End::Exited), "{which}: an open question does not keep an exited session's box");
+        }
+    }
+
+    #[test]
     fn a_working_box_is_not_quiet() {
-        let account = box_showing(AgentStatus::Working, false);
+        let account = box_showing(AgentStatus::Working, false, true);
         assert_eq!(account.seen_any("box"), Seen::Tab { running: true, quiet: false });
     }
 
