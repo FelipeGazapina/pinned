@@ -7,6 +7,7 @@ use crate::db::{Audit, Held};
 use crate::hub::{Account, Hub};
 use pinned_core::surface::{self, ActAnswer, Action, ActorRole, AgentAct, AuditOutcome, Class, Confirmation, Decided, Decision, Parsed, Side};
 use pinned_core::connectors::{Placement, RunsOn};
+use pinned_core::schedule::{self, Actor};
 use pinned_core::wire::{Call, HubCall, RunStarted, ToClient};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -64,11 +65,14 @@ struct Trail<'a> {
     action: &'a str,
     args: String,
     request_id: Option<&'a str>,
+    /// The scheduled task the act is about, known once it has run.
+    task: std::sync::Mutex<Option<String>>,
 }
 
 impl Trail<'_> {
     async fn write(&self, outcome: AuditOutcome, detail: &str) -> Result<(), String> {
-        let row = Audit { account: self.account, machine: self.machine, tab: self.tab, role: self.role, action: self.action, args: &self.args, outcome, detail, request_id: self.request_id };
+        let task = self.task.lock().unwrap().clone();
+        let row = Audit { account: self.account, machine: self.machine, tab: self.tab, role: self.role, action: self.action, args: &self.args, outcome, detail, request_id: self.request_id, task: task.as_deref() };
         self.hub.db.audit(&row).await
     }
 
@@ -90,7 +94,7 @@ fn json<T: serde::Serialize>(value: T) -> Result<Value, String> {
 pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: AgentAct) -> Result<Value, String> {
     let caller = Caller::of(account, origin, &act.tab)?;
     let request_id = act.request_id.as_deref().filter(|id| !id.is_empty());
-    let trail = Trail { hub, account: account.id, machine: caller.machine, tab: &caller.tab, role: caller.role, action: &act.action, args: surface::summary(&act.args), request_id };
+    let trail = Trail { hub, account: account.id, machine: caller.machine, tab: &caller.tab, role: caller.role, action: &act.action, args: surface::summary(&act.args), request_id, task: Default::default() };
     if let Some(id) = request_id {
         match hub.db.audited(account.id, caller.machine, &caller.tab, &act.action, id).await? {
             Some((AuditOutcome::Pending, _)) | None => {}
@@ -105,7 +109,8 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
             return Err(refusal);
         }
     };
-    if admitted.action.class == Class::Confirm {
+    let confirms = admitted.action.class == Class::Confirm || schedule_needs_ok(hub, account, &admitted.call).await?;
+    if confirms {
         let asked = Confirmation {
             id: String::new(),
             at: 0,
@@ -135,6 +140,7 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
             }
             return json(ActAnswer::Pending { id: id.to_string(), next: surface::PENDING_NEXT.into() });
         }
+        note_task(&trail, &act.action, &act.args, &Value::Null, String::new());
         trail.write(AuditOutcome::Pending, "").await?;
         push_confirmations(hub, account).await;
         return json(ActAnswer::Pending { id: id.to_string(), next: surface::PENDING_NEXT.into() });
@@ -143,10 +149,12 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
     let ran = if surface::HUB_LIMITS.contains(&admitted.action.name) {
         limited(hub, account, &caller, admitted.action, admitted.call).await
     } else {
-        run(hub, account, &caller.tab, admitted.call, &admitted.target, admitted.on_origin).await
+        let actor = Actor::Agent { role: caller.role, machine: caller.machine.to_string(), tab: caller.tab.clone(), session_title: caller.title.clone() };
+        run(hub, account, &actor, admitted.call, &admitted.target, admitted.on_origin).await
     };
     match ran {
         Ok(result) => {
+            let widened = note_task(&trail, act.action.as_str(), &act.args, &result, widened);
             trail.ran(AuditOutcome::Done, &widened).await;
             json(ActAnswer::Done { result: surface::redact(result, admitted.action.hides) })
         }
@@ -211,8 +219,13 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
 /// Runs the call as the app runs it: a `HubCall` through the hub's own path, a `Call` on its
 /// machine, where the origin machine hears which session asked. Another machine hears no session
 /// for a call that checks one, which then refuses what needs the asking session's own.
-async fn run(hub: &Arc<Hub>, account: &Arc<Account>, caller_tab: &str, call: Parsed, target: &str, on_origin: bool) -> Result<Value, String> {
+async fn run(hub: &Arc<Hub>, account: &Arc<Account>, actor: &Actor, call: Parsed, target: &str, on_origin: bool) -> Result<Value, String> {
+    let caller_tab = match actor {
+        Actor::Agent { tab, .. } => tab.as_str(),
+        Actor::User => "",
+    };
     match call {
+        Parsed::Hub(call) if schedule::is_schedule_call(&call) => Box::pin(hub.schedule_call(account, call, actor)).await,
         // An agent's Unarchive only reopens the tab: starting a session is `start_claude`'s, under its limits.
         Parsed::Hub(HubCall::UnarchiveSession { session }) => json(hub.unarchive_session(account, &session, false).await?),
         Parsed::Hub(call) => Box::pin(hub.hub_call(account, call)).await,
@@ -277,7 +290,7 @@ pub async fn decide(hub: &Arc<Hub>, account: &Arc<Account>, id: &str, approve: b
     let held = hub.db.decide_confirmation(account.id, key, approve).await?.ok_or_else(unknown)?;
     let asked = &held.confirmation;
     let machine = Uuid::parse_str(&asked.machine).map_err(|e| e.to_string())?;
-    let trail = Trail { hub, account: account.id, machine, tab: &asked.tab, role: asked.role, action: &asked.action, args: surface::summary(&asked.args), request_id: asked.request_id.as_deref() };
+    let trail = Trail { hub, account: account.id, machine, tab: &asked.tab, role: asked.role, action: &asked.action, args: surface::summary(&asked.args), request_id: asked.request_id.as_deref(), task: Default::default() };
     trail.write(if approve { AuditOutcome::Approved } else { AuditOutcome::Denied }, "").await?;
     let action = surface::find(&asked.action);
     let (decision, outcome, result) = match (approve, action) {
@@ -296,6 +309,7 @@ pub async fn decide(hub: &Arc<Hub>, account: &Arc<Account>, id: &str, approve: b
             Err(e) => (Decision::Approved, format!("failed: {}", hide(&e)), Value::Null),
         },
     };
+    note_task(&trail, &asked.action, &asked.args, &result, String::new());
     if decision == Decision::Approved {
         match outcome.strip_prefix("failed: ") {
             Some(error) => trail.ran(AuditOutcome::Failed, error).await,
@@ -325,7 +339,7 @@ pub async fn finish_interrupted(hub: &Arc<Hub>) -> Result<(), String> {
         let asked = &held.confirmation;
         if asked.decision == Some(Decision::Approved) {
             let machine = Uuid::parse_str(&asked.machine).map_err(|e| e.to_string())?;
-            let trail = Trail { hub, account, machine, tab: &asked.tab, role: asked.role, action: &asked.action, args: surface::summary(&asked.args), request_id: asked.request_id.as_deref() };
+            let trail = Trail { hub, account, machine, tab: &asked.tab, role: asked.role, action: &asked.action, args: surface::summary(&asked.args), request_id: asked.request_id.as_deref(), task: Default::default() };
             trail.ran(AuditOutcome::Failed, INTERRUPTED).await;
             eprintln!("pinned-server: confirmation {} was approved when a hub stopped; it reads as failed", asked.id);
         }
@@ -359,7 +373,8 @@ async fn rerun(hub: &Arc<Hub>, account: &Arc<Account>, action: &'static Action, 
         None => asked.machine.clone(),
     };
     let on_origin = target == asked.machine;
-    run(hub, account, &asked.tab, call, &target, on_origin).await
+    let actor = Actor::Agent { role: asked.role, machine: asked.machine.clone(), tab: asked.tab.clone(), session_title: asked.title.clone() };
+    run(hub, account, &actor, call, &target, on_origin).await
 }
 
 /// Tells the session that asked what the user decided, through the queue its worker reports use.
@@ -415,4 +430,39 @@ pub async fn send_confirmations(hub: &Hub, account: &Account, client: u64) {
 
 async fn waiting(hub: &Hub, account: &Account) -> Result<Vec<Confirmation>, String> {
     Ok(hub.db.confirmations(account.id).await?.into_iter().filter(|c| c.decision.is_none()).collect())
+}
+
+/// Whether an agent's `call` is a schedule act that waits for the user although its action is a
+/// Write: a save that carries approvals (`schedule::save_needs_ok`), or a delete of a task the user created.
+async fn schedule_needs_ok(hub: &Hub, account: &Account, call: &Parsed) -> Result<bool, String> {
+    match call {
+        Parsed::Hub(HubCall::SaveSchedule { task, dry_run: false }) => Ok(schedule::save_needs_ok(task).is_some()),
+        Parsed::Hub(HubCall::DeleteSchedule { id }) => {
+            let Ok(id) = Uuid::parse_str(id) else { return Ok(false) };
+            Ok(hub.db.task(account.id, id).await?.is_some_and(|task| task.created_by == Actor::User))
+        }
+        _ => Ok(false),
+    }
+}
+
+/// The task a schedule act was about, from the act's arguments and what it answered.
+fn task_of(action: &str, args: &Value, result: &Value) -> Option<String> {
+    match action {
+        "save_schedule" => result["task"]["id"].as_str().map(str::to_owned),
+        "pause_schedule" | "delete_schedule" | "schedule_runs" => args["id"].as_str().map(str::to_owned),
+        _ => None,
+    }
+}
+
+/// Records the task on the act's audit rows and words what a save came to for its detail.
+fn note_task(trail: &Trail<'_>, action: &str, args: &Value, result: &Value, detail: String) -> String {
+    let Some(task) = task_of(action, args, result) else { return detail };
+    *trail.task.lock().unwrap() = Some(task);
+    match (action, result["task"]["title"].as_str()) {
+        ("save_schedule", Some(title)) => {
+            let next = result["next"][0]["local"].as_str().map_or_else(|| "no run".to_owned(), str::to_owned);
+            format!("saved \"{title}\"; next: {next}")
+        }
+        _ => detail,
+    }
 }

@@ -3,7 +3,8 @@ use crate::db::{self, Db};
 use pinned_core::account::Signup;
 use pinned_core::accounts::AccountId;
 use pinned_core::agent::{AgentStatus, Stage, Subject, Usage, CONNECTOR_ENV};
-use pinned_core::connectors::{Connectors, Delivery, Keys, Placement, Run, RunsOn, Storage, Work};
+use pinned_core::schedule::{self, Actor, SaveAnswer, Task};
+use pinned_core::connectors::{Settings, Connectors, Delivery, Keys, Placement, Run, RunsOn, Storage, Work};
 use pinned_core::convex::client::Http as ConvexHttp;
 use pinned_core::delegate::{RunTarget, TaskRecord};
 use pinned_core::marks::{self, Archived, Mark, MarkChange, SessionMarks};
@@ -526,7 +527,7 @@ impl Hub {
                 }
                 return Ok(Value::Null);
             }
-            HubCall::GetSettings => (json(c().await?.get_settings()), false),
+            HubCall::GetSettings => return json(self.settings(account).await?),
             HubCall::ConnectLinear { key } => (json(c().await?.connect_linear(&key).await?), true),
             HubCall::DisconnectLinear => (json(c().await?.disconnect_linear()?), true),
             HubCall::LinearSuggestions => (json(c().await?.linear_suggestions().await?), false),
@@ -535,6 +536,11 @@ impl Hub {
             HubCall::SlackSuggestions { bot } => (json(c().await?.slack_suggestions(&bot).await?), false),
             HubCall::SaveConnector { connector } => (json(c().await?.save_connector(connector)?), true),
             HubCall::DeleteConnector { id } => (json(c().await?.delete_connector(&id)?), true),
+            call if schedule::is_schedule_call(&call) => return self.schedule_call(account, call, &Actor::User).await,
+            HubCall::SetReleaseProtection { on } => {
+                self.db.set_release_protection(account.id, on).await?;
+                return json(on);
+            }
             HubCall::RunWorkflow { id } => return json(self.run_workflow(account, &id).await?),
             HubCall::GenerateWorkflow { model, description } => (json(c().await?.generate_workflow(&model, &description).await?), false),
             HubCall::OpenBox { repo, size, budget_usd } => (json(self.boxes.open_session(self, account, repo, size, budget_usd, None).await?), false),
@@ -905,8 +911,101 @@ impl Hub {
     }
 
     async fn push_settings(&self, account: &Account) {
-        if let Ok(connectors) = self.connectors(account).await {
-            account.broadcast(&ToClient::Settings { settings: connectors.get_settings() });
+        if let Ok(settings) = self.settings(account).await {
+            account.broadcast(&ToClient::Settings { settings });
+        }
+    }
+
+    /// The account's settings as clients see them: its connectors' and its scheduled tasks.
+    async fn settings(&self, account: &Account) -> Result<Settings, String> {
+        let settings = self.connectors(account).await?.get_settings();
+        Ok(Settings { schedules: self.db.tasks(account.id).await?, ..settings })
+    }
+
+    /// The schedule calls, for `actor`, who is recorded as a new task's creator and held to the caps
+    /// that apply to agents. Tasks are stored and edited here; nothing fires them yet.
+    pub async fn schedule_call(self: &Arc<Self>, account: &Arc<Account>, call: HubCall, actor: &Actor) -> Result<Value, String> {
+        let unknown = |id: &str| format!("this account has no task {id}");
+        let parse = |id: &str| Uuid::parse_str(id.trim()).map_err(|_| unknown(id));
+        match call {
+            HubCall::ListSchedules => json(self.db.tasks(account.id).await?),
+            HubCall::ScheduleRuns { id, limit } => {
+                let key = parse(&id)?;
+                self.db.task(account.id, key).await?.ok_or_else(|| unknown(&id))?;
+                json(self.db.task_runs(account.id, key, i64::from(limit.unwrap_or(20).clamp(1, 200))).await?)
+            }
+            HubCall::DeleteSchedule { id } => {
+                if !self.db.delete_task(account.id, parse(&id)?).await? {
+                    return Err(unknown(&id));
+                }
+                self.push_settings(account).await;
+                Ok(Value::Null)
+            }
+            HubCall::PauseSchedule { id, paused } => {
+                let mut task = self.db.task(account.id, parse(&id)?).await?.ok_or_else(|| unknown(&id))?;
+                task.enabled = !paused;
+                task.updated_at = schedule::now();
+                task.next_at = if task.enabled { schedule::next_after(&task.schedule, &task.tz, task.updated_at)? } else { None };
+                self.db.save_task(account.id, &task).await?;
+                self.push_settings(account).await;
+                json(task)
+            }
+            HubCall::SaveSchedule { task, dry_run } => {
+                let now = schedule::now();
+                let protected = self.db.release_protection(account.id).await?;
+                let existing = match task.id.trim() {
+                    "" => None,
+                    id => self.db.task(account.id, parse(id)?).await?,
+                };
+                let agent = matches!(actor, Actor::Agent { .. });
+                if agent && existing.is_none() && !task.id.trim().is_empty() {
+                    return Err(format!("this account has no task {}: leave id empty to create one", task.id));
+                }
+                let mut task = Task {
+                    id: existing.as_ref().map_or_else(|| if task.id.trim().is_empty() { Uuid::new_v4().to_string() } else { task.id.trim().to_owned() }, |e| e.id.clone()),
+                    created_by: existing.as_ref().map_or_else(|| actor.clone(), |e| e.created_by.clone()),
+                    created_at: existing.as_ref().map_or(now, |e| e.created_at),
+                    updated_at: now,
+                    next_at: None,
+                    last_run: None,
+                    fyi: existing.as_ref().and_then(|e| e.fyi),
+                    ..task
+                };
+                // Changing what a task does or where it goes takes its approvals away: the user grants them again.
+                if let Some(before) = &existing {
+                    if (before.action != task.action || before.target != task.target) && before.approvals == task.approvals {
+                        task.approvals.clear();
+                    }
+                }
+                schedule::check_save(&task, protected)?;
+                if task.enabled {
+                    task.next_at = schedule::next_after(&task.schedule, &task.tz, now)?;
+                    if task.next_at.is_none() {
+                        return Err("that time has already passed: pick a time that is still ahead".into());
+                    }
+                }
+                let next = schedule::next_run_times(&task.schedule, &task.tz, now)?;
+                if agent && existing.is_none() {
+                    let held = self.db.tasks(account.id).await?.into_iter().filter(|t| matches!(t.created_by, Actor::Agent { .. })).collect::<Vec<_>>();
+                    if held.len() >= schedule::AGENT_MAX_TASKS {
+                        let titles: Vec<&str> = held.iter().map(|t| t.title.as_str()).collect();
+                        return Err(format!("agents may hold at most {} tasks and {} exist: delete one first ({})", schedule::AGENT_MAX_TASKS, held.len(), titles.join(", ")));
+                    }
+                    // The notice rule: a task an agent creates is active at once, and the user sees an Inbox row.
+                    task.fyi = Some(now);
+                } else if !agent {
+                    task.fyi = None;
+                }
+                if dry_run {
+                    return json(SaveAnswer { task: None, next });
+                }
+                if !self.db.save_task(account.id, &task).await? {
+                    return Err(unknown(&task.id));
+                }
+                self.push_settings(account).await;
+                json(SaveAnswer { task: Some(task), next })
+            }
+            _ => Err("not a schedule call".into()),
         }
     }
 

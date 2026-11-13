@@ -7,7 +7,7 @@ use crate::graph::project::project;
 use crate::graph::runner::{self, Drive, Effect, Session, Status, Supplied, Wake};
 use crate::graph::{Answers, ChosenOn, Gate, Graph, NodeKind, SessionSetup, Watch};
 use crate::wire::{MachineId, RunSpec, TabView};
-use crate::{convex, github, linear, slack, upstash, vercel};
+use crate::{convex, github, linear, schedule, slack, upstash, vercel};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{json, Value};
@@ -1165,6 +1165,9 @@ pub struct Settings {
     /// Absent on the wire while it is off.
     #[serde(default, skip_serializing_if = "repo_insight_is_off")]
     pub repo_insight: RepoInsight,
+    /// The account's scheduled tasks. The hub fills it; a node's own store has none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub schedules: Vec<schedule::Task>,
 }
 
 /// The integrations' keys, which never leave a store but by `export`.
@@ -4047,6 +4050,7 @@ impl Connectors {
             box_asks: store.box_asks.clone(),
             convex: store.convex.clone(),
             repo_insight: store.repo_insight.clone(),
+            schedules: vec![],
         }
     }
 

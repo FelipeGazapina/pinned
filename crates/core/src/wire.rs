@@ -4,6 +4,7 @@
 use crate::accounts::{self, AccountId, Auth, Provider};
 use crate::agent::{AgentEvent, AgentStatus, Role, Stage, Subject, Usage};
 use crate::connectors::{BoxAccess, BoxSize, Connector, Settings};
+use crate::schedule;
 
 /// What an Upstash Box hour costs in USD. The app previews budgets from it; the hub enforces them.
 pub const BOX_USD_PER_HOUR: f64 = 0.10;
@@ -1076,6 +1077,29 @@ pub enum HubCall {
     /// The connector as stored.
     SaveConnector { connector: Connector },
     DeleteConnector { id: String },
+    /// `Vec<schedule::Task>`: the account's scheduled tasks, soonest first, each with its next run
+    /// and its last run.
+    ListSchedules,
+    /// `schedule::SaveAnswer`. A task with no id is new; the hub gives it one. The hub validates it,
+    /// computes `next_at`, and keeps who created it. With `dry_run` it only answers the next three run
+    /// times in the task's zone, and stores nothing.
+    SaveSchedule {
+        task: schedule::Task,
+        #[serde(default)]
+        dry_run: bool,
+    },
+    /// The task as stored: paused (`enabled` false) or running again.
+    PauseSchedule { id: String, paused: bool },
+    DeleteSchedule { id: String },
+    /// `Vec<schedule::TaskRun>`: the task's runs, newest first. No `limit` answers 20.
+    ScheduleRuns {
+        id: String,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
+    /// The account's release-protection switch: tag and main protection exist, so a task may be
+    /// pre-approved for a release. Only the user's app sets it; no agent action does. Answers `on`.
+    SetReleaseProtection { on: bool },
     /// `RunStarted`: a session of the saved workflow `id`, started now with no trigger behind it,
     /// on the machine the workflow names and under the limits of its project there.
     RunWorkflow { id: String },

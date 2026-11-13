@@ -10,16 +10,21 @@ use chrono_tz::Tz;
 use serde::{Deserialize, Serialize};
 
 use crate::preauth::never::NeverItem;
-use crate::surface::ActorRole;
+use crate::surface::{ActorRole, Parsed};
+use crate::wire::HubCall;
 
 /// The grace window of a task that sets none: how late a run may still be delivered and count as on time.
 /// The one place this number lives; ask `Task::effective_grace`.
 pub const DEFAULT_GRACE_MINS: u32 = 15;
 
+/// The pickup window of a task that sets none: how long a delivered run may sit before it counts as
+/// not picked up. The one place this number lives; ask `Task::effective_pickup`.
+pub const DEFAULT_PICKUP_MINS: u32 = 10;
+
 /// How many run times `next_runs` answers for a dry run.
 pub const DRY_RUN_COUNT: usize = 3;
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
 pub struct Task {
     pub id: String,
     pub title: String,
@@ -36,6 +41,9 @@ pub struct Task {
     /// What to do with a run that was not delivered within grace. None = `OnMissed::default_for(schedule)`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_missed: Option<OnMissed>,
+    /// Minutes a delivered run may wait for its target to start it. None = [`DEFAULT_PICKUP_MINS`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pickup_mins: Option<u32>,
     #[serde(default)]
     pub approvals: Vec<Approval>,
     #[serde(default)]
@@ -51,6 +59,10 @@ pub struct Task {
     pub next_at: Option<i64>,
     #[serde(default)]
     pub last_run: Option<TaskRun>,
+    /// Hub-computed, read-only: when an agent created the task and the user has not looked yet. The
+    /// Inbox shows a row for it. Unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fyi: Option<i64>,
 }
 
 impl Task {
@@ -59,13 +71,18 @@ impl Task {
         self.grace_mins.unwrap_or(DEFAULT_GRACE_MINS)
     }
 
+    /// The pickup window in minutes, with the task's own setting first.
+    pub fn effective_pickup(&self) -> u32 {
+        self.pickup_mins.unwrap_or(DEFAULT_PICKUP_MINS)
+    }
+
     /// The missed-run policy, with the task's own setting first.
     pub fn effective_on_missed(&self) -> OnMissed {
         self.on_missed.unwrap_or_else(|| OnMissed::default_for(&self.schedule))
     }
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Schedule {
     /// A wall-clock date and time in the task's zone: `2026-11-13T09:00`.
@@ -74,7 +91,7 @@ pub enum Schedule {
     Cron { expr: String },
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Target {
     /// The user: a notification on every device, with no agent run.
@@ -101,7 +118,7 @@ pub enum Target {
     },
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Action {
     /// Text the target receives as one prompt.
@@ -110,7 +127,7 @@ pub enum Action {
     Workflow { id: String },
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum OnMissed {
     /// The run becomes `missed` and the user decides: Run now or Skip.
@@ -133,7 +150,7 @@ impl OnMissed {
 }
 
 /// Where a run goes when its target's machine is not there.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum Fallback {
     /// Wait within the grace window. A box costs money, so this is the default.
@@ -144,14 +161,14 @@ pub enum Fallback {
 }
 
 /// A step the task may take without asking: that item, in that repo, when the command contains the text.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
 pub struct Approval {
     pub item: NeverItem,
     pub must_contain: String,
     pub repo: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
 pub struct TaskRun {
     pub task: String,
     pub due_at: i64,
@@ -166,7 +183,7 @@ pub struct TaskRun {
     pub detail: String,
 }
 
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum RunState {
     Due,
@@ -181,7 +198,7 @@ pub enum RunState {
 }
 
 /// Who created a task or an idea: the user, or an agent by the part it plays.
-#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Actor {
     User,
@@ -279,6 +296,146 @@ pub fn next_runs(schedule: &Schedule, tz: &str, after: i64) -> Result<Vec<i64>, 
         }
     }
     Ok(out)
+}
+
+/// One run time as the person reads it.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
+pub struct NextRun {
+    /// Unix seconds.
+    pub at: i64,
+    /// In the task's zone: "Fri 13 Nov 09:00 -03".
+    pub local: String,
+}
+
+/// What `save_schedule` answers.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
+pub struct SaveAnswer {
+    /// The task as stored; None for a dry run, which stores nothing.
+    pub task: Option<Task>,
+    /// The next three run times in the task's zone.
+    pub next: Vec<NextRun>,
+}
+
+/// `next_runs` with each time written in the zone `tz`, for the answer to a save.
+pub fn next_run_times(schedule: &Schedule, tz: &str, after: i64) -> Result<Vec<NextRun>, String> {
+    let zone = parse_tz(tz)?;
+    Ok(next_runs(schedule, tz, after)?
+        .into_iter()
+        .map(|at| NextRun { at, local: zone.timestamp_opt(at, 0).single().map(|t| t.format("%a %d %b %H:%M %Z").to_string()).unwrap_or_default() })
+        .collect())
+}
+
+// ---- What the hub lets a save do (0.18.2 PR 4) ----
+
+/// The shortest interval an agent's cron may repeat at (design 4.4). The user has no such floor.
+pub const AGENT_MIN_INTERVAL_MINS: i64 = 15;
+
+/// The most tasks one account may hold that agents created (design 4.4).
+pub const AGENT_MAX_TASKS: usize = 20;
+
+/// Whether `Target::Worker` may be saved. PR 6 (held steps) flips this: until a run's never-list hits
+/// can be held, a task may not start workers.
+pub const WORKER_TARGETS_OPEN: bool = false;
+
+/// Whether a task an agent creates waits for the user's OK. It does not: it is active at once and the
+/// user gets a notice (`Task::fyi`, an Inbox row, an audit row). The one place that rule lives:
+/// setting this to true makes `save_schedule` a Confirm for every new task an agent creates.
+pub const AGENT_TASK_NEEDS_OK: bool = false;
+
+/// Why `save_schedule` from an agent waits for the user, or None when it runs at once. Approvals
+/// always wait; a new task waits only while [`AGENT_TASK_NEEDS_OK`] is true.
+pub fn save_needs_ok(task: &Task) -> Option<String> {
+    if !task.approvals.is_empty() {
+        let list: Vec<String> = task.approvals.iter().map(|a| format!("{} containing \"{}\"", a.item.label(), a.must_contain)).collect();
+        return Some(format!("task \"{}\" would run without asking for: {}", task.title, list.join("; ")));
+    }
+    (AGENT_TASK_NEEDS_OK && task.id.trim().is_empty()).then(|| format!("an agent wants to schedule \"{}\"", task.title))
+}
+
+/// The argument check of an agent's `save_schedule`: what needs no stored state. An agent's cron may
+/// not repeat more often than [`AGENT_MIN_INTERVAL_MINS`].
+pub fn agent_check(call: &Parsed) -> Result<(), String> {
+    let Parsed::Hub(HubCall::SaveSchedule { task, .. }) = call else { return Ok(()) };
+    let Schedule::Cron { .. } = task.schedule else { return Ok(()) };
+    if let Some(gap) = shortest_gap(&task.schedule, &task.tz, now())? {
+        if gap < AGENT_MIN_INTERVAL_MINS * 60 {
+            return Err(format!(
+                "that schedule repeats every {} minutes: an agent may not schedule a task more often than every {AGENT_MIN_INTERVAL_MINS} minutes",
+                (gap / 60).max(1)
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Whether `call` is one of the schedule calls, which the hub answers with the caller's `Actor`.
+pub fn is_schedule_call(call: &HubCall) -> bool {
+    matches!(
+        call,
+        HubCall::ListSchedules | HubCall::SaveSchedule { .. } | HubCall::PauseSchedule { .. } | HubCall::DeleteSchedule { .. } | HubCall::ScheduleRuns { .. }
+    )
+}
+
+/// Unix seconds now.
+pub fn now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
+}
+
+/// The shortest gap in seconds between two runs of `schedule` after `from`, over its next 400 runs.
+/// None for a one-time schedule or one with fewer than two runs.
+pub fn shortest_gap(schedule: &Schedule, tz: &str, from: i64) -> Result<Option<i64>, String> {
+    let mut at = from;
+    let mut last: Option<i64> = None;
+    let mut gap: Option<i64> = None;
+    for _ in 0..400 {
+        let Some(t) = next_after(schedule, tz, at)? else { break };
+        if let Some(before) = last {
+            gap = Some(gap.map_or(t - before, |g| g.min(t - before)));
+        }
+        last = Some(t);
+        at = t;
+    }
+    Ok(gap)
+}
+
+/// Whether the text names a tag: "tag", "refs/tags", or a version such as v0.18.2.
+fn covers_tag(text: &str) -> bool {
+    let text = text.to_lowercase();
+    text.contains("tag") || text.split(|c: char| !c.is_alphanumeric() && c != '.').any(|w| w.len() > 1 && w.starts_with('v') && w[1..].starts_with(|c: char| c.is_ascii_digit()))
+}
+
+/// Whether an approval needs tag and main protection to exist before it may be granted.
+fn needs_protection(approval: &Approval) -> bool {
+    matches!(approval.item, NeverItem::Release | NeverItem::Deploy | NeverItem::PushToMain) || covers_tag(&approval.must_contain)
+}
+
+/// What a save must satisfy whoever sends it, the user's app or an agent. `protected` is the
+/// account's release-protection switch: tag and main protection exist.
+pub fn check_save(task: &Task, protected: bool) -> Result<(), String> {
+    if task.title.trim().is_empty() {
+        return Err("a task needs a title".into());
+    }
+    validate(&task.schedule, &task.tz)?;
+    match &task.action {
+        Action::Prompt { text } if text.trim().is_empty() => return Err("a prompt task needs its text".into()),
+        Action::Workflow { id } if id.trim().is_empty() => return Err("a workflow task needs the workflow's id".into()),
+        _ => {}
+    }
+    if matches!(task.target, Target::Worker { .. }) && !WORKER_TARGETS_OPEN {
+        return Err("a task cannot start a new worker yet: pick Me, the Orchestrator, a Captain or a session. Workers wait for held steps, so a run can stop for the user".into());
+    }
+    for approval in &task.approvals {
+        if approval.must_contain.trim().is_empty() {
+            return Err("an approval needs the text the command must contain: \"any release\" is not allowed".into());
+        }
+        if matches!(approval.item, NeverItem::Secrets | NeverItem::SelfGrant | NeverItem::Payment) {
+            return Err(format!("{} can never be approved ahead of time: it always stops for the user", approval.item.label()));
+        }
+        if !protected && needs_protection(approval) {
+            return Err("pre-approving a release needs tag and main protection; until Felipe turns that on, a release always stops for him".into());
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

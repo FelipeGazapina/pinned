@@ -267,6 +267,12 @@ pub const ACTIONS: &[Action] = &[
     h("vercel_models", Read, "The chat and decision models a workflow may use.").wired(),
     h("connect_upstash", Confirm, "Connects Upstash for boxes. The user enters the keys in the app; an agent never sends one.").wired().asks(&["key", "claude_token"]),
     h("disconnect_upstash", Confirm, "Deletes the account's boxes and disconnects Upstash.").wired(),
+    h("list_schedules", Read, "Every scheduled task of the account as JSON, soonest first, with its next run (next_at) and last run.").wired(),
+    h("save_schedule", Write, "Saves a scheduled task: leave id empty to create one, or send an existing task whole to edit it. schedule is {\"kind\":\"once\",\"at\":\"2026-11-13T09:00\"} or {\"kind\":\"cron\",\"expr\":\"0 9 * * 1-5\"} in tz, an IANA zone such as America/Sao_Paulo. target is {\"kind\":\"me\"}, orchestrator, captain {project}, or session {session}; action is {\"kind\":\"prompt\",\"text\":...} or workflow {id}. dry_run: true answers the next three run times in tz and stores nothing: read them back to the user. A task you create is active at once and the user is told; it may not repeat more often than every 15 minutes, and you may hold 20. A task that carries approvals (steps it may take without asking) waits for the user's approval.").wired().checks(crate::schedule::agent_check),
+    h("pause_schedule", Write, "Pauses a scheduled task (paused: true) or starts it again, and answers it.").wired(),
+    h("delete_schedule", Write, "Deletes a scheduled task and its run history. Deleting one the user created waits for the user's approval.").wired(),
+    h("schedule_runs", Read, "The runs of scheduled task id, newest first, up to limit (20 when left out).").wired(),
+    h("set_release_protection", Excluded, "whether tag and main protection exist, which only the user says: until then a task may not be pre-approved for a release"),
     h("set_box_access", Confirm, "Sets what the account's boxes may reach.").wired(),
     h("set_repo_insight", Confirm, "Turns on or off whether the account's global orchestrator may read its repositories with repo_overview, repo_read and repo_search.").wired(),
     h("answer_box", Excluded, "the user's yes or no to a box's question, which only they give, on the Upstash card in the app"),
@@ -708,6 +714,9 @@ pub struct AuditEntry {
     pub detail: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    /// The scheduled task the act is about: one it saved, paused or deleted, or later one a run did it for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
