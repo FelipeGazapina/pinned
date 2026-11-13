@@ -1,0 +1,21 @@
+name: ui
+
+# The UI's own tests (ui/*.test.js): plain Node, no browser, no npm packages.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+      - run: node --test 'ui/*.test.js'
