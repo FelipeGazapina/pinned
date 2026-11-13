@@ -917,10 +917,13 @@ fn targets_under(rows: &[Row], root: u32) -> Vec<i32> {
             if pid > 1 && ppid == parent && pid != root && !below.contains(&pid) {
                 below.push(pid);
                 parents.push(pid);
-                if pid == pgid {
-                    targets.push(-(pid as i32));
+                // A pid past `i32::MAX` would wrap into some other target, so it is never named.
+                if let Ok(target) = i32::try_from(pid) {
+                    if pid == pgid {
+                        targets.push(-target);
+                    }
+                    targets.push(target);
                 }
-                targets.push(pid as i32);
             }
         }
     }
@@ -1072,8 +1075,8 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn the_walk_never_targets_pid_0_or_1() {
-        let rows = [(0, 500, 0), (1, 500, 1), (501, 500, 501), (502, 501, 501)].map(|(pid, ppid, pgid)| super::Row { pid, ppid, pgid });
+    fn the_walk_never_targets_pid_0_1_or_a_pid_past_i32() {
+        let rows = [(0, 500, 0), (1, 500, 1), (501, 500, 501), (502, 501, 501), (0x8000_0001, 501, 0x8000_0001)].map(|(pid, ppid, pgid)| super::Row { pid, ppid, pgid });
         assert_eq!(super::targets_under(&rows, 500), vec![-501, 501, 502]);
     }
 
