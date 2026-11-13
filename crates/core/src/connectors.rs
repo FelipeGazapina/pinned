@@ -4455,13 +4455,12 @@ impl Connectors {
     pub fn import(&self, store: serde_json::Value, keys: Keys) -> Result<bool, String> {
         let mut imported: Store = serde_json::from_value(store).map_err(|e| format!("not a connectors store: {e}"))?;
         let mut current = self.store.lock().unwrap();
-        if current.linear.is_some() || current.slack.is_some() || !current.slack_bots.is_empty() || current.github.is_some() || current.vercel.is_some() || !current.connectors.is_empty() {
+        let integrated = current.linear.is_some() || current.slack.is_some() || !current.slack_bots.is_empty() || current.github.is_some() || current.vercel.is_some();
+        if integrated || !current.convex.is_empty() || !current.connectors.is_empty() {
             return Ok(false);
         }
         for connector in &imported.connectors {
-            save_checks(&imported, connector, connector.graph.as_ref(), &current.convex, None).map_err(|refused| {
-                format!("nothing was imported: workflow {:?} fails the {} check: {}", connector.name, refused.check, refused.error)
-            })?;
+            save_checks(&imported, connector, connector.graph.as_ref(), &current.convex, None).map_err(|_| import_refusal(&imported, connector, &current.convex))?;
         }
         let present = |key: Option<String>| key.map(|k| k.trim().to_owned()).filter(|k| !k.is_empty());
         let (linear_key, slack_key, github_key, vercel_key) = (present(keys.linear), present(keys.slack), present(keys.github), present(keys.vercel));
@@ -4686,6 +4685,37 @@ impl Connectors {
 struct Refused {
     check: &'static str,
     error: String,
+}
+
+/// How long a name from an imported file may be in a refusal, before it is cut with "…".
+const IMPORT_NAME_CHARS: usize = 80;
+/// How long the reason after the workflow's name may be, for ids and other text the file sets.
+const IMPORT_WHY_CHARS: usize = 300;
+
+/// `text` from an imported file as a refusal shows it: control characters removed, cut at `chars`.
+fn in_refusal(text: &str, chars: usize) -> String {
+    crate::thread::clip(&text.chars().filter(|c| !c.is_control()).collect::<String>(), chars)
+}
+
+/// Why an import of `imported` is refused for `connector`, one line of bounded length. The checks
+/// run again on a copy whose workflow and step names are cut, so a name the file sets reaches the
+/// message cut, and the reason is cut once more for the ids it can carry.
+fn import_refusal(imported: &Store, connector: &Connector, connected: &[convex::Connection]) -> String {
+    let named = |c: &Connector| {
+        let mut c = c.clone();
+        c.name = in_refusal(&c.name, IMPORT_NAME_CHARS);
+        for node in c.graph.iter_mut().flat_map(|graph| graph.nodes.iter_mut()) {
+            node.name = in_refusal(&node.name, IMPORT_NAME_CHARS);
+        }
+        c
+    };
+    let shown = Store { connectors: imported.connectors.iter().map(named).collect(), ..Store::default() };
+    let workflow = named(connector);
+    let (check, why) = match save_checks(&shown, &workflow, workflow.graph.as_ref(), connected, None) {
+        Err(refused) => (refused.check, refused.error),
+        Ok(()) => ("save", "it fails a check a save runs".into()),
+    };
+    format!("nothing was imported: workflow \"{}\" fails the {check} check: {}", workflow.name, in_refusal(&why, IMPORT_WHY_CHARS))
 }
 
 /// The checks a workflow passes before it is stored, by `save_connector` and by `import` alike.
@@ -5378,7 +5408,7 @@ mod tests {
         let store = serde_json::json!({ "connectors": [serde_json::to_value(workflow).unwrap()] });
         let error = connectors.import(store, Keys::default()).expect_err("the import is refused");
         assert!(!error.chars().any(char::is_control), "one line: {error:?}");
-        assert!(error.chars().count() <= 400, "{} characters: {error}", error.chars().count());
+        assert!(error.chars().count() <= 450, "{} characters: {error}", error.chars().count());
         let cut = |head: &str| format!("{head}{}…", "x".repeat(80 - head.len()));
         assert!(error.contains(&format!("workflow \"{}\" fails the graph check", cut("Nightly"))), "{error}");
         assert!(error.contains(&format!("\"{}\": its permission must be manual", cut("Step"))), "{error}");
