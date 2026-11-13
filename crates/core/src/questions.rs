@@ -470,8 +470,11 @@ fn notice(asked: &Asked) -> Option<String> {
 
 /// `view` as it shows while `questionnaire` is open on its tab: a question mid-turn, as Claude
 /// Code's own question shows, with the questionnaire beside it. Laid over the view, never written
-/// into the tab, so the session's hooks reporting it at work do not hide the wait.
+/// into the tab, so the session's hooks reporting it at work do not hide the wait. It is laid over
+/// only while the tab's process is alive, so the view reads as running, which a headless child at
+/// work does not on its own: it has no session.
 pub fn shown(mut view: TabView, questionnaire: &Questionnaire) -> TabView {
+    view.running = true;
     view.status = Some(AgentStatus::NeedsInput);
     view.interrupted = true;
     view.message = Some(MESSAGE.into());

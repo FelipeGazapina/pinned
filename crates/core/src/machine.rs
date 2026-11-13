@@ -13697,6 +13697,25 @@ Have another model review a risky change before it goes ahead.";
     }
 
     #[test]
+    fn a_headless_child_at_work_with_open_questions_waits_on_the_user() {
+        let m = machine();
+        let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
+        m.tab(&tab, |t| (t.task, t.status) = (Some("task-1".into()), Some(AgentStatus::Working))).unwrap();
+        let before = m.view(&tab).unwrap();
+        assert_eq!((before.running, global::waiting_kind(&before)), (false, None), "no session: it does not run, and nothing is open yet");
+
+        let id = m.questions.lock().unwrap().open(&tab, None, Some("task-1".into()), None, vec![crate::questions::Question { header: None, question: "Base on main?".into(), changes: "the PR target".into(), options: vec![], multi_select: false }], vec![], 1).unwrap();
+        let view = m.view(&tab).unwrap();
+        assert_eq!((view.running, view.status, view.interrupted), (true, Some(AgentStatus::NeedsInput), true));
+        assert_eq!(view.questions.as_ref().map(|q| q.id.clone()), Some(id));
+        assert_eq!(global::waiting_kind(&view), Some(global::WaitingKind::NeedsInput), "the Orchestrator's waiting() lists it");
+
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
+        let ended = m.view(&tab).unwrap();
+        assert_eq!((ended.running, ended.status, global::waiting_kind(&ended)), (false, Some(AgentStatus::Done), None), "a child that ended does not wait");
+    }
+
+    #[test]
     #[cfg(unix)]
     fn a_dead_tab_with_open_questions_does_not_read_as_needs_input() {
         let m = machine();
