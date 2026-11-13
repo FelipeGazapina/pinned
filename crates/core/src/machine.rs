@@ -369,7 +369,6 @@ enum Sent {
     Refused(String),
 }
 
-/// `delegate_task`'s answer when the project already runs as many workers as it allows.
 /// Why a session ended mid-turn: how the task it ran was cancelled, or how its process exited.
 fn stop_reason(task: Option<&crate::delegate::Task>, code: Option<u32>) -> String {
     let Some(task) = task.filter(|task| task.state == crate::delegate::WorkState::Cancelled) else {
@@ -397,6 +396,7 @@ fn wait_text(limit: Duration) -> String {
     }
 }
 
+/// `delegate_task`'s answer when the project already runs as many workers as it allows.
 fn workers_full(working: usize) -> String {
     let working = if working == 1 { "1 worker already runs".to_owned() } else { format!("{working} workers already run") };
     format!("{working} in this project, the most it allows at once. Wait for one to finish, or raise Workers at once in Settings › Way of working.")
