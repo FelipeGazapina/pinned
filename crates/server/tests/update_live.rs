@@ -63,6 +63,7 @@ impl Hub {
             box_policy: Policy::default(),
             convex_http: Arc::new(pinned_core::convex::client::Reqwest),
             learning_db: None,
+            access: Default::default(),
         };
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let running = runtime.block_on(pinned_server::start(config)).unwrap();

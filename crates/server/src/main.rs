@@ -2,13 +2,14 @@ use pinned_core::account::{self, Credentials, Signup};
 use pinned_core::link;
 use pinned_core::machine::{Launch, Machine};
 use pinned_core::reminders;
+use pinned_server::http::TrustedProxy;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const USAGE: &str = "usage:
-  pinned-server hub --db <postgres url> --listen <addr> --ui <dir> --downloads <dir> [--public-url <url>] [--key-file <file>] [--signup first|open|invite] [--learning-db <postgres url>]
+  pinned-server hub --db <postgres url> --listen <addr> --ui <dir> --downloads <dir> [--public-url <url>] [--key-file <file>] [--signup first|open|invite] [--learning-db <postgres url>] [--trusted-proxy off|railway] [--max-accounts <n>]
   pinned-server pair <hub url> <code> [--name <name>] [--config-dir <dir>]
   pinned-server login <hub url> <email> [--name <name>] [--config-dir <dir>]   (password on stdin or in PINNED_PASSWORD)
   pinned-server node [--config-dir <dir>]";
@@ -85,13 +86,20 @@ impl Args {
 }
 
 fn hub(args: &[String]) -> Result<(), String> {
-    let args = Args::parse(args, &["db", "listen", "ui", "downloads", "public-url", "key-file", "signup", "learning-db"], 0)?;
-    let signup = match args.flags.get("signup").map(String::as_str) {
-        None | Some("first") => Signup::First,
-        Some("open") => Signup::Open,
-        Some("invite") => Signup::Invite,
-        Some(other) => return Err(format!("--signup takes first, open or invite, not {other}\n{USAGE}")),
-    };
+    let args = Args::parse(args, &["db", "listen", "ui", "downloads", "public-url", "key-file", "signup", "learning-db", "trusted-proxy", "max-accounts"], 0)?;
+    let (signup, unknown) = signup_mode(args.flags.get("signup").map(String::as_str));
+    if let Some(warning) = unknown {
+        eprintln!("pinned-server: {warning}");
+    }
+    let (trusted_proxy, unknown) = trusted_proxy_flag(args.flags.get("trusted-proxy").map(String::as_str));
+    if let Some(warning) = unknown {
+        eprintln!("pinned-server: {warning}");
+    }
+    let max_accounts = args
+        .flags
+        .get("max-accounts")
+        .map(|n| n.parse::<u32>().map_err(|_| format!("--max-accounts takes a number of accounts, not {n}\n{USAGE}")))
+        .transpose()?;
     let config = pinned_server::Config {
         db: args.required("db")?,
         listen: args.required("listen")?,
@@ -104,6 +112,7 @@ fn hub(args: &[String]) -> Result<(), String> {
         box_policy: pinned_server::boxes::Policy::default(),
         convex_http: std::sync::Arc::new(pinned_core::convex::client::Reqwest),
         learning_db: args.flags.get("learning-db").cloned(),
+        access: pinned_server::http::Access { trusted_proxy, max_accounts, hashing: None },
     };
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     runtime.block_on(async {
@@ -118,6 +127,29 @@ fn hub(args: &[String]) -> Result<(), String> {
         hub.going_away();
         server.await.map_err(|e| e.to_string())
     })
+}
+
+/// The hub's sign up mode from `--signup`. Unset is first. A value that is none of the three is invite,
+/// the closed mode that still lets invited people in, with a line saying so: a mistyped Railway variable
+/// leaves the hub up and closed.
+fn signup_mode(flag: Option<&str>) -> (Signup, Option<String>) {
+    match flag {
+        None | Some("first") => (Signup::First, None),
+        Some("open") => (Signup::Open, None),
+        Some("invite") => (Signup::Invite, None),
+        Some(other) => (Signup::Invite, Some(format!("--signup takes first, open or invite, not {other:?}; using invite"))),
+    }
+}
+
+/// The proxy the hub trusts from `--trusted-proxy`. Unset is off. A value that is neither off nor railway
+/// is off, with a line saying so: a mistyped Railway variable leaves the hub up and trusting no proxy,
+/// where it would otherwise not start.
+fn trusted_proxy_flag(flag: Option<&str>) -> (TrustedProxy, Option<String>) {
+    match flag.map(str::parse) {
+        None => (TrustedProxy::Off, None),
+        Some(Ok(proxy)) => (proxy, None),
+        Some(Err(_)) => (TrustedProxy::Off, Some(format!("--trusted-proxy takes off or railway, not {:?}; using off", flag.unwrap_or_default()))),
+    }
 }
 
 fn pair(args: &[String]) -> Result<(), String> {
@@ -213,4 +245,32 @@ fn node(args: &[String]) -> Result<(), String> {
     }
     let _ = std::fs::remove_file(&machine.launch().sock);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{signup_mode, trusted_proxy_flag};
+    use pinned_core::account::Signup;
+    use pinned_server::http::TrustedProxy;
+
+    #[test]
+    fn an_unknown_trusted_proxy_starts_the_hub_with_none_and_says_so() {
+        assert_eq!(trusted_proxy_flag(None), (TrustedProxy::Off, None));
+        assert_eq!(trusted_proxy_flag(Some("off")), (TrustedProxy::Off, None));
+        assert_eq!(trusted_proxy_flag(Some("railway")), (TrustedProxy::Railway, None));
+        assert_eq!(trusted_proxy_flag(Some("raliway")), (TrustedProxy::Off, Some(r#"--trusted-proxy takes off or railway, not "raliway"; using off"#.into())));
+        assert_eq!(trusted_proxy_flag(Some("")), (TrustedProxy::Off, Some(r#"--trusted-proxy takes off or railway, not ""; using off"#.into())));
+        assert_eq!(trusted_proxy_flag(Some("Railway")).0, TrustedProxy::Off, "the names are exact");
+    }
+
+    #[test]
+    fn an_unknown_signup_mode_runs_as_invite_and_says_so() {
+        assert_eq!(signup_mode(None), (Signup::First, None));
+        assert_eq!(signup_mode(Some("first")), (Signup::First, None));
+        assert_eq!(signup_mode(Some("open")), (Signup::Open, None));
+        assert_eq!(signup_mode(Some("invite")), (Signup::Invite, None));
+        assert_eq!(signup_mode(Some("bogus")), (Signup::Invite, Some(r#"--signup takes first, open or invite, not "bogus"; using invite"#.into())));
+        assert_eq!(signup_mode(Some("")), (Signup::Invite, Some(r#"--signup takes first, open or invite, not ""; using invite"#.into())));
+        assert_eq!(signup_mode(Some("Open")).0, Signup::Invite, "the names are exact");
+    }
 }

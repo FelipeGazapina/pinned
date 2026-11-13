@@ -518,6 +518,11 @@ impl Db {
         Ok(row.get(0))
     }
 
+    pub async fn account_count(&self) -> Result<i64, String> {
+        let row = self.client().await?.query_one("select count(*) from accounts", &[]).await.map_err(err)?;
+        Ok(row.get(0))
+    }
+
     pub async fn account(&self, account: Uuid) -> Result<Option<(AccountView, String)>, String> {
         let row = self.client().await?.query_opt("select email, password_hash from accounts where id = $1", &[&account]).await.map_err(err)?;
         Ok(row.map(|r| (AccountView { id: account.to_string(), email: r.get(0) }, r.get(1))))
@@ -1443,6 +1448,13 @@ impl Db {
         Ok(deleted == 1)
     }
 
+    /// Whether an unused code has this hash, so a sign up can tell before it counts against the hub's
+    /// window. `create_invited_account` still checks it again as it spends it.
+    pub async fn invite_open(&self, code_hash: &[u8]) -> Result<bool, String> {
+        let row = self.client().await?.query_one("select exists (select 1 from invites where code_hash = $1 and used_at is null)", &[&code_hash]).await.map_err(err)?;
+        Ok(row.get(0))
+    }
+
     /// Makes the account and spends the code in one statement, so two sign ups can't share a code
     /// and a taken email leaves the code unused.
     pub async fn create_invited_account(&self, code_hash: &[u8], email: &str, password_hash: &str) -> Result<Invited, String> {
@@ -1902,6 +1914,21 @@ impl Db {
         Ok(Spent::Fresh((grant, r.get(3))))
     }
 
+    /// Whether `token` is a live refresh token of `client`'s that was never used, read without spending
+    /// or rotating it.
+    pub async fn agent_refresh_current(&self, token: &str, client: &str) -> Result<bool, String> {
+        let row = self
+            .client().await?
+            .query_opt(
+                "select 1 from agent_tokens t join agent_grants g on g.id = t.grant_id \
+                 where t.token_hash = $1 and t.kind = 'refresh' and not t.rotated and t.expires_at > now() and not g.revoked and g.client = $2",
+                &[&hash(token), &client],
+            )
+            .await
+            .map_err(err)?;
+        Ok(row.is_some())
+    }
+
     /// Ends the grant: its tokens and codes go. With `account`, only that account's grant.
     pub async fn revoke_agent_grant(&self, grant: Uuid, account: Option<Uuid>) -> Result<bool, String> {
         let client = self.client().await?;
@@ -1916,10 +1943,10 @@ impl Db {
         Ok(n == 1)
     }
 
-    /// The scopes of a grant that still stands.
-    pub async fn agent_grant_scopes(&self, grant: Uuid) -> Result<Option<Vec<String>>, String> {
-        let row = self.client().await?.query_opt("select scopes from agent_grants where id = $1 and not revoked", &[&grant]).await.map_err(err)?;
-        Ok(row.map(|r| strings(r.get(0))))
+    /// The scopes and account of a grant that still stands.
+    pub async fn agent_grant_scopes(&self, grant: Uuid) -> Result<Option<(Vec<String>, Uuid)>, String> {
+        let row = self.client().await?.query_opt("select scopes, account from agent_grants where id = $1 and not revoked", &[&grant]).await.map_err(err)?;
+        Ok(row.map(|r| (strings(r.get(0)), r.get(1))))
     }
 
     /// RFC 7009: forgets one token, of whichever kind. Unknown tokens are no error.
