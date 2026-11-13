@@ -2,6 +2,7 @@ use base64::Engine;
 use pinned_core::account::{self, Credentials, DictationEngine, DictationFeedback, DictationRating, Signup};
 use pinned_core::accounts::Provider;
 use pinned_core::agent::{self, Role, Stage, Subject};
+use pinned_core::delegate::BOX_OFFLINE;
 use pinned_core::connectors::{BoxSize, BoxStep, Delivery, Run, RunsOn, Work};
 use pinned_core::convex::client::Replay;
 use pinned_core::global_orchestrator::{CaptainReport, RelayTo};
@@ -2779,6 +2780,7 @@ fn node_with_a_transcript(name: &str) -> (TestHub, Client, String, PathBuf, Node
             env: vec![],
             bypass: false,
             interrupted: false,
+            cut_by_sleep: None,
             resume_at: None,
             held: false,
             account: "work".into(),
@@ -5176,6 +5178,73 @@ fn a_worker_box_that_never_connects_fails_its_task_even_when_the_hub_restarts_mi
     let status = task_status(&mac_dir, &captain, &task);
     assert_eq!(status["error"].as_str(), Some("Upstash Box: the box did not connect within 8 s"), "{status}");
     wait_for("the box to go", || hub.boxes.live().is_empty());
+}
+
+/// Takes the node out of the box `id`, so its link drops as a box's does when its machine loses
+/// the network.
+fn drop_box_node(boxes: &FakeBoxes, id: &str) {
+    let node = boxes.state.lock().unwrap().boxes.get_mut(id).unwrap().node.take().expect("a box runs a node");
+    drop(node);
+}
+
+/// The `remote_task` call a thread `tab-1` sends the hub for its task `task` on `machine`.
+fn remote_task_call(machine: &str, task: &str, cancel: Option<&str>) -> Value {
+    json!({ "cmd": "remote_task", "machine": machine, "tab": "tab-1", "task": task, "cancel": cancel })
+}
+
+#[test]
+fn a_worker_box_whose_link_blinks_is_offline_not_booting_and_keeps_its_task() {
+    let policy = Policy { offline: Duration::from_secs(30), tab_gone: Duration::from_secs(3600), ..fast() };
+    let hub = TestHub::start_with_boxes("rbox_blink", Signup::Open, policy);
+    let mut ana = BoxAccount::new(&hub);
+    hub.boxes.state.lock().unwrap().checkout = Some(("site".into(), SITE.into()));
+    let fresh = json!({ "workflow": { "mode": "fresh" }, "session": { "mode": "off" }, "worker": { "mode": "fresh" }, "orchestrator": { "mode": "off" } });
+    ana.client.hub(json!({ "cmd": "set_box_access", "access": fresh })).unwrap();
+    ana.client.hub(json!({ "cmd": "set_box_claude_token", "name": "bloom", "token": "sk-ant-oat01-bloomtoken" })).unwrap();
+    let caller = raw_caller(&hub, &mut ana.client, "caller", &[("caller", true)]);
+    let started = caller.ask(delegate_call("task-1", json!({ "box": { "repo": "acme/site" }, "providerInstanceId": "bloom" }), SITE)).unwrap();
+    let machine = started["machine"].as_str().unwrap().to_owned();
+    wait_for("the worker thread running on the box", || box_tabs(&hub.boxes).iter().any(|t| t.role == Some(Role::Worker) && t.running));
+    wait_for("the hub to ask the box's node", || caller.ask(remote_task_call(&machine, "task-1", None)) != Err(BOX_OFFLINE.into()));
+    let id = hub.boxes.live()[0].clone();
+
+    drop_box_node(&hub.boxes, &id);
+    wait_for("the hub to see the box offline", || caller.ask(remote_task_call(&machine, "task-1", None)) == Err(BOX_OFFLINE.into()));
+
+    let creds: Credentials = serde_json::from_str(&hub.boxes.file(&format!("{BOX_DIR}/account.json")).unwrap()).unwrap();
+    let back = Node::resume(&hub.boxes.root.join(&id), creds);
+    hub.boxes.state.lock().unwrap().boxes.get_mut(&id).unwrap().node = Some(Arc::new(back));
+    wait_for("the hub to ask the box's node again", || caller.ask(remote_task_call(&machine, "task-1", None)) != Err(BOX_OFFLINE.into()));
+    assert_eq!((hub.boxes.live(), ana.rows(&hub)), (vec![id.clone()], 1), "the box came back within the grace and keeps running");
+
+    // Its parent may still cancel it while it is offline, which ends it as offline, not as done.
+    drop_box_node(&hub.boxes, &id);
+    wait_for("the hub to see the box offline again", || caller.ask(remote_task_call(&machine, "task-1", None)) == Err(BOX_OFFLINE.into()));
+    let cancelled = caller.ask(remote_task_call(&machine, "task-1", Some("not now"))).unwrap();
+    assert_eq!((cancelled["workState"].as_str(), cancelled["error"].as_str()), (Some("cancelled"), Some("not now")), "{cancelled}");
+    wait_for("the cancelled box to go", || hub.boxes.live().is_empty() && ana.rows(&hub) == 0);
+}
+
+#[test]
+fn a_worker_box_offline_past_the_grace_ends_and_fails_its_task_with_that_reason() {
+    let hub = TestHub::start_with_boxes("rbox_offline", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let mac_dir = temp("rbox-offline-mac");
+    let (_mac, _, captain) = mac_with_captain(&hub, &mut ana, &mac_dir);
+    let started = delegate_from(&mac_dir, &captain, json!({ "task": "Run the slow suite.", "title": "Slow suite", "target": { "box": true } })).unwrap();
+    let task = started["taskId"].as_str().unwrap().to_owned();
+    wait_for("the worker thread running on the box", || box_tabs(&hub.boxes).iter().any(|t| t.role == Some(Role::Worker) && t.running));
+    ana.client.wait_machines(&[("mac", true), ("Box · Slow suite", true)]);
+
+    drop_box_node(&hub.boxes, &hub.boxes.live()[0]);
+    wait_for("the box to go", || hub.boxes.live().is_empty());
+    let status = task_status(&mac_dir, &captain, &task);
+    assert_eq!(
+        (status["workState"].as_str(), status["error"].as_str()),
+        (Some("failed"), Some("Upstash Box: its box went offline and did not come back within 1 s")),
+        "not \"the box did not connect\": {status}"
+    );
+    wait_for("the row to go", || ana.rows(&hub) == 0);
 }
 
 /// A raw machine paired to `ana`'s account, which asks the hub for what a node's thread asks.

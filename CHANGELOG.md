@@ -5,6 +5,7 @@
 ### Added
 
 - Ideas: the Orchestrator and your sessions can now save things you might do someday with `save_idea`, list them with `list_ideas` and delete them with `delete_idea`. Ideas are kept on your account, apart from memory, and are never fed into a prompt on their own. The Ideas page comes in a later update.
+- A thread that stopped on an API error while the computer slept now shows a Needs you card saying when it slept, with a Continue button (for a Captain, also how many delegated tasks are still running). Nothing is typed for you.
 
 ### Removed
 
@@ -15,6 +16,7 @@
 - Workflows: in New workflow, clicking Linear (or any Slack option) with that connector connected now continues the setup instead of opening Connectors. Since 0.17.10 every option sent you to Connectors and said "Connect Linear", whatever was connected. When the connector is missing, Connectors now says which workflow sent you there, and connecting it, or Back to the workflow, returns you to that workflow as you left it.
 - A Captain no longer keeps the global Orchestrator's messages queued for hours after its turn ends. When a turn ended just as a message came in, the Captain's end-of-turn hook could give up waiting for pinned before pinned handed the message over. The turn ended without it, while pinned kept counting the Captain as busy, so every later message waited until you typed into the Captain. The hook now waits long enough for the hand-over. If a hand-over still gets lost, the queued messages start a new turn once Claude Code reports the Captain idle, about a minute later.
 - Agent tabs no longer read working or starting with nothing running behind them: a session killed mid-turn now reads stopped with its reason (its time limit, stopped by you, or its exit code), sleeping and resumed tabs read idle, a start that never reports fails after 10 min, and the Orchestrator's `projects()` count skips workers with no live process.
+- A worker box whose link to the hub drops for a moment keeps its task. Before, a box running for more than 5 minutes that lost its link was deleted at once as "the box did not connect within 5 min". Now its task waits for it to come back, and a box that stays offline for 10 minutes ends with that reason.
 
 ## 0.18.1 (2026-11-12)
 

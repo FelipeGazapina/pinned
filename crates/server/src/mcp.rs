@@ -741,6 +741,7 @@ mod tests {
             updated: None,
             session: None,
             interrupted: false,
+            cut_by_sleep: None,
             stats: None,
             branch: None,
             pr: None,
