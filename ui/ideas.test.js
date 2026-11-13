@@ -460,3 +460,10 @@ test("on a phone the quick-add is pinned at the foot of the page", () => {
   const css = read("gui-ideas.css");
   assert.match(css, /@media \(max-width: 768px\)[\s\S]*\.ideas-add \{[^}]*position: sticky; bottom: 0;/);
 });
+
+test("the shell's stylesheet shows the page view for Ideas wherever it does for Needs you", () => {
+  const css = read("gui-shell.css");
+  const count = (page) => css.split(`[data-page="${page}"]`).length - 1;
+  assert.ok(count("needs-you") > 0);
+  assert.equal(count("ideas"), count("needs-you"));
+});
