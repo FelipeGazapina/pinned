@@ -172,3 +172,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:08:40Z #79 an_agent_reaches_only_the_projects_and_orchestrators_of_the_account_that_let_it_in ok / avail=15072M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:08:41Z #80 a_dictation_is_kept_under_the_account_that_sent_it_and_no_route_reads_it_back START / avail=15072M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:08:45Z #80 a_dictation_is_kept_under_the_account_that_sent_it_and_no_route_reads_it_back ok / avail=15071M /workspace avail=19374M node_stat=Ssl node_tcp=1
+2026-11-13T04:08:46Z #81 a_box_permission_naming_another_accounts_box_opens_a_box_of_its_own START / avail=15071M /workspace avail=19374M node_stat=Ssl
