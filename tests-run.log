@@ -320,3 +320,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:23:15Z #144 a_held_end_reaches_its_machine_once_however_often_it_reconnects_or_is_delivered ok / avail=15048M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:23:16Z #145 a_captain_box_whose_worker_hangs_is_not_idle_reaped_and_still_meets_its_max_life_and_budget START / avail=15048M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:23:32Z #145 a_captain_box_whose_worker_hangs_is_not_idle_reaped_and_still_meets_its_max_life_and_budget ok / avail=15048M /workspace avail=19374M node_stat=Ssl node_tcp=1
+2026-11-13T04:23:33Z #146 a_held_end_its_restarted_parent_does_not_take_stays_readable_through_status_and_the_unclaimed_list START / avail=15048M /workspace avail=19374M node_stat=Ssl
