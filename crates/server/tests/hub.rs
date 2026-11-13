@@ -8367,7 +8367,8 @@ fn an_agent_may_not_repeat_every_five_minutes_nor_hold_more_than_twenty_tasks() 
     assert!(refused.contains("every 5 minutes") && refused.contains("15"), "{refused}");
     assert_eq!(s.titles(), Vec::<String>::new());
     assert!(save_schedule(&mut s.ana, fast).is_ok(), "the user has no such floor");
-    s.ana.hub(json!({ "cmd": "delete_schedule", "id": s.ana.hub(json!({ "cmd": "list_schedules" })).unwrap()[0]["id"] })).unwrap();
+    let fast_id = s.ana.hub(json!({ "cmd": "list_schedules" })).unwrap()[0]["id"].clone();
+    s.ana.hub(json!({ "cmd": "delete_schedule", "id": fast_id })).unwrap();
 
     for n in 0..20 {
         let mut task = task_body(&format!("Task {n}"));
