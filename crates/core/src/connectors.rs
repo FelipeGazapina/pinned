@@ -5479,17 +5479,79 @@ mod tests {
         // The workflow moved off boxes: a newer run of the same subject works on this machine, and another has no session yet.
         let live = serde_json::json!({ "state": "live", "machine": "local", "tab": "t1", "claude": null, "since": 1, "saw_working": false, "await_working": false });
         connectors.runs.lock().unwrap().push(run_started("newer-live", "c1", &subject, "2026-01-01T11:00:00Z", live));
-        connectors.runs.lock().unwrap().push(run_started("newer-unplaced", "c1", &subject, "2026-01-01T11:00:05Z", serde_json::json!({ "state": "none" })));
+        // Production starts a run `Running` with no session until its box is placed; it is never `Waiting` without one.
+        let mut unplaced = run_started("newer-unplaced", "c1", &subject, "2026-01-01T11:00:05Z", serde_json::json!({ "state": "none" }));
+        unplaced.status = Status::Running;
+        connectors.runs.lock().unwrap().push(unplaced);
         connectors.store.lock().unwrap().connectors[0].handled = vec!["uuid".into()];
         for retry in 0..3 {
             assert_eq!(end(&connectors), Ok(0), "retry {retry} fails nothing");
         }
         assert_eq!(status_of(&connectors, "newer-live"), Status::Waiting);
-        assert_eq!(status_of(&connectors, "newer-unplaced"), Status::Waiting);
+        assert_eq!(status_of(&connectors, "newer-unplaced"), Status::Running);
         assert_eq!(handled_of(&connectors), ["uuid"], "the newer runs' subject stays handled by them");
         assert!(matches!(status_of(&connectors, "old"), Status::Failed { .. }));
         assert_eq!(connectors.box_failures.lock().unwrap().len(), 1, "the old run is failed, and the card told, once");
         assert_eq!(marked_subjects(&connectors), BTreeMap::from([("c1".to_owned(), vec!["uuid".to_owned()])]), "one release");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A run `begin`s `Running` with no session; the next `drive` opens its session. The box row it
+    /// is meant for was written at `row_written`, before the run existed.
+    fn run_began_after_its_row(name: &str) -> (Connectors, PathBuf, Subject, u64) {
+        let subject = Subject::LinearIssue { issue: "uuid".into() };
+        let mut connector = Connector { handled: vec!["uuid".into()], ..linear_connector() };
+        connector.graph = Some(talks(&["one"]));
+        let (connectors, dir) = stored(name, vec![connector]);
+        connectors.begin("c1".into(), subject.clone(), issue_trigger(), "2026-10-29T12:00:00Z").unwrap();
+        let row_written = u64::try_from(DateTime::parse_from_rfc3339("2026-10-29T11:59:00Z").unwrap().timestamp_millis()).unwrap();
+        (connectors, dir, subject, row_written)
+    }
+
+    const BOX_ENDED: &str = "Upstash Box: its box went offline";
+
+    /// Round 3's reuse case: a box's end skips a run that began after the box's row was written, and
+    /// that run's own open then fails (its subject's last box is still being deleted). The run is
+    /// failed by that open, so nothing is left `Running` or `Waiting` with nothing to wake it.
+    #[test]
+    fn a_run_a_box_end_skipped_fails_when_its_own_open_fails() {
+        let (connectors, dir, subject, row_written) = run_began_after_its_row("reuse-open-fails");
+        assert_eq!(block_on(connectors.box_ended("box-1", Some(("c1", &subject, row_written)), BOX_ENDED, BoxEndRelease::Once)), Ok(0), "the newer, unplaced run is not the box's run");
+        assert_eq!(connectors.runs.lock().unwrap()[0].status, Status::Running, "and it goes on running");
+
+        let open = |_: Work| async { Err::<Option<Placement>, String>("Upstash Box: the last box for this is still being deleted; the next check tries again".into()) };
+        let driven = block_on(connectors.drive(&open));
+        assert!(driven.as_ref().is_err_and(|e| e.contains("still being deleted")), "the check reports it: {driven:?}");
+        let runs = connectors.runs.lock().unwrap().clone();
+        assert_eq!(runs.len(), 1);
+        match &runs[0].status {
+            Status::Failed { why } => assert!(why.contains("still being deleted"), "{why}"),
+            other => panic!("the run is {other:?}"),
+        }
+        assert!(!runs.iter().any(|run| matches!(run.status, Status::Running | Status::Waiting)), "no run is left going");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The same run whose open works: it waits on the new box's session, and when that box ends the
+    /// end fails it with the box's reason, though it began after the row it was written for.
+    #[test]
+    fn a_run_a_box_end_skipped_is_failed_by_the_end_of_the_box_it_opened() {
+        let (connectors, dir, subject, row_written) = run_began_after_its_row("reuse-open-works");
+        assert_eq!(block_on(connectors.box_ended("box-1", Some(("c1", &subject, row_written)), BOX_ENDED, BoxEndRelease::Once)), Ok(0));
+
+        let open = |_: Work| async { Ok::<Option<Placement>, String>(Some(Placement { machine: "box-1".into(), tab: "tab-1".into() })) };
+        block_on(connectors.drive(&open)).unwrap();
+        let runs = connectors.runs.lock().unwrap().clone();
+        assert!(matches!(runs[0].status, Status::Waiting), "{:?}", runs[0].status);
+        assert!(matches!(&runs[0].session, Session::Live { machine, .. } if machine == "box-1"), "{:?}", runs[0].session);
+
+        assert_eq!(block_on(connectors.box_ended("box-1", Some(("c1", &subject, row_written)), BOX_ENDED, BoxEndRelease::Once)), Ok(1), "the box it opened ended");
+        let runs = connectors.runs.lock().unwrap().clone();
+        match &runs[0].status {
+            Status::Failed { why } => assert!(why.starts_with(BOX_ENDED), "{why}"),
+            other => panic!("the run is {other:?}"),
+        }
+        assert!(!runs.iter().any(|run| matches!(run.status, Status::Running | Status::Waiting)), "no run is left going");
         let _ = std::fs::remove_dir_all(dir);
     }
 

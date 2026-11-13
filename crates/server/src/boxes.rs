@@ -2389,6 +2389,44 @@ mod tests {
         assert_eq!((fresh.size, fresh.labels.len()), (BoxSize::Medium, 2), "the rest of the box is the same");
     }
 
+    /// A store an earlier release saved can name a fixed box for the session, worker or orchestrator
+    /// kind (the apps offered it). Loaded by `Connectors::new`, none of them keeps a box alive or
+    /// reserves one: only the workflow kind owns a row, a box in another kind's permission `Fixed`
+    /// is refused, and a box whose id one of them names ends by the normal timers. The stored rows
+    /// stay in the file (a load and a save of a v0.18.1 store must lose nothing), and are never read.
+    #[tokio::test]
+    async fn a_store_loaded_with_a_fixed_row_for_a_session_worker_or_orchestrator_keeps_no_box_alive_and_reserves_none() {
+        use pinned_core::connectors::{FileStorage, Storage};
+        let dir = tempfile::tempdir().unwrap();
+        let storage = FileStorage::new(dir.path().to_path_buf());
+        let store = serde_json::json!({
+            "connectors": [],
+            "boxes": {
+                "workflow": { "mode": "fresh" },
+                "session": { "mode": "fixed", "row": "fake-row-session" },
+                "worker": { "mode": "fixed", "row": "fake-row-worker" },
+                "orchestrator": { "mode": "fixed", "row": "fake-row-orchestrator" },
+            },
+        });
+        storage.save(store.to_string().as_bytes()).unwrap();
+        let connectors = Connectors::new(storage, "/bin/pinned".into());
+        let access = connectors.box_access();
+        let subject = Subject::LinearIssue { issue: "box".into() };
+        for (kind, row, permission) in [("session", "fake-row-session", &access.session), ("worker", "fake-row-worker", &access.worker), ("orchestrator", "fake-row-orchestrator", &access.orchestrator)] {
+            // The reaper's check (`owns_row`), and what hangs on it: the keep-alive flag and the node leaving.
+            assert!(!access.owns_row(row), "{kind}: the reaper treats its box like any other");
+            let stored = row_of(BoxSize::Medium, Phase::Running, BoxWork::Run, "nightly", row);
+            assert!(!new_box(&access, &stored, "hub:000000000000").keep_alive, "{kind}: its box is created temporary");
+            assert!(leaves_when_refused(&access, row), "{kind}: its node leaves a hub that refuses it");
+            // Nothing opens a box under it.
+            let refused = allowed(&connectors, permission.clone(), kind, "nightly", &subject).await;
+            assert!(refused.is_err_and(|e| e.contains("for workflows only")), "{kind}: a fixed box is refused");
+        }
+        // A workflow run reserves no row either: the kind is fresh, so the hub creates its box and stores none.
+        assert!(matches!(connectors.claim_fixed_row("proposed"), Ok(FixedClaim::Create)));
+        assert_eq!(connectors.box_access().workflow, BoxPermission::Fresh);
+    }
+
     #[test]
     fn normalize_repo_takes_shorthand_and_https() {
         assert_eq!(normalize_repo("o/r"), Some("https://github.com/o/r.git".into()));
