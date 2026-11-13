@@ -4773,6 +4773,15 @@ impl Connectors {
     /// Whether saving `incoming` would let its workflow read more of Convex than the stored one
     /// does: a step where there was none, another deployment, or more tables. The step is the
     /// workflow's grant, so an agent's save must not do this.
+    /// The graph a save of `incoming` keeps from the store: the stored one, when the save carries
+    /// none and names a workflow that has one. Checks that read the incoming call read this too.
+    pub fn kept_graph(&self, incoming: &Connector) -> Option<crate::graph::Graph> {
+        if incoming.graph.is_some() || incoming.id.is_empty() {
+            return None;
+        }
+        self.store.lock().unwrap().connectors.iter().find(|c| c.id == incoming.id).and_then(|c| c.graph.clone())
+    }
+
     pub fn widens_convex(&self, incoming: &Connector) -> bool {
         let Some(asked) = convex_step(incoming) else { return false };
         let store = self.store.lock().unwrap();
