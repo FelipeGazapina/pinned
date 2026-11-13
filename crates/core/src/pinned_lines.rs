@@ -27,7 +27,6 @@ fn breaks_a_line(c: char) -> bool {
 /// Whether `rest`, the text after a `[` at a line start, reads once typed as the rest of the
 /// mark `[pinned]`, in any case. A character the paste drops or that does not show is skipped, so
 /// it cannot split the mark.
-#[allow(dead_code)]
 fn closes_the_mark(rest: &str) -> bool {
     let mut wanted = "pinned]".chars();
     for c in rest.chars() {
@@ -55,13 +54,13 @@ pub fn guard(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut at_start = true;
     for (at, c) in text.char_indices() {
-        if at_start && c == '[' && text[at..].get(..8).is_some_and(|word| word.eq_ignore_ascii_case("[pinned]")) {
+        if at_start && c == '[' && closes_the_mark(&text[at + 1..]) {
             out.push('\\');
         }
         out.push(c);
         if breaks_a_line(c) {
             at_start = true;
-        } else if !(c.is_whitespace() || is_invisible(c)) {
+        } else if !(c.is_whitespace() || dropped_when_typed(c) || is_invisible(c)) {
             at_start = false;
         }
     }
