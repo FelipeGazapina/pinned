@@ -65,7 +65,7 @@ mod tests {
     fn offenders(files: &[PathBuf], rust: bool) -> Vec<String> {
         let mut out = vec![];
         for file in files {
-            let name = file.strip_prefix(root()).unwrap_or(file).to_string_lossy().replace("../", "");
+            let name = slashed(file.strip_prefix(root()).unwrap_or(file));
             let text = std::fs::read_to_string(file).unwrap();
             let lines: Vec<(usize, &str)> = if rust { rust_product_lines(&text) } else { text.lines().enumerate().map(|(i, l)| (i + 1, l)).collect() };
             for (n, line) in lines {
@@ -79,6 +79,11 @@ mod tests {
             }
         }
         out
+    }
+
+    /// A path with `/` between its parts on every platform, and no `../`.
+    fn slashed(path: &Path) -> String {
+        path.to_string_lossy().replace('\\', "/").replace("../", "")
     }
 
     fn product_files() -> (Vec<PathBuf>, Vec<PathBuf>) {
@@ -105,6 +110,7 @@ mod tests {
         let text = "let a = \"x\";\n// plain comment about Felipe\n/// doc about the Bloom account\nlet b = \"Mac Mini\";\n#[cfg(test)]\nmod tests {\n    let c = \"felipe\";\n}\n";
         let product: Vec<_> = rust_product_lines(text).into_iter().filter(|(_, l)| !is_plain_rust_comment(l) && names_the_owner(l)).collect();
         assert_eq!(product, [(3, "/// doc about the Bloom account"), (4, "let b = \"Mac Mini\";")]);
+        assert_eq!(slashed(Path::new("crates/server/src\\self_update.rs")), "crates/server/src/self_update.rs", "a Windows path");
         assert!(is_js_comment("  // Felipe") && is_js_comment(" * bloom") && !is_js_comment("let x = 'bloom';"));
         assert!(!names_the_owner(&"const RELEASE_BASE: &str = \"https://github.com/FelipeGazapina/pinned/releases\";".replace(RELEASE_URL, "")));
     }
