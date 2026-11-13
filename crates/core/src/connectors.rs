@@ -6695,6 +6695,10 @@ mod tests {
             work: None,
             question: None,
             ask_detail: None,
+            alive: true,
+            asleep: false,
+            headless: false,
+            stopped: None,
             questions: None,
         }
     }

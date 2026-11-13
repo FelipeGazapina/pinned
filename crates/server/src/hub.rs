@@ -970,6 +970,14 @@ impl Hub {
     }
 }
 
+/// Whether the tab keeps its box from counting as quiet. Claude reports a finished turn as waiting
+/// for input a minute later, so Working holds a box, and so does an open questionnaire: its
+/// worker waits on the user, and the box ending would take the question with it. A permission
+/// prompt holds nothing. `max_life` and the budget still end the box.
+fn holds_box(tab: &TabView) -> bool {
+    tab.status == Some(AgentStatus::Working) || tab.questions.is_some()
+}
+
 impl Account {
     /// Registers a machine's connection and sends it every client's watch of it. An older one must
     /// have gone offline first.
@@ -1140,8 +1148,7 @@ impl Account {
         let Some(m) = live.machines.get(machine) else { return Seen::Offline };
         match m.tabs().iter().find(|t| t.connector.as_deref() == Some(connector) && t.subject.as_ref() == Some(subject)) {
             None => Seen::NoTab,
-            // Claude reports a finished turn as waiting for input a minute later, so only Working holds a box.
-            Some(t) => Seen::Tab { running: t.running, quiet: t.status != Some(AgentStatus::Working) },
+            Some(t) => Seen::Tab { running: t.running, quiet: !holds_box(t) },
         }
     }
 
@@ -1151,7 +1158,7 @@ impl Account {
         let Some(m) = live.machines.get(machine) else { return Seen::Offline };
         match m.tabs() {
             [] => Seen::NoTab,
-            tabs => Seen::Tab { running: tabs.iter().any(|t| t.running), quiet: !tabs.iter().any(|t| t.status == Some(AgentStatus::Working)) },
+            tabs => Seen::Tab { running: tabs.iter().any(|t| t.running), quiet: !tabs.iter().any(holds_box) },
         }
     }
 
@@ -1591,6 +1598,81 @@ mod tests {
     fn a_live_snapshot_replaces_the_stored_phase() {
         let live = UpdateStatus::Updating { to: "2.0.0".into() };
         assert_eq!(reconcile(Some(UpdateStatus::Restarting { to: "1.0.0".into() }), "0.9.0", Some(live.clone())), Some(live));
+    }
+
+    /// A box's account with one machine showing a single tab with `status`, laid over by an open
+    /// questionnaire when `asked`, as the node shows a tab whose worker called `question_user`.
+    fn box_showing(status: AgentStatus, asked: bool, running: bool) -> Account {
+        use pinned_core::questions::{self, QOption, Question, Questionnaire};
+        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() };
+        let (out, _sent, _) = Outbox::new();
+        account.came_online("box", 1, "box".into(), true, "0.18.2".into(), out);
+        let mut tab: TabView = serde_json::from_value(serde_json::json!({
+            "id": "tab-1", "cwd": "/work/repo", "bypass": true, "running": running, "opened": 1_794_240_000u64,
+            "status": status, "connector": "delegate", "subject": { "issue": "FAKE-1" },
+        }))
+        .unwrap();
+        if asked {
+            let question = Question { header: None, question: "Base the fix on main?".into(), changes: "which branch the PR targets".into(), options: vec![QOption { label: "main".into(), description: None, recommended: true }], multi_select: false };
+            tab = questions::shown(tab, &Questionnaire { id: "q-1".into(), title: None, questions: vec![question], projects: vec![], at: 1_794_240_000 });
+        }
+        account.machine_event("box", 1, MachineEvent::Tabs { tabs: vec![tab] });
+        account
+    }
+
+    /// What the reaper decides for the box once `held` has passed since it first saw `seen`, with
+    /// the box `age` old, under the default policy (idle 10 minutes, max_life 4 hours).
+    fn reaped(seen: impl Fn() -> Seen, held: Duration, age: Duration) -> Option<boxes::End> {
+        let (start, mut timers, policy) = (Instant::now(), boxes::Timers::default(), boxes::Policy::default());
+        assert_eq!(boxes::verdict(Duration::ZERO, seen(), &mut timers, start, &policy), None, "nothing ends it at its first look");
+        boxes::verdict(age, seen(), &mut timers, start + held, &policy)
+    }
+
+    const MIN: Duration = Duration::from_secs(60);
+
+    #[test]
+    fn a_box_waiting_on_an_open_question_is_not_idle() {
+        let account = box_showing(AgentStatus::NeedsInput, true, true);
+        let subject = Subject::LinearIssue { issue: "FAKE-1".into() };
+        let looks: [(&str, Box<dyn Fn() -> Seen>); 2] = [("seen", Box::new(|| account.seen("box", "delegate", &subject))), ("seen_any", Box::new(|| account.seen_any("box")))];
+        for (which, look) in looks {
+            assert_eq!(look(), Seen::Tab { running: true, quiet: false }, "{which}: an open questionnaire holds the box");
+            assert_eq!(reaped(&look, 3 * 60 * MIN, 3 * 60 * MIN), None, "{which}: three hours of waiting on the user is not idle");
+            // Waiting past max_life ends the box as Expired, whatever it waits on.
+            assert_eq!(reaped(&look, 3 * 60 * MIN, 4 * 60 * MIN), Some(boxes::End::Expired), "{which}: max_life still ends it");
+        }
+    }
+
+    #[test]
+    fn a_box_on_a_permission_prompt_or_idle_still_ends_as_idle() {
+        let subject = Subject::LinearIssue { issue: "FAKE-1".into() };
+        for status in [AgentStatus::NeedsInput, AgentStatus::Done] {
+            let account = box_showing(status, false, true);
+            let looks: [(&str, Box<dyn Fn() -> Seen>); 2] = [("seen", Box::new(|| account.seen("box", "delegate", &subject))), ("seen_any", Box::new(|| account.seen_any("box")))];
+            for (which, look) in looks {
+                assert_eq!(look(), Seen::Tab { running: true, quiet: true }, "{which} {status:?}: no questionnaire, so it is quiet");
+                assert_eq!(reaped(&look, 9 * MIN, 9 * MIN), None, "{which} {status:?}: quiet 9 of 10 minutes");
+                assert_eq!(reaped(&look, 11 * MIN, 11 * MIN), Some(boxes::End::Idle), "{which} {status:?}: idle ends it");
+            }
+        }
+    }
+
+    #[test]
+    fn a_box_whose_session_exited_with_a_question_open_still_ends_as_exited() {
+        let account = box_showing(AgentStatus::NeedsInput, true, false);
+        let subject = Subject::LinearIssue { issue: "FAKE-1".into() };
+        let looks: [(&str, Box<dyn Fn() -> Seen>); 2] = [("seen", Box::new(|| account.seen("box", "delegate", &subject))), ("seen_any", Box::new(|| account.seen_any("box")))];
+        for (which, look) in looks {
+            assert_eq!(look(), Seen::Tab { running: false, quiet: false }, "{which}: the question holds, the process does not");
+            assert_eq!(reaped(&look, 4 * MIN, 4 * MIN), None, "{which}: exited 4 of 5 minutes");
+            assert_eq!(reaped(&look, 6 * MIN, 6 * MIN), Some(boxes::End::Exited), "{which}: an open question does not keep an exited session's box");
+        }
+    }
+
+    #[test]
+    fn a_working_box_is_not_quiet() {
+        let account = box_showing(AgentStatus::Working, false, true);
+        assert_eq!(account.seen_any("box"), Seen::Tab { running: true, quiet: false });
     }
 
     #[test]

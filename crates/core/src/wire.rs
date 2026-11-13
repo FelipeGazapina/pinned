@@ -173,6 +173,18 @@ pub struct TabView {
     /// it waits on, read from its transcript, such as the command a permission prompt shows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ask_detail: Option<String>,
+    /// A process runs the tab's session now. `running` also holds for a conversation that sleeps.
+    #[serde(default)]
+    pub alive: bool,
+    /// The conversation sleeps with no process: a message wakes it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub asleep: bool,
+    /// The tab shows a headless child, which works with no session of the tab's own.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub headless: bool,
+    /// Why the tab's last process ended mid-turn, until a new turn or input starts it again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped: Option<String>,
     /// The questionnaire the session waits on the user to answer, which `Call::AnswerQuestions`
     /// answers. While it is open the tab reads as a question mid-turn, so an app that predates it
     /// still shows the tab waiting.
@@ -1744,6 +1756,10 @@ mod tests {
             work: None,
             question: None,
             ask_detail: None,
+            alive: true,
+            asleep: false,
+            headless: false,
+            stopped: None,
             questions: None,
         }
     }
@@ -2031,7 +2047,7 @@ mod tests {
         round_trip(
             MachineEvent::Tabs { tabs: vec![tab_view()] },
             json!({ "kind": "tabs", "tabs": [{
-                "id": "tab-3", "cwd": "/repo", "account": "work", "program": "agent", "bypass": false, "running": true, "status": "needs-input",
+                "id": "tab-3", "cwd": "/repo", "account": "work", "program": "agent", "bypass": false, "running": true, "alive": true, "status": "needs-input",
                 "title": "Fix the build", "message": "Claude needs your permission to use Bash",
                 "resume_at": null, "connector": "c1", "subject": { "issue": "uuid" }, "opened": 3, "updated": 1792400000, "session": "s1",
                 "stats": { "active_ms": 4320000, "cost_usd": 3.42 },
