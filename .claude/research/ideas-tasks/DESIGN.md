@@ -648,3 +648,19 @@ Order and parallelism: 1 → (2, 4) in parallel → 3 after 2 → 5 after 4 → 
 5. Pickup deadline (3.4): 10 minutes by default, and "alive" means the transcript moved within that window. Right numbers?
 6. Server-side backstops (4.5): today `main` is unprotected and `v*` tags have no rule, so the never list is the only thing between a scheduled run and a release. Add the tag ruleset with a `release` environment, and protect `main`? This design recommends both and changes neither.
 7. Managed settings for the never hook on boxes (pinned's image), and as an opt-in admin install on the Mac?
+
+---
+
+## Decisions (Orchestrator, 2026-11-13)
+
+Felipe asked the Orchestrator to settle the open questions so the work can proceed. Each answer is a default kept in one place, so changing it later is cheap.
+
+1. **Grace window.** An offline target waits 15 min by default (`schedule::DEFAULT_GRACE_MINS`), and each task can set its own (`grace_mins`). This is already what PR 1 does.
+2. **Agent-created tasks.** They become active with no OK, plus a notice: the creator is shown, an Inbox FYI row, and an audit row. Risky steps stop anyway, and only Felipe can pre-approve. Keep this rule in one function in PR 4, so making it a Confirm is a one-line change.
+3. **Missed one-time task.** It sends a push and shows in Needs you.
+4. **Ideas in a Captain's context.** Captains do not get project ideas in their starting context; only on request.
+5. **Pickup deadline.** 10 min by default, per task (`pickup_min`).
+6. **Server-side protections.** The tag ruleset, a protected `main`, deploy tokens off Captain machines and a narrow box token are Felipe's to set up, and no agent touches them. Until tag and `main` protection exist, a task run can never be pre-approved for `Release`, a tag, `Deploy` or `PushToMain`: those always stop for Felipe. Build this as a hub-side switch, off by default, that Felipe turns on once the protections exist. While it is off, `save_schedule` refuses approvals for those items, with a readable reason. PR 4 stores the switch and enforces it at save; PR 6 enforces it again at the held step.
+7. **Managed settings for the never hook.** Yes, if they need no admin rights on the machine. Otherwise ask the Orchestrator first.
+
+**Order.** PRs 5 and 6 are released to start after PRs 2–4 are in. PR 6 must land before any task can target `Worker`. Until then, `save_schedule` refuses `Target::Worker` with a readable reason.
