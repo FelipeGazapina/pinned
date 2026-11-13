@@ -39,3 +39,15 @@ postgres up, datadir pgdata.4DlQ pid 6458 port 5499
 2026-11-13T03:46:28Z a_failed_boot_cleans_up_and_cools_down ok 2026-11-13T03:46:30Z
 2026-11-13T03:46:30Z a_hub_restarted_mid_boot_finishes_the_run_with_one_box ok 2026-11-13T03:46:31Z
 2026-11-13T03:46:31Z the_sweep_deletes_this_hubs_unrecorded_boxes_only ok 2026-11-13T03:46:33Z
+2026-11-13T03:46:33Z removing_a_box_machine_or_disconnecting_upstash_deletes_its_boxes ok 2026-11-13T03:46:36Z
+2026-11-13T03:46:36Z a_box_goes_once_its_session_opened_its_pull_request_and_stopped ok 2026-11-13T03:46:39Z
+2026-11-13T03:46:39Z a_box_whose_row_this_hub_cannot_read_is_still_deleted ok 2026-11-13T03:46:41Z
+2026-11-13T03:46:41Z a_fresh_workflow_permission_opens_one_box_per_run ok 2026-11-13T03:46:43Z
+2026-11-13T03:46:43Z a_fixed_workflow_permission_reuses_one_box_across_two_runs ok 2026-11-13T03:46:45Z
+2026-11-13T03:46:45Z an_ask_workflow_permission_opens_nothing_until_it_is_allowed ok 2026-11-13T03:46:47Z
+2026-11-13T03:46:48Z workflow_boxes_that_are_off_or_disconnected_open_nothing ok 2026-11-13T03:46:49Z
+2026-11-13T03:46:49Z an_account_without_a_stored_box_permission_still_opens_a_box ok 2026-11-13T03:46:51Z
+2026-11-13T03:46:51Z a_denied_ask_opens_nothing ok 2026-11-13T03:46:54Z
+2026-11-13T03:46:54Z a_fixed_box_stays_after_its_session_ends_so_the_next_run_reuses_it ok 2026-11-13T03:46:57Z
+2026-11-13T03:46:57Z a_fresh_permission_stops_at_the_accounts_box_limit ok 2026-11-13T03:46:59Z
+2026-11-13T03:46:59Z an_unknown_event_keeps_the_machine_socket_and_a_thread_reaches_only_its_watcher ok 2026-11-13T03:47:02Z

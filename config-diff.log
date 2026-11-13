@@ -8,3 +8,8 @@
 > drwxr-xr-x 2026-11-13 03:45:55.261718580 .
 < -rw-r--r-- 2026-11-13 03:44:54.814382535 tasks.json
 > -rw-r--r-- 2026-11-13 03:45:55.261718580 tasks.json
+--- after a_fixed_box_stays_after_its_session_ends_so_the_next_run_reuses_it (2026-11-13T03:46:57Z)
+< drwxr-xr-x 2026-11-13 03:45:55.261718580 .
+> drwxr-xr-x 2026-11-13 03:46:55.724067670 .
+< -rw-r--r-- 2026-11-13 03:45:55.261718580 tasks.json
+> -rw-r--r-- 2026-11-13 03:46:55.724067670 tasks.json
