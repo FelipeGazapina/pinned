@@ -224,7 +224,7 @@ impl Questions {
 }
 
 /// Whether `answers` answer `questionnaire`: one per question, each choosing only its options
-/// (one unless it is multi-select) or typing something.
+/// (one unless it is multi-select, and none twice) or typing something.
 fn fits(questionnaire: &Questionnaire, answers: &[Answer]) -> Result<(), String> {
     if answers.len() != questionnaire.questions.len() {
         return Err(format!("questions {} has {} questions, the reply answers {}", questionnaire.id, questionnaire.questions.len(), answers.len()));
@@ -236,6 +236,9 @@ fn fits(questionnaire: &Questionnaire, answers: &[Answer]) -> Result<(), String>
         }
         if answer.chosen.len() > 1 && !question.multi_select {
             return Err(format!("question {n} takes one option"));
+        }
+        if let Some(label) = answer.chosen.iter().enumerate().find_map(|(i, label)| answer.chosen[..i].contains(label).then_some(label)) {
+            return Err(format!("question {n} chooses {label:?} twice"));
         }
         if answer.chosen.is_empty() && answer.text.as_deref().is_none_or(|t| t.trim().is_empty()) {
             return Err(format!("question {n} has no answer: choose an option or type one"));
@@ -299,6 +302,9 @@ mod tests {
         assert_eq!(q.answer("tab-1", &id, answered(vec![chose(&["main", "release"]), chose(&["yes"])])), Err("question 1 takes one option".into()));
         assert_eq!(q.answer("tab-1", &id, answered(vec![chose(&["main"]), Answer { chosen: vec![], text: Some(" ".into()) }])), Err("question 2 has no answer: choose an option or type one".into()));
         assert!(q.open_on("tab-1").is_some(), "a refused reply leaves it open");
+        let both = q.open("tab-2", None, None, None, vec![Question { multi_select: true, ..question("Which apps?", &["desktop", "phone"]) }], vec![], 2).unwrap();
+        assert_eq!(q.answer("tab-2", &both, answered(vec![chose(&["desktop", "desktop"])])), Err("question 1 chooses \"desktop\" twice".into()));
+        q.answer("tab-2", &both, answered(vec![chose(&["desktop", "phone"])])).unwrap();
         let typed = Answer { chosen: vec![], text: Some("Only the desktop one".into()) };
         q.answer("tab-1", &id, answered(vec![chose(&["main"]), typed.clone()])).unwrap();
         assert_eq!(q.get(&id).unwrap().outcome, Some(Outcome::Answered { answers: vec![chose(&["main"]), typed] }));
