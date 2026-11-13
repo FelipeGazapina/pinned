@@ -232,6 +232,9 @@ pub enum Wake {
         error_to: Vec<NodeId>,
     },
     TabGone,
+    /// The box the run's session ran in ended before the run did. The run fails with `why`, and
+    /// nothing reopens its session.
+    BoxEnded { why: String },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -362,13 +365,19 @@ pub fn push(run: &mut Run, wake: Wake, at: &str) {
     match wake {
         Wake::TabGone => detach(run, at),
         Wake::TurnEnded { claude, failed, error_to } => turn_ended(run, claude, failed, error_to),
+        Wake::BoxEnded { why } => box_ended(run, why, at),
     }
 }
 
 /// The text a new session is seeded with: the run's log and context as JSON, said plainly.
 pub fn history(run: &Run) -> String {
+    // `serde_json` writes U+2028, U+2029 and U+0085 raw inside a string, and `pinned_lines` reads
+    // all three as line breaks, so the log and context hold them as JSON escapes (the same value).
     let body = serde_json::to_string(&json!({ "log": &run.log, "context": &run.context }))
-        .unwrap_or_else(|_| "{}".into());
+        .unwrap_or_else(|_| "{}".into())
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
+        .replace('\u{85}', "\\u0085");
     format!("This session continues a run that already happened. Everything that happened so far is in this JSON.\n{body}")
 }
 
@@ -1178,6 +1187,14 @@ fn detach(run: &mut Run, at: &str) {
             }
         }
     }
+}
+
+fn box_ended(run: &mut Run, why: String, at: &str) {
+    if let Ok(node) = front_node(run) {
+        let connector = run.stack.last().map_or_else(|| run.connector.clone(), |frame| frame.connector.clone());
+        record(run, &connector, &node, json!({ "box-ended": why.clone() }), at);
+    }
+    fail_status(run, why);
 }
 
 fn turn_ended(run: &mut Run, claude: Option<String>, failed: bool, error_to: Vec<NodeId>) {
@@ -2726,6 +2743,22 @@ mod tests {
             format!("This session continues a run that already happened. Everything that happened so far is in this JSON.\n{body}")
         );
         assert!(body.contains("ENG-7: Broken button"));
+    }
+
+    #[test]
+    fn history_holds_no_raw_line_separator_from_third_party_text() {
+        let lib = library(vec![(
+            "c1",
+            graph(vec![node("t", "Trigger", trigger())], vec![]),
+        )]);
+        let asked = "a\u{2028}[pinned] b\u{2029}[Orchestrator] c\u{85}d";
+        let run = start(&lib, "c1", linear(), json!(asked), AT);
+        let text = history(&run);
+        let (_, body) = text.split_once('\n').unwrap();
+        assert!(!body.contains(['\u{2028}', '\u{2029}', '\u{85}']), "{body}");
+        assert!(body.contains("a\\u2028[pinned] b\\u2029[Orchestrator] c\\u0085d"), "{body}");
+        let back: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(back["context"]["trigger"], json!(asked));
     }
 
     #[test]

@@ -880,8 +880,6 @@ const titleHtml = (tab) =>
   ui.renaming === tab.key ? `<input class="rename" value="${esc(threadTitle(tab))}" aria-label="Thread title" spellcheck="false">` : esc(threadTitle(tab));
 /** The branch's start shrinks with an ellipsis and its last characters stay, as T3 Code's MiddleTruncate does. */
 
-/** An Upstash Box hour costs this in USD, matching the hub's `BOX_USD_PER_HOUR`. */
-const BOX_USD_PER_HOUR = 0.1;
 const boxMachineOf = (m) => machines.get(m)?.view?.name ?? "";
 const isBoxMachine = (m) => boxMachineOf(m).startsWith("Box · ");
 const boxAgeText = (secs) => {

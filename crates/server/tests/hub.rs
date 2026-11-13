@@ -47,6 +47,7 @@ struct TestHub {
     /// The learning database's name, when the hub runs with one.
     learning: Option<String>,
     signup: Signup,
+    access: pinned_server::http::Access,
 }
 
 impl TestHub {
@@ -68,6 +69,18 @@ impl TestHub {
     }
 
     fn start_full(name: &str, signup: Signup, policy: Policy, with_learning: bool) -> TestHub {
+        TestHub::start_all(name, signup, policy, with_learning, Default::default(), "127.0.0.1:0")
+    }
+
+    /// A hub that takes `access` and is reached at this machine's own address, so its peer is not loopback,
+    /// as when a proxy on another machine sends the requests.
+    fn start_behind_proxy(name: &str, signup: Signup, access: pinned_server::http::Access) -> TestHub {
+        let mut hub = TestHub::start_all(name, signup, Policy::default(), false, access, "0.0.0.0:0");
+        hub.url = format!("http://{}:{}", lan_address(), hub.running.as_ref().unwrap().addr.port());
+        hub
+    }
+
+    fn start_all(name: &str, signup: Signup, policy: Policy, with_learning: bool, access: pinned_server::http::Access, listen: &str) -> TestHub {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let database = format!("pinned_test_{name}_{}", std::process::id());
         admin(&format!("drop database if exists {database} with (force)"));
@@ -83,8 +96,8 @@ impl TestHub {
         std::fs::create_dir_all(dir.join("downloads")).unwrap();
         std::fs::write(dir.join("downloads/pinned-server-x86_64-unknown-linux-musl"), "ELF").unwrap();
         let boxes = FakeBoxes::new(dir.join("boxes"));
-        let mut hub = TestHub { runtime: tokio::runtime::Runtime::new().unwrap(), running: None, url: String::new(), database, dir, boxes, policy, learning, signup };
-        hub.serve("127.0.0.1:0");
+        let mut hub = TestHub { runtime: tokio::runtime::Runtime::new().unwrap(), running: None, url: String::new(), database, dir, boxes, policy, learning, signup, access };
+        hub.serve(listen);
         hub
     }
 
@@ -101,6 +114,7 @@ impl TestHub {
             box_policy: self.policy.clone(),
             convex_http: Arc::new(Replay::new(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../core/tests/fixtures/convex"), CONVEX_KEY).unwrap()),
             learning_db: self.learning.as_ref().map(|learning| format!("{}/{learning}", postgres())),
+            access: self.access.clone(),
         };
         let start = Instant::now();
         // A restarted hub takes its old address, which the dying runtime may not have let go of yet.
@@ -1867,6 +1881,463 @@ fn refused_signup() -> (u16, Value) {
     (403, json!({ "error": INVITE_NEEDED }))
 }
 
+const NOT_TAKING: &str = "This hub is not taking new accounts.";
+
+/// This machine's address on its network: a connection to the hub from here arrives from it, not from
+/// loopback, as one from a proxy on another machine does.
+fn lan_address() -> std::net::IpAddr {
+    let probe = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+    // Nothing is sent: connecting a UDP socket only picks the interface a packet to it would leave by.
+    probe.connect("192.0.2.1:9").unwrap();
+    let address = probe.local_addr().unwrap().ip();
+    assert!(!address.is_loopback(), "this test needs a machine with a non-loopback address, not {address}");
+    address
+}
+
+/// A JSON `POST` with these headers, as a proxy forwards a client's: the status and the body.
+fn post_with(url: &str, path: &str, headers: &[(&str, &str)], body: Value) -> (u16, Value) {
+    let mut request = reqwest::blocking::Client::new().post(format!("{url}{path}")).header("content-type", "application/json");
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let response = request.body(body.to_string()).send().unwrap();
+    let status = response.status().as_u16();
+    (status, serde_json::from_str(&response.text().unwrap()).unwrap())
+}
+
+fn new_account(n: usize) -> Value {
+    json!({ "email": format!("user{n}@example.invalid"), "password": "correct horse" })
+}
+
+fn behind(proxy: pinned_server::http::TrustedProxy, max_accounts: Option<u32>) -> pinned_server::http::Access {
+    pinned_server::http::Access { trusted_proxy: proxy, max_accounts, hashing: None }
+}
+
+const TOO_MANY_SIGNUPS: &str = "too many sign ups; try again in 15 minutes";
+
+#[test]
+fn an_open_hub_stops_taking_accounts_at_its_cap() {
+    let hub = TestHub::start_behind_proxy("cap", Signup::Open, behind(pinned_server::http::TrustedProxy::Off, Some(2)));
+    let url = hub.url.clone();
+    let (status, ana) = post_with(&url, "/api/signup", &[], new_account(1));
+    assert_eq!(status, 200, "{ana}");
+    assert_eq!(post_with(&url, "/api/signup", &[], new_account(2)).0, 200);
+    assert_eq!(post_with(&url, "/api/signup", &[], new_account(3)), (403, json!({ "error": NOT_TAKING })), "the third account is over the cap");
+    assert_eq!(post_with(&url, "/api/signup", &[], new_account(1)), (403, json!({ "error": NOT_TAKING })), "a full hub doesn't say which emails it has");
+    assert!(account::login(&url, "user1@example.invalid", "correct horse").is_ok(), "a full hub still lets its accounts in");
+    assert_eq!(account::signup(&url, "user4@example.invalid", "correct horse"), Err(NOT_TAKING.into()), "the app shows the hub's words");
+    assert_eq!(reqwest::blocking::get(format!("{url}/api/signup")).unwrap().text().unwrap(), r#"{"signup":"open"}"#, "the hub's mode is unchanged on the wire");
+}
+
+#[test]
+fn a_hub_without_a_cap_keeps_taking_accounts() {
+    let hub = TestHub::start_behind_proxy("nocap", Signup::Open, Default::default());
+    for n in 0..4 {
+        let (status, body) = post_with(&hub.url, "/api/signup", &[("x-forwarded-for", &format!("10.0.0.{n}"))], new_account(n));
+        assert_eq!(status, 200, "{body}");
+    }
+}
+
+#[test]
+fn a_cap_counts_the_first_account_and_a_full_hub_keeps_an_invite_unspent() {
+    let mut hub = TestHub::start_with("capinvite", Signup::Invite);
+    hub.access.max_accounts = Some(0);
+    hub.restart();
+    assert_eq!(post_with(&hub.url, "/api/signup", &[], new_account(1)), (403, json!({ "error": NOT_TAKING })), "a cap of none refuses even the first account");
+
+    hub.access.max_accounts = Some(2);
+    hub.restart();
+    let url = hub.url.clone();
+    let (status, ana) = post_with(&url, "/api/signup", &[], new_account(1));
+    assert_eq!(status, 200, "the first account of an invite hub needs no code: {ana}");
+    let mut ana_client = signed_in_client(&url, ana["token"].as_str().unwrap());
+    let first = ana_client.hub(json!({ "cmd": "create_invite" })).unwrap()["code"].as_str().unwrap().to_owned();
+    let second = ana_client.hub(json!({ "cmd": "create_invite" })).unwrap()["code"].as_str().unwrap().to_owned();
+    let mut bruno = new_account(2);
+    bruno["invite"] = json!(first);
+    assert_eq!(post_with(&url, "/api/signup", &[], bruno).0, 200, "an invite takes the second place");
+    let mut carla = new_account(3);
+    carla["invite"] = json!(second);
+    assert_eq!(post_with(&url, "/api/signup", &[], carla.clone()), (403, json!({ "error": NOT_TAKING })), "the hub is full, whatever the code");
+
+    hub.access.max_accounts = Some(3);
+    hub.restart();
+    assert_eq!(post_with(&hub.url, "/api/signup", &[], carla).0, 200, "the refused code was not spent");
+}
+
+#[test]
+fn signups_from_two_forwarded_addresses_count_apart() {
+    let hub = TestHub::start_behind_proxy("fwdsignup", Signup::Open, behind(pinned_server::http::TrustedProxy::Railway, None));
+    let url = hub.url.clone();
+    let from = |address: &str, n: usize| post_with(&url, "/api/signup", &[("x-real-ip", address)], new_account(n));
+    for n in 0..5 {
+        assert_eq!(from("203.0.113.10", n).0, 200, "five sign ups from one address fit the limit");
+    }
+    assert_eq!(from("203.0.113.10", 5), (429, json!({ "error": TOO_MANY_SIGNUPS })), "the sixth from it does not");
+    assert_eq!(from("203.0.113.11", 6).0, 200, "another address behind the same proxy has its own count");
+    // The edge overwrites X-Forwarded-For too, so the hub counts no part of it.
+    let spoofed = |left: &str, n: usize| post_with(&url, "/api/signup", &[("x-real-ip", "203.0.113.12"), ("x-forwarded-for", left)], new_account(n));
+    for n in 10..15 {
+        assert_eq!(spoofed(&format!("6.6.6.{n}"), n).0, 200);
+    }
+    assert_eq!(spoofed("7.7.7.7", 15).0, 429, "a changing X-Forwarded-For doesn't make a new address");
+    assert_eq!(post_with(&url, "/api/signup", &[("x-real-ip", "not an address"), ("x-forwarded-for", "1.2.3.4")], new_account(16)).0, 200, "an unreadable X-Real-IP counts as the proxy's own address");
+}
+
+#[test]
+fn failed_logins_from_one_forwarded_address_do_not_lock_out_another() {
+    let hub = TestHub::start_behind_proxy("fwdlogin", Signup::Open, behind(pinned_server::http::TrustedProxy::Railway, None));
+    let url = hub.url.clone();
+    assert_eq!(post_with(&url, "/api/signup", &[("x-real-ip", "203.0.113.1")], new_account(1)).0, 200);
+    let attempt = |address: &str, password: &str| {
+        post_with(&url, "/api/login", &[("x-real-ip", address)], json!({ "email": "user1@example.invalid", "password": password })).0
+    };
+    for _ in 0..10 {
+        assert_eq!(attempt("203.0.113.66", "wrong horse"), 401);
+    }
+    assert_eq!(attempt("203.0.113.66", "wrong horse"), 429, "the stranger is locked out");
+    assert_eq!(attempt("203.0.113.1", "correct horse"), 200, "the owner, at another address, is not");
+}
+
+#[test]
+fn a_forwarded_address_from_a_peer_nobody_trusts_does_not_change_what_the_limiter_counts() {
+    let hub = TestHub::start_behind_proxy("untrusted", Signup::Open, Default::default());
+    let url = hub.url.clone();
+    for n in 0..5 {
+        let address = format!("203.0.113.{n}");
+        let (status, body) = post_with(&url, "/api/signup", &[("x-forwarded-for", &address), ("x-real-ip", &address)], new_account(n));
+        assert_eq!(status, 200, "{body}");
+    }
+    let (status, body) = post_with(&url, "/api/signup", &[("x-forwarded-for", "203.0.113.99"), ("x-real-ip", "203.0.113.99")], new_account(5));
+    assert_eq!((status, body), (429, json!({ "error": TOO_MANY_SIGNUPS })), "six clients that only claim other addresses are the peer's one");
+}
+
+#[test]
+fn a_trusted_proxy_of_off_reads_no_forwarded_header_from_a_peer_off_this_host() {
+    // A hub told "off" and a hub told nothing agree.
+    let hub = TestHub::start_behind_proxy("proxyoff", Signup::Open, behind("off".parse().unwrap(), None));
+    for n in 0..5 {
+        assert_eq!(post_with(&hub.url, "/api/signup", &[("x-real-ip", &format!("203.0.113.{n}"))], new_account(n)).0, 200);
+    }
+    assert_eq!(post_with(&hub.url, "/api/signup", &[("x-real-ip", "203.0.113.50")], new_account(5)).0, 429);
+}
+
+#[test]
+fn with_no_trusted_proxy_a_loopback_proxys_last_forwarded_hop_still_counts() {
+    // Today's rule, for nginx on the hub's own host: the last X-Forwarded-For hop is the client, X-Real-IP is not read.
+    let hub = TestHub::start("loopbackproxy");
+    let url = hub.url.clone();
+    let from = |forwarded: &str, n: usize| post_with(&url, "/api/signup", &[("x-forwarded-for", forwarded), ("x-real-ip", &format!("198.51.100.{n}"))], new_account(n));
+    for n in 0..5 {
+        assert_eq!(from(&format!("6.6.6.{n}, 10.0.0.1"), n).0, 200, "a client's own left part and a changing X-Real-IP don't make new addresses");
+    }
+    assert_eq!(from("7.7.7.7, 10.0.0.1", 5).0, 429, "the last hop is the one that counts");
+    assert_eq!(from("7.7.7.7, 10.0.0.2", 6).0, 200, "another last hop is another address");
+}
+
+/// A sign in to user1's account from `address`, as Railway's edge forwards it: the status.
+fn login_from(url: &str, address: &str, email: &str, password: &str) -> u16 {
+    post_with(url, "/api/login", &[("x-real-ip", address)], json!({ "email": email, "password": password })).0
+}
+
+#[test]
+fn rotating_the_edge_header_does_not_raise_the_guesses_against_one_account_past_its_bound() {
+    let hub = TestHub::start_behind_proxy("rotateguess", Signup::Open, behind(pinned_server::http::TrustedProxy::Railway, None));
+    let url = hub.url.clone();
+    assert_eq!(post_with(&url, "/api/signup", &[("x-real-ip", "198.51.100.7")], new_account(1)).0, 200);
+    // Each guess from its own address, and the email spelt a little differently each time.
+    let spellings = ["user1@example.invalid", "USER1@example.invalid", " user1@Example.Invalid "];
+    for n in 0..30 {
+        assert_eq!(login_from(&url, &format!("203.0.113.{n}"), spellings[n % 3], "wrong horse"), 401, "guess {n}");
+    }
+    assert_eq!(login_from(&url, "203.0.113.200", "user1@example.invalid", "wrong horse"), 429, "the 31st guess, from a new address, is refused");
+    assert_eq!(login_from(&url, "203.0.113.201", "User1@Example.invalid", "correct horse"), 429, "even with the password: the bound is the account's");
+    assert_eq!(login_from(&url, "203.0.113.202", "user2@example.invalid", "wrong horse"), 401, "another email has its own count");
+}
+
+#[test]
+fn a_stranger_rotating_addresses_does_not_lock_the_owner_out_of_an_address_they_signed_in_from() {
+    let hub = TestHub::start_behind_proxy("knownaddr", Signup::Open, behind(pinned_server::http::TrustedProxy::Railway, None));
+    let url = hub.url.clone();
+    assert_eq!(post_with(&url, "/api/signup", &[("x-real-ip", "198.51.100.7")], new_account(1)).0, 200);
+    assert_eq!(login_from(&url, "198.51.100.7", "user1@example.invalid", "correct horse"), 200, "the owner signs in from home");
+    let mut guesses = 0;
+    while login_from(&url, &format!("203.0.113.{guesses}"), "user1@example.invalid", "wrong horse") == 401 {
+        guesses += 1;
+        assert!(guesses <= 120, "the account's bound never held");
+    }
+    assert_eq!(guesses, 30, "the stranger's guesses stop at the account's bound");
+    assert_eq!(login_from(&url, "198.51.100.8", "user1@example.invalid", "correct horse"), 429, "a new address waits out the window");
+    assert_eq!(login_from(&url, "198.51.100.7", "user1@example.invalid", "correct horse"), 200, "the owner's own address still gets in");
+}
+
+#[test]
+fn an_unknown_email_costs_the_same_password_hash_as_a_wrong_password() {
+    let hub = TestHub::start_behind_proxy("hashtime", Signup::Open, behind(pinned_server::http::TrustedProxy::Railway, None));
+    let url = hub.url.clone();
+    assert_eq!(post_with(&url, "/api/signup", &[("x-real-ip", "198.51.100.7")], new_account(1)).0, 200);
+    let fastest = |email: &str, from: usize| {
+        (0..3)
+            .map(|n| {
+                let start = Instant::now();
+                assert_eq!(login_from(&url, &format!("203.0.113.{}", from + n), email, "wrong horse"), 401);
+                start.elapsed()
+            })
+            .min()
+            .unwrap()
+    };
+    // Once first, so a one-time cost doesn't land on either side.
+    fastest("nobody@example.invalid", 0);
+    let known = fastest("user1@example.invalid", 10);
+    let unknown = fastest("nobody@example.invalid", 20);
+    assert!(unknown * 2 > known, "an unknown email answers in {unknown:?}, a known one with a wrong password in {known:?}");
+}
+
+/// A hash queue with one place and no waiting: while a turn is held, every request is told busy at once.
+fn one_place_queue() -> pinned_server::http::Hashing {
+    pinned_server::http::Hashing::new(1, 0, std::time::Duration::from_secs(1))
+}
+
+/// The queue's only turn, held until it drops.
+fn hold(queue: &pinned_server::http::Hashing) -> pinned_server::http::Turn {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
+    runtime.block_on(queue.turn()).expect("a free turn")
+}
+
+fn behind_with(queue: &pinned_server::http::Hashing) -> pinned_server::http::Access {
+    pinned_server::http::Access { hashing: Some(queue.clone()), ..behind(pinned_server::http::TrustedProxy::Railway, None) }
+}
+
+#[test]
+fn busy_answers_do_not_spend_the_owners_sign_in_attempts() {
+    let queue = one_place_queue();
+    let hub = TestHub::start_behind_proxy("busylogin", Signup::Open, behind_with(&queue));
+    let url = hub.url.clone();
+    assert_eq!(post_with(&url, "/api/signup", &[("x-real-ip", "198.51.100.7")], new_account(1)).0, 200);
+    let held = hold(&queue);
+    for n in 0..10 {
+        assert_eq!(login_from(&url, "203.0.113.9", "user1@example.invalid", "correct horse"), 503, "busy answer {n}");
+    }
+    drop(held);
+    assert_eq!(login_from(&url, "203.0.113.9", "user1@example.invalid", "correct horse"), 200, "with the queue free, the right password signs in");
+}
+
+#[test]
+fn a_request_whose_hash_ran_keeps_its_stamp_whatever_busy_answers_follow() {
+    let queue = one_place_queue();
+    let hub = TestHub::start_behind_proxy("busykept", Signup::Open, behind_with(&queue));
+    let url = hub.url.clone();
+    assert_eq!(post_with(&url, "/api/signup", &[("x-real-ip", "198.51.100.7")], new_account(1)).0, 200);
+    assert_eq!(login_from(&url, "203.0.113.9", "user1@example.invalid", "wrong horse"), 401, "a wrong password: its hash ran");
+    let held = hold(&queue);
+    for n in 0..15 {
+        assert_eq!(login_from(&url, "203.0.113.9", "user1@example.invalid", "wrong horse"), 503, "busy answer {n}");
+    }
+    drop(held);
+    // The address holds 10 stamps: one is the wrong password, and the busy answers left nothing, so 9 more fit.
+    let mut more = 0;
+    while login_from(&url, "203.0.113.9", "user1@example.invalid", "wrong horse") == 401 {
+        more += 1;
+        assert!(more <= 20, "the address's bound never held");
+    }
+    assert_eq!(more, 9, "exactly one stamp was left on the address by the earlier requests");
+}
+
+#[test]
+fn busy_answers_do_not_spend_an_addresss_sign_ups() {
+    let queue = one_place_queue();
+    let hub = TestHub::start_behind_proxy("busysignup", Signup::Open, behind_with(&queue));
+    let url = hub.url.clone();
+    let held = hold(&queue);
+    for n in 0..6 {
+        assert_eq!(post_with(&url, "/api/signup", &[("x-real-ip", "198.51.100.7")], new_account(n)).0, 503, "busy answer {n}");
+    }
+    drop(held);
+    assert_eq!(post_with(&url, "/api/signup", &[("x-real-ip", "198.51.100.7")], new_account(1)).0, 200, "the address's 5 sign ups are all still there");
+}
+
+#[test]
+fn busy_answers_do_not_spend_an_accounts_password_changes() {
+    let queue = one_place_queue();
+    let hub = TestHub::start_behind_proxy("busypassword", Signup::Open, behind_with(&queue));
+    let url = hub.url.clone();
+    let (status, session) = post_with(&url, "/api/signup", &[("x-real-ip", "198.51.100.7")], new_account(1));
+    assert_eq!(status, 200);
+    let bearer = format!("Bearer {}", session["token"].as_str().unwrap());
+    let change = || post_with(&url, "/api/password", &[("x-real-ip", "198.51.100.7"), ("authorization", &bearer)], json!({ "current": "correct horse", "password": "another horse 2" })).0;
+    let held = hold(&queue);
+    for n in 0..10 {
+        assert_eq!(change(), 503, "busy answer {n}");
+    }
+    drop(held);
+    assert_eq!(change(), 200, "with the queue free, the right current password changes it");
+}
+
+#[test]
+fn rotating_the_edge_header_does_not_pass_the_hub_wide_signup_ceiling() {
+    let hub = TestHub::start_behind_proxy("hubsignups", Signup::Open, behind(pinned_server::http::TrustedProxy::Railway, None));
+    let url = hub.url.clone();
+    let from = |address: String, n: usize| post_with(&url, "/api/signup", &[("x-real-ip", &address)], new_account(n));
+    for n in 0..5 {
+        assert_eq!(from("198.51.100.1".into(), n).0, 200);
+    }
+    assert_eq!(from("198.51.100.1".into(), 5).0, 429, "one address over its own limit");
+    // The hub's window holds 50: those five and 45 more, as the refused sixth spent none of it.
+    for n in 0..45 {
+        assert_eq!(from(format!("203.0.113.{n}"), 10 + n).0, 200, "sign up {n} from a new address");
+    }
+    assert_eq!(from("203.0.113.100".into(), 100), (429, json!({ "error": TOO_MANY_SIGNUPS })), "a new address finds the hub's window spent");
+}
+
+#[test]
+fn rotating_the_edge_header_does_not_pass_the_hub_wide_agent_registration_ceiling() {
+    let hub = TestHub::start_behind_proxy("hubregister", Signup::Open, behind(pinned_server::http::TrustedProxy::Railway, None));
+    let register = |address: String| post_with(&hub.url, "/oauth/register", &[("x-real-ip", &address)], json!({ "redirect_uris": ["https://agent.example/oauth/callback"], "client_name": "Rotation test" }));
+    for n in 0..100 {
+        assert_eq!(register(format!("203.0.113.{}", n % 250)).0, 201, "registration {n}");
+    }
+    let (status, body) = register("198.51.100.1".into());
+    assert_eq!((status, body["error_description"].clone()), (429, json!("too many registrations; try again in 15 minutes")), "a new address finds the hub's window spent");
+}
+
+#[test]
+fn sign_ups_without_a_good_code_leave_the_hub_wide_signup_ceiling_to_invited_ones() {
+    let hub = TestHub::start_behind_proxy("hubsignups_invite", Signup::Invite, behind(pinned_server::http::TrustedProxy::Railway, None));
+    let url = hub.url.clone();
+    let from = |address: String, body: Value| post_with(&url, "/api/signup", &[("x-real-ip", &address)], body);
+    let (status, ana) = from("192.0.2.1".into(), new_account(0));
+    assert_eq!(status, 200, "the first account needs no code: {ana}");
+    let mut ana_client = signed_in_client(&url, ana["token"].as_str().unwrap());
+    let codes: Vec<String> = (0..50).map(|_| ana_client.hub(json!({ "cmd": "create_invite" })).unwrap()["code"].as_str().unwrap().to_owned()).collect();
+    // A stranger rotating addresses with no code or a wrong one is refused by the code, and spends none of the hub's window.
+    for n in 0..60 {
+        let mut body = new_account(100 + n);
+        if n % 2 == 1 {
+            body["invite"] = json!("AAAA-BBBB-CCCC-DDDD");
+        }
+        assert_eq!(from(format!("203.0.113.{n}"), body), refused_signup(), "sign up {n} without a good code");
+    }
+    // The window holds 50: the first account and 49 invited ones, then it is spent for a good code too.
+    for (n, code) in codes.iter().take(49).enumerate() {
+        let mut body = new_account(1 + n);
+        body["invite"] = json!(code);
+        let (status, made) = from(format!("198.51.100.{n}"), body);
+        assert_eq!(status, 200, "invited sign up {n}: {made}");
+    }
+    let mut body = new_account(50);
+    body["invite"] = json!(codes[49]);
+    assert_eq!(from("198.51.100.200".into(), body), (429, json!({ "error": TOO_MANY_SIGNUPS })), "the ceiling still holds for invited sign ups");
+}
+
+#[test]
+fn registrations_with_a_bad_body_leave_the_hub_wide_agent_registration_ceiling_alone() {
+    let hub = TestHub::start_behind_proxy("hubregister_bad", Signup::Open, behind(pinned_server::http::TrustedProxy::Railway, None));
+    let register = |address: String, body: Value| post_with(&hub.url, "/oauth/register", &[("x-real-ip", &address)], body);
+    let bad = [
+        json!({ "client_name": "No redirect" }),
+        json!({ "redirect_uris": [] }),
+        json!({ "redirect_uris": ["http://agent.example/callback"] }),
+        json!({ "redirect_uris": ["https://agent.example/oauth/callback"], "grant_types": ["client_credentials"] }),
+    ];
+    for n in 0..120 {
+        assert_eq!(register(format!("203.0.113.{n}"), bad[n % bad.len()].clone()).0, 400, "bad registration {n}");
+    }
+    let good = json!({ "redirect_uris": ["https://agent.example/oauth/callback"], "client_name": "Ceiling test" });
+    for n in 0..100 {
+        assert_eq!(register(format!("198.51.100.{}", n % 250), good.clone()).0, 201, "registration {n}");
+    }
+    let (status, body) = register("192.0.2.1".into(), good.clone());
+    assert_eq!((status, body["error_description"].clone()), (429, json!("too many registrations; try again in 15 minutes")), "the ceiling still holds for good registrations");
+}
+
+#[test]
+fn rotating_the_edge_header_does_not_pass_the_hub_wide_agent_token_ceiling() {
+    let hub = TestHub::start_behind_proxy("hubtoken", Signup::Open, behind(pinned_server::http::TrustedProxy::Railway, None));
+    let token = |address: String| {
+        let response = reqwest::blocking::Client::new()
+            .post(format!("{}/oauth/token", hub.url))
+            .header("x-real-ip", address)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body("grant_type=refresh_token&refresh_token=not-a-token")
+            .send()
+            .unwrap();
+        let status = response.status().as_u16();
+        (status, serde_json::from_str::<Value>(&response.text().unwrap()).unwrap())
+    };
+    for n in 0..300 {
+        assert_ne!(token(format!("203.0.{}.{}", n / 250, n % 250)).0, 429, "failure {n} from its own address");
+    }
+    let (status, body) = token("198.51.100.1".into());
+    assert_eq!((status, body["error_description"].clone()), (429, json!("too many failed token requests; try again in 15 minutes")), "a new address finds the hub's ceiling spent");
+}
+
+#[test]
+fn the_hub_wide_agent_token_ceiling_refuses_only_callers_that_proved_nothing() {
+    let hub = TestHub::start_behind_proxy("hubtoken_known", Signup::Open, behind(pinned_server::http::TrustedProxy::Railway, None));
+    let url = hub.url.clone();
+    let http = agent_http();
+    let (token, _) = account::signup(&url, "owner@example.invalid", "correct horse").unwrap();
+    let mut client = signed_in_client(&url, &token);
+    let (machine, machine_token) = account::register_machine(&url, &token, "box", "linux").unwrap();
+    let _raw = RawMachine::start(&url, &machine_token, |call| match call["cmd"].as_str() {
+        Some("list_projects") => RawReply::Ok(json!([{ "path": "/w/app", "name": "app", "account": "claude" }])),
+        _ => RawReply::Ok(Value::Null),
+    });
+    client.wait_machines(&[("box", true)]);
+    let client_id = register_agent(&url, &http);
+    let token_from = |address: &str, form: &[(&str, &str)]| {
+        let body = url::form_urlencoded::Serializer::new(String::new()).extend_pairs(form).finish();
+        let response = http.post(format!("{url}/oauth/token")).header("x-real-ip", address).header("content-type", "application/x-www-form-urlencoded").body(body).send().unwrap();
+        let status = response.status().as_u16();
+        (status, response.json::<Value>().unwrap())
+    };
+    let code = |client: &mut Client| {
+        let (verifier, challenge) = pkce();
+        // Without `resource`: this hub's public URL is its listen address, not the one the test reaches.
+        let query = [("response_type", "code"), ("client_id", &client_id), ("redirect_uri", AGENT_REDIRECT), ("code_challenge", &challenge), ("code_challenge_method", "S256"), ("state", "st-1"), ("scope", "sessions")];
+        let started = http.get(with_query(&format!("{url}/oauth/authorize"), &query)).send().unwrap();
+        let location = started.headers()["location"].to_str().unwrap().to_owned();
+        let request = location.strip_prefix("/connect-agent?request=").unwrap_or_else(|| panic!("{location}")).to_owned();
+        let approved = client.hub(json!({ "cmd": "approve_agent", "request": request, "scopes": ["sessions"], "projects": [{ "machine": machine.id, "path": "/w/app" }] })).unwrap();
+        (query_of(approved["redirect"].as_str().unwrap())["code"].clone(), verifier)
+    };
+    let by_code = |address: &str, (code, verifier): (String, String)| {
+        token_from(address, &[("grant_type", "authorization_code"), ("client_id", &client_id), ("code", &code), ("code_verifier", &verifier), ("redirect_uri", AGENT_REDIRECT)])
+    };
+    let refresh = |address: &str, token: &Value| token_from(address, &[("grant_type", "refresh_token"), ("client_id", &client_id), ("refresh_token", token.as_str().unwrap())]);
+    let unknown = |address: &str| token_from(address, &[("grant_type", "refresh_token"), ("client_id", &client_id), ("refresh_token", "not-a-token")]);
+    let refused = (429, json!("too many failed token requests; try again in 15 minutes"));
+
+    let remembered = "192.0.2.10";
+    let (status, first) = by_code(remembered, code(&mut client));
+    assert_eq!(status, 200, "{first}");
+    for n in 0..300 {
+        assert_ne!(unknown(&format!("203.0.{}.{}", n / 250, n % 250)).0, 429, "failure {n} from its own address");
+    }
+    let (status, body) = unknown("198.51.100.1");
+    assert_eq!((status, body["error_description"].clone()), refused, "an unknown address finds the hub's ceiling spent");
+
+    let (status, second) = by_code(remembered, code(&mut client));
+    assert_eq!(status, 200, "a code from the remembered address: {second}");
+    let (status, body) = refresh(remembered, &second["refresh_token"]);
+    assert_eq!(status, 200, "a refresh from the remembered address: {body}");
+    let (status, body) = refresh("198.51.100.7", &first["refresh_token"]);
+    assert_eq!(status, 200, "a live refresh token never used, from a new address: {body}");
+    let (status, body) = refresh("198.51.100.8", &first["refresh_token"]);
+    assert_eq!((status, body["error_description"].clone()), refused, "a used refresh token proves nothing");
+    let (status, body) = unknown("198.51.100.2");
+    assert_eq!((status, body["error_description"].clone()), refused, "one more unknown address is still refused");
+}
+
+#[test]
+fn at_its_cap_a_hub_counts_a_signup_against_its_address_before_it_counts_the_accounts() {
+    let hub = TestHub::start_behind_proxy("caporder", Signup::Open, behind(pinned_server::http::TrustedProxy::Off, Some(0)));
+    for n in 0..5 {
+        assert_eq!(post_with(&hub.url, "/api/signup", &[], new_account(n)), (403, json!({ "error": NOT_TAKING })));
+    }
+    assert_eq!(post_with(&hub.url, "/api/signup", &[], new_account(5)), (429, json!({ "error": TOO_MANY_SIGNUPS })), "the limiter answers before the count runs");
+}
+
 fn signed_in_client(url: &str, token: &str) -> Client {
     let mut client = Client::connect(url, token);
     client.wait("hello", |f| f["type"] == "hello");
@@ -2399,6 +2870,7 @@ fn a_box_run_boots_its_own_node_and_the_box_goes_when_its_tab_closes() {
     project.truncate(40 - tail.len());
     assert_eq!(created[0].name, format!("{}{tail}", project.trim_matches('-')));
     assert_eq!((created[0].size, created[0].init_command.as_str()), (BoxSize::Small, "sh /workspace/home/.pinned/start.sh || true"));
+    assert!(!created[0].keep_alive, "a temporary box is a standard box: Upstash pauses it when idle and bills its CPU time");
     ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
     let machine = ana.box_machine();
     assert_eq!(hub.boxes.file(&format!("{BOX_DIR}/box.env")), Some(format!("CLAUDE_CODE_OAUTH_TOKEN='{CLAUDE_TOKEN}'\nPINNED_BOX=1\n")), "no GitHub token without GitHub");
@@ -2796,6 +3268,7 @@ fn a_fixed_workflow_permission_reuses_one_box_across_two_runs() {
     ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
     assert_eq!(open(ana.box_run(issue("uuid-2"))), Ok(()));
     assert_eq!(created(&hub), 1, "the second run uses the box the first run opened");
+    assert!(hub.boxes.state.lock().unwrap().created[0].keep_alive, "the fixed box keeps running while idle, so the runs after the first still find its node");
     // The reaper never ends the fixed box while Upstash lists it, so its node must not leave on refusals.
     let env = hub.boxes.file(&format!("{BOX_DIR}/box.env")).expect("the boot wrote no box.env");
     assert!(!env.contains("PINNED_BOX"), "{env}");
@@ -2890,6 +3363,186 @@ fn a_fixed_box_stays_after_its_session_ends_so_the_next_run_reuses_it() {
     }
     assert_eq!(open(ana.box_run(issue("uuid-2"))), Ok(()));
     assert_eq!(created(&hub), 1);
+}
+
+/// The account's workflow store as Postgres holds it, runs included.
+fn account_store(hub: &TestHub, account: uuid::Uuid) -> Value {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let (client, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        let row = client.query_one("select store::text from accounts where id::text = $1", &[&account.to_string()]).await.unwrap();
+        serde_json::from_str(row.get::<_, &str>(0)).unwrap()
+    })
+}
+
+/// Gives the account a workflow run of issue `held` that waits on the box's session, with that issue
+/// handled, as a hub restarted over them reads them, and reconnects `ana`. The run holds the box.
+/// Returns the box machine.
+fn hold_box(hub: &mut TestHub, ana: &mut BoxAccount, held: &str) -> String {
+    let machine = ana.box_machine();
+    let tab = hub.boxes.with_node(|node| node.machine.tabs()[0].id.clone());
+    let run = json!({
+        "id": "run-held", "connector": ana.connector, "subject": issue(held), "status": "waiting", "session_owner": ana.connector,
+        "session": { "state": "live", "machine": machine, "tab": tab, "claude": null, "since": 1, "saw_working": false, "await_working": false },
+        "log": [], "context": {}, "stack": [], "pending": null, "ready": null, "claimed": true,
+    });
+    admin_on(
+        &hub.database,
+        &format!("update accounts set store = jsonb_set(jsonb_set(store, '{{runs}}', '{}'::jsonb), '{{connectors,0,handled}}', '[\"{held}\"]'::jsonb)", json!([run])),
+    );
+    hub.restart();
+    ana.client = Client::connect(&hub.url, &ana.token);
+    machine
+}
+
+/// The run `hold_box` gave the account failed with `why`, the workflow's check says so, its issue
+/// is free for the next trigger when `freed` (handled when not), and no box was created after the
+/// first `boxes`.
+fn assert_run_failed(hub: &TestHub, ana: &mut BoxAccount, why: &str, boxes: usize, freed: bool) {
+    wait_for("the run to fail", || account_store(hub, ana.id)["runs"][0]["status"]["failed"]["why"].is_string());
+    // Read, not waited for: a check that ran before the client connected pushed its frame to no one.
+    let says = |ana: &mut BoxAccount| ana.client.hub(json!({ "cmd": "get_settings" })).unwrap()["checked"]["error"].as_str().is_some_and(|e| e.contains(why));
+    let start = Instant::now();
+    while !says(ana) {
+        assert!(start.elapsed() < WAIT, "timed out waiting for the check that says why");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let store = account_store(hub, ana.id);
+    assert_eq!(store["runs"][0]["status"]["failed"]["why"], json!(why), "{store}");
+    if freed {
+        assert_eq!(store["connectors"][0]["handled"], json!([]), "its issue is no longer handled");
+        let marks = store["box_released_at"][ana.connector.as_str()].as_object().unwrap_or_else(|| panic!("{store}"));
+        assert_eq!(marks.keys().collect::<Vec<_>>(), [store["runs"][0]["subject"]["issue"].as_str().unwrap()], "and it spent its one release");
+        let at = marks.values().next().unwrap().as_u64().unwrap();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+        assert!(now.saturating_sub(at) < 60 * 60 * 1000, "the mark keeps the time of the release: {store}");
+    } else {
+        assert_eq!(store["connectors"][0]["handled"], json!([store["runs"][0]["subject"]["issue"]]), "its issue stays handled");
+        assert!(store.get("box_released_at").is_none(), "{store}");
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(created(hub), boxes, "nothing opened another box for the run");
+    assert_eq!(account_store(hub, ana.id)["runs"].as_array().map(Vec::len), Some(1), "and no other run started");
+}
+
+const STOPPED: &str = "; the run stopped, and its next trigger may start it once more";
+const KEPT: &str = "; the run stopped, and it starts again only when you run it";
+
+#[test]
+fn a_run_whose_box_goes_offline_past_the_wait_fails_with_why_and_frees_its_issue() {
+    let mut hub = TestHub::start_with_boxes("box_run_offline", Signup::Open, Policy { offline: Duration::from_secs(3), ..fast() });
+    let mut ana = BoxAccount::new(&hub);
+    assert_eq!(hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-1")))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    let machine = hold_box(&mut hub, &mut ana, "uuid-1");
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    wait_for("the box's tabs frame", || ana.tabs_held(&hub, &machine).is_some_and(|held| held > 0));
+    drop_box_node(&hub.boxes, "box_1");
+    wait_for("the box to go", || hub.boxes.live().is_empty());
+    assert_run_failed(&hub, &mut ana, &format!("Upstash Box: its box went offline and did not come back within 3 s{STOPPED}"), 1, true);
+}
+
+#[test]
+fn a_run_whose_box_reaches_its_max_life_fails_with_why_and_keeps_its_issue_handled() {
+    let mut hub = TestHub::start_with_boxes("box_run_expired", Signup::Open, Policy { offline: Duration::from_secs(3600), ..fast() });
+    let mut ana = BoxAccount::new(&hub);
+    assert_eq!(hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-1")))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    hub.policy.max_life = Duration::from_millis(1);
+    hold_box(&mut hub, &mut ana, "uuid-1");
+    wait_for("the box to go", || hub.boxes.live().is_empty());
+    assert_run_failed(&hub, &mut ana, &format!("Upstash Box: the box ended before its task did: it ran out of time or budget{KEPT}"), 1, false);
+}
+
+#[test]
+fn a_run_whose_box_machine_is_removed_fails_with_why_and_keeps_its_issue_handled() {
+    let mut hub = TestHub::start_with_boxes("box_run_removed", Signup::Open, Policy { offline: Duration::from_secs(3600), ..fast() });
+    let mut ana = BoxAccount::new(&hub);
+    assert_eq!(hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-1")))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    let machine = hold_box(&mut hub, &mut ana, "uuid-1");
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    ana.client.hub(json!({ "cmd": "remove_machine", "id": machine })).unwrap();
+    assert_eq!(hub.boxes.live(), Vec::<String>::new());
+    assert_run_failed(&hub, &mut ana, &format!("Upstash Box: the box ended before its task did: someone removed its machine{KEPT}"), 1, false);
+}
+
+#[test]
+fn a_run_on_the_fixed_box_fails_when_upstash_stops_listing_the_box() {
+    let mut hub = TestHub::start_with_boxes("box_run_fixed_gone", Signup::Open, Policy { offline: Duration::from_secs(3600), ..fast() });
+    let mut ana = BoxAccount::new(&hub);
+    set_workflow(&mut ana.client, "fixed");
+    assert_eq!(hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-1")))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    // A later run on the one reused box: the row still names the first run's issue.
+    let machine = hold_box(&mut hub, &mut ana, "uuid-2");
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    wait_for("the box's tabs frame", || ana.tabs_held(&hub, &machine).is_some_and(|held| held > 0));
+    let gone = hub.boxes.state.lock().unwrap().boxes.remove("box_1");
+    drop(gone);
+    wait_for("the row to go", || ana.rows(&hub) == 0);
+    assert_run_failed(&hub, &mut ana, &format!("Upstash Box: the box ended before its task did: it was deleted outside pinned{STOPPED}"), 1, true);
+}
+
+/// One row whose runs the hub cannot fail (their save is refused) stays `Ending` and is retried,
+/// and the pass still ends the account's other rows: the next one is past its budget and goes at
+/// once, not when the first row can finish.
+#[test]
+fn a_box_row_that_cannot_fail_its_runs_does_not_stop_the_pass_for_the_next_row() {
+    let mut hub = TestHub::start_with_boxes("box_reap_continues", Signup::Open, Policy { offline: Duration::from_secs(3600), ..fast() });
+    let mut ana = BoxAccount::new(&hub);
+    assert_eq!(hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-1")))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    // The first box (the older row) holds a run that is waiting on it.
+    let machine = hold_box(&mut hub, &mut ana, "uuid-1");
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    assert_eq!(hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-2")))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true), ("Box · ENG-7 Fix login", true)]);
+    let ids: Vec<String> = hub.runtime.block_on(hub.hub().db.boxes(ana.id)).unwrap().into_iter().map(|row| row.ok().unwrap().id).collect();
+    assert_eq!(ids.len(), 2);
+
+    // Removing the first box's machine ends its row, but its run cannot be failed: the row stays
+    // `Ending`, and so does its box.
+    hub.hub().refuse_run_saves.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(ana.client.hub(json!({ "cmd": "remove_machine", "id": machine })).is_err(), "the run cannot be failed");
+    assert_eq!(ana.rows(&hub), 2);
+
+    // The second box is past its budget. The first row is retried first in every pass and still fails.
+    hub.runtime.block_on(hub.hub().db.set_box_budget(ana.id, &ids[1], 0.000_000_1)).unwrap();
+    wait_for("the second row, past its budget, to end in a pass the first row cannot finish", || ana.rows(&hub) == 1);
+    assert_eq!(hub.boxes.live(), ["box_1"], "the first box stays while its run cannot be failed");
+    assert!(account_store(&hub, ana.id)["runs"][0]["status"].get("failed").is_none(), "its run is not failed yet");
+
+    // Once the runs save works, the retry fails the run and ends the row.
+    hub.hub().refuse_run_saves.store(false, std::sync::atomic::Ordering::SeqCst);
+    wait_for("the first row to end", || ana.rows(&hub) == 0);
+    wait_for("the run to fail", || account_store(&hub, ana.id)["runs"][0]["status"]["failed"]["why"].is_string());
+    assert_eq!(hub.boxes.live(), Vec::<String>::new());
+}
+
+/// A workflow kind set to a fixed box is exempt from every box timer but vanishing, so an agent
+/// never sets it: its act waits for the owner, changes nothing meanwhile, and once the owner
+/// approves, the kind is fixed with no row (the hub names one at the first run).
+#[test]
+fn an_agents_set_box_access_to_fixed_waits_for_its_owner_and_changes_nothing_until_then() {
+    let hub = TestHub::start_with_boxes("agent_fixed_box", Signup::Open, fast());
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &token, "ana@acme.dev", "ana-mac");
+    ana.client.hub(json!({ "cmd": "connect_upstash", "key": BOX_KEY, "claude_token": CLAUDE_TOKEN })).unwrap();
+    let workflow = |ana: &mut Agent| ana.client.hub(json!({ "cmd": "get_settings" })).unwrap()["boxes"]["workflow"].clone();
+    // Absent on the wire while it is the default: workflows fresh.
+    assert_eq!(workflow(&mut ana), Value::Null);
+
+    let held = act(&ana.dir, &ana.tab, "set_box_access", json!({ "access": { "workflow": { "mode": "fixed" } } })).unwrap();
+    assert_eq!(held["outcome"], "pending", "{held}");
+    assert_eq!(waiting_actions(&mut ana.client), ["set_box_access"]);
+    assert_eq!(workflow(&mut ana), Value::Null, "nothing changed while it waits");
+
+    ana.client.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    assert_eq!(approve(&mut ana.client, &held["id"], json!({})).unwrap()["outcome"], "done");
+    assert_eq!(workflow(&mut ana), json!({ "mode": "fixed" }), "fixed, naming no row");
 }
 
 #[test]
@@ -5383,6 +6036,7 @@ fn a_box_worker_signs_in_with_the_named_token_nests_under_its_caller_and_goes_wh
     wait_for("the worker thread running on the box", || box_tabs(&hub.boxes).iter().any(|t| t.role == Some(Role::Worker) && t.running));
     assert_eq!(hub.boxes.file(&format!("{BOX_DIR}/box.env")), Some("CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-bloomtoken'\nPINNED_BOX=1\n".into()), "bloom's token, and no GitHub token without GitHub");
     assert_eq!(hub.boxes.state.lock().unwrap().created[0].size, BoxSize::Small);
+    assert!(!hub.boxes.state.lock().unwrap().created[0].keep_alive, "a worker's box is temporary: it is not kept running while idle");
     let child = box_tabs(&hub.boxes).into_iter().find(|t| t.role == Some(Role::Worker)).unwrap();
     assert_eq!(
         (child.spawned_by.as_deref(), child.spawned_on.as_deref(), child.title.as_deref(), child.running),
@@ -5878,9 +6532,33 @@ fn a_task_on_a_box_is_billed_the_box_time_since_the_previous_task_on_that_box() 
     let task = |id: &str| stats["slowest"].as_array().unwrap().iter().find(|t| t["id"] == id).unwrap().clone();
     assert_eq!(minutes(&stats["totals"]["box_ms"]), 30.0, "both tasks together are billed the box's whole 30 minutes: {stats}");
     let usd = stats["totals"]["box_usd"].as_f64().unwrap();
-    assert!((usd - 0.5 * pinned_core::wire::BOX_USD_PER_HOUR).abs() < 0.01, "{usd}");
+    let rate = pinned_core::wire::box_usd_per_hour(pinned_core::connectors::BoxSize::Medium);
+    assert_eq!(rate, 0.20, "the box above is Medium");
+    assert!((usd - 0.5 * rate).abs() < 0.01, "{usd}");
     let a_cost = task("task-a")["cost_usd"].as_f64().unwrap();
-    assert!((a_cost - (0.2 + 10.0 / 60.0 * pinned_core::wire::BOX_USD_PER_HOUR)).abs() < 0.01, "task-a: its 10 box minutes plus its agent cost, sent twice and billed once: {a_cost}");
+    assert!((a_cost - (0.2 + 10.0 / 60.0 * rate)).abs() < 0.01, "task-a: its 10 box minutes plus its agent cost, sent twice and billed once: {a_cost}");
+}
+
+#[test]
+fn a_box_whose_size_is_unreadable_keeps_its_task_records_with_no_box_time() {
+    let hub = TestHub::start("delegation_box_size");
+    let url = hub.url.clone();
+    let (token, ana_account, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (machine, machine_token) = account::register_machine(&url, &token, "Box · site", "linux").unwrap();
+    admin_on(&hub.database, &format!(
+        "insert into boxes (id, account, machine, upstash, connector, subject, spec, size, phase, created_at) values ('anas-box', '{ana_account}', '{}', 'box_ana', 'interactive', '{{\"issue\":\"b1\"}}', '{{\"folder\":\"/w\",\"args\":[]}}', 'enormous', 'running', now() - interval '30 minutes')",
+        machine.id,
+    ));
+    let raw = RawMachine::start(&url, &machine_token, |_| RawReply::Ok(Value::Null));
+    ana.wait_machines(&[("Box · site", true)]);
+    let now = now_ms();
+    let records = [task_record("task-a", "claude-sonnet-5-5", "done", 5, Some(0.2), now - 60_000), task_record("task-b", "claude-sonnet-5-5", "done", 15, Some(0.4), now)];
+    assert_eq!(raw.ask(json!({ "cmd": "record_tasks", "records": records })), Ok(Value::Null), "the batch is kept");
+
+    let stats = ana.hub(json!({ "cmd": "delegation_stats", "days": 1 })).unwrap();
+    let ids: Vec<&str> = stats["slowest"].as_array().unwrap().iter().map(|t| t["id"].as_str().unwrap()).collect();
+    assert_eq!((ids.contains(&"task-a"), ids.contains(&"task-b")), (true, true), "{stats}");
+    assert_eq!(stats["totals"]["box_ms"].as_f64().unwrap_or(0.0), 0.0, "no box time is billed: {stats}");
 }
 
 #[test]
@@ -5919,7 +6597,7 @@ fn overlapping_tasks_on_one_box_each_pay_for_their_own_span_however_their_record
     let stats = ana.hub(json!({ "cmd": "delegation_stats", "days": 1 })).unwrap();
     let box_minutes = |id: &str| {
         let task = stats["slowest"].as_array().unwrap().iter().find(|t| t["id"] == id).unwrap_or_else(|| panic!("{id} in {stats}"));
-        (task["cost_usd"].as_f64().unwrap() / pinned_core::wire::BOX_USD_PER_HOUR * 60.0).round()
+        (task["cost_usd"].as_f64().unwrap() / pinned_core::wire::box_usd_per_hour(pinned_core::connectors::BoxSize::Medium) * 60.0).round()
     };
     assert_eq!(box_minutes("task-b"), 40.0, "task-b pays from the box's start to its own end");
     assert_eq!(box_minutes("task-a"), 20.0, "task-a pays only the span after task-b ended");
@@ -6934,6 +7612,30 @@ fn a_notice_the_machine_took_but_the_hub_never_recorded_is_sent_again_without_re
 /// `act` on `machine` (a name or id) instead of the session's own.
 fn act_on(dir: &Path, tab: &str, machine: &str, action: &str, args: Value) -> Result<Value, String> {
     session_tool(dir, tab, json!({ "name": "act", "action": action, "args": args, "machine": machine }))
+}
+
+/// An agent's `enqueue` aimed at another machine of its account, with a `sender` it chose, never
+/// reaches that machine as a bare `enqueue`, which the machine would type under that sender. It is
+/// refused, or it reaches the machine as `act_for`, whose `enqueue` stamps the caller's own role.
+#[test]
+fn an_agents_enqueue_to_another_machine_never_carries_a_sender_it_chose() {
+    let hub = TestHub::start("enqueue_sender");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &token, "ana@acme.dev", "enqueue-a");
+    let (_, b_token) = account::register_machine(&url, &token, "enqueue-b", "linux").unwrap();
+    let b = RawMachine::start(&url, &b_token, |_| RawReply::Ok(json!({ "outcome": "iniciado", "tab": "tab-c" })));
+    ana.client.wait_machines(&[("enqueue-a", true), ("enqueue-b", true)]);
+
+    let args = json!({ "path": "/w/site", "text": "Ship it.", "request_id": "r-1", "sender": "Almirante Chosen" });
+    let answer = act_on(&ana.dir, &ana.tab, "enqueue-b", "enqueue", args);
+    let reached = b.calls.lock().unwrap().clone();
+    assert_eq!(b.calls("enqueue"), 0, "a bare enqueue reached the other machine: {answer:?} {reached:?}");
+    match answer {
+        // Today the hub refuses work started off the session's own machine before either path.
+        Err(refused) => assert_eq!((refused.as_str(), reached.len()), ("enqueue starts work only on this session's own machine for now", 0), "{reached:?}"),
+        Ok(_) => assert!(reached.iter().all(|c| c["cmd"] == "act_for"), "{reached:?}"),
+    }
 }
 
 /// What `act` ran and answered, which must have run.

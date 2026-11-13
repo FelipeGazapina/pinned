@@ -20,8 +20,13 @@ pub struct Credentials {
 }
 
 impl Credentials {
+    /// The file in `dir` that `load` reads and `remove` deletes.
+    pub fn path(dir: &Path) -> std::path::PathBuf {
+        dir.join(FILE)
+    }
+
     pub fn load(dir: &Path) -> Option<Credentials> {
-        serde_json::from_slice(&std::fs::read(dir.join(FILE)).ok()?).ok()
+        serde_json::from_slice(&std::fs::read(Credentials::path(dir)).ok()?).ok()
     }
 
     pub fn save(&self, dir: &Path) -> Result<(), String> {
@@ -38,7 +43,7 @@ impl Credentials {
     }
 
     pub fn remove(dir: &Path) {
-        let _ = std::fs::remove_file(dir.join(FILE));
+        let _ = std::fs::remove_file(Credentials::path(dir));
     }
 
     /// The entry the app's login store keeps this login under: the hub, then the account's email,
