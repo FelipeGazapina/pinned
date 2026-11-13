@@ -338,7 +338,7 @@ fn run_end_error(p: &Policy, why: &End) -> String {
 /// What a box's end does to the subject of the workflow run it failed. Ends the owner chose keep
 /// it handled for the owner to run again: a budget or max life (`Expired`, both), a removed box
 /// machine and a disconnected Upstash. A box that vanished from Upstash, went offline or failed to
-/// boot frees it once (`Connectors::box_ended`).
+/// boot frees it once per 30 days (`Connectors::box_ended`).
 fn release_for(why: &End) -> BoxEndRelease {
     match why {
         End::Expired | End::Removed | End::Disconnected => BoxEndRelease::Keep,

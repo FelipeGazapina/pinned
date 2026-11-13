@@ -1677,7 +1677,7 @@ pub struct Connectors {
     /// Why runs failed when their box ended, for the next check to report on the workflows card.
     box_failures: Mutex<Vec<String>>,
     /// Subjects, by `subject_key`, whose box failed to boot while a run opened it: that open's
-    /// failure frees the subject at most once (`BoxEndRelease::Once`).
+    /// failure frees the subject once per 30 days (`BoxEndRelease::Once`).
     boot_failed: Mutex<std::collections::HashSet<String>>,
 }
 
@@ -1688,7 +1688,7 @@ pub enum BoxEndRelease {
     /// disconnected Upstash: the subject stays handled, and only its owner runs it again.
     Keep,
     /// It failed to boot, went offline, or vanished from Upstash without being asked: the subject
-    /// is freed for its next trigger the first time, and stays handled after that.
+    /// is freed for its next trigger once per subject per 30 days (`BOX_RELEASE_WINDOW_MS`), and stays handled for the rest of that time.
     Once,
 }
 
@@ -1902,7 +1902,7 @@ impl Connectors {
     }
 
     /// The hub's box for `subject` failed to boot while a run opened it. That open's failure frees
-    /// the subject only if no box end freed it before.
+    /// the subject only if no box end freed it in the last 30 days.
     pub fn box_boot_failed(&self, subject: &Subject) {
         self.boot_failed.lock().unwrap().insert(subject_key(subject));
     }
@@ -3093,7 +3093,7 @@ impl Connectors {
     /// a run the box held began before the box existed, so a newer run of the same subject, on
     /// another machine or not placed yet, is never failed by a retried end. Its subject is freed
     /// (no longer `handled`, followed or tied to a Slack bot, so the next trigger may start it
-    /// again) only as `release` allows: never for `Keep`, once per subject for `Once`. Nothing
+    /// again) only as `release` allows: never for `Keep`, once per subject per 30 days for `Once`. Nothing
     /// reopens the session. Answers how many runs failed. When their save fails, the runs are left
     /// as they were, so a retry fails them once.
     pub async fn box_ended(&self, machine: &str, holder: Option<(&str, &Subject, u64)>, why: &str, release: BoxEndRelease) -> Result<usize, String> {
