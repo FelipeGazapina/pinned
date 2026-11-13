@@ -823,11 +823,19 @@ impl Db {
             .map_err(err)
     }
 
-    /// Deletes the account's held ends older than `HELD_FOR`, and returns how many.
+    /// Deletes up to `HELD_EXPIRY_BATCH` of the account's held ends older than `HELD_FOR`, and
+    /// returns how many. Bounded, as it runs on every connection of a machine over the hub's one
+    /// shared connection; the rest go on the next connection or the hub-wide run.
     pub async fn expire_held_ends(&self, account: Uuid) -> Result<u64, String> {
         self.client()
             .await?
-            .execute(&format!("delete from held_ends where account = $1 and held_at <= now() - {HELD_FOR}"), &[&account])
+            .execute(
+                &format!(
+                    "delete from held_ends where ctid in (select ctid from held_ends where account = $1 and held_at <= now() - {HELD_FOR} limit $2)
+                     and account = $1 and held_at <= now() - {HELD_FOR}"
+                ),
+                &[&account, &HELD_EXPIRY_BATCH],
+            )
             .await
             .map_err(err)
     }

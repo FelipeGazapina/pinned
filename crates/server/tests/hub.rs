@@ -8997,6 +8997,34 @@ fn held_ends_older_than_30_days_expire_for_every_account_at_most_a_bound_per_run
 }
 
 #[test]
+fn a_machine_connection_expires_at_most_a_bound_of_its_accounts_held_ends_and_none_of_another_account() {
+    let hub = TestHub::start("held_expiry_connect");
+    let (token, ana, mut ana_client) = signed_in(&hub.url, "ana@acme.dev");
+    let (_, bob, _bob_client) = signed_in(&hub.url, "bob@acme.dev");
+    let (_, mac_token) = account::register_machine(&hub.url, &token, "ana-mac", "linux").unwrap();
+    let bound = pinned_server::db::HELD_EXPIRY_BATCH;
+    let old = |account: &str, prefix: &str, n: i64| {
+        format!("insert into held_ends (account, origin_machine, task, origin_tab, from_machine, report, held_at)
+            select '{account}', gen_random_uuid(), '{prefix}-' || i, 'tab-1', gen_random_uuid(), '{{}}', now() - interval '40 days' from generate_series(1, {n}) i;")
+    };
+    admin_on(&hub.database, &[old(&ana, "ana", bound + 5), old(&bob, "bob", 7)].concat());
+    let (ana_id, bob_id) = (uuid::Uuid::parse_str(&ana).unwrap(), uuid::Uuid::parse_str(&bob).unwrap());
+
+    let first = RawMachine::start(&hub.url, &mac_token, |_| RawReply::Ok(json!(true)));
+    wait_for("mac online", || ana_client.machines().contains(&("ana-mac".into(), true)));
+    wait_for("the first connection's expiry", || held_ends(&hub, Some(ana_id)) < bound + 5);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(held_ends(&hub, Some(ana_id)), 5, "one connection deletes exactly one batch of the account's expired rows");
+    assert_eq!(held_ends(&hub, Some(bob_id)), 7, "another account's rows are untouched");
+    drop(first);
+    wait_for("mac offline", || ana_client.machines().contains(&("ana-mac".into(), false)));
+
+    let _second = RawMachine::start(&hub.url, &mac_token, |_| RawReply::Ok(json!(true)));
+    wait_for("the next connection to expire the rest", || held_ends(&hub, Some(ana_id)) == 0);
+    assert_eq!(held_ends(&hub, Some(bob_id)), 7, "another account's rows are untouched");
+}
+
+#[test]
 fn an_account_saves_lists_edits_and_deletes_its_ideas_and_no_other_account_sees_or_changes_one() {
     let hub = TestHub::start_with("ideas_store", Signup::Open);
     let url = hub.url.clone();
