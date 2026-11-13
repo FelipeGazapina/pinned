@@ -37,6 +37,11 @@ const SYNC_FIRST: Duration = Duration::from_secs(5);
 const SYNC_EVERY: Duration = Duration::from_secs(20);
 /// The close code the hub sends when it doesn't know the token a socket signed in with.
 pub const UNAUTHORIZED: u16 = 4001;
+/// How long a box's node is refused with `UNAUTHORIZED`, with no hello accepted in between, before
+/// the node ends its sessions and exits. A live box can be refused for a while: a re-boot gives the
+/// box a new token before the bootstrap kills the old node (up to 4 minutes), and sign-in can be slow.
+/// There is no setting for it.
+pub const BOX_REFUSED_FOR: Duration = Duration::from_secs(15 * 60);
 
 pub struct Link {
     shared: Arc<Shared>,
@@ -57,9 +62,20 @@ struct Shared {
     next_call: AtomicU64,
     subscribed: Mutex<HashSet<(TabId, ViewerId)>>,
     sync_now: AtomicBool,
+    refusals: watch::Sender<Refusals>,
 }
 
 impl Shared {
+    /// Records how a connection attempt went in the window `Link::refused_for` waits on.
+    fn note(&self, outcome: Outcome) {
+        let now = tokio::time::Instant::now();
+        self.refusals.send_if_modified(|refusals| {
+            let before = *refusals;
+            refusals.note(outcome, now, BOX_REFUSED_FOR);
+            *refusals != before
+        });
+    }
+
     fn send(&self, frame: &MachineFrame) -> bool {
         let out = self.out.lock().unwrap().clone();
         out.is_some_and(|out| out.send(Outgoing { text: serde_json::to_string(frame).unwrap(), wrote: None }).is_ok())
@@ -174,6 +190,13 @@ impl Link {
 
     pub fn online(&self) -> bool {
         self.shared.online()
+    }
+
+    /// Resolves once the hub has refused this machine's token (close code `UNAUTHORIZED`) for
+    /// `span` with no hello accepted in between. It never resolves while the hub accepts the
+    /// machine, and nothing else, such as a dropped connection, starts the span.
+    pub fn refused_for(&self, span: Duration) -> impl std::future::Future<Output = ()> {
+        wait_refused(self.shared.refusals.subscribe(), span)
     }
 
     pub fn stop(self) {
@@ -376,6 +399,9 @@ async fn run(shared: Arc<Shared>, creds: Credentials, machine: Arc<Machine>, ver
             _ = stopped.changed() => None,
         };
         shared.disconnected(&machine);
+        if let Some(Err(fault)) = &ended {
+            shared.note(fault.outcome());
+        }
         let up = accepted.map(|at: Instant| at.elapsed());
         match ended {
             None => break,
@@ -383,14 +409,14 @@ async fn run(shared: Arc<Shared>, creds: Credentials, machine: Arc<Machine>, ver
                 eprintln!("pinned: disconnected from {}", creds.hub);
                 backoff.ended(up, true);
             }
-            Some(Err(Fault::Refused(e))) => {
-                backoff.ended(up, false);
-                eprintln!("pinned: hub link: {e}; retrying");
-                crate::boot::refuse();
-            }
             Some(Err(Fault::Transport(e))) => {
                 backoff.ended(up, false);
                 eprintln!("pinned: hub link: {e}; retrying");
+            }
+            Some(Err(Fault::Refused(e) | Fault::Unauthorized(e))) => {
+                backoff.ended(up, false);
+                eprintln!("pinned: hub link: {e}; retrying");
+                crate::boot::refuse();
             }
         }
         let wait = backoff.wait(draw());
@@ -417,6 +443,7 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
     let hello = tokio::time::timeout(HELLO_WAIT, stream.next()).await.map_err(|_| Fault::Transport("the hub did not answer the sign in".into()))?;
     let hello = accept_hello(hello)?;
     *accepted = Some(Instant::now());
+    shared.note(Outcome::Accepted);
     machine.set_hub_id(hello.id, hello.name);
     if crate::boot::commit_when_ready().await == crate::boot::AfterHello::Leaving {
         return std::future::pending().await;
@@ -497,7 +524,81 @@ fn in_order(shared: Arc<Shared>, machine: Arc<Machine>) -> mpsc::Sender<(u64, Ca
 
 enum Fault {
     Transport(String),
+    /// The hub answered the sign in with something that is not a hello.
     Refused(String),
+    /// The hub closed the socket with `UNAUTHORIZED`: it does not know the token.
+    Unauthorized(String),
+}
+
+impl Fault {
+    /// What this fault means for the span `Link::refused_for` measures. Only `UNAUTHORIZED` counts.
+    fn outcome(&self) -> Outcome {
+        match self {
+            Fault::Unauthorized(_) => Outcome::Unauthorized,
+            Fault::Refused(_) | Fault::Transport(_) => Outcome::Other,
+        }
+    }
+}
+
+/// How a connection attempt went, as far as `Refusals` is concerned.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Outcome {
+    /// The hub accepted the machine: its hello arrived.
+    Accepted,
+    /// The hub closed the socket with `UNAUTHORIZED`.
+    Unauthorized,
+    /// Anything else: a transport fault, another close code, a frame that is not a hello.
+    Other,
+}
+
+/// Since when the hub has refused this machine's token without accepting it in between.
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+struct Refusals {
+    since: Option<tokio::time::Instant>,
+}
+
+impl Refusals {
+    /// Records `outcome` at `now`. True when the hub has refused the token for `span` or more
+    /// with no accepted hello in between. An accepted hello starts the span over, the first
+    /// refusal opens it, and nothing else touches it.
+    fn note(&mut self, outcome: Outcome, now: tokio::time::Instant, span: Duration) -> bool {
+        match outcome {
+            Outcome::Accepted => self.since = None,
+            Outcome::Unauthorized => {
+                self.since.get_or_insert(now);
+            }
+            Outcome::Other => {}
+        }
+        self.deadline(span).is_some_and(|deadline| now >= deadline)
+    }
+
+    fn deadline(&self, span: Duration) -> Option<tokio::time::Instant> {
+        self.since.map(|since| since + span)
+    }
+}
+
+async fn wait_refused(mut seen: watch::Receiver<Refusals>, span: Duration) {
+    loop {
+        let refusals = *seen.borrow_and_update();
+        let Some(deadline) = refusals.deadline(span) else {
+            if seen.changed().await.is_err() {
+                return std::future::pending().await;
+            }
+            continue;
+        };
+        tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => {
+                if *seen.borrow() == refusals {
+                    return;
+                }
+            }
+            changed = seen.changed() => {
+                if changed.is_err() {
+                    return std::future::pending().await;
+                }
+            }
+        }
+    }
 }
 
 fn transport(error: tokio_tungstenite::tungstenite::Error) -> Fault {
@@ -513,7 +614,7 @@ fn accept_hello(hello: Option<Result<Frame, tokio_tungstenite::tungstenite::Erro
     }
     match hello {
         Some(Ok(Frame::Close(Some(close)))) if u16::from(close.code) == UNAUTHORIZED => {
-            Err(Fault::Refused("the hub does not know this machine's token: pair it again".into()))
+            Err(Fault::Unauthorized("the hub does not know this machine's token: pair it again".into()))
         }
         Some(Ok(frame @ (Frame::Text(_) | Frame::Binary(_)))) => Err(Fault::Refused(format!("the hub answered the sign in with {frame:?}"))),
         other => Err(Fault::Transport(format!("the hub answered the sign in with {other:?}"))),
@@ -858,7 +959,7 @@ mod tests {
     #[test]
     fn a_hub_that_reads_the_sign_in_and_says_no_is_a_refusal() {
         let close = |code: u16| Some(Ok(Frame::Close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame { code: code.into(), reason: "".into() }))));
-        assert!(matches!(accept_hello(close(UNAUTHORIZED)), Err(Fault::Refused(_))));
+        assert!(matches!(accept_hello(close(UNAUTHORIZED)), Err(Fault::Unauthorized(_))));
         assert!(matches!(accept_hello(Some(Ok(Frame::Text(r#"{"type":"nope"}"#.into())))), Err(Fault::Refused(_))));
         assert!(matches!(accept_hello(close(1001)), Err(Fault::Transport(_))));
         assert!(matches!(accept_hello(None), Err(Fault::Transport(_))));
