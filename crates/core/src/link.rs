@@ -965,6 +965,173 @@ mod tests {
         assert!(matches!(accept_hello(None), Err(Fault::Transport(_))));
     }
 
+    fn close_frame(code: u16) -> Option<Result<Frame, tokio_tungstenite::tungstenite::Error>> {
+        Some(Ok(Frame::Close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame { code: code.into(), reason: "".into() }))))
+    }
+
+    fn hello_frame() -> Option<Result<Frame, tokio_tungstenite::tungstenite::Error>> {
+        let hello = ToMachine::Hello {
+            machine: MachineView { id: "m1".into(), name: "box".into(), os: "linux".into(), online: true, last_seen: 0, upstash_box: None, version: String::new(), update: None, state: None, background: None },
+        };
+        Some(Ok(Frame::Text(serde_json::to_string(&hello).unwrap().into())))
+    }
+
+    /// What `run` and `connection` do with one answer to the sign in.
+    fn answer(shared: &Shared, hello: Option<Result<Frame, tokio_tungstenite::tungstenite::Error>>) {
+        match accept_hello(hello) {
+            Ok(_) => shared.note(Outcome::Accepted),
+            Err(fault) => shared.note(fault.outcome()),
+        }
+    }
+
+    const MINUTE: Duration = Duration::from_secs(60);
+
+    /// Feeds `hello` every 30 seconds for 60 virtual minutes and reports whether the refusal span
+    /// ever ran out. The clock is paused, so the hour costs no real time.
+    async fn trips_within_an_hour(hello: impl Fn() -> Option<Result<Frame, tokio_tungstenite::tungstenite::Error>>) -> bool {
+        let shared = Shared::default();
+        let waiting = tokio::spawn(wait_refused(shared.refusals.subscribe(), BOX_REFUSED_FOR));
+        for _ in 0..120 {
+            answer(&shared, hello());
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        }
+        let tripped = waiting.is_finished();
+        waiting.abort();
+        tripped
+    }
+
+    #[test]
+    fn the_refused_span_is_fifteen_minutes() {
+        assert_eq!(BOX_REFUSED_FOR, 15 * MINUTE);
+    }
+
+    #[test]
+    fn the_refused_span_ends_exactly_at_fifteen_minutes_of_unauthorized() {
+        let t0 = tokio::time::Instant::now();
+        let mut refusals = Refusals::default();
+        assert!(!refusals.note(Outcome::Unauthorized, t0, BOX_REFUSED_FOR));
+        assert!(!refusals.note(Outcome::Unauthorized, t0 + BOX_REFUSED_FOR - Duration::from_secs(1), BOX_REFUSED_FOR));
+        assert!(refusals.note(Outcome::Unauthorized, t0 + BOX_REFUSED_FOR, BOX_REFUSED_FOR));
+    }
+
+    #[test]
+    fn an_accepted_hello_starts_the_refused_span_over() {
+        let t0 = tokio::time::Instant::now();
+        let mut refusals = Refusals::default();
+        refusals.note(Outcome::Unauthorized, t0, BOX_REFUSED_FOR);
+        assert!(!refusals.note(Outcome::Accepted, t0 + 14 * MINUTE, BOX_REFUSED_FOR));
+        assert_eq!(refusals, Refusals::default());
+        assert!(!refusals.note(Outcome::Unauthorized, t0 + 14 * MINUTE, BOX_REFUSED_FOR));
+        assert!(!refusals.note(Outcome::Unauthorized, t0 + 28 * MINUTE, BOX_REFUSED_FOR));
+        assert!(refusals.note(Outcome::Unauthorized, t0 + 29 * MINUTE, BOX_REFUSED_FOR));
+    }
+
+    #[test]
+    fn other_outcomes_neither_start_nor_reset_the_refused_span() {
+        let t0 = tokio::time::Instant::now();
+        let mut refusals = Refusals::default();
+        for minute in 0..120 {
+            assert!(!refusals.note(Outcome::Other, t0 + minute * MINUTE, BOX_REFUSED_FOR));
+        }
+        assert_eq!(refusals, Refusals::default());
+        refusals.note(Outcome::Unauthorized, t0, BOX_REFUSED_FOR);
+        refusals.note(Outcome::Other, t0 + 10 * MINUTE, BOX_REFUSED_FOR);
+        assert!(refusals.note(Outcome::Other, t0 + 15 * MINUTE, BOX_REFUSED_FOR), "a transport fault reset the span");
+    }
+
+    #[test]
+    fn only_an_unauthorized_close_is_counted_as_a_refusal() {
+        let outcome = |hello| accept_hello(hello).map(|_| Outcome::Accepted).unwrap_or_else(|fault| fault.outcome());
+        assert_eq!(outcome(close_frame(UNAUTHORIZED)), Outcome::Unauthorized);
+        assert_eq!(outcome(close_frame(1001)), Outcome::Other);
+        assert_eq!(outcome(Some(Ok(Frame::Text(r#"{"type":"nope"}"#.into())))), Outcome::Other);
+        assert_eq!(outcome(Some(Ok(Frame::Binary(vec![1, 2].into())))), Outcome::Other);
+        assert_eq!(outcome(None), Outcome::Other);
+        assert_eq!(Fault::Transport("the hub did not answer the sign in".into()).outcome(), Outcome::Other);
+        assert_eq!(outcome(hello_frame()), Outcome::Accepted);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hub_that_refuses_for_fifteen_minutes_ends_the_wait_and_not_before() {
+        let shared = Shared::default();
+        let started = tokio::time::Instant::now();
+        let waiting = tokio::spawn(wait_refused(shared.refusals.subscribe(), BOX_REFUSED_FOR));
+        while !waiting.is_finished() {
+            answer(&shared, close_frame(UNAUTHORIZED));
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        }
+        assert_eq!(started.elapsed(), BOX_REFUSED_FOR);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_wait_ends_without_another_refusal_once_the_span_has_run_out() {
+        let shared = Shared::default();
+        let started = tokio::time::Instant::now();
+        answer(&shared, close_frame(UNAUTHORIZED));
+        wait_refused(shared.refusals.subscribe(), BOX_REFUSED_FOR).await;
+        assert_eq!(started.elapsed(), BOX_REFUSED_FOR);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hello_after_fourteen_minutes_of_refusals_keeps_the_wait_open() {
+        let shared = Shared::default();
+        let waiting = tokio::spawn(wait_refused(shared.refusals.subscribe(), BOX_REFUSED_FOR));
+        for _ in 0..2 {
+            for _ in 0..28 {
+                answer(&shared, close_frame(UNAUTHORIZED));
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+            assert!(!waiting.is_finished(), "ended after 14 minutes of refusals");
+            answer(&shared, hello_frame());
+        }
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+        assert!(!waiting.is_finished(), "ended with the hub accepting the machine");
+        waiting.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_frame_that_is_not_a_hello_never_ends_the_wait() {
+        assert!(!trips_within_an_hour(|| Some(Ok(Frame::Text(r#"{"type":"nope"}"#.into())))).await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_transport_error_never_ends_the_wait() {
+        let error = || Some(Err(tokio_tungstenite::tungstenite::Error::ConnectionClosed));
+        assert!(!trips_within_an_hour(error).await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_1001_close_never_ends_the_wait() {
+        assert!(!trips_within_an_hour(|| close_frame(1001)).await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_sign_in_the_hub_never_answers_never_ends_the_wait() {
+        let shared = Shared::default();
+        let waiting = tokio::spawn(wait_refused(shared.refusals.subscribe(), BOX_REFUSED_FOR));
+        for _ in 0..240 {
+            let fault = Fault::Transport("the hub did not answer the sign in".into());
+            shared.note(fault.outcome());
+            tokio::time::sleep(Duration::from_secs(15)).await;
+        }
+        assert!(!waiting.is_finished());
+        waiting.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hub_restart_closes_with_1001_and_the_new_hub_accepts_the_machine() {
+        let shared = Shared::default();
+        let waiting = tokio::spawn(wait_refused(shared.refusals.subscribe(), BOX_REFUSED_FOR));
+        for _ in 0..120 {
+            answer(&shared, close_frame(1001));
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            answer(&shared, hello_frame());
+            tokio::time::sleep(Duration::from_secs(20)).await;
+        }
+        assert!(!waiting.is_finished());
+        waiting.abort();
+    }
+
     struct ArmsRestart {
         restarted: Arc<std::sync::atomic::AtomicBool>,
     }
