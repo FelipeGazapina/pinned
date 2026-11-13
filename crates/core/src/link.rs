@@ -1056,11 +1056,13 @@ mod tests {
         let shared = Shared::default();
         let started = tokio::time::Instant::now();
         let waiting = tokio::spawn(wait_refused(shared.refusals.subscribe(), BOX_REFUSED_FOR));
-        while !waiting.is_finished() {
+        while started.elapsed() < BOX_REFUSED_FOR {
+            assert!(!waiting.is_finished(), "ended after {:?}", started.elapsed());
             answer(&shared, close_frame(UNAUTHORIZED));
             tokio::time::sleep(Duration::from_secs(30)).await;
         }
-        assert_eq!(started.elapsed(), BOX_REFUSED_FOR);
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        assert!(waiting.is_finished(), "still waiting after {:?}", started.elapsed());
     }
 
     #[tokio::test(start_paused = true)]

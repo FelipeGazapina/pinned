@@ -647,12 +647,14 @@ pub fn start_script(login: &str, repo: Option<&str>) -> String {
     START.replace("{{login}}", &quoted(login)).replace("{{clones}}", &quoted(&clones))
 }
 
-/// The secrets the node and its sessions run with, as `start.sh` sources them.
+/// What the node and its sessions run with, as `start.sh` sources it: the secrets, and `PINNED_BOX=1`,
+/// which tells the node it runs in a box and may exit for good once the hub has refused it for 15 minutes.
 fn box_env(keys: &Keys, github: Option<&str>) -> String {
     let mut env = format!("CLAUDE_CODE_OAUTH_TOKEN='{}'\n", quoted(&keys.claude_token));
     if let Some(token) = github {
         env += &format!("GH_TOKEN='{}'\n", quoted(token));
     }
+    env += &format!("{}=1\n", crate::box_exit::BOX_ENV);
     env
 }
 
@@ -1893,9 +1895,120 @@ mod tests {
         assert!(start_script("felipe", None).contains("const clones = [].map"));
         assert_eq!(
             box_env(&keys, Some("ghp_SECRETGITHUB")),
-            "CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-SECRETCLAUDE'\nGH_TOKEN='ghp_SECRETGITHUB'\n"
+            "CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-SECRETCLAUDE'\nGH_TOKEN='ghp_SECRETGITHUB'\nPINNED_BOX=1\n"
         );
         assert_eq!(start_script("o'brien", None).lines().find(|l| l.contains("user.name")), Some("git config --global user.name 'o'\\''brien'"));
+    }
+
+    #[test]
+    fn a_box_env_tells_its_node_it_runs_in_a_box() {
+        let keys = Keys { api_key: "box_SECRETKEY".into(), claude_token: "sk-ant-oat01-SECRETCLAUDE".into() };
+        for github in [None, Some("ghp_SECRETGITHUB")] {
+            let env = box_env(&keys, github);
+            assert!(env.lines().any(|line| line == "PINNED_BOX=1"), "{env}");
+            assert!(!env.contains("box_SECRETKEY"), "{env}");
+        }
+    }
+
+    /// Runs the box's start script with a fake HOME and its work directory in a temp dir, with fake
+    /// `node`, `git` and `gh`, and a fake `pinned-server` that records the `PINNED_BOX` it started with.
+    #[cfg(unix)]
+    struct StartRun {
+        dir: std::path::PathBuf,
+        home: std::path::PathBuf,
+        bin: std::path::PathBuf,
+        _root: tempfile::TempDir,
+    }
+
+    #[cfg(unix)]
+    impl StartRun {
+        fn new() -> StartRun {
+            use std::os::unix::fs::PermissionsExt;
+            let root = tempfile::tempdir().unwrap();
+            let (dir, home, bin) = (root.path().join("pinned"), root.path().join("home"), root.path().join("bin"));
+            for path in [&dir, &home, &bin] {
+                std::fs::create_dir_all(path).unwrap();
+            }
+            let executable = |path: std::path::PathBuf, body: &str| {
+                std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            };
+            for fake in ["node", "git", "gh"] {
+                executable(bin.join(fake), "exit 0");
+            }
+            executable(dir.join("pinned-server"), &format!("printf '%s' \"$PINNED_BOX\" >{}/started", dir.display()));
+            let keys = Keys { api_key: "fake-api-key".into(), claude_token: "fake-claude-token".into() };
+            std::fs::write(dir.join("box.env"), box_env(&keys, None)).unwrap();
+            StartRun { dir, home, bin, _root: root }
+        }
+
+        /// Runs the script once and returns what the node it launched saw as `PINNED_BOX`, if it launched one.
+        fn start(&self) -> Option<String> {
+            let script = start_script("fake-login", None);
+            let script = script.replace("DIR=/workspace/home/.pinned", &format!("DIR={}", self.dir.display()));
+            assert!(script.contains(&format!("DIR={}\n", self.dir.display())), "the script no longer sets DIR on its own line");
+            let _ = std::fs::remove_file(self.dir.join("started"));
+            let status = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&script)
+                .env_clear()
+                .env("HOME", &self.home)
+                .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
+                .status()
+                .unwrap();
+            assert!(status.success());
+            for _ in 0..100 {
+                if let Ok(seen) = std::fs::read_to_string(self.dir.join("started")) {
+                    return Some(seen);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            assert!(!self.dir.join("node.pid").exists(), "the script launched a node that never ran");
+            None
+        }
+    }
+
+    #[cfg(unix)]
+    fn pair_fake(dir: &std::path::Path) {
+        let creds = pinned_core::account::Credentials {
+            hub: "https://hub.example".into(),
+            email: "box@example.invalid".into(),
+            user_token: String::new(),
+            machine_id: "m1".into(),
+            machine_token: "fake-machine-token".into(),
+        };
+        creds.save(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_start_script_launches_a_paired_node_with_pinned_box_set() {
+        let run = StartRun::new();
+        pair_fake(&run.dir);
+        assert_eq!(run.start().as_deref(), Some("1"), "the node did not start with PINNED_BOX=1");
+        assert!(run.dir.join("node.pid").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_start_script_does_not_launch_a_node_that_has_no_account() {
+        let run = StartRun::new();
+        assert_eq!(run.start(), None, "a node started with no account.json");
+        assert!(!run.dir.join("node.pid").exists());
+        assert!(!run.home.join(".profile").exists(), "the script went past its account check");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_container_restart_after_a_node_left_for_good_starts_no_node() {
+        let run = StartRun::new();
+        pair_fake(&run.dir);
+        assert_eq!(run.start().as_deref(), Some("1"));
+        // The node leaves for good and, in a restart, the pid file's number belongs to nothing.
+        crate::box_exit::leave(&run.dir, || {}, |_| {});
+        let _ = std::fs::remove_file(run.dir.join("node.pid"));
+        assert_eq!(run.start(), None, "the start script relaunched a node that left for good");
+        assert!(!run.dir.join("node.pid").exists());
     }
 
     #[test]
