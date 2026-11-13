@@ -190,3 +190,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:09:14Z #86 the_global_orchestrator_reads_a_repo_on_another_machine_once_allowed_capped_and_audited START / avail=15061M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:09:18Z #86 the_global_orchestrator_reads_a_repo_on_another_machine_once_allowed_capped_and_audited ok / avail=15061M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:09:19Z #87 the_global_orchestrator_reads_no_repo_of_another_account START / avail=15061M /workspace avail=19374M node_stat=Ssl
+2026-11-13T04:09:23Z #87 the_global_orchestrator_reads_no_repo_of_another_account ok / avail=15060M /workspace avail=19374M node_stat=Ssl node_tcp=1
