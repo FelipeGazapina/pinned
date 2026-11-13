@@ -37799,7 +37799,7 @@
             "default": null
           },
           "boxes": {
-            "description": "Every box the key lists, newest first.",
+            "description": "Every box on the key that this account opened through pinned, newest first.",
             "type": "array",
             "items": {
               "$ref": "#/$defs/UsageBox"
@@ -37807,12 +37807,21 @@
             "default": []
           },
           "upstash": {
-            "description": "The listed boxes created this UTC month.",
+            "description": "The boxes created this UTC month, over the whole key: the figures cover every box the key\nlists, not only those in `boxes`.",
             "$ref": "#/$defs/Totals",
             "default": {
               "cpu_hours": 0.0,
               "compute_usd": 0.0,
               "boxes": 0
+            }
+          },
+          "others": {
+            "description": "The other boxes on the key, which this account did not open: a count and sums, no names.",
+            "$ref": "#/$defs/OtherBoxes",
+            "default": {
+              "boxes": 0,
+              "cpu_hours": 0.0,
+              "compute_usd": 0.0
             }
           },
           "pinned": {
@@ -37836,6 +37845,7 @@
           "error",
           "boxes",
           "upstash",
+          "others",
           "pinned"
         ],
         "$defs": {
@@ -37979,6 +37989,33 @@
               "boxes"
             ]
           },
+          "OtherBoxes": {
+            "description": "The boxes on the account's Upstash key created this UTC month that the account has no box row\nfor, folded into figures, as the key totals count them. That is the account's own boxes pinned\nended (the row goes with the box, Upstash may still list it), boxes made outside pinned, and\nboxes another account opened on a shared key. The count does not tell which, and no name, id\nor detail of these is kept.",
+            "type": "object",
+            "properties": {
+              "boxes": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "cpu_hours": {
+                "type": "number",
+                "format": "double",
+                "default": 0.0
+              },
+              "compute_usd": {
+                "type": "number",
+                "format": "double",
+                "default": 0.0
+              }
+            },
+            "required": [
+              "boxes",
+              "cpu_hours",
+              "compute_usd"
+            ]
+          },
           "PinnedCount": {
             "description": "pinned's count of the box time its delegated tasks ended with this UTC month. It has no price.",
             "type": "object",
@@ -38066,7 +38103,7 @@
             "default": null
           },
           "boxes": {
-            "description": "Every box the key lists, newest first.",
+            "description": "Every box on the key that this account opened through pinned, newest first.",
             "type": "array",
             "items": {
               "$ref": "#/$defs/UsageBox"
@@ -38074,12 +38111,21 @@
             "default": []
           },
           "upstash": {
-            "description": "The listed boxes created this UTC month.",
+            "description": "The boxes created this UTC month, over the whole key: the figures cover every box the key\nlists, not only those in `boxes`.",
             "$ref": "#/$defs/Totals",
             "default": {
               "cpu_hours": 0.0,
               "compute_usd": 0.0,
               "boxes": 0
+            }
+          },
+          "others": {
+            "description": "The other boxes on the key, which this account did not open: a count and sums, no names.",
+            "$ref": "#/$defs/OtherBoxes",
+            "default": {
+              "boxes": 0,
+              "cpu_hours": 0.0,
+              "compute_usd": 0.0
             }
           },
           "pinned": {
@@ -38218,6 +38264,28 @@
                 "format": "uint32",
                 "minimum": 0,
                 "default": 0
+              }
+            }
+          },
+          "OtherBoxes": {
+            "description": "The boxes on the account's Upstash key created this UTC month that the account has no box row\nfor, folded into figures, as the key totals count them. That is the account's own boxes pinned\nended (the row goes with the box, Upstash may still list it), boxes made outside pinned, and\nboxes another account opened on a shared key. The count does not tell which, and no name, id\nor detail of these is kept.",
+            "type": "object",
+            "properties": {
+              "boxes": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0,
+                "default": 0
+              },
+              "cpu_hours": {
+                "type": "number",
+                "format": "double",
+                "default": 0.0
+              },
+              "compute_usd": {
+                "type": "number",
+                "format": "double",
+                "default": 0.0
               }
             }
           },

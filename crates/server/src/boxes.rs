@@ -255,7 +255,7 @@ impl BoxRow {
     }
 
     pub fn remains(&self) -> Remains {
-        Remains { id: self.id.clone(), machine: self.machine, upstash: self.upstash.clone(), why: format!("{:?}", self.phase) }
+        Remains { id: self.id.clone(), account: self.account, machine: self.machine, upstash: self.upstash.clone(), why: format!("{:?}", self.phase) }
     }
 }
 
@@ -272,6 +272,7 @@ pub struct Opener {
 #[derive(Clone, Debug)]
 pub struct Remains {
     pub id: String,
+    pub account: Uuid,
     pub machine: Uuid,
     pub upstash: Option<BoxId>,
     /// Why it ends, for the log.
@@ -682,6 +683,8 @@ pub async fn usage(hub: &Hub, account: &Arc<Account>) -> Result<BoxUsage, String
         Ok(listed) => {
             let (mut boxes, totals) = upstash::usage_boxes(&listed, since);
             let opened = hub.db.opened_boxes(account.id).await?;
+            let ids: Vec<&str> = opened.iter().map(|o| o.upstash.as_str()).collect();
+            (boxes, usage.others) = upstash::keep_opened(boxes, &ids, since);
             for row in &mut boxes {
                 row.pinned = opened.iter().find(|o| o.upstash == row.id).map(|o| PinnedBox { project: Some(project_name(o.folder.as_deref(), o.repo.as_deref())), role: o.role.clone(), machine: o.machine.clone() });
             }
@@ -837,10 +840,11 @@ fn tail(exec: &Exec) -> String {
     text[start..].to_owned()
 }
 
-/// Marks a row as driven while it lives, so an open and a reap never drive one row at once.
+/// Marks a row as driven while it lives, so an open and a reap never drive one row at once. A row
+/// is the account's and its id, so a row id an account's client wrote never meets another account's.
 struct Driving<'a> {
-    rows: &'a Mutex<HashSet<String>>,
-    id: String,
+    rows: &'a Mutex<HashSet<(Uuid, String)>>,
+    id: (Uuid, String),
 }
 
 impl Drop for Driving<'_> {
@@ -854,8 +858,8 @@ pub struct Boxes {
     pub policy: Policy,
     /// Every box this hub creates carries it.
     pub label: String,
-    driving: Mutex<HashSet<String>>,
-    timers: Mutex<HashMap<String, Timers>>,
+    driving: Mutex<HashSet<(Uuid, String)>>,
+    timers: Mutex<HashMap<(Uuid, String), Timers>>,
     cooling: Mutex<HashMap<(Uuid, String), Instant>>,
     swept: Mutex<HashMap<Uuid, Instant>>,
     /// Row id → why its last delete failed, for rows still `Ending`. Cleared once the delete works.
@@ -881,8 +885,9 @@ impl Boxes {
         self.api.list(key, &self.label).await.map(drop)
     }
 
-    fn drive_guard(&self, id: &str) -> Option<Driving<'_>> {
-        self.driving.lock().unwrap().insert(id.to_owned()).then(|| Driving { rows: &self.driving, id: id.to_owned() })
+    fn drive_guard(&self, account: Uuid, id: &str) -> Option<Driving<'_>> {
+        let key = (account, id.to_owned());
+        self.driving.lock().unwrap().insert(key.clone()).then(|| Driving { rows: &self.driving, id: key })
     }
 
     /// `Hub::open` for a box run. The account's workflow permission decides what happens.
@@ -974,7 +979,7 @@ impl Boxes {
             age: Duration::ZERO,
             work: BoxWork::Run,
         };
-        if self.drive_guard(&fresh.id).is_none() {
+        if self.drive_guard(account.id, &fresh.id).is_none() {
             return Err("Upstash Box: its box is still booting; try again".into());
         }
         // Kept before the row, so the box can't end before its opener is known.
@@ -990,7 +995,7 @@ impl Boxes {
         let (hub, account, keys) = (hub.clone(), account.clone(), keys.clone());
         let row = fresh.clone();
         tokio::spawn(async move {
-            let Some(_driving) = hub.boxes.drive_guard(&row.id) else { return };
+            let Some(_driving) = hub.boxes.drive_guard(row.account, &row.id) else { return };
             if let Err(e) = hub.boxes.drive(&hub, &account, row.clone(), &row.spec, &keys).await {
                 eprintln!("pinned-server: could not boot interactive box {}: {e}", row.id);
             }
@@ -1080,7 +1085,7 @@ impl Boxes {
     async fn reserve_work(&self, hub: &Arc<Hub>, account: &Arc<Account>, connector: &str, subject: Subject, spec: RunSpec, size: Option<BoxSize>, work: BoxWork, keys: &Keys) -> Result<BoxRow, String> {
         let size = box_size(hub, account, spec.repo.as_deref(), size).await?.size();
         let fresh = BoxRow { id: new_row_id(), account: account.id, machine: Uuid::new_v4(), upstash: None, connector: connector.into(), subject, spec, size, phase: Phase::Creating, age: Duration::ZERO, work };
-        if self.drive_guard(&fresh.id).is_none() {
+        if self.drive_guard(account.id, &fresh.id).is_none() {
             return Err("Upstash Box: its box is still booting; try again".into());
         }
         let (row, written) = hub.db.reserve_box(&fresh).await?;
@@ -1090,7 +1095,7 @@ impl Boxes {
         let (hub, account, keys) = (hub.clone(), account.clone(), keys.clone());
         let booting = row.clone();
         tokio::spawn(async move {
-            let Some(_driving) = hub.boxes.drive_guard(&booting.id) else { return };
+            let Some(_driving) = hub.boxes.drive_guard(booting.account, &booting.id) else { return };
             if let Err(e) = hub.boxes.drive(&hub, &account, booting.clone(), &booting.spec, &keys).await {
                 eprintln!("pinned-server: could not boot box {} for {}: {e}", booting.id, booting.connector);
             }
@@ -1136,7 +1141,7 @@ impl Boxes {
         }
         let total = row.spec.budget_usd.unwrap_or(0.0) + extra_usd;
         box_budget(hub, account, row.spec.repo.as_deref(), Some(total)).await?;
-        hub.db.set_box_budget(&row.id, total).await?;
+        hub.db.set_box_budget(account.id, &row.id, total).await?;
         self.box_status(hub, account, machine).await
     }
 
@@ -1150,7 +1155,7 @@ impl Boxes {
         keys: &Keys,
     ) -> Result<Placement, String> {
         let proposed = new_row_id();
-        let driving = self.drive_guard(&proposed);
+        let driving = self.drive_guard(account.id, &proposed);
         match connectors.claim_fixed_row(&proposed)? {
             FixedClaim::Use(existing) => {
                 drop(driving);
@@ -1170,14 +1175,14 @@ impl Boxes {
         step: BoxStep,
         keys: &Keys,
     ) -> Result<Placement, String> {
-        let Some(_driving) = self.drive_guard(id) else {
+        let Some(_driving) = self.drive_guard(account.id, id) else {
             return Err("Upstash Box: its box is still booting; the next check tries again".into());
         };
         match hub.db.box_by_id(account.id, id).await? {
             None => {
                 drop(_driving);
                 let proposed = new_row_id();
-                let driving = self.drive_guard(&proposed);
+                let driving = self.drive_guard(account.id, &proposed);
                 match connectors.retake_fixed_row(id, &proposed)? {
                     FixedClaim::Create => self.open_new(hub, account, run, step, keys, Some(proposed), driving.is_some()).await,
                     FixedClaim::Use(other) => {
@@ -1258,7 +1263,7 @@ impl Boxes {
             work: BoxWork::Run,
         };
         // Driven before it is written, so a reap that reads it first leaves it alone.
-        let driving = self.drive_guard(&fresh.id);
+        let driving = self.drive_guard(account.id, &fresh.id);
         if driving.is_none() && !already_guarded {
             self.give_back(hub, account, claimed.as_deref()).await;
             return Err("Upstash Box: its box is still booting; the next check tries again".into());
@@ -1270,7 +1275,7 @@ impl Boxes {
         if let Phase::Ending(_) = row.phase {
             return Err("Upstash Box: the last box for this is still being deleted; the next check tries again".into());
         }
-        let other = if row.id == fresh.id { None } else { self.drive_guard(&row.id) };
+        let other = if row.id == fresh.id { None } else { self.drive_guard(account.id, &row.id) };
         if row.id != fresh.id && other.is_none() {
             return Err("Upstash Box: its box is still booting; the next check tries again".into());
         }
@@ -1325,14 +1330,14 @@ impl Boxes {
         };
         if booted.is_ok() {
             // Another hub may have moved it on already, which is just as good.
-            hub.db.set_box_phase(&row.id, &Phase::Booting, &Phase::Running).await?;
+            hub.db.set_box_phase(account.id, &row.id, &Phase::Booting, &Phase::Running).await?;
         }
         if let Err(e) = &booted {
             eprintln!("pinned-server: box {} of account {} failed: {e}", row.id, account.id);
             self.cooling.lock().unwrap().insert((account.id, row.connector.clone()), Instant::now());
             let failed = Phase::Ending(End::Failed(e.clone()));
             for from in [Phase::Creating, Phase::Booting] {
-                if hub.db.set_box_phase(&row.id, &from, &failed).await? {
+                if hub.db.set_box_phase(account.id, &row.id, &from, &failed).await? {
                     let mut row = row.clone();
                     row.phase = failed.clone();
                     self.tell_origin(hub, account, &row, &End::Failed(e.clone())).await;
@@ -1373,7 +1378,7 @@ impl Boxes {
                     }
                 },
             };
-            if !hub.db.box_created(&row.id, &id).await? {
+            if !hub.db.box_created(account.id, &row.id, &id).await? {
                 // The row ended or another hub created its own box meanwhile, so nothing else
                 // knows of this one; once its key is disconnected no sweep can find it either.
                 if made {
@@ -1489,7 +1494,9 @@ impl Boxes {
         account.went_offline(&machine, None);
         hub.push_machines(account).await;
         self.delete_box(key, row).await?;
-        hub.db.delete_box(&row.id).await.map_err(Failed::Row)?;
+        if hub.db.delete_box(row.account, &row.id).await.map_err(Failed::Row)? == 0 {
+            eprintln!("pinned-server: delete_box of row {} matched no row", row.id);
+        }
         eprintln!("pinned-server: deleted box {} of account {} ({})", row.id, account.id, row.why);
         Ok(())
     }
@@ -1524,7 +1531,7 @@ impl Boxes {
         };
         match ended {
             Ok(()) => {
-                self.timers.lock().unwrap().remove(id);
+                self.timers.lock().unwrap().remove(&(row.account, id.to_owned()));
                 self.stuck.lock().unwrap().remove(id);
             }
             Err(Failed::Box(e)) => {
@@ -1618,7 +1625,7 @@ impl Boxes {
         let failed = matches!(why, End::Failed(_));
         if !matches!(row.phase, Phase::Ending(_)) {
             let ending = Phase::Ending(why.clone());
-            if !hub.db.set_box_phase(&row.id, &row.phase, &ending).await? {
+            if !hub.db.set_box_phase(account.id, &row.id, &row.phase, &ending).await? {
                 return Err(format!("box {} changed while pinned ended it; it ends on the next check", row.id));
             }
             row.phase = ending;
@@ -1658,7 +1665,7 @@ impl Boxes {
     /// The session for `subject` opened its pull request, so its box ends once it stops working.
     pub async fn work_done(&self, hub: &Hub, account: &Account, connector: &str, subject: &Subject) -> Result<(), String> {
         if let Some(row) = hub.db.box_for(account.id, connector, subject).await? {
-            self.timers.lock().unwrap().entry(row).or_default().done = true;
+            self.timers.lock().unwrap().entry((account.id, row)).or_default().done = true;
         }
         Ok(())
     }
@@ -1733,7 +1740,7 @@ impl Boxes {
                     continue;
                 }
             };
-            if self.driving.lock().unwrap().contains(&row.id) {
+            if self.driving.lock().unwrap().contains(&(account.id, row.id.clone())) {
                 continue;
             }
             let ended = match &row.phase {
@@ -1741,7 +1748,7 @@ impl Boxes {
                     Some(keys) => {
                         let (hub, account, keys) = (hub.clone(), account.clone(), keys.clone());
                         tokio::spawn(async move {
-                            let Some(_driving) = hub.boxes.drive_guard(&row.id) else { return };
+                            let Some(_driving) = hub.boxes.drive_guard(row.account, &row.id) else { return };
                             if let Err(e) = hub.boxes.drive(&hub, &account, row.clone(), &row.spec, &keys).await {
                                 eprintln!("pinned-server: could not finish booting a box of account {}: {e}", account.id);
                             }
@@ -1766,7 +1773,7 @@ impl Boxes {
                             _ => account.seen_any(&machine),
                         };
                         let mut timers = self.timers.lock().unwrap();
-                        let slot = timers.entry(row.id.clone()).or_default();
+                        let slot = timers.entry((account.id, row.id.clone())).or_default();
                         if held {
                             slot.quiet_since = None;
                             slot.exited_since = None;
@@ -2589,7 +2596,7 @@ mod tests {
     }
 
     fn remains(id: &str) -> Remains {
-        Remains { id: id.into(), machine: Uuid::nil(), upstash: Some(BoxId("fake-box-0000".into())), why: "test".into() }
+        Remains { id: id.into(), account: Uuid::nil(), machine: Uuid::nil(), upstash: Some(BoxId("fake-box-0000".into())), why: "test".into() }
     }
 
     /// A row whose box id was never recorded.
