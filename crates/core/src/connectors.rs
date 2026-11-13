@@ -1649,11 +1649,11 @@ pub struct Connectors {
 /// What a box's end does to the subject of the run it failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BoxEndRelease {
-    /// It ran out of budget or reached its max life: the subject stays handled, and only its
-    /// owner runs it again.
+    /// It ran out of budget or reached its max life, or the owner removed its machine or
+    /// disconnected Upstash: the subject stays handled, and only its owner runs it again.
     Keep,
-    /// It failed to boot, went offline, or ended for any other reason: the subject is freed for its
-    /// next trigger the first time, and stays handled after that.
+    /// It failed to boot, went offline, or vanished from Upstash without being asked: the subject
+    /// is freed for its next trigger the first time, and stays handled after that.
     Once,
 }
 

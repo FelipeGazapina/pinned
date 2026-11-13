@@ -242,12 +242,13 @@ fn run_end_error(p: &Policy, why: &End) -> String {
     box_end_error(p, why).unwrap_or_else(|| format!("Upstash Box: the box ended before its run did: {}", ended_because(why)))
 }
 
-/// What a box's end does to the subject of the workflow run it failed: one that ran out of budget
-/// or reached its max life (`Expired`, both) keeps it handled for its owner to run again; any other
-/// end frees it once (`Connectors::box_ended`).
+/// What a box's end does to the subject of the workflow run it failed. Ends the owner chose keep
+/// it handled for the owner to run again: a budget or max life (`Expired`, both), a removed box
+/// machine and a disconnected Upstash. A box that vanished from Upstash, went offline or failed to
+/// boot frees it once (`Connectors::box_ended`).
 fn release_for(why: &End) -> BoxEndRelease {
     match why {
-        End::Expired => BoxEndRelease::Keep,
+        End::Expired | End::Removed | End::Disconnected => BoxEndRelease::Keep,
         _ => BoxEndRelease::Once,
     }
 }
@@ -1478,7 +1479,7 @@ impl Boxes {
 
     /// A workflow box ended before its run did: the runs it
     /// holds fail with why. A box that ran out of budget or reached its max life keeps their
-    /// subjects handled, so only their owner runs them again; any other end frees each subject for
+    /// subjects handled, so only their owner runs them again; so do a removed machine and a disconnected Upstash; any other end frees each subject for
     /// its next trigger once (`BoxEndRelease`). Nothing opens another box or session for them. For the fixed row, which many runs share, only the runs whose
     /// session is on its machine. For another row, a run of its subject that started after the row was written is not its run, so a retried end (the row stays `Ending`) never fails a newer
     /// run of the subject that works elsewhere. A run that already finished holds nothing, so this does nothing.
@@ -2144,13 +2145,29 @@ mod tests {
     }
 
     #[test]
-    fn a_box_end_for_budget_or_max_life_keeps_its_subject_and_any_other_frees_it_once() {
+    fn a_box_end_for_budget_or_max_life_keeps_its_subject() {
         let p = Policy::default();
         let mut t = Timers::default();
         let ended = verdict(p.max_life, Seen::Tab { running: true, quiet: false }, &mut t, Instant::now(), &p, false);
         assert_eq!(ended, Some(End::Expired), "max life ends a box as Expired, as its budget does (`over_budget`)");
         assert_eq!(release_for(&End::Expired), BoxEndRelease::Keep);
-        for end in [End::Offline, End::Vanished, End::Failed("the box did not connect".into()), End::Removed, End::Disconnected] {
+    }
+
+    #[test]
+    fn a_removed_box_machine_keeps_its_subject_handled() {
+        assert_eq!(release_for(&End::Removed), BoxEndRelease::Keep, "the owner removed the machine: the run fails, and only the owner runs it again");
+    }
+
+    #[test]
+    fn a_disconnected_upstash_keeps_its_subject_handled() {
+        assert_eq!(release_for(&End::Disconnected), BoxEndRelease::Keep, "the owner disconnected Upstash: the run fails, and only the owner runs it again");
+    }
+
+    #[test]
+    fn a_vanished_box_frees_its_subject_once_like_an_offline_one() {
+        // Once: the first end frees the subject and a second keeps it (`Connectors::box_ended`).
+        assert_eq!(release_for(&End::Vanished), BoxEndRelease::Once);
+        for end in [End::Offline, End::Failed("the box did not connect".into())] {
             assert_eq!(release_for(&end), BoxEndRelease::Once, "{end:?}");
         }
     }

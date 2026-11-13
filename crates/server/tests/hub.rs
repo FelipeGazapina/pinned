@@ -2877,7 +2877,7 @@ fn a_run_whose_box_reaches_its_max_life_fails_with_why_and_keeps_its_issue_handl
 }
 
 #[test]
-fn a_run_whose_box_machine_is_removed_fails_with_why_and_frees_its_issue() {
+fn a_run_whose_box_machine_is_removed_fails_with_why_and_keeps_its_issue_handled() {
     let mut hub = TestHub::start_with_boxes("box_run_removed", Signup::Open, Policy { offline: Duration::from_secs(3600), ..fast() });
     let mut ana = BoxAccount::new(&hub);
     assert_eq!(hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-1")))), Ok(()));
@@ -2886,7 +2886,7 @@ fn a_run_whose_box_machine_is_removed_fails_with_why_and_frees_its_issue() {
     ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
     ana.client.hub(json!({ "cmd": "remove_machine", "id": machine })).unwrap();
     assert_eq!(hub.boxes.live(), Vec::<String>::new());
-    assert_run_failed(&hub, &mut ana, &format!("Upstash Box: the box ended before its task did: someone removed its machine{STOPPED}"), 1, true);
+    assert_run_failed(&hub, &mut ana, &format!("Upstash Box: the box ended before its task did: someone removed its machine{KEPT}"), 1, false);
 }
 
 #[test]
