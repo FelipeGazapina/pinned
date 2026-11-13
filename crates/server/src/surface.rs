@@ -113,7 +113,15 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
             return Err(refusal);
         }
     };
-    let confirms = admitted.action.class == Class::Confirm || schedule_needs_ok(hub, account, &admitted.call).await?;
+    // A schedule act whose task cannot be read is refused here, before anything runs.
+    let confirms = match schedule_needs_ok(hub, account, &admitted.call).await {
+        Ok(needs) => admitted.action.class == Class::Confirm || needs,
+        Err(refusal) => {
+            let refusal = surface::mask_secrets(&refusal);
+            trail.write(AuditOutcome::Refused, &refusal).await?;
+            return Err(refusal);
+        }
+    };
     if confirms {
         let asked = Confirmation {
             id: String::new(),
@@ -435,12 +443,24 @@ async fn waiting(hub: &Hub, account: &Account) -> Result<Vec<Confirmation>, Stri
 
 /// Whether an agent's `call` is a schedule act that waits for the user although its action is a
 /// Write: a save that carries approvals (`schedule::save_needs_ok`), or a delete of a task the user created.
+/// It fails closed: a task id it cannot read, or a task the account does not hold, is an error that
+/// refuses the act, never a "no". It reads ids with `hub::task_key`, as `Hub::schedule_call` does.
 async fn schedule_needs_ok(hub: &Hub, account: &Account, call: &Parsed) -> Result<bool, String> {
+    let Parsed::Hub(call) = call else { return Ok(false) };
+    let stored = |id: &str| {
+        let id = id.to_owned();
+        async move { hub.db.task(account.id, crate::hub::task_key(&id)?).await?.ok_or_else(|| format!("this account has no task {id}")) }
+    };
     match call {
-        Parsed::Hub(HubCall::SaveSchedule { task, dry_run: false }) => Ok(schedule::save_needs_ok(task).is_some()),
-        Parsed::Hub(HubCall::DeleteSchedule { id }) => {
-            let Ok(id) = Uuid::parse_str(id) else { return Ok(false) };
-            Ok(hub.db.task(account.id, id).await?.is_some_and(|task| task.created_by == Actor::User))
+        HubCall::ListSchedules => Ok(false),
+        HubCall::ScheduleRuns { id, .. } => stored(id).await.map(|_| false),
+        HubCall::DeleteSchedule { id } => Ok(stored(id).await?.created_by == Actor::User),
+        HubCall::PauseSchedule { id, .. } => stored(id).await.map(|_| false),
+        HubCall::SaveSchedule { task, dry_run } => {
+            if !task.id.trim().is_empty() {
+                stored(&task.id).await?;
+            }
+            Ok(!dry_run && schedule::save_needs_ok(task).is_some())
         }
         _ => Ok(false),
     }

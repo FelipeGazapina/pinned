@@ -943,7 +943,7 @@ impl Hub {
     /// that apply to agents. Tasks are stored and edited here; nothing fires them yet.
     pub async fn schedule_call(self: &Arc<Self>, account: &Arc<Account>, call: HubCall, actor: Actor) -> Result<Value, String> {
         let unknown = |id: &str| format!("this account has no task {id}");
-        let parse = |id: &str| Uuid::parse_str(id.trim()).map_err(|_| unknown(id));
+        let parse = task_key;
         match call {
             HubCall::ListSchedules => json(self.db.tasks(account.id).await?),
             HubCall::ScheduleRuns { id, limit } => {
@@ -1611,6 +1611,13 @@ impl Storage for PgStorage {
             self.write_keys(&keys);
         }
     }
+}
+
+/// A task id as an app or an agent sends it. Every schedule call, and the agent check before it
+/// (`surface::schedule_needs_ok`), reads ids through this one parse, so the check and the act
+/// always name the same task; an id it cannot read is refused, never passed.
+pub(crate) fn task_key(id: &str) -> Result<Uuid, String> {
+    Uuid::parse_str(id.trim()).map_err(|_| format!("this account has no task {id}"))
 }
 
 #[cfg(test)]

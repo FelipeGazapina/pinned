@@ -8500,6 +8500,35 @@ fn an_agent_deleting_the_users_task_waits_but_its_own_goes_at_once() {
 }
 
 #[test]
+fn an_agent_deleting_the_users_task_by_a_padded_wrong_or_missing_id_waits_or_is_refused() {
+    let mut s = Schedules::start("sched_delete_ids");
+    let users = save_schedule(&mut s.ana, task_body("Users")).unwrap()["task"]["id"].as_str().unwrap().to_owned();
+    // A padded id names the same task the delete would, so it waits for the user like the plain one.
+    for padded in [format!(" {users}"), format!("{users} "), format!(" {users}\t")] {
+        let held = s.act("delete_schedule", json!({ "id": padded })).unwrap();
+        assert_eq!(held["outcome"], "pending", "{padded:?}: {held}");
+        assert_eq!(s.titles(), ["Users"], "{padded:?} deleted nothing");
+    }
+    // An id that is no task id, of the wrong type, or missing is refused before anything runs.
+    for args in [json!({ "id": 42 }), json!({}), json!({ "id": "not-a-task" }), json!({ "id": format!("{users}x") }), json!({ "id": uuid::Uuid::new_v4().to_string() })] {
+        let refused = s.act("delete_schedule", args.clone());
+        assert!(refused.is_err(), "{args}: {refused:?}");
+        assert_eq!(s.titles(), ["Users"], "{args} deleted nothing");
+    }
+    for (action, args) in [("pause_schedule", json!({ "id": 42, "paused": true })), ("pause_schedule", json!({ "id": "nope", "paused": true })), ("pause_schedule", json!({ "id": users })), ("schedule_runs", json!({ "id": "nope" }))] {
+        assert!(s.act(action, args.clone()).is_err(), "{action} {args}");
+    }
+    let mut odd = task_body("Odd");
+    odd["id"] = json!(" not-a-task ");
+    assert!(s.act("save_schedule", json!({ "task": odd })).is_err());
+    assert_eq!(s.titles(), ["Users"]);
+    assert_eq!(s.ana.hub(json!({ "cmd": "list_schedules" })).unwrap()[0]["enabled"], true, "and nothing paused it");
+    let rows = s.ana.hub(json!({ "cmd": "agent_audit" })).unwrap();
+    let refused = rows.as_array().unwrap().iter().filter(|e| e["action"] == "delete_schedule" && e["outcome"] == "refused").count();
+    assert_eq!(refused, 5, "each refusal has its audit row");
+}
+
+#[test]
 fn another_account_neither_sees_nor_touches_the_tasks() {
     let mut s = Schedules::start("sched_isolation");
     let id = save_schedule(&mut s.ana, task_body("Ana's")).unwrap()["task"]["id"].as_str().unwrap().to_owned();
