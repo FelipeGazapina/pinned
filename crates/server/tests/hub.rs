@@ -2790,6 +2790,107 @@ fn a_fixed_box_stays_after_its_session_ends_so_the_next_run_reuses_it() {
     assert_eq!(created(&hub), 1);
 }
 
+/// The account's workflow store as Postgres holds it, runs included.
+fn account_store(hub: &TestHub, account: uuid::Uuid) -> Value {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let (client, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        let row = client.query_one("select store::text from accounts where id::text = $1", &[&account.to_string()]).await.unwrap();
+        serde_json::from_str(row.get::<_, &str>(0)).unwrap()
+    })
+}
+
+/// Gives the account a workflow run of issue `held` that waits on the box's session, with that issue
+/// handled, as a hub restarted over them reads them, and reconnects `ana`. The run holds the box.
+/// Returns the box machine.
+fn hold_box(hub: &mut TestHub, ana: &mut BoxAccount, held: &str) -> String {
+    let machine = ana.box_machine();
+    let tab = hub.boxes.with_node(|node| node.machine.tabs()[0].id.clone());
+    let run = json!({
+        "id": "run-held", "connector": ana.connector, "subject": issue(held), "status": "waiting", "session_owner": ana.connector,
+        "session": { "state": "live", "machine": machine, "tab": tab, "claude": null, "since": 1, "saw_working": false, "await_working": false },
+        "log": [], "context": {}, "stack": [], "pending": null, "ready": null, "claimed": true,
+    });
+    admin_on(
+        &hub.database,
+        &format!("update accounts set store = jsonb_set(jsonb_set(store, '{{runs}}', '{}'::jsonb), '{{connectors,0,handled}}', '[\"{held}\"]'::jsonb)", json!([run])),
+    );
+    hub.restart();
+    ana.client = Client::connect(&hub.url, &ana.token);
+    machine
+}
+
+/// The run `hold_box` gave the account failed with `why`, its issue is free for the next trigger,
+/// and no box was created after the first `boxes`.
+fn assert_run_failed(hub: &TestHub, ana: &BoxAccount, why: &str, boxes: usize) {
+    wait_for("the run to fail", || account_store(hub, ana.id)["runs"][0]["status"]["failed"]["why"].is_string());
+    let store = account_store(hub, ana.id);
+    assert_eq!(store["runs"][0]["status"]["failed"]["why"], json!(why), "{store}");
+    assert_eq!(store["connectors"][0]["handled"], json!([]), "its issue is no longer handled");
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(created(hub), boxes, "nothing opened another box for the run");
+    assert_eq!(account_store(hub, ana.id)["runs"].as_array().map(Vec::len), Some(1), "and no other run started");
+}
+
+const STOPPED: &str = "; the run stopped, and nothing starts it again until you or its next trigger do";
+
+#[test]
+fn a_run_whose_box_goes_offline_past_the_wait_fails_with_why_and_frees_its_issue() {
+    let mut hub = TestHub::start_with_boxes("box_run_offline", Signup::Open, Policy { offline: Duration::from_secs(3), ..fast() });
+    let mut ana = BoxAccount::new(&hub);
+    assert_eq!(hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-1")))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    let machine = hold_box(&mut hub, &mut ana, "uuid-1");
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    wait_for("the box's tabs frame", || ana.tabs_held(&hub, &machine).is_some_and(|held| held > 0));
+    drop_box_node(&hub.boxes, "box_1");
+    wait_for("the box to go", || hub.boxes.live().is_empty());
+    assert_run_failed(&hub, &ana, &format!("Upstash Box: its box went offline and did not come back within 3 s{STOPPED}"), 1);
+}
+
+#[test]
+fn a_run_whose_box_reaches_its_max_life_fails_with_why_and_frees_its_issue() {
+    let mut hub = TestHub::start_with_boxes("box_run_expired", Signup::Open, Policy { offline: Duration::from_secs(3600), ..fast() });
+    let mut ana = BoxAccount::new(&hub);
+    assert_eq!(hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-1")))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    hub.policy.max_life = Duration::from_millis(1);
+    hold_box(&mut hub, &mut ana, "uuid-1");
+    wait_for("the box to go", || hub.boxes.live().is_empty());
+    assert_run_failed(&hub, &ana, &format!("Upstash Box: the box ended before its task did: it ran out of time or budget{STOPPED}"), 1);
+}
+
+#[test]
+fn a_run_whose_box_machine_is_removed_fails_with_why_and_frees_its_issue() {
+    let mut hub = TestHub::start_with_boxes("box_run_removed", Signup::Open, Policy { offline: Duration::from_secs(3600), ..fast() });
+    let mut ana = BoxAccount::new(&hub);
+    assert_eq!(hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-1")))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    let machine = hold_box(&mut hub, &mut ana, "uuid-1");
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    ana.client.hub(json!({ "cmd": "remove_machine", "id": machine })).unwrap();
+    assert_eq!(hub.boxes.live(), Vec::<String>::new());
+    assert_run_failed(&hub, &ana, &format!("Upstash Box: the box ended before its task did: someone removed its machine{STOPPED}"), 1);
+}
+
+#[test]
+fn a_run_on_the_fixed_box_fails_when_upstash_stops_listing_the_box() {
+    let mut hub = TestHub::start_with_boxes("box_run_fixed_gone", Signup::Open, Policy { offline: Duration::from_secs(3600), ..fast() });
+    let mut ana = BoxAccount::new(&hub);
+    set_workflow(&mut ana.client, "fixed");
+    assert_eq!(hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-1")))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    // A later run on the one reused box: the row still names the first run's issue.
+    let machine = hold_box(&mut hub, &mut ana, "uuid-2");
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    wait_for("the box's tabs frame", || ana.tabs_held(&hub, &machine).is_some_and(|held| held > 0));
+    let gone = hub.boxes.state.lock().unwrap().boxes.remove("box_1");
+    drop(gone);
+    wait_for("the row to go", || ana.rows(&hub) == 0);
+    assert_run_failed(&hub, &ana, &format!("Upstash Box: the box ended before its task did: it was deleted outside pinned{STOPPED}"), 1);
+}
+
 #[test]
 fn a_fresh_permission_stops_at_the_accounts_box_limit() {
     let hub = TestHub::start_with_boxes("box_cap", Signup::Open, Policy { max_open: 1, ..fast() });
