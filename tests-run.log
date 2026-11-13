@@ -296,3 +296,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:22:05Z #132 projects_shows_the_load_of_the_machine_that_holds_each_checkout ok / avail=15049M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:22:05Z #133 placing_follows_the_accounts_policy_skips_a_machine_that_went_offline_and_never_sees_another_account START / avail=15049M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:22:10Z #133 placing_follows_the_accounts_policy_skips_a_machine_that_went_offline_and_never_sees_another_account ok / avail=15049M /workspace avail=19374M node_stat=Ssl node_tcp=1
+2026-11-13T04:22:11Z #134 box_usage_without_an_upstash_connection_is_empty START / avail=15049M /workspace avail=19374M node_stat=Ssl
