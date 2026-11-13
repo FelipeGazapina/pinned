@@ -2,6 +2,7 @@ use pinned_core::account::{self, Credentials, Signup};
 use pinned_core::link;
 use pinned_core::machine::{Launch, Machine};
 use pinned_core::reminders;
+use pinned_server::http::TrustedProxy;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -90,7 +91,10 @@ fn hub(args: &[String]) -> Result<(), String> {
     if let Some(warning) = unknown {
         eprintln!("pinned-server: {warning}");
     }
-    let trusted_proxy = args.flags.get("trusted-proxy").map_or(Ok(Default::default()), |name| name.parse())?;
+    let (trusted_proxy, unknown) = trusted_proxy_flag(args.flags.get("trusted-proxy").map(String::as_str));
+    if let Some(warning) = unknown {
+        eprintln!("pinned-server: {warning}");
+    }
     let max_accounts = args
         .flags
         .get("max-accounts")
@@ -134,6 +138,17 @@ fn signup_mode(flag: Option<&str>) -> (Signup, Option<String>) {
         Some("open") => (Signup::Open, None),
         Some("invite") => (Signup::Invite, None),
         Some(other) => (Signup::Invite, Some(format!("--signup takes first, open or invite, not {other:?}; using invite"))),
+    }
+}
+
+/// The proxy the hub trusts from `--trusted-proxy`. Unset is off. A value that is neither off nor railway
+/// is off, with a line saying so: a mistyped Railway variable leaves the hub up and trusting no proxy,
+/// where it would otherwise not start.
+fn trusted_proxy_flag(flag: Option<&str>) -> (TrustedProxy, Option<String>) {
+    match flag.map(str::parse) {
+        None => (TrustedProxy::Off, None),
+        Some(Ok(proxy)) => (proxy, None),
+        Some(Err(_)) => (TrustedProxy::Off, Some(format!("--trusted-proxy takes off or railway, not {:?}; using off", flag.unwrap_or_default()))),
     }
 }
 
@@ -234,8 +249,19 @@ fn node(args: &[String]) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::signup_mode;
+    use super::{signup_mode, trusted_proxy_flag};
     use pinned_core::account::Signup;
+    use pinned_server::http::TrustedProxy;
+
+    #[test]
+    fn an_unknown_trusted_proxy_starts_the_hub_with_none_and_says_so() {
+        assert_eq!(trusted_proxy_flag(None), (TrustedProxy::Off, None));
+        assert_eq!(trusted_proxy_flag(Some("off")), (TrustedProxy::Off, None));
+        assert_eq!(trusted_proxy_flag(Some("railway")), (TrustedProxy::Railway, None));
+        assert_eq!(trusted_proxy_flag(Some("raliway")), (TrustedProxy::Off, Some(r#"--trusted-proxy takes off or railway, not "raliway"; using off"#.into())));
+        assert_eq!(trusted_proxy_flag(Some("")), (TrustedProxy::Off, Some(r#"--trusted-proxy takes off or railway, not ""; using off"#.into())));
+        assert_eq!(trusted_proxy_flag(Some("Railway")).0, TrustedProxy::Off, "the names are exact");
+    }
 
     #[test]
     fn an_unknown_signup_mode_runs_as_invite_and_says_so() {

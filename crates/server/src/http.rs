@@ -359,8 +359,10 @@ impl Hashing {
     }
 
     /// Runs `work` on a blocking thread behind a turn. `busy` when the queue is full or the wait runs out.
+    /// (`Server::hashed` is this with a give-back; the tests of the queue use this one.)
     /// The turn moves into the thread, so it ends when the work does: a request that is dropped while
     /// its hash runs does not stop the hash, and must not free its place either.
+    #[cfg(test)]
     async fn blocking<T: Send + 'static>(&self, work: impl FnOnce() -> T + Send + 'static) -> Result<T, Error> {
         let turn = self.turn().await.ok_or_else(busy)?;
         Hashing::run(turn, work).await
@@ -409,15 +411,23 @@ async fn password_matches(server: &Server, keys: &[(String, usize)], password: S
         .await
 }
 
+/// The hash `password_matches` checks an unknown email against, once it is built.
+static NO_ACCOUNT_HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 /// An argon2 hash made as an account's is, of a random password nobody knows.
 fn no_account_hash() -> &'static str {
-    static HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    HASH.get_or_init(|| {
+    NO_ACCOUNT_HASH.get_or_init(|| {
         use argon2::password_hash::{PasswordHasher, SaltString};
         use rand_core::{OsRng, RngCore};
         let unknown = OsRng.next_u64().to_string();
         argon2::Argon2::default().hash_password(unknown.as_bytes(), &SaltString::generate(&mut OsRng)).map(|h| h.to_string()).unwrap_or_default()
     })
+}
+
+/// What the hub does once, before it listens: builds the stand-in hash on a blocking thread, so the first
+/// unknown email's sign in costs one hash like every other, not two.
+pub async fn warm_up() {
+    let _ = tokio::task::spawn_blocking(no_account_hash).await;
 }
 
 /// Whether the hub holds as many accounts as `--max-accounts` lets it. The first account counts like any other.
@@ -1606,6 +1616,13 @@ mod tests {
         assert!(admitted.is_err(), "the next request is waiting for its turn, not refused");
         drop(holder);
         assert!(hashing.blocking(|| ()).await.is_ok(), "and gets it once the holder lets go");
+    }
+
+    #[tokio::test]
+    async fn the_stand_in_hash_is_built_by_the_start_up_step_not_by_the_first_unknown_email() {
+        assert!(super::NO_ACCOUNT_HASH.get().is_none(), "nothing has asked for the stand-in yet");
+        super::warm_up().await;
+        assert!(super::NO_ACCOUNT_HASH.get().is_some_and(|hash| hash.starts_with("$argon2")), "built once the start-up step has run, before any sign in");
     }
 
     #[test]

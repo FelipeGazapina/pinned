@@ -48,6 +48,8 @@ pub struct Running {
 
 /// Connects to Postgres, starts every account's connectors and serves until the task ends.
 pub async fn start(config: Config) -> Result<Running, String> {
+    // Before the hub listens, so no sign in pays for it.
+    http::warm_up().await;
     let db = db::Db::connect(&config.db, db::Sealer::load(&config.key_file)?).await?;
     let learning = match &config.learning_db {
         Some(url) => Some(db::Learning::connect(url).await?),
