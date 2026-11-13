@@ -305,3 +305,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:22:37Z #137 box_usage_never_shows_one_account_the_boxes_or_tasks_of_another START / avail=15049M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:22:41Z #137 box_usage_never_shows_one_account_the_boxes_or_tasks_of_another ok / avail=15049M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:22:42Z #138 a_worker_box_end_reaches_a_parent_that_was_offline_and_the_box_ends_done_at_once START / avail=15049M /workspace avail=19374M node_stat=Ssl
+2026-11-13T04:22:48Z #138 a_worker_box_end_reaches_a_parent_that_was_offline_and_the_box_ends_done_at_once ok / avail=15048M /workspace avail=19374M node_stat=Ssl node_tcp=1
