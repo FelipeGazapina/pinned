@@ -397,8 +397,13 @@ fn readable(row: Result<BoxRow, Remains>) -> Result<BoxRow, String> {
     row.map_err(|r| format!("box {} {}; the next check deletes it", r.id, r.why))
 }
 
-fn stored_task(account: Uuid, value: Value) -> Result<Task, String> {
-    serde_json::from_value(value).map_err(|e| format!("account {account} has an unreadable task: {e}"))
+/// A fixed message that reaches the agent's answer, the audit detail and the hub log: a serde
+/// message can quote a stored value, so it is not kept, and only the ids go to the hub's own log.
+fn stored_task(account: Uuid, id: Uuid, value: Value) -> Result<Task, String> {
+    serde_json::from_value(value).map_err(|_| {
+        eprintln!("pinned-server: account {account}'s task {id} does not read as a task");
+        format!("task {id} could not be read")
+    })
 }
 
 fn stored_marks(account: Uuid, value: Value) -> Result<SessionMarks, String> {
@@ -987,7 +992,7 @@ impl Db {
 
     pub async fn task(&self, account: Uuid, id: Uuid) -> Result<Option<Task>, String> {
         let row = self.client().await?.query_opt("select task, next_at from tasks where account = $1 and id = $2", &[&account, &id]).await.map_err(err)?;
-        row.map(|r| stored_task(account, r.get(0)).map(|task| Task { next_at: r.get(1), ..task })).transpose()
+        row.map(|r| stored_task(account, id, r.get(0)).map(|task| Task { next_at: r.get(1), ..task })).transpose()
     }
 
     /// Stores `task` (id and `next_at` already set) as the account's. False when the id is another account's.

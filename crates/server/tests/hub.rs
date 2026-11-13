@@ -8837,6 +8837,28 @@ fn an_unreadable_task_or_run_leaves_the_settings_and_the_other_tasks_readable() 
 }
 
 #[test]
+fn an_agent_reading_one_unreadable_task_gets_a_fixed_error_with_no_account_or_stored_text() {
+    let mut s = Schedules::start("sched_unreadable_one");
+    let id = save_schedule(&mut s.ana, task_body("Broken")).unwrap()["task"]["id"].as_str().unwrap().to_owned();
+    // A stored value that serde would quote in its message.
+    admin_on(&s._hub.database, &format!("update tasks set task = '{{\"schedule\": \"STOREDTEXTMARK\"}}' where id = '{id}'"));
+    let account = s._hub.runtime.block_on(async {
+        let (client, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), s._hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        client.query_one("select account::text from tasks", &[]).await.unwrap().get::<_, String>(0)
+    });
+    let fixed = format!("task {id} could not be read");
+    for (action, args) in [("schedule_runs", json!({ "id": id })), ("delete_schedule", json!({ "id": id })), ("pause_schedule", json!({ "id": id, "paused": true }))] {
+        assert_eq!(s.act(action, args), Err(fixed.clone()), "{action}");
+    }
+    let trail = s.ana.hub(json!({ "cmd": "agent_audit" })).unwrap().to_string();
+    assert!(trail.contains(&fixed), "the audit row holds the fixed error: {trail}");
+    for leaked in [account.as_str(), "STOREDTEXTMARK", "invalid type"] {
+        assert!(!trail.contains(leaked), "the audit trail holds {leaked}: {trail}");
+    }
+}
+
+#[test]
 fn another_account_neither_sees_nor_touches_the_tasks() {
     let mut s = Schedules::start("sched_isolation");
     let id = save_schedule(&mut s.ana, task_body("Ana's")).unwrap()["task"]["id"].as_str().unwrap().to_owned();
