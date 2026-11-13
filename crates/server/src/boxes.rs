@@ -1877,6 +1877,34 @@ mod tests {
     }
 
     #[test]
+    fn a_captain_box_outlives_a_short_disconnect_and_ends_offline_after_ten_minutes() {
+        // The shipped policy: a node offline for 10 minutes ends its box, and a reconnect resets that.
+        let p = Policy::default();
+        assert_eq!(p.offline, 10 * MIN);
+        let sec = Duration::from_secs(1);
+        for delegating in [true, false] {
+            // A Captain quiet while its workers run, or a session at work.
+            let waiting = Seen::Tab { running: true, quiet: delegating };
+            let (start, mut t) = (Instant::now(), Timers::default());
+            assert_eq!(verdict(MIN, waiting, &mut t, start, &p, delegating), None);
+            // A hub deploy: the node drops for 30 seconds and reconnects.
+            assert_eq!(verdict(MIN, Seen::Offline, &mut t, start + sec, &p, delegating), None);
+            assert_eq!(verdict(MIN, Seen::Offline, &mut t, start + 31 * sec, &p, delegating), None);
+            assert_eq!(verdict(MIN, waiting, &mut t, start + 40 * sec, &p, delegating), None, "back after 30 s");
+            // Offline for 9 min 59 s, then back: still not ended, and the clock starts over.
+            let away = start + MIN;
+            assert_eq!(verdict(MIN, Seen::Offline, &mut t, away, &p, delegating), None);
+            assert_eq!(verdict(MIN, Seen::Offline, &mut t, away + 10 * MIN - sec, &p, delegating), None, "9 min 59 s offline");
+            assert_eq!(verdict(MIN, waiting, &mut t, away + 10 * MIN, &p, delegating), None, "back before 10 min");
+            // The next drop counts from zero: 10 minutes of it end the box.
+            let gone = away + 11 * MIN;
+            assert_eq!(verdict(MIN, Seen::Offline, &mut t, gone, &p, delegating), None);
+            assert_eq!(verdict(MIN, Seen::Offline, &mut t, gone + 10 * MIN - sec, &p, delegating), None, "a reconnect reset the clock");
+            assert_eq!(verdict(MIN, Seen::Offline, &mut t, gone + 10 * MIN, &p, delegating), Some(End::Offline), "delegating: {delegating}");
+        }
+    }
+
+    #[test]
     fn a_dropped_link_does_not_restart_the_quiet_clock() {
         let p = policy();
         let (start, mut t) = (Instant::now(), Timers::default());
