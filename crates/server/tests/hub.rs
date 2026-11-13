@@ -3016,6 +3016,53 @@ impl MachineSock {
     }
 }
 
+/// The close code the hub ends a machine socket with after the machine sends `first` as its first
+/// frame, or sends nothing.
+fn machine_closed_with(hub: &str, first: Option<Message>) -> Option<u16> {
+    let (mut ws, _) = tungstenite::connect(format!("{}/ws/machine", hub.replace("http://", "ws://"))).unwrap();
+    if let MaybeTlsStream::Plain(s) = ws.get_mut() {
+        s.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+    }
+    if let Some(first) = first {
+        ws.send(first).unwrap();
+    }
+    let start = Instant::now();
+    loop {
+        match ws.read() {
+            Ok(Message::Close(close)) => return close.map(|c| c.code.into()),
+            Ok(other) => panic!("the hub answered with {other:?}"),
+            Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
+                assert!(start.elapsed() < Duration::from_secs(30), "the hub never closed the socket");
+            }
+            Err(e) => panic!("machine socket: {e}"),
+        }
+    }
+}
+
+/// A hub too slow to read a sign in must not refuse the machine: a box's node leaves after 15
+/// minutes of 4001. 1013 asks it to try again later.
+#[test]
+fn a_machine_whose_sign_in_never_arrives_is_told_to_try_again_later_not_refused() {
+    let hub = TestHub::start("machine_no_sign_in");
+    assert_eq!(machine_closed_with(&hub.url, None), Some(1013));
+}
+
+#[test]
+fn a_machine_whose_first_frame_is_not_a_sign_in_is_told_to_try_again_later_not_refused() {
+    let hub = TestHub::start("machine_bad_sign_in");
+    let firsts = [Message::text("not json"), Message::text(json!({ "type": "auth" }).to_string()), Message::binary(vec![1u8, 2, 3])];
+    for first in firsts {
+        assert_eq!(machine_closed_with(&hub.url, Some(first.clone())), Some(1013), "{first:?}");
+    }
+}
+
+#[test]
+fn a_machine_whose_token_no_machine_has_is_refused_with_4001() {
+    let hub = TestHub::start("machine_unknown_token");
+    let auth = json!({ "type": "auth", "token": "fake-unknown-machine-token", "name": "vps", "os": "linux", "version": "0.0.0-test" });
+    assert_eq!(machine_closed_with(&hub.url, Some(Message::text(auth.to_string()))), Some(link::UNAUTHORIZED));
+}
+
 fn listed(frame: &Value, id: &str) -> Value {
     frame["machines"].as_array().unwrap().iter().find(|m| m["id"] == id).unwrap().clone()
 }
