@@ -1356,7 +1356,7 @@ impl Shells {
                     sink(&bytes);
                 }
             },
-            || {},
+            |_| {},
         )?;
         self.open.lock().unwrap().insert(id.clone(), Shell { session, screen });
         Ok(id)

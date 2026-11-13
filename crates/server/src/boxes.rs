@@ -276,14 +276,15 @@ impl Phase {
 pub enum Seen {
     Offline,
     NoTab,
-    /// `quiet`: the session is not working.
+    /// `quiet`: nothing holds the box, so the session is neither working nor waiting on an open
+    /// questionnaire.
     Tab { running: bool, quiet: bool },
 }
 
 /// When each condition of a running row began, by the hub's clock. A restart resets them, and
 /// `max_life` still bounds what a box costs.
 #[derive(Default, Debug)]
-struct Timers {
+pub(crate) struct Timers {
     quiet_since: Option<Instant>,
     exited_since: Option<Instant>,
     gone_since: Option<Instant>,
@@ -394,7 +395,7 @@ pub fn offline_answer(phase: &Phase, removed: bool, machine: &str) -> String {
     }
 }
 
-fn verdict(age: Duration, seen: Seen, t: &mut Timers, now: Instant, p: &Policy) -> Option<End> {
+pub(crate) fn verdict(age: Duration, seen: Seen, t: &mut Timers, now: Instant, p: &Policy) -> Option<End> {
     // `None` is a condition this look can't see, as the session's while its node is offline: its
     // timer neither starts nor restarts, so a dropped link doesn't buy a quiet box more time.
     let (offline, gone, exited, quiet) = match seen {
