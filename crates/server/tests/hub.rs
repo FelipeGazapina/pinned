@@ -2651,6 +2651,10 @@ fn a_fresh_workflow_permission_opens_one_box_per_run() {
     assert_eq!(open(ana.box_run(issue("uuid-2"))), Ok(()));
     assert_eq!(created(&hub), 2);
     assert_eq!(ana.client.hub(json!({ "cmd": "get_settings" })).unwrap()["connectors"][0]["machine"]["kind"], "upstash-box");
+    let state = hub.boxes.state.lock().unwrap();
+    for b in state.boxes.values() {
+        assert_eq!(b.files.get(&format!("{BOX_DIR}/box.env")).map(|env| env.lines().any(|line| line == "PINNED_BOX=1")), Some(true), "a fresh box's node must leave once its hub disowns it");
+    }
 }
 
 #[test]
@@ -2664,6 +2668,9 @@ fn a_fixed_workflow_permission_reuses_one_box_across_two_runs() {
     ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
     assert_eq!(open(ana.box_run(issue("uuid-2"))), Ok(()));
     assert_eq!(created(&hub), 1, "the second run uses the box the first run opened");
+    // The reaper never ends the fixed box while Upstash lists it, so its node must not leave on refusals.
+    let env = hub.boxes.file(&format!("{BOX_DIR}/box.env")).expect("the boot wrote no box.env");
+    assert!(!env.contains("PINNED_BOX"), "{env}");
 }
 
 #[test]
