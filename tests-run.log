@@ -261,3 +261,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
     pinned-server: client 3's hub call failed: Slack unreachable: error sending request for url (https://slack.com/api/auth.test?)
     pinned-server: client 1's hub call failed: GitHub unreachable: error sending request for url (https://api.github.com/user)
 2026-11-13T04:20:36Z #118 a_single_bot_slack_import_becomes_the_default_bot_and_replies_still_use_its_key START / avail=15051M /workspace avail=19374M node_stat=Ssl
+2026-11-13T04:20:41Z #118 a_single_bot_slack_import_becomes_the_default_bot_and_replies_still_use_its_key ok / avail=15051M /workspace avail=19374M node_stat=Ssl node_tcp=1
