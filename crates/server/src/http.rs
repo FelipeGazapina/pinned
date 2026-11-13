@@ -783,15 +783,7 @@ async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: 
         }
         return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
     }
-    let work = match &call {
-        HubCall::Stage { connector, subject, .. } | HubCall::RunSet { connector, subject, .. } => Some((connector.clone(), subject.clone())),
-        HubCall::SlackReply { connector, channel, thread, .. }
-        | HubCall::LinearCreate { connector, channel, thread, .. }
-        | HubCall::LinearTake { connector, channel, thread, .. } => {
-            Some((connector.clone(), Subject::SlackThread { channel: channel.clone(), thread: thread.clone() }))
-        }
-        _ => None,
-    };
+    let work = crate::hub::work_of(&call);
     let result = match work {
         Some((connector, subject)) if account.working_on(&connector, &subject, |id| *id == machine) => hub.hub_call(&account, call).await,
         Some(_) => Err("this machine runs no session of that workflow on that subject".into()),

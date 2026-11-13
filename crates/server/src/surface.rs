@@ -207,6 +207,14 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
         return Err(format!("{}: {field}. The user enters it in the app.", surface::SECRET_REFUSAL));
     }
     let call = surface::parse(action, &surface::with_blank_asks(action, &act.args))?;
+    // The call acts through a workflow's connections: only the session that runs that workflow on that subject may make it.
+    if let Parsed::Hub(hub_call) = &call {
+        if let Some((connector, subject)) = crate::hub::work_of(hub_call) {
+            if !account.runs_on_tab(&connector, &subject, origin, &caller.tab) {
+                return Err(format!("{name} acts only for the workflow and subject this session runs"));
+            }
+        }
+    }
     if surface::skips_prompts(&call) && !caller.bypass {
         return Err(format!("{name} would run a session that skips its permission prompts, and your own session asks for them"));
     }
