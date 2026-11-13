@@ -2137,6 +2137,8 @@ fn integration_keys_reach_postgres_sealed() {
 
 const BOX_KEY: &str = "box_testkey";
 const CLAUDE_TOKEN: &str = "sk-ant-oat01-testtoken";
+/// What opening a box answers while Upstash Box is not connected.
+const NOT_CONNECTED: &str = "Upstash Box is not connected: connect it in pinned's Connectors settings";
 const BOX_DIR: &str = "/workspace/home/.pinned";
 
 struct FakeBox {
@@ -2360,6 +2362,11 @@ impl BoxAccount {
         hub.runtime.block_on(hub.hub().db.boxes(self.id)).unwrap().len()
     }
 
+    /// How many tabs the hub last had from the box machine `machine`, or None while it is offline or has sent no tabs frame.
+    fn tabs_held(&self, hub: &TestHub, machine: &str) -> Option<usize> {
+        hub.runtime.block_on(hub.hub().account(self.id)).unwrap().tabs_of(machine).map(|tabs| tabs.len())
+    }
+
     fn box_machine(&mut self) -> String {
         self.client.pump();
         let latest = self.client.frames.iter().rev().find(|f| f["type"] == "machines").unwrap();
@@ -2394,7 +2401,7 @@ fn a_box_run_boots_its_own_node_and_the_box_goes_when_its_tab_closes() {
     assert_eq!((created[0].size, created[0].init_command.as_str()), (BoxSize::Small, "sh /workspace/home/.pinned/start.sh || true"));
     ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
     let machine = ana.box_machine();
-    assert_eq!(hub.boxes.file(&format!("{BOX_DIR}/box.env")), Some(format!("CLAUDE_CODE_OAUTH_TOKEN='{CLAUDE_TOKEN}'\n")), "no GitHub token without GitHub");
+    assert_eq!(hub.boxes.file(&format!("{BOX_DIR}/box.env")), Some(format!("CLAUDE_CODE_OAUTH_TOKEN='{CLAUDE_TOKEN}'\nPINNED_BOX=1\n")), "no GitHub token without GitHub");
     let token = hub.boxes.state.lock().unwrap().accounts[0].machine_token.clone();
     for script in &hub.boxes.state.lock().unwrap().scripts {
         for secret in [BOX_KEY, CLAUDE_TOKEN, token.as_str()] {
@@ -2549,6 +2556,7 @@ fn a_box_ends_with_only_the_upstash_key_stored() {
     restart_with_secrets(&mut hub, "secrets - 'claude-oauth-token'");
     let mut client = Client::connect(&hub.url, &ana.token);
     client.wait("hello", |f| f["type"] == "hello");
+    assert_eq!(open(&hub, ana.box_run(issue("uuid-3"))), Err(NOT_CONNECTED.into()), "the Claude token is really gone, so no box opens");
     client.hub(json!({ "cmd": "remove_machine", "id": first })).unwrap();
     assert_eq!((hub.boxes.live(), ana.rows(&hub)), (vec!["box_2".to_owned()], 1), "removing a box machine deletes its box");
     assert_eq!(client.hub(json!({ "cmd": "disconnect_upstash" })), Ok(Value::Null));
@@ -2557,7 +2565,8 @@ fn a_box_ends_with_only_the_upstash_key_stored() {
 
 #[test]
 fn the_reaper_sweeps_and_ends_a_box_with_only_the_upstash_key_stored() {
-    let mut hub = TestHub::start_with_boxes("box_key_only_reaper", Signup::Open, Policy { offline: Duration::from_secs(3600), ..fast() });
+    // A long tab_gone through the restarts: a node that is online with no tabs yet (before its first tabs frame) is not a box whose tab is gone.
+    let mut hub = TestHub::start_with_boxes("box_key_only_reaper", Signup::Open, Policy { tab_gone: Duration::from_secs(3600), offline: Duration::from_secs(3600), ..fast() });
     let mut ana = BoxAccount::new(&hub);
     assert_eq!(hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-1")))), Ok(()));
     ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
@@ -2567,6 +2576,12 @@ fn the_reaper_sweeps_and_ends_a_box_with_only_the_upstash_key_stored() {
     restart_with_secrets(&mut hub, "secrets - 'claude-oauth-token'");
     let mut client = Client::connect(&hub.url, &ana.token);
     client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    wait_for("the box's tabs frame", || ana.tabs_held(&hub, &machine).is_some_and(|held| held > 0));
+    assert_eq!(
+        hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-2")))),
+        Err(NOT_CONNECTED.into()),
+        "the Claude token is really gone, so no box opens"
+    );
 
     // The sweep deletes this hub's box that no row names, and keeps the box a row names.
     let label = pinned_server::boxes::hub_label(&hub.url);
@@ -2574,9 +2589,18 @@ fn the_reaper_sweeps_and_ends_a_box_with_only_the_upstash_key_stored() {
     wait_for("the stray box to go", || !hub.boxes.live().contains(&"box_stray".to_owned()));
     assert_eq!((hub.boxes.live(), ana.rows(&hub)), (vec!["box_1".to_owned()], 1));
 
-    // An end rule deletes the box whose session tab is gone.
+    // An end rule deletes the box whose session tab is gone. The tab closes while tab_gone is long, and a hub restarted with a short one finds the box online with no tab, so the end cannot race a first tabs frame.
     let tabs = hub.boxes.with_node(|node| node.machine.tabs());
     client.call(&machine, json!({ "cmd": "close_tab", "tab": &tabs[0].id })).unwrap();
+    wait_for("the tab to be reported gone", || ana.tabs_held(&hub, &machine) == Some(0));
+    assert_eq!((hub.boxes.live(), ana.rows(&hub)), (vec!["box_1".to_owned()], 1), "the box stays while tab_gone is long");
+    hub.policy.tab_gone = Duration::from_millis(400);
+    hub.restart();
+    assert_eq!(
+        hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-3")))),
+        Err(NOT_CONNECTED.into()),
+        "the Claude token is still gone after the last restart, so this open places no box"
+    );
     wait_for("the box to be deleted", || hub.boxes.live().is_empty());
     wait_for("the row to go", || ana.rows(&hub) == 0);
 }
@@ -2651,6 +2675,10 @@ fn a_fresh_workflow_permission_opens_one_box_per_run() {
     assert_eq!(open(ana.box_run(issue("uuid-2"))), Ok(()));
     assert_eq!(created(&hub), 2);
     assert_eq!(ana.client.hub(json!({ "cmd": "get_settings" })).unwrap()["connectors"][0]["machine"]["kind"], "upstash-box");
+    let state = hub.boxes.state.lock().unwrap();
+    for b in state.boxes.values() {
+        assert_eq!(b.files.get(&format!("{BOX_DIR}/box.env")).map(|env| env.lines().any(|line| line == "PINNED_BOX=1")), Some(true), "a fresh box's node must leave once its hub disowns it");
+    }
 }
 
 #[test]
@@ -2664,6 +2692,9 @@ fn a_fixed_workflow_permission_reuses_one_box_across_two_runs() {
     ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
     assert_eq!(open(ana.box_run(issue("uuid-2"))), Ok(()));
     assert_eq!(created(&hub), 1, "the second run uses the box the first run opened");
+    // The reaper never ends the fixed box while Upstash lists it, so its node must not leave on refusals.
+    let env = hub.boxes.file(&format!("{BOX_DIR}/box.env")).expect("the boot wrote no box.env");
+    assert!(!env.contains("PINNED_BOX"), "{env}");
 }
 
 #[test]
@@ -3007,6 +3038,53 @@ impl MachineSock {
     fn send(&mut self, frame: Value) {
         self.ws.send(Message::text(frame.to_string())).unwrap();
     }
+}
+
+/// The close code the hub ends a machine socket with after the machine sends `first` as its first
+/// frame, or sends nothing.
+fn machine_closed_with(hub: &str, first: Option<Message>) -> Option<u16> {
+    let (mut ws, _) = tungstenite::connect(format!("{}/ws/machine", hub.replace("http://", "ws://"))).unwrap();
+    if let MaybeTlsStream::Plain(s) = ws.get_mut() {
+        s.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+    }
+    if let Some(first) = first {
+        ws.send(first).unwrap();
+    }
+    let start = Instant::now();
+    loop {
+        match ws.read() {
+            Ok(Message::Close(close)) => return close.map(|c| c.code.into()),
+            Ok(other) => panic!("the hub answered with {other:?}"),
+            Err(tungstenite::Error::Io(e)) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
+                assert!(start.elapsed() < Duration::from_secs(30), "the hub never closed the socket");
+            }
+            Err(e) => panic!("machine socket: {e}"),
+        }
+    }
+}
+
+/// A hub too slow to read a sign in must not refuse the machine: a box's node leaves after 15
+/// minutes of 4001. 1013 asks it to try again later.
+#[test]
+fn a_machine_whose_sign_in_never_arrives_is_told_to_try_again_later_not_refused() {
+    let hub = TestHub::start("machine_no_sign_in");
+    assert_eq!(machine_closed_with(&hub.url, None), Some(1013));
+}
+
+#[test]
+fn a_machine_whose_first_frame_is_not_a_sign_in_is_told_to_try_again_later_not_refused() {
+    let hub = TestHub::start("machine_bad_sign_in");
+    let firsts = [Message::text("not json"), Message::text(json!({ "type": "auth" }).to_string()), Message::binary(vec![1u8, 2, 3])];
+    for first in firsts {
+        assert_eq!(machine_closed_with(&hub.url, Some(first.clone())), Some(1013), "{first:?}");
+    }
+}
+
+#[test]
+fn a_machine_whose_token_no_machine_has_is_refused_with_4001() {
+    let hub = TestHub::start("machine_unknown_token");
+    let auth = json!({ "type": "auth", "token": "fake-unknown-machine-token", "name": "vps", "os": "linux", "version": "0.0.0-test" });
+    assert_eq!(machine_closed_with(&hub.url, Some(Message::text(auth.to_string()))), Some(link::UNAUTHORIZED));
 }
 
 fn listed(frame: &Value, id: &str) -> Value {
@@ -5166,7 +5244,7 @@ fn a_box_worker_signs_in_with_the_named_token_nests_under_its_caller_and_goes_wh
     assert_eq!((started["workState"].as_str(), started["machine"].as_str()), (Some("working"), Some("Box · Slow suite")), "{started}");
     assert_eq!(started["tabId"], Value::Null, "the box has not booted yet");
     wait_for("the worker thread running on the box", || box_tabs(&hub.boxes).iter().any(|t| t.role == Some(Role::Worker) && t.running));
-    assert_eq!(hub.boxes.file(&format!("{BOX_DIR}/box.env")), Some("CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-bloomtoken'\n".into()), "bloom's token, and no GitHub token without GitHub");
+    assert_eq!(hub.boxes.file(&format!("{BOX_DIR}/box.env")), Some("CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-bloomtoken'\nPINNED_BOX=1\n".into()), "bloom's token, and no GitHub token without GitHub");
     assert_eq!(hub.boxes.state.lock().unwrap().created[0].size, BoxSize::Small);
     let child = box_tabs(&hub.boxes).into_iter().find(|t| t.role == Some(Role::Worker)).unwrap();
     assert_eq!(
@@ -5502,7 +5580,7 @@ fn the_global_orchestrator_opens_a_captain_in_a_box_with_the_accounts_connection
     let captain = box_tabs(&hub.boxes).into_iter().find(|t| t.role == Some(Role::Orchestrator)).unwrap();
     assert!(captain.cwd.ends_with("/site"), "{}", captain.cwd);
     ana.client.wait_machines(&[("mini", true), ("Box · Captain site", true)]);
-    assert_eq!(hub.boxes.file(&format!("{BOX_DIR}/box.env")), Some(format!("CLAUDE_CODE_OAUTH_TOKEN='{CLAUDE_TOKEN}'\n")));
+    assert_eq!(hub.boxes.file(&format!("{BOX_DIR}/box.env")), Some(format!("CLAUDE_CODE_OAUTH_TOKEN='{CLAUDE_TOKEN}'\nPINNED_BOX=1\n")));
 
     let again = send("r-2", "Also the footer.").unwrap();
     assert_eq!((again["box"].as_str(), again["tab"].as_str()), (sent["box"].as_str(), Some(captain.id.as_str())), "the box that runs the Captain takes the next message: {again}");

@@ -293,18 +293,44 @@ async fn call(key: &str, method: reqwest::Method, path: &str, body: Option<Value
     Err(Failure { status: Some(status.as_u16()), message: refusal(key, status.as_u16(), &body) })
 }
 
-/// What Upstash's refusal reads as. Upstash's own `error` text could echo the key, and this message reaches the log and the app, so the key never stays in it.
+/// The most characters of an Upstash response an error repeats.
+const ECHO_LIMIT: usize = 300;
+
+/// `text` as an error may carry it: the key replaced with "…" (an empty key replaces nothing) and
+/// no more than `ECHO_LIMIT` characters. The key goes first, so cutting never leaves half of it.
+/// A body printed as JSON and a serde error quoting with `{:?}` show a key holding `"`, `\` or a
+/// control character escaped, so both escaped forms go too.
+/// Every error built from what Upstash sent passes here, as it reaches the log and the app.
+fn echoed(key: &str, text: &str) -> String {
+    let mut scrubbed = text.to_owned();
+    for form in [key.to_owned(), unquoted(&serde_json::to_string(key).unwrap_or_default()), unquoted(&format!("{key:?}"))] {
+        if !form.is_empty() {
+            scrubbed = scrubbed.replace(&form, "…");
+        }
+    }
+    match scrubbed.char_indices().nth(ECHO_LIMIT) {
+        Some((end, _)) => format!("{}…", &scrubbed[..end]),
+        None => scrubbed,
+    }
+}
+
+/// `quoted` without its outer quotes.
+fn unquoted(quoted: &str) -> String {
+    quoted.strip_prefix('"').and_then(|q| q.strip_suffix('"')).unwrap_or_default().to_owned()
+}
+
+/// What Upstash's refusal reads as. Upstash's own `error` text could echo the key.
 fn refusal(key: &str, status: u16, body: &Value) -> String {
     let said = body["error"].as_str().map(str::to_owned).unwrap_or_else(|| format!("request failed with status {status}"));
     let message = match status {
         401 | 403 => format!("Upstash Box refused the key: {said}"),
         _ => format!("Upstash Box answered {status}: {said}"),
     };
-    if key.is_empty() { message } else { message.replace(key, "…") }
+    echoed(key, &message)
 }
 
-fn parse_id(body: &Value) -> Result<BoxId, String> {
-    body["id"].as_str().filter(|id| !id.is_empty()).map(|id| BoxId(id.to_owned())).ok_or_else(|| format!("Upstash Box sent a box without an id: {body}"))
+fn parse_id(key: &str, body: &Value) -> Result<BoxId, String> {
+    body["id"].as_str().filter(|id| !id.is_empty()).map(|id| BoxId(id.to_owned())).ok_or_else(|| echoed(key, &format!("Upstash Box sent a box without an id: {body}")))
 }
 
 fn parse_status(body: &Value) -> Status {
@@ -315,24 +341,24 @@ fn parse_status(body: &Value) -> Status {
     }
 }
 
-fn parse_list(body: &Value) -> Result<Vec<Listed>, String> {
-    let boxes = body.as_array().ok_or_else(|| format!("Upstash Box sent a list that isn't one: {body}"))?;
+fn parse_list(key: &str, body: &Value) -> Result<Vec<Listed>, String> {
+    let boxes = body.as_array().ok_or_else(|| echoed(key, &format!("Upstash Box sent a list that isn't one: {body}")))?;
     boxes
         .iter()
         .map(|b| {
             let labels = b["labels"].as_array().map(|ls| ls.iter().filter_map(|l| l.as_str().map(str::to_owned)).collect()).unwrap_or_default();
-            Ok(Listed { id: parse_id(b)?, labels })
+            Ok(Listed { id: parse_id(key, b)?, labels })
         })
         .collect()
 }
 
-fn parse_all(body: &Value) -> Result<Vec<BoxData>, String> {
-    let boxes = body.as_array().ok_or_else(|| format!("Upstash Box sent a list that isn't one: {body}"))?;
-    boxes.iter().map(|b| serde_json::from_value(b.clone()).map_err(|e| format!("Upstash Box sent a box pinned cannot read: {e}"))).collect()
+fn parse_all(key: &str, body: &Value) -> Result<Vec<BoxData>, String> {
+    let boxes = body.as_array().ok_or_else(|| echoed(key, &format!("Upstash Box sent a list that isn't one: {body}")))?;
+    boxes.iter().map(|b| serde_json::from_value(b.clone()).map_err(|e| echoed(key, &format!("Upstash Box sent a box pinned cannot read: {e}")))).collect()
 }
 
-fn parse_exec(body: &Value) -> Result<Exec, String> {
-    let exit_code = body["exit_code"].as_i64().ok_or_else(|| format!("Upstash Box sent an exec result without an exit code: {body}"))?;
+fn parse_exec(key: &str, body: &Value) -> Result<Exec, String> {
+    let exit_code = body["exit_code"].as_i64().ok_or_else(|| echoed(key, &format!("Upstash Box sent an exec result without an exit code: {body}")))?;
     let text = |field: &str| body[field].as_str().unwrap_or_default().to_owned();
     Ok(Exec { exit_code: exit_code as i32, output: text("output"), error: text("error") })
 }
@@ -340,18 +366,18 @@ fn parse_exec(body: &Value) -> Result<Exec, String> {
 /// Checks the key by listing the boxes under `label`.
 pub async fn list(key: &str, label: &str) -> Result<Vec<Listed>, String> {
     let path = format!("/v2/box?label={}", urlencode(label));
-    parse_list(&call(key, reqwest::Method::GET, &path, None, CALL_WAIT).await?)
+    parse_list(key, &call(key, reqwest::Method::GET, &path, None, CALL_WAIT).await?)
 }
 
 /// Every box the key lists, whatever its label, for the Usage page.
 pub async fn list_all(key: &str) -> Result<Vec<BoxData>, String> {
-    parse_all(&call(key, reqwest::Method::GET, "/v2/box", None, LIST_ALL_WAIT).await?)
+    parse_all(key, &call(key, reqwest::Method::GET, "/v2/box", None, LIST_ALL_WAIT).await?)
 }
 
 /// Creates the box and waits until it runs.
 pub async fn create(key: &str, new: &NewBox) -> Result<BoxId, String> {
     let created = call(key, reqwest::Method::POST, "/v2/box", Some(new.body()), CALL_WAIT).await?;
-    let id = parse_id(&created)?;
+    let id = parse_id(key, &created)?;
     let mut status = parse_status(&created);
     let started = tokio::time::Instant::now();
     while status == Status::Creating && started.elapsed() < CREATE_WAIT {
@@ -360,10 +386,15 @@ pub async fn create(key: &str, new: &NewBox) -> Result<BoxId, String> {
             status = parse_status(&polled);
         }
     }
+    finished(key, id, status)
+}
+
+/// How `create` ends once it has stopped waiting.
+fn finished(key: &str, id: BoxId, status: Status) -> Result<BoxId, String> {
     match status {
         Status::Ready => Ok(id),
-        Status::Creating => Err(format!("Upstash Box was still creating box {id} after {} minutes", CREATE_WAIT.as_secs() / 60)),
-        Status::Failed => Err(format!("Upstash Box could not create box {id}")),
+        Status::Creating => Err(echoed(key, &format!("Upstash Box was still creating box {id} after {} minutes", CREATE_WAIT.as_secs() / 60))),
+        Status::Failed => Err(echoed(key, &format!("Upstash Box could not create box {id}"))),
     }
 }
 
@@ -376,7 +407,7 @@ pub async fn write(key: &str, id: &BoxId, path: &str, content: &str) -> Result<(
 /// Runs `script` with `sh -c`.
 pub async fn exec(key: &str, id: &BoxId, script: &str) -> Result<Exec, String> {
     let body = json!({ "command": ["sh", "-c", script] });
-    parse_exec(&call(key, reqwest::Method::POST, &format!("/v2/box/{id}/exec"), Some(body), EXEC_WAIT).await?)
+    parse_exec(key, &call(key, reqwest::Method::POST, &format!("/v2/box/{id}/exec"), Some(body), EXEC_WAIT).await?)
 }
 
 /// Succeeds when the box is already gone.
@@ -413,6 +444,57 @@ mod tests {
         assert_eq!(refusal(key, 500, &json!({})), "Upstash Box answered 500: request failed with status 500");
     }
 
+    #[test]
+    fn a_2xx_body_that_is_not_what_was_expected_does_not_carry_the_key_into_the_error() {
+        let key = "box_fake-key-0000";
+        let echoing = |field: &str| json!({ field: key });
+        let errors = [
+            parse_id(key, &echoing("note")).unwrap_err(),
+            parse_list(key, &echoing("note")).unwrap_err(),
+            parse_list(key, &json!([echoing("note")])).unwrap_err(),
+            parse_all(key, &echoing("note")).unwrap_err(),
+            parse_all(key, &json!([{ "id": "b", "created_at": key }])).unwrap_err(),
+            parse_exec(key, &echoing("note")).unwrap_err(),
+        ];
+        for message in &errors {
+            assert!(!message.contains(key), "{message}");
+            assert!(message.contains('…'), "the key is replaced, not dropped: {message}");
+        }
+        let long = json!({ "note": format!("{key}{}", "x".repeat(10_000)) });
+        let message = parse_id(key, &long).unwrap_err();
+        assert!(!message.contains(key) && message.chars().count() < 500, "a body is echoed in part: {} chars", message.chars().count());
+    }
+
+    #[test]
+    fn a_key_with_characters_json_and_debug_escape_does_not_reach_the_error_in_either_form() {
+        for key in ["box_fake\"key\\0000", "box_fake\u{1}key\u{7f}0000"] {
+            let json_form = serde_json::to_string(key).unwrap();
+            let debug_form = format!("{key:?}");
+            let forms = [key, &json_form[1..json_form.len() - 1], &debug_form[1..debug_form.len() - 1]];
+            let echoing = json!({ "note": key });
+            let unreadable = json!([{ "id": "b", "created_at": key }]);
+            let errors = [parse_id(key, &echoing).unwrap_err(), parse_all(key, &unreadable).unwrap_err()];
+            for message in &errors {
+                for form in forms {
+                    assert!(!message.contains(form), "{form:?} is in: {message}");
+                }
+                assert!(message.contains('…'), "the key is replaced, not dropped: {message}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_created_box_that_never_runs_does_not_carry_the_key_or_a_long_id_into_the_error() {
+        let key = "box_fake-key-0000";
+        let id = BoxId(format!("{key}{}", "x".repeat(10_000)));
+        assert_eq!(finished(key, BoxId("b".into()), Status::Ready), Ok(BoxId("b".into())));
+        for status in [Status::Creating, Status::Failed] {
+            let message = finished(key, id.clone(), status).unwrap_err();
+            assert!(!message.contains(key), "{message}");
+            assert!(message.contains('…') && message.chars().count() < 500, "{} chars: {message}", message.chars().count());
+        }
+    }
+
     fn fixture(name: &str) -> Value {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/upstash").join(name);
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap()
@@ -420,9 +502,9 @@ mod tests {
 
     #[test]
     fn a_listed_box_parses_into_its_id_and_labels() {
-        let listed = parse_list(&fixture("list.json")).unwrap();
+        let listed = parse_list("", &fixture("list.json")).unwrap();
         assert_eq!(listed, [Listed { id: BoxId("tough-seal-18518".into()), labels: vec!["hub:000000000000".into(), "p:00000000000000ff".into()] }]);
-        assert_eq!(parse_list(&json!([{ "id": "b" }])), Ok(vec![Listed { id: BoxId("b".into()), labels: vec![] }]));
+        assert_eq!(parse_list("", &json!([{ "id": "b" }])), Ok(vec![Listed { id: BoxId("b".into()), labels: vec![] }]));
     }
 
     const NOVEMBER: u64 = 1_793_491_200;
@@ -440,7 +522,7 @@ mod tests {
 
     #[test]
     fn listed_boxes_become_usage_rows_newest_first() {
-        let (rows, _) = usage_boxes(&parse_all(&usage_list()).unwrap(), NOVEMBER);
+        let (rows, _) = usage_boxes(&parse_all("", &usage_list()).unwrap(), NOVEMBER);
         assert_eq!(rows.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["b", "c", "a", "d"]);
         let (a, b, c) = (&rows[2], &rows[0], &rows[1]);
         assert_eq!((a.name.as_str(), a.size.as_deref(), a.status.as_str(), a.created, a.last_activity), ("web", Some("large"), "running", 1_793_588_400, Some(1_794_398_400)));
@@ -453,7 +535,7 @@ mod tests {
 
     #[test]
     fn totals_count_only_the_boxes_created_this_month() {
-        let (_, totals) = usage_boxes(&parse_all(&usage_list()).unwrap(), NOVEMBER);
+        let (_, totals) = usage_boxes(&parse_all("", &usage_list()).unwrap(), NOVEMBER);
         assert_eq!(totals.boxes, 3, "the box created a second before the month began is out");
         assert!((totals.cpu_hours - 3.0).abs() < 1e-9);
         assert!((totals.compute_usd - 1.75).abs() < 1e-9);
@@ -469,14 +551,14 @@ mod tests {
 
     #[test]
     fn a_list_that_is_not_one_is_refused() {
-        assert!(parse_all(&json!({ "boxes": [] })).unwrap_err().contains("isn't one"));
-        assert!(parse_all(&json!([{ "name": "no id" }])).unwrap_err().contains("cannot read"));
+        assert!(parse_all("", &json!({ "boxes": [] })).unwrap_err().contains("isn't one"));
+        assert!(parse_all("", &json!([{ "name": "no id" }])).unwrap_err().contains("cannot read"));
     }
 
     #[test]
     fn a_created_box_parses_into_its_id_and_waits_while_creating() {
         let created = fixture("create.json");
-        assert_eq!(parse_id(&created), Ok(BoxId("tough-seal-18518".into())));
+        assert_eq!(parse_id("", &created), Ok(BoxId("tough-seal-18518".into())));
         assert_eq!(parse_status(&created), Status::Creating);
         assert_eq!(parse_status(&fixture("get.json")), Status::Ready);
         assert_eq!(parse_status(&json!({ "id": "b", "status": "error" })), Status::Failed);
@@ -484,9 +566,9 @@ mod tests {
 
     #[test]
     fn an_exec_result_parses_its_exit_code_and_output() {
-        let exec = parse_exec(&fixture("exec.json")).unwrap();
+        let exec = parse_exec("", &fixture("exec.json")).unwrap();
         assert_eq!((exec.exit_code, exec.output.lines().next(), exec.error.as_str()), (3, Some("hello"), "err\n"));
-        assert!(parse_exec(&json!({ "output": "" })).is_err());
+        assert!(parse_exec("", &json!({ "output": "" })).is_err());
     }
 
     #[test]
