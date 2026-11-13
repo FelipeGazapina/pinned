@@ -6,3 +6,7 @@
     [a_box_run_boots_its_own_node_and_the_box_goes_when_its_tab_closes] thread 'a_box_run_boots_its_own_node_and_the_box_goes_when_its_tab_closes' (10323) panicked at crates/server/tests/hub.rs:2386:5:
     [a_box_run_boots_its_own_node_and_the_box_goes_when_its_tab_closes]   left: "pinned-server-box-repo-p-workflow-8a4f3d"
     [a_box_run_boots_its_own_node_and_the_box_goes_when_its_tab_closes] test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 145 filtered out; finished in 1.64s
+    [an_accounts_box_budget_bounds_only_its_own_boxes_and_shows_only_in_its_tastes] test an_accounts_box_budget_bounds_only_its_own_boxes_and_shows_only_in_its_tastes ... FAILED
+    [an_accounts_box_budget_bounds_only_its_own_boxes_and_shows_only_in_its_tastes] thread 'an_accounts_box_budget_bounds_only_its_own_boxes_and_shows_only_in_its_tastes' (14483) panicked at crates/server/tests/hub.rs:4552:5:
+    [an_accounts_box_budget_bounds_only_its_own_boxes_and_shows_only_in_its_tastes]   left: Err("this machine is no box")
+    [an_accounts_box_budget_bounds_only_its_own_boxes_and_shows_only_in_its_tastes] test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 145 filtered out; finished in 3.40s

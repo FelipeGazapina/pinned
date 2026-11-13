@@ -79,3 +79,11 @@ postgres up, datadir pgdata.4DlQ pid 6458 port 5499
 2026-11-13T03:48:26Z an_agent_reaches_only_the_projects_and_orchestrators_of_the_account_that_let_it_in ok 2026-11-13T03:48:29Z
 2026-11-13T03:48:29Z a_dictation_is_kept_under_the_account_that_sent_it_and_no_route_reads_it_back ok 2026-11-13T03:48:33Z
 2026-11-13T03:48:33Z a_box_permission_naming_another_accounts_box_opens_a_box_of_its_own ok 2026-11-13T03:48:36Z
+2026-11-13T03:48:36Z an_accounts_tastes_are_read_written_and_imported_only_by_that_account ok 2026-11-13T03:48:40Z
+2026-11-13T03:48:40Z an_accounts_box_budget_bounds_only_its_own_boxes_and_shows_only_in_its_tastes FAILED 2026-11-13T03:48:44Z
+2026-11-13T03:48:44Z the_global_orchestrator_lists_every_session_of_every_machine_and_account_and_reads_one_to_its_end ok 2026-11-13T03:48:48Z
+2026-11-13T03:48:48Z the_global_orchestrators_sessions_read_session_and_waiting_reach_nothing_of_another_account ok 2026-11-13T03:48:52Z
+2026-11-13T03:48:52Z the_global_orchestrator_reads_a_repo_on_another_machine_once_allowed_capped_and_audited ok 2026-11-13T03:48:55Z
+2026-11-13T03:48:55Z the_global_orchestrator_reads_no_repo_of_another_account ok 2026-11-13T03:48:58Z
+2026-11-13T03:48:58Z a_captain_delegates_to_another_machine_and_task_status_hears_how_it_ended ok 2026-11-13T03:49:05Z
+2026-11-13T03:49:05Z a_remote_workers_approval_shows_on_the_captains_task_and_in_waiting_with_its_machine_and_clears_when_answered ok 2026-11-13T03:49:09Z
