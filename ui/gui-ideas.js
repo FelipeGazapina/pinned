@@ -355,6 +355,11 @@ function ideaMenu(idea, at) {
   ], at);
 }
 
+// Done and Save keep the focus where it is. On a phone the tab bar comes back the moment a field loses it,
+// and covers the button the finger is on, so the press never became a click.
+pageView.addEventListener("mousedown", (e) => {
+  if (shellPage() === "ideas" && e.target.closest?.(".idea-close, .ideas-save")) e.preventDefault();
+});
 pageView.addEventListener("click", (e) => {
   if (shellPage() !== "ideas") return;
   const button = e.target.closest("[data-idea]");

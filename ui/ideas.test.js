@@ -108,6 +108,7 @@ function page(rows = SEED(), { signedIn = true } = {}) {
     headHtml: (title) => `<h1>${title}</h1>`,
     setPage: (h) => (shown = h),
     shellPage: () => "ideas",
+    pageHandlers: handlers,
     pageView: { addEventListener: (type, f) => (handlers[type] = f), querySelector: (sel) => part(sel) },
     document: {
       get activeElement() {
@@ -592,6 +593,19 @@ test("a redraw keeps the cards that did not change, so a click that began before
   assert.equal(second.removals, 0, "and it was never taken out of the page");
   await p.click("edit", "i2");
   assert.equal(p.run("ideasUi.editing"), "i2", "so the click opens it");
+});
+
+test("pressing Done or Save keeps the focus in the field, so the tab bar that returns on a phone cannot cover the button", async () => {
+  const p = page();
+  await p.show();
+  const press = (button) => {
+    let prevented = false;
+    p.context.pageHandlers.mousedown({ target: { closest: (sel) => (sel.includes(button) ? {} : null) }, preventDefault: () => (prevented = true) });
+    return prevented;
+  };
+  assert.equal(press(".idea-close"), true, "Done");
+  assert.equal(press(".ideas-save"), true, "Save");
+  assert.equal(p.context.pageHandlers.mousedown({ target: { closest: () => null }, preventDefault: () => assert.fail("another press is left alone") }), undefined);
 });
 
 test("closing an editor the user did not touch sends nothing, and an agent's edit stays", async () => {
