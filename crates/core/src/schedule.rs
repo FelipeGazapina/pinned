@@ -620,6 +620,8 @@ mod tests {
             enabled: true,
             grace_mins: Some(30),
             on_missed: Some(OnMissed::RunLate),
+            pickup_mins: None,
+            fyi: None,
             approvals: vec![Approval {
                 item: NeverItem::Release,
                 must_contain: "v0.18.2".into(),
@@ -698,5 +700,70 @@ mod tests {
         assert_eq!(user, Actor::User);
         let agent: Actor = serde_json::from_str(r#"{"kind":"agent","role":"captain"}"#).unwrap();
         assert!(matches!(agent, Actor::Agent { role: ActorRole::Captain, .. }));
+    }
+
+    fn plain() -> Task {
+        Task { approvals: vec![], target: Target::Me, schedule: cron("0 9 * * 1-5"), ..sample() }
+    }
+
+    #[test]
+    fn pickup_default_lives_in_one_place() {
+        let mut t = sample();
+        assert_eq!(t.effective_pickup(), DEFAULT_PICKUP_MINS);
+        t.pickup_mins = Some(2);
+        assert_eq!(t.effective_pickup(), 2);
+        let old: Task = serde_json::from_str(&serde_json::to_string(&plain()).unwrap()).unwrap();
+        assert_eq!(old.pickup_mins, None);
+    }
+
+    #[test]
+    fn a_save_is_checked_whoever_sends_it() {
+        assert_eq!(check_save(&plain(), false), Ok(()));
+        assert!(check_save(&Task { title: " ".into(), ..plain() }, false).is_err());
+        assert!(check_save(&Task { tz: "Mars/Base".into(), ..plain() }, false).unwrap_err().contains("time zone"));
+        let worker = Task { target: Target::Worker { project: "p".into(), model: String::new() }, ..plain() };
+        assert!(check_save(&worker, true).unwrap_err().contains("new worker"));
+    }
+
+    #[test]
+    fn release_approvals_need_protection() {
+        let approval = |item, text: &str| Approval { item, must_contain: text.into(), repo: "r".into() };
+        for item in [NeverItem::Release, NeverItem::Deploy, NeverItem::PushToMain] {
+            let t = Task { approvals: vec![approval(item, "x")], ..plain() };
+            assert!(check_save(&t, false).unwrap_err().contains("tag and main protection"), "{item:?}");
+            assert_eq!(check_save(&t, true), Ok(()), "{item:?} with protection");
+        }
+        let tag = Task { approvals: vec![approval(NeverItem::NetworkInstall, "git push origin v0.18.2")], ..plain() };
+        assert!(check_save(&tag, false).is_err(), "covers a tag");
+        assert_eq!(check_save(&tag, true), Ok(()));
+        let harmless = Task { approvals: vec![approval(NeverItem::NetworkInstall, "npm install left-pad")], ..plain() };
+        assert_eq!(check_save(&harmless, false), Ok(()));
+        for item in [NeverItem::Secrets, NeverItem::SelfGrant, NeverItem::Payment] {
+            assert!(check_save(&Task { approvals: vec![approval(item, "x")], ..plain() }, true).is_err(), "{item:?} never");
+        }
+        assert!(check_save(&Task { approvals: vec![approval(NeverItem::Release, " ")], ..plain() }, true).is_err());
+    }
+
+    #[test]
+    fn an_agent_may_not_repeat_faster_than_every_15_minutes() {
+        let save = |expr: &str| Parsed::Hub(HubCall::SaveSchedule { task: Task { schedule: cron(expr), ..plain() }, dry_run: false });
+        assert!(agent_check(&save("*/5 * * * *")).unwrap_err().contains("every 5 minutes"));
+        assert!(agent_check(&save("0,10 9 * * *")).is_err(), "two runs ten minutes apart");
+        assert_eq!(agent_check(&save("*/15 * * * *")), Ok(()));
+        assert_eq!(agent_check(&save("0 9 * * 1-5")), Ok(()));
+        assert_eq!(agent_check(&Parsed::Hub(HubCall::ListSchedules)), Ok(()));
+    }
+
+    #[test]
+    fn approvals_make_an_agent_save_wait_and_a_plain_one_run() {
+        assert!(save_needs_ok(&sample()).unwrap().contains("release"));
+        assert_eq!(save_needs_ok(&Task { id: String::new(), ..plain() }), None, "an agent's new task needs no OK");
+    }
+
+    #[test]
+    fn next_run_times_are_written_in_the_task_zone() {
+        let runs = next_run_times(&once("2026-11-13T09:00"), SP, 0).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].local, "Fri 13 Nov 09:00 -03");
     }
 }

@@ -536,7 +536,7 @@ impl Hub {
             HubCall::SlackSuggestions { bot } => (json(c().await?.slack_suggestions(&bot).await?), false),
             HubCall::SaveConnector { connector } => (json(c().await?.save_connector(connector)?), true),
             HubCall::DeleteConnector { id } => (json(c().await?.delete_connector(&id)?), true),
-            call if schedule::is_schedule_call(&call) => return self.schedule_call(account, call, &Actor::User).await,
+            call @ (HubCall::ListSchedules | HubCall::SaveSchedule { .. } | HubCall::PauseSchedule { .. } | HubCall::DeleteSchedule { .. } | HubCall::ScheduleRuns { .. }) => return self.schedule_call(account, call, &Actor::User).await,
             HubCall::SetReleaseProtection { on } => {
                 self.db.set_release_protection(account.id, on).await?;
                 return json(on);
