@@ -1376,6 +1376,55 @@ Deploys go through the VPS."
         assert_eq!(low.admit(Some("claude-fable-5-3"), None, &learned), Ok(None), "the family's tier, not the words of the id, which say mid");
     }
 
+    /// A Claude login's `admit`, over the list pinned knows.
+    fn admit_on_claude(limits: &Limits, model: Option<&str>) -> Result<Option<String>, String> {
+        limits.admit(model, None, &crate::claude_models::known())
+    }
+
+    fn refused_as_unlisted(result: Result<Option<String>, String>, model: &str) {
+        let error = result.expect_err("a model id the machine does not list passed the ceiling");
+        assert!(error.starts_with(&format!("{model} is not in this machine's list of Claude models")), "{error}");
+    }
+
+    #[test]
+    fn a_claude_model_id_the_machine_does_not_list_is_refused_under_a_mid_ceiling() {
+        let mid = Limits { tier: Tier::Mid, ..Limits::default() };
+        refused_as_unlisted(admit_on_claude(&mid, Some("claude-nova-9-9")), "claude-nova-9-9");
+        refused_as_unlisted(admit_on_claude(&mid, Some("sonnet")), "sonnet");
+    }
+
+    #[test]
+    fn a_claude_model_id_the_machine_does_not_list_is_refused_under_a_low_ceiling() {
+        let low = Limits { tier: Tier::Low, ..Limits::default() };
+        // Its words say Low, which is all the guess had.
+        refused_as_unlisted(admit_on_claude(&low, Some("claude-lite-9-9")), "claude-lite-9-9");
+    }
+
+    #[test]
+    fn a_listed_claude_slug_is_held_to_its_listed_tier_under_a_ceiling() {
+        let known = crate::claude_models::known();
+        let slug_of = |cost| known.iter().find(|m| m.cost == cost).map(|m| m.slug.clone()).expect("a listed model of each tier");
+        let (low, mid, high) = (slug_of(crate::delegate::Cost::Low), slug_of(crate::delegate::Cost::Mid), slug_of(crate::delegate::Cost::High));
+        let at_mid = Limits { tier: Tier::Mid, ..Limits::default() };
+        assert_eq!(admit_on_claude(&at_mid, Some(&low)), Ok(None));
+        assert_eq!(admit_on_claude(&at_mid, Some(&mid)), Ok(None));
+        let refused = admit_on_claude(&at_mid, Some(&high)).unwrap_err();
+        assert!(refused.contains("high-tier model") && refused.contains("allows up to mid"), "{refused}");
+        let at_low = Limits { tier: Tier::Low, ..Limits::default() };
+        assert_eq!(admit_on_claude(&at_low, Some(&low)), Ok(None));
+        assert!(admit_on_claude(&at_low, Some(&mid)).unwrap_err().contains("mid-tier model"));
+    }
+
+    #[test]
+    fn with_no_ceiling_a_claude_model_id_the_machine_does_not_list_passes_as_before() {
+        let open = Limits::default();
+        assert_eq!(admit_on_claude(&open, Some("claude-nova-9-9")), Ok(None));
+        assert_eq!(admit_on_claude(&open, Some("sonnet")), Ok(None));
+        assert_eq!(admit_on_claude(&open, None), Ok(None));
+        let mid = Limits { tier: Tier::Mid, ..Limits::default() };
+        assert_eq!(admit_on_claude(&mid, Some("")), Ok(None), "an empty model keeps the default, as before");
+    }
+
     #[test]
     fn the_box_budget_is_the_default_and_the_ceiling_of_a_boxs_budget() {
         let limits = Limits { box_budget_cents: 250, ..Limits::default() };
