@@ -290,7 +290,7 @@ pub const ACTIONS: &[Action] = &[
     h("run_workflow", Write, "Runs the saved workflow id now, with no Linear issue or Slack thread behind it, and answers the session it started: its machine and tab. The session has the setup the workflow gives its sessions and opens on your own machine; a workflow set to another machine or an Upstash Box is refused. It is your task: it counts against its project's workers-at-once limit, is held to the project's tier, effort, time limit and budget, and you get its notice when its first turn ends. A workflow that only sorts Slack messages or only answers threads another workflow hands it has nothing to run.").wired().starts_work(),
     h("open_box", Write, "Starts an interactive session on a new Upstash Box cloning repo, within the account's box limit and its Box budget: budget_usd may not pass it, and is it when left out. Without size it opens at the default box size that get_box_size answers. Once the box ends it counts as your delegated task in delegation_stats.").wired().starts_work(),
     h("box_status", Read, "The phase, age and budget of the box behind machine.").wired(),
-    h("extend_box", Write, "Adds extra_usd to the budget of the box behind machine, which may not pass the account's Box budget for its project.").wired(),
+    h("extend_box", Confirm, "Adds extra_usd to the budget of the box behind machine, which may not pass the account's Box budget for its project. The user approves it in the app.").wired(),
     h("machines", Read, "Every machine of the account: id, name, OS, whether it is online, when it was last seen, its pinned version and update, and its box.").wired(),
     h("rename_machine", Write, "Renames the account's machine id to name.").wired(),
     h("remove_machine", Confirm, "Removes a machine from the account: its sessions stop showing, and a box's machine is deleted with its box.").wired(),
@@ -322,7 +322,7 @@ pub const ACTIONS: &[Action] = &[
     h("repo_look", Excluded, "the global orchestrator's own repo tools: it calls repo_overview, repo_read and repo_search"),
     h("record_tasks", Excluded, "machines send their delegated tasks' records by themselves"),
     h("delegation_stats", Read, "How the account's delegated tasks went over the last days (1, 7 or 30), per model.").wired(),
-    h("box_usage", Read, "The account's Upstash Box usage: every box the key lists with its CPU hours and compute cost, the totals of this UTC month, and the box hours of pinned's own delegated tasks.").wired(),
+    h("box_usage", Read, "The account's Upstash Box usage: the boxes this account opened through pinned with their CPU hours and compute cost, one count with the sums of this UTC month's other boxes on the key (no names), the key's totals of this UTC month, and the box hours of pinned's own delegated tasks.").wired(),
     h("stuck_boxes", Read, "The account's Upstash boxes pinned could not delete, each with its row id and why the delete failed. A box listed without `unconfirmed` is still running on Upstash; one with `unconfirmed: true` is a row pinned could not confirm a box for. Read from pinned's own record: it needs no Upstash connection and makes no Upstash call.").wired(),
     h("unclaimed_ends", Read, "The account's worker reports that their delegating machine did not take, as one that restarted and forgot the task, or was removed, does: task, origin_machine, origin_tab, from_machine, the end (state, summary, error, usage; keys and tokens of a known shape show as [hidden]), held_at and unclaimed_at in unix ms. The hub keeps each for 30 days from when the worker ended.").wired(),
     h("delegate", Excluded, "a machine's way to run delegate_task on another machine or a box: call delegate_task"),
@@ -374,6 +374,12 @@ pub fn owner_only(side: Side, cmd: &str, locked: bool) -> bool {
         return true;
     }
     locked && of_cmd(side, cmd).is_some_and(|action| action.class == Confirm)
+}
+
+/// Whether an agent's `act` of `action` waits for the owner's approval instead of running. The
+/// server's `act` decides by this and by nothing else: no unlock state, no `owner_only`.
+pub fn held_for_owner(action: &Action) -> bool {
+    action.class == Confirm
 }
 
 /// Hub actions that start work and that the hub holds to the limits itself: the server's `act`
@@ -800,11 +806,16 @@ pub fn widening(call: &Parsed) -> Option<String> {
 }
 
 /// Whether `call` saves a workflow with a session that skips its permission prompts. It runs later,
-/// outside the saving session, so a session that asks for its own prompts may not save one.
+/// outside the saving session, so a session that asks for its own prompts may not save one. A
+/// permission the runner's parse does not read counts too: the check never reads a value as safe
+/// that another layer could read as a mode.
 pub fn skips_prompts(call: &Parsed) -> bool {
+    fn skips(field: &Value) -> bool {
+        field.as_str().is_some_and(|name| matches!(crate::connectors::parse_permission(name), Ok(Some(crate::connectors::PermissionMode::BypassPermissions)) | Err(_)))
+    }
     fn walk(value: &Value) -> bool {
         match value {
-            Value::Object(fields) => fields.iter().any(|(name, field)| (matches!(name.as_str(), "permissionMode" | "permission") && field == "bypassPermissions") || walk(field)),
+            Value::Object(fields) => fields.iter().any(|(name, field)| (matches!(name.as_str(), "permissionMode" | "permission") && skips(field)) || walk(field)),
             Value::Array(items) => items.iter().any(walk),
             _ => false,
         }
@@ -1041,13 +1052,23 @@ mod tests {
         assert!(!needs(Side::Hub, "machines", true) && !needs(Side::Hub, "rename_machine", true) && !needs(Side::Node, "write_input", true));
         assert!(!needs(Side::Hub, "unlock", true), "unlocking needs no unlock");
         assert!(!needs(Side::Node, "decide_confirmation", true), "no machine call is a decision");
-        assert!(!needs(Side::Hub, "answer_box", true) && !needs(Side::Hub, "extend_box", true), "a box follows its access setting and Box budget, never the password");
+        assert!(!needs(Side::Hub, "answer_box", true), "a box follows its access setting, never the password");
+        assert!(needs(Side::Hub, "extend_box", true) && !needs(Side::Hub, "extend_box", false), "extending a box is money: a locked login asks the password, an older app's login keeps its call");
         for cmd in ["set_box_access", "connect_upstash", "disconnect_upstash", "set_box_claude_token", "remove_box_claude_token", "connect_convex", "set_convex_repos", "disconnect_convex"] {
             assert!(needs(Side::Hub, cmd, true), "changing who may use a box, or its credentials, still needs the password: {cmd}");
         }
         let confirm: Vec<&str> = ACTIONS.iter().filter(|a| needs(a.side, a.cmd, true)).map(|a| a.name).collect();
+        assert!(confirm.contains(&"decide_confirmation") && confirm.contains(&"extend_box"), "the decision and the Extend need the unlock: {confirm:?}");
         assert_eq!(confirm.len(), ACTIONS.iter().filter(|a| a.class == Confirm).count() + 2, "every confirm action, the decision and the release-protection switch: {confirm:?}");
         assert!(include_str!("../../../ui/hub.js").contains(&format!("const LOCKED = \"{LOCKED}\";")), "the app asks for the password on this exact refusal");
+    }
+
+    #[test]
+    fn an_agents_extend_box_waits_for_the_owner_and_the_apps_own_extend_asks_the_password_on_a_locked_login() {
+        let extend = find("extend_box").unwrap();
+        assert!(held_for_owner(extend), "an agent's extend_box is held for the owner's approval, never run at once");
+        assert!(owner_only(Side::Hub, "extend_box", true), "the app's own Extend on a locked login asks for the password");
+        assert!(!owner_only(Side::Hub, "extend_box", false), "an unlocked app, or an older app's login, extends as before");
     }
 
     #[test]
@@ -1097,7 +1118,7 @@ mod tests {
                 "save_idea", "delete_idea",
             ]
         );
-        for name in ["set_taste", "reset_taste_field", "set_box_size", "delete_connector"] {
+        for name in ["set_taste", "reset_taste_field", "set_box_size", "delete_connector", "extend_box"] {
             assert_eq!(find(name).map(|a| a.class), Some(Confirm), "{name} carries limits or deletes, so the user approves it");
         }
         assert_eq!(find("list_schedules").map(|a| a.class), Some(Read));
@@ -1217,7 +1238,7 @@ mod tests {
             connect_upstash: Confirm on "hub" => {};
             disconnect_upstash: Confirm on "hub" => {};
             set_box_access: Confirm on "hub" => { "access": { "session": { "mode": "fresh" } } };
-            extend_box: Write on "hub" => { "machine": "m1", "extra_usd": 2.0 };
+            extend_box: Confirm on "hub" => { "machine": "m1", "extra_usd": 2.0 };
             pair_code: Confirm on "hub" => {};
             revoke_invite: Confirm on "hub" => { "id": "i1" };
             stage: Write on "hub" => { "connector": "c1", "issue": "uuid-1", "stage": "coding" };
@@ -1442,6 +1463,24 @@ mod tests {
         assert!(skips_prompts(&parsed(workflow("manual", "bypassPermissions"))), "a step's own setting counts");
         assert_eq!(widening(&parsed(workflow("bypassPermissions", ""))).as_deref(), Some("loosened permissions: the saved workflow runs a session that skips its permission prompts"));
         assert_eq!(widening(&parsed(workflow("auto", ""))), None);
+    }
+
+    #[test]
+    fn a_step_permission_that_is_not_an_exact_name_is_noted_as_skipping_prompts() {
+        let workflow = |step: &str| {
+            json!({
+                "connector": {
+                    "name": "Fix", "enabled": true, "trigger": { "kind": "called" }, "folder": "/w/site", "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false, "instructions": "",
+                    "graph": { "nodes": [{ "id": "s", "name": "Fix", "position": [0, 0], "type": "session", "permission": step }], "edges": [] }
+                }
+            })
+        };
+        let parsed = |args: Value| parse(find("save_connector").unwrap(), &args).unwrap();
+        for step in [" bypassPermissions ", "bypassPermissions\n"] {
+            assert!(skips_prompts(&parsed(workflow(step))), "{step:?}");
+            assert_eq!(widening(&parsed(workflow(step))).as_deref(), Some("loosened permissions: the saved workflow runs a session that skips its permission prompts"), "{step:?}");
+        }
+        assert!(!skips_prompts(&parsed(workflow(""))), "an empty step inherits the workflow's own");
     }
 
     #[test]
