@@ -2694,12 +2694,16 @@ fn a_box_row_with_no_upstash_id_is_listed_unconfirmed_through_the_real_end_and_a
         assert!(refused.contains("Invalid box API key"), "{refused}");
     }
     let stuck = client.hub(json!({ "cmd": "stuck_boxes" })).unwrap();
-    println!("stuck_boxes answer: {stuck}");
     let listed = stuck.as_array().unwrap();
     assert_eq!(listed.len(), 2, "{stuck}");
     let of = |id: &str| listed.iter().find(|s| s["id"] == id).unwrap_or_else(|| panic!("{id} is not listed: {stuck}"));
     assert_eq!(of(&unrecorded.id)["unconfirmed"], json!(true), "pinned never learned this row's box id: {stuck}");
     assert!(of(&recorded.id).get("unconfirmed").is_none(), "a row with its Upstash id is a known box: {stuck}");
+    // Which box: the known row by its Upstash id, the unconfirmed one by the label to look for.
+    assert_eq!(of(&recorded.id)["upstash"], json!(recorded.upstash.as_ref().unwrap().0), "{stuck}");
+    assert!(of(&recorded.id).get("label").is_none(), "{stuck}");
+    assert_eq!(of(&unrecorded.id)["label"], json!(format!("p:{}", unrecorded.id)), "{stuck}");
+    assert!(of(&unrecorded.id).get("upstash").is_none(), "{stuck}");
     assert!(listed.iter().all(|s| s["why"] == "Upstash Box refused the key: Invalid box API key"), "{stuck}");
     assert!(!stuck.to_string().contains("wrong-key"), "{stuck}");
 
@@ -2717,6 +2721,11 @@ fn a_box_row_with_no_upstash_id_is_listed_unconfirmed_through_the_real_end_and_a
     let of = |id: &str| listed.iter().find(|s| s["id"] == id).unwrap_or_else(|| panic!("{id} is not listed: {stuck}"));
     assert_eq!(of(&unrecorded.id)["unconfirmed"], json!(true), "{stuck}");
     assert!(of(&recorded.id).get("unconfirmed").is_none(), "{stuck}");
+    // Which box: the known row by its Upstash id, the unconfirmed one by the label to look for.
+    assert_eq!(of(&recorded.id)["upstash"], json!(recorded.upstash.as_ref().unwrap().0), "{stuck}");
+    assert!(of(&recorded.id).get("label").is_none(), "{stuck}");
+    assert_eq!(of(&unrecorded.id)["label"], json!(format!("p:{}", unrecorded.id)), "{stuck}");
+    assert!(of(&unrecorded.id).get("upstash").is_none(), "{stuck}");
     assert!(listed.iter().all(|s| s["why"] == "Upstash is not connected"), "{stuck}");
 }
 

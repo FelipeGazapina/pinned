@@ -1540,7 +1540,7 @@ impl Boxes {
     /// box being deleted as usual.
     pub fn stuck_among(&self, rows: impl Iterator<Item = String>) -> Vec<StuckBox> {
         let record = self.stuck.lock().unwrap();
-        rows.filter_map(|id| record.get(&id).map(|r| StuckBox { why: r.why.clone(), unconfirmed: r.unconfirmed, upstash: r.upstash.clone(), label: r.label.clone(), id })).collect()
+        rows.filter_map(|id| record.get(&id).map(|r| StuckBox { why: r.why.clone(), unconfirmed: r.unconfirmed, upstash: None, label: None, id })).collect()
     }
 
     /// A worker box ended before its task did: the machine whose tab delegated the task hears it
