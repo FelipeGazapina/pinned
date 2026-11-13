@@ -2058,7 +2058,8 @@ mod tests {
         creds.save(dir).unwrap();
     }
 
-    #[cfg(unix)]
+    // The script launches the node with `setsid`, which macOS lacks; a box only ever runs on Linux.
+    #[cfg(target_os = "linux")]
     #[test]
     fn the_start_script_launches_a_paired_node_with_pinned_box_set() {
         let run = StartRun::new();
@@ -2076,7 +2077,8 @@ mod tests {
         assert!(!run.home.join(".profile").exists(), "the script went past its account check");
     }
 
-    #[cfg(unix)]
+    // The script launches the node with `setsid`, which macOS lacks; a box only ever runs on Linux.
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_container_restart_after_a_node_left_for_good_starts_no_node() {
         let run = StartRun::new();
