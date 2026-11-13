@@ -4760,6 +4760,39 @@ fn a_box_permission_naming_another_accounts_box_opens_a_box_of_its_own() {
 }
 
 #[test]
+fn a_box_row_id_another_account_is_driving_is_unknown_to_this_account_not_still_booting() {
+    let hub = TestHub::start_with_boxes("drive_lock", Signup::Open, fast());
+    // The first box script to run hangs, so the row ana's hub drives stays driven for the whole test.
+    hub.boxes.state.lock().unwrap().hanging = true;
+    let ana = BoxAccount::new(&hub);
+    let mut bob = BoxAccount::named(&hub, "bob@example.test");
+    admin_on(&hub.database, &format!(
+        "insert into boxes (id, account, machine, upstash, connector, subject, spec, size, phase) values ('shared-id', '{}', '{}', null, 'c-ana', '{{\"issue\":\"a1\"}}', '{{\"folder\":\"/w\",\"args\":[]}}', 'small', 'creating')",
+        ana.id, uuid::Uuid::new_v4(),
+    ));
+    let started = Instant::now();
+    while !hub.boxes.state.lock().unwrap().scripts.iter().any(|s| s.contains("start.sh")) {
+        assert!(started.elapsed() < Duration::from_secs(10), "ana's row was never driven");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(created(&hub), 1, "ana's row has its box, and its drive hangs on the start script");
+
+    // Bob's settings, which his client writes, name ana's row id.
+    bob.client.hub(json!({ "cmd": "set_box_access", "access": { "workflow": { "mode": "fixed", "row": "shared-id" } } })).unwrap();
+    let answer = hub.runtime.block_on(hub.hub().open(bob.id, bob.box_run(issue("uuid-1"))));
+    assert_eq!(answer, Ok(()), "bob got the answer for a row he does not have (a box of his own), not ana's lock");
+    assert_eq!(created(&hub), 2, "bob's run opened a box of his own");
+    assert_eq!(bob.rows(&hub), 1);
+
+    // Ana's drive is untouched: her row is still hers, still creating or booting, and still the one row.
+    let rows = hub.runtime.block_on(hub.hub().db.boxes(ana.id)).unwrap();
+    assert_eq!(rows.len(), 1);
+    let row = rows.into_iter().next().unwrap().unwrap();
+    assert_eq!(row.id, "shared-id");
+    assert!(matches!(row.phase, pinned_server::boxes::Phase::Creating | pinned_server::boxes::Phase::Booting), "{:?}", row.phase);
+}
+
+#[test]
 fn an_accounts_tastes_are_read_written_and_imported_only_by_that_account() {
     let hub = TestHub::start("iso_taste");
     let url = hub.url.clone();
@@ -8476,7 +8509,7 @@ fn box_usage_without_an_upstash_connection_is_empty() {
     let answer = ana.hub(json!({ "cmd": "box_usage" })).unwrap();
     assert_eq!(
         answer,
-        json!({ "connected": false, "error": null, "boxes": [], "upstash": { "cpu_hours": 0.0, "compute_usd": 0.0, "boxes": 0 }, "pinned": { "box_hours": 0.0, "tasks": 0, "since": 0 } })
+        json!({ "connected": false, "error": null, "boxes": [], "upstash": { "cpu_hours": 0.0, "compute_usd": 0.0, "boxes": 0 }, "others": { "boxes": 0, "cpu_hours": 0.0, "compute_usd": 0.0 }, "pinned": { "box_hours": 0.0, "tasks": 0, "since": 0 } })
     );
 }
 
@@ -8514,10 +8547,10 @@ fn box_usage_lists_what_upstash_lists_and_marks_the_box_pinned_opened() {
             "error": null,
             "boxes": [
                 { "id": "u-web", "name": "web", "size": "large", "status": "running", "created": month + 10, "last_activity": month + 30, "cpu_hours": 2.0, "compute_usd": 1.5,
-                  "pinned": { "project": "site", "role": "worker", "machine": "ana-mac" } },
-                { "id": "u-old", "name": "last month", "size": null, "status": "deleted", "created": month - 86_400, "last_activity": null, "cpu_hours": 1.0, "compute_usd": 0.5, "pinned": null }
+                  "pinned": { "project": "site", "role": "worker", "machine": "ana-mac" } }
             ],
             "upstash": { "cpu_hours": 2.0, "compute_usd": 1.5, "boxes": 1 },
+            "others": { "boxes": 0, "cpu_hours": 0.0, "compute_usd": 0.0 },
             "pinned": { "box_hours": 2.0, "tasks": 2, "since": month }
         })
     );
@@ -8547,6 +8580,7 @@ fn box_usage_reports_an_upstash_that_fails_and_still_counts_pinneds_own() {
             "error": "Upstash did not answer: Upstash Box answered 500: boom",
             "boxes": [],
             "upstash": { "cpu_hours": 0.0, "compute_usd": 0.0, "boxes": 0 },
+            "others": { "boxes": 0, "cpu_hours": 0.0, "compute_usd": 0.0 },
             "pinned": { "box_hours": 2.0, "tasks": 1, "since": month }
         })
     );
@@ -8617,11 +8651,243 @@ fn box_usage_never_shows_one_account_the_boxes_or_tasks_of_another() {
     let a = ana.hub(json!({ "cmd": "box_usage" })).unwrap();
     assert_eq!((a["boxes"][0]["id"].clone(), a["boxes"][0]["pinned"]["project"].clone(), a["pinned"]["box_hours"].clone(), a["pinned"]["tasks"].clone()), (json!("a-1"), json!("site"), json!(1.0), json!(1)));
     let b = bob.hub(json!({ "cmd": "box_usage" })).unwrap();
-    assert_eq!(b["boxes"].as_array().unwrap().iter().map(|x| (x["id"].clone(), x["pinned"].clone())).collect::<Vec<_>>(), [(json!("a-1"), Value::Null), (json!("b-1"), Value::Null)], "a box row of ana's names no box of bob's, even under the same Upstash id");
+    assert_eq!((b["boxes"].clone(), b["others"]["boxes"].clone()), (json!([]), json!(2)), "a box row of ana's names no box of bob's, even under the same Upstash id, and bob opened neither");
     assert_eq!(b["pinned"], json!({ "box_hours": 0.0, "tasks": 0, "since": month }));
     for leaked in ["site", "ana-mac", "worker", "ghp_"] {
         assert!(!b.to_string().contains(leaked), "ana's {leaked} reached bob: {b}");
     }
+}
+
+#[test]
+fn two_accounts_on_one_upstash_key_list_only_their_own_boxes_and_count_the_rest() {
+    let hub = TestHub::start("usage_shared_key");
+    let key = "box_testkey-usage-shared";
+    let (token_a, id_a, mut ana) = usage_account(&hub.url, "ana@example.test", key);
+    let (token_b, id_b, mut bob) = usage_account(&hub.url, "bob@example.test", key);
+    let (machine_a, _) = account::register_machine(&hub.url, &token_a, "ana-mac", "linux").unwrap();
+    let (machine_b, _) = account::register_machine(&hub.url, &token_b, "bob-mac", "linux").unwrap();
+    let month = month_start();
+    upstash_answers(
+        key,
+        Some((
+            200,
+            json!([
+                { "id": "u-ana", "name": "ana-site-worker-aaaaaa", "status": "running", "created_at": month + 10, "updated_at": month + 20, "total_cpu_ns": 3.6e12, "total_compute_cost_usd": 1.0 },
+                { "id": "u-bob", "name": "bobproject-worker-bbbbbb", "status": "running", "created_at": month + 11, "updated_at": month + 21, "total_cpu_ns": 7.2e12, "total_compute_cost_usd": 2.0 },
+                { "id": "u-hand", "name": "made-by-hand", "status": "idle", "created_at": month + 12, "updated_at": month + 22, "total_cpu_ns": 3.6e12, "total_compute_cost_usd": 0.5 }
+            ]),
+        )),
+    );
+    opened_box(&hub, &id_a, &machine_a.id, "box-a1", "u-ana", "git@github.com:example/ana-site.git");
+    opened_box(&hub, &id_b, &machine_b.id, "box-b1", "u-bob", "git@github.com:example/bobproject.git");
+
+    let a = ana.hub(json!({ "cmd": "box_usage" })).unwrap();
+    assert_eq!(a["boxes"].as_array().unwrap().iter().map(|x| x["id"].clone()).collect::<Vec<_>>(), [json!("u-ana")], "ana's page lists only the box ana opened");
+    assert_eq!(a["boxes"][0]["pinned"]["project"], json!("ana-site"));
+    assert_eq!(a["others"], json!({ "boxes": 2, "cpu_hours": 3.0, "compute_usd": 2.5 }), "bob's box and the hand-made one are one count with their sums");
+    assert_eq!(a["upstash"], json!({ "cpu_hours": 4.0, "compute_usd": 3.5, "boxes": 3 }), "the key-wide totals still cover the whole key");
+    let shown = a.to_string();
+    for leaked in ["u-bob", "bobproject", "bbbbbb", "bob-mac", "u-hand", "made-by-hand", id_b.as_str()] {
+        assert!(!shown.contains(leaked), "bob's {leaked} reached ana: {shown}");
+    }
+
+    let b = bob.hub(json!({ "cmd": "box_usage" })).unwrap();
+    assert_eq!(b["boxes"].as_array().unwrap().iter().map(|x| x["id"].clone()).collect::<Vec<_>>(), [json!("u-bob")]);
+    assert_eq!(b["others"], json!({ "boxes": 2, "cpu_hours": 2.0, "compute_usd": 1.5 }));
+    let shown = b.to_string();
+    for leaked in ["u-ana", "ana-site", "aaaaaa", "ana-mac", "u-hand", "made-by-hand", id_a.as_str()] {
+        assert!(!shown.contains(leaked), "ana's {leaked} reached bob: {shown}");
+    }
+}
+
+/// The first column of the first row of `sql` as text, or "none" when it has no row, as Postgres has it.
+fn first_text(hub: &TestHub, sql: &str) -> String {
+    hub.runtime.block_on(async {
+        let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        db.query_opt(sql, &[]).await.unwrap().map_or("none".to_owned(), |row| row.get::<_, Option<String>>(0).unwrap_or_else(|| "null".into()))
+    })
+}
+
+/// Ana's rows of every kind the id-only writes touch, and the ids bob would have to guess.
+struct AnaRows {
+    machine: uuid::Uuid,
+    grant: uuid::Uuid,
+    session: uuid::Uuid,
+    confirmation: uuid::Uuid,
+}
+
+fn ana_rows(hub: &TestHub, ana: &str, machine: &str) -> AnaRows {
+    let rows = AnaRows { machine: machine.parse().unwrap(), grant: uuid::Uuid::new_v4(), session: uuid::Uuid::new_v4(), confirmation: uuid::Uuid::new_v4() };
+    opened_box(hub, ana, machine, "box-run", "u-ana", "git@github.com:example/site.git");
+    admin_on(
+        &hub.database,
+        &format!(
+            "update boxes set phase = 'running' where id = 'box-run';
+             insert into boxes (id, account, machine, upstash, connector, subject, spec, size, phase) values ('box-new', '{ana}', '{machine}', null, 'c2', '{{\"issue\":\"ISSUE-2\"}}', '{{}}', 'small', 'creating');
+             update machines set last_seen = now() - interval '1 day' where id = '{machine}';
+             insert into agent_clients (id, name, redirect_uris) values ('client-1', 'fake agent', '[]');
+             insert into agent_grants (id, account, client, scopes, projects) values ('{grant}', '{ana}', 'client-1', '[]', '[]');
+             insert into agent_sessions (id, grant_id, machine, project, title) values ('{session}', '{grant}', '{machine}', 'site', 'a session');
+             insert into agent_confirmations (id, account, machine, tab, role, action, args) values ('{confirmation}', '{ana}', '{machine}', 'tab-1', 'worker', 'fake.action', '{{}}')",
+            grant = rows.grant,
+            session = rows.session,
+            confirmation = rows.confirmation
+        ),
+    );
+    rows
+}
+
+/// What ana's rows say now, one line: any change to a row an id-only write may touch shows in it.
+fn ana_state(hub: &TestHub, rows: &AnaRows) -> String {
+    first_text(
+        hub,
+        &format!(
+            "select concat_ws('|',
+               (select extract(epoch from last_seen)::bigint::text from machines where id = '{machine}'),
+               (select concat_ws(',', id, phase, coalesce(upstash, '-'), spec::text) from boxes where id = 'box-run'),
+               (select concat_ws(',', id, phase, coalesce(upstash, '-')) from boxes where id = 'box-new'),
+               (select count(*)::text from boxes),
+               (select concat_ws(',', coalesce(outcome, '-'), notified::text, coalesce(result::text, '-')) from agent_confirmations where id = '{confirmation}'),
+               (select count(*)::text from agent_sessions where id = '{session}'))",
+            machine = rows.machine,
+            confirmation = rows.confirmation,
+            session = rows.session
+        ),
+    )
+}
+
+#[test]
+fn an_account_alone_on_its_key_counts_its_own_ended_boxes_as_other_boxes_with_no_name_and_only_this_months() {
+    let hub = TestHub::start("usage_single_owner");
+    let key = "box_testkey-usage-single";
+    let (token, ana, mut client) = usage_account(&hub.url, "ana@example.test", key);
+    let (machine, _) = account::register_machine(&hub.url, &token, "ana-mac", "linux").unwrap();
+    let month = month_start();
+    upstash_answers(
+        key,
+        Some((
+            200,
+            json!([
+                { "id": "u-open", "name": "ana-site-worker-aaaaaa", "status": "running", "created_at": month + 10, "updated_at": month + 20, "total_cpu_ns": 3.6e12, "total_compute_cost_usd": 1.0 },
+                // Ended by pinned, so its row is gone, and Upstash still lists it.
+                { "id": "u-ended", "name": "ana-site-worker-endedx", "status": "stopped", "created_at": month + 11, "updated_at": month + 21, "total_cpu_ns": 7.2e12, "total_compute_cost_usd": 2.0 },
+                // Last month's: the key totals leave it out, and so does the count of other boxes.
+                { "id": "u-last-month", "name": "ana-site-worker-lastmo", "status": "stopped", "created_at": month - 86_400, "updated_at": month - 80_000, "total_cpu_ns": 36e12, "total_compute_cost_usd": 20.0 }
+            ]),
+        )),
+    );
+    opened_box(&hub, &ana, &machine.id, "box-a1", "u-open", "git@github.com:example/ana-site.git");
+
+    let usage = client.hub(json!({ "cmd": "box_usage" })).unwrap();
+    assert_eq!(usage["boxes"].as_array().unwrap().iter().map(|x| x["id"].clone()).collect::<Vec<_>>(), [json!("u-open")]);
+    assert_eq!(usage["others"], json!({ "boxes": 1, "cpu_hours": 2.0, "compute_usd": 2.0 }), "the ended box is the one other box; last month's is not counted");
+    assert_eq!(usage["upstash"]["boxes"], json!(2), "the key totals and the count of other boxes cover the same month");
+    let shown = usage.to_string();
+    for leaked in ["u-ended", "endedx", "u-last-month", "lastmo"] {
+        assert!(!shown.contains(leaked), "a box that is not in the list showed as {leaked}: {shown}");
+    }
+}
+
+#[test]
+fn an_id_only_write_with_another_accounts_id_changes_no_row() {
+    use pinned_core::upstash::BoxId;
+    use pinned_server::boxes::{End, Phase};
+    let hub = TestHub::start("id_only_writes");
+    let (token_a, ana, _client_a) = signed_in(&hub.url, "ana@example.test");
+    let (_, bob, _client_b) = signed_in(&hub.url, "bob@example.test");
+    let (machine, _) = account::register_machine(&hub.url, &token_a, "ana-mac", "linux").unwrap();
+    let rows = ana_rows(&hub, &ana, &machine.id);
+    let (ana_id, bob_id) = (uuid::Uuid::parse_str(&ana).unwrap(), uuid::Uuid::parse_str(&bob).unwrap());
+    let bob_grant = uuid::Uuid::new_v4();
+    admin_on(&hub.database, &format!("insert into agent_grants (id, account, client, scopes, projects) values ('{bob_grant}', '{bob}', 'client-1', '[]', '[]')"));
+    let db = &hub.hub().db;
+    let before = ana_state(&hub, &rows);
+    println!("before: {before}");
+
+    // Bob's account, ana's ids: every call is a no-op.
+    let (moved, created) = hub.runtime.block_on(async {
+        db.machine_seen(bob_id, rows.machine).await.unwrap();
+        db.set_box_budget(bob_id, "box-run", 99.0).await.unwrap();
+        let moved = db.set_box_phase(bob_id, "box-run", &Phase::Running, &Phase::Ending(End::Exited)).await.unwrap();
+        let created = db.box_created(bob_id, "box-new", &BoxId("u-stolen".into())).await.unwrap();
+        assert_eq!(db.delete_box(bob_id, "box-run").await.unwrap(), 0, "a delete that matched no row says so, to be logged by the hub-wide end");
+        db.finish_confirmation(bob_id, rows.confirmation, "done", &json!({ "by": "bob" })).await.unwrap();
+        db.notified(bob_id, rows.confirmation).await.unwrap();
+        db.drop_agent_session(bob_grant, rows.session).await.unwrap();
+        (moved, created)
+    });
+    assert_eq!(ana_state(&hub, &rows), before, "a write with bob's id changed one of ana's rows (last seen | box-run | box-new | boxes | confirmation | sessions)");
+    assert_eq!((moved, created), (false, false), "set_box_phase or box_created answered that it changed ana's row");
+
+    // The same calls with ana's own ids do change them, so the check above is not vacuous.
+    hub.runtime.block_on(async {
+        db.machine_seen(ana_id, rows.machine).await.unwrap();
+        db.set_box_budget(ana_id, "box-run", 99.0).await.unwrap();
+        assert!(db.set_box_phase(ana_id, "box-run", &Phase::Running, &Phase::Ending(End::Exited)).await.unwrap());
+        assert!(db.box_created(ana_id, "box-new", &BoxId("u-new".into())).await.unwrap());
+        db.finish_confirmation(ana_id, rows.confirmation, "done", &json!({ "by": "ana" })).await.unwrap();
+        db.notified(ana_id, rows.confirmation).await.unwrap();
+        db.drop_agent_session(rows.grant, rows.session).await.unwrap();
+    });
+    let after = ana_state(&hub, &rows);
+    println!("after: {after}");
+    for (changed, what) in [("|box-run,", "box-run"), ("budget_usd", "the budget"), ("box-new,booting,u-new", "box_created"), ("done,true", "the confirmation"), ("|0", "the session")] {
+        assert!(after.contains(changed), "ana's own call did not change {what}: {after}");
+    }
+    assert_eq!(hub.runtime.block_on(db.delete_box(ana_id, "box-run")).unwrap(), 1, "the owner's delete changed the one row");
+    assert_eq!(first_text(&hub, "select count(*)::text from boxes where id = 'box-run'"), "0", "the owner's delete_box deletes");
+}
+
+#[test]
+fn a_request_id_replayed_under_another_grant_never_gets_the_first_grants_session_back() {
+    use pinned_server::db::Reserved;
+    let hub = TestHub::start("replayed_session");
+    let (_, ana, _client_a) = signed_in(&hub.url, "ana@example.test");
+    let (_, bob, _client_b) = signed_in(&hub.url, "bob@example.test");
+    let (ana_grant, bob_grant) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    admin_on(
+        &hub.database,
+        &format!(
+            "insert into agent_clients (id, name, redirect_uris) values ('client-1', 'fake agent', '[]');
+             insert into agent_grants (id, account, client, scopes, projects) values ('{ana_grant}', '{ana}', 'client-1', '[]', '[]');
+             insert into agent_grants (id, account, client, scopes, projects) values ('{bob_grant}', '{bob}', 'client-1', '[]', '[]')"
+        ),
+    );
+    let (ana_session, bob_session) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    let db = &hub.hub().db;
+    let hash = b"same arguments".to_vec();
+    let reserve = |grant, session| hub.runtime.block_on(db.reserve_agent_call(grant, "req-1", "start_session", &hash, Some(session))).unwrap();
+    let session_of = |reserved: Reserved| match reserved {
+        Reserved::Existing { session, .. } => Some(session),
+        Reserved::New => None,
+    };
+    assert!(matches!(reserve(ana_grant, ana_session), Reserved::New), "ana's first call with the id is new");
+    // Bob sends the same request id: it is new for his grant, and the session recorded is his own.
+    assert!(matches!(reserve(bob_grant, bob_session), Reserved::New), "bob's call with ana's request id is new, not ana's call replayed");
+    let (ana_again, bob_again) = (reserve(ana_grant, uuid::Uuid::new_v4()), reserve(bob_grant, uuid::Uuid::new_v4()));
+    assert_eq!(session_of(ana_again), Some(Some(ana_session)), "the owner's replay gets the owner's session");
+    assert_eq!(session_of(bob_again), Some(Some(bob_session)), "bob's replay gets bob's session, never ana's");
+    // A grant that never sent the id has nothing to replay: whatever it is handed back is its own new call.
+    let other = uuid::Uuid::new_v4();
+    admin_on(&hub.database, &format!("insert into agent_grants (id, account, client, scopes, projects) values ('{other}', '{bob}', 'client-1', '[]', '[]')"));
+    assert!(matches!(reserve(other, uuid::Uuid::new_v4()), Reserved::New), "a third grant's call with the same request id is new");
+}
+
+#[test]
+fn another_accounts_box_row_never_joins_an_accounts_machine() {
+    let hub = TestHub::start("machine_join");
+    let (token_a, ana, _client_a) = signed_in(&hub.url, "ana@example.test");
+    let (_, bob, _client_b) = signed_in(&hub.url, "bob@example.test");
+    let (machine, machine_token) = account::register_machine(&hub.url, &token_a, "ana-mac", "linux").unwrap();
+    // A box row of bob's that names ana's machine: no caller writes one, but nothing in the schema stops it.
+    opened_box(&hub, &bob, &machine.id, "box-bob", "u-bob", "git@github.com:example/bobproject.git");
+    let db = &hub.hub().db;
+    let listed = hub.runtime.block_on(db.machines(uuid::Uuid::parse_str(&ana).unwrap())).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].upstash_box, None, "bob's box id showed on ana's machine");
+    let row = hub.runtime.block_on(db.machine_connected(&machine_token, "linux", "0.0.0")).unwrap().unwrap();
+    assert!(!row.dedicated, "bob's box row made ana's machine a box's");
 }
 
 // ---- Scheduled tasks (0.18.2 Ideas+Tasks PR 4): stored and edited, nothing fires them yet ----

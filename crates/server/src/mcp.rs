@@ -510,7 +510,7 @@ async fn start_session(ctx: &Ctx<'_>, args: &Value) -> Result<Value, String> {
             Ok(answer)
         }
         Err(Unanswered::Refused(why)) => {
-            let _ = ctx.hub.db.drop_agent_session(session).await;
+            let _ = ctx.hub.db.drop_agent_session(ctx.grant.id, session).await;
             refuse(why).await
         }
         // The session may run, so the key keeps it: a retry finds its tab rather than starting a second one.

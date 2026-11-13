@@ -410,7 +410,7 @@ fn err(e: tokio_postgres::Error) -> String {
 /// The row, or what deleting its box takes when its run is in a shape this hub can't read.
 fn box_row(r: &tokio_postgres::Row) -> Result<BoxRow, Remains> {
     let (id, machine, upstash): (String, Uuid, _) = (r.get(0), r.get(2), r.get::<_, Option<String>>(3).map(BoxId));
-    let unreadable = |e: serde_json::Error| Remains { id: id.clone(), machine, upstash: upstash.clone(), why: format!("its row is unreadable: {e}") };
+    let unreadable = |e: serde_json::Error| Remains { id: id.clone(), account: r.get(1), machine, upstash: upstash.clone(), why: format!("its row is unreadable: {e}") };
     Ok(BoxRow {
         account: r.get(1),
         machine,
@@ -671,7 +671,7 @@ impl Db {
             .client().await?
             .query_opt(
                 "update machines set os = $2, last_seen = now(), version = $3 where token_hash = $1
-                 returning id, account, name, exists (select 1 from boxes where boxes.machine = machines.id)",
+                 returning id, account, name, exists (select 1 from boxes where boxes.machine = machines.id and boxes.account = machines.account)",
                 &[&hash(token), &os, &version],
             )
             .await
@@ -679,8 +679,8 @@ impl Db {
         Ok(row.map(|r| MachineRow { id: r.get(0), account: r.get(1), name: r.get(2), dedicated: r.get(3) }))
     }
 
-    pub async fn machine_seen(&self, machine: Uuid) -> Result<(), String> {
-        self.client().await?.execute("update machines set last_seen = now() where id = $1", &[&machine]).await.map_err(err).map(drop)
+    pub async fn machine_seen(&self, account: Uuid, machine: Uuid) -> Result<(), String> {
+        self.client().await?.execute("update machines set last_seen = now() where id = $1 and account = $2", &[&machine, &account]).await.map_err(err).map(drop)
     }
 
     /// The account's machines in the order they joined, all offline: the hub knows which are online.
@@ -689,7 +689,7 @@ impl Db {
             .client().await?
             .query(
                 "select m.id, m.name, m.os, extract(epoch from coalesce(m.last_seen, m.created_at))::bigint, b.upstash, m.version from machines m
-                 left join boxes b on b.machine = m.id where m.account = $1 order by m.created_at, m.id",
+                 left join boxes b on b.machine = m.id and b.account = m.account where m.account = $1 order by m.created_at, m.id",
                 &[&account],
             )
             .await
@@ -950,30 +950,30 @@ impl Db {
     }
 
     /// Adds to the row's budget, kept in its spec beside the run.
-    pub async fn set_box_budget(&self, id: &str, budget: f64) -> Result<(), String> {
-        self.client().await?.execute("update boxes set spec = spec || jsonb_build_object('budget_usd', $2::float8) where id = $1", &[&id, &budget]).await.map_err(err)?;
+    pub async fn set_box_budget(&self, account: Uuid, id: &str, budget: f64) -> Result<(), String> {
+        self.client().await?.execute("update boxes set spec = spec || jsonb_build_object('budget_usd', $2::float8) where id = $1 and account = $3", &[&id, &budget, &account]).await.map_err(err)?;
         Ok(())
     }
 
     /// Moves the row from `from` to `to`, and answers false when it was no longer at `from`:
     /// another hub, as during a deploy, moved it first.
-    pub async fn set_box_phase(&self, id: &str, from: &Phase, to: &Phase) -> Result<bool, String> {
+    pub async fn set_box_phase(&self, account: Uuid, id: &str, from: &Phase, to: &Phase) -> Result<bool, String> {
         let ((from, _), (to, reason)) = (from.stored(), to.stored());
         let n = self
             .client().await?
-            .execute("update boxes set phase = $3, reason = $4 where id = $1 and phase = $2", &[&id, &from, &to, &reason])
+            .execute("update boxes set phase = $3, reason = $4 where id = $1 and phase = $2 and account = $5", &[&id, &from, &to, &reason, &account])
             .await
             .map_err(err)?;
         Ok(n == 1)
     }
 
     /// Records the row's box and moves it on to booting, as `set_box_phase` does.
-    pub async fn box_created(&self, id: &str, upstash: &BoxId) -> Result<bool, String> {
+    pub async fn box_created(&self, account: Uuid, id: &str, upstash: &BoxId) -> Result<bool, String> {
         let (from, _) = Phase::Creating.stored();
         let (to, _) = Phase::Booting.stored();
         let n = self
             .client().await?
-            .execute("update boxes set upstash = $3, phase = $4 where id = $1 and phase = $2", &[&id, &from, &upstash.0, &to])
+            .execute("update boxes set upstash = $3, phase = $4 where id = $1 and phase = $2 and account = $5", &[&id, &from, &upstash.0, &to, &account])
             .await
             .map_err(err)?;
         Ok(n == 1)
@@ -1094,8 +1094,9 @@ impl Db {
         self.client().await?.execute("delete from agent_boxes where box = $1 and account = $2", &[&id, &account]).await.map_err(err).map(drop)
     }
 
-    pub async fn delete_box(&self, id: &str) -> Result<(), String> {
-        self.client().await?.execute("delete from boxes where id = $1", &[&id]).await.map_err(err).map(drop)
+    /// How many rows it deleted: none when the row is gone or is another account's.
+    pub async fn delete_box(&self, account: Uuid, id: &str) -> Result<u64, String> {
+        self.client().await?.execute("delete from boxes where id = $1 and account = $2", &[&id, &account]).await.map_err(err)
     }
 
     /// A fresh pairing code for the account and when it expires, in Unix seconds.
@@ -1404,8 +1405,8 @@ impl Db {
             .map(drop)
     }
 
-    pub async fn finish_confirmation(&self, id: Uuid, outcome: &str, result: &Value) -> Result<(), String> {
-        self.client().await?.execute("update agent_confirmations set outcome = $2, result = $3 where id = $1", &[&id, &outcome, result]).await.map_err(err).map(drop)
+    pub async fn finish_confirmation(&self, account: Uuid, id: Uuid, outcome: &str, result: &Value) -> Result<(), String> {
+        self.client().await?.execute("update agent_confirmations set outcome = $2, result = $3 where id = $1 and account = $4", &[&id, &outcome, result, &account]).await.map_err(err).map(drop)
     }
 
     /// The account's confirmations decided in the last week whose session on `machine` has no notice yet.
@@ -1417,8 +1418,8 @@ impl Db {
         Ok(self.client().await?.query(&query, &[&account, &machine]).await.map_err(err)?.iter().map(held).collect())
     }
 
-    pub async fn notified(&self, id: Uuid) -> Result<(), String> {
-        self.client().await?.execute("update agent_confirmations set notified = true where id = $1", &[&id]).await.map_err(err).map(drop)
+    pub async fn notified(&self, account: Uuid, id: Uuid) -> Result<(), String> {
+        self.client().await?.execute("update agent_confirmations set notified = true where id = $1 and account = $2", &[&id, &account]).await.map_err(err).map(drop)
     }
 
     /// The account's codes nobody has used yet, newest first.
@@ -2005,8 +2006,8 @@ impl Db {
             .map(drop)
     }
 
-    pub async fn drop_agent_session(&self, id: Uuid) -> Result<(), String> {
-        self.client().await?.execute("delete from agent_sessions where id = $1", &[&id]).await.map_err(err).map(drop)
+    pub async fn drop_agent_session(&self, grant: Uuid, id: Uuid) -> Result<(), String> {
+        self.client().await?.execute("delete from agent_sessions where id = $1 and grant_id = $2", &[&id, &grant]).await.map_err(err).map(drop)
     }
 
     /// The grant's sessions, newest first, or only `id` when given. Another grant's never.
