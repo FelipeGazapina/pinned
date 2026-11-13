@@ -352,10 +352,15 @@ pub fn save_needs_ok(task: &Task) -> Option<String> {
     (AGENT_TASK_NEEDS_OK && task.id.trim().is_empty()).then(|| format!("an agent wants to schedule \"{}\"", task.title))
 }
 
-/// The argument check of an agent's `save_schedule`: what needs no stored state. An agent's cron may
-/// not repeat more often than [`AGENT_MIN_INTERVAL_MINS`].
+/// The argument check of an agent's `save_schedule`: what needs no stored state, [`agent_floor`].
 pub fn agent_check(call: &Parsed) -> Result<(), String> {
     let Parsed::Hub(HubCall::SaveSchedule { task, .. }) = call else { return Ok(()) };
+    agent_floor(task)
+}
+
+/// An agent's cron may not repeat more often than [`AGENT_MIN_INTERVAL_MINS`]. The hub checks it
+/// again on every save an agent makes, whatever path the save came by.
+pub fn agent_floor(task: &Task) -> Result<(), String> {
     let Schedule::Cron { .. } = task.schedule else { return Ok(()) };
     if let Some(gap) = shortest_gap(&task.schedule, &task.tz, now())? {
         if gap < AGENT_MIN_INTERVAL_MINS * 60 {

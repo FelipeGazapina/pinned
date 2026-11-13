@@ -1007,10 +1007,29 @@ impl Db {
         self.client().await?.execute("delete from tasks where account = $1 and id = $2", &[&account, &id]).await.map(|n| n > 0).map_err(err)
     }
 
-    /// How many tasks agents created that the account still holds.
-    pub async fn agent_task_count(&self, account: Uuid) -> Result<usize, String> {
-        let row = self.client().await?.query_one("select count(*) from tasks where account = $1 and by_agent", &[&account]).await.map_err(err)?;
-        Ok(row.get::<_, i64>(0) as usize)
+    /// Stores `task`, which an agent creates, unless the tasks agents created (`by_agent`) of the
+    /// account already number `cap`: then answers their titles and stores nothing. The count and
+    /// the insert run in one transaction that locks the account's row, so two saves at once never
+    /// both pass.
+    pub async fn add_agent_task(&self, account: Uuid, task: &Task, cap: usize) -> Result<Result<(), Vec<String>>, String> {
+        let id = Uuid::parse_str(&task.id).map_err(|_| format!("{} is not a task id", task.id))?;
+        let stored = Task { next_at: None, last_run: None, ..task.clone() };
+        let value = serde_json::to_value(&stored).map_err(|e| e.to_string())?;
+        let mut held = self.transactions.lock().await;
+        if held.as_ref().map_or(true, Client::is_closed) {
+            *held = Some(open(&self.connection.url).await?);
+        }
+        let tx = held.as_mut().expect("opened above").transaction().await.map_err(err)?;
+        tx.execute("select 1 from accounts where id = $1 for update", &[&account]).await.map_err(err)?;
+        let agents = tx.query("select coalesce(task->>'title', '') from tasks where account = $1 and by_agent order by created_at", &[&account]).await.map_err(err)?;
+        if agents.len() >= cap {
+            return Ok(Err(agents.iter().map(|r| r.get(0)).collect()));
+        }
+        tx.execute("insert into tasks (id, account, task, enabled, next_at, by_agent) values ($1, $2, $3, $4, $5, true)", &[&id, &account, &value, &task.enabled, &task.next_at])
+            .await
+            .map_err(err)?;
+        tx.commit().await.map_err(err)?;
+        Ok(Ok(()))
     }
 
     /// The task's runs, newest first.

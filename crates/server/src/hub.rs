@@ -997,6 +997,9 @@ impl Hub {
                         task.approvals.clear();
                     }
                 }
+                if agent {
+                    schedule::agent_floor(&task)?;
+                }
                 schedule::check_save(&task, protected)?;
                 if task.enabled {
                     task.next_at = schedule::next_after(&task.schedule, &task.tz, now)?;
@@ -1005,12 +1008,8 @@ impl Hub {
                     }
                 }
                 let next = schedule::next_run_times(&task.schedule, &task.tz, now)?;
-                if agent && existing.is_none() {
-                    let held = self.db.tasks(account.id).await?.into_iter().filter(|t| matches!(t.created_by, Actor::Agent { .. })).collect::<Vec<_>>();
-                    if held.len() >= schedule::AGENT_MAX_TASKS {
-                        let titles: Vec<&str> = held.iter().map(|t| t.title.as_str()).collect();
-                        return Err(format!("agents may hold at most {} tasks and {} exist: delete one first ({})", schedule::AGENT_MAX_TASKS, held.len(), titles.join(", ")));
-                    }
+                let created = agent && existing.is_none();
+                if created {
                     // The notice rule: a task an agent creates is active at once, and the user sees an Inbox row.
                     task.fyi = Some(now);
                 } else if !agent {
@@ -1019,7 +1018,12 @@ impl Hub {
                 if dry_run {
                     return json(SaveAnswer { task: None, next });
                 }
-                if !self.db.save_task(account.id, &task).await? {
+                if created {
+                    // Counted and stored in one locked step, so two saves at once never pass the cap together.
+                    if let Err(held) = self.db.add_agent_task(account.id, &task, schedule::AGENT_MAX_TASKS).await? {
+                        return Err(format!("agents may hold at most {} tasks and {} exist: delete one first ({})", schedule::AGENT_MAX_TASKS, held.len(), held.join(", ")));
+                    }
+                } else if !self.db.save_task(account.id, &task).await? {
                     return Err(unknown(&task.id));
                 }
                 self.push_settings(account).await;

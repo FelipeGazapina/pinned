@@ -8489,16 +8489,44 @@ fn an_agent_may_not_repeat_every_five_minutes_nor_hold_more_than_twenty_tasks() 
     let fast_id = s.ana.hub(json!({ "cmd": "list_schedules" })).unwrap()[0]["id"].clone();
     s.ana.hub(json!({ "cmd": "delete_schedule", "id": fast_id })).unwrap();
 
-    for n in 0..20 {
+    // An edit of an hourly task to every 5 minutes is refused too, and leaves it hourly.
+    let mut hourly = task_body("Hourly");
+    hourly["schedule"] = json!({ "kind": "cron", "expr": "0 * * * *" });
+    let hourly = s.act("save_schedule", json!({ "task": hourly })).unwrap()["result"]["task"].clone();
+    let mut faster = hourly.clone();
+    faster["schedule"] = json!({ "kind": "cron", "expr": "*/5 * * * *" });
+    let refused = s.act("save_schedule", json!({ "task": faster })).unwrap_err();
+    assert!(refused.contains("every 5 minutes"), "{refused}");
+    assert_eq!(s.task(hourly["id"].as_str().unwrap())["schedule"]["expr"], "0 * * * *");
+
+    // The user's own tasks do not count toward the agents' 20.
+    for n in 0..2 {
+        save_schedule(&mut s.ana, task_body(&format!("User {n}"))).unwrap();
+    }
+    for n in 0..17 {
         let mut task = task_body(&format!("Task {n}"));
         task["schedule"] = json!({ "kind": "cron", "expr": format!("{n} 9 * * *") });
         assert_eq!(s.act("save_schedule", json!({ "task": task })).unwrap()["outcome"], "done", "task {n}");
     }
+    // 18 agents' tasks: of five saves at once, two pass.
+    let raced: Vec<Result<Value, String>> = std::thread::scope(|scope| {
+        let saves: Vec<_> = (0..5).map(|n| {
+            let s = &s;
+            scope.spawn(move || {
+                let mut task = task_body(&format!("Raced {n}"));
+                task["schedule"] = json!({ "kind": "cron", "expr": format!("{n} 10 * * *") });
+                s.act("save_schedule", json!({ "task": task }))
+            })
+        }).collect();
+        saves.into_iter().map(|save| save.join().unwrap()).collect()
+    });
+    assert_eq!(raced.iter().filter(|r| r.is_ok()).count(), 2, "{raced:?}");
+    assert!(raced.iter().filter_map(|r| r.as_ref().err()).all(|e| e.contains("at most 20")), "{raced:?}");
     let refused = s.act("save_schedule", json!({ "task": task_body("One too many") })).unwrap_err();
-    assert!(refused.contains("at most 20"), "{refused}");
-    assert_eq!(s.titles().len(), 20);
+    assert!(refused.contains("at most 20") && refused.contains("20 exist"), "{refused}");
+    assert_eq!(s.titles().len(), 22, "20 of the agents' and 2 of the user's");
     assert!(save_schedule(&mut s.ana, task_body("The user's own")).is_ok(), "the cap is on agents");
-    assert_eq!(s.titles().len(), 21);
+    assert_eq!(s.titles().len(), 23);
 }
 
 #[test]
