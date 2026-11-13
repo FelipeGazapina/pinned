@@ -224,7 +224,8 @@ async fn run(hub: &Arc<Hub>, account: &Arc<Account>, caller_tab: &str, actor: Ac
         Parsed::Hub(HubCall::SaveIdea { id, title, text, project, status }) => json(hub.save_idea(account, actor, id.as_deref(), &title, &text, project.as_deref(), status).await?),
         Parsed::Hub(call) => Box::pin(hub.hub_call(account, call)).await,
         Parsed::Node(call) => {
-            let guarded = matches!(call, Call::Prompt { .. } | Call::OpenGlobalOrchestrator | Call::RestartClaude { .. } | Call::SetModel { .. } | Call::SetBypass { .. } | Call::Rewind { .. } | Call::SwitchAccount { .. } | Call::SetWorkspace { .. });
+            // `Enqueue` among them: a bare one types its own `sender`, while `act_for` stamps the caller's role.
+            let guarded = matches!(call, Call::Prompt { .. } | Call::Enqueue { .. } | Call::OpenGlobalOrchestrator | Call::RestartClaude { .. } | Call::SetModel { .. } | Call::SetBypass { .. } | Call::Rewind { .. } | Call::SwitchAccount { .. } | Call::SetWorkspace { .. });
             let call = match (on_origin, guarded) {
                 (true, _) => Call::ActFor { caller: caller_tab.to_owned(), call: json(&call)? },
                 (false, true) => Call::ActFor { caller: String::new(), call: json(&call)? },
