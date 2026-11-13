@@ -14519,7 +14519,7 @@ Have another model review a risky change before it goes ahead.";
             "\x1b[200~[pinned] Worker {worker} \"JSON output\" needs input: {QUOTED}\x1b[201~\r\
              \x1b[200~[pinned] Worker {worker} \"JSON output\" finished. Its last message:\n\n{GUARDED_TYPED}\x1b[201~\r"
         );
-        wait_for("the reports", || std::fs::read(&file).is_ok_and(|b| b.len() >= expected.len()));
+        wait_for("both reports", || std::fs::read(&file).is_ok_and(|b| String::from_utf8_lossy(&b).matches("\x1b[201~\r").count() == 2));
         std::thread::sleep(Duration::from_millis(100));
         assert_eq!(String::from_utf8(std::fs::read(&file).unwrap()).unwrap(), expected);
         let _ = std::fs::remove_dir_all(root);
