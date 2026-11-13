@@ -4486,6 +4486,16 @@ impl Connectors {
             }
         }
         self.channels.lock().unwrap().clear();
+        // What the account set up itself stays its own: a file never replaces it. Its Upstash
+        // account, Claude token hints and Slack thread claims also stand for keys and bots of this
+        // account that the file does not carry.
+        imported.upstash = current.upstash.take();
+        imported.box_claude_tokens = std::mem::take(&mut current.box_claude_tokens);
+        imported.boxes = std::mem::take(&mut current.boxes);
+        imported.box_asks = std::mem::take(&mut current.box_asks);
+        imported.box_grants = std::mem::take(&mut current.box_grants);
+        imported.repo_insight = std::mem::take(&mut current.repo_insight);
+        imported.slack_threads = std::mem::take(&mut current.slack_threads);
         imported.mcp_servers = std::mem::take(&mut current.mcp_servers);
         imported.convex = std::mem::take(&mut current.convex);
         *current = imported;
