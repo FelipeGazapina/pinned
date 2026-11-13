@@ -17,7 +17,7 @@ const GO_COLOR = "#4c8dff";
 const providerColor = (account) => (account.go ? GO_COLOR : CLAUDE_COLOR);
 const providerName = (account) => (account.go ? "OpenCode Go" : "Claude Code");
 /** `envs` holds each machine's transcripts and `limits` its claude's limits check; `selected` is null for every machine, as T3 Code's environment filter. */
-const usageState = { metric: "limits", days: 30, breakdown: "model", selected: null, envs: new Map(), limits: new Map(), limitsNow: 0, refreshing: false, now: 0, seq: 0, box: { data: null, error: "", loading: false, seq: 0 } };
+const usageState = { metric: "limits", days: 30, breakdown: "model", selected: null, envs: new Map(), limits: new Map(), limitsNow: 0, refreshing: false, now: 0, seq: 0, box: { data: null, error: "", loading: false, seq: 0 }, stuck: [] };
 try {
   const saved = JSON.parse(load("gui-usage-page"));
   if (USAGE_METRICS.some(([m]) => m === saved?.metric)) usageState.metric = saved.metric;
@@ -628,12 +628,62 @@ function boxListsHtml(boxes, now, open) {
   return `<div class="breakdown"><h3>Running now</h3>${live.length ? boxTableHtml(live, "Running boxes", "Up for", now) : `<p class="muted note">No boxes right now.</p>`}</div>
     ${others.length ? `<details class="box-others"${open ? " open" : ""}><summary>Other boxes (${others.length})</summary>${boxTableHtml(others, "Other boxes", "Status", now)}</details>` : ""}`;
 }
-const boxNotice = (text) => `<div class="limit-notices" role="alert">${icon("triangle-alert")}<div><p>${esc(text)}</p></div></div>`;
+/** A reason as the end of a sentence: trailing full stops and spaces go, and `.` is added unless the text closes on `…` (a reason the hub cut short), `?` or `!`. */
+const reasonEnd = (why) => {
+  const text = String(why).trim().replace(/[.\s]+$/, "");
+  return /[…?!]$/.test(text) ? text : `${text}.`;
+};
+const boxNotice = (text, ids = "") => `<div class="limit-notices" role="alert">${icon("triangle-alert")}<div><p>${esc(text)}</p>${ids}</div></div>`;
+/** A stuck box with no `unconfirmed` flag is one pinned knows is on Upstash; one with it is a row that never recorded a box id. */
+const stuckSplit = (stuck) => [(stuck ?? []).filter((b) => !b.unconfirmed), (stuck ?? []).filter((b) => b.unconfirmed)];
+const stuckCount = (n) => `${n} ${n === 1 ? "box" : "boxes"}`;
+const stillRunning = (n) => `${n === 1 ? "It is" : "They are"} still running, and may still be billed, on Upstash. ${n === 1 ? "It" : "They"} can be deleted in the Upstash console.`;
+/** What pinned says of a row with no Upstash id when its delete failed: it does not know a box exists. */
+const unconfirmedTail = (n) => n === 1
+  ? "pinned could not confirm whether a box exists on Upstash for it. Check the Upstash console and delete it there if it does."
+  : "pinned could not confirm whether a box exists on Upstash for any of them. Check the Upstash console and delete any you find there.";
+/** The reason the hub gives when it has no Upstash key; reconnecting the key is the way out. */
+const NOT_CONNECTED = "Upstash is not connected";
+const reconnectTail = (why, n, verb) => (why === NOT_CONNECTED ? ` Reconnecting the Upstash key lets pinned ${verb} ${n === 1 ? "it" : "them"} on its next pass.` : "");
+const STUCK_IDS_SHOWN = 3;
+/** What lets the owner find each box on Upstash: its id where pinned has it, else the label it lists the box by. Long lists stop after a few. */
+function stuckIdsHtml(boxes) {
+  const values = boxes.map((b) => b.upstash || b.label).filter(Boolean);
+  if (!values.length) return "";
+  const lead = boxes.every((b) => b.upstash) ? `Upstash ${values.length === 1 ? "id" : "ids"}` : "Look for";
+  const shown = values.slice(0, STUCK_IDS_SHOWN).map((v) => `<code>${esc(v)}</code>`).join(", ");
+  const more = values.length > STUCK_IDS_SHOWN ? ` and ${values.length - STUCK_IDS_SHOWN} more` : "";
+  return `<p class="stuck-ids muted">${lead}: ${shown}${more}</p>`;
+}
+/** One notice per distinct reason: the boxes pinned could not delete and knows are still running on Upstash, and the rows it could not confirm a box for. */
+function stuckBoxesHtml(stuck) {
+  const notices = [];
+  const [known, unconfirmed] = stuckSplit(stuck);
+  for (const [list, line] of [
+    [known, (n, why) => `${stuckCount(n)} pinned could not delete: ${reasonEnd(why)} ${stillRunning(n)}${reconnectTail(why, n, "delete")}`],
+    [unconfirmed, (n, why) => `${stuckCount(n)} pinned could not end: ${reasonEnd(why)} ${unconfirmedTail(n)}${reconnectTail(why, n, "try to end")}`],
+  ]) {
+    const byWhy = new Map();
+    for (const b of list) byWhy.set(b.why, [...(byWhy.get(b.why) ?? []), b]);
+    for (const [why, boxes] of byWhy) notices.push(boxNotice(line(boxes.length, why), stuckIdsHtml(boxes)));
+  }
+  return notices.join("");
+}
+/** The title of the sidebar's mark on Usage: the same two cases as the notices. */
+function stuckMarkTitle(stuck) {
+  const [known, unconfirmed] = stuckSplit(stuck);
+  const k = known.length;
+  const u = unconfirmed.length;
+  const knownText = `pinned could not delete ${k} Upstash ${k === 1 ? "box" : "boxes"}. ${stillRunning(k)}`;
+  const unconfirmedText = `${k ? "Separately, pinned" : "pinned"} could not end ${u} ${k ? "more " : ""}${u === 1 ? "box" : "boxes"}. ${unconfirmedTail(u)}`;
+  return `${[k ? knownText : "", u ? unconfirmedText : ""].filter(Boolean).join(" ")} Open Usage.`;
+}
 function boxBodyHtml(box, now) {
   const u = box.data;
-  if (!u) return box.error ? boxNotice(`Could not read Upstash Box usage: ${box.error}`) : `<p class="muted note" role="status">Loading…</p>`;
-  if (!u.connected) return `<p class="muted note">Connect Upstash in Settings › Connectors to see box usage.</p>`;
-  return `${u.error ? boxNotice(u.error) : ""}${boxFiguresHtml(u)}${u.error ? "" : `${boxOthersHtml(u.others)}${boxListsHtml(u.boxes ?? [], now, box.open)}`}`;
+  if (!u) return box.error ? `${stuckBoxesHtml(usageState.stuck)}${boxNotice(`Could not read Upstash Box usage: ${box.error}`)}` : `<p class="muted note" role="status">Loading…</p>`;
+  const stuck = stuckBoxesHtml(u.stuck);
+  if (!u.connected) return `${stuck}<p class="muted note">Connect Upstash in Settings › Connectors to see box usage.</p>`;
+  return `${stuck}${u.error ? boxNotice(u.error) : ""}${boxFiguresHtml(u)}${u.error ? "" : `${boxOthersHtml(u.others)}${boxListsHtml(u.boxes ?? [], now, box.open)}`}`;
 }
 function boxUsageHtml(box, now) {
   return `<section class="box-usage" aria-busy="${box.loading}"><div class="box-title"><h2>Upstash Box</h2><span class="muted sub-title">This month</span></div>${boxBodyHtml(box, now)}</section>`;
@@ -650,14 +700,31 @@ async function fetchBoxUsage() {
   if (shellPage() === "usage") renderUsagePage();
   try {
     const data = await hub.hub({ cmd: "box_usage" });
-    if (seq === box.seq) Object.assign(box, { data, error: "" });
+    if (seq === box.seq) {
+      Object.assign(box, { data, error: "" });
+      usageState.stuck = data.stuck ?? [];
+    }
   } catch (e) {
     if (seq === box.seq) Object.assign(box, { data: null, error: String(e?.message ?? e) });
   }
   if (seq !== box.seq) return;
   box.loading = false;
   if (shellPage() === "usage") renderUsagePage();
+  drawNav();
 }
+/** The sidebar's Usage mark: asks the hub for the boxes it could not delete, which lists nothing at Upstash. A look that fails, or a hub that does not know the call, keeps the last answer. */
+async function fetchStuckBoxes() {
+  if (!hub) return;
+  try {
+    const stuck = await hub.hub({ cmd: "stuck_boxes" });
+    if (!Array.isArray(stuck)) return;
+    usageState.stuck = stuck;
+    drawNav();
+  } catch {}
+}
+// The mark needs the answer without the page open: a look soon after start, when the hub connects, then every 10 minutes.
+setTimeout(fetchStuckBoxes, 8000);
+setInterval(fetchStuckBoxes, 10 * 60 * 1000);
 document.addEventListener("click", (e) => {
   const email = e.target.closest?.("#usage-pop .redacted");
   if (!email) return;

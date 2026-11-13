@@ -147,6 +147,28 @@ pub struct BoxUsage {
     pub others: OtherBoxes,
     #[serde(default)]
     pub pinned: PinnedCount,
+    /// Boxes pinned could not delete yet, with why. Filled also when Upstash is not connected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stuck: Vec<StuckBox>,
+}
+
+/// A box whose delete failed, and the last reason, scrubbed of keys and tokens.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct StuckBox {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub why: String,
+    /// The row never recorded an Upstash box id and the delete failed before pinned knew whether a
+    /// box exists for it: it may or may not be running. Absent when pinned knows the box is there.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unconfirmed: bool,
+    /// The box's id on Upstash, for a row that recorded it: what to look for in the console.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstash: Option<String>,
+    /// For a row with no recorded Upstash id: the label its box carries there, which pinned lists by.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]

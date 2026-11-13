@@ -4,6 +4,7 @@
 use crate::accounts::{self, AccountId, Auth, Provider};
 use crate::agent::{AgentEvent, AgentStatus, Role, Stage, Subject, Usage};
 use crate::connectors::{BoxAccess, BoxSize, Connector, Settings};
+use crate::schedule;
 
 /// What an Upstash Box hour costs in USD. The app previews budgets from it; the hub enforces them.
 pub const BOX_USD_PER_HOUR: f64 = 0.10;
@@ -1106,6 +1107,29 @@ pub enum HubCall {
     /// The connector as stored.
     SaveConnector { connector: Connector },
     DeleteConnector { id: String },
+    /// `Vec<schedule::Task>`: the account's scheduled tasks, soonest first, each with its next run
+    /// and its last run.
+    ListSchedules,
+    /// `schedule::SaveAnswer`. A task with no id is new; the hub gives it one. The hub validates it,
+    /// computes `next_at`, and keeps who created it. With `dry_run` it only answers the next three run
+    /// times in the task's zone, and stores nothing.
+    SaveSchedule {
+        task: schedule::Task,
+        #[serde(default)]
+        dry_run: bool,
+    },
+    /// The task as stored: paused (`enabled` false) or running again.
+    PauseSchedule { id: String, paused: bool },
+    DeleteSchedule { id: String },
+    /// `Vec<schedule::TaskRun>`: the task's runs, newest first. No `limit` answers 20.
+    ScheduleRuns {
+        id: String,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
+    /// The account's release-protection switch: tag and main protection exist, so a task may be
+    /// pre-approved for a release. Only the user's app sets it; no agent action does. Answers `on`.
+    SetReleaseProtection { on: bool },
     /// `RunStarted`: a session of the saved workflow `id`, started now with no trigger behind it,
     /// on the machine the workflow names and under the limits of its project there.
     RunWorkflow { id: String },
@@ -1318,6 +1342,9 @@ pub enum HubCall {
     /// `upstash::BoxUsage`: the account's Upstash Box usage, and pinned's count of the box time its
     /// delegated tasks used this UTC month. The Upstash key stays on the hub.
     BoxUsage,
+    /// `Vec<upstash::StuckBox>`: the account's boxes pinned could not delete, with why, from the
+    /// hub's own record and rows. It reads no Upstash key and calls no Upstash.
+    StuckBoxes,
     /// `Vec<marks::SessionMarks>`: how the user filed each of the account's conversations.
     SessionMarks,
     /// `Vec<marks::SessionMarks>` of the sessions `changes` named, as they are once each change
@@ -2181,6 +2208,7 @@ mod tests {
         assert_eq!(delegate["request"]["target"]["box"], json!({ "size": "large" }), "the box target keeps its own name on the wire");
         round_trip(HubCall::GetTastes, json!({ "cmd": "get_tastes" }));
         round_trip(HubCall::BoxUsage, json!({ "cmd": "box_usage" }));
+        round_trip(HubCall::StuckBoxes, json!({ "cmd": "stuck_boxes" }));
         round_trip(HubCall::UnclaimedEnds, json!({ "cmd": "unclaimed_ends" }));
         round_trip(HubCall::DelegationStats { days: 7 }, json!({ "cmd": "delegation_stats", "days": 7 }));
         round_trip(
@@ -2241,7 +2269,7 @@ mod tests {
             }),
         );
         round_trip(
-            ToClient::Settings { settings: Settings { linear: None, slack: None, slack_bots: vec![], github: None, vercel: None, upstash: None, box_claude_tokens: BTreeMap::new(), connectors: vec![], checked: None, boxes: BoxAccess::default(), box_asks: vec![], convex: vec![], ideas: vec![], repo_insight: Default::default() } },
+            ToClient::Settings { settings: Settings { linear: None, slack: None, slack_bots: vec![], github: None, vercel: None, upstash: None, box_claude_tokens: BTreeMap::new(), connectors: vec![], checked: None, boxes: BoxAccess::default(), box_asks: vec![], convex: vec![], ideas: vec![], repo_insight: Default::default(), schedules: vec![] } },
             json!({ "type": "settings", "settings": { "linear": null, "slack": null, "github": null, "vercel": null, "upstash": null, "connectors": [], "checked": null } }),
         );
         let old: ToClient = serde_json::from_value(json!({ "type": "machines", "machines": [] })).unwrap();
