@@ -33,3 +33,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:02:48Z #12 a_taste_chat_changes_its_own_accounts_taste_live_and_never_another_accounts ok / avail=15124M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:02:49Z #13 machines_share_a_projects_memory_through_the_hub_wherever_they_keep_it START / avail=15124M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:02:52Z #13 machines_share_a_projects_memory_through_the_hub_wherever_they_keep_it ok / avail=15124M /workspace avail=19374M node_stat=Ssl node_tcp=1
+2026-11-13T04:02:53Z #14 a_node_reads_an_older_hubs_refusal_of_a_later_call_as_an_unknown_command START / avail=15124M /workspace avail=19374M node_stat=Ssl
