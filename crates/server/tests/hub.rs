@@ -6455,7 +6455,8 @@ fn an_agents_enqueue_to_another_machine_never_carries_a_sender_it_chose() {
     let reached = b.calls.lock().unwrap().clone();
     assert_eq!(b.calls("enqueue"), 0, "a bare enqueue reached the other machine: {answer:?} {reached:?}");
     match answer {
-        Err(refused) => assert!(reached.is_empty(), "{refused}: {reached:?}"),
+        // Today the hub refuses work started off the session's own machine before either path.
+        Err(refused) => assert_eq!((refused.as_str(), reached.len()), ("enqueue starts work only on this session's own machine for now", 0), "{reached:?}"),
         Ok(_) => assert!(reached.iter().all(|c| c["cmd"] == "act_for"), "{reached:?}"),
     }
 }
