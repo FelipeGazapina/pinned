@@ -128,6 +128,10 @@ pub struct Hub {
     going_away: tokio::sync::watch::Sender<bool>,
     /// When the hub last expired held ends for every account, so it runs at most once an hour.
     held_expired: Mutex<Option<Instant>>,
+    /// While true, every account's runs save fails, as a full disk would make it. Only a test sets
+    /// it: a queued Postgres write cannot fail on its own at the moment a box ends.
+    #[doc(hidden)]
+    pub refuse_run_saves: Arc<AtomicBool>,
 }
 
 struct Unlock {
@@ -225,7 +229,7 @@ impl Hub {
     pub fn new(db: Db, public_url: String, signup: Signup, box_api: Arc<dyn BoxApi>, box_policy: boxes::Policy, convex_http: Arc<dyn ConvexHttp>) -> Arc<Hub> {
         let public_url = public_url.trim_end_matches('/').to_owned();
         let boxes = Boxes::new(box_api, box_policy, &public_url);
-        Arc::new(Hub { db, public_url, signup, boxes, convex_http, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default(), unlocks: Mutex::default(), going_away: tokio::sync::watch::channel(false).0, held_expired: Mutex::default() })
+        Arc::new(Hub { db, public_url, signup, boxes, convex_http, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default(), unlocks: Mutex::default(), going_away: tokio::sync::watch::channel(false).0, held_expired: Mutex::default(), refuse_run_saves: Arc::default() })
     }
 
     /// Tells every socket to close with a going away frame. The hub stops serving afterwards.
@@ -342,7 +346,7 @@ impl Hub {
             .connectors
             .get_or_try_init(|| async {
                 let stored = self.db.connectors(account.id).await?;
-                let storage = PgStorage::new(self.db.clone(), account.id, stored);
+                let storage = PgStorage::new(self.db.clone(), account.id, stored, self.refuse_run_saves.clone());
                 Ok::<_, String>(Arc::new(Connectors::new(storage, EXE_PLACEHOLDER.into())))
             })
             .await?;
@@ -1528,6 +1532,8 @@ struct PgStorage {
     state: Mutex<Stored>,
     keys: Mutex<BTreeMap<String, String>>,
     writes: mpsc::UnboundedSender<Write>,
+    /// `Hub::refuse_run_saves`.
+    refuse_runs: Arc<AtomicBool>,
 }
 
 /// The name of the listed project that holds `cwd`, the innermost one, else the folder's own name.
@@ -1592,7 +1598,7 @@ enum Write {
 }
 
 impl PgStorage {
-    fn new(db: Db, account: Uuid, stored: db::Connectors) -> PgStorage {
+    fn new(db: Db, account: Uuid, stored: db::Connectors, refuse_runs: Arc<AtomicBool>) -> PgStorage {
         let (writes, mut queue) = mpsc::unbounded_channel::<Write>();
         tokio::spawn(async move {
             while let Some(first) = queue.recv().await {
@@ -1625,6 +1631,7 @@ impl PgStorage {
             state: Mutex::new(Stored { store, runs }),
             keys: Mutex::new(stored.secrets),
             writes,
+            refuse_runs,
         }
     }
 
@@ -1668,6 +1675,9 @@ impl Storage for PgStorage {
     }
 
     fn save_runs(&self, bytes: &[u8]) -> Result<(), String> {
+        if self.refuse_runs.load(Ordering::SeqCst) {
+            return Err("could not save the runs: refused".into());
+        }
         let mut state = self.state.lock().unwrap();
         state.runs = bytes.to_vec();
         self.persist(&state)

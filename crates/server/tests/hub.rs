@@ -3014,6 +3014,42 @@ fn a_run_on_the_fixed_box_fails_when_upstash_stops_listing_the_box() {
     assert_run_failed(&hub, &mut ana, &format!("Upstash Box: the box ended before its task did: it was deleted outside pinned{STOPPED}"), 1, true);
 }
 
+/// One row whose runs the hub cannot fail (their save is refused) stays `Ending` and is retried,
+/// and the pass still ends the account's other rows: the next one is past its budget and goes at
+/// once, not when the first row can finish.
+#[test]
+fn a_box_row_that_cannot_fail_its_runs_does_not_stop_the_pass_for_the_next_row() {
+    let mut hub = TestHub::start_with_boxes("box_reap_continues", Signup::Open, Policy { offline: Duration::from_secs(3600), ..fast() });
+    let mut ana = BoxAccount::new(&hub);
+    assert_eq!(hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-1")))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    // The first box (the older row) holds a run that is waiting on it.
+    let machine = hold_box(&mut hub, &mut ana, "uuid-1");
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    assert_eq!(hub.runtime.block_on(hub.hub().open(ana.id, ana.box_run(issue("uuid-2")))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true), ("Box · ENG-7 Fix login", true)]);
+    let ids: Vec<String> = hub.runtime.block_on(hub.hub().db.boxes(ana.id)).unwrap().into_iter().map(|row| row.ok().unwrap().id).collect();
+    assert_eq!(ids.len(), 2);
+
+    // Removing the first box's machine ends its row, but its run cannot be failed: the row stays
+    // `Ending`, and so does its box.
+    hub.hub().refuse_run_saves.store(true, std::sync::atomic::Ordering::SeqCst);
+    assert!(ana.client.hub(json!({ "cmd": "remove_machine", "id": machine })).is_err(), "the run cannot be failed");
+    assert_eq!(ana.rows(&hub), 2);
+
+    // The second box is past its budget. The first row is retried first in every pass and still fails.
+    hub.runtime.block_on(hub.hub().db.set_box_budget(&ids[1], 0.000_000_1)).unwrap();
+    wait_for("the second row, past its budget, to end in a pass the first row cannot finish", || ana.rows(&hub) == 1);
+    assert_eq!(hub.boxes.live(), ["box_1"], "the first box stays while its run cannot be failed");
+    assert!(account_store(&hub, ana.id)["runs"][0]["status"].get("failed").is_none(), "its run is not failed yet");
+
+    // Once the runs save works, the retry fails the run and ends the row.
+    hub.hub().refuse_run_saves.store(false, std::sync::atomic::Ordering::SeqCst);
+    wait_for("the first row to end", || ana.rows(&hub) == 0);
+    wait_for("the run to fail", || account_store(&hub, ana.id)["runs"][0]["status"]["failed"]["why"].is_string());
+    assert_eq!(hub.boxes.live(), Vec::<String>::new());
+}
+
 #[test]
 fn a_fresh_permission_stops_at_the_accounts_box_limit() {
     let hub = TestHub::start_with_boxes("box_cap", Signup::Open, Policy { max_open: 1, ..fast() });
