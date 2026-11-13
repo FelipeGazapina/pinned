@@ -1227,6 +1227,9 @@ mod tests {
         Close(u16),
         /// Takes the socket and never reads it, as a hub too busy to look at the sign in.
         Silent,
+        /// Reads the sign in, answers it with a hello and closes the socket with 1001, as a hub
+        /// that accepts the machine and then restarts.
+        Hello,
     }
 
     /// A hub on a real socket, spawned on the test's own runtime so the paused clock moves only once
@@ -1244,6 +1247,14 @@ mod tests {
                 let Ok(mut socket) = tokio_tungstenite::accept_async(socket).await else { continue };
                 match answer(n) {
                     Answer::Silent => unread.push(socket),
+                    Answer::Hello => {
+                        socket.next().await;
+                        if let Some(Ok(hello)) = hello_frame() {
+                            let _ = socket.send(hello).await;
+                        }
+                        let close = tokio_tungstenite::tungstenite::protocol::CloseFrame { code: 1001.into(), reason: "".into() };
+                        let _ = socket.send(Frame::Close(Some(close))).await;
+                    }
                     Answer::Close(code) => {
                         socket.next().await;
                         let close = tokio_tungstenite::tungstenite::protocol::CloseFrame { code: code.into(), reason: "".into() };
@@ -1314,6 +1325,44 @@ mod tests {
         assert_eq!(the_wait_against(hub, 20 * MINUTE + BOX_REFUSED_FOR, "outage").await, None);
         let answered = answered.load(Ordering::SeqCst);
         assert!(answered >= 10, "the hub answered only {answered} sign ins");
+    }
+
+    /// How a hub on the test's runtime answered each connection: when, since `t0`, and with which
+    /// close code (0 for a hello).
+    type Answers = Arc<Mutex<Vec<(Duration, u16)>>>;
+
+    fn noted(answers: &Answers, t0: tokio::time::Instant, answer: Answer) -> Answer {
+        let code = match answer {
+            Answer::Close(code) => code,
+            Answer::Silent => u16::MAX,
+            Answer::Hello => 0,
+        };
+        answers.lock().unwrap().push((t0.elapsed(), code));
+        answer
+    }
+
+    /// Through the real `run` and the production span: 4001 for 10 minutes, one accepted hello,
+    /// then 4001 again. The hello starts the span over, so the wait ends on the first 4001 at or
+    /// after 15 minutes from the first one that follows the hello, not 15 minutes from the first
+    /// one ever. Without `shared.note(Outcome::Accepted)` in `connection` it ends at about 15 minutes.
+    #[tokio::test(start_paused = true)]
+    async fn a_hello_between_two_runs_of_4001_starts_the_wait_over_through_run() {
+        let t0 = tokio::time::Instant::now();
+        let answers = Answers::default();
+        let hello_given = AtomicBool::new(false);
+        let noting = answers.clone();
+        let (hub, _) = a_hub_on_this_runtime(move |_| {
+            let hello_now = t0.elapsed() >= 10 * MINUTE && !hello_given.swap(true, Ordering::SeqCst);
+            noted(&noting, t0, if hello_now { Answer::Hello } else { Answer::Close(UNAUTHORIZED) })
+        })
+        .await;
+        let ended = the_wait_against(hub, 40 * MINUTE, "hello").await.expect("4001, a hello and 4001 again never ended the wait");
+        let answers = answers.lock().unwrap();
+        let mut after_the_hello = answers.iter().skip_while(|(_, code)| *code != 0).skip(1);
+        let (first, _) = after_the_hello.next().expect("the hub never answered after the hello");
+        assert!(answers.iter().filter(|(_, code)| *code == 0).count() == 1);
+        assert!(ended >= *first + BOX_REFUSED_FOR, "ended after {ended:?}, less than 15 minutes after the first 4001 that followed the hello at {first:?}");
+        assert!(ended <= *first + BOX_REFUSED_FOR + BACKOFF_MAX + Duration::from_secs(1), "ended after {ended:?}, long after the first 4001 past the span from {first:?}");
     }
 
     struct ArmsRestart {
