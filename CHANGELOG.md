@@ -4,6 +4,7 @@
 
 ### Added
 
+- Ideas: the Orchestrator and your sessions can now save things you might do someday with `save_idea`, list them with `list_ideas` and delete them with `delete_idea`. Ideas are kept on your account, apart from memory, and are never fed into a prompt on their own. The Ideas page comes in a later update.
 - A thread that stopped on an API error while the computer slept now shows a Needs you card saying when it slept, with a Continue button (for a Captain, also how many delegated tasks are still running). Nothing is typed for you.
 
 ### Fixed
