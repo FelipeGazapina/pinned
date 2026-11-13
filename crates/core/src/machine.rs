@@ -14256,7 +14256,7 @@ Have another model review a risky change before it goes ahead.";
         let parent = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
         let task = headless_task(&m, crate::delegate::Parent::Tab(parent.clone()));
         let (shown, id) = open_for_task_on_another_tab(&m, &task);
-        m.close_tab(&parent, None);
+        m.close_tab(&parent, Some(Canceller::User));
         assert_eq!(m.delegates.get(&task).map(|t| t.state), Some(crate::delegate::WorkState::Cancelled));
         assert_eq!(m.view(&shown).unwrap().questions, None, "the tab stops asking");
         assert_eq!(question_result(&m, &id), cancelled(&id, "The user cancelled this task."), "the waiting call answers cancelled");
