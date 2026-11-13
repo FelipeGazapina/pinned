@@ -2643,6 +2643,60 @@ fn a_stuck_box_is_given_the_no_keys_reason_only_when_the_upstash_key_is_missing_
 }
 
 #[test]
+fn a_box_row_with_no_upstash_id_is_listed_unconfirmed_through_the_real_end_and_a_row_with_an_id_is_not() {
+    // A slow tick, so the reaper does not retry the rows while the test looks.
+    let policy = Policy { tab_gone: Duration::from_secs(3600), offline: Duration::from_secs(3600), tick: Duration::from_secs(3600), ..fast() };
+    let mut hub = TestHub::start_with_boxes("box_stuck_unconfirmed", Signup::Open, policy);
+    let mut ana = BoxAccount::new(&hub);
+    let account = ana.id;
+    let open = |hub: &TestHub, work| hub.runtime.block_on(hub.hub().open(account, work));
+    let rows = |hub: &TestHub| hub.runtime.block_on(hub.hub().db.boxes(account)).unwrap().into_iter().map(|r| r.unwrap()).collect::<Vec<_>>();
+    assert_eq!(open(&hub, ana.box_run(issue("uuid-1"))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    let unrecorded = rows(&hub).remove(0);
+    assert_eq!(open(&hub, ana.box_run(issue("uuid-2"))), Ok(()));
+    let recorded = rows(&hub).into_iter().find(|r| r.id != unrecorded.id).unwrap();
+    assert!(unrecorded.upstash.is_some() && recorded.upstash.is_some());
+    // As a row whose box was created but whose id was never written, as after a crash between the two.
+    admin_on(&hub.database, &format!("update boxes set upstash = null where id = '{}'", unrecorded.id));
+
+    // The Box key is one Upstash refuses, so the label list for the row with no id fails, and the
+    // delete of the other row's box fails. Both go through the real `end`, by removing their machines.
+    restart_with_secrets(&mut hub, "jsonb_set(secrets, '{upstash-box-key}', '\"wrong-key\"')");
+    let mut client = Client::connect(&hub.url, &ana.token);
+    client.wait("hello", |f| f["type"] == "hello");
+    for row in [&unrecorded, &recorded] {
+        let refused = client.hub(json!({ "cmd": "remove_machine", "id": row.machine })).unwrap_err();
+        assert!(refused.contains("Invalid box API key"), "{refused}");
+    }
+    let stuck = client.hub(json!({ "cmd": "stuck_boxes" })).unwrap();
+    println!("stuck_boxes answer: {stuck}");
+    let listed = stuck.as_array().unwrap();
+    assert_eq!(listed.len(), 2, "{stuck}");
+    let of = |id: &str| listed.iter().find(|s| s["id"] == id).unwrap_or_else(|| panic!("{id} is not listed: {stuck}"));
+    assert_eq!(of(&unrecorded.id)["unconfirmed"], json!(true), "pinned never learned this row's box id: {stuck}");
+    assert!(of(&recorded.id).get("unconfirmed").is_none(), "a row with its Upstash id is a known box: {stuck}");
+    assert!(listed.iter().all(|s| s["why"] == "Upstash Box refused the key: Invalid box API key"), "{stuck}");
+    assert!(!stuck.to_string().contains("wrong-key"), "{stuck}");
+
+    // The Box key is gone: nothing is asked of Upstash, and the row with no id is still unconfirmed.
+    restart_with_secrets(&mut hub, "secrets - 'upstash-box-key'");
+    let mut client = Client::connect(&hub.url, &ana.token);
+    client.wait("hello", |f| f["type"] == "hello");
+    for row in [&unrecorded, &recorded] {
+        let refused = client.hub(json!({ "cmd": "remove_machine", "id": row.machine })).unwrap_err();
+        assert!(refused.starts_with("Upstash Box is not connected, so box "), "{refused}");
+    }
+    let stuck = client.hub(json!({ "cmd": "stuck_boxes" })).unwrap();
+    let listed = stuck.as_array().unwrap();
+    assert_eq!(listed.len(), 2, "{stuck}");
+    let of = |id: &str| listed.iter().find(|s| s["id"] == id).unwrap_or_else(|| panic!("{id} is not listed: {stuck}"));
+    assert_eq!(of(&unrecorded.id)["unconfirmed"], json!(true), "{stuck}");
+    assert!(of(&recorded.id).get("unconfirmed").is_none(), "{stuck}");
+    assert!(listed.iter().all(|s| s["why"] == "Upstash is not connected"), "{stuck}");
+}
+
+#[test]
 fn a_box_goes_once_its_session_opened_its_pull_request_and_stopped() {
     let hub = TestHub::start_with_boxes("box_done", Signup::Open, Policy { done: Duration::from_millis(300), ..fast() });
     let mut ana = BoxAccount::new(&hub);
