@@ -1663,6 +1663,95 @@ mod tests {
         }
     }
 
+    /// A tab of the box's machine, running, laid over by an open questionnaire when `asked`. The
+    /// worker's tab carries the connector and subject a run's `seen` looks for. `running` is set
+    /// after the questionnaire is laid over, so it never depends on what `questions::shown` sets.
+    fn box_tab(id: &str, worker: bool, status: AgentStatus, asked: bool) -> TabView {
+        use pinned_core::questions::{self, QOption, Question, Questionnaire};
+        let mut tab: TabView = serde_json::from_value(serde_json::json!({
+            "id": id, "cwd": "/work/repo", "bypass": true, "running": true, "opened": 1_794_240_000u64, "status": status,
+        }))
+        .unwrap();
+        if worker {
+            tab.connector = Some("delegate".into());
+            tab.subject = Some(Subject::LinearIssue { issue: "FAKE-1".into() });
+        }
+        if asked {
+            let question = Question { header: None, question: "Base the fix on main?".into(), changes: "which branch the PR targets".into(), options: vec![QOption { label: "main".into(), description: None, recommended: true }], multi_select: false };
+            tab = questions::shown(tab, &Questionnaire { id: format!("q-{id}"), title: None, questions: vec![question], projects: vec![], at: 1_794_240_000 });
+        }
+        tab.running = true;
+        tab
+    }
+
+    /// A box's account whose machine `box` is online and shows `tabs`.
+    fn box_with(tabs: Vec<TabView>) -> Account {
+        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() };
+        let (out, _sent, _) = Outbox::new();
+        account.came_online("box", 1, "box".into(), true, "0.18.2".into(), out);
+        account.machine_event("box", 1, MachineEvent::Tabs { tabs });
+        account
+    }
+
+    /// What the reaper decides for the box, which it first looked at as `before` when the box was
+    /// new, and then at each `(time since, seen)` of `looks`, the box as old as the time since.
+    fn looked(before: Seen, looks: &[(Duration, Seen)]) -> Vec<Option<boxes::End>> {
+        let (start, mut timers, policy) = (Instant::now(), boxes::Timers::default(), boxes::Policy::default());
+        assert_eq!(boxes::verdict(Duration::ZERO, before, &mut timers, start, &policy), None, "nothing ends it at its first look");
+        looks.iter().map(|(at, seen)| boxes::verdict(*at, *seen, &mut timers, start + *at, &policy)).collect()
+    }
+
+    #[test]
+    fn a_box_whose_tab_closed_with_a_question_open_still_ends_as_tab_closed() {
+        let subject = Subject::LinearIssue { issue: "FAKE-1".into() };
+        for which in ["seen", "seen_any"] {
+            let account = box_with(vec![box_tab("tab-1", true, AgentStatus::NeedsInput, true)]);
+            let look = || if which == "seen" { account.seen("box", "delegate", &subject) } else { account.seen_any("box") };
+            let before = look();
+            assert_eq!(before, Seen::Tab { running: true, quiet: false }, "{which}: an open questionnaire holds the box");
+            account.machine_event("box", 1, MachineEvent::Tabs { tabs: vec![] });
+            assert_eq!(look(), Seen::NoTab, "{which}: the machine is online and its tab is gone");
+            // The tab is first seen gone at one minute; its two minutes run out at three.
+            let gone = |secs| (Duration::from_secs(secs), look());
+            let ends = looked(before, &[gone(60), gone(60 + 119), gone(60 + 120), gone(60 + 600)]);
+            assert_eq!(ends, [None, None, Some(boxes::End::TabClosed), Some(boxes::End::TabClosed)], "{which}: not before two minutes, and then at them, whatever the closed tab was waiting on");
+        }
+    }
+
+    #[test]
+    fn a_box_whose_node_went_offline_with_a_question_open_still_ends_as_offline() {
+        let subject = Subject::LinearIssue { issue: "FAKE-1".into() };
+        for which in ["seen", "seen_any"] {
+            let account = box_with(vec![box_tab("tab-1", true, AgentStatus::NeedsInput, true)]);
+            let look = || if which == "seen" { account.seen("box", "delegate", &subject) } else { account.seen_any("box") };
+            let before = look();
+            assert_eq!(before, Seen::Tab { running: true, quiet: false }, "{which}: an open questionnaire holds the box");
+            assert!(account.went_offline("box", Some(1)), "{which}: the machine leaves");
+            assert_eq!(look(), Seen::Offline, "{which}");
+            // The node is first seen offline at one minute; its ten minutes run out at eleven.
+            let offline = |secs| (Duration::from_secs(secs), look());
+            let ends = looked(before, &[offline(60), offline(60 + 599), offline(60 + 600), offline(60 + 3600)]);
+            assert_eq!(ends, [None, None, Some(boxes::End::Offline), Some(boxes::End::Offline)], "{which}: not before ten minutes, and then at them, whatever its tab was waiting on");
+        }
+    }
+
+    #[test]
+    fn a_box_with_a_question_open_on_another_tab_is_not_idle_but_still_expires() {
+        // The worker's tab is quiet; a headless child's questionnaire lands on a second tab.
+        let tabs = vec![box_tab("tab-1", true, AgentStatus::Done, false), box_tab("tab-2", false, AgentStatus::NeedsInput, true)];
+        let account = box_with(tabs.clone());
+        let look = || account.seen_any("box");
+        assert_eq!(look(), Seen::Tab { running: true, quiet: false }, "a question on any tab holds the box");
+        assert_eq!(reaped(look, 9 * MIN, 9 * MIN), None, "held 9 of 10 minutes");
+        assert_eq!(reaped(look, 11 * MIN, 11 * MIN), None, "not idle at 11 minutes");
+        assert_eq!(reaped(look, 3 * 60 * MIN, 3 * 60 * MIN), None, "three hours of waiting on the user is not idle");
+        assert_eq!(reaped(look, 3 * 60 * MIN, 4 * 60 * MIN), Some(boxes::End::Expired), "max_life still ends it");
+        // Without the second tab the worker's own tab is quiet, so that tab is what holds the box.
+        let alone = box_with(tabs[..1].to_vec());
+        assert_eq!(alone.seen_any("box"), Seen::Tab { running: true, quiet: true });
+        assert_eq!(reaped(|| alone.seen_any("box"), 11 * MIN, 11 * MIN), Some(boxes::End::Idle), "the same box without the question is idle at 11 minutes");
+    }
+
     #[test]
     fn a_working_box_is_not_quiet() {
         let account = box_showing(AgentStatus::Working, false, true);
