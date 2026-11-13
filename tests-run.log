@@ -169,3 +169,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:08:30Z #78 a_pairing_code_pairs_into_the_account_that_made_it_and_a_logout_ends_only_that_login START / avail=15072M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:08:34Z #78 a_pairing_code_pairs_into_the_account_that_made_it_and_a_logout_ends_only_that_login ok / avail=15072M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:08:36Z #79 an_agent_reaches_only_the_projects_and_orchestrators_of_the_account_that_let_it_in START / avail=15072M /workspace avail=19374M node_stat=Ssl
+2026-11-13T04:08:40Z #79 an_agent_reaches_only_the_projects_and_orchestrators_of_the_account_that_let_it_in ok / avail=15072M /workspace avail=19374M node_stat=Ssl node_tcp=1
