@@ -926,6 +926,14 @@ mod tests {
     }
 
     #[test]
+    fn a_name_that_reads_as_pinned_falls_back_to_the_default() {
+        for name in ["pinned", " [PINNED] ", "Pin\u{200B}ned\n"] {
+            assert_eq!(Settings { name: name.into(), ..Settings::default() }.cleaned().name, "Orchestrator", "{name:?}");
+        }
+        assert_eq!(Settings { name: "pinned ops".into(), ..Settings::default() }.cleaned().name, "pinned ops");
+    }
+
+    #[test]
     fn a_handoff_reads_as_its_portuguese_outcome() {
         let queued = Handoff::Queued { tab: "tab-1a-3".into(), position: 2 };
         assert_eq!(serde_json::to_string(&queued).unwrap(), r#"{"outcome":"na_fila","tab":"tab-1a-3","position":2}"#);

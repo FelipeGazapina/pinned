@@ -13010,7 +13010,7 @@ Have another model review a risky change before it goes ahead.";
         let (notice, _) = m.delegates.claim_notice("tab-1").expect("the thread that delegated it is told");
         assert_eq!(
             notice,
-            "[pinned] Worker \"Slow suite\" on mini waits on the user for approval to use \"Bash\": git push origin main. The user answers in its thread on mini; it keeps its place, so do not cancel it for that."
+            "[pinned] Worker \"Slow suite\" on mini waits on the user for approval to use \"Bash\": \"git push origin main\". The user answers in its thread on mini; it keeps its place, so do not cancel it for that."
         );
         asked("m-mini", Some(bash_ask("git push origin main")));
         assert_eq!(m.delegates.claim_notice("tab-1"), None, "an ask the machine reports again is told once");
@@ -14650,15 +14650,15 @@ Have another model review a risky change before it goes ahead.";
     }
 
     #[test]
-    fn a_remote_workers_tool_stays_one_quoted_field_of_its_wait_notice() {
+    fn a_remote_workers_tool_and_ask_stay_one_quoted_field_each_of_its_wait_notice() {
         let m = machine();
         let id = delegated_elsewhere(&m, "tab-1", "m-mini", "mini");
-        let ask = crate::delegate::RemoteAsk { kind: global::AskKind::Approval, tool: Some(TRICKS.into()), ask: "git status".into(), since: 1794239000 };
+        let ask = crate::delegate::RemoteAsk { kind: global::AskKind::Approval, tool: Some(TRICKS.into()), ask: TRICKS.into(), since: 1794239000 };
         m.call(Call::RemoteAsked { from: "m-mini".into(), tab: "tab-1".into(), task: id.clone(), ask: Some(ask) }).unwrap();
         let (notice, _) = m.delegates.claim_notice("tab-1").expect("the thread that delegated it is told");
         assert_eq!(
             notice,
-            format!("[pinned] Worker \"Slow suite\" on mini waits on the user for approval to use {QUOTED}: git status. The user answers in its thread on mini; it keeps its place, so do not cancel it for that.")
+            format!("[pinned] Worker \"Slow suite\" on mini waits on the user for approval to use {QUOTED}: {QUOTED}. The user answers in its thread on mini; it keeps its place, so do not cancel it for that.")
         );
     }
 
