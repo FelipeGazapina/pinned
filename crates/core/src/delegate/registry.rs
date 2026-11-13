@@ -2455,7 +2455,21 @@ fn stamp(ms: u64) -> String {
         .unwrap_or_default()
 }
 
-/// `text` as the hub holds a worker's end: keys masked and NUL characters dropped.
+/// `text` as the hub holds a worker's end: NUL characters dropped, then keys masked, so a NUL
+/// inside a key cannot hide it from the mask. The same as the hub's `scrub_held`.
 fn stored(text: &str) -> String {
-    crate::surface::mask_secrets(text).replace('\0', "")
+    crate::surface::mask_secrets(&text.replace('\0', ""))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stored;
+
+    #[test]
+    fn a_key_split_by_a_nul_character_is_stored_masked_whole() {
+        let split = "key sk-ant-api03-FAKE\0FAKEFAKE0000 done";
+        let held = stored(split);
+        assert!(!held.contains("FAKEFAKE") && !held.contains('\0'), "{held}");
+        assert_eq!(held, "key [hidden] done");
+    }
 }

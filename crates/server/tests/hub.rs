@@ -8646,6 +8646,34 @@ fn a_held_end_with_a_nul_character_is_held_and_comes_back_without_it() {
 }
 
 #[test]
+fn a_held_end_whose_key_a_nul_character_splits_is_stored_and_answered_masked() {
+    let hub = TestHub::start("held_nul_key");
+    let (token, _, mut ana) = signed_in(&hub.url, "ana@acme.dev");
+    let (mac, mac_token) = account::register_machine(&hub.url, &token, "ana-mac", "linux").unwrap();
+    let (mini, mini_token) = account::register_machine(&hub.url, &token, "ana-mini", "linux").unwrap();
+    let mini_raw = RawMachine::start(&hub.url, &mini_token, |_| RawReply::Ok(Value::Null));
+    wait_for("mini online", || ana.machines().contains(&("ana-mini".into(), true)));
+    let split = "sk-ant-api03-FAKE\u{0}FAKEFAKE0000";
+    let end = json!({ "state": "failed", "summary": format!("Used {split} to deploy."), "error": format!("401 for key {split}") });
+    assert_eq!(mini_raw.ask(json!({ "cmd": "remote_ended", "to": mac.id, "tab": "tab-1", "task": "task-1", "end": end })), Ok(json!(true)), "held for mac, which is offline");
+    let stored = held_reports(&hub);
+    assert_eq!(stored.len(), 1);
+    assert!(!stored[0].contains("FAKEFAKE") && stored[0].matches("[hidden]").count() == 2, "the NUL goes before the mask: {}", stored[0]);
+
+    let mac_raw = RawMachine::start(&hub.url, &mac_token, |call| match call["cmd"].as_str().unwrap() {
+        "remote_ended" => RawReply::Err("not now".into()),
+        _ => RawReply::Ok(Value::Null),
+    });
+    wait_for("the hub to offer mac the held end", || mac_raw.calls("remote_ended") == 1);
+    let got = mac_raw.calls.lock().unwrap().iter().find(|c| c["cmd"] == "remote_ended").cloned().unwrap();
+    assert!(!got.to_string().contains("FAKEFAKE"), "{got}");
+    assert_eq!((got["end"]["summary"].as_str(), got["end"]["error"].as_str()), (Some("Used [hidden] to deploy."), Some("401 for key [hidden]")), "{got}");
+    let status = mac_raw.ask(remote_task_call(&mini.id, "task-1", None)).unwrap();
+    assert!(!status.to_string().contains("FAKEFAKE"), "{status}");
+    assert_eq!(status["error"].as_str(), Some("401 for key [hidden]"), "{status}");
+}
+
+#[test]
 fn a_held_end_answers_its_tasks_status_after_its_worker_is_gone_and_stays_until_answered() {
     let hub = TestHub::start("held_status");
     let (mut ana, mac, mac_token, mini, _mini_raw, _) = held_for_offline_mac(&hub);

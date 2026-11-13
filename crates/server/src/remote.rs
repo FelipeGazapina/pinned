@@ -280,11 +280,13 @@ pub fn clamp_held(text: String) -> String {
     format!("{}…[truncated by pinned: {} bytes]", &text[..cut], text.len() - cut)
 }
 
-/// `text` as the hub stores it: keys and tokens masked, then NUL characters dropped, as Postgres
-/// `jsonb` refuses `\u0000`. The hub keeps no unmasked copy, so a late report shows `[hidden]` where
-/// a live one shows the text. It runs before `clamp_held`, so a cut never leaves a token's prefix.
+/// `text` as the hub stores it: NUL characters dropped, as Postgres `jsonb` refuses `\u0000`, then
+/// keys and tokens masked, so a NUL inside a key cannot hide it from the mask. The hub keeps no
+/// unmasked copy, so a late report shows `[hidden]` where a live one shows the text. It runs before
+/// `clamp_held`, so a cut never leaves a token's prefix. The node's `delegate::registry::stored`
+/// does the same, to tell a repeat of an end it holds.
 pub fn scrub_held(text: &str) -> String {
-    pinned_core::surface::mask_secrets(text).replace('\0', "")
+    pinned_core::surface::mask_secrets(&text.replace('\0', ""))
 }
 
 /// Holds `end` for the machine `origin` of the account, which is offline, until it comes back, or,
@@ -434,5 +436,12 @@ mod tests {
         assert!(clamp_held(straddling.clone()).contains("sk-ant"), "cut first, it would keep a prefix");
         let held = clamp_held(scrub_held(&straddling));
         assert!(!held.contains("sk-ant") && held.ends_with("[hidden]"), "{}", &held[held.len() - 40..]);
+    }
+
+    #[test]
+    fn a_key_split_by_a_nul_character_is_masked_whole() {
+        let held = scrub_held("key sk-ant-api03-FAKE\0FAKEFAKE0000 done");
+        assert!(!held.contains("FAKEFAKE") && !held.contains('\0'), "{held}");
+        assert_eq!(held, "key [hidden] done");
     }
 }
