@@ -1719,6 +1719,23 @@ mod tests {
     }
 
     #[test]
+    fn a_box_whose_node_went_offline_with_a_question_open_still_ends_as_offline() {
+        let subject = Subject::LinearIssue { issue: "FAKE-1".into() };
+        for which in ["seen", "seen_any"] {
+            let account = box_with(vec![box_tab("tab-1", true, AgentStatus::NeedsInput, true)]);
+            let look = || if which == "seen" { account.seen("box", "delegate", &subject) } else { account.seen_any("box") };
+            let before = look();
+            assert_eq!(before, Seen::Tab { running: true, quiet: false }, "{which}: an open questionnaire holds the box");
+            assert!(account.went_offline("box", Some(1)), "{which}: the machine leaves");
+            assert_eq!(look(), Seen::Offline, "{which}");
+            // The node is first seen offline at one minute; its ten minutes run out at eleven.
+            let offline = |secs| (Duration::from_secs(secs), look());
+            let ends = looked(before, &[offline(60), offline(60 + 599), offline(60 + 600), offline(60 + 3600)]);
+            assert_eq!(ends, [None, None, Some(boxes::End::Offline), Some(boxes::End::Offline)], "{which}: not before ten minutes, and then at them, whatever its tab was waiting on");
+        }
+    }
+
+    #[test]
     fn a_working_box_is_not_quiet() {
         let account = box_showing(AgentStatus::Working, false, true);
         assert_eq!(account.seen_any("box"), Seen::Tab { running: true, quiet: false });
