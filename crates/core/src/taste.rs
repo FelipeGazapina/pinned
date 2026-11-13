@@ -482,13 +482,19 @@ impl Limits {
     /// The effort a worker on `model` runs at: the one asked for, or the default. Refuses a model
     /// above the tier, a call that names no model under a tier cap, and an effort above the most.
     /// `claude` is the machine's Claude models, so a model its claude's menu added has its tier.
+    /// On a Claude login the tier of a model is the one `claude` lists for it, so a model id that
+    /// list does not hold is refused under a tier cap: the words of an id are no proof of its cost.
     /// An effort outside the five levels, such as Cursor's `fast`, passes unranked.
-    pub fn admit(&self, model: Option<&str>, effort: Option<&str>, claude: &[crate::claude_models::ClaudeModel]) -> Result<Option<String>, String> {
+    pub fn admit(&self, account: &crate::accounts::Account, model: Option<&str>, effort: Option<&str>, claude: &[crate::claude_models::ClaudeModel]) -> Result<Option<String>, String> {
         if self.tier < Tier::High {
             let tier = self.tier.name();
             let Some(model) = model else {
                 return Err(format!("name a model: this project allows models up to the {tier} tier, and a worker without one runs on its account's default. Pick a {tier} model from orchestrator_capabilities, or raise Tier {RAISE}"));
             };
+            let lists_claude = account.provider == crate::accounts::Provider::Claude && account.auth == crate::accounts::Auth::Login;
+            if lists_claude && !model.is_empty() && !claude.iter().any(|m| m.slug == model) {
+                return Err(format!("{model} is not in this machine's list of Claude models, so its tier is unknown and this project allows up to {tier}. Pick a model from orchestrator_capabilities or raise Tier {RAISE}"));
+            }
             let cost = crate::delegate::cost_in(claude, model);
             if cost > self.tier {
                 return Err(format!("{model} is a {}-tier model; this project allows up to {tier}. Pick a {tier} model or raise Tier {RAISE}", cost.name()));
@@ -1352,13 +1358,14 @@ Deploys go through the VPS."
     #[test]
     fn admit_checks_the_tier_and_the_effort_and_fills_the_default() {
         let known = crate::claude_models::known();
+        let cursor = crate::accounts::Account::builtin(crate::accounts::Provider::Cursor);
         let limits = Limits { tier: Tier::Mid, default_effort: Some(Effort::Medium), max_effort: Effort::High, ..Limits::default() };
-        assert_eq!(limits.admit(Some("glm-5.3"), None, &known), Ok(Some("medium".into())));
-        assert_eq!(limits.admit(Some("deepseek-v4.1-flash"), Some("high"), &known), Ok(Some("high".into())));
-        assert_eq!(limits.admit(Some("composer-2.5"), Some("fast"), &known), Ok(Some("fast".into())), "a level outside the five passes");
-        assert_eq!(limits.admit(Some("kimi-k3.1-pro"), None, &known), Err("kimi-k3.1-pro is a high-tier model; this project allows up to mid. Pick a mid model or raise Tier in Settings › Way of working".into()));
-        assert_eq!(limits.admit(Some("glm-5.3"), Some("xhigh"), &known), Err("effort xhigh is above high, the most this project allows. Ask for high or less, or raise Max effort in Settings › Way of working".into()));
-        assert_eq!(Limits::default().admit(None, None, &known), Ok(None), "with no tier cap a call may leave the model and the effort to the account");
+        assert_eq!(limits.admit(&cursor, Some("glm-5.3"), None, &known), Ok(Some("medium".into())));
+        assert_eq!(limits.admit(&cursor, Some("deepseek-v4.1-flash"), Some("high"), &known), Ok(Some("high".into())));
+        assert_eq!(limits.admit(&cursor, Some("composer-2.5"), Some("fast"), &known), Ok(Some("fast".into())), "a level outside the five passes");
+        assert_eq!(limits.admit(&cursor, Some("kimi-k3.1-pro"), None, &known), Err("kimi-k3.1-pro is a high-tier model; this project allows up to mid. Pick a mid model or raise Tier in Settings › Way of working".into()));
+        assert_eq!(limits.admit(&cursor, Some("glm-5.3"), Some("xhigh"), &known), Err("effort xhigh is above high, the most this project allows. Ask for high or less, or raise Max effort in Settings › Way of working".into()));
+        assert_eq!(Limits::default().admit(&cursor, None, None, &known), Ok(None), "with no tier cap a call may leave the model and the effort to the account");
     }
 
     #[test]
@@ -1366,19 +1373,20 @@ Deploys go through the VPS."
         use crate::claude_models::{known, merged, MenuRow};
         let menu = [MenuRow { menu: "Fable".into(), version: "5.3".into() }, MenuRow { menu: "Haiku".into(), version: "5.5".into() }];
         let learned = merged(known(), &menu);
+        let claude = crate::accounts::Account::builtin(crate::accounts::Provider::Claude);
         let low = Limits { tier: Tier::Low, ..Limits::default() };
-        assert_eq!(low.admit(Some("claude-fable-5-3"), None, &learned), Err("claude-fable-5-3 is a mid-tier model; this project allows up to low. Pick a low model or raise Tier in Settings › Way of working".into()));
-        assert_eq!(Limits { tier: Tier::Mid, ..Limits::default() }.admit(Some("claude-fable-5-3"), None, &learned), Ok(None));
+        assert_eq!(low.admit(&claude, Some("claude-fable-5-3"), None, &learned), Err("claude-fable-5-3 is a mid-tier model; this project allows up to low. Pick a low model or raise Tier in Settings › Way of working".into()));
+        assert_eq!(Limits { tier: Tier::Mid, ..Limits::default() }.admit(&claude, Some("claude-fable-5-3"), None, &learned), Ok(None));
 
         let mut cheap_fable = known();
         cheap_fable.iter_mut().filter(|m| m.slug.starts_with("claude-fable-")).for_each(|m| m.cost = crate::delegate::Cost::Low);
         let learned = merged(cheap_fable, &menu);
-        assert_eq!(low.admit(Some("claude-fable-5-3"), None, &learned), Ok(None), "the family's tier, not the words of the id, which say mid");
+        assert_eq!(low.admit(&claude, Some("claude-fable-5-3"), None, &learned), Ok(None), "the family's tier, not the words of the id, which say mid");
     }
 
     /// A Claude login's `admit`, over the list pinned knows.
     fn admit_on_claude(limits: &Limits, model: Option<&str>) -> Result<Option<String>, String> {
-        limits.admit(model, None, &crate::claude_models::known())
+        limits.admit(&crate::accounts::Account::builtin(crate::accounts::Provider::Claude), model, None, &crate::claude_models::known())
     }
 
     fn refused_as_unlisted(result: Result<Option<String>, String>, model: &str) {
@@ -1423,6 +1431,17 @@ Deploys go through the VPS."
         assert_eq!(admit_on_claude(&open, None), Ok(None));
         let mid = Limits { tier: Tier::Mid, ..Limits::default() };
         assert_eq!(admit_on_claude(&mid, Some("")), Ok(None), "an empty model keeps the default, as before");
+    }
+
+    #[test]
+    fn a_ceiling_leaves_the_other_drivers_to_their_own_lists() {
+        use crate::accounts::{Account, Auth, Provider};
+        let mid = Limits { tier: Tier::Mid, ..Limits::default() };
+        let known = crate::claude_models::known();
+        let go = Account { id: "go".into(), name: "Go".into(), auth: Auth::OpenCodeGo, ..Account::builtin(Provider::Claude) };
+        for account in [Account::builtin(Provider::Cursor), Account::builtin(Provider::Codex), go] {
+            assert_eq!(mid.admit(&account, Some("claude-nova-9-9"), None, &known), Ok(None), "{}", account.id);
+        }
     }
 
     #[test]

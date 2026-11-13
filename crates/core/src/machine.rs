@@ -1938,7 +1938,7 @@ impl Machine {
         let (cwd, account) = self.tab(&id, |t| (t.cwd.clone(), t.account.clone()))?;
         let project = history::project_of(&cwd);
         let limits = caller.map_or_else(|| self.tastes().resolve(&captain_scope(&project)).limits(), |caller| self.limits_in(caller, &project));
-        let effort = match limits.admit(model.as_deref(), flag("--effort").as_deref(), &self.claude_models()) {
+        let effort = match limits.admit(&account, model.as_deref(), flag("--effort").as_deref(), &self.claude_models()) {
             Ok(effort) => effort,
             Err(refused) => {
                 self.close_tab(&id);
@@ -3514,9 +3514,17 @@ impl Machine {
         if let Call::StartClaude { tab, cols, rows } = call {
             return json(self.start_for(caller, &tab, cols, rows)?);
         }
-        if let Call::SetModel { model, .. } = &call {
+        if let Call::SetModel { tab, model, account, .. } = &call {
             // An agent moves a session only to a model its own project allows, as it starts a worker.
-            self.caller_limits(caller)?.admit(Some(model), None, &self.claude_models())?;
+            // The account the session runs on after the call. A tab or account that is not here is refused by the call itself.
+            let to = match account.as_deref().filter(|id| !id.is_empty()) {
+                Some(id) => self.accounts.get(id),
+                None => self.tab(tab, |t| t.account.clone()).ok(),
+            };
+            let limits = self.caller_limits(caller)?;
+            if let Some(to) = to {
+                limits.admit(&to, Some(model), None, &self.claude_models())?;
+            }
         }
         if let Call::Enqueue { path, text, request_id, busy, .. } = call {
             return json(self.enqueue_for(caller, &path, &text, &request_id, busy)?);
@@ -3573,10 +3581,10 @@ impl Machine {
         if tab == caller {
             return Err("enqueue hands a message to a Captain; your own session is the one reading this".into());
         }
-        let (running, model) = self.tab(&tab, |t| (t.live() || t.starting, t.model.clone()))?;
+        let (running, model, account) = self.tab(&tab, |t| (t.live() || t.starting, t.model.clone(), t.account.clone()))?;
         if !running {
             let limits = self.limits_in(caller, &project);
-            limits.admit(model.as_deref(), None, &self.claude_models())?;
+            limits.admit(&account, model.as_deref(), None, &self.claude_models())?;
             let working = self.delegates.working_in(&project);
             if working >= limits.parallel as usize {
                 return Err(workers_full(working));
@@ -3625,7 +3633,7 @@ impl Machine {
             return Err(format!("{tab} runs with {} access, wider than your session's {}", access.as_str(), ceiling.as_str()));
         }
         let limits = self.caller_limits(caller)?;
-        let effort = limits.admit(model.as_deref(), None, &self.claude_models())?;
+        let effort = limits.admit(&account, model.as_deref(), None, &self.claude_models())?;
         let caller_ref = Caller { tab: Some(caller.to_owned()), task: None };
         let title = title.unwrap_or_else(|| format!("Session in {}", cwd.file_name().map_or_else(|| cwd.display().to_string(), |name| name.to_string_lossy().into_owned())));
         let new = NewTask {
@@ -4671,17 +4679,20 @@ impl Machine {
     fn delegate_elsewhere(&self, caller: &crate::delegate::Caller, tool: Option<String>, mut request: crate::delegate::Request, limits: taste::Limits, placed: crate::placement::Placed, may_refuse: bool) -> Result<Sent, String> {
         use crate::delegate::{resolve_access, Claim, NewTask, Parent, RemoteTarget};
         let tab = caller.tab.clone().ok_or("only a thread delegates to another machine or a box, and this is a headless task")?;
-        let (account, cwd, ceiling, session) = self.tab(&tab, |t| (t.account.id.clone(), t.cwd.clone(), t.child_access(), t.claude_session.clone()))?;
+        let (account, cwd, ceiling, session) = self.tab(&tab, |t| (t.account.clone(), t.cwd.clone(), t.child_access(), t.claude_session.clone()))?;
         let access = resolve_access(ceiling, &request)?;
         let repo = request.target.boxed.as_ref().and_then(|b| b.repo.clone()).or_else(|| git_remote(&cwd));
         if repo.is_none() {
             return Err("this thread's folder has no git origin, so no other machine or box can find its project".into());
         }
-        let account = request.target.account.clone().filter(|id| !id.is_empty()).unwrap_or(account);
-        let provider = self.accounts.get(&account).map_or(Provider::Claude, |a| a.provider);
+        let account = match request.target.account.clone().filter(|id| !id.is_empty()) {
+            Some(id) => self.accounts.get(&id).unwrap_or_else(|| Account { id, ..Account::builtin(Provider::Claude) }),
+            None => account,
+        };
+        let provider = account.provider;
         let place = Some(placed.machine_name.clone()).filter(|name| !name.is_empty()).or_else(|| request.target.machine.clone()).unwrap_or_else(|| "an Upstash Box".into());
         // Held here to the caller's limits, and sent with them, so the worker there is held too.
-        let effort = limits.admit(request.target.model.as_deref(), request.target.effort.as_deref(), &self.claude_models())?;
+        let effort = limits.admit(&account, request.target.model.as_deref(), request.target.effort.as_deref(), &self.claude_models())?;
         let (budget_ms, limit_ms) = crate::delegate::run_limits(request.budget_ms, request.limit_ms, limits.time_limit_ms())?;
         (request.target.effort, request.budget_ms, request.limit_ms) = (effort.clone(), Some(budget_ms), Some(limit_ms));
         let held = taste::Limits { time_limit_min: limit_ms.div_ceil(60_000).try_into().unwrap_or(u32::MAX), ..limits };
@@ -4690,7 +4701,7 @@ impl Machine {
             parent: Parent::Tab(tab.clone()),
             tool,
             title: request.title.clone(),
-            account,
+            account: account.id,
             provider,
             model: request.target.model.clone(),
             cwd,
@@ -5230,10 +5241,7 @@ impl Machine {
         let from = model.as_deref().and_then(|asked| ladder.iter().position(|rung| rung.model == asked)).map_or(0, |at| at + 1);
         let claude = self.claude_models();
         for rung in &ladder[from..] {
-            if limits.admit(Some(&rung.model), effort, &claude).is_err() {
-                continue;
-            }
-            let runs = self.accounts.list().into_iter().filter(|next| next.id != account.id && self.rung_runs_on(rung, next));
+            let runs = self.accounts.list().into_iter().filter(|next| next.id != account.id && self.rung_runs_on(rung, next) && limits.admit(next, Some(&rung.model), effort, &claude).is_ok());
             let Some(next) = runs.into_iter().find(|next| !matches!(self.admit_account(next), Admit::Blocked(_))) else { continue };
             let moved = Moved { account: account.id.clone(), model: model.clone(), reason: blocked.note() };
             return Ok((next, Some(rung.model.clone()), Some(moved)));
@@ -5295,7 +5303,7 @@ impl Machine {
         let inherited_model = if parent_auth == account.auth { inherited_model } else { None };
         let model = crate::delegate::child_model(parent_provider, account.provider, inherited_model, request.target.model.clone());
         let (account, mut model, moved) = self.route_around_limits(account, model, &limits, &cwd, request.target.effort.as_deref())?;
-        let mut effort = limits.admit(model.as_deref(), request.target.effort.as_deref(), &self.claude_models())?;
+        let mut effort = limits.admit(&account, model.as_deref(), request.target.effort.as_deref(), &self.claude_models())?;
         let (budget_ms, limit_ms) = crate::delegate::run_limits(request.budget_ms, request.limit_ms, limits.time_limit_ms())?;
         self.ensure_parent(parent_tab.as_deref(), None)?;
         let isolated = request.isolation == Isolation::Worktree;
