@@ -6290,11 +6290,11 @@ fn an_agent_manages_its_accounts_workflows_projects_sessions_settings_and_usage_
 
     let listed = session_tool(&ana.dir, &ana.tab, json!({ "name": "actions" })).unwrap();
     let class = |name: &str| listed["actions"].as_array().unwrap().iter().find(|a| a["name"] == name).map(|a| a["class"].as_str().unwrap().to_owned());
-    for (name, expected) in [("save_connector", "write"), ("delete_connector", "confirm"), ("generate_workflow", "write"), ("clone", "write"), ("share_project", "write"), ("prompt", "write"), ("enqueue", "write"), ("set_taste", "confirm"), ("reset_taste_field", "confirm"), ("save_skill", "write"), ("token_usage", "read"), ("delegation_stats", "read")] {
+    for (name, expected) in [("save_connector", "write"), ("delete_connector", "confirm"), ("clone", "write"), ("share_project", "write"), ("prompt", "write"), ("enqueue", "write"), ("set_taste", "confirm"), ("reset_taste_field", "confirm"), ("save_skill", "write"), ("token_usage", "read"), ("delegation_stats", "read")] {
         assert_eq!(class(name).as_deref(), Some(expected), "{name}");
     }
     assert_eq!(class("run_workflow").as_deref(), Some("write"), "a Run now is held to the caller's limits, with no approval");
-    assert!(class("run").is_none() && class("run_now").is_none() && class("node_clone").is_none(), "the hub's run and the token-taking clone stay closed");
+    assert!(class("run").is_none() && class("run_now").is_none() && class("node_clone").is_none() && class("generate_workflow").is_none(), "the hub's run, the token-taking clone and the removed generate_workflow stay closed");
 
     // Workflows: save, edit, list, and a refusal for one that skips permission prompts.
     let workflow = |name: &str, mode: &str, id: Option<&str>| {
@@ -6319,8 +6319,6 @@ fn an_agent_manages_its_accounts_workflows_projects_sessions_settings_and_usage_
         Err("save_connector would run a session that skips its permission prompts, and your own session asks for them".into()),
         "a workflow outlives the session that saved it, so it never runs wider than that session"
     );
-    assert_eq!(act(&ana.dir, &ana.tab, "generate_workflow", json!({ "model": "gpt-6-luna", "description": "Triage bugs" })), Err("Vercel AI Gateway is not connected: connect it in pinned's Connectors settings".into()));
-    assert_eq!(act(&ana.dir, &ana.tab, "generate_workflow", json!({ "model": "gpt-6-luna", "description": " " })), Err("describe the workflow first".into()));
     assert_eq!(act(&ana.dir, &ana.tab, "run", json!({})), Err("run is not open to agents: the hub's way to start a workflow's session: its raw arguments and environment could pass for a workflow's".into()));
 
     // Bob's account holds none of Ana's workflows, and cannot reach, edit or delete one.
@@ -7178,6 +7176,18 @@ fn a_single_bot_slack_import_becomes_the_default_bot_and_replies_still_use_its_k
 }
 
 #[test]
+fn an_older_apps_generate_workflow_gets_a_short_error() {
+    let hub = TestHub::start_with("old_generate", Signup::Open);
+    let (token, _) = account::signup(&hub.url, "ana@acme.dev", "correct horse").unwrap();
+    let mut app = Client::app(&hub.url, &token);
+    app.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    assert_eq!(
+        app.hub(json!({ "cmd": "generate_workflow", "model": "x", "description": "y" })),
+        Err("Generate with AI was removed: ask an agent to create the workflow".into())
+    );
+}
+
+#[test]
 fn the_reads_of_linear_slack_github_and_vercel_answer_from_the_callers_account_or_refuse_cleanly() {
     let Pair { _hub, url: _, mut ana, mut bob } = ana_and_bob("agent_reads");
     let mut seen = Seen(vec![]);
@@ -7198,17 +7208,14 @@ fn the_reads_of_linear_slack_github_and_vercel_answer_from_the_callers_account_o
         assert_eq!(asked_of(host), reached + 1, "{action}: a refused read reaches nobody, and never takes ana's key");
     }
 
-    let draft = json!({ "model": "openai/gpt-5", "description": "when a bug is filed, fix it" });
-    let gateway = "ai-gateway.vercel.sh:443";
-    let reached = asked_of(gateway);
-    let hers = seen.log(act(&ana.dir, &ana.tab, "generate_workflow", draft.clone())).unwrap_err();
-    assert!(hers.starts_with("Vercel AI Gateway: unreachable"), "ana's draft goes to her gateway key: {hers}");
-    assert_eq!(asked_of(gateway), reached + 1);
-    let none = "Vercel AI Gateway is not connected: connect it in pinned's Connectors settings";
-    assert_eq!(seen.log(act(&bob.dir, &bob.tab, "generate_workflow", draft.clone())), Err(none.into()), "bob has no gateway key to draft with");
-    assert_eq!(seen.log(bob.client.hub(json!({ "cmd": "generate_workflow", "model": "openai/gpt-5", "description": "x" }))), Err(none.into()));
-    assert_eq!(asked_of(gateway), reached + 1, "bob's refused draft reaches nobody");
+    // An account-wide read answers each caller from its own account.
+    for (agent, own) in [(&ana, "ana-mac"), (&bob, "bob-mac")] {
+        let machines = ran(seen.log(act(&agent.dir, &agent.tab, "machines", json!({}))));
+        let names: Vec<&str> = machines.as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap()).collect();
+        assert_eq!(names, [own], "machines lists the caller's own account only");
+    }
 
+    let gateway = "ai-gateway.vercel.sh:443";
     // The model list is the gateway's public one: it reads nothing of an account, so both ask the gateway alike.
     for agent in [&ana, &bob] {
         let before = asked_of(gateway);
@@ -7230,7 +7237,7 @@ fn the_reads_of_linear_slack_github_and_vercel_answer_from_the_callers_account_o
         holds_none_of(&all, &format!("{who}'s audit trail"), &format!("{:?}", trail_of(client)));
     }
     let bobs_reads: std::collections::BTreeSet<String> = trail_of(&mut bob.client).into_iter().map(|r| r.0).collect();
-    assert_eq!(bobs_reads.into_iter().collect::<Vec<_>>(), ["generate_workflow", "github_repos", "linear_suggestions", "slack_suggestions", "vercel_models"], "bob's trail holds his reads only");
+    assert_eq!(bobs_reads.into_iter().collect::<Vec<_>>(), ["github_repos", "linear_suggestions", "machines", "slack_suggestions", "vercel_models"], "bob's trail holds his reads only");
 }
 
 #[test]
