@@ -191,6 +191,10 @@ pub struct TabView {
     /// still shows the tab waiting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub questions: Option<crate::questions::Questionnaire>,
+    /// The session acts read-only whatever `bypass` says: its permission mode is plan, or a key
+    /// press left the mode unknown until a hook reports it. An older node never sends it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_only: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
@@ -811,6 +815,28 @@ fn pulls_limit() -> usize {
 }
 
 impl Call {
+    /// Only the hub sends this call to a machine, which runs what it carries as the hub's word:
+    /// the hub refuses it from a client, whose calls its unlock check reads. The one list of them,
+    /// so a new call the hub alone sends is added here.
+    pub fn only_the_hub_sends(&self) -> bool {
+        matches!(
+            self,
+            Call::ActFor { .. }
+                | Call::Notice { .. }
+                | Call::RunNow { .. }
+                | Call::OpenRun { .. }
+                | Call::Deliver { .. }
+                | Call::OrchestratorReport { .. }
+                | Call::Delegate { .. }
+                | Call::RemoteTask { .. }
+                | Call::RemoteEnded { .. }
+                | Call::RemoteAsked { .. }
+                | Call::RepoLook { .. }
+                | Call::Enqueue { .. }
+                | Call::CancelSetupToken { .. }
+        )
+    }
+
     /// Runs off the machine's call queue, which carries keystrokes in order: a run may clone a
     /// repository for minutes, gh waits on GitHub, and the others read files or run git.
     pub fn may_wait(&self) -> bool {
@@ -1788,6 +1814,7 @@ mod tests {
             headless: false,
             stopped: None,
             questions: None,
+            read_only: false,
         }
     }
 
@@ -2411,5 +2438,43 @@ mod tests {
         assert!(matches!(asked, HubCall::GetBoxSize { repo: Some(ref repo), size: None } if repo == "acme/site"));
         let cleared = serde_json::from_value::<HubCall>(json!({ "cmd": "set_box_size" })).unwrap();
         assert!(matches!(cleared, HubCall::SetBoxSize { repo: None, size: None }));
+    }
+
+    #[test]
+    fn every_call_only_the_hub_sends_is_named_once_and_a_clients_own_calls_are_not() {
+        let request = serde_json::to_value(crate::delegate::parse_request(&json!({ "task": "Fix it." })).unwrap()).unwrap();
+        let hub_only = [
+            json!({ "cmd": "act_for", "caller": "tab-1", "call": { "cmd": "tabs" } }),
+            json!({ "cmd": "notice", "tab": "tab-1", "text": "[pinned] Done.", "id": "n-1" }),
+            json!({ "cmd": "run_now", "run": { "folder": "/w/site", "args": [] }, "title": "Fix · Run now" }),
+            json!({ "cmd": "open_run", "run": { "folder": "/w/site", "args": [] } }),
+            json!({ "cmd": "deliver", "env": [["PINNED_SLACK_THREAD", "1.2"]], "text": "yes" }),
+            json!({ "cmd": "orchestrator_report", "request_id": "r-1", "report": { "project": "site", "path": "/w/site", "tab": "tab-1", "text": "Done." } }),
+            json!({ "cmd": "delegate", "origin": { "machine": "m2", "tab": "tab-1", "task": "task-1", "access": "auto" }, "request": request }),
+            json!({ "cmd": "remote_task", "origin_machine": "m2", "tab": "tab-1", "task": "task-1" }),
+            json!({ "cmd": "remote_ended", "from": "m2", "tab": "tab-1", "task": "task-1", "end": { "state": "result_available" } }),
+            json!({ "cmd": "remote_asked", "from": "m2", "tab": "tab-1", "task": "task-1" }),
+            json!({ "cmd": "repo_look", "path": "/w/site", "look": { "look": "overview" } }),
+            json!({ "cmd": "enqueue", "path": "/w/site", "text": "Ship it.", "request_id": "r-1", "sender": "Orchestrator" }),
+            json!({ "cmd": "cancel_setup_token", "account": "work" }),
+        ];
+        for call in &hub_only {
+            let parsed: Call = serde_json::from_value(call.clone()).unwrap_or_else(|e| panic!("{call}: {e}"));
+            assert!(parsed.only_the_hub_sends(), "{call}");
+        }
+        let schema = serde_json::to_value(schemars::schema_for!(Call)).unwrap();
+        let named = schema["oneOf"].as_array().unwrap().iter().filter(|v| hub_only.iter().any(|c| c["cmd"] == v["properties"]["cmd"]["const"])).count();
+        assert_eq!(named, hub_only.len(), "each is a call of its own");
+        let from_a_client = [
+            json!({ "cmd": "tabs" }),
+            json!({ "cmd": "run", "run": { "folder": "/w/site", "args": [] } }),
+            json!({ "cmd": "start_claude", "tab": "tab-1", "cols": 80, "rows": 24 }),
+            json!({ "cmd": "watch_threads", "tabs": ["tab-1"] }),
+            json!({ "cmd": "update_self" }),
+        ];
+        for call in &from_a_client {
+            let parsed: Call = serde_json::from_value(call.clone()).unwrap_or_else(|e| panic!("{call}: {e}"));
+            assert!(!parsed.only_the_hub_sends(), "{call}");
+        }
     }
 }
