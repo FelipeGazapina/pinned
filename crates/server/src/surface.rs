@@ -5,9 +5,9 @@
 use crate::boxes::Opener;
 use crate::db::{Audit, Held};
 use crate::hub::{Account, Hub};
-use pinned_core::schedule::Actor;
 use pinned_core::surface::{self, ActAnswer, Action, ActorRole, AgentAct, AuditOutcome, Class, Confirmation, Decided, Decision, Parsed, Side};
 use pinned_core::connectors::{Connector, Placement, RunsOn};
+use pinned_core::schedule::{self, Actor};
 use pinned_core::wire::{Call, HubCall, RunStarted, ToClient};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -70,11 +70,14 @@ struct Trail<'a> {
     action: &'a str,
     args: String,
     request_id: Option<&'a str>,
+    /// The scheduled task the act is about, known once it has run.
+    task: std::sync::Mutex<Option<String>>,
 }
 
 impl Trail<'_> {
     async fn write(&self, outcome: AuditOutcome, detail: &str) -> Result<(), String> {
-        let row = Audit { account: self.account, machine: self.machine, tab: self.tab, role: self.role, action: self.action, args: &self.args, outcome, detail, request_id: self.request_id };
+        let task = self.task.lock().unwrap().clone();
+        let row = Audit { account: self.account, machine: self.machine, tab: self.tab, role: self.role, action: self.action, args: &self.args, outcome, detail, request_id: self.request_id, task: task.as_deref() };
         self.hub.db.audit(&row).await
     }
 
@@ -96,7 +99,7 @@ fn json<T: serde::Serialize>(value: T) -> Result<Value, String> {
 pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: AgentAct) -> Result<Value, String> {
     let caller = Caller::of(account, origin, &act.tab)?;
     let request_id = act.request_id.as_deref().filter(|id| !id.is_empty());
-    let trail = Trail { hub, account: account.id, machine: caller.machine, tab: &caller.tab, role: caller.role, action: &act.action, args: surface::summary(&act.args), request_id };
+    let trail = Trail { hub, account: account.id, machine: caller.machine, tab: &caller.tab, role: caller.role, action: &act.action, args: surface::summary(&act.args), request_id, task: Default::default() };
     if let Some(id) = request_id {
         match hub.db.audited(account.id, caller.machine, &caller.tab, &act.action, id).await? {
             Some((AuditOutcome::Pending, _)) | None => {}
@@ -111,7 +114,16 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
             return Err(refusal);
         }
     };
-    if admitted.action.class == Class::Confirm {
+    // A schedule act whose task cannot be read is refused here, before anything runs.
+    let why = match schedule_needs_ok(hub, account, &admitted.call).await {
+        Ok(why) => why,
+        Err(refusal) => {
+            let refusal = surface::mask_secrets(&refusal);
+            trail.write(AuditOutcome::Refused, &refusal).await?;
+            return Err(refusal);
+        }
+    };
+    if admitted.action.class == Class::Confirm || why.is_some() {
         let asked = Confirmation {
             id: String::new(),
             at: 0,
@@ -121,9 +133,12 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
             title: caller.title.clone(),
             role: caller.role,
             action: admitted.action.name.to_owned(),
-            about: String::new(),
+            about: why.as_deref().map(surface::mask_secrets).unwrap_or_default(),
             args: match surface::without_asked(admitted.action, &act.args) {
                 Value::Null => Value::Object(Default::default()),
+                // The held copy is listed to every app of the account, and an approval runs it, so a
+                // schedule act holds what the user sees: the stored task is masked the same way.
+                args if matches!(&admitted.call, Parsed::Hub(call) if schedule::is_schedule_call(call)) => surface::mask_values(args),
                 args => args,
             },
             target: (!admitted.on_origin).then(|| admitted.target.clone()),
@@ -141,6 +156,7 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
             }
             return json(ActAnswer::Pending { id: id.to_string(), next: surface::PENDING_NEXT.into() });
         }
+        note_task(&trail, &act.action, &act.args, &Value::Null, String::new());
         trail.write(AuditOutcome::Pending, "").await?;
         push_confirmations(hub, account).await;
         return json(ActAnswer::Pending { id: id.to_string(), next: surface::PENDING_NEXT.into() });
@@ -153,6 +169,7 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
     };
     match ran {
         Ok(result) => {
+            let widened = note_task(&trail, act.action.as_str(), &act.args, &result, widened);
             trail.ran(AuditOutcome::Done, &widened).await;
             json(ActAnswer::Done { result: surface::redact(result, admitted.action.hides) })
         }
@@ -232,6 +249,7 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
 /// for a call that checks one, which then refuses what needs the asking session's own.
 async fn run(hub: &Arc<Hub>, account: &Arc<Account>, caller_tab: &str, actor: Actor, call: Parsed, target: &str, on_origin: bool) -> Result<Value, String> {
     match call {
+        Parsed::Hub(call) if schedule::is_schedule_call(&call) => Box::pin(hub.schedule_call(account, call, actor)).await,
         // An agent's Unarchive only reopens the tab: starting a session is `start_claude`'s, under its limits.
         Parsed::Hub(HubCall::UnarchiveSession { session }) => json(hub.unarchive_session(account, &session, false).await?),
         // An idea made by an agent says which one.
@@ -298,7 +316,7 @@ pub async fn decide(hub: &Arc<Hub>, account: &Arc<Account>, id: &str, approve: b
     let held = hub.db.decide_confirmation(account.id, key, approve).await?.ok_or_else(unknown)?;
     let asked = &held.confirmation;
     let machine = Uuid::parse_str(&asked.machine).map_err(|e| e.to_string())?;
-    let trail = Trail { hub, account: account.id, machine, tab: &asked.tab, role: asked.role, action: &asked.action, args: surface::summary(&asked.args), request_id: asked.request_id.as_deref() };
+    let trail = Trail { hub, account: account.id, machine, tab: &asked.tab, role: asked.role, action: &asked.action, args: surface::summary(&asked.args), request_id: asked.request_id.as_deref(), task: Default::default() };
     trail.write(if approve { AuditOutcome::Approved } else { AuditOutcome::Denied }, "").await?;
     let action = surface::find(&asked.action);
     let (decision, outcome, result) = match (approve, action) {
@@ -317,6 +335,7 @@ pub async fn decide(hub: &Arc<Hub>, account: &Arc<Account>, id: &str, approve: b
             Err(e) => (Decision::Approved, format!("failed: {}", hide(&e)), Value::Null),
         },
     };
+    note_task(&trail, &asked.action, &asked.args, &result, String::new());
     if decision == Decision::Approved {
         match outcome.strip_prefix("failed: ") {
             Some(error) => trail.ran(AuditOutcome::Failed, error).await,
@@ -346,7 +365,7 @@ pub async fn finish_interrupted(hub: &Arc<Hub>) -> Result<(), String> {
         let asked = &held.confirmation;
         if asked.decision == Some(Decision::Approved) {
             let machine = Uuid::parse_str(&asked.machine).map_err(|e| e.to_string())?;
-            let trail = Trail { hub, account, machine, tab: &asked.tab, role: asked.role, action: &asked.action, args: surface::summary(&asked.args), request_id: asked.request_id.as_deref() };
+            let trail = Trail { hub, account, machine, tab: &asked.tab, role: asked.role, action: &asked.action, args: surface::summary(&asked.args), request_id: asked.request_id.as_deref(), task: Default::default() };
             trail.ran(AuditOutcome::Failed, INTERRUPTED).await;
             eprintln!("pinned-server: confirmation {} was approved when a hub stopped; it reads as failed", asked.id);
         }
@@ -437,4 +456,69 @@ pub async fn send_confirmations(hub: &Hub, account: &Account, client: u64) {
 
 async fn waiting(hub: &Hub, account: &Account) -> Result<Vec<Confirmation>, String> {
     Ok(hub.db.confirmations(account.id).await?.into_iter().filter(|c| c.decision.is_none()).collect())
+}
+
+/// Why an agent's schedule act waits for the user although its action is a Write, or None when it
+/// runs at once. Every rule of when an agent's schedule act waits lives here:
+/// - a save that carries approvals (`schedule::save_needs_ok`), as a dry run never does;
+/// - an edit, a pause or a start again, or a delete of a task the user created;
+/// - starting a task that carries approvals again, whoever created it.
+///
+/// It fails closed: a task id it cannot read, or a task the account does not hold, is an error that
+/// refuses the act, never a "no". It reads ids with `hub::task_key`, as `Hub::schedule_call` does.
+async fn schedule_needs_ok(hub: &Hub, account: &Account, call: &Parsed) -> Result<Option<String>, String> {
+    let Parsed::Hub(call) = call else { return Ok(None) };
+    let stored = |id: &str| {
+        let id = id.to_owned();
+        async move { hub.db.task(account.id, crate::hub::task_key(&id)?).await?.ok_or_else(|| format!("this account has no task {id}")) }
+    };
+    let users = |task: &schedule::Task, what: &str| (task.created_by == Actor::User).then(|| format!("an agent wants to {what} \"{}\", a task the user created", task.title));
+    let why = match call {
+        HubCall::ListSchedules => Vec::new(),
+        HubCall::ScheduleRuns { id, .. } => stored(id).await.map(|_| Vec::new())?,
+        HubCall::DeleteSchedule { id } => users(&stored(id).await?, "delete, with its run history,").into_iter().collect(),
+        HubCall::PauseSchedule { id, paused } => {
+            let task = stored(id).await?;
+            let mut why: Vec<String> = users(&task, if *paused { "pause" } else { "start again" }).into_iter().collect();
+            if !paused {
+                why.extend(schedule::save_needs_ok(&task));
+            }
+            why
+        }
+        HubCall::SaveSchedule { task, dry_run } => {
+            let mut why = Vec::new();
+            if !task.id.trim().is_empty() {
+                why.extend(users(&stored(&task.id).await?, "edit"));
+            }
+            if *dry_run {
+                return Ok(None);
+            }
+            why.extend(schedule::save_needs_ok(task));
+            why
+        }
+        _ => Vec::new(),
+    };
+    Ok((!why.is_empty()).then(|| why.join("; ")))
+}
+
+/// The task a schedule act was about, from the act's arguments and what it answered.
+fn task_of(action: &str, args: &Value, result: &Value) -> Option<String> {
+    match action {
+        "save_schedule" => result["task"]["id"].as_str().map(str::to_owned),
+        "pause_schedule" | "delete_schedule" | "schedule_runs" => args["id"].as_str().map(str::to_owned),
+        _ => None,
+    }
+}
+
+/// Records the task on the act's audit rows and words what a save came to for its detail.
+fn note_task(trail: &Trail<'_>, action: &str, args: &Value, result: &Value, detail: String) -> String {
+    let Some(task) = task_of(action, args, result) else { return detail };
+    *trail.task.lock().unwrap() = Some(task);
+    match (action, result["task"]["title"].as_str()) {
+        ("save_schedule", Some(title)) => {
+            let next = result["next"][0]["local"].as_str().map_or_else(|| "no run".to_owned(), str::to_owned);
+            surface::mask_secrets(&format!("saved \"{title}\"; next: {next}"))
+        }
+        _ => detail,
+    }
 }
