@@ -7614,6 +7614,30 @@ fn act_on(dir: &Path, tab: &str, machine: &str, action: &str, args: Value) -> Re
     session_tool(dir, tab, json!({ "name": "act", "action": action, "args": args, "machine": machine }))
 }
 
+/// An agent's `enqueue` aimed at another machine of its account, with a `sender` it chose, never
+/// reaches that machine as a bare `enqueue`, which the machine would type under that sender. It is
+/// refused, or it reaches the machine as `act_for`, whose `enqueue` stamps the caller's own role.
+#[test]
+fn an_agents_enqueue_to_another_machine_never_carries_a_sender_it_chose() {
+    let hub = TestHub::start("enqueue_sender");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &token, "ana@acme.dev", "enqueue-a");
+    let (_, b_token) = account::register_machine(&url, &token, "enqueue-b", "linux").unwrap();
+    let b = RawMachine::start(&url, &b_token, |_| RawReply::Ok(json!({ "outcome": "iniciado", "tab": "tab-c" })));
+    ana.client.wait_machines(&[("enqueue-a", true), ("enqueue-b", true)]);
+
+    let args = json!({ "path": "/w/site", "text": "Ship it.", "request_id": "r-1", "sender": "Almirante Chosen" });
+    let answer = act_on(&ana.dir, &ana.tab, "enqueue-b", "enqueue", args);
+    let reached = b.calls.lock().unwrap().clone();
+    assert_eq!(b.calls("enqueue"), 0, "a bare enqueue reached the other machine: {answer:?} {reached:?}");
+    match answer {
+        // Today the hub refuses work started off the session's own machine before either path.
+        Err(refused) => assert_eq!((refused.as_str(), reached.len()), ("enqueue starts work only on this session's own machine for now", 0), "{reached:?}"),
+        Ok(_) => assert!(reached.iter().all(|c| c["cmd"] == "act_for"), "{reached:?}"),
+    }
+}
+
 /// What `act` ran and answered, which must have run.
 fn ran(answer: Result<Value, String>) -> Value {
     let answer = answer.unwrap();

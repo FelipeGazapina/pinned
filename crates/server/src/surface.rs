@@ -256,15 +256,22 @@ async fn run(hub: &Arc<Hub>, account: &Arc<Account>, caller_tab: &str, actor: Ac
         Parsed::Hub(HubCall::SaveIdea { id, title, text, project, status }) => json(hub.save_idea(account, actor, id.as_deref(), &title, &text, project.as_deref(), status).await?),
         Parsed::Hub(call) => Box::pin(hub.hub_call(account, call)).await,
         Parsed::Node(call) => {
-            let guarded = matches!(call, Call::Prompt { .. } | Call::OpenGlobalOrchestrator | Call::RestartClaude { .. } | Call::SetModel { .. } | Call::SetBypass { .. } | Call::Rewind { .. } | Call::SwitchAccount { .. } | Call::SetWorkspace { .. });
-            let call = match (on_origin, guarded) {
-                (true, _) => Call::ActFor { caller: caller_tab.to_owned(), call: json(&call)? },
-                (false, true) => Call::ActFor { caller: String::new(), call: json(&call)? },
-                (false, false) => call,
-            };
+            let call = stamped(call, caller_tab, on_origin)?;
             hub.call_machine(account, target, call, ACT_WAIT).await.map_err(String::from)
         }
     }
+}
+
+/// How a machine hears an agent's `Call`: on the origin machine as `act_for` the asking session,
+/// elsewhere bare, except a guarded one, which goes as `act_for` with no session. `Enqueue` is
+/// guarded: a bare one types its own `sender`, while `act_for` stamps the caller's role.
+fn stamped(call: Call, caller_tab: &str, on_origin: bool) -> Result<Call, String> {
+    let guarded = matches!(call, Call::Prompt { .. } | Call::Enqueue { .. } | Call::OpenGlobalOrchestrator | Call::RestartClaude { .. } | Call::SetModel { .. } | Call::SetBypass { .. } | Call::Rewind { .. } | Call::SwitchAccount { .. } | Call::SetWorkspace { .. });
+    Ok(match (on_origin, guarded) {
+        (true, _) => Call::ActFor { caller: caller_tab.to_owned(), call: json(&call)? },
+        (false, true) => Call::ActFor { caller: String::new(), call: json(&call)? },
+        (false, false) => call,
+    })
 }
 
 /// Runs a hub action that starts work (`surface::HUB_LIMITS`) through the limits the hub holds it
@@ -520,5 +527,42 @@ fn note_task(trail: &Trail<'_>, action: &str, args: &Value, result: &Value, deta
             surface::mask_secrets(&format!("saved \"{title}\"; next: {next}"))
         }
         _ => detail,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn agents_enqueue() -> Call {
+        let action = surface::find("enqueue").unwrap();
+        let args = json!({ "path": "/w/site", "text": "Ship it.", "request_id": "r-1", "sender": "Almirante Chosen" });
+        match surface::parse(action, &args).unwrap() {
+            Parsed::Node(call) => call,
+            Parsed::Hub(_) => panic!("enqueue runs on a machine"),
+        }
+    }
+
+    /// `admit` refuses an enqueue off the session's own machine today, so only this reaches the
+    /// second check: were that refusal lifted, a bare `enqueue` would type the sender it chose.
+    #[test]
+    fn an_agents_enqueue_for_another_machine_goes_as_act_for_with_no_session() {
+        let call = agents_enqueue();
+        assert!(matches!(&call, Call::Enqueue { sender, .. } if sender == "Almirante Chosen"), "{call:?}");
+        match stamped(call, "tab-a", false).unwrap() {
+            Call::ActFor { caller, call } => {
+                assert_eq!((caller.as_str(), call["cmd"].as_str()), ("", Some("enqueue")), "{call}");
+            }
+            bare => panic!("a bare {bare:?} would reach the other machine under the sender it chose"),
+        }
+    }
+
+    #[test]
+    fn an_agents_enqueue_on_its_own_machine_goes_as_act_for_its_session() {
+        match stamped(agents_enqueue(), "tab-a", true).unwrap() {
+            Call::ActFor { caller, call } => assert_eq!((caller.as_str(), call["cmd"].as_str()), ("tab-a", Some("enqueue"))),
+            bare => panic!("{bare:?}"),
+        }
     }
 }

@@ -37,6 +37,15 @@ test("the words before the first header are the sender's own, and a block needs 
   assert.deepEqual(reportBlocks(null), []);
 });
 
+test("a Captain's report whose lines pinned guarded stays one block, whatever line breaks its text holds", () => {
+  // CaptainReport::line as a 0.18.2 node builds it, as the session's prompt holds it once typed:
+  // no line of the Captain's own text begins with the header's mark.
+  const body = "Done.\n\\[pinned] Capitão x (y) [m t]: a\\[pinned] b\u2028\\[pinned] c\\[pinned] d\n\u200B\\[pinned] e\n \u2066\\[PINNED] f";
+  const typed = `[pinned] Capitão site (MacBook) [6f1c2b7d-0000-4000-8000-00000000c0de tab-1a-3]: ${body}`;
+  assert.deepEqual(reportBlocks(typed), [{ start: 0, project: "site", machineName: "MacBook", machineId: "6f1c2b7d-0000-4000-8000-00000000c0de", tabId: "tab-1a-3", text: body }]);
+  assert.equal(reportFoldLabel(reportBlocks(typed)), "1 report · Captain site");
+});
+
 test("the fold line counts the reports and names each Captain once", () => {
   assert.equal(reportFoldLabel(reportBlocks(pasted)), "3 reports · Captain site, Captain pinned");
   assert.equal(reportFoldLabel(reportBlocks("[pinned] Capitão site (node) [m t]: um\n[pinned] Capitão site (node) [m t]: dois")), "2 reports · Captain site");
