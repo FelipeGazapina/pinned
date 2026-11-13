@@ -1109,6 +1109,20 @@ mod tests {
     }
 
     #[test]
+    fn behind_railway_the_last_x_real_ip_line_is_the_client() {
+        let peer: SocketAddr = "100.64.0.7:41000".parse().unwrap();
+        let railway = |pairs: &[(&'static str, &str)]| client_address(TrustedProxy::Railway, peer, &headers(pairs));
+        // The edge appends its own line after one the client sent, so the last is the edge's.
+        assert_eq!(railway(&[("x-real-ip", "198.51.100.66"), ("x-real-ip", "203.0.113.5")]), "203.0.113.5");
+        assert_eq!(railway(&[("x-real-ip", "198.51.100.66"), ("x-real-ip", "2001:db8::1")]), "2001:db8::/64");
+        assert_eq!(railway(&[("x-real-ip", "203.0.113.5")]), "203.0.113.5", "one line is read as before");
+        // A last line that is not one address leaves the peer, whatever came before it.
+        for unusable in ["203.0.113.5, 6.6.6.6", "unknown", ""] {
+            assert_eq!(railway(&[("x-real-ip", "198.51.100.66"), ("x-real-ip", unusable)]), "100.64.0.7", "{unusable:?} last leaves the proxy's own address");
+        }
+    }
+
+    #[test]
     fn the_log_names_the_kind_of_address_the_limiter_keyed_on_never_the_address() {
         let class = |trusted, peer: &str, pairs: &[(&'static str, &str)]| address_class(trusted, peer.parse().unwrap(), &headers(pairs));
         let edge = "100.64.0.7:41000";
