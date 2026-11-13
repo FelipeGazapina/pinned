@@ -8707,6 +8707,26 @@ fn the_hub_holds_no_end_whose_task_or_state_is_not_one_pinned_makes() {
 }
 
 #[test]
+fn a_machine_that_answers_a_held_end_with_an_error_is_offered_no_more_until_it_connects_again() {
+    let hub = TestHub::start("held_error_stops");
+    let (_ana, mac, mac_token, _mini, mini_raw, _) = held_for_offline_mac(&hub);
+    let end = json!({ "cmd": "remote_ended", "to": mac.id, "tab": "tab-1", "task": "task-2", "end": { "state": "result_available", "summary": "Newer." } });
+    assert_eq!(mini_raw.ask(end), Ok(json!(true)));
+    let busy = RawMachine::start(&hub.url, &mac_token, |call| match call["cmd"].as_str().unwrap() {
+        "remote_ended" => RawReply::Err("not now".into()),
+        _ => RawReply::Ok(Value::Null),
+    });
+    wait_for("the hub to offer mac a held end", || busy.calls("remote_ended") >= 1);
+    std::thread::sleep(Duration::from_millis(800));
+    assert_eq!(busy.calls("remote_ended"), 1, "after an error the hub stops, as each try can wait on a silent machine");
+    assert_eq!(held_ends(&hub, None), 2, "both still wait");
+    drop(busy);
+    let back = RawMachine::start(&hub.url, &mac_token, |_| RawReply::Ok(json!(true)));
+    wait_for("mac to get both on its next connection", || back.calls("remote_ended") == 2);
+    wait_for("the rows to go", || held_ends(&hub, None) == 0);
+}
+
+#[test]
 fn a_held_end_answers_its_tasks_status_after_its_worker_is_gone_and_stays_until_answered() {
     let hub = TestHub::start("held_status");
     let (mut ana, mac, mac_token, mini, _mini_raw, _) = held_for_offline_mac(&hub);

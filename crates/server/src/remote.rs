@@ -325,7 +325,7 @@ pub async fn hold_end(hub: &Hub, account: &Account, origin: &str, from: &str, ta
             eprintln!("pinned-server: the hub {kept} the end of task {task} from {from} {why} machine {origin} of account {} ({size} bytes)", account.id);
         }
         Err(e) => {
-            eprintln!("pinned-server: could not hold the end of task {task} from {from} for machine {origin}: {e}");
+            eprintln!("pinned-server: could not hold the end of task {task} from {from_id} for machine {origin_id}: {e}");
             return Err(match unclaimed {
                 true => format!("the hub could not keep the end of task {task} that its machine did not take; it is sent again"),
                 false => format!("the hub could not keep the end of task {task} for its machine, which is offline; it is sent again"),
@@ -400,7 +400,12 @@ pub async fn deliver_held(hub: Arc<Hub>, account: Arc<Account>, machine: String)
                 }
                 eprintln!("pinned-server: machine {machine} did not take the held end of task {} (taken: false); it stays unclaimed", held.task);
             }
-            Err(e) => eprintln!("pinned-server: machine {machine} did not take the held end of task {}: {}", held.task, String::from(e)),
+            Err(_) => {
+                // Its text is the machine's own, so only ids are logged. The rest wait for its next
+                // connection: each try can wait `LOOK_WAIT` on a machine that does not answer.
+                eprintln!("pinned-server: machine {machine} answered the held end of task {} with an error; the rest wait for its next connection", held.task);
+                break;
+            }
         }
     }
 }
