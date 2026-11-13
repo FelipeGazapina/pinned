@@ -8718,6 +8718,25 @@ fn an_agents_task_is_stored_with_secrets_masked_and_the_users_as_typed() {
 }
 
 #[test]
+fn an_unreadable_task_or_run_leaves_the_settings_and_the_other_tasks_readable() {
+    let mut s = Schedules::start("sched_unreadable");
+    for title in ["Kept", "Broken", "Also kept"] {
+        save_schedule(&mut s.ana, task_body(title)).unwrap();
+    }
+    let broken = s.ana.hub(json!({ "cmd": "list_schedules" })).unwrap().as_array().unwrap().iter().find(|t| t["title"] == "Broken").unwrap()["id"].as_str().unwrap().to_owned();
+    let kept = s.ana.hub(json!({ "cmd": "list_schedules" })).unwrap().as_array().unwrap().iter().find(|t| t["title"] == "Kept").unwrap()["id"].as_str().unwrap().to_owned();
+    admin_on(&s._hub.database, &format!("update tasks set task = task - 'schedule' where id = '{broken}'"));
+    admin_on(&s._hub.database, &format!("insert into task_runs (task, account, due_at, state, run) select id, account, 1, 'due', '{{\"not\": \"a run\"}}' from tasks where id = '{kept}'"));
+    let settings = s.ana.hub(json!({ "cmd": "get_settings" }));
+    let mut titles: Vec<String> = settings.expect("the settings still load")["schedules"].as_array().unwrap().iter().map(|t| t["title"].as_str().unwrap().to_owned()).collect();
+    titles.sort();
+    assert_eq!(titles, ["Also kept", "Kept"], "the readable tasks, without the broken one");
+    let mut listed = s.titles();
+    listed.sort();
+    assert_eq!(listed, ["Also kept", "Kept"]);
+}
+
+#[test]
 fn another_account_neither_sees_nor_touches_the_tasks() {
     let mut s = Schedules::start("sched_isolation");
     let id = save_schedule(&mut s.ana, task_body("Ana's")).unwrap()["task"]["id"].as_str().unwrap().to_owned();
