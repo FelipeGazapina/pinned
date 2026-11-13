@@ -1,5 +1,5 @@
 // The real ui/ in headless Chromium against a fake hub: the WebSocket is routed, and `stuck_boxes`
-// and `box_usage` answer fixed fake data. No real hub, no Upstash. Fake ids and text only.
+// and `box_usage` answer fixed fake data (ids like box_fake_1). No real hub, no Upstash. Fake ids and text only.
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
@@ -20,42 +20,35 @@ const server = http.createServer((req, res) => {
 
 const cut = (text) => `${text.slice(0, 299)}…`;
 const LONG = cut("Upstash answered 503: fake-upstream-detail ".repeat(20));
+const known = (n, why, extra = {}) => ({ id: `fake-row-${n}`, why, upstash: `box_fake_${n}`, ...extra });
+const unconfirmed = (n, why) => ({ id: `fake-row-u${n}`, why, unconfirmed: true, label: `p:fake-row-u${n}` });
 const SCENARIOS = {
-  "known-one": [{ id: "box_fake_known_1", why: "Upstash answered 503" }],
-  "unconfirmed-one": [{ id: "box_fake_unconfirmed_1", why: "Upstash is not connected", unconfirmed: true }],
+  "known-one": [known(1, "Upstash answered 503")],
+  "unconfirmed-one": [unconfirmed(1, "Upstash answered 502")],
   "known-several": [
-    { id: "box_fake_known_1", why: "Upstash answered 503" },
-    { id: "box_fake_known_2", why: "Upstash answered 503" },
-    { id: "box_fake_known_3", why: "Upstash Box refused the key: Invalid box API key" },
+    known(1, "Upstash answered 503"),
+    known(2, "Upstash answered 503"),
+    known(3, "Upstash Box refused the key: Invalid box API key"),
+    known(4, "Upstash answered 503"),
+    known(5, "Upstash answered 503"),
   ],
-  "unconfirmed-several": [
-    { id: "box_fake_unconfirmed_1", why: "Upstash is not connected", unconfirmed: true },
-    { id: "box_fake_unconfirmed_2", why: "Upstash is not connected", unconfirmed: true },
-    { id: "box_fake_unconfirmed_3", why: "Upstash answered 502", unconfirmed: true },
-  ],
-  "both-kinds": [
-    { id: "box_fake_known_1", why: "Upstash answered 503" },
-    { id: "box_fake_known_2", why: "Upstash answered 503" },
-    { id: "box_fake_unconfirmed_1", why: "Upstash is not connected", unconfirmed: true },
-    { id: "box_fake_unconfirmed_2", why: "Upstash answered 502", unconfirmed: true },
-  ],
-  "long-reason": [{ id: "box_fake_known_1", why: LONG }],
+  "unconfirmed-several": [unconfirmed(1, "Upstash is not connected"), unconfirmed(2, "Upstash is not connected"), unconfirmed(3, "Upstash answered 502")],
+  "both-kinds": [known(1, "Upstash answered 503"), known(2, "Upstash answered 503"), unconfirmed(1, "Upstash is not connected"), unconfirmed(2, "Upstash answered 502")],
+  "long-reason": [known(1, LONG)],
+  // What the real hub answers with no Upstash key (boxes.rs: BoxUsage { stuck, ..default }): connected false, so no "From Upstash" card.
+  "not-connected": { connected: false, stuck: [known(1, "Upstash is not connected"), known(2, "Upstash is not connected"), unconfirmed(1, "Upstash is not connected")] },
 };
 
-const usage = (stuck) => ({
-  connected: true,
-  error: null,
-  boxes: [],
-  upstash: { cpu_hours: 0.0, compute_usd: 0.0, boxes: 0 },
-  pinned: { box_hours: 0.0, tasks: 0, since: 0 },
-  stuck,
-});
+const usage = (stuck, connected = true) => (connected
+  ? { connected, error: null, boxes: [], upstash: { cpu_hours: 0.0, compute_usd: 0.0, boxes: 0 }, pinned: { box_hours: 0.0, tasks: 0, since: 0 }, stuck }
+  : { connected, boxes: [], upstash: { cpu_hours: 0.0, compute_usd: 0.0, boxes: 0 }, pinned: { box_hours: 0.0, tasks: 0, since: 0 }, stuck });
 
 (async () => {
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   const base = `http://127.0.0.1:${server.address().port}`;
   const browser = await chromium.launch({ executablePath: "/usr/bin/chromium", args: ["--no-sandbox"] });
-  for (const [name, stuck] of Object.entries(SCENARIOS)) {
+  for (const [name, scenario] of Object.entries(SCENARIOS)) {
+    const { stuck, connected } = Array.isArray(scenario) ? { stuck: scenario, connected: true } : scenario;
     const context = await browser.newContext({ viewport: { width: 1280, height: 800 } });
     await context.addInitScript(() => localStorage.setItem("hub-token", "fake-token-0000"));
     const page = await context.newPage();
@@ -67,7 +60,7 @@ const usage = (stuck) => ({
         if (frame.type === "auth") return ws.send(JSON.stringify({ type: "hello", account: { id: "acct-fake-0001", email: "fake-account" }, machines: [], tabs: {} }));
         if (frame.type !== "hub") return;
         asked.push(frame.call.cmd);
-        const answer = { stuck_boxes: stuck, box_usage: usage(stuck), get_settings: { connectors: [], upstash: null } }[frame.call.cmd];
+        const answer = { stuck_boxes: stuck, box_usage: usage(stuck, connected), get_settings: { connectors: [], upstash: null } }[frame.call.cmd];
         ws.send(JSON.stringify(answer === undefined ? { type: "reply", id: frame.id, err: "fake hub: not answered" } : { type: "reply", id: frame.id, ok: answer }));
       });
     });
@@ -75,6 +68,7 @@ const usage = (stuck) => ({
     await page.waitForSelector('[data-nav="usage"] .stuck-box:not([hidden])', { timeout: 15000 });
     await page.click('[data-nav="usage"]');
     await page.waitForSelector(".box-usage .limit-notices", { timeout: 15000 });
+    if (!connected) await page.waitForSelector(".box-usage .limit-notices ~ .muted.note, .box-usage .muted.note", { timeout: 15000 });
     await page.waitForFunction(() => document.querySelector(".box-usage")?.getAttribute("aria-busy") === "false");
     await page.screenshot({ path: path.join(OUT, `${name}.png`) });
     const text = await page.locator(".box-usage .limit-notices").allInnerTexts();
