@@ -314,19 +314,19 @@ const QUOTED_QUESTION_CHARS: usize = 120;
 pub(crate) struct Unanswered {
     /// How many questions, over the open questionnaires of its tabs.
     count: usize,
-    /// The first one, as `quoted` made it.
+    /// The first one, as `one_line` made it.
     first: String,
 }
 
 /// The questions the tabs of a box's machine show open, None when none do.
 fn unanswered(tabs: &[TabView]) -> Option<Unanswered> {
     let open: Vec<&pinned_core::questions::Question> = tabs.iter().filter_map(|t| t.questions.as_ref()).flat_map(|q| &q.questions).collect();
-    Some(Unanswered { count: open.len(), first: quoted(&open.first()?.question) })
+    Some(Unanswered { count: open.len(), first: one_line(&open.first()?.question) })
 }
 
 /// An agent's text as one clean line for another's error: whitespace runs become one space,
 /// control and invisible formatting characters go, and it is cut to `QUOTED_QUESTION_CHARS` with a `…`.
-fn quoted(text: &str) -> String {
+fn one_line(text: &str) -> String {
     let mut line = String::new();
     for c in text.chars() {
         if c.is_whitespace() || matches!(c, '\u{2028}' | '\u{2029}') {
@@ -1775,14 +1775,14 @@ mod tests {
 
     #[test]
     fn the_quoted_question_is_one_clean_line_cut_to_the_quote_length() {
-        assert_eq!(quoted("Which\ndatabase?\r\n\tPostgres or\u{7}  MySQL?\u{202e} \u{2028}"), "Which database? Postgres or MySQL?");
-        assert_eq!(quoted("  \n "), "");
+        assert_eq!(one_line("Which\ndatabase?\r\n\tPostgres or\u{7}  MySQL?\u{202e} \u{2028}"), "Which database? Postgres or MySQL?");
+        assert_eq!(one_line("  \n "), "");
         let long = "x".repeat(QUOTED_QUESTION_CHARS + 30);
-        assert_eq!(quoted(&long), format!("{}…", "x".repeat(QUOTED_QUESTION_CHARS)));
+        assert_eq!(one_line(&long), format!("{}…", "x".repeat(QUOTED_QUESTION_CHARS)));
         let exact = "y".repeat(QUOTED_QUESTION_CHARS);
-        assert_eq!(quoted(&exact), exact, "text of exactly the length is not cut");
+        assert_eq!(one_line(&exact), exact, "text of exactly the length is not cut");
         let wide = "é".repeat(QUOTED_QUESTION_CHARS + 1);
-        assert_eq!(quoted(&wide).chars().count(), QUOTED_QUESTION_CHARS + 1, "it cuts at a character, not a byte");
+        assert_eq!(one_line(&wide).chars().count(), QUOTED_QUESTION_CHARS + 1, "it cuts at a character, not a byte");
         let asked = unanswered(&tab_asking(&["Which\ndatabase?\u{1b}[2J Now"])).unwrap();
         assert_eq!(asked.first, "Which database?[2J Now", "a control character never reaches the error as one");
         assert!(!origin_error(&End::Expired, 10 * MIN, Some(&asked)).unwrap().contains('\n'));
