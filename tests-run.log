@@ -220,3 +220,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:11:00Z #101 an_accounts_delegated_task_records_and_totals_reach_only_that_account START / avail=15058M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:11:05Z #101 an_accounts_delegated_task_records_and_totals_reach_only_that_account ok / avail=15058M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:11:08Z #102 a_task_on_a_box_is_billed_the_box_time_since_the_previous_task_on_that_box START / avail=15058M /workspace avail=19374M node_stat=Ssl
+2026-11-13T04:11:11Z #102 a_task_on_a_box_is_billed_the_box_time_since_the_previous_task_on_that_box ok / avail=15058M /workspace avail=19374M node_stat=Ssl node_tcp=1
