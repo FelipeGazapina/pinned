@@ -86,12 +86,10 @@ impl Args {
 
 fn hub(args: &[String]) -> Result<(), String> {
     let args = Args::parse(args, &["db", "listen", "ui", "downloads", "public-url", "key-file", "signup", "learning-db", "trusted-proxy", "max-accounts"], 0)?;
-    let signup = match args.flags.get("signup").map(String::as_str) {
-        None | Some("first") => Signup::First,
-        Some("open") => Signup::Open,
-        Some("invite") => Signup::Invite,
-        Some(other) => return Err(format!("--signup takes first, open or invite, not {other}\n{USAGE}")),
-    };
+    let (signup, unknown) = signup_mode(args.flags.get("signup").map(String::as_str));
+    if let Some(warning) = unknown {
+        eprintln!("pinned-server: {warning}");
+    }
     let trusted_proxy = args.flags.get("trusted-proxy").map_or(Ok(Default::default()), |name| name.parse())?;
     let max_accounts = args
         .flags
@@ -125,6 +123,18 @@ fn hub(args: &[String]) -> Result<(), String> {
         hub.going_away();
         server.await.map_err(|e| e.to_string())
     })
+}
+
+/// The hub's sign up mode from `--signup`. Unset is first. A value that is none of the three is invite,
+/// the closed mode that still lets invited people in, with a line saying so: a mistyped Railway variable
+/// leaves the hub up and closed.
+fn signup_mode(flag: Option<&str>) -> (Signup, Option<String>) {
+    match flag {
+        None | Some("first") => (Signup::First, None),
+        Some("open") => (Signup::Open, None),
+        Some("invite") => (Signup::Invite, None),
+        Some(other) => (Signup::Invite, Some(format!("--signup takes first, open or invite, not {other:?}; using invite"))),
+    }
 }
 
 fn pair(args: &[String]) -> Result<(), String> {
@@ -220,4 +230,21 @@ fn node(args: &[String]) -> Result<(), String> {
     }
     let _ = std::fs::remove_file(&machine.launch().sock);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::signup_mode;
+    use pinned_core::account::Signup;
+
+    #[test]
+    fn an_unknown_signup_mode_runs_as_invite_and_says_so() {
+        assert_eq!(signup_mode(None), (Signup::First, None));
+        assert_eq!(signup_mode(Some("first")), (Signup::First, None));
+        assert_eq!(signup_mode(Some("open")), (Signup::Open, None));
+        assert_eq!(signup_mode(Some("invite")), (Signup::Invite, None));
+        assert_eq!(signup_mode(Some("bogus")), (Signup::Invite, Some(r#"--signup takes first, open or invite, not "bogus"; using invite"#.into())));
+        assert_eq!(signup_mode(Some("")), (Signup::Invite, Some(r#"--signup takes first, open or invite, not ""; using invite"#.into())));
+        assert_eq!(signup_mode(Some("Open")).0, Signup::Invite, "the names are exact");
+    }
 }

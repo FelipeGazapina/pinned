@@ -40,15 +40,16 @@ const ADDRESS_SIGNUPS: usize = 5;
 /// Sign ups the whole hub takes within `ATTEMPT_WINDOW`, whichever addresses they come from: a burst of
 /// invited testers fits, a client that keeps changing its address does not get past it.
 const HUB_SIGNUPS: usize = 50;
-/// Keys the limiter holds at most, under 20 MB when filled by one-off keys of the longest email. Rotating addresses or emails can't grow
-/// it past this; when it is full a request that needs a new key is refused, and no live key is dropped.
+/// Keys the limiter holds at most, under 20 MB when filled by one-off keys of the longest email. Rotating
+/// addresses or emails can't grow it past this; when it is full a request that needs a new key is refused,
+/// and no live key is dropped.
 const ATTEMPT_KEYS: usize = 50_000;
 /// Addresses an account signed in from that the limiter remembers at most, and for how long.
 const KNOWN_ADDRESSES: usize = 10_000;
 const KNOWN_FOR: Duration = Duration::from_secs(30 * 24 * 60 * 60);
-/// The one answer to a sign up without a good code, so it tells nobody which codes or accounts exist.
 /// The one answer to a sign up at a hub that holds as many accounts as it was told to.
 const NOT_TAKING: &str = "This hub is not taking new accounts.";
+/// The one answer to a sign up without a good code, so it tells nobody which codes or accounts exist.
 const INVITE_NEEDED: &str = "this hub needs a valid invite code to create an account";
 const ATTEMPT_WINDOW: Duration = Duration::from_secs(15 * 60);
 /// Each argon2 hash holds about 19 MiB, so only this many run at once whatever arrives.
