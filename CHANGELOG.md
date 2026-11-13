@@ -7,6 +7,10 @@
 - Ideas: the Orchestrator and your sessions can now save things you might do someday with `save_idea`, list them with `list_ideas` and delete them with `delete_idea`. Ideas are kept on your account, apart from memory, and are never fed into a prompt on their own.
 - Ideas page: Ideas in the sidebar (under More on a phone) lists your ideas, with a quick-add, filters by project and status, search, and an editor that saves as you type, and the sidebar shows how many are open.
 
+### Removed
+
+- Workflows: Generate with AI is gone. Ask an agent, such as the Orchestrator, to create a workflow from a description; older apps that still press the button get a short message saying so.
+
 ### Fixed
 
 - Workflows: in New workflow, clicking Linear (or any Slack option) with that connector connected now continues the setup instead of opening Connectors. Since 0.17.10 every option sent you to Connectors and said "Connect Linear", whatever was connected. When the connector is missing, Connectors now says which workflow sent you there, and connecting it, or Back to the workflow, returns you to that workflow as you left it.
