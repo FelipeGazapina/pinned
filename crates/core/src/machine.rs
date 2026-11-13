@@ -12504,6 +12504,30 @@ Have another model review a risky change before it goes ahead.";
 
     #[test]
     #[cfg(unix)]
+    fn an_approved_set_bypass_loosens_only_a_session_of_the_callers_project_no_higher_than_its_seat() {
+        let (m, dir, captain) = limited_captain("act-bypass-seat", TastePatch::default());
+        let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
+        m.tab(&captain, |t| t.bypass = true).unwrap();
+        let session = m.open_tab(Some(path.clone()), false).unwrap();
+        let worker = m.open_tab(Some(path.clone()), true).unwrap();
+        m.tab(&worker, |t| t.env.extend(role_env(Role::Worker, Path::new(&path)))).unwrap();
+        let other = m.open_tab(Some(dir.display().to_string()), false).unwrap();
+        for tab in [&session, &worker, &other, &captain] {
+            m.start_claude(tab, 80, 24).unwrap();
+        }
+        let bypass = |caller: &str, tab: &str| m.call(Call::ActFor { caller: caller.into(), call: json!({ "cmd": "set_bypass", "tab": tab, "on": true, "cols": 80, "rows": 24 }) });
+        assert_eq!(bypass("", &session), Err("set_bypass on skips the permission prompts of a session on your own machine only".into()), "relayed from another machine, it names no caller");
+        assert_eq!(bypass(&worker, &session), Err(format!("{session} is a session the user started, above your worker's seat: set_bypass on skips the permission prompts of a worker only")));
+        assert_eq!(bypass(&worker, &captain), Err(format!("{captain} is a Captain, the global orchestrator or a taste chat, whose permission prompts only the user turns off")));
+        assert!(bypass(&captain, &other).is_err_and(|e| e.contains("outside your project")));
+        assert!(!m.view(&session).unwrap().bypass && !m.view(&other).unwrap().bypass, "a refusal changes nothing");
+        assert_eq!(bypass(&captain, &session), Ok(json!(path)), "a Captain loosens a session of its own project");
+        assert!(m.view(&session).unwrap().bypass);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn an_agent_changes_the_machines_orchestrator_settings_prices_and_skills_through_the_surface() {
         let (m, dir, captain) = limited_captain("act-settings", TastePatch::default());
         let act = |action: &str, args: Value| act_as(&m, &captain, action, args);
