@@ -49,7 +49,7 @@ jobs:
       - run: npm ci
       - run: cargo test --locked -p pinned
       # The Linux code pinned-core gained for the app, plus the tests that guard a task's time limit and questionnaires; the whole suite assumes macOS in places.
-      - run: cargo test --locked -p pinned-core --lib -- "shell::" "process::" "account::" "questions::" "machine::tests::open_questions_" "machine::tests::an_answered_approval_" "machine::tests::a_box_that_connected_and_went_offline_keeps_its_task_past_the_connect_window"
+      - run: cargo test --locked -p pinned-core --lib -- "shell::" "process::" "account::" "questions::" "machine::tests::open_questions_" "machine::tests::an_answered_approval_" "machine::tests::a_box_that_connected_and_went_offline_keeps_its_task_past_the_connect_window" "delegate::drivers::tests::a_kill_never_names_pid_0_1_every_process_or_the_caller" "delegate::drivers::tests::a_shell_recorded_before_it_was_reparented_is_still_killed" "delegate::drivers::tests::the_walk_never_targets_pid_0_1_or_a_pid_past_i32"
       # Updater signing belongs to the release; this build makes the installers only.
       - run: |
           npx tauri build --bundles appimage,deb --config '{"bundle":{"createUpdaterArtifacts":false}}'
