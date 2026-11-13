@@ -87,3 +87,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
     pinned-server: could not look after account 24beea57-bd80-4ca4-bbdd-b70cdc9a2ac8's boxes: could not connect to Postgres: db error
     pinned: hub link: WebSocket protocol error: Connection reset without closing handshake; retrying
 2026-11-13T04:05:06Z #38 other_workflows_never_run_on_a_box_but_its_thread_reaches_it START / avail=15074M /workspace avail=19374M node_stat=Ssl
+2026-11-13T04:05:09Z #38 other_workflows_never_run_on_a_box_but_its_thread_reaches_it ok / avail=15074M /workspace avail=19374M node_stat=Ssl node_tcp=1
