@@ -37,6 +37,23 @@ const SYNC_FIRST: Duration = Duration::from_secs(5);
 const SYNC_EVERY: Duration = Duration::from_secs(20);
 /// The close code the hub sends when it doesn't know the token a socket signed in with.
 pub const UNAUTHORIZED: u16 = 4001;
+/// How long a box's node is refused with `UNAUTHORIZED`, with no hello accepted in between, before
+/// the node ends its sessions and exits. The node leaves on a refusal that arrives at or after
+/// this span from the first one; a hub that is merely unreachable never makes it leave. A live box
+/// can be refused for a while: a re-boot gives the box a new token before the bootstrap kills the
+/// old node (up to 4 minutes), and sign-in can be slow. There is no setting for it.
+pub const BOX_REFUSED_FOR: Duration = Duration::from_secs(15 * 60);
+
+/// The span `Shared::note` measures refusals against. It is `BOX_REFUSED_FOR` everywhere but in
+/// the tests that run `run` against a real socket and need it short.
+#[derive(Clone, Copy)]
+struct RefusedSpan(Duration);
+
+impl Default for RefusedSpan {
+    fn default() -> Self {
+        RefusedSpan(BOX_REFUSED_FOR)
+    }
+}
 
 pub struct Link {
     shared: Arc<Shared>,
@@ -57,9 +74,21 @@ struct Shared {
     next_call: AtomicU64,
     subscribed: Mutex<HashSet<(TabId, ViewerId)>>,
     sync_now: AtomicBool,
+    refusals: watch::Sender<Refusals>,
+    refused_span: RefusedSpan,
 }
 
 impl Shared {
+    /// Records how a connection attempt went in the window `Link::refused_for` waits on.
+    fn note(&self, outcome: Outcome) {
+        let now = tokio::time::Instant::now();
+        self.refusals.send_if_modified(|refusals| {
+            let before = *refusals;
+            refusals.note(outcome, now, self.refused_span.0);
+            *refusals != before
+        });
+    }
+
     fn send(&self, frame: &MachineFrame) -> bool {
         let out = self.out.lock().unwrap().clone();
         out.is_some_and(|out| out.send(Outgoing { text: serde_json::to_string(frame).unwrap(), wrote: None }).is_ok())
@@ -174,6 +203,14 @@ impl Link {
 
     pub fn online(&self) -> bool {
         self.shared.online()
+    }
+
+    /// Resolves when the hub refuses this machine's token (close code `UNAUTHORIZED`) at or after
+    /// `BOX_REFUSED_FOR` from the first refusal, with no hello accepted in between. It never
+    /// resolves while the hub accepts the machine, and nothing else, such as a dropped connection
+    /// or a hub that does not answer, starts the span or ends it: it takes a fresh refusal.
+    pub fn refused_for(&self) -> impl std::future::Future<Output = ()> {
+        wait_refused(self.shared.refusals.subscribe())
     }
 
     pub fn stop(self) {
@@ -376,6 +413,9 @@ async fn run(shared: Arc<Shared>, creds: Credentials, machine: Arc<Machine>, ver
             _ = stopped.changed() => None,
         };
         shared.disconnected(&machine);
+        if let Some(Err(fault)) = &ended {
+            shared.note(fault.outcome());
+        }
         let up = accepted.map(|at: Instant| at.elapsed());
         match ended {
             None => break,
@@ -383,14 +423,14 @@ async fn run(shared: Arc<Shared>, creds: Credentials, machine: Arc<Machine>, ver
                 eprintln!("pinned: disconnected from {}", creds.hub);
                 backoff.ended(up, true);
             }
-            Some(Err(Fault::Refused(e))) => {
-                backoff.ended(up, false);
-                eprintln!("pinned: hub link: {e}; retrying");
-                crate::boot::refuse();
-            }
             Some(Err(Fault::Transport(e))) => {
                 backoff.ended(up, false);
                 eprintln!("pinned: hub link: {e}; retrying");
+            }
+            Some(Err(Fault::Refused(e) | Fault::Unauthorized(e))) => {
+                backoff.ended(up, false);
+                eprintln!("pinned: hub link: {e}; retrying");
+                crate::boot::refuse();
             }
         }
         let wait = backoff.wait(draw());
@@ -417,6 +457,7 @@ async fn connection(shared: &Arc<Shared>, creds: &Credentials, machine: &Arc<Mac
     let hello = tokio::time::timeout(HELLO_WAIT, stream.next()).await.map_err(|_| Fault::Transport("the hub did not answer the sign in".into()))?;
     let hello = accept_hello(hello)?;
     *accepted = Some(Instant::now());
+    shared.note(Outcome::Accepted);
     machine.set_hub_id(hello.id, hello.name);
     if crate::boot::commit_when_ready().await == crate::boot::AfterHello::Leaving {
         return std::future::pending().await;
@@ -497,7 +538,73 @@ fn in_order(shared: Arc<Shared>, machine: Arc<Machine>) -> mpsc::Sender<(u64, Ca
 
 enum Fault {
     Transport(String),
+    /// The hub answered the sign in with something that is not a hello.
     Refused(String),
+    /// The hub closed the socket with `UNAUTHORIZED`: it does not know the token.
+    Unauthorized(String),
+}
+
+impl Fault {
+    /// What this fault means for the span `Link::refused_for` measures. Only `UNAUTHORIZED` counts.
+    fn outcome(&self) -> Outcome {
+        match self {
+            Fault::Unauthorized(_) => Outcome::Unauthorized,
+            Fault::Refused(_) | Fault::Transport(_) => Outcome::Other,
+        }
+    }
+}
+
+/// How a connection attempt went, as far as `Refusals` is concerned.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Outcome {
+    /// The hub accepted the machine: its hello arrived.
+    Accepted,
+    /// The hub closed the socket with `UNAUTHORIZED`.
+    Unauthorized,
+    /// Anything else: a transport fault, another close code, a frame that is not a hello.
+    Other,
+}
+
+/// Since when the hub has refused this machine's token without accepting it in between, and
+/// whether a refusal has since arrived at or after the deadline.
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+struct Refusals {
+    since: Option<tokio::time::Instant>,
+    due: bool,
+}
+
+impl Refusals {
+    /// Records `outcome` at `now`. True when `outcome` is a refusal that arrives at or after
+    /// `span` from the first one with no accepted hello in between, and from then on `due`
+    /// holds. An accepted hello starts the span over, the first refusal opens it, and nothing
+    /// else touches it: the time passing, a transport fault, another close code or a frame that
+    /// is not a hello is not a refusal, so it never makes this true.
+    fn note(&mut self, outcome: Outcome, now: tokio::time::Instant, span: Duration) -> bool {
+        match outcome {
+            Outcome::Accepted => {
+                *self = Refusals::default();
+                false
+            }
+            Outcome::Unauthorized => {
+                let since = *self.since.get_or_insert(now);
+                let fresh = now >= since + span;
+                self.due |= fresh;
+                fresh
+            }
+            Outcome::Other => false,
+        }
+    }
+}
+
+async fn wait_refused(mut seen: watch::Receiver<Refusals>) {
+    loop {
+        if seen.borrow_and_update().due {
+            return;
+        }
+        if seen.changed().await.is_err() {
+            return std::future::pending().await;
+        }
+    }
 }
 
 fn transport(error: tokio_tungstenite::tungstenite::Error) -> Fault {
@@ -513,7 +620,7 @@ fn accept_hello(hello: Option<Result<Frame, tokio_tungstenite::tungstenite::Erro
     }
     match hello {
         Some(Ok(Frame::Close(Some(close)))) if u16::from(close.code) == UNAUTHORIZED => {
-            Err(Fault::Refused("the hub does not know this machine's token: pair it again".into()))
+            Err(Fault::Unauthorized("the hub does not know this machine's token: pair it again".into()))
         }
         Some(Ok(frame @ (Frame::Text(_) | Frame::Binary(_)))) => Err(Fault::Refused(format!("the hub answered the sign in with {frame:?}"))),
         other => Err(Fault::Transport(format!("the hub answered the sign in with {other:?}"))),
@@ -858,10 +965,428 @@ mod tests {
     #[test]
     fn a_hub_that_reads_the_sign_in_and_says_no_is_a_refusal() {
         let close = |code: u16| Some(Ok(Frame::Close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame { code: code.into(), reason: "".into() }))));
-        assert!(matches!(accept_hello(close(UNAUTHORIZED)), Err(Fault::Refused(_))));
+        assert!(matches!(accept_hello(close(UNAUTHORIZED)), Err(Fault::Unauthorized(_))));
         assert!(matches!(accept_hello(Some(Ok(Frame::Text(r#"{"type":"nope"}"#.into())))), Err(Fault::Refused(_))));
         assert!(matches!(accept_hello(close(1001)), Err(Fault::Transport(_))));
         assert!(matches!(accept_hello(None), Err(Fault::Transport(_))));
+    }
+
+    fn close_frame(code: u16) -> Option<Result<Frame, tokio_tungstenite::tungstenite::Error>> {
+        Some(Ok(Frame::Close(Some(tokio_tungstenite::tungstenite::protocol::CloseFrame { code: code.into(), reason: "".into() }))))
+    }
+
+    fn hello_frame() -> Option<Result<Frame, tokio_tungstenite::tungstenite::Error>> {
+        let hello = ToMachine::Hello {
+            machine: MachineView { id: "m1".into(), name: "box".into(), os: "linux".into(), online: true, last_seen: 0, upstash_box: None, version: String::new(), update: None, state: None, background: None },
+        };
+        Some(Ok(Frame::Text(serde_json::to_string(&hello).unwrap().into())))
+    }
+
+    /// What `run` and `connection` do with one answer to the sign in.
+    fn answer(shared: &Shared, hello: Option<Result<Frame, tokio_tungstenite::tungstenite::Error>>) {
+        match accept_hello(hello) {
+            Ok(_) => shared.note(Outcome::Accepted),
+            Err(fault) => shared.note(fault.outcome()),
+        }
+    }
+
+    const MINUTE: Duration = Duration::from_secs(60);
+
+    /// Feeds `hello` every 30 seconds for 60 virtual minutes and reports whether the refusal span
+    /// ever ran out. The clock is paused, so the hour costs no real time.
+    async fn trips_within_an_hour(hello: impl Fn() -> Option<Result<Frame, tokio_tungstenite::tungstenite::Error>>) -> bool {
+        let shared = Shared::default();
+        let waiting = tokio::spawn(wait_refused(shared.refusals.subscribe()));
+        for _ in 0..120 {
+            answer(&shared, hello());
+            tokio::time::sleep(Duration::from_secs(30)).await;
+        }
+        let tripped = waiting.is_finished();
+        waiting.abort();
+        tripped
+    }
+
+    #[test]
+    fn the_refused_span_is_fifteen_minutes() {
+        assert_eq!(BOX_REFUSED_FOR, 15 * MINUTE);
+    }
+
+    #[test]
+    fn the_refused_span_ends_exactly_at_fifteen_minutes_of_unauthorized() {
+        let t0 = tokio::time::Instant::now();
+        let mut refusals = Refusals::default();
+        assert!(!refusals.note(Outcome::Unauthorized, t0, BOX_REFUSED_FOR));
+        assert!(!refusals.note(Outcome::Unauthorized, t0 + BOX_REFUSED_FOR - Duration::from_secs(1), BOX_REFUSED_FOR));
+        assert!(refusals.note(Outcome::Unauthorized, t0 + BOX_REFUSED_FOR, BOX_REFUSED_FOR));
+    }
+
+    #[test]
+    fn an_accepted_hello_starts_the_refused_span_over() {
+        let t0 = tokio::time::Instant::now();
+        let mut refusals = Refusals::default();
+        refusals.note(Outcome::Unauthorized, t0, BOX_REFUSED_FOR);
+        assert!(!refusals.note(Outcome::Accepted, t0 + 14 * MINUTE, BOX_REFUSED_FOR));
+        assert_eq!(refusals, Refusals::default());
+        assert!(!refusals.note(Outcome::Unauthorized, t0 + 14 * MINUTE, BOX_REFUSED_FOR));
+        assert!(!refusals.note(Outcome::Unauthorized, t0 + 28 * MINUTE, BOX_REFUSED_FOR));
+        assert!(refusals.note(Outcome::Unauthorized, t0 + 29 * MINUTE, BOX_REFUSED_FOR));
+    }
+
+    #[test]
+    fn other_outcomes_neither_start_nor_reset_the_refused_span() {
+        let t0 = tokio::time::Instant::now();
+        let mut refusals = Refusals::default();
+        for minute in 0..120 {
+            assert!(!refusals.note(Outcome::Other, t0 + minute * MINUTE, BOX_REFUSED_FOR));
+        }
+        assert_eq!(refusals, Refusals::default());
+        refusals.note(Outcome::Unauthorized, t0, BOX_REFUSED_FOR);
+        for minute in [10, 15, 60] {
+            assert!(!refusals.note(Outcome::Other, t0 + minute * MINUTE, BOX_REFUSED_FOR), "only a refusal can be the one that ends the wait");
+        }
+        assert!(!refusals.due, "a transport fault made the span run out");
+        assert!(refusals.note(Outcome::Unauthorized, t0 + 60 * MINUTE, BOX_REFUSED_FOR), "a transport fault reset the span");
+    }
+
+    #[test]
+    fn only_an_unauthorized_close_is_counted_as_a_refusal() {
+        let outcome = |hello| accept_hello(hello).map(|_| Outcome::Accepted).unwrap_or_else(|fault| fault.outcome());
+        assert_eq!(outcome(close_frame(UNAUTHORIZED)), Outcome::Unauthorized);
+        assert_eq!(outcome(close_frame(1001)), Outcome::Other);
+        assert_eq!(outcome(Some(Ok(Frame::Text(r#"{"type":"nope"}"#.into())))), Outcome::Other);
+        assert_eq!(outcome(Some(Ok(Frame::Binary(vec![1, 2].into())))), Outcome::Other);
+        assert_eq!(outcome(None), Outcome::Other);
+        assert_eq!(Fault::Transport("the hub did not answer the sign in".into()).outcome(), Outcome::Other);
+        assert_eq!(outcome(hello_frame()), Outcome::Accepted);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hub_that_refuses_for_fifteen_minutes_ends_the_wait_and_not_before() {
+        let shared = Shared::default();
+        let started = tokio::time::Instant::now();
+        let waiting = tokio::spawn(wait_refused(shared.refusals.subscribe()));
+        while started.elapsed() < BOX_REFUSED_FOR {
+            answer(&shared, close_frame(UNAUTHORIZED));
+            tokio::time::sleep(Duration::from_millis(1)).await;
+            assert!(!waiting.is_finished(), "ended after {:?}", started.elapsed());
+            tokio::time::sleep(Duration::from_secs(30) - Duration::from_millis(1)).await;
+        }
+        assert_eq!(started.elapsed(), BOX_REFUSED_FOR);
+        assert!(!waiting.is_finished(), "ended with no refusal at the deadline");
+        answer(&shared, close_frame(UNAUTHORIZED));
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        assert!(waiting.is_finished(), "still waiting after a refusal at {:?}", started.elapsed());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_wait_stays_open_after_fifteen_minutes_without_another_refusal_and_a_refusal_after_the_deadline_ends_it() {
+        let shared = Shared::default();
+        let started = tokio::time::Instant::now();
+        let waiting = tokio::spawn(wait_refused(shared.refusals.subscribe()));
+        answer(&shared, close_frame(UNAUTHORIZED));
+        tokio::time::sleep(BOX_REFUSED_FOR).await;
+        assert!(!waiting.is_finished(), "ended at the deadline with no refusal since the first one");
+        for _ in 0..8 {
+            answer(&shared, Some(Err(tokio_tungstenite::tungstenite::Error::ConnectionClosed)));
+            tokio::time::sleep(30 * MINUTE).await;
+            assert!(!waiting.is_finished(), "a hub that does not answer ended the wait after {:?}", started.elapsed());
+        }
+        answer(&shared, close_frame(UNAUTHORIZED));
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        assert!(waiting.is_finished(), "a refusal after the deadline left the wait open");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hello_after_fourteen_minutes_of_refusals_keeps_the_wait_open() {
+        let shared = Shared::default();
+        let waiting = tokio::spawn(wait_refused(shared.refusals.subscribe()));
+        for _ in 0..2 {
+            for _ in 0..28 {
+                answer(&shared, close_frame(UNAUTHORIZED));
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+            assert!(!waiting.is_finished(), "ended after 14 minutes of refusals");
+            answer(&shared, hello_frame());
+        }
+        tokio::time::sleep(Duration::from_secs(3600)).await;
+        assert!(!waiting.is_finished(), "ended with the hub accepting the machine");
+        waiting.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_frame_that_is_not_a_hello_never_ends_the_wait() {
+        assert!(!trips_within_an_hour(|| Some(Ok(Frame::Text(r#"{"type":"nope"}"#.into())))).await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_transport_error_never_ends_the_wait() {
+        let error = || Some(Err(tokio_tungstenite::tungstenite::Error::ConnectionClosed));
+        assert!(!trips_within_an_hour(error).await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_1001_close_never_ends_the_wait() {
+        assert!(!trips_within_an_hour(|| close_frame(1001)).await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_sign_in_the_hub_never_answers_never_ends_the_wait() {
+        let shared = Shared::default();
+        let waiting = tokio::spawn(wait_refused(shared.refusals.subscribe()));
+        for _ in 0..240 {
+            let fault = Fault::Transport("the hub did not answer the sign in".into());
+            shared.note(fault.outcome());
+            tokio::time::sleep(Duration::from_secs(15)).await;
+        }
+        assert!(!waiting.is_finished());
+        waiting.abort();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hub_restart_closes_with_1001_and_the_new_hub_accepts_the_machine() {
+        let shared = Shared::default();
+        let waiting = tokio::spawn(wait_refused(shared.refusals.subscribe()));
+        for _ in 0..120 {
+            answer(&shared, close_frame(1001));
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            answer(&shared, hello_frame());
+            tokio::time::sleep(Duration::from_secs(20)).await;
+        }
+        assert!(!waiting.is_finished());
+        waiting.abort();
+    }
+
+    /// A hub on a real socket that reads each sign in and closes the socket with `code` instead of
+    /// a hello, and counts the sign ins it read.
+    fn a_hub_that_closes_every_sign_in(code: u16, sign_ins: Arc<std::sync::atomic::AtomicUsize>) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            runtime.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                loop {
+                    let (socket, _) = listener.accept().await.unwrap();
+                    let Ok(mut socket) = tokio_tungstenite::accept_async(socket).await else { continue };
+                    socket.next().await;
+                    sign_ins.fetch_add(1, Ordering::SeqCst);
+                    let close = tokio_tungstenite::tungstenite::protocol::CloseFrame { code: code.into(), reason: "".into() };
+                    let _ = socket.send(Frame::Close(Some(close))).await;
+                }
+            });
+        });
+        url
+    }
+
+    /// Runs the link's own `run` loop against `hub`, with the span cut to `span` so the test costs
+    /// seconds and not 15 minutes. True when `refused_for` resolved, false once the hub has read
+    /// `sign_ins_to_watch` sign ins and it still had not. `BOX_REFUSED_FOR` stays the production value.
+    async fn the_link_against(hub: String, span: Duration, sign_ins: &std::sync::atomic::AtomicUsize, sign_ins_to_watch: usize) -> bool {
+        let dir = std::env::temp_dir().join(format!("pinned-link-{}-socket-{}", std::process::id(), sign_ins_to_watch));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let machine = Machine::new(crate::machine::tests::launch(), Some(dir.clone()), None, |_| {});
+        let shared = Arc::new(Shared { refused_span: RefusedSpan(span), ..Shared::default() });
+        let (_stop, stopped) = watch::channel(false);
+        let watched = async {
+            while sign_ins.load(Ordering::SeqCst) < sign_ins_to_watch {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        };
+        let ended = tokio::select! {
+            _ = run(shared.clone(), creds(hub), machine, "0.0.0-test".into(), stopped, 0) => panic!("the link's run loop ended"),
+            _ = wait_refused(shared.refusals.subscribe()) => true,
+            _ = watched => false,
+            _ = tokio::time::sleep(Duration::from_secs(60)) => panic!("the link did not settle in 60 s"),
+        };
+        let _ = std::fs::remove_dir_all(dir);
+        ended
+    }
+
+    #[tokio::test]
+    async fn a_hub_that_closes_every_sign_in_with_4001_ends_the_wait_on_the_first_refusal_after_the_span() {
+        let sign_ins = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hub = a_hub_that_closes_every_sign_in(UNAUTHORIZED, sign_ins.clone());
+        assert!(the_link_against(hub, Duration::from_millis(200), &sign_ins, usize::MAX).await);
+        assert!(sign_ins.load(Ordering::SeqCst) >= 2, "the first refusal alone ended the wait");
+    }
+
+    #[tokio::test]
+    async fn a_hub_that_closes_every_sign_in_with_1001_never_ends_the_wait() {
+        let sign_ins = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let hub = a_hub_that_closes_every_sign_in(1001, sign_ins.clone());
+        assert!(!the_link_against(hub, Duration::from_millis(200), &sign_ins, 3).await);
+        assert!(sign_ins.load(Ordering::SeqCst) >= 3);
+    }
+
+    /// What the fake hub on the test's runtime does with a connection.
+    #[derive(Clone, Copy)]
+    enum Answer {
+        /// Reads the sign in and closes the socket with this code instead of a hello.
+        Close(u16),
+        /// Takes the socket and never reads it, as a hub too busy to look at the sign in.
+        Silent,
+        /// Reads the sign in, answers it with a hello and closes the socket with 1001, as a hub
+        /// that accepts the machine and then restarts.
+        Hello,
+    }
+
+    /// A hub on a real socket, spawned on the test's own runtime so the paused clock moves only once
+    /// both ends are idle. It answers its `n`th connection, from 0, with `answer(n)`, and counts the
+    /// connections it answered.
+    async fn a_hub_on_this_runtime(answer: impl Fn(usize) -> Answer + Send + 'static) -> (String, Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let answered = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = answered.clone();
+        tokio::spawn(async move {
+            let mut unread = Vec::new();
+            for n in 0.. {
+                let (socket, _) = listener.accept().await.unwrap();
+                let Ok(mut socket) = tokio_tungstenite::accept_async(socket).await else { continue };
+                match answer(n) {
+                    Answer::Silent => unread.push(socket),
+                    Answer::Hello => {
+                        socket.next().await;
+                        if let Some(Ok(hello)) = hello_frame() {
+                            let _ = socket.send(hello).await;
+                        }
+                        let close = tokio_tungstenite::tungstenite::protocol::CloseFrame { code: 1001.into(), reason: "".into() };
+                        let _ = socket.send(Frame::Close(Some(close))).await;
+                    }
+                    Answer::Close(code) => {
+                        socket.next().await;
+                        let close = tokio_tungstenite::tungstenite::protocol::CloseFrame { code: code.into(), reason: "".into() };
+                        let _ = socket.send(Frame::Close(Some(close))).await;
+                    }
+                }
+                counted.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        (url, answered)
+    }
+
+    /// Runs the link's own `run` loop against `hub` with the production span, for at most
+    /// `for_at_most` on the paused clock. How long `refused_for` took to resolve, or None if it did not.
+    async fn the_wait_against(hub: String, for_at_most: Duration, name: &str) -> Option<Duration> {
+        let dir = std::env::temp_dir().join(format!("pinned-link-{}-paused-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let machine = Machine::new(crate::machine::tests::launch(), Some(dir.clone()), None, |_| {});
+        let shared = Arc::new(Shared::default());
+        let (_stop, stopped) = watch::channel(false);
+        let started = tokio::time::Instant::now();
+        let ended = tokio::select! {
+            _ = run(shared.clone(), creds(hub), machine, "0.0.0-test".into(), stopped, 0) => panic!("the link's run loop ended"),
+            _ = wait_refused(shared.refusals.subscribe()) => Some(started.elapsed()),
+            _ = tokio::time::sleep(for_at_most) => None,
+        };
+        let _ = std::fs::remove_dir_all(dir);
+        ended
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hub_that_never_reads_the_sign_in_for_twenty_minutes_never_ends_the_wait() {
+        let (hub, answered) = a_hub_on_this_runtime(|_| Answer::Silent).await;
+        assert_eq!(the_wait_against(hub, 20 * MINUTE, "silent").await, None);
+        let answered = answered.load(Ordering::SeqCst);
+        assert!(answered >= 10, "the link dialed only {answered} times in 20 minutes");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hub_that_closes_every_sign_in_with_1013_for_twenty_minutes_never_ends_the_wait() {
+        let (hub, answered) = a_hub_on_this_runtime(|_| Answer::Close(1013)).await;
+        assert_eq!(the_wait_against(hub, 20 * MINUTE, "1013").await, None);
+        let answered = answered.load(Ordering::SeqCst);
+        assert!(answered >= 10, "the hub read only {answered} sign ins in 20 minutes");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_hub_that_answers_every_sign_in_with_4001_for_fifteen_minutes_ends_the_wait_on_the_next_one() {
+        let (hub, answered) = a_hub_on_this_runtime(|_| Answer::Close(UNAUTHORIZED)).await;
+        let ended = the_wait_against(hub, 20 * MINUTE, "4001").await.expect("15 minutes of unknown token and one more did not end the wait");
+        assert!(ended >= BOX_REFUSED_FOR, "ended after {ended:?}, before the span");
+        assert!(ended <= BOX_REFUSED_FOR + BACKOFF_MAX + Duration::from_secs(1), "ended after {ended:?}, long after the first refusal past the span");
+        let answered = answered.load(Ordering::SeqCst);
+        assert!(answered >= 10, "the hub read only {answered} sign ins");
+    }
+
+    /// A hub outage: the hub says "unknown token" once, then for 20 minutes it either never reads
+    /// the sign in or closes it with 1013. The node stays.
+    #[tokio::test(start_paused = true)]
+    async fn a_hub_outage_after_one_4001_never_ends_the_wait() {
+        let answer = |n: usize| match n {
+            0 => Answer::Close(UNAUTHORIZED),
+            n if n % 2 == 1 => Answer::Silent,
+            _ => Answer::Close(1013),
+        };
+        let (hub, answered) = a_hub_on_this_runtime(answer).await;
+        assert_eq!(the_wait_against(hub, 20 * MINUTE + BOX_REFUSED_FOR, "outage").await, None);
+        let answered = answered.load(Ordering::SeqCst);
+        assert!(answered >= 10, "the hub answered only {answered} sign ins");
+    }
+
+    /// How a hub on the test's runtime answered each connection: when, since `t0`, and with which
+    /// close code (0 for a hello).
+    type Answers = Arc<Mutex<Vec<(Duration, u16)>>>;
+
+    fn noted(answers: &Answers, t0: tokio::time::Instant, answer: Answer) -> Answer {
+        let code = match answer {
+            Answer::Close(code) => code,
+            Answer::Silent => u16::MAX,
+            Answer::Hello => 0,
+        };
+        answers.lock().unwrap().push((t0.elapsed(), code));
+        answer
+    }
+
+    /// Through the real `run` and the production span: 4001 for 10 minutes, one accepted hello,
+    /// then 4001 again. The hello starts the span over, so the wait ends on the first 4001 at or
+    /// after 15 minutes from the first one that follows the hello, not 15 minutes from the first
+    /// one ever. Without `shared.note(Outcome::Accepted)` in `connection` it ends at about 15 minutes.
+    #[tokio::test(start_paused = true)]
+    async fn a_hello_between_two_runs_of_4001_starts_the_wait_over_through_run() {
+        let t0 = tokio::time::Instant::now();
+        let answers = Answers::default();
+        let hello_given = AtomicBool::new(false);
+        let noting = answers.clone();
+        let (hub, _) = a_hub_on_this_runtime(move |_| {
+            let hello_now = t0.elapsed() >= 10 * MINUTE && !hello_given.swap(true, Ordering::SeqCst);
+            noted(&noting, t0, if hello_now { Answer::Hello } else { Answer::Close(UNAUTHORIZED) })
+        })
+        .await;
+        let ended = the_wait_against(hub, 40 * MINUTE, "hello").await.expect("4001, a hello and 4001 again never ended the wait");
+        let answers = answers.lock().unwrap();
+        let mut after_the_hello = answers.iter().skip_while(|(_, code)| *code != 0).skip(1);
+        let (first, _) = after_the_hello.next().expect("the hub never answered after the hello");
+        assert!(answers.iter().filter(|(_, code)| *code == 0).count() == 1);
+        assert!(ended >= *first + BOX_REFUSED_FOR, "ended after {ended:?}, less than 15 minutes after the first 4001 that followed the hello at {first:?}");
+        assert!(ended <= *first + BOX_REFUSED_FOR + BACKOFF_MAX + Duration::from_secs(1), "ended after {ended:?}, long after the first 4001 past the span from {first:?}");
+    }
+
+    /// Through the real `run` and the production span: one 4001, then a hub that reads no sign in
+    /// for 16 minutes, then 4001 again. The silence neither ends the wait nor starts the span over,
+    /// so the wait ends on the first 4001 at or after 15 minutes from the first one: the one that
+    /// ends the silence.
+    #[tokio::test(start_paused = true)]
+    async fn a_4001_then_silence_then_4001_ends_the_wait_on_the_first_4001_past_the_span_through_run() {
+        let t0 = tokio::time::Instant::now();
+        let answers = Answers::default();
+        let noting = answers.clone();
+        let (hub, _) = a_hub_on_this_runtime(move |n| {
+            let silent = n > 0 && t0.elapsed() < 16 * MINUTE;
+            noted(&noting, t0, if silent { Answer::Silent } else { Answer::Close(UNAUTHORIZED) })
+        })
+        .await;
+        let ended = the_wait_against(hub, 40 * MINUTE, "silence").await.expect("4001, silence and 4001 again never ended the wait");
+        let answers = answers.lock().unwrap();
+        let (first, _) = answers[0];
+        let (last, code) = *answers.iter().rfind(|(_, code)| *code == UNAUTHORIZED).unwrap();
+        assert_eq!(code, UNAUTHORIZED);
+        assert!(answers.iter().filter(|(_, code)| *code == UNAUTHORIZED).count() == 2, "{answers:?}");
+        assert!(last >= first + BOX_REFUSED_FOR, "the 4001 that ended it came at {last:?}, before the span from {first:?}");
+        assert!(ended >= last && ended <= last + Duration::from_secs(1), "ended at {ended:?}, not on the first 4001 past the span at {last:?}");
     }
 
     struct ArmsRestart {
