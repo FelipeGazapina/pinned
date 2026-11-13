@@ -655,3 +655,23 @@ helps the next time the Mac sleeps whatever the switch says.
    (3.4: a cut turn may have half-run a command, and you are there when the lid opens). Do you want
    Captains and the Orchestrator to continue **on their own** after a sleep (the opt-in, off by
    default, once per cut, never for a turn that ended normally), or is the card enough?
+
+---
+
+## Decisions (Orchestrator, 2026-11-13)
+
+Felipe asked the Orchestrator to settle the open questions. Each is a default kept in one place.
+
+1. **Approach accepted.** A root helper that the user approves once in System Settings, and that restores the settings by itself.
+2. **Guards.** The heat guard, a 20% battery floor and an 8 h cap on battery are all on by default and all adjustable.
+3. **A session waiting on an approval** keeps the machine awake for up to 30 min.
+4. **Who turns it on.** Agents may turn the switch OFF without asking. Turning it ON is the user's, because it needs the admin approval.
+5. **After a cut by sleep.** A Needs you card with **Continue** only. There is no auto-continue option in 0.18.2.
+6. **Signing.** Assume Developer ID signing is NOT active.
+
+**Build order:**
+- PR 1: `cut_by_sleep`, which has no power code.
+- PR 2: the non-privileged part, an idle-sleep assertion while agents run, with delegated box tasks counted.
+- PR 3: the root helper, last. Before writing it, tell the Orchestrator exactly what it needs from Felipe's Apple account.
+
+No agent installs or tests the helper on Felipe's MacBook.
