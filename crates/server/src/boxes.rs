@@ -210,6 +210,38 @@ pub enum End {
     Failed(String),
 }
 
+/// The verdict on a box a workflow run holds. The run waits between its session's turns, so only
+/// its node going missing, its max life, its budget or its box vanishing ends the box, and
+/// `fail_held_runs` fails the run with it. Its idle, exited and gone timers are cleared, so one
+/// that started before the run held the box can't end it as Done, Idle or Exited while its node is
+/// offline, which `verdict` reads as a condition it can't see.
+fn held_verdict(age: Duration, seen: Seen, t: &mut Timers, now: Instant, p: &Policy) -> Option<End> {
+    t.quiet_since = None;
+    t.exited_since = None;
+    t.gone_since = None;
+    let seen = match seen {
+        Seen::Offline => Seen::Offline,
+        _ => Seen::Tab { running: true, quiet: false },
+    };
+    verdict(age, seen, t, now, p, false)
+}
+
+/// Why a box's work failed when the box ended for `why`, or None when it ended for its work's end.
+fn box_end_error(p: &Policy, why: &End) -> Option<String> {
+    Some(match why {
+        End::Done => return None,
+        End::Failed(e) => format!("Upstash Box: {e}"),
+        End::Offline => format!("Upstash Box: its box went offline and did not come back within {}", wait_span(p.offline)),
+        why => format!("Upstash Box: the box ended before its task did: {}", ended_because(why)),
+    })
+}
+
+/// Why a workflow run fails when its box ends for `why`. `Done` too: a run that already finished
+/// holds nothing, so `box_ended` leaves it, and one still going fails.
+fn run_end_error(p: &Policy, why: &End) -> String {
+    box_end_error(p, why).unwrap_or_else(|| format!("Upstash Box: the box ended before its run did: {}", ended_because(why)))
+}
+
 /// What a box's end does to the subject of the workflow run it failed: one that ran out of budget
 /// or reached its max life (`Expired`, both) keeps it handled for its owner to run again; any other
 /// end frees it once (`Connectors::box_ended`).
@@ -1441,15 +1473,10 @@ impl Boxes {
 
     /// Why a box's work failed when the box ended for `why`, or None when it ended for its work's end.
     fn box_end_error(&self, why: &End) -> Option<String> {
-        Some(match why {
-            End::Done => return None,
-            End::Failed(e) => format!("Upstash Box: {e}"),
-            End::Offline => format!("Upstash Box: its box went offline and did not come back within {}", wait_span(self.policy.offline)),
-            why => format!("Upstash Box: the box ended before its task did: {}", ended_because(why)),
-        })
+        box_end_error(&self.policy, why)
     }
 
-    /// A workflow box ended before its run did, for any reason but that run's end: the runs it
+    /// A workflow box ended before its run did: the runs it
     /// holds fail with why. A box that ran out of budget or reached its max life keeps their
     /// subjects handled, so only their owner runs them again; any other end frees each subject for
     /// its next trigger once (`BoxEndRelease`). Nothing opens another box or session for them. For the fixed row, which many runs share, only the runs whose
@@ -1458,7 +1485,7 @@ impl Boxes {
         if row.work != BoxWork::Run || row.connector == INTERACTIVE_CONNECTOR {
             return;
         }
-        let Some(error) = self.box_end_error(why) else { return };
+        let error = run_end_error(&self.policy, why);
         let connectors = match hub.connectors(account).await {
             Ok(connectors) => connectors,
             Err(e) => return eprintln!("pinned-server: could not fail the runs of box {}: {e}", row.id),
@@ -1669,14 +1696,7 @@ impl Boxes {
                         let mut timers = self.timers.lock().unwrap();
                         let slot = timers.entry(row.id.clone()).or_default();
                         if held {
-                            // A run waits between its session's turns, so only its node going
-                            // missing, its max life, its budget or its box vanishing ends the box,
-                            // and `fail_held_runs` fails the run with it.
-                            let seen = match seen {
-                                Seen::Offline => Seen::Offline,
-                                _ => Seen::Tab { running: true, quiet: false },
-                            };
-                            let verdict = verdict(row.age, seen, slot, now, &self.policy, false);
+                            let verdict = held_verdict(row.age, seen, slot, now, &self.policy);
                             if over_budget {
                                 Some(End::Expired)
                             } else if gone {
@@ -2128,6 +2148,23 @@ mod tests {
         for end in [End::Offline, End::Vanished, End::Failed("the box did not connect".into()), End::Removed, End::Disconnected] {
             assert_eq!(release_for(&end), BoxEndRelease::Once, "{end:?}");
         }
+    }
+
+    #[test]
+    fn a_held_box_with_a_stale_quiet_timer_ends_offline_not_done() {
+        let p = Policy::default();
+        let t0 = Instant::now();
+        // Quiet and done before the run held the box.
+        let mut t = Timers { quiet_since: Some(t0), done: true, ..Timers::default() };
+        let later = t0 + p.done.max(p.idle) + Duration::from_secs(1);
+        assert_eq!(held_verdict(Duration::from_secs(60), Seen::Offline, &mut t, later, &p), None, "its node just went offline");
+        assert_eq!(held_verdict(Duration::from_secs(60), Seen::Offline, &mut t, later + p.offline, &p), Some(End::Offline), "it ends offline, and its run fails");
+    }
+
+    #[test]
+    fn a_box_that_ends_as_done_while_its_run_goes_fails_the_run() {
+        let error = run_end_error(&Policy::default(), &End::Done);
+        assert_eq!(error, "Upstash Box: the box ended before its run did: its work was done");
     }
 
     #[test]
