@@ -12,3 +12,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:02:09Z #4 a_reconnected_node_does_not_wipe_the_tabs_the_client_already_has START / avail=15125M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:02:12Z #4 a_reconnected_node_does_not_wipe_the_tabs_the_client_already_has ok / avail=15125M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:02:13Z #5 a_restarted_node_reports_the_restored_session START / avail=15125M /workspace avail=19374M node_stat=Ssl
+2026-11-13T04:02:17Z #5 a_restarted_node_reports_the_restored_session ok / avail=15125M /workspace avail=19374M node_stat=Ssl node_tcp=1
