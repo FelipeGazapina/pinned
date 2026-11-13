@@ -211,6 +211,16 @@ function workersSummary(rows) {
   return { total: rows.length, done: count("done"), working: count("working"), needs: count("needs"), since: starts.length ? Math.min(...starts) : null };
 }
 
+const hhmm = (unix) => new Date(unix * 1000).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", hour12: false });
+
+/** What a turn cut by a sleep says: the sentence, and for a Captain how many delegated tasks still
+ * run, since nobody supervises them until it continues. */
+function sleepOf(tab) {
+  const { slept_at, woke_at } = tab.view.cut_by_sleep;
+  const delegated = tab.view.role === "orchestrator" ? workersOf(tab).filter((w) => w.state === "working").length : 0;
+  return { slept_at, woke_at, delegated, text: `Stopped while the Mac slept (${hhmm(slept_at)}\u2013${hhmm(woke_at)}): API error` };
+}
+
 function needsYouItem(tab) {
   const view = tab.view;
   const item = (kind, extra = {}) => ({ tab, kind, title: threadTitle(tab), project: projectName(tab), machine: machineName(tab.machine), since: (view.updated ?? 0) * 1000 || null, ask: null, limit: null, ...extra });
@@ -223,6 +233,7 @@ function needsYouItem(tab) {
     const switchTo = switchTargets(tab).map((a) => ({ id: a.id, name: a.name }));
     return item("limit", { limit: { resumesAt: view.resume_at * 1000, account: accountName(tab.machine, view.account), held: !!view.held, switchTo } });
   }
+  if (waiting === "failed" && view.cut_by_sleep) return item("sleep", { sleep: sleepOf(tab) });
   if (waiting === "failed") return item("failed");
   if (view.role !== "worker" && !isGlobalOrchestratorTab(tab) && unseenDone(tab)) return item("review", { since: lastActivity(tab) * 1000 || null });
   return null;

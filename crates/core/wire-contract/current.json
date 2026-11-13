@@ -20981,6 +20981,17 @@
                 "description": "A turn was running when pinned quit, so the tab has work left to continue.",
                 "type": "boolean"
               },
+              "cut_by_sleep": {
+                "description": "The turn died on an API error while the machine slept, so it stopped where the sleep cut it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/CutBySleep"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "stats": {
                 "description": "What the conversation's work came to so far, once its transcript holds any of it.",
                 "anyOf": [
@@ -21186,6 +21197,26 @@
                   "thread"
                 ]
               }
+            ]
+          },
+          "CutBySleep": {
+            "description": "When the machine slept: the last tick before it and the first after it, in unix seconds.",
+            "type": "object",
+            "properties": {
+              "slept_at": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "woke_at": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "slept_at",
+              "woke_at"
             ]
           },
           "ThreadStats": {
@@ -28017,6 +28048,17 @@
                 "description": "A turn was running when pinned quit, so the tab has work left to continue.",
                 "type": "boolean"
               },
+              "cut_by_sleep": {
+                "description": "The turn died on an API error while the machine slept, so it stopped where the sleep cut it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/CutBySleep"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "stats": {
                 "description": "What the conversation's work came to so far, once its transcript holds any of it.",
                 "anyOf": [
@@ -28215,6 +28257,26 @@
                   "thread"
                 ]
               }
+            ]
+          },
+          "CutBySleep": {
+            "description": "When the machine slept: the last tick before it and the first after it, in unix seconds.",
+            "type": "object",
+            "properties": {
+              "slept_at": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "woke_at": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "slept_at",
+              "woke_at"
             ]
           },
           "ThreadStats": {
@@ -48726,6 +48788,17 @@
             "description": "A turn was running when pinned quit, so the tab has work left to continue.",
             "type": "boolean"
           },
+          "cut_by_sleep": {
+            "description": "The turn died on an API error while the machine slept, so it stopped where the sleep cut it.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CutBySleep"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "stats": {
             "description": "What the conversation's work came to so far, once its transcript holds any of it.",
             "anyOf": [
@@ -48931,6 +49004,26 @@
                   "thread"
                 ]
               }
+            ]
+          },
+          "CutBySleep": {
+            "description": "When the machine slept: the last tick before it and the first after it, in unix seconds.",
+            "type": "object",
+            "properties": {
+              "slept_at": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "woke_at": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "slept_at",
+              "woke_at"
             ]
           },
           "ThreadStats": {
@@ -49221,6 +49314,17 @@
             "description": "A turn was running when pinned quit, so the tab has work left to continue.",
             "type": "boolean"
           },
+          "cut_by_sleep": {
+            "description": "The turn died on an API error while the machine slept, so it stopped where the sleep cut it.",
+            "anyOf": [
+              {
+                "$ref": "#/$defs/CutBySleep"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "stats": {
             "description": "What the conversation's work came to so far, once its transcript holds any of it.",
             "anyOf": [
@@ -49419,6 +49523,26 @@
                   "thread"
                 ]
               }
+            ]
+          },
+          "CutBySleep": {
+            "description": "When the machine slept: the last tick before it and the first after it, in unix seconds.",
+            "type": "object",
+            "properties": {
+              "slept_at": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "woke_at": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "slept_at",
+              "woke_at"
             ]
           },
           "ThreadStats": {
@@ -51275,6 +51399,17 @@
                 "description": "A turn was running when pinned quit, so the tab has work left to continue.",
                 "type": "boolean"
               },
+              "cut_by_sleep": {
+                "description": "The turn died on an API error while the machine slept, so it stopped where the sleep cut it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/CutBySleep"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "stats": {
                 "description": "What the conversation's work came to so far, once its transcript holds any of it.",
                 "anyOf": [
@@ -51480,6 +51615,26 @@
                   "thread"
                 ]
               }
+            ]
+          },
+          "CutBySleep": {
+            "description": "When the machine slept: the last tick before it and the first after it, in unix seconds.",
+            "type": "object",
+            "properties": {
+              "slept_at": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "woke_at": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "slept_at",
+              "woke_at"
             ]
           },
           "ThreadStats": {
@@ -54771,6 +54926,17 @@
                 "description": "A turn was running when pinned quit, so the tab has work left to continue.",
                 "type": "boolean"
               },
+              "cut_by_sleep": {
+                "description": "The turn died on an API error while the machine slept, so it stopped where the sleep cut it.",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/CutBySleep"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "stats": {
                 "description": "What the conversation's work came to so far, once its transcript holds any of it.",
                 "anyOf": [
@@ -54969,6 +55135,26 @@
                   "thread"
                 ]
               }
+            ]
+          },
+          "CutBySleep": {
+            "description": "When the machine slept: the last tick before it and the first after it, in unix seconds.",
+            "type": "object",
+            "properties": {
+              "slept_at": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              },
+              "woke_at": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "slept_at",
+              "woke_at"
             ]
           },
           "ThreadStats": {
