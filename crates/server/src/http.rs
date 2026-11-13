@@ -227,11 +227,24 @@ async fn signed_in(server: &Server, headers: &HeaderMap) -> Result<db::Login, Er
 /// request, so the whole header is the client and there is no hop to pick. `X-Forwarded-For` is not
 /// read for it: its hop count is not fixed and its left part may be the client's own. A header that is
 /// missing or is not one address (a list, text) leaves the peer, the proxy, as the key.
+///
+/// An IPv6 client is keyed by its /64, since one client holds a whole one.
 pub(crate) fn client_address(trusted: TrustedProxy, peer: SocketAddr, headers: &HeaderMap) -> String {
     if trusted == TrustedProxy::Railway {
-        return real_ip(headers).map_or_else(|| peer.ip().to_string(), |ip| ip.to_string());
+        return address_key(real_ip(headers).unwrap_or(peer.ip()));
     }
-    loopback_hop(peer, headers).map_or_else(|| peer.ip().to_string(), str::to_owned)
+    match loopback_hop(peer, headers) {
+        Some(hop) => hop.parse().map_or_else(|_| hop.to_owned(), address_key),
+        None => address_key(peer.ip()),
+    }
+}
+
+/// An IPv4 address, or the /64 an IPv6 one is in.
+fn address_key(ip: std::net::IpAddr) -> String {
+    match ip.to_canonical() {
+        std::net::IpAddr::V6(ip) => format!("{}/64", std::net::Ipv6Addr::from(ip.to_bits() & !u128::from(u64::MAX))),
+        ip => ip.to_string(),
+    }
 }
 
 /// Railway's `X-Real-IP` when it is one address.
@@ -1060,7 +1073,7 @@ mod tests {
         let railway = |pairs: &[(&'static str, &str)]| client_address(TrustedProxy::Railway, peer, &headers(pairs));
         assert_eq!(railway(&[("x-real-ip", "203.0.113.5")]), "203.0.113.5");
         assert_eq!(railway(&[("x-real-ip", " 203.0.113.5 "), ("x-forwarded-for", "6.6.6.6, 203.0.113.9")]), "203.0.113.5", "X-Forwarded-For is not read");
-        assert_eq!(railway(&[("x-real-ip", "2001:db8::1")]), "2001:db8::1");
+        assert_eq!(railway(&[("x-real-ip", "2001:db8::1")]), "2001:db8::/64");
         assert_eq!(railway(&[("x-real-ip", "::ffff:203.0.113.5")]), "203.0.113.5", "a mapped v4 address is the v4 address");
         // One IPv6 address is a client; one with brackets, a port or a zone is not one address.
         for unusable in ["", " ", "unknown", "203.0.113.5, 6.6.6.6", "203.0.113.5 203.0.113.6", "203.0.113.5:80", "<script>", "[2001:db8::1]", "[2001:db8::1]:443", "fe80::1%eth0", "2001:db8::1, 2001:db8::2"] {
@@ -1087,6 +1100,35 @@ mod tests {
         assert_eq!(class(TrustedProxy::Off, "127.0.0.1:5000", &[("x-forwarded-for", "8.8.4.4")]), "loopback forwarded hop");
         assert_eq!(class(TrustedProxy::Off, "127.0.0.1:5000", &[]), "direct peer");
         assert_eq!(class(TrustedProxy::Off, edge, &[("x-forwarded-for", "8.8.4.4"), ("x-real-ip", "8.8.4.4")]), "direct peer");
+    }
+
+    #[test]
+    fn an_ipv6_client_is_keyed_by_its_64_and_shares_that_64s_limit() {
+        let edge: SocketAddr = "100.64.0.7:41000".parse().unwrap();
+        let railway = |real: &str| client_address(TrustedProxy::Railway, edge, &headers(&[("x-real-ip", real)]));
+        assert_eq!(railway("2606:4700:10:20::1"), "2606:4700:10:20::/64");
+        assert_eq!(railway("2606:4700:10:20:ffff:1:2:3"), "2606:4700:10:20::/64", "one /64, one key");
+        assert_eq!(railway("2606:4700:10:21::1"), "2606:4700:10:21::/64", "another /64, another key");
+        assert_eq!(railway("::ffff:203.0.113.5"), "203.0.113.5", "a mapped v4 address is the v4 address");
+        assert_eq!(railway("203.0.113.5"), "203.0.113.5");
+        for malformed in ["[2606:4700:10:20::1]", "2606:4700:10:20::1%eth0", "2606:4700:10:20::1, 2606:4700:10:20::2", "unknown"] {
+            assert_eq!(railway(malformed), "100.64.0.7", "{malformed:?} leaves the peer");
+        }
+        let off = |peer: &str, pairs: &[(&'static str, &str)]| client_address(TrustedProxy::Off, peer.parse().unwrap(), &headers(pairs));
+        assert_eq!(off("[2606:4700:10:20::1]:5000", &[]), "2606:4700:10:20::/64", "a direct IPv6 peer");
+        assert_eq!(off("[::ffff:203.0.113.5]:5000", &[]), "203.0.113.5");
+        assert_eq!(off("[::1]:5000", &[("x-forwarded-for", "2606:4700:10:20::9")]), "2606:4700:10:20::/64", "a loopback forwarded IPv6 hop");
+        assert_eq!(off("127.0.0.1:5000", &[("x-forwarded-for", "203.0.113.9")]), "203.0.113.9");
+        assert_eq!(off("127.0.0.1:5000", &[("x-forwarded-for", "not-an-address")]), "not-an-address", "a hop that is no address stays as it was");
+        // Two addresses in one /64 spend one limit; another /64 has its own.
+        let mut limiter = Limiter::new(100);
+        let now = std::time::Instant::now();
+        let key = |real: &str| [(format!("address:{}", railway(real)), 10)];
+        for n in 0..10 {
+            assert!(limiter.attempt(&key(&format!("2606:4700:10:20::{n:x}")), now), "attempt {n}");
+        }
+        assert!(!limiter.attempt(&key("2606:4700:10:20:abcd::1"), now), "the same /64 is spent");
+        assert!(limiter.attempt(&key("2606:4700:10:21::1"), now), "another /64 is not");
     }
 
     #[test]
