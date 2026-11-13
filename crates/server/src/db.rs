@@ -1063,8 +1063,22 @@ impl Db {
         Ok(row.is_some_and(|r| r.get(0)))
     }
 
-    pub async fn set_release_protection(&self, account: Uuid, on: bool) -> Result<(), String> {
-        self.client().await?.execute("update accounts set release_protection = $2 where id = $1", &[&account, &on]).await.map(drop).map_err(err)
+    /// Sets the switch and writes its audit row `row` in one transaction, so a change never happens
+    /// without its row, nor a row without its change.
+    pub async fn set_release_protection(&self, account: Uuid, on: bool, row: &Audit<'_>) -> Result<(), String> {
+        let mut held = self.transactions.lock().await;
+        if held.as_ref().map_or(true, Client::is_closed) {
+            *held = Some(open(&self.connection.url).await?);
+        }
+        let tx = held.as_mut().expect("opened above").transaction().await.map_err(err)?;
+        tx.execute("update accounts set release_protection = $2 where id = $1", &[&account, &on]).await.map_err(err)?;
+        tx.execute(
+            "insert into agent_actions (id, account, machine, tab, role, action, args, outcome, detail, request_id, task) values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+            &[&Uuid::new_v4(), &row.account, &row.machine, &row.tab, &row.role.name(), &row.action, &row.args, &row.outcome.name(), &row.detail, &row.request_id, &row.task],
+        )
+        .await
+        .map_err(err)?;
+        tx.commit().await.map_err(err)
     }
 
     /// What the first `action` with `request_id` from the session in `tab` on `machine` came to, and when.

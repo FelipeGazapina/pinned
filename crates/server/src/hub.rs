@@ -540,12 +540,9 @@ impl Hub {
             call @ (HubCall::ListSchedules | HubCall::SaveSchedule { .. } | HubCall::PauseSchedule { .. } | HubCall::DeleteSchedule { .. } | HubCall::ScheduleRuns { .. }) => return self.schedule_call(account, call, Actor::User).await,
             // Only an app reaches this, unlocked (`surface::owner_only`): no agent action and no machine call sets it.
             HubCall::SetReleaseProtection { on } => {
-                self.db.set_release_protection(account.id, on).await?;
                 let (args, detail) = (serde_json::json!({ "on": on }).to_string(), format!("the user's app turned release protection {}", if on { "on" } else { "off" }));
                 let row = db::Audit { account: account.id, machine: Uuid::nil(), tab: "app", role: surface::ActorRole::Session, action: "set_release_protection", args: &args, outcome: surface::AuditOutcome::Done, detail: &detail, request_id: None, task: None };
-                if let Err(e) = self.db.audit(&row).await {
-                    eprintln!("pinned-server: account {} changed its release protection, and its audit row was not written: {e}", account.id);
-                }
+                self.db.set_release_protection(account.id, on, &row).await?;
                 return json(on);
             }
             HubCall::RunWorkflow { id } => return json(self.run_workflow(account, &id).await?),
