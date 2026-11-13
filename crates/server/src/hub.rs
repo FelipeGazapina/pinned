@@ -1736,6 +1736,23 @@ mod tests {
     }
 
     #[test]
+    fn a_box_with_a_question_open_on_another_tab_is_not_idle_but_still_expires() {
+        // The worker's tab is quiet; a headless child's questionnaire lands on a second tab.
+        let tabs = vec![box_tab("tab-1", true, AgentStatus::Done, false), box_tab("tab-2", false, AgentStatus::NeedsInput, true)];
+        let account = box_with(tabs.clone());
+        let look = || account.seen_any("box");
+        assert_eq!(look(), Seen::Tab { running: true, quiet: false }, "a question on any tab holds the box");
+        assert_eq!(reaped(look, 9 * MIN, 9 * MIN), None, "held 9 of 10 minutes");
+        assert_eq!(reaped(look, 11 * MIN, 11 * MIN), None, "not idle at 11 minutes");
+        assert_eq!(reaped(look, 3 * 60 * MIN, 3 * 60 * MIN), None, "three hours of waiting on the user is not idle");
+        assert_eq!(reaped(look, 3 * 60 * MIN, 4 * 60 * MIN), Some(boxes::End::Expired), "max_life still ends it");
+        // Without the second tab the worker's own tab is quiet, so that tab is what holds the box.
+        let alone = box_with(tabs[..1].to_vec());
+        assert_eq!(alone.seen_any("box"), Seen::Tab { running: true, quiet: true });
+        assert_eq!(reaped(|| alone.seen_any("box"), 11 * MIN, 11 * MIN), Some(boxes::End::Idle), "the same box without the question is idle at 11 minutes");
+    }
+
+    #[test]
     fn a_working_box_is_not_quiet() {
         let account = box_showing(AgentStatus::Working, false, true);
         assert_eq!(account.seen_any("box"), Seen::Tab { running: true, quiet: false });
