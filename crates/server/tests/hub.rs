@@ -5206,7 +5206,14 @@ fn a_worker_box_whose_link_blinks_is_offline_not_booting_and_keeps_its_task() {
     let back = Node::resume(&hub.boxes.root.join(&id), creds);
     hub.boxes.state.lock().unwrap().boxes.get_mut(&id).unwrap().node = Some(Arc::new(back));
     wait_for("the hub to ask the box's node again", || caller.ask(remote_task_call(&machine, "task-1", None)) != Err(BOX_OFFLINE.into()));
-    assert_eq!((hub.boxes.live(), ana.rows(&hub)), (vec![id], 1), "the box came back within the grace and keeps running");
+    assert_eq!((hub.boxes.live(), ana.rows(&hub)), (vec![id.clone()], 1), "the box came back within the grace and keeps running");
+
+    // Its parent may still cancel it while it is offline, which ends it as offline, not as done.
+    drop_box_node(&hub.boxes, &id);
+    wait_for("the hub to see the box offline again", || caller.ask(remote_task_call(&machine, "task-1", None)) == Err(BOX_OFFLINE.into()));
+    let cancelled = caller.ask(remote_task_call(&machine, "task-1", Some("not now"))).unwrap();
+    assert_eq!((cancelled["workState"].as_str(), cancelled["error"].as_str()), (Some("cancelled"), Some("not now")), "{cancelled}");
+    wait_for("the cancelled box to go", || hub.boxes.live().is_empty() && ana.rows(&hub) == 0);
 }
 
 #[test]
