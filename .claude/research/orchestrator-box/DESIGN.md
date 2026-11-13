@@ -420,6 +420,10 @@ They need the throwaway Postgres on 5499 (pinned memory "Hub tests Postgres"):
 - No machine online, then open: the box node becomes the seat, and `projects` answers from it.
 - `send_to_captain` opens a Captain box.
 - The Orchestrator box outlives the Captain box, then goes idle.
+- Held report across the seat: the Orchestrator box is deleted while a Captain box still works. The
+  Captain finishes, and its report is held on the hub. A new Orchestrator starts and receives it once.
+  This depends on `fix/held-remote-ends` and on the follow-up PR that routes Captain reports through
+  the held table. PR 2 lands after both.
 - `FlushOrchestrator` arrives before `delete`, and the memory is in `project_files`.
 - A second open answers the same row.
 - With no token, it refuses with the ADD_TOKEN text and writes no row.
@@ -497,7 +501,11 @@ follows the `pinned:tutorial-video` skill: visible clicks only, never URL jumps.
 7. **Idle delete.** The sweep hub runs a short `Policy` (idle 30 s, tick 2 s). Today `main.rs` always uses `Policy::default()`, so PR 2 adds `PINNED_BOX_POLICY_SECS=idle,tick`, read once at hub start, which the stack script sets. The Captain box goes
    first, then the Orchestrator box. The stub logs `exec FlushOrchestrator` before `delete`, and
    the sidebar goes back to "No computer online".
-8. **Memory survived.** Tap Orchestrator again. The sheet's history shows step 6's turn. Start a
+8. **Held report.** Start a box Orchestrator and have it open a Captain box. Delete the Orchestrator box
+   while the Captain is still working. The sheet goes back to "No computer online". The scripted
+   Captain finishes, and the hub holds its report. Start a new Orchestrator box. The report arrives in
+   its chat once, and the script asserts the held row is gone afterwards.
+9. **Memory survived.** Tap Orchestrator again. The sheet's history shows step 6's turn. Start a
    box again, type "what font does the footer use?", and the reply quotes "[2] …brand font".
    Then start the "MacBook" node again. Its Memory panel lists memories 1 and 2, which shows the
    way back to a machine as well.
