@@ -1509,6 +1509,19 @@ Deploys go through the VPS."
     }
 
     #[test]
+    fn a_budget_warning_starts_at_its_share_of_the_budget_and_never_moves_the_stop() {
+        let limits = Limits { budget_cents: 50, ..Limits::default() };
+        assert_eq!(limits.used_percent(Some(0.39), 80), None);
+        assert_eq!(limits.used_percent(Some(0.40), 80), Some((0.40, 0.50)));
+        assert_eq!(limits.used_percent(Some(0.47), 95), None);
+        assert_eq!(limits.used_percent(Some(0.48), 95), Some((0.48, 0.50)));
+        assert_eq!(limits.used_percent(None, 80), None, "an unpriced worker is never warned");
+        assert_eq!(Limits::default().used_percent(Some(1000.0), 80), None, "no budget, no warning");
+        assert_eq!(limits.over_budget(Some(0.49)), None, "the stop's point is the budget itself");
+        assert_eq!(limits.over_budget(Some(0.50)), Some("pinned stopped it after it spent US$ 0.50, its budget of US$ 0.50".into()));
+    }
+
+    #[test]
     fn the_old_worker_cap_lowers_each_scope_once_and_the_file_goes() {
         let dir = tempfile::tempdir().unwrap();
         let mut seeded = Tastes::default();
