@@ -8320,21 +8320,38 @@ fn a_worker_box_end_reaches_a_parent_that_was_offline_and_the_box_ends_done_at_o
     let (task, child) = box_worker(&hub, &mut ana, &mac_dir, &captain);
     let box_dir = hub.boxes.root.join(&hub.boxes.live()[0]);
 
+    eprintln!("scenario: mac's link drops, as a laptop that sleeps");
     mac.link.take().unwrap().stop();
     ana.client.wait_machines(&[("mac", false), ("Box · Slow suite", true)]);
+    eprintln!("scenario: the worker on the box ends while mac is offline");
+    let ended_at = Instant::now();
     hook(&box_dir, json!({ "kind": "agent", "status": "working", "tab": child.id, "session": "s-suite" }));
     hook(&box_dir, json!({ "kind": "agent", "status": "done", "tab": child.id, "session": "s-suite", "reply": "Suite green; 412 tests pass." }));
     // Idle and Exited are an hour here: only a delivered or held end ends the box this soon.
     wait_for("the box to go once the hub held its end", || hub.boxes.live().is_empty() && ana.rows(&hub) == 0);
+    eprintln!("scenario: the box is gone {} ms after its worker ended; held ends: {}", ended_at.elapsed().as_millis(), held_ends(&hub, Some(ana.id)));
     assert_eq!(held_ends(&hub, Some(ana.id)), 1, "the end outlives the box");
     assert_eq!(task_status(&mac_dir, &captain, &task)["workState"], "working", "mac, asleep, heard nothing yet");
 
-    mac.link = Some(link::spawn(creds, mac.machine.clone(), "0.0.0-test"));
+    eprintln!("scenario: mac comes back");
+    mac.link = Some(link::spawn(creds.clone(), mac.machine.clone(), "0.0.0-test"));
     wait_for("mac to hear how its worker ended", || task_status(&mac_dir, &captain, &task)["workState"] == "result_available");
     let status = task_status(&mac_dir, &captain, &task);
+    eprintln!("scenario: mac's task {task}: {} \"{}\"", status["workState"], status["summary"].as_str().unwrap_or_default());
     assert_eq!(status["summary"].as_str(), Some("Suite green; 412 tests pass."), "{status}");
     assert!(status["usage"]["box_ms"].as_u64().is_some_and(|ms| ms > 0), "with the box's time: {status}");
     wait_for("the held row to go once mac answered it", || held_ends(&hub, None) == 0);
+    eprintln!("scenario: held ends after mac took it: {}", held_ends(&hub, None));
+
+    // Once more: the link drops and comes back, and nothing is delivered again.
+    mac.link.take().unwrap().stop();
+    ana.client.wait_machines(&[("mac", false)]);
+    eprintln!("scenario: mac reconnects a second time");
+    let again = RawMachine::start(&hub.url, &creds.machine_token, |_| RawReply::Ok(json!(true)));
+    ana.client.wait_machines(&[("mac", true)]);
+    std::thread::sleep(Duration::from_millis(800));
+    eprintln!("scenario: remote_ended calls on the second reconnect: {}", again.calls("remote_ended"));
+    assert_eq!(again.calls("remote_ended"), 0, "delivered once");
 }
 
 #[test]

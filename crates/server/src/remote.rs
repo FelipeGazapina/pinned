@@ -209,6 +209,7 @@ async fn ended(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, to: &str, tab
         Err(Unanswered::Lost(e)) => return Err(e),
     };
     if let Some(row) = worker_box {
+        eprintln!("pinned-server: worker box {} of account {} ends done: its end of task {task} got through or is held", row.id, account.id);
         hub.boxes.end_delegate(hub, account, row, crate::boxes::End::Done).await?;
     }
     Ok(taken)
