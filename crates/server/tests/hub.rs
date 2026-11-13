@@ -8784,6 +8784,41 @@ fn an_id_only_write_with_another_accounts_id_changes_no_row() {
 }
 
 #[test]
+fn a_request_id_replayed_under_another_grant_never_gets_the_first_grants_session_back() {
+    use pinned_server::db::Reserved;
+    let hub = TestHub::start("replayed_session");
+    let (_, ana, _client_a) = signed_in(&hub.url, "ana@example.test");
+    let (_, bob, _client_b) = signed_in(&hub.url, "bob@example.test");
+    let (ana_grant, bob_grant) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    admin_on(
+        &hub.database,
+        &format!(
+            "insert into agent_clients (id, name, redirect_uris) values ('client-1', 'fake agent', '[]');
+             insert into agent_grants (id, account, client, scopes, projects) values ('{ana_grant}', '{ana}', 'client-1', '[]', '[]');
+             insert into agent_grants (id, account, client, scopes, projects) values ('{bob_grant}', '{bob}', 'client-1', '[]', '[]')"
+        ),
+    );
+    let (ana_session, bob_session) = (uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
+    let db = &hub.hub().db;
+    let hash = b"same arguments".to_vec();
+    let reserve = |grant, session| hub.runtime.block_on(db.reserve_agent_call(grant, "req-1", "start_session", &hash, Some(session))).unwrap();
+    let session_of = |reserved: Reserved| match reserved {
+        Reserved::Existing { session, .. } => Some(session),
+        Reserved::New => None,
+    };
+    assert!(matches!(reserve(ana_grant, ana_session), Reserved::New), "ana's first call with the id is new");
+    // Bob sends the same request id: it is new for his grant, and the session recorded is his own.
+    assert!(matches!(reserve(bob_grant, bob_session), Reserved::New), "bob's call with ana's request id is new, not ana's call replayed");
+    let (ana_again, bob_again) = (reserve(ana_grant, uuid::Uuid::new_v4()), reserve(bob_grant, uuid::Uuid::new_v4()));
+    assert_eq!(session_of(ana_again), Some(Some(ana_session)), "the owner's replay gets the owner's session");
+    assert_eq!(session_of(bob_again), Some(Some(bob_session)), "bob's replay gets bob's session, never ana's");
+    // A grant that never sent the id has nothing to replay: whatever it is handed back is its own new call.
+    let other = uuid::Uuid::new_v4();
+    admin_on(&hub.database, &format!("insert into agent_grants (id, account, client, scopes, projects) values ('{other}', '{bob}', 'client-1', '[]', '[]')"));
+    assert!(matches!(reserve(other, uuid::Uuid::new_v4()), Reserved::New), "a third grant's call with the same request id is new");
+}
+
+#[test]
 fn another_accounts_box_row_never_joins_an_accounts_machine() {
     let hub = TestHub::start("machine_join");
     let (token_a, ana, _client_a) = signed_in(&hub.url, "ana@example.test");
