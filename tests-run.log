@@ -315,3 +315,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:23:02Z #142 a_held_end_expires_after_30_days_unread START / avail=15048M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:23:06Z #142 a_held_end_expires_after_30_days_unread ok / avail=15048M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:23:07Z #143 the_hub_answers_a_held_end_only_once_its_row_is_written START / avail=15048M /workspace avail=19374M node_stat=Ssl
+2026-11-13T04:23:09Z #143 the_hub_answers_a_held_end_only_once_its_row_is_written ok / avail=15048M /workspace avail=19374M node_stat=Ssl node_tcp=1
