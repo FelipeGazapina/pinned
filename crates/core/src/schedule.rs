@@ -346,7 +346,7 @@ pub const AGENT_TASK_NEEDS_OK: bool = false;
 /// always wait; a new task waits only while [`AGENT_TASK_NEEDS_OK`] is true.
 pub fn save_needs_ok(task: &Task) -> Option<String> {
     if !task.approvals.is_empty() {
-        let list: Vec<String> = task.approvals.iter().map(|a| format!("{} containing \"{}\"", a.item.label(), a.must_contain)).collect();
+        let list: Vec<String> = task.approvals.iter().map(|a| format!("{} containing \"{}\" in {}", a.item.label(), a.must_contain, a.repo)).collect();
         return Some(format!("task \"{}\" would run without asking for: {}", task.title, list.join("; ")));
     }
     (AGENT_TASK_NEEDS_OK && task.id.trim().is_empty()).then(|| format!("an agent wants to schedule \"{}\"", task.title))
@@ -757,6 +757,13 @@ mod tests {
         assert_eq!(agent_check(&save("*/15 * * * *")), Ok(()));
         assert_eq!(agent_check(&save("0 9 * * 1-5")), Ok(()));
         assert_eq!(agent_check(&Parsed::Hub(HubCall::ListSchedules)), Ok(()));
+    }
+
+    #[test]
+    fn the_reason_an_approval_waits_names_its_repo() {
+        let task = Task { approvals: vec![Approval { item: NeverItem::NetworkInstall, must_contain: "npm ci".into(), repo: "github.com/acme/app".into() }], ..plain() };
+        let reason = save_needs_ok(&task).unwrap();
+        assert!(reason.ends_with(&format!(": {} containing \"npm ci\" in github.com/acme/app", NeverItem::NetworkInstall.label())), "{reason}");
     }
 
     #[test]
