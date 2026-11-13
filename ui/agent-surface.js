@@ -64,7 +64,8 @@ const AGENT_MCP_COPY = {
 /** What a box action does, in words. Only the action's known fields are read, the box by the name the app knows and the amount in US$; any other key an agent sent is dropped, never shown. */
 const AGENT_BOX_COPY = {
   extend_box: (a) => {
-    const usd = typeof a.extra_usd === "number" && Number.isFinite(a.extra_usd) && a.extra_usd > 0 ? `US$ ${a.extra_usd.toFixed(2)}` : "funds";
+    const amount = typeof a.extra_usd === "number" && Number.isFinite(a.extra_usd) && a.extra_usd > 0 ? a.extra_usd.toFixed(2) : null;
+    const usd = amount === null ? "funds" : amount === "0.00" ? "less than US$ 0.01" : `US$ ${amount}`;
     const name = agentMachineName(a.machine);
     return `Add ${usd} to the budget of ${name ? `box ${name}` : "a box"}`;
   },
