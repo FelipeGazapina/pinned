@@ -21105,6 +21105,26 @@
                   "null"
                 ]
               },
+              "alive": {
+                "description": "A process runs the tab's session now. `running` also holds for a conversation that sleeps.",
+                "type": "boolean",
+                "default": false
+              },
+              "asleep": {
+                "description": "The conversation sleeps with no process: a message wakes it.",
+                "type": "boolean"
+              },
+              "headless": {
+                "description": "The tab shows a headless child, which works with no session of the tab's own.",
+                "type": "boolean"
+              },
+              "stopped": {
+                "description": "Why the tab's last process ended mid-turn, until a new turn or input starts it again.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "questions": {
                 "description": "The questionnaire the session waits on the user to answer, which `Call::AnswerQuestions`\nanswers. While it is open the tab reads as a question mid-turn, so an app that predates it\nstill shows the tab waiting.",
                 "anyOf": [
@@ -21129,7 +21149,8 @@
               "message",
               "resume_at",
               "connector",
-              "opened"
+              "opened",
+              "alive"
             ]
           },
           "Program": {
@@ -28167,6 +28188,26 @@
               },
               "ask_detail": {
                 "description": "While the session waits on an approval or a question mid-turn: the tool call or the question\nit waits on, read from its transcript, such as the command a permission prompt shows.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "alive": {
+                "description": "A process runs the tab's session now. `running` also holds for a conversation that sleeps.",
+                "type": "boolean",
+                "default": false
+              },
+              "asleep": {
+                "description": "The conversation sleeps with no process: a message wakes it.",
+                "type": "boolean"
+              },
+              "headless": {
+                "description": "The tab shows a headless child, which works with no session of the tab's own.",
+                "type": "boolean"
+              },
+              "stopped": {
+                "description": "Why the tab's last process ended mid-turn, until a new turn or input starts it again.",
                 "type": [
                   "string",
                   "null"
@@ -48912,6 +48953,26 @@
               "null"
             ]
           },
+          "alive": {
+            "description": "A process runs the tab's session now. `running` also holds for a conversation that sleeps.",
+            "type": "boolean",
+            "default": false
+          },
+          "asleep": {
+            "description": "The conversation sleeps with no process: a message wakes it.",
+            "type": "boolean"
+          },
+          "headless": {
+            "description": "The tab shows a headless child, which works with no session of the tab's own.",
+            "type": "boolean"
+          },
+          "stopped": {
+            "description": "Why the tab's last process ended mid-turn, until a new turn or input starts it again.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "questions": {
             "description": "The questionnaire the session waits on the user to answer, which `Call::AnswerQuestions`\nanswers. While it is open the tab reads as a question mid-turn, so an app that predates it\nstill shows the tab waiting.",
             "anyOf": [
@@ -48936,7 +48997,8 @@
           "message",
           "resume_at",
           "connector",
-          "opened"
+          "opened",
+          "alive"
         ],
         "$defs": {
           "Program": {
@@ -49433,6 +49495,26 @@
           },
           "ask_detail": {
             "description": "While the session waits on an approval or a question mid-turn: the tool call or the question\nit waits on, read from its transcript, such as the command a permission prompt shows.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "alive": {
+            "description": "A process runs the tab's session now. `running` also holds for a conversation that sleeps.",
+            "type": "boolean",
+            "default": false
+          },
+          "asleep": {
+            "description": "The conversation sleeps with no process: a message wakes it.",
+            "type": "boolean"
+          },
+          "headless": {
+            "description": "The tab shows a headless child, which works with no session of the tab's own.",
+            "type": "boolean"
+          },
+          "stopped": {
+            "description": "Why the tab's last process ended mid-turn, until a new turn or input starts it again.",
             "type": [
               "string",
               "null"
@@ -51523,6 +51605,26 @@
                   "null"
                 ]
               },
+              "alive": {
+                "description": "A process runs the tab's session now. `running` also holds for a conversation that sleeps.",
+                "type": "boolean",
+                "default": false
+              },
+              "asleep": {
+                "description": "The conversation sleeps with no process: a message wakes it.",
+                "type": "boolean"
+              },
+              "headless": {
+                "description": "The tab shows a headless child, which works with no session of the tab's own.",
+                "type": "boolean"
+              },
+              "stopped": {
+                "description": "Why the tab's last process ended mid-turn, until a new turn or input starts it again.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "questions": {
                 "description": "The questionnaire the session waits on the user to answer, which `Call::AnswerQuestions`\nanswers. While it is open the tab reads as a question mid-turn, so an app that predates it\nstill shows the tab waiting.",
                 "anyOf": [
@@ -51547,7 +51649,8 @@
               "message",
               "resume_at",
               "connector",
-              "opened"
+              "opened",
+              "alive"
             ]
           },
           "Program": {
@@ -55045,6 +55148,26 @@
               },
               "ask_detail": {
                 "description": "While the session waits on an approval or a question mid-turn: the tool call or the question\nit waits on, read from its transcript, such as the command a permission prompt shows.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "alive": {
+                "description": "A process runs the tab's session now. `running` also holds for a conversation that sleeps.",
+                "type": "boolean",
+                "default": false
+              },
+              "asleep": {
+                "description": "The conversation sleeps with no process: a message wakes it.",
+                "type": "boolean"
+              },
+              "headless": {
+                "description": "The tab shows a headless child, which works with no session of the tab's own.",
+                "type": "boolean"
+              },
+              "stopped": {
+                "description": "Why the tab's last process ended mid-turn, until a new turn or input starts it again.",
                 "type": [
                   "string",
                   "null"
