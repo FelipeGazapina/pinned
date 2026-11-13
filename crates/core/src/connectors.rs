@@ -6959,7 +6959,7 @@ mod tests {
         let (connectors, dir) = stored("dash-model", vec![]);
         let mut own = linear_connector();
         own.model = "--dangerously-skip-permissions".into();
-        let error = connectors.save_connector(own).unwrap_err();
+        let error = connectors.save_connector(own).err().unwrap();
         assert!(error.contains("model") && error.contains("start with -"), "{error}");
         let mut stepped = linear_connector();
         let mut graph = talks(&[]);
@@ -6967,7 +6967,7 @@ mod tests {
         graph.nodes.push(node("s", "Fix", NodeKind::Session(step)));
         graph.edges.push(edge("t", "out", "s"));
         stepped.graph = Some(graph);
-        let error = connectors.save_connector(stepped).unwrap_err();
+        let error = connectors.save_connector(stepped).err().unwrap();
         assert!(error.starts_with("\"Fix\"") && error.contains("model"), "{error}");
         assert!(connectors.store.lock().unwrap().connectors.is_empty(), "neither was saved");
         let mut plain = linear_connector();
