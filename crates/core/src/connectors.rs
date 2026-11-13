@@ -2735,30 +2735,41 @@ pub fn parse_permission(name: &str) -> Result<Option<PermissionMode>, String> {
     }
 }
 
-/// Why `connector` must start no run: the first session step, in its graph or a graph it calls,
-/// whose permission the parse cannot read, named with its workflow.
-fn unreadable_step(library: &runner::Library, names: &BTreeMap<String, String>, connector: &str) -> Option<String> {
-    let name = |id: &str| names.get(id).cloned().unwrap_or_else(|| id.to_owned());
+/// Walks `connector` and each workflow it reaches through its Call steps, to any depth, itself
+/// first. Each is visited once, so a cycle ends. `visit` gets the workflow's graph, or `None` when
+/// the library has none, and the walk stops at its first answer.
+fn reach_calls<T>(library: &runner::Library, connector: &str, mut visit: impl FnMut(&str, Option<&Graph>) -> Option<T>) -> Option<T> {
     let (mut todo, mut seen) = (vec![connector.to_owned()], std::collections::BTreeSet::new());
     while let Some(id) = todo.pop() {
         if !seen.insert(id.clone()) {
             continue;
         }
-        let Some(graph) = library.get(&id) else { continue };
-        for node in &graph.nodes {
-            match &node.kind {
-                NodeKind::Session(setup) => {
-                    if let Err(e) = parse_permission(&setup.permission) {
-                        let holder = if id == connector { String::new() } else { format!(" of workflow {:?}, which it calls,", name(&id)) };
-                        return Some(format!("workflow {:?} starts no run: step {:?}{holder} has a permission pinned cannot read: {e}", name(connector), node.name));
-                    }
-                }
-                NodeKind::Call { workflow } => todo.push(workflow.clone()),
-                _ => {}
+        let graph = library.get(&id);
+        if let Some(found) = visit(&id, graph) {
+            return Some(found);
+        }
+        for node in graph.iter().flat_map(|graph| &graph.nodes) {
+            if let NodeKind::Call { workflow } = &node.kind {
+                todo.push(workflow.clone());
             }
         }
     }
     None
+}
+
+/// Why `connector` must start no run: the first session step, in its graph or a graph it calls,
+/// whose permission the parse cannot read, named with its workflow.
+fn unreadable_step(library: &runner::Library, names: &BTreeMap<String, String>, connector: &str) -> Option<String> {
+    let name = |id: &str| names.get(id).cloned().unwrap_or_else(|| id.to_owned());
+    reach_calls(library, connector, |id, graph| {
+        graph?.nodes.iter().find_map(|node| match &node.kind {
+            NodeKind::Session(setup) => parse_permission(&setup.permission).err().map(|e| {
+                let holder = if id == connector { String::new() } else { format!(" of workflow {:?}, which it calls,", name(id)) };
+                format!("workflow {:?} starts no run: step {:?}{holder} has a permission pinned cannot read: {e}", name(connector), node.name)
+            }),
+            _ => None,
+        })
+    })
 }
 
 /// A session node's setup over the session owner's own settings: every field it names wins,
@@ -4780,6 +4791,28 @@ impl Connectors {
             return None;
         }
         self.store.lock().unwrap().connectors.iter().find(|c| c.id == incoming.id).and_then(|c| c.graph.clone())
+    }
+
+    /// Whether a save of `incoming` reaches, through its Call steps to any depth, a stored workflow
+    /// `skips` holds for, or one the store does not have. The graph walked is the one the save
+    /// sends, else the one it keeps. A called workflow opens its own session from its own stored
+    /// setup, so a check that reads only the save must read these too.
+    pub fn calls_any(&self, incoming: &Connector, skips: impl Fn(&Connector) -> bool) -> bool {
+        let mut library = self.library();
+        match incoming.graph.clone().or_else(|| self.kept_graph(incoming)) {
+            Some(graph) => library.insert(incoming.id.clone(), graph),
+            None => library.remove(&incoming.id),
+        };
+        let store = self.store.lock().unwrap().connectors.clone();
+        reach_calls(&library, &incoming.id, |id, graph| {
+            let called = (id != incoming.id).then(|| store.iter().find(|c| c.id == id));
+            match called {
+                None => None,
+                Some(Some(target)) if graph.is_some() && !skips(target) => None,
+                Some(_) => Some(()),
+            }
+        })
+        .is_some()
     }
 
     /// Whether saving `incoming` would let its workflow read more of Convex than the stored one

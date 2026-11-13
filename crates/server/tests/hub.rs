@@ -5954,6 +5954,95 @@ fn an_agents_save_without_a_graph_cannot_set_the_trigger_of_a_stored_session_tha
     assert_eq!(stored(&mut owner.client), (json!(true), json!("agent"), json!("acceptEdits")));
 }
 
+#[test]
+fn an_agents_save_that_calls_a_stored_workflow_whose_session_skips_prompts_is_refused_at_any_depth() {
+    let hub = TestHub::start("call_steps");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "owner@example.com", "correct horse").unwrap();
+    let mut owner = agent_of(&url, &token, "owner@example.com", "call-steps-mac");
+    let folder = owner.dir.join("site").canonicalize().unwrap().display().to_string();
+    // A workflow whose steps run in order after its trigger: `call:<id>` calls one, any other text
+    // is a session step with that permission.
+    let workflow = |id: Option<&str>, name: &str, trigger: Value, steps: &[&str]| {
+        let mut nodes = vec![json!({ "id": "t", "name": "Trigger", "position": [0, 0], "type": "trigger", "watch": trigger.clone() })];
+        let mut edges = Vec::new();
+        for (i, step) in steps.iter().enumerate() {
+            let node = match step.strip_prefix("call:") {
+                Some(target) => json!({ "id": format!("n{i}"), "name": format!("Call {i}"), "position": [i + 1, 0], "type": "call", "workflow": target }),
+                None => json!({ "id": format!("n{i}"), "name": format!("Step {i}"), "position": [i + 1, 0], "type": "session", "permission": step }),
+            };
+            nodes.push(node);
+            edges.push(json!({ "from": if i == 0 { "t".to_owned() } else { format!("n{}", i - 1) }, "port": "out", "to": format!("n{i}") }));
+        }
+        let mut connector = json!({
+            "name": name, "enabled": false, "trigger": trigger,
+            "folder": folder, "model": "claude-sonnet-5-5", "effort": "medium", "permissionMode": "acceptEdits", "worktree": false, "instructions": "Fix it.",
+            "graph": { "nodes": nodes, "edges": edges },
+        });
+        if let Some(id) = id {
+            connector["id"] = json!(id);
+        }
+        json!({ "connector": connector })
+    };
+    let called = || json!({ "kind": "called" });
+    let label = |label: &str| json!({ "kind": "linear-label", "label": label });
+    let mut own = |connector: Value| {
+        let mut call = connector;
+        call["cmd"] = json!("save_connector");
+        owner.client.hub(call).unwrap()["id"].as_str().unwrap().to_owned()
+    };
+    let skips = own(workflow(None, "Skips", called(), &["bypassPermissions"]));
+    let asks = own(workflow(None, "Asks", called(), &["acceptEdits"]));
+    let calls_skips = own(workflow(None, "Calls skips", called(), &[&format!("call:{skips}")]));
+    let calls_asks = own(workflow(None, "Calls asks", called(), &[&format!("call:{asks}")]));
+    let back = own(workflow(None, "Back", called(), &["acceptEdits"]));
+    let back_skips = own(workflow(None, "Back skips", called(), &["bypassPermissions"]));
+    let to_back = own(workflow(None, "To back", called(), &[&format!("call:{back}")]));
+    let to_back_skips = own(workflow(None, "To back skips", called(), &[&format!("call:{back_skips}")]));
+    let names = |client: &mut Client| {
+        let settings = client.hub(json!({ "cmd": "get_settings" })).unwrap();
+        let mut names: Vec<String> = settings["connectors"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap().to_owned()).collect();
+        names.sort();
+        names
+    };
+    let before = names(&mut owner.client);
+    let wide = owner.node.machine.open_tab(Some(folder.clone()), true).unwrap();
+    owner.client.wait("the bypass tab at the hub", |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == wide.as_str() && t["bypass"] == true));
+
+    let refused = "save_connector would call a workflow whose session skips its permission prompts, or one pinned cannot read, and your own session asks for them";
+    let direct = workflow(None, "Direct", label("direct"), &[&format!("call:{skips}")]);
+    let deep = workflow(None, "Deep", label("deep"), &[&format!("call:{calls_skips}")]);
+    let unknown = workflow(None, "Unknown", label("unknown"), &["call:no-such-workflow"]);
+    // `back` and `back_skips` call `to_back` / `to_back_skips` again, which already call them.
+    let cycle = workflow(Some(&back), "Back", called(), &[&format!("call:{to_back}")]);
+    let cycle_skips = workflow(Some(&back_skips), "Back skips", called(), &[&format!("call:{to_back_skips}"), "bypassPermissions"]);
+    for (why, save) in [("a direct call", &direct), ("a call two levels deep", &deep), ("an unknown target", &unknown)] {
+        assert_eq!(act(&owner.dir, &owner.tab, "save_connector", save.clone()), Err(refused.to_owned()), "{why}");
+    }
+    assert_eq!(names(&mut owner.client), before, "nothing is saved");
+    let calls_back = |cycle: &str| format!("save_connector failed: \"Call 0\" calls \"{cycle}\", which calls back");
+    let cycle_answer = act(&owner.dir, &owner.tab, "save_connector", cycle_skips.clone());
+    assert_eq!(cycle_answer, Err(refused.to_owned()), "a cycle through one that skips prompts ends with the refusal");
+    let cycle_answer = act(&owner.dir, &wide, "save_connector", cycle_skips.clone());
+    assert!(cycle_answer.as_ref().is_err_and(|e| e.contains(&calls_back("To back skips"))), "a session that skips prompts gets the save's own answer: {cycle_answer:?}");
+    for tab in [&owner.tab, &wide] {
+        let cycle_answer = act(&owner.dir, tab, "save_connector", cycle.clone());
+        assert!(cycle_answer.as_ref().is_err_and(|e| e.contains(&calls_back("To back"))), "a cycle where nothing skips prompts ends with the save's answer: {cycle_answer:?}");
+    }
+
+    for (why, save) in [("a direct call", &direct), ("a call two levels deep", &deep)] {
+        assert_eq!(act(&owner.dir, &wide, "save_connector", save.clone()).unwrap()["outcome"], "done", "a session that skips prompts may save {why}");
+    }
+    for (tab, name) in [(&owner.tab, "Asks chain"), (&wide, "Wide chain")] {
+        let chain = workflow(None, name, label(name), &[&format!("call:{calls_asks}")]);
+        assert_eq!(act(&owner.dir, tab, "save_connector", chain).unwrap()["outcome"], "done", "a chain where nothing skips prompts saves");
+    }
+    let mut after = before.clone();
+    after.extend(["Asks chain", "Deep", "Direct", "Wide chain"].map(String::from));
+    after.sort();
+    assert_eq!(names(&mut owner.client), after);
+}
+
 /// What a session's hook reports when its permission mode is `mode`.
 fn report_mode(dir: &Path, tab: &str, mode: &str) {
     let mut stream = std::os::unix::net::UnixStream::connect(dir.join("sock")).unwrap();

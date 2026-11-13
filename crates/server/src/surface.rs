@@ -203,6 +203,11 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
                 return Err(format!("{name} would keep this workflow's session that skips its permission prompts, and your own session asks for them"));
             }
         }
+        // A called workflow opens its session from its own stored setup, on this save's trigger.
+        let skips = |target: &Connector| surface::skips_prompts(&Parsed::Hub(HubCall::SaveConnector { connector: target.clone() }));
+        if !caller.bypass && connectors.calls_any(connector, skips) {
+            return Err(format!("{name} would call a workflow whose session skips its permission prompts, or one pinned cannot read, and your own session asks for them"));
+        }
         if connectors.widens_convex(connector) {
             return Err(format!("{name} would let this workflow read more of Convex than it does now. Only the user sets what a workflow reads from Convex, on its Read Convex data step in the app."));
         }
