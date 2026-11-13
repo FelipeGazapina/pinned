@@ -1,0 +1,8 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.22s
+     Running tests/hub.rs (target/debug/build/pinned-server/d3d2d3cbddb62ab3/out/hub-d3d2d3cbddb62ab3)
+
+running 1 test
+test an_agent_acts_as_its_own_account_audited_and_a_confirm_runs_once_its_owner_approves ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 145 filtered out; finished in 5.67s
+
