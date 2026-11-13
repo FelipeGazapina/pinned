@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -1699,6 +1699,8 @@ pub struct Connectors {
     /// True while a tab wake waits for `driving`. Later wakes only store their list: that waiter
     /// drives on the newest lists, so tab wakes never pile up behind a slow check.
     tab_drive_queued: AtomicBool,
+    /// How many tab wakes returned because a tab drive was already queued, since start.
+    tab_drives_coalesced: AtomicU64,
     /// How many calls wait for `driving`, for the hub's census.
     drive_waiters: AtomicUsize,
     /// `runs.json` did not parse. Saves stay off so a later write does not replace the file with nothing.
@@ -1727,6 +1729,19 @@ pub enum BoxEndRelease {
 
 /// How long a Slack, Linear or GitHub call may take, so a stalled one cannot hold the drive lock.
 pub(crate) const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// What one account's connectors hold, for the hub's census.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ConnectorsCensus {
+    /// Machines with a stored tab list.
+    pub known_tabs: usize,
+    /// Calls waiting for the drive lock.
+    pub drive_waiters: usize,
+    /// 1 while a tab wake waits for the drive lock, else 0.
+    pub tab_drive_waiting: usize,
+    /// Tab wakes that returned because a tab drive was already queued, since start.
+    pub tab_drives_coalesced: u64,
+}
 
 /// Clears a flag when dropped.
 struct ClearOnDrop<'a>(&'a AtomicBool);
@@ -1776,6 +1791,7 @@ impl Connectors {
             inbox: Mutex::new(vec![]),
             driving: tokio::sync::Mutex::new(()),
             tab_drive_queued: AtomicBool::new(false),
+            tab_drives_coalesced: AtomicU64::new(0),
             drive_waiters: AtomicUsize::new(0),
             runs_broken: Mutex::new(runs_broken),
             known_tabs: Mutex::new(HashMap::new()),
@@ -3310,6 +3326,7 @@ impl Connectors {
             }
         }
         if self.tab_drive_queued.swap(true, Ordering::AcqRel) {
+            self.tab_drives_coalesced.fetch_add(1, Ordering::Relaxed);
             return Ok(());
         }
         // Cleared once the lock is taken, before the drive reads `known_tabs`, so a list stored
@@ -3329,10 +3346,14 @@ impl Connectors {
         guard
     }
 
-    /// How many machines have a stored tab list, and how many calls wait for the drive lock. Counts
-    /// only, for the hub's census.
-    pub fn census(&self) -> (usize, usize) {
-        (self.known_tabs.lock().unwrap().len(), self.drive_waiters.load(Ordering::Relaxed))
+    /// Counts only, for the hub's census.
+    pub fn census(&self) -> ConnectorsCensus {
+        ConnectorsCensus {
+            known_tabs: self.known_tabs.lock().unwrap().len(),
+            drive_waiters: self.drive_waiters.load(Ordering::Relaxed),
+            tab_drive_waiting: self.tab_drive_queued.load(Ordering::Relaxed) as usize,
+            tab_drives_coalesced: self.tab_drives_coalesced.load(Ordering::Relaxed),
+        }
     }
 
     fn reconcile_known(&self) -> Result<(), String> {
@@ -8357,10 +8378,14 @@ mod tests {
             }
             let finished = handles.iter().filter(|handle| handle.is_finished()).count();
             assert!(finished >= 99, "only {finished} of 100 tab wakes returned while a drive held the lock");
+            let census = connectors.census();
+            assert_eq!((census.tab_drive_waiting, census.tab_drives_coalesced, census.drive_waiters), (1, 99, 1));
             drop(guard);
             for handle in handles {
                 handle.await.unwrap().unwrap();
             }
+            let census = connectors.census();
+            assert_eq!((census.tab_drive_waiting, census.tab_drives_coalesced, census.drive_waiters), (0, 99, 0));
         });
         let known = connectors.known_tabs.lock().unwrap();
         let (at, tabs) = &known["m1"];
