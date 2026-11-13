@@ -2675,8 +2675,7 @@ impl Machine {
         })??;
         if mode_unknown || cleared {
             self.save_sessions();
-        }
-        if cleared {
+            // The hub reads the tab's `read_only` from this frame, so the mode change reaches it now.
             self.emit_tabs();
         }
         if submitted {
