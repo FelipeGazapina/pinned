@@ -1,0 +1,33 @@
+== 2026-11-13T03:41:07Z captain additions
+== my shell PINNED_* names
+PINNED_TUTORIAL_HELPER
+PINNED_TAB
+PINNED_SOCK
+PINNED_PROJECT
+PINNED_ACCOUNT
+PINNED_ROLE
+== node environ PINNED_* names
+== /workspace/home/.pinned (names+times)
+total    
+drwxr-xr-x 4096 2026-11-13 03:41:03.975634459 .
+drwxr-xr-x 144 2026-11-13 03:39:54.541519030 ..
+-rw------- 238 2026-11-13 03:39:55.000000000 account.json
+drwxr-xr-x 6 2026-11-13 03:39:54.541519030 bin
+-rw------- 187 2026-11-13 03:39:55.000000000 box.env
+drwxr-xr-x 51 2026-11-13 03:41:03.886636876 history
+-rw-r--r-- 102 2026-11-13 03:40:01.455330766 made-folders.json
+-rw-r--r-- 4 2026-11-13 03:39:55.442494725 node.pid
+-rwxr-xr-x 30723768 2026-11-13 03:39:55.361496934 pinned-server
+-rw-r--r-- 84 2026-11-13 03:40:00.720350808 projects.json
+-rw-r--r-- 486 2026-11-13 03:40:04.514866789 sessions.json
+-rw-r--r-- 2077 2026-11-13 03:39:55.000000000 start.sh
+-rw------- 849271 2026-11-13 03:41:03.964634758 sync.json
+drwxr-xr-x 51 2026-11-13 03:40:00.709351108 synced-plugins
+-rw-r--r-- 1875 2026-11-13 03:40:53.107929495 tasks.json
+-rw-r--r-- 1507 2026-11-13 03:40:00.736350372 taste.json
+-rw-r--r-- 4069847 2026-11-13 03:40:07.546164680 usage-model-rates.json
+== ~/.config/pinned
+ls: No such file directory
+== node listening sockets / unix
+/tmp/pinned-288-YLePKK/pinned.sock
+PINNED_SOCK in my shell == node 288 listening unix socket
