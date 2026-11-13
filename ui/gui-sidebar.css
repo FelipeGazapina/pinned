@@ -303,6 +303,7 @@ body.dragging-row .settled-head.drop-target { color: var(--g-primary); }
 .nav-row .meta { display: flex; align-items: center; gap: 6px; flex: none; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--side-meta); }
 .nav-row .count { flex: none; min-width: 18px; height: 18px; padding: 0 5px; box-sizing: border-box; border-radius: 9px; background: var(--g-primary); color: var(--g-on-primary);
   font-size: 11px; font-weight: 600; line-height: 18px; text-align: center; font-variant-numeric: tabular-nums; }
+.nav-row[data-nav="usage"] .stuck-box { background: rgb(var(--g-warning-rgb) / 0.16); color: var(--g-warning-fg); }
 .nav-row[data-nav="needs-you"] .count { background: rgb(var(--g-warning-rgb) / 0.16); color: var(--g-warning-fg); }
 .nav-row .bar { width: 28px; height: 3px; flex: none; border-radius: 2px; background: rgb(var(--g-ink-rgb) / 0.12); overflow: hidden; }
 .nav-row .bar > span { display: block; height: 3px; background: var(--g-info); }

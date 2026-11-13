@@ -32,6 +32,10 @@ function boxPage({ answer, hubOn = true } = {}) {
     hub: hubOn ? { hub: async (message) => (assert.equal(JSON.stringify(message), '{"cmd":"box_usage"}'), answer()) } : null,
     pageView: { addEventListener: (type, handler) => (context.toggled = { type, handler }) },
     renders,
+    drawn: 0,
+    drawNav: () => context.drawn++,
+    setTimeout: () => 0,
+    setInterval: () => 0,
   };
   vm.createContext(context);
   vm.runInContext(`${line(usageSrc, "const usd = ")}\n${line(read("settings.js"), "const BOX_SIZES = ")}\n${sectionSrc}
@@ -253,4 +257,25 @@ test("a stuck reason is escaped", () => {
   const html = page.boxUsageHtml({ data: { connected: false, stuck: [{ id: "r1", why: "<b>bold</b> & more" }] }, error: "", loading: false, open: {} }, NOW);
   assert.ok(!html.includes("<b>"));
   assert.match(html, /&lt;b&gt;bold&lt;\/b&gt; &amp; more/);
+});
+
+test("the sidebar's Usage entry is marked while a box is stuck, and redrawn once the answer is in", async () => {
+  const page = boxPage({ answer: async () => ({ connected: false, stuck: [{ id: "r1", why: "Upstash answered 503" }] }) });
+  await page.fetchBoxUsage();
+  assert.equal(page.drawn, 1);
+  assert.equal(page.usageState.box.data.stuck.length, 1);
+  const sidebarSrc = read("gui-sidebar.js");
+  const mark = between(sidebarSrc, "const stuck = typeof usageState", '  for (const name of ["needs-you"');
+  const draw = (box) => {
+    const el = { hidden: true, title: "" };
+    const context = { usageState: { box }, navRow: () => ({ querySelector: () => el }) };
+    vm.createContext(context);
+    vm.runInContext(mark, context);
+    return el;
+  };
+  const marked = draw(page.usageState.box);
+  assert.equal(marked.hidden, false);
+  assert.match(marked.title, /could not delete 1 Upstash box\. It may still be running/);
+  assert.equal(draw({ data: { connected: true, stuck: [] } }).hidden, true);
+  assert.equal(draw({ data: null }).hidden, true);
 });

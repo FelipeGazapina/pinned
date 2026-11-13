@@ -657,7 +657,11 @@ async function fetchBoxUsage() {
   if (seq !== box.seq) return;
   box.loading = false;
   if (shellPage() === "usage") renderUsagePage();
+  drawNav();
 }
+// The sidebar's Usage mark needs the answer without the page open: a look soon after start, then every 10 minutes.
+setTimeout(fetchBoxUsage, 8000);
+setInterval(fetchBoxUsage, 10 * 60 * 1000);
 document.addEventListener("click", (e) => {
   const email = e.target.closest?.("#usage-pop .redacted");
   if (!email) return;
