@@ -106,7 +106,13 @@ impl Settings {
     /// The name on one line and at most 40 characters, the default one when blank. It sits inside
     /// `[` `]` in every prefix and report, so brackets are dropped.
     pub fn cleaned(mut self) -> Self {
-        let name: String = self.name.chars().filter(|c| !matches!(c, '[' | ']')).map(|c| if c.is_control() { ' ' } else { c }).collect();
+        let name: String = self
+            .name
+            .chars()
+            .filter(|c| !matches!(c, '[' | ']'))
+            .map(|c| if c.is_control() || c.is_whitespace() { ' ' } else { c })
+            .filter(|c| !crate::pinned_lines::is_invisible(*c))
+            .collect();
         let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
         self.name = if name.is_empty() { default_name() } else { name.chars().take(NAME_MAX).collect() };
         self

@@ -3527,7 +3527,8 @@ impl Machine {
         }
         if let Call::Prompt { tab, text } = &call {
             self.may_prompt(caller, tab)?;
-            return json(self.type_prompt(tab, text)?);
+            // Typed text from another agent says who sent it, as enqueue's does.
+            return json(self.type_prompt(tab, &format!("[{}] {}", self.sender_of(caller), pinned_lines::guard(text)))?);
         }
         if matches!(call, Call::OpenGlobalOrchestrator) && !self.tab(caller, |t| global::is_global(&t.env)).unwrap_or(false) {
             return Err("open_global_orchestrator is for the global orchestrator's own session".into());
@@ -3583,6 +3584,12 @@ impl Machine {
                 return Err(workers_full(working));
             }
         }
+        self.enqueue_to_captain(path, text, request_id, &self.sender_of(caller), busy)
+    }
+
+    /// Who the agent in `caller` is, as the stamp on what it types into another session reads:
+    /// its role and its tab's title, without brackets, line breaks or invisible characters.
+    fn sender_of(&self, caller: &str) -> String {
         let sender = self.tab(caller, |t| (global::is_global(&t.env), role_of(&t.env).map(|(role, _)| role), t.title.clone())).map_or_else(
             |_| "Session".to_owned(),
             |(global, role, title)| {
@@ -3595,7 +3602,7 @@ impl Machine {
                 title.map_or_else(|| kind.to_owned(), |title| format!("{kind} {title}"))
             },
         );
-        self.enqueue_to_captain(path, text, request_id, &sender, busy)
+        global::Settings { name: sender, ..global::Settings::default() }.cleaned().name
     }
 
     /// Starts the session in `tab` as the worker of the agent in `caller`, as `delegate_task` starts
@@ -12383,7 +12390,7 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(prompt(&other), Err(format!("tab {other} has no running session")));
         m.start_claude(&other, 80, 24).unwrap();
         assert_eq!(prompt(&other), Ok(Value::Null));
-        assert_eq!(m.tab(&other, |t| t.held.clone()).unwrap(), ["Rebase on main."], "the prompt reached the session, held until its screen draws");
+        assert_eq!(m.tab(&other, |t| t.held.clone()).unwrap(), ["[Session] Rebase on main."], "the prompt reached the session with its sender, held until its screen draws");
         assert_eq!(prompt(&me), Err("prompt types into another session; your own session is the one reading this".into()));
         assert_eq!(prompt(&captain), Err(format!("{captain} is a Captain: enqueue hands it a message when it is idle")));
         let global = m.open_global_orchestrator().unwrap();
