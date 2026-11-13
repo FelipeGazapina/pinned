@@ -1877,7 +1877,15 @@ mod tests {
         t.done = true;
         assert_eq!(verdict(MIN, Seen::Tab { running: true, quiet: true }, &mut t, start + 30 * 60 * MIN, &Policy { done: MIN, ..policy() }, true), None, "nor Done");
         assert_eq!(verdict(21 * MIN, Seen::Tab { running: true, quiet: true }, &mut t, start, &policy(), true), Some(End::Expired), "max life ends it");
-        assert_eq!(after(Seen::Offline, 21 * MIN, MIN), Some(End::Offline), "and a node gone offline still ends it");
+        // A node gone offline, or its tab closed, still ends it, by the default policy's 10 and 2 minutes.
+        let p = Policy::default();
+        let (mut offline, mut closed) = (Timers::default(), Timers::default());
+        assert_eq!(verdict(MIN, Seen::Offline, &mut offline, start, &p, true), None);
+        assert_eq!(verdict(MIN, Seen::Offline, &mut offline, start + 10 * MIN - Duration::from_secs(1), &p, true), None);
+        assert_eq!(verdict(MIN, Seen::Offline, &mut offline, start + 10 * MIN, &p, true), Some(End::Offline), "a node gone offline still ends it");
+        assert_eq!(verdict(MIN, Seen::NoTab, &mut closed, start, &p, true), None);
+        assert_eq!(verdict(MIN, Seen::NoTab, &mut closed, start + 2 * MIN - Duration::from_secs(1), &p, true), None);
+        assert_eq!(verdict(MIN, Seen::NoTab, &mut closed, start + 2 * MIN, &p, true), Some(End::TabClosed), "a closed tab still ends it after 2 minutes");
         // Its workers are done: the quiet it had then counts from now.
         assert_eq!(verdict(MIN, Seen::Tab { running: true, quiet: true }, &mut t, start + 40 * 60 * MIN, &policy(), false), None);
         assert_eq!(verdict(MIN, Seen::Tab { running: true, quiet: true }, &mut t, start + 40 * 60 * MIN + 21 * MIN, &policy(), false), Some(End::Done));

@@ -214,8 +214,8 @@ async fn ended(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, to: &str, tab
             }
             true
         }
-        Err(Unanswered::Refused(e)) => {
-            eprintln!("pinned-server: machine {to} answered the end of task {task} with an error: {e}");
+        Err(Unanswered::Refused(_)) => {
+            eprintln!("pinned-server: machine {to} answered the end of task {task} with an error; it is kept unclaimed");
             keep_unclaimed(hub, account, to, from, &tab, &task, end).await;
             false
         }
@@ -371,12 +371,12 @@ pub async fn deliver_held(hub: Arc<Hub>, account: Arc<Account>, machine: String)
                 }
                 eprintln!("pinned-server: machine {machine} had the held end of task {} from its status already", held.task);
             }
-            Ok(taken) => {
+            Ok(_) => {
                 // `"unknown"`, or a bare `false` before any status read it.
                 if let Err(e) = hub.db.unclaim_held_end(account.id, origin, &held.task).await {
                     eprintln!("pinned-server: could not mark the held end of task {} unclaimed: {e}", held.task);
                 }
-                eprintln!("pinned-server: machine {machine} did not take the held end of task {} ({taken:?}); it stays unclaimed", held.task);
+                eprintln!("pinned-server: machine {machine} did not take the held end of task {} (taken: false); it stays unclaimed", held.task);
             }
             Err(e) => eprintln!("pinned-server: machine {machine} did not take the held end of task {}: {}", held.task, String::from(e)),
         }
