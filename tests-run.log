@@ -43,3 +43,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:03:09Z #17 an_omitted_executable_field_keeps_the_stored_bit_through_the_hub ok / avail=15124M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:03:10Z #18 a_new_sha_with_executable_false_clears_the_bit_on_the_receiver START / avail=15124M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:03:12Z #18 a_new_sha_with_executable_false_clears_the_bit_on_the_receiver ok / avail=15124M /workspace avail=19374M node_stat=Ssl node_tcp=1
+2026-11-13T04:03:13Z #19 a_mode_repair_keeps_a_newer_edit_and_marks_only_the_matching_sha START / avail=15124M /workspace avail=19374M node_stat=Ssl
