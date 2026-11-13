@@ -136,3 +136,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:07:00Z #61 a_lost_answer_is_reported_as_unknown_and_never_acted_on_twice ok / avail=15073M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:07:01Z #62 the_global_orchestrator_reaches_a_capitao_on_another_machine_and_hears_back START / avail=15073M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:07:05Z #62 the_global_orchestrator_reaches_a_capitao_on_another_machine_and_hears_back ok / avail=15073M /workspace avail=19374M node_stat=Ssl node_tcp=1
+2026-11-13T04:07:06Z #63 a_plain_session_still_cannot_reach_the_hub START / avail=15073M /workspace avail=19374M node_stat=Ssl
