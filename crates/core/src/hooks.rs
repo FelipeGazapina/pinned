@@ -30,6 +30,10 @@ type Reply = Result<String, String>;
 /// goes on without it.
 const RECALL_WAIT: Duration = Duration::from_millis(300);
 
+/// How long a Stop hook waits for the machine's reply. The machine counts the queue it hands over
+/// there as delivered, and the turn ends without it when the hook stops waiting first.
+const HAND_OVER_WAIT: Duration = Duration::from_secs(10);
+
 /// Claude Code settings layered onto the harnessed session via `--settings`, so the user's
 /// own ~/.claude/settings.json stays untouched.
 pub fn write_settings(path: &Path, exe: &Path) -> std::io::Result<()> {
@@ -223,7 +227,7 @@ fn feed(sock: &str, mut event: AgentEvent, codex_notify: bool, stop_hook_active:
     let mut stream = UnixStream::connect(sock).ok()?;
     let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
     writeln!(stream, "{}", serde_json::to_string(&Message::Agent(event)).unwrap()).ok()?;
-    let _ = stream.set_read_timeout(Some(RECALL_WAIT));
+    let _ = stream.set_read_timeout(Some(if stop { HAND_OVER_WAIT } else { RECALL_WAIT }));
     let mut reply = String::new();
     BufReader::new(stream).read_line(&mut reply).ok()?;
     let context = serde_json::from_str::<Reply>(&reply).ok()?.ok().filter(|context| !context.is_empty())?;
@@ -681,6 +685,27 @@ mod tests {
         assert_eq!(deliver(&sock, event(AgentStatus::Working, Some("slow"))), None);
         assert!(start.elapsed() < Duration::from_millis(800), "the prompt waited {:?}", start.elapsed());
         assert_eq!(deliver("/nonexistent/pinned.sock", event(AgentStatus::Working, Some("how do we deploy?"))), None);
+        let _ = std::fs::remove_file(sock);
+    }
+
+    /// The machine hands its queue over in the Stop hook's reply and counts it delivered. A reply
+    /// slower than a prompt's recall wait still reaches Claude Code, or the queue is lost.
+    #[test]
+    fn a_stop_hook_waits_for_a_slow_hand_over() {
+        let sock = std::env::temp_dir().join(format!("pinned-hand-over-{}.sock", std::process::id()));
+        listen(sock.clone(), |message| match message {
+            Message::Agent(AgentEvent { status: AgentStatus::Done, .. }) => {
+                std::thread::sleep(Duration::from_secs(1));
+                Ok("[Orquestrador] Ship the form.".into())
+            }
+            _ => Ok(String::new()),
+        })
+        .unwrap();
+        let event = AgentEvent { status: AgentStatus::Done, cwd: None, message: None, tab: Some("tab-1".into()), session: None, title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false, reply: None };
+        assert_eq!(
+            deliver(&sock.display().to_string(), event),
+            Some(r#"{"hookSpecificOutput":{"hookEventName":"Stop","additionalContext":"[Orquestrador] Ship the form."}}"#.into())
+        );
         let _ = std::fs::remove_file(sock);
     }
 
