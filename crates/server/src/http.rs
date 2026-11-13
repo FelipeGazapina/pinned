@@ -38,7 +38,8 @@ const EMAIL_ATTEMPTS: usize = 30;
 const ACCOUNT_UNLOCKS: usize = 100;
 const ADDRESS_SIGNUPS: usize = 5;
 /// Sign ups the whole hub takes within `ATTEMPT_WINDOW`, whichever addresses they come from: a burst of
-/// invited testers fits, a client that keeps changing its address does not get past it.
+/// invited testers fits, a client that keeps changing its address does not get past it. Only a sign up
+/// that would make an account counts: in invite mode, one with an unused code.
 const HUB_SIGNUPS: usize = 50;
 /// Keys the limiter holds at most for addresses and emails a stranger can make up, about 45 MB at worst
 /// (each key the longest email holding 30 stamps). Rotating addresses or emails can't grow it past this.
@@ -362,9 +363,9 @@ async fn signup(State(server): State<Arc<Server>>, ConnectInfo(peer): ConnectInf
     if server.hub.signup == Signup::First && !first {
         return Err(Error(StatusCode::FORBIDDEN, "this hub already has its account, so sign in with it instead".into()));
     }
-    let keys = [(format!("signup:{}", server.client_address(peer, &headers)), ADDRESS_SIGNUPS), ("hub:signup".to_owned(), HUB_SIGNUPS)];
-    if server.attempt(&keys).is_none() {
-        return Err(Error(StatusCode::TOO_MANY_REQUESTS, "too many sign ups; try again in 15 minutes".into()));
+    let too_many = || Error(StatusCode::TOO_MANY_REQUESTS, "too many sign ups; try again in 15 minutes".into());
+    if server.attempt(&[(format!("signup:{}", server.client_address(peer, &headers)), ADDRESS_SIGNUPS)]).is_none() {
+        return Err(too_many());
     }
     // After the limiter, so a full hub's answer costs a counted attempt before it costs a query.
     if at_cap(&server).await? {
@@ -375,10 +376,19 @@ async fn signup(State(server): State<Arc<Server>>, ConnectInfo(peer): ConnectInf
     let invite = match server.hub.signup {
         Signup::Invite if !first => {
             let code = body.invite.as_deref().map(str::trim).filter(|code| !code.is_empty()).ok_or_else(invite_needed)?;
-            Some(db::invite_hash(code))
+            let code = db::invite_hash(code);
+            if !server.hub.db.invite_open(&code).await.map_err(internal)? {
+                return Err(invite_needed());
+            }
+            Some(code)
         }
         _ => None,
     };
+    // Only a sign up that would make an account counts against the hub's window, so a stranger without
+    // a good code can't spend the invited testers' share of it.
+    if server.attempt(&[("hub:signup".to_owned(), HUB_SIGNUPS)]).is_none() {
+        return Err(too_many());
+    }
     let hash = hash_password(&server, body.password).await?;
     // Counted again with the account made under one lock, so signups racing at the cap can't pass it.
     let _slot = match server.access.max_accounts {

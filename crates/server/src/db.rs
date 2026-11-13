@@ -1295,6 +1295,13 @@ impl Db {
         Ok(deleted == 1)
     }
 
+    /// Whether an unused code has this hash, so a sign up can tell before it counts against the hub's
+    /// window. `create_invited_account` still checks it again as it spends it.
+    pub async fn invite_open(&self, code_hash: &[u8]) -> Result<bool, String> {
+        let row = self.client().await?.query_one("select exists (select 1 from invites where code_hash = $1 and used_at is null)", &[&code_hash]).await.map_err(err)?;
+        Ok(row.get(0))
+    }
+
     /// Makes the account and spends the code in one statement, so two sign ups can't share a code
     /// and a taken email leaves the code unused.
     pub async fn create_invited_account(&self, code_hash: &[u8], email: &str, password_hash: &str) -> Result<Invited, String> {

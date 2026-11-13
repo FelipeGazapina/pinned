@@ -36,6 +36,7 @@ const MAX_REDIRECTS: usize = 5;
 const MAX_PROJECTS: usize = 20;
 const REGISTRATIONS: usize = 20;
 /// Registrations the whole hub takes within the limiter's window, whichever addresses they come from.
+/// Only a registration whose body passed validation counts.
 const HUB_REGISTRATIONS: usize = 100;
 const TOKEN_FAILURES: usize = 30;
 /// How long the approval waits for a machine to list its projects.
@@ -178,9 +179,9 @@ pub async fn server_metadata(State(server): State<Arc<Server>>) -> Response {
 }
 
 pub async fn register(State(server): State<Arc<Server>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, Json(body): Json<Value>) -> Response {
-    let keys = [(format!("agent-register:{}", server.client_address(peer, &headers)), REGISTRATIONS), ("hub:agent-register".to_owned(), HUB_REGISTRATIONS)];
-    if server.attempt(&keys).is_none() {
-        return oauth_error(StatusCode::TOO_MANY_REQUESTS, "invalid_client_metadata", "too many registrations; try again in 15 minutes");
+    let too_many = || oauth_error(StatusCode::TOO_MANY_REQUESTS, "invalid_client_metadata", "too many registrations; try again in 15 minutes");
+    if server.attempt(&[(format!("agent-register:{}", server.client_address(peer, &headers)), REGISTRATIONS)]).is_none() {
+        return too_many();
     }
     let uris: Vec<String> = match body.get("redirect_uris").and_then(Value::as_array) {
         Some(uris) => uris.iter().filter_map(Value::as_str).map(str::to_owned).collect(),
@@ -198,6 +199,10 @@ pub async fn register(State(server): State<Arc<Server>>, ConnectInfo(peer): Conn
     }
     let name: String = body.get("client_name").and_then(Value::as_str).unwrap_or("").chars().filter(|c| !c.is_control()).take(80).collect();
     let name = if name.trim().is_empty() { "An MCP client".to_owned() } else { name.trim().to_owned() };
+    // Only a body that passed the checks above counts against the hub's window, so bad ones can't spend it.
+    if server.attempt(&[("hub:agent-register".to_owned(), HUB_REGISTRATIONS)]).is_none() {
+        return too_many();
+    }
     match server.hub.db.register_agent_client(&name, &uris).await {
         Ok(id) => no_store(
             (
