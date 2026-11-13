@@ -5134,7 +5134,7 @@ mod tests {
 
     fn failed_why(connectors: &Connectors, machine: &str) -> String {
         let runs = connectors.runs.lock().unwrap();
-        match &runs.iter().find(|run| run.id == format!("run-{machine}")).unwrap().status {
+        match &runs.iter().find(|run| run.id.0 == format!("run-{machine}")).unwrap().status {
             Status::Failed { why } => why.clone(),
             other => panic!("the run is {other:?}"),
         }
