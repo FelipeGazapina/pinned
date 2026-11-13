@@ -297,10 +297,11 @@ pub(crate) struct Timers {
 }
 
 impl Timers {
-    /// Keeps what the box's machine shows now: `tabs` as it last reported them, or None while
-    /// it is offline or has not reported, which keeps what was last seen.
-    fn keep(&mut self, tabs: Option<&[TabView]>) {
-        if let Some(tabs) = tabs {
+    /// Keeps what the machine of a box running `work` shows now: `tabs` as it last reported them,
+    /// or None while it is offline or has not reported, which keeps what was last seen. Only a
+    /// worker box has a task to tell, so no other kind of box keeps anything.
+    fn keep(&mut self, work: &BoxWork, tabs: Option<&[TabView]>) {
+        if let (BoxWork::Delegate { .. }, Some(tabs)) = (work, tabs) {
             self.asked = unanswered(tabs);
         }
     }
@@ -1495,6 +1496,9 @@ impl Boxes {
     /// failed, so it does not wait on it. A box that ends for its task's end, `Done`, has nothing to tell.
     async fn tell_origin(&self, hub: &Hub, account: &Account, row: &BoxRow, why: &End) {
         let BoxWork::Delegate { origin, .. } = &row.work else { return };
+        if matches!(why, End::Done) {
+            return;
+        }
         let asked = asked_at_end(account.tabs_of(&row.machine.to_string()).as_deref(), self.timers.lock().unwrap().get(&row.id).and_then(|t| t.asked.as_ref()));
         let Some(error) = origin_error(why, self.policy.offline, asked.as_ref()) else { return };
         let mut end = RemoteEnd { state: "failed".into(), summary: None, error: Some(error), usage: None };
@@ -1689,11 +1693,10 @@ impl Boxes {
                             BoxWork::Run => account.seen(&machine, &row.connector, &row.subject),
                             _ => account.seen_any(&machine),
                         };
+                        let tabs = account.tabs_of(&machine);
                         let mut timers = self.timers.lock().unwrap();
                         let slot = timers.entry(row.id.clone()).or_default();
-                        if matches!(row.work, BoxWork::Delegate { .. }) {
-                            slot.keep(account.tabs_of(&machine).as_deref());
-                        }
+                        slot.keep(&row.work, tabs.as_deref());
                         if held {
                             slot.quiet_since = None;
                             slot.exited_since = None;
@@ -1775,13 +1778,20 @@ mod tests {
         vec![tab]
     }
 
+    /// The work of a worker box, whose task is `task-1` on `tab-1` of the machine `origin`.
+    fn delegate() -> BoxWork {
+        let origin = serde_json::from_value(serde_json::json!({ "machine": "origin", "tab": "tab-1", "task": "task-1", "access": "auto" })).unwrap();
+        let request = pinned_core::delegate::parse_request(&serde_json::json!({ "task": "Run it.", "title": "Slow" })).unwrap();
+        BoxWork::Delegate { origin, request: Box::new(request), claude: None }
+    }
+
     const TASK_ENDED: &str = "Upstash Box: the box ended before its task did: it ran out of time or budget";
 
     #[test]
     fn a_box_ending_at_max_life_with_an_open_question_names_it_in_the_parents_error() {
         let tabs = tab_asking(&["Which database?", "Which region?", "Which plan?", "Which owner?"]);
         let mut timers = Timers::default();
-        timers.keep(Some(&tabs));
+        timers.keep(&delegate(), Some(&tabs));
         // The box is online when it ends, so its machine's tabs answer, not the kept copy.
         let asked = asked_at_end(Some(&tabs), None);
         assert_eq!(origin_error(&End::Expired, 10 * MIN, asked.as_ref()).as_deref(), Some(&*format!("{TASK_ENDED}, with 4 questions unanswered: \"Which database?\"")));
@@ -1799,16 +1809,30 @@ mod tests {
     #[test]
     fn a_box_that_went_offline_and_was_reaped_names_its_question_from_the_kept_copy() {
         let mut timers = Timers::default();
-        timers.keep(Some(&tab_asking(&["Which database?"])));
-        timers.keep(None);
-        timers.keep(None);
+        timers.keep(&delegate(), Some(&tab_asking(&["Which database?"])));
+        timers.keep(&delegate(), None);
+        timers.keep(&delegate(), None);
         let asked = asked_at_end(None, timers.asked.as_ref());
         assert_eq!(
             origin_error(&End::Offline, 10 * MIN, asked.as_ref()).as_deref(),
             Some("Upstash Box: its box went offline and did not come back within 10 min, with 1 question unanswered: \"Which database?\"")
         );
-        timers.keep(Some(&tab_asking(&[])));
+        timers.keep(&delegate(), Some(&tab_asking(&[])));
         assert_eq!(timers.asked, None, "a look at an online machine with no question open clears it");
+    }
+
+    #[test]
+    fn only_a_worker_box_keeps_what_its_machine_asks() {
+        let tabs = tab_asking(&["Which database?"]);
+        let captain = BoxWork::Captain { request_id: "r1".into(), text: "Hello.".into(), sender: "bot".into(), busy: None };
+        for work in [BoxWork::Run, captain] {
+            let mut timers = Timers::default();
+            timers.keep(&work, Some(&tabs));
+            assert_eq!(timers.asked, None, "{work:?} has no task to tell");
+        }
+        let mut timers = Timers::default();
+        timers.keep(&delegate(), Some(&tabs));
+        assert_eq!(timers.asked, Some(Unanswered { count: 1, first: "Which database?".into() }));
     }
 
     #[test]
