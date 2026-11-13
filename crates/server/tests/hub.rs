@@ -2121,6 +2121,56 @@ fn rotating_the_edge_header_does_not_pass_the_hub_wide_agent_registration_ceilin
 }
 
 #[test]
+fn sign_ups_without_a_good_code_leave_the_hub_wide_signup_ceiling_to_invited_ones() {
+    let hub = TestHub::start_behind_proxy("hubsignups_invite", Signup::Invite, behind(pinned_server::http::TrustedProxy::Railway, None));
+    let url = hub.url.clone();
+    let from = |address: String, body: Value| post_with(&url, "/api/signup", &[("x-real-ip", &address)], body);
+    let (status, ana) = from("192.0.2.1".into(), new_account(0));
+    assert_eq!(status, 200, "the first account needs no code: {ana}");
+    let mut ana_client = signed_in_client(&url, ana["token"].as_str().unwrap());
+    let codes: Vec<String> = (0..50).map(|_| ana_client.hub(json!({ "cmd": "create_invite" })).unwrap()["code"].as_str().unwrap().to_owned()).collect();
+    // A stranger rotating addresses with no code or a wrong one is refused by the code, and spends none of the hub's window.
+    for n in 0..60 {
+        let mut body = new_account(100 + n);
+        if n % 2 == 1 {
+            body["invite"] = json!("AAAA-BBBB-CCCC-DDDD");
+        }
+        assert_eq!(from(format!("203.0.113.{n}"), body), refused_signup(), "sign up {n} without a good code");
+    }
+    // The window holds 50: the first account and 49 invited ones, then it is spent for a good code too.
+    for (n, code) in codes.iter().take(49).enumerate() {
+        let mut body = new_account(1 + n);
+        body["invite"] = json!(code);
+        let (status, made) = from(format!("198.51.100.{n}"), body);
+        assert_eq!(status, 200, "invited sign up {n}: {made}");
+    }
+    let mut body = new_account(50);
+    body["invite"] = json!(codes[49]);
+    assert_eq!(from("198.51.100.200".into(), body), (429, json!({ "error": TOO_MANY_SIGNUPS })), "the ceiling still holds for invited sign ups");
+}
+
+#[test]
+fn registrations_with_a_bad_body_leave_the_hub_wide_agent_registration_ceiling_alone() {
+    let hub = TestHub::start_behind_proxy("hubregister_bad", Signup::Open, behind(pinned_server::http::TrustedProxy::Railway, None));
+    let register = |address: String, body: Value| post_with(&hub.url, "/oauth/register", &[("x-real-ip", &address)], body);
+    let bad = [
+        json!({ "client_name": "No redirect" }),
+        json!({ "redirect_uris": [] }),
+        json!({ "redirect_uris": ["http://agent.example/callback"] }),
+        json!({ "redirect_uris": ["https://agent.example/oauth/callback"], "grant_types": ["client_credentials"] }),
+    ];
+    for n in 0..120 {
+        assert_eq!(register(format!("203.0.113.{n}"), bad[n % bad.len()].clone()).0, 400, "bad registration {n}");
+    }
+    let good = json!({ "redirect_uris": ["https://agent.example/oauth/callback"], "client_name": "Ceiling test" });
+    for n in 0..100 {
+        assert_eq!(register(format!("198.51.100.{}", n % 250), good.clone()).0, 201, "registration {n}");
+    }
+    let (status, body) = register("192.0.2.1".into(), good.clone());
+    assert_eq!((status, body["error_description"].clone()), (429, json!("too many registrations; try again in 15 minutes")), "the ceiling still holds for good registrations");
+}
+
+#[test]
 fn at_its_cap_a_hub_counts_a_signup_against_its_address_before_it_counts_the_accounts() {
     let hub = TestHub::start_behind_proxy("caporder", Signup::Open, behind(pinned_server::http::TrustedProxy::Off, Some(0)));
     for n in 0..5 {
