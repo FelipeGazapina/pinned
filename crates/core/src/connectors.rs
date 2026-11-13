@@ -831,9 +831,11 @@ struct Store {
     /// The subjects a box end freed, by workflow id and then `subject_key`, with the unix millis it
     /// did. A later failed boot or offline end of the same subject keeps it handled while the mark
     /// is within `BOX_RELEASE_WINDOW_MS`. A mark is dropped when it is older than that or its
-    /// workflow is deleted (`prune_thread_bots`), whoever still tracks the subject.
+    /// workflow is deleted (`prune_thread_bots`), whoever still tracks the subject. Not named
+    /// `box_released`: earlier commits of this release saved that key as a list of subjects, which
+    /// this shape cannot read, so the old key is ignored and its mark dropped.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    box_released: BTreeMap<String, BTreeMap<String, u64>>,
+    box_released_at: BTreeMap<String, BTreeMap<String, u64>>,
     connectors: Vec<Connector>,
 }
 
@@ -897,19 +899,19 @@ impl Store {
     /// Drops the bots of threads no workflow handles or follows and no run works on anymore, and
     /// the box-end marks older than `BOX_RELEASE_WINDOW_MS` at `now` or of a deleted workflow.
     fn prune_thread_bots(&mut self, runs: &[runner::Run], starting: &[String], now: u64) -> bool {
-        let before = (self.slack_threads.len(), self.box_released.values().map(|keys| keys.len()).sum::<usize>());
+        let before = (self.slack_threads.len(), self.box_released_at.values().map(|keys| keys.len()).sum::<usize>());
         let connectors = &self.connectors;
         let tracked = |key: &String| {
             connectors.iter().any(|c| c.handled.iter().any(|h| h == key) || c.followed.contains_key(key)) || runs.iter().any(|run| subject_key(&run.subject) == *key)
                 || starting.contains(key)
         };
         self.slack_threads.retain(|key, _| tracked(key));
-        self.box_released.retain(|workflow, _| connectors.iter().any(|c| c.id == *workflow));
-        for keys in self.box_released.values_mut() {
+        self.box_released_at.retain(|workflow, _| connectors.iter().any(|c| c.id == *workflow));
+        for keys in self.box_released_at.values_mut() {
             keys.retain(|_, at| box_release_is_live(Some(*at), now));
         }
-        self.box_released.retain(|_, keys| !keys.is_empty());
-        (self.slack_threads.len(), self.box_released.values().map(|keys| keys.len()).sum::<usize>()) != before
+        self.box_released_at.retain(|_, keys| !keys.is_empty());
+        (self.slack_threads.len(), self.box_released_at.values().map(|keys| keys.len()).sum::<usize>()) != before
     }
 
     /// Frees `subject` of workflow `connector` after its run's box ended, as `release` allows:
@@ -917,10 +919,10 @@ impl Store {
     /// `BOX_RELEASE_WINDOW_MS` before `now`. Answers whether it did.
     fn release_after_box_end(&mut self, connector: &str, subject: &Subject, release: BoxEndRelease, now: u64) -> bool {
         let key = subject_key(subject);
-        if release == BoxEndRelease::Keep || box_release_is_live(self.box_released.get(connector).and_then(|keys| keys.get(&key)).copied(), now) {
+        if release == BoxEndRelease::Keep || box_release_is_live(self.box_released_at.get(connector).and_then(|keys| keys.get(&key)).copied(), now) {
             return false;
         }
-        self.box_released.entry(connector.to_owned()).or_default().insert(key.clone(), now);
+        self.box_released_at.entry(connector.to_owned()).or_default().insert(key.clone(), now);
         if let Some(c) = self.connectors.iter_mut().find(|c| c.id == connector) {
             c.unclaim(subject);
         }
@@ -3099,7 +3101,7 @@ impl Connectors {
     pub async fn box_ended(&self, machine: &str, holder: Option<(&str, &Subject, u64)>, why: &str, release: BoxEndRelease) -> Result<usize, String> {
         let _guard = self.driving.lock().await;
         let at = Utc::now().to_rfc3339();
-        let released = self.store.lock().unwrap().box_released.clone();
+        let released = self.store.lock().unwrap().box_released_at.clone();
         let now = unix_millis();
         let mut whys = vec![];
         let mut before = vec![];
@@ -5194,7 +5196,7 @@ mod tests {
 
     /// The subjects each workflow holds a release mark for, without their times.
     fn marked_subjects(connectors: &Connectors) -> BTreeMap<String, Vec<String>> {
-        connectors.store.lock().unwrap().box_released.iter().map(|(workflow, keys)| (workflow.clone(), keys.keys().cloned().collect())).collect()
+        connectors.store.lock().unwrap().box_released_at.iter().map(|(workflow, keys)| (workflow.clone(), keys.keys().cloned().collect())).collect()
     }
 
     /// A check that finds no labelled issue, so nothing claims `uuid` and only the prune looks at marks.
@@ -5234,7 +5236,25 @@ mod tests {
         }
         let reloaded = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into());
         assert_eq!(handled_of(&reloaded), ["uuid"]);
-        assert!(reloaded.store.lock().unwrap().box_released.is_empty(), "a kept subject spends no release");
+        assert!(reloaded.store.lock().unwrap().box_released_at.is_empty(), "a kept subject spends no release");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Earlier commits of this release saved the release mark as `"box_released_at": {"c1": ["uuid"]}`,
+    /// a list of subjects. The mark has a new key and shape, so such a store still parses: the
+    /// workflow and what it handled stay, and only the old mark is dropped.
+    #[test]
+    fn a_store_with_the_old_release_mark_shape_keeps_its_workflows() {
+        let linear = Connector { handled: vec!["uuid".into()], ..linear_connector() };
+        let mut store = serde_json::to_value(Store { connectors: vec![linear], ..Store::default() }).unwrap();
+        store["box_released"] = json!({ "c1": ["uuid"] });
+        let dir = temp_dir("old-release-mark");
+        let storage = FileStorage::new(dir.clone());
+        storage.save(&serde_json::to_vec(&store).unwrap()).unwrap();
+        let connectors = Connectors::new(storage, "/bin/pinned".into());
+        assert_eq!(connectors.store.lock().unwrap().connectors.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), ["c1"], "the store loaded empty");
+        assert_eq!(handled_of(&connectors), ["uuid"], "the workflow keeps what it handled");
+        assert!(marked_subjects(&connectors).is_empty(), "the old mark is dropped");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -5294,17 +5314,17 @@ mod tests {
         let (connectors, dir) = stored("release-mark-age", vec![linear_connector()]);
         let now = 1_800_000_000_000_u64;
         let mut store = connectors.store.lock().unwrap();
-        store.box_released.insert("c1".into(), BTreeMap::from([("older".into(), now - 30 * DAY_MS - 1), ("newer".into(), now - 30 * DAY_MS + 1)]));
-        store.box_released.insert("deleted".into(), BTreeMap::from([("fresh".into(), now)]));
+        store.box_released_at.insert("c1".into(), BTreeMap::from([("older".into(), now - 30 * DAY_MS - 1), ("newer".into(), now - 30 * DAY_MS + 1)]));
+        store.box_released_at.insert("deleted".into(), BTreeMap::from([("fresh".into(), now)]));
         assert!(store.prune_thread_bots(&[], &[], now), "the prune changes the store");
-        assert_eq!(store.box_released, BTreeMap::from([("c1".to_owned(), BTreeMap::from([("newer".to_owned(), now - 30 * DAY_MS + 1)]))]), "30 days and 1 ms goes, 30 days less 1 ms stays, and a deleted workflow's mark goes");
+        assert_eq!(store.box_released_at, BTreeMap::from([("c1".to_owned(), BTreeMap::from([("newer".to_owned(), now - 30 * DAY_MS + 1)]))]), "30 days and 1 ms goes, 30 days less 1 ms stays, and a deleted workflow's mark goes");
         // A mark of a subject nothing tracks stays, however long ago nobody did.
         assert!(!store.prune_thread_bots(&[], &[], now), "nothing more to prune");
         // The one that stayed counts as a release until it is old, and an old one counts as none.
         let subject = Subject::LinearIssue { issue: "newer".into() };
         assert!(!store.release_after_box_end("c1", &subject, BoxEndRelease::Once, now), "a young mark: already released once");
         assert!(store.release_after_box_end("c1", &subject, BoxEndRelease::Once, now + 2 * DAY_MS), "an old mark counts as none, and the release is written again");
-        assert_eq!(store.box_released["c1"]["newer"], now + 2 * DAY_MS, "with its new time");
+        assert_eq!(store.box_released_at["c1"]["newer"], now + 2 * DAY_MS, "with its new time");
         drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }

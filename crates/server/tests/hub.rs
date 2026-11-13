@@ -2941,14 +2941,14 @@ fn assert_run_failed(hub: &TestHub, ana: &mut BoxAccount, why: &str, boxes: usiz
     assert_eq!(store["runs"][0]["status"]["failed"]["why"], json!(why), "{store}");
     if freed {
         assert_eq!(store["connectors"][0]["handled"], json!([]), "its issue is no longer handled");
-        let marks = store["box_released"][ana.connector.as_str()].as_object().unwrap_or_else(|| panic!("{store}"));
+        let marks = store["box_released_at"][ana.connector.as_str()].as_object().unwrap_or_else(|| panic!("{store}"));
         assert_eq!(marks.keys().collect::<Vec<_>>(), [store["runs"][0]["subject"]["issue"].as_str().unwrap()], "and it spent its one release");
         let at = marks.values().next().unwrap().as_u64().unwrap();
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
         assert!(now.saturating_sub(at) < 60 * 60 * 1000, "the mark keeps the time of the release: {store}");
     } else {
         assert_eq!(store["connectors"][0]["handled"], json!([store["runs"][0]["subject"]["issue"]]), "its issue stays handled");
-        assert!(store.get("box_released").is_none(), "{store}");
+        assert!(store.get("box_released_at").is_none(), "{store}");
     }
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(created(hub), boxes, "nothing opened another box for the run");
