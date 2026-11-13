@@ -1803,8 +1803,33 @@ function generateErrorHint(err) {
   if (raw.includes("has no usable trigger")) return `${raw} Name where it listens, e.g. "when mentioned in #support", then generate again.`;
   if (raw.includes("did not answer with a workflow map")) return `${raw} Simplify the description into short steps and try again.`;
   if (raw.includes("which is no step")) return `${raw} Ask for fewer, simply linked steps and try again.`;
+  if (raw.includes("did not answer in time")) return `${raw} Describe fewer steps, or try again in a moment.`;
+  if (/unknown variant|can't answer/.test(raw)) return `${raw} Update pinned on that machine to draft with Claude, or pick a Vercel model.`;
+  if (/not logged in|\/login|log in/i.test(raw)) return `${raw} Sign in that Claude account in pinned's Accounts settings, then generate again.`;
   return raw;
 }
+
+/** Whether a saved workflow answers a Slack thread, so a call step may hand it one, as the backend's `answers_threads` decides. */
+function answersThreads(k) {
+  const kind = k.graph ? k.graph.nodes?.find((n) => (n.type ?? n.kind) === "trigger")?.watch?.kind : k.trigger?.kind;
+  return kind === "called" || kind === "slack-mention";
+}
+
+/** The machine a Claude draft runs on: this computer when online, else the first online machine. A box has no login of its own. */
+function draftMachine() {
+  const online = onlineMachines().filter((id) => !machines.get(id)?.view.upstash_box);
+  return online.includes(LOCAL) ? LOCAL : online[0];
+}
+
+/** The generate dialog's model choices: `machine`'s signed-in Claude Code logins, then the gateway's chat models. A value names its path, `claude:<account>` or `vercel:<model>`. */
+function generateModelOptions(machine, accounts, chats) {
+  const where = machine && machine !== LOCAL ? ` on ${machineName(machine)}` : "";
+  const logins = (machine ? accounts ?? [] : []).filter((a) => a.provider === "claude" && (a.auth ?? "login") === "login" && a.signed_in);
+  const options = [...logins.map((a) => ({ value: `claude:${a.id}`, label: `Claude · ${a.name}${where}` })), ...chats.map((m) => ({ value: `vercel:${m.id}`, label: m.id }))];
+  return options.length ? options : [{ value: "", label: "Sign in a Claude account on a machine or connect the Vercel AI Gateway", disabled: true }];
+}
+
+const generateOptionsHtml = (options) => options.map((o) => `<option value="${esc(o.value)}"${o.disabled ? " disabled" : ""}>${esc(o.label)}</option>`).join("");
 const actions = {
   "go-integrations": () => showPage("integrations"),
   "open-linear-keys": () => (TAURI ? invoke("open_linear_keys") : window.open(LINEAR_KEYS, "_blank", "noopener")),
@@ -1978,28 +2003,50 @@ const actions = {
   },
   "generate-workflow"() {
     const chats = suggestions.models.filter((m) => m.kind !== "decision");
+    const machine = draftMachine();
+    const options = () => generateModelOptions(machine, machines.get(machine)?.accounts, chats);
     showDialog(`<div class="dialog-head"><h2><span>Generate workflow</span></h2>
-      <p class="muted">Describe the automation. A chat model drafts the map; review it before saving, as AI can make mistakes.</p></div>
+      <p class="muted">Describe the automation. A model drafts the map; review it before saving, as AI can make mistakes.</p></div>
       <div class="dialog-body generate-body">
-        <label>Model <select id="generate-model">${chats.map((m) => `<option value="${esc(m.id)}">${esc(m.id)}</option>`).join("") || `<option value="">Connect the Vercel AI Gateway first</option>`}</select></label>
+        <label>Model <select id="generate-model">${generateOptionsHtml(options())}</select></label>
         <label>What should the workflow do?<textarea id="generate-text" rows="5" placeholder="When the bot is mentioned in #support, sort the message; fix bugs in a session and reply when done"></textarea></label>
         <p class="error" id="generate-error"></p>
       </div>
       <div class="dialog-foot"><span class="muted"></span><span class="buttons"><button type="button" class="primary" data-generate>Generate</button></span></div>`);
     shellDialog.dataset.kind = "generate";
+    const picker = document.getElementById("generate-model");
+    picker.onchange = () => (picker.dataset.picked = "1");
+    if (machine && !machines.get(machine)?.accounts) {
+      accountsOf(machine)
+        .then(() => {
+          if (!picker.isConnected || picker.dataset.picked) return;
+          picker.innerHTML = generateOptionsHtml(options());
+        })
+        .catch(console.warn);
+    }
     shellDialog.querySelector("[data-generate]").onclick = async (e) => {
       const button = e.target.closest("[data-generate]");
       const error = document.getElementById("generate-error");
       const description = document.getElementById("generate-text").value;
+      const [path, ...rest] = picker.value.split(":");
+      const id = rest.join(":");
       error.textContent = "";
       if (!description.trim()) {
         error.textContent = "Describe the workflow first.";
         return;
       }
+      if (!path) {
+        error.textContent = "Sign in a Claude account on a machine or connect the Vercel AI Gateway first.";
+        return;
+      }
       button.disabled = true;
       button.textContent = "Generating…";
       try {
-        const graph = await connectorCall("generate_workflow", { model: document.getElementById("generate-model").value, description });
+        const workflows = settings.connectors.map((k) => ({ id: k.id, name: k.name, answers_threads: answersThreads(k) }));
+        const graph =
+          path === "claude"
+            ? await callOn(machine, { cmd: "draft_workflow", account: id, description, workflows })
+            : await connectorCall("generate_workflow", { model: id, description });
         const watch = graph.nodes.find((n) => (n.type ?? n.kind) === "trigger")?.watch;
         const kind = watch?.kind === "linear-label" ? "linear-label" : watch?.kind === "slack-mention" ? "slack-mention" : watch?.kind === "slack-message" ? "slack-message" : "called";
         const draft = blank(kind);
@@ -2009,6 +2056,7 @@ const actions = {
         redraw();
       } catch (err) {
         error.textContent = generateErrorHint(err);
+      } finally {
         button.disabled = false;
         button.textContent = "Generate";
       }

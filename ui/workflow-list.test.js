@@ -62,7 +62,65 @@ test("generation errors tell what to change before retrying", () => {
   vm.runInContext(src.slice(start, end), context);
   assert.match(context.generateErrorHint('step "Message" has no usable trigger'), /when mentioned in #support/);
   assert.match(context.generateErrorHint("the model did not answer with a workflow map"), /Simplify/);
+  assert.match(context.generateErrorHint("claude did not answer in time"), /fewer steps/);
+  assert.match(context.generateErrorHint("this machine runs pinned 0.18.1, which can't answer that: unknown variant `draft_workflow`"), /Update pinned on that machine/);
+  assert.match(context.generateErrorHint("claude: Not logged in · Please run /login"), /Sign in that Claude account/);
   assert.equal(context.generateErrorHint("boom"), "boom");
+});
+
+function generateWorld({ machines = [], local = "local" } = {}) {
+  const start = src.indexOf("/** Backend generation errors");
+  const end = src.indexOf("const actions = {");
+  const known = new Map(machines.map((m) => [m.id, { view: { online: m.online ?? true, upstash_box: m.box ?? false, name: m.name ?? m.id } }]));
+  const context = {
+    console,
+    LOCAL: local,
+    machines: known,
+    onlineMachines: () => [...known.entries()].filter(([, m]) => m.view.online).map(([id]) => id),
+    machineName: (id) => (id === local ? "This computer" : known.get(id)?.view.name ?? "machine"),
+  };
+  vm.createContext(context);
+  vm.runInContext(`const esc = (s) => String(s);${src.slice(start, end)}`, context);
+  return context;
+}
+
+const work = { id: "work", provider: "claude", name: "Work", auth: "login", signed_in: true };
+
+test("the generate dialog offers Claude logins first and the gateway's models after", () => {
+  const context = generateWorld({ machines: [{ id: "local" }] });
+  const accounts = [
+    work,
+    { id: "out", provider: "claude", name: "Signed out", auth: "login", signed_in: false },
+    { id: "go", provider: "claude", name: "Go", auth: "opencode-go", signed_in: true },
+    { id: "codex", provider: "codex", name: "Codex", signed_in: true },
+  ];
+  const options = context.generateModelOptions(context.draftMachine(), accounts, [{ id: "openai/gpt-5" }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(options)), [
+    { value: "claude:work", label: "Claude · Work" },
+    { value: "vercel:openai/gpt-5", label: "openai/gpt-5" },
+  ]);
+});
+
+test("a Claude draft names the remote machine it runs on, never a box", () => {
+  const context = generateWorld({ machines: [{ id: "local", online: false }, { id: "box", box: true }, { id: "mb", name: "Studio" }] });
+  assert.equal(context.draftMachine(), "mb");
+  assert.equal(context.generateModelOptions("mb", [work], [])[0].label, "Claude · Work on Studio");
+});
+
+test("with no Claude login and no gateway the dialog says what to connect", () => {
+  const context = generateWorld();
+  assert.equal(context.draftMachine(), undefined);
+  const options = JSON.parse(JSON.stringify(context.generateModelOptions(undefined, [work], [])));
+  assert.deepEqual(options, [{ value: "", label: "Sign in a Claude account on a machine or connect the Vercel AI Gateway", disabled: true }]);
+});
+
+test("a call step may run a workflow whose trigger answers threads", () => {
+  const context = generateWorld();
+  const graphed = (kind) => ({ graph: { nodes: [{ type: "trigger", watch: { kind } }] }, trigger: { kind: "linear-label" } });
+  assert.equal(context.answersThreads(graphed("called")), true);
+  assert.equal(context.answersThreads(graphed("slack-mention")), true);
+  assert.equal(context.answersThreads(graphed("slack-message")), false);
+  assert.equal(context.answersThreads({ trigger: { kind: "called" } }), true, "a workflow saved before maps reads its trigger");
 });
 
 test("a connector without a trigger still renders a card", () => {
@@ -126,4 +184,59 @@ test("a workflow with no session of its own shows Run now disabled with the reas
   assert.match(html, /<button class="secondary run-now" disabled title="It sorts Slack messages into other workflows and has no session of its own\.">Run now<\/button>/);
   const called = listWorld([]).runNowHtml({ ...mention(), trigger: { kind: "called" } });
   assert.equal(called.button, '<button class="secondary run-now" disabled title="It answers only the Slack threads another workflow hands it.">Run now</button>');
+});
+
+async function generateClick({ value, fail }) {
+  const helpers = src.slice(src.indexOf("/** Backend generation errors"), src.indexOf("const actions = {"));
+  const action = src.slice(src.indexOf('  "generate-workflow"() {'), src.indexOf('  "connect-for-trigger"(button) {'));
+  const els = {};
+  const el = (id) => (els[id] ??= { value: "", textContent: "", dataset: {}, isConnected: true, innerHTML: "" });
+  const button = { disabled: false, textContent: "Generate", closest: () => button };
+  const calls = [];
+  const context = {
+    console,
+    LOCAL: "local",
+    machines: new Map([["local", { view: { online: true }, accounts: [work] }]]),
+    onlineMachines: () => ["local"],
+    machineName: () => "This computer",
+    esc: String,
+    suggestions: { models: [{ id: "openai/gpt-5" }] },
+    settings: { connectors: [{ id: "fixer", name: "Fix", trigger: { kind: "called" } }] },
+    showDialog: (html) => (el("generate-model").html = html),
+    shellDialog: { dataset: {}, querySelector: () => button },
+    document: { getElementById: el },
+    accountsOf: async () => [],
+    callOn: async (machine, call) => {
+      calls.push([machine, call]);
+      if (fail) throw new Error(fail);
+      return { nodes: [{ id: "t", type: "trigger", watch: { kind: "called" } }] };
+    },
+    connectorCall: async (cmd, args) => (calls.push([cmd, args]), { nodes: [] }),
+    blank: (kind) => ({ kind }),
+    closeDialog: () => calls.push("closed"),
+    edit: () => {},
+    redraw: () => {},
+  };
+  vm.createContext(context);
+  vm.runInContext(`${helpers};var actions = {${action}};`, context);
+  context.actions["generate-workflow"]();
+  el("generate-model").value = value;
+  el("generate-text").value = "Triage";
+  await button.onclick({ target: button });
+  return { html: el("generate-model").html, calls: JSON.parse(JSON.stringify(calls)), button, error: el("generate-error").textContent };
+}
+
+test("generating with a Claude login drafts on the machine and the gateway path is unchanged", async () => {
+  const claude = await generateClick({ value: "claude:work" });
+  assert.match(claude.html, /<option value="claude:work">Claude · Work<\/option><option value="vercel:openai\/gpt-5">/);
+  assert.deepEqual(claude.calls, [["local", { cmd: "draft_workflow", account: "work", description: "Triage", workflows: [{ id: "fixer", name: "Fix", answers_threads: true }] }], "closed"]);
+  const vercel = await generateClick({ value: "vercel:openai/gpt-5" });
+  assert.deepEqual(vercel.calls[0], ["generate_workflow", { model: "openai/gpt-5", description: "Triage" }]);
+});
+
+test("a failed generation gives the button back with a hint", async () => {
+  const failed = await generateClick({ value: "claude:work", fail: "claude did not answer in time" });
+  assert.equal(failed.button.disabled, false);
+  assert.equal(failed.button.textContent, "Generate");
+  assert.match(failed.error, /fewer steps/);
 });
