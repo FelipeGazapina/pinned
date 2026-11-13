@@ -896,6 +896,12 @@ fn question_call(params: &Value, output: &Mutex<impl Write>) -> Value {
         Ok(ask) => ask,
         Err(e) => return tool_result(Err(format!("{QUESTION_TOOL}: {e}"))),
     };
+    // A shape the node would refuse is refused here, before anything is shown.
+    if let ProjectTool::QuestionUser { title, questions, .. } = &ask {
+        if let Err(error) = crate::questions::checked(title.clone(), questions.clone()) {
+            return tool_result(Err(error));
+        }
+    }
     let tab = tab.unwrap_or_default();
     let id = match send(&Message::Project { tab: tab.clone(), tool: ask }) {
         Ok(id) => id,
@@ -1447,6 +1453,12 @@ fn restore_var(name: &str, value: Option<String>) {
     /// JSON-RPC replies and the socket lines.
     #[cfg(unix)]
     fn over_socket(task: Option<&str>, requests: &[Value], answers: Vec<Result<String, String>>) -> (Vec<Value>, Vec<String>) {
+        over_socket_in(Some("tab-1"), task, requests, answers)
+    }
+
+    /// `over_socket` in tab `tab`, or in none, as a headless child runs.
+    #[cfg(unix)]
+    fn over_socket_in(tab: Option<&str>, task: Option<&str>, requests: &[Value], answers: Vec<Result<String, String>>) -> (Vec<Value>, Vec<String>) {
         use std::io::{BufRead, Write};
         let _guard = session_env_lock();
         let dir = std::env::temp_dir().join(format!("pinned-mcp-convex-{}-{}", std::process::id(), task.unwrap_or("none")));
@@ -1477,7 +1489,10 @@ fn restore_var(name: &str, value: Option<String>) {
         };
         let previous = [SOCK_ENV, TAB_ENV, TASK_ENV, ROLE_ENV].map(|name| (name, std::env::var(name).ok()));
         std::env::set_var(SOCK_ENV, &sock);
-        std::env::set_var(TAB_ENV, "tab-1");
+        match tab {
+            Some(tab) => std::env::set_var(TAB_ENV, tab),
+            None => std::env::remove_var(TAB_ENV),
+        }
         std::env::remove_var(ROLE_ENV);
         match task {
             Some(task) => std::env::set_var(TASK_ENV, task),
@@ -1573,6 +1588,111 @@ fn restore_var(name: &str, value: Option<String>) {
             ask("repo_search", serde_json::json!({ "project": "github.com/o/r", "query": "Call::", "max": 500 })),
             Ok(r#"{"kind":"project","tab":"tab-9","tool":{"name":"repo_search","project":"github.com/o/r","query":"Call::","regex":false,"case":false,"max":500}}"#.into())
         );
+    }
+
+    #[cfg(unix)]
+    fn questions_call(arguments: Value) -> Value {
+        json!({ "jsonrpc": "2.0", "id": 7, "method": "tools/call", "params": { "name": "question_user", "arguments": arguments, "_meta": { "progressToken": "p-1" } } })
+    }
+
+    #[cfg(unix)]
+    fn branch_question() -> Value {
+        json!({ "header": "Branch", "question": "Base the fix on main or on release/0.18?", "changes": "which branch the PR targets", "options": [{ "label": "main", "recommended": true }, { "label": "release/0.18" }] })
+    }
+
+    /// Runs `requests` with the question poll and progress set to `poll_ms` and `progress_ms`
+    /// and the wait to `wait_ms`.
+    #[cfg(unix)]
+    fn over_socket_timed(tab: Option<&str>, task: Option<&str>, (poll_ms, progress_ms, wait_ms): (u64, u64, Option<u64>), requests: &[Value], answers: Vec<Result<String, String>>) -> (Vec<Value>, Vec<String>) {
+        let names = ["PINNED_QUESTION_POLL_MS", "PINNED_DELEGATE_PROGRESS_MS", "PINNED_QUESTION_WAIT_MS"];
+        let previous = names.map(|name| std::env::var(name).ok());
+        std::env::set_var(names[0], poll_ms.to_string());
+        std::env::set_var(names[1], progress_ms.to_string());
+        match wait_ms {
+            Some(ms) => std::env::set_var(names[2], ms.to_string()),
+            None => std::env::remove_var(names[2]),
+        }
+        let replies = over_socket_in(tab, task, requests, answers);
+        for (name, value) in names.into_iter().zip(previous) {
+            restore_var(name, value);
+        }
+        replies
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn question_user_waits_on_the_user_reports_progress_and_answers_each_outcome() {
+        let open = || Ok(r#"{"outcome":"open","id":"q-1"}"#.to_owned());
+        let answered = r#"{"outcome":"answered","id":"q-1","answers":[{"question":"Base the fix on main or on release/0.18?","chosen":["main"],"header":"Branch","recommended":true}],"next":"Go on with these answers."}"#;
+        let call = questions_call(json!({ "title": "Checkout redesign", "questions": [branch_question()] }));
+        let mut answers = vec![Ok("q-1".to_owned())];
+        answers.extend((0..8).map(|_| open()));
+        answers.push(Ok(answered.into()));
+        let (replies, heard) = over_socket_timed(Some("tab-1"), None, (20, 50, None), std::slice::from_ref(&call), answers);
+        assert_eq!(heard[0], r#"{"kind":"project","tab":"tab-1","tool":{"name":"question_user","title":"Checkout redesign","questions":[{"header":"Branch","question":"Base the fix on main or on release/0.18?","changes":"which branch the PR targets","options":[{"label":"main","recommended":true},{"label":"release/0.18"}]}]}}"#);
+        assert_eq!(heard.len(), 10, "it asked how the questions stand until they closed: {heard:?}");
+        assert!(heard[1..].iter().all(|line| line == r#"{"kind":"project","tab":"tab-1","tool":{"name":"question_status","id":"q-1"}}"#), "{heard:?}");
+        let (notes, results): (Vec<&Value>, Vec<&Value>) = replies.iter().partition(|reply| reply["method"] == "notifications/progress");
+        assert!(!notes.is_empty(), "the wait reports progress: {replies:?}");
+        assert!(notes.iter().all(|note| note["params"]["progressToken"] == "p-1" && note["params"]["message"] == "waiting on the user"), "{notes:?}");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0]["result"], json!({ "content": [{ "type": "text", "text": answered }], "isError": false }));
+
+        for closed in [
+            r#"{"outcome":"skipped","id":"q-1","next":"The user skipped these questions."}"#,
+            r#"{"outcome":"cancelled","id":"q-1","next":"The user stopped this turn."}"#,
+        ] {
+            let (replies, heard) = over_socket_timed(Some("tab-1"), None, (20, 1000, None), std::slice::from_ref(&call), vec![Ok("q-1".into()), open(), Ok(closed.into())]);
+            assert_eq!(heard.len(), 3);
+            assert_eq!(replies.last().unwrap()["result"]["content"][0]["text"], closed);
+        }
+
+        let (replies, heard) = over_socket_timed(Some("tab-1"), None, (20, 1000, Some(0)), std::slice::from_ref(&call), vec![Ok("q-1".into()), open()]);
+        assert_eq!(heard.len(), 2, "the wait ended after one look");
+        let pending: Value = serde_json::from_str(replies.last().unwrap()["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(pending, json!({ "outcome": "pending", "id": "q-1", "next": "The questions are still open. End your turn now; the answers arrive as a message that starts with [pinned] Answers to q-1." }));
+
+        // A headless child has no tab: it names its task, and the node finds the tab that shows it.
+        let (_, heard) = over_socket_timed(None, Some("task-4"), (20, 1000, None), std::slice::from_ref(&call), vec![Ok("q-2".into()), Ok(r#"{"outcome":"skipped","id":"q-2"}"#.into())]);
+        assert!(heard[0].starts_with(r#"{"kind":"project","tab":"","tool":{"name":"question_user","#) && heard[0].ends_with(r#""task":"task-4"}}"#), "{heard:?}");
+        assert_eq!(heard[1], r#"{"kind":"project","tab":"","tool":{"name":"question_status","id":"q-2"}}"#);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn question_user_refuses_a_shape_the_user_cannot_answer_well_before_asking() {
+        let refused = |questions: Value| {
+            let (replies, heard) = over_socket_timed(Some("tab-1"), None, (20, 1000, None), &[questions_call(json!({ "questions": questions }))], vec![]);
+            assert!(heard.is_empty(), "nothing reached pinned: {heard:?}");
+            assert_eq!(replies[0]["result"]["isError"], true);
+            replies[0]["result"]["content"][0]["text"].as_str().unwrap().to_owned()
+        };
+        let mut late = branch_question();
+        late["options"] = json!([{ "label": "release/0.18" }, { "label": "main", "recommended": true }]);
+        assert_eq!(refused(json!([late])), "question 1 recommends an option that is not first: put your recommended option first and mark it recommended");
+        let mut both = branch_question();
+        both["options"][1]["recommended"] = json!(true);
+        assert_eq!(refused(json!([both])), "question 1 recommends more than one option: mark only your recommendation, and put it first");
+        assert_eq!(refused(json!([branch_question(), branch_question(), branch_question(), branch_question(), branch_question()])), "ask 1 to 4 questions in one call, not 5");
+        let mut none = branch_question();
+        none["options"][0]["recommended"] = json!(false);
+        assert_eq!(refused(json!([none])), "question 1 has no recommended option: put your recommended option first and mark it recommended");
+        let mut one = branch_question();
+        one["options"] = json!([{ "label": "main", "recommended": true }]);
+        assert_eq!(refused(json!([one])), "question 1 has 1 options: give 2 to 4");
+        let mut nothing = branch_question();
+        nothing["changes"] = json!(" ");
+        assert_eq!(refused(json!([nothing])), "question 1 does not say what its answer changes: a question whose answer changes nothing is not asked");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn every_seat_is_offered_question_user() {
+        let seats = [(Some("global-orchestrator"), None), (Some("orchestrator"), None), (Some("taste-chat"), None), (None, None), (Some("worker"), None), (None, Some("task-1"))];
+        for (role, task) in seats {
+            assert!(offered(role, task).contains(&"question_user".to_owned()), "{role:?} {task:?}");
+        }
+        assert!(permissions().contains(&"mcp__pinned__question_user".to_owned()));
     }
 
     #[test]

@@ -13570,6 +13570,151 @@ Have another model review a risky change before it goes ahead.";
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// What `question_user` sends the node: one question on the branch, main recommended.
+    fn branch_questions(task: Option<&str>) -> ProjectTool {
+        use crate::questions::{QOption, Question};
+        let option = |label: &str, recommended| QOption { label: label.into(), description: None, recommended };
+        ProjectTool::QuestionUser {
+            title: Some("Checkout".into()),
+            questions: vec![Question { header: Some("Branch".into()), question: "Base the fix on main or on release/0.18?".into(), changes: "which branch the PR targets".into(), options: vec![option("main", true), option("release/0.18", false)], multi_select: false }],
+            projects: vec![],
+            task: task.map(str::to_owned),
+        }
+    }
+
+    fn chose_main(tab: &str, id: &str) -> Call {
+        use crate::questions::{Answer, QuestionsReply};
+        Call::AnswerQuestions { tab: tab.into(), id: id.into(), reply: QuestionsReply::Answered { answers: vec![Answer { chosen: vec!["main".into()], text: None }] } }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_workers_turn_that_ends_with_open_questions_does_not_end_its_task() {
+        let (m, dir, _captain, task, child, _transcript) = captain_with_thread_child("thread-asks");
+        m.record_event(AgentEvent { session: Some("s-child".into()), ..hook(&child, AgentStatus::Working) });
+        // Sent with the task alone, as a headless child sends it: it lands on the tab that shows the task.
+        let id = m.project_tool("", branch_questions(Some(&task))).unwrap();
+        assert_eq!(m.questions.lock().unwrap().open_on(&child).map(|q| q.id.clone()), Some(id.clone()));
+        assert_eq!(m.project_tool(&child, branch_questions(None)), Err(format!("questions {id} are still open: wait for them")));
+        let ProjectTool::QuestionUser { title, questions, task: none, .. } = branch_questions(None) else { unreachable!() };
+        assert_eq!(m.project_tool(&child, ProjectTool::QuestionUser { title, questions, projects: vec!["github.com/o/site".into()], task: none }), Err("projects is the global orchestrator's: leave it out".into()));
+
+        m.record_event(AgentEvent { session: Some("s-child".into()), ..hook(&child, AgentStatus::Done) });
+        assert!(!m.delegates.get(&task).unwrap().state.terminal(), "a turn that ends with its questions open does not end the task");
+        assert_eq!(m.view(&child).unwrap().status, Some(AgentStatus::NeedsInput));
+
+        assert_eq!(m.call(chose_main(&child, &id)), Ok(Value::Null));
+        m.record_event(AgentEvent { session: Some("s-child".into()), ..hook(&child, AgentStatus::Working) });
+        m.record_event(AgentEvent { session: Some("s-child".into()), ..hook(&child, AgentStatus::Done) });
+        assert!(m.delegates.get(&task).unwrap().state.terminal(), "the turn the answer started ends it");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn stop_turn_close_and_archive_each_cancel_the_open_questions() {
+        let (m, root, _) = reload_machine("questions-cancel");
+        let claude = Account::builtin(Provider::Claude);
+        let [stopped, closed, archived] = ["stop", "close", "archive"].map(|name| typing_tab(&m, claude.clone(), &root.join(format!("{name}.bin"))));
+        let ids = [&stopped, &closed, &archived].map(|tab| m.project_tool(tab, branch_questions(None)).unwrap());
+        let status = |id: &str| m.project_tool(&stopped, ProjectTool::QuestionStatus { id: id.into() }).map(|text| serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone());
+        assert_eq!(status(&ids[0]), Ok(json!("open")), "the call waits");
+
+        assert_eq!(m.call(Call::StopTurn { tab: stopped.clone() }), Ok(Value::Null));
+        assert_eq!(status(&ids[0]), Ok(json!("cancelled")), "the waiting call answers cancelled");
+        assert_eq!(m.view(&stopped).unwrap().questions, None);
+
+        assert!(!m.close_tab(&closed));
+        // The hub archives a thread by closing its tab on its machine.
+        assert_eq!(m.call(Call::CloseTab { tab: archived.clone() }), Ok(Value::Null));
+        let questions = m.questions.lock().unwrap();
+        for id in &ids[1..] {
+            let asked = questions.get(id).unwrap();
+            assert_eq!((&asked.outcome, asked.notified), (&Some(crate::questions::Outcome::Cancelled), true), "dropped with no notice");
+        }
+        drop(questions);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn after_a_restart_the_tab_that_resumed_the_session_takes_its_questions_and_a_late_answer_is_typed_once() {
+        let (before, dir, claude, tabs) = restored_idle("questions-restart", &["s1"]);
+        let id = before.project_tool(&tabs[0], branch_questions(None)).unwrap();
+        assert_eq!(before.view(&tabs[0]).unwrap().questions.map(|q| q.id), Some(id.clone()), "a sleeping session asks");
+        drop(before);
+
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        let tab = m.restore_tabs().remove(0);
+        assert_ne!(tab, tabs[0], "tab ids change with a restart");
+        let view = m.view(&tab).unwrap();
+        assert_eq!((view.status, view.questions.map(|q| q.id)), (Some(AgentStatus::NeedsInput), Some(id.clone())), "the tab that resumed s1 took its questions");
+
+        // No call waits after a restart: the answer goes as a notice, typed once.
+        assert_eq!(m.call(chose_main(&tab, &id)), Ok(Value::Null));
+        let notice = format!("[pinned] Answers to {id} (Checkout):\n- Branch: main (your recommendation)");
+        wait_for("the answers", || kept(&claude, "typed", &tab).contains(&notice));
+        assert!(m.questions.lock().unwrap().get(&id).unwrap().notified);
+        m.tab(&tab, |t| (t.turn_pending, t.status) = (None, Some(AgentStatus::Done))).unwrap();
+        m.maybe_deliver(&tab);
+        std::thread::sleep(Duration::from_millis(1500));
+        assert_eq!(kept(&claude, "typed", &tab).matches("[pinned] Answers to").count(), 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_passed_wait_limit_closes_the_questions_as_skipped() {
+        let (m, root, _) = reload_machine("questions-limit");
+        let file = root.join("typed.bin");
+        let tab = typing_tab(&m, Account::builtin(Provider::Claude), &file);
+        m.record_event(hook(&tab, AgentStatus::Done));
+        let waited = m.project_tool(&tab, branch_questions(None)).unwrap();
+        assert_eq!(m.questions.lock().unwrap().get(&waited).unwrap().wait_limit_secs, None, "no limit by default");
+        m.expire_questions();
+        assert!(m.questions.lock().unwrap().open_on(&tab).is_some(), "with no limit it waits");
+
+        // A call still waits on it: the call answers skipped.
+        let status = |id: &str| m.project_tool(&tab, ProjectTool::QuestionStatus { id: id.into() }).map(|text| serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone());
+        assert_eq!(status(&waited), Ok(json!("open")));
+        m.questions.lock().unwrap().set_wait_limit(&waited, Some(0));
+        m.expire_questions();
+        m.maybe_deliver(&tab);
+        assert_eq!(status(&waited), Ok(json!("skipped")));
+
+        // None waits: the session is told.
+        let gone = m.project_tool(&tab, branch_questions(None)).unwrap();
+        m.questions.lock().unwrap().set_wait_limit(&gone, Some(0));
+        m.expire_questions();
+        assert_eq!(m.questions.lock().unwrap().get(&gone).unwrap().outcome, Some(crate::questions::Outcome::Skipped));
+        m.maybe_deliver(&tab);
+        let notice = format!("[pinned] The user skipped {gone} (Checkout). Go on with your recommended options and state your assumptions.");
+        assert!(String::from_utf8_lossy(&typed(&file, notice.as_bytes())).contains(&notice));
+        assert!(!read_pty(&file).contains(&format!("skipped {waited}")), "the call already told the session");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_dead_tab_with_open_questions_does_not_read_as_needs_input() {
+        let m = machine();
+        let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, Some("s-dead".into()));
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
+        let id = m.project_tool(&tab, branch_questions(None)).unwrap();
+        let view = m.view(&tab).unwrap();
+        assert_eq!((view.running, view.status, view.questions), (false, Some(AgentStatus::Done), None), "its process exited: it keeps its own state");
+        assert_eq!(global::waiting_kind(&m.view(&tab).unwrap()), None);
+        let asked = m.questions.lock().unwrap().get(&id).cloned().unwrap();
+        assert_eq!((asked.is_open(), asked.session.as_deref()), (true, Some("s-dead")), "the questions wait for the tab that resumes s-dead");
+
+        m.tab(&tab, |t| t.asleep = true).unwrap();
+        assert_eq!(m.view(&tab).unwrap().status, Some(AgentStatus::NeedsInput), "a sleeping session asks");
+        m.tab(&tab, |t| (t.asleep, t.task, t.status) = (false, Some("task-1".into()), Some(AgentStatus::Working))).unwrap();
+        assert_eq!(m.view(&tab).unwrap().status, Some(AgentStatus::NeedsInput), "a headless child at work asks");
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
+        assert_eq!(m.view(&tab).unwrap().status, Some(AgentStatus::Done), "a headless child that ended does not");
+    }
+
     #[test]
     #[cfg(unix)]
     fn an_answered_approval_clears_the_wait_while_the_turn_runs_and_the_time_limit_counts_again() {
