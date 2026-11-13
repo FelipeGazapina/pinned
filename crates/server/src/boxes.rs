@@ -38,9 +38,38 @@ const NO_KEYS: &str = "Upstash is not connected";
 /// The longest reason the Usage page gets.
 const WHY_MAX: usize = 300;
 
+/// The shortest run of key characters after `box_` that is taken for a Box API key. A real key is
+/// a long random run, well past this; the words that start with `box_` in pinned's own names and
+/// in API paths (`box_usage`, `box_size`, `box_hours`, even `box_usage_this_month` at 16) are not.
+const BOX_KEY_RUN_MIN: usize = 20;
+
+/// `text` with every `box_` followed by `BOX_KEY_RUN_MIN` or more letters, digits, `-` or `_`
+/// replaced by `…`, wherever it stands: a key echoed cut short, re-encoded or an older key is not
+/// the configured one. Not in `mask_secrets`: it would hide `box_usage_…` in audit summaries.
+fn hide_box_keys(text: &str) -> String {
+    let key_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '_' | '-');
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find(upstash::KEY_PREFIX) {
+        let (before, from) = rest.split_at(at);
+        out.push_str(before);
+        let tail = &from[upstash::KEY_PREFIX.len()..];
+        let run = tail.find(|c: char| !key_char(c)).unwrap_or(tail.len());
+        if run >= BOX_KEY_RUN_MIN {
+            out.push('…');
+            rest = &tail[run..];
+        } else {
+            out.push_str(upstash::KEY_PREFIX);
+            rest = tail;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// A delete error for the Usage page: the fixed reason for a missing Box API key; otherwise the
-/// error with the key and anything shaped like a token replaced, and cut short. Deleting a box
-/// never sends the Claude token, so it cannot be in the error.
+/// error with the key and anything shaped like a Box key or a token replaced, and cut short.
+/// Deleting a box never sends the Claude token, so it cannot be in the error.
 fn stuck_reason(e: &str, key: Option<&str>) -> String {
     if key.is_none() && e.starts_with(NOT_CONNECTED_END) {
         return NO_KEYS.into();
@@ -49,7 +78,7 @@ fn stuck_reason(e: &str, key: Option<&str>) -> String {
     if let Some(key) = key.filter(|k| !k.is_empty()) {
         why = why.replace(key, "…");
     }
-    pinned_core::surface::mask_secrets(&why).chars().take(WHY_MAX).collect()
+    pinned_core::surface::mask_secrets(&hide_box_keys(&why)).chars().take(WHY_MAX).collect()
 }
 
 /// The step of `Boxes::end_steps` that failed. Only a failure at the box, or before it, leaves it
@@ -2361,6 +2390,25 @@ mod tests {
             assert!(!why.contains(secret), "{secret} leaked into {why}");
         }
         assert!(why.contains("refused"), "{why}");
+    }
+
+    #[tokio::test]
+    async fn a_stuck_reason_hides_anything_shaped_like_a_box_key_and_keeps_words_that_start_with_box() {
+        // The configured key, a cut-short copy of it, and a key that is not the configured one.
+        let configured = "box_FAKEKEYFAKEKEYFAKEKEYFAKEKEY0000";
+        let cut = &configured[..configured.len() - 9];
+        let other = "box_ANOTHERFAKEKEY-0000_NOTAREALKEYATALL1234";
+        let error = format!("DELETE box_usage failed: key {cut} refused, then {other}; also {configured}. Retry box_size later");
+        let (boxes, _) = boxes_deleting(Some(&error));
+        assert!(try_delete(&boxes, &remains("row-12"), Some(configured)).await.is_err());
+        let why = stuck_of(&boxes, &["row-12"]).remove(0).why;
+        for secret in ["FAKEKEY", "ANOTHERFAKE", "NOTAREALKEY"] {
+            assert!(!why.contains(secret), "{secret} leaked into {why}");
+        }
+        assert!(why.contains("box_usage") && why.contains("box_size") && why.contains("refused"), "{why}");
+        // Also with no key configured: the shape alone hides it.
+        assert_eq!(stuck_reason(&format!("sent {other}"), None), "sent …");
+        assert_eq!(stuck_reason("box_usage_this_month is slow", None), "box_usage_this_month is slow");
     }
 
     #[tokio::test]
