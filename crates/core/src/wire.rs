@@ -1352,6 +1352,9 @@ pub enum HubCall {
     /// `upstash::BoxUsage`: the account's Upstash Box usage, and pinned's count of the box time its
     /// delegated tasks used this UTC month. The Upstash key stays on the hub.
     BoxUsage,
+    /// `Vec<upstash::StuckBox>`: the account's boxes pinned could not delete, with why, from the
+    /// hub's own record and rows. It reads no Upstash key and calls no Upstash.
+    StuckBoxes,
     /// `Vec<marks::SessionMarks>`: how the user filed each of the account's conversations.
     SessionMarks,
     /// `Vec<marks::SessionMarks>` of the sessions `changes` named, as they are once each change
@@ -2215,6 +2218,7 @@ mod tests {
         assert_eq!(delegate["request"]["target"]["box"], json!({ "size": "large" }), "the box target keeps its own name on the wire");
         round_trip(HubCall::GetTastes, json!({ "cmd": "get_tastes" }));
         round_trip(HubCall::BoxUsage, json!({ "cmd": "box_usage" }));
+        round_trip(HubCall::StuckBoxes, json!({ "cmd": "stuck_boxes" }));
         round_trip(HubCall::UnclaimedEnds, json!({ "cmd": "unclaimed_ends" }));
         round_trip(HubCall::DelegationStats { days: 7 }, json!({ "cmd": "delegation_stats", "days": 7 }));
         round_trip(
