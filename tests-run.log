@@ -212,3 +212,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:10:38Z #97 task_cancel_ends_a_remote_task_here_when_its_machine_left_the_account START / avail=15059M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:10:42Z #97 task_cancel_ends_a_remote_task_here_when_its_machine_left_the_account ok / avail=15058M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:10:44Z #98 the_global_orchestrator_opens_a_captain_in_a_box_with_the_accounts_connection START / avail=15058M /workspace avail=19374M node_stat=Ssl
+2026-11-13T04:10:48Z #98 the_global_orchestrator_opens_a_captain_in_a_box_with_the_accounts_connection ok / avail=15058M /workspace avail=19374M node_stat=Ssl node_tcp=1
