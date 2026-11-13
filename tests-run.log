@@ -74,3 +74,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:04:43Z #33 a_limit_one_accounts_provider_hit_shows_on_its_machines_and_never_on_another_accounts START / avail=15075M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:04:47Z #33 a_limit_one_accounts_provider_hit_shows_on_its_machines_and_never_on_another_accounts ok / avail=15075M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:04:48Z #34 a_burst_of_parallel_sign_ins_counts_against_the_limit START / avail=15075M /workspace avail=19374M node_stat=Ssl
+2026-11-13T04:04:52Z #34 a_burst_of_parallel_sign_ins_counts_against_the_limit ok / avail=15075M /workspace avail=19374M node_stat=Ssl node_tcp=1
