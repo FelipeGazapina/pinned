@@ -176,3 +176,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:08:50Z #81 a_box_permission_naming_another_accounts_box_opens_a_box_of_its_own ok / avail=15071M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:08:51Z #82 an_accounts_tastes_are_read_written_and_imported_only_by_that_account START / avail=15071M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:08:56Z #82 an_accounts_tastes_are_read_written_and_imported_only_by_that_account ok / avail=15071M /workspace avail=19374M node_stat=Ssl node_tcp=1
+2026-11-13T04:08:57Z #83 an_accounts_box_budget_bounds_only_its_own_boxes_and_shows_only_in_its_tastes START / avail=15071M /workspace avail=19374M node_stat=Ssl
