@@ -2399,7 +2399,7 @@ impl Machine {
     /// returns its folder. Claude's own /model saves its pick as the default for every session.
     /// With `account`, a model from another account moves the conversation there first.
     pub fn set_model(&self, tab: &str, model: &str, cols: u16, rows: u16, account: Option<&str>) -> Result<String, String> {
-        if model.starts_with('-') || !model.bytes().all(|b| b.is_ascii_alphanumeric() || b"-.[]_".contains(&b)) {
+        if model.is_empty() || model.starts_with('-') || !model.bytes().all(|b| b.is_ascii_alphanumeric() || b"-.[]_".contains(&b)) {
             return Err(format!("{model:?} is not a model name"));
         }
         if let Some(id) = account.filter(|id| !id.is_empty()) {
@@ -12165,6 +12165,27 @@ Have another model review a risky change before it goes ahead.";
         let error = set.unwrap_err();
         assert!(error.starts_with("claude-nova-9-9 ") && error.contains(unlisted), "{error}");
         assert_ne!(m.tab(&tab, |t| t.model.clone()).unwrap().as_deref(), Some("claude-nova-9-9"), "a refused model is not set");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_empty_model_name_is_refused_by_set_model_in_a_tier_capped_project() {
+        let (m, dir, captain) = limited_captain("limits-empty-model", TastePatch { tier: Some(taste::Tier::Mid), ..TastePatch::default() });
+        let claude = dir.join("claude");
+        titling_claude(&claude);
+        let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
+        let act = |call: Value| m.call(Call::ActFor { caller: captain.clone(), call });
+        let tab = m.open_tab(Some(path.clone()), false).unwrap();
+        let work = m.accounts.get("work").unwrap();
+        m.tab(&tab, |t| (t.account, t.model) = (work, Some("claude-haiku-5-5".into()))).unwrap();
+        assert_eq!(act(json!({ "cmd": "start_claude", "tab": tab, "cols": 80, "rows": 24 })), Ok(json!(path)));
+        started(&claude, &tab);
+        let set = act(json!({ "cmd": "set_model", "tab": tab, "model": "", "cols": 80, "rows": 24 }));
+        assert!(set.unwrap_err().starts_with("name a model:"), "the cap treats an empty model as none");
+        let direct = m.call(Call::SetModel { tab: tab.clone(), model: String::new(), cols: 80, rows: 24, account: None });
+        assert_eq!(direct, Err("\"\" is not a model name".into()));
+        assert_eq!(m.tab(&tab, |t| t.model.clone()).unwrap().as_deref(), Some("claude-haiku-5-5"), "a refused model changes nothing");
         let _ = std::fs::remove_dir_all(dir);
     }
 

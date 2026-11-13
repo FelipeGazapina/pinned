@@ -480,7 +480,7 @@ impl Limits {
     }
 
     /// The effort a worker on `model` runs at: the one asked for, or the default. Refuses a model
-    /// above the tier, a call that names no model under a tier cap, and an effort above the most.
+    /// above the tier, a call that names no model (or an empty one) under a tier cap, and an effort above the most.
     /// `claude` is the machine's Claude models, so a model its claude's menu added has its tier.
     /// On a Claude login the tier of a model is the one `claude` lists for it, so a model id that
     /// list does not hold is refused under a tier cap: the words of an id are no proof of its cost.
@@ -488,11 +488,11 @@ impl Limits {
     pub fn admit(&self, account: &crate::accounts::Account, model: Option<&str>, effort: Option<&str>, claude: &[crate::claude_models::ClaudeModel]) -> Result<Option<String>, String> {
         if self.tier < Tier::High {
             let tier = self.tier.name();
-            let Some(model) = model else {
+            let Some(model) = model.filter(|m| !m.is_empty()) else {
                 return Err(format!("name a model: this project allows models up to the {tier} tier, and a worker without one runs on its account's default. Pick a {tier} model from orchestrator_capabilities, or raise Tier {RAISE}"));
             };
             let lists_claude = account.provider == crate::accounts::Provider::Claude && account.auth == crate::accounts::Auth::Login;
-            if lists_claude && !model.is_empty() && !claude.iter().any(|m| m.slug == model) {
+            if lists_claude && !claude.iter().any(|m| m.slug == model) {
                 return Err(format!("{model} is not in this machine's list of Claude models, so its tier is unknown and this project allows up to {tier}. Pick a model from orchestrator_capabilities or raise Tier {RAISE}"));
             }
             let cost = crate::delegate::cost_in(claude, model);
@@ -1430,7 +1430,8 @@ Deploys go through the VPS."
         assert_eq!(admit_on_claude(&open, Some("sonnet")), Ok(None));
         assert_eq!(admit_on_claude(&open, None), Ok(None));
         let mid = Limits { tier: Tier::Mid, ..Limits::default() };
-        assert_eq!(admit_on_claude(&mid, Some("")), Ok(None), "an empty model keeps the default, as before");
+        let error = admit_on_claude(&mid, Some("")).unwrap_err();
+        assert!(error.starts_with("name a model:"), "an empty model is no model under a tier cap: {error}");
     }
 
     #[test]
