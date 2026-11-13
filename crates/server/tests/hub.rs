@@ -2171,6 +2171,27 @@ fn registrations_with_a_bad_body_leave_the_hub_wide_agent_registration_ceiling_a
 }
 
 #[test]
+fn rotating_the_edge_header_does_not_pass_the_hub_wide_agent_token_ceiling() {
+    let hub = TestHub::start_behind_proxy("hubtoken", Signup::Open, behind(pinned_server::http::TrustedProxy::Railway, None));
+    let token = |address: String| {
+        let response = reqwest::blocking::Client::new()
+            .post(format!("{}/oauth/token", hub.url))
+            .header("x-real-ip", address)
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body("grant_type=refresh_token&refresh_token=not-a-token")
+            .send()
+            .unwrap();
+        let status = response.status().as_u16();
+        (status, serde_json::from_str::<Value>(&response.text().unwrap()).unwrap())
+    };
+    for n in 0..300 {
+        assert_ne!(token(format!("203.0.{}.{}", n / 250, n % 250)).0, 429, "failure {n} from its own address");
+    }
+    let (status, body) = token("198.51.100.1".into());
+    assert_eq!((status, body["error_description"].clone()), (429, json!("too many failed token requests; try again in 15 minutes")), "a new address finds the hub's ceiling spent");
+}
+
+#[test]
 fn at_its_cap_a_hub_counts_a_signup_against_its_address_before_it_counts_the_accounts() {
     let hub = TestHub::start_behind_proxy("caporder", Signup::Open, behind(pinned_server::http::TrustedProxy::Off, Some(0)));
     for n in 0..5 {

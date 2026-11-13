@@ -39,6 +39,11 @@ const REGISTRATIONS: usize = 20;
 /// Only a registration whose body passed validation counts.
 const HUB_REGISTRATIONS: usize = 100;
 const TOKEN_FAILURES: usize = 30;
+/// Failed token requests the whole hub takes within the limiter's window, whichever addresses they come
+/// from: ten addresses' worth of `TOKEN_FAILURES`. A success gives its stamps back, so only failures and
+/// requests still in flight hold it, and a burst of the owner's real agents fits: 50 agents refreshing at
+/// once after a revoke or a hub restart, each failing and retrying up to 6 times, is 300.
+pub(crate) const HUB_TOKEN_FAILURES: usize = 300;
 /// How long the approval waits for a machine to list its projects.
 const LIST_WAIT: Duration = Duration::from_secs(20);
 /// The path the web app shows a pending authorization on.
@@ -291,7 +296,7 @@ fn tokens(access: String, refresh: String, scopes: &[String]) -> Response {
 }
 
 pub async fn token(State(server): State<Arc<Server>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, body: axum::body::Bytes) -> Response {
-    let limit = [(format!("agent-token:{}", server.client_address(peer, &headers)), TOKEN_FAILURES)];
+    let limit = token_limit(&server.client_address(peer, &headers));
     let Some(limit) = server.attempt(&limit) else {
         return oauth_error(StatusCode::TOO_MANY_REQUESTS, "invalid_request", "too many failed token requests; try again in 15 minutes");
     };
@@ -301,6 +306,11 @@ pub async fn token(State(server): State<Arc<Server>>, ConnectInfo(peer): Connect
         server.succeeded(&limit);
     }
     answer
+}
+
+/// The keys a token request counts against.
+pub(crate) fn token_limit(address: &str) -> Vec<(String, usize)> {
+    vec![(format!("agent-token:{address}"), TOKEN_FAILURES)]
 }
 
 async fn exchange(hub: &Hub, params: &HashMap<String, String>) -> Response {

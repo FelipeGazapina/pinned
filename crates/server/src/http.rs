@@ -1303,6 +1303,22 @@ mod tests {
     }
 
     #[test]
+    fn rotating_addresses_stop_at_the_hub_wide_agent_token_ceiling_until_the_window_passes() {
+        use crate::oauth::{token_limit, HUB_TOKEN_FAILURES};
+        let now = std::time::Instant::now();
+        let mut limiter = Limiter::new(super::ATTEMPT_KEYS);
+        let ok = limiter.attempt(&token_limit("192.0.2.1"), false, now).expect("a first exchange");
+        limiter.succeeded(&ok);
+        assert!(limiter.keys.values().all(Vec::is_empty), "a successful exchange gives back every stamp it took: {ok:?}");
+        for n in 0..HUB_TOKEN_FAILURES {
+            assert!(limiter.attempt(&token_limit(&format!("203.0.{}.{}", n / 250, n % 250)), false, now).is_some(), "failure {n} from its own address");
+        }
+        assert!(limiter.attempt(&token_limit("198.51.100.1"), false, now).is_none(), "a new address finds the hub's ceiling spent");
+        let later = now + super::ATTEMPT_WINDOW;
+        assert!(limiter.attempt(&token_limit("198.51.100.1"), false, later).is_some(), "the ceiling opens again after the window");
+    }
+
+    #[test]
     fn the_router_serves_each_published_route() {
         let src = include_str!("http.rs");
         let mut used = vec![];
