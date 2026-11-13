@@ -1,0 +1,49 @@
+== 2026-11-13T03:40:20Z baseline
+node pid: 288
+== ps
+    PID    PPID    PGID     SID USER     COMMAND
+      7       1       7       1 root     tail -f /dev/null
+    288       1     288     288 boxuser  /workspace/home/.pinned/pinned-server node --config-dir /workspace/home/.pinned
+    391     288     391     391 boxuser  /opt/runner/node_modules/@anthropic-ai/claude-agent-sdk-linux-arm64/claude --mcp-config /tmp/pinned-288-YLePKK/claude-mcp.json /tmp/pinned-mcp-288-6lMH7B/serve
+    464     391     391     391 boxuser  /workspace/home/.pinned/pinned-server mcp --no-reminders
+    693     391     693     693 boxuser  /bin/bash -c source /home/boxuser/.claude/shell-snapshots/snapshot-bash-1794541206645-3b6zd2.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && 
+    695     693     695     693 boxuser  ps -eo pid,ppid,pgid,sid,user,args
+    696     693     695     693 boxuser  /bin/bash -c source /home/boxuser/.claude/shell-snapshots/snapshot-bash-1794541206645-3b6zd2.sh 2>/dev/null || true && shopt -u extglob 2>/dev/null || true && 
+    697     693     695     693 boxuser  cut -c1-200
+    698     693     695     693 boxuser  sed -E s/((key|token|secret|password|auth)[^ =:<cut> =:]+)[^ ]+/\1<cut>/Ig; s/([?&][^=& ]+=)[^& ]+/\1<cut>/g
+    699     696     695     693 boxuser  ugrep -G --ignore-files --hidden -I --exclude-dir=.git --exclude-dir=.svn --exclude-dir=.hg --exclude-dir=.bzr --exclude-dir=.jj --exclude-dir=.sl -v  \[
+== node environ names
+GRPC_DEFAULT_SSL_ROOTS_FILE_PATH
+CURL_CA_BUNDLE
+NODE_EXTRA_CA_CERTS
+NODE_VERSION
+HOSTNAME
+YARN_VERSION
+GH_TOKEN
+GIT_SSL_CAINFO
+HOME
+SSL_CERT_FILE
+UPSTASH_BOX_NAME
+AWS_CA_BUNDLE
+UPSTASH_BOX_ID
+PATH
+REQUESTS_CA_BUNDLE
+LANG
+NODE_PATH
+NODE_USE_SYSTEM_CA
+CLAUDE_CODE_OAUTH_TOKEN
+NPM_CONFIG_CACHE
+LC_ALL
+PWD
+NPM_CONFIG_CAFILE
+UPSTASH_BOX_RUNTIME
+PIP_CERT
+CARGO_HTTP_CAINFO
+== ss
+ESTAB 0      0        172.18.0.71:38452  153.52.255.120:443  users:(("pinned-server",pid=288,fd=15))
+== cgroup
+8589934592
+400000 100000
+nproc 64
+== tail node log
+pinned: connected to https://pinned-hub-production.up.railway.app
