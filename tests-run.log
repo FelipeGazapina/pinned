@@ -286,3 +286,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:21:38Z #127 another_accounts_project_account_never_picks_this_accounts_box_tokens ok / avail=15050M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:21:39Z #128 use_for_boxes_mints_the_accounts_token_on_its_machine_and_only_the_hub_keeps_it START / avail=15050M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:21:46Z #128 use_for_boxes_mints_the_accounts_token_on_its_machine_and_only_the_hub_keeps_it ok / avail=15049M /workspace avail=19374M node_stat=Ssl node_tcp=1
+2026-11-13T04:21:49Z #129 a_machines_load_and_accounts_reach_the_hub_and_show_in_another_machines_capabilities START / avail=15049M /workspace avail=19374M node_stat=Ssl
