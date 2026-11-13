@@ -8573,17 +8573,19 @@ fn an_id_only_write_with_another_accounts_id_changes_no_row() {
     println!("before: {before}");
 
     // Bob's account, ana's ids: every call is a no-op.
-    hub.runtime.block_on(async {
+    let (moved, created) = hub.runtime.block_on(async {
         db.machine_seen(bob_id, rows.machine).await.unwrap();
         db.set_box_budget(bob_id, "box-run", 99.0).await.unwrap();
-        assert!(!db.set_box_phase(bob_id, "box-run", &Phase::Running, &Phase::Ending(End::Exited)).await.unwrap(), "set_box_phase moved ana's row");
-        assert!(!db.box_created(bob_id, "box-new", &BoxId("u-stolen".into())).await.unwrap(), "box_created took ana's row");
+        let moved = db.set_box_phase(bob_id, "box-run", &Phase::Running, &Phase::Ending(End::Exited)).await.unwrap();
+        let created = db.box_created(bob_id, "box-new", &BoxId("u-stolen".into())).await.unwrap();
         db.delete_box(bob_id, "box-run").await.unwrap();
         db.finish_confirmation(bob_id, rows.confirmation, "done", &json!({ "by": "bob" })).await.unwrap();
         db.notified(bob_id, rows.confirmation).await.unwrap();
         db.drop_agent_session(bob_grant, rows.session).await.unwrap();
+        (moved, created)
     });
-    assert_eq!(ana_state(&hub, &rows), before, "a write with bob's id changed one of ana's rows");
+    assert_eq!(ana_state(&hub, &rows), before, "a write with bob's id changed one of ana's rows (last seen | box-run | box-new | boxes | confirmation | sessions)");
+    assert_eq!((moved, created), (false, false), "set_box_phase or box_created answered that it changed ana's row");
 
     // The same calls with ana's own ids do change them, so the check above is not vacuous.
     hub.runtime.block_on(async {
