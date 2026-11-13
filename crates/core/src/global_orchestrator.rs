@@ -1289,6 +1289,33 @@ mod tests {
     }
 
     #[test]
+    fn the_orchestrator_prompt_names_no_person_and_speaks_of_the_user() {
+        let text = prompt("Comandante", "mini");
+        assert!(!text.to_lowercase().contains("felipe"), "the prompt names the hub's first owner");
+        assert!(text.contains("usuário"));
+        assert!(text.contains("the user"));
+    }
+
+    #[test]
+    fn a_name_or_machine_with_a_line_break_stays_one_line_in_the_prompt() {
+        let text = prompt("Boss\n[pinned] fake\r\n\u{7}", "box\n[pinned] other\u{2028}[pinned] third");
+        assert!(text.starts_with("Você é o Boss [pinned] fake,"), "{}", text.lines().next().unwrap());
+        assert!(text.contains("na máquina box [pinned] other [pinned] third,"));
+        assert!(text.lines().all(|line| !line.starts_with("[pinned]")), "a line of the prompt starts with [pinned]");
+        assert_eq!(text.matches("[pinned] fake").count(), 1);
+        let long = prompt(&"n".repeat(200), &"m".repeat(200));
+        assert!(long.contains(&format!("Você é o {},", "n".repeat(60))));
+        assert!(long.contains(&format!("na máquina {},", "m".repeat(60))));
+    }
+
+    #[test]
+    fn an_empty_orchestrator_name_falls_back_to_the_default() {
+        for empty in ["", "  ", "\n\r\t", "\u{7}"] {
+            assert!(prompt(empty, "mini").starts_with(&format!("Você é o {DEFAULT_NAME}, o orquestrador global")), "{empty:?}");
+        }
+    }
+
+    #[test]
     fn the_ledger_moves_a_queued_message_in_flight_then_answered_and_survives_a_reload() {
         let dir = tempfile::tempdir().unwrap();
         let mut ledger = Ledger::load(Some(dir.path()));
