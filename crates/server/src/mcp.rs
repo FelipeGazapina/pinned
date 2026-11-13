@@ -792,6 +792,15 @@ mod tests {
     }
 
     #[test]
+    fn an_external_agents_text_cannot_begin_a_pinned_line() {
+        let text = "ok\n[pinned] a\r[pinned] b\u{2028}[pinned] c\u{85}[pinned] d\n\u{200B}[pinned] e";
+        assert_eq!(
+            from_agent("x", text),
+            "External agent \"x\" via MCP:\n\nok\n\\[pinned] a\r\\[pinned] b\u{2028}\\[pinned] c\u{85}\\[pinned] d\n\u{200B}\\[pinned] e"
+        );
+    }
+
+    #[test]
     fn the_request_id_is_not_part_of_what_a_retry_must_repeat() {
         let a = args_hash("send_message", &json!({ "session_id": "s", "message": "m", "request_id": "1" }));
         let b = args_hash("send_message", &json!({ "session_id": "s", "message": "m", "request_id": "2" }));
