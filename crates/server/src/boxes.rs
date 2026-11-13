@@ -1620,26 +1620,39 @@ impl Boxes {
                 eprintln!("pinned-server: could not end a box of account {}: {e}", account.id);
             }
         }
-        // Every orphan is tried: one that will not delete is logged and the pass goes on, then the
-        // first failure is the pass's error.
-        let mut first = None;
         if let (Some(listed), Some(key)) = (listed, &key) {
-            for orphan in listed {
-                let row = orphan.labels.iter().find_map(|l| l.strip_prefix("p:"));
-                if let Some(row) = row {
-                    if hub.db.box_exists(row).await? {
-                        continue;
-                    }
-                }
-                eprintln!("pinned-server: deleting box {} that no row of this hub names", orphan.id);
-                if let Err(e) = self.api.delete(key, &orphan.id).await {
-                    eprintln!("pinned-server: could not delete box {} that no row of this hub names: {e}", orphan.id);
-                    first.get_or_insert(format!("could not delete box {}: {e}", orphan.id));
-                }
+            let named = |row: String| -> BoxFuture<'_, Result<bool, String>> { Box::pin(async move { hub.db.box_exists(&row).await }) };
+            delete_orphans(self.api.as_ref(), key, listed, named).await?;
+        }
+        Ok(())
+    }
+}
+
+/// Deletes the listed boxes no row names. Every orphan is tried: one that will not delete is logged,
+/// the pass goes on, and the first failure is the pass's error once it ends. Neither the log nor the
+/// error carries the key.
+async fn delete_orphans<'a>(
+    api: &dyn BoxApi,
+    key: &str,
+    listed: Vec<Listed>,
+    named: impl Fn(String) -> BoxFuture<'a, Result<bool, String>>,
+) -> Result<(), String> {
+    let mut first = None;
+    for orphan in listed {
+        let row = orphan.labels.iter().find_map(|l| l.strip_prefix("p:"));
+        if let Some(row) = row {
+            if named(row.to_owned()).await? {
+                continue;
             }
         }
-        first.map_or(Ok(()), Err)
+        eprintln!("pinned-server: deleting box {} that no row of this hub names", orphan.id);
+        if let Err(e) = api.delete(key, &orphan.id).await {
+            let failed = format!("could not delete box {} that no row of this hub names: {e}", orphan.id);
+            eprintln!("pinned-server: {failed}");
+            first.get_or_insert(failed);
+        }
     }
+    first.map_or(Ok(()), Err)
 }
 
 #[cfg(test)]
@@ -1649,6 +1662,72 @@ mod tests {
     const MIN: Duration = Duration::from_secs(60);
 
     const ROW_ID: &str = "7fc0a1b2c3d4e5f6";
+
+    /// A Box API that only deletes: it keeps what it was asked and refuses the ids in `refuse`.
+    #[derive(Default)]
+    struct Deleting {
+        refuse: Vec<&'static str>,
+        asked: Mutex<Vec<(String, String)>>,
+    }
+
+    impl BoxApi for Deleting {
+        fn create<'a>(&'a self, _: &'a str, _: NewBox) -> BoxFuture<'a, Result<BoxId, String>> {
+            unreachable!()
+        }
+        fn list<'a>(&'a self, _: &'a str, _: &'a str) -> BoxFuture<'a, Result<Vec<Listed>, String>> {
+            unreachable!()
+        }
+        fn write<'a>(&'a self, _: &'a str, _: &'a BoxId, _: &'a str, _: String) -> BoxFuture<'a, Result<(), String>> {
+            unreachable!()
+        }
+        fn exec<'a>(&'a self, _: &'a str, _: &'a BoxId, _: String) -> BoxFuture<'a, Result<Exec, String>> {
+            unreachable!()
+        }
+        fn delete<'a>(&'a self, key: &'a str, id: &'a BoxId) -> BoxFuture<'a, Result<(), String>> {
+            Box::pin(async move {
+                self.asked.lock().unwrap().push((key.to_owned(), id.0.clone()));
+                if self.refuse.contains(&id.0.as_str()) { Err(format!("Upstash Box answered 500: {} would not go", id.0)) } else { Ok(()) }
+            })
+        }
+    }
+
+    fn orphan(id: &str) -> Listed {
+        Listed { id: BoxId(id.into()), labels: vec!["hub:000000000000".into(), "p:ffffffffffffffff".into()] }
+    }
+
+    fn sweep(api: &Deleting, listed: Vec<Listed>, named: &'static [&'static str]) -> Result<(), String> {
+        let named = move |row: String| -> BoxFuture<'static, Result<bool, String>> { Box::pin(async move { Ok(named.contains(&row.as_str())) }) };
+        tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(delete_orphans(api, "box_fake-key-0000", listed, named))
+    }
+
+    #[test]
+    fn the_orphan_sweep_deletes_the_next_orphan_after_one_fails() {
+        let api = Deleting { refuse: vec!["box_first"], ..Deleting::default() };
+        let listed = vec![orphan("box_first"), orphan("box_second")];
+        let failed = sweep(&api, listed, &[]).unwrap_err();
+        assert_eq!(failed, "could not delete box box_first that no row of this hub names: Upstash Box answered 500: box_first would not go");
+        let asked: Vec<String> = api.asked.lock().unwrap().iter().map(|(_, id)| id.clone()).collect();
+        assert_eq!(asked, ["box_first", "box_second"], "the failed delete does not stop the pass");
+    }
+
+    #[test]
+    fn the_orphan_sweep_keeps_a_box_a_row_names_and_succeeds_when_every_delete_does() {
+        let api = Deleting::default();
+        let mut kept = orphan("box_kept");
+        kept.labels = vec!["p:eeeeeeeeeeeeeeee".into()];
+        assert_eq!(sweep(&api, vec![kept, orphan("box_gone")], &["eeeeeeeeeeeeeeee"]), Ok(()));
+        let asked: Vec<String> = api.asked.lock().unwrap().iter().map(|(_, id)| id.clone()).collect();
+        assert_eq!(asked, ["box_gone"]);
+    }
+
+    #[test]
+    fn the_orphan_sweep_error_carries_no_key() {
+        let api = Deleting { refuse: vec!["box_first", "box_second"], ..Deleting::default() };
+        let failed = sweep(&api, vec![orphan("box_first"), orphan("box_second")], &[]).unwrap_err();
+        assert!(!failed.contains("fake-key-0000"), "{failed}");
+        let asked = api.asked.lock().unwrap().clone();
+        assert!(asked.iter().all(|(key, _)| key == "box_fake-key-0000"), "the key goes to the API, and only there");
+    }
 
     #[test]
     fn a_box_is_named_for_its_project_role_and_row() {

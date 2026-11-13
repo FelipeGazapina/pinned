@@ -6303,12 +6303,14 @@ mod tests {
 
     #[test]
     fn the_box_api_key_is_there_without_the_claude_token() {
-        let (connectors, dir) = stored("upstash-key-only", vec![]);
+        let storage = MemStorage::default();
+        let connectors = Connectors::new(storage.clone(), "/bin/pinned".into());
         assert!(connectors.box_api_key().is_none());
-        connectors.storage.set_key(UPSTASH_KEY, "box_fake0000").unwrap();
+        storage.write_key(UPSTASH_KEY, "box_fake0000").unwrap();
         assert!(connectors.box_keys().is_none(), "booting a box needs the token too");
         assert_eq!(connectors.box_api_key().as_deref(), Some("box_fake0000"));
-        let _ = std::fs::remove_dir_all(dir);
+        storage.write_key(CLAUDE_TOKEN, "sk-ant-oat01-fake0000").unwrap();
+        assert_eq!(connectors.box_keys().unwrap().api_key, "box_fake0000");
     }
 
     #[test]
