@@ -576,6 +576,18 @@ mod tests {
     }
 
     #[test]
+    fn keep_opened_lists_the_named_boxes_and_folds_every_other_into_sums() {
+        let (rows, _) = usage_boxes(&parse_all("", &usage_list()).unwrap(), NOVEMBER);
+        let (kept, others) = keep_opened(rows.clone(), &["a"]);
+        assert_eq!(kept.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["a"]);
+        assert_eq!(others.boxes, 3);
+        assert!((others.cpu_hours - 11.0).abs() < 1e-9, "b has no figure, c is 1 h, d is 10 h");
+        assert!((others.compute_usd - 9.25).abs() < 1e-9);
+        assert_eq!(keep_opened(rows.clone(), &[]).0, vec![], "nothing opened lists nothing");
+        assert_eq!(keep_opened(rows, &["a", "b", "c", "d"]).1, OtherBoxes::default());
+    }
+
+    #[test]
     fn the_month_starts_at_midnight_utc_on_the_first() {
         assert_eq!(month_start(1_794_398_400), NOVEMBER);
         assert_eq!(month_start(NOVEMBER), NOVEMBER);
