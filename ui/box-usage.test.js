@@ -314,6 +314,33 @@ test("known and unconfirmed boxes with the same reason show as two notices, each
   assert.match(text(html), new RegExp(`1 box pinned could not end: Upstash answered 503\. ${CONFIRM.replace(/\./g, "\\.")}`));
 });
 
+test("each notice lists which boxes: the Upstash id of a known row, the label to look for for an unconfirmed one, and a long list stops after a few", () => {
+  const page = boxPage({ answer: async () => ({}) });
+  const html = (stuck) => page.boxUsageHtml({ data: { connected: false, stuck }, error: "", loading: false, open: {} }, NOW);
+  const two = html([{ ...KNOWN, upstash: "box_fake_1" }, { ...KNOWN, id: "fake-row-5", upstash: "box_fake_2" }]);
+  assert.match(two, /<p class="stuck-ids muted">Upstash ids: <code>box_fake_1<\/code>, <code>box_fake_2<\/code><\/p>/);
+  assert.match(html([{ ...KNOWN, upstash: "box_fake_1" }]), /Upstash id: <code>box_fake_1<\/code>/);
+  const unconfirmed = html([{ ...UNCONFIRMED, label: "p:fake-row-2" }]);
+  assert.match(unconfirmed, /<p class="stuck-ids muted">Look for: <code>p:fake-row-2<\/code><\/p>/);
+  assert.doesNotMatch(unconfirmed, /Upstash id/);
+  // A known row found through its label has no id: it is listed by the label.
+  assert.match(html([{ ...KNOWN, label: "p:fake-row-1" }]), /Look for: <code>p:fake-row-1<\/code>/);
+  // Each notice lists only its own boxes.
+  const both = html([{ ...KNOWN, upstash: "box_fake_1" }, { ...UNCONFIRMED, why: KNOWN.why, label: "p:fake-row-2" }]);
+  assert.equal(both.match(/limit-notices/g).length, 2);
+  const [first, second] = both.split('class="limit-notices"').slice(1);
+  assert.ok(first.includes("box_fake_1") && !first.includes("p:fake-row-2"));
+  assert.ok(second.includes("p:fake-row-2") && !second.includes("box_fake_1"));
+  // More than three: the first three and a count.
+  const many = html([1, 2, 3, 4, 5].map((n) => ({ ...KNOWN, id: `fake-row-${n}`, upstash: `box_fake_${n}` })));
+  assert.match(many, /Upstash ids: <code>box_fake_1<\/code>, <code>box_fake_2<\/code>, <code>box_fake_3<\/code> and 2 more<\/p>/);
+  assert.doesNotMatch(many, /box_fake_4|box_fake_5/);
+  // An older hub sends no id: nothing is listed, and the notice is as before.
+  assert.doesNotMatch(html([KNOWN]), /stuck-ids/);
+  // The ids are escaped.
+  assert.match(html([{ ...KNOWN, upstash: "<i>x</i>" }]), /<code>&lt;i&gt;x&lt;\/i&gt;<\/code>/);
+});
+
 test("the mark's title follows the notice: known, unconfirmed, and both", () => {
   const page = boxPage({ answer: async () => ({}) });
   const known = drawMark(page, [KNOWN]);

@@ -626,7 +626,7 @@ const reasonEnd = (why) => {
   const text = String(why).replace(/\.+$/, "");
   return text.endsWith("…") ? text : `${text}.`;
 };
-const boxNotice = (text) => `<div class="limit-notices" role="alert">${icon("triangle-alert")}<div><p>${esc(text)}</p></div></div>`;
+const boxNotice = (text, ids = "") => `<div class="limit-notices" role="alert">${icon("triangle-alert")}<div><p>${esc(text)}</p>${ids}</div></div>`;
 /** A stuck box with no `unconfirmed` flag is one pinned knows is on Upstash; one with it is a row that never recorded a box id. */
 const stuckSplit = (stuck) => [(stuck ?? []).filter((b) => !b.unconfirmed), (stuck ?? []).filter((b) => b.unconfirmed)];
 const stuckCount = (n) => `${n} ${n === 1 ? "box" : "boxes"}`;
@@ -635,6 +635,16 @@ const stillRunning = (n) => `${n === 1 ? "It is" : "They are"} still running on 
 const unconfirmedTail = (n) => n === 1
   ? "pinned could not confirm whether a box exists on Upstash for it. Check the Upstash console and delete it there if it does."
   : "pinned could not confirm whether a box exists on Upstash for any of them. Check the Upstash console and delete any you find there.";
+const STUCK_IDS_SHOWN = 3;
+/** What lets the owner find each box on Upstash: its id where pinned has it, else the label it lists the box by. Long lists stop after a few. */
+function stuckIdsHtml(boxes) {
+  const values = boxes.map((b) => b.upstash || b.label).filter(Boolean);
+  if (!values.length) return "";
+  const lead = boxes.every((b) => b.upstash) ? `Upstash ${values.length === 1 ? "id" : "ids"}` : "Look for";
+  const shown = values.slice(0, STUCK_IDS_SHOWN).map((v) => `<code>${esc(v)}</code>`).join(", ");
+  const more = values.length > STUCK_IDS_SHOWN ? ` and ${values.length - STUCK_IDS_SHOWN} more` : "";
+  return `<p class="stuck-ids muted">${lead}: ${shown}${more}</p>`;
+}
 /** One notice per distinct reason: the boxes pinned could not delete and knows are still running on Upstash, and the rows it could not confirm a box for. */
 function stuckBoxesHtml(stuck) {
   const notices = [];
@@ -644,8 +654,8 @@ function stuckBoxesHtml(stuck) {
     [unconfirmed, (n, why) => `${stuckCount(n)} pinned could not end: ${reasonEnd(why)} ${unconfirmedTail(n)}`],
   ]) {
     const byWhy = new Map();
-    for (const { why } of list) byWhy.set(why, (byWhy.get(why) ?? 0) + 1);
-    for (const [why, n] of byWhy) notices.push(boxNotice(line(n, why)));
+    for (const b of list) byWhy.set(b.why, [...(byWhy.get(b.why) ?? []), b]);
+    for (const [why, boxes] of byWhy) notices.push(boxNotice(line(boxes.length, why), stuckIdsHtml(boxes)));
   }
   return notices.join("");
 }

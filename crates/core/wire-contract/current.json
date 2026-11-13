@@ -35551,6 +35551,20 @@
               "unconfirmed": {
                 "description": "The row never recorded an Upstash box id and the delete failed before pinned knew whether a\nbox exists for it: it may or may not be running. Absent when pinned knows the box is there.",
                 "type": "boolean"
+              },
+              "upstash": {
+                "description": "The box's id on Upstash, for a row that recorded it: what to look for in the console.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "label": {
+                "description": "For a row with no recorded Upstash id: the label its box carries there, which pinned lists by.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -35774,6 +35788,20 @@
               "unconfirmed": {
                 "description": "The row never recorded an Upstash box id and the delete failed before pinned knew whether a\nbox exists for it: it may or may not be running. Absent when pinned knows the box is there.",
                 "type": "boolean"
+              },
+              "upstash": {
+                "description": "The box's id on Upstash, for a row that recorded it: what to look for in the console.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "label": {
+                "description": "For a row with no recorded Upstash id: the label its box carries there, which pinned lists by.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             }
           }
@@ -48559,6 +48587,20 @@
           "unconfirmed": {
             "description": "The row never recorded an Upstash box id and the delete failed before pinned knew whether a\nbox exists for it: it may or may not be running. Absent when pinned knows the box is there.",
             "type": "boolean"
+          },
+          "upstash": {
+            "description": "The box's id on Upstash, for a row that recorded it: what to look for in the console.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "label": {
+            "description": "For a row with no recorded Upstash id: the label its box carries there, which pinned lists by.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -48583,6 +48625,20 @@
           "unconfirmed": {
             "description": "The row never recorded an Upstash box id and the delete failed before pinned knew whether a\nbox exists for it: it may or may not be running. Absent when pinned knows the box is there.",
             "type": "boolean"
+          },
+          "upstash": {
+            "description": "The box's id on Upstash, for a row that recorded it: what to look for in the console.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "label": {
+            "description": "For a row with no recorded Upstash id: the label its box carries there, which pinned lists by.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       }
