@@ -249,7 +249,7 @@ test("an extend_box confirmation reads as US$ and the box's name, and an extra k
   context.onAgentConfirmations([extend, { ...extend, id: "c-5", args: { machine: "gone-id", extra_usd: "lots", reason: extra } }]);
   const html = context.asksHtml();
   const titles = [...html.matchAll(/<b class="title"[^>]*>([^<]*)<\/b>/g)].map(([, title]) => title);
-  assert.deepEqual(titles, ["Add US$ 1.50 to the budget of box site", "Add funds to the budget of a box"]);
+  assert.deepEqual(titles, ["Add US$ 1.50 to the budget of box site", "Add funds to the budget of a box this app does not list"]);
   assert.ok(!html.includes(extra) && !html.includes("reason") && !html.includes("note"), `the extra keys never reach the card: ${html}`);
   assert.ok(!html.includes("<pre"), "the known fields are in the title; no raw arguments");
   assert.ok(!html.includes("gone-id"), "an id the app does not know is not shown");

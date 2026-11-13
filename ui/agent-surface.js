@@ -67,7 +67,7 @@ const AGENT_BOX_COPY = {
     const amount = typeof a.extra_usd === "number" && Number.isFinite(a.extra_usd) && a.extra_usd > 0 ? a.extra_usd.toFixed(2) : null;
     const usd = amount === null ? "funds" : amount === "0.00" ? "less than US$ 0.01" : `US$ ${amount}`;
     const name = agentMachineName(a.machine);
-    return `Add ${usd} to the budget of ${name ? `box ${name}` : "a box"}`;
+    return `Add ${usd} to the budget of ${name ? `box ${name}` : "a box this app does not list"}`;
   },
 };
 /** Actions whose title says everything the card shows of their arguments, so the card lists none. */
