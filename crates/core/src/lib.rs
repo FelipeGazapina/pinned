@@ -57,6 +57,7 @@ pub mod sleep;
 pub mod shell;
 pub mod setup_token;
 pub mod skills;
+pub mod space;
 pub mod slack;
 pub mod stats;
 pub mod subagents;

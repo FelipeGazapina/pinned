@@ -5,6 +5,7 @@
 use pinned_core::accounts::Provider;
 use pinned_core::agent::{AgentStatus, Role, SOCK_ENV, TAB_ENV, TASK_ENV};
 use pinned_core::machine::{Launch, Machine};
+use pinned_core::space::Space;
 use pinned_core::reminders;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -91,7 +92,7 @@ esac"#,
         first_run_wait: std::time::Duration::from_secs(60),
         starting_limit: std::time::Duration::from_secs(600),
     };
-    let machine = Machine::new(launch, Some(dir.clone()), Some(dir.clone()), |_| {});
+    let machine = Machine::new(launch, Space::at(&dir), Some(dir.clone()), |_| {});
     machine
         .listen(|_| Err("not a connector callback".into()))
         .unwrap();

@@ -2,7 +2,9 @@
 //! panics inside one). The binary installs rustls's ring provider before the first call.
 
 use crate::link::Link;
+use crate::delegate::Delegates;
 use crate::login_store::LoginStore;
+use crate::space::Space;
 use crate::wire::{AccountView, MachineId, MachineView};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -284,6 +286,16 @@ pub fn logout(hub: &str, user_token: &str) -> Result<(), String> {
 /// signs in next.
 pub fn after_sign_in(_link: &Link, _creds: &Credentials) {}
 
+/// What a switch of account leaves to its caller: end this process and start again on the new
+/// account's space. It holds no `Link` and no `Machine`, so nothing can link from it.
+#[derive(Debug, PartialEq)]
+pub struct Restart;
+
+/// Records the account this computer signs in as next, or none, in `space`. It links nothing.
+pub fn switch(_space: &Space, _to: Option<Credentials>, _delegates: &Delegates) -> Result<Restart, String> {
+    Err("not yet".into())
+}
+
 pub fn hostname() -> String {
     let name = system_hostname();
     let name = name.trim();
@@ -347,6 +359,22 @@ fn send(hub: &str, path: &str, bearer: Option<&str>, body: &impl Serialize) -> R
 
 #[cfg(test)]
 mod tests {
+    use crate::machine::Machine;
+
+    #[test]
+    fn a_switch_stub_returns_a_restart_and_links_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        let creds = |email: &str, machine: &str| Credentials { hub: "http://hub.test".into(), email: email.into(), user_token: "test-user-token".into(), machine_id: machine.into(), machine_token: "test-machine-token".into() };
+        creds("a@acme.test", "machine-a").save(root.path()).unwrap();
+        let space = Space::at(root.path());
+        let machine = Machine::new(crate::machine::tests::launch(), space.clone(), None, |_| {});
+        machine.set_hub_id("hub-id-of-a".into(), "mac".into());
+        let delegates = Delegates::load(None);
+        assert_eq!(switch(&space, Some(creds("b@acme.test", "machine-b")), &delegates), Ok(Restart));
+        assert_eq!(Credentials::load(root.path()).unwrap().email, "b@acme.test", "B's account.json is written");
+        assert_eq!(machine.hub_id(), "hub-id-of-a", "the machine built before still reports A's hub id");
+    }
+
     use super::*;
     use crate::login_store::fake::{Memory, Reads, Writes};
 

@@ -267,7 +267,7 @@ pub fn statusline() {
     if let (Some(sock), Some(account), true) = (sock.as_deref(), account, go) {
         tell(sock, &Message::RefreshUsage { account });
     }
-    let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map_or_else(|| crate::machine::home().join(".claude"), PathBuf::from);
+    let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR").map_or_else(|| crate::space::process_home().join(".claude"), PathBuf::from);
     if let Some(command) = user_statusline(&config_dir) {
         let _ = std::io::stdout().write_all(&run_statusline(&command, &input));
     }

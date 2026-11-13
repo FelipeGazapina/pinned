@@ -1,4 +1,5 @@
 use crate::accounts::{self, Account, Accounts, Auth, Provider};
+use crate::space::{self, Space};
 use crate::agent::{role_env, role_of, session_of, AgentEvent, AgentStatus, LimitWindow, Message, ProjectTool, Role, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV, TASK_ENV};
 use crate::stats::{ThreadStats, Tally};
 use crate::wire::{CutBySleep, Call, HubCall, MachineEvent, Program, ProjectView, RunSpec, TabId, TabView, ThreadMatch, ThreadPage, UpdateStatus, EXE_PLACEHOLDER};
@@ -171,7 +172,7 @@ impl Launch {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn command(&self, program: Program, account: &Account, tab: &str, cwd: &Path, bypass: bool, args: Vec<String>, env: &[(String, String)], plugin_dirs: &[PathBuf], mcp: Option<&mcp::SessionFiles>) -> CommandBuilder {
+    fn command(&self, program: Program, account: &Account, tab: &str, cwd: &Path, bypass: bool, args: Vec<String>, env: &[(String, String)], plugin_dirs: &[PathBuf], mcp: Option<&mcp::SessionFiles>, user_home: &Path) -> CommandBuilder {
         let provider = account.provider;
         let spec = provider.spec();
         let mut cmd = CommandBuilder::new(self.bin(provider));
@@ -213,7 +214,7 @@ impl Launch {
                         .find(|(key, _)| key == "CODEX_HOME")
                         .map(|(_, value)| PathBuf::from(value))
                         .or_else(|| std::env::var_os("CODEX_HOME").map(PathBuf::from))
-                        .unwrap_or_else(|| home().join(".codex"));
+                        .unwrap_or_else(|| user_home.join(".codex"));
                     let user = crate::delegate::codex_user_notify(&std::fs::read_to_string(home.join("config.toml")).unwrap_or_default());
                     cmd.args(crate::delegate::codex_notify_flag(&self.exe, &user));
                 }
@@ -697,6 +698,8 @@ pub struct Machine {
     /// The last time the machine slept, found from a jump between ticks, and saved beside the sessions.
     sleeps: Mutex<sleep::Watch>,
     sync_file: Option<PathBuf>,
+    /// Where this account's state is kept, and the OS user's home it shares with the others here.
+    space: Space,
     sync_loop_holds_state: AtomicBool,
     projects: Mutex<Vec<projects::Project>>,
     projects_file: Option<PathBuf>,
@@ -871,7 +874,19 @@ struct Missed {
 impl Machine {
     /// A machine that keeps its sessions, projects and history in `dir`, or nothing without one,
     /// and opens new tabs on `open`, else the most recent project. Everything it reports goes to `events`.
-    pub fn new(launch: Launch, dir: Option<PathBuf>, open: Option<PathBuf>, events: impl Fn(Event) + Send + Sync + 'static) -> Arc<Machine> {
+    pub fn new(launch: Launch, space: Space, open: Option<PathBuf>, events: impl Fn(Event) + Send + Sync + 'static) -> Arc<Machine> {
+        let Space { dir, user_home, role } = space;
+        Machine::build(launch, Some(dir), user_home, role, open, events)
+    }
+
+    /// A machine that keeps nothing on disk, for a caller with no space to give it.
+    pub fn without_dir(launch: Launch, open: Option<PathBuf>, events: impl Fn(Event) + Send + Sync + 'static) -> Arc<Machine> {
+        let user_home = if test_binary() { std::env::temp_dir().join("home") } else { space::process_home() };
+        Machine::build(launch, None, user_home, space::Role::Owner, open, events)
+    }
+
+    fn build(launch: Launch, dir: Option<PathBuf>, user_home: PathBuf, role: space::Role, open: Option<PathBuf>, events: impl Fn(Event) + Send + Sync + 'static) -> Arc<Machine> {
+        let space = Space { dir: dir.clone().unwrap_or_default(), user_home: user_home.clone(), role };
         let projects_file = dir.as_ref().map(|d| d.join("projects.json"));
         let mut projects = dir
             .as_ref()
@@ -895,15 +910,15 @@ impl Machine {
         let sent = global::Ledger::load(dir.as_deref());
         // Seeds taste.json from the old cost style, then moves the old worker cap into it.
         taste::migrate_worker_cap(dir.as_deref());
-        let home = home();
+        let home = user_home;
         // A test must never write the user's own claude config.
         let builtin_claude_config = match (test_binary(), std::env::var_os("CLAUDE_CONFIG_DIR")) {
-            (true, _) => dir.clone().unwrap_or_else(std::env::temp_dir).join("home"),
+            (true, _) => home.clone(),
             (false, Some(config)) => PathBuf::from(config),
             (false, None) => home.clone(),
         }
         .join(".claude.json");
-        let global_dir = if test_binary() { dir.clone().unwrap_or_else(std::env::temp_dir).join("home") } else { home.clone() }.join(global::FOLDER[0]).join(global::FOLDER[1]);
+        let global_dir = home.join(global::FOLDER[0]).join(global::FOLDER[1]);
         let default_cwd = open
             .or_else(|| projects::recent(&projects).first().map(|p| p.path.clone()))
             .unwrap_or_else(|| home.clone());
@@ -917,6 +932,7 @@ impl Machine {
             sessions_file: dir.as_ref().map(|d| d.join("sessions.json")),
             sleeps: Mutex::new(sleep::Watch::with_window(dir.as_ref().and_then(|d| sleep::load(&d.join("sleep.json"))))),
             sync_file: dir.as_ref().map(|d| d.join("sync.json")),
+            space,
             sync_loop_holds_state: AtomicBool::new(false),
             projects: Mutex::new(projects),
             projects_file,
@@ -1159,7 +1175,7 @@ impl Machine {
                 json(turns)
             }
             Call::GitRemote { path } => json(git_remote(Path::new(&path))),
-            Call::Browse { path } => json(projects::browse(&path, &home())?),
+            Call::Browse { path } => json(projects::browse(&path, &self.space.user_home)?),
             Call::CreateProject { name } => {
                 let mut created = scaffold::create(&self.clones, &name, self.launch.path_env.as_deref())?;
                 self.made_folders.add(Path::new(&created.path));
@@ -1170,7 +1186,7 @@ impl Machine {
             Call::Clone { repo, token, dest: None } => json(self.find_folder("", Some(&repo), token.as_deref())?),
             Call::Clone { repo, token, dest: Some(dest) } => json(self.clone_into(&repo, &dest, token.as_deref())?),
             Call::MakeFolder { path } => {
-                let dir = projects::expand(&path, &home());
+                let dir = projects::expand(&path, &self.space.user_home);
                 std::fs::create_dir_all(&dir).map_err(|e| format!("could not make {}: {e}", dir.display()))?;
                 json(dunce::canonicalize(&dir).map_err(|e| e.to_string())?)
             }
@@ -1187,7 +1203,7 @@ impl Machine {
                 let dir = self.uploads.as_ref().ok_or("this machine keeps no files")?;
                 json(uploads::image(dir, &path)?)
             }
-            Call::ReadImage { path } => json(uploads::named(&path, &home())?),
+            Call::ReadImage { path } => json(uploads::named(&path, &self.space.user_home)?),
             Call::ListAccounts => json(self.list_accounts()),
             Call::LearnModelMenu { lines } => json(self.learn_model_menu(&lines)?),
             Call::AddAccount { provider, name, auth, key } => {
@@ -1297,11 +1313,11 @@ impl Machine {
                 let pid = self.tab(&tab, |t| t.session.as_ref().and_then(|s| s.pid()))?;
                 json(workspace::listeners(pid, self.launch.path_env.as_deref()))
             }
-            Call::Editors => json(workspace::editors(&home(), self.launch.path_env.as_deref())),
+            Call::Editors => json(workspace::editors(&self.space.user_home, self.launch.path_env.as_deref())),
             Call::OpenIn { tab, editor, path, folder, reveal } => {
                 let cwd = self.tab(&tab, |t| t.cwd.clone())?;
                 let how = workspace::OpenHow { folder, reveal };
-                json(workspace::open_in(&cwd, &editor, path.as_deref(), how, &home(), self.launch.path_env.as_deref())?)
+                json(workspace::open_in(&cwd, &editor, path.as_deref(), how, &self.space.user_home, self.launch.path_env.as_deref())?)
             }
             Call::Commands { tab } => {
                 let (cwd, account) = self.tab(&tab, |t| (t.cwd.clone(), t.account.clone()))?;
@@ -1333,9 +1349,9 @@ impl Machine {
             Call::SetWorkspace { tab, worktree, cols, rows } => json(self.set_workspace(&tab, worktree.as_deref(), cols, rows)?),
             Call::PullRequests { paths, state, involvement, query, filters, limit } => {
                 let path = self.launch.path_env.as_deref();
-                json(pulls::list(&home(), path, self.gh_repos(&paths), state, involvement, &query, &filters, limit)?)
+                json(pulls::list(&self.space.user_home, path, self.gh_repos(&paths), state, involvement, &query, &filters, limit)?)
             }
-            Call::PullRequestStack { repo, number } => json(pulls::stack(&home(), self.launch.path_env.as_deref(), &repo, number)?),
+            Call::PullRequestStack { repo, number } => json(pulls::stack(&self.space.user_home, self.launch.path_env.as_deref(), &repo, number)?),
             Call::TokenUsage { since } => {
                 let homes: Vec<PathBuf> = self.accounts.list().iter().filter(|a| a.provider == Provider::Claude).map(|a| self.accounts.home(a).join("projects")).collect();
                 json(usage::read(&homes, since, &usage::rates(self.rates_file.as_deref()), &usage::PriceBook::load(self.prices_file().as_deref())))
@@ -1348,9 +1364,9 @@ impl Machine {
                 book.save(&file)?;
                 json(book)
             }
-            Call::UsageLimits => json(usage::limits(&self.launch.bin(Provider::Claude), &home(), self.launch.path_env.as_deref())?),
-            Call::PullRequestFilterOptions { paths, kind, query } => json(pulls::filter_options(&home(), self.launch.path_env.as_deref(), &self.gh_repos(&paths), kind, &query)?),
-            Call::PullRequestFiles { host, repo, number } => json(pulls::files(&home(), self.launch.path_env.as_deref(), &host, &repo, number)?),
+            Call::UsageLimits => json(usage::limits(&self.launch.bin(Provider::Claude), &self.space.user_home, self.launch.path_env.as_deref())?),
+            Call::PullRequestFilterOptions { paths, kind, query } => json(pulls::filter_options(&self.space.user_home, self.launch.path_env.as_deref(), &self.gh_repos(&paths), kind, &query)?),
+            Call::PullRequestFiles { host, repo, number } => json(pulls::files(&self.space.user_home, self.launch.path_env.as_deref(), &host, &repo, number)?),
             Call::PageMeta { url, frame_by } => json(panel::page_meta(&url, frame_by.as_deref())?),
             Call::Refs { tab } => json(panel::refs(&self.tab(&tab, |t| t.cwd.clone())?, self.launch.path_env.as_deref())?),
             Call::ReadFile { tab, path, root, rev } => json(panel::read_file(&self.tab(&tab, |t| t.cwd.clone())?, &path, root, rev.as_deref())?),
@@ -2170,7 +2186,7 @@ impl Machine {
         if first_run {
             self.seed_first_run(&account, &cwd);
         }
-        let cmd = self.launch.command(program, &account, tab, &cwd, bypass, args, &env, &plugin_dirs, mcp.as_ref());
+        let cmd = self.launch.command(program, &account, tab, &cwd, bypass, args, &env, &plugin_dirs, mcp.as_ref(), &self.space.user_home);
         if let Err(error) = self.spawn_with(tab, cmd, pty::size(cols, rows), mcp) {
             // The next start asks for the same again: with its arguments gone it would open a new
             // conversation in place of this one.
@@ -2344,7 +2360,7 @@ impl Machine {
         repos.sort_by_key(|r| (r.host != pulls::GITHUB, r.host.clone(), r.name.to_lowercase()));
         repos.dedup_by(|a, b| a.host == b.host && a.name.eq_ignore_ascii_case(&b.name));
         let mut known = HashMap::new();
-        repos.retain(|r| *known.entry(r.host.clone()).or_insert_with(|| pulls::gh_knows(&home(), path, &r.host)));
+        repos.retain(|r| *known.entry(r.host.clone()).or_insert_with(|| pulls::gh_knows(&self.space.user_home, path, &r.host)));
         repos
     }
 
@@ -3194,7 +3210,7 @@ impl Machine {
             return Ok(String::new());
         }
         let projects: Vec<PathBuf> = self.projects.lock().unwrap().iter().map(|p| p.path.clone()).collect();
-        let config = self.accounts.env(&account).into_iter().find(|(k, _)| k == "CLAUDE_CONFIG_DIR").map_or_else(|| home().join(".claude"), |(_, v)| PathBuf::from(v));
+        let config = self.accounts.env(&account).into_iter().find(|(k, _)| k == "CLAUDE_CONFIG_DIR").map_or_else(|| self.space.user_home.join(".claude"), |(_, v)| PathBuf::from(v));
         let roots = orchestrator_roots(&cwd, self.uploads.as_deref(), &config, &claude_tmp(), &projects);
         crate::repo_look::guard(&roots, &cwd, tool, input).map(|()| String::new())
     }
@@ -3956,6 +3972,11 @@ impl Machine {
         self.sync_loop_holds_state.store(held, Ordering::SeqCst);
     }
 
+    /// The OS user's home this account shares with every other account on its root.
+    pub fn user_home(&self) -> &Path {
+        &self.space.user_home
+    }
+
     fn sync_stopped(&self) -> Option<String> {
         if self.sync_loop_holds_state.load(Ordering::SeqCst) {
             return None;
@@ -3967,7 +3988,7 @@ impl Machine {
     pub fn plugin_shares(&self) -> Vec<sync::PluginShare> {
         let Some(config) = self.sync_file.as_ref().and_then(|file| file.parent()).map(Path::to_path_buf) else { return vec![] };
         let dir = config.join("synced-plugins");
-        let mut homes = vec![home().join(".claude")];
+        let mut homes = vec![self.space.user_home.join(".claude")];
         for account in self.accounts.list() {
             if account.provider == Provider::Claude {
                 homes.push(self.accounts.home(&account));
@@ -3976,7 +3997,7 @@ impl Machine {
         homes.sort();
         homes.dedup();
         if test_binary() {
-            homes.retain(|path| path.starts_with(&config));
+            homes.retain(|path| path.starts_with(&self.space.dir));
         }
         homes.into_iter().map(|claude_home| sync::PluginShare { claude_home, dir: dir.clone() }).collect()
     }
@@ -3984,16 +4005,15 @@ impl Machine {
     fn places(&self) -> skills::Places {
         let config = self.sync_file.as_ref().and_then(|file| file.parent()).map(Path::to_path_buf);
         let accounts = self.accounts.list();
-        let inside = |path: &Path| !test_binary() || config.as_ref().is_some_and(|c| path.starts_with(c));
+        let inside = |path: &Path| !test_binary() || path.starts_with(&self.space.dir);
         let homes = |provider| accounts.iter().filter(|a| a.provider == provider).map(|a| (a.id.clone(), self.accounts.home(a))).filter(|(_, home)| inside(home)).collect();
         let mut projects: Vec<PathBuf> = projects::recent(&self.projects.lock().unwrap()).into_iter().map(|p| p.path.clone()).collect();
         projects.extend(self.tabs.lock().unwrap().values().map(|t| t.cwd.clone()));
         let mut projects: Vec<skills::CanonicalPath> = projects.iter().filter_map(|p| skills::CanonicalPath::new(p).ok()).collect();
         projects.sort();
         projects.dedup();
-        let home = if test_binary() { config.clone().unwrap_or_default().join("home") } else { home() };
         skills::Places {
-            home,
+            home: self.space.user_home.clone(),
             claude_homes: homes(Provider::Claude),
             codex_homes: homes(Provider::Codex),
             cursor: accounts.iter().find(|a| a.provider == Provider::Cursor).map(|a| a.id.clone()),
@@ -4115,6 +4135,11 @@ impl Machine {
 
     /// Remembers this machine's id and name from the hub's hello, so a project named by it is
     /// local and what this machine lists of itself reads as the hub lists it.
+    #[cfg(test)]
+    pub(crate) fn hub_id(&self) -> crate::wire::MachineId {
+        self.hub_id.lock().unwrap().clone()
+    }
+
     pub(crate) fn set_hub_id(&self, id: crate::wire::MachineId, name: String) {
         *self.hub_id.lock().unwrap() = id;
         *self.hub_name.lock().unwrap() = name;
@@ -5981,7 +6006,7 @@ impl Machine {
             (held.len() as u32, held.iter().filter(|t| role_of(&t.env).is_some_and(|(role, _)| role == Role::Worker)).count() as u32)
         };
         crate::load::MachineState {
-            load: crate::load::sample(&home()),
+            load: crate::load::sample(&self.space.user_home),
             accounts: listed.iter().filter_map(crate::load::AccountState::of).collect(),
             sessions,
             workers: working.max(worker_tabs),
@@ -6474,7 +6499,7 @@ impl Machine {
 
     /// Clones `repo` into `dest`, as T3 Code's Add project clones to the folder picked, and opens it as a project.
     fn clone_into(&self, repo: &str, dest: &str, token: Option<&str>) -> Result<PathBuf, String> {
-        let target = projects::expand(dest, &home());
+        let target = projects::expand(dest, &self.space.user_home);
         if std::fs::read_dir(&target).is_ok_and(|mut entries| entries.next().is_some()) {
             return Err(format!("{} already holds files", target.display()));
         }
@@ -6549,21 +6574,12 @@ fn copy_dir(from: &Path, into: &Path) -> std::io::Result<()> {
     }
     Ok(())
 }
-#[cfg(unix)]
-const HOME_ENV: &str = "HOME";
-// Where Claude Code looks for ~/.claude on Windows; HOME there is Git Bash's, when set at all.
-#[cfg(windows)]
-const HOME_ENV: &str = "USERPROFILE";
 
 /// Tests keep the global orchestrator's folder and skill homes inside their config dir, never in
 /// `$HOME`. This crate's own tests count wherever their binary is copied; another crate's tests
 /// count by running from cargo's `deps` folder.
-fn test_binary() -> bool {
+pub(crate) fn test_binary() -> bool {
     cfg!(test) || std::env::current_exe().ok().is_some_and(|exe| exe.components().any(|part| part.as_os_str() == "deps"))
-}
-
-pub(crate) fn home() -> PathBuf {
-    PathBuf::from(std::env::var_os(HOME_ENV).unwrap_or_default())
 }
 
 impl Machine {
@@ -6906,7 +6922,7 @@ fn find_bin(name: &str, path_env: Option<&str>) -> PathBuf {
         .iter()
         .flat_map(|name| dirs.iter().map(move |dir| dir.join(name)))
         .find(|p| p.is_file())
-        .unwrap_or_else(|| home().join(".local").join("bin").join(&names[0]))
+        .unwrap_or_else(|| space::process_home().join(".local").join("bin").join(&names[0]))
 }
 
 /// pinned's own PATH, less what an AppImage put on it, for when the login shell gives none.
@@ -6987,7 +7003,7 @@ pub(crate) mod tests {
     }
 
     fn machine() -> Arc<Machine> {
-        Machine::new(launch(), None, Some("/repo".into()), |_| {})
+        Machine::without_dir(launch(), Some("/repo".into()), |_| {})
     }
 
     #[test]
@@ -7043,7 +7059,7 @@ pub(crate) mod tests {
     fn quitting_announces_an_empty_tab_list() {
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let events = seen.clone();
-        let m = Machine::new(launch(), None, Some("/repo".into()), move |event| {
+        let m = Machine::without_dir(launch(), Some("/repo".into()), move |event| {
             if let Event::Tabs { tabs } = event {
                 events.lock().unwrap().push(tabs.len());
             }
@@ -7177,7 +7193,7 @@ pub(crate) mod tests {
         let sock = dir.join("pinned.sock");
         let project = dir.join("app");
         std::fs::create_dir_all(&project).unwrap();
-        let m = Machine::new(Launch { sock: sock.clone(), bins: BTreeMap::from([(Provider::Claude, thread_claude(&dir))]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        let m = Machine::new(Launch { sock: sock.clone(), bins: BTreeMap::from([(Provider::Claude, thread_claude(&dir))]), ..launch() }, Space::at(&dir.join("config")), None, |_| {});
         m.listen(|_| Err("not the machine's".into())).unwrap();
         let path = m.open_project(project).display().to_string();
         let captain = m.open_orchestrator(&path).unwrap();
@@ -7271,7 +7287,7 @@ pub(crate) mod tests {
         let saved: Vec<Value> = sessions.iter().map(|session| json!({ "cwd": app, "session": session, "env": env(&app) })).collect();
         std::fs::write(config.join("sessions.json"), json!(saved).to_string()).unwrap();
         let claude = typed_claude(&dir);
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config), None, |_| {});
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Space::at(&config), None, |_| {});
         let tabs = m.restore_tabs();
         (m, dir, claude, tabs)
     }
@@ -7305,7 +7321,7 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&config).unwrap();
         std::fs::write(config.join("sessions.json"), json!([{ "cwd": app, "session": "idle", "env": [] }, { "cwd": app, "session": "busy", "env": [], "interrupted": true }]).to_string()).unwrap();
         let claude = typed_claude(&dir);
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config), None, |_| {});
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Space::at(&config), None, |_| {});
         let now = m.restore_working();
         let tab = |session: &str| m.tabs().into_iter().find(|t| t.session.as_deref() == Some(session)).unwrap();
         let (idle, busy) = (tab("idle").id, tab("busy").id);
@@ -7388,7 +7404,7 @@ pub(crate) mod tests {
         // The limit reset while pinned was closed, and the user had switched auto-resume off.
         std::fs::write(config.join("sessions.json"), json!([{ "cwd": app, "session": "held", "env": [], "interrupted": true, "resume_at": unix_now() - 60, "held": true }]).to_string()).unwrap();
         let claude = typed_claude(&dir);
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config), None, |_| {});
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Space::at(&config), None, |_| {});
         let tab = m.restore_working().remove(0);
         m.start_claude(&tab, 80, 24).unwrap();
         assert_eq!(started(&claude, &tab)[4..], ["--resume", "held"], "the turn waits for the user");
@@ -7668,7 +7684,7 @@ pub(crate) mod tests {
         }
         let events = Arc::new(Mutex::new(vec![]));
         let seen = events.clone();
-        let m = Machine::new(launch(), None, Some("/repo".into()), move |e| seen.lock().unwrap().push(serde_json::to_value(e).unwrap()));
+        let m = Machine::without_dir(launch(), Some("/repo".into()), move |e| seen.lock().unwrap().push(serde_json::to_value(e).unwrap()));
         assert_eq!(m.background(), None, "a node has no setting to report");
         assert_eq!(m.call(Call::SetBackground { on: true }), Err("this machine runs pinned without the app, so it has no window".into()));
 
@@ -7687,7 +7703,7 @@ pub(crate) mod tests {
     fn a_session_that_exits_reports_it_and_stops_running() {
         let events = Arc::new(Mutex::new(vec![]));
         let seen = events.clone();
-        let m = Machine::new(launch(), None, Some("/repo".into()), move |e| seen.lock().unwrap().push(serde_json::to_value(e).unwrap()));
+        let m = Machine::without_dir(launch(), Some("/repo".into()), move |e| seen.lock().unwrap().push(serde_json::to_value(e).unwrap()));
         let tab = running(&m, vec![], "exit 0");
         wait_for("the exit", || events.lock().unwrap().iter().any(|e| e["kind"] == "exit"));
         assert_eq!(events.lock().unwrap().iter().find(|e| e["kind"] == "exit"), Some(&json!({ "kind": "exit", "tab": tab })));
@@ -7700,7 +7716,7 @@ pub(crate) mod tests {
     fn a_session_runs_in_conpty_and_reports_its_exit() {
         let events = Arc::new(Mutex::new(vec![]));
         let seen_events = events.clone();
-        let m = Machine::new(launch(), None, Some("/repo".into()), move |e| seen_events.lock().unwrap().push(serde_json::to_value(e).unwrap()));
+        let m = Machine::without_dir(launch(), Some("/repo".into()), move |e| seen_events.lock().unwrap().push(serde_json::to_value(e).unwrap()));
         let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
         let mut cmd = CommandBuilder::new("cmd.exe");
         cmd.args(["/c", "echo pinned on windows"]);
@@ -7774,7 +7790,7 @@ pub(crate) mod tests {
     #[test]
     fn mcp_servers_reads_the_named_accounts_own_config_and_refuses_an_account_claude_does_not_run() {
         let root = temp("mcp-servers");
-        let m = Machine::new(launch(), Some(root.join("config")), None, |_| {});
+        let m = Machine::new(launch(), Space::at(&root.join("config")), None, |_| {});
         m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
         let config = r#"{"mcpServers":{"linear":{"type":"http","url":"https://mcp.linear.app/mcp","headers":{"Authorization":"Bearer lin_api_x"}}}}"#;
         std::fs::write(root.join("config/accounts/work/.claude.json"), config).unwrap();
@@ -7814,7 +7830,7 @@ pub(crate) mod tests {
         std::fs::write(&claude, "#!/bin/sh\nprintf '%s|' \"$@\"; echo; exec sleep 30\n").unwrap();
         std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let launch = Launch { bins: [(Provider::Claude, claude)].into_iter().collect(), mcp_config: Some(root.join("pinned-mcp.json")), ..launch() };
-        let m = Machine::new(launch, Some(root.join("config")), None, |_| {});
+        let m = Machine::new(launch, Space::at(&root.join("config")), None, |_| {});
         m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
         std::fs::write(root.join("config/accounts/work/.claude.json"), r#"{"mcpServers":{"linear":{"type":"http","url":"https://mcp.linear.app/mcp"}}}"#).unwrap();
         let down = Arc::new(AtomicBool::new(false));
@@ -7857,7 +7873,7 @@ pub(crate) mod tests {
         let codex = root.join("codex");
         std::fs::write(&codex, "#!/bin/sh\nprintf '%s|' \"$@\"; echo; exec sleep 30\n").unwrap();
         std::fs::set_permissions(&codex, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let m = Machine::new(Launch { bins: [(Provider::Codex, codex)].into_iter().collect(), ..launch() }, Some(root.join("config")), None, |_| {});
+        let m = Machine::new(Launch { bins: [(Provider::Codex, codex)].into_iter().collect(), ..launch() }, Space::at(&root.join("config")), None, |_| {});
         m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into(), auth: None, key: None }).unwrap();
         let account = m.accounts.get("side").unwrap();
         std::fs::write(m.accounts.home(&account).join("config.toml"), "[mcp_servers.ctx]\ncommand = \"own-ctx\"\n").unwrap();
@@ -7893,7 +7909,7 @@ pub(crate) mod tests {
     #[test]
     fn the_first_session_waits_for_a_link_still_coming_up_and_later_ones_start_at_once() {
         let root = temp("mcp-link-up");
-        let m = Machine::new(launch(), Some(root.join("config")), None, |_| {});
+        let m = Machine::new(launch(), Space::at(&root.join("config")), None, |_| {});
         m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
         let work = m.accounts.get("work").unwrap();
         let up = Instant::now() + Duration::from_millis(200);
@@ -7915,7 +7931,7 @@ pub(crate) mod tests {
     #[test]
     fn the_machine_reads_a_claude_accounts_servers_in_full_for_the_apps_import() {
         let root = temp("mcp-importable");
-        let m = Machine::new(launch(), Some(root.join("config")), None, |_| {});
+        let m = Machine::new(launch(), Space::at(&root.join("config")), None, |_| {});
         m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
         std::fs::write(root.join("config/accounts/work/.claude.json"), r#"{"mcpServers":{"ctx":{"command":"npx","args":["@acme/ctx"],"env":{"API_KEY":"ctx-secret-1"}}}}"#).unwrap();
         let found = m.call(Call::McpImportable { account: Some("work".into()), path: None }).unwrap();
@@ -7926,7 +7942,7 @@ pub(crate) mod tests {
 
     fn watching(name: &str) -> (PathBuf, Arc<Machine>, Arc<Mutex<Vec<Value>>>, TabId, PathBuf) {
         let root = temp(name);
-        let m = Machine::new(launch(), Some(root.join("config")), None, |_| {});
+        let m = Machine::new(launch(), Space::at(&root.join("config")), None, |_| {});
         m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
         let heard = Arc::new(Mutex::new(vec![]));
         let seen = heard.clone();
@@ -8040,7 +8056,7 @@ pub(crate) mod tests {
         let root = temp("thread-loop");
         let heard = Arc::new(Mutex::new(vec![]));
         let seen = heard.clone();
-        let m = Machine::new(launch(), Some(root.join("config")), None, move |event| seen.lock().unwrap().push(serde_json::to_value(event).unwrap()));
+        let m = Machine::new(launch(), Space::at(&root.join("config")), None, move |event| seen.lock().unwrap().push(serde_json::to_value(event).unwrap()));
         m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
         let tab = m.add_tab(root.join("app"), m.accounts.get("work").unwrap(), vec![], vec![], false, Some("s1".into()));
         let dir = root.join("config/accounts/work/projects/demo");
@@ -8272,7 +8288,7 @@ pub(crate) mod tests {
         let seen = heard.clone();
         let m = Machine::new(
             Launch { bins: fake_bins(&root.join("bin")), ..launch() },
-            Some(root.join("config")),
+            Space::at(&root.join("config")),
             None,
             move |event| seen.lock().unwrap().push(serde_json::to_value(event).unwrap()),
         );
@@ -8418,7 +8434,7 @@ pub(crate) mod tests {
         let claude = dir.join("claude");
         std::fs::write(&claude, "#!/bin/sh\nprintf '%s|' \"$@\"; echo; exec sleep 30\n").unwrap();
         std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(dir.clone()), Some(dir.clone()), |_| {});
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Space::at(&dir), Some(dir.clone()), |_| {});
         let tab = m.add_tab(dir.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, Some("s1".into()));
         m.spawn(&tab, sh("sleep 30"), pty::size(80, 24)).unwrap();
         m.tab(&tab, |t| t.interrupted = true).unwrap();
@@ -8445,7 +8461,7 @@ pub(crate) mod tests {
         let claude = dir.join("claude");
         std::fs::write(&claude, "#!/bin/sh\nprintf '%s|' \"$@\"; echo; exec sleep 30\n").unwrap();
         std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(dir.clone()), Some(dir.clone()), |_| {});
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Space::at(&dir), Some(dir.clone()), |_| {});
         let tab = m.add_tab(dir.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, Some("s1".into()));
         let (seen, sink) = viewer();
         m.attach(&tab, "test".into(), sink).unwrap();
@@ -8465,7 +8481,7 @@ pub(crate) mod tests {
         let claude = dir.join("claude");
         std::fs::write(&claude, "#!/bin/sh\nprintf '%s|' \"$@\"; echo; exec sleep 30\n").unwrap();
         std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let m = Machine::new(Launch { bins: [(Provider::Claude, claude)].into_iter().collect(), ..launch() }, Some(dir.clone()), Some(dir.clone()), |_| {});
+        let m = Machine::new(Launch { bins: [(Provider::Claude, claude)].into_iter().collect(), ..launch() }, Space::at(&dir), Some(dir.clone()), |_| {});
         assert_eq!(m.call(Call::DeviceAgents { allow: None }), Ok(json!(false)));
         assert_eq!(m.call(Call::DeviceAgents { allow: Some(true) }), Ok(json!(true)));
         let tab = m.add_tab(dir.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
@@ -8483,7 +8499,7 @@ pub(crate) mod tests {
         let dir = temp("scratch");
         let project = dir.join("project");
         std::fs::create_dir_all(&project).unwrap();
-        let m = Machine::new(launch(), Some(dir.clone()), Some(project.clone()), |_| {});
+        let m = Machine::new(launch(), Space::at(&dir), Some(project.clone()), |_| {});
         let tab = m.call(Call::OpenScratch { bypass: false }).unwrap().as_str().unwrap().to_owned();
         assert_eq!(m.view(&tab).unwrap().cwd, dir.join("scratch").display().to_string());
         assert!(dir.join("scratch").is_dir());
@@ -8801,7 +8817,7 @@ pub(crate) mod tests {
         let claude = dir.join("claude");
         std::fs::write(&claude, "#!/bin/sh\npwd; exec sleep 30\n").unwrap();
         std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, None, None, |_| {});
+        let m = Machine::without_dir(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, None, |_| {});
         let tab = m.add_tab(std::fs::canonicalize(&repo).unwrap(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
         let (seen, sink) = viewer();
         m.attach(&tab, "test".into(), sink).unwrap();
@@ -8824,7 +8840,7 @@ pub(crate) mod tests {
         let claude = dir.join("claude");
         std::fs::write(&claude, "#!/bin/sh\nprintf '%s|' \"$@\"; echo; exec sleep 30\n").unwrap();
         std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(dir.clone()), Some(dir.clone()), |_| {});
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Space::at(&dir), Some(dir.clone()), |_| {});
         let tab = m.add_tab(dir.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, Some("s1".into()));
         m.spawn(&tab, sh("sleep 30"), pty::size(80, 24)).unwrap();
         let (seen, sink) = viewer();
@@ -8841,7 +8857,7 @@ pub(crate) mod tests {
     #[cfg(unix)]
     fn a_run_opens_in_its_folder_with_this_machines_binary() {
         let dir = temp("run-folder");
-        let m = Machine::new(Launch { bins: fake_bins(&dir.join(".bin")), ..launch() }, None, Some("/repo".into()), |_| {});
+        let m = Machine::without_dir(Launch { bins: fake_bins(&dir.join(".bin")), ..launch() }, Some("/repo".into()), |_| {});
         let run = RunSpec {
             folder: dir.display().to_string(),
             repo: Some("git@github.com:acme/app.git".into()),
@@ -8895,11 +8911,11 @@ pub(crate) mod tests {
             account: None,
             budget_usd: None,
         };
-        let refused = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, missing)]), ..launch() }, Some(dir.clone()), Some(dir.clone()), |_| {});
+        let refused = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, missing)]), ..launch() }, Space::at(&dir), Some(dir.clone()), |_| {});
         let err = refused.run(&run).unwrap_err();
         assert!(err.contains("No conversation found"), "{err}");
         assert!(refused.tabs().is_empty(), "the refused resume left a tab");
-        let staying_machine = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, staying)]), ..launch() }, Some(dir.clone()), Some(dir.clone()), |_| {});
+        let staying_machine = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, staying)]), ..launch() }, Space::at(&dir), Some(dir.clone()), |_| {});
         let id = staying_machine.run(&run).unwrap();
         assert!(staying_machine.view(&id).unwrap().running);
         staying_machine.close_tab(&id);
@@ -8933,7 +8949,7 @@ pub(crate) mod tests {
             account: None,
             budget_usd: None,
         };
-        let refused = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, missing)]), ..launch() }, Some(dir.clone()), Some(dir.clone()), |_| {});
+        let refused = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, missing)]), ..launch() }, Space::at(&dir), Some(dir.clone()), |_| {});
         let err = refused.run(&run).unwrap_err();
         assert!(err.contains("No conversation found"), "{err}");
         assert!(refused.tabs().is_empty(), "the refused resume left a tab");
@@ -8945,7 +8961,7 @@ pub(crate) mod tests {
         let env = vec![(CONNECTOR_ENV.to_owned(), "c1".into())];
         let tabs_seen = Arc::new(Mutex::new(vec![]));
         let seen = tabs_seen.clone();
-        let m = Machine::new(launch(), None, Some("/repo".into()), move |event| {
+        let m = Machine::without_dir(launch(), Some("/repo".into()), move |event| {
             if let MachineEvent::Tabs { tabs } = event {
                 seen.lock().unwrap().extend(tabs);
             }
@@ -8980,7 +8996,7 @@ pub(crate) mod tests {
     fn claude_does_not_inherit_the_session_pinned_was_started_from() {
         std::env::set_var("CLAUDE_CODE_SESSION_ID", "outer-session");
         std::env::set_var("CLAUDECODE", "1");
-        let cmd = launch().command(Program::Agent, &Account::builtin(Provider::Claude), "tab-1", Path::new("/repo"), false, vec![], &[], &[], None);
+        let cmd = launch().command(Program::Agent, &Account::builtin(Provider::Claude), "tab-1", Path::new("/repo"), false, vec![], &[], &[], None, Path::new("/home/test"));
         assert_eq!(cmd.get_env("CLAUDE_CODE_SESSION_ID"), None);
         assert_eq!(cmd.get_env("CLAUDECODE"), None);
         assert_eq!(cmd.get_env("PINNED_TAB").and_then(|v| v.to_str()), Some("tab-1"));
@@ -8992,7 +9008,7 @@ pub(crate) mod tests {
         let plugin = dir.join("toy@demo");
         std::fs::create_dir_all(plugin.join(".claude-plugin")).unwrap();
         std::fs::write(plugin.join(".claude-plugin/plugin.json"), r#"{"name":"toy"}"#).unwrap();
-        let cmd = launch().command(Program::Agent, &Account::builtin(Provider::Claude), "tab-1", Path::new("/repo"), false, vec![], &[], std::slice::from_ref(&plugin), None);
+        let cmd = launch().command(Program::Agent, &Account::builtin(Provider::Claude), "tab-1", Path::new("/repo"), false, vec![], &[], std::slice::from_ref(&plugin), None, Path::new("/home/test"));
         let args: Vec<String> = cmd.get_argv().iter().map(|a| a.to_string_lossy().into_owned()).collect();
         let flags: Vec<_> = args.windows(2).filter(|w| w[0] == "--plugin-dir").map(|w| w[1].as_str()).collect();
         assert_eq!(flags, vec!["p", plugin.to_str().unwrap()]);
@@ -9002,7 +9018,7 @@ pub(crate) mod tests {
     #[test]
     fn a_run_that_cannot_start_leaves_no_tab() {
         let dir = temp("run-unstartable");
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, "/nonexistent/claude".into())]), ..launch() }, None, Some("/repo".into()), |_| {});
+        let m = Machine::without_dir(Launch { bins: BTreeMap::from([(Provider::Claude, "/nonexistent/claude".into())]), ..launch() }, Some("/repo".into()), |_| {});
         let run = RunSpec { folder: dir.display().to_string(), repo: None, args: vec![], env: vec![], token: None, account: None, budget_usd: None };
         assert!(m.run(&run).is_err());
         assert_eq!(m.tabs(), vec![]);
@@ -9038,7 +9054,7 @@ pub(crate) mod tests {
 
     #[cfg(unix)]
     fn accounts_machine(root: &Path) -> Arc<Machine> {
-        Machine::new(Launch { bins: fake_bins(&root.join("bin")), ..launch() }, Some(root.join("config")), None, |_| {})
+        Machine::new(Launch { bins: fake_bins(&root.join("bin")), ..launch() }, Space::at(&root.join("config")), None, |_| {})
     }
 
     /// Starts the tab and returns the first line its session printed.
@@ -9156,7 +9172,7 @@ pub(crate) mod tests {
     fn a_worker_on_a_trust_prompt_in_a_folder_pinned_did_not_make_fails_its_task_with_the_reason() {
         let root = temp("first-run-trust-fail");
         let (claude, keys) = claude_on_screens(&root, &[TRUST_SCREEN]);
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(root.join("config")), None, |_| {});
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Space::at(&root.join("config")), None, |_| {});
         let app = root.join("app");
         std::fs::create_dir_all(&app).unwrap();
         let task = delegate_from(&m, &app, "shared");
@@ -9175,7 +9191,7 @@ pub(crate) mod tests {
     fn a_worker_in_a_worktree_pinned_made_gets_its_theme_and_trust_answered() {
         let root = temp("first-run-answer");
         let (claude, keys) = claude_on_screens(&root, &[THEME_SCREEN, TRUST_SCREEN]);
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(root.join("config")), None, |_| {});
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Space::at(&root.join("config")), None, |_| {});
         let repo = root.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         git(&repo, &["init", "-q", "-b", "main"]);
@@ -9196,7 +9212,7 @@ pub(crate) mod tests {
     fn the_bypass_warning_is_never_accepted_for_a_session_started_without_bypass() {
         let root = temp("first-run-bypass");
         let (claude, keys) = claude_on_screens(&root, &[BYPASS_SCREEN]);
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(root.join("config")), None, |_| {});
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Space::at(&root.join("config")), None, |_| {});
         let tab = m.open_tab(Some(root.display().to_string()), false).unwrap();
         m.start_claude(&tab, 120, 32).unwrap();
         wait_for("the start to end", || m.view(&tab).unwrap().status == Some(AgentStatus::Failed));
@@ -9227,7 +9243,7 @@ pub(crate) mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(root.join("config")), None, |_| {});
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Space::at(&root.join("config")), None, |_| {});
         let app = root.join("app");
         std::fs::create_dir_all(&app).unwrap();
         m.open_project(app.clone());
@@ -9299,7 +9315,7 @@ pub(crate) mod tests {
         let claude = root.join("claude");
         std::fs::write(&claude, "#!/bin/sh\necho \"{\\\"title\\\":\\\"as $PINNED_ACCOUNT\\\"}\"\n").unwrap();
         std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(root.join("config")), None, |_| {});
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Space::at(&root.join("config")), None, |_| {});
         m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
         m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into(), auth: None, key: None }).unwrap();
         let title = |account: &str| {
@@ -9409,7 +9425,7 @@ pub(crate) mod tests {
         let root = temp("usage");
         let events = Arc::new(Mutex::new(vec![]));
         let seen = events.clone();
-        let m = Machine::new(Launch { sock: root.join("sock"), ..launch() }, None, None, move |e| seen.lock().unwrap().push(serde_json::to_value(e).unwrap()));
+        let m = Machine::without_dir(Launch { sock: root.join("sock"), ..launch() }, None, move |e| seen.lock().unwrap().push(serde_json::to_value(e).unwrap()));
         m.listen(|_| Err("not for this test".into())).unwrap();
         let report = |line: &str| {
             let mut sock = std::os::unix::net::UnixStream::connect(root.join("sock")).unwrap();
@@ -9450,7 +9466,7 @@ pub(crate) mod tests {
         assert_eq!(
             homes.into_iter().collect::<BTreeMap<_, _>>(),
             BTreeMap::from([
-                ("own".into(), Some(home().join(".claude"))),
+                ("own".into(), Some(m.user_home().join(".claude"))),
                 ("side".into(), None),
                 ("work".into(), Some(root.join("config/accounts/work"))),
             ])
@@ -9648,7 +9664,7 @@ pub(crate) mod tests {
             git(dir, &["init", "-q"]);
             git(dir, &["remote", "add", "origin", origin]);
         }
-        let m = Machine::new(Launch { bins: fake_bins(&root.join("bin")), ..launch() }, None, Some("/repo".into()), |_| {});
+        let m = Machine::without_dir(Launch { bins: fake_bins(&root.join("bin")), ..launch() }, Some("/repo".into()), |_| {});
         m.open_project(other);
         m.open_project(ours.clone());
         let run = RunSpec { folder: "/Users/someone-else/app".into(), repo: Some("git@github.com:acme/app.git".into()), args: vec![], env: vec![], token: None, account: None, budget_usd: None };
@@ -9695,7 +9711,7 @@ echo '{"type":"result","result":"ok"}'
         .replace("ARGV", &argv.display().to_string());
         std::fs::write(&cursor, body).unwrap();
         std::fs::set_permissions(&cursor, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Cursor, cursor)]), ..launch() }, None, Some(root.clone()), |_| {});
+        let m = Machine::without_dir(Launch { bins: BTreeMap::from([(Provider::Cursor, cursor)]), ..launch() }, Some(root.clone()), |_| {});
         let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
         m.tab(&tab, |t| t.model = Some("claude-opus-5-5".into())).unwrap();
         let plain = crate::delegate::parse_request(&json!({ "task": "look", "target": { "providerInstanceId": "cursor" }, "mode": "async" })).unwrap();
@@ -9725,7 +9741,7 @@ echo '{"type":"result","result":"ok"}'
         let body = "#!/bin/sh\nif [ \"$1\" = status ]; then echo 'Logged in as ana@acme.dev'; exit 0; fi\necho '{\"type\":\"result\",\"result\":\"ok\"}'\n";
         std::fs::write(&cursor, body).unwrap();
         std::fs::set_permissions(&cursor, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Cursor, cursor)]), ..launch() }, None, Some(root.clone()), |_| {});
+        let m = Machine::without_dir(Launch { bins: BTreeMap::from([(Provider::Cursor, cursor)]), ..launch() }, Some(root.clone()), |_| {});
         let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
         let request = crate::delegate::parse_request(&json!({ "task": "look", "target": { "providerInstanceId": "cursor" }, "budgetMs": 90000, "limitMs": 600000 })).unwrap();
         let started: Value = serde_json::from_str(&m.start_delegate(Some(tab.clone()), None, None, request).unwrap()).unwrap();
@@ -9738,7 +9754,7 @@ echo '{"type":"result","result":"ok"}'
     #[test]
     fn a_worker_may_start_a_delegated_task() {
         let root = temp("worker-delegate");
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, root.join("missing-claude"))]), ..launch() }, None, None, |_| {});
+        let m = Machine::without_dir(Launch { bins: BTreeMap::from([(Provider::Claude, root.join("missing-claude"))]), ..launch() }, None, |_| {});
         let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], role_env(Role::Worker, Path::new("/repo")), false, None);
         let request = crate::delegate::parse_request(&json!({ "task": "look" })).unwrap();
         assert_eq!(m.start_delegate(Some(tab), None, None, request).unwrap_err(), "Claude Code is not installed on this machine", "the worker got past every check up to the missing binary");
@@ -9756,7 +9772,7 @@ echo '{"type":"result","result":"ok"}'
 
     #[test]
     fn a_task_caller_the_registry_does_not_know_is_refused() {
-        let m = Machine::new(launch(), None, None, |_| {});
+        let m = Machine::without_dir(launch(), None, |_| {});
         let request = crate::delegate::parse_request(&json!({ "task": "look" })).unwrap();
         assert_eq!(m.start_delegate(None, Some("task-gone".into()), None, request), Err("a delegated child cannot start another pinned worker".into()));
         assert!(m.delegates.running().is_empty());
@@ -9779,7 +9795,7 @@ echo '{"type":"result","result":"ok"}'
         .replace("ARGV", &argv.display().to_string());
         std::fs::write(&cursor, body).unwrap();
         std::fs::set_permissions(&cursor, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Cursor, cursor)]), ..launch() }, None, Some(root.clone()), |_| {});
+        let m = Machine::without_dir(Launch { bins: BTreeMap::from([(Provider::Cursor, cursor)]), ..launch() }, Some(root.clone()), |_| {});
         let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
         m.close_tab(&tab);
         let gone = crate::delegate::parse_request(&json!({ "task": "look", "target": { "providerInstanceId": "cursor" }, "mode": "async" })).unwrap();
@@ -9844,9 +9860,8 @@ echo '{"type":"result","result":"ok"}'
         std::fs::write(&claude, body).unwrap();
         std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let path = blocking_git(&root, &started, &go);
-        let m = Machine::new(
+        let m = Machine::without_dir(
             Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), path_env: Some(path), ..launch() },
-            None,
             Some(repo.clone()),
             |_| {},
         );
@@ -9908,7 +9923,7 @@ echo '{"type":"result","result":"ok"}'
         .replace("ARGV", &argv.display().to_string());
         std::fs::write(&claude, body).unwrap();
         std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, None, Some(root.clone()), |_| {});
+        let m = Machine::without_dir(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(root.clone()), |_| {});
         let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], true, None);
         m.record_event(AgentEvent { permission_mode: Some("plan".into()), ..done_event(&tab) });
         assert_eq!(argv_of(&m, &tab, &argv), ["--permission-mode", "plan"]);
@@ -9948,7 +9963,7 @@ echo '{"type":"result","result":"ok"}'
         let root = temp("shift-tab-mode");
         let claude = claude_recording_argv(&root);
         let argv = root.join("argv");
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, None, Some(root.clone()), |_| {});
+        let m = Machine::without_dir(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(root.clone()), |_| {});
         let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], true, None);
         let full = ["--dangerously-skip-permissions"].map(str::to_owned).to_vec();
         let plan = ["--permission-mode", "plan"].map(str::to_owned).to_vec();
@@ -9987,7 +10002,7 @@ echo '{"type":"result","result":"ok"}'
             }],
         )
         .unwrap();
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(root.clone()), Some(repo), |_| {});
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Space::at(&root), Some(repo), |_| {});
         let tab = m.restore_tabs().pop().expect("the plan session restored");
         assert_eq!(argv_of(&m, &tab, &argv), ["--permission-mode", "plan"]);
         let _ = std::fs::remove_dir_all(root);
@@ -10009,9 +10024,8 @@ exec sleep 30
             std::fs::write(bin, &body).unwrap();
             std::fs::set_permissions(bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         }
-        let m = Machine::new(
+        let m = Machine::without_dir(
             Launch { bins: BTreeMap::from([(Provider::Claude, claude), (Provider::Codex, codex)]), ..launch() },
-            None,
             Some(root.clone()),
             |_| {},
         );
@@ -10112,7 +10126,7 @@ exec sleep 30
             value["providers"][0]["models"].as_array().unwrap().iter().map(|model| model["id"].as_str().unwrap().to_owned()).collect()
         };
 
-        let m = Machine::new(launch(), Some(dir.clone()), Some("/repo".into()), |_| {});
+        let m = Machine::new(launch(), Space::at(&dir), Some("/repo".into()), |_| {});
         assert_eq!(picker(&m)[0], "Claude Fable 5.2 false");
         assert_eq!(m.call(Call::LearnModelMenu { lines: vec!["$ ls".into()] }).unwrap_err(), "claude's /model menu is not on that screen");
         let learned = m.call(Call::LearnModelMenu { lines }).unwrap();
@@ -10122,7 +10136,7 @@ exec sleep 30
         assert_eq!(catalog(&m), ["claude-fable-5-3", "claude-fable-5-2", "claude-fable-5-1", "claude-fable-5"]);
         drop(m);
 
-        let again = Machine::new(launch(), Some(dir.clone()), Some("/repo".into()), |_| {});
+        let again = Machine::new(launch(), Space::at(&dir), Some("/repo".into()), |_| {});
         assert_eq!(picker(&again), expected, "a restarted machine keeps what its claude showed");
         assert_eq!(catalog(&again)[0], "claude-fable-5-3");
         let _ = std::fs::remove_dir_all(dir);
@@ -10200,7 +10214,7 @@ exec sleep 30
         let root = temp(name);
         let events = Arc::new(Mutex::new(vec![]));
         let heard = events.clone();
-        let m = Machine::new(launch(), Some(root.join("config")), Some(root.clone()), move |e| heard.lock().unwrap().push(e));
+        let m = Machine::new(launch(), Space::at(&root.join("config")), Some(root.clone()), move |e| heard.lock().unwrap().push(e));
         (m, root, events)
     }
 
@@ -10658,9 +10672,8 @@ while True:
         for path in [&exe, &codex] {
             std::fs::set_permissions(path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         }
-        let m = Machine::new(
+        let m = Machine::without_dir(
             Launch { exe, bins: BTreeMap::from([(Provider::Codex, codex)]), sock: sock.clone(), ..launch() },
-            None,
             Some(root.clone()),
             |_| {},
         );
@@ -10753,7 +10766,7 @@ while True:
         let project = dir.join("site");
         std::fs::create_dir_all(&project).unwrap();
         let file = dir.join("typed.bin");
-        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let m = Machine::new(launch(), Space::at(&dir.join("config")), None, |_| {});
         let path = project.display().to_string();
         let tab = idle_captain(&m, &path, &file);
 
@@ -10787,7 +10800,7 @@ while True:
         let project = dir.join("site");
         std::fs::create_dir_all(&project).unwrap();
         let sock = dir.join("pinned.sock");
-        let m = Machine::new(Launch { sock: sock.clone(), ..launch() }, Some(dir.join("config")), None, |_| {});
+        let m = Machine::new(Launch { sock: sock.clone(), ..launch() }, Space::at(&dir.join("config")), None, |_| {});
         m.listen(|_| Err("not the machine's".into())).unwrap();
         let path = project.display().to_string();
         let tab = idle_captain(&m, &path, &dir.join("typed.bin"));
@@ -10806,7 +10819,7 @@ while True:
         let dir = temp("enqueue-refuse");
         let project = dir.join("site");
         std::fs::create_dir_all(&project).unwrap();
-        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let m = Machine::new(launch(), Space::at(&dir.join("config")), None, |_| {});
         let path = project.display().to_string();
         let tab = idle_captain(&m, &path, &dir.join("typed.bin"));
         m.record_event(hook(&tab, AgentStatus::Working));
@@ -10828,7 +10841,7 @@ while True:
         let (project, config) = (dir.join("site"), dir.join("config"));
         std::fs::create_dir_all(&project).unwrap();
         let claude = recording_claude(&dir);
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config), None, |_| {});
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Space::at(&config), None, |_| {});
         let path = project.display().to_string();
         let capitao = format!("{}\n\n{}\n\n{}\n\n{}", Role::Orchestrator.prompt(), taste::Taste::default().brief(), taste::Taste::default().limits().hint(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
 
@@ -10861,7 +10874,7 @@ while True:
         let env = json!([["PINNED_ROLE", "orchestrator"], ["PINNED_PROJECT", path]]);
         std::fs::write(config.join("sessions.json"), json!([{ "cwd": path, "session": "s1", "env": env }]).to_string()).unwrap();
         let claude = recording_claude(&dir);
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config), None, |_| {});
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Space::at(&config), None, |_| {});
         let tab = m.restore_tabs().remove(0);
         assert_eq!(enqueue(&m, &path, "Where are we?", "r-1"), Ok(json!({ "outcome": "iniciado", "tab": tab })));
         assert_eq!(started(&claude, &tab)[7..11], ["--resume", "s1", "[Orchestrator] Where are we?", "--append-system-prompt"]);
@@ -10875,13 +10888,13 @@ while True:
         let (project, config) = (dir.join("site"), dir.join("config"));
         std::fs::create_dir_all(&project).unwrap();
         let path = project.display().to_string();
-        let before = Machine::new(launch(), Some(config.clone()), None, |_| {});
+        let before = Machine::new(launch(), Space::at(&config), None, |_| {});
         let tab = idle_captain(&before, &path, &dir.join("typed.bin"));
         before.record_event(hook(&tab, AgentStatus::Working));
         assert_eq!(enqueue(&before, &path, "Ship it.", "r-1"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })));
         before.quit();
 
-        let after = Machine::new(launch(), Some(config), None, |_| {});
+        let after = Machine::new(launch(), Space::at(&config), None, |_| {});
         let restored = after.restore_tabs().remove(0);
         assert_ne!(restored, tab);
         assert_eq!(enqueue(&after, &path, "Ship it.", "r-1"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })));
@@ -10897,7 +10910,7 @@ while True:
         std::fs::create_dir_all(&project).unwrap();
         let (sock, config) = (dir.join("pinned.sock"), dir.join("config"));
         let claude = recording_claude(&dir);
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), sock: sock.clone(), ..launch() }, Some(config.clone()), None, |_| {});
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), sock: sock.clone(), ..launch() }, Space::at(&config), None, |_| {});
         m.listen(|_| Err("not the machine's".into())).unwrap();
         let path = m.open_project(project.clone()).display().to_string();
 
@@ -10938,7 +10951,7 @@ while True:
         let project = dir.join("site");
         std::fs::create_dir_all(&project).unwrap();
         let claude = recording_claude(&dir);
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Space::at(&dir.join("config")), None, |_| {});
         let path = m.open_project(project).display().to_string();
         let overview: Arc<Mutex<Option<Value>>> = Arc::default();
         let relayed: Arc<Mutex<Vec<Value>>> = Arc::default();
@@ -10992,7 +11005,7 @@ while True:
     #[test]
     fn read_captain_reads_a_capitao_on_another_machine_through_the_hub() {
         let dir = temp("global-read");
-        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let m = Machine::new(launch(), Space::at(&dir.join("config")), None, |_| {});
         let asked: Arc<Mutex<Vec<Value>>> = Arc::default();
         let seen = asked.clone();
         m.set_hub(Arc::new(move |call| match call {
@@ -11025,7 +11038,7 @@ while True:
     fn a_report_starts_the_global_orchestrator_on_its_line_once() {
         let dir = temp("global-report");
         let claude = recording_claude(&dir);
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Space::at(&dir.join("config")), None, |_| {});
         let report = CaptainReport { machine: "m1".into(), machine_name: "MacBook".into(), project: "site".into(), path: "/w/site".into(), tab: "tab-1a-3".into(), text: "Done: PR #12 is open.".into(), answers: vec![] };
         let call = || m.call(Call::OrchestratorReport { request_id: "report-1".into(), report: report.clone() });
         let first = call().unwrap();
@@ -11044,7 +11057,7 @@ while True:
         let config = dir.join("config");
         std::fs::create_dir_all(&config).unwrap();
         std::fs::write(config.join("accounts.json"), r#"[{"id": "work", "provider": "claude", "name": "Work"}]"#).unwrap();
-        Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.to_owned())]), sock: sock.to_owned(), ..launch() }, Some(config), None, |_| {})
+        Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.to_owned())]), sock: sock.to_owned(), ..launch() }, Space::at(&config), None, |_| {})
     }
 
     #[cfg(unix)]
@@ -11480,7 +11493,7 @@ while True:
     fn archiving_machine(name: &str, folder: &Path) -> (Arc<Machine>, String, Arc<Mutex<Vec<String>>>, PathBuf) {
         use crate::delegate::{Access, Claim, Mode, NewTask, Parent, Thread};
         let dir = temp(name);
-        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let m = Machine::new(launch(), Space::at(&dir.join("config")), None, |_| {});
         let archived = Arc::new(Mutex::new(vec![]));
         let seen = archived.clone();
         m.set_hub(Arc::new(move |call| match call {
@@ -11541,7 +11554,7 @@ while True:
         assert_eq!(*archived.lock().unwrap(), Vec::<String>::new());
         assert_eq!(m.call(Call::AutoArchiveSettings), Ok(json!({ "workers": null, "sessions": null })));
         drop(m);
-        let again = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let again = Machine::new(launch(), Space::at(&dir.join("config")), None, |_| {});
         assert_eq!(again.auto_archive_settings(), off, "it survives a restart");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -11687,7 +11700,7 @@ while True:
         let project = dir.join("site");
         std::fs::create_dir_all(&project).unwrap();
         let file = dir.join("typed.bin");
-        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let m = Machine::new(launch(), Space::at(&dir.join("config")), None, |_| {});
         let path = project.display().to_string();
         let tab = idle_captain(&m, &path, &file);
         let state = || global::CaptainState::of(Some(&m.view(&tab).unwrap()));
@@ -11709,7 +11722,7 @@ while True:
     fn the_global_orchestrators_folder_gets_no_capitao_and_its_tab_starts_no_worker() {
         let dir = temp("global-nocap");
         let (sock, config) = (dir.join("pinned.sock"), dir.join("config"));
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, dir.join("missing-claude"))]), sock: sock.clone(), ..launch() }, Some(config.clone()), None, |_| {});
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, dir.join("missing-claude"))]), sock: sock.clone(), ..launch() }, Space::at(&config), None, |_| {});
         m.listen(|_| Err("not the machine's".into())).unwrap();
         let global = m.call(Call::OpenGlobalOrchestrator).unwrap().as_str().unwrap().to_owned();
         let folder = config.join("home/.pinned/orquestrador").display().to_string();
@@ -11728,12 +11741,12 @@ while True:
     #[test]
     fn global_orchestrator_settings_are_saved_on_the_machine() {
         let dir = temp("global-settings");
-        let m = Machine::new(launch(), Some(dir.clone()), None, |_| {});
+        let m = Machine::new(launch(), Space::at(&dir), None, |_| {});
         assert_eq!(m.call(Call::GlobalOrchestratorSettings), Ok(json!({ "name": "Orchestrator", "host": false, "busy": "queue", "reports": "auto", "group_reports": true, "read_aloud": false })));
         let settings = global::Settings { name: " Almirante ".into(), host: true, busy: BusyPolicy::Refuse, reports: global::ReportPolicy::ToolOnly, group_reports: false, read_aloud: true };
         let saved = json!({ "name": "Almirante", "host": true, "busy": "refuse", "reports": "tool_only", "group_reports": false, "read_aloud": true });
         assert_eq!(m.call(Call::SetGlobalOrchestratorSettings { settings }), Ok(saved.clone()));
-        let again = Machine::new(launch(), Some(dir.clone()), None, |_| {});
+        let again = Machine::new(launch(), Space::at(&dir), None, |_| {});
         assert_eq!(again.call(Call::GlobalOrchestratorSettings), Ok(saved));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -11746,7 +11759,7 @@ while True:
         std::fs::create_dir_all(&project).unwrap();
         std::fs::create_dir_all(dir.join("config")).unwrap();
         let claude = recording_claude(&dir);
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Space::at(&dir.join("config")), None, |_| {});
         m.call(Call::DeviceAgents { allow: Some(true) }).unwrap();
         let path = project.display().to_string();
         let tab = m.call(Call::OpenOrchestrator { path: path.clone() }).unwrap().as_str().unwrap().to_owned();
@@ -11770,7 +11783,7 @@ while True:
         git(&site, &["init", "-q"]);
         git(&site, &["remote", "add", "origin", "git@github.com:acme/site.git"]);
         let claude = recording_claude(&dir);
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config.clone()), None, |_| {});
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Space::at(&config), None, |_| {});
         let account = json!({
             "orchestrator": { "strategy": "strongest_first", "ladder": [{ "model": "claude-opus-5-5" }], "parallel": 6, "autonomy": "report_at_end", "review_diffs": false, "second_opinion": true },
             "projects": { "github.com/acme/site": { "parallel": 4, "autonomy": "report_at_end", "context": ["Deploys go through the VPS."], "tier": "mid", "budget_cents": 200 } },
@@ -11823,7 +11836,7 @@ Have another model review a risky change before it goes ahead.";
         std::fs::create_dir_all(&config).unwrap();
         std::fs::write(config.join("orchestration.json"), r#"{"style":"quality","max_workers":4}"#).unwrap();
         std::fs::write(config.join("taste.json"), serde_json::to_vec(&Tastes { captains: taste::Profile::Economical.preset().unwrap(), ..Tastes::default() }).unwrap()).unwrap();
-        let m = Machine::new(launch(), Some(config.clone()), None, |_| {});
+        let m = Machine::new(launch(), Space::at(&config), None, |_| {});
         let calls = Arc::new(Mutex::new(vec![]));
         let seen = calls.clone();
         m.set_hub(Arc::new(move |call| {
@@ -11840,11 +11853,24 @@ Have another model review a risky change before it goes ahead.";
     }
 
     #[test]
+    fn a_test_machine_shares_the_user_home_plugins_and_nothing_outside_the_root() {
+        let root = temp("plugin-shares-home");
+        let plugin = root.join("home/.claude/plugins/x");
+        std::fs::create_dir_all(&plugin).unwrap();
+        let m = Machine::new(launch(), Space::at(&root), None, |_| {});
+        let shares = m.plugin_shares();
+        let homes: Vec<PathBuf> = shares.iter().map(|share| share.claude_home.clone()).collect();
+        assert!(homes.contains(&root.join("home/.claude")), "the shared user home's Claude folder is listed: {homes:?}");
+        assert!(homes.iter().all(|home| home.starts_with(&root)), "nothing outside the root is shared: {homes:?}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn a_silent_hub_holds_a_sessions_start_only_briefly_and_its_late_answer_is_kept() {
         let dir = temp("taste-slow");
         let config = dir.join("config");
         std::fs::create_dir_all(&config).unwrap();
-        let m = Machine::new(launch(), Some(config.clone()), None, |_| {});
+        let m = Machine::new(launch(), Space::at(&config), None, |_| {});
         let kept = Tastes { orchestrator: taste::Profile::Economical.preset().unwrap(), ..Tastes::default() };
         taste::save(&kept, Some(&config)).unwrap();
         let late = Tastes { orchestrator: taste::Profile::Aggressive.preset().unwrap(), ..Tastes::default() };
@@ -11869,7 +11895,7 @@ Have another model review a risky change before it goes ahead.";
         let config = dir.join("config");
         std::fs::create_dir_all(&config).unwrap();
         std::fs::write(config.join("orchestration.json"), r#"{"style":"economical","max_workers":4}"#).unwrap();
-        let m = Machine::new(launch(), Some(config.clone()), None, |_| {});
+        let m = Machine::new(launch(), Space::at(&config), None, |_| {});
         assert_eq!(m.local_tastes().captains.profile(), taste::Profile::Economical, "the old cost style seeded the Capitães");
         let site = TasteScope::Project { repo: "github.com/acme/site".into() };
         let set = m.set_local_taste(&site, TastePatch { parallel: Some(5), review_diffs: Some(false), ..TastePatch::default() }).unwrap();
@@ -11891,7 +11917,7 @@ Have another model review a risky change before it goes ahead.";
         let claude = recording_claude(&dir);
         let events = Arc::new(Mutex::new(vec![]));
         let seen = events.clone();
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), sock: sock.clone(), ..launch() }, Some(config.clone()), None, move |e| {
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), sock: sock.clone(), ..launch() }, Space::at(&config), None, move |e| {
             seen.lock().unwrap().push(serde_json::to_value(e).unwrap())
         });
         m.listen(|_| Err("not the machine's".into())).unwrap();
@@ -11967,7 +11993,7 @@ Have another model review a risky change before it goes ahead.";
         let env = json!([["PINNED_ROLE", "orchestrator"], ["PINNED_PROJECT", path]]);
         std::fs::write(config.join("sessions.json"), json!([{ "cwd": path, "session": "s1", "env": env }]).to_string()).unwrap();
         let claude = recording_claude(&dir);
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config), None, |_| {});
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Space::at(&config), None, |_| {});
         let tabs = m.restore_tabs();
         m.start_claude(&tabs[0], 80, 24).unwrap();
         let prompt = format!("{}\n\n{}\n\n{}\n\n{}", Role::Orchestrator.prompt(), taste::Taste::default().brief(), taste::Taste::default().limits().hint(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
@@ -12000,7 +12026,7 @@ Have another model review a risky change before it goes ahead.";
         let dir = temp(name);
         let project = dir.join("app");
         std::fs::create_dir_all(&project).unwrap();
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, thread_claude(&dir))]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, thread_claude(&dir))]), ..launch() }, Space::at(&dir.join("config")), None, |_| {});
         m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
         m.set_local_taste(&TasteScope::Captains, limits).unwrap();
         let path = m.open_project(project).display().to_string();
@@ -12552,14 +12578,14 @@ Have another model review a risky change before it goes ahead.";
     #[test]
     fn a_notice_typed_before_a_restart_is_not_queued_again_after_it() {
         let root = temp("notice-restart");
-        let first = Machine::new(launch(), Some(root.join("config")), None, |_| {});
+        let first = Machine::new(launch(), Space::at(&root.join("config")), None, |_| {});
         let tab = first.open_tab(None, false).unwrap();
         first.tab(&tab, |t| t.claude_session = Some("s-1".into())).unwrap();
         assert_eq!(notice_call(&first, &tab, None, "c-1"), Ok(json!(true)));
         assert_eq!(first.take_notices(&turn_done(&tab, "s-1")).0, "[pinned] The user approved your remove_machine request (c-1): done.");
         drop(first);
 
-        let second = Machine::new(launch(), Some(root.join("config")), None, |_| {});
+        let second = Machine::new(launch(), Space::at(&root.join("config")), None, |_| {});
         let back = second.open_tab(None, false).unwrap();
         second.tab(&back, |t| t.claude_session = Some("s-1".into())).unwrap();
         assert_eq!(notice_call(&second, &tab, Some("s-1"), "c-1"), Ok(json!(true)), "the tab that took it was found by its session");
@@ -12656,7 +12682,7 @@ Have another model review a risky change before it goes ahead.";
     fn a_start_that_never_reports_fails_after_the_starting_limit() {
         let root = temp("starting-limit");
         let (claude, _) = claude_on_screens(&root, &["Warming up the flux capacitor"]);
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), starting_limit: Duration::from_secs(1), ..launch() }, Some(root.join("config")), None, |_| {});
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), starting_limit: Duration::from_secs(1), ..launch() }, Space::at(&root.join("config")), None, |_| {});
         let app = root.join("app");
         std::fs::create_dir_all(&app).unwrap();
         let task = delegate_from(&m, &app, "shared");
@@ -12713,7 +12739,7 @@ Have another model review a risky change before it goes ahead.";
     /// A machine over `dir`'s config as `limited_captain` made it, as after the app restarted.
     #[cfg(unix)]
     fn restarted(dir: &Path) -> Arc<Machine> {
-        Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, thread_claude(dir))]), ..launch() }, Some(dir.join("config")), None, |_| {})
+        Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, thread_claude(dir))]), ..launch() }, Space::at(&dir.join("config")), None, |_| {})
     }
 
     #[cfg(unix)]
@@ -12775,7 +12801,7 @@ Have another model review a risky change before it goes ahead.";
         let root = temp("remote-origin-restart");
         let (app, config) = (root.join("app"), root.join("config"));
         std::fs::create_dir_all(&app).unwrap();
-        let before = Machine::new(launch(), Some(config.clone()), None, |_| {});
+        let before = Machine::new(launch(), Space::at(&config), None, |_| {});
         let tab = before.add_tab(app.clone(), Account::builtin(Provider::Claude), vec![], role_env(Role::Worker, &app), false, Some("s-parent".into()));
         let task = delegated_elsewhere(&before, &tab, "m-mini", "mini");
         before.delegates.set_remote(&task, RemoteTarget { machine: "m-mini".into(), name: "mini".into(), tab: Some("tab-9".into()), looked: Some(Instant::now()), waiting: None });
@@ -12783,7 +12809,7 @@ Have another model review a risky change before it goes ahead.";
         before.quit();
         drop(before);
 
-        let after = Machine::new(launch(), Some(config), None, |_| {});
+        let after = Machine::new(launch(), Space::at(&config), None, |_| {});
         let tabs = after.restore_tabs();
         assert_eq!(tabs.len(), 1);
         assert_ne!(tabs[0], tab, "the parent has a new tab id");
@@ -13161,7 +13187,7 @@ Have another model review a risky change before it goes ahead.";
             r#"{"type":"assistant","uuid":"a2","timestamp":"2026-10-29T10:02:00Z","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"git push origin main"}}]}}"#,
         ];
         std::fs::write(config.join("accounts/work/projects/-app/s1.jsonl"), transcript.map(|l| l.to_owned() + "\n").concat()).unwrap();
-        let m = Machine::new(launch(), Some(config), None, |_| {});
+        let m = Machine::new(launch(), Space::at(&config), None, |_| {});
         let (sent, told) = std::sync::mpsc::channel();
         m.set_hub(Arc::new(move |call| {
             if let HubCall::RemoteAsked { to, tab, task, ask } = call {
@@ -13278,7 +13304,7 @@ Have another model review a risky change before it goes ahead.";
         use crate::delegate::{Access, Mode, NewTask, Origin, Parent};
         let root = temp("remote-end-restart");
         let config = root.join("config");
-        let first = Machine::new(launch(), Some(config.clone()), None, |_| {});
+        let first = Machine::new(launch(), Space::at(&config), None, |_| {});
         first.set_hub(Arc::new(|_| Err("mac is offline".into())));
         let key = Origin::key("m-mac", "tab-1");
         let task = first.delegates.begin(NewTask {
@@ -13300,7 +13326,7 @@ Have another model review a risky change before it goes ahead.";
         first.send_remote_ends(Instant::now());
         drop(first);
 
-        let second = Machine::new(launch(), Some(config.clone()), None, |_| {});
+        let second = Machine::new(launch(), Space::at(&config), None, |_| {});
         let (sent, ends) = std::sync::mpsc::channel();
         second.set_hub(Arc::new(move |call| {
             if let HubCall::RemoteEnded { to, tab, task, end } = call {
@@ -13316,7 +13342,7 @@ Have another model review a risky change before it goes ahead.";
         );
         std::thread::sleep(Duration::from_millis(200));
         drop(second);
-        let third = Machine::new(launch(), Some(config), None, |_| {});
+        let third = Machine::new(launch(), Space::at(&config), None, |_| {});
         assert_eq!(third.delegates.remote_ends(), vec![], "an end the hub took is not sent again");
         let _ = std::fs::remove_dir_all(root);
     }
@@ -13328,7 +13354,7 @@ Have another model review a risky change before it goes ahead.";
         // "unknown" reaches the worker. Like a bare false, it is not taken, and the end is not sent again.
         for answer in [json!(crate::delegate::END_SETTLED), json!(crate::delegate::END_UNKNOWN), json!(false)] {
             let root = temp("remote-end-string");
-            let m = Machine::new(launch(), Some(root.join("config")), None, |_| {});
+            let m = Machine::new(launch(), Space::at(&root.join("config")), None, |_| {});
             let sends = Arc::new(AtomicU64::new(0));
             let (counted, reply) = (sends.clone(), answer.clone());
             m.set_hub(Arc::new(move |call| match call {
@@ -13503,7 +13529,7 @@ Have another model review a risky change before it goes ahead.";
         git(&project, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "first"]);
         let claude = thread_claude(&dir);
         let config = dir.join("config");
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(config.clone()), None, |_| {});
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Space::at(&config), None, |_| {});
         m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
         let path = m.open_project(project.clone()).display().to_string();
         let captain = m.open_orchestrator(&path).unwrap();
@@ -13591,7 +13617,7 @@ Have another model review a risky change before it goes ahead.";
         std::fs::create_dir_all(&project).unwrap();
         let claude = thread_claude(&dir);
         let config = dir.join("config");
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(config.clone()), None, |_| {});
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Space::at(&config), None, |_| {});
         m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
         let path = m.open_project(project).display().to_string();
         let captain = m.open_orchestrator(&path).unwrap();
@@ -13695,7 +13721,7 @@ Have another model review a risky change before it goes ahead.";
         git(&project, &["init", "-q"]);
         git(&project, &["remote", "add", "origin", "git@github.com:Acme/Site.git"]);
         std::fs::write(project.join(".env.local"), "CONVEX_DEPLOYMENT=dev:quick-lemur-789 # team: acme, project: site\n").unwrap();
-        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let m = Machine::new(launch(), Space::at(&dir.join("config")), None, |_| {});
         m.open_project(project.clone());
         assert_eq!(m.list_projects().into_iter().map(|p| p.convex).collect::<Vec<_>>(), [Some("dev:quick-lemur-789".to_owned())]);
         let thread = m.add_tab(project.join(".claude/worktrees/pinned-1"), Account::builtin(Provider::Claude), vec![], vec![], false, None);
@@ -13747,7 +13773,7 @@ Have another model review a risky change before it goes ahead.";
         std::fs::create_dir_all(&project).unwrap();
         git(&project, &["init", "-q"]);
         git(&project, &["remote", "add", "origin", "git@github.com:Acme/Site.git"]);
-        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let m = Machine::new(launch(), Space::at(&dir.join("config")), None, |_| {});
         let path = m.open_project(project.clone()).display().to_string();
         let captain = m.open_orchestrator(&path).unwrap();
         let global = m.open_global_orchestrator().unwrap();
@@ -13936,7 +13962,7 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(global::waiting_kind(&view), Some(global::WaitingKind::NeedsInput));
         assert_eq!(m.tabs().iter().find(|t| t.id == child).and_then(|t| t.questions.clone()), view.questions);
 
-        let reloaded = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let reloaded = Machine::new(launch(), Space::at(&dir.join("config")), None, |_| {});
         assert_eq!(reloaded.questions.lock().unwrap().open_on(&child).map(|q| q.id.clone()), Some(id.clone()), "open questions outlive a restart");
         drop(reloaded);
 
@@ -13996,7 +14022,7 @@ Have another model review a risky change before it goes ahead.";
         git(&project, &["init", "-q", "-b", "main"]);
         git(&project, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "first"]);
         let claude = thread_claude(&dir);
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Space::at(&dir.join("config")), None, |_| {});
         let path = m.open_project(project.clone()).display().to_string();
         let orchestrator = m.open_orchestrator(&path).unwrap();
         let plain = m.open_tab(Some(path.clone()), false).unwrap();
@@ -14038,7 +14064,7 @@ Have another model review a risky change before it goes ahead.";
         let project = dir.join("app");
         std::fs::create_dir_all(&project).unwrap();
         let sock = dir.join("pinned.sock");
-        let m = Machine::new(Launch { sock: sock.clone(), ..launch() }, Some(dir.join("config")), None, |_| {});
+        let m = Machine::new(Launch { sock: sock.clone(), ..launch() }, Space::at(&dir.join("config")), None, |_| {});
         m.listen(|_| Err("not the machine's".into())).unwrap();
         let path = m.open_project(project.clone()).display().to_string();
         let plain = m.open_tab(Some(path.clone()), false).unwrap();
@@ -14089,7 +14115,7 @@ Have another model review a risky change before it goes ahead.";
         let project = dir.join("app");
         std::fs::create_dir_all(&project).unwrap();
         let sock = dir.join("pinned.sock");
-        let m = Machine::new(Launch { sock: sock.clone(), ..launch() }, Some(dir.join("config")), None, |_| {});
+        let m = Machine::new(Launch { sock: sock.clone(), ..launch() }, Space::at(&dir.join("config")), None, |_| {});
         m.listen(|_| Err("not the machine's".into())).unwrap();
         let path = m.open_project(project).display().to_string();
         let plain = m.open_tab(Some(path.clone()), false).unwrap();
@@ -14134,7 +14160,7 @@ Have another model review a risky change before it goes ahead.";
         let root = temp("notice-stop");
         let sock = root.join("hook.sock");
         let file = root.join("typed.bin");
-        let m = Machine::new(Launch { sock: sock.clone(), ..launch() }, None, Some(root.clone()), |_| {});
+        let m = Machine::without_dir(Launch { sock: sock.clone(), ..launch() }, Some(root.clone()), |_| {});
         m.listen(|_| Err("not a connector".into())).unwrap();
         let tab = running(&m, vec![], &format!("stty raw -echo; echo ready; exec cat > '{}'", file.display()));
         let (seen, sink) = viewer();
@@ -14163,7 +14189,7 @@ Have another model review a risky change before it goes ahead.";
         let root = temp("notice-lost-hand-over");
         let sock = root.join("hook.sock");
         let file = root.join("typed.bin");
-        let m = Machine::new(Launch { sock: sock.clone(), ..launch() }, None, Some(root.clone()), |_| {});
+        let m = Machine::without_dir(Launch { sock: sock.clone(), ..launch() }, Some(root.clone()), |_| {});
         m.listen(|_| Err("not a connector".into())).unwrap();
         let tab = running(&m, vec![], &format!("stty raw -echo; echo ready; exec cat > '{}'", file.display()));
         let (seen, sink) = viewer();
@@ -14197,7 +14223,7 @@ Have another model review a risky change before it goes ahead.";
         let root = temp("notice-draft");
         let sock = root.join("hook.sock");
         let file = root.join("typed.bin");
-        let m = Machine::new(Launch { sock: sock.clone(), ..launch() }, None, Some(root.clone()), |_| {});
+        let m = Machine::without_dir(Launch { sock: sock.clone(), ..launch() }, Some(root.clone()), |_| {});
         m.listen(|_| Err("not a connector".into())).unwrap();
         let tab = running(&m, vec![], &format!("stty raw -echo; echo ready; exec cat > '{}'", file.display()));
         let (seen, sink) = viewer();
@@ -14255,7 +14281,7 @@ Have another model review a risky change before it goes ahead.";
         std::fs::create_dir_all(&config).unwrap();
         let project = root.join("app");
         std::fs::create_dir_all(&project).unwrap();
-        let m = Machine::new(launch(), Some(config.clone()), None, |_| {});
+        let m = Machine::new(launch(), Space::at(&config), None, |_| {});
         let _first = m.add_tab(project.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
         let parent = m.add_tab(project.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
         m.record_event(AgentEvent {
@@ -14308,7 +14334,7 @@ Have another model review a risky change before it goes ahead.";
             role: None,
         });
         m.quit();
-        let m2 = Machine::new(launch(), Some(config), None, |_| {});
+        let m2 = Machine::new(launch(), Space::at(&config), None, |_| {});
         let tabs = m2.restore_tabs();
         assert_eq!(tabs.len(), 1, "the orchestrator session was not restored");
         let notice = m2.delegates.claim_notice(&tabs[0]).map(|(text, _)| text).unwrap_or_default();
@@ -14343,7 +14369,7 @@ Have another model review a risky change before it goes ahead.";
     #[cfg(unix)]
     fn the_delegate_pass_stops_a_task_past_its_hard_limit() {
         use std::os::unix::process::CommandExt;
-        let m = Machine::new(launch(), None, None, |_| {});
+        let m = Machine::without_dir(launch(), None, |_| {});
         let task = runaway(&m);
         m.delegates.set_limits(&task.id, 1, 2);
         let mut sleeper = crate::process::command("sleep");
@@ -14362,7 +14388,7 @@ Have another model review a risky change before it goes ahead.";
     #[cfg(unix)]
     fn the_delegate_pass_still_stops_a_task_after_a_quit_that_reopens() {
         use std::os::unix::process::CommandExt;
-        let m = Machine::new(launch(), None, None, |_| {});
+        let m = Machine::without_dir(launch(), None, |_| {});
         m.arm_delegate_pass();
         m.quit();
         std::thread::sleep(Duration::from_millis(2500));
@@ -14382,7 +14408,7 @@ Have another model review a risky change before it goes ahead.";
 
     #[test]
     fn the_delegate_pass_keeps_enforcing_limits_after_a_panic() {
-        let m = Machine::new(launch(), None, None, |_| {});
+        let m = Machine::without_dir(launch(), None, |_| {});
         let task = runaway(&m);
         m.delegates.set_limits(&task.id, 2_000, 2_500);
         let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -14399,7 +14425,7 @@ Have another model review a risky change before it goes ahead.";
 
     #[test]
     fn a_laptop_sleep_does_not_count_against_a_working_task() {
-        let m = Machine::new(launch(), None, None, |_| {});
+        let m = Machine::without_dir(launch(), None, |_| {});
         let task = m.delegates.begin(crate::delegate::NewTask {
             parent: crate::delegate::Parent::Tab("tab-1".into()),
             tool: None,
@@ -14432,7 +14458,7 @@ Have another model review a risky change before it goes ahead.";
         let file = root.join("typed.bin");
         let project = root.join("app");
         std::fs::create_dir_all(&project).unwrap();
-        let m = Machine::new(Launch { sock: sock.clone(), ..launch() }, None, Some(root.clone()), |_| {});
+        let m = Machine::without_dir(Launch { sock: sock.clone(), ..launch() }, Some(root.clone()), |_| {});
         m.listen(|_| Err("not a connector".into())).unwrap();
         let orchestrator = running(&m, role_env(Role::Orchestrator, &project), &format!("stty raw -echo; echo ready; exec cat > '{}'", file.display()));
         let (seen, sink) = viewer();
@@ -14468,7 +14494,7 @@ Have another model review a risky change before it goes ahead.";
         ];
         std::fs::write(config.join("accounts/work/projects/-app/s1.jsonl"), transcript.map(|l| l.to_owned() + "\n").concat()).unwrap();
         let file = root.join("typed.bin");
-        let m = Machine::new(launch(), Some(config), None, |_| {});
+        let m = Machine::new(launch(), Space::at(&config), None, |_| {});
         let app = Path::new("/work/app");
         let orchestrator = running(&m, role_env(Role::Orchestrator, app), &format!("stty raw -echo; echo ready; exec cat > '{}'", file.display()));
         let (seen, sink) = viewer();
@@ -14507,7 +14533,7 @@ Have another model review a risky change before it goes ahead.";
         let transcript = config.join("accounts/work/projects/-app/s1.jsonl");
         std::fs::write(&transcript, "").unwrap();
         let file = root.join("typed.bin");
-        let m = Machine::new(launch(), Some(config), None, |_| {});
+        let m = Machine::new(launch(), Space::at(&config), None, |_| {});
         let app = Path::new("/work/app");
         let orchestrator = running(&m, role_env(Role::Orchestrator, app), &format!("stty raw -echo; echo ready; exec cat > '{}'", file.display()));
         let (seen, sink) = viewer();
@@ -14598,7 +14624,7 @@ Have another model review a risky change before it goes ahead.";
         let file = root.join("typed.bin");
         let project = root.join("app");
         std::fs::create_dir_all(&project).unwrap();
-        let m = Machine::new(Launch { sock: root.join("hook.sock"), ..launch() }, None, Some(root.clone()), |_| {});
+        let m = Machine::without_dir(Launch { sock: root.join("hook.sock"), ..launch() }, Some(root.clone()), |_| {});
         m.listen(|_| Err("not a connector".into())).unwrap();
         let spawner = running(&m, vec![], &format!("stty raw -echo; echo ready; exec cat > '{}'", file.display()));
         let (seen, sink) = viewer();
@@ -14631,7 +14657,7 @@ Have another model review a risky change before it goes ahead.";
         let root = temp("report-parent");
         let project = root.join("app");
         std::fs::create_dir_all(&project).unwrap();
-        let m = Machine::new(Launch { sock: root.join("hook.sock"), ..launch() }, None, Some(root.clone()), |_| {});
+        let m = Machine::without_dir(Launch { sock: root.join("hook.sock"), ..launch() }, Some(root.clone()), |_| {});
         m.listen(|_| Err("not a connector".into())).unwrap();
         let typed_into = |env: Vec<(String, String)>, name: &str| {
             let file = root.join(name);
@@ -14674,7 +14700,7 @@ Have another model review a risky change before it goes ahead.";
     fn a_workers_news_is_queued_for_an_orchestrator_without_a_running_session() {
         let root = temp("report-queued");
         std::fs::create_dir_all(root.join("app")).unwrap();
-        let m = Machine::new(launch(), None, Some(root.clone()), |_| {});
+        let m = Machine::without_dir(launch(), Some(root.clone()), |_| {});
         let project = root.join("app");
         let orchestrator = m.add_tab(project.clone(), Account::builtin(Provider::Claude), vec![], role_env(Role::Orchestrator, &project), false, None);
         let worker = m.add_tab(project.clone(), Account::builtin(Provider::Claude), vec![], role_env(Role::Worker, &project), false, None);
@@ -14745,7 +14771,7 @@ Have another model review a risky change before it goes ahead.";
     #[test]
     fn a_second_press_while_updating_does_not_install_again() {
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let m = Machine::new(launch(), None, None, {
+        let m = Machine::without_dir(launch(), None, {
             let seen = seen.clone();
             move |event| seen.lock().unwrap().push(event)
         });
@@ -14866,7 +14892,7 @@ Have another model review a risky change before it goes ahead.";
     #[test]
     fn a_report_uses_the_link_flusher_when_one_is_installed() {
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let m = Machine::new(launch(), None, None, {
+        let m = Machine::without_dir(launch(), None, {
             let seen = seen.clone();
             move |event| seen.lock().unwrap().push(event)
         });
@@ -15200,7 +15226,7 @@ Have another model review a risky change before it goes ahead.";
         let dir = temp("report-cached");
         let claude = counting_claude(&dir);
         std::fs::write(format!("{}.in", claude.display()), "").unwrap();
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Space::at(&dir.join("config")), None, |_| {});
         m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
         let after_add = status_runs(&claude);
         assert_eq!(after_add, 1, "adding the account asked its CLI once, to show it");
@@ -15224,7 +15250,7 @@ Have another model review a risky change before it goes ahead.";
         let dir = temp("report-warm");
         let claude = counting_claude(&dir);
         std::fs::write(format!("{}.in", claude.display()), "").unwrap();
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Space::at(&dir.join("config")), None, |_| {});
         m.warm_statuses();
         assert_eq!(status_runs(&claude), 1, "the built-in Claude account was asked once");
         for _ in 0..3 {
@@ -15242,7 +15268,7 @@ Have another model review a risky change before it goes ahead.";
     fn a_status_older_than_the_window_is_asked_again_off_the_report_and_the_old_one_is_reported_meanwhile() {
         let dir = temp("report-stale");
         let claude = counting_claude(&dir);
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Space::at(&dir.join("config")), None, |_| {});
         m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
         let before = status_runs(&claude);
         let work = m.accounts.get("work").unwrap();
@@ -15259,7 +15285,7 @@ Have another model review a risky change before it goes ahead.";
     fn a_state_asked_for_directly_reads_the_cli_live_while_the_report_keeps_the_cached_one() {
         let dir = temp("report-live");
         let claude = counting_claude(&dir);
-        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Space::at(&dir.join("config")), None, |_| {});
         m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
         let signed_in = |state: &crate::load::MachineState| state.accounts.iter().any(|a| a.id == "work" && a.can_run_child_task);
         assert!(!signed_in(&m.report_state()), "signed out when the account was added");

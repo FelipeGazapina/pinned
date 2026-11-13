@@ -14,6 +14,7 @@ use pinned_core::connectors::{
 use pinned_core::graph::runner::{self, Session, Status};
 use pinned_core::graph::{Edge, Graph, Node, NodeId, NodeKind, PortId, Watch};
 use pinned_core::machine::{Launch, Machine};
+use pinned_core::space::Space;
 use pinned_core::wire::TabView;
 use serde_json::{json, Value};
 use std::fs;
@@ -362,7 +363,7 @@ fn machine(exe: &Path, dir: &Path) -> Arc<Machine> {
     fs::create_dir_all(dir).expect("machine dir");
     let mut launch = Launch::prepare(exe).expect("prepare");
     launch.vector_search = false;
-    Machine::new(launch, Some(dir.into()), None, |_| {})
+    Machine::new(launch, Space::at(&PathBuf::from(dir)), None, |_| {})
 }
 
 fn server_bin() -> PathBuf {

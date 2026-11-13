@@ -2,6 +2,7 @@
 //! A real Machine socket and the real `pinned-server mcp` process, then a real Cursor child and a real Claude child, which runs as a worker thread.
 
 use pinned_core::agent::{SOCK_ENV, TAB_ENV, TASK_ENV};
+use pinned_core::space::Space;
 use pinned_core::machine::{Launch, Machine};
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader, Write};
@@ -18,7 +19,7 @@ fn live_cursor_and_claude_through_pinned_mcp() {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let launch = Launch::prepare(&exe).expect("prepare");
-    let machine = Machine::new(launch, Some(dir.clone()), Some(root), |_| {});
+    let machine = Machine::new(launch, Space::at(&dir), Some(root), |_| {});
     machine
         .listen(|_| Err("not a connector callback".into()))
         .unwrap();
@@ -46,7 +47,7 @@ fn live_claude_child_is_a_worker_thread_that_ends_its_task_on_its_first_reply() 
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let launch = Launch::prepare(&exe).expect("prepare");
-    let machine = Machine::new(launch, Some(dir.clone()), Some(root), |_| {});
+    let machine = Machine::new(launch, Space::at(&dir), Some(root), |_| {});
     machine.listen(|_| Err("not a connector callback".into())).unwrap();
     let sock = machine.launch().sock.clone();
     let tab = machine.open_tab(Some(dir.display().to_string()), false).unwrap();

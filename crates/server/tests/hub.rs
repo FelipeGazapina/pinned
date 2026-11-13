@@ -7,6 +7,7 @@ use pinned_core::connectors::{BoxSize, BoxStep, Delivery, Run, RunsOn, Work};
 use pinned_core::convex::client::Replay;
 use pinned_core::global_orchestrator::{CaptainReport, RelayTo};
 use pinned_core::link::{self, Link};
+use pinned_core::space::Space;
 use pinned_core::machine::{Launch, Machine};
 use pinned_core::sync;
 use pinned_core::taste::{TastePatch, TasteScope, Tastes};
@@ -335,7 +336,7 @@ fn launched(dir: &Path) -> Arc<Machine> {
         first_run_wait: std::time::Duration::from_secs(60),
         starting_limit: std::time::Duration::from_secs(600),
     };
-    Machine::new(launch, Some(dir.to_owned()), Some(dir.to_owned()), |_| {})
+    Machine::new(launch, Space::at(&dir.to_owned()), Some(dir.to_owned()), |_| {})
 }
 
 impl Node {
@@ -881,6 +882,20 @@ fn signed_up(url: &str, email: &str, machine: &str) -> (String, Credentials) {
     let (token, account) = account::signup(url, email, "correct horse").unwrap();
     let (registered, machine_token) = account::register_machine(url, &token, machine, "macos").unwrap();
     (token.clone(), Credentials { hub: url.to_owned(), email: account.email, user_token: token, machine_id: registered.id, machine_token })
+}
+
+#[test]
+fn a_test_machine_reads_agent_spend_only_under_its_user_home() {
+    let dir = temp("spend-user-home");
+    let transcripts = dir.join("home/.claude/projects/-repo");
+    std::fs::create_dir_all(&transcripts).unwrap();
+    let usage = json!({ "input_tokens": 111, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0, "output_tokens": 222 });
+    let line = json!({ "type": "assistant", "sessionId": "s1", "requestId": "r1", "timestamp": "2026-11-09T10:00:00Z", "message": { "id": "m1", "model": "claude-opus-5-5", "usage": usage } });
+    std::fs::write(transcripts.join("s1.jsonl"), format!("{line}\n")).unwrap();
+    let machine = launched(&dir);
+    let rows = machine.call(Call::TokenUsage { since: 0 }).unwrap();
+    let counted = |field: &str| rows.as_array().unwrap().iter().map(|row| row[field].as_u64().unwrap()).sum::<u64>();
+    assert_eq!((counted("input"), counted("output")), (111, 222), "{rows}");
 }
 
 #[test]
