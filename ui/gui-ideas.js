@@ -1,7 +1,8 @@
 /** The Ideas page (0.18.2): things the user might do, kept on the hub. The page, the sidebar's "N open"
  * and More's hint all read `ideasUi.rows`, which is `list_ideas`. The hub's settings push carries no
  * ideas, so it stays small however many there are. The hub sends `ideas_changed` after an idea is saved
- * or deleted, and the app reads again then and once after it connects; a settings push reads nothing. */
+ * or deleted, and the app reads again then, once after it connects and on every page open; a settings
+ * push reads nothing. */
 
 const IDEA_STATUSES = [["open", "Open"], ["done", "Done"], ["dropped", "Dropped"], ["all", "All"]];
 const IDEA_INTRO = "Things you might do. Agents read them only when asked; facts you want agents to always know go in memory instead.";

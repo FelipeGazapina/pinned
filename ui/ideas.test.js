@@ -806,6 +806,25 @@ test("the idea being edited keeps its place when its own autosave's ideas_change
   assert.equal(p.titles()[0], "Delta");
 });
 
+test("a failed background read keeps the last list and the sidebar's count", async () => {
+  const p = page();
+  await p.show();
+  assert.equal(p.titles().length, 2);
+  assert.equal(p.run("ideasOpenText()"), "2 open");
+  const call = p.context.connectorCall;
+  p.context.connectorCall = async (cmd, args) => {
+    if (cmd === "list_ideas") throw new Error("not connected to the hub");
+    return call(cmd, args);
+  };
+  p.run("ideasRefresh()");
+  await p.timers.filter((t) => !t.cancelled).at(-1).f();
+  await flush();
+  assert.equal(p.titles().length, 2, "the cards stay");
+  assert.equal(p.run("ideasUi.rows.length"), 4, "the last list is kept");
+  assert.equal(p.run("ideasUi.error"), "not connected to the hub");
+  assert.equal(p.run("ideasOpenText()"), "2 open", "the sidebar's count stays");
+});
+
 test("the sidebar's Ideas row says how many are open", async () => {
   const meta = await nav(SEED());
   assert.deepEqual([meta.hidden, meta.textContent], [false, "2 open"], "done and dropped ideas do not count");
