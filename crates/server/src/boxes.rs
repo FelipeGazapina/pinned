@@ -379,12 +379,16 @@ fn over_budget(spec: &RunSpec, age: Duration) -> bool {
     spec.budget_usd.is_some_and(|b| b > 0.0 && age.as_secs_f64() * BOX_USD_PER_HOUR / 3600.0 >= b)
 }
 
-fn verdict(age: Duration, seen: Seen, t: &mut Timers, now: Instant, p: &Policy) -> Option<End> {
+/// `delegating` is a box whose tab waits on workers in other boxes. It is quiet, or done with its own
+/// turn, while they run, so neither starts its Idle, Done or Exited timer: only its max life (and,
+/// before this, its budget) ends it then, so their ends find it.
+fn verdict(age: Duration, seen: Seen, t: &mut Timers, now: Instant, p: &Policy, delegating: bool) -> Option<End> {
     // `None` is a condition this look can't see, as the session's while its node is offline: its
     // timer neither starts nor restarts, so a dropped link doesn't buy a quiet box more time.
     let (offline, gone, exited, quiet) = match seen {
         Seen::Offline => (Some(true), None, None, None),
         Seen::NoTab => (Some(false), Some(true), None, None),
+        Seen::Tab { .. } if delegating => (Some(false), Some(false), Some(false), Some(false)),
         Seen::Tab { running, quiet } => (Some(false), Some(false), Some(!running), Some(quiet)),
     };
     let held = |since: &mut Option<Instant>, on: Option<bool>| match on {
@@ -1580,14 +1584,7 @@ impl Boxes {
                                 (INTERACTIVE_CONNECTOR, Seen::Tab { running, .. }) => Seen::Tab { running, quiet: false },
                                 _ => seen,
                             };
-                            // A box whose tab waits on workers in other boxes is quiet, or done with
-                            // its own turn, while they run: only its max life and budget end it then,
-                            // so their ends find it.
-                            if delegating.contains(&machine) {
-                                slot.quiet_since = None;
-                                slot.exited_since = None;
-                            }
-                            let verdict = verdict(row.age, seen, slot, now, &self.policy);
+                            let verdict = verdict(row.age, seen, slot, now, &self.policy, delegating.contains(&machine));
                             if gone { Some(End::Vanished) } else { verdict }
                         }
                     }
@@ -1740,8 +1737,8 @@ mod tests {
     /// The verdict after `seen` held for `held`, judged at the start and at the end.
     fn after(seen: Seen, held: Duration, age: Duration) -> Option<End> {
         let (start, mut timers) = (Instant::now(), Timers::default());
-        assert_eq!(verdict(Duration::ZERO, seen, &mut timers, start, &policy()), None);
-        verdict(age, seen, &mut timers, start + held, &policy())
+        assert_eq!(verdict(Duration::ZERO, seen, &mut timers, start, &policy(), false), None);
+        verdict(age, seen, &mut timers, start + held, &policy(), false)
     }
 
     #[test]
@@ -1832,8 +1829,25 @@ mod tests {
     fn max_life_ends_a_box_whatever_its_session_does() {
         let working = Seen::Tab { running: true, quiet: false };
         let mut timers = Timers::default();
-        assert_eq!(verdict(19 * MIN, working, &mut timers, Instant::now(), &policy()), None);
-        assert_eq!(verdict(21 * MIN, working, &mut timers, Instant::now(), &policy()), Some(End::Expired));
+        assert_eq!(verdict(19 * MIN, working, &mut timers, Instant::now(), &policy(), false), None);
+        assert_eq!(verdict(21 * MIN, working, &mut timers, Instant::now(), &policy(), false), Some(End::Expired));
+    }
+
+    #[test]
+    fn a_box_others_delegate_from_ignores_idle_and_exited_and_still_meets_its_max_life() {
+        let (start, mut t) = (Instant::now(), Timers::default());
+        for seen in [Seen::Tab { running: true, quiet: true }, Seen::Tab { running: false, quiet: true }] {
+            for minute in [0, 21, 60, 19 * 60] {
+                assert_eq!(verdict(MIN, seen, &mut t, start + minute * MIN, &policy(), true), None, "{seen:?} at {minute} min while its worker hangs");
+            }
+        }
+        t.done = true;
+        assert_eq!(verdict(MIN, Seen::Tab { running: true, quiet: true }, &mut t, start + 30 * 60 * MIN, &Policy { done: MIN, ..policy() }, true), None, "nor Done");
+        assert_eq!(verdict(21 * MIN, Seen::Tab { running: true, quiet: true }, &mut t, start, &policy(), true), Some(End::Expired), "max life ends it");
+        assert_eq!(after(Seen::Offline, 21 * MIN, MIN), Some(End::Offline), "and a node gone offline still ends it");
+        // Its workers are done: the quiet it had then counts from now.
+        assert_eq!(verdict(MIN, Seen::Tab { running: true, quiet: true }, &mut t, start + 40 * 60 * MIN, &policy(), false), None);
+        assert_eq!(verdict(MIN, Seen::Tab { running: true, quiet: true }, &mut t, start + 40 * 60 * MIN + 21 * MIN, &policy(), false), Some(End::Done));
     }
 
     #[test]
@@ -1841,11 +1855,11 @@ mod tests {
         let p = policy();
         let (start, mut t) = (Instant::now(), Timers::default());
         let quiet = Seen::Tab { running: true, quiet: true };
-        assert_eq!(verdict(MIN, quiet, &mut t, start, &p), None);
-        assert_eq!(verdict(MIN, Seen::Tab { running: true, quiet: false }, &mut t, start + 15 * MIN, &p), None, "working again");
-        assert_eq!(verdict(MIN, quiet, &mut t, start + 16 * MIN, &p), None);
-        assert_eq!(verdict(MIN, quiet, &mut t, start + 35 * MIN, &p), None, "quiet for 19 minutes since it worked");
-        assert_eq!(verdict(MIN, quiet, &mut t, start + 37 * MIN, &p), Some(End::Idle));
+        assert_eq!(verdict(MIN, quiet, &mut t, start, &p, false), None);
+        assert_eq!(verdict(MIN, Seen::Tab { running: true, quiet: false }, &mut t, start + 15 * MIN, &p, false), None, "working again");
+        assert_eq!(verdict(MIN, quiet, &mut t, start + 16 * MIN, &p, false), None);
+        assert_eq!(verdict(MIN, quiet, &mut t, start + 35 * MIN, &p, false), None, "quiet for 19 minutes since it worked");
+        assert_eq!(verdict(MIN, quiet, &mut t, start + 37 * MIN, &p, false), Some(End::Idle));
     }
 
     #[test]
@@ -1853,13 +1867,13 @@ mod tests {
         let p = Policy { done: 2 * MIN, ..policy() };
         let (start, mut t) = (Instant::now(), Timers::default());
         let quiet = Seen::Tab { running: true, quiet: true };
-        assert_eq!(verdict(MIN, quiet, &mut t, start, &p), None);
-        assert_eq!(verdict(MIN, quiet, &mut t, start + 3 * MIN, &p), None, "quiet without a pull request waits out idle");
+        assert_eq!(verdict(MIN, quiet, &mut t, start, &p, false), None);
+        assert_eq!(verdict(MIN, quiet, &mut t, start + 3 * MIN, &p, false), None, "quiet without a pull request waits out idle");
         t.done = true;
-        assert_eq!(verdict(MIN, Seen::Tab { running: true, quiet: false }, &mut t, start + 4 * MIN, &p), None, "still working");
-        assert_eq!(verdict(MIN, quiet, &mut t, start + 5 * MIN, &p), None);
-        assert_eq!(verdict(MIN, quiet, &mut t, start + 6 * MIN, &p), None, "quiet for 1 of 2 minutes");
-        assert_eq!(verdict(MIN, quiet, &mut t, start + 7 * MIN, &p), Some(End::Done));
+        assert_eq!(verdict(MIN, Seen::Tab { running: true, quiet: false }, &mut t, start + 4 * MIN, &p, false), None, "still working");
+        assert_eq!(verdict(MIN, quiet, &mut t, start + 5 * MIN, &p, false), None);
+        assert_eq!(verdict(MIN, quiet, &mut t, start + 6 * MIN, &p, false), None, "quiet for 1 of 2 minutes");
+        assert_eq!(verdict(MIN, quiet, &mut t, start + 7 * MIN, &p, false), Some(End::Done));
     }
 
     #[test]
@@ -1867,10 +1881,10 @@ mod tests {
         let p = policy();
         let (start, mut t) = (Instant::now(), Timers::default());
         let quiet = Seen::Tab { running: true, quiet: true };
-        assert_eq!(verdict(MIN, quiet, &mut t, start, &p), None);
-        assert_eq!(verdict(MIN, Seen::Offline, &mut t, start + 10 * MIN, &p), None);
-        assert_eq!(verdict(MIN, quiet, &mut t, start + 19 * MIN, &p), None);
-        assert_eq!(verdict(MIN, quiet, &mut t, start + 21 * MIN, &p), Some(End::Idle));
+        assert_eq!(verdict(MIN, quiet, &mut t, start, &p, false), None);
+        assert_eq!(verdict(MIN, Seen::Offline, &mut t, start + 10 * MIN, &p, false), None);
+        assert_eq!(verdict(MIN, quiet, &mut t, start + 19 * MIN, &p, false), None);
+        assert_eq!(verdict(MIN, quiet, &mut t, start + 21 * MIN, &p, false), Some(End::Idle));
     }
 
     #[test]

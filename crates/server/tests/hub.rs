@@ -8192,3 +8192,273 @@ fn box_usage_never_shows_one_account_the_boxes_or_tasks_of_another() {
         assert!(!b.to_string().contains(leaked), "ana's {leaked} reached bob: {b}");
     }
 }
+
+/// How many ends the hub holds, for every account or only `account`, as Postgres has them.
+fn held_ends(hub: &TestHub, account: Option<uuid::Uuid>) -> i64 {
+    hub.runtime.block_on(async {
+        let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        db.query_one("select count(*) from held_ends where $1::uuid is null or account = $1", &[&account]).await.unwrap().get(0)
+    })
+}
+
+/// mac, paired to ana's account with a Captain on the `site` checkout and its credentials, so it can go
+/// offline and come back as a laptop that sleeps does: the link drops, the process stays.
+fn sleepy_mac(hub: &TestHub, ana: &mut BoxAccount, dir: &Path) -> (Node, Credentials, String) {
+    hub.boxes.state.lock().unwrap().checkout = Some(("site".into(), SITE.into()));
+    let creds = pair(&hub.url, &mut ana.client, "mac", dir);
+    let mac = Node::start(dir, creds.clone());
+    mac.machine.listen(|_| Err("not in this test".into())).unwrap();
+    ana.client.wait_machines(&[("mac", true)]);
+    origin(&dir.join("site"), SITE);
+    let site = mac.machine.open_project(dir.join("site")).display().to_string();
+    let captain = ana.client.call(&creds.machine_id, json!({ "cmd": "open_orchestrator", "path": site })).unwrap().as_str().unwrap().to_owned();
+    let fresh = json!({ "workflow": { "mode": "fresh" }, "session": { "mode": "off" }, "worker": { "mode": "fresh" }, "orchestrator": { "mode": "fresh" } });
+    ana.client.hub(json!({ "cmd": "set_box_access", "access": fresh })).unwrap();
+    (mac, creds, captain)
+}
+
+/// A box worker for mac's Captain, running: its task id and its tab on the box.
+fn box_worker(hub: &TestHub, ana: &mut BoxAccount, mac_dir: &Path, captain: &str) -> (String, pinned_core::wire::TabView) {
+    let started = delegate_from(mac_dir, captain, json!({ "task": "Run the slow suite.", "title": "Slow suite", "target": { "box": true } })).unwrap();
+    wait_for("the worker thread running on the box", || box_tabs(&hub.boxes).iter().any(|t| t.role == Some(Role::Worker) && t.running));
+    ana.client.wait_machines(&[("mac", true), ("Box · Slow suite", true)]);
+    hub.boxes.with_node(|node| node.machine.listen(|_| Err("not in this test".into())).unwrap());
+    let child = box_tabs(&hub.boxes).into_iter().find(|t| t.role == Some(Role::Worker)).unwrap();
+    (started["taskId"].as_str().unwrap().to_owned(), child)
+}
+
+#[test]
+fn a_worker_box_end_reaches_a_parent_that_was_offline_and_the_box_ends_done_at_once() {
+    let hub = TestHub::start_with_boxes("held_main", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let mac_dir = temp("held-main-mac");
+    let (mut mac, creds, captain) = sleepy_mac(&hub, &mut ana, &mac_dir);
+    let (task, child) = box_worker(&hub, &mut ana, &mac_dir, &captain);
+    let box_dir = hub.boxes.root.join(&hub.boxes.live()[0]);
+
+    mac.link.take().unwrap().stop();
+    ana.client.wait_machines(&[("mac", false), ("Box · Slow suite", true)]);
+    hook(&box_dir, json!({ "kind": "agent", "status": "working", "tab": child.id, "session": "s-suite" }));
+    hook(&box_dir, json!({ "kind": "agent", "status": "done", "tab": child.id, "session": "s-suite", "reply": "Suite green; 412 tests pass." }));
+    // Idle and Exited are an hour here: only a delivered or held end ends the box this soon.
+    wait_for("the box to go once the hub held its end", || hub.boxes.live().is_empty() && ana.rows(&hub) == 0);
+    assert_eq!(held_ends(&hub, Some(ana.id)), 1, "the end outlives the box");
+    assert_eq!(task_status(&mac_dir, &captain, &task)["workState"], "working", "mac, asleep, heard nothing yet");
+
+    mac.link = Some(link::spawn(creds, mac.machine.clone(), "0.0.0-test"));
+    wait_for("mac to hear how its worker ended", || task_status(&mac_dir, &captain, &task)["workState"] == "result_available");
+    let status = task_status(&mac_dir, &captain, &task);
+    assert_eq!(status["summary"].as_str(), Some("Suite green; 412 tests pass."), "{status}");
+    assert!(status["usage"]["box_ms"].as_u64().is_some_and(|ms| ms > 0), "with the box's time: {status}");
+    wait_for("the held row to go once mac answered it", || held_ends(&hub, None) == 0);
+}
+
+#[test]
+fn a_box_ended_notice_its_parent_missed_is_held_and_told_once_it_is_back() {
+    let hub = TestHub::start_with_boxes("held_notice", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let mac_dir = temp("held-notice-mac");
+    let (mut mac, creds, captain) = sleepy_mac(&hub, &mut ana, &mac_dir);
+    let (task, _) = box_worker(&hub, &mut ana, &mac_dir, &captain);
+    let machine = ana.box_machine();
+
+    mac.link.take().unwrap().stop();
+    ana.client.wait_machines(&[("mac", false), ("Box · Slow suite", true)]);
+    ana.client.hub(json!({ "cmd": "remove_machine", "id": machine })).unwrap();
+    wait_for("the box to go", || hub.boxes.live().is_empty() && ana.rows(&hub) == 0);
+    assert_eq!(held_ends(&hub, Some(ana.id)), 1, "the notice mac could not hear is held");
+
+    mac.link = Some(link::spawn(creds, mac.machine.clone(), "0.0.0-test"));
+    wait_for("mac to hear its box ended", || task_status(&mac_dir, &captain, &task)["workState"] == "failed");
+    let status = task_status(&mac_dir, &captain, &task);
+    assert_eq!(status["error"].as_str(), Some("Upstash Box: the box ended before its task did: someone removed its machine"), "not gone from this account: {status}");
+    wait_for("the held row to go", || held_ends(&hub, None) == 0);
+}
+
+/// ana with an offline mac and a worker machine mini, whose end of mac's task-1 the hub holds.
+fn held_for_offline_mac(hub: &TestHub) -> (Client, MachineView, String, MachineView, RawMachine, uuid::Uuid) {
+    let (token, ana_id, mut ana) = signed_in(&hub.url, "ana@acme.dev");
+    let (mac, mac_token) = account::register_machine(&hub.url, &token, "ana-mac", "linux").unwrap();
+    let (mini, mini_token) = account::register_machine(&hub.url, &token, "ana-mini", "linux").unwrap();
+    let mini_raw = RawMachine::start(&hub.url, &mini_token, |_| RawReply::Ok(Value::Null));
+    wait_for("mini online", || ana.machines().contains(&("ana-mini".into(), true)));
+    let end = json!({ "state": "result_available", "summary": "Suite green.", "usage": { "tokens_in": 1200, "tokens_out": 30, "cost_usd": 0.42, "wall_ms": 90000 } });
+    assert_eq!(mini_raw.ask(json!({ "cmd": "remote_ended", "to": mac.id, "tab": "tab-1", "task": "task-1", "end": end })), Ok(json!(true)), "taken for mac, which is offline");
+    (ana, mac, mac_token, mini, mini_raw, uuid::Uuid::parse_str(&ana_id).unwrap())
+}
+
+fn remote_task_call(machine: &str, task: &str) -> Value {
+    json!({ "cmd": "remote_task", "machine": machine, "tab": "tab-1", "task": task })
+}
+
+#[test]
+fn a_held_end_answers_its_tasks_status_after_its_worker_is_gone_and_stays_until_answered() {
+    let hub = TestHub::start("held_status");
+    let (mut ana, mac, mac_token, mini, _mini_raw, _) = held_for_offline_mac(&hub);
+    ana.hub(json!({ "cmd": "remove_machine", "id": mini.id })).unwrap();
+    let mac_raw = RawMachine::start(&hub.url, &mac_token, |call| match call["cmd"].as_str().unwrap() {
+        "remote_ended" => RawReply::Err("not now".into()),
+        _ => RawReply::Ok(Value::Null),
+    });
+    wait_for("the hub to offer mac the held end", || mac_raw.calls("remote_ended") == 1);
+    let status = mac_raw.ask(remote_task_call(&mini.id, "task-1")).unwrap();
+    assert_eq!(
+        (status["workState"].as_str(), status["summary"].as_str(), status["usage"]["tokens_in"].as_u64()),
+        (Some("result_available"), Some("Suite green."), Some(1200)),
+        "answered from the held end, not 'this account has no machine': {status}"
+    );
+    assert_eq!(held_ends(&hub, None), 1, "a machine that did not take it keeps it held");
+    assert_eq!(mac_raw.ask(remote_task_call(&mini.id, "task-2")), Err(format!("this account has no machine {}", mini.id)), "another task of a gone machine is still gone");
+    let _ = mac;
+}
+
+#[test]
+fn another_account_neither_reads_nor_receives_a_held_end() {
+    let hub = TestHub::start("held_iso");
+    let (_ana, mac, _mac_token, mini, _mini_raw, ana_id) = held_for_offline_mac(&hub);
+    let (bob_token, bob_account, mut bob) = signed_in(&hub.url, "bob@acme.dev");
+    let (_, bob_machine_token) = account::register_machine(&hub.url, &bob_token, "bob-mac", "linux").unwrap();
+    let bob_raw = RawMachine::start(&hub.url, &bob_machine_token, |_| RawReply::Ok(json!(true)));
+    bob.wait_machines(&[("bob-mac", true)]);
+    assert_eq!(bob_raw.ask(remote_task_call(&mini.id, "task-1")), Err(format!("this account has no machine {}", mini.id)), "bob reads nothing of ana's held end");
+    let forged = json!({ "cmd": "remote_ended", "to": mac.id, "tab": "tab-1", "task": "task-9", "end": { "state": "failed", "error": "forged" } });
+    assert_eq!(bob_raw.ask(forged), Err(format!("this account has no machine {}", mac.id)), "nor holds an end for ana's offline machine");
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(bob_raw.calls("remote_ended"), 0, "bob's machine is handed none of ana's");
+    let bob_id = uuid::Uuid::parse_str(&bob_account).unwrap();
+    assert_eq!((held_ends(&hub, Some(bob_id)), held_ends(&hub, Some(ana_id))), (0, 1));
+    let read = hub.runtime.block_on(hub.hub().db.held_ends(bob_id, uuid::Uuid::parse_str(&mac.id).unwrap(), Some("task-1"))).unwrap();
+    assert!(read.is_empty(), "keyed by account: bob's id reads nothing for ana's machine and task");
+}
+
+#[test]
+fn a_held_end_expires_after_30_days_unread() {
+    let hub = TestHub::start("held_expiry");
+    let (mut ana, mac, mac_token, mini, mini_raw, _) = held_for_offline_mac(&hub);
+    let end = json!({ "state": "result_available", "summary": "Newer." });
+    assert_eq!(mini_raw.ask(json!({ "cmd": "remote_ended", "to": mac.id, "tab": "tab-1", "task": "task-2", "end": end })), Ok(json!(true)));
+    admin_on(&hub.database, "update held_ends set held_at = now() - interval '31 days' where task = 'task-1';
+        update held_ends set held_at = now() - interval '29 days' where task = 'task-2'");
+    ana.hub(json!({ "cmd": "remove_machine", "id": mini.id })).unwrap();
+    let mac_raw = RawMachine::start(&hub.url, &mac_token, |_| RawReply::Ok(json!(true)));
+    wait_for("the 29-day end to reach mac", || mac_raw.calls("remote_ended") == 1);
+    std::thread::sleep(Duration::from_millis(500));
+    let delivered: Vec<Value> = mac_raw.calls.lock().unwrap().iter().filter(|c| c["cmd"] == "remote_ended").map(|c| c["task"].clone()).collect();
+    assert_eq!(delivered, vec![json!("task-2")], "the 31-day one is never delivered");
+    assert_eq!(held_ends(&hub, None), 0, "and is deleted");
+    assert_eq!(mac_raw.ask(remote_task_call(&mini.id, "task-1")), Err(format!("this account has no machine {}", mini.id)), "nor answers a status");
+}
+
+#[test]
+fn the_hub_answers_a_held_end_only_once_its_row_is_written() {
+    let hub = TestHub::start("held_durable");
+    let (token, _, mut ana) = signed_in(&hub.url, "ana@acme.dev");
+    let (mac, mac_token) = account::register_machine(&hub.url, &token, "ana-mac", "linux").unwrap();
+    let (_, mini_token) = account::register_machine(&hub.url, &token, "ana-mini", "linux").unwrap();
+    let mini_raw = RawMachine::start(&hub.url, &mini_token, |_| RawReply::Ok(Value::Null));
+    wait_for("mini online", || ana.machines().contains(&("ana-mini".into(), true)));
+    admin_on(&hub.database, "create function refuse_held() returns trigger language plpgsql as $$ begin raise exception 'disk full'; end $$;
+        create trigger refuse_held before insert on held_ends for each row execute function refuse_held()");
+    let end = json!({ "cmd": "remote_ended", "to": mac.id, "tab": "tab-1", "task": "task-1", "end": { "state": "result_available", "summary": "Suite green." } });
+    assert_eq!(
+        mini_raw.ask(end.clone()),
+        Err("the hub could not keep the end of task task-1 for its machine, which is offline; it is sent again".into()),
+        "a write that failed is no taken end: the worker keeps it and sends it again"
+    );
+    assert_eq!(held_ends(&hub, None), 0);
+    admin_on(&hub.database, "drop trigger refuse_held on held_ends");
+    assert_eq!(mini_raw.ask(end), Ok(json!(true)), "the retry is held");
+    assert_eq!(held_ends(&hub, None), 1);
+    let mac_raw = RawMachine::start(&hub.url, &mac_token, |_| RawReply::Ok(json!(true)));
+    wait_for("mac to get it", || mac_raw.calls("remote_ended") == 1);
+    let got = mac_raw.calls.lock().unwrap().iter().find(|c| c["cmd"] == "remote_ended").cloned().unwrap();
+    assert_eq!((got["task"].as_str(), got["end"]["summary"].as_str()), (Some("task-1"), Some("Suite green.")), "{got}");
+}
+
+#[test]
+fn a_held_end_reaches_its_machine_once_however_often_it_reconnects_or_is_delivered() {
+    let hub = TestHub::start("held_once");
+    let (_ana, mac, mac_token, _mini, mini_raw, ana_id) = held_for_offline_mac(&hub);
+    let first = RawMachine::start(&hub.url, &mac_token, |_| RawReply::Ok(json!(true)));
+    wait_for("mac to get it", || first.calls("remote_ended") == 1);
+    wait_for("the row to go", || held_ends(&hub, None) == 0);
+    drop(first);
+    let second = RawMachine::start(&hub.url, &mac_token, |_| RawReply::Ok(json!(true)));
+    std::thread::sleep(Duration::from_millis(800));
+    assert_eq!(second.calls("remote_ended"), 0, "a reconnect does not deliver it again");
+    drop(second);
+
+    // Held again while mac is away, then delivered by its connection and two more flushes at once.
+    std::thread::sleep(Duration::from_millis(300));
+    let end = json!({ "cmd": "remote_ended", "to": mac.id, "tab": "tab-1", "task": "task-2", "end": { "state": "result_available", "summary": "Two." } });
+    assert_eq!(mini_raw.ask(end), Ok(json!(true)));
+    let slow = RawMachine::start(&hub.url, &mac_token, |call| {
+        if call["cmd"] == "remote_ended" {
+            std::thread::sleep(Duration::from_millis(300));
+        }
+        RawReply::Ok(json!(true))
+    });
+    let account = hub.runtime.block_on(hub.hub().account(ana_id)).unwrap();
+    wait_for("mac online", || account.is_online(&mac.id));
+    let flushes: Vec<_> = (0..2).map(|_| hub.runtime.spawn(pinned_server::remote::deliver_held(hub.hub().clone(), account.clone(), mac.id.clone()))).collect();
+    for flush in flushes {
+        hub.runtime.block_on(flush).unwrap();
+    }
+    wait_for("the row to go", || held_ends(&hub, None) == 0);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(slow.calls("remote_ended"), 1, "three deliveries at once pass it once");
+}
+
+#[test]
+fn a_captain_box_whose_worker_hangs_is_not_idle_reaped_and_still_meets_its_max_life_and_budget() {
+    for limit in ["max_life", "budget"] {
+        let max_life = if limit == "max_life" { Duration::from_secs(6) } else { Duration::from_secs(3600) };
+        let policy = Policy { idle: Duration::from_millis(300), exited: Duration::from_millis(300), done: Duration::from_millis(300), max_life, ..fast() };
+        let hub = TestHub::start_with_boxes(&format!("held_reap_{limit}"), Signup::Open, policy);
+        let mut ana = BoxAccount::new(&hub);
+        hub.boxes.state.lock().unwrap().checkout = Some(("site".into(), SITE.into()));
+        let mini_dir = temp(&format!("held-reap-{limit}-mini"));
+        let creds = pair(&hub.url, &mut ana.client, "mini", &mini_dir);
+        let mini = Node::start(&mini_dir, creds.clone());
+        mini.machine.listen(|_| Err("not in this test".into())).unwrap();
+        ana.client.wait_machines(&[("mini", true)]);
+        let fresh = json!({ "workflow": { "mode": "fresh" }, "session": { "mode": "off" }, "worker": { "mode": "fresh" }, "orchestrator": { "mode": "fresh" } });
+        ana.client.hub(json!({ "cmd": "set_box_access", "access": fresh })).unwrap();
+        ana.client.call(&creds.machine_id, json!({ "cmd": "set_global_orchestrator_settings", "settings": { "host": true } })).unwrap();
+        let global = ana.client.call(&creds.machine_id, json!({ "cmd": "open_global_orchestrator" })).unwrap().as_str().unwrap().to_owned();
+        session_tool(&mini_dir, &global, json!({ "name": "send_to_captain", "project": "github.com/acme/site", "message": "Ship the form.", "request_id": "r-1", "box": true })).unwrap();
+        wait_for("a Captain on a box", || box_tabs(&hub.boxes).iter().any(|t| t.role == Some(Role::Orchestrator) && t.running));
+        let captain_box = hub.boxes.live()[0].clone();
+        let captain = box_tabs(&hub.boxes).into_iter().find(|t| t.role == Some(Role::Orchestrator)).unwrap();
+        let captain_dir = hub.boxes.root.join(&captain_box);
+        let node_of = |id: &str| hub.boxes.state.lock().unwrap().boxes.get(id).and_then(|b| b.node.clone());
+        node_of(&captain_box).unwrap().machine.listen(|_| Err("not in this test".into())).unwrap();
+        let captain_machine = ana.box_machine();
+        if limit == "budget" {
+            // 0.0001 USD lasts 3.6 s at the box rate.
+            let budget = ana.client.hub(json!({ "cmd": "extend_box", "machine": captain_machine, "extra_usd": 0.0001 }));
+            assert!(budget.is_ok(), "{budget:?}");
+        }
+        delegate_from(&captain_dir, &captain.id, json!({ "task": "Hang.", "title": "Hung", "target": { "box": true } })).unwrap();
+        wait_for("the worker box", || hub.boxes.live().len() == 2);
+        let worker_box = hub.boxes.live().into_iter().find(|id| *id != captain_box).unwrap();
+        let worker_dir = hub.boxes.root.join(&worker_box);
+        wait_for("the worker running", || node_of(&worker_box).is_some_and(|node| node.machine.tabs().iter().any(|t| t.role == Some(Role::Worker) && t.running)));
+        let node = node_of(&worker_box).unwrap();
+        node.machine.listen(|_| Err("not in this test".into())).unwrap();
+        let worker = node.machine.tabs().into_iter().find(|t| t.role == Some(Role::Worker)).unwrap();
+        // It works and never ends.
+        hook(&worker_dir, json!({ "kind": "agent", "status": "working", "tab": worker.id }));
+
+        std::thread::sleep(Duration::from_millis(2000));
+        assert!(hub.boxes.live().contains(&captain_box), "{limit}: the quiet Captain box outlived Idle and Exited (300 ms) while its worker runs");
+        let started = Instant::now();
+        while hub.boxes.live().contains(&captain_box) {
+            assert!(started.elapsed() < Duration::from_secs(15), "{limit}: the Captain box never ended");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(hub.boxes.live().contains(&worker_box), "{limit}: it ended for its own {limit} while its worker still hangs");
+        drop(mini);
+    }
+}

@@ -12644,6 +12644,29 @@ Have another model review a risky change before it goes ahead.";
     }
 
     #[test]
+    fn a_remote_end_the_hub_passes_again_or_after_a_status_answered_it_settles_the_task_once() {
+        let m = machine();
+        let end = |summary: &str| crate::delegate::RemoteEnd { state: "result_available".into(), summary: Some(summary.into()), error: None, usage: None };
+        let status = |m: &Machine, id: &str| m.delegates.status(&crate::delegate::Caller { tab: Some("tab-1".into()), task: None }, id).unwrap();
+        let id = delegated_elsewhere(&m, "tab-1", "m-box", "box");
+        assert_eq!(m.call(Call::RemoteEnded { from: "m-box".into(), tab: "tab-1".into(), task: id.clone(), end: end("Suite green.") }).unwrap(), json!(true));
+        let ended = m.delegates.get(&id).unwrap().ended;
+        assert_eq!(m.call(Call::RemoteEnded { from: "m-box".into(), tab: "tab-1".into(), task: id.clone(), end: end("Suite green, again.") }).unwrap(), json!(false), "a repeat is a no-op");
+        assert_eq!((status(&m, &id)["summary"].as_str(), m.delegates.get(&id).unwrap().ended), (Some("Suite green."), ended));
+
+        // The hub's held end answered a status look first, then reaches the machine as RemoteEnded.
+        let id = delegated_elsewhere(&m, "tab-1", "m-box2", "box2");
+        m.set_hub(Arc::new(|call| match call {
+            HubCall::RemoteTask { .. } => Ok(json!({ "workState": "result_available", "summary": "From the hub." })),
+            _ => Err("not this test's".into()),
+        }));
+        m.check_remotes(Instant::now() + Duration::from_secs(61));
+        assert_eq!(status(&m, &id)["summary"].as_str(), Some("From the hub."));
+        assert_eq!(m.call(Call::RemoteEnded { from: "m-box2".into(), tab: "tab-1".into(), task: id.clone(), end: end("From the hub.") }).unwrap(), json!(false));
+        assert_eq!(status(&m, &id)["workState"].as_str(), Some("result_available"));
+    }
+
+    #[test]
     fn a_remote_task_that_ends_waiting_on_nothing_clears_what_it_waited_on() {
         let m = machine();
         let id = delegated_elsewhere(&m, "tab-1", "m-mini", "mini");

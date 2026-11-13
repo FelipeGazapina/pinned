@@ -294,3 +294,20 @@ async fn call(hub: &Hub, account: &Account, machine: &str, call: Call, wait: Dur
         Err(Unanswered::Lost(e)) => Err(format!("{e}, so the worker may have started there: look at {}'s threads before starting it again", name())),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_held_text_past_the_cap_is_cut_with_a_marker_and_never_dropped() {
+        assert_eq!(clamp_held("Footer fixed.".into()), "Footer fixed.");
+        let exact = "a".repeat(HELD_TEXT_MAX);
+        assert_eq!(clamp_held(exact.clone()), exact);
+        let long = "a".repeat(HELD_TEXT_MAX + 10);
+        assert_eq!(clamp_held(long), format!("{}…[truncated by pinned: 10 bytes]", "a".repeat(HELD_TEXT_MAX)));
+        // A cut inside a character backs off to its start.
+        let wide = format!("{}é{}", "a".repeat(HELD_TEXT_MAX - 1), "b".repeat(5));
+        assert_eq!(clamp_held(wide), format!("{}…[truncated by pinned: 7 bytes]", "a".repeat(HELD_TEXT_MAX - 1)));
+    }
+}
