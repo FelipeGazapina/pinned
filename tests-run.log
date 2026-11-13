@@ -77,3 +77,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:04:52Z #34 a_burst_of_parallel_sign_ins_counts_against_the_limit ok / avail=15075M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:04:55Z #35 the_hub_reconnects_when_postgres_drops_it START / avail=15075M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:04:58Z #35 the_hub_reconnects_when_postgres_drops_it ok / avail=15075M /workspace avail=19374M node_stat=Ssl node_tcp=1
+2026-11-13T04:04:59Z #36 integration_keys_reach_postgres_sealed START / avail=15075M /workspace avail=19374M node_stat=Ssl
