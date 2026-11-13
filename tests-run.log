@@ -309,3 +309,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:22:49Z #139 a_box_ended_notice_its_parent_missed_is_held_and_told_once_it_is_back START / avail=15048M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:22:52Z #139 a_box_ended_notice_its_parent_missed_is_held_and_told_once_it_is_back ok / avail=15048M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:22:53Z #140 a_held_end_answers_its_tasks_status_after_its_worker_is_gone_and_stays_until_answered START / avail=15048M /workspace avail=19374M node_stat=Ssl
+2026-11-13T04:22:56Z #140 a_held_end_answers_its_tasks_status_after_its_worker_is_gone_and_stays_until_answered ok / avail=15048M /workspace avail=19374M node_stat=Ssl node_tcp=1
