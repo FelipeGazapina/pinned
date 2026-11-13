@@ -138,3 +138,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:07:05Z #62 the_global_orchestrator_reaches_a_capitao_on_another_machine_and_hears_back ok / avail=15073M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:07:06Z #63 a_plain_session_still_cannot_reach_the_hub START / avail=15073M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:07:09Z #63 a_plain_session_still_cannot_reach_the_hub ok / avail=15073M /workspace avail=19374M node_stat=Ssl node_tcp=1
+2026-11-13T04:07:10Z #64 a_machine_too_old_for_the_relay_is_named_for_an_update START / avail=15073M /workspace avail=19374M node_stat=Ssl
