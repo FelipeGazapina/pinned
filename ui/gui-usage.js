@@ -621,10 +621,10 @@ function boxListsHtml(boxes, now, open) {
   return `<div class="breakdown"><h3>Running now</h3>${live.length ? boxTableHtml(live, "Running boxes", "Up for", now) : `<p class="muted note">No boxes right now.</p>`}</div>
     ${others.length ? `<details class="box-others"${open ? " open" : ""}><summary>Other boxes (${others.length})</summary>${boxTableHtml(others, "Other boxes", "Status", now)}</details>` : ""}`;
 }
-/** A reason as the end of a sentence: one that already ends in `.` gets no second one, and one the hub cut short ends in `…`, which closes it. */
+/** A reason as the end of a sentence: trailing full stops and spaces go, and `.` is added unless the text closes on `…` (a reason the hub cut short), `?` or `!`. */
 const reasonEnd = (why) => {
-  const text = String(why).replace(/\.+$/, "");
-  return text.endsWith("…") ? text : `${text}.`;
+  const text = String(why).trim().replace(/[.\s]+$/, "");
+  return /[…?!]$/.test(text) ? text : `${text}.`;
 };
 const boxNotice = (text, ids = "") => `<div class="limit-notices" role="alert">${icon("triangle-alert")}<div><p>${esc(text)}</p>${ids}</div></div>`;
 /** A stuck box with no `unconfirmed` flag is one pinned knows is on Upstash; one with it is a row that never recorded a box id. */

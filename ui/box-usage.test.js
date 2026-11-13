@@ -265,6 +265,26 @@ test("a reason that ends in a full stop gets no second one, and a reason the hub
   assert.doesNotMatch(cut, /…\./);
 });
 
+test("the mark that closes a reason: a question or exclamation mark gets no full stop, and trailing full stops and white space are dropped", () => {
+  const page = boxPage({ answer: async () => ({}) });
+  const reasonOf = (why) => {
+    const notice = text(page.boxUsageHtml({ data: { connected: false, stuck: [{ id: "r1", why }] }, error: "", loading: false, open: {} }, NOW));
+    return notice.match(/1 box pinned could not delete: (.*?) It is still running/)[1];
+  };
+  assert.equal(reasonOf("Upstash said why?"), "Upstash said why?");
+  assert.equal(reasonOf("Upstash said no!"), "Upstash said no!");
+  assert.equal(reasonOf("Upstash said no."), "Upstash said no.");
+  assert.equal(reasonOf("Upstash said no.\n"), "Upstash said no.");
+  assert.equal(reasonOf("Upstash said no. "), "Upstash said no.");
+  assert.equal(reasonOf("Upstash said no. ."), "Upstash said no.");
+  assert.equal(reasonOf("Upstash said no..."), "Upstash said no.");
+  assert.equal(reasonOf("Upstash said no?."), "Upstash said no?");
+  assert.equal(reasonOf("Upstash said no!\n"), "Upstash said no!");
+  assert.equal(reasonOf(`${"x".repeat(5)}…`), "xxxxx…");
+  assert.equal(reasonOf("  Upstash said no  "), "Upstash said no.");
+  assert.equal(reasonOf("Upstash answered 503"), "Upstash answered 503.");
+});
+
 test("a stuck reason is escaped", () => {
   const page = boxPage({ answer: async () => ({}) });
   const html = page.boxUsageHtml({ data: { connected: false, stuck: [{ id: "r1", why: "<b>bold</b> & more" }] }, error: "", loading: false, open: {} }, NOW);
