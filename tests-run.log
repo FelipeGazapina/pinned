@@ -57,3 +57,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:03:43Z #24 a_stopping_hub_closes_every_socket_with_going_away_and_then_stops ok / avail=15095M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:03:44Z #25 a_file_a_client_attaches_lands_in_the_nodes_private_uploads_folder START / avail=15095M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:03:56Z #25 a_file_a_client_attaches_lands_in_the_nodes_private_uploads_folder ok / avail=15075M /workspace avail=19374M node_stat=Ssl node_tcp=1
+2026-11-13T04:03:57Z #26 a_client_that_connects_later_sees_the_usage_a_machine_reported_before START / avail=15075M /workspace avail=19374M node_stat=Ssl
