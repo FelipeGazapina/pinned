@@ -69,3 +69,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:04:30Z #30 guessing_invite_codes_hits_the_sign_up_limit ok / avail=15075M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:04:33Z #31 only_an_invite_hub_makes_invite_codes START / avail=15075M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:04:36Z #31 only_an_invite_hub_makes_invite_codes ok / avail=15075M /workspace avail=19374M node_stat=Ssl node_tcp=1
+2026-11-13T04:04:37Z #32 two_invited_accounts_see_nothing_of_each_others_machines_projects_or_memory START / avail=15075M /workspace avail=19374M node_stat=Ssl
