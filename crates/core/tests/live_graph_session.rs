@@ -94,7 +94,7 @@ fn run_case(name: &str, proof: Proof) {
             finish(&connectors, &machine, &open, &second);
         }
         Proof::Resume => {
-            assert!(machine.close_tab(&first_tab), "close_tab");
+            assert!(machine.close_tab(&first_tab, None), "close_tab");
             feed(&connectors, &machine, &open, &machine.tabs());
             let (tab, claude) = live_session(&connectors);
             assert_eq!(claude.as_deref(), Some(first_id.as_str()), "resume stored a different session id");
@@ -109,7 +109,7 @@ fn run_case(name: &str, proof: Proof) {
         }
         Proof::Seeded => {
             connectors.set_live_claude(BOGUS).expect("edit stored session");
-            assert!(machine.close_tab(&first_tab), "close_tab");
+            assert!(machine.close_tab(&first_tab, None), "close_tab");
             feed(&connectors, &machine, &open, &machine.tabs());
             assert!(kept.log_contains(&format!("--resume\n{BOGUS}")), "the bogus id was not resumed\n{}", kept.log_text());
             assert!(

@@ -224,11 +224,11 @@ impl Questions {
         Ok(())
     }
 
-    /// Closes the questionnaire open on `tab` as cancelled by `by`. Whether one was.
-    pub fn cancel_tab(&mut self, tab: &str, by: Canceller) -> bool {
+    /// Closes the questionnaire open on `tab` as cancelled by `by`, when known. Whether one was.
+    pub fn cancel_tab(&mut self, tab: &str, by: Option<Canceller>) -> bool {
         let Some(asked) = self.asked.iter_mut().find(|a| a.tab == tab && a.is_open()) else { return false };
         asked.outcome = Some(Outcome::Cancelled);
-        asked.cancelled_by = Some(by);
+        asked.cancelled_by = by;
         // A call that still waits hears it; a gone one gets no notice.
         asked.notified = true;
         self.closed();
@@ -644,7 +644,7 @@ mod tests {
         let mut q = Questions::load(Some(&dir));
         let id = q.open("tab-1", Some("sess-1".into()), Some("task-1".into()), Some("Checkout".into()), vec![question("Base?", &["main", "release"])], vec!["github.com/o/site".into()], 7).unwrap();
         q.open("tab-2", None, None, None, vec![question("Other?", &["yes", "no"])], vec![], 8).unwrap();
-        q.cancel_tab("tab-2", Canceller::User);
+        q.cancel_tab("tab-2", Some(Canceller::User));
         let asked = q.get(&id).unwrap().clone();
         drop(q);
 
@@ -738,7 +738,7 @@ mod tests {
         }
         let mut q = Questions::default();
         let id = q.open("tab-1", None, None, None, vec![question("One?", &["yes", "no"])], vec![], 0).unwrap();
-        assert!(q.cancel_tab("tab-1", Canceller::Turn));
+        assert!(q.cancel_tab("tab-1", Some(Canceller::Turn)));
         assert_eq!(q.status(&id, "tab-1", None, Instant::now()).unwrap()["next"], format!("The user stopped this turn. {STOP}"), "cancel_tab names who it was");
     }
 
@@ -749,7 +749,7 @@ mod tests {
         for n in 0..CLOSED_KEEP + 5 {
             let tab = format!("tab-{n}");
             q.open(&tab, None, None, None, vec![question("Done?", &["yes", "no"])], vec![], 0).unwrap();
-            q.cancel_tab(&tab, Canceller::Turn);
+            q.cancel_tab(&tab, Some(Canceller::Turn));
         }
         assert_eq!(q.asked.len(), CLOSED_KEEP + 1);
         assert!(q.open_on("tab-open").is_some());

@@ -1132,7 +1132,7 @@ impl Machine {
             Call::WriteInput { tab, data } => json(self.write_input(&tab, data.as_bytes())?),
             Call::ResizePty { tab, cols, rows } => json(self.resize_pty(&tab, cols, rows)?),
             Call::CloseTab { tab } => {
-                self.close_tab(&tab);
+                self.close_tab(&tab, Some(Canceller::User));
                 Ok(Value::Null)
             }
             Call::StopTurn { tab } => json(self.stop_turn(&tab)?),
@@ -1907,14 +1907,14 @@ impl Machine {
         let id = self.open_run(run)?;
         // A run that can't start is refused whole, so the hub's next machine takes it and no idle tab stays behind here.
         if let Err(e) = self.start_claude(&id, UNWATCHED.0, UNWATCHED.1) {
-            self.close_tab(&id);
+            self.close_tab(&id, None);
             return Err(e);
         }
         // `claude --resume` exits 1 and prints this when the conversation is gone. The hub then
         // opens a new session seeded with the run's history. A live resume stays up, so the wait ends.
         if run.args.windows(2).any(|w| w[0] == "--resume") {
             if let Err(e) = self.resume_missing(&id) {
-                self.close_tab(&id);
+                self.close_tab(&id, None);
                 return Err(e);
             }
         }
@@ -1953,7 +1953,7 @@ impl Machine {
         let effort = match limits.admit(model.as_deref(), flag("--effort").as_deref(), &self.claude_models()) {
             Ok(effort) => effort,
             Err(refused) => {
-                self.close_tab(&id);
+                self.close_tab(&id, None);
                 return Err(refused);
             }
         };
@@ -1977,11 +1977,11 @@ impl Machine {
         let task = match self.delegates.claim(new, Some(limits.parallel)) {
             Claim::Fresh(task) => *task,
             Claim::Full(working) => {
-                self.close_tab(&id);
+                self.close_tab(&id, None);
                 return Err(workers_full(working));
             }
             Claim::Existing(task) => {
-                self.close_tab(&id);
+                self.close_tab(&id, None);
                 return Err(format!("task {task} already runs for this request"));
             }
         };
@@ -2006,7 +2006,7 @@ impl Machine {
         self.delegates.link_thread(&task.id, Thread { tab: id.clone(), runs: true });
         if let Err(error) = self.start_claude(&id, UNWATCHED.0, UNWATCHED.1) {
             self.delegates.fail(&task.id, error.clone(), self.launch.path_env.as_deref());
-            self.close_tab(&id);
+            self.close_tab(&id, None);
             return Err(error);
         }
         if let Some(pid) = self.tab(&id, |t| t.session.as_ref().and_then(pty::Session::pid)).ok().flatten() {
@@ -2094,7 +2094,7 @@ impl Machine {
         let id = self.add_tab(home, account, vec![], vec![], false, None);
         self.tab(&id, |t| t.program = Program::SignIn)?;
         if let Err(e) = self.start_claude(&id, UNWATCHED.0, UNWATCHED.1) {
-            self.close_tab(&id);
+            self.close_tab(&id, None);
             return Err(e);
         }
         Ok(id)
@@ -2640,7 +2640,7 @@ impl Machine {
     pub fn stop_turn(&self, tab: &str) -> Result<(), String> {
         const KILL_AGENTS: &[u8] = b"\x18\x0b";
         // Stopping the turn drops what it asked: the call that waits answers cancelled.
-        if self.questions.lock().unwrap().cancel_tab(tab, Canceller::Turn) {
+        if self.questions.lock().unwrap().cancel_tab(tab, Some(Canceller::Turn)) {
             self.end_task_held_for_questions(tab);
             self.emit_tabs();
         }
@@ -2714,14 +2714,16 @@ impl Machine {
         })?
     }
 
-    /// Ends the tab's session and forgets it. Answers whether no tab is left.
-    pub fn close_tab(&self, tab: &str) -> bool {
+    /// Ends the tab's session and forgets it. `by` is who closed it, as the `cancelled` result of
+    /// the questions it drops says: the user, or None for pinned's own close. Answers whether no
+    /// tab is left.
+    pub fn close_tab(&self, tab: &str, by: Option<Canceller>) -> bool {
         let path = self.launch.path_env.clone();
         for id in self.delegates.running_under(tab) {
-            let _ = self.cancel_tree_with_questions(&id, "the parent tab closed", Some(Canceller::User));
+            let _ = self.cancel_tree_with_questions(&id, "the parent tab closed", by.clone());
         }
         if let Some(task) = self.thread_task(tab, false) {
-            let _ = self.cancel_tree_with_questions(&task, "its thread was closed", Some(Canceller::User));
+            let _ = self.cancel_tree_with_questions(&task, "its thread was closed", by.clone());
         }
         let (closed, owned, last) = {
             let mut tabs = self.tabs.lock().unwrap();
@@ -2732,7 +2734,7 @@ impl Machine {
         let made = closed.as_ref().and_then(|t| t.made.clone());
         drop(closed);
         // Closed or archived: its questions go, with no notice.
-        self.questions.lock().unwrap().cancel_tab(tab, Canceller::User);
+        self.questions.lock().unwrap().cancel_tab(tab, by);
         self.delegates.drop_kept_worktrees(tab, &owned, path.as_deref());
         if let Some(made) = made {
             if !owned.iter().any(|dir| dir == &made) {
@@ -5557,7 +5559,7 @@ impl Machine {
         self.delegates.link_thread(child.task, crate::delegate::Thread { tab: id.clone(), runs: true });
         if let Err(error) = self.start_claude(&id, UNWATCHED.0, UNWATCHED.1) {
             self.delegates.fail(child.task, error.clone(), self.launch.path_env.as_deref());
-            self.close_tab(&id);
+            self.close_tab(&id, None);
             return Err(error);
         }
         // Cancel, the limit and quit stop the task by this pid, which is the thread's session.
@@ -7257,7 +7259,7 @@ pub(crate) mod tests {
         before.quit();
         before.quit();
         let tab = before.add_tab(app.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, Some("s3".into()));
-        before.close_tab(&tab);
+        before.close_tab(&tab, None);
         let saved: Vec<String> = sessions::load(&root.join("config/sessions.json")).into_iter().map(|s| s.session).collect();
         assert_eq!(saved, ["s1", "s2"], "nothing after the first quit rewrites the threads it saved");
 
@@ -7786,7 +7788,7 @@ pub(crate) mod tests {
         wait_for("the keys", || std::fs::read_to_string(&typed).is_ok_and(|t| !t.trim().is_empty()));
         assert_eq!(std::fs::read_to_string(&typed).unwrap().split_whitespace().collect::<Vec<_>>(), ["18", "0b", "18", "0b", "1b", "1b"]);
         assert_eq!(m.call(Call::StopTurn { tab: "tab-none".into() }), Err("no tab tab-none".into()));
-        m.close_tab(&tab);
+        m.close_tab(&tab, None);
     }
 
     #[cfg(unix)]
@@ -8461,7 +8463,7 @@ pub(crate) mod tests {
         m.nudge_thread_watchers(&mut looks);
         assert_eq!(thread_events(&heard), vec![json!({ "kind": "thread", "tab": tab })], "a line written in the new home nudges");
         assert_eq!(texts_from(&m, &tab, assistant_line("ready").len() as u64), vec!["moved"]);
-        m.close_tab(&tab);
+        m.close_tab(&tab, None);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -8481,7 +8483,7 @@ pub(crate) mod tests {
         let id = m.subscribe(Box::new(move |e| seen.lock().unwrap().push(serde_json::to_value(e).unwrap())));
         let tab = m.open_tab(None, false).unwrap();
         m.unsubscribe(id);
-        m.close_tab(&tab);
+        m.close_tab(&tab, None);
         assert_eq!(
             *heard.lock().unwrap(),
             [json!({ "kind": "tabs", "tabs": [{
@@ -8865,10 +8867,10 @@ pub(crate) mod tests {
         let opened = m.open_delegated(&parent, &owned_task.id).unwrap();
         assert_eq!(m.tab(&opened, |t| t.made.clone()).unwrap(), Some(owned.clone()));
         assert_eq!(m.view(&opened).unwrap().spawned_by, Some(parent.clone()), "an opened task nests under the thread that delegated it");
-        m.close_tab(&parent);
+        m.close_tab(&parent, None);
         assert!(!loose.exists(), "closing the parent left a worktree no tab owns");
         assert!(owned.is_dir(), "closing the parent removed a worktree an opened tab owns");
-        m.close_tab(&opened);
+        m.close_tab(&opened, None);
         assert!(!owned.exists(), "closing the opened tab left its worktree");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -9064,7 +9066,7 @@ pub(crate) mod tests {
         let staying_machine = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, staying)]), ..launch() }, Some(dir.clone()), Some(dir.clone()), |_| {});
         let id = staying_machine.run(&run).unwrap();
         assert!(staying_machine.view(&id).unwrap().running);
-        staying_machine.close_tab(&id);
+        staying_machine.close_tab(&id, None);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -9763,7 +9765,7 @@ pub(crate) mod tests {
             Err("close the tabs that run under spare before removing it".into()),
             "its saved session would not resume after a restart"
         );
-        m.close_tab(&tab);
+        m.close_tab(&tab, None);
         assert_eq!(m.call(Call::RemoveAccount { account: "spare".into() }), Ok(Value::Null));
         let _ = std::fs::remove_dir_all(root);
     }
@@ -9944,7 +9946,7 @@ echo '{"type":"result","result":"ok"}'
         std::fs::set_permissions(&cursor, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Cursor, cursor)]), ..launch() }, None, Some(root.clone()), |_| {});
         let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
-        m.close_tab(&tab);
+        m.close_tab(&tab, None);
         let gone = crate::delegate::parse_request(&json!({ "task": "look", "target": { "providerInstanceId": "cursor" }, "mode": "async" })).unwrap();
         let err = m.start_delegate(Some(tab), None, None, gone).unwrap_err();
         assert!(err.contains("no tab"), "{err}");
@@ -9960,7 +9962,7 @@ echo '{"type":"result","result":"ok"}'
         let parent = tab.clone();
         let handle = std::thread::spawn(move || started.start_delegate(Some(parent), None, None, mapped));
         wait_for("the model list", || listing.is_file());
-        assert!(m.close_tab(&tab));
+        assert!(m.close_tab(&tab, None));
         let err = handle.join().unwrap().unwrap_err();
         assert!(err.contains("no tab"), "{err}");
         std::thread::sleep(std::time::Duration::from_millis(200));
@@ -14047,8 +14049,8 @@ Have another model review a risky change before it goes ahead.";
     fn stop_turn_close_and_archive_each_cancel_the_open_questions() {
         let (m, root, _) = reload_machine("questions-cancel");
         let claude = Account::builtin(Provider::Claude);
-        let [stopped, closed, archived] = ["stop", "close", "archive"].map(|name| typing_tab(&m, claude.clone(), &root.join(format!("{name}.bin"))));
-        let ids = [&stopped, &closed, &archived].map(|tab| m.project_tool(tab, branch_questions(None)).unwrap());
+        let [stopped, closed, archived, internal] = ["stop", "close", "archive", "internal"].map(|name| typing_tab(&m, claude.clone(), &root.join(format!("{name}.bin"))));
+        let ids = [&stopped, &closed, &archived, &internal].map(|tab| m.project_tool(tab, branch_questions(None)).unwrap());
         let status = |id: &str| m.project_tool(&stopped, ProjectTool::QuestionStatus { id: id.into(), task: None }).map(|text| serde_json::from_str::<Value>(&text).unwrap()["outcome"].clone());
         assert_eq!(status(&ids[0]), Ok(json!("open")), "the call waits");
 
@@ -14057,16 +14059,21 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(question_result(&m, &ids[0]), cancelled(&ids[0], "The user stopped this turn."));
         assert_eq!(m.view(&stopped).unwrap().questions, None);
 
-        assert!(!m.close_tab(&closed));
+        assert!(!m.close_tab(&closed, Some(Canceller::User)));
         // The hub archives a thread by closing its tab on its machine.
         assert_eq!(m.call(Call::CloseTab { tab: archived.clone() }), Ok(Value::Null));
         let questions = m.questions.lock().unwrap();
-        for id in &ids[1..] {
+        for id in &ids[1..3] {
             let asked = questions.get(id).unwrap();
             assert_eq!((&asked.outcome, asked.notified), (&Some(crate::questions::Outcome::Cancelled), true), "dropped with no notice");
         }
         drop(questions);
         assert_eq!(question_result(&m, &ids[1]), cancelled(&ids[1], "The user cancelled this task."));
+        assert_eq!(question_result(&m, &ids[2]), cancelled(&ids[2], "The user cancelled this task."), "archiving is the user's");
+
+        // A close pinned makes itself does not say the user cancelled.
+        assert!(!m.close_tab(&internal, None));
+        assert_eq!(question_result(&m, &ids[3]), cancelled(&ids[3], "This task was cancelled."));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -14249,7 +14256,7 @@ Have another model review a risky change before it goes ahead.";
         let parent = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], vec![], false, None);
         let task = headless_task(&m, crate::delegate::Parent::Tab(parent.clone()));
         let (shown, id) = open_for_task_on_another_tab(&m, &task);
-        m.close_tab(&parent);
+        m.close_tab(&parent, None);
         assert_eq!(m.delegates.get(&task).map(|t| t.state), Some(crate::delegate::WorkState::Cancelled));
         assert_eq!(m.view(&shown).unwrap().questions, None, "the tab stops asking");
         assert_eq!(question_result(&m, &id), cancelled(&id, "The user cancelled this task."), "the waiting call answers cancelled");
@@ -14517,10 +14524,10 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(agents(&worker), Ok(format!("{nested}: Flag tests (starting) in {nested_tree}")));
         assert_eq!(agents(&nested), Ok("No workers yet.".into()));
 
-        m.close_tab(&plain);
+        m.close_tab(&plain, None);
         assert!(m.view(&worker).unwrap().running, "closing the spawner leaves its worker thread running");
         let task = m.tab(&nested, |t| t.task.clone()).unwrap().unwrap();
-        m.close_tab(&nested);
+        m.close_tab(&nested, None);
         assert_eq!(m.delegates.get(&task).map(|t| (t.state, t.error)), Some((crate::delegate::WorkState::Cancelled, Some("its thread was closed".into()))));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -14765,7 +14772,7 @@ Have another model review a risky change before it goes ahead.";
             permission_mode: None,
             hook_feedback: false, reply: None,
         });
-        m.close_tab(&_first);
+        m.close_tab(&_first, None);
         let finished = {
             use crate::delegate::{ChildEvent, Mode, NewTask};
             let task = m.delegates.begin(NewTask {
@@ -15152,7 +15159,7 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(String::from_utf8(std::fs::read(&parent_file).unwrap()).unwrap(), to_parent);
         assert_eq!(std::fs::read(&orchestrator_file).unwrap_or_default(), b"", "the orchestrator got news its worker's worker owed the worker");
 
-        m.close_tab(&parent);
+        m.close_tab(&parent, None);
         m.record_event(ask("Still there?"));
         let to_orchestrator = format!("\x1b[200~[pinned] Worker {nested} \"Flag tests\" needs input: Still there?\x1b[201~\r");
         wait_for("the orchestrator's report", || std::fs::read(&orchestrator_file).is_ok_and(|b| b.len() >= to_orchestrator.len()));
