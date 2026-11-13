@@ -1087,7 +1087,7 @@ pub enum HubCall {
     /// `RunStarted`: a session of the saved workflow `id`, started now with no trigger behind it,
     /// on the machine the workflow names and under the limits of its project there.
     RunWorkflow { id: String },
-    /// `graph::Graph`: a workflow map drafted from a plain description by a chat model.
+    /// Kept for older apps, whose Generate with AI button still sends it. The hub answers an error: an agent creates a workflow with `save_connector`.
     GenerateWorkflow { model: String, description: String },
     /// Starts an interactive session on a new Upstash Box cloning `repo`. Returns `BoxStatus`.
     OpenBox {

@@ -5724,7 +5724,7 @@
                 ]
               },
               {
-                "description": "`graph::Graph`: a workflow map drafted from a plain description by a chat model.",
+                "description": "Kept for older apps, whose Generate with AI button still sends it. The hub answers an error: an agent creates a workflow with `save_connector`.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -15921,7 +15921,7 @@
                 ]
               },
               {
-                "description": "`graph::Graph`: a workflow map drafted from a plain description by a chat model.",
+                "description": "Kept for older apps, whose Generate with AI button still sends it. The hub answers an error: an agent creates a workflow with `save_connector`.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -22295,7 +22295,7 @@
                 ]
               },
               {
-                "description": "`graph::Graph`: a workflow map drafted from a plain description by a chat model.",
+                "description": "Kept for older apps, whose Generate with AI button still sends it. The hub answers an error: an agent creates a workflow with `save_connector`.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -29301,7 +29301,7 @@
                 ]
               },
               {
-                "description": "`graph::Graph`: a workflow map drafted from a plain description by a chat model.",
+                "description": "Kept for older apps, whose Generate with AI button still sends it. The hub answers an error: an agent creates a workflow with `save_connector`.",
                 "type": "object",
                 "properties": {
                   "cmd": {
