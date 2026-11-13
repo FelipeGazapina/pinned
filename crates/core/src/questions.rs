@@ -139,10 +139,28 @@ pub struct Questions {
 }
 
 impl Questions {
-    /// The questionnaires saved in `dir`, none without one.
+    /// The questionnaires saved in `dir`, none without one. A row this build cannot read, as one
+    /// written by a build with an outcome it lacks, is skipped and logged, never at the cost of
+    /// the rows it can: an open questionnaire is not lost to a neighbour's unknown value.
     pub fn load(dir: Option<&Path>) -> Self {
         let file = dir.map(|d| d.join(FILE));
-        let asked = file.as_ref().and_then(|f| std::fs::read(f).ok()).and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default();
+        let Some(bytes) = file.as_ref().and_then(|f| std::fs::read(f).ok()) else { return Questions { file, asked: vec![] } };
+        let Ok(rows) = serde_json::from_slice::<Vec<serde_json::Value>>(&bytes) else {
+            eprintln!("pinned: {FILE} is not a list of questionnaires, so none were loaded");
+            return Questions { file, asked: vec![] };
+        };
+        let mut skipped = vec![];
+        let mut asked = Vec::with_capacity(rows.len());
+        for (index, row) in rows.into_iter().enumerate() {
+            // The error is not logged: serde echoes values from the row, and a row holds question text.
+            match serde_json::from_value::<Asked>(row) {
+                Ok(row) => asked.push(row),
+                Err(_) => skipped.push(index + 1),
+            }
+        }
+        if !skipped.is_empty() {
+            eprintln!("pinned: skipped {} unreadable row(s) of {FILE}, at position(s) {skipped:?}", skipped.len());
+        }
         Questions { file, asked }
     }
 
@@ -365,6 +383,33 @@ mod tests {
         assert!(q.open_on("tab-3").is_some(), "another tab's questionnaire stays open");
         let again = Questions::load(Some(&dir));
         assert_eq!(again.get(&by_tab).unwrap().outcome, Some(Outcome::Ended), "the outcome is saved");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_row_this_build_cannot_read_costs_only_that_row() {
+        let dir = temp("unreadable");
+        let mut q = Questions::load(Some(&dir));
+        let open = q.open("tab-1", None, Some("task-1".into()), None, vec![question("Which database?", &["postgres", "mysql"])], vec![], 1).unwrap();
+        let ended = q.open("tab-2", None, Some("task-2".into()), None, vec![question("Which region?", &["eu", "us"])], vec![], 2).unwrap();
+        q.end(&ended);
+        let future = q.open("tab-3", None, None, None, vec![question("Which plan?", &["free", "paid"])], vec![], 3).unwrap();
+        q.cancel_tab("tab-3");
+        let file = dir.join(FILE);
+        let mut rows: Vec<serde_json::Value> = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        let row = rows.iter_mut().find(|row| row["questionnaire"]["id"] == future.as_str()).unwrap();
+        row["outcome"] = serde_json::json!({ "kind": "from_the_future" });
+        std::fs::write(&file, serde_json::to_vec(&rows).unwrap()).unwrap();
+        drop(q);
+
+        let again = Questions::load(Some(&dir));
+        assert_eq!(again.open_on("tab-1").map(|q| q.id.clone()), Some(open.clone()), "the open questionnaire survives a row it cannot read");
+        assert_eq!(again.get(&ended).unwrap().outcome, Some(Outcome::Ended), "so does the one closed as ended");
+        assert_eq!(again.get(&future), None, "the unreadable row is skipped");
+        assert_eq!(again.waiting_tasks().collect::<Vec<_>>(), ["task-1"]);
+
+        std::fs::write(&file, b"{ not json").unwrap();
+        assert_eq!(Questions::load(Some(&dir)).waiting_tasks().count(), 0, "a file that is no list of rows at all is an empty one");
         let _ = std::fs::remove_dir_all(dir);
     }
 
