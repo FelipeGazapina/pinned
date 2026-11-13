@@ -6694,6 +6694,7 @@ mod tests {
             work: None,
             question: None,
             ask_detail: None,
+            questions: None,
         }
     }
 

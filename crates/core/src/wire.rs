@@ -163,6 +163,11 @@ pub struct TabView {
     /// it waits on, read from its transcript, such as the command a permission prompt shows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ask_detail: Option<String>,
+    /// The questionnaire the session waits on the user to answer, which `Call::AnswerQuestions`
+    /// answers. While it is open the tab reads as a question mid-turn, so an app that predates it
+    /// still shows the tab waiting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub questions: Option<crate::questions::Questionnaire>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
@@ -228,6 +233,9 @@ pub enum Call {
     /// `null`, once the tab's turn is stopped as the app's Stop button stops it: claude's background
     /// agents and workflows first, then the turn, then the turn their "stopped" notices wake.
     StopTurn { tab: TabId },
+    /// `null`, once `reply` closes the questionnaire `id` open on the tab. Refused when it is
+    /// closed already, or the reply does not fit its questions.
+    AnswerQuestions { tab: TabId, id: String, reply: crate::questions::QuestionsReply },
     /// The tab's new folder, canonical. Stands in for the folder dialog on a remote machine;
     /// the client then sends `StartClaude`.
     SetFolder { tab: TabId, path: String },
@@ -1721,6 +1729,7 @@ mod tests {
             work: None,
             question: None,
             ask_detail: None,
+            questions: None,
         }
     }
 
@@ -1744,6 +1753,48 @@ mod tests {
         let plain = serde_json::to_value(tab_view()).unwrap();
         assert!(plain.get("orchestrator_global").is_none(), "{plain}");
         assert!(!serde_json::from_value::<TabView>(plain).unwrap().orchestrator_global);
+    }
+
+    #[test]
+    fn a_tab_carries_its_open_questions_and_an_older_tab_reads_without_them() {
+        use crate::questions::{QOption, Question, Questionnaire};
+        let asked = Questionnaire {
+            id: "q-7".into(),
+            title: Some("Checkout redesign".into()),
+            questions: vec![Question {
+                header: Some("Branch".into()),
+                question: "Base the fix on main or on release/0.18?".into(),
+                changes: "which branch the PR targets".into(),
+                options: vec![QOption { label: "main".into(), description: Some("ships in the next release".into()), recommended: true }, QOption { label: "release/0.18".into(), description: None, recommended: false }],
+                multi_select: false,
+            }],
+            projects: vec![],
+            at: 1_794_240_000,
+        };
+        let tab = TabView { questions: Some(asked), ..tab_view() };
+        let sent = serde_json::to_value(&tab).unwrap();
+        assert_eq!(
+            sent["questions"],
+            json!({ "id": "q-7", "title": "Checkout redesign", "at": 1_794_240_000, "questions": [{ "header": "Branch", "question": "Base the fix on main or on release/0.18?", "changes": "which branch the PR targets", "options": [{ "label": "main", "description": "ships in the next release", "recommended": true }, { "label": "release/0.18" }] }] })
+        );
+        assert_eq!(serde_json::from_value::<TabView>(sent).unwrap(), tab);
+        let older = serde_json::to_value(tab_view()).unwrap();
+        assert!(older.get("questions").is_none(), "a tab with no questions sends none: {older}");
+        assert_eq!(serde_json::from_value::<TabView>(older).unwrap().questions, None, "an older machine's tab reads with no questions");
+    }
+
+    #[test]
+    fn answer_questions_round_trips_answered_and_skipped() {
+        use crate::questions::{Answer, QuestionsReply};
+        round_trip(
+            Call::AnswerQuestions {
+                tab: "tab-1".into(),
+                id: "q-7".into(),
+                reply: QuestionsReply::Answered { answers: vec![Answer { chosen: vec!["main".into()], text: None }, Answer { chosen: vec![], text: Some("Only the desktop one".into()) }] },
+            },
+            json!({ "cmd": "answer_questions", "tab": "tab-1", "id": "q-7", "reply": { "kind": "answered", "answers": [{ "chosen": ["main"] }, { "text": "Only the desktop one" }] } }),
+        );
+        round_trip(Call::AnswerQuestions { tab: "tab-1".into(), id: "q-7".into(), reply: QuestionsReply::Skipped }, json!({ "cmd": "answer_questions", "tab": "tab-1", "id": "q-7", "reply": { "kind": "skipped" } }));
     }
 
     #[test]
