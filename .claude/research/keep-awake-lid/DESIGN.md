@@ -312,22 +312,38 @@ All of it lives in the node, `crates/core/src/machine.rs`, which runs inside the
   requests that will start a turn as soon as the tab is idle.
 - **Delegated tasks**: `delegates.running()` (`delegate/registry.rs:1482`), every task not in a
   terminal `WorkState` (`delegate/mod.rs:318`: `Working`, `WaitingForChildren`). `summary()`
-  (`machine.rs:5830`) already filters out tasks that run on another machine (`task.remote`).
+  (`machine.rs:5830`) filters out tasks that run on another machine (`task.remote`, a box
+  included): right for this machine's **load**, wrong for "must stay awake" (3.2, rule 3). This
+  machine is the one that hears such a task end: it asks after each one every 60 s
+  (`REMOTE_CHECK`, `machine.rs:82`), and a box worker's end reaches its Captain through here.
 - **Scheduled workflow / connector runs**: owned by the hub (`graph/runner.rs`), but their work is
   a session on a machine (`talk` opens a tab; `run_now` starts it), so the tab rule covers them.
 
 ### 3.2 The rule
 
-New pure function in core, `awake::busy(&tabs, &tasks, now) -> Busy { agents: u32, waiting: u32 }`.
-A machine is **busy** when any of these holds, counting only work on this machine:
+New pure function in core, `awake::busy(&tabs, &tasks, now) -> Busy { agents: u32, delegated: u32, waiting: u32 }`.
+A machine is **busy** when any of these holds:
 
 1. a tab of `Program::Agent` with a turn in progress: `turn_pending`, `starting`,
    `status == Working` (including `background_wait`, since background work it started is still
-   agent work), or `shells_left`;
+   agent work), or `shells_left`. A **streaming model response is a turn in progress**: the
+   prompt's hook sets `Working` (`machine.rs:6178`) before the first token, and nothing clears it
+   until the Stop or StopFailure hook (`machine.rs:6168-6170`), so a Captain or the global
+   Orchestrator mid-response counts the whole time, not only while a tool runs;
 2. a tab with `orchestrator_turn` or `queued > 0`;
-3. a delegated task not terminal and not `remote`.
+3. **a delegated task that is not terminal, wherever it runs** (this machine, another machine, or a
+   box). This is changed from the first draft, which said "not `remote`". The case of 2026-11-12
+   showed the hole: a Captain that has handed work to box workers sits at its prompt (`Done`), so
+   rules 1 and 2 are false for it, and the only thing that is true is the delegated task, which is
+   `remote`. The workers run in the cloud, but their end and their questions come back to the
+   Captain through this machine, so while it sleeps the Captain is gone (`agents` counts rules 1 and
+   2, `delegated` counts this rule, so the hub can say "waiting on 2 box workers").
 
-**Does not count:** a tab sitting at its prompt; a `Failed` tab; a tab waiting out a usage limit
+   A remote task that waits on the user (`RemoteTarget::waiting`, `delegate/mod.rs:471`) follows the
+   30-minute waiting cap below. On battery the 8 h cap bounds a box task that runs for hours.
+
+**Does not count:** a tab sitting at its prompt with no delegated task; a `Failed` tab (its turn
+is dead, so there is nothing to hold the lid for; 3.4 is what happens to it); a tab waiting out a usage limit
 (`resume_at`): that can be hours, and the session continues when the machine wakes; a plain shell
 in the terminal panel (the brief says agents; `panel.rs:1399` `busy()` exists if Felipe wants
 shells too later).
