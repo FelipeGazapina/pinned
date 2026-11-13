@@ -87,3 +87,8 @@ postgres up, datadir pgdata.4DlQ pid 6458 port 5499
 2026-11-13T03:48:55Z the_global_orchestrator_reads_no_repo_of_another_account ok 2026-11-13T03:48:58Z
 2026-11-13T03:48:58Z a_captain_delegates_to_another_machine_and_task_status_hears_how_it_ended ok 2026-11-13T03:49:05Z
 2026-11-13T03:49:05Z a_remote_workers_approval_shows_on_the_captains_task_and_in_waiting_with_its_machine_and_clears_when_answered ok 2026-11-13T03:49:09Z
+2026-11-13T03:49:09Z a_box_worker_signs_in_with_the_named_token_nests_under_its_caller_and_goes_when_its_task_ends ok 2026-11-13T03:49:15Z
+2026-11-13T03:49:15Z a_box_the_hub_ends_fails_its_task_on_the_machine_that_delegated_it ok 2026-11-13T03:49:17Z
+2026-11-13T03:49:17Z a_worker_box_that_never_connects_fails_its_task_even_when_the_hub_restarts_mid_boot ok 2026-11-13T03:49:28Z
+2026-11-13T03:49:28Z a_box_start_asked_again_returns_the_box_it_started_and_makes_no_second ok 2026-11-13T03:49:30Z
+2026-11-13T03:49:30Z a_remote_start_asked_again_while_the_first_still_starts_finds_the_one_worker ok 2026-11-13T03:49:32Z

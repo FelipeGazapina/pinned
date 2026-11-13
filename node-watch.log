@@ -352,3 +352,24 @@
   log: pinned: synced plugins: 0 up, 2337 down
   log: pinned: synced github.com/felipegazapina/pinned: 0 up, 239 down
   test: test a_box_worker_signs_in_with_the_named_token_nests_under_its_caller_and_goes_when_its_task_ends ... 
+== 2026-11-13T03:49:21Z node=288 alive
+  tcp ESTAB 172.18.0.71:38452 153.52.255.120:443
+  mem.current=6844243968 oom_kill=0
+  log: pinned: connected to https://pinned-hub-production.up.railway.app
+  log: pinned: synced plugins: 0 up, 2337 down
+  log: pinned: synced github.com/felipegazapina/pinned: 0 up, 239 down
+  test: test a_worker_box_that_never_connects_fails_its_task_even_when_the_hub_restarts_mid_boot ... 
+== 2026-11-13T03:49:31Z node=288 alive
+  tcp ESTAB 172.18.0.71:38452 153.52.255.120:443
+  mem.current=6847295488 oom_kill=0
+  log: pinned: connected to https://pinned-hub-production.up.railway.app
+  log: pinned: synced plugins: 0 up, 2337 down
+  log: pinned: synced github.com/felipegazapina/pinned: 0 up, 239 down
+  test: test a_remote_start_asked_again_while_the_first_still_starts_finds_the_one_worker ... 
+== 2026-11-13T03:49:41Z node=288 alive
+  tcp ESTAB 172.18.0.71:38452 153.52.255.120:443
+  mem.current=6865911808 oom_kill=0
+  log: pinned: connected to https://pinned-hub-production.up.railway.app
+  log: pinned: synced plugins: 0 up, 2337 down
+  log: pinned: synced github.com/felipegazapina/pinned: 0 up, 239 down
+  test: test a_remote_workers_usage_reaches_the_task_that_asked_and_is_recorded_once ... 
