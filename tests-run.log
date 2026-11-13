@@ -229,3 +229,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:11:25Z #105 a_session_reads_convex_through_the_hub_and_the_key_never_leaves_it ok / avail=15058M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:11:26Z #106 an_agent_holding_what_its_machine_keeps_readable_cannot_approve_or_run_a_confirm_action START / avail=15058M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:11:53Z #106 an_agent_holding_what_its_machine_keeps_readable_cannot_approve_or_run_a_confirm_action ok / avail=15058M /workspace avail=19374M node_stat=Ssl node_tcp=1
+2026-11-13T04:11:54Z #107 a_node_keeps_only_its_machine_token_and_ends_a_login_an_older_pinned_kept START / avail=15058M /workspace avail=19374M node_stat=Ssl
