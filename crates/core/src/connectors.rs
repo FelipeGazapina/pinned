@@ -4032,6 +4032,12 @@ impl Connectors {
         Some(upstash::Keys { api_key: self.key(UPSTASH_KEY)?, claude_token: self.key(CLAUDE_TOKEN)? })
     }
 
+    /// The Upstash Box API key alone: all that listing and deleting boxes needs, so a box ends
+    /// even when the Claude token is missing. Never serialized, never sent to a client.
+    pub fn box_api_key(&self) -> Option<String> {
+        self.key(UPSTASH_KEY)
+    }
+
     /// Keeps a Claude token for boxes that run as the pinned account `name`. Answers every name
     /// with its token's last characters.
     pub fn set_box_claude_token(&self, name: &str, token: &str) -> Result<BTreeMap<String, String>, String> {
@@ -6292,6 +6298,16 @@ mod tests {
         connectors.disconnect_upstash().unwrap();
         assert!(connectors.box_keys().is_none());
         assert!(connectors.get_settings().upstash.is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_box_api_key_is_there_without_the_claude_token() {
+        let (connectors, dir) = stored("upstash-key-only", vec![]);
+        assert!(connectors.box_api_key().is_none());
+        connectors.storage.set_key(UPSTASH_KEY, "box_fake0000").unwrap();
+        assert!(connectors.box_keys().is_none(), "booting a box needs the token too");
+        assert_eq!(connectors.box_api_key().as_deref(), Some("box_fake0000"));
         let _ = std::fs::remove_dir_all(dir);
     }
 

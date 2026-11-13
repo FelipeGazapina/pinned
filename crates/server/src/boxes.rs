@@ -982,8 +982,8 @@ impl Boxes {
     /// The worker's task ended or was cancelled, so its box goes for `why`: `Done`, or `Offline`
     /// for a cancel while its node was offline. The machine that delegated the task knows already.
     pub async fn end_delegate(&self, hub: &Hub, account: &Arc<Account>, row: BoxRow, why: End) -> Result<(), String> {
-        let keys = hub.connectors(account).await?.box_keys();
-        self.finish_told(hub, account, row, why, keys.as_ref(), false).await
+        let key = hub.connectors(account).await?.box_api_key();
+        self.finish_told(hub, account, row, why, key.as_deref(), false).await
     }
 
     /// The box behind `machine`: its phase, age and budget, for its cost display.
@@ -1212,7 +1212,7 @@ impl Boxes {
                     row.phase = failed.clone();
                     self.tell_origin(hub, account, &row, &End::Failed(e.clone())).await;
                     self.record_agent_box(hub, account, &row).await;
-                    if let Err(e) = self.end(hub, account, &row.remains(), Some(keys)).await {
+                    if let Err(e) = self.end(hub, account, &row.remains(), Some(&keys.api_key)).await {
                         eprintln!("pinned-server: could not delete box {}: {e}", row.id);
                     }
                     break;
@@ -1349,14 +1349,14 @@ impl Boxes {
     }
 
     /// Ending → gone, each step a no-op once done: the machine, so its node can't sign in again,
-    /// then the box, then the row. Without keys the row stays, to be retried once they are back.
-    async fn end(&self, hub: &Hub, account: &Arc<Account>, row: &Remains, keys: Option<&Keys>) -> Result<(), String> {
+    /// then the box, then the row. Deleting needs only the Box API key, not the Claude token. Without
+    /// it the row stays, to be retried once it is back.
+    async fn end(&self, hub: &Hub, account: &Arc<Account>, row: &Remains, key: Option<&str>) -> Result<(), String> {
         let machine = row.machine.to_string();
         hub.db.remove_machine(account.id, row.machine).await?;
         account.went_offline(&machine, None);
         hub.push_machines(account).await;
-        let keys = keys.ok_or_else(|| format!("Upstash Box is not connected, so box {} stays until it is", row.upstash.as_ref().map_or(&row.id, |b| &b.0)))?;
-        let key = keys.api_key.as_str();
+        let key = key.ok_or_else(|| format!("Upstash Box is not connected, so box {} stays until it is", row.upstash.as_ref().map_or(&row.id, |b| &b.0)))?;
         match &row.upstash {
             Some(id) => self.api.delete(key, id).await?,
             None => {
@@ -1427,12 +1427,12 @@ impl Boxes {
     }
 
     /// Ends the row for `why`, unless it is ending already, and deletes its box.
-    async fn finish(&self, hub: &Hub, account: &Arc<Account>, row: BoxRow, why: End, keys: Option<&Keys>) -> Result<(), String> {
-        self.finish_told(hub, account, row, why, keys, true).await
+    async fn finish(&self, hub: &Hub, account: &Arc<Account>, row: BoxRow, why: End, key: Option<&str>) -> Result<(), String> {
+        self.finish_told(hub, account, row, why, key, true).await
     }
 
     /// `finish`, telling a worker box's origin only when `tell`.
-    async fn finish_told(&self, hub: &Hub, account: &Arc<Account>, mut row: BoxRow, why: End, keys: Option<&Keys>, tell: bool) -> Result<(), String> {
+    async fn finish_told(&self, hub: &Hub, account: &Arc<Account>, mut row: BoxRow, why: End, key: Option<&str>, tell: bool) -> Result<(), String> {
         let failed = matches!(why, End::Failed(_));
         if !matches!(row.phase, Phase::Ending(_)) {
             let ending = Phase::Ending(why.clone());
@@ -1445,7 +1445,7 @@ impl Boxes {
             }
         }
         self.record_agent_box(hub, account, &row).await;
-        self.end(hub, account, &row.remains(), keys).await?;
+        self.end(hub, account, &row.remains(), key).await?;
         if !failed {
             if let Ok(connectors) = hub.connectors(account).await {
                 if let Err(e) = connectors.forget_box_grant(&row.connector, &row.subject) {
@@ -1484,18 +1484,18 @@ impl Boxes {
     /// Removing a box's machine deletes the box too. Answers whether `machine` ran in one.
     pub async fn end_for_machine(&self, hub: &Hub, account: &Arc<Account>, machine: Uuid) -> Result<bool, String> {
         let Some(row) = hub.db.box_of(account.id, machine).await? else { return Ok(false) };
-        let keys = hub.connectors(account).await?.box_keys();
-        self.finish(hub, account, row, End::Removed, keys.as_ref()).await?;
+        let key = hub.connectors(account).await?.box_api_key();
+        self.finish(hub, account, row, End::Removed, key.as_deref()).await?;
         Ok(true)
     }
 
     /// Deletes every box of the account, before its Box key goes.
     pub async fn end_all(&self, hub: &Hub, account: &Arc<Account>) -> Result<(), String> {
-        let keys = hub.connectors(account).await?.box_keys();
+        let key = hub.connectors(account).await?.box_api_key();
         for row in hub.db.boxes(account.id).await? {
             match row {
-                Ok(row) => self.finish(hub, account, row, End::Disconnected, keys.as_ref()).await?,
-                Err(remains) => self.end(hub, account, &remains, keys.as_ref()).await?,
+                Ok(row) => self.finish(hub, account, row, End::Disconnected, key.as_deref()).await?,
+                Err(remains) => self.end(hub, account, &remains, key.as_deref()).await?,
             }
         }
         Ok(())
@@ -1512,11 +1512,13 @@ impl Boxes {
 
     async fn reap_once(&self, hub: &Arc<Hub>, account: &Arc<Account>) -> Result<(), String> {
         let connectors = hub.connectors(account).await?;
+        // Only a box's boot needs both keys. Listing and deleting need the Box API key alone.
         let keys = connectors.box_keys();
+        let key = connectors.box_api_key();
         let due = self.swept.lock().unwrap().get(&account.id).is_none_or(|at| at.elapsed() >= self.policy.sweep);
         // Listed before the rows are read, so every box listed has its row among them.
-        let listed = match &keys {
-            Some(keys) if due => match self.api.list(&keys.api_key, &self.label).await {
+        let listed = match &key {
+            Some(key) if due => match self.api.list(key, &self.label).await {
                 Ok(listed) => {
                     self.swept.lock().unwrap().insert(account.id, Instant::now());
                     Some(listed)
@@ -1535,7 +1537,7 @@ impl Boxes {
             let row = match row {
                 Ok(row) => row,
                 Err(remains) => {
-                    if let Err(e) = self.end(hub, account, &remains, keys.as_ref()).await {
+                    if let Err(e) = self.end(hub, account, &remains, key.as_deref()).await {
                         eprintln!("pinned-server: could not end a box of account {}: {e}", account.id);
                     }
                     continue;
@@ -1606,11 +1608,11 @@ impl Boxes {
                 Phase::Ending(_) => None,
             };
             let finished = match ended {
-                Some(why) => self.finish(hub, account, row, why, keys.as_ref()).await,
+                Some(why) => self.finish(hub, account, row, why, key.as_deref()).await,
                 None if matches!(row.phase, Phase::Ending(_)) => {
                     // A hub that stopped between ending the row and recording it records it now.
                     self.record_agent_box(hub, account, &row).await;
-                    self.end(hub, account, &row.remains(), keys.as_ref()).await
+                    self.end(hub, account, &row.remains(), key.as_deref()).await
                 }
                 None => Ok(()),
             };
@@ -1618,7 +1620,10 @@ impl Boxes {
                 eprintln!("pinned-server: could not end a box of account {}: {e}", account.id);
             }
         }
-        if let (Some(listed), Some(keys)) = (listed, &keys) {
+        // Every orphan is tried: one that will not delete is logged and the pass goes on, then the
+        // first failure is the pass's error.
+        let mut first = None;
+        if let (Some(listed), Some(key)) = (listed, &key) {
             for orphan in listed {
                 let row = orphan.labels.iter().find_map(|l| l.strip_prefix("p:"));
                 if let Some(row) = row {
@@ -1627,10 +1632,13 @@ impl Boxes {
                     }
                 }
                 eprintln!("pinned-server: deleting box {} that no row of this hub names", orphan.id);
-                self.api.delete(&keys.api_key, &orphan.id).await?;
+                if let Err(e) = self.api.delete(key, &orphan.id).await {
+                    eprintln!("pinned-server: could not delete box {} that no row of this hub names: {e}", orphan.id);
+                    first.get_or_insert(format!("could not delete box {}: {e}", orphan.id));
+                }
             }
         }
-        Ok(())
+        first.map_or(Ok(()), Err)
     }
 }
 
