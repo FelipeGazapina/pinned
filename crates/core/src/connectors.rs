@@ -2232,10 +2232,11 @@ fn claude_args(c: &Connector, worktree: &str, name: String) -> Vec<String> {
     args
 }
 
-/// What `pinned linear take` prints: the issue's identifier and link, its title and its description.
+/// What `pinned linear take` prints: the issue's identifier and link, its title on one line and its
+/// description with no line that begins as a pinned or sender header.
 fn take_answer(filed: &Filed, issue: &linear::Issue) -> String {
-    let description = issue.description.as_deref().unwrap_or_default().trim();
-    format!("{}\n\n{}\n\n{description}", filed.answer(), issue.title).trim_end().to_owned()
+    let description = pinned_lines::guard(issue.description.as_deref().unwrap_or_default().trim());
+    format!("{}\n\n{}\n\n{description}", filed.answer(), pinned_lines::flat(&issue.title, pinned_lines::FIELD_CHARS)).trim_end().to_owned()
 }
 
 fn run(c: &Connector, issue: &linear::Issue, exe: &str) -> Run {
@@ -2258,12 +2259,14 @@ fn run(c: &Connector, issue: &linear::Issue, exe: &str) -> Run {
         prompt += &proof_of_work(exe);
     }
     prompt += c.box_note();
+    // The title and description are written by whoever can edit the issue: one line, and no line of
+    // the description begins as a pinned or sender header.
     let input = format!(
         "{}: {}\n{}\n\n{}",
         issue.identifier,
-        issue.title,
+        pinned_lines::flat(&issue.title, pinned_lines::FIELD_CHARS),
         issue.url,
-        issue.description.as_deref().unwrap_or("(no description)"),
+        issue.description.as_deref().map(pinned_lines::guard).unwrap_or_else(|| "(no description)".to_owned()),
     );
     prompt += &format!("\n\nLinear issue {input}");
     args.push(prompt);
