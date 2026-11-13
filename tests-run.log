@@ -52,3 +52,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:03:24Z #22 a_hub_without_a_learning_database_keeps_no_dictation START / avail=15123M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:03:27Z #22 a_hub_without_a_learning_database_keeps_no_dictation ok / avail=15123M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:03:28Z #23 a_session_too_big_for_one_websocket_frame_syncs_without_dropping_the_link START / avail=15123M /workspace avail=19374M node_stat=Ssl
+2026-11-13T04:03:39Z #23 a_session_too_big_for_one_websocket_frame_syncs_without_dropping_the_link ok / avail=15095M /workspace avail=19374M node_stat=Ssl node_tcp=1
