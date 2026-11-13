@@ -916,10 +916,14 @@ impl Hub {
         }
     }
 
-    /// The account's settings with its ideas, which live in the hub's own table.
+    /// The account's settings with its ideas, which live in the hub's own table. A failed ideas
+    /// read leaves them out rather than failing the settings every app loads.
     async fn settings(&self, account: &Account) -> Result<pinned_core::connectors::Settings, String> {
         let mut settings = self.connectors(account).await?.get_settings();
-        settings.ideas = self.db.ideas(account.id, None).await?;
+        settings.ideas = self.db.ideas(account.id, None).await.unwrap_or_else(|e| {
+            eprintln!("pinned-server: could not read the ideas of account {}: {e}", account.id);
+            Vec::new()
+        });
         Ok(settings)
     }
 
