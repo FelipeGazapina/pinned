@@ -452,6 +452,16 @@ pub enum Call {
     /// `String`: a new title for the tab's conversation, which `claude -p` writes from `thread`, its
     /// messages, and the `previous` title. An empty `thread` reads the tab's own conversation.
     RegenerateTitle { tab: TabId, previous: String, thread: String },
+    /// `graph::Graph`: a workflow map `claude -p` drafts from `description` under `account`, else
+    /// the built-in Claude Code login, in the machine's scratch folder. Its call steps may run only
+    /// the `workflows` that answer threads.
+    DraftWorkflow {
+        #[serde(default)]
+        account: Option<AccountId>,
+        description: String,
+        #[serde(default)]
+        workflows: Vec<WorkflowRef>,
+    },
     /// What `gh pr list` answers in the tab's folder: number, title, state, isDraft, url, headRefName.
     PrList { tab: TabId },
     /// `null`. Merges `pr`, or marks it ready, through gh in the tab's folder.
@@ -795,6 +805,7 @@ impl Call {
                 | Call::PrStatus { .. }
                 | Call::Favicon { .. }
                 | Call::RegenerateTitle { .. }
+                | Call::DraftWorkflow { .. }
                 | Call::StopTurn { .. }
                 | Call::PrList { .. }
                 | Call::PrAction { .. }
@@ -943,6 +954,18 @@ pub struct RunSpec {
     /// What may be spent on the box running this, in USD; none leaves the hub's lifetime cap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_usd: Option<f64>,
+}
+
+/// A saved workflow a drafted map's call step may name.
+///
+/// `{"id":"c1","name":"Fix bugs","answers_threads":true}`
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct WorkflowRef {
+    pub id: String,
+    pub name: String,
+    /// Whether it answers a Slack thread, which a call hands it.
+    #[serde(default)]
+    pub answers_threads: bool,
 }
 
 /// The session a workflow's Run now started.
@@ -1648,6 +1671,15 @@ mod tests {
         assert_eq!(serde_json::to_value(&frame).unwrap(), expected);
         let parsed: T = serde_json::from_value(expected.clone()).unwrap();
         assert_eq!(serde_json::to_value(parsed).unwrap(), expected);
+    }
+
+    #[test]
+    fn a_workflow_draft_names_its_account_and_callable_workflows_only_when_it_has_them() {
+        let bare: Call = serde_json::from_value(json!({ "cmd": "draft_workflow", "description": "Triage bugs" })).unwrap();
+        assert_eq!(bare, Call::DraftWorkflow { account: None, description: "Triage bugs".into(), workflows: vec![] });
+        let named: Call = serde_json::from_value(json!({ "cmd": "draft_workflow", "account": "work", "description": "x", "workflows": [{ "id": "c1", "name": "Fix" }] })).unwrap();
+        assert_eq!(named, Call::DraftWorkflow { account: Some("work".into()), description: "x".into(), workflows: vec![WorkflowRef { id: "c1".into(), name: "Fix".into(), answers_threads: false }] });
+        assert!(bare.may_wait(), "claude -p runs for minutes off the call queue");
     }
 
     #[test]

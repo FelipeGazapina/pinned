@@ -1286,6 +1286,7 @@ impl Machine {
                 let headless = Headless { env: &env, strip: self.headless_strip(&tab)? };
                 json(titles::regenerate(&self.launch.bin(Provider::Claude), &headless, &cwd, self.launch.path_env.as_deref(), &previous, &thread)?)
             }
+            Call::DraftWorkflow { account, description, workflows } => json(self.draft_workflow(account.as_deref(), &description, &workflows)?),
             Call::Favicon { tab } => json(favicon::of(&history::project_of(&self.tab(&tab, |t| t.cwd.clone())?))),
             Call::PrStatus { tab, pr } => json(workspace::pr_status(&self.tab(&tab, |t| t.cwd.clone())?, &pr, self.launch.path_env.as_deref())?),
             Call::PullRequest { tab, pr } => json(workspace::pull_request(&self.tab(&tab, |t| t.cwd.clone())?, &pr, self.launch.path_env.as_deref())?),
@@ -1705,6 +1706,28 @@ impl Machine {
     fn headless_strip(&self, tab: &str) -> Result<&'static [&'static str], String> {
         let account = self.tab(tab, |t| t.account.clone())?;
         Ok(if account.auth == Auth::OpenCodeGo { &crate::opencode_go::STRIP_ENV } else { &[] })
+    }
+
+    /// A workflow map drafted by `claude -p` under a Claude Code login. It runs in the scratch
+    /// folder: claude reads its whole working folder, and a project or home can be huge.
+    fn draft_workflow(&self, account: Option<&str>, description: &str, workflows: &[crate::wire::WorkflowRef]) -> Result<crate::graph::Graph, String> {
+        if description.trim().is_empty() {
+            return Err("describe the workflow first".into());
+        }
+        let account = match account.filter(|id| !id.is_empty()) {
+            Some(id) => self.accounts.get(id).ok_or_else(|| format!("no account {id} on this machine"))?,
+            None => Account::builtin(Provider::Claude),
+        };
+        if account.provider != Provider::Claude || account.auth != Auth::Login {
+            return Err(format!("{} is no Claude Code login, so it can't draft a workflow", account.name));
+        }
+        std::fs::create_dir_all(&self.scratch).map_err(|e| format!("could not make {}: {e}", self.scratch.display()))?;
+        let instructions = crate::connectors::generate_instructions(workflows.iter().map(|w| (w.name.as_str(), w.id.as_str())));
+        let args = ["--no-session-persistence", "--model", "sonnet", "--system-prompt", &instructions, "--tools", "", "--settings", r#"{"disableAllHooks":true}"#];
+        let env = self.accounts.env(&account);
+        let headless = Headless { env: &env, strip: &[] };
+        let answer = headless.run(&self.launch.bin(Provider::Claude), &self.scratch, self.launch.path_env.as_deref(), &args, description.trim(), HEADLESS_WAIT)?;
+        crate::connectors::graph_from_answer(&answer, &|id| workflows.iter().any(|w| w.id == id && w.answers_threads))
     }
 
     /// The long-lived token `claude setup-token` prints for this machine's Claude account `id`,
@@ -9074,6 +9097,48 @@ pub(crate) mod tests {
         };
         assert_eq!(title("work"), Ok(json!("as work")));
         assert_eq!(title("side"), Ok(json!("as claude")), "a Codex tab asks the built-in Claude Code login");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_drafted_workflow_runs_claude_in_the_scratch_folder_under_the_named_account() {
+        let root = temp("draft-workflow");
+        let claude = root.join("claude");
+        let script = r#"#!/bin/sh
+asked=$(cat)
+case "$*" in *"--model sonnet"*"--system-prompt"*"- Fix bugs (fixer)"*) told=told;; *) told=untold;; esac
+printf 'Here is the map:\n```json\n{"nodes":[{"name":"Message","type":"trigger","watch":{"kind":"slack-mention","channel":"support"}},{"name":"Reply","type":"reply","text":"%s|%s|%s|%s"},{"name":"Hand off","type":"call","workflow":"fixer"}],"edges":[{"from":"Message","to":"Reply"},{"from":"Reply","to":"Hand off"}]}\n```\n' "$PINNED_ACCOUNT" "$(pwd -P)" "$told" "$asked"
+"#;
+        std::fs::write(&claude, script).unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(root.join("config")), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+        m.call(Call::AddAccount { provider: Provider::Codex, name: "Side".into(), auth: None, key: None }).unwrap();
+        let fixer = || vec![crate::wire::WorkflowRef { id: "fixer".into(), name: "Fix bugs".into(), answers_threads: true }];
+        let draft = |account: Option<&str>, workflows| m.call(Call::DraftWorkflow { account: account.map(Into::into), description: "  Triage support  ".into(), workflows });
+        let graph: crate::graph::Graph = serde_json::from_value(draft(Some("work"), fixer()).unwrap()).unwrap();
+        let reply = graph.nodes.iter().find_map(|n| match &n.kind { crate::graph::NodeKind::Reply { text } => Some(text.clone()), _ => None }).unwrap();
+        let scratch = std::fs::canonicalize(root.join("config").join("scratch")).unwrap();
+        assert_eq!(reply, format!("work|{}|told|Triage support", scratch.display()), "claude ran in the scratch folder, as the account, with the instructions and the description");
+        assert!(draft(None, fixer()).unwrap()["nodes"].to_string().contains("claude|"), "no account asks the built-in Claude Code login");
+        assert!(draft(Some("work"), vec![]).is_err(), "a call step to a workflow the caller did not offer fails as a save would");
+        assert_eq!(draft(Some("side"), fixer()), Err("Side is no Claude Code login, so it can't draft a workflow".into()));
+        assert_eq!(m.call(Call::DraftWorkflow { account: None, description: " ".into(), workflows: vec![] }), Err("describe the workflow first".into()));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_headless_claude_that_does_not_answer_in_time_is_killed() {
+        let root = temp("headless-wait");
+        let claude = root.join("claude");
+        std::fs::write(&claude, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let started = Instant::now();
+        let answer = Headless { env: &[], strip: &[] }.run(&claude, &root, None, &[], "hi", Duration::from_millis(300));
+        assert_eq!(answer, Err("claude did not answer in time".into()));
+        assert!(started.elapsed() < Duration::from_secs(10), "the call came back without waiting for claude");
         let _ = std::fs::remove_dir_all(root);
     }
 
