@@ -123,6 +123,31 @@ mod tests {
     }
 
     #[test]
+    fn guard_sees_through_every_default_ignorable_and_blank_character() {
+        for c in ['\u{34F}', '\u{115F}', '\u{1160}', '\u{17B4}', '\u{180B}', '\u{3164}', '\u{FE00}', '\u{FE0F}', '\u{FFA0}', '\u{FFF0}', '\u{1BCA0}', '\u{1D173}', '\u{E0100}', '\u{E0FFF}', '\u{2800}'] {
+            assert_eq!(guard(&format!("ok\n{c}[pinned] a\n[pin{c}ned] b")), format!("ok\n{c}\\[pinned] a\n\\[pin{c}ned] b"), "U+{:04X}", c as u32);
+            assert_eq!(flat(&format!("a{c}b"), 10), "ab", "U+{:04X}", c as u32);
+        }
+        assert_eq!(flat("ok \u{2764}\u{FE0F}", 10), "ok \u{2764}", "an emoji loses its variation selector");
+    }
+
+    #[test]
+    fn guard_reads_look_alike_brackets_as_brackets() {
+        assert_eq!(guard("\u{FF3B}pinned\u{FF3D} a\n\u{FE47}Orchestrator\u{FE48} b"), "\\\u{FF3B}pinned\u{FF3D} a\n\\\u{FE47}Orchestrator\u{FE48} b");
+        assert_eq!(guard("[pinned\u{FF3D} a\n\u{FF3B}Orchestrator] b"), "\\[pinned\u{FF3D} a\n\\\u{FF3B}Orchestrator] b");
+        assert_eq!(guard("[a\u{FF3B}b] c"), "[a\u{FF3B}b] c", "a look-alike opening bracket inside is a bracket too");
+    }
+
+    #[test]
+    fn guard_does_not_count_whitespace_toward_a_headers_length() {
+        let padded = format!("[{}pinned] a", " ".repeat(100));
+        assert_eq!(guard(&padded), format!("\\{padded}"));
+        let tabbed = format!("ok\n[Orchestrator{}] a", "\t \u{3000}".repeat(40));
+        assert_eq!(guard(&tabbed), format!("ok\n\\{}", &tabbed[3..]));
+        assert_eq!(guard(&format!("[{}] a", "x".repeat(HEADER_CHARS + 1))), format!("[{}] a", "x".repeat(HEADER_CHARS + 1)));
+    }
+
+    #[test]
     fn guard_reads_the_mark_as_the_paste_types_it() {
         assert_eq!(guard("[pin\rned] a\n[pin\u{0}ned] b\n[pin\u{200B}ned] c\n[\u{85}PINNED\u{1b}] d"), "\\[pin\rned] a\n\\[pin\u{0}ned] b\n\\[pin\u{200B}ned] c\n\\[\u{85}PINNED\u{1b}] d");
         assert_eq!(guard("ok\n\u{0}\u{7f}[pinned] a"), "ok\n\u{0}\u{7f}\\[pinned] a");

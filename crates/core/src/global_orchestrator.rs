@@ -928,7 +928,7 @@ mod tests {
 
     #[test]
     fn a_name_that_reads_as_pinned_falls_back_to_the_default() {
-        for name in ["pinned", " [PINNED] ", "Pin\u{200B}ned\n"] {
+        for name in ["pinned", " [PINNED] ", "Pin\u{200B}ned\n", "p.i.n.n.e.d", "pinned:", "pin ned", "P-I-N-N-E-D!", "\u{FF50}\u{FF49}\u{FF4E}\u{FF4E}\u{FF45}\u{FF44}", "\u{FF30}inned", "pinned2"] {
             assert_eq!(Settings { name: name.into(), ..Settings::default() }.cleaned().name, "Orchestrator", "{name:?}");
         }
         assert_eq!(Settings { name: "pinned ops".into(), ..Settings::default() }.cleaned().name, "pinned ops");
