@@ -3516,9 +3516,9 @@ impl Machine {
         }
         if let Call::SetModel { tab, model, account, .. } = &call {
             // An agent moves a session only to a model its own project allows, as it starts a worker.
-            // The account the session runs on after the call. A tab or account that is not here is refused by the call itself.
+            // The account the session runs on after the call. A tab that is not here is refused by the call itself.
             let to = match account.as_deref().filter(|id| !id.is_empty()) {
-                Some(id) => self.accounts.get(id),
+                Some(id) => Some(self.accounts.get(id).ok_or_else(|| format!("no account {id} on this machine"))?),
                 None => self.tab(tab, |t| t.account.clone()).ok(),
             };
             let limits = self.caller_limits(caller)?;
@@ -12194,6 +12194,20 @@ Have another model review a risky change before it goes ahead.";
         let direct = m.call(Call::SetModel { tab: tab.clone(), model: String::new(), cols: 80, rows: 24, account: None });
         assert_eq!(direct, Err("\"\" is not a model name".into()));
         assert_eq!(m.tab(&tab, |t| t.model.clone()).unwrap().as_deref(), Some("claude-haiku-5-5"), "a refused model changes nothing");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agents_set_model_names_an_account_or_a_tab_that_is_not_here_and_is_refused_as_such() {
+        let (m, dir, captain) = limited_captain("limits-set-model-gone", TastePatch { tier: Some(taste::Tier::Mid), ..TastePatch::default() });
+        let path = m.tab(&captain, |t| t.cwd.display().to_string()).unwrap();
+        let tab = m.open_tab(Some(path), false).unwrap();
+        let act = |call: Value| m.call(Call::ActFor { caller: captain.clone(), call });
+        let set = |tab: &str, account: Option<&str>| act(json!({ "cmd": "set_model", "tab": tab, "model": "claude-haiku-5-5", "account": account, "cols": 80, "rows": 24 }));
+        assert_eq!(set(&tab, Some("elsewhere")), Err("no account elsewhere on this machine".into()));
+        assert!(set("tab-gone", None).is_err(), "a tab that is not here is refused");
+        assert!(set("tab-gone", Some("work")).is_err(), "a tab that is not here is refused");
         let _ = std::fs::remove_dir_all(dir);
     }
 
