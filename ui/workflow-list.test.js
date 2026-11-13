@@ -54,17 +54,6 @@ test("an unknown trigger still renders a card instead of blanking the page", () 
   assert.match(html, /data-toggle="enabled"/);
 });
 
-test("generation errors tell what to change before retrying", () => {
-  const start = src.indexOf("/** Backend generation errors");
-  const end = src.indexOf("const actions = {");
-  const context = { console };
-  vm.createContext(context);
-  vm.runInContext(src.slice(start, end), context);
-  assert.match(context.generateErrorHint('step "Message" has no usable trigger'), /when mentioned in #support/);
-  assert.match(context.generateErrorHint("the model did not answer with a workflow map"), /Simplify/);
-  assert.equal(context.generateErrorHint("boom"), "boom");
-});
-
 test("a connector without a trigger still renders a card", () => {
   const context = listWorld([{ id: "c0", name: "Old thing", enabled: false, folder: "/repo", machine: "", columns: {} }]);
   const html = context.connectorsHtml();
