@@ -410,6 +410,13 @@ fn close_behind() -> Message {
     Message::Close(Some(CloseFrame { code: 1013, reason: "fell behind".into() }))
 }
 
+/// 1013 to a machine whose sign in never arrived or could not be read. A slow or overloaded hub must
+/// not read as a refusal: a box's node leaves after 15 minutes of 4001, so 4001 means only "no machine
+/// has this token".
+fn close_no_sign_in() -> Message {
+    Message::Close(Some(CloseFrame { code: 1013, reason: "no sign in in time".into() }))
+}
+
 /// Resolves once the hub is told to stop. It doesn't hand out the watch's guard, which can't be held across an await.
 async fn hub_going_away(away: &mut tokio::sync::watch::Receiver<bool>) {
     let _ = away.wait_for(|away| *away).await;
@@ -605,7 +612,7 @@ async fn machine_socket(State(server): State<Arc<Server>>, upgrade: WebSocketUpg
 async fn serve_machine(hub: Arc<Hub>, mut socket: WebSocket) {
     let (token, os, version) = match first_text(&mut socket).await.map(|t| serde_json::from_str::<MachineFrame>(&t)) {
         Some(Ok(MachineFrame::Auth { token, os, version, .. })) => (token, os, version),
-        _ => return drop(socket.send(close_unauthorized()).await),
+        _ => return drop(socket.send(close_no_sign_in()).await),
     };
     let row = match hub.db.machine_connected(&token, &os, &version).await {
         Ok(Some(row)) => row,
