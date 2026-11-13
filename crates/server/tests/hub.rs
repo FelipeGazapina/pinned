@@ -8273,7 +8273,9 @@ fn a_saved_or_deleted_idea_sends_ideas_changed_to_the_accounts_apps_and_a_settin
     let url = hub.url.clone();
     let (ana_token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
     let (bob_token, _) = account::signup(&url, "bob@acme.dev", "correct horse").unwrap();
-    let mut ana = Client::app(&url, &ana_token);
+    // The first app is one that has not locked its login, which may turn Repo insight on; the second is as an app signs in now.
+    let mut ana = Client::connect(&url, &ana_token);
+    ana.wait("hello", |f| f["type"] == "hello");
     let mut phone = Client::app(&url, &ana_token);
     let mut bob = Client::app(&url, &bob_token);
     let signals = |c: &Client| c.frames.iter().filter(|f| f["type"] == "ideas_changed").count();
