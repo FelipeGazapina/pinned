@@ -8785,6 +8785,26 @@ fn the_hub_holds_no_end_whose_task_or_state_is_not_one_pinned_makes() {
 }
 
 #[test]
+fn the_hub_holds_no_end_whose_tab_is_not_one_pinned_makes() {
+    let hub = TestHub::start("held_tab_checked");
+    let (token, _, mut ana) = signed_in(&hub.url, "ana@acme.dev");
+    let (mac, _) = account::register_machine(&hub.url, &token, "ana-mac", "linux").unwrap();
+    let (_, mini_token) = account::register_machine(&hub.url, &token, "ana-mini", "linux").unwrap();
+    let mini_raw = RawMachine::start(&hub.url, &mini_token, |_| RawReply::Ok(Value::Null));
+    wait_for("mini online", || ana.machines().contains(&("ana-mini".into(), true)));
+    let end = |tab: &str| json!({ "cmd": "remote_ended", "to": mac.id, "tab": tab, "task": "task-1", "end": { "state": "result_available", "summary": "Suite green." } });
+    let long = format!("tab-{}", "a".repeat(125));
+    for tab in ["", long.as_str(), "tab-1\nforged line", "tab-1\u{7}", "tab-1\u{0}"] {
+        let refused = mini_raw.ask(end(tab));
+        assert_eq!(refused, Err("the hub refuses this end: its task id or state is not one pinned makes".into()), "{tab:?}");
+        assert_eq!(held_ends(&hub, None), 0, "{tab:?}: nothing is stored");
+    }
+    assert_eq!(long.len(), 129);
+    assert_eq!(mini_raw.ask(end(&format!("tab-{}", "a".repeat(124)))), Ok(json!(true)), "the longest tab is held for mac, which is offline");
+    assert_eq!(held_ends(&hub, None), 1);
+}
+
+#[test]
 fn a_machine_that_answers_a_held_end_with_an_error_is_offered_no_more_until_it_connects_again() {
     let hub = TestHub::start("held_error_stops");
     let (_ana, mac, mac_token, _mini, mini_raw, _) = held_for_offline_mac(&hub);
