@@ -772,7 +772,15 @@ impl Hub {
         let id = Uuid::parse_str(machine).map_err(|_| format!("this account has no machine {machine}"))?;
         let name = self.db.machine_name(account.id, id).await?.ok_or_else(|| format!("this account has no machine {machine}"))?;
         let _held = account.task_records.lock().await;
-        let boxed = self.db.box_made(account.id, id).await?;
+        // A box whose size this hub can't read bills no box time, and the records are still kept.
+        let boxed = match self.db.box_made(account.id, id).await? {
+            Some((created, Ok(size))) => Some((created, size)),
+            Some((_, Err(e))) => {
+                eprintln!("pinned-server: machine {machine}'s task records are kept with no box time: {e}");
+                None
+            }
+            None => None,
+        };
         // Each task is billed the box time since the one that ended before it.
         records.sort_by_key(|record| record.ended);
         for mut record in records {

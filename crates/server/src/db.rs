@@ -1214,7 +1214,8 @@ impl Db {
     }
 
     /// When the box `machine` runs in was made, in unix milliseconds, and its size, while it is one of the account's boxes.
-    pub async fn box_made(&self, account: Uuid, machine: Uuid) -> Result<Option<(u64, BoxSize)>, String> {
+    /// A size this hub can't read comes back as its error, apart from the creation time.
+    pub async fn box_made(&self, account: Uuid, machine: Uuid) -> Result<Option<(u64, Result<BoxSize, String>)>, String> {
         let row = self
             .client()
             .await?
@@ -1222,7 +1223,7 @@ impl Db {
             .await
             .map_err(err)?;
         let Some(row) = row else { return Ok(None) };
-        let size = serde_json::from_value(Value::String(row.get(1))).map_err(|e| format!("the size of the box of machine {machine} is unreadable: {e}"))?;
+        let size = serde_json::from_value(Value::String(row.get(1))).map_err(|e| format!("the size of the box of machine {machine} is unreadable: {e}"));
         Ok(u64::try_from(row.get::<_, i64>(0)).ok().map(|created| (created, size)))
     }
 

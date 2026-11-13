@@ -5844,6 +5844,28 @@ fn a_task_on_a_box_is_billed_the_box_time_since_the_previous_task_on_that_box() 
 }
 
 #[test]
+fn a_box_whose_size_is_unreadable_keeps_its_task_records_with_no_box_time() {
+    let hub = TestHub::start("delegation_box_size");
+    let url = hub.url.clone();
+    let (token, ana_account, mut ana) = signed_in(&url, "ana@acme.dev");
+    let (machine, machine_token) = account::register_machine(&url, &token, "Box · site", "linux").unwrap();
+    admin_on(&hub.database, &format!(
+        "insert into boxes (id, account, machine, upstash, connector, subject, spec, size, phase, created_at) values ('anas-box', '{ana_account}', '{}', 'box_ana', 'interactive', '{{\"issue\":\"b1\"}}', '{{\"folder\":\"/w\",\"args\":[]}}', 'enormous', 'running', now() - interval '30 minutes')",
+        machine.id,
+    ));
+    let raw = RawMachine::start(&url, &machine_token, |_| RawReply::Ok(Value::Null));
+    ana.wait_machines(&[("Box · site", true)]);
+    let now = now_ms();
+    let records = [task_record("task-a", "claude-sonnet-5-5", "done", 5, Some(0.2), now - 60_000), task_record("task-b", "claude-sonnet-5-5", "done", 15, Some(0.4), now)];
+    assert_eq!(raw.ask(json!({ "cmd": "record_tasks", "records": records })), Ok(Value::Null), "the batch is kept");
+
+    let stats = ana.hub(json!({ "cmd": "delegation_stats", "days": 1 })).unwrap();
+    let ids: Vec<&str> = stats["slowest"].as_array().unwrap().iter().map(|t| t["id"].as_str().unwrap()).collect();
+    assert_eq!((ids.contains(&"task-a"), ids.contains(&"task-b")), (true, true), "{stats}");
+    assert_eq!(stats["totals"]["box_ms"].as_f64().unwrap_or(0.0), 0.0, "no box time is billed: {stats}");
+}
+
+#[test]
 fn overlapping_tasks_on_one_box_each_pay_for_their_own_span_however_their_records_arrive() {
     let hub = TestHub::start("delegation_box_overlap");
     let url = hub.url.clone();
