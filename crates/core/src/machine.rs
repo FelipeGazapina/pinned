@@ -375,11 +375,17 @@ fn stop_reason(task: Option<&crate::delegate::Task>, code: Option<u32>) -> Strin
     let Some(task) = task.filter(|task| task.state == crate::delegate::WorkState::Cancelled) else {
         return code.map_or_else(|| "crashed".to_owned(), |code| format!("exited with code {code}"));
     };
-    match (task.limit.as_deref(), task.error.as_deref()) {
+    cancel_reason(task.limit.as_deref(), task.error.as_deref())
+}
+
+/// How a cancelled task reads on the wire. A cancel's own reason is free text any caller wrote, so
+/// only reasons pinned itself names pass through.
+fn cancel_reason(limit: Option<&str>, error: Option<&str>) -> String {
+    match (limit, error) {
         (Some(limit), _) => format!("cancelled at its {limit} limit"),
         (None, Some(CARD_CANCEL)) => "stopped by you".into(),
-        (None, Some(error)) => format!("cancelled: {error}"),
-        (None, None) => "cancelled".into(),
+        (None, Some(crate::delegate::RESTART_ENDED)) => format!("cancelled: {}", crate::delegate::RESTART_ENDED),
+        (None, _) => "cancelled".into(),
     }
 }
 
@@ -6904,6 +6910,16 @@ pub(crate) mod tests {
 
     fn machine() -> Arc<Machine> {
         Machine::new(launch(), None, Some("/repo".into()), |_| {})
+    }
+
+    #[test]
+    fn a_cancel_reason_reaches_the_wire_only_when_pinned_wrote_it() {
+        let reason = super::cancel_reason;
+        assert_eq!(reason(Some("time"), Some("pinned stopped it after US$ 5.00")), "cancelled at its time limit");
+        assert_eq!(reason(None, Some(CARD_CANCEL)), "stopped by you");
+        assert_eq!(reason(None, Some(crate::delegate::RESTART_ENDED)), format!("cancelled: {}", crate::delegate::RESTART_ENDED));
+        assert_eq!(reason(None, Some("run: deploy --token fake-token-0000")), "cancelled");
+        assert_eq!(reason(None, None), "cancelled");
     }
 
     #[test]
