@@ -531,6 +531,15 @@ impl Limits {
         (self.budget_cents > 0 && spent * 100.0 >= f64::from(self.budget_cents)).then(|| format!("pinned stopped it after it spent US$ {spent:.2}, its budget of {}", usd(self.budget_cents)))
     }
 
+    /// Whether a worker that spent `cost_usd` has used `percent` of its budget: its spend and its
+    /// budget in USD, or none when it has no budget or no price. It is a warning's test, and
+    /// never the stop's: `over_budget` alone decides that.
+    pub fn used_percent(&self, cost_usd: Option<f64>, percent: u32) -> Option<(f64, f64)> {
+        let spent = cost_usd?;
+        let budget = f64::from(self.budget_cents);
+        (self.budget_cents > 0 && spent * 100.0 * 100.0 >= budget * f64::from(percent)).then_some((spent, budget / 100.0))
+    }
+
     /// A box's budget in USD: the one asked for, at most the box budget, which is also the default.
     pub fn box_budget_usd(&self, asked: Option<f64>) -> Result<Option<f64>, String> {
         if self.box_budget_cents == 0 {
@@ -1497,6 +1506,19 @@ Deploys go through the VPS."
         assert_eq!(tight.over_budget(None), None, "an unpriced worker can't be held to a budget");
         assert_eq!(tight.over_budget(Some(1.5)), Some("pinned stopped it after it spent US$ 1.50, its budget of US$ 1.50".into()));
         assert_eq!(Limits::default().over_budget(Some(1000.0)), None, "no budget, no stop");
+    }
+
+    #[test]
+    fn a_budget_warning_starts_at_its_share_of_the_budget_and_never_moves_the_stop() {
+        let limits = Limits { budget_cents: 50, ..Limits::default() };
+        assert_eq!(limits.used_percent(Some(0.39), 80), None);
+        assert_eq!(limits.used_percent(Some(0.40), 80), Some((0.40, 0.50)));
+        assert_eq!(limits.used_percent(Some(0.47), 95), None);
+        assert_eq!(limits.used_percent(Some(0.48), 95), Some((0.48, 0.50)));
+        assert_eq!(limits.used_percent(None, 80), None, "an unpriced worker is never warned");
+        assert_eq!(Limits::default().used_percent(Some(1000.0), 80), None, "no budget, no warning");
+        assert_eq!(limits.over_budget(Some(0.49)), None, "the stop's point is the budget itself");
+        assert_eq!(limits.over_budget(Some(0.50)), Some("pinned stopped it after it spent US$ 0.50, its budget of US$ 0.50".into()));
     }
 
     #[test]
