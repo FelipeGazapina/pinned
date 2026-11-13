@@ -379,8 +379,31 @@ fn reject_call_cycle(origin: &str, origin_graph: &Graph, store: &Store) -> Resul
 }
 
 fn graph_of(store: &Store, workflow: &str) -> Option<Graph> {
-    let connector = store.connectors.iter().find(|connector| connector.id == workflow)?;
-    Some(connector.graph.clone().unwrap_or_else(|| migrate(connector)))
+    store.connectors.iter().find(|connector| connector.id == workflow).map(run_graph)
+}
+
+/// The graph a run of `connector` walks: its stored graph, else the one `migrate` builds.
+fn run_graph(connector: &Connector) -> Graph {
+    connector.graph.clone().unwrap_or_else(|| migrate(connector))
+}
+
+/// Sets the graph and legacy fields `connector` is stored with when a save sends `graph`, as
+/// `save_connector` stores it: a sent graph equal to `migrate` is stored as `None`; with no graph
+/// sent, an edited stored graph stays and one equal to `migrate` of the stored copy is dropped.
+fn settle_graph(store: &Store, connector: &mut Connector, graph: Option<Graph>) {
+    if let Some(graph) = graph {
+        refresh_legacy(connector, &graph);
+        connector.graph = (graph != migrate(connector)).then_some(graph);
+    } else if let Some(existing) = store.connectors.iter().find(|existing| existing.id == connector.id && !connector.id.is_empty()) {
+        if let Some(stored) = existing.graph.clone() {
+            if stored == migrate(existing) {
+                connector.graph = None;
+            } else {
+                refresh_legacy(connector, &stored);
+                connector.graph = Some(stored);
+            }
+        }
+    }
 }
 
 fn walk_calls(graph: &Graph, stack: &mut Vec<String>, origin: &str, origin_graph: &Graph, store: &Store) -> Result<(), String> {
@@ -3107,7 +3130,7 @@ impl Connectors {
     }
 
     fn library(&self) -> runner::Library {
-        self.store.lock().unwrap().connectors.iter().map(|c| (c.id.clone(), c.graph.clone().unwrap_or_else(|| migrate(c)))).collect()
+        self.store.lock().unwrap().connectors.iter().map(|c| (c.id.clone(), run_graph(c))).collect()
     }
 
     fn names(&self) -> BTreeMap<String, String> {
@@ -4387,19 +4410,7 @@ impl Connectors {
         let graph = connector.graph.take();
         let had = store.connectors.iter().find(|c| !connector.id.is_empty() && c.id == connector.id).and_then(convex_step);
         save_checks(&store, &connector, graph.as_ref(), &store.convex, had.as_ref().map(|step| step.connection.as_str())).map_err(|refused| refused.error)?;
-        if let Some(graph) = graph {
-            refresh_legacy(&mut connector, &graph);
-            connector.graph = (graph != migrate(&connector)).then_some(graph);
-        } else if let Some(existing) = store.connectors.iter().find(|existing| existing.id == connector.id && !connector.id.is_empty()) {
-            if let Some(stored) = existing.graph.clone() {
-                if stored == migrate(existing) {
-                    connector.graph = None;
-                } else {
-                    refresh_legacy(&mut connector, &stored);
-                    connector.graph = Some(stored);
-                }
-            }
-        }
+        settle_graph(&store, &mut connector, graph);
         match store.connectors.iter_mut().find(|c| c.id == connector.id && !c.id.is_empty()) {
             Some(existing) => {
                 connector.since = existing.since.clone();
@@ -4827,16 +4838,18 @@ impl Connectors {
     }
 
     /// Whether a save of `incoming` reaches, through its Call steps to any depth, a stored workflow
-    /// `skips` holds for, or one the store does not have. The graph walked is the one the save
-    /// sends, else the one it keeps. A called workflow opens its own session from its own stored
-    /// setup, so a check that reads only the save must read these too.
+    /// `skips` holds for, or one the store does not have. The graph walked is the one `library`
+    /// holds for this workflow after the save: `settle_graph` stores it as `save_connector` does,
+    /// and `run_graph` builds it, so a save with no graph is walked on what `migrate` builds (a
+    /// slack-message router's categories become Call steps). A called workflow opens its own
+    /// session from its own stored setup, so a check that reads only the save must read these too.
     pub fn calls_any(&self, incoming: &Connector, skips: impl Fn(&Connector) -> bool) -> bool {
         let mut library = self.library();
-        match incoming.graph.clone().or_else(|| self.kept_graph(incoming)) {
-            Some(graph) => library.insert(incoming.id.clone(), graph),
-            None => library.remove(&incoming.id),
-        };
-        let store = self.store.lock().unwrap().connectors.clone();
+        let store = self.store.lock().unwrap();
+        let mut saved = incoming.clone();
+        settle_graph(&store, &mut saved, incoming.graph.clone());
+        library.insert(incoming.id.clone(), run_graph(&saved));
+        let store = store.connectors.clone();
         reach_calls(&library, &incoming.id, |id, graph| {
             let called = (id != incoming.id).then(|| store.iter().find(|c| c.id == id));
             match called {
