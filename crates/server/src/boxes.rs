@@ -2039,17 +2039,13 @@ mod tests {
             assert!((record.usage.box_usd.unwrap() - usd).abs() < 1e-9, "{size:?}: {:?}", record.usage.box_usd);
         }
         let medium = row_of(BoxSize::Medium, Phase::Ending(End::Expired), BoxWork::Run, INTERACTIVE_CONNECTOR, ROW_ID);
-        assert_eq!(agent_box_record(&medium, &opener, 0, 5 * hour, &End::Expired).limit.as_deref(), Some("budget"), "$2 is ten Medium hours: five is not the budget");
-    }
-
-    /// A temporary box and the fixed one, both built from the same access.
-    fn fixed_access() -> BoxAccess {
-        BoxAccess { workflow: BoxPermission::Fixed { row: Some(ROW_ID.into()) }, ..BoxAccess::default() }
+        let limit = |hours: u64| agent_box_record(&medium, &opener, 0, hours * hour, &End::Expired).limit;
+        assert_eq!((limit(5).as_deref(), limit(10).as_deref()), (Some("time"), Some("budget")), "$2 is ten Medium hours at $0.20");
     }
 
     #[test]
     fn only_the_fixed_row_gets_a_keep_alive_box() {
-        let access = fixed_access();
+        let access = fixed_access(ROW_ID);
         let fixed = row_of(BoxSize::Medium, Phase::Creating, BoxWork::Run, "nightly", ROW_ID);
         assert!(new_box(&access, &fixed, "hub:000000000000").keep_alive, "the fixed row outlives the runs it serves");
         let worker = BoxWork::Captain { request_id: "r".into(), text: "t".into(), sender: "s".into(), busy: None };

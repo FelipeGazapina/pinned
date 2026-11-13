@@ -772,7 +772,7 @@ impl Hub {
         let id = Uuid::parse_str(machine).map_err(|_| format!("this account has no machine {machine}"))?;
         let name = self.db.machine_name(account.id, id).await?.ok_or_else(|| format!("this account has no machine {machine}"))?;
         let _held = account.task_records.lock().await;
-        let boxed = self.db.box_created(account.id, id).await?;
+        let boxed = self.db.box_made(account.id, id).await?;
         // Each task is billed the box time since the one that ended before it.
         records.sort_by_key(|record| record.ended);
         for mut record in records {
