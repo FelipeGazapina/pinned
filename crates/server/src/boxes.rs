@@ -5,7 +5,7 @@
 //! pass after a restart finishes whatever the last hub left halfway.
 
 use crate::hub::{Account, Hub, RUN_WAIT};
-use pinned_core::delegate::BOX_CONNECT_WAIT;
+use pinned_core::delegate::{wait_span, BOX_BOOTING, BOX_CONNECT_WAIT, BOX_OFFLINE};
 use futures_util::future::BoxFuture;
 use pinned_core::account::Credentials;
 use pinned_core::accounts::{self, Provider};
@@ -399,6 +399,21 @@ fn started_box(row: &BoxRow) -> serde_json::Value {
 /// Whether the spec's budget paid for `age` at the box hourly rate. None budgets run free.
 fn over_budget(spec: &RunSpec, age: Duration) -> bool {
     spec.budget_usd.is_some_and(|b| b > 0.0 && age.as_secs_f64() * BOX_USD_PER_HOUR / 3600.0 >= b)
+}
+
+/// What the hub answers about the worker box on `machine` while its node is offline. A row turns
+/// `Running` once its node connected and took its task, so one before that never connected and still
+/// boots; one after it dropped its link, and the reaper ends it once it stays offline past
+/// `Policy::offline`. An ending row whose machine is `removed` outlives that machine only while its box
+/// can't be deleted (as with Upstash disconnected), so it reads as gone, as it will once the row
+/// goes: an older parent would otherwise wait on it. Its origin was told why it ended unless the tell
+/// failed, the hub restarted before it, or the origin cancelled it; then the origin reads it as gone.
+pub fn offline_answer(phase: &Phase, removed: bool, machine: &str) -> String {
+    match phase {
+        Phase::Creating | Phase::Booting => BOX_BOOTING.to_owned(),
+        Phase::Ending(_) if removed => format!("this account has no machine {machine}"),
+        Phase::Running | Phase::Ending(_) => BOX_OFFLINE.to_owned(),
+    }
 }
 
 fn verdict(age: Duration, seen: Seen, t: &mut Timers, now: Instant, p: &Policy) -> Option<End> {
@@ -994,10 +1009,11 @@ impl Boxes {
         Ok(hub.db.box_of(account.id, machine).await?.filter(|row| matches!(row.work, BoxWork::Delegate { .. })))
     }
 
-    /// The worker's task ended or was cancelled, so its box goes.
-    pub async fn end_delegate(&self, hub: &Hub, account: &Arc<Account>, row: BoxRow) -> Result<(), String> {
+    /// The worker's task ended or was cancelled, so its box goes for `why`: `Done`, or `Offline`
+    /// for a cancel while its node was offline. The machine that delegated the task knows already.
+    pub async fn end_delegate(&self, hub: &Hub, account: &Arc<Account>, row: BoxRow, why: End) -> Result<(), String> {
         let keys = hub.connectors(account).await?.box_keys();
-        self.finish(hub, account, row, End::Done, keys.as_ref()).await
+        self.finish_told(hub, account, row, why, keys.as_ref(), false).await
     }
 
     /// The box behind `machine`: its phase, age and budget, for its cost display.
@@ -1428,6 +1444,7 @@ impl Boxes {
         let error = match why {
             End::Done => return,
             End::Failed(e) => format!("Upstash Box: {e}"),
+            End::Offline => format!("Upstash Box: its box went offline and did not come back within {}", wait_span(self.policy.offline)),
             why => format!("Upstash Box: the box ended before its task did: {}", ended_because(why)),
         };
         let mut end = RemoteEnd { state: "failed".into(), summary: None, error: Some(error), usage: None };
@@ -1476,7 +1493,12 @@ impl Boxes {
     }
 
     /// Ends the row for `why`, unless it is ending already, and deletes its box.
-    async fn finish(&self, hub: &Hub, account: &Arc<Account>, mut row: BoxRow, why: End, keys: Option<&Keys>) -> Result<(), String> {
+    async fn finish(&self, hub: &Hub, account: &Arc<Account>, row: BoxRow, why: End, keys: Option<&Keys>) -> Result<(), String> {
+        self.finish_told(hub, account, row, why, keys, true).await
+    }
+
+    /// `finish`, telling a worker box's origin only when `tell`.
+    async fn finish_told(&self, hub: &Hub, account: &Arc<Account>, mut row: BoxRow, why: End, keys: Option<&Keys>, tell: bool) -> Result<(), String> {
         let failed = matches!(why, End::Failed(_));
         if !matches!(row.phase, Phase::Ending(_)) {
             let ending = Phase::Ending(why.clone());
@@ -1484,7 +1506,9 @@ impl Boxes {
                 return Err(format!("box {} changed while pinned ended it; it ends on the next check", row.id));
             }
             row.phase = ending;
-            self.tell_origin(hub, account, &row, &why).await;
+            if tell {
+                self.tell_origin(hub, account, &row, &why).await;
+            }
         }
         self.record_agent_box(hub, account, &row).await;
         self.end(hub, account, &row.remains(), keys).await?;
@@ -1632,7 +1656,15 @@ impl Boxes {
                                 (INTERACTIVE_CONNECTOR, Seen::Tab { running, .. }) => Seen::Tab { running, quiet: false },
                                 _ => seen,
                             };
+                            let was_offline = slot.offline_since;
                             let verdict = verdict(row.age, seen, slot, now, &self.policy);
+                            if matches!(row.work, BoxWork::Delegate { .. }) {
+                                match (was_offline, slot.offline_since) {
+                                    (None, Some(_)) => eprintln!("pinned-server: box {} of account {} went offline", row.id, account.id),
+                                    (Some(at), None) => eprintln!("pinned-server: box {} of account {} is back after {} s", row.id, account.id, now.duration_since(at).as_secs()),
+                                    _ => {}
+                                }
+                            }
                             if gone { Some(End::Vanished) } else { verdict }
                         }
                     }
@@ -1916,6 +1948,52 @@ mod tests {
         assert_eq!(verdict(MIN, Seen::Offline, &mut t, start + 10 * MIN, &p), None);
         assert_eq!(verdict(MIN, quiet, &mut t, start + 19 * MIN, &p), None);
         assert_eq!(verdict(MIN, quiet, &mut t, start + 21 * MIN, &p), Some(End::Idle));
+    }
+
+    #[test]
+    fn a_worker_box_that_never_connected_is_booting_one_that_connected_is_offline_and_an_ending_one_is_gone() {
+        let answer = |phase: Phase, removed: bool| offline_answer(&phase, removed, "m-box");
+        assert_eq!((answer(Phase::Creating, false), answer(Phase::Booting, false)), (BOX_BOOTING.to_owned(), BOX_BOOTING.to_owned()));
+        assert_eq!(answer(Phase::Running, false), BOX_OFFLINE);
+        for end in [End::Offline, End::Done, End::Expired, End::Failed("fake".into())] {
+            // Until its machine goes, the origin's own end report names the reason.
+            assert_eq!(answer(Phase::Ending(end.clone()), false), BOX_OFFLINE, "{end:?}");
+            // A 0.18.1 parent keeps waiting on BOX_OFFLINE, with its limit paused while the worker
+            // waited on the user, so a row whose box can't be deleted must read as gone.
+            let gone = answer(Phase::Ending(end.clone()), true);
+            assert_eq!(gone, "this account has no machine m-box", "{end:?}");
+            assert!(pinned_core::delegate::machine_gone(&gone), "{end:?}");
+        }
+    }
+
+    #[test]
+    fn a_box_whose_link_blinks_keeps_running_and_one_that_stays_offline_ends() {
+        let p = Policy::default();
+        let (start, mut t) = (Instant::now(), Timers::default());
+        let working = Seen::Tab { running: true, quiet: false };
+        assert_eq!(verdict(30 * MIN, working, &mut t, start, &p), None);
+        assert_eq!(verdict(31 * MIN, Seen::Offline, &mut t, start + MIN, &p), None);
+        assert_eq!(verdict(40 * MIN, Seen::Offline, &mut t, start + 10 * MIN, &p), None, "offline for 9 of 10 minutes");
+        assert_eq!(verdict(41 * MIN, working, &mut t, start + 11 * MIN, &p), None, "back within the grace");
+        assert_eq!(verdict(42 * MIN, Seen::Offline, &mut t, start + 12 * MIN, &p), None);
+        assert_eq!(verdict(51 * MIN, Seen::Offline, &mut t, start + 21 * MIN, &p), None, "a blink restarts the grace");
+        assert_eq!(verdict(53 * MIN, Seen::Offline, &mut t, start + 23 * MIN, &p), Some(End::Offline));
+    }
+
+    #[test]
+    fn a_flapping_box_still_ends_at_its_max_life_and_its_budget() {
+        let p = Policy::default();
+        let (start, mut t) = (Instant::now(), Timers::default());
+        let working = Seen::Tab { running: true, quiet: false };
+        let mut minute = 0;
+        // Offline 9 minutes, back 1, over and over: never offline for the whole grace.
+        while minute < 4 * 60 {
+            let seen = if minute % 10 == 9 { working } else { Seen::Offline };
+            assert_eq!(verdict(minute * MIN, seen, &mut t, start + minute * MIN, &p), None, "minute {minute}");
+            minute += 1;
+        }
+        assert_eq!(verdict(4 * 60 * MIN, Seen::Offline, &mut t, start + 4 * 60 * MIN, &p), Some(End::Expired));
+        assert!(over_budget(&spec_with(Some(BOX_USD_PER_HOUR)), 60 * MIN), "a budget ends it sooner whatever it is seen as");
     }
 
     #[test]

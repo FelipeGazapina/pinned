@@ -62,6 +62,13 @@ impl JsonSchema for Bytes {
     }
 }
 
+/// When the machine slept: the last tick before it and the first after it, in unix seconds.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
+pub struct CutBySleep {
+    pub slept_at: u64,
+    pub woke_at: u64,
+}
+
 /// What a tab runs.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "kebab-case")]
@@ -108,6 +115,9 @@ pub struct TabView {
     /// A turn was running when pinned quit, so the tab has work left to continue.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub interrupted: bool,
+    /// The turn died on an API error while the machine slept, so it stopped where the sleep cut it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cut_by_sleep: Option<CutBySleep>,
     /// What the conversation's work came to so far, once its transcript holds any of it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stats: Option<ThreadStats>,
@@ -1714,6 +1724,7 @@ mod tests {
             updated: Some(1792400000),
             session: Some("s1".into()),
             interrupted: false,
+            cut_by_sleep: None,
             stats: Some(ThreadStats { active_ms: Some(4_320_000), cost_usd: Some(3.42) }),
             branch: Some("felipe/forms".into()),
             pr: Some(PrLink { number: 92, url: "https://github.com/o/site/pull/92".into() }),
