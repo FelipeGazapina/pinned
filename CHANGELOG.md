@@ -23,6 +23,7 @@
 - Agent tabs no longer read working or starting with nothing running behind them: a session killed mid-turn now reads stopped with its reason (its time limit, stopped by you, or its exit code), sleeping and resumed tabs read idle, a start that never reports fails after 10 min, and the Orchestrator's `projects()` count skips workers with no live process.
 - A worker box whose link to the hub drops for a moment keeps its task. Before, a box running for more than 5 minutes that lost its link was deleted at once as "the box did not connect within 5 min". Now its task waits for it to come back, and a box that stays offline for 10 minutes ends with that reason.
 - Upstash Box: removing a box machine, disconnecting Upstash or ending a worker now deletes its box with only the Upstash key stored, and one box that will not delete no longer stops the sweep from deleting the others. A box that reaches one of its limits (time, idle, budget) is now deleted too when only the key is stored.
+- A project's model ceiling (Tier) no longer lets through a Claude model id that this machine's `claude` does not list, nor an empty model name, because the words of an id are no proof of its cost. A remote worker's model is checked against the Claude list of the machine that runs it once that machine is on 0.18.2; until then the sending machine refuses a Claude id it does not list.
 
 ## 0.18.1 (2026-11-12)
 
