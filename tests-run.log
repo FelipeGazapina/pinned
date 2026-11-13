@@ -104,3 +104,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:05:40Z #45 a_fresh_workflow_permission_opens_one_box_per_run ok / avail=15074M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:05:41Z #46 a_fixed_workflow_permission_reuses_one_box_across_two_runs START / avail=15074M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:05:44Z #46 a_fixed_workflow_permission_reuses_one_box_across_two_runs ok / avail=15074M /workspace avail=19374M node_stat=Ssl node_tcp=1
+2026-11-13T04:05:45Z #47 an_ask_workflow_permission_opens_nothing_until_it_is_allowed START / avail=15074M /workspace avail=19374M node_stat=Ssl
