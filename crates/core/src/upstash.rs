@@ -386,6 +386,11 @@ pub async fn create(key: &str, new: &NewBox) -> Result<BoxId, String> {
             status = parse_status(&polled);
         }
     }
+    created(key, id, status)
+}
+
+/// How `create` ends once it has stopped waiting.
+fn created(key: &str, id: BoxId, status: Status) -> Result<BoxId, String> {
     match status {
         Status::Ready => Ok(id),
         Status::Creating => Err(format!("Upstash Box was still creating box {id} after {} minutes", CREATE_WAIT.as_secs() / 60)),
@@ -475,6 +480,18 @@ mod tests {
                 }
                 assert!(message.contains('…'), "the key is replaced, not dropped: {message}");
             }
+        }
+    }
+
+    #[test]
+    fn a_created_box_that_never_runs_does_not_carry_the_key_or_a_long_id_into_the_error() {
+        let key = "box_fake-key-0000";
+        let id = BoxId(format!("{key}{}", "x".repeat(10_000)));
+        assert_eq!(created(key, BoxId("b".into()), Status::Ready), Ok(BoxId("b".into())));
+        for status in [Status::Creating, Status::Failed] {
+            let message = created(key, id.clone(), status).unwrap_err();
+            assert!(!message.contains(key), "{message}");
+            assert!(message.contains('…') && message.chars().count() < 500, "{} chars: {message}", message.chars().count());
         }
     }
 
