@@ -77,7 +77,7 @@ pub enum Schedule {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Target {
-    /// The user himself: a notification on every device, with no agent run.
+    /// The user: a notification on every device, with no agent run.
     Me,
     /// The global Orchestrator, on the machine that hosts it.
     Orchestrator,
@@ -379,6 +379,34 @@ mod tests {
         assert_eq!(show(NY, first), "2018-11-04T01:30-04:00");
         assert_eq!(next(&c, NY, first), "2018-11-05T01:30-05:00");
         assert_eq!(next(&once("2018-11-04T01:30"), NY, after), "2018-11-04T01:30-04:00");
+    }
+
+    #[test]
+    fn weekly_cron_keeps_its_local_time_across_dst() {
+        let runs = |s: &Schedule, after: i64| -> Vec<String> {
+            next_runs(s, NY, after).unwrap().iter().map(|t| show(NY, *t)).collect()
+        };
+        // Sundays at 09:00 across both changes: the local time stays, the UTC offset moves.
+        // New York falls back on Sunday 2026-11-01 and springs forward on Sunday 2027-03-14.
+        let sunday_nine = cron("0 9 * * 0");
+        assert_eq!(
+            runs(&sunday_nine, ts(NY, "2026-10-20T12:00")),
+            ["2026-10-25T09:00-04:00", "2026-11-01T09:00-05:00", "2026-11-08T09:00-05:00"]
+        );
+        assert_eq!(
+            runs(&sunday_nine, ts(NY, "2027-03-01T12:00")),
+            ["2027-03-07T09:00-05:00", "2027-03-14T09:00-04:00", "2027-03-21T09:00-04:00"]
+        );
+        // A weekly time inside the change itself: the repeated 01:30 runs once, the skipped 02:30 at
+        // 03:00, and the following weeks are back at the set time.
+        assert_eq!(
+            runs(&cron("30 1 * * 0"), ts(NY, "2026-10-31T12:00")),
+            ["2026-11-01T01:30-04:00", "2026-11-08T01:30-05:00", "2026-11-15T01:30-05:00"]
+        );
+        assert_eq!(
+            runs(&cron("30 2 * * 0"), ts(NY, "2027-03-13T12:00")),
+            ["2027-03-14T03:00-04:00", "2027-03-21T02:30-04:00", "2027-03-28T02:30-04:00"]
+        );
     }
 
     #[test]
