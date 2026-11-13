@@ -448,6 +448,24 @@ mod tests {
         assert!(!message.contains(key) && message.chars().count() < 500, "a body is echoed in part: {} chars", message.chars().count());
     }
 
+    #[test]
+    fn a_key_with_characters_json_and_debug_escape_does_not_reach_the_error_in_either_form() {
+        for key in ["box_fake\"key\\0000", "box_fake\u{1}key\u{7f}0000"] {
+            let json_form = serde_json::to_string(key).unwrap();
+            let debug_form = format!("{key:?}");
+            let forms = [key, &json_form[1..json_form.len() - 1], &debug_form[1..debug_form.len() - 1]];
+            let echoing = json!({ "note": key });
+            let unreadable = json!([{ "id": "b", "created_at": key }]);
+            let errors = [parse_id(key, &echoing).unwrap_err(), parse_all(key, &unreadable).unwrap_err()];
+            for message in &errors {
+                for form in forms {
+                    assert!(!message.contains(form), "{form:?} is in: {message}");
+                }
+                assert!(message.contains('…'), "the key is replaced, not dropped: {message}");
+            }
+        }
+    }
+
     fn fixture(name: &str) -> Value {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/upstash").join(name);
         serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap()
