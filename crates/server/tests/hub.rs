@@ -7889,6 +7889,7 @@ fn a_locked_app_still_needs_the_password_for_every_confirm_action_and_never_for_
         ("revoke_agent", json!({ "id": "g1" })),
         ("set_taste", json!({ "scope": { "kind": "captains" }, "patch": { "box_budget_cents": 100 } })),
         ("reset_taste_field", json!({ "scope": { "kind": "captains" }, "field": "box_budget_cents" })),
+        ("set_box_size", json!({ "size": "small" })),
         ("set_box_claude_token", json!({ "name": "bloom" })),
         ("remove_box_claude_token", json!({ "name": "bloom" })),
         ("mint_box_claude_token", json!({ "machine": machine, "account": "bloom" })),
@@ -7914,6 +7915,35 @@ fn a_locked_app_still_needs_the_password_for_every_confirm_action_and_never_for_
         assert_eq!(answer, Err(LOCKED.into()), "{} still needs the password on a locked app", action.name);
     }
     assert_eq!(app.hub(json!({ "cmd": "answer_box", "id": "q-1", "allow": true })), Err("that box question is gone".into()), "a box question's answer needs no password");
+    assert_eq!(
+        app.hub(json!({ "cmd": "extend_box", "machine": machine, "extra_usd": 1.0 })),
+        Err(LOCKED.into()),
+        "a locked login cannot extend a box"
+    );
+}
+
+#[test]
+fn a_locked_login_cannot_extend_a_box_until_it_unlocks() {
+    let hub = TestHub::start_with_boxes("locked_extend", Signup::Open, fast());
+    hub.boxes.state.lock().unwrap().checkout = Some(("site".into(), SITE.into()));
+    let mut ana = BoxAccount::new(&hub);
+    ana.client.hub(json!({ "cmd": "set_box_access", "access": { "session": { "mode": "fresh" } } })).unwrap();
+    ana.client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": { "box_budget_cents": 500 } })).unwrap();
+    let opened = ana.client.hub(json!({ "cmd": "open_box", "repo": "acme/site", "size": "small", "budget_usd": 1.0 })).unwrap();
+    assert_eq!(opened["budget_usd"].as_f64(), Some(1.0));
+    let machine = opened["machine"].as_str().unwrap().to_owned();
+    let budget_of = |client: &mut Client| client.hub(json!({ "cmd": "box_status", "machine": machine })).unwrap()["budget_usd"].as_f64();
+    let before = budget_of(&mut ana.client);
+    assert_eq!(before, Some(1.0), "the box's budget, read back before");
+
+    let mut app = Client::app(&hub.url, &ana.token);
+    let extend = json!({ "cmd": "extend_box", "machine": machine, "extra_usd": 2.0 });
+    assert_eq!(app.hub(extend.clone()), Err(LOCKED.into()), "a locked login cannot extend a box");
+    assert_eq!(budget_of(&mut ana.client), before, "the refused call changed nothing");
+
+    app.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    assert_eq!(app.hub(extend).unwrap()["budget_usd"].as_f64(), Some(3.0), "once unlocked the same call goes through");
+    assert_eq!(budget_of(&mut ana.client), Some(3.0), "the budget rose by exactly the amount");
 }
 
 const BLOOM_TOKEN: &str = "sk-ant-oat01-bloomtoken";
