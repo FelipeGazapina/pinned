@@ -6969,10 +6969,17 @@ fn an_agents_change_of_orchestrator_settings_waits_for_its_owner_shows_old_and_n
     let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
     let mut ana = agent_of(&url, &token, "ana@acme.dev", "settings-mac");
     ana.client.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
-    let mut spare = agent_of(&url, &token, "ana@acme.dev", "settings-spare");
+    // A second machine of the account, which the agent names with `machine`.
+    let spare_dir = node_dir("surface-settings-spare");
+    let (spare_machine, spare_token) = account::register_machine(&url, &token, "settings-spare", "macos").unwrap();
+    let creds = Credentials { hub: url.clone(), email: "ana@acme.dev".into(), user_token: token.clone(), machine_id: spare_machine.id, machine_token: spare_token };
+    creds.save(&spare_dir).unwrap();
+    let mut spare = Node::start(&spare_dir, creds);
+    spare.machine.listen(|_| Err("unexpected".into())).unwrap();
+    ana.client.wait_machines(&[("settings-mac", true), ("settings-spare", true)]);
     let before = Settings { name: "Orchestrator".into(), host: false, busy: BusyPolicy::Refuse, reports: ReportPolicy::ToolOnly, group_reports: false, read_aloud: true };
-    for agent in [&ana, &spare] {
-        agent.node.machine.set_global_settings(before.clone()).unwrap();
+    for node in [&ana.node, &spare] {
+        node.machine.set_global_settings(before.clone()).unwrap();
     }
     let ask = |on: Option<&str>, settings: Value| match on {
         None => act(&ana.dir, &ana.tab, "set_global_orchestrator_settings", json!({ "settings": settings })),
@@ -6980,7 +6987,7 @@ fn an_agents_change_of_orchestrator_settings_waits_for_its_owner_shows_old_and_n
     };
 
     for (on, name) in [(None, "settings-mac"), (Some("settings-spare"), "settings-spare")] {
-        let node = if on.is_none() { &ana.node } else { &spare.node };
+        let node = if on.is_none() { &ana.node } else { &spare };
         let asked = ask(on, json!({ "name": "Almirante" })).unwrap();
         assert_eq!(asked["outcome"], "pending", "{name}: {asked}");
         assert_eq!(node.machine.global_settings(), before, "{name}: nothing changes before the user approves");
@@ -7002,7 +7009,7 @@ fn an_agents_change_of_orchestrator_settings_waits_for_its_owner_shows_old_and_n
         assert_eq!(node.machine.global_settings(), Settings { host: true, ..named }, "{name}");
     }
 
-    spare.node.kill();
+    spare.kill();
     ana.client.wait_machines(&[("settings-mac", true), ("settings-spare", false)]);
     let offline = ask(Some("settings-spare"), json!({ "read_aloud": false }));
     assert!(offline.as_ref().is_err_and(|e| e.contains("settings-spare")), "a prompt without the old values is refused: {offline:?}");
