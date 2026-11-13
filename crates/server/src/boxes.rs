@@ -1494,7 +1494,9 @@ impl Boxes {
         account.went_offline(&machine, None);
         hub.push_machines(account).await;
         self.delete_box(key, row).await?;
-        hub.db.delete_box(row.account, &row.id).await.map_err(Failed::Row)?;
+        if hub.db.delete_box(row.account, &row.id).await.map_err(Failed::Row)? == 0 {
+            eprintln!("pinned-server: delete_box of row {} matched no row", row.id);
+        }
         eprintln!("pinned-server: deleted box {} of account {} ({})", row.id, account.id, row.why);
         Ok(())
     }

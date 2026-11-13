@@ -1094,8 +1094,9 @@ impl Db {
         self.client().await?.execute("delete from agent_boxes where box = $1 and account = $2", &[&id, &account]).await.map_err(err).map(drop)
     }
 
-    pub async fn delete_box(&self, account: Uuid, id: &str) -> Result<(), String> {
-        self.client().await?.execute("delete from boxes where id = $1 and account = $2", &[&id, &account]).await.map_err(err).map(drop)
+    /// How many rows it deleted: none when the row is gone or is another account's.
+    pub async fn delete_box(&self, account: Uuid, id: &str) -> Result<u64, String> {
+        self.client().await?.execute("delete from boxes where id = $1 and account = $2", &[&id, &account]).await.map_err(err)
     }
 
     /// A fresh pairing code for the account and when it expires, in Unix seconds.

@@ -8787,7 +8787,7 @@ fn an_id_only_write_with_another_accounts_id_changes_no_row() {
         db.set_box_budget(bob_id, "box-run", 99.0).await.unwrap();
         let moved = db.set_box_phase(bob_id, "box-run", &Phase::Running, &Phase::Ending(End::Exited)).await.unwrap();
         let created = db.box_created(bob_id, "box-new", &BoxId("u-stolen".into())).await.unwrap();
-        db.delete_box(bob_id, "box-run").await.unwrap();
+        assert_eq!(db.delete_box(bob_id, "box-run").await.unwrap(), 0, "a delete that matched no row says so, to be logged by the hub-wide end");
         db.finish_confirmation(bob_id, rows.confirmation, "done", &json!({ "by": "bob" })).await.unwrap();
         db.notified(bob_id, rows.confirmation).await.unwrap();
         db.drop_agent_session(bob_grant, rows.session).await.unwrap();
@@ -8811,7 +8811,7 @@ fn an_id_only_write_with_another_accounts_id_changes_no_row() {
     for (changed, what) in [("|box-run,", "box-run"), ("budget_usd", "the budget"), ("box-new,booting,u-new", "box_created"), ("done,true", "the confirmation"), ("|0", "the session")] {
         assert!(after.contains(changed), "ana's own call did not change {what}: {after}");
     }
-    hub.runtime.block_on(db.delete_box(ana_id, "box-run")).unwrap();
+    assert_eq!(hub.runtime.block_on(db.delete_box(ana_id, "box-run")).unwrap(), 1, "the owner's delete changed the one row");
     assert_eq!(first_text(&hub, "select count(*)::text from boxes where id = 'box-run'"), "0", "the owner's delete_box deletes");
 }
 
