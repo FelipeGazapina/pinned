@@ -210,6 +210,16 @@ pub enum End {
     Failed(String),
 }
 
+/// What a box's end does to the subject of the workflow run it failed: one that ran out of budget
+/// or reached its max life (`Expired`, both) keeps it handled for its owner to run again; any other
+/// end frees it once (`Connectors::box_ended`).
+fn release_for(why: &End) -> BoxEndRelease {
+    match why {
+        End::Expired => BoxEndRelease::Keep,
+        _ => BoxEndRelease::Once,
+    }
+}
+
 /// Why a box ended, as the task it ran hears it.
 fn ended_because(why: &End) -> String {
     match why {
@@ -1454,8 +1464,7 @@ impl Boxes {
             Err(e) => return eprintln!("pinned-server: could not fail the runs of box {}: {e}", row.id),
         };
         let holder = (!connectors.box_access().owns_row(&row.id)).then_some((row.connector.as_str(), &row.subject));
-        let release = if *why == End::Expired { BoxEndRelease::Keep } else { BoxEndRelease::Once };
-        match connectors.box_ended(&row.machine.to_string(), holder, &error, release).await {
+        match connectors.box_ended(&row.machine.to_string(), holder, &error, release_for(why)).await {
             Ok(0) => {}
             Ok(n) => eprintln!("pinned-server: box {} of account {} ended, so {n} workflow run(s) failed", row.id, account.id),
             Err(e) => eprintln!("pinned-server: could not fail the runs of box {}: {e}", row.id),
@@ -2107,6 +2116,18 @@ mod tests {
         let medium = row_of(BoxSize::Medium, Phase::Ending(End::Expired), BoxWork::Run, INTERACTIVE_CONNECTOR, ROW_ID);
         let limit = |hours: u64| agent_box_record(&medium, &opener, 0, hours * hour, &End::Expired).limit;
         assert_eq!((limit(5).as_deref(), limit(10).as_deref()), (Some("time"), Some("budget")), "$2 is ten Medium hours at $0.20");
+    }
+
+    #[test]
+    fn a_box_end_for_budget_or_max_life_keeps_its_subject_and_any_other_frees_it_once() {
+        let p = Policy::default();
+        let mut t = Timers::default();
+        let ended = verdict(p.max_life, Seen::Tab { running: true, quiet: false }, &mut t, Instant::now(), &p, false);
+        assert_eq!(ended, Some(End::Expired), "max life ends a box as Expired, as its budget does (`over_budget`)");
+        assert_eq!(release_for(&End::Expired), BoxEndRelease::Keep);
+        for end in [End::Offline, End::Vanished, End::Failed("the box did not connect".into()), End::Removed, End::Disconnected] {
+            assert_eq!(release_for(&end), BoxEndRelease::Once, "{end:?}");
+        }
     }
 
     #[test]
