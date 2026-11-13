@@ -553,10 +553,14 @@ fn box_ask_id(connector: &str, subject: &Subject) -> String {
     hasher.finalize()[..8].iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Only the hub names the fixed row, through `claim_fixed_row`, `retake_fixed_row` and
+/// `release_fixed_row`. A save that still asks for Fixed keeps the stored row, as an older app sends
+/// back the row it read, and any other row it names becomes none: a row named there is exempt from
+/// every box timer, so a client must not pick one.
 fn keep_fixed_row(incoming: BoxPermission, stored: &BoxPermission) -> BoxPermission {
-    match (incoming, stored) {
-        (BoxPermission::Fixed { row: None }, BoxPermission::Fixed { row: Some(kept) }) => BoxPermission::Fixed { row: Some(kept.clone()) },
-        (incoming, _) => incoming,
+    match incoming {
+        BoxPermission::Fixed { .. } => BoxPermission::Fixed { row: stored.fixed_row().map(str::to_owned) },
+        incoming => incoming,
     }
 }
 
@@ -6379,6 +6383,24 @@ mod tests {
         connectors.claim_fixed_row("row-1").unwrap();
         let again = connectors.set_box_access(BoxAccess { workflow: BoxPermission::Fixed { row: None }, ..BoxAccess::default() }).unwrap();
         assert_eq!(again.workflow, BoxPermission::Fixed { row: Some("row-1".into()) }, "saving fixed without a row keeps the box the hub created");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_saved_box_permission_cannot_name_the_fixed_row() {
+        let dir = temp_dir("fixed-row-named");
+        let connectors = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into());
+        let fixed = |row: &str| BoxPermission::Fixed { row: Some(row.into()) };
+        let named = connectors.set_box_access(BoxAccess { workflow: fixed("another-row"), session: fixed("row-x"), ..BoxAccess::default() }).unwrap();
+        assert_eq!((&named.workflow, &named.session), (&BoxPermission::Fixed { row: None }, &BoxPermission::Fixed { row: None }), "no stored row: the named one is dropped");
+        assert!(!connectors.box_access().owns_row("another-row") && !connectors.box_access().owns_row("row-x"), "the named boxes keep the normal timers");
+        connectors.claim_fixed_row("row-1").unwrap();
+        let named = connectors.set_box_access(BoxAccess { workflow: fixed("another-row"), ..BoxAccess::default() }).unwrap();
+        assert_eq!(named.workflow, fixed("row-1"), "the stored row stays");
+        assert!(!connectors.box_access().owns_row("another-row"));
+        let resent = connectors.set_box_access(connectors.box_access()).unwrap();
+        assert_eq!(resent.workflow, fixed("row-1"), "an older app sending back the row it read changes nothing");
+        assert_eq!(connectors.set_box_access(BoxAccess { workflow: BoxPermission::Fresh, ..BoxAccess::default() }).unwrap().workflow, BoxPermission::Fresh);
         let _ = std::fs::remove_dir_all(dir);
     }
 
