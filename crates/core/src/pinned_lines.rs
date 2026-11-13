@@ -95,10 +95,16 @@ pub fn flat(text: &str, max: usize) -> String {
     }
 }
 
-/// Agent text for one field of a pinned sentence: `flat` and quoted, its own double quotes turned
-/// into single ones, so it cannot add a line or end the sentence.
+/// Agent text for one field of a pinned sentence: `quoted` at `FIELD_CHARS`.
 pub fn field(text: &str) -> String {
-    format!("\"{}\"", flat(text, FIELD_CHARS).replace('"', "'"))
+    quoted(text, FIELD_CHARS)
+}
+
+/// `text` as one quoted field: `flat` at `max` characters, its own double quotes and the
+/// characters that look like one turned into single quotes, and a trailing backslash dropped, so it
+/// cannot add a line, end the quote, or seem to escape the closing quote.
+pub fn quoted(text: &str, max: usize) -> String {
+    format!("\"{}\"", flat(text, max).replace('"', "'"))
 }
 
 #[cfg(test)]
@@ -163,6 +169,15 @@ mod tests {
         let long = "é".repeat(FIELD_CHARS + 5);
         assert_eq!(field(&long), format!("\"{}…\"", "é".repeat(FIELD_CHARS)));
         assert_eq!(field(&"é".repeat(FIELD_CHARS)), format!("\"{}\"", "é".repeat(FIELD_CHARS)));
+    }
+
+    #[test]
+    fn field_turns_look_alike_quotes_and_drops_a_trailing_backslash() {
+        assert_eq!(field("a\u{201C}b\u{201D}c\u{FF02}d\u{2033}e\"f"), "\"a'b'c'd'e'f\"");
+        assert_eq!(field("ends in \\"), "\"ends in\"");
+        assert_eq!(field("ends in \\\\\u{200B}\n"), "\"ends in\"");
+        assert_eq!(field("a \\ \\"), "\"a\"");
+        assert_eq!(field("a \\ b"), "\"a \\ b\"");
     }
 
     #[test]
