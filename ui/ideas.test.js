@@ -778,6 +778,34 @@ async function nav(rows, { withScript = true } = {}) {
   return parts.ideas.querySelector(".meta");
 }
 
+test("the idea being edited keeps its place when its own autosave's ideas_changed read lists it first", async () => {
+  n = 0;
+  const five = ["Alpha", "Bravo", "Charlie", "Delta", "Echo"].map((t, i) => idea(t, { updated_at: NOW - 100 * (i + 1) }));
+  const p = page(five);
+  await p.show();
+  assert.deepEqual(p.titles(), ["Alpha", "Bravo", "Charlie", "Delta", "Echo"]);
+  await p.click("edit", "i4");
+  const editor = p.run("ideasUi.editor");
+  const field = typed(p, "text");
+  p.type(editor, "text", "typed while the hub saves");
+  await p.timers.at(-1).f(); // the autosave
+  assert.equal(p.calls.filter((c) => c.cmd === "save_idea").length, 1);
+  // The hub lists newest edit first, so the idea just saved is now the first row.
+  const saved = p.store.rows.find((i) => i.id === "i4");
+  p.store.rows = [{ ...saved, updated_at: NOW + 1 }, ...p.store.rows.filter((i) => i.id !== "i4")];
+  p.run("ideasRefresh()"); // the autosave's own ideas_changed, about 300 ms later
+  await p.timers.filter((t) => !t.cancelled).at(-1).f();
+  await flush();
+  assert.deepEqual(p.titles().filter((t) => t !== undefined), ["Alpha", "Bravo", "Charlie", "Echo"], "the other cards keep the hub's order, and the editor is not a card");
+  assert.equal(p.part(".ideas-list").children.indexOf(editor), 3, "the open card is still the fourth");
+  assert.equal(p.run("ideasUi.editor"), editor, "the editor element is the same");
+  assert.equal(editor.removals, 0, "it was never taken out of the page");
+  assert.equal(field.value, "typed while the hub saves", "the text is unchanged");
+  // Closing it sorts as before: the saved idea is the newest.
+  await p.click("close", "i4");
+  assert.equal(p.titles()[0], "Delta");
+});
+
 test("the sidebar's Ideas row says how many are open", async () => {
   const meta = await nav(SEED());
   assert.deepEqual([meta.hidden, meta.textContent], [false, "2 open"], "done and dropped ideas do not count");

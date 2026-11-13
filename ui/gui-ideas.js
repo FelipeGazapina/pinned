@@ -54,6 +54,21 @@ function ideasShown() {
 
 const ideasCall = (cmd, args = {}) => connectorCall(cmd, args);
 
+/** The hub lists newest edit first, so the autosave of the idea being edited would move its card to the top
+ * while the user types. The open idea goes back behind the row it followed (or to the index it had, if that
+ * row is gone); the others follow the hub's order. Closing the editor sorts again. */
+function ideasHoldEditing(list) {
+  const id = ideasUi.editing;
+  const before = ideasUi.rows ?? [];
+  const was = id ? before.findIndex((i) => i.id === id) : -1;
+  const row = list.find((i) => i.id === id);
+  if (was < 0 || !row) return list;
+  const rest = list.filter((i) => i !== row);
+  const after = was > 0 ? rest.findIndex((i) => i.id === before[was - 1].id) : -1;
+  rest.splice(was === 0 ? 0 : after >= 0 ? after + 1 : Math.min(was, rest.length), 0, row);
+  return rest;
+}
+
 async function ideasLoad() {
   if (!ideasHub()) return;
   if (ideasUi.loading) {
@@ -62,7 +77,7 @@ async function ideasLoad() {
   }
   ideasUi.loading = true;
   try {
-    ideasUi.rows = await ideasCall("list_ideas");
+    ideasUi.rows = ideasHoldEditing(await ideasCall("list_ideas"));
     ideasUi.error = null;
   } catch (e) {
     ideasUi.error = String(e?.message ?? e);
