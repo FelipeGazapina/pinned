@@ -1624,8 +1624,8 @@ mod tests {
     /// the box `age` old, under the default policy (idle 10 minutes, max_life 4 hours).
     fn reaped(seen: impl Fn() -> Seen, held: Duration, age: Duration) -> Option<boxes::End> {
         let (start, mut timers, policy) = (Instant::now(), boxes::Timers::default(), boxes::Policy::default());
-        assert_eq!(boxes::verdict(Duration::ZERO, seen(), &mut timers, start, &policy), None, "nothing ends it at its first look");
-        boxes::verdict(age, seen(), &mut timers, start + held, &policy)
+        assert_eq!(boxes::verdict(Duration::ZERO, seen(), &mut timers, start, &policy, false), None, "nothing ends it at its first look");
+        boxes::verdict(age, seen(), &mut timers, start + held, &policy, false)
     }
 
     const MIN: Duration = Duration::from_secs(60);
