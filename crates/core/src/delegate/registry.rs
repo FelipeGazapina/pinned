@@ -686,6 +686,24 @@ impl Delegates {
         Some(parent)
     }
 
+    /// Whether task `id`, which `tab` owns and `from` runs, ended already with this same `end`: its
+    /// state, summary and error, as a status look that settled it first read them. A held end comes
+    /// masked, so both sides compare masked and without NULs, as the hub stores them.
+    pub fn holds_remote_end(&self, id: &str, tab: &str, from: &str, end: &RemoteEnd) -> bool {
+        let tasks = self.tasks.lock().unwrap();
+        let Some(task) = tasks.iter().find(|task| task.id == id) else { return false };
+        let Parent::Tab(parent) = &task.parent else { return false };
+        let owned = parent == tab || task.remote_tab.as_deref() == Some(tab);
+        let ran = task.remote.as_ref().is_some_and(|remote| remote.machine.is_empty() || remote.machine == from);
+        let state = match end.state.as_str() {
+            "failed" => WorkState::Failed,
+            "cancelled" => WorkState::Cancelled,
+            _ => WorkState::ResultAvailable,
+        };
+        let same = |held: &Option<String>, sent: &Option<String>| held.as_deref().map(stored) == sent.as_deref().map(stored);
+        owned && ran && task.state.terminal() && task.state == state && same(&task.summary, &end.summary) && same(&task.error, &end.error)
+    }
+
     /// Shows what the worker of a remote task has used so far, as the machine that runs it
     /// reported. Nothing is recorded from it: that machine records the run.
     pub fn note_remote_usage(&self, id: &str, usage: TaskUsage) {
@@ -2435,4 +2453,23 @@ fn stamp(ms: u64) -> String {
     chrono::DateTime::from_timestamp((ms / 1000) as i64, ((ms % 1000) * 1_000_000) as u32)
         .map(|time| time.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
         .unwrap_or_default()
+}
+
+/// `text` as the hub holds a worker's end: NUL characters dropped, then keys masked, so a NUL
+/// inside a key cannot hide it from the mask. The same as the hub's `scrub_held`.
+fn stored(text: &str) -> String {
+    crate::surface::mask_secrets(&text.replace('\0', ""))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stored;
+
+    #[test]
+    fn a_key_split_by_a_nul_character_is_stored_masked_whole() {
+        let split = "key sk-ant-api03-FAKE\0FAKEFAKE0000 done";
+        let held = stored(split);
+        assert!(!held.contains("FAKEFAKE") && !held.contains('\0'), "{held}");
+        assert_eq!(held, "key [hidden] done");
+    }
 }
