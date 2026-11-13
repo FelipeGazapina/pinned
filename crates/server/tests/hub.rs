@@ -8192,3 +8192,89 @@ fn box_usage_never_shows_one_account_the_boxes_or_tasks_of_another() {
         assert!(!b.to_string().contains(leaked), "ana's {leaked} reached bob: {b}");
     }
 }
+
+#[test]
+fn an_account_saves_lists_edits_and_deletes_its_ideas_and_no_other_account_sees_or_changes_one() {
+    let hub = TestHub::start_with("ideas_store", Signup::Open);
+    let url = hub.url.clone();
+    let (ana_token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let (bob_token, _) = account::signup(&url, "bob@acme.dev", "correct horse").unwrap();
+    let mut ana = Client::app(&url, &ana_token);
+    let mut bob = Client::app(&url, &bob_token);
+    let site = "github.com/acme/site";
+
+    assert_eq!(ana.hub(json!({ "cmd": "list_ideas" })).unwrap(), json!([]), "a new account has no ideas");
+    let ipad = ana.hub(json!({ "cmd": "save_idea", "title": "An iPad app", "text": "  Maybe next year.  " })).unwrap();
+    let ipad_id = ipad["id"].as_str().unwrap().to_owned();
+    assert_eq!((ipad["title"].as_str(), ipad["text"].as_str(), ipad["status"].as_str()), (Some("An iPad app"), Some("Maybe next year."), Some("open")));
+    assert_eq!(ipad["created_by"], json!({ "kind": "user" }), "the hub sets who made it");
+    assert!(ipad["project"].is_null() && ipad["task"].is_null());
+    assert!(ipad["created_at"].as_i64().unwrap() > 1_700_000_000 && ipad["created_at"] == ipad["updated_at"], "the hub sets the times: {ipad}");
+    let cache = ana.hub(json!({ "cmd": "save_idea", "title": "Cache the diff", "project": site })).unwrap();
+    let cache_id = cache["id"].as_str().unwrap().to_owned();
+    assert_ne!(ipad_id, cache_id);
+    assert_eq!(ana.hub(json!({ "cmd": "save_idea", "title": "  " })), Err("an idea needs a title".into()));
+
+    let ids = |listed: Value| listed.as_array().unwrap().iter().map(|i| i["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    let mut both = ids(ana.hub(json!({ "cmd": "list_ideas" })).unwrap());
+    both.sort();
+    let mut expected = vec![ipad_id.clone(), cache_id.clone()];
+    expected.sort();
+    assert_eq!(both, expected, "the list holds all of them");
+    assert_eq!(ids(ana.hub(json!({ "cmd": "list_ideas", "project": site })).unwrap()), [cache_id.clone()], "by project");
+    assert_eq!(ana.hub(json!({ "cmd": "list_ideas", "project": "github.com/acme/other" })).unwrap(), json!([]));
+
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let edited = ana.hub(json!({ "cmd": "save_idea", "id": ipad_id, "title": "An iPad app, read-only", "project": site, "status": "dropped" })).unwrap();
+    assert_eq!((edited["id"].as_str(), edited["title"].as_str(), edited["project"].as_str(), edited["status"].as_str()), (Some(ipad_id.as_str()), Some("An iPad app, read-only"), Some(site), Some("dropped")));
+    assert_eq!(edited["text"], "", "an edit sets the text as sent");
+    assert_eq!((edited["created_at"].clone(), edited["created_by"].clone()), (ipad["created_at"].clone(), ipad["created_by"].clone()), "an edit keeps who made it and when");
+    assert!(edited["updated_at"].as_i64() > ipad["updated_at"].as_i64());
+    let kept = ana.hub(json!({ "cmd": "save_idea", "id": ipad_id, "title": "An iPad app, read-only" })).unwrap();
+    assert_eq!((kept["status"].as_str(), kept["project"].is_null()), (Some("dropped"), true), "a status left out is kept; a project left out clears it");
+    assert_eq!(ids(ana.hub(json!({ "cmd": "list_ideas" })).unwrap())[0], ipad_id, "the most recently changed comes first");
+
+    let settings = ana.hub(json!({ "cmd": "get_settings" })).unwrap();
+    assert_eq!(settings["ideas"].as_array().unwrap().len(), 2, "the settings carry the ideas");
+    assert!(bob.hub(json!({ "cmd": "get_settings" })).unwrap().get("ideas").is_none(), "an account with none gets no field");
+
+    assert_eq!(bob.hub(json!({ "cmd": "list_ideas" })).unwrap(), json!([]), "bob lists none of ana's");
+    assert_eq!(bob.hub(json!({ "cmd": "list_ideas", "project": site })).unwrap(), json!([]));
+    let no_idea = |id: &str| Err(format!("this account has no idea {id}"));
+    assert_eq!(bob.hub(json!({ "cmd": "save_idea", "id": cache_id, "title": "Bob's now" })), no_idea(&cache_id), "bob cannot edit ana's idea");
+    assert_eq!(bob.hub(json!({ "cmd": "delete_idea", "id": cache_id })), no_idea(&cache_id), "bob cannot delete it");
+    let after = ana.hub(json!({ "cmd": "list_ideas", "project": site })).unwrap();
+    assert_eq!(after.as_array().unwrap().iter().find(|i| i["id"] == json!(cache_id)).unwrap()["title"], "Cache the diff", "ana's idea is untouched");
+
+    assert_eq!(ana.hub(json!({ "cmd": "delete_idea", "id": cache_id })).unwrap(), Value::Null);
+    assert_eq!(ids(ana.hub(json!({ "cmd": "list_ideas" })).unwrap()), [ipad_id.clone()]);
+    assert_eq!(ana.hub(json!({ "cmd": "delete_idea", "id": cache_id })), no_idea(&cache_id), "a second delete finds nothing");
+    assert_eq!(ana.hub(json!({ "cmd": "delete_idea", "id": "not-an-id" })), no_idea("not-an-id"));
+}
+
+#[test]
+fn an_agent_saves_and_lists_ideas_through_act_and_its_role_is_kept() {
+    let hub = TestHub::start_with("agent_ideas", Signup::Open);
+    let url = hub.url.clone();
+    let (ana_token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let ana = agent_of(&url, &ana_token, "ana@acme.dev", "ana-mac");
+
+    let saved = act(&ana.dir, &ana.tab, "save_idea", json!({ "title": "A cheaper box tier", "project": "github.com/acme/site" })).unwrap();
+    assert_eq!(saved["outcome"], "done", "{saved}");
+    let idea = &saved["result"];
+    assert_eq!(idea["created_by"]["kind"], "agent", "{idea}");
+    assert_eq!(idea["created_by"]["role"], "session");
+    assert_eq!(idea["created_by"]["tab"], ana.tab.as_str());
+    let id = idea["id"].as_str().unwrap();
+
+    let listed = act(&ana.dir, &ana.tab, "list_ideas", json!({ "project": "github.com/acme/site" })).unwrap();
+    assert_eq!(listed["result"].as_array().unwrap().len(), 1);
+    let edited = act(&ana.dir, &ana.tab, "save_idea", json!({ "id": id, "title": "A cheaper box tier", "status": "done" })).unwrap();
+    assert_eq!(edited["result"]["status"], "done");
+    assert_eq!(edited["result"]["created_by"], idea["created_by"], "an edit keeps the creator");
+    let mut app = ana.client;
+    assert_eq!(app.hub(json!({ "cmd": "list_ideas" })).unwrap().as_array().unwrap().len(), 1, "the app sees the agent's idea");
+    let deleted = act(&ana.dir, &ana.tab, "delete_idea", json!({ "id": id })).unwrap();
+    assert_eq!(deleted["outcome"], "done");
+    assert_eq!(act(&ana.dir, &ana.tab, "list_ideas", json!({})).unwrap()["result"], json!([]));
+}

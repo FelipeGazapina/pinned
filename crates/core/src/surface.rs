@@ -347,6 +347,9 @@ pub const ACTIONS: &[Action] = &[
     h("set_convex_repos", Confirm, "Sets the projects, as repo keys, whose sessions read the connected Convex deployment id. A project moves off any other deployment.").wired(),
     h("disconnect_convex", Confirm, "Disconnects the Convex deployment id and forgets its key.").wired(),
     h("convex_tables", Excluded, "the Read Convex data step's table list in the app: a session reads Convex through its convex_ tools"),
+    h("list_ideas", Read, "The account's ideas, most recently changed first, or with project (a repository like github.com/owner/repo) only that project's: id, title, text, project, status (open, done or dropped), task, who made it, and times. An idea is something that might be done; it is never recalled into a prompt, and facts go to memory (memory_save) instead.").wired(),
+    h("save_idea", Write, "Saves an idea: title, text and an optional project (a repository like github.com/owner/repo), or with id changes that one (status: open, done or dropped). An idea is something that might be done; it is never recalled into a prompt, and facts go to memory (memory_save) instead.").wired(),
+    h("delete_idea", Write, "Deletes an idea of the account. An idea is something that might be done; it is never recalled into a prompt, and facts go to memory (memory_save) instead.").wired(),
     h("convex", Excluded, "a session's Convex read, which its machine sends: call the convex_ tools"),
 ];
 
@@ -1067,6 +1070,7 @@ mod tests {
                 "delete_session",
                 "save_mcp_server", "enable_mcp_server", "remove_mcp_server", "import_mcp_server",
                 "connect_convex", "set_convex_repos", "disconnect_convex",
+                "save_idea", "delete_idea",
             ]
         );
         for name in ["set_taste", "reset_taste_field", "set_box_size", "delete_connector"] {
@@ -1237,6 +1241,18 @@ mod tests {
         #[test]
         fn list_mcp_servers() {
             wired("list_mcp_servers", Read, "hub", false, json!({}));
+        }
+
+        #[test]
+        fn the_idea_actions() {
+            wired("list_ideas", Read, "hub", false, json!({}));
+            wired("list_ideas", Read, "hub", false, json!({ "project": "github.com/acme/site" }));
+            wired("save_idea", Write, "hub", false, json!({ "title": "An iPad app" }));
+            wired("save_idea", Write, "hub", false, json!({ "id": "i1", "title": "An iPad app", "text": "Maybe.", "project": "github.com/acme/site", "status": "dropped" }));
+            wired("delete_idea", Write, "hub", false, json!({ "id": "i1" }));
+            for name in ["list_ideas", "save_idea", "delete_idea"] {
+                assert!(find(name).unwrap().about.contains("never recalled into a prompt"), "{name} says how an idea differs from memory");
+            }
         }
 
         #[test]
