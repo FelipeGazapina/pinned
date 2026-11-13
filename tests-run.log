@@ -282,3 +282,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
     error: test failed, to rerun pass `-p pinned-server --test hub`
 2026-11-13T04:21:27Z #126 every_box_signs_in_with_the_claude_token_of_its_projects_account_and_refuses_one_it_has_none_for START / avail=15050M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:21:32Z #126 every_box_signs_in_with_the_claude_token_of_its_projects_account_and_refuses_one_it_has_none_for ok / avail=15050M /workspace avail=19374M node_stat=Ssl node_tcp=1
+2026-11-13T04:21:33Z #127 another_accounts_project_account_never_picks_this_accounts_box_tokens START / avail=15050M /workspace avail=19374M node_stat=Ssl
