@@ -16,6 +16,7 @@
 - Workflows: in New workflow, clicking Linear (or any Slack option) with that connector connected now continues the setup instead of opening Connectors. Since 0.17.10 every option sent you to Connectors and said "Connect Linear", whatever was connected. When the connector is missing, Connectors now says which workflow sent you there, and connecting it, or Back to the workflow, returns you to that workflow as you left it.
 - A Captain no longer keeps the global Orchestrator's messages queued for hours after its turn ends. When a turn ended just as a message came in, the Captain's end-of-turn hook could give up waiting for pinned before pinned handed the message over. The turn ended without it, while pinned kept counting the Captain as busy, so every later message waited until you typed into the Captain. The hook now waits long enough for the hand-over. If a hand-over still gets lost, the queued messages start a new turn once Claude Code reports the Captain idle, about a minute later.
 - A worker box whose link to the hub drops for a moment keeps its task. Before, a box running for more than 5 minutes that lost its link was deleted at once as "the box did not connect within 5 min". Now its task waits for it to come back, and a box that stays offline for 10 minutes ends with that reason.
+- Upstash Box: removing a box machine, disconnecting Upstash or ending a worker now deletes its box with only the Upstash key stored, and one box that will not delete no longer stops the sweep from deleting the others.
 
 ## 0.18.1 (2026-11-12)
 
