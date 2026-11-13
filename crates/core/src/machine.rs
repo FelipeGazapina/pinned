@@ -5679,6 +5679,19 @@ impl Machine {
         self.delegates.note_user_waits(&waiting, now);
     }
 
+    /// Closes as ended each open questionnaire whose task has ended, so a worker that stopped,
+    /// by its time limit, a failure or its exit, does not leave it open to show as a question and
+    /// to pause that task's time limit.
+    fn end_questions_of_ended_tasks(&self) {
+        let tab_tasks: HashMap<String, String> = self.tabs.lock().unwrap().iter().filter_map(|(id, t)| Some((id.clone(), t.task.clone()?))).collect();
+        let open = self.questions.lock().unwrap().open_tasks(|tab| tab_tasks.get(tab).cloned());
+        let ended: Vec<String> = open.into_iter().filter(|(_, task)| self.delegates.get(task).is_some_and(|info| info.state.terminal())).map(|(id, _)| id).collect();
+        let closed = ended.iter().fold(false, |any, id| self.questions.lock().unwrap().end(id) | any);
+        if closed {
+            self.emit_tabs();
+        }
+    }
+
     /// The last steps of a thread's conversation, as `task_status` lists them.
     fn thread_steps(&self, tab: &str) -> Vec<thread::Item> {
         let Some(page) = self.transcript(tab).ok().and_then(|file| thread::read(&file, 0).ok()) else { return vec![] };
@@ -5813,6 +5826,7 @@ impl Machine {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let stopped = machine.delegates.enforce_limits(Instant::now(), machine.launch.path_env.as_deref());
                 machine.clear_answered_asks(Instant::now());
+                machine.end_questions_of_ended_tasks();
                 machine.note_user_waits(Instant::now());
                 machine.look_after_remotes(stopped);
                 machine.send_remote_ends(Instant::now());
@@ -13812,6 +13826,31 @@ Have another model review a risky change before it goes ahead.";
         let run = m.delegates.get(&task).unwrap().run;
         assert_eq!((run.user_wait, run.paused), (None, answered - asked), "the clock runs again from the answer");
         assert_eq!(m.call(Call::AnswerQuestions { tab: child.clone(), id: id.clone(), reply: QuestionsReply::Skipped }), Err(format!("questions {id} are already closed")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_task_that_ends_with_an_open_questionnaire_closes_it_as_ended_and_it_no_longer_pauses_its_time_limit() {
+        use crate::questions::{Outcome, QOption, Question};
+        let (m, dir, _captain, task, child, transcript) = captain_with_thread_child("thread-questions-ended");
+        m.record_event(hook_event(&child, "working", &transcript, Some("Board check")));
+        let question = Question { header: None, question: "Which database?".into(), changes: "the schema".into(), options: vec![QOption { label: "postgres".into(), description: None, recommended: true }], multi_select: false };
+        let id = m.questions.lock().unwrap().open(&child, Some("s-child".into()), Some(task.clone()), None, vec![question], vec![], unix_now()).unwrap();
+        let asked = Instant::now();
+        m.note_user_waits(asked);
+        assert_eq!(m.delegates.get(&task).unwrap().run.user_wait, Some(asked), "the open questionnaire pauses the time limit");
+        m.end_questions_of_ended_tasks();
+        assert!(m.questions.lock().unwrap().open_on(&child).is_some(), "a task still working keeps its questionnaire open");
+
+        m.delegates.fail(&task, "the worker was cut off".into(), None);
+        assert!(m.delegates.get(&task).unwrap().state.terminal());
+        m.end_questions_of_ended_tasks();
+        let questions = m.questions.lock().unwrap();
+        assert_eq!(questions.get(&id).unwrap().outcome, Some(Outcome::Ended), "its worker ended before anyone answered");
+        assert_eq!((questions.open_on(&child), questions.waiting_tasks().count()), (None, 0), "nothing is left open, so nothing pauses the task");
+        drop(questions);
+        assert_eq!(m.view(&child).unwrap().questions, None, "the tab no longer shows it");
         let _ = std::fs::remove_dir_all(dir);
     }
 

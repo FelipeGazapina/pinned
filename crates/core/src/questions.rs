@@ -99,6 +99,8 @@ pub enum Outcome {
     Skipped,
     /// The user stopped the turn, or the tab closed.
     Cancelled,
+    /// Its worker ended before anyone answered.
+    Ended,
 }
 
 /// One questionnaire on this machine, open or closed.
@@ -193,6 +195,22 @@ impl Questions {
     pub fn cancel_tab(&mut self, tab: &str) -> bool {
         let Some(asked) = self.asked.iter_mut().find(|a| a.tab == tab && a.is_open()) else { return false };
         asked.outcome = Some(Outcome::Cancelled);
+        self.closed();
+        true
+    }
+
+    /// The open questionnaires with the task whose worker asked each: its `task`, else the one its
+    /// tab runs, which `tab_task` answers. Each is (id, task).
+    pub fn open_tasks(&self, tab_task: impl Fn(&str) -> Option<String>) -> Vec<(String, String)> {
+        self.asked.iter().filter(|a| a.is_open()).filter_map(|a| Some((a.questionnaire.id.clone(), a.task.clone().or_else(|| tab_task(&a.tab))?))).collect()
+    }
+
+    /// Closes the open questionnaire `id` as ended: its worker's task ended with nobody having
+    /// answered, so nobody is left to tell. Whether one was open.
+    pub fn end(&mut self, id: &str) -> bool {
+        let Some(asked) = self.asked.iter_mut().find(|a| a.questionnaire.id == id && a.is_open()) else { return false };
+        asked.outcome = Some(Outcome::Ended);
+        asked.notified = true;
         self.closed();
         true
     }
