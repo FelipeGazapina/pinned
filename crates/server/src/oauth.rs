@@ -35,6 +35,8 @@ pub const SCOPES: [(&str, &str); 2] = [
 const MAX_REDIRECTS: usize = 5;
 const MAX_PROJECTS: usize = 20;
 const REGISTRATIONS: usize = 20;
+/// Registrations the whole hub takes within the limiter's window, whichever addresses they come from.
+const HUB_REGISTRATIONS: usize = 100;
 const TOKEN_FAILURES: usize = 30;
 /// How long the approval waits for a machine to list its projects.
 const LIST_WAIT: Duration = Duration::from_secs(20);
@@ -176,7 +178,8 @@ pub async fn server_metadata(State(server): State<Arc<Server>>) -> Response {
 }
 
 pub async fn register(State(server): State<Arc<Server>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, headers: HeaderMap, Json(body): Json<Value>) -> Response {
-    if !server.attempt(&[(format!("agent-register:{}", server.client_address(peer, &headers)), REGISTRATIONS)]) {
+    let keys = [(format!("agent-register:{}", server.client_address(peer, &headers)), REGISTRATIONS), ("hub:agent-register".to_owned(), HUB_REGISTRATIONS)];
+    if !server.attempt(&keys) {
         return oauth_error(StatusCode::TOO_MANY_REQUESTS, "invalid_client_metadata", "too many registrations; try again in 15 minutes");
     }
     let uris: Vec<String> = match body.get("redirect_uris").and_then(Value::as_array) {

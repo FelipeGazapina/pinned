@@ -37,6 +37,9 @@ const EMAIL_ATTEMPTS: usize = 30;
 /// Wrong passwords allowed within `ATTEMPT_WINDOW` to unlock one account's apps, over all its logins.
 const ACCOUNT_UNLOCKS: usize = 100;
 const ADDRESS_SIGNUPS: usize = 5;
+/// Sign ups the whole hub takes within `ATTEMPT_WINDOW`, whichever addresses they come from: a burst of
+/// invited testers fits, a client that keeps changing its address does not get past it.
+const HUB_SIGNUPS: usize = 50;
 /// Keys the limiter holds at most, under 20 MB when filled by one-off keys of the longest email. Rotating addresses or emails can't grow
 /// it past this; when it is full a request that needs a new key is refused, and no live key is dropped.
 const ATTEMPT_KEYS: usize = 50_000;
@@ -299,11 +302,13 @@ async fn signup(State(server): State<Arc<Server>>, ConnectInfo(peer): ConnectInf
     if server.hub.signup == Signup::First && !first {
         return Err(Error(StatusCode::FORBIDDEN, "this hub already has its account, so sign in with it instead".into()));
     }
+    let keys = [(format!("signup:{}", server.client_address(peer, &headers)), ADDRESS_SIGNUPS), ("hub:signup".to_owned(), HUB_SIGNUPS)];
+    if !server.attempt(&keys) {
+        return Err(Error(StatusCode::TOO_MANY_REQUESTS, "too many sign ups; try again in 15 minutes".into()));
+    }
+    // After the limiter, so a full hub's answer costs a counted attempt before it costs a query.
     if at_cap(&server).await? {
         return Err(Error(StatusCode::FORBIDDEN, NOT_TAKING.into()));
-    }
-    if !server.attempt(&[(format!("signup:{}", server.client_address(peer, &headers)), ADDRESS_SIGNUPS)]) {
-        return Err(Error(StatusCode::TOO_MANY_REQUESTS, "too many sign ups; try again in 15 minutes".into()));
     }
     let invite_needed = || Error(StatusCode::FORBIDDEN, INVITE_NEEDED.into());
     // The first account of an invite hub needs no code, so a fresh hub can start.

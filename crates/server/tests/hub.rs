@@ -2102,8 +2102,9 @@ fn rotating_the_edge_header_does_not_pass_the_hub_wide_signup_ceiling() {
         assert_eq!(from("198.51.100.1".into(), n).0, 200);
     }
     assert_eq!(from("198.51.100.1".into(), 5).0, 429, "one address over its own limit");
-    for n in 0..50 {
-        assert_eq!(from(format!("203.0.113.{n}"), 10 + n).0, 200, "sign up {n} of the hub's window; an address refused above spent none of it");
+    // The hub's window holds 50: those five and 45 more, as the refused sixth spent none of it.
+    for n in 0..45 {
+        assert_eq!(from(format!("203.0.113.{n}"), 10 + n).0, 200, "sign up {n} from a new address");
     }
     assert_eq!(from("203.0.113.100".into(), 100), (429, json!({ "error": TOO_MANY_SIGNUPS })), "a new address finds the hub's window spent");
 }
