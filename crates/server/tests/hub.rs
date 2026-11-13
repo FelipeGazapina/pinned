@@ -5996,9 +5996,9 @@ fn an_agents_save_that_calls_a_stored_workflow_whose_session_skips_prompts_is_re
     let calls_skips = own(workflow(None, "Calls skips", called(), &[&format!("call:{skips}")]));
     let calls_asks = own(workflow(None, "Calls asks", called(), &[&format!("call:{asks}")]));
     let back = own(workflow(None, "Back", called(), &["acceptEdits"]));
-    let back_skips = own(workflow(None, "Back skips", called(), &["bypassPermissions"]));
+    let back_asks = own(workflow(None, "Back asks", called(), &["acceptEdits"]));
     let to_back = own(workflow(None, "To back", called(), &[&format!("call:{back}")]));
-    let to_back_skips = own(workflow(None, "To back skips", called(), &[&format!("call:{back_skips}")]));
+    let to_back_skips = own(workflow(None, "To back skips", called(), &[&format!("call:{back_asks}"), "bypassPermissions"]));
     let names = |client: &mut Client| {
         let settings = client.hub(json!({ "cmd": "get_settings" })).unwrap();
         let mut names: Vec<String> = settings["connectors"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap().to_owned()).collect();
@@ -6013,9 +6013,9 @@ fn an_agents_save_that_calls_a_stored_workflow_whose_session_skips_prompts_is_re
     let direct = workflow(None, "Direct", label("direct"), &[&format!("call:{skips}")]);
     let deep = workflow(None, "Deep", label("deep"), &[&format!("call:{calls_skips}")]);
     let unknown = workflow(None, "Unknown", label("unknown"), &["call:no-such-workflow"]);
-    // `back` and `back_skips` call `to_back` / `to_back_skips` again, which already call them.
+    // `back` and `back_asks` call `to_back` / `to_back_skips` again, which already call them.
     let cycle = workflow(Some(&back), "Back", called(), &[&format!("call:{to_back}")]);
-    let cycle_skips = workflow(Some(&back_skips), "Back skips", called(), &[&format!("call:{to_back_skips}"), "bypassPermissions"]);
+    let cycle_skips = workflow(Some(&back_asks), "Back asks", called(), &[&format!("call:{to_back_skips}")]);
     for (why, save) in [("a direct call", &direct), ("a call two levels deep", &deep), ("an unknown target", &unknown)] {
         assert_eq!(act(&owner.dir, &owner.tab, "save_connector", save.clone()), Err(refused.to_owned()), "{why}");
     }
