@@ -6564,6 +6564,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[test]
+    fn a_save_of_a_graph_whose_spine_loops_answers_and_the_next_save_still_works() {
+        let (connectors, dir) = stored("loop-graph", vec![called()]);
+        let connectors = std::sync::Arc::new(connectors);
+        let mut looped = called();
+        looped.graph = Some(crate::graph::Graph {
+            nodes: vec![
+                node("trigger", "Trigger", NodeKind::Trigger { watch: Watch::Called }),
+                node("a", "A", NodeKind::Classify(kind_classify(None))),
+                node("b", "B", NodeKind::Classify(kind_classify(None))),
+            ],
+            edges: vec![edge("trigger", "out", "a"), edge("a", "out", "b"), edge("b", "out", "a")],
+        });
+        // Each save runs on its own thread, so a save that never ends fails in seconds, not by hanging the run.
+        let within_a_bound = |connector: Connector| {
+            let (done, result) = std::sync::mpsc::channel();
+            let connectors = connectors.clone();
+            std::thread::spawn(move || {
+                let _ = done.send(connectors.save_connector(connector));
+            });
+            result.recv_timeout(std::time::Duration::from_secs(5)).expect("the save answered within 5 seconds")
+        };
+        assert!(within_a_bound(looped).expect("the looped graph saves").graph.is_some());
+        let mut renamed = called();
+        renamed.name = "Answer v2".into();
+        assert_eq!(within_a_bound(renamed).map(|saved| saved.name), Ok("Answer v2".to_owned()), "the next ordinary save works");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     fn talks(prompts: &[&str]) -> crate::graph::Graph {
         let mut nodes = vec![Node {
             id: NodeId("t".into()),
