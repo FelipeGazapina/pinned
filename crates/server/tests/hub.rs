@@ -8321,8 +8321,8 @@ impl Schedules {
     fn start(name: &str) -> Schedules {
         let hub = TestHub::start(name);
         let url = hub.url.clone();
-        let (ana_token, _, mut ana) = signed_in(&url, "ana@acme.dev");
-        let (_, _, bob) = signed_in(&url, "bob@acme.dev");
+        let (ana_token, _, mut ana) = signed_in(&url, "ana@example.test");
+        let (_, _, bob) = signed_in(&url, "bob@example.test");
         let tab = json!({ "id": "tab-agent", "cwd": "/a/app", "bypass": false, "running": true, "status": "working", "title": "Planner", "message": null, "resume_at": null, "opened": 1, "session": "agent-conv" });
         let (machine, machine_token) = account::register_machine(&url, &ana_token, "ana-mac", "linux").unwrap();
         let raw = RawMachine::start_with(&url, &machine_token, vec![json!({ "kind": "tabs", "tabs": [tab] })], |_| RawReply::Ok(Value::Null));
