@@ -317,7 +317,7 @@ pub const ACTIONS: &[Action] = &[
     h("record_tasks", Excluded, "machines send their delegated tasks' records by themselves"),
     h("delegation_stats", Read, "How the account's delegated tasks went over the last days (1, 7 or 30), per model.").wired(),
     h("box_usage", Read, "The account's Upstash Box usage: every box the key lists with its CPU hours and compute cost, the totals of this UTC month, and the box hours of pinned's own delegated tasks.").wired(),
-    h("stuck_boxes", Read, "The account's Upstash boxes pinned could not delete, each with its row id and why the delete failed. A box listed is still running on Upstash. Read from pinned's own record: it needs no Upstash connection and makes no Upstash call.").wired(),
+    h("stuck_boxes", Read, "The account's Upstash boxes pinned could not delete, each with its row id and why the delete failed. A box listed without `unconfirmed` is still running on Upstash; one with `unconfirmed: true` is a row pinned could not confirm a box for. Read from pinned's own record: it needs no Upstash connection and makes no Upstash call.").wired(),
     h("delegate", Excluded, "a machine's way to run delegate_task on another machine or a box: call delegate_task"),
     h("remote_task", Excluded, "a machine's way to read its remote worker: call task_status"),
     h("remote_ended", Excluded, "a machine's way to report a remote worker's end"),
