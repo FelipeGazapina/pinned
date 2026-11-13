@@ -572,8 +572,16 @@ pub fn overview_at(machines: &[MachineSnapshot], now: u64) -> Overview {
         let tabs = if machine.online { machine.tabs } else { &[] };
         for project in machine.projects {
             let captain = captain_tab(tabs, &project.path);
-            // A stored status never counts alone: a worker needs a live process, or is a headless child at work.
-            let workers = tabs.iter().filter(|t| ((t.alive && !finished(t)) || (t.headless && t.status == Some(AgentStatus::Working))) && t.role == Some(Role::Worker) && history::project_of(Path::new(&t.cwd)) == Path::new(&project.path)).count();
+            // From 0.18.2 a stored status never counts alone: a worker needs a live process, or is a headless child at work.
+            // An older machine never sends `alive`, so it keeps the rule that reads `running` and the status.
+            let reports_alive = reports_alive(machine.version);
+            let workers = tabs
+                .iter()
+                .filter(|t| {
+                    let counts = if reports_alive { (t.alive && !finished(t)) || (t.headless && t.status == Some(AgentStatus::Working)) } else { (t.running || t.status == Some(AgentStatus::Working)) && !finished(t) };
+                    counts && t.role == Some(Role::Worker) && history::project_of(Path::new(&t.cwd)) == Path::new(&project.path)
+                })
+                .count();
             let checkout = OverviewCheckout {
                 machine: machine.id.to_owned(),
                 machine_name: machine.name.to_owned(),
@@ -624,6 +632,19 @@ pub fn overview_at(machines: &[MachineSnapshot], now: u64) -> Overview {
         .map(|m| OverviewMachine { id: m.id.to_owned(), name: m.name.to_owned(), online: m.online, version: m.version.to_owned(), problem: m.problem.map(str::to_owned), state: None })
         .collect();
     Overview { projects, waiting, machines, sessions: Some(sessions) }
+}
+
+/// The first version that sends `TabView.alive` (and `asleep`, `headless`, `stopped`); an older machine leaves it `false`.
+const ALIVE_FROM: (u32, u32, u32) = (0, 18, 2);
+
+/// Whether a machine at `version` sends `TabView.alive`. A version that does not parse (a dev build) does.
+fn reports_alive(version: &str) -> bool {
+    let core = version.split(['-', '+']).next().unwrap_or_default();
+    let mut parts = core.split('.').map(|p| p.parse::<u32>());
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(Ok(major)), Some(Ok(minor)), Some(Ok(patch)), None) => (major, minor, patch) >= ALIVE_FROM,
+        _ => true,
+    }
 }
 
 /// Whether a tab's turn ended and nothing waits on it: idle with a status, unlike a session that
@@ -964,6 +985,20 @@ mod tests {
         let machines = [MachineSnapshot { id: "m", name: "Mac", online: true, version: "0.18.2", projects: &site, tabs: &tabs, problem: None }];
         let counted = overview(&machines).projects[0].checkouts[0].workers;
         assert_eq!(counted, 2, "the live worker and the headless child count; the stopped and the sleeping one do not");
+    }
+
+    #[test]
+    fn a_machine_before_0_18_2_counts_its_workers_by_running_and_status() {
+        let site = [project("/w/site", Some("github.com/o/site"))];
+        // What a 0.18.1 machine sends: no `alive`, `asleep`, `headless` or `stopped`.
+        let tab: TabView = serde_json::from_value(serde_json::json!({ "id": "tab-f-1", "cwd": "/w/site/.claude/worktrees/pinned-1", "bypass": false, "running": true, "status": "working", "role": "worker", "title": null, "message": null, "resume_at": null, "connector": null, "opened": 1 })).unwrap();
+        assert!(!tab.alive && tab.role == Some(Role::Worker), "the tab reads as a worker that is not alive");
+        let counted = |version| overview(&[MachineSnapshot { id: "m", name: "Mac", online: true, version, projects: &site, tabs: std::slice::from_ref(&tab), problem: None }]).projects[0].checkouts[0].workers;
+        assert_eq!(counted("0.18.1"), 1);
+        assert_eq!(counted("0.18.2"), 0);
+        assert_eq!(counted("0.18.2-rc.1+build.7"), 0);
+        assert_eq!(counted("dev"), 0, "a version that does not parse takes the new rule");
+        assert_eq!(counted("0.9.30"), 1);
     }
 
     #[test]
