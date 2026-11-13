@@ -245,7 +245,7 @@ fn place_stops(built: &mut Built, question_index: usize, cases: &[(String, Strin
 mod tests {
     use super::*;
     use crate::connectors::{Ask, Category, Columns, Connector, Decide, Effort, Fix, PermissionMode, Question as LegacyQuestion, RunsOn, Trigger};
-    use crate::graph::project::project;
+    use crate::graph::project::{direct_asks, project, Projected};
     use std::collections::BTreeMap;
 
     fn workflow(trigger: Trigger, ask: Option<Ask>, picked: &str) -> Connector {
@@ -456,6 +456,73 @@ mod tests {
         let projected = project(&graph);
         let questions = projected.ask.expect("ask").questions;
         assert_eq!(questions[0].stop_on, vec!["No".to_owned()]);
+    }
+
+    /// Runs `project`, and the spine walk under it, on their own thread so a walk that never
+    /// ends fails the test in seconds instead of hanging the run. Gives the projection and the
+    /// ids of the asks the walk found, in order.
+    fn projected_within_a_bound(graph: &Graph) -> (Projected, Vec<String>) {
+        let graph = graph.clone();
+        let (done, result) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let asks = direct_asks(&graph, graph.trigger()).iter().map(|node| node.id.0.clone()).collect();
+            let _ = done.send((project(&graph), asks));
+        });
+        result.recv_timeout(std::time::Duration::from_secs(5)).expect("projecting the graph ended within 5 seconds")
+    }
+
+    fn direct_classify(id: &str, name: &str, column: i32, question: &str) -> Node {
+        node(
+            id,
+            name,
+            at(column, 0),
+            NodeKind::Classify(Classify {
+                model: "m".into(),
+                instructions: String::new(),
+                questions: vec![Question { name: question.into(), ask: String::new(), choices: vec![choice("yes", "yes", "")] }],
+                branch_on: None,
+                gate: Gate::Direct,
+                fallback: Fallback::None,
+            }),
+        )
+    }
+
+    #[test]
+    fn a_spine_that_loops_through_classifies_projects_each_ask_once_and_ends() {
+        let graph = Graph {
+            nodes: vec![
+                node("trigger", "Trigger", at(0, 0), NodeKind::Trigger { watch: Watch::Called }),
+                direct_classify("a", "A", 1, "first"),
+                direct_classify("b", "B", 2, "second"),
+            ],
+            edges: vec![edge("trigger", "out", "a"), edge("a", "out", "b"), edge("b", "out", "a")],
+        };
+        let (projected, asks) = projected_within_a_bound(&graph);
+        assert_eq!(projected.trigger, Trigger::Called);
+        assert_eq!(projected.ask.expect("the first classify is the ask").questions[0].name, "first");
+        assert_eq!(asks, vec!["a", "b"], "each classify on the loop is listed once, in walk order, and the walk stops where it comes back to one it has seen");
+    }
+
+    #[test]
+    fn a_spine_that_loops_through_a_plain_node_or_back_to_the_trigger_ends() {
+        let looped = Graph {
+            nodes: vec![
+                node("trigger", "Trigger", at(0, 0), NodeKind::Trigger { watch: Watch::Called }),
+                node("stage", "Picked", at(1, 0), NodeKind::StagePicked),
+                node("proof", "Proof", at(2, 0), NodeKind::Proof),
+            ],
+            edges: vec![edge("trigger", "out", "stage"), edge("stage", "out", "proof"), edge("proof", "out", "stage")],
+        };
+        let (projected, asks) = projected_within_a_bound(&looped);
+        assert_eq!((projected.trigger, projected.ask, projected.decide, asks), (Trigger::Called, None, None, Vec::new()));
+
+        let back_to_trigger = Graph {
+            nodes: vec![node("trigger", "Trigger", at(0, 0), NodeKind::Trigger { watch: Watch::Called }), direct_classify("a", "A", 1, "first")],
+            edges: vec![edge("trigger", "out", "a"), edge("a", "out", "trigger")],
+        };
+        let (projected, asks) = projected_within_a_bound(&back_to_trigger);
+        assert_eq!(projected.ask.expect("the classify on the loop is the ask").questions[0].name, "first");
+        assert_eq!(asks, vec!["a"], "the walk stops where it comes back to the trigger");
     }
 
     #[test]

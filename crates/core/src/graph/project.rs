@@ -2,6 +2,7 @@
 
 use super::{Fallback, Gate, Graph, Node, NodeId, NodeKind, PortId, Watch};
 use crate::connectors::{Ask, Category, Decide, Question, Trigger};
+use std::collections::HashSet;
 
 /// What an older app sees of a graph workflow.
 #[derive(Clone, Debug, PartialEq)]
@@ -36,11 +37,16 @@ fn empty_decide() -> Decide {
     Decide { model: String::new(), instructions: String::new(), categories: Vec::new(), fallback: None }
 }
 
-/// Direct classifies on the spine, in walk order, stopping at the first talk, session or decide.
-fn direct_asks<'a>(graph: &'a Graph, trigger: &'a Node) -> Vec<&'a Node> {
+/// Direct classifies on the spine, in walk order, stopping at the first talk, session or decide,
+/// or where the spine comes back to a node the walk has already been at.
+pub(super) fn direct_asks<'a>(graph: &'a Graph, trigger: &'a Node) -> Vec<&'a Node> {
     let mut asks = Vec::new();
     let mut current = trigger;
+    let mut seen = HashSet::from([&trigger.id]);
     while let Some(next) = follow(graph, current) {
+        if !seen.insert(&next.id) {
+            break;
+        }
         match &next.kind {
             NodeKind::Classify(classify) if matches!(classify.gate, Gate::Decide { .. }) => break,
             NodeKind::Classify(_) => {
