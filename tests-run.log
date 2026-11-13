@@ -242,3 +242,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
 2026-11-13T04:17:50Z #112 an_agent_manages_its_accounts_workflows_projects_sessions_settings_and_usage_and_another_account_reaches_none_of_it START / avail=15048M /workspace avail=19374M node_stat=Ssl
 2026-11-13T04:17:57Z #112 an_agent_manages_its_accounts_workflows_projects_sessions_settings_and_usage_and_another_account_reaches_none_of_it ok / avail=15044M /workspace avail=19374M node_stat=Ssl node_tcp=1
 2026-11-13T04:17:58Z #113 an_agent_pairs_machines_and_connects_services_only_with_what_its_owner_types_in_the_app START / avail=15044M /workspace avail=19374M node_stat=Ssl
+2026-11-13T04:18:05Z #113 an_agent_pairs_machines_and_connects_services_only_with_what_its_owner_types_in_the_app ok / avail=15044M /workspace avail=19374M node_stat=Ssl node_tcp=1
