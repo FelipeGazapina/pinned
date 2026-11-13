@@ -1219,7 +1219,7 @@
                 ]
               },
               {
-                "description": "The `global_orchestrator::Settings` saved, with a blank name back to the default one.",
+                "description": "The `global_orchestrator::Settings` saved, with a blank name back to the default one. Only\nthe fields `settings` names change; the answer is every field as saved.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -11486,7 +11486,7 @@
                 ]
               },
               {
-                "description": "The `global_orchestrator::Settings` saved, with a blank name back to the default one.",
+                "description": "The `global_orchestrator::Settings` saved, with a blank name back to the default one. Only\nthe fields `settings` names change; the answer is every field as saved.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -35718,6 +35718,13 @@
           "args": {
             "description": "The exact arguments it runs with."
           },
+          "changes": {
+            "description": "What it changes, one line each, as `name: old → new` or the session it touches, so the\nprompt shows it. Empty for an action whose arguments say it all.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
           "target": {
             "description": "The machine `act` named for an action on a machine, an id or a name; the asking session's own\nmachine when absent.",
             "type": [
@@ -35832,6 +35839,13 @@
           },
           "args": {
             "description": "The exact arguments it runs with."
+          },
+          "changes": {
+            "description": "What it changes, one line each, as `name: old → new` or the session it touches, so the\nprompt shows it. Empty for an action whose arguments say it all.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           },
           "target": {
             "description": "The machine `act` named for an action on a machine, an id or a name; the asking session's own\nmachine when absent.",
@@ -54394,6 +54408,13 @@
               "args": {
                 "description": "The exact arguments it runs with."
               },
+              "changes": {
+                "description": "What it changes, one line each, as `name: old → new` or the session it touches, so the\nprompt shows it. Empty for an action whose arguments say it all.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
               "target": {
                 "description": "The machine `act` named for an action on a machine, an id or a name; the asking session's own\nmachine when absent.",
                 "type": [
@@ -57846,6 +57867,13 @@
               "args": {
                 "description": "The exact arguments it runs with."
               },
+              "changes": {
+                "description": "What it changes, one line each, as `name: old → new` or the session it touches, so the\nprompt shows it. Empty for an action whose arguments say it all.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
               "target": {
                 "description": "The machine `act` named for an action on a machine, an id or a name; the asking session's own\nmachine when absent.",
                 "type": [
@@ -59413,7 +59441,7 @@
                 ]
               },
               {
-                "description": "The `global_orchestrator::Settings` saved, with a blank name back to the default one.",
+                "description": "The `global_orchestrator::Settings` saved, with a blank name back to the default one. Only\nthe fields `settings` names change; the answer is every field as saved.",
                 "type": "object",
                 "properties": {
                   "cmd": {
@@ -64968,7 +64996,7 @@
                 ]
               },
               {
-                "description": "The `global_orchestrator::Settings` saved, with a blank name back to the default one.",
+                "description": "The `global_orchestrator::Settings` saved, with a blank name back to the default one. Only\nthe fields `settings` names change; the answer is every field as saved.",
                 "type": "object",
                 "properties": {
                   "cmd": {
