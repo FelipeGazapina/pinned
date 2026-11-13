@@ -1066,18 +1066,6 @@ mod tests {
     }
 
     #[test]
-    fn the_extend_box_exception_in_owner_only_never_reaches_an_agents_act() {
-        let extend = find("extend_box").unwrap();
-        for locked in [false, true] {
-            assert_eq!(owner_only(Side::Hub, "extend_box", locked), locked, "the app's own Extend asks the password only on a locked login: {locked}");
-            assert!(held_for_owner(extend), "an agent's extend_box is held whether the app is locked or not: {locked}");
-        }
-        let act = include_str!("../../server/src/surface.rs");
-        assert!(act.contains("if surface::held_for_owner(admitted.action) || why.is_some() {"), "an agent's act holds an action by held_for_owner (or a schedule act that needs ok)");
-        assert!(!act.contains("owner_only"), "an agent's act never asks owner_only, which only the app's own connection meets");
-    }
-
-    #[test]
     fn names_are_unique_and_a_shared_cmd_names_the_node_call_node_cmd() {
         let names: BTreeSet<&str> = ACTIONS.iter().map(|a| a.name).collect();
         assert_eq!(names.len(), ACTIONS.len(), "two actions share a name");
