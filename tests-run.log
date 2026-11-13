@@ -29,3 +29,4 @@ order: suspect first, then all other hub tests in file order (run 1 order)
     assertion `left == right` failed: the old style's preset, with workers at once lowered to the old cap of 4
     pinned-server: Postgres connection ended: error communicating with the server
     error: test failed, to rerun pass `-p pinned-server --test hub`
+2026-11-13T04:02:44Z #12 a_taste_chat_changes_its_own_accounts_taste_live_and_never_another_accounts START / avail=15124M /workspace avail=19374M node_stat=Ssl
