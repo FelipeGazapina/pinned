@@ -5306,6 +5306,48 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// Imports `workflow` into the empty account in `dir` and expects a refusal that names the
+    /// workflow and `check`, with nothing written: the store on disk stays as it was and no key lands.
+    fn refused_import(connectors: &Connectors, dir: &std::path::Path, workflow: Connector, check: &str, why: &str) {
+        let before = std::fs::read(dir.join("connectors.json")).unwrap();
+        let name = workflow.name.clone();
+        let store = serde_json::json!({ "connectors": [serde_json::to_value(workflow).unwrap()] });
+        let keys = Keys { linear: Some("lin_api_fake".into()), ..Keys::default() };
+        let error = connectors.import(store, keys).err().expect("the import is refused");
+        assert!(error.contains(&format!("workflow {name:?} fails the {check} check")), "{error}");
+        assert!(error.contains(why), "{error}");
+        assert_eq!(std::fs::read(dir.join("connectors.json")).unwrap(), before, "the store is unchanged");
+        assert!(!dir.join("linear-key").exists(), "no key was written");
+        assert!(connectors.export().0["connectors"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn an_import_refuses_a_workflow_whose_step_permission_pinned_cannot_read() {
+        let (connectors, dir) = stored("import-permission", vec![]);
+        let mut graph = talks(&["go"]);
+        graph.nodes[1].kind = NodeKind::Session(SessionSetup { permission: "everything".into(), ..SessionSetup::default() });
+        let workflow = Connector { id: "c9".into(), name: "Nightly".into(), graph: Some(graph), ..linear_connector() };
+        refused_import(&connectors, &dir, workflow, "graph", "its permission must be manual");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_import_refuses_a_workflow_whose_model_starts_with_a_dash() {
+        let (connectors, dir) = stored("import-model", vec![]);
+        let workflow = Connector { id: "c9".into(), name: "Nightly".into(), model: " --dangerously-skip-permissions".into(), ..linear_connector() };
+        refused_import(&connectors, &dir, workflow, "model", "may not start with -");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_import_refuses_a_workflow_with_an_invalid_graph() {
+        let (connectors, dir) = stored("import-graph", vec![]);
+        let graph = crate::graph::Graph { nodes: vec![], edges: vec![] };
+        let workflow = Connector { id: "c9".into(), name: "Nightly".into(), graph: Some(graph), ..linear_connector() };
+        refused_import(&connectors, &dir, workflow, "graph", "a workflow needs a trigger");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn an_import_fills_an_empty_store_and_keys_and_drops_integrations_without_a_key() {
         let (connectors, dir) = stored("import", vec![]);
@@ -8453,6 +8495,30 @@ mod tests {
             let prompts = opened.lock().unwrap().clone();
             assert_eq!(prompts.len(), 1);
             assert!(prompts[0].contains("\n\nYou may read the tables invoices of Convex deployment quick-lemur-789 (dev) with the tools convex_tables and convex_data."), "{}", prompts[0]);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn an_import_refuses_a_convex_step_the_accounts_connections_do_not_allow() {
+            let (connectors, dir) = with_convex("convex-import-refused", vec![]);
+            let mut graph = talks(&["go"]);
+            graph.nodes.push(reads("gone-deployment-1", None));
+            let workflow = Connector { id: "c9".into(), name: "Invoices".into(), graph: Some(graph), ..linear_connector() };
+            refused_import(&connectors, &dir, workflow, "Convex step", "reads Convex deployment gone-deployment-1, which is not connected");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn an_import_whose_workflows_pass_the_save_checks_is_stored() {
+            let (connectors, dir) = with_convex("convex-import-clean", vec![]);
+            let mut graph = talks(&["go"]);
+            graph.nodes.push(reads("quick-lemur-789", Some(&["invoices"])));
+            let workflow = Connector { id: "c9".into(), name: "Invoices".into(), graph: Some(graph), ..linear_connector() };
+            let store = serde_json::json!({ "connectors": [serde_json::to_value(workflow).unwrap()] });
+            assert_eq!(connectors.import(store, Keys::default()), Ok(true));
+            let stored = connectors.get_settings().connectors;
+            assert_eq!(stored.len(), 1);
+            assert_eq!(convex_step(&stored[0]).map(|step| step.connection), Some("quick-lemur-789".to_owned()));
             let _ = std::fs::remove_dir_all(dir);
         }
 
