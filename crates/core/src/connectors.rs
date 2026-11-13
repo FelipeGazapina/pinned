@@ -828,11 +828,12 @@ struct Store {
     /// The connected Convex deployments. Their keys are keys, under `convex::key_name`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     convex: Vec<convex::Connection>,
-    /// The subjects a box end already freed once, by workflow id and then `subject_key`. A later
-    /// failed boot or offline end of the same subject keeps it handled. Marks of subjects no
-    /// workflow handles or follows and no run works on are dropped (`prune_thread_bots`).
+    /// The subjects a box end freed, by workflow id and then `subject_key`, with the unix millis it
+    /// did. A later failed boot or offline end of the same subject keeps it handled while the mark
+    /// is within `BOX_RELEASE_WINDOW_MS`. A mark is dropped when it is older than that or its
+    /// workflow is deleted (`prune_thread_bots`), whoever still tracks the subject.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    box_released: BTreeMap<String, std::collections::BTreeSet<String>>,
+    box_released: BTreeMap<String, BTreeMap<String, u64>>,
     connectors: Vec<Connector>,
 }
 
@@ -893,9 +894,9 @@ impl Store {
         }
     }
 
-    /// Drops the bots of threads, and the box-end marks of subjects, no workflow handles or
-    /// follows and no run works on anymore.
-    fn prune_thread_bots(&mut self, runs: &[runner::Run], starting: &[String]) -> bool {
+    /// Drops the bots of threads no workflow handles or follows and no run works on anymore, and
+    /// the box-end marks older than `BOX_RELEASE_WINDOW_MS` at `now` or of a deleted workflow.
+    fn prune_thread_bots(&mut self, runs: &[runner::Run], starting: &[String], now: u64) -> bool {
         let before = (self.slack_threads.len(), self.box_released.values().map(|keys| keys.len()).sum::<usize>());
         let connectors = &self.connectors;
         let tracked = |key: &String| {
@@ -903,20 +904,23 @@ impl Store {
                 || starting.contains(key)
         };
         self.slack_threads.retain(|key, _| tracked(key));
+        self.box_released.retain(|workflow, _| connectors.iter().any(|c| c.id == *workflow));
         for keys in self.box_released.values_mut() {
-            keys.retain(|key| tracked(key));
+            keys.retain(|_, at| box_release_is_live(Some(*at), now));
         }
         self.box_released.retain(|_, keys| !keys.is_empty());
         (self.slack_threads.len(), self.box_released.values().map(|keys| keys.len()).sum::<usize>()) != before
     }
 
     /// Frees `subject` of workflow `connector` after its run's box ended, as `release` allows:
-    /// never for `Keep`, and for `Once` only when no box end freed it before. Answers whether it did.
-    fn release_after_box_end(&mut self, connector: &str, subject: &Subject, release: BoxEndRelease) -> bool {
+    /// never for `Keep`, and for `Once` only when no box end freed it in the last
+    /// `BOX_RELEASE_WINDOW_MS` before `now`. Answers whether it did.
+    fn release_after_box_end(&mut self, connector: &str, subject: &Subject, release: BoxEndRelease, now: u64) -> bool {
         let key = subject_key(subject);
-        if release == BoxEndRelease::Keep || !self.box_released.entry(connector.to_owned()).or_default().insert(key.clone()) {
+        if release == BoxEndRelease::Keep || box_release_is_live(self.box_released.get(connector).and_then(|keys| keys.get(&key)).copied(), now) {
             return false;
         }
+        self.box_released.entry(connector.to_owned()).or_default().insert(key.clone(), now);
         if let Some(c) = self.connectors.iter_mut().find(|c| c.id == connector) {
             c.unclaim(subject);
         }
@@ -1137,7 +1141,7 @@ impl Store {
             }
         }
         let starting: Vec<String> = settled.starts.iter().map(|start| subject_key(&start.subject)).collect();
-        settled.needs_save |= self.prune_thread_bots(runs, &starting);
+        settled.needs_save |= self.prune_thread_bots(runs, &starting, unix_millis());
         settled
     }
 }
@@ -1624,6 +1628,16 @@ fn read_runs(bytes: Option<Vec<u8>>) -> (Vec<runner::Run>, Option<String>) {
     }
 }
 
+/// How long a box-end release mark keeps its subject from being freed by another box end: a
+/// subject is freed at most once per this long, 30 days in millis.
+const BOX_RELEASE_WINDOW_MS: u64 = 30 * 24 * 60 * 60 * 1000;
+
+/// Whether a release mark written at `at` still counts at `now`: it does until it is older than
+/// `BOX_RELEASE_WINDOW_MS`. No mark never counts.
+fn box_release_is_live(at: Option<u64>, now: u64) -> bool {
+    at.is_some_and(|at| now.saturating_sub(at) <= BOX_RELEASE_WINDOW_MS)
+}
+
 /// Unix millis now. A machine's tab list is stamped with this when it arrives.
 pub fn unix_millis() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
@@ -1898,7 +1912,7 @@ impl Connectors {
         let mut error = format!("could not open a session in {}: {why}; the next check tries again", folder.display());
         let mut store = self.store.lock().unwrap();
         if booted {
-            if !store.release_after_box_end(connector, subject, BoxEndRelease::Once) {
+            if !store.release_after_box_end(connector, subject, BoxEndRelease::Once, unix_millis()) {
                 error = format!("could not open a session in {}: {why}; its box failed before, so it starts again only when you run it", folder.display());
             }
             return match self.save(&store) {
@@ -3086,6 +3100,7 @@ impl Connectors {
         let _guard = self.driving.lock().await;
         let at = Utc::now().to_rfc3339();
         let released = self.store.lock().unwrap().box_released.clone();
+        let now = unix_millis();
         let mut whys = vec![];
         let mut before = vec![];
         let failed: Vec<(String, Subject)> = {
@@ -3098,7 +3113,7 @@ impl Connectors {
                     &run.subject == subject && owner == connector && !matches!(&run.session, Session::Live { machine: live, .. } if live != machine) && started_by(run, row_written)
                 });
                 if on_box || holds {
-                    let frees = release == BoxEndRelease::Once && !released.get(&owner).is_some_and(|keys| keys.contains(&subject_key(&run.subject)));
+                    let frees = release == BoxEndRelease::Once && !box_release_is_live(released.get(&owner).and_then(|keys| keys.get(&subject_key(&run.subject))).copied(), now);
                     let then = if frees { "its next trigger may start it once more" } else { "it starts again only when you run it" };
                     let why = format!("{why}; the run stopped, and {then}");
                     before.push(run.clone());
@@ -3125,7 +3140,7 @@ impl Connectors {
         {
             let mut store = self.store.lock().unwrap();
             for (owner, subject) in &failed {
-                store.release_after_box_end(owner, subject, release);
+                store.release_after_box_end(owner, subject, release, now);
             }
             self.save(&store)?;
         }
@@ -5177,6 +5192,17 @@ mod tests {
         settled.work.len() + settled.starts.len()
     }
 
+    /// The subjects each workflow holds a release mark for, without their times.
+    fn marked_subjects(connectors: &Connectors) -> BTreeMap<String, Vec<String>> {
+        connectors.store.lock().unwrap().box_released.iter().map(|(workflow, keys)| (workflow.clone(), keys.keys().cloned().collect())).collect()
+    }
+
+    /// A check that finds no labelled issue, so nothing claims `uuid` and only the prune looks at marks.
+    fn check_finding_nothing(connectors: &Connectors) {
+        let runs = connectors.runs.lock().unwrap().clone();
+        connectors.store.lock().unwrap().settle(&["c1".into()], vec![], checked_at(), "/bin/pinned", &runs);
+    }
+
     fn handled_of(connectors: &Connectors) -> Vec<String> {
         connectors.store.lock().unwrap().connectors[0].handled.clone()
     }
@@ -5231,7 +5257,55 @@ mod tests {
         assert_eq!(next_check_starts(&connectors), 0);
 
         let reloaded = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into());
-        assert_eq!(reloaded.store.lock().unwrap().box_released, BTreeMap::from([("c1".to_owned(), ["uuid".to_owned()].into())]), "the mark is stored");
+        assert_eq!(marked_subjects(&reloaded), BTreeMap::from([("c1".to_owned(), vec!["uuid".to_owned()])]), "the mark is stored");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_second_failed_boot_does_not_release_after_the_failed_run_is_dropped() {
+        let subject = Subject::LinearIssue { issue: "uuid".into() };
+        let linear = Connector { handled: vec!["uuid".into()], ..linear_connector() };
+        let (connectors, dir) = stored("boot-twice-run-dropped", vec![linear]);
+        connectors.runs.lock().unwrap().push(held_run("c1", &subject, "box-1", &[]));
+        assert_eq!(block_on(connectors.box_ended("box-1", None, "Upstash Box: its box went offline", BoxEndRelease::Once)), Ok(1));
+        assert!(handled_of(&connectors).is_empty(), "the first end frees the issue");
+        assert_eq!(marked_subjects(&connectors).len(), 1);
+
+        // The failed run is dropped before anything claims the issue again, and a check prunes.
+        connectors.runs.lock().unwrap().clear();
+        check_finding_nothing(&connectors);
+        assert_eq!(marked_subjects(&connectors), BTreeMap::from([("c1".to_owned(), vec!["uuid".to_owned()])]), "the mark outlives the run");
+        assert_eq!(next_check_starts(&connectors), 1, "the trigger claims the issue again");
+        assert_eq!(handled_of(&connectors), ["uuid"]);
+
+        let refuse = |_: Work| async { Err::<(), String>("Upstash Box: the box did not connect within 5 min".to_owned()) };
+        connectors.box_boot_failed(&subject);
+        assert_eq!(
+            block_on(connectors.hand_over(Work::Run(run(&linear_connector(), &issue(), "/bin/pinned")), &refuse)),
+            Err("could not open a session in /repo: Upstash Box: the box did not connect within 5 min; its box failed before, so it starts again only when you run it".into())
+        );
+        assert_eq!(handled_of(&connectors), ["uuid"], "a second failed boot keeps it handled");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_release_mark_older_than_thirty_days_is_dropped_and_a_newer_one_is_kept() {
+        const DAY_MS: u64 = 24 * 60 * 60 * 1000;
+        let (connectors, dir) = stored("release-mark-age", vec![linear_connector()]);
+        let now = 1_800_000_000_000_u64;
+        let mut store = connectors.store.lock().unwrap();
+        store.box_released.insert("c1".into(), BTreeMap::from([("older".into(), now - 30 * DAY_MS - 1), ("newer".into(), now - 30 * DAY_MS + 1)]));
+        store.box_released.insert("deleted".into(), BTreeMap::from([("fresh".into(), now)]));
+        assert!(store.prune_thread_bots(&[], &[], now), "the prune changes the store");
+        assert_eq!(store.box_released, BTreeMap::from([("c1".to_owned(), BTreeMap::from([("newer".to_owned(), now - 30 * DAY_MS + 1)]))]), "30 days and 1 ms goes, 30 days less 1 ms stays, and a deleted workflow's mark goes");
+        // A mark of a subject nothing tracks stays, however long ago nobody did.
+        assert!(!store.prune_thread_bots(&[], &[], now), "nothing more to prune");
+        // The one that stayed counts as a release until it is old, and an old one counts as none.
+        let subject = Subject::LinearIssue { issue: "newer".into() };
+        assert!(!store.release_after_box_end("c1", &subject, BoxEndRelease::Once, now), "a young mark: already released once");
+        assert!(store.release_after_box_end("c1", &subject, BoxEndRelease::Once, now + 2 * DAY_MS), "an old mark counts as none, and the release is written again");
+        assert_eq!(store.box_released["c1"]["newer"], now + 2 * DAY_MS, "with its new time");
+        drop(store);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -5389,7 +5463,7 @@ mod tests {
         assert_eq!(handled_of(&connectors), ["uuid"], "the newer runs' subject stays handled by them");
         assert!(matches!(status_of(&connectors, "old"), Status::Failed { .. }));
         assert_eq!(connectors.box_failures.lock().unwrap().len(), 1, "the old run is failed, and the card told, once");
-        assert_eq!(connectors.store.lock().unwrap().box_released, BTreeMap::from([("c1".to_owned(), ["uuid".to_owned()].into())]), "one release");
+        assert_eq!(marked_subjects(&connectors), BTreeMap::from([("c1".to_owned(), vec!["uuid".to_owned()])]), "one release");
         let _ = std::fs::remove_dir_all(dir);
     }
 
