@@ -8,6 +8,7 @@ pub mod oauth;
 pub mod relay;
 pub mod remote;
 pub mod self_update;
+mod store_writes;
 pub mod surface;
 
 use std::net::SocketAddr;

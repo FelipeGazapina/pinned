@@ -24,6 +24,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use crate::store_writes::{self, Writes};
 use tokio::sync::{mpsc, oneshot, OnceCell};
 use uuid::Uuid;
 
@@ -150,6 +151,8 @@ pub struct Hub {
     /// it: a queued Postgres write cannot fail on its own at the moment a box ends.
     #[doc(hidden)]
     pub refuse_run_saves: Arc<AtomicBool>,
+    /// Every account's `PgStorage` state, for the census and the flush on stop.
+    persisted: Mutex<HashMap<Uuid, Arc<Persisted>>>,
 }
 
 struct Unlock {
@@ -247,7 +250,7 @@ impl Hub {
     pub fn new(db: Db, public_url: String, signup: Signup, box_api: Arc<dyn BoxApi>, box_policy: boxes::Policy, convex_http: Arc<dyn ConvexHttp>) -> Arc<Hub> {
         let public_url = public_url.trim_end_matches('/').to_owned();
         let boxes = Boxes::new(box_api, box_policy, &public_url);
-        Arc::new(Hub { db, public_url, signup, boxes, convex_http, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default(), unlocks: Mutex::default(), going_away: tokio::sync::watch::channel(false).0, held_expired: Mutex::default(), refuse_run_saves: Arc::default() })
+        Arc::new(Hub { db, public_url, signup, boxes, convex_http, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default(), unlocks: Mutex::default(), going_away: tokio::sync::watch::channel(false).0, held_expired: Mutex::default(), refuse_run_saves: Arc::default(), persisted: Mutex::default() })
     }
 
     /// Tells every socket to close with a going away frame. The hub stops serving afterwards.
@@ -359,6 +362,18 @@ impl Hub {
         line
     }
 
+    /// Writes every account's store and keys that wait, all at once, giving up at `within`. Answers
+    /// how many accounts still have a document waiting, which their ids follow in the log.
+    pub async fn flush_writes(&self, within: Duration) -> usize {
+        let persisted: Vec<(Uuid, Arc<Persisted>)> = self.persisted.lock().unwrap().iter().map(|(id, p)| (*id, p.clone())).collect();
+        let flushed = futures_util::future::join_all(persisted.iter().map(|(_, p)| p.writes.flush(within))).await;
+        let left: Vec<Uuid> = persisted.iter().zip(flushed).filter(|(_, done)| !done).map(|((id, _), _)| *id).collect();
+        for id in &left {
+            eprintln!("pinned-server: account {id}'s workflows or connector keys were not saved before the hub stopped");
+        }
+        left.len()
+    }
+
     pub async fn watch_all(self: &Arc<Self>) -> Result<(), String> {
         for id in self.db.accounts_with_connectors().await? {
             let account = self.account(id).await?;
@@ -412,6 +427,7 @@ impl Hub {
             .get_or_try_init(|| async {
                 let stored = self.db.connectors(account.id).await?;
                 let storage = PgStorage::new(self.db.clone(), account.id, stored, self.refuse_run_saves.clone());
+                self.persisted.lock().unwrap().insert(account.id, storage.0.clone());
                 Ok::<_, String>(Arc::new(Connectors::new(storage, EXE_PLACEHOLDER.into())))
             })
             .await?;
@@ -1593,10 +1609,15 @@ struct Stored {
 
 /// Keeps an account's store and keys in memory and writes them to its row behind the
 /// connectors' back, so `Storage`'s synchronous calls never wait on Postgres.
-struct PgStorage {
+struct PgStorage(Arc<Persisted>);
+
+/// What `PgStorage` keeps of one account, which the hub reaches too for its census and to
+/// flush the writes when it stops.
+pub(crate) struct Persisted {
     state: Mutex<Stored>,
     keys: Mutex<BTreeMap<String, String>>,
-    writes: mpsc::UnboundedSender<Write>,
+    /// The newest store document and keys not yet written (`store_writes`).
+    writes: Arc<Writes>,
     /// `Hub::refuse_run_saves`.
     refuse_runs: Arc<AtomicBool>,
 }
@@ -1657,112 +1678,103 @@ fn prompt_outcome(answer: Result<Value, Unanswered>) -> Result<bool, String> {
     }
 }
 
-enum Write {
-    Store(Value),
-    Secrets(BTreeMap<String, String>),
-}
-
 impl PgStorage {
     fn new(db: Db, account: Uuid, stored: db::Connectors, refuse_runs: Arc<AtomicBool>) -> PgStorage {
-        let (writes, mut queue) = mpsc::unbounded_channel::<Write>();
-        tokio::spawn(async move {
-            while let Some(first) = queue.recv().await {
-                // Only the newest of each kind matters, so a burst of saves is one write.
-                let (mut store, mut secrets) = (None, None);
-                let mut next = Some(first);
-                while let Some(write) = next {
-                    match write {
-                        Write::Store(v) => store = Some(v),
-                        Write::Secrets(v) => secrets = Some(v),
-                    }
-                    next = queue.try_recv().ok();
+        let write: store_writes::Write = Arc::new(move |account, doc| {
+            let db = db.clone();
+            Box::pin(async move {
+                match doc {
+                    store_writes::Doc::Store(store) => db.save_store(account, &store).await,
+                    store_writes::Doc::Secrets(secrets) => db.save_secrets(account, &secrets).await,
                 }
-                if let Some(store) = store {
-                    if let Err(e) = db.save_store(account, &store).await {
-                        eprintln!("pinned-server: could not save account {account}'s workflows: {e}");
-                    }
-                }
-                if let Some(secrets) = secrets {
-                    if let Err(e) = db.save_secrets(account, &secrets).await {
-                        eprintln!("pinned-server: could not save account {account}'s connector keys: {e}");
-                    }
-                }
-            }
+            })
         });
+        PgStorage::with_writer(account, stored, refuse_runs, write)
+    }
+
+    fn with_writer(account: Uuid, stored: db::Connectors, refuse_runs: Arc<AtomicBool>, write: store_writes::Write) -> PgStorage {
         let mut doc = stored.store;
         let runs = doc.as_object_mut().and_then(|map| map.remove("runs")).and_then(|value| serde_json::to_vec(&value).ok()).unwrap_or_default();
         let store = (doc != serde_json::json!({})).then(|| serde_json::to_vec(&doc).unwrap());
-        PgStorage {
+        PgStorage(Arc::new(Persisted {
             state: Mutex::new(Stored { store, runs }),
             keys: Mutex::new(stored.secrets),
-            writes,
+            writes: Writes::start(account, write),
             refuse_runs,
-        }
+        }))
     }
 
     /// Queues the store and the runs as one document. Callers hold the `state` lock, so the
-    /// writer receives the documents in the order the state changed and the newest one wins.
-    fn persist(&self, state: &Stored) -> Result<(), String> {
-        let (store, runs) = (&state.store, &state.runs);
-        let mut doc: Value = match store {
-            Some(bytes) => serde_json::from_slice(bytes).map_err(|e| e.to_string())?,
-            None => serde_json::json!({}),
-        };
-        let object = doc.as_object_mut().ok_or("the workflow store is not an object")?;
-        if runs.is_empty() {
-            object.remove("runs");
-        } else {
-            object.insert("runs".to_owned(), serde_json::from_slice(runs).map_err(|e| e.to_string())?);
-        }
-        self.writes.send(Write::Store(doc)).map_err(|_| "the hub is shutting down".to_string())
+    /// documents take their numbers in the order the state changed and the newest one wins.
+    fn persist(&self, state: &Stored) {
+        self.0.writes.queue_store(state.store.clone(), state.runs.clone());
     }
+}
 
-    fn write_keys(&self, keys: &BTreeMap<String, String>) {
-        let _ = self.writes.send(Write::Secrets(keys.clone()));
+impl Drop for PgStorage {
+    fn drop(&mut self) {
+        self.0.writes.close();
+    }
+}
+
+impl Persisted {
+    /// `store_bytes`, `runs_bytes` and what waits to be written.
+    fn census(&self) -> (usize, usize, store_writes::Pending) {
+        let (store, runs) = {
+            let state = self.state.lock().unwrap();
+            (state.store.as_ref().map_or(0, Vec::len), state.runs.len())
+        };
+        (store, runs, self.writes.pending())
     }
 }
 
 impl Storage for PgStorage {
     fn load(&self) -> Option<Vec<u8>> {
-        self.state.lock().unwrap().store.clone()
+        self.0.state.lock().unwrap().store.clone()
     }
 
     fn save(&self, store: &[u8]) -> Result<(), String> {
-        serde_json::from_slice::<Value>(store).map_err(|e| e.to_string())?;
-        let mut state = self.state.lock().unwrap();
+        // Read through, without building the document: the writer builds the one it writes.
+        serde_json::from_slice::<HashMap<String, serde::de::IgnoredAny>>(store).map_err(|e| e.to_string())?;
+        let mut state = self.0.state.lock().unwrap();
         state.store = Some(store.to_vec());
-        self.persist(&state)
+        self.persist(&state);
+        Ok(())
     }
 
     fn load_runs(&self) -> Option<Vec<u8>> {
-        let runs = self.state.lock().unwrap().runs.clone();
+        let runs = self.0.state.lock().unwrap().runs.clone();
         (!runs.is_empty()).then_some(runs)
     }
 
     fn save_runs(&self, bytes: &[u8]) -> Result<(), String> {
-        if self.refuse_runs.load(Ordering::SeqCst) {
+        if self.0.refuse_runs.load(Ordering::SeqCst) {
             return Err("could not save the runs: refused".into());
         }
-        let mut state = self.state.lock().unwrap();
+        if !bytes.is_empty() {
+            serde_json::from_slice::<serde::de::IgnoredAny>(bytes).map_err(|e| e.to_string())?;
+        }
+        let mut state = self.0.state.lock().unwrap();
         state.runs = bytes.to_vec();
-        self.persist(&state)
+        self.persist(&state);
+        Ok(())
     }
 
     fn key(&self, name: &str) -> Option<String> {
-        self.keys.lock().unwrap().get(name).cloned().filter(|k| !k.is_empty())
+        self.0.keys.lock().unwrap().get(name).cloned().filter(|k| !k.is_empty())
     }
 
     fn write_key(&self, name: &str, key: &str) -> Result<(), String> {
-        let mut keys = self.keys.lock().unwrap();
+        let mut keys = self.0.keys.lock().unwrap();
         keys.insert(name.to_owned(), key.to_owned());
-        self.write_keys(&keys);
+        self.0.writes.queue_secrets(keys.clone());
         Ok(())
     }
 
     fn remove_key(&self, name: &str) {
-        let mut keys = self.keys.lock().unwrap();
+        let mut keys = self.0.keys.lock().unwrap();
         if keys.remove(name).is_some() {
-            self.write_keys(&keys);
+            self.0.writes.queue_secrets(keys.clone());
         }
     }
 }
