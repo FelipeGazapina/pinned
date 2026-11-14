@@ -1596,9 +1596,12 @@ impl Db {
 
     pub async fn connectors(&self, account: Uuid) -> Result<Connectors, String> {
         let row = self.client().await?.query_one("select store, secrets, greatest(store_version, secrets_version) from accounts where id = $1", &[&account]).await.map_err(err)?;
-        let sealed: BTreeMap<String, String> = serde_json::from_value(row.get(1)).map_err(|e| format!("account {account} has unreadable secrets: {e}"))?;
+        // A row this hub cannot read, such as a number past f64 that jsonb holds, is an error, not a panic.
+        let unreadable = |what: &str, e: tokio_postgres::Error| format!("account {account} has an unreadable {what}: {}", err(e));
+        let sealed: Value = row.try_get(1).map_err(|e| unreadable("secrets", e))?;
+        let sealed: BTreeMap<String, String> = serde_json::from_value(sealed).map_err(|e| format!("account {account} has unreadable secrets: {e}"))?;
         let secrets = sealed.into_iter().map(|(name, value)| Ok((name, self.sealer.open(&value)?))).collect::<Result<_, String>>()?;
-        Ok(Connectors { store: row.get(0), secrets, version: row.get(2) })
+        Ok(Connectors { store: row.try_get(0).map_err(|e| unreadable("store", e))?, secrets, version: row.try_get(2).map_err(|e| unreadable("version", e))? })
     }
 
     pub async fn accounts_with_connectors(&self) -> Result<Vec<Uuid>, String> {

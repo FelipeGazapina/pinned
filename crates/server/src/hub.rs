@@ -1903,8 +1903,8 @@ impl AccountStore {
 
 /// The deepest nesting of arrays and objects the account row's document may have: what
 /// serde_json reads into a `Value`, as loading the account does (`Db::connectors`). `save` and
-/// `save_runs` refuse what is deeper, so a document they took is never one the writer or the next
-/// load can't handle.
+/// `save_runs` refuse what is deeper, so a document they took is not too deep for the writer or
+/// the next load. A row written some other way may still not load; the load answers an error.
 pub const DOCUMENT_DEPTH: usize = 127;
 
 /// Refuses JSON text, already read through, that jsonb would refuse though serde_json reads it:

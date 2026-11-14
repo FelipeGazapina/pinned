@@ -209,3 +209,17 @@ async fn a_statement_the_schema_does_not_fit_is_a_failure_to_retry_not_a_refusal
     other.batch_execute("alter table accounts rename column store_version_moved to store_version").await.unwrap();
     assert!(db.save_store(account, 1, Some(r#"{"n":1}"#), None).await.unwrap(), "the same write lands once the schema fits");
 }
+
+/// A row the hub cannot read, a number jsonb holds that serde_json can't (past f64), makes
+/// loading the account an error, not a panic inside the hub.
+#[tokio::test]
+async fn loading_an_account_whose_store_cannot_be_read_is_an_error_not_a_panic() {
+    let dir = tempfile::tempdir().unwrap();
+    let (url, db, account) = fresh("unreadable", dir.path()).await;
+    let (other, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls).await.unwrap();
+    tokio::spawn(connection);
+    other.execute(r#"update accounts set store = '{"n":1e999}'::jsonb where id = $1"#, &[&account]).await.unwrap();
+    let loaded = tokio::spawn(async move { db.connectors(account).await }).await.expect("connectors did not panic");
+    let e = loaded.err().expect("an unreadable store is an error");
+    assert!(e.contains("unreadable store"), "{e}");
+}
