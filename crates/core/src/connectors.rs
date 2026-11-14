@@ -1761,7 +1761,9 @@ struct TabFacts {
     /// Per tab, in order: the latest terminal status before any Working, the first Working, and the
     /// first terminal status after that Working. Before a Working the newest terminal replaces the
     /// one kept, so a Done from the turn before cannot hide this turn's. Later views change nothing a
-    /// waiting run reads.
+    /// waiting run reads. Before the first Working only the latest terminal status is kept, so when
+    /// one drive sees Failed and then Done (or Done then Failed) with no Working between, the latest
+    /// status decides how the run's wait ends, by the success or the error route.
     views: HashMap<TabId, Vec<TabView>>,
 }
 
@@ -8594,7 +8596,7 @@ mod tests {
         );
     }
 
-    /// A Done whose status time is past the run's wait, and one from before it.
+    /// A Done view with the given status time, in unix seconds.
     fn done_at(updated: u64) -> TabView {
         TabView { updated: Some(updated), ..session_tab(Some(AgentStatus::Done), Some("claude-1")) }
     }
