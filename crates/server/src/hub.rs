@@ -1817,8 +1817,10 @@ impl Storage for PgStorage {
     }
 
     fn save(&self, store: &[u8]) -> Result<(), String> {
-        // Read through, without building the document: the writer builds the one it writes.
-        serde_json::from_slice::<HashMap<String, serde::de::IgnoredAny>>(store).map_err(|e| e.to_string())?;
+        // Read through, without building the document; the writer sends the text as it is.
+        let text = std::str::from_utf8(store).map_err(|e| e.to_string())?;
+        serde_json::from_str::<HashMap<String, serde::de::IgnoredAny>>(text).map_err(|e| e.to_string())?;
+        no_deeper(store, DOCUMENT_DEPTH)?;
         let mut state = self.0.state.lock().unwrap();
         state.store = Some(store.to_vec());
         self.persist(&state);
@@ -1835,7 +1837,10 @@ impl Storage for PgStorage {
             return Err("could not save the runs: refused".into());
         }
         if !bytes.is_empty() {
-            serde_json::from_slice::<serde::de::IgnoredAny>(bytes).map_err(|e| e.to_string())?;
+            let text = std::str::from_utf8(bytes).map_err(|e| e.to_string())?;
+            serde_json::from_str::<serde::de::IgnoredAny>(text).map_err(|e| e.to_string())?;
+            // One less: the runs sit under the store's `runs`.
+            no_deeper(bytes, DOCUMENT_DEPTH - 1)?;
         }
         let mut state = self.0.state.lock().unwrap();
         state.runs = bytes.to_vec();
@@ -1860,6 +1865,40 @@ impl Storage for PgStorage {
             self.0.writes.queue_secrets(keys.clone());
         }
     }
+}
+
+/// The deepest nesting of arrays and objects the account row's document may have: what
+/// serde_json reads into a `Value`, as loading the account does (`Db::connectors`). `save` and
+/// `save_runs` refuse what is deeper, so a document they took is never one the writer or the next
+/// load can't handle.
+pub const DOCUMENT_DEPTH: usize = 127;
+
+/// Refuses JSON text, already read through, nested deeper than `most`.
+fn no_deeper(json: &[u8], most: usize) -> Result<(), String> {
+    let (mut depth, mut in_string, mut escaped) = (0usize, false, false);
+    for &b in json {
+        if in_string {
+            match b {
+                _ if escaped => escaped = false,
+                b'\\' => escaped = true,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'[' | b'{' => {
+                depth += 1;
+                if depth > most {
+                    return Err(format!("nested deeper than {most} levels"));
+                }
+            }
+            b']' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// A task id as an app or an agent sends it. Every schedule call, and the agent check before it
@@ -2150,5 +2189,42 @@ mod tests {
         gate.add_permits(100);
         assert!(storage.0.writes.flush(Duration::from_secs(5)).await);
         assert_eq!(written.lock().unwrap().last().unwrap(), &serde_json::json!({ "n": 19, "runs": [{ "run": 19 }] }));
+    }
+
+    #[tokio::test]
+    async fn a_store_or_runs_too_deep_for_the_row_is_refused_at_save_and_one_at_the_limit_is_written_as_sent() {
+        let written = Arc::new(Mutex::new(vec![]));
+        let write: store_writes::Write = {
+            let written = written.clone();
+            Arc::new(move |_, _, doc| {
+                let written = written.clone();
+                Box::pin(async move {
+                    if let store_writes::Doc::Store(bytes) = doc {
+                        written.lock().unwrap().push((bytes.store.clone(), bytes.runs.clone()));
+                    }
+                    Ok(true)
+                })
+            })
+        };
+        let stored = db::Connectors { store: serde_json::json!({}), secrets: BTreeMap::new(), version: 0 };
+        let storage = PgStorage::with_writer(Uuid::nil(), stored, Arc::default(), write);
+        let nested = |n: usize| format!("{}0{}", "[".repeat(n), "]".repeat(n));
+        let store_at = |n: usize| format!(r#"{{"s":"[[\\\"{{","deep":{}}}"#, nested(n - 1));
+        assert!(storage.save(store_at(200).as_bytes()).is_err(), "a store 200 deep is refused, not taken and dropped");
+        assert!(storage.save_runs(nested(200).as_bytes()).is_err(), "runs 200 deep likewise");
+        assert!(storage.save(store_at(DOCUMENT_DEPTH + 1).as_bytes()).is_err());
+        assert!(storage.save_runs(nested(DOCUMENT_DEPTH).as_bytes()).is_err(), "runs sit one level under the store");
+        assert!(storage.save(b"{\"a\":\"\xff\"}").is_err(), "text that is not UTF-8 is refused");
+        assert_eq!(storage.0.writes.pending(), store_writes::Pending::default(), "nothing refused was queued");
+
+        let (store, runs) = (store_at(DOCUMENT_DEPTH), nested(DOCUMENT_DEPTH - 1));
+        storage.save(store.as_bytes()).unwrap();
+        storage.save_runs(runs.as_bytes()).unwrap();
+        assert!(storage.0.writes.flush(Duration::from_secs(5)).await);
+        assert_eq!(written.lock().unwrap().last().unwrap(), &(Some(store.clone().into_bytes()), runs.clone().into_bytes()), "the writer sends the text as saved");
+        // The row's document at the limit still reads back as a Value, as loading the account reads it.
+        let mut doc: Value = serde_json::from_str(&store).unwrap();
+        doc["runs"] = serde_json::from_str(&runs).unwrap();
+        assert!(serde_json::from_str::<Value>(&doc.to_string()).is_ok());
     }
 }

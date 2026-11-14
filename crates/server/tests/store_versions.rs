@@ -46,3 +46,16 @@ async fn an_older_version_never_replaces_a_newer_one_and_a_reopened_hub_writes_a
     assert_eq!(reopened.connectors(account).await.unwrap().store, serde_json::json!({ "n": 4 }), "runs absent means no runs in the row");
 }
 
+
+#[tokio::test]
+async fn a_document_as_deep_as_the_hub_accepts_lands_and_reads_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, db, account) = fresh("deep", dir.path()).await;
+    let depth = pinned_server::hub::DOCUMENT_DEPTH;
+    // The store at the deepest a save accepts, and runs one less, under `runs` in the same row.
+    let store = format!(r#"{{"deep":{}0{}}}"#, "[".repeat(depth - 1), "]".repeat(depth - 1));
+    let runs = format!("{}0{}", "[".repeat(depth - 1), "]".repeat(depth - 1));
+    assert!(db.save_store(account, 1, Some(&store), Some(&runs)).await.unwrap());
+    let stored = db.connectors(account).await.unwrap();
+    assert!(stored.store["deep"].is_array() && stored.store["runs"].is_array(), "the row reads back as a document");
+}
