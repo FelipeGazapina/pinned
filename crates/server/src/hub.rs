@@ -1761,11 +1761,14 @@ impl PgStorage {
                 match doc {
                     store_writes::Doc::Store(bytes) => {
                         // `save` and `save_runs` read the text through, so it is UTF-8; Postgres
-                        // answers text that is not with 22021 too.
-                        let text = |bytes: &[u8]| std::str::from_utf8(bytes).map(str::to_owned).map_err(|_| store_writes::WriteFailure::Refused { sqlstate: "22021".into() });
+                        // answers text that is not with 22021 too. The text is borrowed from
+                        // `bytes`, which this write holds, not copied.
+                        fn text(bytes: &[u8]) -> Result<&str, store_writes::WriteFailure> {
+                            std::str::from_utf8(bytes).map_err(|_| store_writes::WriteFailure::Refused { sqlstate: "22021".into() })
+                        }
                         let store = bytes.store.as_deref().map(text).transpose()?;
                         let runs = (!bytes.runs.is_empty()).then(|| text(&bytes.runs)).transpose()?;
-                        if db.save_store(account, version, store.as_deref(), runs.as_deref()).await? {
+                        if db.save_store(account, version, store, runs).await? {
                             return Ok(Landed::Written);
                         }
                         let Some((stored, _)) = db.stored_versions(account).await? else { return Ok(Landed::Gone) };
