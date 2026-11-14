@@ -17,7 +17,9 @@
 //! in the row, which the other process wrote, moves this process's numbers above it and writes
 //! the slot's document again as the next number: whole documents, no merge, and the one that
 //! lands last wins. Only the slot's document, the newest, is renumbered, so an older document of
-//! this process still never lands after a newer one.
+//! this process still never lands after a newer one. A document is never let go for being
+//! overtaken: after `RENUMBER_AT_MOST` renumbers in a row the writer waits out a backoff, as after
+//! a failed write, and renumbers it again.
 pub(crate) use crate::db::WriteFailure;
 use futures_util::future::BoxFuture;
 use std::collections::BTreeMap;
@@ -31,8 +33,8 @@ const RETRY_FIRST: Duration = Duration::from_millis(500);
 const RETRY_AT_MOST: Duration = Duration::from_secs(10);
 /// How often `flush` asks a writer that waits out a failure to try again.
 const HURRY_EVERY: Duration = Duration::from_millis(250);
-/// How many times one document is renumbered above a version another process wrote before the
-/// writer lets it go: by then that process keeps writing the account, and its newer write wins.
+/// How many times in a row one document is renumbered above a version another process wrote
+/// before the writer waits out a backoff, as after a failed write, and renumbers it again.
 const RENUMBER_AT_MOST: u32 = 3;
 
 /// A document as the writer hands it to the database.
@@ -63,7 +65,8 @@ struct Queued<T> {
     seq: u64,
     doc: Arc<T>,
     bytes: usize,
-    /// How often the document was numbered again above a version another process wrote.
+    /// How often the document was numbered again above a version another process wrote since
+    /// the last backoff.
     renumbered: u32,
 }
 
@@ -214,20 +217,17 @@ impl Writes {
     /// The write of `seq` found `stored` in the row, which another process wrote. Moves the numbers
     /// above it and, when the slot's document is not above it yet, numbers that one again so the
     /// writer writes it next: the document of `seq` itself, or a newer one that replaced it.
-    /// After `RENUMBER_AT_MOST` times the writer lets the document go.
-    fn behind(&self, kind: Kind, seq: u64, stored: u64, what: &str) {
-        fn renumber<T>(slot: &mut Option<Queued<T>>, next: &mut u64, stored: u64) -> Result<Option<u64>, u64> {
+    /// The renumber after `RENUMBER_AT_MOST` in a row answers true: the writer waits out a backoff
+    /// before it writes the document again, and the count starts over.
+    fn behind(&self, kind: Kind, seq: u64, stored: u64, what: &str) -> bool {
+        fn renumber<T>(slot: &mut Option<Queued<T>>, next: &mut u64, stored: u64) -> Option<(u64, bool)> {
             *next = (*next).max(stored);
-            let Some(queued) = slot.as_mut().filter(|q| q.seq <= stored) else { return Ok(None) };
-            if queued.renumbered >= RENUMBER_AT_MOST {
-                let seq = queued.seq;
-                *slot = None;
-                return Err(seq);
-            }
+            let queued = slot.as_mut().filter(|q| q.seq <= stored)?;
             *next += 1;
             queued.seq = *next;
-            queued.renumbered += 1;
-            Ok(Some(*next))
+            let wait = queued.renumbered >= RENUMBER_AT_MOST;
+            queued.renumbered = if wait { 0 } else { queued.renumbered + 1 };
+            Some((*next, wait))
         }
         // The row holds `seq` at least, whatever a read that raced the write answered.
         let stored = stored.max(seq);
@@ -239,13 +239,14 @@ impl Writes {
         };
         drop(slots);
         match renumbered {
-            Ok(Some(again)) => eprintln!("pinned-server: account {}'s {what} version {seq} not written: the row holds version {stored}; writing it as version {again}", self.account),
-            Ok(None) => {}
-            Err(last) => {
-                eprintln!("pinned-server: account {}'s {what} version {last} not written: the row holds version {stored}, renumbered {RENUMBER_AT_MOST} times, dropped", self.account);
-                self.emptied.notify_waiters();
+            Some((again, false)) => eprintln!("pinned-server: account {}'s {what} version {seq} not written: the row holds version {stored}; writing it as version {again}", self.account),
+            Some((again, true)) => {
+                eprintln!("pinned-server: account {}'s {what} version {seq} not written: the row holds version {stored}, renumbered {RENUMBER_AT_MOST} times in a row; writing it as version {again} after a backoff", self.account);
+                return true;
             }
+            None => {}
         }
+        false
     }
 
     async fn run(self: Arc<Self>) {
@@ -254,7 +255,7 @@ impl Writes {
             let queued = self.queued.notified();
             tokio::pin!(queued);
             queued.as_mut().enable();
-            let mut failed = false;
+            let (mut failed, mut renumbered) = (false, false);
             for kind in [Kind::Store, Kind::Secrets] {
                 let Some((seq, doc)) = self.take(kind) else { continue };
                 debug_assert!(seq > self.written_seq(kind), "a document older than one written");
@@ -264,7 +265,10 @@ impl Writes {
                 };
                 match (self.write)(self.account, seq, doc).await {
                     Ok(Landed::Written) => self.written(kind, seq),
-                    Ok(Landed::Behind(stored)) => self.behind(kind, seq, stored, what),
+                    Ok(Landed::Behind(stored)) => {
+                        renumbered = true;
+                        failed |= self.behind(kind, seq, stored, what);
+                    }
                     Err(WriteFailure::Refused { sqlstate }) => {
                         // Writing it again is refused again; a newer document may still be written.
                         eprintln!("pinned-server: Postgres refused account {}'s {what} version {seq} (SQLSTATE {sqlstate}), dropped", self.account);
@@ -285,7 +289,10 @@ impl Writes {
                 }
                 continue;
             }
-            failures = 0;
+            // Renumbers between backoffs keep the backoff growing until a write lands.
+            if !renumbered {
+                failures = 0;
+            }
             {
                 let slots = self.slots.lock().unwrap();
                 if slots.store.is_some() || slots.secrets.is_some() {
@@ -350,8 +357,8 @@ mod tests {
         /// The versions the row holds of the store and of the keys. A write lands only above, as
         /// in Postgres; writers that share the fake share the row, as two hub processes do.
         row: Mutex<(u64, u64)>,
-        /// Before each write lands, another process writes this many versions more.
-        racing: AtomicUsize,
+        /// The next this many writes find that another process wrote 5 versions more meanwhile.
+        overtakes: AtomicUsize,
         gate: Option<Arc<Semaphore>>,
         fail: AtomicUsize,
         /// Writes that land but answer a failure, as a statement the hub gave up on that
@@ -402,7 +409,10 @@ mod tests {
                             Doc::Store(_) => &mut row.0,
                             Doc::Secrets(_) => &mut row.1,
                         };
-                        *held += fake.racing.load(Ordering::SeqCst) as u64;
+                        if fake.overtakes.load(Ordering::SeqCst) > 0 {
+                            fake.overtakes.fetch_sub(1, Ordering::SeqCst);
+                            *held += 5;
+                        }
                         if version <= *held {
                             return Ok(Landed::Behind(*held));
                         }
@@ -563,20 +573,23 @@ mod tests {
         assert_eq!(fake.keys.lock().unwrap().last().unwrap()["k"], "first again");
     }
 
-    #[tokio::test]
-    async fn a_document_renumbered_while_another_process_keeps_writing_higher_is_let_go_and_a_later_save_lands() {
-        let fake = Arc::new(Fake { row: Mutex::new((100, 100)), racing: AtomicUsize::new(5), ..Fake::default() });
+    /// Another process, as a deploy runs one, overtakes every write of this one for more than
+    /// `RENUMBER_AT_MOST` renumbers, then stops: the document is kept, not dropped, and lands.
+    #[tokio::test(start_paused = true)]
+    async fn a_document_overtaken_more_than_renumber_at_most_times_is_kept_and_lands_once_the_other_process_stops() {
+        let overtakes = 3 * RENUMBER_AT_MOST as usize;
+        let fake = Arc::new(Fake { row: Mutex::new((100, 100)), overtakes: AtomicUsize::new(overtakes), ..Fake::default() });
         let writes = writes(&fake);
         writes.queue_store(store(1), vec![]);
-        assert!(writes.flush(Duration::from_secs(5)).await, "the slot empties");
-        assert_eq!(fake.tried.load(Ordering::SeqCst), 1 + RENUMBER_AT_MOST as usize, "written once, then renumbered at most {RENUMBER_AT_MOST} times");
-        assert!(fake.written.lock().unwrap().is_empty());
-
-        fake.racing.store(0, Ordering::SeqCst);
-        writes.queue_store(store(2), vec![]);
-        assert!(writes.flush(Duration::from_secs(5)).await);
-        assert_eq!(*fake.versions.lock().unwrap(), vec![121], "the next save takes a number above the version last read");
-        assert_eq!(*fake.written.lock().unwrap(), vec![serde_json::json!({ "n": 2 })]);
+        settle().await;
+        assert_eq!(fake.tried.load(Ordering::SeqCst), 1 + RENUMBER_AT_MOST as usize, "written once, renumbered {RENUMBER_AT_MOST} times, then a backoff");
+        assert_eq!(writes.pending().store, 1, "the document is kept");
+        let started = tokio::time::Instant::now();
+        assert!(writes.flush(Duration::from_secs(10)).await);
+        assert!(started.elapsed() < Duration::from_secs(2), "the flush hurries the backoffs: {:?}", started.elapsed());
+        assert_eq!(fake.tried.load(Ordering::SeqCst), overtakes + 1);
+        assert_eq!(*fake.written.lock().unwrap(), vec![serde_json::json!({ "n": 1 })], "the document ends in the row");
+        assert_eq!(fake.row.lock().unwrap().0, *fake.versions.lock().unwrap().last().unwrap());
     }
 
     /// The process's own write that it gave up on lands, so the retry of the same number finds it
