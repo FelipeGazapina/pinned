@@ -1,6 +1,6 @@
 //! The account row's store and connector keys against a real Postgres: a write carries a version
 //! and never replaces a newer one. Needs the test Postgres that `hub.rs` uses.
-use pinned_server::db::{Db, Sealer};
+use pinned_server::db::{Db, Sealer, WriteFailure};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
@@ -58,4 +58,17 @@ async fn a_document_as_deep_as_the_hub_accepts_lands_and_reads_back() {
     assert!(db.save_store(account, 1, Some(&store), Some(&runs)).await.unwrap());
     let stored = db.connectors(account).await.unwrap();
     assert!(stored.store["deep"].is_array() && stored.store["runs"].is_array(), "the row reads back as a document");
+}
+
+#[tokio::test]
+async fn postgres_refusing_a_document_is_a_permanent_failure_and_a_later_document_still_lands() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, db, account) = fresh("refused", dir.path()).await;
+    // jsonb has no \u0000; serde reads it as a plain string.
+    match db.save_store(account, 1, Some(r#"{"n":"a\u0000b"}"#), None).await {
+        Err(WriteFailure::Refused { sqlstate }) => assert!(sqlstate.starts_with("22"), "a data exception: {sqlstate}"),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+    assert!(db.save_store(account, 2, Some(r#"{"n":2}"#), None).await.unwrap());
+    assert_eq!(db.connectors(account).await.unwrap().store, serde_json::json!({ "n": 2 }));
 }

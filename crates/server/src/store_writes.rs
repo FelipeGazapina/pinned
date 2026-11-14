@@ -309,6 +309,11 @@ mod tests {
                         gate.acquire().await.unwrap().forget();
                     }
                     fake.tried.fetch_add(1, Ordering::SeqCst);
+                    if let Doc::Store(bytes) = &doc {
+                        if bytes.store.as_deref().is_some_and(|store| store.windows(6).any(|w| w == br"\u0000")) {
+                            return Err(WriteFailure::Refused { sqlstate: "22P05".into() });
+                        }
+                    }
                     if fake.fail.load(Ordering::SeqCst) > 0 {
                         fake.fail.fetch_sub(1, Ordering::SeqCst);
                         return Err(WriteFailure::Failed("connection reset".into()));
@@ -446,5 +451,17 @@ mod tests {
         assert!(writes.flush(Duration::from_secs(5)).await, "the slot empties");
         assert_eq!(fake.tried.load(Ordering::SeqCst), 1, "and it is not retried");
         assert!(fake.written.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_document_postgres_refuses_fails_once_and_a_later_save_lands() {
+        let fake = Arc::new(Fake::default());
+        let writes = writes(&fake);
+        writes.queue_store(Some(br#"{"n":"a\u0000b"}"#.to_vec()), vec![]);
+        assert!(writes.flush(Duration::from_secs(5)).await, "the refused document leaves its slot");
+        assert_eq!(fake.tried.load(Ordering::SeqCst), 1, "and is tried once, not retried");
+        writes.queue_store(store(2), vec![]);
+        assert!(writes.flush(Duration::from_secs(5)).await);
+        assert_eq!(*fake.written.lock().unwrap(), vec![serde_json::json!({ "n": 2 })]);
     }
 }
