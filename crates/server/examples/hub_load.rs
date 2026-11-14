@@ -151,8 +151,8 @@ fn tab_view(rng: &mut Rng, n: usize, round: u64) -> Value {
         "branch": format!("feature/branch-{n}"),
         "last_message_at": 1_700_000_000 + round,
         "prompt_title": rng.text(80),
-        "question": if n % 3 == 0 { Value::String(rng.text(500)) } else { Value::Null },
-        "ask_detail": if n % 5 == 0 { Value::String(rng.text(300)) } else { Value::Null },
+        "question": if n.is_multiple_of(3) { Value::String(rng.text(500)) } else { Value::Null },
+        "ask_detail": if n.is_multiple_of(5) { Value::String(rng.text(300)) } else { Value::Null },
         "alive": true,
     })
 }
@@ -161,7 +161,7 @@ fn tab_view(rng: &mut Rng, n: usize, round: u64) -> Value {
 fn page(rng: &mut Rng, bytes: usize) -> Value {
     let mut items = Vec::new();
     let mut size = 0;
-    if rng.next() % 4 == 0 {
+    if rng.next().is_multiple_of(4) {
         let picture = format!("data:image/png;base64,{}", "A".repeat(2 << 20));
         size += picture.len();
         items.push(json!({"kind": "user", "id": "u0", "at": "2026-11-14T00:00:00Z", "text": "look", "images": 1, "pictures": [picture]}));
@@ -245,7 +245,7 @@ fn machine(o: Opts, token: String, name: String, seed: u64, stop: Arc<AtomicBool
                     round += 1;
                     let tabs: Vec<Value> = (0..o.tabs).map(|n| tab_view(&mut rng, n, round)).collect();
                     send(&mut socket, &json!({"type": "event", "event": {"kind": "tabs", "tabs": tabs}}))?;
-                    if round % 20 == 0 {
+                    if round.is_multiple_of(20) {
                         send(&mut socket, &json!({"type": "event", "event": {"kind": "usage", "usage": {}, "account": "default"}})).ok();
                     }
                 }
