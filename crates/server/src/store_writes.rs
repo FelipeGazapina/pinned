@@ -145,8 +145,9 @@ impl Writes {
             if now >= until {
                 return false;
             }
-            // A writer waiting out a failure tries again now, and again every `HURRY_EVERY`.
-            self.hurry.notify_one();
+            // A writer waiting out a failure tries again now, and again every `HURRY_EVERY`. Only a
+            // writer waiting now: a permit kept for later would skip a backoff after the flush.
+            self.hurry.notify_waiters();
             let _ = tokio::time::timeout((until - now).min(HURRY_EVERY), emptied).await;
         }
     }
