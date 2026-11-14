@@ -431,10 +431,15 @@ impl Hub {
     /// how many accounts still have a document waiting, which their ids follow in the log.
     pub async fn flush_writes(&self, within: Duration) -> usize {
         let persisted: Vec<(Uuid, Arc<Persisted>)> = self.persisted.lock().unwrap().iter().map(|(id, p)| (*id, p.clone())).collect();
+        let waiting = persisted.iter().filter(|(_, p)| p.writes.pending() != store_writes::Pending::default()).count();
+        let started = Instant::now();
         let flushed = futures_util::future::join_all(persisted.iter().map(|(_, p)| p.writes.flush(within))).await;
         let left: Vec<Uuid> = persisted.iter().zip(flushed).filter(|(_, done)| !done).map(|((id, _), _)| *id).collect();
         for id in &left {
             eprintln!("pinned-server: account {id}'s workflows or connector keys were not saved before the hub stopped");
+        }
+        if waiting > 0 {
+            eprintln!("pinned-server: {waiting} accounts had saves waiting at stop; {} written in {} ms", waiting.saturating_sub(left.len()), started.elapsed().as_millis());
         }
         left.len()
     }

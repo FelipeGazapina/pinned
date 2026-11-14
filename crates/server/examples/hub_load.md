@@ -1,4 +1,4 @@
-# Hub memory runs (wip/hub-memory-r2, on 0.18.3)
+# Hub memory runs
 
 Local hub, local Postgres 15 on 127.0.0.1:5499, fake accounts only, aarch64 box.
 glibc = `cargo build --release`; musl = `cargo build --release --target aarch64-unknown-linux-musl`
@@ -26,3 +26,26 @@ the largest frame that socket carried: machine read buffers (FrameCodec::read_fr
 95 MB, machine write buffers (FrameCodec::buffer_frame Vec) 134 MB, client write buffers 63 MB;
 tokio-postgres connection buffers ~41 MB (sync_push binds); in-flight serde_json Values of
 relayed replies ~27 MB.
+
+## Census diagnostics and bounded store writes (fix/hub-memory-diagnostics)
+
+Same box, same Postgres. `hub_load` now prints the hub's CPU seconds (`cpu_s`, utime + stime from
+`/proc/<pid>/stat`) and takes `--store-every <secs>`: the first client of each account saves the
+store (repo insight on, then off) at that pace and prints the last value it saved.
+
+Counting allocator overhead, release glibc builds of the same tree with and without
+`#[global_allocator]`, same load, CPU seconds of the hub at the end:
+
+| load | without counter | with counter |
+|---|---|---|
+| 3 accounts, 40 tabs every 1 s, 1–8 MB pages, sync every 20 s (4 MB), 240 s | 4.8 | 5.1 |
+| connect churn (client life 8 s, machine life 15 s, tabs every 0.5 s, pages ≤ 4 MB), 180 s | 2.1 | 2.2 |
+
+About 5 % of the hub's own CPU time, 0.1–0.3 CPU seconds over these runs; one run each, so
+the noise is not measured.
+
+Stalled store writes: with `--store-every 0.2` (5 saves/s per account) and every account row
+locked by `select … for update` for 25–30 s, each account's census line shows `store_pending=1`
+with constant `store_pending_bytes` for the whole stall. With the lock held across the hub's
+SIGTERM the hub logged `3 accounts had saves waiting at stop; 3 written in 9227 ms` once the lock
+went, and every row held the last value its client saved.

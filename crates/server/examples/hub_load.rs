@@ -5,7 +5,7 @@
 //!
 //! cargo run --release -p pinned-server --example hub_load -- --hub 127.0.0.1:8790 --pid <hub pid> --secs 540
 //!
-//! Every `--every` seconds it prints the hub's VmRSS and the bytes the hub sent to the fake peers
+//! Every `--every` seconds it prints the hub's VmRSS, its CPU seconds so far, and the bytes the hub sent to the fake peers
 //! in that interval, by frame type. Nothing here touches a real account or hub.
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -47,6 +47,9 @@ struct Opts {
     /// Extra clients per account that read at `slow_kbps`, as a phone on a poor link.
     slow_clients: usize,
     slow_kbps: f64,
+    /// Seconds between a client's saves of the account's store (repo insight on, then off); 0 for none.
+    /// The first client of each account saves; saves stop 5 s before the end.
+    store_every: f64,
     secs: u64,
     every: u64,
     pid: Option<u32>,
@@ -304,8 +307,17 @@ fn base64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-fn client(o: Opts, token: String, machines: Vec<String>, seed: u64, slow: bool, stop: Arc<AtomicBool>, tally: Arc<Tally>) {
+/// Which account a client is of, and whether it saves the account's store while `saving` holds.
+struct Saver {
+    account: usize,
+    saves: bool,
+    saving: Arc<AtomicBool>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn client(o: Opts, token: String, machines: Vec<String>, seed: u64, slow: bool, stop: Arc<AtomicBool>, tally: Arc<Tally>, saver: Saver) {
     let mut rng = Rng(seed);
+    let (mut insight, mut saved, mut last_store) = (false, 0u64, Instant::now());
     while !stop.load(Ordering::Relaxed) {
         let mut socket = connect(&o.hub, "/ws/client");
         send(&mut socket, &json!({"type": "auth", "token": token})).unwrap();
@@ -342,6 +354,13 @@ fn client(o: Opts, token: String, machines: Vec<String>, seed: u64, slow: bool, 
                         send(&mut socket, &json!({"type": "attach", "machine": machine, "tab": tabs[0]}))?;
                     }
                 }
+                if saver.saves && o.store_every > 0.0 && saver.saving.load(Ordering::Relaxed) && last_store.elapsed() > Duration::from_secs_f64(o.store_every) {
+                    last_store = Instant::now();
+                    insight = !insight;
+                    saved += 1;
+                    next_id += 1;
+                    send(&mut socket, &json!({"type": "hub", "id": next_id, "call": {"cmd": "set_repo_insight", "settings": {"on": insight}}}))?;
+                }
                 if last_settings.elapsed() > Duration::from_secs(30) {
                     last_settings = Instant::now();
                     next_id += 1;
@@ -357,11 +376,24 @@ fn client(o: Opts, token: String, machines: Vec<String>, seed: u64, slow: bool, 
         let _ = socket.flush();
         std::thread::sleep(Duration::from_millis(200));
     }
+    if saved > 0 {
+        println!("[{}] account {} saved its store {saved} times, the last with repo insight on={insight}", o.tag, saver.account);
+    }
 }
 
 fn rss_kib(pid: u32) -> u64 {
     let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
     status.lines().find_map(|l| l.strip_prefix("VmRSS:")).and_then(|v| v.trim().strip_suffix("kB")).and_then(|v| v.trim().parse().ok()).unwrap_or(0)
+}
+
+/// The process's CPU time, user and system, in seconds, from `/proc/<pid>/stat`.
+fn cpu_secs(pid: u32) -> f64 {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+    // Fields after the command name, which ends at the last ')': utime and stime are the 12th and 13th.
+    let rest = stat.rsplit_once(')').map_or("", |(_, rest)| rest);
+    let fields: Vec<&str> = rest.split_whitespace().collect();
+    let ticks: u64 = fields.get(11..13).map_or(0, |f| f.iter().filter_map(|v| v.parse::<u64>().ok()).sum());
+    ticks as f64 / unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64
 }
 
 fn main() {
@@ -385,6 +417,7 @@ fn main() {
         sync_mb: num("--sync-mb", 8.0),
         slow_clients: num("--slow-clients", 0.0) as usize,
         slow_kbps: num("--slow-kbps", 256.0),
+        store_every: num("--store-every", 0.0),
         secs: num("--secs", 300.0) as u64,
         every: num("--every", 30.0) as u64,
         pid: flag("--pid").map(|p| p.parse().unwrap()),
@@ -393,6 +426,7 @@ fn main() {
     let stop = Arc::new(AtomicBool::new(false));
     let tally = Arc::new(Tally::default());
     let machine_sent = Arc::new(AtomicU64::new(0));
+    let saving = Arc::new(AtomicBool::new(true));
     let mut threads = Vec::new();
     let run = format!("{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
     for a in 0..o.accounts {
@@ -410,13 +444,17 @@ fn main() {
         for c in 0..o.clients + o.slow_clients {
             let (o, t, ids, s, tally) = (o.clone(), token.clone(), ids.clone(), stop.clone(), tally.clone());
             let slow = c >= o.clients;
-            threads.push(std::thread::spawn(move || client(o, t, ids, 1000 + (a * 31 + c) as u64, slow, s, tally)));
+            let saver = Saver { account: a, saves: c == 0, saving: saving.clone() };
+            threads.push(std::thread::spawn(move || client(o, t, ids, 1000 + (a * 31 + c) as u64, slow, s, tally, saver)));
         }
     }
     let start = Instant::now();
     let mut last = Instant::now();
     while start.elapsed() < Duration::from_secs(o.secs) {
         std::thread::sleep(Duration::from_millis(250));
+        if start.elapsed() + Duration::from_secs(5) >= Duration::from_secs(o.secs) {
+            saving.store(false, Ordering::Relaxed);
+        }
         if last.elapsed() >= Duration::from_secs(o.every) {
             let secs = last.elapsed().as_secs_f64();
             last = Instant::now();
@@ -426,8 +464,9 @@ fn main() {
             kinds.sort_by_key(|(_, t)| std::cmp::Reverse(t.1));
             let kinds: Vec<String> = kinds.iter().map(|(k, (n, b, max))| format!("{k}={n}/{}KB/max{}KB", b >> 10, max >> 10)).collect();
             let rss = o.pid.map(rss_kib).unwrap_or(0);
+            let cpu = o.pid.map(cpu_secs).unwrap_or(0.0);
             println!(
-                "[{}] t={:>5}s rss_mb={} to_clients_mb_per_h={:.0} machine_up_mb={} machine_down_mb={} {}",
+                "[{}] t={:>5}s rss_mb={} cpu_s={cpu:.1} to_clients_mb_per_h={:.0} machine_up_mb={} machine_down_mb={} {}",
                 o.tag,
                 start.elapsed().as_secs(),
                 rss >> 10,
