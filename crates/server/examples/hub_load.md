@@ -88,7 +88,69 @@ counter swapped (C code still on musl malloc) stays flat: mimalloc 76 → 89 →
 46 → 45 → 49 MB over the same first minutes. So the growth is musl's malloc keeping memory the
 Rust heap freed, not C allocations the counter cannot see.
 
-Why round 1–4 did not reproduce: those loads moved mostly 1–22 MB buffers, which musl serves with
-mmap and unmaps on free. This load frees ~30 000 small allocations per `sync_list` reply (the
-`serde_json::Value` tree of ~3 300 entries) about once a second, which is where mallocng keeps
-memory. The full 20-minute tables follow below.
+Why rounds 1–4 most likely did not reproduce: those loads moved mostly 1–22 MB buffers, which
+musl serves with mmap and unmaps on free. This load frees ~30 000 small allocations per
+`sync_list` reply (the `serde_json::Value` tree of ~3 300 entries) about once a second. Not
+isolated further (zig's musl vs Debian's musl-gcc was not compared).
+
+### The reply and its allocations
+
+The ~47/min reply is `sync_list`: every node runs a sync round every 20 s
+(`crates/core/src/link.rs:37`) and lists each checkout plus the plugins (`link.rs:335`,
+`sync.rs:289`, `sync.rs:546`); `sync_pull` is the smaller share. Bytes allocated per 704 KB
+reply (3 341 entries), measured with a counting allocator on the same code:
+
+| step | where | allocated |
+|---|---|---|
+| Postgres rows (read buffer, a ranges vec per row) | `db.rs:641` | not measured |
+| path and sha copied out of each row into `Vec<Entry>` | `db.rs:646` | 694 KB, 6 683 allocations |
+| `serde_json::to_value`: an IndexMap per entry, 5 key strings, path and sha copied again | `hub.rs:767` → `hub.rs:294` | 2 747 KB, 30 070 allocations |
+| `Reply::new` / `ToMachine::Reply` | `http.rs:1273` | moved |
+| `serde_json::to_string`, buffer doubling from empty | `hub.rs:1567` → `hub.rs:290` | 2 047 KB, 14 allocations |
+| outbox queue, `Message::Text(text.into())` | `hub.rs:111`, `http.rs:1079` | moved |
+| tungstenite copies the frame into the socket's write buffer | | 704 KB once; the buffer keeps its size |
+
+About 8 times the reply's size in allocations before Postgres; production's ~17 also counts the
+pushes in (`http.rs:1109` parse, `hub.rs:775` base64 decode, Postgres bind at `db.rs:673`) and
+the pulls (`db.rs:705`, base64 at `hub.rs:802`, `to_value` at `hub.rs:806`, `to_string`).
+
+### Allocator, before and after (20 min each)
+
+Same load as above, aarch64 musl built with zigbuild. Run 1: the three hubs ran at the same time,
+with two release builds on the box for part of it. Run 2: two hubs at the same time, nothing else.
+Each cell: rss_mb / heap_live_mb / heap_allocated_gb at the 1-min census.
+
+| min | run 1 System | run 1 mimalloc | run 1 jemalloc | run 2 System | run 2 mimalloc (final build) |
+|---|---|---|---|---|---|
+| 1 | 60/12/0 | 76/11/0 | 46/13/0 | 64/12/0 | 95/13/0 |
+| 2 | 91/19/0 | 89/14/0 | 45/16/0 | 93/19/0 | 67/17/0 |
+| 3 | 117/22/0 | 83/19/0 | 49/18/0 | 117/21/0 | 68/19/0 |
+| 4 | 143/26/0 | 79/29/0 | 49/18/0 | 139/22/0 | 78/25/0 |
+| 5 | 164/26/1 | 84/29/1 | 47/18/0 | 172/27/0 | 90/25/1 |
+| 6 | 188/28/1 | 110/31/1 | 54/26/1 | 195/27/1 | 84/29/1 |
+| 7 | 209/24/1 | 105/30/1 | 50/24/1 | 224/24/1 | 87/26/1 |
+| 8 | 232/26/1 | 108/30/1 | 52/26/1 | 251/25/1 | 96/27/1 |
+| 9 | 256/24/1 | 93/30/1 | 57/27/1 | 274/24/1 | 79/28/1 |
+| 10 | 280/24/1 | 92/30/1 | 58/27/1 | 302/25/1 | 73/27/1 |
+| 11 | 302/25/2 | 94/31/2 | 61/29/2 | 328/25/2 | 97/30/2 |
+| 12 | 333/26/2 | 86/31/2 | 61/29/2 | 355/28/2 | 81/30/2 |
+| 13 | 353/26/2 | 89/31/2 | 57/29/2 | 381/28/2 | 91/30/2 |
+| 14 | 381/31/2 | 83/31/2 | 57/29/2 | 405/28/2 | 83/29/2 |
+| 15 | 404/26/2 | 86/31/2 | 47/25/2 | 432/24/2 | 80/27/2 |
+| 16 | 427/26/3 | 84/33/3 | 48/25/3 | 456/24/3 | 79/27/3 |
+| 17 | 452/28/3 | 95/33/3 | 51/27/3 | 492/26/3 | 83/30/3 |
+| 18 | 472/28/3 | 76/33/3 | 52/27/3 | 517/26/3 | 85/30/3 |
+| 19 | 498/28/3 | 80/33/3 | 49/27/3 | 541/26/3 | 82/30/3 |
+| 20 | 522/29/3 | 87/33/3 | 47/27/3 | 562/26/3 | 86/30/3 |
+| 21 |  |  |  | 585/26/4 | 86/30/4 |
+| hub CPU s at the end | 10.0 | 11.0 | 9.1 | 10.2 | 9.2 |
+
+The System hubs grow ~25 MB/min (~1.5 GB/h) to 522 and 585 MB; both other allocators stay flat
+(mimalloc 67–110 MB, jemalloc 45–61 MB) with the same live heap and the same ~3–4 GB allocated.
+CPU is one run each; run 1 shared the box with builds, run 2 did not.
+
+jemalloc held less memory, but tikv-jemalloc-sys bakes the page size in at build time
+(`LG_PAGE 12` in this aarch64 build, from the build host), and jemalloc aborts on a kernel with
+larger pages. pinned-server is also the node binary on Linux machines, some aarch64 ones with 16 or
+64 KB pages, so it would take a per-target build setting. mimalloc reads the page size at start and
+needed no build change, so the hub takes mimalloc.
