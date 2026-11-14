@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.18.4 (2026-11-14)
+
+### Fixed
+
+- Workflows: a run waiting on an agent tab no longer repeats its step when that tab finishes its turn and closes in quick succession.
+- The hub's saves of workflows and connector keys to its database no longer queue without limit. Each account keeps only its newest unsaved copy, an older copy never replaces a newer one (also across a hub restart or a deploy), and a stopping hub writes what is still waiting first.
+- The hub's database connection now has time limits: connecting, each statement and each write give up instead of waiting forever, and a stuck connection is replaced.
+
+### Changed
+
+- The hub's periodic census log now reports heap memory in use, bytes queued per connection, traffic by message type, sync bytes and per-account sizes (counts and sizes only, no content). The hub's memory growth is not fixed in this release: these measurements are there to find its cause, and the bounded saves above remove one possible cause. Counting heap memory costs about 5% of the hub's CPU.
+- The hub's accounts table gains two version columns, added automatically when the hub starts. An older hub keeps working with them.
+
 ## 0.18.3 (2026-11-13)
 
 ### Fixed
