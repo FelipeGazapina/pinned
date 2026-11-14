@@ -317,7 +317,7 @@ impl Hub {
     pub fn census(&self) -> String {
         let accounts: Vec<Arc<Account>> = self.accounts.lock().unwrap().values().cloned().collect();
         let (mut clients, mut machines, mut frames_sum, mut frames_max, mut pending) = (0, 0, 0, 0, 0);
-        let (mut known_tabs, mut drive_waiters, mut tab_drive_waiting, mut tab_drives_coalesced) = (0, 0, 0, 0);
+        let (mut known_tabs, mut known_tab_facts, mut drive_waiters, mut tab_drive_waiting, mut tab_drives_coalesced) = (0, 0, 0, 0, 0);
         for account in &accounts {
             {
                 let live = account.live.lock().unwrap();
@@ -333,13 +333,14 @@ impl Hub {
             if let Some(connectors) = account.connectors.get() {
                 let census = connectors.census();
                 known_tabs += census.known_tabs;
+                known_tab_facts += census.known_tab_facts;
                 drive_waiters += census.drive_waiters;
                 tab_drive_waiting += census.tab_drive_waiting;
                 tab_drives_coalesced += census.tab_drives_coalesced;
             }
         }
         let mut line = format!(
-            "pinned-server: census accounts={} clients={clients} machines={machines} outbox_frames_sum={frames_sum} outbox_frames_max={frames_max} pending_calls={pending} known_tabs={known_tabs} drive_waiters={drive_waiters} tab_drive_waiting={tab_drive_waiting} tab_drives_coalesced={tab_drives_coalesced}",
+            "pinned-server: census accounts={} clients={clients} machines={machines} outbox_frames_sum={frames_sum} outbox_frames_max={frames_max} pending_calls={pending} known_tabs={known_tabs} known_tab_facts={known_tab_facts} drive_waiters={drive_waiters} tab_drive_waiting={tab_drive_waiting} tab_drives_coalesced={tab_drives_coalesced}",
             accounts.len()
         );
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
