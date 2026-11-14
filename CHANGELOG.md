@@ -5,7 +5,7 @@
 ### Fixed
 
 - Workflows: a run waiting on an agent tab no longer repeats its step when that tab finishes its turn and closes in quick succession.
-- The hub's saves of workflows and connector keys to its database no longer queue without limit. Each account keeps only its newest unsaved copy, an older copy never replaces a newer one (also across a hub restart or a deploy), and a stopping hub writes what is still waiting first.
+- The hub's saves of workflows and connector keys to its database no longer queue without limit. Each account keeps only its newest unsaved copy, an older copy no longer replaces a newer one from the same hub, and a stopping hub writes what is still waiting first. During a deploy, the stopping hub can still overwrite a save from the new hub once; the new hub's next save restores it.
 - The hub's database connection now has time limits: connecting, each statement and each write give up instead of waiting forever, and a stuck connection is replaced.
 
 ### Changed
