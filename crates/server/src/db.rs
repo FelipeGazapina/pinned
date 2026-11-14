@@ -230,8 +230,9 @@ struct Connection {
 const CONNECT_WAIT: Duration = Duration::from_secs(10);
 /// Postgres cancels a statement of the hub's that runs longer (`statement_timeout`).
 const STATEMENT_LIMIT: Duration = Duration::from_secs(120);
-/// How long `Connection::write` waits for its statement before it gives the connection up.
-/// Longer than `STATEMENT_LIMIT`, so Postgres has cancelled a statement it was running by then.
+/// How long `Connection::write` waits for a client and its statement together before it gives the
+/// connection up. Longer than `STATEMENT_LIMIT`, so Postgres has cancelled a statement it was
+/// running by then.
 const WRITE_WAIT: Duration = Duration::from_secs(150);
 
 impl Connection {
@@ -488,8 +489,11 @@ async fn open(url: &str) -> Result<Client, String> {
         }
     });
     // A plain statement rather than a startup option, which a pooler in front of Postgres may refuse.
-    if let Err(e) = client.batch_execute(&format!("set statement_timeout = {}", STATEMENT_LIMIT.as_millis())).await {
-        eprintln!("pinned-server: Postgres keeps its own statement timeout: {e}");
+    // Bounded like the connect: `client` runs this holding the lock every caller waits on.
+    match tokio::time::timeout(CONNECT_WAIT, client.batch_execute(&format!("set statement_timeout = {}", STATEMENT_LIMIT.as_millis()))).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => eprintln!("pinned-server: Postgres keeps its own statement timeout: {e}"),
+        Err(_) => return Err("could not connect to Postgres: it did not answer the statement timeout".into()),
     }
     Ok(client)
 }
