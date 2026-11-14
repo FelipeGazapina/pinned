@@ -8578,6 +8578,85 @@ mod tests {
         }
         let kept: Vec<_> = one.views["tab-1"].iter().map(|view| view.status).collect();
         assert_eq!(kept, [Some(AgentStatus::Done), Some(AgentStatus::Working), Some(AgentStatus::Done)]);
+        let mut latest = TabFacts::default();
+        for (status, updated) in [(AgentStatus::Done, 1), (AgentStatus::Failed, 2), (AgentStatus::Working, 3), (AgentStatus::Done, 4), (AgentStatus::Failed, 5)] {
+            let mut view = session_tab(Some(status), Some("claude-1"));
+            view.updated = Some(updated);
+            latest.keep(&[view]);
+        }
+        let kept: Vec<_> = latest.views["tab-1"].iter().map(|view| (view.status, view.updated)).collect();
+        assert_eq!(
+            kept,
+            [(Some(AgentStatus::Failed), Some(2)), (Some(AgentStatus::Working), Some(3)), (Some(AgentStatus::Done), Some(4))],
+            "the latest terminal before Working, the first Working, the first terminal after it"
+        );
+    }
+
+    /// A Done whose status time is past the run's wait, and one from before it.
+    fn done_at(updated: u64) -> TabView {
+        TabView { updated: Some(updated), ..session_tab(Some(AgentStatus::Done), Some("claude-1")) }
+    }
+
+    #[test]
+    fn an_old_done_then_a_new_done_then_gone_inside_one_drive_ends_the_turn_and_does_not_repeat_the_step() {
+        let (connectors, dir, handed) = waiting_after_a_prompt("tab-coalesce-old-done-new-done-gone");
+        let (previous_turn, this_turn) = (done_at(1), done_at(unix_millis() / 1000 + 3600));
+        deliver_during_a_drive(&connectors, &handed, vec![vec![previous_turn], vec![this_turn], vec![]]);
+        assert_eq!(
+            *handed.lock().unwrap(),
+            ["run", "prompt two", "prompt three"],
+            "the second Done is this turn's end, so the run goes on to the third talk instead of opening a session to repeat the second"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_kept_stale_done_does_not_wake_a_run_while_the_newest_list_shows_working() {
+        let (connectors, dir, handed) = waiting_after_a_prompt("tab-coalesce-stale-done-working");
+        let working = session_tab(Some(AgentStatus::Working), Some("claude-1"));
+        deliver_during_a_drive(&connectors, &handed, vec![vec![done_at(1)], vec![working]]);
+        let run = connectors.runs.lock().unwrap()[0].clone();
+        assert!(matches!(run.status, Status::Waiting), "the Done is the previous turn's, so the run still waits: {:?}", run.status);
+        assert!(matches!(run.session, Session::Live { saw_working: true, .. }), "{:?}", run.session);
+        assert_eq!(*handed.lock().unwrap(), ["run", "prompt two"], "nothing more was typed or opened");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Stores `lists` from m1 as tab wakes that give up on the held drive lock, so no tab drive is left waiting.
+    fn store_while_a_drive_holds_the_lock(connectors: &std::sync::Arc<Connectors>, handed: &Handed, lists: Vec<Vec<TabView>>) {
+        let observed = unix_millis();
+        block_on(async {
+            let guard = connectors.driving.lock().await;
+            for tabs in lists {
+                let wake = connectors.on_tabs("m1", observed, &tabs, handing(handed));
+                assert!(tokio::time::timeout(std::time::Duration::from_millis(20), wake).await.is_err(), "the wake waits for the lock the drive holds");
+            }
+            assert_eq!(connectors.census().known_tab_facts, 1, "the replaced list's view of tab-1 is kept");
+            drop(guard);
+        });
+    }
+
+    #[test]
+    fn views_kept_between_drives_are_read_by_a_drive_that_no_tab_wake_started() {
+        let working = session_tab(Some(AgentStatus::Working), Some("claude-1"));
+        let done = session_tab(Some(AgentStatus::Done), Some("claude-1"));
+        for through_check_once in [false, true] {
+            let (connectors, dir, handed) = waiting_after_a_prompt(&format!("tab-coalesce-other-drive-{through_check_once}"));
+            store_while_a_drive_holds_the_lock(&connectors, &handed, vec![vec![working.clone()], vec![done.clone()]]);
+            let open = handing(&handed);
+            if through_check_once {
+                block_on(connectors.check_once(&open));
+            } else {
+                block_on(connectors.drive(&open)).unwrap();
+            }
+            assert_eq!(connectors.census().known_tab_facts, 0, "the drive used what it kept (check_once: {through_check_once})");
+            assert_eq!(
+                *handed.lock().unwrap(),
+                ["run", "prompt two", "prompt three"],
+                "the kept Working let the newest Done end the turn (check_once: {through_check_once})"
+            );
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[test]
