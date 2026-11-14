@@ -420,11 +420,15 @@ impl Hub {
     pub fn census_accounts(&self) -> Vec<String> {
         let mut persisted: Vec<(Uuid, Arc<Persisted>)> = self.persisted.lock().unwrap().iter().map(|(id, p)| (*id, p.clone())).collect();
         persisted.sort_by_key(|(id, _)| *id);
-        let runs: HashMap<Uuid, usize> = {
-            let accounts = self.accounts.lock().unwrap();
-            persisted.iter().filter_map(|(id, _)| Some((*id, accounts.get(id)?.connectors.get()?.census().runs))).collect()
-        };
-        persisted.iter().map(|(id, p)| account_census(*id, runs.get(id).copied().unwrap_or(0), p.census())).collect()
+        // The accounts' lock is let go before any account's own locks are taken.
+        let accounts: HashMap<Uuid, Arc<Account>> = self.accounts.lock().unwrap().clone();
+        persisted
+            .iter()
+            .map(|(id, p)| {
+                let runs = accounts.get(id).and_then(|account| account.connectors.get()).map_or(0, |connectors| connectors.census().runs);
+                account_census(*id, runs, p.census())
+            })
+            .collect()
     }
 
     /// Writes every account's store and keys that wait, all at once, giving up at `within`. Answers
