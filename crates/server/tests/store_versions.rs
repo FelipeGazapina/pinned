@@ -148,3 +148,25 @@ async fn the_later_save_of_the_lower_numbered_of_two_hub_processes_lands_in_the_
     assert!(first.flush(Duration::from_secs(10)).await);
     assert_eq!(db.connectors(account).await.unwrap().store, serde_json::json!({ "by": "first", "n": 21 }));
 }
+
+/// What `save` takes, jsonb holds: an escaped backslash before the text u0000 and a surrogate
+/// pair land in the row as saved. What jsonb would refuse, `save` refuses first.
+#[tokio::test]
+async fn a_document_save_accepts_lands_in_jsonb_and_one_jsonb_refuses_is_refused_at_save() {
+    use pinned_server::hub::AccountStore;
+    use std::time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let (_, db, account) = fresh("escapes", dir.path()).await;
+    let storage = AccountStore::load(db.clone(), account).await.unwrap();
+    for refused in [r#"{"n":"a\u0000b"}"#, r#"{"n":{"\u0000":1}}"#, r#"{"n":"\ud800"}"#, r#"{"n":"\udc00\ud800"}"#] {
+        assert!(storage.save(refused.as_bytes()).is_err(), "save refuses {refused}");
+        assert!(matches!(db.save_store(account, 1, Some(refused), None).await, Err(WriteFailure::Refused { .. })), "as jsonb does: {refused}");
+    }
+    let store = r#"{"a":"x\\u0000y","b\\u0000":"\\\\u0000","c":"😀","d":"é"}"#;
+    storage.save(store.as_bytes()).unwrap();
+    assert!(storage.flush(Duration::from_secs(10)).await);
+    let stored = db.connectors(account).await.unwrap();
+    assert_eq!(stored.store, serde_json::from_str::<serde_json::Value>(store).unwrap(), "the row holds the document as saved");
+    assert_eq!(stored.store["a"], "x\\u0000y");
+    assert_eq!(stored.version, 1);
+}

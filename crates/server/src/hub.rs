@@ -1829,7 +1829,7 @@ impl Storage for PgStorage {
         // Read through, without building the document; the writer sends the text as it is.
         let text = std::str::from_utf8(store).map_err(|e| e.to_string())?;
         serde_json::from_str::<HashMap<String, serde::de::IgnoredAny>>(text).map_err(|e| e.to_string())?;
-        no_deeper(store, DOCUMENT_DEPTH)?;
+        jsonb_takes(store, DOCUMENT_DEPTH)?;
         let mut state = self.0.state.lock().unwrap();
         state.store = Some(store.to_vec());
         self.persist(&state);
@@ -1849,7 +1849,7 @@ impl Storage for PgStorage {
             let text = std::str::from_utf8(bytes).map_err(|e| e.to_string())?;
             serde_json::from_str::<serde::de::IgnoredAny>(text).map_err(|e| e.to_string())?;
             // One less: the runs sit under the store's `runs`.
-            no_deeper(bytes, DOCUMENT_DEPTH - 1)?;
+            jsonb_takes(bytes, DOCUMENT_DEPTH - 1)?;
         }
         let mut state = self.0.state.lock().unwrap();
         state.runs = bytes.to_vec();
@@ -1907,17 +1907,36 @@ impl AccountStore {
 /// load can't handle.
 pub const DOCUMENT_DEPTH: usize = 127;
 
-/// Refuses JSON text, already read through, nested deeper than `most`.
-fn no_deeper(json: &[u8], most: usize) -> Result<(), String> {
-    let (mut depth, mut in_string, mut escaped) = (0usize, false, false);
-    for &b in json {
+/// Refuses JSON text, already read through, that jsonb would refuse though serde_json reads it:
+/// nested deeper than `most`, or with a `\u0000` escape or a lone UTF-16 surrogate escape in a
+/// string or a key. serde_json reads `\u0000` into a string, and skips any `\u` escape it
+/// ignores; jsonb holds neither.
+fn jsonb_takes(json: &[u8], most: usize) -> Result<(), String> {
+    let (mut depth, mut in_string) = (0usize, false);
+    // The string's last escape was a high surrogate, which a low one must follow.
+    let mut high = false;
+    let mut at = 0;
+    while let Some(&b) = json.get(at) {
+        at += 1;
         if in_string {
+            let mut unit = None;
             match b {
-                _ if escaped => escaped = false,
-                b'\\' => escaped = true,
+                b'\\' if json.get(at) == Some(&b'u') => {
+                    let hex = json.get(at + 1..at + 5).and_then(|hex| std::str::from_utf8(hex).ok());
+                    unit = Some(hex.and_then(|hex| u16::from_str_radix(hex, 16).ok()).ok_or("a bad \\u escape")?);
+                    at += 5;
+                }
+                b'\\' => at += 1,
                 b'"' => in_string = false,
                 _ => {}
             }
+            if unit == Some(0) {
+                return Err("a \\u0000 escape, which Postgres cannot store".into());
+            }
+            if high != matches!(unit, Some(0xDC00..=0xDFFF)) {
+                return Err("a lone UTF-16 surrogate escape, which Postgres cannot store".into());
+            }
+            high = matches!(unit, Some(0xD800..=0xDBFF));
             continue;
         }
         match b {
@@ -2260,5 +2279,54 @@ mod tests {
         let mut doc: Value = serde_json::from_str(&store).unwrap();
         doc["runs"] = serde_json::from_str(&runs).unwrap();
         assert!(serde_json::from_str::<Value>(&doc.to_string()).is_ok());
+    }
+
+    /// serde_json reads `\u0000` and, through `IgnoredAny`, a lone UTF-16 surrogate, but jsonb
+    /// refuses both; `save` and `save_runs` refuse them too, so the writer never drops a save they took.
+    #[tokio::test]
+    async fn a_nul_escape_or_a_lone_surrogate_is_refused_at_save_and_an_escaped_backslash_before_u0000_is_not() {
+        let written = Arc::new(Mutex::new(vec![]));
+        let write: store_writes::Write = {
+            let written = written.clone();
+            Arc::new(move |_, _, doc| {
+                let written = written.clone();
+                Box::pin(async move {
+                    if let store_writes::Doc::Store(bytes) = doc {
+                        written.lock().unwrap().push((bytes.store.clone(), bytes.runs.clone()));
+                    }
+                    Ok(Landed::Written)
+                })
+            })
+        };
+        let stored = db::Connectors { store: serde_json::json!({}), secrets: BTreeMap::new(), version: 0 };
+        let storage = PgStorage::with_writer(Uuid::nil(), stored, Arc::default(), write);
+        for store in [
+            r#"{"a":"x\u0000y"}"#,
+            r#"{"a\u0000":1}"#,
+            r#"{"a":{"b\u0000":1}}"#,
+            r#"{"a":["\\\u0000"]}"#,
+            r#"{"a":"\ud800"}"#,
+            r#"{"a":"\udc00"}"#,
+            r#"{"a":"\uD800x"}"#,
+            r#"{"a":"\ud800\u0041"}"#,
+            r#"{"a":"\ud800\ud800\udc00"}"#,
+            r#"{"a":{"\udbff":1}}"#,
+        ] {
+            assert!(serde_json::from_str::<HashMap<String, serde::de::IgnoredAny>>(store).is_ok(), "serde reads {store}");
+            assert!(storage.save(store.as_bytes()).is_err(), "jsonb refuses {store}, so save does");
+        }
+        for runs in [r#"[{"x":"\u0000"}]"#, r#"["\udfff"]"#, r#"[{"\u0000":1}]"#] {
+            assert!(serde_json::from_str::<serde::de::IgnoredAny>(runs).is_ok(), "serde reads {runs}");
+            assert!(storage.save_runs(runs.as_bytes()).is_err(), "jsonb refuses {runs}, so save_runs does");
+        }
+        assert_eq!(storage.0.writes.pending(), store_writes::Pending::default(), "nothing refused was queued");
+
+        // An escaped backslash followed by the text u0000 is ordinary text; so is a surrogate pair.
+        let store = r#"{"a":"x\\u0000y","b\\u0000":"\\\\u0000","c":"\ud83d\ude00","d":"\u00e9"}"#;
+        let runs = r#"[{"x":"\\u0000","y":"\uDBFF\uDFFF"}]"#;
+        storage.save(store.as_bytes()).unwrap();
+        storage.save_runs(runs.as_bytes()).unwrap();
+        assert!(storage.0.writes.flush(Duration::from_secs(5)).await);
+        assert_eq!(written.lock().unwrap().last().unwrap(), &(Some(store.as_bytes().to_vec()), runs.as_bytes().to_vec()));
     }
 }
