@@ -49,3 +49,46 @@ locked by `select … for update` for 25–30 s, each account's census line show
 with constant `store_pending_bytes` for the whole stall. With the lock held across the hub's
 SIGTERM the hub logged `3 accounts had saves waiting at stop; 3 written in 9227 ms` once the lock
 went, and every row held the last value its client saved.
+
+## Round 3: production shape
+
+Production (hub 0.18.4, x86_64 musl, census every 5 min): rss 331 → 851 MB in 21 min while
+heap_live stays 89–96 MB; ~1 GB allocated per 5 min; machine replies ~47/min, ~255 KB average,
+620 KB max; machine calls in up to 3.7 MB; ~6 sync pulls/min of ~250 KB.
+
+This round: hub built as the Dockerfile builds it, `cargo zigbuild --release --target
+aarch64-unknown-linux-musl` (zig 0.17.1, cargo-zigbuild 0.24.1, static). The box is aarch64, so
+x86_64 musl was not run. `hub_load` gained `--list-kb` (production-shaped sync: projects seeded
+so each `sync_list` reply is about that many KB; every machine lists every project each round,
+pulls a `--pull-kb` file on two rounds in three and pushes up to `--push-max-mb` on one in three).
+
+```
+PINNED_CENSUS_SECS=60 crates/server/examples/hub_load.sh <hub> 8791 before1 <out> \
+  --accounts 1 --machines 3 --clients 2 --tabs 10 --tabs-every 5 --thread-every 30 \
+  --page-min-mb 0.02 --page-max-mb 0.2 --output-rate 2000 --client-life 600 --machine-life 100000 \
+  --sync-every 20 --list-kb 620,400,150,70,35 --pull-kb 260 --push-max-mb 2.8 --secs 1200 --every 60
+```
+
+Traffic per 1-min census: sent_machine_reply_n 53–54, sent_machine_reply_bytes 10–15.5 MB,
+sent_machine_reply_max 722 KB (production: ~47/min, ~12 MB/min, max 620 KB).
+
+**Reproduced** within 8 minutes, musl system allocator (VmRSS at each 1-min census):
+
+| min | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 |
+|---|---|---|---|---|---|---|---|---|
+| rss_mb | 60 | 91 | 117 | 143 | 164 | 188 | 209 | 232 |
+| heap_live_mb | 12 | 19 | 22 | 26 | 26 | 28 | 24 | 26 |
+
+~25 MB/min = ~1.5 GB/h, the production slope, while live heap stays at 12–28 MB. smaps_rollup:
+Anonymous ≈ Rss (226 MB of 238 MB at minute 8), so it is heap, not file pages.
+
+C code: the only C libraries linked are ring (no malloc) and bundled SQLite, which only the
+node's `memory.rs` opens, never the hub. The same binary with only the Rust allocator under the
+counter swapped (C code still on musl malloc) stays flat: mimalloc 76 → 89 → 83 MB, jemalloc
+46 → 45 → 49 MB over the same first minutes. So the growth is musl's malloc keeping memory the
+Rust heap freed, not C allocations the counter cannot see.
+
+Why round 1–4 did not reproduce: those loads moved mostly 1–22 MB buffers, which musl serves with
+mmap and unmaps on free. This load frees ~30 000 small allocations per `sync_list` reply (the
+`serde_json::Value` tree of ~3 300 entries) about once a second, which is where mallocng keeps
+memory. The full 20-minute tables follow below.

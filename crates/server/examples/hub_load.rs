@@ -44,6 +44,13 @@ struct Opts {
     /// Seconds between a machine's sync pushes and pulls; 0 for none.
     sync_every: f64,
     sync_mb: f64,
+    /// Production-shaped sync instead of the 8 MB push/list/pull above: the reply size in KB of
+    /// each project's `sync_list`, which the first account's first machine seeds with that many
+    /// small files before the load starts. Each sync round every machine lists every project, pulls a
+    /// `pull_kb` file on two rounds in three and pushes a file of up to `push_max_mb` on one in three.
+    list_kb: Vec<usize>,
+    pull_kb: usize,
+    push_max_mb: f64,
     /// Extra clients per account that read at `slow_kbps`, as a phone on a poor link.
     slow_clients: usize,
     slow_kbps: f64,
@@ -193,6 +200,7 @@ fn machine(o: Opts, token: String, name: String, seed: u64, stop: Arc<AtomicBool
         let born = Instant::now();
         let (mut last_tabs, mut last_thread, mut last_output, mut last_sync) = (Instant::now() - Duration::from_secs(60), Instant::now(), Instant::now(), Instant::now());
         let mut call_id = 1_000_000u64;
+        let mut sync_round = seed;
         // viewer -> tabs it subscribed to.
         let mut viewers: HashMap<String, Vec<String>> = HashMap::new();
         let mut watched: HashMap<String, Vec<String>> = HashMap::new();
@@ -260,7 +268,29 @@ fn machine(o: Opts, token: String, name: String, seed: u64, stop: Arc<AtomicBool
                         send(&mut socket, &json!({"type": "event", "event": {"kind": "thread", "tab": tab}}))?;
                     }
                 }
-                if o.sync_every > 0.0 && last_sync.elapsed().as_secs_f64() >= o.sync_every {
+                if o.sync_every > 0.0 && !o.list_kb.is_empty() && last_sync.elapsed().as_secs_f64() >= o.sync_every {
+                    last_sync = Instant::now();
+                    sync_round += 1;
+                    for p in 0..o.list_kb.len() {
+                        call_id += 1;
+                        send(&mut socket, &json!({"type": "call", "id": call_id, "call": {"cmd": "sync_list", "project": listed_project(p)}}))?;
+                    }
+                    if sync_round % 3 != 0 {
+                        call_id += 1;
+                        send(&mut socket, &json!({"type": "call", "id": call_id, "call": {"cmd": "sync_pull", "project": listed_project(0), "paths": [PULLED]}}))?;
+                    }
+                    if sync_round % 3 == 0 {
+                        // Mostly small, now and then near the most: u^5 of the most.
+                        let u = (rng.next() % 1000) as f64 / 1000.0;
+                        let bytes = ((o.push_max_mb * 1048576.0 * u.powi(5)) as usize).max(4096);
+                        let data = random_bytes(&mut rng, bytes);
+                        let file = json!({"path": format!("claude/push-{name}.jsonl"), "sha": format!("{:064x}", rng.next()), "modified": round, "size": data.len(), "data": base64(&data)});
+                        call_id += 1;
+                        let push = json!({"type": "call", "id": call_id, "call": {"cmd": "sync_push", "project": listed_project(1), "files": [file]}}).to_string();
+                        sent.fetch_add(push.len() as u64, Ordering::Relaxed);
+                        socket.send(Message::text(push)).map_err(|e| e.to_string())?;
+                    }
+                } else if o.sync_every > 0.0 && last_sync.elapsed().as_secs_f64() >= o.sync_every {
                     last_sync = Instant::now();
                     let project = format!("github.com/load/{}", name.rsplit_once('-').unwrap().0);
                     let mut data = Vec::with_capacity((o.sync_mb * 1048576.0) as usize + 8);
@@ -300,6 +330,65 @@ fn machine(o: Opts, token: String, name: String, seed: u64, stop: Arc<AtomicBool
         let _ = socket.flush();
         std::thread::sleep(Duration::from_millis(200));
     }
+}
+
+/// The file every machine pulls in production-shaped sync.
+const PULLED: &str = "claude/pulled.jsonl";
+/// Bytes of one listed entry as the hub sends it, near enough to size the seeded projects.
+const ENTRY_BYTES: usize = 190;
+
+fn listed_project(p: usize) -> String {
+    format!("github.com/load/listed-{p}")
+}
+
+fn random_bytes(rng: &mut Rng, n: usize) -> Vec<u8> {
+    let mut data = Vec::with_capacity(n + 8);
+    while data.len() < n {
+        data.extend_from_slice(&rng.next().to_le_bytes());
+    }
+    data.truncate(n);
+    data
+}
+
+/// Waits for the reply to call `id`, panicking on a refusal.
+fn await_reply(socket: &mut Socket, id: u64) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while Instant::now() < deadline {
+        if let Some(text) = read(socket).unwrap() {
+            let frame: Value = serde_json::from_str(&text).unwrap();
+            if frame["type"] == "reply" && frame["id"] == id {
+                assert!(frame.get("err").is_none(), "seeding: {}", frame["err"]);
+                return;
+            }
+        }
+    }
+    panic!("seeding: no reply to call {id}");
+}
+
+/// Fills each listed project with enough small files that its `sync_list` reply is about
+/// `list_kb` KB, and the first one with the file every machine pulls.
+fn seed(o: &Opts, token: &str) {
+    let mut rng = Rng(99);
+    let mut socket = connect(&o.hub, "/ws/machine");
+    send(&mut socket, &json!({"type": "auth", "token": token, "name": "seed", "os": "linux", "version": "0.18.3"})).unwrap();
+    let mut id = 1u64;
+    for (p, kb) in o.list_kb.iter().enumerate() {
+        let files: Vec<Value> = (0..kb * 1024 / ENTRY_BYTES)
+            .map(|i| json!({"path": format!("claude/-home-dev-projects-repo-{p}/{:032x}-{i:05}.jsonl", rng.next()), "sha": format!("{:064x}", rng.next()), "modified": 1_763_000_000_000u64 + i as u64, "size": 64, "data": base64(&random_bytes(&mut rng, 64))}))
+            .collect();
+        for batch in files.chunks(500) {
+            id += 1;
+            send(&mut socket, &json!({"type": "call", "id": id, "call": {"cmd": "sync_push", "project": listed_project(p), "files": batch}})).unwrap();
+            await_reply(&mut socket, id);
+        }
+    }
+    let data = random_bytes(&mut rng, o.pull_kb * 1024);
+    id += 1;
+    let file = json!({"path": PULLED, "sha": format!("{:064x}", rng.next()), "modified": 1_763_000_000_000u64, "size": data.len(), "data": base64(&data)});
+    send(&mut socket, &json!({"type": "call", "id": id, "call": {"cmd": "sync_push", "project": listed_project(0), "files": [file]}})).unwrap();
+    await_reply(&mut socket, id);
+    let _ = socket.close(None);
+    let _ = socket.flush();
 }
 
 fn base64(bytes: &[u8]) -> String {
@@ -415,6 +504,9 @@ fn main() {
         output_rate: num("--output-rate", 40960.0) as usize,
         sync_every: num("--sync-every", 0.0),
         sync_mb: num("--sync-mb", 8.0),
+        list_kb: flag("--list-kb").map(|v| v.split(',').map(|n| n.trim().parse().unwrap()).collect()).unwrap_or_default(),
+        pull_kb: num("--pull-kb", 260.0) as usize,
+        push_max_mb: num("--push-max-mb", 2.8),
         slow_clients: num("--slow-clients", 0.0) as usize,
         slow_kbps: num("--slow-kbps", 256.0),
         store_every: num("--store-every", 0.0),
@@ -434,6 +526,11 @@ fn main() {
         let session = http_post(&o.hub, "/api/signup", None, &json!({"email": email, "password": "load-test-password-1"}));
         let token = session["token"].as_str().unwrap().to_owned();
         let mut ids = Vec::new();
+        if a == 0 && !o.list_kb.is_empty() {
+            let registered = http_post(&o.hub, "/api/machines", Some(&token), &json!({"name": "seed", "os": "linux"}));
+            seed(&o, registered["token"].as_str().unwrap());
+            println!("[{}] seeded {} listed projects", o.tag, o.list_kb.len());
+        }
         for m in 0..o.machines {
             let name = format!("fake-{a}-{m}");
             let registered = http_post(&o.hub, "/api/machines", Some(&token), &json!({"name": name, "os": "linux"}));
