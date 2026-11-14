@@ -69,6 +69,17 @@ pub async fn start(config: Config) -> Result<Running, String> {
         }
     });
     hub.watch_all().await?;
+    // Counts of what the hub holds, so memory that grows can be told apart by cause.
+    let census = Arc::downgrade(&hub);
+    tokio::spawn(async move {
+        let mut every = tokio::time::interval(hub::CENSUS_EVERY);
+        every.tick().await;
+        loop {
+            every.tick().await;
+            let Some(hub) = census.upgrade() else { break };
+            eprintln!("{}", hub.census());
+        }
+    });
     let app = http::router(hub.clone(), config.ui, config.downloads, learning, config.access).into_make_service_with_connect_info::<SocketAddr>();
     // `going_away` closes every socket with a close frame, which lets the graceful stop finish. A
     // socket that doesn't answer is dropped after the grace period.
