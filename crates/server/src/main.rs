@@ -7,6 +7,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// Counts live heap bytes for the hub's census (`pinned_server::heap`).
+#[global_allocator]
+static HEAP: pinned_server::heap::Counting = pinned_server::heap::Counting;
+
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const USAGE: &str = "usage:
   pinned-server hub --db <postgres url> --listen <addr> --ui <dir> --downloads <dir> [--public-url <url>] [--key-file <file>] [--signup first|open|invite] [--learning-db <postgres url>] [--trusted-proxy off|railway] [--max-accounts <n>]
@@ -119,13 +123,25 @@ fn hub(args: &[String]) -> Result<(), String> {
         let pinned_server::Running { hub, server, .. } = pinned_server::start(config).await?;
         let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).map_err(|e| e.to_string())?;
         let mut server = server;
-        tokio::select! {
-            ended = &mut server => return ended.map_err(|e| e.to_string()),
-            _ = terminate.recv() => eprintln!("pinned-server: SIGTERM, closing every socket before stopping"),
-            _ = tokio::signal::ctrl_c() => eprintln!("pinned-server: interrupted, closing every socket before stopping"),
+        let ended = tokio::select! {
+            ended = &mut server => Some(ended),
+            _ = terminate.recv() => { eprintln!("pinned-server: SIGTERM, closing every socket before stopping"); None }
+            _ = tokio::signal::ctrl_c() => { eprintln!("pinned-server: interrupted, closing every socket before stopping"); None }
+        };
+        let ended = match ended {
+            Some(ended) => ended,
+            None => {
+                hub.going_away();
+                server.await
+            }
+        };
+        // The sockets are closed, but a connectors task may still run and save. Write what has not
+        // reached Postgres, and again what was saved meanwhile, until a pass finds nothing waiting
+        // or FLUSH_WITHIN passed. A save after that last pass is not written.
+        if hub.flush_writes(pinned_server::FLUSH_WITHIN).await > 0 {
+            eprintln!("pinned-server: stopped with saves not written after {}s", pinned_server::FLUSH_WITHIN.as_secs());
         }
-        hub.going_away();
-        server.await.map_err(|e| e.to_string())
+        ended.map_err(|e| e.to_string())
     })
 }
 

@@ -21,9 +21,10 @@ use pinned_core::surface::{self, Side, Unlocked};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use crate::store_writes::{self, Landed, Writes};
 use tokio::sync::{mpsc, oneshot, OnceCell};
 use uuid::Uuid;
 
@@ -63,30 +64,70 @@ const OUTBOX_FRAMES: usize = 1024;
 pub struct Outbox {
     frames: mpsc::Sender<String>,
     overflowed: Arc<tokio::sync::Notify>,
+    /// The bytes of the frames that wait, for the census.
+    bytes: Arc<AtomicUsize>,
+}
+
+/// A frame to send, with its type for the census (`traffic`).
+#[derive(Clone)]
+pub struct Frame {
+    label: &'static str,
+    text: String,
+}
+
+/// The socket's end of an `Outbox`.
+pub struct OutboxQueue {
+    frames: mpsc::Receiver<String>,
+    bytes: Arc<AtomicUsize>,
+}
+
+impl OutboxQueue {
+    pub async fn recv(&mut self) -> Option<String> {
+        let text = self.frames.recv().await?;
+        self.bytes.fetch_sub(text.len(), Ordering::Relaxed);
+        Some(text)
+    }
+
+    pub fn try_recv(&mut self) -> Result<String, mpsc::error::TryRecvError> {
+        let text = self.frames.try_recv()?;
+        self.bytes.fetch_sub(text.len(), Ordering::Relaxed);
+        Ok(text)
+    }
 }
 
 impl Outbox {
     /// The outbox, the socket's end of it, and what fires once the peer fell behind.
-    pub fn new() -> (Outbox, mpsc::Receiver<String>, Arc<tokio::sync::Notify>) {
+    pub fn new() -> (Outbox, OutboxQueue, Arc<tokio::sync::Notify>) {
         let (frames, queue) = mpsc::channel(OUTBOX_FRAMES);
         let overflowed = Arc::new(tokio::sync::Notify::new());
-        (Outbox { frames, overflowed: overflowed.clone() }, queue, overflowed)
+        let bytes = Arc::new(AtomicUsize::new(0));
+        (Outbox { frames, overflowed: overflowed.clone(), bytes: bytes.clone() }, OutboxQueue { frames: queue, bytes }, overflowed)
     }
 
-    pub fn send(&self, frame: String) -> Result<(), ()> {
-        match self.frames.try_send(frame) {
-            Ok(()) => Ok(()),
+    pub fn send(&self, frame: Frame) -> Result<(), ()> {
+        let (label, len) = (frame.label, frame.text.len());
+        // Counted before the send, so the queue's end never subtracts bytes not added yet.
+        self.bytes.fetch_add(len, Ordering::Relaxed);
+        match self.frames.try_send(frame.text) {
+            Ok(()) => {
+                crate::traffic::sent(label, len);
+                Ok(())
+            }
             Err(mpsc::error::TrySendError::Full(_)) => {
+                self.bytes.fetch_sub(len, Ordering::Relaxed);
                 self.overflowed.notify_one();
                 Err(())
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => Err(()),
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                self.bytes.fetch_sub(len, Ordering::Relaxed);
+                Err(())
+            }
         }
     }
 
-    /// How many frames wait for the peer to read them.
-    fn queued(&self) -> usize {
-        self.frames.max_capacity() - self.frames.capacity()
+    /// How many frames wait for the peer to read them, and their bytes.
+    fn queued(&self) -> (usize, usize) {
+        (self.frames.max_capacity() - self.frames.capacity(), self.bytes.load(Ordering::Relaxed))
     }
 }
 pub type Sent = (String, oneshot::Receiver<Result<Value, String>>);
@@ -113,6 +154,14 @@ pub(crate) fn too_old_for_run_now(account: &Account, machine: &str, subject: &Su
 
 /// How often the hub logs its census.
 pub const CENSUS_EVERY: Duration = Duration::from_secs(300);
+
+/// `census_accounts`' line for one account.
+fn account_census(id: Uuid, runs: usize, (store_bytes, runs_bytes, pending): (usize, usize, store_writes::Pending)) -> String {
+    format!(
+        "pinned-server: census-account id={id} runs={runs} runs_bytes={runs_bytes} store_bytes={store_bytes} store_pending={} store_pending_bytes={} secrets_pending={} secrets_pending_bytes={}",
+        pending.store, pending.store_bytes, pending.secrets, pending.secrets_bytes
+    )
+}
 
 /// The resident set size, in KiB, from the text of `/proc/self/status`.
 fn rss_kib(status: &str) -> Option<u64> {
@@ -150,6 +199,8 @@ pub struct Hub {
     /// it: a queued Postgres write cannot fail on its own at the moment a box ends.
     #[doc(hidden)]
     pub refuse_run_saves: Arc<AtomicBool>,
+    /// Every account's `PgStorage` state, for the census and the flush on stop.
+    persisted: Mutex<HashMap<Uuid, Arc<Persisted>>>,
 }
 
 struct Unlock {
@@ -235,8 +286,8 @@ fn client_of(viewer: &str) -> Option<u64> {
     viewer.strip_prefix("client-")?.parse().ok()
 }
 
-fn frame<T: Serialize>(frame: &T) -> String {
-    serde_json::to_string(frame).unwrap()
+pub(crate) fn frame<T: Serialize + crate::traffic::Labeled>(frame: &T) -> Frame {
+    Frame { label: frame.label(), text: serde_json::to_string(frame).unwrap() }
 }
 
 fn json<T: Serialize>(value: T) -> Result<Value, String> {
@@ -247,7 +298,7 @@ impl Hub {
     pub fn new(db: Db, public_url: String, signup: Signup, box_api: Arc<dyn BoxApi>, box_policy: boxes::Policy, convex_http: Arc<dyn ConvexHttp>) -> Arc<Hub> {
         let public_url = public_url.trim_end_matches('/').to_owned();
         let boxes = Boxes::new(box_api, box_policy, &public_url);
-        Arc::new(Hub { db, public_url, signup, boxes, convex_http, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default(), unlocks: Mutex::default(), going_away: tokio::sync::watch::channel(false).0, held_expired: Mutex::default(), refuse_run_saves: Arc::default() })
+        Arc::new(Hub { db, public_url, signup, boxes, convex_http, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default(), unlocks: Mutex::default(), going_away: tokio::sync::watch::channel(false).0, held_expired: Mutex::default(), refuse_run_saves: Arc::default(), persisted: Mutex::default() })
     }
 
     /// Tells every socket to close with a going away frame. The hub stops serving afterwards.
@@ -317,6 +368,7 @@ impl Hub {
     pub fn census(&self) -> String {
         let accounts: Vec<Arc<Account>> = self.accounts.lock().unwrap().values().cloned().collect();
         let (mut clients, mut machines, mut frames_sum, mut frames_max, mut pending) = (0, 0, 0, 0, 0);
+        let (mut outbox_bytes_sum, mut outbox_bytes_max) = (0, 0);
         let (mut known_tabs, mut known_tab_facts, mut drive_waiters, mut tab_drive_waiting, mut tab_drives_coalesced) = (0, 0, 0, 0, 0);
         for account in &accounts {
             {
@@ -325,9 +377,11 @@ impl Hub {
                 machines += live.machines.len();
                 pending += live.machines.values().map(|machine| machine.pending.len()).sum::<usize>();
                 for out in live.clients.values().map(|client| &client.out).chain(live.machines.values().map(|machine| &machine.out)) {
-                    let queued = out.queued();
+                    let (queued, bytes) = out.queued();
                     frames_sum += queued;
                     frames_max = frames_max.max(queued);
+                    outbox_bytes_sum += bytes;
+                    outbox_bytes_max = outbox_bytes_max.max(bytes);
                 }
             }
             if let Some(connectors) = account.connectors.get() {
@@ -340,7 +394,7 @@ impl Hub {
             }
         }
         let mut line = format!(
-            "pinned-server: census accounts={} clients={clients} machines={machines} outbox_frames_sum={frames_sum} outbox_frames_max={frames_max} pending_calls={pending} known_tabs={known_tabs} known_tab_facts={known_tab_facts} drive_waiters={drive_waiters} tab_drive_waiting={tab_drive_waiting} tab_drives_coalesced={tab_drives_coalesced}",
+            "pinned-server: census accounts={} clients={clients} machines={machines} outbox_frames_sum={frames_sum} outbox_frames_max={frames_max} outbox_bytes_sum={outbox_bytes_sum} outbox_bytes_max={outbox_bytes_max} pending_calls={pending} known_tabs={known_tabs} known_tab_facts={known_tab_facts} drive_waiters={drive_waiters} tab_drive_waiting={tab_drive_waiting} tab_drives_coalesced={tab_drives_coalesced}",
             accounts.len()
         );
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
@@ -356,7 +410,41 @@ impl Hub {
                 line.push_str(&format!(" {field}={}", bytes >> 20));
             }
         }
+        line.push_str(&crate::heap::census());
+        line.push_str(&crate::traffic::take().fields());
         line
+    }
+
+    /// One census line per account whose connectors run: its runs and store, and what waits to be
+    /// written to its row. Counts and sizes only; the account appears by id.
+    pub fn census_accounts(&self) -> Vec<String> {
+        let mut persisted: Vec<(Uuid, Arc<Persisted>)> = self.persisted.lock().unwrap().iter().map(|(id, p)| (*id, p.clone())).collect();
+        persisted.sort_by_key(|(id, _)| *id);
+        // The accounts' lock is let go before any account's own locks are taken.
+        let accounts: HashMap<Uuid, Arc<Account>> = self.accounts.lock().unwrap().clone();
+        persisted
+            .iter()
+            .map(|(id, p)| {
+                let runs = accounts.get(id).and_then(|account| account.connectors.get()).map_or(0, |connectors| connectors.census().runs);
+                account_census(*id, runs, p.census())
+            })
+            .collect()
+    }
+
+    /// Writes every account's store and keys that wait, all at once, and again what was saved
+    /// meanwhile, until nothing waits or `within` passed. Answers how many accounts still have a
+    /// document waiting, which their ids follow in the log.
+    pub async fn flush_writes(&self, within: Duration) -> usize {
+        let started = Instant::now();
+        let accounts = || self.persisted.lock().unwrap().iter().map(|(id, p)| (*id, p.writes.clone())).collect();
+        let (waiting, left) = store_writes::flush_all(accounts, within).await;
+        for id in &left {
+            eprintln!("pinned-server: account {id}'s workflows or connector keys were not saved before the hub stopped");
+        }
+        if waiting > 0 {
+            eprintln!("pinned-server: {waiting} accounts had saves waiting at stop; {} written in {} ms", waiting.saturating_sub(left.len()), started.elapsed().as_millis());
+        }
+        left.len()
     }
 
     pub async fn watch_all(self: &Arc<Self>) -> Result<(), String> {
@@ -412,6 +500,7 @@ impl Hub {
             .get_or_try_init(|| async {
                 let stored = self.db.connectors(account.id).await?;
                 let storage = PgStorage::new(self.db.clone(), account.id, stored, self.refuse_run_saves.clone());
+                self.persisted.lock().unwrap().insert(account.id, storage.0.clone());
                 Ok::<_, String>(Arc::new(Connectors::new(storage, EXE_PLACEHOLDER.into())))
             })
             .await?;
@@ -706,6 +795,7 @@ impl Hub {
             }
             HubCall::SyncPull { project, paths } => {
                 let files = self.db.sync_pull(account.id, &project, &paths).await?;
+                crate::traffic::sync_pulled(files.iter().map(|(_, data)| data.len()).sum());
                 let files: Vec<sync::File> = files
                     .into_iter()
                     .map(|(entry, data)| {
@@ -1593,10 +1683,15 @@ struct Stored {
 
 /// Keeps an account's store and keys in memory and writes them to its row behind the
 /// connectors' back, so `Storage`'s synchronous calls never wait on Postgres.
-struct PgStorage {
+struct PgStorage(Arc<Persisted>);
+
+/// What `PgStorage` keeps of one account, which the hub reaches too for its census and to
+/// flush the writes when it stops.
+pub(crate) struct Persisted {
     state: Mutex<Stored>,
     keys: Mutex<BTreeMap<String, String>>,
-    writes: mpsc::UnboundedSender<Write>,
+    /// The newest store document and keys not yet written (`store_writes`).
+    writes: Arc<Writes>,
     /// `Hub::refuse_run_saves`.
     refuse_runs: Arc<AtomicBool>,
 }
@@ -1657,114 +1752,209 @@ fn prompt_outcome(answer: Result<Value, Unanswered>) -> Result<bool, String> {
     }
 }
 
-enum Write {
-    Store(Value),
-    Secrets(BTreeMap<String, String>),
-}
-
 impl PgStorage {
     fn new(db: Db, account: Uuid, stored: db::Connectors, refuse_runs: Arc<AtomicBool>) -> PgStorage {
-        let (writes, mut queue) = mpsc::unbounded_channel::<Write>();
-        tokio::spawn(async move {
-            while let Some(first) = queue.recv().await {
-                // Only the newest of each kind matters, so a burst of saves is one write.
-                let (mut store, mut secrets) = (None, None);
-                let mut next = Some(first);
-                while let Some(write) = next {
-                    match write {
-                        Write::Store(v) => store = Some(v),
-                        Write::Secrets(v) => secrets = Some(v),
+        let write: store_writes::Write = Arc::new(move |account, version, doc| {
+            let db = db.clone();
+            Box::pin(async move {
+                let version = i64::try_from(version).map_err(|_| store_writes::WriteFailure::Failed("a version past i64".into()))?;
+                match doc {
+                    store_writes::Doc::Store(bytes) => {
+                        // `save` and `save_runs` read the text through, so it is UTF-8; Postgres
+                        // answers text that is not with 22021 too. The text is borrowed from
+                        // `bytes`, which this write holds, not copied.
+                        fn text(bytes: &[u8]) -> Result<&str, store_writes::WriteFailure> {
+                            std::str::from_utf8(bytes).map_err(|_| store_writes::WriteFailure::Refused { sqlstate: "22021".into() })
+                        }
+                        let store = bytes.store.as_deref().map(text).transpose()?;
+                        let runs = (!bytes.runs.is_empty()).then(|| text(&bytes.runs)).transpose()?;
+                        if db.save_store(account, version, store, runs).await? {
+                            return Ok(Landed::Written);
+                        }
+                        let Some((stored, _)) = db.stored_versions(account).await? else { return Ok(Landed::Gone) };
+                        Ok(Landed::Behind(u64::try_from(stored).unwrap_or(0)))
                     }
-                    next = queue.try_recv().ok();
-                }
-                if let Some(store) = store {
-                    if let Err(e) = db.save_store(account, &store).await {
-                        eprintln!("pinned-server: could not save account {account}'s workflows: {e}");
+                    store_writes::Doc::Secrets(secrets) => {
+                        if db.save_secrets(account, version, &secrets).await? {
+                            return Ok(Landed::Written);
+                        }
+                        let Some((_, stored)) = db.stored_versions(account).await? else { return Ok(Landed::Gone) };
+                        Ok(Landed::Behind(u64::try_from(stored).unwrap_or(0)))
                     }
                 }
-                if let Some(secrets) = secrets {
-                    if let Err(e) = db.save_secrets(account, &secrets).await {
-                        eprintln!("pinned-server: could not save account {account}'s connector keys: {e}");
-                    }
-                }
-            }
+            })
         });
+        PgStorage::with_writer(account, stored, refuse_runs, write)
+    }
+
+    fn with_writer(account: Uuid, stored: db::Connectors, refuse_runs: Arc<AtomicBool>, write: store_writes::Write) -> PgStorage {
         let mut doc = stored.store;
         let runs = doc.as_object_mut().and_then(|map| map.remove("runs")).and_then(|value| serde_json::to_vec(&value).ok()).unwrap_or_default();
         let store = (doc != serde_json::json!({})).then(|| serde_json::to_vec(&doc).unwrap());
-        PgStorage {
+        PgStorage(Arc::new(Persisted {
             state: Mutex::new(Stored { store, runs }),
             keys: Mutex::new(stored.secrets),
-            writes,
+            writes: Writes::start(account, u64::try_from(stored.version).unwrap_or(0), write),
             refuse_runs,
-        }
+        }))
     }
 
     /// Queues the store and the runs as one document. Callers hold the `state` lock, so the
-    /// writer receives the documents in the order the state changed and the newest one wins.
-    fn persist(&self, state: &Stored) -> Result<(), String> {
-        let (store, runs) = (&state.store, &state.runs);
-        let mut doc: Value = match store {
-            Some(bytes) => serde_json::from_slice(bytes).map_err(|e| e.to_string())?,
-            None => serde_json::json!({}),
-        };
-        let object = doc.as_object_mut().ok_or("the workflow store is not an object")?;
-        if runs.is_empty() {
-            object.remove("runs");
-        } else {
-            object.insert("runs".to_owned(), serde_json::from_slice(runs).map_err(|e| e.to_string())?);
-        }
-        self.writes.send(Write::Store(doc)).map_err(|_| "the hub is shutting down".to_string())
+    /// documents take their numbers in the order the state changed and the newest one wins.
+    fn persist(&self, state: &Stored) {
+        self.0.writes.queue_store(state.store.clone(), state.runs.clone());
     }
+}
 
-    fn write_keys(&self, keys: &BTreeMap<String, String>) {
-        let _ = self.writes.send(Write::Secrets(keys.clone()));
+impl Drop for PgStorage {
+    fn drop(&mut self) {
+        self.0.writes.close();
+    }
+}
+
+impl Persisted {
+    /// `store_bytes`, `runs_bytes` and what waits to be written.
+    fn census(&self) -> (usize, usize, store_writes::Pending) {
+        let (store, runs) = {
+            let state = self.state.lock().unwrap();
+            (state.store.as_ref().map_or(0, Vec::len), state.runs.len())
+        };
+        (store, runs, self.writes.pending())
     }
 }
 
 impl Storage for PgStorage {
     fn load(&self) -> Option<Vec<u8>> {
-        self.state.lock().unwrap().store.clone()
+        self.0.state.lock().unwrap().store.clone()
     }
 
     fn save(&self, store: &[u8]) -> Result<(), String> {
-        serde_json::from_slice::<Value>(store).map_err(|e| e.to_string())?;
-        let mut state = self.state.lock().unwrap();
+        // Read through, without building the document; the writer sends the text as it is.
+        let text = std::str::from_utf8(store).map_err(|e| e.to_string())?;
+        serde_json::from_str::<HashMap<String, serde::de::IgnoredAny>>(text).map_err(|e| e.to_string())?;
+        jsonb_takes(store, DOCUMENT_DEPTH)?;
+        let mut state = self.0.state.lock().unwrap();
         state.store = Some(store.to_vec());
-        self.persist(&state)
+        self.persist(&state);
+        Ok(())
     }
 
     fn load_runs(&self) -> Option<Vec<u8>> {
-        let runs = self.state.lock().unwrap().runs.clone();
+        let runs = self.0.state.lock().unwrap().runs.clone();
         (!runs.is_empty()).then_some(runs)
     }
 
     fn save_runs(&self, bytes: &[u8]) -> Result<(), String> {
-        if self.refuse_runs.load(Ordering::SeqCst) {
+        if self.0.refuse_runs.load(Ordering::SeqCst) {
             return Err("could not save the runs: refused".into());
         }
-        let mut state = self.state.lock().unwrap();
+        if !bytes.is_empty() {
+            let text = std::str::from_utf8(bytes).map_err(|e| e.to_string())?;
+            serde_json::from_str::<serde::de::IgnoredAny>(text).map_err(|e| e.to_string())?;
+            // One less: the runs sit under the store's `runs`.
+            jsonb_takes(bytes, DOCUMENT_DEPTH - 1)?;
+        }
+        let mut state = self.0.state.lock().unwrap();
         state.runs = bytes.to_vec();
-        self.persist(&state)
+        self.persist(&state);
+        Ok(())
     }
 
     fn key(&self, name: &str) -> Option<String> {
-        self.keys.lock().unwrap().get(name).cloned().filter(|k| !k.is_empty())
+        self.0.keys.lock().unwrap().get(name).cloned().filter(|k| !k.is_empty())
     }
 
     fn write_key(&self, name: &str, key: &str) -> Result<(), String> {
-        let mut keys = self.keys.lock().unwrap();
+        let mut keys = self.0.keys.lock().unwrap();
         keys.insert(name.to_owned(), key.to_owned());
-        self.write_keys(&keys);
+        self.0.writes.queue_secrets(keys.clone());
         Ok(())
     }
 
     fn remove_key(&self, name: &str) {
-        let mut keys = self.keys.lock().unwrap();
+        let mut keys = self.0.keys.lock().unwrap();
         if keys.remove(name).is_some() {
-            self.write_keys(&keys);
+            self.0.writes.queue_secrets(keys.clone());
         }
     }
+}
+
+/// One account's store and keys as one hub process keeps them, built as `Hub::connectors` builds
+/// them: for a test of two hub processes that write one row.
+#[doc(hidden)]
+pub struct AccountStore(PgStorage);
+
+impl AccountStore {
+    pub async fn load(db: Db, account: Uuid) -> Result<AccountStore, String> {
+        let stored = db.connectors(account).await?;
+        Ok(AccountStore(PgStorage::new(db, account, stored, Arc::default())))
+    }
+
+    pub fn save(&self, store: &[u8]) -> Result<(), String> {
+        self.0.save(store)
+    }
+
+    pub fn write_key(&self, name: &str, key: &str) -> Result<(), String> {
+        self.0.write_key(name, key)
+    }
+
+    /// `Writes::flush`.
+    pub async fn flush(&self, within: Duration) -> bool {
+        self.0 .0.writes.flush(within).await
+    }
+}
+
+/// The deepest nesting of arrays and objects the account row's document may have: what
+/// serde_json reads into a `Value`, as loading the account does (`Db::connectors`). `save` and
+/// `save_runs` refuse what is deeper, so a document they took is not too deep for the writer or
+/// the next load. A row written some other way may still not load; the load answers an error.
+pub const DOCUMENT_DEPTH: usize = 127;
+
+/// Refuses JSON text, already read through, that jsonb would refuse though serde_json reads it:
+/// nested deeper than `most`, or with a `\u0000` escape or a lone UTF-16 surrogate escape in a
+/// string or a key. serde_json reads `\u0000` into a string, and skips any `\u` escape it
+/// ignores; jsonb holds neither.
+fn jsonb_takes(json: &[u8], most: usize) -> Result<(), String> {
+    let (mut depth, mut in_string) = (0usize, false);
+    // The string's last escape was a high surrogate, which a low one must follow.
+    let mut high = false;
+    let mut at = 0;
+    while let Some(&b) = json.get(at) {
+        at += 1;
+        if in_string {
+            let mut unit = None;
+            match b {
+                b'\\' if json.get(at) == Some(&b'u') => {
+                    let hex = json.get(at + 1..at + 5).and_then(|hex| std::str::from_utf8(hex).ok());
+                    unit = Some(hex.and_then(|hex| u16::from_str_radix(hex, 16).ok()).ok_or("a bad \\u escape")?);
+                    at += 5;
+                }
+                b'\\' => at += 1,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            if unit == Some(0) {
+                return Err("a \\u0000 escape, which Postgres cannot store".into());
+            }
+            if high != matches!(unit, Some(0xDC00..=0xDFFF)) {
+                return Err("a lone UTF-16 surrogate escape, which Postgres cannot store".into());
+            }
+            high = matches!(unit, Some(0xD800..=0xDBFF));
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'[' | b'{' => {
+                depth += 1;
+                if depth > most {
+                    return Err(format!("nested deeper than {most} levels"));
+                }
+            }
+            b']' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// A task id as an app or an agent sends it. Every schedule call, and the agent check before it
@@ -1786,6 +1976,42 @@ mod tests {
         assert_eq!(cgroup_bytes(stat, "anon"), Some(1 << 20));
         assert_eq!(cgroup_bytes(stat, "file"), Some(3 << 20));
         assert_eq!(cgroup_bytes("", "anon"), None);
+    }
+
+    /// The fields of a census line after its prefix, each `name=<number>`, or the failure.
+    fn numeric_fields<'a>(line: &'a str, prefix: &str) -> Vec<(&'a str, u64)> {
+        let rest = line.strip_prefix(prefix).unwrap_or_else(|| panic!("{line:?} starts with {prefix:?}"));
+        rest.split_whitespace()
+            .map(|field| {
+                let (name, value) = field.split_once('=').unwrap_or_else(|| panic!("{field:?} is name=value"));
+                assert!(!name.is_empty() && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'), "{name:?}");
+                (name, value.parse().unwrap_or_else(|_| panic!("{field:?} holds a number")))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_census_fields_are_names_and_numbers_only() {
+        crate::traffic::sent("client_event_output", 1500);
+        crate::traffic::sent("client_event_output", 500);
+        crate::traffic::received("machine_reply", 7);
+        crate::traffic::sync_pulled(4096);
+        let line = format!("pinned-server: census{}{}", crate::heap::census(), crate::traffic::take().fields());
+        let fields: HashMap<&str, u64> = numeric_fields(&line, "pinned-server: census").into_iter().collect();
+        for name in ["heap_live_mb", "heap_big_live_mb", "heap_allocated_gb", "sent_n", "sent_bytes", "sent_max", "recv_n", "recv_bytes", "recv_max", "sync_pulls", "sync_pull_bytes"] {
+            assert!(fields.contains_key(name), "{name} in {line}");
+        }
+        // Other tests may send frames meanwhile, so these are at least what this one counted.
+        assert!(fields["sent_client_event_output_n"] >= 2 && fields["sent_client_event_output_bytes"] >= 2000 && fields["sent_client_event_output_max"] >= 1500, "{line}");
+        assert!(fields["recv_machine_reply_n"] >= 1 && fields["sync_pull_bytes"] >= 4096, "{line}");
+        let pending = store_writes::Pending { store: 1, store_bytes: 1234, secrets: 0, secrets_bytes: 0 };
+        let id = Uuid::from_u128(7);
+        let account = account_census(id, 3, (100, 200, pending));
+        let fields = numeric_fields(&account, &format!("pinned-server: census-account id={id}"));
+        assert_eq!(
+            fields,
+            vec![("runs", 3), ("runs_bytes", 200), ("store_bytes", 100), ("store_pending", 1), ("store_pending_bytes", 1234), ("secrets_pending", 0), ("secrets_pending_bytes", 0)]
+        );
     }
 
     #[test]
@@ -1983,5 +2209,127 @@ mod tests {
             Some(UpdateStatus::Failed { to: String::new(), reason: "came back on 1.2.0".into() }),
         );
         assert_eq!(reconcile(None, "1.2.0", None), None);
+    }
+
+    #[tokio::test]
+    async fn saves_through_storage_while_postgres_stalls_hold_one_document_and_the_newest_lands() {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let written = Arc::new(Mutex::new(vec![]));
+        let write: store_writes::Write = {
+            let (gate, written) = (gate.clone(), written.clone());
+            Arc::new(move |_, _, doc| {
+                let (gate, written) = (gate.clone(), written.clone());
+                Box::pin(async move {
+                    gate.acquire().await.unwrap().forget();
+                    if let store_writes::Doc::Store(bytes) = doc {
+                        let mut doc: Value = serde_json::from_slice(bytes.store.as_deref().unwrap_or(b"{}")).unwrap();
+                        doc["runs"] = serde_json::from_slice(&bytes.runs).unwrap();
+                        written.lock().unwrap().push(doc);
+                    }
+                    Ok(Landed::Written)
+                })
+            })
+        };
+        let stored = db::Connectors { store: serde_json::json!({ "runs": [] }), secrets: BTreeMap::new(), version: 0 };
+        let storage = PgStorage::with_writer(Uuid::nil(), stored, Arc::default(), write);
+        for n in 0..20 {
+            storage.save(format!(r#"{{"n":{n}}}"#).as_bytes()).unwrap();
+            storage.save_runs(format!(r#"[{{"run":{n}}}]"#).as_bytes()).unwrap();
+            tokio::task::yield_now().await;
+        }
+        assert!(storage.save(b"[1]").is_err(), "a store that is not an object is refused before it is queued");
+        assert!(storage.save_runs(b"{").is_err());
+        let (store_bytes, runs_bytes, pending) = storage.0.census();
+        assert_eq!((store_bytes, runs_bytes), (r#"{"n":19}"#.len(), r#"[{"run":19}]"#.len()));
+        assert_eq!((pending.store, pending.store_bytes), (1, store_bytes + runs_bytes), "one document waits");
+        gate.add_permits(100);
+        assert!(storage.0.writes.flush(Duration::from_secs(5)).await);
+        assert_eq!(written.lock().unwrap().last().unwrap(), &serde_json::json!({ "n": 19, "runs": [{ "run": 19 }] }));
+    }
+
+    #[tokio::test]
+    async fn a_store_or_runs_too_deep_for_the_row_is_refused_at_save_and_one_at_the_limit_is_written_as_sent() {
+        let written = Arc::new(Mutex::new(vec![]));
+        let write: store_writes::Write = {
+            let written = written.clone();
+            Arc::new(move |_, _, doc| {
+                let written = written.clone();
+                Box::pin(async move {
+                    if let store_writes::Doc::Store(bytes) = doc {
+                        written.lock().unwrap().push((bytes.store.clone(), bytes.runs.clone()));
+                    }
+                    Ok(Landed::Written)
+                })
+            })
+        };
+        let stored = db::Connectors { store: serde_json::json!({}), secrets: BTreeMap::new(), version: 0 };
+        let storage = PgStorage::with_writer(Uuid::nil(), stored, Arc::default(), write);
+        let nested = |n: usize| format!("{}0{}", "[".repeat(n), "]".repeat(n));
+        let store_at = |n: usize| format!(r#"{{"s":"[[\\\"{{","deep":{}}}"#, nested(n - 1));
+        assert!(storage.save(store_at(200).as_bytes()).is_err(), "a store 200 deep is refused, not taken and dropped");
+        assert!(storage.save_runs(nested(200).as_bytes()).is_err(), "runs 200 deep likewise");
+        assert!(storage.save(store_at(DOCUMENT_DEPTH + 1).as_bytes()).is_err());
+        assert!(storage.save_runs(nested(DOCUMENT_DEPTH).as_bytes()).is_err(), "runs sit one level under the store");
+        assert!(storage.save(b"{\"a\":\"\xff\"}").is_err(), "text that is not UTF-8 is refused");
+        assert_eq!(storage.0.writes.pending(), store_writes::Pending::default(), "nothing refused was queued");
+
+        let (store, runs) = (store_at(DOCUMENT_DEPTH), nested(DOCUMENT_DEPTH - 1));
+        storage.save(store.as_bytes()).unwrap();
+        storage.save_runs(runs.as_bytes()).unwrap();
+        assert!(storage.0.writes.flush(Duration::from_secs(5)).await);
+        assert_eq!(written.lock().unwrap().last().unwrap(), &(Some(store.clone().into_bytes()), runs.clone().into_bytes()), "the writer sends the text as saved");
+        // The row's document at the limit still reads back as a Value, as loading the account reads it.
+        let mut doc: Value = serde_json::from_str(&store).unwrap();
+        doc["runs"] = serde_json::from_str(&runs).unwrap();
+        assert!(serde_json::from_str::<Value>(&doc.to_string()).is_ok());
+    }
+
+    /// serde_json reads `\u0000` and, through `IgnoredAny`, a lone UTF-16 surrogate, but jsonb
+    /// refuses both; `save` and `save_runs` refuse them too, so the writer never drops a save they took.
+    #[tokio::test]
+    async fn a_nul_escape_or_a_lone_surrogate_is_refused_at_save_and_an_escaped_backslash_before_u0000_is_not() {
+        let written = Arc::new(Mutex::new(vec![]));
+        let write: store_writes::Write = {
+            let written = written.clone();
+            Arc::new(move |_, _, doc| {
+                let written = written.clone();
+                Box::pin(async move {
+                    if let store_writes::Doc::Store(bytes) = doc {
+                        written.lock().unwrap().push((bytes.store.clone(), bytes.runs.clone()));
+                    }
+                    Ok(Landed::Written)
+                })
+            })
+        };
+        let stored = db::Connectors { store: serde_json::json!({}), secrets: BTreeMap::new(), version: 0 };
+        let storage = PgStorage::with_writer(Uuid::nil(), stored, Arc::default(), write);
+        for store in [
+            r#"{"a":"x\u0000y"}"#,
+            r#"{"a\u0000":1}"#,
+            r#"{"a":{"b\u0000":1}}"#,
+            r#"{"a":["\\\u0000"]}"#,
+            r#"{"a":"\ud800"}"#,
+            r#"{"a":"\udc00"}"#,
+            r#"{"a":"\uD800x"}"#,
+            r#"{"a":"\ud800\u0041"}"#,
+            r#"{"a":"\ud800\ud800\udc00"}"#,
+            r#"{"a":{"\udbff":1}}"#,
+        ] {
+            assert!(serde_json::from_str::<HashMap<String, serde::de::IgnoredAny>>(store).is_ok(), "serde reads {store}");
+            assert!(storage.save(store.as_bytes()).is_err(), "jsonb refuses {store}, so save does");
+        }
+        for runs in [r#"[{"x":"\u0000"}]"#, r#"["\udfff"]"#, r#"[{"\u0000":1}]"#] {
+            assert!(serde_json::from_str::<serde::de::IgnoredAny>(runs).is_ok(), "serde reads {runs}");
+            assert!(storage.save_runs(runs.as_bytes()).is_err(), "jsonb refuses {runs}, so save_runs does");
+        }
+        assert_eq!(storage.0.writes.pending(), store_writes::Pending::default(), "nothing refused was queued");
+
+        // An escaped backslash followed by the text u0000 is ordinary text; so is a surrogate pair.
+        let store = r#"{"a":"x\\u0000y","b\\u0000":"\\\\u0000","c":"\ud83d\ude00","d":"\u00e9"}"#;
+        let runs = r#"[{"x":"\\u0000","y":"\uDBFF\uDFFF"}]"#;
+        storage.save(store.as_bytes()).unwrap();
+        storage.save_runs(runs.as_bytes()).unwrap();
+        assert!(storage.0.writes.flush(Duration::from_secs(5)).await);
+        assert_eq!(written.lock().unwrap().last().unwrap(), &(Some(store.as_bytes().to_vec()), runs.as_bytes().to_vec()));
     }
 }

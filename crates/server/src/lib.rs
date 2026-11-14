@@ -1,6 +1,7 @@
 pub mod box_exit;
 pub mod boxes;
 pub mod db;
+pub mod heap;
 pub mod http;
 pub mod hub;
 pub mod mcp;
@@ -8,6 +9,8 @@ pub mod oauth;
 pub mod relay;
 pub mod remote;
 pub mod self_update;
+mod store_writes;
+pub mod traffic;
 pub mod surface;
 
 use std::net::SocketAddr;
@@ -39,6 +42,9 @@ pub struct Config {
 
 /// How long the hub gives sockets to close once it is told to stop, before it drops them.
 pub const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+/// How long a stopping hub waits for every account's waiting store and keys to be written, after
+/// its sockets closed (`hub::Hub::flush_writes`).
+pub const FLUSH_WITHIN: std::time::Duration = std::time::Duration::from_secs(10);
 
 pub struct Running {
     pub hub: Arc<hub::Hub>,
@@ -72,12 +78,17 @@ pub async fn start(config: Config) -> Result<Running, String> {
     // Counts of what the hub holds, so memory that grows can be told apart by cause.
     let census = Arc::downgrade(&hub);
     tokio::spawn(async move {
-        let mut every = tokio::time::interval(hub::CENSUS_EVERY);
+        // PINNED_CENSUS_SECS shortens it for a local run.
+        let every_secs = std::env::var("PINNED_CENSUS_SECS").ok().and_then(|s| s.parse().ok()).filter(|&secs| secs > 0).unwrap_or(hub::CENSUS_EVERY.as_secs());
+        let mut every = tokio::time::interval(std::time::Duration::from_secs(every_secs));
         every.tick().await;
         loop {
             every.tick().await;
             let Some(hub) = census.upgrade() else { break };
             eprintln!("{}", hub.census());
+            for line in hub.census_accounts() {
+                eprintln!("{line}");
+            }
         }
     });
     let app = http::router(hub.clone(), config.ui, config.downloads, learning, config.access).into_make_service_with_connect_info::<SocketAddr>();
