@@ -192,3 +192,20 @@ async fn a_save_for_an_account_whose_row_is_gone_is_dropped_after_one_try() {
     assert!(storage.flush(Duration::from_secs(5)).await, "the slots empty");
     assert!(started.elapsed() < Duration::from_millis(400), "after one try, no retry: {:?}", started.elapsed());
 }
+
+/// A statement Postgres cannot run against the schema (SQLSTATE class 42) is not the document's
+/// fault: the write fails and is retried, it is not refused and dropped.
+#[tokio::test]
+async fn a_statement_the_schema_does_not_fit_is_a_failure_to_retry_not_a_refusal() {
+    let dir = tempfile::tempdir().unwrap();
+    let (url, db, account) = fresh("class_42", dir.path()).await;
+    let (other, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls).await.unwrap();
+    tokio::spawn(connection);
+    other.batch_execute("alter table accounts rename column store_version to store_version_moved").await.unwrap();
+    match db.save_store(account, 1, Some(r#"{"n":1}"#), None).await {
+        Err(WriteFailure::Failed(_)) => {}
+        other => panic!("expected a failure to retry, got {other:?}"),
+    }
+    other.batch_execute("alter table accounts rename column store_version_moved to store_version").await.unwrap();
+    assert!(db.save_store(account, 1, Some(r#"{"n":1}"#), None).await.unwrap(), "the same write lands once the schema fits");
+}

@@ -416,17 +416,18 @@ pub struct Connectors {
 /// Why a write of an account's document did not happen.
 #[derive(Debug)]
 pub enum WriteFailure {
-    /// Postgres refused the statement itself (SQLSTATE class 22, 23 or 42): the same document
-    /// is refused again however often it is written.
+    /// Postgres refused the document (SQLSTATE class 22 or 23): the same document is refused
+    /// again however often it is written.
     Refused { sqlstate: String },
-    /// The connection or a wait failed; the same write may work later.
+    /// The connection or a wait failed, or the statement, the schema or the grants are wrong
+    /// (class 42), which a fix or a migration ends; the same write may work later.
     Failed(String),
 }
 
 impl WriteFailure {
     fn of(e: tokio_postgres::Error) -> WriteFailure {
         match e.code().map(|code| code.code()) {
-            Some(sqlstate) if ["22", "23", "42"].iter().any(|class| sqlstate.starts_with(class)) => WriteFailure::Refused { sqlstate: sqlstate.to_owned() },
+            Some(sqlstate) if ["22", "23"].iter().any(|class| sqlstate.starts_with(class)) => WriteFailure::Refused { sqlstate: sqlstate.to_owned() },
             _ => WriteFailure::Failed(e.to_string()),
         }
     }
