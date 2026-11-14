@@ -127,6 +127,11 @@ create table if not exists task_runs (task uuid not null references tasks on del
 create index if not exists task_runs_account on task_runs (account, task, due_at desc);
 -- Whether tag and main protection exist for the account's repos: set only by the user's app, off until then.
 alter table accounts add column if not exists release_protection boolean not null default false;
+-- The version of the store and of the secrets the row holds. A write sets them only above what is
+-- stored, so a write that lands late never replaces a newer document. A hub that knows nothing of
+-- them writes the documents alone and leaves them as they are.
+alter table accounts add column if not exists store_version bigint not null default 0;
+alter table accounts add column if not exists secrets_version bigint not null default 0;
 -- A box an agent opened through act, until the box ends and is recorded as that session's task.
 -- `started` is unix milliseconds.
 create table if not exists agent_boxes (box text primary key, account uuid not null references accounts on delete cascade,
@@ -214,24 +219,84 @@ pub struct Learning(Connection);
 #[derive(Clone)]
 struct Connection {
     url: Arc<str>,
-    /// Replaced when Postgres drops the connection, as on its restart, so the hub doesn't stay down.
-    client: Arc<tokio::sync::Mutex<Arc<Client>>>,
+    /// Replaced when Postgres drops the connection, as on its restart, so the hub doesn't stay
+    /// down, and when a write gave it up (`write`). None until the next `client` opens one.
+    client: Arc<tokio::sync::Mutex<Option<Arc<Client>>>>,
+    /// `WRITE_WAIT` unless a test shortened it (`Db::shorten_write_wait`); 0 is unset.
+    write_wait_ms: Arc<std::sync::atomic::AtomicU64>,
 }
+
+/// How long opening a connection to Postgres may take, unless the url says.
+const CONNECT_WAIT: Duration = Duration::from_secs(10);
+/// Postgres cancels a statement of the hub's that runs longer (`statement_timeout`).
+const STATEMENT_LIMIT: Duration = Duration::from_secs(120);
+/// How long `Connection::write` waits for a client and its statement together before it gives the
+/// connection up. Longer than `STATEMENT_LIMIT`, so Postgres has cancelled a statement it was
+/// running by then.
+const WRITE_WAIT: Duration = Duration::from_secs(150);
 
 impl Connection {
     async fn open(url: &str, schema: &str) -> Result<Connection, String> {
         let client = open(url).await?;
         client.batch_execute(schema).await.map_err(|e| format!("could not create the tables: {e}"))?;
-        Ok(Connection { url: url.into(), client: Arc::new(tokio::sync::Mutex::new(Arc::new(client))) })
+        Ok(Connection { url: url.into(), client: Arc::new(tokio::sync::Mutex::new(Some(Arc::new(client)))), write_wait_ms: Arc::default() })
     }
 
     async fn client(&self) -> Result<Arc<Client>, String> {
         let mut client = self.client.lock().await;
-        if client.is_closed() {
-            *client = Arc::new(open(&self.url).await?);
-            eprintln!("pinned-server: reconnected to Postgres");
+        match &*client {
+            Some(open) if !open.is_closed() => Ok(open.clone()),
+            _ => {
+                let fresh = Arc::new(open(&self.url).await?);
+                *client = Some(fresh.clone());
+                eprintln!("pinned-server: reconnected to Postgres");
+                Ok(fresh)
+            }
         }
-        Ok(client.clone())
+    }
+
+    /// Runs one write and answers the rows it changed, waiting at most `write_wait` for the
+    /// client and the statement together. A write that gets no answer by then gives its
+    /// connection up, and the next `client` opens another. Nothing is cancelled: a cancel reaches
+    /// whatever that backend runs then, maybe another caller's statement. The statement may still
+    /// run later, which the versions of the row make harmless.
+    async fn write(&self, statement: &str, params: &[&(dyn tokio_postgres::types::ToSql + Sync)]) -> Result<u64, WriteFailure> {
+        self.bounded(|client| async move { client.execute(statement, params).await }).await
+    }
+
+    /// Runs `run` on the client as `write` runs its statement, within the same wait.
+    async fn bounded<T, F>(&self, run: impl FnOnce(Arc<Client>) -> F) -> Result<T, WriteFailure>
+    where
+        F: std::future::Future<Output = Result<T, tokio_postgres::Error>>,
+    {
+        let mut used = None;
+        let attempt = async {
+            let client = self.client().await.map_err(WriteFailure::Failed)?;
+            used = Some(client.clone());
+            run(client).await.map_err(WriteFailure::of)
+        };
+        let wait = self.write_wait();
+        match tokio::time::timeout(wait, attempt).await {
+            Ok(done) => done,
+            Err(_) => {
+                if let Some(client) = used {
+                    // Bounded too: another caller may hold the lock while it connects.
+                    if let Ok(mut shared) = tokio::time::timeout(CONNECT_WAIT, self.client.lock()).await {
+                        if shared.as_ref().is_some_and(|open| Arc::ptr_eq(open, &client)) {
+                            *shared = None;
+                        }
+                    }
+                }
+                Err(WriteFailure::Failed(format!("Postgres did not answer within {}s; the connection is given up", wait.as_secs())))
+            }
+        }
+    }
+
+    fn write_wait(&self) -> Duration {
+        match self.write_wait_ms.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => WRITE_WAIT,
+            ms => Duration::from_millis(ms),
+        }
     }
 }
 
@@ -344,6 +409,28 @@ pub struct MachineRow {
 pub struct Connectors {
     pub store: Value,
     pub secrets: BTreeMap<String, String>,
+    /// The newest version the row holds of either document; this process writes above it.
+    pub version: i64,
+}
+
+/// Why a write of an account's document did not happen.
+#[derive(Debug)]
+pub enum WriteFailure {
+    /// Postgres refused the document (SQLSTATE class 22 or 23): the same document is refused
+    /// again however often it is written.
+    Refused { sqlstate: String },
+    /// The connection or a wait failed, or the statement, the schema or the grants are wrong
+    /// (class 42), which a fix or a migration ends; the same write may work later.
+    Failed(String),
+}
+
+impl WriteFailure {
+    fn of(e: tokio_postgres::Error) -> WriteFailure {
+        match e.code().map(|code| code.code()) {
+            Some(sqlstate) if ["22", "23"].iter().any(|class| sqlstate.starts_with(class)) => WriteFailure::Refused { sqlstate: sqlstate.to_owned() },
+            _ => WriteFailure::Failed(e.to_string()),
+        }
+    }
 }
 
 /// Seals the integrations' keys before they reach Postgres, so a dump or a backup of the
@@ -395,12 +482,28 @@ impl Sealer {
 }
 
 async fn open(url: &str) -> Result<Client, String> {
-    let (client, connection) = tokio_postgres::connect(url, NoTls).await.map_err(|e| format!("could not connect to Postgres: {e}"))?;
+    let mut config: tokio_postgres::Config = url.parse().map_err(|e| format!("could not connect to Postgres: {e}"))?;
+    if config.get_connect_timeout().is_none() {
+        config.connect_timeout(CONNECT_WAIT);
+    }
+    // A peer that went away without closing is noticed in about a minute, not at the kernel's
+    // hours, so a statement waiting on it fails and the connection is replaced.
+    config.keepalives(true).keepalives_idle(Duration::from_secs(30)).keepalives_interval(Duration::from_secs(10)).keepalives_retries(3);
+    config.tcp_user_timeout(Duration::from_secs(60));
+    let connecting = tokio::time::timeout(CONNECT_WAIT + Duration::from_secs(5), config.connect(NoTls));
+    let (client, connection) = connecting.await.map_err(|_| "could not connect to Postgres: it did not answer".to_string())?.map_err(|e| format!("could not connect to Postgres: {e}"))?;
     tokio::spawn(async move {
         if let Err(e) = connection.await {
             eprintln!("pinned-server: Postgres connection ended: {e}");
         }
     });
+    // A plain statement rather than a startup option, which a pooler in front of Postgres may refuse.
+    // Bounded like the connect: `client` runs this holding the lock every caller waits on.
+    match tokio::time::timeout(CONNECT_WAIT, client.batch_execute(&format!("set statement_timeout = {}", STATEMENT_LIMIT.as_millis()))).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => eprintln!("pinned-server: Postgres keeps its own statement timeout: {e}"),
+        Err(_) => return Err("could not connect to Postgres: it did not answer the statement timeout".into()),
+    }
     Ok(client)
 }
 
@@ -1492,10 +1595,13 @@ impl Db {
     }
 
     pub async fn connectors(&self, account: Uuid) -> Result<Connectors, String> {
-        let row = self.client().await?.query_one("select store, secrets from accounts where id = $1", &[&account]).await.map_err(err)?;
-        let sealed: BTreeMap<String, String> = serde_json::from_value(row.get(1)).map_err(|e| format!("account {account} has unreadable secrets: {e}"))?;
+        let row = self.client().await?.query_one("select store, secrets, greatest(store_version, secrets_version) from accounts where id = $1", &[&account]).await.map_err(err)?;
+        // A row this hub cannot read, such as a number past f64 that jsonb holds, is an error, not a panic.
+        let unreadable = |what: &str, e: tokio_postgres::Error| format!("account {account} has an unreadable {what}: {}", err(e));
+        let sealed: Value = row.try_get(1).map_err(|e| unreadable("secrets", e))?;
+        let sealed: BTreeMap<String, String> = serde_json::from_value(sealed).map_err(|e| format!("account {account} has unreadable secrets: {e}"))?;
         let secrets = sealed.into_iter().map(|(name, value)| Ok((name, self.sealer.open(&value)?))).collect::<Result<_, String>>()?;
-        Ok(Connectors { store: row.get(0), secrets })
+        Ok(Connectors { store: row.try_get(0).map_err(|e| unreadable("store", e))?, secrets, version: row.try_get(2).map_err(|e| unreadable("version", e))? })
     }
 
     pub async fn accounts_with_connectors(&self) -> Result<Vec<Uuid>, String> {
@@ -1503,8 +1609,38 @@ impl Db {
         Ok(rows.iter().map(|r| r.get(0)).collect())
     }
 
-    pub async fn save_store(&self, account: Uuid, store: &Value) -> Result<(), String> {
-        self.client().await?.execute("update accounts set store = $2 where id = $1", &[&account, store]).await.map_err(err).map(drop)
+    /// Writes the store, an object as JSON text, with `runs` under `runs` (none removes them),
+    /// unless the row holds this version or a newer one. True when it was written. The text goes
+    /// to Postgres as it is; the hub never builds the document.
+    pub async fn save_store(&self, account: Uuid, version: i64, store: Option<&str>, runs: Option<&str>) -> Result<bool, WriteFailure> {
+        let store = store.unwrap_or("{}");
+        let written = self
+            .connection
+            .write(
+                "update accounts set store = case when $4::text is null then $3::text::jsonb - 'runs'
+                   else ($3::text::jsonb - 'runs') || jsonb_build_object('runs', $4::text::jsonb) end, store_version = $2
+                 where id = $1 and store_version < $2",
+                &[&account, &version, &store, &runs],
+            )
+            .await?;
+        Ok(written == 1)
+    }
+
+    /// The versions the row holds of the store and of the connector keys, read within the wait
+    /// of a write: the writer asks when a write of its found a newer version there. None when the
+    /// account has no row any more.
+    pub async fn stored_versions(&self, account: Uuid) -> Result<Option<(i64, i64)>, WriteFailure> {
+        let row = self
+            .connection
+            .bounded(|client| async move { client.query_opt("select store_version, secrets_version from accounts where id = $1", &[&account]).await })
+            .await?;
+        Ok(row.map(|row| (row.get(0), row.get(1))))
+    }
+
+    /// Shortens how long a write waits before it gives its connection up, for a test.
+    #[doc(hidden)]
+    pub fn shorten_write_wait(&self, wait: Duration) {
+        self.connection.write_wait_ms.store(wait.as_millis().max(1) as u64, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Stores `record` as the machine's latest word on that task.
@@ -1679,10 +1815,16 @@ impl Db {
         Ok(touched)
     }
 
-    pub async fn save_secrets(&self, account: Uuid, secrets: &BTreeMap<String, String>) -> Result<(), String> {
+    /// Writes the connector keys sealed, unless the row holds this version or a newer one. True
+    /// when they were written.
+    pub async fn save_secrets(&self, account: Uuid, version: i64, secrets: &BTreeMap<String, String>) -> Result<bool, WriteFailure> {
         let sealed: BTreeMap<&String, String> = secrets.iter().map(|(name, value)| (name, self.sealer.seal(value))).collect();
-        let sealed = serde_json::to_value(sealed).map_err(|e| e.to_string())?;
-        self.client().await?.execute("update accounts set secrets = $2 where id = $1", &[&account, &sealed]).await.map_err(err).map(drop)
+        let sealed = serde_json::to_value(sealed).map_err(|e| WriteFailure::Failed(e.to_string()))?;
+        let written = self
+            .connection
+            .write("update accounts set secrets = $3, secrets_version = $2 where id = $1 and secrets_version < $2", &[&account, &version, &sealed])
+            .await?;
+        Ok(written == 1)
     }
 }
 
