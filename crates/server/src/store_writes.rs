@@ -255,6 +255,25 @@ impl Writes {
     }
 }
 
+/// Flushes the writes of every account `accounts` names, asking for them again after each pass so
+/// a document saved meanwhile, or an account loaded meanwhile, is written too. Ends once a pass
+/// finds nothing waiting, or at `within`. Answers how many accounts had something waiting and
+/// the ones still waiting at the end. A save after the pass that found nothing waiting is not
+/// written.
+pub(crate) async fn flush_all(accounts: impl Fn() -> Vec<(Uuid, Arc<Writes>)>, within: Duration) -> (usize, Vec<Uuid>) {
+    let until = tokio::time::Instant::now() + within;
+    let mut waited = std::collections::HashSet::new();
+    loop {
+        let waiting: Vec<(Uuid, Arc<Writes>)> = accounts().into_iter().filter(|(_, w)| w.pending() != Pending::default()).collect();
+        waited.extend(waiting.iter().map(|(id, _)| *id));
+        let left = until.saturating_duration_since(tokio::time::Instant::now());
+        if waiting.is_empty() || left.is_zero() {
+            return (waited.len(), waiting.into_iter().map(|(id, _)| id).collect());
+        }
+        futures_util::future::join_all(waiting.iter().map(|(_, w)| w.flush(left))).await;
+    }
+}
+
 /// A failure's first line, cut short, for a log line.
 fn short(e: &str) -> String {
     let line = e.lines().next().unwrap_or_default();
@@ -463,5 +482,37 @@ mod tests {
         writes.queue_store(store(2), vec![]);
         assert!(writes.flush(Duration::from_secs(5)).await);
         assert_eq!(*fake.written.lock().unwrap(), vec![serde_json::json!({ "n": 2 })]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_flush_of_every_account_also_writes_a_save_made_after_its_account_was_flushed() {
+        let (gate_a, gate_b) = (Arc::new(Semaphore::new(1)), Arc::new(Semaphore::new(0)));
+        let quick = Arc::new(Fake { gate: Some(gate_a.clone()), ..Fake::default() });
+        let slow = Arc::new(Fake { gate: Some(gate_b.clone()), ..Fake::default() });
+        let (a, b) = (writes(&quick), writes(&slow));
+        a.queue_store(store(1), vec![]);
+        b.queue_store(store(1), vec![]);
+        let late = {
+            let (a, quick) = (a.clone(), quick.clone());
+            tokio::spawn(async move {
+                while quick.written.lock().unwrap().is_empty() {
+                    tokio::task::yield_now().await;
+                }
+                // Account a's flush has returned; a connector saves again while b still writes,
+                // and a's write of it takes a second.
+                settle().await;
+                a.queue_store(store(2), vec![]);
+                settle().await;
+                gate_b.add_permits(10);
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                gate_a.add_permits(10);
+            })
+        };
+        let accounts = || vec![(Uuid::from_u128(1), a.clone()), (Uuid::from_u128(2), b.clone())];
+        let (waiting, left) = flush_all(accounts, Duration::from_secs(5)).await;
+        assert_eq!(a.pending(), Pending::default(), "the save made during the flush was written before the flush ended");
+        assert_eq!((waiting, left), (2, vec![]));
+        late.await.unwrap();
+        assert_eq!(quick.written.lock().unwrap().last().unwrap(), &serde_json::json!({ "n": 2 }));
     }
 }

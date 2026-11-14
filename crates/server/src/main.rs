@@ -135,7 +135,9 @@ fn hub(args: &[String]) -> Result<(), String> {
                 server.await
             }
         };
-        // Every save the connectors made is in memory by now; write what has not reached Postgres yet.
+        // The sockets are closed, but a connectors task may still run and save. Write what has not
+        // reached Postgres, and again what was saved meanwhile, until a pass finds nothing waiting
+        // or FLUSH_WITHIN passed. A save after that last pass is not written.
         if hub.flush_writes(pinned_server::FLUSH_WITHIN).await > 0 {
             eprintln!("pinned-server: stopped with saves not written after {}s", pinned_server::FLUSH_WITHIN.as_secs());
         }
