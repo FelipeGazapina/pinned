@@ -24,7 +24,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use crate::store_writes::{self, Writes};
+use crate::store_writes::{self, Landed, Writes};
 use tokio::sync::{mpsc, oneshot, OnceCell};
 use uuid::Uuid;
 
@@ -1765,9 +1765,19 @@ impl PgStorage {
                         let text = |bytes: &[u8]| std::str::from_utf8(bytes).map(str::to_owned).map_err(|_| store_writes::WriteFailure::Refused { sqlstate: "22021".into() });
                         let store = bytes.store.as_deref().map(text).transpose()?;
                         let runs = (!bytes.runs.is_empty()).then(|| text(&bytes.runs)).transpose()?;
-                        db.save_store(account, version, store.as_deref(), runs.as_deref()).await
+                        if db.save_store(account, version, store.as_deref(), runs.as_deref()).await? {
+                            return Ok(Landed::Written);
+                        }
+                        let (stored, _) = db.stored_versions(account).await?;
+                        Ok(Landed::Behind(u64::try_from(stored).unwrap_or(0)))
                     }
-                    store_writes::Doc::Secrets(secrets) => db.save_secrets(account, version, &secrets).await,
+                    store_writes::Doc::Secrets(secrets) => {
+                        if db.save_secrets(account, version, &secrets).await? {
+                            return Ok(Landed::Written);
+                        }
+                        let (_, stored) = db.stored_versions(account).await?;
+                        Ok(Landed::Behind(u64::try_from(stored).unwrap_or(0)))
+                    }
                 }
             })
         });
@@ -1863,6 +1873,31 @@ impl Storage for PgStorage {
         if keys.remove(name).is_some() {
             self.0.writes.queue_secrets(keys.clone());
         }
+    }
+}
+
+/// One account's store and keys as one hub process keeps them, built as `Hub::connectors` builds
+/// them: for a test of two hub processes that write one row.
+#[doc(hidden)]
+pub struct AccountStore(PgStorage);
+
+impl AccountStore {
+    pub async fn load(db: Db, account: Uuid) -> Result<AccountStore, String> {
+        let stored = db.connectors(account).await?;
+        Ok(AccountStore(PgStorage::new(db, account, stored, Arc::default())))
+    }
+
+    pub fn save(&self, store: &[u8]) -> Result<(), String> {
+        self.0.save(store)
+    }
+
+    pub fn write_key(&self, name: &str, key: &str) -> Result<(), String> {
+        self.0.write_key(name, key)
+    }
+
+    /// `Writes::flush`.
+    pub async fn flush(&self, within: Duration) -> bool {
+        self.0 .0.writes.flush(within).await
     }
 }
 
@@ -2169,7 +2204,7 @@ mod tests {
                         doc["runs"] = serde_json::from_slice(&bytes.runs).unwrap();
                         written.lock().unwrap().push(doc);
                     }
-                    Ok(true)
+                    Ok(Landed::Written)
                 })
             })
         };
@@ -2201,7 +2236,7 @@ mod tests {
                     if let store_writes::Doc::Store(bytes) = doc {
                         written.lock().unwrap().push((bytes.store.clone(), bytes.runs.clone()));
                     }
-                    Ok(true)
+                    Ok(Landed::Written)
                 })
             })
         };

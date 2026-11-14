@@ -110,3 +110,41 @@ async fn a_write_given_up_that_postgres_runs_late_does_not_replace_the_newer_doc
     assert!(db.save_store(account, 3, Some(r#"{"n":3}"#), None).await.unwrap(), "the hub writes again on a new connection");
     assert_eq!(db.connectors(account).await.unwrap().store, serde_json::json!({ "n": 3 }));
 }
+
+/// Two hub processes, as every deploy runs them for a while, each with its own connection and its
+/// own copy of the account, built as the hub builds it. Both load the account at the same
+/// version; the first saves many times, then the second, numbered lower, saves once. The row ends
+/// with the second's document and keys: the write that lands last wins.
+#[tokio::test]
+async fn the_later_save_of_the_lower_numbered_of_two_hub_processes_lands_in_the_row() {
+    use pinned_server::hub::AccountStore;
+    use std::time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let (url, db, account) = fresh("two_processes", dir.path()).await;
+    assert!(db.save_store(account, 5, Some(r#"{"n":0}"#), None).await.unwrap());
+    let process = || async { Db::connect(&url, Sealer::load(&dir.path().join("hub.key")).unwrap()).await.unwrap() };
+    let first = AccountStore::load(process().await, account).await.unwrap();
+    let second = AccountStore::load(process().await, account).await.unwrap();
+
+    for n in 1..=20 {
+        first.save(format!(r#"{{"by":"first","n":{n}}}"#).as_bytes()).unwrap();
+        first.write_key("linear", &format!("first {n}")).unwrap();
+        assert!(first.flush(Duration::from_secs(10)).await);
+    }
+    let stored = db.connectors(account).await.unwrap();
+    assert_eq!(stored.store, serde_json::json!({ "by": "first", "n": 20 }));
+    assert_eq!(stored.version, 45, "the first process numbered from 6 to 45");
+
+    second.save(br#"{"by":"second","n":1}"#).unwrap();
+    second.write_key("linear", "second").unwrap();
+    assert!(second.flush(Duration::from_secs(10)).await);
+    let stored = db.connectors(account).await.unwrap();
+    assert_eq!(stored.store, serde_json::json!({ "by": "second", "n": 1 }), "the second process's later store is in the row");
+    assert_eq!(stored.secrets, BTreeMap::from([("linear".to_owned(), "second".to_owned())]), "and its later keys");
+    assert!(stored.version > 45, "written above what the first process wrote: {}", stored.version);
+
+    // The first saves again, and that later save lands in its turn.
+    first.save(br#"{"by":"first","n":21}"#).unwrap();
+    assert!(first.flush(Duration::from_secs(10)).await);
+    assert_eq!(db.connectors(account).await.unwrap().store, serde_json::json!({ "by": "first", "n": 21 }));
+}

@@ -12,6 +12,12 @@
 //! the version stored: a write the hub gave up on that Postgres runs late never replaces a newer
 //! one. The numbers start above the versions the row held when the account was loaded, so a new
 //! hub process writes above what an earlier one wrote.
+//!
+//! Two hub processes write one row while a deploy runs both. A write that finds a higher version
+//! in the row, which the other process wrote, moves this process's numbers above it and writes
+//! the slot's document again as the next number: whole documents, no merge, and the one that
+//! lands last wins. Only the slot's document, the newest, is renumbered, so an older document of
+//! this process still never lands after a newer one.
 pub(crate) use crate::db::WriteFailure;
 use futures_util::future::BoxFuture;
 use std::collections::BTreeMap;
@@ -25,6 +31,9 @@ const RETRY_FIRST: Duration = Duration::from_millis(500);
 const RETRY_AT_MOST: Duration = Duration::from_secs(10);
 /// How often `flush` asks a writer that waits out a failure to try again.
 const HURRY_EVERY: Duration = Duration::from_millis(250);
+/// How many times one document is renumbered above a version another process wrote before the
+/// writer lets it go: by then that process keeps writing the account, and its newer write wins.
+const RENUMBER_AT_MOST: u32 = 3;
 
 /// A document as the writer hands it to the database.
 pub(crate) enum Doc {
@@ -32,9 +41,16 @@ pub(crate) enum Doc {
     Secrets(BTreeMap<String, String>),
 }
 
-/// Writes one document of the account to its row as the version given. True when it was
-/// written, false when the row already holds that version or a newer one.
-pub(crate) type Write = Arc<dyn Fn(Uuid, u64, Doc) -> BoxFuture<'static, Result<bool, WriteFailure>> + Send + Sync>;
+/// Writes one document of the account to its row as the version given.
+pub(crate) type Write = Arc<dyn Fn(Uuid, u64, Doc) -> BoxFuture<'static, Result<Landed, WriteFailure>> + Send + Sync>;
+
+/// What a write did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Landed {
+    Written,
+    /// Not written: the row holds this version of the kind, the version given or a newer one.
+    Behind(u64),
+}
 
 /// The store and the runs as the state held them, JSON text that `save` and `save_runs` read
 /// through; the database joins them into the row's one document.
@@ -47,6 +63,8 @@ struct Queued<T> {
     seq: u64,
     doc: Arc<T>,
     bytes: usize,
+    /// How often the document was numbered again above a version another process wrote.
+    renumbered: u32,
 }
 
 #[derive(Default)]
@@ -103,7 +121,7 @@ impl Writes {
         let mut slots = self.slots.lock().unwrap();
         slots.next += 1;
         let seq = slots.next;
-        slots.store = Some(Queued { seq, doc: Arc::new(StoreBytes { store, runs }), bytes });
+        slots.store = Some(Queued { seq, doc: Arc::new(StoreBytes { store, runs }), bytes, renumbered: 0 });
         drop(slots);
         self.queued.notify_one();
         seq
@@ -115,7 +133,7 @@ impl Writes {
         let mut slots = self.slots.lock().unwrap();
         slots.next += 1;
         let seq = slots.next;
-        slots.secrets = Some(Queued { seq, doc: Arc::new(keys), bytes });
+        slots.secrets = Some(Queued { seq, doc: Arc::new(keys), bytes, renumbered: 0 });
         drop(slots);
         self.queued.notify_one();
         seq
@@ -174,8 +192,8 @@ impl Writes {
         Some((seq, doc))
     }
 
-    /// Empties `kind`'s slot when it still holds `seq`, the document just written, or one the
-    /// row holds a newer version than, or one Postgres refused.
+    /// Empties `kind`'s slot when it still holds `seq`, the document just written or one Postgres
+    /// refused.
     fn written(&self, kind: Kind, seq: u64) {
         let mut slots = self.slots.lock().unwrap();
         let (slot_seq, written) = match kind {
@@ -193,6 +211,43 @@ impl Writes {
         self.emptied.notify_waiters();
     }
 
+    /// The write of `seq` found `stored` in the row, which another process wrote. Moves the numbers
+    /// above it and, when the slot's document is not above it yet, numbers that one again so the
+    /// writer writes it next: the document of `seq` itself, or a newer one that replaced it.
+    /// After `RENUMBER_AT_MOST` times the writer lets the document go.
+    fn behind(&self, kind: Kind, seq: u64, stored: u64, what: &str) {
+        fn renumber<T>(slot: &mut Option<Queued<T>>, next: &mut u64, stored: u64) -> Result<Option<u64>, u64> {
+            *next = (*next).max(stored);
+            let Some(queued) = slot.as_mut().filter(|q| q.seq <= stored) else { return Ok(None) };
+            if queued.renumbered >= RENUMBER_AT_MOST {
+                let seq = queued.seq;
+                *slot = None;
+                return Err(seq);
+            }
+            *next += 1;
+            queued.seq = *next;
+            queued.renumbered += 1;
+            Ok(Some(*next))
+        }
+        // The row holds `seq` at least, whatever a read that raced the write answered.
+        let stored = stored.max(seq);
+        let mut slots = self.slots.lock().unwrap();
+        let Slots { next, store, secrets, .. } = &mut *slots;
+        let renumbered = match kind {
+            Kind::Store => renumber(store, next, stored),
+            Kind::Secrets => renumber(secrets, next, stored),
+        };
+        drop(slots);
+        match renumbered {
+            Ok(Some(again)) => eprintln!("pinned-server: account {}'s {what} version {seq} not written: the row holds version {stored}; writing it as version {again}", self.account),
+            Ok(None) => {}
+            Err(last) => {
+                eprintln!("pinned-server: account {}'s {what} version {last} not written: the row holds version {stored}, renumbered {RENUMBER_AT_MOST} times, dropped", self.account);
+                self.emptied.notify_waiters();
+            }
+        }
+    }
+
     async fn run(self: Arc<Self>) {
         let mut failures = 0u32;
         loop {
@@ -208,11 +263,8 @@ impl Writes {
                     Kind::Secrets => "connector keys",
                 };
                 match (self.write)(self.account, seq, doc).await {
-                    Ok(true) => self.written(kind, seq),
-                    Ok(false) => {
-                        eprintln!("pinned-server: account {}'s {what} version {seq} not written: the row already holds a newer one", self.account);
-                        self.written(kind, seq);
-                    }
+                    Ok(Landed::Written) => self.written(kind, seq),
+                    Ok(Landed::Behind(stored)) => self.behind(kind, seq, stored, what),
                     Err(WriteFailure::Refused { sqlstate }) => {
                         // Writing it again is refused again; a newer document may still be written.
                         eprintln!("pinned-server: Postgres refused account {}'s {what} version {seq} (SQLSTATE {sqlstate}), dropped", self.account);
@@ -295,10 +347,16 @@ mod tests {
         keys: Mutex<Vec<BTreeMap<String, String>>>,
         /// The version each write carried, in order.
         versions: Mutex<Vec<u64>>,
-        /// Writes of a version up to this one answer that the row holds a newer one.
-        stored: AtomicUsize,
+        /// The versions the row holds of the store and of the keys. A write lands only above, as
+        /// in Postgres; writers that share the fake share the row, as two hub processes do.
+        row: Mutex<(u64, u64)>,
+        /// Before each write lands, another process writes this many versions more.
+        racing: AtomicUsize,
         gate: Option<Arc<Semaphore>>,
         fail: AtomicUsize,
+        /// Writes that land but answer a failure, as a statement the hub gave up on that
+        /// Postgres runs anyway.
+        lost_answers: AtomicUsize,
         tried: AtomicUsize,
     }
 
@@ -338,15 +396,28 @@ mod tests {
                         fake.fail.fetch_sub(1, Ordering::SeqCst);
                         return Err(WriteFailure::Failed("connection reset".into()));
                     }
-                    if version <= fake.stored.load(Ordering::SeqCst) as u64 {
-                        return Ok(false);
+                    {
+                        let mut row = fake.row.lock().unwrap();
+                        let held = match &doc {
+                            Doc::Store(_) => &mut row.0,
+                            Doc::Secrets(_) => &mut row.1,
+                        };
+                        *held += fake.racing.load(Ordering::SeqCst) as u64;
+                        if version <= *held {
+                            return Ok(Landed::Behind(*held));
+                        }
+                        *held = version;
                     }
                     fake.versions.lock().unwrap().push(version);
                     match doc {
                         Doc::Store(bytes) => fake.written.lock().unwrap().push(joined(&bytes)),
                         Doc::Secrets(k) => fake.keys.lock().unwrap().push(k),
                     }
-                    Ok(true)
+                    if fake.lost_answers.load(Ordering::SeqCst) > 0 {
+                        fake.lost_answers.fetch_sub(1, Ordering::SeqCst);
+                        return Err(WriteFailure::Failed("Postgres did not answer; the connection is given up".into()));
+                    }
+                    Ok(Landed::Written)
                 })
             }),
         )
@@ -463,14 +534,64 @@ mod tests {
         assert_eq!(*fake.versions.lock().unwrap(), vec![42, 43], "a new process writes above the stored version");
     }
 
+    /// Two hub processes, as a deploy runs them, load the account at the same version. The first
+    /// saves many times; the second, numbered lower, saves once after, and its save lands.
     #[tokio::test]
-    async fn a_document_the_row_holds_a_newer_version_than_counts_as_written() {
-        let fake = Arc::new(Fake { stored: AtomicUsize::new(100), ..Fake::default() });
+    async fn a_save_of_the_lower_numbered_of_two_processes_on_one_row_lands_above_the_other() {
+        let fake = Arc::new(Fake { row: Mutex::new((10, 10)), ..Fake::default() });
+        let (first, second) = (writes_above(&fake, 10), writes_above(&fake, 10));
+        for n in 1..=20 {
+            first.queue_store(store(n), vec![]);
+            first.queue_secrets(BTreeMap::from([("k".to_owned(), format!("first {n}"))]));
+            assert!(first.flush(Duration::from_secs(5)).await);
+        }
+        assert_eq!(*fake.row.lock().unwrap(), (49, 50));
+
+        second.queue_store(store(100), vec![]);
+        second.queue_secrets(BTreeMap::from([("k".to_owned(), "second".to_owned())]));
+        assert!(second.flush(Duration::from_secs(5)).await);
+        assert_eq!(fake.written.lock().unwrap().last().unwrap(), &serde_json::json!({ "n": 100 }), "the second process's later store is in the row");
+        assert_eq!(fake.keys.lock().unwrap().last().unwrap()["k"], "second", "and its later keys");
+        assert_eq!(*fake.row.lock().unwrap(), (50, 51), "numbered above what the first wrote");
+
+        // The first saves again, numbered above the row or renumbered above it: the write that
+        // lands last wins.
+        first.queue_store(store(21), vec![]);
+        first.queue_secrets(BTreeMap::from([("k".to_owned(), "first again".to_owned())]));
+        assert!(first.flush(Duration::from_secs(5)).await);
+        assert_eq!(fake.written.lock().unwrap().last().unwrap(), &serde_json::json!({ "n": 21 }));
+        assert_eq!(fake.keys.lock().unwrap().last().unwrap()["k"], "first again");
+    }
+
+    #[tokio::test]
+    async fn a_document_renumbered_while_another_process_keeps_writing_higher_is_let_go_and_a_later_save_lands() {
+        let fake = Arc::new(Fake { row: Mutex::new((100, 100)), racing: AtomicUsize::new(5), ..Fake::default() });
         let writes = writes(&fake);
         writes.queue_store(store(1), vec![]);
         assert!(writes.flush(Duration::from_secs(5)).await, "the slot empties");
-        assert_eq!(fake.tried.load(Ordering::SeqCst), 1, "and it is not retried");
+        assert_eq!(fake.tried.load(Ordering::SeqCst), 1 + RENUMBER_AT_MOST as usize, "written once, then renumbered at most {RENUMBER_AT_MOST} times");
         assert!(fake.written.lock().unwrap().is_empty());
+
+        fake.racing.store(0, Ordering::SeqCst);
+        writes.queue_store(store(2), vec![]);
+        assert!(writes.flush(Duration::from_secs(5)).await);
+        assert_eq!(*fake.versions.lock().unwrap(), vec![121], "the next save takes a number above the version last read");
+        assert_eq!(*fake.written.lock().unwrap(), vec![serde_json::json!({ "n": 2 })]);
+    }
+
+    /// The process's own write that it gave up on lands, so the retry of the same number finds it
+    /// in the row: the document is written again as a higher number, which changes nothing.
+    #[tokio::test(start_paused = true)]
+    async fn a_retry_that_finds_its_own_given_up_write_in_the_row_writes_the_same_document_higher() {
+        let fake = Arc::new(Fake { lost_answers: AtomicUsize::new(1), ..Fake::default() });
+        let writes = writes(&fake);
+        writes.queue_store(store(1), vec![]);
+        assert!(writes.flush(Duration::from_secs(5)).await);
+        assert_eq!(*fake.versions.lock().unwrap(), vec![1, 2]);
+        assert_eq!(*fake.written.lock().unwrap(), vec![serde_json::json!({ "n": 1 }); 2]);
+        writes.queue_store(store(2), vec![]);
+        assert!(writes.flush(Duration::from_secs(5)).await);
+        assert_eq!(*fake.versions.lock().unwrap(), vec![1, 2, 3], "numbers only grow");
     }
 
     #[tokio::test(start_paused = true)]

@@ -261,11 +261,19 @@ impl Connection {
     /// whatever that backend runs then, maybe another caller's statement. The statement may still
     /// run later, which the versions of the row make harmless.
     async fn write(&self, statement: &str, params: &[&(dyn tokio_postgres::types::ToSql + Sync)]) -> Result<u64, WriteFailure> {
+        self.bounded(|client| async move { client.execute(statement, params).await }).await
+    }
+
+    /// Runs `run` on the client as `write` runs its statement, within the same wait.
+    async fn bounded<T, F>(&self, run: impl FnOnce(Arc<Client>) -> F) -> Result<T, WriteFailure>
+    where
+        F: std::future::Future<Output = Result<T, tokio_postgres::Error>>,
+    {
         let mut used = None;
         let attempt = async {
             let client = self.client().await.map_err(WriteFailure::Failed)?;
             used = Some(client.clone());
-            client.execute(statement, params).await.map_err(WriteFailure::of)
+            run(client).await.map_err(WriteFailure::of)
         };
         let wait = self.write_wait();
         match tokio::time::timeout(wait, attempt).await {
@@ -1612,6 +1620,16 @@ impl Db {
             )
             .await?;
         Ok(written == 1)
+    }
+
+    /// The versions the row holds of the store and of the connector keys, read within the wait
+    /// of a write: the writer asks when a write of its found a newer version there.
+    pub async fn stored_versions(&self, account: Uuid) -> Result<(i64, i64), WriteFailure> {
+        let row = self
+            .connection
+            .bounded(|client| async move { client.query_one("select store_version, secrets_version from accounts where id = $1", &[&account]).await })
+            .await?;
+        Ok((row.get(0), row.get(1)))
     }
 
     /// Shortens how long a write waits before it gives its connection up, for a test.
