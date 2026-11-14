@@ -21,7 +21,7 @@ use pinned_core::surface::{self, Side, Unlocked};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::store_writes::{self, Writes};
@@ -64,30 +64,70 @@ const OUTBOX_FRAMES: usize = 1024;
 pub struct Outbox {
     frames: mpsc::Sender<String>,
     overflowed: Arc<tokio::sync::Notify>,
+    /// The bytes of the frames that wait, for the census.
+    bytes: Arc<AtomicUsize>,
+}
+
+/// A frame to send, with its type for the census (`traffic`).
+#[derive(Clone)]
+pub struct Frame {
+    label: &'static str,
+    text: String,
+}
+
+/// The socket's end of an `Outbox`.
+pub struct OutboxQueue {
+    frames: mpsc::Receiver<String>,
+    bytes: Arc<AtomicUsize>,
+}
+
+impl OutboxQueue {
+    pub async fn recv(&mut self) -> Option<String> {
+        let text = self.frames.recv().await?;
+        self.bytes.fetch_sub(text.len(), Ordering::Relaxed);
+        Some(text)
+    }
+
+    pub fn try_recv(&mut self) -> Result<String, mpsc::error::TryRecvError> {
+        let text = self.frames.try_recv()?;
+        self.bytes.fetch_sub(text.len(), Ordering::Relaxed);
+        Ok(text)
+    }
 }
 
 impl Outbox {
     /// The outbox, the socket's end of it, and what fires once the peer fell behind.
-    pub fn new() -> (Outbox, mpsc::Receiver<String>, Arc<tokio::sync::Notify>) {
+    pub fn new() -> (Outbox, OutboxQueue, Arc<tokio::sync::Notify>) {
         let (frames, queue) = mpsc::channel(OUTBOX_FRAMES);
         let overflowed = Arc::new(tokio::sync::Notify::new());
-        (Outbox { frames, overflowed: overflowed.clone() }, queue, overflowed)
+        let bytes = Arc::new(AtomicUsize::new(0));
+        (Outbox { frames, overflowed: overflowed.clone(), bytes: bytes.clone() }, OutboxQueue { frames: queue, bytes }, overflowed)
     }
 
-    pub fn send(&self, frame: String) -> Result<(), ()> {
-        match self.frames.try_send(frame) {
-            Ok(()) => Ok(()),
+    pub fn send(&self, frame: Frame) -> Result<(), ()> {
+        let (label, len) = (frame.label, frame.text.len());
+        // Counted before the send, so the queue's end never subtracts bytes not added yet.
+        self.bytes.fetch_add(len, Ordering::Relaxed);
+        match self.frames.try_send(frame.text) {
+            Ok(()) => {
+                crate::traffic::sent(label, len);
+                Ok(())
+            }
             Err(mpsc::error::TrySendError::Full(_)) => {
+                self.bytes.fetch_sub(len, Ordering::Relaxed);
                 self.overflowed.notify_one();
                 Err(())
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => Err(()),
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                self.bytes.fetch_sub(len, Ordering::Relaxed);
+                Err(())
+            }
         }
     }
 
-    /// How many frames wait for the peer to read them.
-    fn queued(&self) -> usize {
-        self.frames.max_capacity() - self.frames.capacity()
+    /// How many frames wait for the peer to read them, and their bytes.
+    fn queued(&self) -> (usize, usize) {
+        (self.frames.max_capacity() - self.frames.capacity(), self.bytes.load(Ordering::Relaxed))
     }
 }
 pub type Sent = (String, oneshot::Receiver<Result<Value, String>>);
@@ -114,6 +154,14 @@ pub(crate) fn too_old_for_run_now(account: &Account, machine: &str, subject: &Su
 
 /// How often the hub logs its census.
 pub const CENSUS_EVERY: Duration = Duration::from_secs(300);
+
+/// `census_accounts`' line for one account.
+fn account_census(id: Uuid, runs: usize, (store_bytes, runs_bytes, pending): (usize, usize, store_writes::Pending)) -> String {
+    format!(
+        "pinned-server: census-account id={id} runs={runs} runs_bytes={runs_bytes} store_bytes={store_bytes} store_pending={} store_pending_bytes={} secrets_pending={} secrets_pending_bytes={}",
+        pending.store, pending.store_bytes, pending.secrets, pending.secrets_bytes
+    )
+}
 
 /// The resident set size, in KiB, from the text of `/proc/self/status`.
 fn rss_kib(status: &str) -> Option<u64> {
@@ -238,8 +286,8 @@ fn client_of(viewer: &str) -> Option<u64> {
     viewer.strip_prefix("client-")?.parse().ok()
 }
 
-fn frame<T: Serialize>(frame: &T) -> String {
-    serde_json::to_string(frame).unwrap()
+pub(crate) fn frame<T: Serialize + crate::traffic::Labeled>(frame: &T) -> Frame {
+    Frame { label: frame.label(), text: serde_json::to_string(frame).unwrap() }
 }
 
 fn json<T: Serialize>(value: T) -> Result<Value, String> {
@@ -320,6 +368,7 @@ impl Hub {
     pub fn census(&self) -> String {
         let accounts: Vec<Arc<Account>> = self.accounts.lock().unwrap().values().cloned().collect();
         let (mut clients, mut machines, mut frames_sum, mut frames_max, mut pending) = (0, 0, 0, 0, 0);
+        let (mut outbox_bytes_sum, mut outbox_bytes_max) = (0, 0);
         let (mut known_tabs, mut known_tab_facts, mut drive_waiters, mut tab_drive_waiting, mut tab_drives_coalesced) = (0, 0, 0, 0, 0);
         for account in &accounts {
             {
@@ -328,9 +377,11 @@ impl Hub {
                 machines += live.machines.len();
                 pending += live.machines.values().map(|machine| machine.pending.len()).sum::<usize>();
                 for out in live.clients.values().map(|client| &client.out).chain(live.machines.values().map(|machine| &machine.out)) {
-                    let queued = out.queued();
+                    let (queued, bytes) = out.queued();
                     frames_sum += queued;
                     frames_max = frames_max.max(queued);
+                    outbox_bytes_sum += bytes;
+                    outbox_bytes_max = outbox_bytes_max.max(bytes);
                 }
             }
             if let Some(connectors) = account.connectors.get() {
@@ -343,7 +394,7 @@ impl Hub {
             }
         }
         let mut line = format!(
-            "pinned-server: census accounts={} clients={clients} machines={machines} outbox_frames_sum={frames_sum} outbox_frames_max={frames_max} pending_calls={pending} known_tabs={known_tabs} known_tab_facts={known_tab_facts} drive_waiters={drive_waiters} tab_drive_waiting={tab_drive_waiting} tab_drives_coalesced={tab_drives_coalesced}",
+            "pinned-server: census accounts={} clients={clients} machines={machines} outbox_frames_sum={frames_sum} outbox_frames_max={frames_max} outbox_bytes_sum={outbox_bytes_sum} outbox_bytes_max={outbox_bytes_max} pending_calls={pending} known_tabs={known_tabs} known_tab_facts={known_tab_facts} drive_waiters={drive_waiters} tab_drive_waiting={tab_drive_waiting} tab_drives_coalesced={tab_drives_coalesced}",
             accounts.len()
         );
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
@@ -359,7 +410,21 @@ impl Hub {
                 line.push_str(&format!(" {field}={}", bytes >> 20));
             }
         }
+        line.push_str(&crate::heap::census());
+        line.push_str(&crate::traffic::take().fields());
         line
+    }
+
+    /// One census line per account whose connectors run: its runs and store, and what waits to be
+    /// written to its row. Counts and sizes only; the account appears by id.
+    pub fn census_accounts(&self) -> Vec<String> {
+        let mut persisted: Vec<(Uuid, Arc<Persisted>)> = self.persisted.lock().unwrap().iter().map(|(id, p)| (*id, p.clone())).collect();
+        persisted.sort_by_key(|(id, _)| *id);
+        let runs: HashMap<Uuid, usize> = {
+            let accounts = self.accounts.lock().unwrap();
+            persisted.iter().filter_map(|(id, _)| Some((*id, accounts.get(id)?.connectors.get()?.census().runs))).collect()
+        };
+        persisted.iter().map(|(id, p)| account_census(*id, runs.get(id).copied().unwrap_or(0), p.census())).collect()
     }
 
     /// Writes every account's store and keys that wait, all at once, giving up at `within`. Answers
@@ -722,6 +787,7 @@ impl Hub {
             }
             HubCall::SyncPull { project, paths } => {
                 let files = self.db.sync_pull(account.id, &project, &paths).await?;
+                crate::traffic::sync_pulled(files.iter().map(|(_, data)| data.len()).sum());
                 let files: Vec<sync::File> = files
                     .into_iter()
                     .map(|(entry, data)| {
@@ -1798,6 +1864,42 @@ mod tests {
         assert_eq!(cgroup_bytes(stat, "anon"), Some(1 << 20));
         assert_eq!(cgroup_bytes(stat, "file"), Some(3 << 20));
         assert_eq!(cgroup_bytes("", "anon"), None);
+    }
+
+    /// The fields of a census line after its prefix, each `name=<number>`, or the failure.
+    fn numeric_fields<'a>(line: &'a str, prefix: &str) -> Vec<(&'a str, u64)> {
+        let rest = line.strip_prefix(prefix).unwrap_or_else(|| panic!("{line:?} starts with {prefix:?}"));
+        rest.split_whitespace()
+            .map(|field| {
+                let (name, value) = field.split_once('=').unwrap_or_else(|| panic!("{field:?} is name=value"));
+                assert!(!name.is_empty() && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'), "{name:?}");
+                (name, value.parse().unwrap_or_else(|_| panic!("{field:?} holds a number")))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_census_fields_are_names_and_numbers_only() {
+        crate::traffic::sent("client_event_output", 1500);
+        crate::traffic::sent("client_event_output", 500);
+        crate::traffic::received("machine_reply", 7);
+        crate::traffic::sync_pulled(4096);
+        let line = format!("pinned-server: census{}{}", crate::heap::census(), crate::traffic::take().fields());
+        let fields: HashMap<&str, u64> = numeric_fields(&line, "pinned-server: census").into_iter().collect();
+        for name in ["heap_live_mb", "heap_big_live_mb", "heap_allocated_gb", "sent_n", "sent_bytes", "sent_max", "recv_n", "recv_bytes", "recv_max", "sync_pulls", "sync_pull_bytes"] {
+            assert!(fields.contains_key(name), "{name} in {line}");
+        }
+        // Other tests may send frames meanwhile, so these are at least what this one counted.
+        assert!(fields["sent_client_event_output_n"] >= 2 && fields["sent_client_event_output_bytes"] >= 2000 && fields["sent_client_event_output_max"] >= 1500, "{line}");
+        assert!(fields["recv_machine_reply_n"] >= 1 && fields["sync_pull_bytes"] >= 4096, "{line}");
+        let pending = store_writes::Pending { store: 1, store_bytes: 1234, secrets: 0, secrets_bytes: 0 };
+        let id = Uuid::from_u128(7);
+        let account = account_census(id, 3, (100, 200, pending));
+        let fields = numeric_fields(&account, &format!("pinned-server: census-account id={id}"));
+        assert_eq!(
+            fields,
+            vec![("runs", 3), ("runs_bytes", 200), ("store_bytes", 100), ("store_pending", 1), ("store_pending_bytes", 1234), ("secrets_pending", 0), ("secrets_pending_bytes", 0)]
+        );
     }
 
     #[test]

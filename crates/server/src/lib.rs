@@ -1,6 +1,7 @@
 pub mod box_exit;
 pub mod boxes;
 pub mod db;
+pub mod heap;
 pub mod http;
 pub mod hub;
 pub mod mcp;
@@ -9,6 +10,7 @@ pub mod relay;
 pub mod remote;
 pub mod self_update;
 mod store_writes;
+pub mod traffic;
 pub mod surface;
 
 use std::net::SocketAddr;
@@ -76,12 +78,17 @@ pub async fn start(config: Config) -> Result<Running, String> {
     // Counts of what the hub holds, so memory that grows can be told apart by cause.
     let census = Arc::downgrade(&hub);
     tokio::spawn(async move {
-        let mut every = tokio::time::interval(hub::CENSUS_EVERY);
+        // PINNED_CENSUS_SECS shortens it for a local run.
+        let every_secs = std::env::var("PINNED_CENSUS_SECS").ok().and_then(|s| s.parse().ok()).filter(|&secs| secs > 0).unwrap_or(hub::CENSUS_EVERY.as_secs());
+        let mut every = tokio::time::interval(std::time::Duration::from_secs(every_secs));
         every.tick().await;
         loop {
             every.tick().await;
             let Some(hub) = census.upgrade() else { break };
             eprintln!("{}", hub.census());
+            for line in hub.census_accounts() {
+                eprintln!("{line}");
+            }
         }
     });
     let app = http::router(hub.clone(), config.ui, config.downloads, learning, config.access).into_make_service_with_connect_info::<SocketAddr>();

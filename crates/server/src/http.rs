@@ -967,7 +967,9 @@ async fn serve_client(server: Arc<Server>, mut socket: WebSocket) {
 fn client_frame(server: &Arc<Server>, account: &Arc<Account>, client: u64, text: &str) {
     let hub = &server.hub;
     let locked = |id| account.to_client(client, &ToClient::Reply(Reply::new(id, Err(surface::LOCKED.to_owned()))));
-    match serde_json::from_str::<ClientFrame>(text) {
+    let parsed = serde_json::from_str::<ClientFrame>(text);
+    crate::traffic::received(parsed.as_ref().map_or(crate::traffic::UNREADABLE, crate::traffic::Labeled::label), text.len());
+    match parsed {
         Ok(ClientFrame::Call { id, call, .. }) if account.needs_unlock(client, Side::Node, &call) => locked(id),
         Ok(ClientFrame::Hub { id, call }) if account.needs_unlock(client, Side::Hub, &call) => locked(id),
         Ok(ClientFrame::Hub { id, call: HubCall::Unlock { password } }) => {
@@ -1057,7 +1059,7 @@ async fn serve_machine(hub: Arc<Hub>, mut socket: WebSocket) {
     let (machine, socket_id) = (row.id.to_string(), hub.next_socket());
     let (out, mut outbox, overflowed) = Outbox::new();
     let view = MachineView { id: machine.clone(), name: row.name.clone(), os, online: true, last_seen: 0, upstash_box: None, version: version.clone(), update: None, state: None, background: None };
-    let _ = out.send(serde_json::to_string(&ToMachine::Hello { machine: view }).unwrap());
+    let _ = out.send(crate::hub::frame(&ToMachine::Hello { machine: view }));
     // A machine that reconnects before its old socket timed out goes offline and back, so clients attach again.
     if account.went_offline(&machine, None) {
         hub.push_machines(&account).await;
@@ -1104,7 +1106,9 @@ async fn serve_machine(hub: Arc<Hub>, mut socket: WebSocket) {
 }
 
 fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: u64, text: &str) {
-    match serde_json::from_str::<MachineFrame>(text) {
+    let parsed = serde_json::from_str::<MachineFrame>(text);
+    crate::traffic::received(parsed.as_ref().map_or(crate::traffic::UNREADABLE, crate::traffic::Labeled::label), text.len());
+    match parsed {
         Ok(MachineFrame::Reply(reply)) => {
             if account.answered(machine, socket, reply) {
                 let (hub, account) = (hub.clone(), account.clone());

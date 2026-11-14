@@ -1746,6 +1746,8 @@ pub struct ConnectorsCensus {
     pub tab_drive_waiting: usize,
     /// Tab wakes that returned because a tab drive was already queued, since start.
     pub tab_drives_coalesced: u64,
+    /// Runs the account keeps.
+    pub runs: usize,
 }
 
 /// The most tabs one machine keeps views for between drives.
@@ -3431,6 +3433,7 @@ impl Connectors {
             drive_waiters: self.drive_waiters.load(Ordering::Relaxed),
             tab_drive_waiting: self.tab_drive_queued.load(Ordering::Relaxed) as usize,
             tab_drives_coalesced: self.tab_drives_coalesced.load(Ordering::Relaxed),
+            runs: self.runs.lock().unwrap().len(),
         }
     }
 
