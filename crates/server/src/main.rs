@@ -119,13 +119,23 @@ fn hub(args: &[String]) -> Result<(), String> {
         let pinned_server::Running { hub, server, .. } = pinned_server::start(config).await?;
         let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).map_err(|e| e.to_string())?;
         let mut server = server;
-        tokio::select! {
-            ended = &mut server => return ended.map_err(|e| e.to_string()),
-            _ = terminate.recv() => eprintln!("pinned-server: SIGTERM, closing every socket before stopping"),
-            _ = tokio::signal::ctrl_c() => eprintln!("pinned-server: interrupted, closing every socket before stopping"),
+        let ended = tokio::select! {
+            ended = &mut server => Some(ended),
+            _ = terminate.recv() => { eprintln!("pinned-server: SIGTERM, closing every socket before stopping"); None }
+            _ = tokio::signal::ctrl_c() => { eprintln!("pinned-server: interrupted, closing every socket before stopping"); None }
+        };
+        let ended = match ended {
+            Some(ended) => ended,
+            None => {
+                hub.going_away();
+                server.await
+            }
+        };
+        // Every save the connectors made is in memory by now; write what has not reached Postgres yet.
+        if hub.flush_writes(pinned_server::FLUSH_WITHIN).await > 0 {
+            eprintln!("pinned-server: stopped with saves not written after {}s", pinned_server::FLUSH_WITHIN.as_secs());
         }
-        hub.going_away();
-        server.await.map_err(|e| e.to_string())
+        ended.map_err(|e| e.to_string())
     })
 }
 

@@ -214,24 +214,58 @@ pub struct Learning(Connection);
 #[derive(Clone)]
 struct Connection {
     url: Arc<str>,
-    /// Replaced when Postgres drops the connection, as on its restart, so the hub doesn't stay down.
-    client: Arc<tokio::sync::Mutex<Arc<Client>>>,
+    /// Replaced when Postgres drops the connection, as on its restart, so the hub doesn't stay
+    /// down, and when a write gave it up (`write`). None until the next `client` opens one.
+    client: Arc<tokio::sync::Mutex<Option<Arc<Client>>>>,
 }
+
+/// How long opening a connection to Postgres may take, unless the url says.
+const CONNECT_WAIT: Duration = Duration::from_secs(10);
+/// Postgres cancels a statement of the hub's that runs longer (`statement_timeout`).
+const STATEMENT_LIMIT: Duration = Duration::from_secs(120);
+/// How long `Connection::write` waits for its statement before it gives the connection up.
+/// Longer than `STATEMENT_LIMIT`, so Postgres has cancelled a statement it was running by then.
+const WRITE_WAIT: Duration = Duration::from_secs(150);
 
 impl Connection {
     async fn open(url: &str, schema: &str) -> Result<Connection, String> {
         let client = open(url).await?;
         client.batch_execute(schema).await.map_err(|e| format!("could not create the tables: {e}"))?;
-        Ok(Connection { url: url.into(), client: Arc::new(tokio::sync::Mutex::new(Arc::new(client))) })
+        Ok(Connection { url: url.into(), client: Arc::new(tokio::sync::Mutex::new(Some(Arc::new(client)))) })
     }
 
     async fn client(&self) -> Result<Arc<Client>, String> {
         let mut client = self.client.lock().await;
-        if client.is_closed() {
-            *client = Arc::new(open(&self.url).await?);
-            eprintln!("pinned-server: reconnected to Postgres");
+        match &*client {
+            Some(open) if !open.is_closed() => Ok(open.clone()),
+            _ => {
+                let fresh = Arc::new(open(&self.url).await?);
+                *client = Some(fresh.clone());
+                eprintln!("pinned-server: reconnected to Postgres");
+                Ok(fresh)
+            }
         }
-        Ok(client.clone())
+    }
+
+    /// Runs one write, waiting at most `WRITE_WAIT`. A write that gets no answer by then gives
+    /// its connection up: the statement is cancelled and the next `client` opens another.
+    async fn write(&self, statement: &str, params: &[&(dyn tokio_postgres::types::ToSql + Sync)]) -> Result<(), String> {
+        let client = self.client().await?;
+        match tokio::time::timeout(WRITE_WAIT, client.execute(statement, params)).await {
+            Ok(done) => done.map_err(err).map(drop),
+            Err(_) => {
+                let mut shared = self.client.lock().await;
+                if shared.as_ref().is_some_and(|open| Arc::ptr_eq(open, &client)) {
+                    *shared = None;
+                }
+                drop(shared);
+                let cancel = client.cancel_token();
+                tokio::spawn(async move {
+                    let _ = tokio::time::timeout(CONNECT_WAIT, cancel.cancel_query(NoTls)).await;
+                });
+                Err(format!("Postgres did not answer within {}s; the connection is given up", WRITE_WAIT.as_secs()))
+            }
+        }
     }
 }
 
@@ -395,12 +429,25 @@ impl Sealer {
 }
 
 async fn open(url: &str) -> Result<Client, String> {
-    let (client, connection) = tokio_postgres::connect(url, NoTls).await.map_err(|e| format!("could not connect to Postgres: {e}"))?;
+    let mut config: tokio_postgres::Config = url.parse().map_err(|e| format!("could not connect to Postgres: {e}"))?;
+    if config.get_connect_timeout().is_none() {
+        config.connect_timeout(CONNECT_WAIT);
+    }
+    // A peer that went away without closing is noticed in about a minute, not at the kernel's
+    // hours, so a statement waiting on it fails and the connection is replaced.
+    config.keepalives(true).keepalives_idle(Duration::from_secs(30)).keepalives_interval(Duration::from_secs(10)).keepalives_retries(3);
+    config.tcp_user_timeout(Duration::from_secs(60));
+    let connecting = tokio::time::timeout(CONNECT_WAIT + Duration::from_secs(5), config.connect(NoTls));
+    let (client, connection) = connecting.await.map_err(|_| "could not connect to Postgres: it did not answer".to_string())?.map_err(|e| format!("could not connect to Postgres: {e}"))?;
     tokio::spawn(async move {
         if let Err(e) = connection.await {
             eprintln!("pinned-server: Postgres connection ended: {e}");
         }
     });
+    // A plain statement rather than a startup option, which a pooler in front of Postgres may refuse.
+    if let Err(e) = client.batch_execute(&format!("set statement_timeout = {}", STATEMENT_LIMIT.as_millis())).await {
+        eprintln!("pinned-server: Postgres keeps its own statement timeout: {e}");
+    }
     Ok(client)
 }
 
@@ -1504,7 +1551,7 @@ impl Db {
     }
 
     pub async fn save_store(&self, account: Uuid, store: &Value) -> Result<(), String> {
-        self.client().await?.execute("update accounts set store = $2 where id = $1", &[&account, store]).await.map_err(err).map(drop)
+        self.connection.write("update accounts set store = $2 where id = $1", &[&account, store]).await
     }
 
     /// Stores `record` as the machine's latest word on that task.
@@ -1682,7 +1729,7 @@ impl Db {
     pub async fn save_secrets(&self, account: Uuid, secrets: &BTreeMap<String, String>) -> Result<(), String> {
         let sealed: BTreeMap<&String, String> = secrets.iter().map(|(name, value)| (name, self.sealer.seal(value))).collect();
         let sealed = serde_json::to_value(sealed).map_err(|e| e.to_string())?;
-        self.client().await?.execute("update accounts set secrets = $2 where id = $1", &[&account, &sealed]).await.map_err(err).map(drop)
+        self.connection.write("update accounts set secrets = $2 where id = $1", &[&account, &sealed]).await
     }
 }
 

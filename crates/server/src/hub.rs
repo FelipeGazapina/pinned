@@ -1996,4 +1996,38 @@ mod tests {
         );
         assert_eq!(reconcile(None, "1.2.0", None), None);
     }
+
+    #[tokio::test]
+    async fn saves_through_storage_while_postgres_stalls_hold_one_document_and_the_newest_lands() {
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let written = Arc::new(Mutex::new(vec![]));
+        let write: store_writes::Write = {
+            let (gate, written) = (gate.clone(), written.clone());
+            Arc::new(move |_, doc| {
+                let (gate, written) = (gate.clone(), written.clone());
+                Box::pin(async move {
+                    gate.acquire().await.unwrap().forget();
+                    if let store_writes::Doc::Store(doc) = doc {
+                        written.lock().unwrap().push(doc);
+                    }
+                    Ok(())
+                })
+            })
+        };
+        let stored = db::Connectors { store: serde_json::json!({ "runs": [] }), secrets: BTreeMap::new() };
+        let storage = PgStorage::with_writer(Uuid::nil(), stored, Arc::default(), write);
+        for n in 0..20 {
+            storage.save(format!(r#"{{"n":{n}}}"#).as_bytes()).unwrap();
+            storage.save_runs(format!(r#"[{{"run":{n}}}]"#).as_bytes()).unwrap();
+            tokio::task::yield_now().await;
+        }
+        assert!(storage.save(b"[1]").is_err(), "a store that is not an object is refused before it is queued");
+        assert!(storage.save_runs(b"{").is_err());
+        let (store_bytes, runs_bytes, pending) = storage.0.census();
+        assert_eq!((store_bytes, runs_bytes), (r#"{"n":19}"#.len(), r#"[{"run":19}]"#.len()));
+        assert_eq!((pending.store, pending.store_bytes), (1, store_bytes + runs_bytes), "one document waits");
+        gate.add_permits(100);
+        assert!(storage.0.writes.flush(Duration::from_secs(5)).await);
+        assert_eq!(written.lock().unwrap().last().unwrap(), &serde_json::json!({ "n": 19, "runs": [{ "run": 19 }] }));
+    }
 }

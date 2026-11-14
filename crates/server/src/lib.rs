@@ -40,6 +40,9 @@ pub struct Config {
 
 /// How long the hub gives sockets to close once it is told to stop, before it drops them.
 pub const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+/// How long a stopping hub waits for every account's waiting store and keys to be written, after
+/// its sockets closed (`hub::Hub::flush_writes`).
+pub const FLUSH_WITHIN: std::time::Duration = std::time::Duration::from_secs(10);
 
 pub struct Running {
     pub hub: Arc<hub::Hub>,
