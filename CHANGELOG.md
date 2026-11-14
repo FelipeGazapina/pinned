@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.18.3 (2026-11-13)
+
+### Fixed
+
+- The hub's memory no longer grows while machines send frequent tab updates: tab updates that arrive while workflows are being driven are merged into one pending update per account instead of queuing without limit.
+- Calls to Slack, Linear and GitHub now time out after 30 seconds, so a stalled call cannot hold up workflows.
+
 ## 0.18.2 (2026-11-13)
 
 ### Added
