@@ -1758,8 +1758,10 @@ const MAX_TAB_FACTS: usize = 256;
 struct TabFacts {
     /// The stored list is not reconciled yet, so the list that replaces it keeps what it showed.
     unread: bool,
-    /// Per tab, in order: a terminal status before any Working, the first Working, and the first
-    /// terminal status after that Working. Later views change nothing a waiting run reads.
+    /// Per tab, in order: the latest terminal status before any Working, the first Working, and the
+    /// first terminal status after that Working. Before a Working the newest terminal replaces the
+    /// one kept, so a Done from the turn before cannot hide this turn's. Later views change nothing a
+    /// waiting run reads.
     views: HashMap<TabId, Vec<TabView>>,
 }
 
@@ -1776,12 +1778,12 @@ impl TabFacts {
             }
             let kept = self.views.entry(view.id.clone()).or_default();
             let was_working = |kept: &TabView| matches!(kept.status, Some(AgentStatus::Working));
-            let wanted = match working {
-                true => !kept.iter().any(was_working),
-                false => kept.last().is_none_or(was_working),
-            };
-            if wanted {
-                kept.push(view.clone());
+            let working_kept = kept.iter().any(was_working);
+            match (working, kept.last_mut()) {
+                (true, _) if working_kept => {}
+                (false, Some(last)) if !working_kept => *last = view.clone(),
+                (false, Some(last)) if !was_working(last) => {}
+                _ => kept.push(view.clone()),
             }
         }
     }
