@@ -72,3 +72,41 @@ async fn postgres_refusing_a_document_is_a_permanent_failure_and_a_later_documen
     assert!(db.save_store(account, 2, Some(r#"{"n":2}"#), None).await.unwrap());
     assert_eq!(db.connectors(account).await.unwrap().store, serde_json::json!({ "n": 2 }));
 }
+
+/// A write that gives its connection up while Postgres runs its statement, which waits for the
+/// row: a newer document lands meanwhile, and the given-up statement, which Postgres still runs
+/// once the row is free, does not replace it. The hub then writes on a new connection.
+#[tokio::test]
+async fn a_write_given_up_that_postgres_runs_late_does_not_replace_the_newer_document() {
+    let dir = tempfile::tempdir().unwrap();
+    let (url, db, account) = fresh("given_up", dir.path()).await;
+    db.shorten_write_wait(std::time::Duration::from_secs(2));
+    let (other, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls).await.unwrap();
+    tokio::spawn(connection);
+    // Another writer holds the row, as another hub process or a slow statement would.
+    other.batch_execute("begin").await.unwrap();
+    other.execute("select 1 from accounts where id = $1 for update", &[&account]).await.unwrap();
+
+    match db.save_store(account, 1, Some(r#"{"n":1}"#), None).await {
+        Err(WriteFailure::Failed(e)) => assert!(e.contains("given up"), "{e}"),
+        other => panic!("expected the write to give up, got {other:?}"),
+    }
+    let waiting = "select count(*) from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'";
+    assert_eq!(other.query_one(waiting, &[]).await.unwrap().get::<_, i64>(0), 1, "the given-up statement still waits in Postgres");
+
+    // The newer document lands, then the row is free and the late statement runs.
+    other.execute("update accounts set store = '{\"n\":2}', store_version = 2 where id = $1", &[&account]).await.unwrap();
+    other.batch_execute("commit").await.unwrap();
+    for _ in 0..250 {
+        if other.query_one(waiting, &[]).await.unwrap().get::<_, i64>(0) == 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let row = other.query_one("select store, store_version from accounts where id = $1", &[&account]).await.unwrap();
+    assert_eq!((row.get::<_, serde_json::Value>(0), row.get::<_, i64>(1)), (serde_json::json!({ "n": 2 }), 2), "the late write of version 1 did not land");
+
+    assert!(db.save_store(account, 3, Some(r#"{"n":3}"#), None).await.unwrap(), "the hub writes again on a new connection");
+    assert_eq!(db.connectors(account).await.unwrap().store, serde_json::json!({ "n": 3 }));
+}
