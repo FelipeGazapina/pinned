@@ -6,7 +6,7 @@ use crate::graph::migrate::migrate;
 use crate::graph::project::project;
 use crate::graph::runner::{self, Drive, Effect, Session, Status, Supplied, Wake};
 use crate::graph::{Answers, ChosenOn, Gate, Graph, NodeKind, SessionSetup, Watch};
-use crate::wire::{MachineId, RunSpec, TabView};
+use crate::wire::{MachineId, RunSpec, TabId, TabView};
 use crate::{convex, github, linear, pinned_lines, schedule, slack, upstash, vercel};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -1695,10 +1696,20 @@ pub struct Connectors {
     inbox: Mutex<Vec<GraphInbox>>,
     /// One drive at a time, so a tab wake cannot perform the effect a check is already performing.
     driving: tokio::sync::Mutex<()>,
+    /// True while a tab wake waits for `driving`. Later wakes only store their list: that waiter
+    /// drives on the newest lists, so tab wakes never pile up behind a slow check.
+    tab_drive_queued: AtomicBool,
+    /// How many tab wakes returned because a tab drive was already queued, since start.
+    tab_drives_coalesced: AtomicU64,
+    /// How many calls wait for `driving`, for the hub's census.
+    drive_waiters: AtomicUsize,
     /// `runs.json` did not parse. Saves stay off so a later write does not replace the file with nothing.
     runs_broken: Mutex<Option<String>>,
     /// The latest tab list each machine has sent, with the unix millis it was observed.
     known_tabs: Mutex<HashMap<String, (u64, Vec<TabView>)>>,
+    /// Per machine, what lists no drive reconciled showed before a newer list replaced them.
+    /// Locked inside `known_tabs`, so a drive reads both as of one moment.
+    tab_facts: Mutex<HashMap<String, TabFacts>>,
     /// The Slack bots `fill_bots` already asked Slack about, so it asks once per bot.
     bots_filled: Mutex<std::collections::HashSet<String>>,
     /// Why runs failed when their box ended, for the next check to report on the workflows card.
@@ -1717,6 +1728,85 @@ pub enum BoxEndRelease {
     /// It failed to boot, went offline, or vanished from Upstash without being asked: the subject
     /// is freed for its next trigger once per subject per 30 days (`BOX_RELEASE_WINDOW_MS`), and stays handled for the rest of that time.
     Once,
+}
+
+/// How long a Slack, Linear or GitHub call may take, so a stalled one cannot hold the drive lock.
+pub(crate) const CALL_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// What one account's connectors hold, for the hub's census.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ConnectorsCensus {
+    /// Machines with a stored tab list.
+    pub known_tabs: usize,
+    /// Tab views kept from replaced lists for the next drive, at most `MAX_TAB_FACTS` tabs of three each per machine.
+    pub known_tab_facts: usize,
+    /// Calls waiting for the drive lock.
+    pub drive_waiters: usize,
+    /// 1 while a tab wake waits for the drive lock, else 0.
+    pub tab_drive_waiting: usize,
+    /// Tab wakes that returned because a tab drive was already queued, since start.
+    pub tab_drives_coalesced: u64,
+}
+
+/// The most tabs one machine keeps views for between drives.
+const MAX_TAB_FACTS: usize = 256;
+
+/// What one machine's tab lists showed that the next drive has not reconciled and the newest list
+/// no longer shows. A drive reconciles only the newest list, so these keep the transitions a run
+/// would have seen with each list reconciled in turn.
+#[derive(Default)]
+struct TabFacts {
+    /// The stored list is not reconciled yet, so the list that replaces it keeps what it showed.
+    unread: bool,
+    /// Per tab, in order: a terminal status before any Working, the first Working, and the first
+    /// terminal status after that Working. Later views change nothing a waiting run reads.
+    views: HashMap<TabId, Vec<TabView>>,
+}
+
+impl TabFacts {
+    fn keep(&mut self, list: &[TabView]) {
+        for view in list {
+            let working = matches!(view.status, Some(AgentStatus::Working));
+            let ended = matches!(view.status, Some(AgentStatus::Done | AgentStatus::Failed));
+            if !working && !ended {
+                continue;
+            }
+            if !self.views.contains_key(&view.id) && self.views.len() >= MAX_TAB_FACTS {
+                continue;
+            }
+            let kept = self.views.entry(view.id.clone()).or_default();
+            let was_working = |kept: &TabView| matches!(kept.status, Some(AgentStatus::Working));
+            let wanted = match working {
+                true => !kept.iter().any(was_working),
+                false => kept.last().is_none_or(was_working),
+            };
+            if wanted {
+                kept.push(view.clone());
+            }
+        }
+    }
+
+    fn count(&self) -> usize {
+        self.views.values().map(Vec::len).sum()
+    }
+}
+
+/// Clears a flag when dropped.
+struct ClearOnDrop<'a>(&'a AtomicBool);
+
+impl Drop for ClearOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+/// Counts one waiter down when dropped.
+struct CountedWait<'a>(&'a AtomicUsize);
+
+impl Drop for CountedWait<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
 }
 
 /// A Slack bot with its token, as a read or a post uses it.
@@ -1748,8 +1838,12 @@ impl Connectors {
             runs: Mutex::new(runs),
             inbox: Mutex::new(vec![]),
             driving: tokio::sync::Mutex::new(()),
+            tab_drive_queued: AtomicBool::new(false),
+            tab_drives_coalesced: AtomicU64::new(0),
+            drive_waiters: AtomicUsize::new(0),
             runs_broken: Mutex::new(runs_broken),
             known_tabs: Mutex::new(HashMap::new()),
+            tab_facts: Mutex::new(HashMap::new()),
             bots_filled: Mutex::new(std::collections::HashSet::new()),
             box_failures: Mutex::new(vec![]),
             boot_failed: Mutex::new(std::collections::HashSet::new()),
@@ -3076,15 +3170,15 @@ fn reconcile_runs(machine: &str, after: &[TabView], observed: u64, runs: &mut [r
     let notes: Vec<_> = runs
         .iter()
         .filter_map(|run| {
-            let Session::Live { machine: live, tab, since, saw_working, await_working, .. } = &run.session else { return None };
+            let Session::Live { machine: live, tab, since, .. } = &run.session else { return None };
             if live != machine {
                 return None;
             }
-            Some((run.id.0.clone(), tab.clone(), *since, *saw_working, *await_working, run.status.clone(), tab_of(after, tab).cloned()))
+            Some((run.id.0.clone(), *since, run.status.clone(), tab_of(after, tab).cloned()))
         })
         .collect();
     let mut changed = false;
-    for (id, _tab, since, saw_working, await_working, status, view) in notes {
+    for (id, since, status, view) in notes {
         let Some(run) = runs.iter_mut().find(|run| run.id.0 == id) else { continue };
         let Some(view) = view else {
             if observed < since {
@@ -3106,31 +3200,52 @@ fn reconcile_runs(machine: &str, after: &[TabView], observed: u64, runs: &mut [r
             }
             continue;
         };
-        if let Session::Live { claude, saw_working: flag, .. } = &mut run.session {
-            if claude.is_none() && view.session.is_some() {
-                *claude = view.session.clone();
-                changed = true;
-            }
-            if matches!(view.status, Some(AgentStatus::Working)) && !*flag {
-                *flag = true;
-                changed = true;
-            }
-        }
-        if !matches!(status, Status::Waiting) {
-            continue;
-        }
-        let saw = match &run.session {
-            Session::Live { saw_working, .. } => *saw_working,
-            _ => saw_working,
+        changed |= see_view(run, &view, library, at);
+    }
+    changed
+}
+
+/// Views of tabs that a list no drive reconciled showed before a newer list replaced it, per tab
+/// in the order they came, so a run sees Working then Done, or Done then gone, as it would have
+/// with each list reconciled in turn. The newest list is reconciled after these.
+fn reconcile_earlier(machine: &str, earlier: &HashMap<TabId, Vec<TabView>>, runs: &mut [runner::Run], library: &runner::Library, at: &str) -> bool {
+    let mut changed = false;
+    for run in runs.iter_mut() {
+        let views = match &run.session {
+            Session::Live { machine: live, tab, .. } if live == machine => earlier.get(tab),
+            _ => None,
         };
-        let ended = matches!(view.status, Some(AgentStatus::Done | AgentStatus::Failed));
-        let newer = view.updated.is_some_and(|updated| since > 0 && updated > since / 1000);
-        if ended && (saw || newer || !await_working) {
-            let failed = matches!(view.status, Some(AgentStatus::Failed));
-            let error_to = if failed { runner::wait_error_targets(run, library) } else { Vec::new() };
-            runner::push(run, Wake::TurnEnded { claude: view.session.clone(), failed, error_to }, at);
-            changed = true;
+        for view in views.into_iter().flatten() {
+            changed |= see_view(run, view, library, at);
         }
+    }
+    changed
+}
+
+/// One view of the run's own tab: keeps the session id and that Working was seen, and ends a wait
+/// on a terminal status that belongs to this turn.
+fn see_view(run: &mut runner::Run, view: &TabView, library: &runner::Library, at: &str) -> bool {
+    let Session::Live { claude, saw_working, since, await_working, .. } = &mut run.session else { return false };
+    let mut changed = false;
+    if claude.is_none() && view.session.is_some() {
+        *claude = view.session.clone();
+        changed = true;
+    }
+    if matches!(view.status, Some(AgentStatus::Working)) && !*saw_working {
+        *saw_working = true;
+        changed = true;
+    }
+    let (saw, since, await_working) = (*saw_working, *since, *await_working);
+    if !matches!(run.status, Status::Waiting) {
+        return changed;
+    }
+    let ended = matches!(view.status, Some(AgentStatus::Done | AgentStatus::Failed));
+    let newer = view.updated.is_some_and(|updated| since > 0 && updated > since / 1000);
+    if ended && (saw || newer || !await_working) {
+        let failed = matches!(view.status, Some(AgentStatus::Failed));
+        let error_to = if failed { runner::wait_error_targets(run, library) } else { Vec::new() };
+        runner::push(run, Wake::TurnEnded { claude: view.session.clone(), failed, error_to }, at);
+        changed = true;
     }
     changed
 }
@@ -3164,7 +3279,7 @@ impl Connectors {
         Fut: Future<Output = R>,
         R: Taken,
     {
-        let _guard = self.driving.lock().await;
+        let _guard = self.lock_driving().await;
         let (work, mut error) = self.poll().await;
         for work in work {
             if let Err(e) = self.hand_over(work, open).await {
@@ -3211,7 +3326,7 @@ impl Connectors {
     /// reopens the session. Answers how many runs failed. When their save fails, the runs are left
     /// as they were, so a retry fails them once.
     pub async fn box_ended(&self, machine: &str, holder: Option<(&str, &Subject, u64)>, why: &str, release: BoxEndRelease) -> Result<usize, String> {
-        let _guard = self.driving.lock().await;
+        let _guard = self.lock_driving().await;
         let at = Utc::now().to_rfc3339();
         let released = self.store.lock().unwrap().box_released_at.clone();
         let now = unix_millis();
@@ -3265,30 +3380,83 @@ impl Connectors {
     }
 
     /// Tab statuses changed on `machine`. Waiting runs wake, then every running graph continues.
-    /// `observed` is the unix millis the list arrived. Lists can queue behind a drive, so an older one never replaces a newer one.
+    /// `observed` is the unix millis the list arrived. Lists can arrive out of order, so an older one never replaces a newer one.
+    /// The list is stored before the drive lock. At most one tab wake waits for that lock: a wake that finds
+    /// one waiting returns, and the waiter's drive reads every list stored until it took the lock: the newest
+    /// whole, and from the lists it replaced the views a run still needs (see `TabFacts`).
     pub async fn on_tabs<F, Fut, R>(&self, machine: &str, observed: u64, after: &[TabView], open: F) -> Result<(), String>
     where
         F: Fn(Work) -> Fut,
         Fut: Future<Output = R>,
         R: Taken,
     {
-        let _guard = self.driving.lock().await;
         {
             let mut known = self.known_tabs.lock().unwrap();
             if known.get(machine).is_none_or(|(at, _)| *at <= observed) {
-                known.insert(machine.to_owned(), (observed, after.to_vec()));
+                let replaced = known.insert(machine.to_owned(), (observed, after.to_vec()));
+                let mut facts = self.tab_facts.lock().unwrap();
+                let facts = facts.entry(machine.to_owned()).or_default();
+                if let Some((_, replaced)) = replaced.filter(|_| facts.unread) {
+                    facts.keep(&replaced);
+                }
+                facts.unread = true;
             }
         }
+        if self.tab_drive_queued.swap(true, Ordering::AcqRel) {
+            self.tab_drives_coalesced.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
+        }
+        // Cleared once the lock is taken, before the drive reads `known_tabs`, so a list stored
+        // after this point queues a drive of its own. Cleared on drop too, so a cancelled wait never blocks tab wakes.
+        let queued = ClearOnDrop(&self.tab_drive_queued);
+        let _guard = self.lock_driving().await;
+        drop(queued);
         self.drive_locked(&open).await
     }
 
+    /// Takes `driving`, counted in `drive_waiters` while it waits.
+    async fn lock_driving(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.drive_waiters.fetch_add(1, Ordering::Relaxed);
+        let waiting = CountedWait(&self.drive_waiters);
+        let guard = self.driving.lock().await;
+        drop(waiting);
+        guard
+    }
+
+    /// Counts only, for the hub's census.
+    pub fn census(&self) -> ConnectorsCensus {
+        ConnectorsCensus {
+            known_tabs: self.known_tabs.lock().unwrap().len(),
+            known_tab_facts: self.tab_facts.lock().unwrap().values().map(TabFacts::count).sum(),
+            drive_waiters: self.drive_waiters.load(Ordering::Relaxed),
+            tab_drive_waiting: self.tab_drive_queued.load(Ordering::Relaxed) as usize,
+            tab_drives_coalesced: self.tab_drives_coalesced.load(Ordering::Relaxed),
+        }
+    }
+
     fn reconcile_known(&self) -> Result<(), String> {
-        let known: Vec<_> = self.known_tabs.lock().unwrap().iter().map(|(machine, (at, tabs))| (machine.clone(), *at, tabs.clone())).collect();
+        let known: Vec<_> = {
+            let known = self.known_tabs.lock().unwrap();
+            let mut facts = self.tab_facts.lock().unwrap();
+            known
+                .iter()
+                .map(|(machine, (at, tabs))| {
+                    let earlier = facts.get_mut(machine).map(|facts| {
+                        facts.unread = false;
+                        std::mem::take(&mut facts.views)
+                    });
+                    (machine.clone(), *at, tabs.clone(), earlier.unwrap_or_default())
+                })
+                .collect()
+        };
         let at = Utc::now().to_rfc3339();
         let changed = {
             let mut runs = self.runs.lock().unwrap();
             let library = self.library();
-            known.into_iter().fold(false, |changed, (machine, observed, tabs)| reconcile_runs(&machine, &tabs, observed, &mut runs, &library, &at) || changed)
+            known.into_iter().fold(false, |changed, (machine, observed, tabs, earlier)| {
+                let replayed = reconcile_earlier(&machine, &earlier, &mut runs, &library, &at);
+                reconcile_runs(&machine, &tabs, observed, &mut runs, &library, &at) || replayed || changed
+            })
         };
         if changed {
             self.save_runs()?;
@@ -3403,7 +3571,7 @@ impl Connectors {
         Fut: Future<Output = R>,
         R: Taken,
     {
-        let _guard = self.driving.lock().await;
+        let _guard = self.lock_driving().await;
         self.drive_locked(open).await
     }
 
@@ -8281,6 +8449,224 @@ mod tests {
         block_on(connectors.on_tabs("m1", fresh - 1, &[], &open)).unwrap();
         assert_eq!(*opened.lock().unwrap(), 1, "the list without the tab arrived first, so the tab is still there");
         assert!(matches!(connectors.runs.lock().unwrap()[0].status, Status::Waiting));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn tab_lists_that_land_during_a_drive_queue_one_drive_not_one_each() {
+        let (connectors, dir) = stored("tab-coalesce", vec![]);
+        let connectors = std::sync::Arc::new(connectors);
+        block_on(async {
+            let guard = connectors.driving.lock().await;
+            let handles: Vec<_> = (0..100u64)
+                .map(|i| {
+                    let connectors = connectors.clone();
+                    tokio::spawn(async move {
+                        let tabs = vec![session_tab(None, Some(&format!("claude-{i}")))];
+                        connectors.on_tabs("m1", i + 1, &tabs, placed).await
+                    })
+                })
+                .collect();
+            let finished = until_finished(&handles, 99).await;
+            assert!(finished >= 99, "only {finished} of 100 tab wakes returned while a drive held the lock");
+            let census = connectors.census();
+            assert_eq!((census.tab_drive_waiting, census.tab_drives_coalesced, census.drive_waiters), (1, 99, 1));
+            drop(guard);
+            for handle in handles {
+                handle.await.unwrap().unwrap();
+            }
+            let census = connectors.census();
+            assert_eq!((census.tab_drive_waiting, census.tab_drives_coalesced, census.drive_waiters), (0, 99, 0));
+        });
+        let known = connectors.known_tabs.lock().unwrap();
+        let (at, tabs) = &known["m1"];
+        assert_eq!(*at, 100);
+        assert_eq!(tabs[0].session.as_deref(), Some("claude-99"));
+        drop(known);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Yields until `want` of `handles` have finished, so a test does not lean on how many polls the scheduler takes.
+    async fn until_finished<T>(handles: &[tokio::task::JoinHandle<T>], want: usize) -> usize {
+        for _ in 0..100_000 {
+            let finished = handles.iter().filter(|handle| handle.is_finished()).count();
+            if finished >= want {
+                return finished;
+            }
+            tokio::task::yield_now().await;
+        }
+        handles.iter().filter(|handle| handle.is_finished()).count()
+    }
+
+    /// What a run's `open` was handed: `run` for a session it opened, `prompt <text>` for text it typed.
+    type Handed = std::sync::Arc<Mutex<Vec<String>>>;
+
+    type Handing = std::pin::Pin<Box<dyn Future<Output = Result<Option<Placement>, String>> + Send>>;
+
+    fn handing(handed: &Handed) -> impl Fn(Work) -> Handing + Clone + Send + Sync + 'static {
+        let handed = handed.clone();
+        move |work: Work| {
+            handed.lock().unwrap().push(match &work {
+                Work::Run(_) => "run".to_owned(),
+                Work::Prompt { text, .. } => format!("prompt {text}"),
+                Work::Delivery(_) => "delivery".to_owned(),
+            });
+            Box::pin(placed(work))
+        }
+    }
+
+    /// A run of three talks on tab-1 of m1, waiting on the second talk's turn: its prompt was typed,
+    /// so it waits for Working first, and no Working has been seen yet.
+    fn waiting_after_a_prompt(name: &str) -> (std::sync::Arc<Connectors>, PathBuf, Handed) {
+        let mut connector = linear_connector();
+        connector.graph = Some(talks(&["one", "two", "three"]));
+        let (connectors, dir) = stored(name, vec![connector]);
+        let connectors = std::sync::Arc::new(connectors);
+        connectors.begin("c1".into(), Subject::LinearIssue { issue: "uuid".into() }, issue_trigger(), "2026-10-29T12:00:00Z").unwrap();
+        let handed = Handed::default();
+        let open = handing(&handed);
+        block_on(connectors.drive(&open)).unwrap();
+        let done = session_tab(Some(AgentStatus::Done), Some("claude-1"));
+        block_on(connectors.on_tabs("m1", unix_millis(), std::slice::from_ref(&done), &open)).unwrap();
+        assert_eq!(*handed.lock().unwrap(), ["run", "prompt two"]);
+        let run = connectors.runs.lock().unwrap()[0].clone();
+        assert!(matches!(run.status, Status::Waiting));
+        assert!(matches!(run.session, Session::Live { saw_working: false, await_working: true, .. }), "{:?}", run.session);
+        (connectors, dir, handed)
+    }
+
+    /// Delivers `lists` from m1 while a drive holds the lock, the first as the waiting tab wake and
+    /// the rest as wakes that return at once, then lets the waiter drive.
+    fn deliver_during_a_drive(connectors: &std::sync::Arc<Connectors>, handed: &Handed, lists: Vec<Vec<TabView>>) {
+        let observed = unix_millis();
+        block_on(async {
+            let guard = connectors.driving.lock().await;
+            let count = lists.len();
+            let handles: Vec<_> = lists
+                .into_iter()
+                .map(|tabs| {
+                    let (connectors, open) = (connectors.clone(), handing(handed));
+                    tokio::spawn(async move { connectors.on_tabs("m1", observed, &tabs, open).await })
+                })
+                .collect();
+            assert_eq!(until_finished(&handles, count - 1).await, count - 1, "every wake but one returned while the drive held the lock");
+            let census = connectors.census();
+            assert_eq!(census.tab_drive_waiting, 1);
+            assert_eq!(census.known_tab_facts, 1, "the replaced list's view of tab-1 is kept for the drive");
+            drop(guard);
+            for handle in handles {
+                handle.await.unwrap().unwrap();
+            }
+        });
+        assert_eq!(connectors.census().known_tab_facts, 0, "the drive used what it kept");
+    }
+
+    #[test]
+    fn tab_views_kept_between_drives_stay_bounded_however_many_lists_come() {
+        let mut facts = TabFacts::default();
+        for round in 0..20_000usize {
+            let status = if round % 2 == 0 { AgentStatus::Working } else { AgentStatus::Done };
+            let mut view = session_tab(Some(status), Some("claude-1"));
+            view.id = format!("tab-{}", round / 2 % 1000);
+            facts.keep(&[view]);
+        }
+        assert_eq!(facts.views.len(), MAX_TAB_FACTS);
+        assert!(facts.views.values().all(|views| views.len() == 2), "Working, then the Done after it");
+        let mut one = TabFacts::default();
+        for status in [AgentStatus::Done, AgentStatus::Working, AgentStatus::Done, AgentStatus::Working, AgentStatus::Failed, AgentStatus::Done] {
+            one.keep(&[session_tab(Some(status), Some("claude-1"))]);
+        }
+        let kept: Vec<_> = one.views["tab-1"].iter().map(|view| view.status).collect();
+        assert_eq!(kept, [Some(AgentStatus::Done), Some(AgentStatus::Working), Some(AgentStatus::Done)]);
+    }
+
+    #[test]
+    fn working_then_done_inside_one_drive_still_ends_the_wait_without_a_status_time() {
+        let (connectors, dir, handed) = waiting_after_a_prompt("tab-coalesce-working-done");
+        let working = session_tab(Some(AgentStatus::Working), Some("claude-1"));
+        let done = session_tab(Some(AgentStatus::Done), Some("claude-1"));
+        assert_eq!(done.updated, None, "an older app sends no status time");
+        deliver_during_a_drive(&connectors, &handed, vec![vec![working], vec![done]]);
+        assert_eq!(*handed.lock().unwrap(), ["run", "prompt two", "prompt three"], "Working then Done ended the second talk's turn, as it did when each list was reconciled in order");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn done_then_gone_inside_one_drive_ends_the_turn_and_does_not_repeat_the_step() {
+        let (connectors, dir, handed) = waiting_after_a_prompt("tab-coalesce-done-gone");
+        let working = session_tab(Some(AgentStatus::Working), Some("claude-1"));
+        let open = handing(&handed);
+        block_on(connectors.on_tabs("m1", unix_millis(), std::slice::from_ref(&working), &open)).unwrap();
+        assert!(matches!(connectors.runs.lock().unwrap()[0].session, Session::Live { saw_working: true, .. }));
+        let done = session_tab(Some(AgentStatus::Done), Some("claude-1"));
+        deliver_during_a_drive(&connectors, &handed, vec![vec![done], vec![]]);
+        assert_eq!(
+            *handed.lock().unwrap(),
+            ["run", "prompt two", "prompt three"],
+            "Done ended the second talk's turn before the tab closed, so the run goes on to the third talk instead of opening a session to repeat the second"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_done_list_from_a_returned_wake_and_a_list_from_during_the_drive_both_reach_the_run() {
+        let mut connector = linear_connector();
+        connector.graph = Some(talks(&["one", "two", "three"]));
+        let (connectors, dir) = stored("tab-coalesce-returned-wake", vec![connector]);
+        let connectors = std::sync::Arc::new(connectors);
+        connectors.begin("c1".into(), Subject::LinearIssue { issue: "uuid".into() }, issue_trigger(), "2026-10-29T12:00:00Z").unwrap();
+        let handed = Handed::default();
+        block_on(connectors.drive(&handing(&handed))).unwrap();
+        assert_eq!(*handed.lock().unwrap(), ["run"]);
+        // While the drive that types the second talk runs, the machine sends a list whose status time is past that wait.
+        let mut later = session_tab(Some(AgentStatus::Done), Some("claude-1"));
+        later.updated = Some(unix_millis() / 1000 + 3600);
+        let late_wake = std::sync::Arc::new(Mutex::new(None::<tokio::task::JoinHandle<Result<(), String>>>));
+        let open = {
+            let (connectors, handed, late_wake) = (connectors.clone(), handed.clone(), late_wake.clone());
+            move |work: Work| {
+                let typed_two = matches!(&work, Work::Prompt { text, .. } if text.ends_with("two"));
+                if typed_two {
+                    let (connectors, later, open) = (connectors.clone(), later.clone(), handing(&handed));
+                    *late_wake.lock().unwrap() = Some(tokio::spawn(async move { connectors.on_tabs("m1", unix_millis(), &[later], open).await }));
+                }
+                let handed = handing(&handed)(work);
+                async move {
+                    // Lets the late wake store its list while this drive still holds the lock.
+                    tokio::task::yield_now().await;
+                    handed.await
+                }
+            }
+        };
+        let working = session_tab(Some(AgentStatus::Working), Some("claude-1"));
+        let done = session_tab(Some(AgentStatus::Done), Some("claude-1"));
+        block_on(async {
+            let guard = connectors.driving.lock().await;
+            let waiter = {
+                let (connectors, open) = (connectors.clone(), open.clone());
+                tokio::spawn(async move { connectors.on_tabs("m1", unix_millis(), &[working], open).await })
+            };
+            let returned = {
+                let (connectors, open) = (connectors.clone(), open.clone());
+                tokio::spawn(async move { connectors.on_tabs("m1", unix_millis(), &[done], open).await })
+            };
+            let returned = [returned];
+            assert_eq!(until_finished(&returned, 1).await, 1, "the Done wake returned while the drive held the lock");
+            assert!(matches!(connectors.runs.lock().unwrap()[0].status, Status::Waiting), "nothing reconciled yet");
+            drop(guard);
+            waiter.await.unwrap().unwrap();
+            let [returned] = returned;
+            returned.await.unwrap().unwrap();
+            let late = late_wake.lock().unwrap().take().expect("the second talk was typed, so the late list was sent during that drive");
+            late.await.unwrap().unwrap();
+        });
+        assert_eq!(
+            *handed.lock().unwrap(),
+            ["run", "prompt two", "prompt three"],
+            "the returned wake's Done ended the first turn, and the list stored during that drive got a drive of its own"
+        );
+        let census = connectors.census();
+        assert_eq!((census.tab_drive_waiting, census.drive_waiters), (0, 0));
         let _ = std::fs::remove_dir_all(dir);
     }
 

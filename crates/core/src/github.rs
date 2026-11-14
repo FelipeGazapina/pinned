@@ -29,6 +29,7 @@ pub struct Repo {
 async fn get(token: &str, path: &str) -> Result<Value, String> {
     let response = reqwest::Client::new()
         .get(format!("{API}{path}"))
+        .timeout(crate::connectors::CALL_TIMEOUT)
         .bearer_auth(token)
         .header("User-Agent", "pinned")
         .header("Accept", "application/vnd.github+json")
