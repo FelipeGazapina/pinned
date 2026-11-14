@@ -1755,12 +1755,20 @@ fn prompt_outcome(answer: Result<Value, Unanswered>) -> Result<bool, String> {
 
 impl PgStorage {
     fn new(db: Db, account: Uuid, stored: db::Connectors, refuse_runs: Arc<AtomicBool>) -> PgStorage {
-        let write: store_writes::Write = Arc::new(move |account, doc| {
+        let write: store_writes::Write = Arc::new(move |account, version, doc| {
             let db = db.clone();
             Box::pin(async move {
+                let version = i64::try_from(version).map_err(|_| store_writes::WriteFailure::Failed("a version past i64".into()))?;
                 match doc {
-                    store_writes::Doc::Store(store) => db.save_store(account, &store).await,
-                    store_writes::Doc::Secrets(secrets) => db.save_secrets(account, &secrets).await,
+                    store_writes::Doc::Store(bytes) => {
+                        // `save` and `save_runs` read the text through, so it is UTF-8; Postgres
+                        // answers text that is not with 22021 too.
+                        let text = |bytes: &[u8]| std::str::from_utf8(bytes).map(str::to_owned).map_err(|_| store_writes::WriteFailure::Refused { sqlstate: "22021".into() });
+                        let store = bytes.store.as_deref().map(text).transpose()?;
+                        let runs = (!bytes.runs.is_empty()).then(|| text(&bytes.runs)).transpose()?;
+                        db.save_store(account, version, store.as_deref(), runs.as_deref()).await
+                    }
+                    store_writes::Doc::Secrets(secrets) => db.save_secrets(account, version, &secrets).await,
                 }
             })
         });
@@ -1774,7 +1782,7 @@ impl PgStorage {
         PgStorage(Arc::new(Persisted {
             state: Mutex::new(Stored { store, runs }),
             keys: Mutex::new(stored.secrets),
-            writes: Writes::start(account, write),
+            writes: Writes::start(account, u64::try_from(stored.version).unwrap_or(0), write),
             refuse_runs,
         }))
     }
@@ -2114,18 +2122,20 @@ mod tests {
         let written = Arc::new(Mutex::new(vec![]));
         let write: store_writes::Write = {
             let (gate, written) = (gate.clone(), written.clone());
-            Arc::new(move |_, doc| {
+            Arc::new(move |_, _, doc| {
                 let (gate, written) = (gate.clone(), written.clone());
                 Box::pin(async move {
                     gate.acquire().await.unwrap().forget();
-                    if let store_writes::Doc::Store(doc) = doc {
+                    if let store_writes::Doc::Store(bytes) = doc {
+                        let mut doc: Value = serde_json::from_slice(bytes.store.as_deref().unwrap_or(b"{}")).unwrap();
+                        doc["runs"] = serde_json::from_slice(&bytes.runs).unwrap();
                         written.lock().unwrap().push(doc);
                     }
-                    Ok(())
+                    Ok(true)
                 })
             })
         };
-        let stored = db::Connectors { store: serde_json::json!({ "runs": [] }), secrets: BTreeMap::new() };
+        let stored = db::Connectors { store: serde_json::json!({ "runs": [] }), secrets: BTreeMap::new(), version: 0 };
         let storage = PgStorage::with_writer(Uuid::nil(), stored, Arc::default(), write);
         for n in 0..20 {
             storage.save(format!(r#"{{"n":{n}}}"#).as_bytes()).unwrap();

@@ -7,8 +7,13 @@
 //! it succeeds; a newer document replaces it in place. The writer writes only what a slot holds
 //! at the time, so the numbers it writes only grow and an older document never lands after a
 //! newer one, across failures and retries too.
+//!
+//! The number is also the version the row keeps with the document, and a write lands only above
+//! the version stored: a write the hub gave up on that Postgres runs late never replaces a newer
+//! one. The numbers start above the versions the row held when the account was loaded, so a new
+//! hub process writes above what an earlier one wrote.
+pub(crate) use crate::db::WriteFailure;
 use futures_util::future::BoxFuture;
-use serde_json::Value;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -23,17 +28,19 @@ const HURRY_EVERY: Duration = Duration::from_millis(250);
 
 /// A document as the writer hands it to the database.
 pub(crate) enum Doc {
-    Store(Value),
+    Store(Arc<StoreBytes>),
     Secrets(BTreeMap<String, String>),
 }
 
-/// Writes one document of the account to its row.
-pub(crate) type Write = Arc<dyn Fn(Uuid, Doc) -> BoxFuture<'static, Result<(), String>> + Send + Sync>;
+/// Writes one document of the account to its row as the version given. True when it was
+/// written, false when the row already holds that version or a newer one.
+pub(crate) type Write = Arc<dyn Fn(Uuid, u64, Doc) -> BoxFuture<'static, Result<bool, WriteFailure>> + Send + Sync>;
 
-/// The store and the runs as the state held them; the writer joins them into one document.
-struct StoreBytes {
-    store: Option<Vec<u8>>,
-    runs: Vec<u8>,
+/// The store and the runs as the state held them, JSON text that `save` and `save_runs` read
+/// through; the database joins them into the row's one document.
+pub(crate) struct StoreBytes {
+    pub(crate) store: Option<Vec<u8>>,
+    pub(crate) runs: Vec<u8>,
 }
 
 struct Queued<T> {
@@ -81,9 +88,10 @@ enum Kind {
 
 impl Writes {
     /// The account's slots and the task that writes them, which ends once `close` ran and
-    /// nothing waits.
-    pub(crate) fn start(account: Uuid, write: Write) -> Arc<Writes> {
-        let writes = Arc::new(Writes { account, slots: Mutex::default(), queued: Notify::new(), emptied: Notify::new(), hurry: Notify::new(), write });
+    /// nothing waits. The documents take numbers above `stored`, the newest version the row held.
+    pub(crate) fn start(account: Uuid, stored: u64, write: Write) -> Arc<Writes> {
+        let slots = Slots { next: stored, written: (stored, stored), ..Slots::default() };
+        let writes = Arc::new(Writes { account, slots: Mutex::new(slots), queued: Notify::new(), emptied: Notify::new(), hurry: Notify::new(), write });
         tokio::spawn(writes.clone().run());
         writes
     }
@@ -158,24 +166,15 @@ impl Writes {
                 Kind::Secrets => slots.secrets.as_ref().map(|q| (q.seq, Ok(q.doc.clone())))?,
             }
         };
-        // Outside the lock: a save never waits for the writer to parse a document.
         let doc = match doc {
             Ok(keys) => Doc::Secrets((*keys).clone()),
-            Err(bytes) => match join(&bytes) {
-                Ok(doc) => Doc::Store(doc),
-                Err(e) => {
-                    // `save` reads the store before it queues it, so this does not happen; a
-                    // document that can't be read is never retried.
-                    eprintln!("pinned-server: account {}'s workflows do not read as a document, not saved: {e}", self.account);
-                    self.written(kind, seq);
-                    return None;
-                }
-            },
+            Err(bytes) => Doc::Store(bytes),
         };
         Some((seq, doc))
     }
 
-    /// Empties `kind`'s slot when it still holds `seq`, the document just written.
+    /// Empties `kind`'s slot when it still holds `seq`, the document just written, or one the
+    /// row holds a newer version than, or one Postgres refused.
     fn written(&self, kind: Kind, seq: u64) {
         let mut slots = self.slots.lock().unwrap();
         let (slot_seq, written) = match kind {
@@ -203,14 +202,23 @@ impl Writes {
             for kind in [Kind::Store, Kind::Secrets] {
                 let Some((seq, doc)) = self.take(kind) else { continue };
                 debug_assert!(seq > self.written_seq(kind), "a document older than one written");
-                match (self.write)(self.account, doc).await {
-                    Ok(()) => self.written(kind, seq),
-                    Err(e) => {
+                let what = match kind {
+                    Kind::Store => "workflows",
+                    Kind::Secrets => "connector keys",
+                };
+                match (self.write)(self.account, seq, doc).await {
+                    Ok(true) => self.written(kind, seq),
+                    Ok(false) => {
+                        eprintln!("pinned-server: account {}'s {what} version {seq} not written: the row already holds a newer one", self.account);
+                        self.written(kind, seq);
+                    }
+                    Err(WriteFailure::Refused { sqlstate }) => {
+                        // Writing it again is refused again; a newer document may still be written.
+                        eprintln!("pinned-server: Postgres refused account {}'s {what} version {seq} (SQLSTATE {sqlstate}), dropped", self.account);
+                        self.written(kind, seq);
+                    }
+                    Err(WriteFailure::Failed(e)) => {
                         failed = true;
-                        let what = match kind {
-                            Kind::Store => "workflows",
-                            Kind::Secrets => "connector keys",
-                        };
                         eprintln!("pinned-server: could not save account {}'s {what}, retrying: {}", self.account, short(&e));
                     }
                 }
@@ -247,21 +255,6 @@ impl Writes {
     }
 }
 
-/// The store with the runs under `runs`, as the account's row keeps them.
-fn join(bytes: &StoreBytes) -> Result<Value, String> {
-    let mut doc: Value = match &bytes.store {
-        Some(store) => serde_json::from_slice(store).map_err(|e| e.to_string())?,
-        None => serde_json::json!({}),
-    };
-    let object = doc.as_object_mut().ok_or("the workflow store is not an object")?;
-    if bytes.runs.is_empty() {
-        object.remove("runs");
-    } else {
-        object.insert("runs".to_owned(), serde_json::from_slice(&bytes.runs).map_err(|e| e.to_string())?);
-    }
-    Ok(doc)
-}
-
 /// A failure's first line, cut short, for a log line.
 fn short(e: &str) -> String {
     let line = e.lines().next().unwrap_or_default();
@@ -271,6 +264,7 @@ fn short(e: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Semaphore;
 
@@ -279,16 +273,36 @@ mod tests {
     struct Fake {
         written: Mutex<Vec<Value>>,
         keys: Mutex<Vec<BTreeMap<String, String>>>,
+        /// The version each write carried, in order.
+        versions: Mutex<Vec<u64>>,
+        /// Writes of a version up to this one answer that the row holds a newer one.
+        stored: AtomicUsize,
         gate: Option<Arc<Semaphore>>,
         fail: AtomicUsize,
         tried: AtomicUsize,
     }
 
+    /// The row's document, as the database joins it.
+    fn joined(bytes: &StoreBytes) -> Value {
+        let mut doc: Value = bytes.store.as_ref().map_or(serde_json::json!({}), |store| serde_json::from_slice(store).unwrap());
+        let object = doc.as_object_mut().unwrap();
+        object.remove("runs");
+        if !bytes.runs.is_empty() {
+            object.insert("runs".to_owned(), serde_json::from_slice(&bytes.runs).unwrap());
+        }
+        doc
+    }
+
     fn writes(fake: &Arc<Fake>) -> Arc<Writes> {
+        writes_above(fake, 0)
+    }
+
+    fn writes_above(fake: &Arc<Fake>, stored: u64) -> Arc<Writes> {
         let fake = fake.clone();
         Writes::start(
             Uuid::nil(),
-            Arc::new(move |_, doc| {
+            stored,
+            Arc::new(move |_, version, doc| {
                 let fake = fake.clone();
                 Box::pin(async move {
                     if let Some(gate) = &fake.gate {
@@ -297,13 +311,17 @@ mod tests {
                     fake.tried.fetch_add(1, Ordering::SeqCst);
                     if fake.fail.load(Ordering::SeqCst) > 0 {
                         fake.fail.fetch_sub(1, Ordering::SeqCst);
-                        return Err("connection reset".into());
+                        return Err(WriteFailure::Failed("connection reset".into()));
                     }
+                    if version <= fake.stored.load(Ordering::SeqCst) as u64 {
+                        return Ok(false);
+                    }
+                    fake.versions.lock().unwrap().push(version);
                     match doc {
-                        Doc::Store(v) => fake.written.lock().unwrap().push(v),
+                        Doc::Store(bytes) => fake.written.lock().unwrap().push(joined(&bytes)),
                         Doc::Secrets(k) => fake.keys.lock().unwrap().push(k),
                     }
-                    Ok(())
+                    Ok(true)
                 })
             }),
         )
@@ -407,5 +425,26 @@ mod tests {
         settle().await;
         assert_eq!(Arc::strong_count(&writes), 1, "the writer task ended and let go of the slots");
         assert_eq!(fake.written.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn the_versions_start_above_what_the_row_held_and_grow() {
+        let fake = Arc::new(Fake::default());
+        let writes = writes_above(&fake, 41);
+        writes.queue_store(store(1), vec![]);
+        assert!(writes.flush(Duration::from_secs(5)).await);
+        writes.queue_secrets(BTreeMap::from([("k".to_owned(), "v".to_owned())]));
+        assert!(writes.flush(Duration::from_secs(5)).await);
+        assert_eq!(*fake.versions.lock().unwrap(), vec![42, 43], "a new process writes above the stored version");
+    }
+
+    #[tokio::test]
+    async fn a_document_the_row_holds_a_newer_version_than_counts_as_written() {
+        let fake = Arc::new(Fake { stored: AtomicUsize::new(100), ..Fake::default() });
+        let writes = writes(&fake);
+        writes.queue_store(store(1), vec![]);
+        assert!(writes.flush(Duration::from_secs(5)).await, "the slot empties");
+        assert_eq!(fake.tried.load(Ordering::SeqCst), 1, "and it is not retried");
+        assert!(fake.written.lock().unwrap().is_empty());
     }
 }

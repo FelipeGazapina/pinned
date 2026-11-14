@@ -14,7 +14,8 @@ async fn fresh(name: &str, dir: &std::path::Path) -> (String, Db, Uuid) {
     let database = format!("pinned_test_{name}_{}", std::process::id());
     let (client, connection) = tokio_postgres::connect(&format!("{}/pinned", postgres()), tokio_postgres::NoTls).await.unwrap();
     tokio::spawn(connection);
-    client.batch_execute(&format!("drop database if exists {database} with (force); create database {database}")).await.unwrap();
+    client.batch_execute(&format!("drop database if exists {database} with (force)")).await.unwrap();
+    client.batch_execute(&format!("create database {database}")).await.unwrap();
     let url = format!("{}/{database}", postgres());
     let db = Db::connect(&url, Sealer::load(&dir.join("hub.key")).unwrap()).await.unwrap();
     let account = db.create_account(&format!("{name}@example.test"), "x").await.unwrap().unwrap();
