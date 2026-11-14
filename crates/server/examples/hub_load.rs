@@ -17,6 +17,9 @@ use std::time::{Duration, Instant};
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::Message;
 
+/// Bytes the hub sent to the fake machines since the last report.
+static MACHINE_DOWN: AtomicU64 = AtomicU64::new(0);
+
 type Socket = tungstenite::WebSocket<MaybeTlsStream<TcpStream>>;
 
 #[derive(Clone)]
@@ -38,6 +41,12 @@ struct Opts {
     machine_life: f64,
     /// Output bytes per second a machine streams to each attached viewer.
     output_rate: usize,
+    /// Seconds between a machine's sync pushes and pulls; 0 for none.
+    sync_every: f64,
+    sync_mb: f64,
+    /// Extra clients per account that read at `slow_kbps`, as a phone on a poor link.
+    slow_clients: usize,
+    slow_kbps: f64,
     secs: u64,
     every: u64,
     pid: Option<u32>,
@@ -99,7 +108,9 @@ fn http_post(hub: &str, path: &str, bearer: Option<&str>, body: &Value) -> Value
 }
 
 fn connect(hub: &str, path: &str) -> Socket {
-    let (mut socket, _) = tungstenite::connect(format!("ws://{hub}{path}")).expect("websocket");
+    // As big as a real machine's, so a sync pull fits.
+    let config = tungstenite::protocol::WebSocketConfig::default().max_message_size(Some(96 << 20)).max_frame_size(Some(96 << 20));
+    let (mut socket, _) = tungstenite::client::connect_with_config(format!("ws://{hub}{path}"), Some(config), 3).expect("websocket");
     if let MaybeTlsStream::Plain(tcp) = socket.get_mut() {
         tcp.set_read_timeout(Some(Duration::from_millis(20))).unwrap();
         tcp.set_nodelay(true).unwrap();
@@ -177,7 +188,8 @@ fn machine(o: Opts, token: String, name: String, seed: u64, stop: Arc<AtomicBool
         let mut socket = connect(&o.hub, "/ws/machine");
         send(&mut socket, &json!({"type": "auth", "token": token, "name": name, "os": "linux", "version": "0.18.3"})).unwrap();
         let born = Instant::now();
-        let (mut last_tabs, mut last_thread, mut last_output) = (Instant::now() - Duration::from_secs(60), Instant::now(), Instant::now());
+        let (mut last_tabs, mut last_thread, mut last_output, mut last_sync) = (Instant::now() - Duration::from_secs(60), Instant::now(), Instant::now(), Instant::now());
+        let mut call_id = 1_000_000u64;
         // viewer -> tabs it subscribed to.
         let mut viewers: HashMap<String, Vec<String>> = HashMap::new();
         let mut watched: HashMap<String, Vec<String>> = HashMap::new();
@@ -185,8 +197,10 @@ fn machine(o: Opts, token: String, name: String, seed: u64, stop: Arc<AtomicBool
         let result: Result<(), String> = (|| {
             while !stop.load(Ordering::Relaxed) && born.elapsed() < life {
                 while let Some(text) = read(&mut socket)? {
+                    MACHINE_DOWN.fetch_add(text.len() as u64, Ordering::Relaxed);
                     let frame: Value = serde_json::from_str(&text).unwrap();
                     match frame["type"].as_str() {
+                        Some("reply") if frame.get("err").is_some() => eprintln!("[{}] machine {name}: hub refused call {}: {}", o.tag, frame["id"], frame["err"]),
                         Some("call") => {
                             let id = frame["id"].as_u64().unwrap();
                             let answer = match frame["call"]["cmd"].as_str() {
@@ -243,6 +257,27 @@ fn machine(o: Opts, token: String, name: String, seed: u64, stop: Arc<AtomicBool
                         send(&mut socket, &json!({"type": "event", "event": {"kind": "thread", "tab": tab}}))?;
                     }
                 }
+                if o.sync_every > 0.0 && last_sync.elapsed().as_secs_f64() >= o.sync_every {
+                    last_sync = Instant::now();
+                    let project = format!("github.com/load/{}", name.rsplit_once('-').unwrap().0);
+                    let mut data = Vec::with_capacity((o.sync_mb * 1048576.0) as usize + 8);
+                    while data.len() < (o.sync_mb * 1048576.0) as usize {
+                        data.extend_from_slice(&rng.next().to_le_bytes());
+                    }
+                    let path = format!("claude/load-{name}.jsonl");
+                    let file = json!({"path": path, "sha": format!("{:016x}", rng.next()), "modified": round, "size": data.len(), "data": base64(&data)});
+                    drop(data);
+                    call_id += 1;
+                    let push = json!({"type": "call", "id": call_id, "call": {"cmd": "sync_push", "project": project, "files": [file]}}).to_string();
+                    sent.fetch_add(push.len() as u64, Ordering::Relaxed);
+                    socket.send(Message::text(push)).map_err(|e| e.to_string())?;
+                    call_id += 1;
+                    send(&mut socket, &json!({"type": "call", "id": call_id, "call": {"cmd": "sync_list", "project": project}}))?;
+                    let prefix = name.rsplit_once('-').unwrap().0;
+                    let paths: Vec<String> = (0..o.machines).map(|m| format!("claude/load-{prefix}-{m}.jsonl")).collect();
+                    call_id += 1;
+                    send(&mut socket, &json!({"type": "call", "id": call_id, "call": {"cmd": "sync_pull", "project": project, "paths": paths}}))?;
+                }
                 if o.output_rate > 0 && last_output.elapsed() >= Duration::from_millis(100) {
                     last_output = Instant::now();
                     let chunk = base64(&vec![b'y'; o.output_rate / 10]);
@@ -269,7 +304,7 @@ fn base64(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-fn client(o: Opts, token: String, machines: Vec<String>, seed: u64, stop: Arc<AtomicBool>, tally: Arc<Tally>) {
+fn client(o: Opts, token: String, machines: Vec<String>, seed: u64, slow: bool, stop: Arc<AtomicBool>, tally: Arc<Tally>) {
     let mut rng = Rng(seed);
     while !stop.load(Ordering::Relaxed) {
         let mut socket = connect(&o.hub, "/ws/client");
@@ -287,7 +322,10 @@ fn client(o: Opts, token: String, machines: Vec<String>, seed: u64, stop: Arc<At
                         "event" => format!("event:{}", frame["event"]["kind"].as_str().unwrap_or("?")),
                         other => other.to_owned(),
                     };
-                    tally.add(kind, text.len());
+                    tally.add(if slow { format!("slow:{kind}") } else { kind }, text.len());
+                    if slow {
+                        std::thread::sleep(Duration::from_secs_f64(text.len() as f64 / (o.slow_kbps * 1024.0)));
+                    }
                     if frame["type"] == "event" && frame["event"]["kind"] == "thread" {
                         let tab = frame["event"]["tab"].clone();
                         let machine = frame["machine"].clone();
@@ -343,6 +381,10 @@ fn main() {
         client_life: num("--client-life", 60.0),
         machine_life: num("--machine-life", 300.0),
         output_rate: num("--output-rate", 40960.0) as usize,
+        sync_every: num("--sync-every", 0.0),
+        sync_mb: num("--sync-mb", 8.0),
+        slow_clients: num("--slow-clients", 0.0) as usize,
+        slow_kbps: num("--slow-kbps", 256.0),
         secs: num("--secs", 300.0) as u64,
         every: num("--every", 30.0) as u64,
         pid: flag("--pid").map(|p| p.parse().unwrap()),
@@ -365,9 +407,10 @@ fn main() {
             let (o, t, s, sent) = (o.clone(), registered["token"].as_str().unwrap().to_owned(), stop.clone(), machine_sent.clone());
             threads.push(std::thread::spawn(move || machine(o, t, name, 7 + (a * 31 + m) as u64, s, sent)));
         }
-        for c in 0..o.clients {
+        for c in 0..o.clients + o.slow_clients {
             let (o, t, ids, s, tally) = (o.clone(), token.clone(), ids.clone(), stop.clone(), tally.clone());
-            threads.push(std::thread::spawn(move || client(o, t, ids, 1000 + (a * 31 + c) as u64, s, tally)));
+            let slow = c >= o.clients;
+            threads.push(std::thread::spawn(move || client(o, t, ids, 1000 + (a * 31 + c) as u64, slow, s, tally)));
         }
     }
     let start = Instant::now();
@@ -384,12 +427,13 @@ fn main() {
             let kinds: Vec<String> = kinds.iter().map(|(k, (n, b, max))| format!("{k}={n}/{}KB/max{}KB", b >> 10, max >> 10)).collect();
             let rss = o.pid.map(rss_kib).unwrap_or(0);
             println!(
-                "[{}] t={:>5}s rss_mb={} to_clients_mb_per_h={:.0} machine_up_mb={} {}",
+                "[{}] t={:>5}s rss_mb={} to_clients_mb_per_h={:.0} machine_up_mb={} machine_down_mb={} {}",
                 o.tag,
                 start.elapsed().as_secs(),
                 rss >> 10,
                 total as f64 / secs * 3600.0 / 1048576.0,
                 machine_sent.swap(0, Ordering::Relaxed) >> 20,
+                MACHINE_DOWN.swap(0, Ordering::Relaxed) >> 20,
                 kinds.join(" ")
             );
         }

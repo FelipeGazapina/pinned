@@ -1,6 +1,7 @@
 pub mod box_exit;
 pub mod boxes;
 pub mod db;
+pub mod heap;
 pub mod http;
 pub mod hub;
 pub mod mcp;
@@ -72,7 +73,8 @@ pub async fn start(config: Config) -> Result<Running, String> {
     // Counts of what the hub holds, so memory that grows can be told apart by cause.
     let census = Arc::downgrade(&hub);
     tokio::spawn(async move {
-        let mut every = tokio::time::interval(hub::CENSUS_EVERY);
+        let every_secs = std::env::var("PINNED_CENSUS_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(hub::CENSUS_EVERY.as_secs());
+        let mut every = tokio::time::interval(std::time::Duration::from_secs(every_secs));
         every.tick().await;
         loop {
             every.tick().await;

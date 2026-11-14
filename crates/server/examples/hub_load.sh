@@ -22,7 +22,7 @@ HOME=$home setsid ${WRAP:-} "$bin" hub --db "postgres://hub@127.0.0.1:5499/$db" 
 leader=$!
 stop() {
   kill -s TERM -- "-$leader" 2>/dev/null || true
-  for _ in $(seq 50); do kill -0 "$leader" 2>/dev/null || break; sleep 0.2; done
+  for _ in $(seq $((${STOP_WAIT:-10} * 5))); do kill -0 "$leader" 2>/dev/null || break; sleep 0.2; done
   kill -s KILL -- "-$leader" 2>/dev/null || true
   wait "$leader" 2>/dev/null || true
 }

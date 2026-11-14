@@ -356,6 +356,7 @@ impl Hub {
                 line.push_str(&format!(" {field}={}", bytes >> 20));
             }
         }
+        line.push_str(&crate::heap::census());
         line
     }
 

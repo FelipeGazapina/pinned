@@ -7,6 +7,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+#[global_allocator]
+static HEAP: pinned_server::heap::Counting = pinned_server::heap::Counting;
+
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const USAGE: &str = "usage:
   pinned-server hub --db <postgres url> --listen <addr> --ui <dir> --downloads <dir> [--public-url <url>] [--key-file <file>] [--signup first|open|invite] [--learning-db <postgres url>] [--trusted-proxy off|railway] [--max-accounts <n>]
