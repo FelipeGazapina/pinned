@@ -1623,13 +1623,14 @@ impl Db {
     }
 
     /// The versions the row holds of the store and of the connector keys, read within the wait
-    /// of a write: the writer asks when a write of its found a newer version there.
-    pub async fn stored_versions(&self, account: Uuid) -> Result<(i64, i64), WriteFailure> {
+    /// of a write: the writer asks when a write of its found a newer version there. None when the
+    /// account has no row any more.
+    pub async fn stored_versions(&self, account: Uuid) -> Result<Option<(i64, i64)>, WriteFailure> {
         let row = self
             .connection
-            .bounded(|client| async move { client.query_one("select store_version, secrets_version from accounts where id = $1", &[&account]).await })
+            .bounded(|client| async move { client.query_opt("select store_version, secrets_version from accounts where id = $1", &[&account]).await })
             .await?;
-        Ok((row.get(0), row.get(1)))
+        Ok(row.map(|row| (row.get(0), row.get(1))))
     }
 
     /// Shortens how long a write waits before it gives its connection up, for a test.

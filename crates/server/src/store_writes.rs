@@ -52,6 +52,8 @@ pub(crate) enum Landed {
     Written,
     /// Not written: the row holds this version of the kind, the version given or a newer one.
     Behind(u64),
+    /// Not written: the account has no row any more.
+    Gone,
 }
 
 /// The store and the runs as the state held them, JSON text that `save` and `save_runs` read
@@ -195,8 +197,8 @@ impl Writes {
         Some((seq, doc))
     }
 
-    /// Empties `kind`'s slot when it still holds `seq`, the document just written or one Postgres
-    /// refused.
+    /// Empties `kind`'s slot when it still holds `seq`, the document just written, one Postgres
+    /// refused, or one whose account row is gone.
     fn written(&self, kind: Kind, seq: u64) {
         let mut slots = self.slots.lock().unwrap();
         let (slot_seq, written) = match kind {
@@ -268,6 +270,11 @@ impl Writes {
                     Ok(Landed::Behind(stored)) => {
                         renumbered = true;
                         failed |= self.behind(kind, seq, stored, what);
+                    }
+                    Ok(Landed::Gone) => {
+                        // No row takes it, now or later; a flush need not wait on it.
+                        eprintln!("pinned-server: account {}'s {what} version {seq} not written: account row gone, dropped", self.account);
+                        self.written(kind, seq);
                     }
                     Err(WriteFailure::Refused { sqlstate }) => {
                         // Writing it again is refused again; a newer document may still be written.
@@ -344,7 +351,7 @@ fn short(e: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::Value;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::sync::Semaphore;
 
     /// A database whose writes wait for a permit each, and that can fail the next ones.
@@ -361,6 +368,8 @@ mod tests {
         overtakes: AtomicUsize,
         gate: Option<Arc<Semaphore>>,
         fail: AtomicUsize,
+        /// The account's row is gone: every write finds no row.
+        gone: AtomicBool,
         /// Writes that land but answer a failure, as a statement the hub gave up on that
         /// Postgres runs anyway.
         lost_answers: AtomicUsize,
@@ -398,6 +407,9 @@ mod tests {
                         if bytes.store.as_deref().is_some_and(|store| store.windows(6).any(|w| w == br"\u0000")) {
                             return Err(WriteFailure::Refused { sqlstate: "22P05".into() });
                         }
+                    }
+                    if fake.gone.load(Ordering::SeqCst) {
+                        return Ok(Landed::Gone);
                     }
                     if fake.fail.load(Ordering::SeqCst) > 0 {
                         fake.fail.fetch_sub(1, Ordering::SeqCst);
@@ -617,6 +629,18 @@ mod tests {
         writes.queue_store(store(2), vec![]);
         assert!(writes.flush(Duration::from_secs(5)).await);
         assert_eq!(*fake.written.lock().unwrap(), vec![serde_json::json!({ "n": 2 })]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_document_whose_account_row_is_gone_is_tried_once_and_its_slot_empties() {
+        let fake = Arc::new(Fake { gone: true.into(), ..Fake::default() });
+        let writes = writes(&fake);
+        writes.queue_store(store(1), vec![]);
+        writes.queue_secrets(BTreeMap::from([("k".to_owned(), "v".to_owned())]));
+        let started = tokio::time::Instant::now();
+        assert!(writes.flush(Duration::from_secs(5)).await, "both slots empty");
+        assert_eq!(started.elapsed(), Duration::ZERO, "without a backoff");
+        assert_eq!(fake.tried.load(Ordering::SeqCst), 2, "each document is tried once, not retried");
     }
 
     #[tokio::test(start_paused = true)]

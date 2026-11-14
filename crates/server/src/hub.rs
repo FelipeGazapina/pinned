@@ -1768,14 +1768,14 @@ impl PgStorage {
                         if db.save_store(account, version, store.as_deref(), runs.as_deref()).await? {
                             return Ok(Landed::Written);
                         }
-                        let (stored, _) = db.stored_versions(account).await?;
+                        let Some((stored, _)) = db.stored_versions(account).await? else { return Ok(Landed::Gone) };
                         Ok(Landed::Behind(u64::try_from(stored).unwrap_or(0)))
                     }
                     store_writes::Doc::Secrets(secrets) => {
                         if db.save_secrets(account, version, &secrets).await? {
                             return Ok(Landed::Written);
                         }
-                        let (_, stored) = db.stored_versions(account).await?;
+                        let Some((_, stored)) = db.stored_versions(account).await? else { return Ok(Landed::Gone) };
                         Ok(Landed::Behind(u64::try_from(stored).unwrap_or(0)))
                     }
                 }

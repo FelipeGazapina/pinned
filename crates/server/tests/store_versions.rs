@@ -170,3 +170,25 @@ async fn a_document_save_accepts_lands_in_jsonb_and_one_jsonb_refuses_is_refused
     assert_eq!(stored.store["a"], "x\\u0000y");
     assert_eq!(stored.version, 1);
 }
+
+/// The account's row is deleted while the hub holds the account. A save finds no row: the writer
+/// drops the document after one try instead of retrying it forever, and its slot empties.
+#[tokio::test]
+async fn a_save_for_an_account_whose_row_is_gone_is_dropped_after_one_try() {
+    use pinned_server::hub::AccountStore;
+    use std::time::Duration;
+    let dir = tempfile::tempdir().unwrap();
+    let (url, db, account) = fresh("row_gone", dir.path()).await;
+    let storage = AccountStore::load(db.clone(), account).await.unwrap();
+    let (other, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls).await.unwrap();
+    tokio::spawn(connection);
+    assert_eq!(other.execute("delete from accounts where id = $1", &[&account]).await.unwrap(), 1);
+    assert_eq!(db.stored_versions(account).await.unwrap(), None, "no row, no versions");
+
+    storage.save(br#"{"n":1}"#).unwrap();
+    storage.write_key("linear", "k").unwrap();
+    // A retry would wait out a backoff of 0.5 s at least; one try answers at once.
+    let started = std::time::Instant::now();
+    assert!(storage.flush(Duration::from_secs(5)).await, "the slots empty");
+    assert!(started.elapsed() < Duration::from_millis(400), "after one try, no retry: {:?}", started.elapsed());
+}
