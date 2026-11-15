@@ -1,0 +1,172 @@
+<title>NOME DA PROPOSTA</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Architects+Daughter&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Uma coluna de leitura; a folha azul sai mais larga, como uma planta presa na página. */
+:root {
+  --bg: #f2f4f8; --surface: #ffffff; --fg: #152038; --muted: #56617a; --rule: #d5dbe7;
+  --accent: #1c4c99; --accent-soft: #e3ebf8;
+  /* A folha é fixa: azul com tinta branca nos dois temas. */
+  --bp-paper: #1b4a93; --bp-grid: rgba(255, 255, 255, 0.09); --bp-grid-strong: rgba(255, 255, 255, 0.16);
+  --bp-ink: #f3f7ff; --bp-faint: #b9cdee;
+  --font-body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  --font-hand: "Architects Daughter", "Comic Sans MS", "Segoe Print", cursive;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0c1422; --surface: #131d30; --fg: #e5ebf6; --muted: #9aa7bf; --rule: #27344d;
+    --accent: #8fb4f2; --accent-soft: #18294a; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0c1422; --surface: #131d30; --fg: #e5ebf6; --muted: #9aa7bf; --rule: #27344d;
+  --accent: #8fb4f2; --accent-soft: #18294a; color-scheme: dark;
+}
+body {
+  background: var(--bg); color: var(--fg);
+  font-family: var(--font-body); font-size: 16px; line-height: 1.6;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 40px 72px;
+}
+.col { max-width: 720px; margin-inline: auto; display: flex; flex-direction: column; gap: 18px; }
+.wide { max-width: 1120px; margin-inline: auto; }
+.eyebrow { font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+h1 { font-size: 34px; line-height: 1.15; font-weight: 600; margin: 0; text-wrap: balance; }
+h2 { font-size: 21px; line-height: 1.25; font-weight: 600; margin: 26px 0 0; text-wrap: balance; }
+p { margin: 0; }
+.lede { font-size: 18px; }
+.note { color: var(--muted); font-size: 14px; }
+ul, ol { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 8px; }
+li { min-width: 0; }
+strong { font-weight: 600; }
+
+figure { margin: 30px auto; }
+.sheet {
+  background-color: var(--bp-paper);
+  background-image:
+    linear-gradient(var(--bp-grid-strong) 1px, transparent 1px),
+    linear-gradient(90deg, var(--bp-grid-strong) 1px, transparent 1px),
+    linear-gradient(var(--bp-grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--bp-grid) 1px, transparent 1px);
+  background-size: 100px 100px, 100px 100px, 20px 20px, 20px 20px;
+  overflow-x: auto;
+  box-shadow: 0 10px 30px rgba(10, 25, 60, 0.25);
+}
+.sheet svg { display: block; width: 100%; min-width: 980px; height: auto; color: var(--bp-ink); }
+.bp-new { fill: none; stroke: var(--bp-ink); stroke-width: 2; }                              /* novo */
+.bp-old { fill: none; stroke: var(--bp-faint); stroke-width: 1.4; stroke-dasharray: 6 5; }   /* já existe */
+.bp-frame { fill: none; stroke: var(--bp-ink); stroke-width: 1.5; }
+.bp-wire { fill: none; stroke: var(--bp-ink); stroke-width: 1.6; }
+.bp-head { fill: var(--bp-ink); stroke: none; }
+.bp-t { font-family: var(--font-hand); fill: var(--bp-ink); font-size: 13px; }
+.bp-h { font-family: var(--font-hand); fill: var(--bp-ink); font-size: 15px; letter-spacing: 0.06em; }
+.bp-s { font-family: var(--font-hand); fill: var(--bp-faint); font-size: 12px; }
+.bp-l { font-family: var(--font-hand); fill: var(--bp-ink); font-size: 12px; }
+figcaption { max-width: 720px; margin: 12px auto 0; color: var(--muted); font-size: 14px; }
+
+.tablewrap { overflow-x: auto; background: var(--surface); border: 1px solid var(--rule); }
+table { border-collapse: collapse; width: 100%; min-width: 560px; font-size: 14.5px; }
+th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font-family: var(--font-mono); font-weight: 500; font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+tr:last-child td { border-bottom: none; }
+td.yes { color: var(--accent); font-weight: 600; }
+td.no { color: var(--muted); }
+.decision { background: var(--surface); border: 1px solid var(--rule); padding: 14px 16px; display: flex; flex-direction: column; gap: 6px; }
+.decision b { font-weight: 600; }
+.decision .rec { color: var(--accent); font-weight: 500; }
+</style>
+
+<div class="col">
+  <div class="eyebrow">Proposta de desenho · DATA</div>
+  <h1>NOME DA PROPOSTA</h1>
+  <p class="lede">A ideia inteira em um parágrafo simples.</p>
+  <p>As duas ou três regras que sustentam o desenho.</p>
+</div>
+
+<figure class="wide">
+  <div class="sheet">
+    <svg viewBox="0 0 1200 800" role="img" aria-label="O desenho contado em uma frase.">
+      <defs>
+        <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+          <path class="bp-head" d="M0 0 L10 5 L0 10 Z"/>
+        </marker>
+      </defs>
+      <rect class="bp-frame" x="12" y="12" width="1176" height="776"/>
+
+      <!-- títulos das colunas: quem usa · servidor · onde roda -->
+      <text class="bp-h" x="40" y="56">QUEM USA</text>
+      <text class="bp-h" x="400" y="56">SERVIDOR</text>
+      <text class="bp-h" x="950" y="56">EXECUÇÃO</text>
+
+      <!-- peça que já existe: tracejada -->
+      <rect class="bp-old" x="40" y="80" width="230" height="150"/>
+      <text class="bp-t" x="52" y="103">PEÇA QUE JÁ EXISTE</text>
+      <text class="bp-s" x="52" y="188">detalhe em tinta fraca</text>
+
+      <!-- peça nova: traço contínuo -->
+      <rect class="bp-new" x="400" y="80" width="420" height="300"/>
+      <text class="bp-h" x="414" y="106">PEÇA NOVA</text>
+
+      <rect class="bp-new" x="950" y="80" width="226" height="150"/>
+      <text class="bp-t" x="962" y="104">ONDE O TRABALHO RODA</text>
+
+      <!-- fio com rótulo em duas linhas; o fio principal usa stroke-width 2.6 -->
+      <line class="bp-wire" x1="270" y1="140" x2="400" y2="140" marker-end="url(#ah)" style="stroke-width:2.6"/>
+      <text class="bp-l" x="335" y="131" text-anchor="middle">o que vai</text>
+      <text class="bp-l" x="335" y="158" text-anchor="middle">por este fio</text>
+
+      <line class="bp-wire" x1="820" y1="150" x2="950" y2="150" marker-end="url(#ah)"/>
+      <text class="bp-l" x="885" y="141" text-anchor="middle">abre</text>
+
+      <!-- legenda -->
+      <line class="bp-old" x1="40" y1="656" x2="84" y2="656"/>
+      <text class="bp-s" x="94" y="660">já existe hoje</text>
+      <line class="bp-new" x1="40" y1="680" x2="84" y2="680"/>
+      <text class="bp-l" x="94" y="684">novo nesta proposta</text>
+
+      <!-- carimbo -->
+      <rect class="bp-frame" x="820" y="716" width="368" height="72"/>
+      <line class="bp-frame" x1="1040" y1="716" x2="1040" y2="788"/>
+      <line class="bp-frame" x1="820" y1="752" x2="1188" y2="752"/>
+      <text class="bp-t" x="832" y="739">NOME DO PROJETO</text>
+      <text class="bp-t" x="832" y="775">ARQUITETURA PROPOSTA</text>
+      <text class="bp-s" x="1052" y="739">FOLHA 1/1 · REV A</text>
+      <text class="bp-s" x="1052" y="775">DATA · S/ ESCALA</text>
+    </svg>
+  </div>
+  <figcaption>O que o desenho mostra, em duas ou três frases.</figcaption>
+</figure>
+
+<div class="col">
+  <h2>O que muda e o que continua igual</h2>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Item</th><th>Novo</th><th>Continua</th></tr></thead>
+    <tbody><tr><td>…</td><td>…</td><td>…</td></tr></tbody>
+  </table></div>
+
+  <h2>Como funciona</h2>
+  <ol><li>…</li></ol>
+
+  <h2>Escolhas de desenho que recomendo</h2>
+  <div class="decision">
+    <b>A escolha, em uma frase.</b>
+    <span>O motivo.</span>
+    <span class="rec">Alternativa descartada: … e por quê.</span>
+  </div>
+
+  <h2>O que precisa existir antes</h2>
+  <ul><li><strong>…</strong> …</li></ul>
+
+  <h2>Fases</h2>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Fase</th><th>Entrega</th><th>Prova de que funciona</th></tr></thead>
+    <tbody><tr><td>1 · …</td><td>…</td><td>…</td></tr></tbody>
+  </table></div>
+
+  <h2>Decisões que são suas</h2>
+  <ol><li><strong>A pergunta?</strong> Recomendo …, porque …</li></ol>
+
+  <p class="note">Base desta proposta: o que eu li, o que não li, e o próximo passo.</p>
+</div>

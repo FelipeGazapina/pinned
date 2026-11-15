@@ -8,6 +8,8 @@ const SKILL: &str = include_str!("../../../plugin/skills/tutorial-video/SKILL.md
 const HELPER: &str = include_str!("../../../plugin/skills/tutorial-video/tutorial.mjs");
 const BRO: &str = include_str!("../../../plugin/skills/bro/SKILL.md");
 const UPSTASH_BOX: &str = include_str!("../../../plugin/skills/upstash-box/SKILL.md");
+const PROPOSTA: &str = include_str!("../../../plugin/skills/proposta-blueprint/SKILL.md");
+const PROPOSTA_TEMPLATE: &str = include_str!("../../../plugin/skills/proposta-blueprint/template.html");
 
 /// Where `install` puts the helper, relative to the plugin directory.
 fn helper_path(dir: &Path) -> PathBuf {
@@ -22,6 +24,8 @@ pub fn install(dir: &Path) -> std::io::Result<PathBuf> {
         ("skills/tutorial-video/tutorial.mjs", HELPER),
         ("skills/bro/SKILL.md", BRO),
         ("skills/upstash-box/SKILL.md", UPSTASH_BOX),
+        ("skills/proposta-blueprint/SKILL.md", PROPOSTA),
+        ("skills/proposta-blueprint/template.html", PROPOSTA_TEMPLATE),
     ] {
         let file = dir.join(name);
         std::fs::create_dir_all(file.parent().unwrap())?;
@@ -47,6 +51,11 @@ mod tests {
         let upstash = std::fs::read_to_string(dir.join("skills/upstash-box/SKILL.md")).unwrap();
         assert!(upstash.starts_with("---\nname: upstash-box\n"));
         assert!(upstash.contains("CLAUDE_CODE_OAUTH_TOKEN"));
+        let proposta = std::fs::read_to_string(dir.join("skills/proposta-blueprint/SKILL.md")).unwrap();
+        assert!(proposta.starts_with("---\nname: proposta-blueprint\n"));
+        assert!(proposta.contains("template.html"));
+        let template = std::fs::read_to_string(dir.join("skills/proposta-blueprint/template.html")).unwrap();
+        assert!(template.contains("class=\"sheet\""));
         assert!(std::fs::read_to_string(dir.join(".claude-plugin/plugin.json")).unwrap().contains("\"name\": \"pinned\""));
         std::fs::remove_dir_all(dir).unwrap();
     }
