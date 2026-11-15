@@ -14,7 +14,7 @@ Nenhuma das duas é código do projeto. Código só começa quando o Felipe mand
 
 ## Antes de escrever
 
-- Leia o que existe. Use `repo_overview` e poucas chamadas de `repo_search` ou `repo_read` para saber o que já está pronto e o que seria novo. O desenho separa as duas coisas.
+- Leia o que existe antes de propor: o que já está pronto e o que seria novo. O Orquestrador usa `repo_overview` e poucas chamadas de `repo_search` ou `repo_read`; um Capitão lê o próprio repositório com Read e Grep. O desenho separa as duas coisas.
 - Procure na memória (`memory_search`) decisões que o Felipe já tomou sobre o assunto. Uma decisão dele entra na página como decidida, não como pergunta.
 - Guarde a direção nova na memória (`memory_save`) quando ele refinar a ideia.
 
