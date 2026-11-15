@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.18.5 (2026-11-15)
+
+### Fixed
+
+- The hub now returns freed memory to the system. Its Linux build used the allocator of its static build, which kept the memory of the many small allocations each machine's sync reply frees. On a local hub under load shaped like production's, resident memory grew about 1.5 GB an hour while the memory actually in use stayed under 31 MB. With the new allocator (mimalloc) it stayed between 67 and 110 MB over a 21-minute run. Longer runs and the x86_64 build under load have not been measured yet.
+- `pinned-server` on Linux machines, which is also the node, uses the same allocator.
+
 ## 0.18.4 (2026-11-14)
 
 ### Fixed
