@@ -1,9 +1,16 @@
 //! Counts the bytes the hub holds on the heap, for the census: live bytes next to the resident
 //! set tell memory the hub holds from memory the allocator keeps after the hub freed it.
-use std::alloc::{GlobalAlloc, Layout, System};
+//!
+//! Underneath is mimalloc, not the system's: musl's malloc, which the static Linux builds carry,
+//! kept the memory of the many small allocations a `sync_list` reply frees, and the hub's resident
+//! set grew ~1.5 GB an hour over a flat live heap (`examples/hub_load.md`, round 3). mimalloc reads
+//! the page size when it starts, so the same binary runs on aarch64 kernels with 16 or 64 KB pages.
+use std::alloc::{GlobalAlloc, Layout};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub struct Counting;
+
+static INNER: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 static LIVE: AtomicU64 = AtomicU64::new(0);
 static LIVE_BIG: AtomicU64 = AtomicU64::new(0);
@@ -28,25 +35,25 @@ fn shrank(size: usize) {
 
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        let p = System.alloc(layout);
+        let p = INNER.alloc(layout);
         if !p.is_null() {
             grew(layout.size());
         }
         p
     }
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        let p = System.alloc_zeroed(layout);
+        let p = INNER.alloc_zeroed(layout);
         if !p.is_null() {
             grew(layout.size());
         }
         p
     }
     unsafe fn dealloc(&self, p: *mut u8, layout: Layout) {
-        System.dealloc(p, layout);
+        INNER.dealloc(p, layout);
         shrank(layout.size());
     }
     unsafe fn realloc(&self, p: *mut u8, layout: Layout, new: usize) -> *mut u8 {
-        let q = System.realloc(p, layout, new);
+        let q = INNER.realloc(p, layout, new);
         if !q.is_null() {
             shrank(layout.size());
             grew(new);
