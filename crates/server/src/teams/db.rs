@@ -440,11 +440,11 @@ pub async fn use_go_ahead(db: &Db, team: Uuid, run: Uuid, step: &str, question: 
         .client()
         .await?
         .query_opt(
-            "update team_calls set released_at = $5 where id = (
+            "update team_calls set released_at = $5::bigint where id = (
                select id from team_calls
                where team = $1 and run = $2 and step_hash = $3 and question = $4 and situation = 'before_irreversible'
                  and answer -> 'kind' ->> 'kind' = 'choice' and answer ->> 'choice' = $6
-                 and released_at is null and (answer ->> 'at')::bigint >= $5 - 600
+                 and released_at is null and (answer ->> 'at')::bigint >= $5::bigint - 600
                order by answered_at desc limit 1 for update)
              returning id",
             &[&team, &run, &step, &question, &now, &GO_AHEAD],

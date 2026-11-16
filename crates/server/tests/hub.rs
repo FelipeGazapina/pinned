@@ -11541,3 +11541,4 @@ fn an_agent_saves_and_lists_ideas_through_act_and_its_role_is_kept() {
 #[path = "hub/teams_calls.rs"] mod teams_calls;
 #[path = "hub/teams_box_call.rs"]
 mod teams_box_call;
+#[path = "hub/teams_go_ahead.rs"] mod teams_go_ahead;
