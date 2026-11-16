@@ -500,10 +500,22 @@ pub async fn start_reserved(hub: &Arc<Hub>, team: &Arc<Account>, id: Uuid, mut w
     // Stopped, or ended by the backstop, since its session started: it gets no box, and its box ends
     // at once. In a task of its own: the poller's check that opens this holds its subject while it
     // runs, and ending the box needs that subject to fail the runs the box held.
-    if !db::open_reserved(&hub.db, team.id, id, &placed.machine).await? {
-        let (hub, team, machine) = (hub.clone(), team.clone(), placed.machine.clone());
-        tokio::spawn(async move { end_box_of_ended_run(&hub, &team, id, &machine).await });
-        return Err(super::calls::ENDED_WHILE_BOOTING.into());
+    // Its session works already: a write that fails (a busy row) is tried once more, and when that
+    // fails too its box ends as well, so no session keeps working on a run that only holds a place.
+    let open = match db::open_reserved(&hub.db, team.id, id, &placed.machine).await {
+        Ok(open) => Ok(open),
+        Err(_) => db::open_reserved(&hub.db, team.id, id, &placed.machine).await,
+    };
+    if !matches!(open, Ok(true)) {
+        let (ending, of, machine) = (hub.clone(), team.clone(), placed.machine.clone());
+        tokio::spawn(async move { end_box_of_ended_run(&ending, &of, id, &machine).await });
+        return Err(match open {
+            Err(e) => {
+                eprintln!("pinned-server: run {id} of team {} did not open, so its box is ended: {e}", team.id);
+                e
+            }
+            Ok(_) => super::calls::ENDED_WHILE_BOOTING.into(),
+        });
     }
     if let Some(run) = db::run(&hub.db, team.id, id).await? {
         super::push(hub, team.id, TeamEvent::RunChanged { run }).await?;
