@@ -719,3 +719,66 @@ fn a_waiting_event_whose_bot_read_is_busy_still_waits_and_starts_later() {
     wait_for("the event to open its session", || opened(&crew, &pages) == 1 && crew.waiting(&pages) == 0);
     assert_eq!(crew.skipped(&pages), skipped, "nothing was counted as skipped");
 }
+
+// ---- a team-wide read that fails leaves the whole line waiting ----
+
+/// A stored key as the hub seals one, which this hub's key file can't open.
+const UNOPENABLE: &str = "sealed:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
+/// The team's skip counts as the table holds them, by bot and reason: no member's call reads
+/// them while the team's keys can't be opened.
+fn skip_rows(crew: &Crew) -> Vec<Vec<Option<String>>> {
+    super::teams_calls::rows(&crew.hub, &format!("select workflow, reason, count::text from team_bot_skips where team = '{}' order by workflow, reason", crew.team))
+}
+
+#[test]
+fn a_team_whose_keys_cant_be_opened_keeps_its_whole_line_waiting() {
+    let mut crew = Crew::new("tl_team_unreadable");
+    let (holder, x, z) = (crew.on_bot("Docs"), crew.on_bot("Pages"), crew.on_bot("Notes"));
+    admin_on(&crew.hub.database, &format!("update teams set max_live_runs = 1 where id = '{}'", crew.team));
+    assert_eq!(crew.found(crew.labeled(&holder, 9)), Ok(()));
+    assert_eq!(crew.found(crew.labeled(&x, 1)), Ok(()));
+    assert_eq!(crew.waiting(&x), 1, "Pages's trigger event waits behind the holder");
+    for (bot, place) in [(&z, 1), (&x, 2)] {
+        let reply = crew.call(&crew.bob, TeamOp::RunNow { workflow: bot.clone() }).unwrap();
+        assert_eq!((reply["waiting"].clone(), reply["place"].clone()), (json!(true), json!(place)), "a Run now waits behind the holder");
+    }
+    assert_eq!(skip_rows(&crew), Vec::<Vec<Option<String>>>::new());
+    // Another hub starts on the database while the team stores nothing yet, so it reads the
+    // team's keys only when it first needs them; by then a key is stored that its key file can't
+    // open (as one sealed by a hub with another key file). The team gets a free place, and this
+    // hub's reaper wakes what waits: every read of the team's keys fails.
+    let addr = crew.hub.stop();
+    let team = crew.team;
+    admin_on(&crew.hub.database, &format!(
+        "create table kept_keys as select store, secrets from accounts where id = '{team}';
+         update accounts set store = '{{}}', secrets = '{{}}' where id = '{team}'"
+    ));
+    let (twin, running) = crew.hub.twin();
+    admin_on(&crew.hub.database, &format!(
+        "update accounts a set store = k.store, secrets = k.secrets || jsonb_build_object('unopenable', '{UNOPENABLE}') from kept_keys k where a.id = '{team}';
+         update teams set max_live_runs = 2 where id = '{team}'"
+    ));
+    let (other, policy) = (running.hub.clone(), crew.hub.team_policy.clone());
+    assert_eq!(twin.block_on(async move { teams::calls::tick(&other, &policy).await }), Ok(()));
+    std::thread::sleep(Duration::from_millis(1500));
+
+    assert_eq!((crew.waiting(&x), crew.waiting(&z)), (2, 1), "every row still waits");
+    assert_eq!((opened(&crew, &x), opened(&crew, &z)), (0, 0), "nothing started");
+    assert_eq!(skip_rows(&crew), Vec::<Vec<Option<String>>>::new(), "nothing was counted as skipped");
+
+    // The key is put right and the hub starts again: the rows start in their order, each when a
+    // place is free for it.
+    twin.shutdown_background();
+    admin_on(&crew.hub.database, &format!("update accounts set secrets = secrets - 'unopenable' where id = '{team}'"));
+    crew.hub.serve(&addr);
+    crew.reaper_pass();
+    wait_for("Pages's trigger event to open its session", || opened(&crew, &x) == 1);
+    assert_eq!((crew.waiting(&x), crew.waiting(&z)), (1, 1), "the two Run nows wait: the team is full");
+    crew.stop(&crew.live_of(&holder)[0]);
+    wait_for("Notes's Run now to open its session", || opened(&crew, &z) == 1 && crew.waiting(&z) == 0);
+    assert_eq!(crew.waiting(&x), 1, "Pages's Run now waits behind Pages's live run");
+    crew.stop(&crew.live_of(&x)[0]);
+    wait_for("Pages's Run now to open its session", || opened(&crew, &x) == 1 && crew.waiting(&x) == 0);
+    assert_eq!(skip_rows(&crew), Vec::<Vec<Option<String>>>::new(), "nothing was counted as skipped");
+}
