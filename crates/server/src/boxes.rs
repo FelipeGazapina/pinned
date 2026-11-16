@@ -1765,9 +1765,14 @@ impl Boxes {
 
     /// Removing a box's machine deletes the box too. Answers whether `machine` ran in one.
     pub async fn end_for_machine(&self, hub: &Hub, account: &Arc<Account>, machine: Uuid) -> Result<bool, String> {
+        self.end_machine(hub, account, machine, End::Removed).await
+    }
+
+    /// Ends the box `machine` runs in for `why`, as the reaper would. Answers whether it ran in one.
+    pub async fn end_machine(&self, hub: &Hub, account: &Arc<Account>, machine: Uuid, why: End) -> Result<bool, String> {
         let Some(row) = hub.db.box_of(account.id, machine).await? else { return Ok(false) };
         let key = hub.connectors(account).await?.box_api_key();
-        self.finish(hub, account, row, End::Removed, key.as_deref()).await?;
+        self.finish(hub, account, row, why, key.as_deref()).await?;
         Ok(true)
     }
 
@@ -1822,6 +1827,8 @@ impl Boxes {
                 _ => None,
             })
             .collect();
+        // A team box whose run waits on people (`teams::calls`): it sits quiet for as long as they take.
+        let asking = if rows.is_empty() { HashSet::new() } else { crate::teams::db::waiting_boxes(&hub.db, account.id).await? };
         let now = Instant::now();
         for row in rows {
             let row = match row {
@@ -1879,10 +1886,12 @@ impl Boxes {
                         } else if over_budget {
                             Some(End::Expired)
                         } else {
-                            // An interactive session is quiet while its human thinks; only its
-                            // budget, its closed or exited tab, or going missing ends it.
+                            // An interactive session is quiet while its human thinks, and a team
+                            // box's while its run waits on people; only its budget, its max life,
+                            // its closed or exited tab, or going missing ends it.
                             let seen = match (row.connector.as_str(), seen) {
                                 (INTERACTIVE_CONNECTOR, Seen::Tab { running, .. }) => Seen::Tab { running, quiet: false },
+                                (_, Seen::Tab { running, .. }) if asking.contains(&machine) => Seen::Tab { running, quiet: false },
                                 _ => seen,
                             };
                             let was_offline = slot.offline_since;

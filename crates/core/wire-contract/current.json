@@ -11383,7 +11383,7 @@
                 ]
               },
               {
-                "description": "From a box's session only, on the team account's machine: asks the people its bot's\n`CallRules` name for `situation`. The session never names people.",
+                "description": "From a box's session only, on the team account's machine: asks the people its bot's\n`CallRules` name for `situation`. The session never names people. The hub replies at once\nwith the call's id and who it asks (`{\"call\":\"…\",\"asked\":[\"@design\"]}`); the answer, or\nthat nobody answered in time, is typed into the session later.",
                 "type": "object",
                 "properties": {
                   "op": {
@@ -22896,7 +22896,7 @@
                 ]
               },
               {
-                "description": "From a box's session only, on the team account's machine: asks the people its bot's\n`CallRules` name for `situation`. The session never names people.",
+                "description": "From a box's session only, on the team account's machine: asks the people its bot's\n`CallRules` name for `situation`. The session never names people. The hub replies at once\nwith the call's id and who it asks (`{\"call\":\"…\",\"asked\":[\"@design\"]}`); the answer, or\nthat nobody answered in time, is typed into the session later.",
                 "type": "object",
                 "properties": {
                   "op": {
@@ -31570,7 +31570,7 @@
                 ]
               },
               {
-                "description": "From a box's session only, on the team account's machine: asks the people its bot's\n`CallRules` name for `situation`. The session never names people.",
+                "description": "From a box's session only, on the team account's machine: asks the people its bot's\n`CallRules` name for `situation`. The session never names people. The hub replies at once\nwith the call's id and who it asks (`{\"call\":\"…\",\"asked\":[\"@design\"]}`); the answer, or\nthat nobody answered in time, is typed into the session later.",
                 "type": "object",
                 "properties": {
                   "op": {
@@ -39935,7 +39935,7 @@
                 ]
               },
               {
-                "description": "From a box's session only, on the team account's machine: asks the people its bot's\n`CallRules` name for `situation`. The session never names people.",
+                "description": "From a box's session only, on the team account's machine: asks the people its bot's\n`CallRules` name for `situation`. The session never names people. The hub replies at once\nwith the call's id and who it asks (`{\"call\":\"…\",\"asked\":[\"@design\"]}`); the answer, or\nthat nobody answered in time, is typed into the session later.",
                 "type": "object",
                 "properties": {
                   "op": {

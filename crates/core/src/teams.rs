@@ -435,7 +435,9 @@ pub enum TeamOp {
     /// checker's stack.
     Hub { call: Value },
     /// From a box's session only, on the team account's machine: asks the people its bot's
-    /// `CallRules` name for `situation`. The session never names people.
+    /// `CallRules` name for `situation`. The session never names people. The hub replies at once
+    /// with the call's id and who it asks (`{"call":"…","asked":["@design"]}`); the answer, or
+    /// that nobody answered in time, is typed into the session later.
     AskPeople {
         situation: Situation,
         question: String,
