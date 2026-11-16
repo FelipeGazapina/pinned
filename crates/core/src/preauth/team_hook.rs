@@ -30,6 +30,10 @@ pub const DONT: &str = "Don't";
 /// What a session reads for a step longer than `STEP_CHARS`, which nobody is asked about.
 pub const TOO_LONG: &str = "This step is too long to show to the team; split it into shorter steps.";
 
+/// What a session reads for a step that sets a secret-named variable to a command: hiding the
+/// value would hide the command from the person asked, so nobody is asked and the step is denied.
+pub const HIDES_COMMAND: &str = "this step hides a command in a secret";
+
 /// The longest step, secrets hidden, a person is asked to approve whole.
 const STEP_CHARS: usize = 4000;
 
@@ -80,6 +84,9 @@ pub fn decide(payload: &str, env: &HookEnv, ask: impl FnOnce(Message) -> Result<
     let ctx = AskCtx { worktree: &worktree, scratch: None, home: &env.home, cwd: &cwd, default_branch: &default_branch, current_branch: current_branch.as_deref() };
     let hit = never(&ctx, &tool_ask)?;
     let tool = hook["tool_name"].as_str()?;
+    if hides_command(&step_text(tool, &tool_ask, input)) {
+        return Some(deny(HIDES_COMMAND));
+    }
     let shown = step(tool, &tool_ask, input);
     if shown.chars().count() > STEP_CHARS {
         return Some(deny(TOO_LONG));
@@ -125,11 +132,15 @@ fn canonical(value: &Value) -> String {
 /// The exact step as it will run, with tokens and secret-named assignments hidden: a command as
 /// the bot wrote it, any other tool call as its name and input.
 fn step(tool: &str, ask: &Ask, input: &Value) -> String {
-    let text = match ask {
+    scrub(&step_text(tool, ask, input))
+}
+
+/// The step as it will run, nothing hidden.
+fn step_text(tool: &str, ask: &Ask, input: &Value) -> String {
+    match ask {
         Ask::Bash { command } => (*command).to_owned(),
         Ask::Edit { .. } | Ask::Read { .. } | Ask::WebFetch { .. } | Ask::Mcp { .. } => format!("{tool} {}", canonical(input)),
-    };
-    scrub(&text)
+    }
 }
 
 /// `text` whole, with keys and tokens hidden, and the value of any `NAME=value` whose name says
@@ -147,9 +158,24 @@ fn scrub(text: &str) -> String {
         .collect()
 }
 
+/// Whether `text` sets a secret-named `NAME=` to anything but a plain literal (`$(...)`, a
+/// backtick, `;`, a quote ...): `scrub` would hide that part, so a person approving the step would
+/// not see the command in it.
+fn hides_command(text: &str) -> bool {
+    let literal = |c: char| c.is_ascii_alphanumeric() || "_./+:@%-".contains(c);
+    text.split(char::is_whitespace).any(|word| match word.split_once('=') {
+        Some((name, value)) => !value.is_empty() && secret_name(name) && !value.chars().all(literal),
+        None => false,
+    })
+}
+
+/// Whether the variable name ending `name` says secret: one of its `_`/`-` parts is a secret word,
+/// so `API_KEY` and `--password` do, `AUTHOR` and `MONKEY` do not.
 fn secret_name(name: &str) -> bool {
-    let name = name.trim_start_matches('-').to_ascii_uppercase();
-    ["TOKEN", "SECRET", "PASSWORD", "PASSWD", "KEY", "CREDENTIAL", "AUTH"].iter().any(|word| name.contains(word))
+    let tail = name.len() - name.chars().rev().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-').map(char::len_utf8).sum::<usize>();
+    name[tail..].to_ascii_uppercase().split(['_', '-']).any(|part| {
+        ["TOKEN", "SECRET", "PASSWORD", "PASSWD", "KEY", "CREDENTIAL", "CREDENTIALS", "AUTH", "APIKEY", "ACCESSKEY", "PRIVATEKEY", "AUTHTOKEN", "ACCESSTOKEN"].contains(&part)
+    })
 }
 
 /// The folder holding `.git` at or above `start`.
@@ -293,6 +319,32 @@ mod tests {
         assert_eq!(scrub("curl -H 'x' API_KEY=abc123 --password=hunter2 sk-0123456789abcdefghij0123"), "curl -H 'x' API_KEY=[hidden] --password=[hidden] [hidden]");
         assert_eq!(scrub("a  TOKEN=x\n\tb=c "), "a  TOKEN=[hidden]\n\tb=c ");
         assert_eq!(scrub(&"a ".repeat(400)), "a ".repeat(400));
+    }
+
+    #[test]
+    fn a_secret_set_to_a_command_is_denied_and_nobody_is_asked() {
+        for command in [
+            "SECRET_KEY=$(git push -f origin main) vercel deploy --prod",
+            "API_TOKEN=`git push -f origin main` vercel deploy --prod",
+            "AUTH=x;git push -f origin main; vercel deploy --prod",
+            "GH_TOKEN=\"$(cat ~/.ssh/id_ed25519)\" gh release create v1",
+            "vercel deploy --prod --token=a|sh",
+        ] {
+            let (out, message) = decision(&payload("Bash", json!({ "command": command })), true, Ok(r#"{"id":"k1"}"#));
+            assert_eq!(denied(&out.unwrap()), "this step hides a command in a secret", "{command}");
+            assert!(message.is_none(), "nobody is asked: {command}");
+        }
+        // A plain literal is still hidden and asked about.
+        let (_, message) = decision(&payload("Bash", json!({ "command": "SECRET_KEY=abc.def/1+2:x@y%z-_ vercel deploy --prod" })), true, Ok(r#"{"id":"k1"}"#));
+        let Some(Message::AskPeople { question, .. }) = message else { panic!("no ask") };
+        assert_eq!(question, "deploy: SECRET_KEY=[hidden] vercel deploy --prod");
+        // A name that only contains a secret word is no secret: shown, never denied.
+        let (_, message) = decision(&payload("Bash", json!({ "command": "AUTHOR=$(whoami) MONKEY=x vercel deploy --prod" })), true, Ok(r#"{"id":"k1"}"#));
+        let Some(Message::AskPeople { question, .. }) = message else { panic!("no ask") };
+        assert_eq!(question, "deploy: AUTHOR=$(whoami) MONKEY=x vercel deploy --prod");
+        assert_eq!(scrub("AUTHOR=x MONKEY=y KEY=z"), "AUTHOR=x MONKEY=y KEY=[hidden]");
+        assert!(!hides_command("AUTHOR=$(x) MONKEY=`y` NOTE=a;b"));
+        assert!(hides_command("--password='$(x)'"));
     }
 
     #[test]
