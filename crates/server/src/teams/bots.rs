@@ -451,8 +451,16 @@ pub async fn start_reserved(hub: &Arc<Hub>, team: &Arc<Account>, id: Uuid, mut w
             // failure ended stays listed, and either counts `StartFailed` once. A run the backstop
             // ended (counted `NeverStarted` there) or that was stopped stays as it ended, counted
             // by nobody here. No memory of this hub decides the count.
-            if db::fail_reserved_start(&hub.db, team.id, id, super::calls::NEVER_OPENED).await? {
-                db::count_skipped(&hub.db, team.id, &work.connector, SkipReason::StartFailed, 1).await?;
+            // Each cleanup step is logged when it fails and the next still runs: above all
+            // `queue::next`, so what waits in the bot's line is not left for the reaper.
+            match db::fail_reserved_start(&hub.db, team.id, id, super::calls::NEVER_OPENED).await {
+                Ok(true) => {
+                    if let Err(e) = db::count_skipped(&hub.db, team.id, &work.connector, SkipReason::StartFailed, 1).await {
+                        eprintln!("pinned-server: team {} bot {}: a failed start was not counted: {e}", team.id, work.connector);
+                    }
+                }
+                Ok(false) => {}
+                Err(e) => eprintln!("pinned-server: team {} bot {}: run {id} did not start and its place was not freed yet: {e}", team.id, work.connector),
             }
             super::queue::next(hub, team, &work.connector);
             return Err(e);

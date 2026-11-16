@@ -213,6 +213,25 @@ fn a_run_now_refused_after_its_turn_queued_it_is_queued_and_counted_exactly_once
     assert_eq!(crew.skipped(&pages), json!([{ "reason": "queue_full", "count": 1 }]), "one oldest dropped, counted once");
 }
 
+#[test]
+fn a_failed_start_whose_count_is_busy_still_starts_what_waits_next() {
+    let crew = Crew::new("tl_start_cleanup");
+    let pages = crew.on_bot("Pages");
+    assert_eq!(crew.found(crew.labeled(&pages, 1)), Ok(()));
+    for who in [&crew.bob, &crew.ana] {
+        let reply = crew.call(who, TeamOp::RunNow { workflow: pages.clone() }).unwrap();
+        assert_eq!(reply["waiting"], json!(true));
+    }
+    // Bob's run's box does not boot, and counting that waits on another connection's lock.
+    crew.hub.boxes.state.lock().unwrap().failing = Some(Exec { exit_code: 22, output: String::new(), error: "curl: (22) The requested URL returned error: 404\n".into() });
+    let held = Held::new(&crew.hub, "lock table team_bot_skips in share mode");
+    crew.stop(&crew.live_of(&pages)[0]);
+
+    wait_for("ana's waiting run to open its session", || opened(&crew, &pages) == 1);
+    assert_eq!(crew.waiting(&pages), 0, "nothing is left waiting for the reaper");
+    held.release();
+}
+
 // ---- the claim of a granted event ----
 
 #[test]
