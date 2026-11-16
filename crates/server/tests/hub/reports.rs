@@ -366,8 +366,34 @@ fn the_reports_environment_reads_a_token_alone_and_overrides_only_under_dev() {
     let dev = Config::from_env(true, &overrides).unwrap();
     assert_eq!((dev.api.as_str(), dev.repo.as_str()), ("http://127.0.0.1:4010", "acme/app"));
     let remote = vars(&[("PINNED_REPORTS_GITHUB_TOKEN", "fake-1"), ("PINNED_REPORTS_GITHUB_API", "https://api.example.test")]);
-    assert_eq!(Config::from_env(true, &remote), None, "a token never goes to a host that is not this machine");
+    let remote = Config::from_env(true, &remote).unwrap();
+    assert_eq!((remote.api.as_str(), remote.repo.as_str()), ("https://api.github.com", "FelipeGazapina/pinned"), "a token never goes to a host that is not this machine");
     assert_eq!(Config::from_env(true, &vars(&[])), None);
+}
+
+#[test]
+fn a_dev_hub_files_in_the_override_repository_only_with_an_accepted_api() {
+    use pinned_server::reports::Config;
+    let fake = Fake::start();
+    let env = |pairs: Vec<(&'static str, String)>| move |name: &str| pairs.iter().find(|(k, _)| *k == name).map(|(_, v)| v.clone());
+    let token = ("PINNED_REPORTS_GITHUB_TOKEN", "fake-1".to_owned());
+    let repo = ("PINNED_REPORTS_REPO", "octo-labs/tracker".to_owned());
+
+    // No accepted API: unset, or not on this machine. Reports go to the fixed repository, on GitHub's API.
+    for api in [None, Some("https://api.example.test")] {
+        let pairs = [token.clone(), repo.clone()].into_iter().chain(api.map(|api| ("PINNED_REPORTS_GITHUB_API", api.to_owned()))).collect();
+        let config = Config::from_env(true, &env(pairs)).unwrap();
+        assert_eq!((config.api.as_str(), config.repo.as_str()), ("https://api.github.com", "FelipeGazapina/pinned"), "{api:?}");
+    }
+
+    // Both, and the API is on this machine: the hub files in the override repository.
+    let config = Config::from_env(true, &env(vec![token, repo, ("PINNED_REPORTS_GITHUB_API", fake.github.url.clone())])).unwrap();
+    assert_eq!((config.api.as_str(), config.repo.as_str()), (fake.github.url.as_str(), "octo-labs/tracker"));
+    let hub = TestHub::start_reports("reports_override_repo", Signup::Open, Policy::default(), false, Default::default(), "127.0.0.1:0", Some(config));
+    let mut ana = Client::connect(&hub.url, &signed_up(&hub, "ana@example.test"));
+    reviewed_send(&mut ana, problem("Crash on launch", "It closes."), json!({})).unwrap();
+    let posts: Vec<String> = fake.github.requests().into_iter().filter(|r| r.method == "POST").map(|r| r.path).collect();
+    assert_eq!(posts, ["/repos/octo-labs/tracker/issues"]);
 }
 
 #[test]
