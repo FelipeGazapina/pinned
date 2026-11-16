@@ -1081,29 +1081,33 @@ fn two_hubs_on_one_database_count_the_sixth_send_under_the_accounts_lock() {
     }
     fake.github.slow_creates(Duration::from_millis(300));
 
-    // The account's lock, held from outside: neither hub marks a send while it is held.
-    let outside = first.runtime.block_on(async {
-        let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), first.database), tokio_postgres::NoTls).await.unwrap();
-        tokio::spawn(connection);
-        db.batch_execute("begin; select pg_advisory_xact_lock(hashtextextended('pinned-reports:' || id::text, 0)) from accounts where email = 'ana@example.test'").await.unwrap();
-        db
-    });
-    let answers = Mutex::new(vec![]);
-    std::thread::scope(|scope| {
-        for (n, url) in [first.url.clone(), second.url.clone()].into_iter().enumerate() {
-            let (token, answers) = (&token, &answers);
-            scope.spawn(move || {
-                let mut client = Client::connect(&url, token);
-                answers.lock().unwrap().push(reviewed_send(&mut client, problem(&format!("Race {n}"), "It closes."), json!({})));
-            });
-        }
-        std::thread::sleep(Duration::from_millis(800));
-        assert_eq!(sql_text(&first, "select count(*)::text from reports"), Some("4".into()), "no send is marked while the lock is held");
-        first.runtime.block_on(outside.batch_execute("rollback")).unwrap();
-    });
-    let answers = answers.into_inner().unwrap();
+    // The account's lock, held from outside: neither hub marks a send while it is held, and neither waits for it.
+    let outside = holding_reports_of(&first, "ana@example.test");
+    let send_on_both = |n: usize| {
+        let answers = Mutex::new(vec![]);
+        std::thread::scope(|scope| {
+            for (hub, url) in [first.url.clone(), second.url.clone()].into_iter().enumerate() {
+                let (token, answers) = (&token, &answers);
+                scope.spawn(move || {
+                    let mut client = Client::connect(&url, token);
+                    answers.lock().unwrap().push(reviewed_send(&mut client, problem(&format!("Race {n}.{hub}"), "It closes."), json!({})));
+                });
+            }
+        });
+        answers.into_inner().unwrap()
+    };
+    assert_eq!(send_on_both(0), vec![Err(SEND_BUSY.to_owned()), Err(SEND_BUSY.to_owned())]);
+    assert_eq!(sql_text(&first, "select count(*)::text from reports"), Some("4".into()), "no send is marked while the lock is held");
+    outside.release();
+
+    // Once it is free, one of two sends at once files the fifth; the other is refused, by the limit or as busy.
+    let answers = send_on_both(1);
     assert_eq!(answers.iter().filter(|a| a.is_ok()).count(), 1, "{answers:?}");
-    assert!(answers.iter().find_map(|a| a.as_ref().err()).unwrap().starts_with("You sent 5 reports in the last day."), "{answers:?}");
+    let refused = answers.iter().find_map(|a| a.as_ref().err()).unwrap();
+    assert!(refused.starts_with("You sent 5 reports in the last day.") || refused == SEND_BUSY, "{answers:?}");
+    let mut on_second = Client::connect(&second.url, &token);
+    let sixth = reviewed_send(&mut on_second, problem("Sixth", "It closes."), json!({})).unwrap_err();
+    assert!(sixth.starts_with("You sent 5 reports in the last day."), "{sixth}");
     assert_eq!((fake.posts(), left_today(&mut ana)), ((5, 0), json!(0)));
 }
 
