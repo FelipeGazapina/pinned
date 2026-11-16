@@ -1,4 +1,9 @@
 #!/bin/sh
+# BOX ONLY. Do not run this on a real computer (a laptop, a Mac mini, a server with a real pinned).
+# The fake box runner checks only the command line it is given: a path the command builds while it
+# runs (a variable, a script file, an interpreter) slips past its "stay inside the stack dir" check.
+# The real isolation is the Upstash box the stack runs in, not this guard.
+#
 # One command for a local pinned development stack with empty data, three invented accounts and a
 # fake Upstash Box runner, for exercising Teams flows end to end. See scripts/teams-dev/README.md.
 #

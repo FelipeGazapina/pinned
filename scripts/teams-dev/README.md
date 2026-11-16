@@ -1,5 +1,11 @@
 # Teams dev stack
 
+## Box only
+
+BOX ONLY. Do not run this on a real computer (a laptop, a Mac mini, a server with a real pinned).
+The fake box runner checks only the command line it is given: a path the command builds while it runs (a variable, a script file, an interpreter) slips past its "stay inside the stack dir" check.
+The real isolation is the Upstash box the stack runs in, not this guard.
+
 One command for a local pinned hub with empty data, three invented accounts and a fake Upstash Box
 runner, so Teams flows can be tried end to end. Nothing leaves the machine.
 
