@@ -244,7 +244,7 @@ const NOT_ITS_RUN: &str = "this box's run is not of that workflow on that subjec
 
 /// Signs in a machine of the team's own account, as a team's box is, with `token`, and reports
 /// `tabs` as running sessions of (workflow, subject) pairs that the box itself claims.
-fn team_machine(hub: &TestHub, team: Uuid, id: &str, token: &str, tabs: &[(&str, Value)]) -> WebSocket<MaybeTlsStream<TcpStream>> {
+pub(crate) fn team_machine(hub: &TestHub, team: Uuid, id: &str, token: &str, tabs: &[(&str, Value)]) -> WebSocket<MaybeTlsStream<TcpStream>> {
     admin_on(&hub.database, &format!("insert into machines (id, account, name, os, token_hash) values ('{id}', '{team}', 'box {id}', 'linux', sha256('{token}'::bytea)) on conflict do nothing"));
     let (mut ws, _) = tungstenite::connect(format!("{}/ws/machine", hub.url.replace("http://", "ws://"))).unwrap();
     if let MaybeTlsStream::Plain(stream) = ws.get_mut() {

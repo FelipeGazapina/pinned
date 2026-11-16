@@ -9551,6 +9551,80 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// A hub's team: every event runs now, and replies pass to the thread's live run.
+    struct TeamAdmission;
+
+    impl Admission for TeamAdmission {
+        fn admit(&self, event: Event) -> Pending<Result<Admitted, String>> {
+            let _ = event;
+            Box::pin(async { Ok(Admitted::Go) })
+        }
+
+        fn release(&self, connector: String, subject: Subject) -> Pending<()> {
+            let _ = (connector, subject);
+            Box::pin(async {})
+        }
+    }
+
+    const LIVE_REPLY: &str = "[Slack reply from ana in the thread]\n@pinned and the staging logs?";
+
+    /// A Slack graph run of `c2` whose session is open, on a team's connectors when `team`, and
+    /// what its session is typed (`Work::Prompt`) and handed (`Work::Delivery`) once `reply` reached
+    /// the thread's inbox and a delivery of the same reply was handed over.
+    fn live_reply_reaches(name: &str, team: bool) -> (Vec<String>, Vec<String>) {
+        let mut connector = slack_connector();
+        connector.graph = Some(talks(&["one"]));
+        let (connectors, dir) = stored(name, vec![connector]);
+        if team {
+            connectors.set_admission(std::sync::Arc::new(TeamAdmission));
+        }
+        connectors.begin("c2".into(), Subject::SlackThread { channel: "C0123ABCD".into(), thread: "1792400050.000200".into() }, slack_trigger(None), "2026-11-16T10:00:00Z").unwrap();
+        let typed = Mutex::new(Vec::<String>::new());
+        let delivered = Mutex::new(Vec::<String>::new());
+        let open = |work: Work| {
+            match &work {
+                Work::Prompt { text, .. } => typed.lock().unwrap().push(text.clone()),
+                Work::Delivery(delivery) => delivered.lock().unwrap().push(delivery.text()),
+                Work::Run(_) => {}
+            }
+            placed(work)
+        };
+        block_on(connectors.drive(&open)).unwrap();
+        assert!(matches!(connectors.runs.lock().unwrap()[0].session, Session::Live { .. }), "the run's session is open");
+        typed.lock().unwrap().clear();
+
+        let mut reply = mention_in_thread("1792400100.000100", "@pinned and the staging logs?");
+        reply.mentioned = vec![];
+        connectors.enqueue(reply);
+        block_on(connectors.drive(&open)).unwrap();
+        let delivery = Delivery {
+            connector: "c2".into(),
+            channel: "C0123ABCD".into(),
+            thread: "1792400050.000200".into(),
+            messages: vec![LIVE_REPLY.into()],
+            cursor: "1792400100.000100".into(),
+            mentioned: vec![],
+        };
+        block_on(connectors.handed(Work::Delivery(delivery), &open)).unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+        (typed.into_inner().unwrap(), delivered.into_inner().unwrap())
+    }
+
+    #[test]
+    fn a_reply_to_a_live_team_graph_run_reaches_its_session_framed() {
+        let framed = crate::untrusted::frame("a Slack reply in this thread", LIVE_REPLY);
+        let (typed, delivered) = live_reply_reaches("team-live-reply", true);
+        assert_eq!(typed, [framed.clone()], "the graph inbox types the reply framed, once");
+        assert_eq!(delivered, [framed], "a delivery hands the reply framed, once");
+    }
+
+    #[test]
+    fn a_persons_live_replies_reach_its_session_unframed() {
+        let (typed, delivered) = live_reply_reaches("person-live-reply", false);
+        assert_eq!(typed, [LIVE_REPLY], "the graph inbox types the reply as it is");
+        assert_eq!(delivered, [LIVE_REPLY], "a delivery hands the reply as it is");
+    }
+
     struct RestoreLinear;
 
     impl Drop for RestoreLinear {
