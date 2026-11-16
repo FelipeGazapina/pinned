@@ -30,6 +30,10 @@ pub(crate) static THINKING: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// team's triggers claims no granted event meanwhile.
 pub(crate) static POLLS_HELD: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
+/// The tests whose model calls about the second event on ENG-1 (`ENG-1 again:`) wait while they
+/// are listed here.
+pub(crate) static AGAIN_THINKING: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
 /// Starts the Linear and model stand-ins once, and the Slack one. Each test names its own keys,
 /// so they share the servers.
 fn standins() {
@@ -68,6 +72,9 @@ fn answer(mut stream: TcpStream) {
         std::thread::sleep(Duration::from_millis(50));
     }
     while service == "model" && body.contains("ENG-1:") && THINKING.lock().unwrap().iter().any(|t| key.ends_with(t.as_str())) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    while service == "model" && body.contains("ENG-1 again:") && AGAIN_THINKING.lock().unwrap().iter().any(|t| key.ends_with(t.as_str())) {
         std::thread::sleep(Duration::from_millis(50));
     }
     // A model call about ENG-1 that stops its run (`ta_rel_stop`) or fails (`ta_rel_model`).
@@ -1188,4 +1195,162 @@ fn a_turn_that_fails_after_taking_a_waiting_event_leaves_it_waiting() {
     assert_eq!(crew.live_of(&pages).len(), 1, "it started once");
     assert_eq!(crew.waiting(&pages), 0);
     assert_eq!(crew.skipped(&pages), Value::Null);
+}
+
+impl Crew {
+    /// A second event on ENG-1, after the first: its prompt and its Ask step's text say `ENG-1 again:`.
+    fn again(&self, id: &str) -> Event {
+        let Event::Run(run) = self.labeled(id, 1) else { unreachable!() };
+        Event::Run(Run {
+            args: vec!["--name".into(), "ENG-1 Fix page 1".into(), "Fix it again.\n\nENG-1 again: Fix page 1".into()],
+            input: "ENG-1 again: Fix page 1".into(),
+            ..run
+        })
+    }
+
+    /// `found` on another hub of the same database (`TestHub::twin`).
+    fn found_on(&self, twin: &tokio::runtime::Runtime, hub: &Arc<pinned_server::hub::Hub>, event: Event) -> Result<(), String> {
+        let (hub, team) = (hub.clone(), self.team);
+        twin.block_on(async move {
+            let account = hub.account(team).await?;
+            let connectors = hub.connectors(&account).await?;
+            let open = |work| {
+                let hub = hub.clone();
+                async move { hub.open_found(team, work).await }
+            };
+            connectors.found(event, &open).await
+        })
+    }
+
+    /// `handed` on another hub of the same database.
+    fn handed_on(&self, twin: &tokio::runtime::Runtime, hub: &Arc<pinned_server::hub::Hub>, work: Work) -> Result<(), String> {
+        let (hub, team) = (hub.clone(), self.team);
+        twin.block_on(async move {
+            let account = hub.account(team).await?;
+            let connectors = hub.connectors(&account).await?;
+            let open = |work| {
+                let hub = hub.clone();
+                async move { hub.open_found(team, work).await }
+            };
+            connectors.handed(work, &open).await
+        })
+    }
+
+    /// The prompt of each box the team's runs were opened in.
+    fn box_prompts(&self) -> Vec<String> {
+        self.hub.runtime.block_on(async {
+            let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), self.hub.database), tokio_postgres::NoTls).await.unwrap();
+            tokio::spawn(connection);
+            let rows = db.query("select spec from boxes where account = $1", &[&self.team]).await.unwrap();
+            rows.iter().filter_map(|r| r.get::<_, Value>(0)["args"].as_array()?.last()?.as_str().map(str::to_owned)).collect()
+        })
+    }
+}
+
+#[test]
+fn a_new_event_on_a_subject_whose_last_reservation_was_ended_runs() {
+    let crew = Crew::new("ta_rc2_ended");
+    let pages = crew.on_bot("Pages");
+    let (twin, running) = crew.hub.twin();
+    let boxes_before = crew.boxes_created();
+    THINKING.lock().unwrap().push("ta_rc2_ended".into());
+    AGAIN_THINKING.lock().unwrap().push("ta_rc2_ended".into());
+    std::thread::scope(|scope| {
+        // The first event is admitted; its Ask step thinks past the limit, and the backstop ends its place.
+        let first = scope.spawn(|| crew.found(crew.labeled(&pages, 1)));
+        wait_for("the first event's model call", || crew.outside(1) == vec!["model".to_owned()]);
+        crew.past_limit(&pages);
+        crew.reaper_pass();
+        assert_eq!(crew.states_of(&pages), never_started(), "the backstop ended the first event's place");
+        // A new event on ENG-1 (another hub of the team found it) is admitted to a place of its own.
+        let second = scope.spawn(|| crew.found_on(&twin, &running.hub, crew.again(&pages)));
+        wait_for("the new event's place", || crew.reserved_at(&pages) == vec!["set".to_owned()]);
+        // The first event is fired now: its own place ended, so it is consumed and takes no other.
+        THINKING.lock().unwrap().retain(|t| t != "ta_rc2_ended");
+        assert_eq!(first.join().unwrap(), Ok(()), "consumed");
+        assert_eq!(crew.boxes_created() - boxes_before, 0, "the first event opened no session in the new event's place");
+        AGAIN_THINKING.lock().unwrap().retain(|t| t != "ta_rc2_ended");
+        assert_eq!(second.join().unwrap(), Ok(()), "the new event runs");
+    });
+    crew.reaper_pass();
+    assert_eq!(crew.boxes_created() - boxes_before, 1, "one session, in one box");
+    assert_eq!(crew.box_prompts(), vec![format!("Fix it again.\n\n{}", pinned_core::untrusted::frame("a Linear issue", "ENG-1 again: Fix page 1"))], "the box runs the new event");
+    assert_eq!(crew.states_of(&pages), vec![("working".to_owned(), None), ("failed".to_owned(), Some("it never started".to_owned()))]);
+    assert_eq!(crew.reserved_at(&pages), none(), "its session opened in its own place");
+    assert_eq!(crew.skipped(&pages), json!([{ "reason": "never_started", "count": 1 }]), "counts unchanged");
+    twin.shutdown_background();
+}
+
+#[test]
+fn a_new_event_on_a_subject_whose_last_start_failed_runs() {
+    let crew = Crew::new("ta_rc2_failed");
+    let pages = crew.on_bot("Pages");
+    crew.hub.boxes.state.lock().unwrap().failing = Some(box_failed());
+    assert!(crew.found(crew.labeled(&pages, 1)).is_err(), "its box did not boot");
+    assert_eq!(crew.skipped(&pages), json!([{ "reason": "start_failed", "count": 1 }]));
+    let why = "its box failed: the bootstrap failed: Downloading pinned-server\ncurl: (22) The requested URL returned error: 404";
+    assert_eq!(crew.states_of(&pages), vec![("failed".to_owned(), Some(why.to_owned()))], "the failed run keeps its place's flag");
+    crew.hub.boxes.state.lock().unwrap().failing = None;
+    let boxes_before = crew.boxes_created();
+    // ENG-1 found again, as the poller's one retry after a failed boot or a new event: admitted anew.
+    assert_eq!(crew.found(crew.labeled(&pages, 1)), Ok(()));
+    crew.reaper_pass();
+    assert_eq!(crew.boxes_created() - boxes_before, 1, "it runs once, in one box");
+    assert_eq!(crew.states_of(&pages), vec![("working".to_owned(), None), ("failed".to_owned(), Some(why.to_owned()))]);
+    assert_eq!(crew.reserved_at(&pages), vec!["null".to_owned()], "only the failed run keeps its flag: the new run's session opened in its own place");
+    assert_eq!(crew.skipped(&pages), json!([{ "reason": "start_failed", "count": 1 }]), "one count in total");
+}
+
+#[test]
+fn a_reply_after_the_claim_waits_for_the_session_and_starts_nothing() {
+    let crew = Crew::new("ta_rc2_reply");
+    let (holder, footer) = (crew.on_bot("Docs"), crew.slack_bot("Footer"));
+    let thread = "1792400090.000100";
+    admin_on(&crew.hub.database, &format!("update teams set max_live_runs = 1 where id = '{}'", crew.team));
+    assert_eq!(crew.found(crew.labeled(&holder, 9)), Ok(()));
+    assert_eq!(crew.found(crew.mentioned(&footer, thread)), Ok(()));
+    assert_eq!(crew.waiting(&footer), 1, "the thread's event waits");
+    // The thread's box will wait at the gate while it boots.
+    let gate = Arc::new(tokio::sync::Notify::new());
+    crew.hub.boxes.state.lock().unwrap().gate = Some(gate.clone());
+    let (boxes_before, boots_before) = (crew.boxes_created(), crew.boots());
+    let held = crew.live_of(&holder);
+    crew.stop(&held[0]);
+    wait_for("the thread's claim and its box's boot", || crew.waiting(&footer) == 0 && crew.boots() > boots_before);
+    assert_eq!(crew.reserved_at(&footer), vec!["set".to_owned()], "claimed: its place is held while its box boots");
+
+    // A reply in the thread, found by another hub of the team while the claimed run's box boots.
+    let (twin, running) = crew.hub.twin();
+    let delivery = Delivery {
+        connector: footer.clone(),
+        channel: "C0ACME001".into(),
+        thread: thread.into(),
+        messages: vec!["[Slack reply from Dina] still broken".into()],
+        cursor: "1792400095.000100".into(),
+        mentioned: vec![],
+    };
+    assert_eq!(crew.handed_on(&twin, &running.hub, Work::Delivery(delivery.clone())), Ok(()), "the reply is held for the claimed run");
+    assert_eq!(crew.boots() - boots_before, 1, "the reply booted no box");
+    assert_eq!(crew.reserved_at(&footer), vec!["set".to_owned()], "the claimed run still holds its place");
+
+    // The box boots: the claimed run's session opens in its place.
+    gate.notify_one();
+    wait_for("the thread's session", || crew.reserved_at(&footer).is_empty());
+    assert_eq!(crew.live_of(&footer).len(), 1, "one run");
+    let subject = serde_json::to_value(Subject::SlackThread { channel: "C0ACME001".into(), thread: thread.into() }).unwrap();
+    let mut ws = super::teams_hardening_b::team_machine(&crew.hub, crew.team, "0f0e0d0c-0b0a-4908-8706-050403020109", "box-rc2-reply-token", &[(footer.as_str(), subject)]);
+    // The next check passes the held reply on again: it reaches the session, once.
+    let typed = std::thread::scope(|scope| {
+        let handed = scope.spawn(|| crew.handed(Work::Delivery(delivery)));
+        let call = read_machine(&mut ws, |frame| frame["type"] == "call" && frame["call"]["cmd"] == "deliver");
+        ws.send(Message::text(json!({ "type": "reply", "id": call["id"], "ok": true }).to_string())).unwrap();
+        assert_eq!(handed.join().unwrap(), Ok(()));
+        call["call"]["text"].clone()
+    });
+    assert_eq!(typed, json!(pinned_core::untrusted::frame("a Slack reply in this thread", "[Slack reply from Dina] still broken")), "the reply reaches the session framed, once");
+    assert_eq!(crew.boxes_created() - boxes_before, 1, "one box");
+    assert_eq!(crew.boots() - boots_before, 1, "one boot");
+    assert_eq!(crew.live_of(&footer).len(), 1, "one session");
+    assert_eq!(crew.skipped(&footer), Value::Null, "nothing counted");
+    twin.shutdown_background();
 }
