@@ -1216,8 +1216,9 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
 /// run on the team's account goes on to `forward`, which checks each as it does a person's
 /// machine's: a workflow session's callbacks, its own tabs' archive, its task records, and asking
 /// the team's people. A session callback must also name the workflow and subject of a live run
-/// the hub bound to this machine (`teams::db::bound_runs`): the tabs a box reports vouch for nothing. No agent act, import, tastes, sync, sharing, delegation, MCP secrets or
-/// global orchestrator.
+/// the hub bound to this machine (`teams::db::bound_runs`): the tabs a box reports vouch for
+/// nothing. No agent act, import, tastes, sync, sharing, delegation, MCP secrets or global
+/// orchestrator.
 async fn forward_team_box(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: u64, id: u64, call: HubCall) {
     let allowed = matches!(
         call,
