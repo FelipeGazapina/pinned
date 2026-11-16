@@ -305,6 +305,8 @@ struct Client {
     unlocked: Option<Instant>,
     attached: HashSet<Target>,
     threads: HashMap<MachineId, HashSet<TabId>>,
+    /// It sent a team call on this connection, so it hears its teams' events (`broadcast_team`).
+    hears_teams: bool,
 }
 
 fn viewer(client: u64) -> String {
@@ -322,6 +324,9 @@ pub(crate) fn frame<T: Serialize + crate::traffic::Labeled>(frame: &T) -> Frame 
 fn json<T: Serialize>(value: T) -> Result<Value, String> {
     serde_json::to_value(value).map_err(|e| e.to_string())
 }
+
+/// The answer of `Hub::hub_call` to a team call: team ops come only from the app's own path.
+pub const TEAM_CALL_ELSEWHERE: &str = "a team's ops run only from the pinned app";
 
 impl Hub {
     pub fn new(db: Db, public_url: String, signup: Signup, box_api: Arc<dyn BoxApi>, box_policy: boxes::Policy, team_policy: pinned_core::teams::TeamPolicy, convex_http: Arc<dyn ConvexHttp>) -> Arc<Hub> {
@@ -1019,13 +1024,10 @@ impl Hub {
             HubCall::DisconnectConvex { id } => (json(c().await?.disconnect_convex(&id)?), true),
             HubCall::ConvexTables { id } => (json(c().await?.convex_tables(&*self.convex_http, &id).await?), false),
             HubCall::Convex { .. } => return Err("only a session on a machine reads Convex".into()),
-            // `account` is the person: `teams::call` checks the membership and runs the op on the team.
-            // An app's own call comes through `http::client_frame`, which reads the op and checks
-            // the unlock on it first.
-            HubCall::Team { team, op } => {
-                let op = crate::teams::Op::read(op)?;
-                return crate::teams::call(self, account, crate::teams::team_id(team)?, op).await;
-            }
+            // A team op runs only on the app's own path, `http::client_frame`, which reads the op
+            // and checks the unlock on it first; a team box's ask goes through `teams::machine_call`.
+            // An agent's act, a team's own call or any other path that lands here runs none.
+            HubCall::Team { .. } => return Err(TEAM_CALL_ELSEWHERE.into()),
         };
         if changed {
             self.watch(account).await?;
@@ -1672,7 +1674,7 @@ impl Account {
                 let _ = out.send(frame(&ToClient::Event { machine: id.clone(), event }));
             }
         }
-        live.clients.insert(id, Client { out, login, locked, unlocked, attached: HashSet::new(), threads: HashMap::new() });
+        live.clients.insert(id, Client { out, login, locked, unlocked, attached: HashSet::new(), threads: HashMap::new(), hears_teams: false });
     }
 
     /// Whether client `id` must unlock before `call` on `side`: only the account's owner makes it,
@@ -1747,6 +1749,22 @@ impl Account {
     pub fn broadcast(&self, message: &ToClient) {
         let text = frame(message);
         for client in self.live.lock().unwrap().clients.values() {
+            let _ = client.out.send(text.clone());
+        }
+    }
+
+    /// Client `id` sent a team call: from now on this connection hears its teams' events.
+    pub fn hears_teams(&self, id: u64) {
+        if let Some(client) = self.live.lock().unwrap().clients.get_mut(&id) {
+            client.hears_teams = true;
+        }
+    }
+
+    /// Sends a team's event to the app connections that sent a team call (`hears_teams`) and to
+    /// no other connection; a machine never gets one.
+    pub fn broadcast_team(&self, message: &ToClient) {
+        let text = frame(message);
+        for client in self.live.lock().unwrap().clients.values().filter(|client| client.hears_teams) {
             let _ = client.out.send(text.clone());
         }
     }

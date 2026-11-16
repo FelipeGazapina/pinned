@@ -1,5 +1,5 @@
 //! What keeps a team's people and codes from being probed: an account id from outside a team is
-//! refused like an unknown one, join codes are single-purpose, limited, short-lived and capped, and
+//! refused like an unknown one, join codes are single-purpose, limited and capped, and
 //! a member who goes takes its projects, group seats and bot ownership with it.
 
 use super::teams_membership::{db_text, join_team, make_team, new_invite, person, roster, team_op};
@@ -136,44 +136,6 @@ fn failed_joins_stop_at_10_per_account_without_reaching_the_database_and_a_lande
     assert_eq!(roster(&mut carla, &team), Err(NOT_A_MEMBER.into()));
 
     assert_eq!(join_team(&mut dani, &for_dani).unwrap()["id"], json!(team), "another account is not held by carla's failures");
-}
-
-#[test]
-fn an_unused_invite_expires_after_7_days_and_a_team_has_at_most_20_open_ones() {
-    let hub = TestHub::start("teams_invite_cap");
-    let url = hub.url.clone();
-    let (mut ana, _) = person(&url, "ana@example.test");
-    let (mut bruno, _) = person(&url, "bruno@example.test");
-    let (mut carla, _) = person(&url, "carla@example.test");
-    let team = make_team(&mut ana, "Acme");
-
-    let stale = new_invite(&mut ana, &team);
-    let fresh = new_invite(&mut ana, &team);
-    let set_age = |code: &str, age: &str| {
-        admin_on(&hub.database, &format!("update team_invites set created_at = now() - interval '{age}' where code_hash = sha256(convert_to('{}', 'UTF8'))", code.replace('-', "")))
-    };
-    set_age(&stale, "7 days 1 minute");
-    set_age(&fresh, "6 days 23 hours");
-    assert_eq!(join_team(&mut bruno, &stale), Err(NO_INVITE.into()), "an expired code answers like an unknown one");
-    assert_eq!(team_op(&mut ana, &team, json!({ "op": "revoke_invite", "hint": &stale[..4] })), Err("there is no unused invite with that hint".into()));
-    assert_eq!(join_team(&mut bruno, &fresh).unwrap()["id"], json!(team), "a 6 day old code works");
-
-    // The expired and the used ones don't count: the team has 0 open invites now, and 20 fit.
-    let mut codes: Vec<String> = (0..20).map(|_| new_invite(&mut ana, &team)).collect();
-    let full = "this team has 20 open invite codes; revoke some first";
-    assert_eq!(team_op(&mut ana, &team, json!({ "op": "invite" })), Err(full.into()), "the 21st");
-    assert_eq!(db_text(&hub.database, "select count(*)::text from team_invites where used_by is null and not revoked and created_at > now() - interval '7 days'"), vec!["20"]);
-
-    let last = codes.pop().unwrap();
-    assert_eq!(team_op(&mut ana, &team, json!({ "op": "revoke_invite", "hint": &last[..4] })), Ok(Value::Null));
-    codes.push(new_invite(&mut ana, &team));
-    assert_eq!(team_op(&mut ana, &team, json!({ "op": "invite" })), Err(full.into()), "a revoked one made room for one");
-    assert_eq!(join_team(&mut carla, &codes[0]).unwrap()["id"], json!(team));
-    codes.remove(0);
-    new_invite(&mut ana, &team);
-    assert_eq!(team_op(&mut ana, &team, json!({ "op": "invite" })), Err(full.into()), "a used one made room for one");
-    admin_on(&hub.database, "update team_invites set created_at = now() - interval '8 days' where used_by is null");
-    new_invite(&mut ana, &team);
 }
 
 /// A team with its owner Ana and members Bruno and Carla, who each attached a project, sit in the

@@ -11603,3 +11603,4 @@ mod teams_hardening;
 #[path = "hub/teams_run_log.rs"] mod teams_run_log;
 #[path = "hub/teams_slack_notice.rs"] mod teams_slack_notice;
 #[path = "hub/teams_hardening_a.rs"] mod teams_hardening_a;
+#[path = "hub/teams_hardening_b.rs"] mod teams_hardening_b;

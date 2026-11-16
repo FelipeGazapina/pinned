@@ -15,9 +15,8 @@ pub const NAME_CHARS: usize = 80;
 /// The one answer to an invite code that is unknown, used or revoked, so a stranger learns nothing.
 const NO_INVITE: &str = "that invite code is unknown, used or revoked";
 
-/// How long an unused invite code stays good.
-pub const INVITE_DAYS: i32 = 7;
-/// The most open invites (unused, unrevoked, unexpired) a team has at once.
+/// The most open invites (unused and unrevoked) a team has at once. A code never expires: it is
+/// good until it is used or revoked.
 pub const MAX_OPEN_INVITES: i64 = 20;
 /// Failed joins an account may make, and the hub in all, in `JOIN_WINDOW`.
 pub const JOIN_FAILS_PER_ACCOUNT: usize = 10;
@@ -27,7 +26,9 @@ const TOO_MANY_JOINS: &str = "too many invite codes tried; try again in 15 minut
 
 /// When `join`s came that are not known to have landed, per account and for the whole hub, for
 /// their limit. A try counts when it starts and is taken back (`forgive`) once it lands, so tries
-/// racing each other can't all pass a full limit. Kept in memory on the `Hub`: a restart forgets it.
+/// racing each other can't all pass a full limit.
+/// This limiter lives in memory only, on the `Hub`: it resets when the hub restarts, so a restart
+/// gives every account and the hub a fresh window of tries.
 #[derive(Default)]
 pub struct JoinFails {
     hub: VecDeque<Instant>,
@@ -127,13 +128,13 @@ pub async fn create(hub: &Arc<Hub>, person: Uuid, name: &str) -> Result<Team, St
 
 /// Joins the team of invite `code` as a member, once: `db::take_invite` with the code's sha256
 /// (`crate::db::invite_hash`, which ignores case, spaces and dashes). Unknown, used and revoked codes all
-/// answer the same error; so does a code older than `INVITE_DAYS`. A member of the team already keeps
+/// answer the same error; a code never expires, however old. A member of the team already keeps
 /// its role. Failed tries are limited per account and per hub (`JoinFails`): past the limit the code
 /// is not looked up. A join that lands does not count. Answers the team as `list` shows it.
 pub async fn join(hub: &Arc<Hub>, person: Uuid, code: &str) -> Result<Team, String> {
     let tried = Instant::now();
     hub.team_join_fails.lock().unwrap().attempt(person, tried)?;
-    let team = match db::take_invite(&hub.db, &invite_hash(code), person, INVITE_DAYS).await {
+    let team = match db::take_invite(&hub.db, &invite_hash(code), person).await {
         Ok(Some(team)) => team,
         Ok(None) => return Err(NO_INVITE.into()),
         Err(e) => {
@@ -173,14 +174,14 @@ pub async fn members(hub: &Arc<Hub>, scope: &Scope) -> Result<Vec<Member>, Strin
         .collect())
 }
 
-/// Owner only. A new single-use invite code (`crate::db::invite_code`), good for `INVITE_DAYS`
-/// days; the hub keeps only its sha256 and the hint (its first group), and shows the code this once.
+/// Owner only. A new single-use invite code (`crate::db::invite_code`), good until it is used or
+/// revoked, with no expiry; the hub keeps only its sha256 and the hint (its first group), and shows the code this once.
 /// A team has at most `MAX_OPEN_INVITES` open invites.
 pub async fn invite(hub: &Arc<Hub>, scope: &Scope) -> Result<TeamInvite, String> {
     scope.owner_only()?;
     let code = invite_code();
     let hint = code[..4].to_owned();
-    if !db::create_invite(&hub.db, scope.team.id, scope.member, &invite_hash(&code), &hint, INVITE_DAYS, MAX_OPEN_INVITES).await? {
+    if !db::create_invite(&hub.db, scope.team.id, scope.member, &invite_hash(&code), &hint, MAX_OPEN_INVITES).await? {
         return Err(format!("this team has {MAX_OPEN_INVITES} open invite codes; revoke some first"));
     }
     eprintln!("pinned-server: account {} made an invite to team {}", scope.member, scope.team.id);
@@ -191,7 +192,7 @@ pub async fn invite(hub: &Arc<Hub>, scope: &Scope) -> Result<TeamInvite, String>
 pub async fn revoke_invite(hub: &Arc<Hub>, scope: &Scope, hint: &str) -> Result<(), String> {
     scope.owner_only()?;
     let hint = hint.trim().to_ascii_uppercase();
-    match db::revoke_invite(&hub.db, scope.team.id, &hint, INVITE_DAYS).await? {
+    match db::revoke_invite(&hub.db, scope.team.id, &hint).await? {
         0 => Err("there is no unused invite with that hint".into()),
         _ => Ok(()),
     }
@@ -200,29 +201,35 @@ pub async fn revoke_invite(hub: &Arc<Hub>, scope: &Scope, hint: &str) -> Result<
 /// Owner only. Removes member `account` (never the owner). Its groups lose it by cascade; the
 /// projects it attached go with it and the bots it owned lose their owner (`db::remove_member`);
 /// its runs keep going. An `account` that is not a member of this team, however it is wrong, gets
-/// `members_only`'s one message.
+/// `members_only`'s one message. A live run it controlled goes back to its bot, and a call it was
+/// the only one asked goes to the owner (`calls::member_gone`).
 pub async fn remove_member(hub: &Arc<Hub>, scope: &Scope, account: &str) -> Result<(), String> {
     scope.owner_only()?;
     let account = super::members_only(hub, scope.team.id, &[account]).await?[0];
     if db::role(&hub.db, scope.team.id, account).await? == Some(Role::Owner) {
         return Err("the owner cannot be removed from the team".into());
     }
+    let asking = super::calls::calls_asking(hub, scope.team.id, account).await?;
     if !db::remove_member(&hub.db, scope.team.id, account).await? {
         return Err(format!("no member {account} on this team"));
     }
+    super::calls::member_gone(hub, &scope.team, account, asking).await;
     eprintln!("pinned-server: account {} removed {account} from team {}", scope.member, scope.team.id);
     Ok(())
 }
 
 /// The member leaves the team, as `remove_member` removes one: its projects go, it stops being a
-/// group's fallback and its bots lose their owner. The owner cannot leave: it removes the others first, or the team.
+/// group's fallback, its bots lose their owner, a live run it controlled goes back to its bot and a
+/// call it was the only one asked goes to the owner. The owner cannot leave: it removes the others first, or the team.
 pub async fn leave(hub: &Arc<Hub>, scope: &Scope) -> Result<(), String> {
     if scope.role == Role::Owner {
         return Err("the owner cannot leave the team; remove the others first".into());
     }
+    let asking = super::calls::calls_asking(hub, scope.team.id, scope.member).await?;
     if !db::remove_member(&hub.db, scope.team.id, scope.member).await? {
         return Err("you are not a member of that team".into());
     }
+    super::calls::member_gone(hub, &scope.team, scope.member, asking).await;
     eprintln!("pinned-server: account {} left team {}", scope.member, scope.team.id);
     Ok(())
 }

@@ -5,7 +5,7 @@
 use crate::db::{err, Db};
 use pinned_core::agent::Subject;
 use pinned_core::preauth::team_hook::GO_AHEAD;
-use pinned_core::teams::{Answer, Bot, Call, Group, Role, Run, RunState, TeamProject};
+use pinned_core::teams::{Answer, Bot, Call, Group, Role, Run, RunState, TeamProject, Who};
 use tokio_postgres::error::SqlState;
 use uuid::Uuid;
 
@@ -116,17 +116,17 @@ pub async fn member_groups(db: &Db, team: Uuid) -> Result<Vec<(Uuid, String)>, S
 }
 
 /// Keeps an invite by the sha256 of its code (`crate::db::invite_hash`), never the code, unless the
-/// team already has `max_open` open invites (unused, unrevoked, made in the last `days` days):
-/// false then. The count and the insert run under one lock per team, so two racing invites never
+/// team already has `max_open` open invites (unused and unrevoked: a code never expires): false
+/// then. The count and the insert run under one lock per team, so two racing invites never
 /// pass the cap together.
-pub async fn create_invite(db: &Db, team: Uuid, made_by: Uuid, code_hash: &[u8], hint: &str, days: i32, max_open: i64) -> Result<bool, String> {
+pub async fn create_invite(db: &Db, team: Uuid, made_by: Uuid, code_hash: &[u8], hint: &str, max_open: i64) -> Result<bool, String> {
     let mut held = db.transaction_client().await?;
     let tx = held.as_mut().expect("opened above").transaction().await.map_err(err)?;
     tx.execute("select pg_advisory_xact_lock(hashtext($1::text))", &[&format!("team_invites:{team}")]).await.map_err(err)?;
     let open: i64 = tx
         .query_one(
-            "select count(*) from team_invites where team = $1 and used_by is null and not revoked and created_at > now() - make_interval(days => $2)",
-            &[&team, &days],
+            "select count(*) from team_invites where team = $1 and used_by is null and not revoked",
+            &[&team],
         )
         .await
         .map_err(err)?
@@ -139,26 +139,26 @@ pub async fn create_invite(db: &Db, team: Uuid, made_by: Uuid, code_hash: &[u8],
     Ok(true)
 }
 
-/// Marks the unused, unrevoked invite `code_hash`, made in the last `days` days, used by `member`
-/// and adds `member` as a member, in one statement; answers the team, or None when the code is
-/// unknown, used, revoked or expired. It reads `team_invites` only: an account signup code
+/// Marks the unused, unrevoked invite `code_hash`, however old, used by `member` and adds
+/// `member` as a member, in one statement; answers the team, or None when the code is unknown,
+/// used or revoked. It reads `team_invites` only: an account signup code
 /// (`invites`) is never a team code.
 /// A member of the invite's team who joins again keeps its role and the invite stays unused, so
 /// that case answers the team without spending it.
-pub async fn take_invite(db: &Db, code_hash: &[u8], member: Uuid, days: i32) -> Result<Option<Uuid>, String> {
+pub async fn take_invite(db: &Db, code_hash: &[u8], member: Uuid) -> Result<Option<Uuid>, String> {
     let client = db.client().await?;
     // A racing second spend finds `used_by` set when its row lock comes free, so only one join lands.
     let joined = client
         .query_opt(
             "with spent as (update team_invites set used_by = $2, used_at = now()
-                 where code_hash = $1 and used_by is null and not revoked and created_at > now() - make_interval(days => $3)
+                 where code_hash = $1 and used_by is null and not revoked
                  and exists (select 1 from accounts where id = $2 and kind = 'person')
                  and not exists (select 1 from team_members where team = team_invites.team and member = $2)
                  returning team),
               added as (insert into team_members (team, member, role) select team, $2, 'member' from spent
                  on conflict (team, member) do nothing returning team)
              select team from added",
-            &[&code_hash, &member, &days],
+            &[&code_hash, &member],
         )
         .await
         .map_err(err)?;
@@ -168,23 +168,23 @@ pub async fn take_invite(db: &Db, code_hash: &[u8], member: Uuid, days: i32) -> 
     let again = client
         .query_opt(
             "select i.team from team_invites i join team_members m on m.team = i.team and m.member = $2
-             where i.code_hash = $1 and i.used_by is null and not i.revoked and i.created_at > now() - make_interval(days => $3)",
-            &[&code_hash, &member, &days],
+             where i.code_hash = $1 and i.used_by is null and not i.revoked",
+            &[&code_hash, &member],
         )
         .await
         .map_err(err)?;
     Ok(again.map(|r| r.get(0)))
 }
 
-/// Revokes the team's open invites (unused, unrevoked, made in the last `days` days) whose hint is
-/// `hint`; answers how many.
-pub async fn revoke_invite(db: &Db, team: Uuid, hint: &str, days: i32) -> Result<u64, String> {
+/// Revokes the team's open invites (unused and unrevoked, however old) whose hint is `hint`;
+/// answers how many.
+pub async fn revoke_invite(db: &Db, team: Uuid, hint: &str) -> Result<u64, String> {
     db.client()
         .await?
         .execute(
             "update team_invites set revoked = true
-             where team = $1 and hint = $2 and used_by is null and not revoked and created_at > now() - make_interval(days => $3)",
-            &[&team, &hint, &days],
+             where team = $1 and hint = $2 and used_by is null and not revoked",
+            &[&team, &hint],
         )
         .await
         .map_err(err)
@@ -596,6 +596,21 @@ pub async fn run_on_machine(db: &Db, team: Uuid, machine: &str) -> Result<Option
     Ok(row.as_ref().map(run_of))
 }
 
+/// The workflow and subject of each live run of the team bound to `machine` (its `box`), which
+/// a team box's session callbacks are held to. A run with no subject recorded has None.
+pub async fn bound_runs(db: &Db, team: Uuid, machine: &str) -> Result<Vec<(String, Option<Subject>)>, String> {
+    let rows = db
+        .client()
+        .await?
+        .query(&format!("select workflow, subject from team_runs where team = $1 and box = $2 and state in {LIVE}"), &[&team, &machine])
+        .await
+        .map_err(err)?;
+    Ok(rows
+        .iter()
+        .map(|r| (r.get(0), r.get::<_, Option<serde_json::Value>>(1).and_then(|subject| serde_json::from_value(subject).ok())))
+        .collect())
+}
+
 /// Moves a run that has not ended to `state` with `controller`; sets `ended_at` and `outcome`
 /// when `state` ends it. False when the run had already ended.
 pub async fn set_run_state(db: &Db, team: Uuid, run: Uuid, state: RunState, controller: Option<Uuid>, outcome: Option<&str>) -> Result<bool, String> {
@@ -683,6 +698,41 @@ pub async fn give_back(db: &Db, team: Uuid, run: Uuid) -> Result<Option<Run>, St
         .await
         .map_err(err)?;
     Ok(row.as_ref().map(run_of))
+}
+
+/// The live runs `member` controls.
+pub async fn runs_controlled_by(db: &Db, team: Uuid, member: Uuid) -> Result<Vec<Uuid>, String> {
+    let rows = db
+        .client()
+        .await?
+        .query(&format!("select id from team_runs where team = $1 and controller = $2 and state in {LIVE}"), &[&team, &member])
+        .await
+        .map_err(err)?;
+    Ok(rows.iter().map(|r| r.get(0)).collect())
+}
+
+/// Whether `who` takes in any member of the team now: a member named, a group with a member, or a
+/// group with none whose fallback is a member; the owner always.
+pub async fn reaches_anyone(db: &Db, team: Uuid, who: &Who) -> Result<bool, String> {
+    let client = db.client().await?;
+    let row = match who {
+        Who::Owner => return Ok(true),
+        Who::Person { account } => {
+            let Ok(account) = Uuid::parse_str(account) else { return Ok(false) };
+            client.query_one("select exists (select 1 from team_members where team = $1 and member = $2)", &[&team, &account]).await
+        }
+        Who::Group { handle } => {
+            client
+                .query_one(
+                    "select exists (select 1 from team_group_members where team = $1 and handle = $2)
+                         or exists (select 1 from team_groups g join team_members m on m.team = g.team and m.member = g.fallback
+                                      where g.team = $1 and g.handle = $2)",
+                    &[&team, &handle],
+                )
+                .await
+        }
+    };
+    Ok(row.map_err(err)?.get(0))
 }
 
 /// Who the bot of `workflow` asks, and the member who answers for it; None when it has no row.
@@ -827,6 +877,27 @@ pub async fn answer_call(db: &Db, team: Uuid, call: Uuid, answer: &Answer, outco
                  returning {CALL_COLUMNS}"
             ),
             &[&team, &call, &by, &json(answer)?, &outcome],
+        )
+        .await
+        .map_err(err)?;
+    Ok(row.as_ref().map(call_of).transpose()?.map(|row| row.call))
+}
+
+/// The open call `call`, not escalated yet, now escalated as `escalate_due` does it: `escalated_at`
+/// set and the owner added to `asked`. None when it was answered or escalated already.
+pub async fn escalate_now(db: &Db, team: Uuid, call: Uuid) -> Result<Option<Call>, String> {
+    let row = db
+        .client()
+        .await?
+        .query_opt(
+            &format!(
+                "update team_calls c set escalated_at = now(),
+                   asked = case when c.asked @> '[{{\"kind\":\"owner\"}}]'::jsonb then c.asked else c.asked || '[{{\"kind\":\"owner\"}}]'::jsonb end
+                 from team_runs r
+                 where r.id = c.run and c.team = $1 and c.id = $2 and c.answered_at is null and c.escalated_at is null
+                 returning {CALL_COLUMNS}"
+            ),
+            &[&team, &call],
         )
         .await
         .map_err(err)?;
