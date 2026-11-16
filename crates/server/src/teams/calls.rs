@@ -732,17 +732,35 @@ async fn end_run_if(hub: &Hub, team: &Arc<Account>, run_id: Uuid, state: RunStat
     if let Err(e) = db::drop_grant(&hub.db, team.id, run_id).await {
         eprintln!("pinned-server: run {run_id} of team {} ended but its granted event stays in line: {e}", team.id);
     }
+    // The run has ended: each step after the state write is logged when it fails and the rest
+    // still runs, so the caller hears that the run ended, as it did.
     let closed = Answer { by: team.id.to_string(), choice: None, text: outcome.to_owned(), kind: AnswerKind::Stop, at: now() };
-    if let Some(call) = db::stop_open_call(&hub.db, team.id, run_id, &closed).await? {
-        push_logged(hub, team.id, TeamEvent::CallResolved { call }).await;
+    match db::stop_open_call(&hub.db, team.id, run_id, &closed).await {
+        Ok(Some(call)) => push_logged(hub, team.id, TeamEvent::CallResolved { call }).await,
+        Ok(None) => {}
+        Err(e) => eprintln!("pinned-server: run {run_id} of team {} ended but its open call stays open: {e}", team.id),
     }
-    let run = db::run(&hub.db, team.id, run_id).await?.ok_or("the team has no such run")?;
+    let run = match db::run(&hub.db, team.id, run_id).await {
+        Ok(Some(run)) => run,
+        read => {
+            if let Err(e) = read {
+                eprintln!("pinned-server: run {run_id} of team {} ended but was not read again: {e}", team.id);
+            }
+            let ended_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
+            Run { state, outcome: Some(outcome.to_owned()), ended_at: Some(ended_at), ..current }
+        }
+    };
     push_logged(hub, team.id, TeamEvent::RunChanged { run: run.clone() }).await;
     if let Some(why) = box_end {
-        if let Some(machine) = db::run_box(&hub.db, team.id, run_id).await?.and_then(|m| Uuid::parse_str(&m).ok()) {
-            if let Err(e) = hub.boxes.end_machine(hub, team, machine, why).await {
-                eprintln!("pinned-server: the box of run {run_id} of team {} did not end yet: {e}", team.id);
+        match db::run_box(&hub.db, team.id, run_id).await {
+            Ok(machine) => {
+                if let Some(machine) = machine.and_then(|m| Uuid::parse_str(&m).ok()) {
+                    if let Err(e) = hub.boxes.end_machine(hub, team, machine, why).await {
+                        eprintln!("pinned-server: the box of run {run_id} of team {} did not end yet: {e}", team.id);
+                    }
+                }
             }
+            Err(e) => eprintln!("pinned-server: the box of run {run_id} of team {} was not found to end: {e}", team.id),
         }
     }
     if let Err(e) = super::bots::run_ended(hub, team.id, &run).await {

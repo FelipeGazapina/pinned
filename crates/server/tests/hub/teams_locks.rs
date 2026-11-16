@@ -83,6 +83,15 @@ fn turn_of(team: Uuid) -> String {
     format!("select pg_advisory_lock(hashtextextended('pinned-team-runs:' || '{team}'::uuid::text, 0))")
 }
 
+/// Waits until bot `bot`'s one run opened its session and nothing of the bot is left to start:
+/// no run only holding its place, nothing waiting or granted in its line, and its outside steps
+/// taken. Whatever ran twice has shown by then.
+fn settled(crew: &Crew, bot: &str) {
+    wait_for("the bot's run to open and nothing of it to be left pending", || {
+        opened(crew, bot) == 1 && crew.reserved_at(bot).is_empty() && crew.waiting(bot) == 0 && crew.outside(1).len() >= 2
+    });
+}
+
 // ---- the team's turn ----
 
 #[test]
@@ -101,6 +110,36 @@ fn run_now_is_refused_while_another_hub_holds_the_teams_turn_and_the_hub_answers
 
     let started = crew.call(&crew.bob, TeamOp::RunNow { workflow: bot.clone() }).unwrap();
     assert_eq!((started["workflow"].as_str(), started["state"].as_str()), (Some(bot.as_str()), Some("working")), "the next Run now starts");
+}
+
+#[test]
+fn run_nows_queued_behind_a_turn_another_hub_holds_are_all_refused_within_three_seconds() {
+    let crew = Crew::new("tl_turn_wait");
+    let bot = crew.on_bot("Pages");
+    let held = Held::new(&crew.hub, &turn_of(crew.team));
+    let since = Instant::now();
+    let asked: Vec<_> = [&crew.bob, &crew.ana, &crew.bob].into_iter().map(|who| spawn_op(&crew, who, TeamOp::RunNow { workflow: bot.clone() })).collect();
+    for (n, ask) in asked.into_iter().enumerate() {
+        assert_eq!(within(&crew.hub, "a Run now", ask).unwrap(), Err(BUSY.to_owned()), "Run now {n}");
+    }
+    assert!(since.elapsed() < Duration::from_secs(3), "all three were refused within 3 s, not {:?}", since.elapsed());
+    held.release();
+}
+
+#[test]
+fn a_connection_opened_again_after_a_drop_still_refuses_a_held_lock_in_time() {
+    let crew = Crew::new("tl_reconnect");
+    let bot = crew.on_bot("Pages");
+    assert_eq!(crew.found(crew.labeled(&bot, 1)), Ok(()));
+    let run = crew.live_of(&bot)[0].clone();
+    // Every connection of the hub's is dropped; the next statement opens one again.
+    admin_on(&crew.hub.database, "select pg_terminate_backend(pid) from pg_stat_activity where datname = current_database() and pid <> pg_backend_pid()");
+    wait_for("the hub to answer again", || crew.call(&crew.bob, TeamOp::Runs).is_ok());
+    let held = Held::new(&crew.hub, &format!("select 1 from team_runs where id = '{run}' for update"));
+
+    let stopped = spawn_op(&crew, &crew.ana, serde_json::from_value(json!({ "op": "stop_run", "run": run })).unwrap());
+    assert_eq!(within(&crew.hub, "the stop on a connection opened again", stopped).unwrap(), Err(BUSY.to_owned()));
+    held.release();
 }
 
 #[test]
@@ -136,7 +175,7 @@ fn a_trigger_event_refused_by_a_busy_turn_runs_later_exactly_once() {
 
     // The next check finds it again.
     assert_eq!(crew.found(crew.labeled(&bot, 1)), Ok(()));
-    std::thread::sleep(Duration::from_secs(3));
+    settled(&crew, &bot);
     assert_eq!(crew.outside(1), vec!["model".to_owned(), "linear move".to_owned()], "each outside step exactly once");
     assert_eq!(crew.live_of(&bot).len(), 1, "one run");
 }
@@ -159,10 +198,76 @@ fn an_event_left_waiting_by_a_busy_turn_after_a_run_ends_starts_on_the_next_reap
     assert_eq!((crew.waiting(&pages), crew.outside(1)), (1, none()), "ENG-1 still waits");
 
     crew.reaper_pass();
-    wait_for("ENG-1 to run", || crew.outside(1).len() == 2 && crew.live_of(&pages).len() == 1);
-    std::thread::sleep(Duration::from_secs(3));
+    settled(&crew, &pages);
     assert_eq!(crew.outside(1), vec!["model".to_owned(), "linear move".to_owned()], "each outside step exactly once");
     assert_eq!(crew.waiting(&pages), 0);
+}
+
+/// How many runs of bot `bot` are live and opened their session (no longer only reserved).
+fn opened(crew: &Crew, bot: &str) -> i64 {
+    let rows = super::teams_calls::rows(&crew.hub, &format!("select count(*)::text from team_runs where team = '{}' and workflow = '{bot}' and state = 'working' and not reserved", crew.team));
+    rows[0][0].as_deref().unwrap_or("0").parse().unwrap()
+}
+
+#[test]
+fn a_waiting_run_reserved_by_a_turn_that_then_fails_still_starts_at_once() {
+    let crew = Crew::new("tl_reserved_start");
+    let (holder, pages, notes) = (crew.on_bot("Docs"), crew.on_bot("Pages"), crew.on_bot("Notes"));
+    admin_on(&crew.hub.database, &format!("update teams set max_live_runs = 1 where id = '{}'", crew.team));
+    assert_eq!(crew.found(crew.labeled(&holder, 9)), Ok(()));
+    for bot in [&pages, &notes] {
+        let reply = crew.call(&crew.bob, TeamOp::RunNow { workflow: bot.clone() }).unwrap();
+        assert_eq!(reply["waiting"], json!(true), "a Run now waits behind the holder");
+    }
+    // Two places once the holder ends: the turn reserves Pages's run first, then reads Notes's bot
+    // row, which no longer reads, and fails after its reservation committed.
+    admin_on(&crew.hub.database, &format!("update teams set max_live_runs = 2 where id = '{}'; update team_bots set limits = '\"unreadable\"' where team = '{}' and workflow = '{notes}'", crew.team, crew.team));
+    let boxes = crew.boxes_created();
+    crew.stop(&crew.live_of(&holder)[0]);
+
+    wait_for("the reserved Pages run to open its session in a box of its own", || opened(&crew, &pages) == 1 && crew.boxes_created() > boxes);
+    assert_eq!(crew.reserved_at(&pages), Vec::<String>::new(), "no Pages run is left only holding its place");
+}
+
+#[test]
+fn a_run_now_refused_after_its_turn_queued_it_is_queued_and_counted_exactly_once_on_retry() {
+    let crew = Crew::new("tl_queue_once");
+    let pages = crew.on_bot("Pages");
+    assert_eq!(crew.found(crew.labeled(&pages, 1)), Ok(()));
+    // Pages's line is full of ana's waiting Run nows.
+    let ana = format!("{{\"by\": \"member\", \"member\": \"{}\"}}", crew.ana.id);
+    admin_on(&crew.hub.database, &format!("insert into team_run_queue (team, workflow, start) select '{}', '{pages}', '{ana}'::jsonb from generate_series(1, 20)", crew.team));
+    let line = || super::teams_calls::rows(&crew.hub, &format!("select start->>'member', count(*)::text from team_run_queue where team = '{}' group by 1 order by 2", crew.team));
+    // Counting the dropped oldest waits on another connection's lock and is refused: bob's Run now
+    // was queued in the same turn, so it goes back out with it.
+    let held = Held::new(&crew.hub, "lock table team_bot_skips in share mode");
+    assert_eq!(crew.call(&crew.bob, TeamOp::RunNow { workflow: pages.clone() }), Err(BUSY.to_owned()));
+    held.release();
+    assert_eq!(line(), vec![vec![Some(crew.ana.id.to_string()), Some("20".to_owned())]], "the refused turn left the line as it was");
+
+    let waiting = crew.call(&crew.bob, TeamOp::RunNow { workflow: pages.clone() }).unwrap();
+    assert_eq!(waiting["waiting"], json!(true));
+    assert_eq!(line(), vec![vec![Some(crew.bob.id.to_string()), Some("1".to_owned())], vec![Some(crew.ana.id.to_string()), Some("19".to_owned())]], "bob's Run now waits once");
+    assert_eq!(crew.skipped(&pages), json!([{ "reason": "queue_full", "count": 1 }]), "one oldest dropped, counted once");
+}
+
+#[test]
+fn a_failed_start_whose_count_is_busy_still_starts_what_waits_next() {
+    let crew = Crew::new("tl_start_cleanup");
+    let pages = crew.on_bot("Pages");
+    assert_eq!(crew.found(crew.labeled(&pages, 1)), Ok(()));
+    for who in [&crew.bob, &crew.ana] {
+        let reply = crew.call(who, TeamOp::RunNow { workflow: pages.clone() }).unwrap();
+        assert_eq!(reply["waiting"], json!(true));
+    }
+    // Bob's run's box does not boot, and counting that waits on another connection's lock.
+    crew.hub.boxes.state.lock().unwrap().failing = Some(Exec { exit_code: 22, output: String::new(), error: "curl: (22) The requested URL returned error: 404\n".into() });
+    let held = Held::new(&crew.hub, "lock table team_bot_skips in share mode");
+    crew.stop(&crew.live_of(&pages)[0]);
+
+    wait_for("ana's waiting run to open its session", || opened(&crew, &pages) == 1);
+    assert_eq!(crew.waiting(&pages), 0, "nothing is left waiting for the reaper");
+    held.release();
 }
 
 // ---- the claim of a granted event ----
@@ -199,8 +304,7 @@ fn a_claim_skips_a_granted_row_another_holds_and_the_hub_answers_others() {
     // on its next check (a minute): wake it, as a grant does, so the event does not wait for that.
     crew.hub.runtime.block_on(async { hub.connectors(&hub.account(team).await.unwrap()).await.unwrap().wake() });
 
-    wait_for("ENG-1 to run", || crew.outside(1).len() == 2 && crew.live_of(&pages).len() == 1);
-    std::thread::sleep(Duration::from_secs(3));
+    settled(&crew, &pages);
     assert_eq!(crew.outside(1), vec!["model".to_owned(), "linear move".to_owned()], "each outside step exactly once");
 }
 

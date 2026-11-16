@@ -97,8 +97,8 @@ pub const TURN_KEY: &str = "hashtextextended('pinned-team-runs:' || $1::uuid::te
 /// A team's turn to decide what runs: this hub's line, and a transaction on a connection of its
 /// own holding the team's `pg_advisory_xact_lock`, so another hub on the database waits too.
 /// `end` commits it; a turn dropped on an error closes its connection, which frees the lock.
-/// Both waits are bounded: a turn not had within `TURN_WAIT` (this hub's line), or within the
-/// connection's lock timeout (the advisory lock), is refused as `crate::db::BUSY`, never retried.
+/// Both waits together are bounded by `TURN_WAIT`: a turn not had by then (this hub's line, then
+/// the advisory lock for what is left) is refused as `crate::db::BUSY`, never retried.
 /// A turn only decides and reserves: nothing outside pinned is called while one is held.
 struct Turn {
     _line: tokio::sync::OwnedMutexGuard<()>,
@@ -110,10 +110,17 @@ const TURN_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl Turn {
     async fn take(hub: &Hub, team: Uuid) -> Result<Turn, String> {
-        let line = tokio::time::timeout(TURN_WAIT, line(team).lock_owned()).await.map_err(|_| crate::db::BUSY.to_string())?;
+        // The connection opens before the line is taken, so a slow connect never holds the line.
         let held = hub.db.own_client().await?;
-        held.batch_execute("begin").await.map_err(crate::db::err)?;
+        // One deadline for both waits: a task that got the line late waits on the advisory lock
+        // only for what is left, so the turns queued behind another hub's are all refused in time.
+        let deadline = tokio::time::Instant::now() + TURN_WAIT;
+        let line = tokio::time::timeout_at(deadline, line(team).lock_owned()).await.map_err(|_| crate::db::BUSY.to_string())?;
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis().max(1);
+        held.batch_execute(&format!("begin; set local lock_timeout = {left}")).await.map_err(crate::db::err)?;
         held.execute(&format!("select pg_advisory_xact_lock({TURN_KEY})"), &[&team]).await.map_err(crate::db::err)?;
+        // The turn's own statements wait on locks as every statement of the hub's does.
+        held.batch_execute(&crate::db::lock_limit()).await.map_err(crate::db::err)?;
         Ok(Turn { _line: line, held })
     }
 
@@ -163,10 +170,10 @@ async fn ask_in_turn(hub: &Arc<Hub>, turn: &Turn, team: &Arc<Account>, workflow:
     let full = db::live_count(&hub.db, team.id).await? >= db::max_live_runs(&hub.db, team.id).await?;
     if waiting > 0 || busy || full {
         let stored = serde_json::to_value(Stored::of(&start)).map_err(|e| e.to_string())?;
-        let dropped = db::enqueue(&hub.db, team.id, workflow, &stored, MOST_WAITING).await?;
+        let dropped = db::enqueue(&turn.held, team.id, workflow, &stored, MOST_WAITING).await?;
         if dropped > 0 {
             eprintln!("pinned-server: team {} bot {workflow}: its line is full, so its oldest waiting event was dropped", team.id);
-            db::count_skipped(&hub.db, team.id, workflow, SkipReason::QueueFull, dropped).await?;
+            db::count_skipped_on(&turn.held, team.id, workflow, SkipReason::QueueFull, dropped).await?;
         }
         return Ok(Err((waiting + 1).min(MOST_WAITING)));
     }
@@ -208,10 +215,10 @@ async fn decide(hub: &Arc<Hub>, turn: &Turn, team: &Arc<Account>, kind: &str, ev
     let full = db::live_count(&hub.db, team.id).await? >= db::max_live_runs(&hub.db, team.id).await?;
     if waiting > 0 || busy || full {
         let stored = serde_json::to_value(Stored::Event { kind: kind.to_owned(), event, replies: vec![], earlier: 0 }).map_err(|e| e.to_string())?;
-        let dropped = db::enqueue(&hub.db, team.id, &workflow, &stored, MOST_WAITING).await?;
+        let dropped = db::enqueue(&turn.held, team.id, &workflow, &stored, MOST_WAITING).await?;
         if dropped > 0 {
             eprintln!("pinned-server: team {} bot {workflow}: its line is full, so its oldest waiting event was dropped", team.id);
-            db::count_skipped(&hub.db, team.id, &workflow, SkipReason::QueueFull, dropped).await?;
+            db::count_skipped_on(&turn.held, team.id, &workflow, SkipReason::QueueFull, dropped).await?;
         }
         return Ok(Admitted::Waiting);
     }
@@ -255,7 +262,7 @@ pub async fn keep_replies(hub: &Arc<Hub>, team: &Arc<Account>, delivery: &Delive
         }
     }
     let turn = Turn::take(hub, team.id).await?;
-    let kept = keep_in_turn(hub, team, delivery, &subject, live).await;
+    let kept = keep_in_turn(hub, &turn, team, delivery, &subject, live).await;
     turn.end().await?;
     kept
 }
@@ -274,7 +281,7 @@ async fn for_live(hub: &Arc<Hub>, team: &Arc<Account>, run: Uuid) -> Result<Repl
 
 /// `keep_replies` in the team's turn; `live` is the thread's live run. A granted event a poller
 /// claims meanwhile is gone from its line, and its run takes the replies (`for_live`).
-async fn keep_in_turn(hub: &Arc<Hub>, team: &Arc<Account>, delivery: &Delivery, subject: &Subject, live: Option<Uuid>) -> Result<Replies, String> {
+async fn keep_in_turn(hub: &Arc<Hub>, turn: &Turn, team: &Arc<Account>, delivery: &Delivery, subject: &Subject, live: Option<Uuid>) -> Result<Replies, String> {
     let subject = subject.clone();
     let Some(waiting) = db::waiting_event_for(&hub.db, team.id, &delivery.connector, &subject).await? else {
         if let Some(run) = live {
@@ -284,7 +291,7 @@ async fn keep_in_turn(hub: &Arc<Hub>, team: &Arc<Account>, delivery: &Delivery, 
         // have no run to reach: they are dropped once, logged and counted on the bot.
         if db::last_run_never_opened(&hub.db, team.id, &delivery.connector, &subject).await? {
             eprintln!("pinned-server: team {} workflow {}: {} new thread messages dropped: the thread's run ended before its session opened", team.id, delivery.connector, delivery.messages.len());
-            db::count_skipped(&hub.db, team.id, &delivery.connector, SkipReason::RepliesDropped, delivery.messages.len() as u64).await?;
+            db::count_skipped_on(&turn.held, team.id, &delivery.connector, SkipReason::RepliesDropped, delivery.messages.len() as u64).await?;
             return Ok(Replies::Dropped);
         }
         eprintln!("pinned-server: team {} workflow {}: new thread messages dropped: the thread has no run and no waiting event", team.id, delivery.connector);
@@ -298,7 +305,7 @@ async fn keep_in_turn(hub: &Arc<Hub>, team: &Arc<Account>, delivery: &Delivery, 
     replies.drain(..over);
     earlier += over as u64;
     let stored = serde_json::to_value(Stored::Event { kind, event, replies, earlier }).map_err(|e| e.to_string())?;
-    if !db::set_waiting(&hub.db, waiting.id, &stored).await? {
+    if !db::set_waiting(&turn.held, waiting.id, &stored).await? {
         return match live {
             Some(run) => for_live(hub, team, run).await,
             None => Ok(Replies::Dropped),
@@ -383,13 +390,23 @@ async fn start_waiting(hub: &Arc<Hub>, team: &Arc<Account>, ended: &str) -> Resu
     let mut taken = Taken::default();
     let decided = take_and_start(hub, &turn, team, ended, &mut taken).await;
     turn.end().await?;
-    decided?;
+    // What the turn reserved and committed starts even when a step after a reservation failed:
+    // left, a reserved run would hold its place until the backstop ends it as never started.
     // A grant is in Postgres once the turn committed: the team's poller looks now.
     if taken.granted {
-        hub.connectors(team).await?.wake();
+        match hub.connectors(team).await {
+            Ok(connectors) => connectors.wake(),
+            Err(e) => eprintln!("pinned-server: team {}: a granted event waits for its poller's next check: {e}", team.id),
+        }
     }
     // Each reserved run's box starts outside the turn, on its own, so one slow boot holds up no other.
     for (id, work, told) in taken.starts {
+        // A turn whose statement failed rolled back with it: only a run still reserved starts.
+        match db::is_reserved(&hub.db, team.id, id).await {
+            Ok(false) => continue,
+            Ok(true) => {}
+            Err(e) => eprintln!("pinned-server: team {}: reserved run {id} starts unchecked: {e}", team.id),
+        }
         let (hub, team) = (hub.clone(), team.clone());
         tokio::spawn(async move {
             let workflow = work.connector.clone();
@@ -408,7 +425,7 @@ async fn start_waiting(hub: &Arc<Hub>, team: &Arc<Account>, ended: &str) -> Resu
             }
         });
     }
-    Ok(())
+    decided
 }
 
 /// What `take_and_start` decided in the team's turn: whether it granted an event a place, and the

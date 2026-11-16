@@ -196,7 +196,8 @@ alter table team_runs add column if not exists subject jsonb;
 alter table team_bots add column if not exists off_note text;
 -- The hash of the exact step a team-box hook asked about, and when its Go ahead let that step run
 -- (unix seconds): each Go ahead lets its step run once (`teams::db::use_go_ahead`).
-alter table team_calls add column if not exists step_hash text, add column if not exists released_at bigint;
+alter table team_calls add column if not exists step_hash text;
+alter table team_calls add column if not exists released_at bigint;
 -- When a run last moved to waiting, so the calls tick tells a run left waiting with no open call
 -- from one whose call is being opened (`teams::db::stale_waiting`).
 alter table team_runs add column if not exists waiting_since timestamptz;
@@ -305,7 +306,10 @@ const WRITE_WAIT: Duration = Duration::from_secs(150);
 /// Postgres refuses a statement of the hub's that waits longer on a lock (`lock_timeout`): the
 /// shared connections pipeline every account's statements, so one waiting stalls them all.
 const LOCK_LIMIT: Duration = Duration::from_secs(2);
-/// What a statement refused by `LOCK_LIMIT` answers, as an ordinary error. Nothing retries it.
+/// What a statement refused by `LOCK_LIMIT` answers, as an ordinary error. The hub does not
+/// repeat the statement itself: the caller hears it and decides. A person's or a bot's call is
+/// refused with it and tried again by them, a trigger's check finds its event again on its next
+/// pass, and the store writer (`store_writes`) keeps the document and resends it.
 pub const BUSY: &str = pinned_core::wire::HUB_BUSY;
 
 impl Connection {
@@ -593,7 +597,7 @@ async fn bound_lock_waits(client: &Client) -> Result<(), String> {
     limit("lock timeout", client.batch_execute(&lock_limit())).await
 }
 
-fn lock_limit() -> String {
+pub(crate) fn lock_limit() -> String {
     format!("set lock_timeout = {}", LOCK_LIMIT.as_millis())
 }
 
@@ -2459,6 +2463,19 @@ mod tests {
         );
         assert_eq!(needs("alter table invites alter column expires_at drop not null"), Needs::Nullable("invites", "expires_at"));
         assert_eq!(needs("create index if not exists tasks_due on tasks (next_at) where enabled and next_at is not null"), Needs::Index("tasks_due"));
+    }
+
+    #[test]
+    fn no_schema_statement_alters_a_table_in_more_than_one_clause() {
+        // The boot checks each statement on its own (`needs`): a second clause after a comma
+        // would run, and lock its table, whenever the first one's check says it is needed, or
+        // would be skipped with it.
+        for statement in statements(SCHEMA).iter().chain(&statements(LEARNING_SCHEMA)) {
+            let words = statement.split_whitespace().collect::<Vec<_>>().join(" ");
+            if words.starts_with("alter table ") {
+                assert!(![", add ", ", alter ", ", drop ", ", rename ", ", set "].iter().any(|clause| words.contains(clause)), "one clause per statement: {words}");
+            }
+        }
     }
 
     #[tokio::test(start_paused = true)]

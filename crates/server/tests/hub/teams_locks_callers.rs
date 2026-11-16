@@ -253,7 +253,7 @@ fn a_store_write_refused_for_a_busy_account_row_is_kept_and_lands_once_the_row_i
     let (token, ana_id, mut ana) = signed_in(&url, "ana@example.test");
     let (machine, _) = account::register_machine(&url, &token, "ana-mini", "linux").unwrap();
     let stored = || rows(&hub, &format!("select coalesce(store::text, '') from accounts where id = '{ana_id}'"))[0][0].clone().unwrap_or_default();
-    let held = Held::new(&hub, &format!("select 1 from accounts where id = '{ana_id}' for update"));
+    let held = super::teams_locks::Held::new(&hub, &format!("select 1 from accounts where id = '{ana_id}' for update"));
 
     let saved = timed("the app's save", || {
         ana.hub(json!({ "cmd": "save_connector", "connector": {
@@ -263,7 +263,9 @@ fn a_store_write_refused_for_a_busy_account_row_is_kept_and_lands_once_the_row_i
         } }))
     });
     assert!(saved.is_ok(), "{saved:?}");
-    std::thread::sleep(Duration::from_secs(3));
+    // The writer's try waits on the held row, and is refused.
+    wait_for("the writer's try to wait on the held row", || held.waiters() >= 1);
+    wait_for("the writer's try to be refused", || held.waiters() == 0);
     assert!(!stored().contains("Bugs"), "the row is held: nothing is written yet");
     held.release();
 

@@ -1340,9 +1340,10 @@ pub async fn waiting_count(db: &Db, team: Uuid, workflow: &str) -> Result<i64, S
 }
 
 /// Puts `start` at the end of the line of bot `workflow`, and drops its oldest beyond `most`.
-/// Answers how many it dropped.
-pub async fn enqueue(db: &Db, team: Uuid, workflow: &str, start: &serde_json::Value, most: i64) -> Result<u64, String> {
-    let client = db.client().await?;
+/// Answers how many it dropped. Written on `held`, in the team's turn, so a turn that fails
+/// leaves the line as it was and a retry cannot add the event twice.
+pub async fn enqueue(held: &Client, team: Uuid, workflow: &str, start: &serde_json::Value, most: i64) -> Result<u64, String> {
+    let client = held;
     client.execute("insert into team_run_queue (team, workflow, start) values ($1, $2, $3)", &[&team, &workflow, start]).await.map_err(err)?;
     client
         .execute(
@@ -1386,9 +1387,9 @@ pub async fn waiting_event_for(db: &Db, team: Uuid, workflow: &str, subject: &Su
 }
 
 /// Stores what waiting event `id` starts with: false when its row is gone, as when a poller
-/// claimed it meanwhile.
-pub async fn set_waiting(db: &Db, id: i64, start: &serde_json::Value) -> Result<bool, String> {
-    db.client().await?.execute("update team_run_queue set start = $2 where id = $1", &[&id, start]).await.map_err(err).map(|n| n == 1)
+/// claimed it meanwhile. Written on `held`, in the team's turn.
+pub async fn set_waiting(held: &Client, id: i64, start: &serde_json::Value) -> Result<bool, String> {
+    held.execute("update team_run_queue set start = $2 where id = $1", &[&id, start]).await.map_err(err).map(|n| n == 1)
 }
 
 /// Waiting event `id`'s turn came: it stays in its line, granted the place reserved run `run`
