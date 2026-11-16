@@ -2696,7 +2696,8 @@ impl Machine {
                 return;
             }
             drop(machine);
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            // A startup menu can stay up for good, so it is looked at less often than a clear screen.
+            std::thread::sleep(std::time::Duration::from_millis(if blocked { 100 } else { 10 }));
         });
     }
 
@@ -4333,17 +4334,28 @@ impl Machine {
             let free = self.tab(&tab, |t| t.live() && matches!(t.status, None | Some(AgentStatus::Done))).unwrap_or(false);
             // Read before the wake is taken, so a menu or dialog leaves it for a later read.
             if free && self.blocker(&tab).is_none() {
-                if let Some(text) = self.pr_watches.take_wake(&tab) {
-                    let _ = self.type_prompt(&tab, &text);
-                }
+                self.wake_tab(&tab);
+            }
+        }
+    }
+
+    /// Types the tab's pull request wake, if it has one. A wake that was not typed is put back.
+    fn wake_tab(&self, tab: &str) {
+        if let Some(wake) = self.pr_watches.take_held_wake(tab) {
+            if self.type_prompt(tab, &wake.text).is_err() {
+                self.pr_watches.put_back(tab, wake);
             }
         }
     }
 
     /// The menu or dialog the tab's screen shows, if any. The screen lock is taken alone, after the
     /// tabs lock is let go, as the reader thread takes it.
+    /// Only Claude Code's screens are known: another provider's tab is never held back.
     fn blocker(&self, tab: &str) -> Option<Blocker> {
-        let screen = self.tab(tab, |t| t.screen.clone()).ok()?;
+        let (screen, claude) = self.tab(tab, |t| (t.screen.clone(), t.account.provider == Provider::Claude)).ok()?;
+        if !claude {
+            return None;
+        }
         let blocker = screen.lock().unwrap().blocker();
         blocker
     }
@@ -6626,6 +6638,13 @@ impl Machine {
             let _ = type_into(sessions::CONTINUE_PROMPT);
             // Enter arrives separately, or the TUI takes it as part of a paste.
             std::thread::sleep(std::time::Duration::from_millis(300));
+            // A menu or dialog that opened meanwhile would take the Enter: it waits for the screen too.
+            while machine.blocker(&tab).is_some() {
+                if machine.tab(&tab, |t| t.session.is_none()) != Ok(false) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
             let _ = type_into("\r");
             machine.save_sessions();
             machine.emit_tabs();
@@ -14500,7 +14519,13 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(kept(&claude, "typed", &tab), "", "nothing reached the session");
         assert_eq!(m.tab(&tab, |t| t.resume_at).unwrap(), Some(at), "the limit still waits to continue");
         show(&m, &tab, ERASE);
-        wait_for("the continue", || kept(&claude, "typed", &tab).ends_with('\r'));
+        // A menu that opens between the text and its Enter holds the Enter back.
+        wait_for("the continue text", || kept(&claude, "typed", &tab) == sessions::CONTINUE_PROMPT);
+        show(&m, &tab, MENU);
+        std::thread::sleep(Duration::from_millis(1200));
+        assert_eq!(kept(&claude, "typed", &tab), sessions::CONTINUE_PROMPT, "no Enter reached the menu");
+        show(&m, &tab, ERASE);
+        wait_for("the Enter", || kept(&claude, "typed", &tab).ends_with('\r'));
         assert_eq!(kept(&claude, "typed", &tab), format!("{}\r", sessions::CONTINUE_PROMPT));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -14579,6 +14604,54 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(typed_times(&claude, &tab, "tab-9 finished"), 1, "typed once: {:?}", kept(&claude, "typed", &tab));
         assert!(!m.delegates.has_news(&tab));
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_pull_request_wake_that_was_not_typed_is_kept_for_the_next_pass() {
+        let (m, dir, claude, tabs) = woken("guard-wake", &["s1"]);
+        let tab = tabs[0].clone();
+        m.tab(&tab, |t| (t.status, t.turn_pending) = (Some(AgentStatus::Done), None)).unwrap();
+        let url = "https://github.com/o/r/pull/41";
+        let view = |status: &str, conclusion: &str| json!({ "number": 41, "url": url, "state": "OPEN", "headRefOid": "abc1234def", "baseRefName": "main", "mergeable": "MERGEABLE",
+            "statusCheckRollup": [{ "name": "build", "status": status, "conclusion": conclusion }], "comments": [], "reviews": [] });
+        m.pr_watches.set(&tab, url, true);
+        m.pr_watches.update(&tab, url, crate::prwatch::snapshot(&view("IN_PROGRESS", "")));
+        m.pr_watches.update(&tab, url, crate::prwatch::snapshot(&view("COMPLETED", "SUCCESS")));
+        // The menu opened after the pass looked: the wake is taken, and typing it is refused.
+        show(&m, &tab, MENU);
+        m.wake_tab(&tab);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(kept(&claude, "typed", &tab), "", "nothing reached the session");
+        assert_eq!(m.pr_watches.of(&tab), [url], "the pull request is still watched");
+        show(&m, &tab, ERASE);
+        m.wake_tab(&tab);
+        wait_for("the wake", || kept(&claude, "typed", &tab).ends_with('\r'));
+        assert_eq!(typed_times(&claude, &tab, "pull request #41"), 1);
+        m.wake_tab(&tab);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(typed_times(&claude, &tab, "pull request #41"), 1, "a wake typed is not typed again");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_codex_or_cursor_tab_is_never_held_back_by_a_screen_it_cannot_read() {
+        let (m, root, _) = reload_machine("guard-providers");
+        // Twenty ▔ and text, with no ─ rule under them: a dialog on a Claude Code screen.
+        let screen = format!("\x1b[2J\x1b[H{}\r\nsome text\r\n", "\u{2594}".repeat(20));
+        let claude = typing_tab(&m, Account::builtin(Provider::Claude), &root.join("claude.bin"));
+        show(&m, &claude, &screen);
+        assert_eq!(m.blocker(&claude), Some(Blocker::Dialog), "the same screen blocks Claude Code");
+        for provider in [Provider::Codex, Provider::Cursor] {
+            let file = root.join(format!("{provider:?}.bin"));
+            let tab = typing_tab(&m, Account::builtin(provider), &file);
+            show(&m, &tab, &screen);
+            assert_eq!(m.blocker(&tab), None, "{provider:?}");
+            assert!(m.type_prompt(&tab, "Run the tests.").is_ok(), "{provider:?}");
+            wait_for("the prompt", || read_pty(&file).contains("Run the tests."));
+        }
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
