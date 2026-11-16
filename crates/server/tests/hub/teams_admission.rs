@@ -1003,3 +1003,184 @@ fn a_stopped_reservation_leaves_no_granted_event_behind() {
     assert_eq!(crew.unopened(), vec!["stopped"]);
     assert_eq!(crew.skipped(&pages), Value::Null, "a stop is not counted");
 }
+
+// ---- an admitted event runs once or is counted once, never both ----
+
+impl Crew {
+    /// Moves bot `id`'s reserved places back past the 15 minute limit, as if held 16 minutes ago.
+    fn past_limit(&self, id: &str) {
+        admin_on(&self.hub.database, &format!("update team_runs set reserved_at = now() - interval '16 minutes' where team = '{}' and workflow = '{id}' and reserved", self.team));
+    }
+}
+
+fn never_started() -> Vec<(String, Option<String>)> {
+    vec![("failed".to_owned(), Some("it never started".to_owned()))]
+}
+
+fn box_failed() -> Exec {
+    Exec { exit_code: 22, output: "Downloading pinned-server\n".into(), error: "curl: (22) The requested URL returned error: 404\n".into() }
+}
+
+#[test]
+fn an_admitted_event_whose_reservation_the_backstop_ended_is_consumed_not_started() {
+    let crew = Crew::new("ta_rc_consumed");
+    let pages = crew.on_bot("Pages");
+    let boxes_before = crew.boxes_created();
+    THINKING.lock().unwrap().push("ta_rc_consumed".into());
+    std::thread::scope(|scope| {
+        // Admitted: its place is held, and its Ask step's model call is still thinking.
+        let found = scope.spawn(|| crew.found(crew.labeled(&pages, 1)));
+        wait_for("ENG-1's admitted model call", || crew.outside(1) == vec!["model".to_owned()]);
+        assert_eq!(crew.reserved_at(&pages), vec!["set".to_owned()], "its place is held");
+        crew.past_limit(&pages);
+        crew.reaper_pass();
+        assert_eq!(crew.states_of(&pages), never_started(), "the backstop ended its reservation");
+        // The model answers: the event's run is fired after its reservation ended.
+        THINKING.lock().unwrap().retain(|t| t != "ta_rc_consumed");
+        assert_eq!(found.join().unwrap(), Ok(()), "consumed");
+    });
+    crew.reaper_pass();
+    assert_eq!(crew.boxes_created() - boxes_before, 0, "no session opened");
+    assert_eq!(crew.outside(1), vec!["model".to_owned()], "only the admitted Ask step's call; no Linear move, no second model call");
+    assert_eq!(crew.skipped(&pages), json!([{ "reason": "never_started", "count": 1 }]), "counted once, by the backstop");
+    assert_eq!(crew.live_of(&pages), none(), "no live run");
+    assert_eq!(crew.states_of(&pages), never_started(), "no fresh run was started");
+}
+
+#[test]
+fn an_admitted_event_that_runs_before_the_backstop_is_not_ended() {
+    let crew = Crew::new("ta_rc_runs_first");
+    let pages = crew.on_bot("Pages");
+    assert_eq!(crew.found(crew.labeled(&pages, 1)), Ok(()));
+    assert_eq!(crew.reserved_at(&pages), none(), "its session opened in its place");
+    admin_on(&crew.hub.database, &format!("update team_runs set reserved_at = now() - interval '16 minutes', started_at = now() - interval '16 minutes' where team = '{}' and workflow = '{pages}'", crew.team));
+    crew.reaper_pass();
+    assert_eq!(crew.states_of(&pages), vec![("working".to_owned(), None)], "the run lives");
+    assert_eq!(crew.skipped(&pages), Value::Null, "nothing counted");
+    assert_eq!(crew.outside(1), vec!["model".to_owned(), "linear move".to_owned()]);
+    assert_eq!(crew.boxes_created(), 1);
+}
+
+#[test]
+fn a_session_that_fails_to_open_after_the_backstop_counts_only_never_started() {
+    let crew = Crew::new("ta_rc_fail_after");
+    let pages = crew.on_bot("Pages");
+    let gate = Arc::new(tokio::sync::Notify::new());
+    crew.hub.boxes.state.lock().unwrap().gate = Some(gate.clone());
+    std::thread::scope(|scope| {
+        let found = scope.spawn(|| crew.found(crew.labeled(&pages, 1)));
+        wait_for("ENG-1's box to start booting", || crew.boots() == 1);
+        assert_eq!(crew.reserved_at(&pages), vec!["set".to_owned()], "its place is held while its box boots");
+        crew.past_limit(&pages);
+        crew.reaper_pass();
+        assert_eq!(crew.states_of(&pages), never_started(), "the backstop ended it while its box booted");
+        assert_eq!(crew.skipped(&pages), json!([{ "reason": "never_started", "count": 1 }]));
+        crew.hub.boxes.state.lock().unwrap().failing = Some(box_failed());
+        gate.notify_one();
+        assert!(found.join().unwrap().is_err(), "its session did not open");
+    });
+    crew.reaper_pass();
+    assert_eq!(crew.skipped(&pages), json!([{ "reason": "never_started", "count": 1 }]), "counted once: no start_failed on top");
+    assert_eq!(crew.states_of(&pages), never_started(), "the ended run stays listed with its outcome, not deleted");
+    assert_eq!(crew.unopened(), vec!["failed"]);
+}
+
+#[test]
+fn a_session_that_fails_to_open_before_the_backstop_counts_only_start_failed() {
+    let crew = Crew::new("ta_rc_fail_before");
+    let pages = crew.on_bot("Pages");
+    crew.hub.boxes.state.lock().unwrap().failing = Some(box_failed());
+    assert!(crew.found(crew.labeled(&pages, 1)).is_err(), "its box did not boot");
+    crew.past_limit(&pages);
+    crew.reaper_pass();
+    assert_eq!(crew.skipped(&pages), json!([{ "reason": "start_failed", "count": 1 }]), "counted once, as a failed start");
+    let why = "its box failed: the bootstrap failed: Downloading pinned-server\ncurl: (22) The requested URL returned error: 404";
+    assert_eq!(crew.states_of(&pages), vec![("failed".to_owned(), Some(why.to_owned()))], "not ended again by the backstop");
+}
+
+#[test]
+fn a_reply_to_a_granted_event_waits_with_it_and_the_event_runs_once() {
+    let crew = Crew::new("ta_rc_reply");
+    let (holder, footer) = (crew.on_bot("Docs"), crew.slack_bot("Footer"));
+    let thread = "1792400070.000100";
+    admin_on(&crew.hub.database, &format!("update teams set max_live_runs = 1 where id = '{}'", crew.team));
+    assert_eq!(crew.found(crew.labeled(&holder, 9)), Ok(()));
+    assert_eq!(crew.found(crew.mentioned(&footer, thread)), Ok(()));
+    assert_eq!(crew.waiting(&footer), 1, "the thread's event waits");
+    POLLS_HELD.lock().unwrap().push(crew.name.clone());
+    let held = crew.live_of(&holder);
+    crew.stop(&held[0]);
+    wait_for("the thread's grant", || crew.reserved_at(&footer) == vec!["set".to_owned()]);
+    assert_eq!(crew.waiting(&footer), 1, "granted, its row waits for a claim");
+    let boxes_before = crew.boxes_created();
+
+    let delivery = Delivery {
+        connector: footer.clone(),
+        channel: "C0ACME001".into(),
+        thread: thread.into(),
+        messages: vec!["[Slack reply from Dina] still broken".into()],
+        cursor: "1792400080.000100".into(),
+        mentioned: vec!["1792400080.000100".into()],
+    };
+    assert_eq!(crew.handed(Work::Delivery(delivery)), Ok(()));
+    assert_eq!(crew.boxes_created() - boxes_before, 0, "no session opened for the reply");
+    assert_eq!(crew.kept(&footer), (vec!["[Slack reply from Dina] still broken".to_owned()], 0), "the reply waits with the event");
+
+    POLLS_HELD.lock().unwrap().retain(|t| t != &crew.name);
+    wait_for("the thread's box", || crew.box_prompt(thread).is_some());
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(
+        crew.box_prompt(thread).unwrap(),
+        format!(
+            "Answer the thread.\n\nSlack thread in #acme, oldest first:\n{}\n\nReplies the thread got while this run waited to start:\n\n{}",
+            pinned_core::untrusted::frame("a Slack thread", "ENG-0: a thread"),
+            pinned_core::untrusted::frame("a Slack reply in this thread", "[Slack reply from Dina] still broken")
+        )
+    );
+    assert_eq!(crew.boxes_created() - boxes_before, 1, "one session, in one box");
+    assert_eq!(crew.live_of(&footer).len(), 1, "one run");
+    assert_eq!(crew.waiting(&footer), 0, "the granted row is gone");
+    assert_eq!(crew.reserved_at(&footer), none(), "its session opened in the granted place");
+}
+
+#[test]
+fn a_turn_that_fails_after_taking_a_waiting_event_leaves_it_waiting() {
+    let crew = Crew::new("ta_rc_take");
+    let (holder, pages) = (crew.on_bot("Docs"), crew.on_bot("Pages"));
+    admin_on(&crew.hub.database, &format!("update teams set max_live_runs = 1 where id = '{}'", crew.team));
+    assert_eq!(crew.found(crew.labeled(&holder, 9)), Ok(()));
+    let reply = crew.call(&crew.bob, serde_json::from_value(json!({ "op": "run_now", "workflow": pages })).unwrap()).unwrap();
+    assert_eq!(reply["waiting"], json!(true), "bob's run waits behind the holder");
+    // The database refuses Pages' reservation; each refused try counts on a sequence, which a
+    // rollback does not undo.
+    admin_on(
+        &crew.hub.database,
+        &format!(
+            "create sequence ta_rc_tries;
+             create function refuse_pages() returns trigger language plpgsql as $$ begin
+               if new.workflow = '{pages}' then perform nextval('ta_rc_tries'); raise exception 'refused'; end if; return new; end $$;
+             create trigger refuse_pages before insert on team_runs for each row execute function refuse_pages()"
+        ),
+    );
+    let tries = || -> i64 {
+        crew.hub.runtime.block_on(async {
+            let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), crew.hub.database), tokio_postgres::NoTls).await.unwrap();
+            tokio::spawn(connection);
+            db.query_one("select case when is_called then last_value else 0 end from ta_rc_tries", &[]).await.unwrap().get(0)
+        })
+    };
+    let held = crew.live_of(&holder);
+    crew.stop(&held[0]);
+    wait_for("the turn's refused reservation", || tries() >= 1);
+    assert_eq!(crew.waiting(&pages), 1, "the event still waits");
+    assert_eq!(crew.skipped(&pages), Value::Null, "nothing counted");
+    assert_eq!(crew.live_of(&pages), none());
+
+    admin_on(&crew.hub.database, "drop trigger refuse_pages on team_runs");
+    crew.reaper_pass();
+    wait_for("the waiting run to start", || crew.live_of(&pages).len() == 1 && crew.waiting(&pages) == 0);
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(crew.live_of(&pages).len(), 1, "it started once");
+    assert_eq!(crew.waiting(&pages), 0);
+    assert_eq!(crew.skipped(&pages), Value::Null);
+}
