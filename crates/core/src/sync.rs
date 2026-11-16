@@ -2819,4 +2819,132 @@ mod tests {
             Ok(())
         }
     }
+
+    const QUOTA_REFUSAL: &str = "the account's synced projects would pass 1024 MB; delete old sessions to sync more";
+
+    /// Keeps what it is sent while the account's compressed bytes stay within `limit`, the way the
+    /// hub does, and records every push it is sent: each file's path, and whether it was a deletion.
+    struct QuotaHub {
+        inner: MemHub,
+        limit: Cell<u64>,
+        pushes: RefCell<Vec<Vec<(String, bool)>>>,
+    }
+
+    impl QuotaHub {
+        fn new(limit: u64) -> QuotaHub {
+            QuotaHub { inner: MemHub::default(), limit: Cell::new(limit), pushes: RefCell::default() }
+        }
+        fn used(&self) -> u64 {
+            self.inner.0.borrow().values().map(|f| f.entry.size).sum()
+        }
+    }
+
+    impl Hub for QuotaHub {
+        fn list(&self, project: &str) -> Result<Vec<Entry>, String> {
+            self.inner.list(project)
+        }
+        fn push(&self, project: &str, files: Vec<File>) -> Result<(), String> {
+            self.pushes.borrow_mut().push(files.iter().map(|f| (f.entry.path.clone(), f.data.is_none())).collect());
+            let replaced: u64 = files.iter().filter_map(|f| self.inner.0.borrow().get(&f.entry.path).map(|old| old.entry.size)).sum();
+            let incoming: u64 = files.iter().map(|f| f.entry.size).sum();
+            if incoming > replaced && self.used() - replaced + incoming > self.limit.get() {
+                return Err(QUOTA_REFUSAL.into());
+            }
+            self.inner.push(project, files)
+        }
+        fn pull(&self, project: &str, paths: Vec<String>) -> Result<Vec<File>, String> {
+            self.inner.pull(project, paths)
+        }
+        fn mark_executable(&self, project: &str, repairs: Vec<ModeRepair>) -> Result<(), String> {
+            self.inner.mark_executable(project, repairs)
+        }
+    }
+
+    fn memory(name: &str) -> String {
+        format!("claude/memory/{name}.md")
+    }
+
+    #[test]
+    fn deletions_reach_the_hub_first_in_a_batch_of_their_own_and_the_same_files_are_sent() {
+        let root = root("deletions-first");
+        let hub = QuotaHub::new(u64::MAX);
+        let mut mac = Side::new(&root, "mac", "app");
+        for name in ["b", "d", "e"] {
+            put(&mac.claude(&format!("memory/{name}.md")), &format!("{name} as both machines had it"));
+        }
+        sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap();
+        hub.pushes.borrow_mut().clear();
+        std::fs::remove_file(mac.claude("memory/b.md")).unwrap();
+        std::fs::remove_file(mac.claude("memory/d.md")).unwrap();
+        put(&mac.claude("memory/a.md"), "a is new");
+        put(&mac.claude("memory/c.md"), "c is new");
+        put(&mac.claude("memory/e.md"), "e changed here");
+
+        let done = sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap();
+        let pushes = hub.pushes.borrow().clone();
+        let deletion = |name: &str| (memory(name), true);
+        let addition = |name: &str| (memory(name), false);
+        assert_eq!(pushes, vec![vec![deletion("b"), deletion("d")], vec![addition("a"), addition("c"), addition("e")]]);
+        let sent: BTreeSet<String> = pushes.iter().flatten().map(|(path, _)| path.clone()).collect();
+        let in_path_order: BTreeSet<String> = ["a", "b", "c", "d", "e"].map(memory).into();
+        assert_eq!(sent, in_path_order, "the order changed, not which files are sent");
+        let mut pushed = done.pushed.clone();
+        pushed.sort();
+        assert_eq!(pushed, ["a", "b", "c", "d", "e"].map(memory));
+        let stored = hub.inner.0.borrow();
+        assert_eq!(["b", "d"].map(|name| stored[&memory(name)].data.is_none()), [true, true]);
+        drop(stored);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_push_refused_at_the_limit_still_sends_deletions_and_pulls_and_keeps_its_old_baseline() {
+        let root = root("refused-push");
+        let hub = QuotaHub::new(u64::MAX);
+        let (mut mac, mut mini) = (Side::new(&root, "mac", "app"), Side::new(&root, "mini", "app"));
+        put(&mac.claude("memory/old.md"), "old");
+        sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap();
+        sync(&hub, &mut mini.state, &mini.checkout, SystemTime::now()).unwrap();
+        put(&mini.claude("memory/from-mini.md"), "mini's notes");
+        sync(&hub, &mut mini.state, &mini.checkout, SystemTime::now()).unwrap();
+        hub.limit.set(hub.used());
+        hub.pushes.borrow_mut().clear();
+        std::fs::remove_file(mac.claude("memory/old.md")).unwrap();
+        let notes: Vec<String> = (0..400).map(|i| format!("{i}:{}", i * 7919 % 1000)).collect();
+        put(&mac.claude("memory/new.md"), &notes.join(","));
+
+        let done = sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).map(|d| (d.pushed, d.pulled));
+        assert_eq!(done, Ok((vec![memory("old")], vec![memory("from-mini")])));
+        assert_eq!(hub.pushes.borrow().len(), 2, "one batch of deletions taken, one of additions refused");
+        assert_eq!(std::fs::read_to_string(mac.claude("memory/from-mini.md")).unwrap(), "mini's notes");
+        assert!(hub.inner.0.borrow()[&memory("old")].data.is_none());
+        assert!(!hub.inner.0.borrow().contains_key(&memory("new")));
+        let agreed = &mac.state.agreed[&format!("github.com/acme/app {}", mac.checkout.path.display())];
+        assert_eq!((agreed.get(&memory("new")), agreed.get(&memory("old")), agreed.contains_key(&memory("from-mini"))), (None, None, true));
+
+        hub.limit.set(u64::MAX);
+        let again = sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap();
+        assert_eq!((again.pushed, again.pulled), (vec![memory("new")], vec![]));
+        assert!(hub.inner.0.borrow()[&memory("new")].data.is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_deletion_never_removes_a_file_another_machine_changed_after_it() {
+        let root = root("delete-after-change");
+        let hub = MemHub::default();
+        let (mut mac, mut mini) = (Side::new(&root, "mac", "app"), Side::new(&root, "mini", "app"));
+        put(&mac.claude("memory/f.md"), "first");
+        mac.sync(&hub);
+        mini.sync(&hub);
+        put(&mini.claude("memory/f.md"), "second, from mini");
+        assert_eq!(mini.sync(&hub).pushed, vec![memory("f")]);
+        std::fs::remove_file(mac.claude("memory/f.md")).unwrap();
+
+        let done = mac.sync(&hub);
+        assert_eq!((done.pushed, done.pulled), (vec![], vec![memory("f")]));
+        assert_eq!(hub.0.borrow()[&memory("f")].entry.sha, sha(b"second, from mini"));
+        assert_eq!(std::fs::read_to_string(mac.claude("memory/f.md")).unwrap(), "second, from mini");
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

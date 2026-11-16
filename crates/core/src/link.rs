@@ -275,6 +275,17 @@ struct Syncer {
     reported_unreadable: bool,
     shared_projects: HashSet<String>,
     reported_old_hub: bool,
+    backoff: PushBackoff,
+}
+
+/// Syncs one project at a time.
+#[derive(Default)]
+struct PushBackoff {}
+
+impl PushBackoff {
+    fn sync(&mut self, hub: &impl sync::Hub, state: &mut sync::State, checkout: &sync::Checkout, _now: Instant) -> Result<sync::Synced, String> {
+        sync::sync(hub, state, checkout, SystemTime::now())
+    }
 }
 
 impl Syncer {
@@ -332,7 +343,7 @@ impl Syncer {
             if !self.shared_projects.contains(&key) && shared.call(HubCall::ShareProject { project: checkout.project.clone() }).is_ok() {
                 self.shared_projects.insert(key.clone());
             }
-            match sync::sync(shared, state, &checkout, SystemTime::now()) {
+            match self.backoff.sync(shared, state, &checkout, Instant::now()) {
                 Ok(done) => {
                     machine.skills_changed(&skills::pulled_by_project_sync(&checkout, &done.pulled));
                     if !done.pushed.is_empty() || !done.pulled.is_empty() {
@@ -1540,5 +1551,95 @@ mod tests {
         assert!(restarted.load(Ordering::SeqCst), "the update call did not restart");
         drop(shared);
         writer.join().unwrap();
+    }
+
+    /// A hub at the account's limit while `room` is false: it refuses any push that grows the
+    /// account, and counts the calls it gets.
+    #[derive(Default)]
+    struct FullHub {
+        files: std::cell::RefCell<std::collections::BTreeMap<String, sync::File>>,
+        room: std::cell::Cell<bool>,
+        lists: std::cell::Cell<usize>,
+        pushes: std::cell::Cell<usize>,
+    }
+
+    impl sync::Hub for FullHub {
+        fn list(&self, _: &str) -> Result<Vec<sync::Entry>, String> {
+            self.lists.set(self.lists.get() + 1);
+            Ok(self.files.borrow().values().map(|f| f.entry.clone()).collect())
+        }
+        fn push(&self, _: &str, files: Vec<sync::File>) -> Result<(), String> {
+            self.pushes.set(self.pushes.get() + 1);
+            let replaced: u64 = files.iter().filter_map(|f| self.files.borrow().get(&f.entry.path).map(|old| old.entry.size)).sum();
+            let incoming: u64 = files.iter().map(|f| f.entry.size).sum();
+            if !self.room.get() && incoming > replaced {
+                return Err("the account's synced projects would pass 1024 MB; delete old sessions to sync more".into());
+            }
+            for file in files {
+                self.files.borrow_mut().insert(file.entry.path.clone(), file);
+            }
+            Ok(())
+        }
+        fn pull(&self, _: &str, paths: Vec<String>) -> Result<Vec<sync::File>, String> {
+            Ok(paths.iter().filter_map(|p| self.files.borrow().get(p).cloned()).collect())
+        }
+        fn mark_executable(&self, _: &str, _: Vec<sync::ModeRepair>) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    fn full_checkout(name: &str) -> (std::path::PathBuf, sync::Checkout, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("pinned-link-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let project = sync::Project { key: "github.com/acme/app".into(), name: "app".into(), repo: "git@github.com:acme/app.git".into() };
+        let checkout = sync::Checkout { project, path: dir.join("app"), history: None, claude_home: Some(dir.join(".claude")) };
+        let notes = sync::claude_dir(&dir.join(".claude"), &checkout.path).join("memory/notes.md");
+        std::fs::create_dir_all(notes.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&checkout.path).unwrap();
+        std::fs::write(&notes, "notes written at the limit").unwrap();
+        (dir, checkout, notes)
+    }
+
+    /// Runs a sync cycle every `SYNC_EVERY` from `start`, calling `before` ahead of each, and
+    /// returns the seconds at which a push reached the hub.
+    fn pushed_at(hub: &FullHub, checkout: &sync::Checkout, cycles: u32, mut before: impl FnMut(u64)) -> Vec<u64> {
+        let (mut backoff, mut state) = (PushBackoff::default(), sync::State::default());
+        let start = Instant::now();
+        let mut at = vec![];
+        for cycle in 0..cycles {
+            let seconds = (SYNC_EVERY * cycle).as_secs();
+            before(seconds);
+            let pushes = hub.pushes.get();
+            let _ = backoff.sync(hub, &mut state, checkout, start + SYNC_EVERY * cycle);
+            if hub.pushes.get() > pushes {
+                at.push(seconds);
+            }
+        }
+        at
+    }
+
+    #[test]
+    fn a_refused_push_waits_twice_as_long_each_time_up_to_half_an_hour_while_the_project_lists_every_cycle() {
+        let (dir, checkout, _) = full_checkout("full-hub");
+        let hub = FullHub::default();
+        let at = pushed_at(&hub, &checkout, 311, |_| {});
+        assert_eq!(at, [0, 20, 60, 140, 300, 620, 1260, 2540, 4340, 6140]);
+        assert_eq!(hub.lists.get(), 311, "the project still lists and pulls every cycle");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_held_push_goes_out_at_the_next_cycle_once_the_files_change_and_a_taken_push_ends_the_wait() {
+        let (dir, checkout, notes) = full_checkout("full-hub-reset");
+        let hub = FullHub::default();
+        let at = pushed_at(&hub, &checkout, 8, |seconds| match seconds {
+            40 => std::fs::write(&notes, "notes edited at second 40").unwrap(),
+            100 => hub.room.set(true),
+            120 => std::fs::write(&notes, "notes edited again at second 120").unwrap(),
+            _ => {}
+        });
+        assert_eq!(at, [0, 20, 40, 60, 100, 120]);
+        assert_eq!(hub.files.borrow()["claude/memory/notes.md"].entry.sha, sync::sha(b"notes edited again at second 120"));
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

@@ -11526,3 +11526,44 @@ fn an_agent_saves_and_lists_ideas_through_act_and_its_role_is_kept() {
     assert_eq!(deleted["outcome"], "done");
     assert_eq!(act(&ana.dir, &ana.tab, "list_ideas", json!({})).unwrap()["result"], json!([]));
 }
+
+#[test]
+fn an_account_over_the_sync_limit_takes_a_push_that_does_not_grow_it_and_refuses_one_that_does() {
+    let hub = TestHub::start("sync_quota");
+    let url = hub.url.clone();
+    let (_, _, mut ana) = signed_in(&url, "ana@example.test");
+    let project = "github.com/acme/site";
+    let file = |path: &str, text: &str| {
+        json!({ "path": path, "sha": sha256_hex(text.as_bytes()), "modified": 1, "data": base64::engine::general_purpose::STANDARD.encode(gzip_bytes(text.as_bytes())) })
+    };
+    let tombstone = |path: &str| json!({ "path": path, "sha": "", "modified": 2 });
+    let push = |client: &mut Client, files: Vec<Value>| client.hub(json!({ "cmd": "sync_push", "project": project, "files": files }));
+    let (notes, plan) = ("claude/memory/notes.md", "claude/memory/plan.md");
+    push(&mut ana, vec![file(notes, "ana's notes"), file(plan, "plan: ship 0.18.6")]).unwrap();
+    // Eleven sessions of 100 MiB: 1153433600 bytes, past the 1073741824 the account may keep.
+    admin_on(
+        &hub.database,
+        &format!(
+            "insert into project_files (account, project, path, sha, modified, data) \
+             select a.id, '{project}', 'claude/big-' || n || '.jsonl', 'big' || n, 1, convert_to(repeat('x', 104857600), 'UTF8') \
+             from accounts a, generate_series(1, 11) n where a.email = 'ana@example.test'"
+        ),
+    );
+    let refused = Err("the account's synced projects would pass 1024 MB; delete old sessions to sync more".to_owned());
+    let sha_of = |client: &mut Client, path: &str| {
+        let listed = client.hub(json!({ "cmd": "sync_list", "project": project })).unwrap();
+        listed.as_array().unwrap().iter().find(|e| e["path"] == path).map(|e| e["sha"].as_str().unwrap().to_owned())
+    };
+
+    assert_eq!(push(&mut ana, vec![tombstone(notes)]), Ok(Value::Null), "a deletion frees bytes even past the limit");
+    assert_eq!(sha_of(&mut ana, notes), Some(String::new()));
+    assert_eq!(gzip_bytes(b"plan: ship 0.18.6").len(), gzip_bytes(b"plan: ship 0.18.7").len());
+    assert_eq!(push(&mut ana, vec![file(plan, "plan: ship 0.18.7")]), Ok(Value::Null), "a file replaced by one of the same size grows nothing");
+    assert_eq!(push(&mut ana, vec![file("claude/big-1.jsonl", "{}")]), Ok(Value::Null), "a session shrunk from 100 MiB to a few bytes");
+    assert_eq!(push(&mut ana, vec![file("claude/memory/more.md", "one more note")]), refused, "a push that grows the account stays refused");
+    assert_eq!(sha_of(&mut ana, "claude/memory/more.md"), None);
+    let mixed = vec![tombstone("claude/big-2.jsonl"), file("claude/memory/more.md", "one more note")];
+    assert_eq!(push(&mut ana, mixed), Ok(Value::Null), "freeing 104857600 bytes while adding a few is taken whole");
+    assert_eq!(sha_of(&mut ana, "claude/memory/more.md"), Some(sha256_hex(b"one more note")));
+    assert_eq!(push(&mut ana, vec![file("claude/memory/later.md", "under the limit again")]), Ok(Value::Null), "9 sessions of 100 MiB leave room");
+}
