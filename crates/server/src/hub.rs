@@ -145,11 +145,11 @@ pub(crate) fn run_call(spec: RunSpec, subject: &Subject) -> Call {
     }
 }
 
-/// A machine whose pinned predates Run now can't read it: say so, instead of its parse error.
 /// What a workflow's step reads when the hub was busy partway through opening it: unlike the busy
 /// refusal, the step is not tried again, since part of it may have happened.
 pub const BUSY_PARTWAY: &str = "the hub was busy partway through opening this, so it was not tried again";
 
+/// `e`, the refusal of a step's call, read as `BUSY_PARTWAY` when it is the busy refusal (`db::BUSY`).
 fn busy_partway(e: String) -> String {
     match e == db::BUSY {
         true => BUSY_PARTWAY.into(),
@@ -157,6 +157,7 @@ fn busy_partway(e: String) -> String {
     }
 }
 
+/// A machine whose pinned predates Run now can't read it: say so, instead of its parse error.
 pub(crate) fn too_old_for_run_now(account: &Account, machine: &str, subject: &Subject, refused: String) -> String {
     if !pinned_core::connectors::is_run_now(subject) || !refused.contains("can't answer that") {
         return refused;
