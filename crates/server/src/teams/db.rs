@@ -902,6 +902,21 @@ pub async fn use_go_ahead(db: &Db, team: Uuid, run: Uuid, step: &str, question: 
     Ok(row.map(|r| r.get(0)))
 }
 
+/// Spends every unused "Go ahead" of run `run` (`now` is unix seconds): a take-over hands the run
+/// to someone else, and a step the bot asked about before is asked about again.
+pub async fn release_go_aheads(db: &Db, team: Uuid, run: Uuid, now: i64) -> Result<u64, String> {
+    db.client()
+        .await?
+        .execute(
+            "update team_calls set released_at = $3::bigint
+             where team = $1 and run = $2 and situation = 'before_irreversible' and released_at is null
+               and answer -> 'kind' ->> 'kind' = 'choice' and answer ->> 'choice' = $4",
+            &[&team, &run, &now, &GO_AHEAD],
+        )
+        .await
+        .map_err(err)
+}
+
 pub async fn call(db: &Db, team: Uuid, call: Uuid) -> Result<Option<CallRow>, String> {
     let row = db
         .client()

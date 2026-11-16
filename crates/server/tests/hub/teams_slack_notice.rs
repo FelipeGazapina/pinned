@@ -153,6 +153,17 @@ fn a_question_goes_to_slack_without_secrets_on_one_line_and_cut_at_300_character
 }
 
 #[test]
+fn a_mention_in_the_question_is_escaped_and_pings_nobody() {
+    let (hub, tb, _dina, _omar) = slack_team("teams_slack_notice_escaped", "xoxb-dev-notice-escaped", Some("C0FOOTER01"), true, design());
+    tb.ask(&hub, "Ship it? <!channel> <!here> <@U123> <!subteam^S1> & a>b", &[]).unwrap();
+    let sent = wait_for_posts("xoxb-dev-notice-escaped", 1);
+    assert_eq!(
+        sent[0].text,
+        "Footer needs <!subteam^S0DESIGN01>: Ship it? &lt;!channel&gt; &lt;!here&gt; &lt;@U123&gt; &lt;!subteam^S1&gt; &amp; a&gt;b. Answer in pinned."
+    );
+}
+
+#[test]
 fn a_call_to_a_person_or_the_owner_posts_nothing() {
     let (hub, mut tb, dina, _omar) = slack_team("teams_slack_notice_person", "xoxb-dev-notice-person", Some("C0FOOTER01"), true, json!({ "kind": "owner" }));
     tb.ask(&hub, "Red or blue footer?", &[]).unwrap();

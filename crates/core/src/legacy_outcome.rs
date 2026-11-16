@@ -729,7 +729,7 @@ fn stop_name(run: &runner::Run, library: &runner::Library) -> Option<String> {
 fn open_observation(connectors: &[Connector], owner: &str, run: &runner::Run, library: &runner::Library, prompt: &str, seeded: bool) -> Observation {
     let owner_connector = connectors.iter().find(|connector| connector.id == owner).expect("owner");
     let names = connectors.iter().map(|connector| (connector.id.clone(), connector.name.clone())).collect();
-    let session = run_opening(run, owner_connector, prompt, seeded, library, &names, GRAPH_EXE).expect("opening");
+    let session = run_opening(run, owner_connector, prompt, seeded, library, &names, GRAPH_EXE, false).expect("opening");
     let prompt = session.args.last().cloned().unwrap_or_default();
     let args_contain = if session.args.is_empty() { Vec::new() } else { session.args[..session.args.len() - 1].to_vec() };
     Observation::Open { connector: owner.into(), subject: session.subject, prompt_contains: vec![prompt], args_contain }

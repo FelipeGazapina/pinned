@@ -982,7 +982,11 @@ impl Boxes {
     pub async fn open(&self, hub: &Hub, account: &Arc<Account>, mut run: Run, step: BoxStep) -> Result<Placement, String> {
         let connectors = hub.connectors(account).await?;
         let keys = connectors.box_keys().ok_or(NOT_CONNECTED)?;
-        let permission = connectors.box_access().workflow;
+        let permission = match connectors.box_access().workflow {
+            // A team's runs never share a machine, whatever an older hub stored.
+            BoxPermission::Fixed { .. } if account.team => BoxPermission::Fresh,
+            permission => permission,
+        };
         if permission == BoxPermission::Off {
             return Err("Upstash Box is off for workflows: choose a box permission in Connectors settings".into());
         }

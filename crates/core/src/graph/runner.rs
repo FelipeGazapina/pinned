@@ -19,6 +19,9 @@ pub struct RunId(pub String);
 /// Every graph the hub holds, by connector id. `call` reads its target here.
 pub type Library = BTreeMap<String, Graph>;
 
+/// Why a hub's team refuses a Call step to a workflow that is not one of its on bots.
+pub const NOT_AN_ON_BOT: &str = "the called workflow is not an on bot of this team";
+
 /// One execution. Owned by the hub, stored beside `connectors.json`, never sent to apps.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Run {
@@ -43,6 +46,10 @@ pub struct Run {
     stack: Vec<Frame>,
     /// Returned by `drive` until `supply` answers it.
     pending: Option<Effect>,
+    /// On a hub's team, the workflows that are on bots: a Call step to any other fails
+    /// (`NOT_AN_ON_BOT`). `None` on a person's account. Set before each `drive`, never stored.
+    #[serde(skip)]
+    pub callable: Option<std::collections::BTreeSet<String>>,
     /// The classify `pending` is asking. `supply` has no library, so the gate travels with the run.
     ready: Option<ReadyClassify>,
     /// Set once a claim has been supplied, so a finished run does not claim twice.
@@ -262,6 +269,7 @@ impl Run {
 /// issue or the Slack message, which goes into `context.trigger` and the first log entry.
 pub fn start(library: &Library, connector: &str, subject: Subject, input: Value, at: &str) -> Run {
     let mut run = Run {
+        callable: None,
         id: RunId(format!("{connector}:{}:{at}", subject_key(&subject))),
         connector: connector.to_owned(),
         subject,
@@ -633,6 +641,9 @@ fn enter_call(
             .collect::<Vec<_>>()
             .join(" -> ");
         return Next::Fail(format!("call to workflow {workflow:?} cycles: it is already on the stack ({chain} -> {workflow})"));
+    }
+    if run.callable.as_ref().is_some_and(|on| !on.contains(workflow)) {
+        return Next::Fail(NOT_AN_ON_BOT.into());
     }
     let Some(graph) = library.get(workflow) else {
         return Next::Fail(format!("call to workflow {workflow:?}, which has no graph"));
@@ -2500,6 +2511,21 @@ mod tests {
                 why: "call to workflow \"missing\", which has no graph".into()
             }
         );
+    }
+
+    #[test]
+    fn on_a_team_a_call_to_a_workflow_that_is_not_an_on_bot_fails_the_run() {
+        let callee = chain(vec![("t", "Trigger", trigger()), ("s", "Talk", NodeKind::Talk { prompt: "Fix.".into() })]);
+        let caller = chain(vec![("t", "Trigger", trigger()), ("c", "Call", NodeKind::Call { workflow: "c2".into() })]);
+        let lib = library(vec![("c1", caller), ("c2", callee)]);
+        let mut run = start(&lib, "c1", linear(), json!("ENG-7: Broken button"), AT);
+        run.callable = Some(["c1".to_owned()].into_iter().collect());
+        assert_eq!(drive(&mut run, &lib), Drive::Done);
+        assert_eq!(run.status, Status::Failed { why: "the called workflow is not an on bot of this team".into() });
+        // With the callee on, the call goes in.
+        let mut run = start(&lib, "c1", linear(), json!("ENG-7: Broken button"), AT);
+        run.callable = Some(["c1".to_owned(), "c2".to_owned()].into_iter().collect());
+        assert!(matches!(drive(&mut run, &lib), Drive::Act(_)), "{:?}", run.status);
     }
 
     #[test]

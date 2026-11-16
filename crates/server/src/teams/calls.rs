@@ -142,6 +142,7 @@ pub async fn answer_call(hub: &Arc<Hub>, scope: &Scope, id: &str, mut answer: An
             if db::take_over(&hub.db, team, run_id, scope.member).await?.is_none() && run.controller.is_none() {
                 eprintln!("pinned-server: run {run_id} of team {team} changed while {} took it over", scope.member);
             }
+            db::release_go_aheads(&hub.db, team, run_id, now()).await?;
             back_to_work(hub, &scope.team, run_id).await?;
             let said = if answer.text.is_empty() { String::new() } else { format!(": {}", answer.text) };
             tell_session(hub, &scope.team, run_id, &format!("call-{id}"), format!("[{who} took over the run on call {id}{said}]")).await;
@@ -162,6 +163,8 @@ pub async fn take_over(hub: &Arc<Hub>, scope: &Scope, run: &str) -> Result<Run, 
     may_steer(hub, scope, run_id, &run).await?;
     match db::take_over(&hub.db, scope.team.id, run_id, scope.member).await? {
         Some(run) => {
+            // A "Go ahead" was given for the run as it was; the one who took over decides anew.
+            db::release_go_aheads(&hub.db, scope.team.id, run_id, now()).await?;
             push_logged(hub, scope.team.id, TeamEvent::RunChanged { run: run.clone() }).await;
             Ok(run)
         }
@@ -366,10 +369,17 @@ pub async fn ask_people(
 const NOTICE_QUESTION: usize = 300;
 
 /// The notice a call to a group posts in Slack: one line, the question without secrets and cut.
+/// The bot's name and question are escaped as Slack text, so a `<!channel>` or `<@U123>` in them
+/// pings nobody; only `mention`, pinned's own, stays live.
 fn slack_notice(bot: &str, mention: &str, question: &str) -> String {
     let masked = pinned_core::surface::mask_secrets(question);
     let line: String = masked.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(NOTICE_QUESTION).collect();
-    format!("{bot} needs {mention}: {line}. Answer in pinned.")
+    format!("{} needs {mention}: {}. Answer in pinned.", slack_escape(bot), slack_escape(&line))
+}
+
+/// `text` as Slack shows it literally: `&`, `<` and `>` as `&amp;`, `&lt;` and `&gt;`.
+fn slack_escape(text: &str) -> String {
+    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
 /// A newly opened call that asks a group with a Slack user group tells that group in Slack, in the

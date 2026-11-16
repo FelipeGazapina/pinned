@@ -265,7 +265,7 @@ pub fn with_replies(event: Event, replies: &[String], earlier: u64) -> Event {
     if earlier > 0 {
         text.push(format!("{earlier} earlier replies not shown"));
     }
-    text.extend(replies.iter().map(|reply| pinned_core::untrusted::frame("a Slack reply in this thread", reply)));
+    text.extend(replies.iter().map(|reply| pinned_core::untrusted::frame(pinned_core::untrusted::SLACK_REPLY, reply)));
     let text = text.join("\n\n");
     match event {
         Event::Run(mut run) => {
