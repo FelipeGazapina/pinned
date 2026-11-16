@@ -755,6 +755,18 @@ mod tests {
     }
 
     #[test]
+    fn a_search_an_agent_asks_for_gains_its_sessions_folder_words_and_no_other_ask_changes() {
+        let asked = Ask::Similar { title: "loja-web export fails".into(), context: Context { names: vec!["mac-mini".into()], projects: vec!["caixa-pdv".into()], ..Context::default() } };
+        let Ask::Similar { title, context } = with_cwd(asked, "/home/x/projetos/loja-web/.worktrees/fix-1") else { panic!("still a search") };
+        assert_eq!(title, "loja-web export fails");
+        assert_eq!(context.names, ["mac-mini"]);
+        assert_eq!(context.projects, ["caixa-pdv", "fix-1", "loja-web"]);
+        assert_eq!(context.folders, ["/home/x/projetos/loja-web/.worktrees/fix-1", "/home/x/projetos/loja-web"]);
+        assert_eq!(scrubbed_text(&title, &context), "[project] export fails");
+        assert!(matches!(with_cwd(Ask::List, "/home/x/loja-web"), Ask::List));
+    }
+
+    #[test]
     fn an_apps_context_over_500_words_or_with_a_word_over_200_characters_is_refused() {
         let too_large = |ctx: &Context| super::too_large(ctx).unwrap_err();
         let words = |n: usize, len: usize| (0..n).map(|i| format!("{i:0len$}")).collect::<Vec<String>>();
