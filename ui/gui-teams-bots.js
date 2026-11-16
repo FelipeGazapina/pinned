@@ -369,7 +369,7 @@ const tbFires = (s) => {
 };
 const tbTriggerOk = (s) => (s.trigger === "linear-label" ? !!s.label.trim() : s.trigger === "slack-mention" ? !!s.channel.trim() : true);
 
-/** The workflow the hub stores for a bot made here, as `save_bot`'s `connector`: one Session step and the chosen trigger. A new one has an empty id. */
+/** The workflow the hub stores for a bot made here, as `save_bot`'s `connector`: one Session step and the chosen trigger. A new one has the id made for it. */
 function tbConnector({ id = "", name, steps, repo, trigger }) {
   const watch = tbTrigger(trigger);
   return {
@@ -395,16 +395,35 @@ function tbConnector({ id = "", name, steps, repo, trigger }) {
   };
 }
 
-/** The `Bot` a wizard saves: draft, owner left to the hub. */
-const tbBotOf = ({ workflow, name, who, once }) => ({
+/** The `Bot` a wizard saves: draft, owner left to the hub. A bot that already has limits keeps them, the spend one too. */
+const tbBotOf = ({ workflow, name, who, once, limits }) => ({
   workflow,
   name,
   owner: null,
   calls: { before_irreversible: who.before, in_doubt: who.doubt, on_limit: who.limit, on_failure: who.limit },
-  limits: { usd: TB_POLICY.usd, minutes: TB_POLICY.minutes },
+  limits: { usd: limits?.usd ?? TB_POLICY.usd, minutes: limits?.minutes ?? TB_POLICY.minutes },
   on: false,
   on_by: null,
   once,
+});
+
+/** A new workflow's id, made here: lowercase and hyphenated, the form the hub keeps (`crypto.randomUUID()`). */
+function tbNewId() {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID().toLowerCase();
+  // A page that is not a secure context has no randomUUID, and still has the random bytes.
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  b[6] = (b[6] & 0x0f) | 0x40;
+  b[8] = (b[8] & 0x3f) | 0x80;
+  const hex = [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/** The `save_bot` a save sends: `id` is the bot's workflow, the uuid made for a new bot or the id a bot already has,
+ * in the bot and in its connector alike (the hub refuses a bot for another workflow than the one it saves). */
+const tbSavePayload = ({ id, name, steps, repo, trigger, who, once, limits }) => ({
+  op: "save_bot",
+  bot: tbBotOf({ workflow: id, name, who, once, limits }),
+  connector: tbConnector({ id, name, steps, repo, trigger }),
 });
 
 /** "today", "yesterday", the weekday for the last week, then the date. */
@@ -880,6 +899,7 @@ function tbWizReset() {
     loadError: "",
     busy: false,
     error: "",
+    newId: "",
     workflow: "",
     saved: null,
     on: false,
@@ -1008,8 +1028,9 @@ async function tbWizLoad() {
   tbWizDraw();
 }
 
-/** Saves the bot and its workflow in one `save_bot`: the workflow goes in `connector`, new when its id is empty, and the bot is a draft.
- * `save_bot` answers nothing, so the new bot's workflow id is the one `bots` lists after the save and not before. */
+/** Saves the bot and its workflow in one `save_bot`: the workflow goes in `connector`, and the bot is a draft.
+ * A new bot is named by the wizard, a uuid made at the first try and sent again by every retry, so a save the hub
+ * did take but whose answer was lost never makes a second bot. `save_bot` answers `{workflow}`, the id to use. */
 async function tbWizCreate() {
   const s = tbWiz;
   const steps = s.steps.map((x) => x.trim()).filter(Boolean);
@@ -1019,15 +1040,12 @@ async function tbWizCreate() {
   s.error = "";
   tbWizDraw();
   try {
-    const list = (v) => (Array.isArray(v) ? v : []);
-    const before = new Set(list(await tbCall({ op: "bots" })).map((b) => b.workflow));
-    const connector = tbConnector({ name, steps, repo: project?.repo ?? "", trigger: s });
-    const bot = tbBotOf({ workflow: "", name, who: s.who, once: s.once });
-    const reply = await tbCall({ op: "save_bot", bot, connector });
-    const fresh = list(await tbCall({ op: "bots" })).filter((b) => !before.has(b.workflow));
-    s.workflow = String(reply?.workflow ?? reply?.id ?? (fresh.find((b) => b.name === name) ?? fresh[0])?.workflow ?? "");
-    if (!s.workflow) throw "the bot was saved, but the hub did not list it";
-    s.saved = { ...bot, workflow: s.workflow };
+    if (!s.newId) s.newId = tbNewId();
+    const save = tbSavePayload({ id: s.newId, name, steps, repo: project?.repo ?? "", trigger: s, who: s.who, once: s.once });
+    const reply = await tbCall(save);
+    s.workflow = String(reply?.workflow ?? "");
+    if (!s.workflow) throw "the hub did not name the saved bot";
+    s.saved = { ...save.bot, workflow: s.workflow };
     s.step = 5;
     s.on = false;
   } catch (e) {

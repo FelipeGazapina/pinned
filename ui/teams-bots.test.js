@@ -38,7 +38,7 @@ const workflow = (over = {}) => ({
 const run = (over = {}) => ({ id: "r1", workflow: "c1", state: "done", controller: null, cost_usd: 1, active_secs: 60, started_at: NOW - 100, ended_at: NOW - 50, outcome: null, started_by: "a1", ...over });
 
 /** gui-teams-bots.js in a page whose hub answers each team op from `answers` (a value, or a function of the call). */
-function app({ answers = {}, team = OWNER_TEAM, email = "bruno@acme.dev", pages = ["team-run", "team-calls"] } = {}) {
+function app({ answers = {}, team = OWNER_TEAM, email = "bruno@acme.dev", pages = ["team-run", "team-calls"], crypto = globalThis.crypto } = {}) {
   const frames = [];
   const listeners = {};
   const docListeners = {};
@@ -46,6 +46,7 @@ function app({ answers = {}, team = OWNER_TEAM, email = "bruno@acme.dev", pages 
   const context = {
     console,
     Date,
+    crypto,
     document: { body: { dataset: { page: "" } }, addEventListener: (type, fn) => (docListeners[type] = fn) },
     SHELL_PAGES: Object.fromEntries(pages.map((p) => [p, {}])),
     pageView: { addEventListener: (type, fn) => (listeners[type] = fn), querySelector: () => null },
@@ -117,10 +118,10 @@ function assertAsksList(html, where) {
 
 /** The ops a page asks to draw itself. */
 const wizardAnswers = (over = {}) => ({ members: MEMBERS, groups: [PUBLISH, REVIEWERS], projects: PROJECTS, ...over });
-/** The hub's `save_bot` and `bots`: save_bot answers null, and `bots` lists the new bot (with the workflow id the hub made) only after it. */
+/** The hub's `save_bot`: it answers `{workflow}`, the id of the saved bot's workflow. */
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 function saving(id = "c1700", over = {}) {
-  let made = null;
-  return { save_bot: (op) => ((made = { ...op.bot, workflow: id, name: op.connector.name }), null), bots: () => (made ? [made] : []), ...over };
+  return { save_bot: () => ({ workflow: id }), ...over };
 }
 
 // ---- Helpers ------------------------------------------------------------------------------------
@@ -305,12 +306,13 @@ test("creating a bot sends one save_bot with the workflow as its connector, as a
   await a.click("project", { key: "github.com/acme/orders-api" });
   a.frames.length = 0;
   await a.click("next");
+  const id = a.frames[0].bot.workflow;
+  assert.match(id, UUID, "a new bot is named by a lowercase uuid made here");
   assert.deepEqual(a.frames, [
-    { op: "bots" },
     {
       op: "save_bot",
       bot: {
-        workflow: "",
+        workflow: id,
         name: "Test publisher",
         owner: null,
         calls: { before_irreversible: { kind: "group", handle: "publish" }, in_doubt: { kind: "group", handle: "reviewers" }, on_limit: { kind: "person", account: "b2" }, on_failure: { kind: "person", account: "b2" } },
@@ -320,7 +322,7 @@ test("creating a bot sends one save_bot with the workflow as its connector, as a
         once: true,
       },
       connector: {
-        id: "",
+        id,
         name: "Test publisher",
         enabled: false,
         trigger: { kind: "manual" },
@@ -355,16 +357,16 @@ test("creating a bot sends one save_bot with the workflow as its connector, as a
         },
       },
     },
-    { op: "bots" },
   ]);
   t = text(a.page());
   assert.ok(t.includes("Test publisher is ready, as a draft"), t);
-  assert.equal(a.read("tbWiz.workflow"), "c1700", "the id is the one the hub listed after the save");
+  assert.equal(a.read("tbWiz.workflow"), "c1700", "the id is the one save_bot answered");
+  assert.ok(!a.frames.some((f) => f.op === "bots"), "the bots list is not read to find the new bot");
 });
 
-test("a refused save_bot saves nothing, says why, and trying again sends the same save with no workflow id", async () => {
+test("a refused save_bot saves nothing, says why, and trying again sends the same uuid, never a second bot", async () => {
   let fail = true;
-  const a = app({ answers: wizardAnswers(saving("c9", { save_bot: (op) => (fail ? new Error("this team has no group @publish") : saving("c9").save_bot(op)) })) });
+  const a = app({ answers: wizardAnswers(saving("c9", { save_bot: (op) => (fail ? new Error("this team has no group @publish") : { workflow: op.bot.workflow }) })) });
   await a.open("team-bot-new");
   await a.click("idea", { idea: "weekly" });
   for (let i = 0; i < 3; i++) await a.click("next");
@@ -372,12 +374,54 @@ test("a refused save_bot saves nothing, says why, and trying again sends the sam
   await a.click("next");
   assert.ok(text(a.page()).includes("Could not create the bot: this team has no group @publish"));
   fail = false;
-  a.frames.length = 0;
   await a.click("next");
   const sent = a.frames.filter((f) => f.op === "save_bot");
-  assert.equal(sent.length, 1);
-  assert.equal(sent[0].connector.id, "");
-  assert.equal(sent[0].bot.workflow, "");
+  assert.equal(sent.length, 2);
+  assert.match(sent[0].bot.workflow, UUID);
+  assert.equal(sent[0].connector.id, sent[0].bot.workflow);
+  assert.equal(sent[1].bot.workflow, sent[0].bot.workflow, "the retry reuses the id");
+  assert.equal(sent[1].connector.id, sent[0].bot.workflow);
+  assert.equal(a.read("tbWiz.workflow"), sent[0].bot.workflow, "and the page uses the id the hub answered");
+  assert.ok(text(a.page()).includes("is ready, as a draft"));
+});
+
+test("a retry after an answer that never came reuses the id too, and a new wizard makes a new one", async () => {
+  let lost = true;
+  const a = app({ answers: wizardAnswers({ save_bot: (op) => (lost ? new Error("connection lost") : { workflow: op.bot.workflow }) }) });
+  const toStep4 = async () => {
+    await a.open("team-bot-new");
+    await a.click("idea", { idea: "weekly" });
+    for (let i = 0; i < 3; i++) await a.click("next");
+    await a.click("project", { key: "github.com/acme/site" });
+  };
+  await toStep4();
+  await a.click("next");
+  lost = false;
+  await a.click("next");
+  await toStep4();
+  await a.click("next");
+  const ids = a.frames.filter((f) => f.op === "save_bot").map((f) => f.bot.workflow);
+  assert.equal(ids.length, 3);
+  assert.equal(ids[0], ids[1]);
+  assert.notEqual(ids[2], ids[0], "a second bot is a second uuid");
+});
+
+test("a page that is not a secure context has no randomUUID, and the id is still a lowercase uuid", async () => {
+  const bare = { getRandomValues: (b) => globalThis.crypto.getRandomValues(b) };
+  const a = app({ crypto: bare });
+  for (let i = 0; i < 20; i++) assert.match(a.read("tbNewId()"), UUID);
+});
+
+test("the save of a bot that already exists keeps its id, its connector's id and its limits", () => {
+  const a = app();
+  const base = { name: "Test publisher", steps: ["Run the tests."], repo: "github.com/acme/site", trigger: { trigger: "manual", label: "", channel: "" }, who: { before: { kind: "owner" }, doubt: { kind: "owner" }, limit: { kind: "owner" } }, once: false };
+  const kept = a.read(`tbSavePayload(${JSON.stringify({ ...base, id: "c7", limits: { usd: 12.5, minutes: 45 } })})`);
+  assert.equal(kept.bot.workflow, "c7");
+  assert.equal(kept.connector.id, "c7");
+  assert.deepEqual(kept.bot.limits, { usd: 12.5, minutes: 45 }, "a limit the bot has is not replaced by the default");
+  const fresh = a.read(`tbSavePayload(${JSON.stringify({ ...base, id: "0b7e5d1c-1111-4222-8333-444455556666" })})`);
+  assert.deepEqual(fresh.bot.limits, { usd: 5, minutes: 30 }, "a new bot has the policy default, usd 5");
+  assert.equal(fresh.op, "save_bot");
 });
 
 test("the done screen turns the bot on only when the person may", async () => {
@@ -420,7 +464,7 @@ test("the done screen turns the bot on only when the person may", async () => {
 });
 
 test("seeing the bot's page opens it by the workflow's id", async () => {
-  const a = app({ answers: { ...wizardAnswers(saving("c1", { bots: ((n) => () => (n++ < 1 ? [] : [bot()]))(0) })), runs: [], calls: [], "hub:get_settings": { connectors: [workflow()] } } });
+  const a = app({ answers: { ...wizardAnswers(saving("c1", { bots: [bot()] })), runs: [], calls: [], "hub:get_settings": { connectors: [workflow()] } } });
   await a.open("team-bot-new");
   await a.click("idea", { idea: "review" });
   await a.click("next");
