@@ -305,6 +305,8 @@ struct Client {
     unlocked: Option<Instant>,
     attached: HashSet<Target>,
     threads: HashMap<MachineId, HashSet<TabId>>,
+    /// It sent a team call on this connection, so it hears its teams' events (`broadcast_team`).
+    hears_teams: bool,
 }
 
 fn viewer(client: u64) -> String {
@@ -1672,7 +1674,7 @@ impl Account {
                 let _ = out.send(frame(&ToClient::Event { machine: id.clone(), event }));
             }
         }
-        live.clients.insert(id, Client { out, login, locked, unlocked, attached: HashSet::new(), threads: HashMap::new() });
+        live.clients.insert(id, Client { out, login, locked, unlocked, attached: HashSet::new(), threads: HashMap::new(), hears_teams: false });
     }
 
     /// Whether client `id` must unlock before `call` on `side`: only the account's owner makes it,
@@ -1747,6 +1749,22 @@ impl Account {
     pub fn broadcast(&self, message: &ToClient) {
         let text = frame(message);
         for client in self.live.lock().unwrap().clients.values() {
+            let _ = client.out.send(text.clone());
+        }
+    }
+
+    /// Client `id` sent a team call: from now on this connection hears its teams' events.
+    pub fn hears_teams(&self, id: u64) {
+        if let Some(client) = self.live.lock().unwrap().clients.get_mut(&id) {
+            client.hears_teams = true;
+        }
+    }
+
+    /// Sends a team's event to the app connections that sent a team call (`hears_teams`) and to
+    /// no other connection; a machine never gets one.
+    pub fn broadcast_team(&self, message: &ToClient) {
+        let text = frame(message);
+        for client in self.live.lock().unwrap().clients.values().filter(|client| client.hears_teams) {
             let _ = client.out.send(text.clone());
         }
     }

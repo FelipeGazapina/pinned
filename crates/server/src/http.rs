@@ -974,6 +974,8 @@ fn client_frame(server: &Arc<Server>, account: &Arc<Account>, client: u64, text:
         // A team's op is read once, the personal call inside it into its type, and the unlock
         // check and the run both take that one read.
         Ok(ClientFrame::Hub { id, call: HubCall::Team { team, op } }) => {
+            // This connection asks about teams, so it hears their events from now on.
+            account.hears_teams(client);
             let reply = |result| account.to_client(client, &ToClient::Reply(Reply::new(id, result)));
             let op = match crate::teams::Op::read(op) {
                 Ok(op) => op,

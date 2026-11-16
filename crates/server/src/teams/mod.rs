@@ -367,13 +367,14 @@ pub fn hub_call_allowed(call: &HubCall, role: Role) -> Result<(), String> {
     }
 }
 
-/// Sends `event` to every connected app of every member of `team`. An app that never listed its
-/// teams ignores it; a member with no app connected gets nothing.
+/// Sends `event` to every app connection of every member of `team` that sent a team call on that
+/// connection (`Account::broadcast_team`). Another connection, a machine, and a member with no app
+/// connected get nothing.
 pub async fn push(hub: &Hub, team: Uuid, event: TeamEvent) -> Result<(), String> {
     let frame = ToClient::Team { team: team.to_string(), event };
     for member in db::member_ids(&hub.db, team).await? {
         if let Some(account) = hub.loaded(member) {
-            account.broadcast(&frame);
+            account.broadcast_team(&frame);
         }
     }
     Ok(())
