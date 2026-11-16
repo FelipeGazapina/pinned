@@ -185,3 +185,36 @@ fn a_callee_turned_off_after_the_caller_went_on_stops_its_run_before_anything_ou
     assert_eq!(crew.hub.boxes.live(), Vec::<String>::new(), "no box opens for the callee");
     assert_eq!(crew.call(&crew.bob, TeamOp::Runs).unwrap(), json!([]), "no run is recorded");
 }
+
+#[test]
+fn a_teams_owner_may_not_set_one_box_reused() {
+    let crew = Crew::new("teams_guards_fixed_refused");
+    for kind in ["workflow", "session", "worker", "orchestrator"] {
+        let call = json!({ "cmd": "set_box_access", "access": { kind: { "mode": "fixed" } } });
+        assert_eq!(crew.call(&crew.ana, TeamOp::Hub { call }).map(drop), Err("a team's runs each get a box of their own".to_owned()), "{kind}");
+    }
+    let ask = json!({ "cmd": "set_box_access", "access": { "workflow": { "mode": "ask" } } });
+    assert!(crew.call(&crew.ana, TeamOp::Hub { call: ask }).is_ok(), "other kinds stay the owner's to set");
+    let fresh = json!({ "cmd": "set_box_access", "access": { "workflow": { "mode": "fresh" } } });
+    assert!(crew.call(&crew.ana, TeamOp::Hub { call: fresh }).is_ok());
+}
+
+#[test]
+fn a_team_with_one_box_reused_stored_runs_on_a_fresh_box() {
+    let mut crew = Crew::new("teams_guards_fixed_stored");
+    let mut solo = crew.graph("Solo", json!({ "kind": "manual" }), json!({}));
+    solo["graph"]["nodes"][1] = json!({ "id": "s", "name": "Fix", "position": [1, 0], "type": "session", "prompt": "Fix." });
+    let solo = save_team_workflow(&crew.hub, &crew.bob, crew.team, solo).unwrap();
+    crew.turn_on(&solo, true).unwrap();
+    // An older hub let the owner store "One box, reused" on the team.
+    let addr = crew.hub.stop();
+    admin_on(&crew.hub.database, &format!("update accounts set store = jsonb_set(store, '{{boxes}}', '{{\"workflow\":{{\"mode\":\"fixed\"}}}}') where id = '{}'", crew.team));
+    crew.hub.serve(&addr);
+    let account = |id: Uuid| crew.hub.runtime.block_on(crew.hub.hub().account(id)).unwrap();
+    (crew.ana, crew.bob) = (account(crew.ana.id), account(crew.bob.id));
+    assert_eq!(team_settings(&crew.hub, crew.team)["boxes"]["workflow"], json!({ "mode": "fixed" }));
+
+    crew.call(&crew.bob, TeamOp::RunNow { workflow: solo }).unwrap();
+    assert_eq!(crew.hub.boxes.live().len(), 1, "the run opened a box");
+    assert_eq!(team_settings(&crew.hub, crew.team)["boxes"]["workflow"], json!({ "mode": "fixed" }), "no shared box was claimed");
+}

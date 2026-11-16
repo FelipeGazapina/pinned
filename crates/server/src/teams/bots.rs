@@ -234,6 +234,9 @@ pub async fn save_bot(hub: &Arc<Hub>, scope: &Scope, mut bot: Bot, connector: Op
     draft(hub, scope, &saved.workflow).await
 }
 
+/// What a team's owner reads for "One box, reused" on a team: each run opens a fresh box.
+pub const OWN_BOX_EACH: &str = "a team's runs each get a box of their own";
+
 /// What a refused delete of a bot that is on, or has a live run, says.
 pub const TURN_OFF_FIRST: &str = "turn the bot off first";
 
