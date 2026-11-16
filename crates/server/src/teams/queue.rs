@@ -361,7 +361,10 @@ async fn take_and_start(hub: &Arc<Hub>, team: &Arc<Account>, ended: &str) -> Res
                     });
                 }
             }
-            Err(e) => eprintln!("pinned-server: team {} bot {}: a waiting run did not start and is dropped: {e}", team.id, waiting.workflow),
+            Err(e) => {
+                eprintln!("pinned-server: team {} bot {}: a waiting run did not start and is dropped: {e}", team.id, waiting.workflow);
+                db::count_skipped(&hub.db, team.id, &waiting.workflow, SkipReason::StartFailed, 1).await?;
+            }
         }
     }
 }

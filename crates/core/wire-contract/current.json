@@ -11713,14 +11713,15 @@
             ]
           },
           "SkipReason": {
-            "description": "Why an event of a bot started no run: `\"off\"`, `\"draft\"`, `\"manual\"` (a trigger of a workflow\nthat runs only by Run now), `\"queue_full\"` (the oldest of 20 waiting events, dropped for a\nnewer one) or `\"bot_removed\"` (its workflow was deleted before its turn).",
+            "description": "Why an event of a bot started no run: `\"off\"`, `\"draft\"`, `\"manual\"` (a trigger of a workflow\nthat runs only by Run now), `\"queue_full\"` (the oldest of 20 waiting events, dropped for a\nnewer one), `\"bot_removed\"` (its workflow was deleted before its turn) or `\"start_failed\"` (its\nturn came and its run did not start).",
             "type": "string",
             "enum": [
               "off",
               "draft",
               "manual",
               "queue_full",
-              "bot_removed"
+              "bot_removed",
+              "start_failed"
             ]
           },
           "Answer2": {
@@ -23306,14 +23307,15 @@
             ]
           },
           "SkipReason": {
-            "description": "Why an event of a bot started no run: `\"off\"`, `\"draft\"`, `\"manual\"` (a trigger of a workflow\nthat runs only by Run now), `\"queue_full\"` (the oldest of 20 waiting events, dropped for a\nnewer one) or `\"bot_removed\"` (its workflow was deleted before its turn).",
+            "description": "Why an event of a bot started no run: `\"off\"`, `\"draft\"`, `\"manual\"` (a trigger of a workflow\nthat runs only by Run now), `\"queue_full\"` (the oldest of 20 waiting events, dropped for a\nnewer one), `\"bot_removed\"` (its workflow was deleted before its turn) or `\"start_failed\"` (its\nturn came and its run did not start).",
             "type": "string",
             "enum": [
               "off",
               "draft",
               "manual",
               "queue_full",
-              "bot_removed"
+              "bot_removed",
+              "start_failed"
             ]
           },
           "Answer2": {
@@ -32095,14 +32097,15 @@
             ]
           },
           "SkipReason": {
-            "description": "Why an event of a bot started no run: `\"off\"`, `\"draft\"`, `\"manual\"` (a trigger of a workflow\nthat runs only by Run now), `\"queue_full\"` (the oldest of 20 waiting events, dropped for a\nnewer one) or `\"bot_removed\"` (its workflow was deleted before its turn).",
+            "description": "Why an event of a bot started no run: `\"off\"`, `\"draft\"`, `\"manual\"` (a trigger of a workflow\nthat runs only by Run now), `\"queue_full\"` (the oldest of 20 waiting events, dropped for a\nnewer one), `\"bot_removed\"` (its workflow was deleted before its turn) or `\"start_failed\"` (its\nturn came and its run did not start).",
             "type": "string",
             "enum": [
               "off",
               "draft",
               "manual",
               "queue_full",
-              "bot_removed"
+              "bot_removed",
+              "start_failed"
             ]
           },
           "Answer": {
@@ -40540,14 +40543,15 @@
             ]
           },
           "SkipReason": {
-            "description": "Why an event of a bot started no run: `\"off\"`, `\"draft\"`, `\"manual\"` (a trigger of a workflow\nthat runs only by Run now), `\"queue_full\"` (the oldest of 20 waiting events, dropped for a\nnewer one) or `\"bot_removed\"` (its workflow was deleted before its turn).",
+            "description": "Why an event of a bot started no run: `\"off\"`, `\"draft\"`, `\"manual\"` (a trigger of a workflow\nthat runs only by Run now), `\"queue_full\"` (the oldest of 20 waiting events, dropped for a\nnewer one), `\"bot_removed\"` (its workflow was deleted before its turn) or `\"start_failed\"` (its\nturn came and its run did not start).",
             "type": "string",
             "enum": [
               "off",
               "draft",
               "manual",
               "queue_full",
-              "bot_removed"
+              "bot_removed",
+              "start_failed"
             ]
           },
           "Answer": {
@@ -58584,14 +58588,15 @@
             ]
           },
           "SkipReason": {
-            "description": "Why an event of a bot started no run: `\"off\"`, `\"draft\"`, `\"manual\"` (a trigger of a workflow\nthat runs only by Run now), `\"queue_full\"` (the oldest of 20 waiting events, dropped for a\nnewer one) or `\"bot_removed\"` (its workflow was deleted before its turn).",
+            "description": "Why an event of a bot started no run: `\"off\"`, `\"draft\"`, `\"manual\"` (a trigger of a workflow\nthat runs only by Run now), `\"queue_full\"` (the oldest of 20 waiting events, dropped for a\nnewer one), `\"bot_removed\"` (its workflow was deleted before its turn) or `\"start_failed\"` (its\nturn came and its run did not start).",
             "type": "string",
             "enum": [
               "off",
               "draft",
               "manual",
               "queue_full",
-              "bot_removed"
+              "bot_removed",
+              "start_failed"
             ]
           }
         }
@@ -58795,14 +58800,15 @@
             ]
           },
           "SkipReason": {
-            "description": "Why an event of a bot started no run: `\"off\"`, `\"draft\"`, `\"manual\"` (a trigger of a workflow\nthat runs only by Run now), `\"queue_full\"` (the oldest of 20 waiting events, dropped for a\nnewer one) or `\"bot_removed\"` (its workflow was deleted before its turn).",
+            "description": "Why an event of a bot started no run: `\"off\"`, `\"draft\"`, `\"manual\"` (a trigger of a workflow\nthat runs only by Run now), `\"queue_full\"` (the oldest of 20 waiting events, dropped for a\nnewer one), `\"bot_removed\"` (its workflow was deleted before its turn) or `\"start_failed\"` (its\nturn came and its run did not start).",
             "type": "string",
             "enum": [
               "off",
               "draft",
               "manual",
               "queue_full",
-              "bot_removed"
+              "bot_removed",
+              "start_failed"
             ]
           }
         }

@@ -506,3 +506,21 @@ fn another_hub_deciding_holds_the_last_place_and_this_event_waits() {
     assert_eq!(crew.waiting(&a), 1, "this event waits");
     assert_eq!(crew.outside(1), none());
 }
+
+#[test]
+fn a_waiting_run_whose_start_fails_is_counted_on_its_bot() {
+    let crew = Crew::new("ta_start_failed");
+    let id = crew.on_bot("Pages");
+    assert_eq!(crew.found(crew.labeled(&id, 1)), Ok(()));
+    let reply = crew.call(&crew.bob, serde_json::from_value(json!({ "op": "run_now", "workflow": id })).unwrap()).unwrap();
+    assert_eq!(reply["waiting"], json!(true), "bob's run waits behind the first");
+    assert_eq!(crew.skipped(&id), Value::Null);
+
+    crew.hub.boxes.state.lock().unwrap().failing = Some(Exec { exit_code: 22, output: "Downloading pinned-server\n".into(), error: "curl: (22) The requested URL returned error: 404\n".into() });
+    let first = crew.live_of(&id);
+    crew.stop(&first[0]);
+    wait_for("the failed start to be counted", || !crew.skipped(&id).is_null());
+    assert_eq!(crew.skipped(&id), json!([{ "reason": "start_failed", "count": 1 }]));
+    assert_eq!(crew.waiting(&id), 0, "it is dropped, not kept");
+    assert_eq!(crew.live(), 0, "no run started");
+}
