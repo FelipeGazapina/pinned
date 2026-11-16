@@ -437,10 +437,33 @@ fn notify_slack(hub: &Arc<Hub>, team: &Arc<Account>, call: &Call) {
 /// answer, so only one of them wins; its run ends as `RunState::GaveUp`, its session is told to
 /// end without the step, and its box ends. Then each run's limits are held (`limits`), and no run
 /// or box is left behind (`reap`).
+///
+/// Each phase runs on its own: one that fails is logged with its name and the next still runs,
+/// so one team's bad row holds up no other team's ends. Max life runs first, `reap` always.
 pub async fn tick(hub: &Arc<Hub>, policy: &TeamPolicy) -> Result<(), String> {
+    logged("max life", max_life(hub, policy).await);
+    logged("escalate", escalate(hub, policy).await);
+    logged("give-up", give_up(hub, policy).await);
+    logged("charge", charge(hub).await);
+    logged("at-limit", at_limit(hub).await);
+    logged("reap", reap(hub, policy).await);
+    Ok(())
+}
+
+fn logged(phase: &str, done: Result<(), String>) {
+    if let Err(e) = done {
+        eprintln!("pinned-server: the teams' tick did not finish its {phase} phase: {e}");
+    }
+}
+
+async fn escalate(hub: &Arc<Hub>, policy: &TeamPolicy) -> Result<(), String> {
     for row in db::escalate_due(&hub.db, policy.escalate_after_secs).await? {
         push_logged(hub, row.team, TeamEvent::CallOpened { call: row.call }).await;
     }
+    Ok(())
+}
+
+async fn give_up(hub: &Arc<Hub>, policy: &TeamPolicy) -> Result<(), String> {
     for row in db::give_up_due(&hub.db, policy.give_up_after_secs).await? {
         let (team, call) = (row.team, row.call);
         push_logged(hub, team, TeamEvent::CallResolved { call: call.clone() }).await;
@@ -452,14 +475,13 @@ pub async fn tick(hub: &Arc<Hub>, policy: &TeamPolicy) -> Result<(), String> {
             }
         });
     }
-    limits(hub, policy).await?;
-    reap(hub, policy).await
+    Ok(())
 }
 
 /// What a run that lived `TeamPolicy::max_life_secs` ends with.
 pub const MAX_LIFE_REACHED: &str = "it reached the most time a run may take, waiting included";
 
-/// The limits half of `tick`:
+/// The limits phases of `tick` (`max_life`, `charge`, `at_limit`):
 /// - a live run whose start is `policy.max_life_secs` ago ends (`RunState::Failed`,
 ///   `MAX_LIFE_REACHED`) with its box, whatever it does: waiting counts toward its max life;
 /// - each run at work is charged its box's rate for its active time (`db::charge_working_runs`);
@@ -468,7 +490,7 @@ pub const MAX_LIFE_REACHED: &str = "it reached the most time a run may take, wai
 ///   it waits on an `OnLimit` call to whom the bot's `CallRules::on_limit` names, and its session
 ///   is told to stop and wait. Nobody answering ends it at give-up as any call does; an answer
 ///   lets it go on, called no more for its limits (one limit call per run), up to its max life.
-async fn limits(hub: &Arc<Hub>, policy: &TeamPolicy) -> Result<(), String> {
+async fn max_life(hub: &Arc<Hub>, policy: &TeamPolicy) -> Result<(), String> {
     for (team, run) in db::runs_past_max_life(&hub.db, policy.max_life_secs).await? {
         let ended = async { end_run(hub, &hub.account(team).await?, run, RunState::Failed, MAX_LIFE_REACHED, Some(End::Expired)).await };
         match ended.await {
@@ -476,9 +498,16 @@ async fn limits(hub: &Arc<Hub>, policy: &TeamPolicy) -> Result<(), String> {
             _ => {}
         }
     }
+    Ok(())
+}
+
+async fn charge(hub: &Arc<Hub>) -> Result<(), String> {
     use pinned_core::wire::box_usd_per_hour;
     use pinned_core::connectors::BoxSize::{Large, Medium, Small};
-    db::charge_working_runs(&hub.db, [box_usd_per_hour(Small), box_usd_per_hour(Medium), box_usd_per_hour(Large)]).await?;
+    db::charge_working_runs(&hub.db, [box_usd_per_hour(Small), box_usd_per_hour(Medium), box_usd_per_hour(Large)]).await
+}
+
+async fn at_limit(hub: &Arc<Hub>) -> Result<(), String> {
     for at in db::runs_at_limit(&hub.db).await? {
         if let Err(e) = limit_reached(hub, &at).await {
             eprintln!("pinned-server: run {} of team {} reached a limit but was not called for it: {e}", at.run, at.team);

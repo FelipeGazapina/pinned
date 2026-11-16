@@ -1521,7 +1521,7 @@ pub async fn runs_at_limit(db: &Db) -> Result<Vec<AtLimit>, String> {
         .client()
         .await?
         .query(
-            "select r.team, r.id, b.limits, r.cost_usd >= (b.limits->>'usd')::float8
+            "select r.team, r.id, b.limits, coalesce(r.cost_usd >= (b.limits->>'usd')::float8, false), b.workflow
                  from team_runs r join team_bots b on b.team = r.team and b.workflow = r.workflow
                  where r.state in ('working', 'taken_over') and not r.reserved
                    and (r.cost_usd >= (b.limits->>'usd')::float8
@@ -1533,7 +1533,12 @@ pub async fn runs_at_limit(db: &Db) -> Result<Vec<AtLimit>, String> {
         .map_err(err)?;
     let mut found = Vec::with_capacity(rows.len());
     for r in &rows {
-        let limits = serde_json::from_value(r.get(2)).map_err(|e| e.to_string())?;
+        // One bot's unreadable row holds up no other run's limit: it is skipped, and logged.
+        let Ok(limits) = serde_json::from_value(r.get(2)) else {
+            let (team, workflow): (Uuid, String) = (r.get(0), r.get(4));
+            eprintln!("pinned-server: the limits of bot {workflow} of team {team} are not readable: its runs are not held to them");
+            continue;
+        };
         found.push(AtLimit { team: r.get(0), run: r.get(1), limits, spent: r.get(3) });
     }
     Ok(found)
