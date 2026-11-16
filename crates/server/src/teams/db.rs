@@ -1099,8 +1099,9 @@ fn spend_go_aheads(choice: u8) -> String {
 /// Answers a call nobody answered yet, in one statement guarded by `answered_at is null`, so of
 /// two answers (or an answer and the give-up) only one wins. None when someone already did.
 /// An answer that stops its run (a stop, or a limit call's "Stop it") spends every unused
-/// "Go ahead" of the run in the same statement: a run a person stopped never uses one, even
-/// while its end has not happened yet.
+/// "Go ahead" of the run in the same statement, keyed off the call it closed: a run a person
+/// stopped never uses one, even while its end has not happened yet, and a stop that lost the
+/// answer to someone else spends none.
 pub async fn answer_call(db: &Db, team: Uuid, call: Uuid, answer: &Answer, outcome: &str) -> Result<Option<Call>, String> {
     let by = Uuid::parse_str(&answer.by).map_err(|_| "an answer's author is an account id")?;
     let (stop, stop_it) = (matches!(answer.kind, pinned_core::teams::AnswerKind::Stop), answer.choice.as_deref() == Some(super::calls::STOP_IT));
@@ -1109,11 +1110,11 @@ pub async fn answer_call(db: &Db, team: Uuid, call: Uuid, answer: &Answer, outco
         .await?
         .query_opt(
             &format!(
-                "with spent as ({} and g.run = (select o.run from team_calls o where o.team = $1 and o.id = $2 and o.answered_at is null
-                                                       and ($6 or ($8 and o.situation = 'on_limit'))))
-                 update team_calls c set answered_by = $3, answered_at = now(), answer = $4, outcome = $5
-                 from team_runs r where r.id = c.run and c.team = $1 and c.id = $2 and c.answered_at is null
-                 returning {CALL_COLUMNS}",
+                "with answered as (update team_calls c set answered_by = $3, answered_at = now(), answer = $4, outcome = $5
+                                   from team_runs r where r.id = c.run and c.team = $1 and c.id = $2 and c.answered_at is null
+                                   returning {CALL_COLUMNS}, ($6 or ($8 and c.situation = 'on_limit')) as stops),
+                      spent as ({} and g.run = (select a.run from answered a where a.stops))
+                 select * from answered",
                 spend_go_aheads(7)
             ),
             &[&team, &call, &by, &json(answer)?, &outcome, &stop, &GO_AHEAD, &stop_it],
