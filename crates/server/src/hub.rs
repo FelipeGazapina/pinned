@@ -261,6 +261,26 @@ struct Online {
     state: Option<pinned_core::load::MachineState>,
     /// Whether its desktop app runs in the background, as it last reported. A node reports none.
     background: Option<bool>,
+    /// The tabs a person asked the machine to close (`Call::CloseTab`), until they go.
+    closing: HashSet<String>,
+    /// How each connector session whose tab went ended: its connector, subject, and `LastTurn`.
+    gone: Vec<(String, Subject, LastTurn)>,
+}
+
+/// How a connector session's last turn stood when its tab went or its box ended.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LastTurn {
+    /// Its last hook status was Done: the session ended its own turn (Claude's Stop hook).
+    Ended,
+    /// A person closed its tab before the session ended its turn.
+    ClosedByPerson,
+    /// Neither is known: it was mid-turn, or the hub never saw it.
+    Unknown,
+}
+
+/// What a tab that is still open says about its turn.
+fn last_turn(tab: &TabView) -> LastTurn {
+    if tab.status == Some(AgentStatus::Done) && tab.questions.is_none() { LastTurn::Ended } else { LastTurn::Unknown }
 }
 
 impl Online {
@@ -1325,7 +1345,7 @@ impl Account {
                 let _ = out.send(frame(&ToMachine::WatchThreads { viewer: viewer(*id), tabs: tabs.iter().cloned().collect() }));
             }
         }
-        let online = Online { socket, name, out, pending: HashMap::new(), next_call: 1, tabs: None, usage: BTreeMap::new(), dedicated, version, state: None, background: None };
+        let online = Online { socket, name, out, pending: HashMap::new(), next_call: 1, tabs: None, usage: BTreeMap::new(), dedicated, version, state: None, background: None, closing: HashSet::new(), gone: Vec::new() };
         live.machines.insert(machine.to_owned(), online);
     }
 
@@ -1489,6 +1509,17 @@ impl Account {
         }
     }
 
+    /// How the session for `connector` and `subject` on `machine` last stood: its open tab's, else
+    /// the one its tab had when it went. `Unknown` while the machine is offline.
+    pub fn last_turn(&self, machine: &str, connector: &str, subject: &Subject) -> LastTurn {
+        let live = self.live.lock().unwrap();
+        let Some(m) = live.machines.get(machine) else { return LastTurn::Unknown };
+        if let Some(t) = m.tabs().iter().find(|t| t.connector.as_deref() == Some(connector) && t.subject.as_ref() == Some(subject)) {
+            return last_turn(t);
+        }
+        m.gone.iter().find(|(c, s, _)| c == connector && s == subject).map_or(LastTurn::Unknown, |(_, _, turn)| *turn)
+    }
+
     /// What a worker's or a Captain's box shows: any of its tabs, working or not.
     pub fn seen_any(&self, machine: &str) -> Seen {
         let live = self.live.lock().unwrap();
@@ -1506,6 +1537,9 @@ impl Account {
         let m = live.machines.get_mut(machine)?;
         let id = m.next_call;
         m.next_call += 1;
+        if let Call::CloseTab { tab } = &call {
+            m.closing.insert(tab.clone());
+        }
         // Calls whose callers stopped waiting, as after a timeout, would otherwise stay until the machine disconnects.
         m.pending.retain(|_, waiting| !waiting.answer.is_closed());
         let (answer, answered) = oneshot::channel();
@@ -1535,7 +1569,19 @@ impl Account {
         let mut live = self.live.lock().unwrap();
         let Some(m) = live.machines.get_mut(machine).filter(|m| m.socket == socket) else { return };
         match &event {
-            MachineEvent::Tabs { tabs } => m.tabs = Some(tabs.clone()),
+            MachineEvent::Tabs { tabs } => {
+                for was in m.tabs.iter().flatten().filter(|was| !tabs.iter().any(|t| t.id == was.id)) {
+                    let by_person = m.closing.remove(&was.id);
+                    let (Some(connector), Some(subject)) = (&was.connector, &was.subject) else { continue };
+                    let turn = match last_turn(was) {
+                        LastTurn::Unknown if by_person => LastTurn::ClosedByPerson,
+                        turn => turn,
+                    };
+                    m.gone.retain(|(c, s, _)| !(c == connector && s == subject));
+                    m.gone.push((connector.clone(), subject.clone(), turn));
+                }
+                m.tabs = Some(tabs.clone());
+            }
             MachineEvent::Usage { usage, account } => {
                 m.usage.insert(account.clone(), *usage);
             }

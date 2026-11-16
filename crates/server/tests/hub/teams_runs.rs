@@ -135,9 +135,8 @@ fn a_box_that_ends_at_max_life_while_its_run_waits_ends_the_run_and_closes_its_c
     assert_eq!(crew.op(&crew.ana, json!({ "op": "stop_run", "run": run })), Err("this run has ended".into()));
 }
 
-#[test]
-fn a_session_that_finishes_normally_ends_its_run_as_done() {
-    let crew = Crew::new("tr_done", fast());
+/// Starts a run of a new bot and answers its box's node, the box's machine id and its session's tab.
+fn running_session(crew: &Crew) -> (Arc<Node>, String, String) {
     let id = crew.on_bot("Footer", "", false);
     crew.run_now(&id);
     let mut tab = String::new();
@@ -145,10 +144,60 @@ fn a_session_that_finishes_normally_ends_its_run_as_done() {
         tab = crew.node().and_then(|n| n.machine.tabs().first().map(|t| t.id.clone())).unwrap_or_default();
         !tab.is_empty()
     });
-    assert!(crew.node().unwrap().machine.close_tab(&tab), "the session ends");
+    let creds = crew.hub.boxes.state.lock().unwrap().boxes.values().find_map(|b| b.files.get(&format!("{BOX_DIR}/account.json")).cloned()).unwrap();
+    let creds: Credentials = serde_json::from_str(&creds).unwrap();
+    (crew.node().unwrap(), creds.machine_id, tab)
+}
+
+/// The status of `tab` as the hub last heard it from the box's `machine`.
+fn hub_status(crew: &Crew, machine: &str, tab: &str) -> Option<pinned_core::agent::AgentStatus> {
+    let team = crew.hub.runtime.block_on(crew.hub.hub().account(crew.team)).unwrap();
+    team.tabs_of(machine)?.into_iter().find(|t| t.id == tab)?.status
+}
+
+/// Claude's Stop hook for `tab`, through the node's hook socket as the session's hook sends it:
+/// the session ended its own turn. Waits until the hub has heard it.
+fn turn_ends(crew: &Crew, node: &Node, machine: &str, tab: &str) {
+    use std::io::Write;
+    node.machine.listen(|_| Err("not in this test".into())).unwrap();
+    let event = pinned_core::agent::AgentEvent { tab: Some(tab.into()), ..pinned_core::hooks::event_from(Some("done"), "{}").unwrap() };
+    let sock = crew.hub.boxes.root.join(&crew.hub.boxes.live()[0]).join("sock");
+    let mut stream = std::os::unix::net::UnixStream::connect(sock).unwrap();
+    writeln!(stream, "{}", serde_json::to_string(&pinned_core::agent::Message::Agent(event)).unwrap()).unwrap();
+    wait_for("the hub to hear the turn end", || hub_status(crew, machine, tab) == Some(pinned_core::agent::AgentStatus::Done));
+}
+
+#[test]
+fn a_session_that_finishes_normally_ends_its_run_as_done() {
+    let crew = Crew::new("tr_done", fast());
+    let (node, machine, tab) = running_session(&crew);
+    turn_ends(&crew, &node, &machine, &tab);
+    assert!(node.machine.close_tab(&tab), "the session ends");
     wait_long("the box to end", Duration::from_secs(15), || crew.hub.boxes.live().is_empty());
     wait_for("the run to end", || crew.runs()[0].0 != "working");
     assert_eq!(crew.runs(), vec![("done".to_owned(), Some("its session finished".to_owned()))]);
+}
+
+#[test]
+fn a_tab_that_goes_away_mid_turn_fails_its_run() {
+    let crew = Crew::new("tr_tab_gone", fast());
+    let (node, _, tab) = running_session(&crew);
+    assert!(node.machine.close_tab(&tab), "the tab goes, with no Stop hook and no person closing it");
+    wait_long("the box to end", Duration::from_secs(15), || crew.hub.boxes.live().is_empty());
+    wait_for("the run to end", || crew.runs()[0].0 != "working");
+    assert_eq!(crew.runs(), vec![("failed".to_owned(), Some("its session's tab went away before it finished".to_owned()))]);
+}
+
+#[test]
+fn a_tab_a_person_closes_mid_turn_stops_its_run() {
+    let crew = Crew::new("tr_tab_closed", fast());
+    let (_, machine, tab) = running_session(&crew);
+    let team = crew.hub.runtime.block_on(crew.hub.hub().account(crew.team)).unwrap();
+    let close = Call::CloseTab { tab };
+    crew.hub.runtime.block_on(crew.hub.hub().call_machine(&team, &machine, close, Duration::from_secs(10))).map_err(String::from).unwrap();
+    wait_long("the box to end", Duration::from_secs(15), || crew.hub.boxes.live().is_empty());
+    wait_for("the run to end", || crew.runs()[0].0 != "working");
+    assert_eq!(crew.runs(), vec![("stopped".to_owned(), Some("its session's tab was closed before it finished".to_owned()))]);
 }
 
 #[test]

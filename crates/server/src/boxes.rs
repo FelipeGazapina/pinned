@@ -1660,7 +1660,8 @@ impl Boxes {
     /// An error leaves the runs as they were: the caller keeps the row `Ending`, so the reaper's
     /// next pass tries again before it deletes the row.
     async fn fail_held_runs(&self, hub: &Hub, account: &Account, row: &BoxRow, why: &End) -> Result<(), String> {
-        crate::teams::calls::box_ended(hub, account, row.machine, why)
+        let turn = account.last_turn(&row.machine.to_string(), &row.connector, &row.subject);
+        crate::teams::calls::box_ended(hub, account, row.machine, why, turn)
             .await.map_err(|e| format!("could not end the team run of box {}, so it stays until the next check: {e}", row.id))?;
         if row.work != BoxWork::Run || row.connector == INTERACTIVE_CONNECTOR {
             return Ok(());

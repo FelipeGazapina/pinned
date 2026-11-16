@@ -12,7 +12,7 @@
 
 use super::{db, push, Scope};
 use crate::boxes::End;
-use crate::hub::{Account, Hub};
+use crate::hub::{Account, Hub, LastTurn};
 use futures_util::future::BoxFuture;
 use pinned_core::teams::{Answer, AnswerKind, Call, Role, Run, RunState, Situation, TeamEvent, TeamPolicy, Who};
 use pinned_core::wire::Call as MachineCall;
@@ -356,14 +356,14 @@ pub async fn stop_live_runs(hub: &Hub, team: &Arc<Account>, workflow: &str, outc
 }
 
 /// The box `machine` of `account` ends for `why` (`boxes::Boxes` calls it on every end, before
-/// the box goes). When it is a team's box whose run has not ended, the run ends with it, so no
-/// run stays `waiting` or `working` once its box is gone; the state follows `ended_by_box`.
-/// Boxed: ending a run can end its box, which comes back here.
-pub fn box_ended<'a>(hub: &'a Hub, account: &'a Account, machine: Uuid, why: &'a End) -> BoxFuture<'a, Result<(), String>> {
+/// the box goes), its session's last turn having stood as `turn`. When it is a team's box whose run
+/// has not ended, the run ends with it, so no run stays `waiting` or `working` once its box is gone;
+/// the state follows `ended_by_box`. Boxed: ending a run can end its box, which comes back here.
+pub fn box_ended<'a>(hub: &'a Hub, account: &'a Account, machine: Uuid, why: &'a End, turn: LastTurn) -> BoxFuture<'a, Result<(), String>> {
     Box::pin(async move {
         let Some(run) = db::run_on_machine(&hub.db, account.id, &machine.to_string()).await? else { return Ok(()) };
         let team = hub.account(account.id).await?;
-        let (state, outcome) = ended_by_box(why);
+        let (state, outcome) = ended_by_box(why, turn);
         match end_run(hub, &team, parse_id(&run.id, "run")?, state, &outcome, None).await {
             Err(e) if e != RUN_ENDED => Err(e),
             _ => Ok(()),
@@ -371,18 +371,29 @@ pub fn box_ended<'a>(hub: &'a Hub, account: &'a Account, machine: Uuid, why: &'a
     })
 }
 
-/// How a run ends when its box ends first: its session finishing is `Done`; a box someone removed,
-/// or the team's Upstash Box disconnected, is `Stopped`; max life, budget, going offline, a box
-/// deleted outside pinned or one that failed is `Failed`.
-fn ended_by_box(why: &End) -> (RunState, String) {
-    match why {
-        End::Done | End::Exited | End::Idle | End::TabClosed => (RunState::Done, "its session finished".into()),
-        End::Removed => (RunState::Stopped, "its box was removed".into()),
-        End::Disconnected => (RunState::Stopped, "the team's Upstash Box was disconnected".into()),
-        End::Expired => (RunState::Failed, "its box ran out of time or budget".into()),
-        End::Offline => (RunState::Failed, "its box went offline".into()),
-        End::Vanished => (RunState::Failed, "its box was deleted outside pinned".into()),
-        End::Failed(e) => (RunState::Failed, format!("its box failed: {e}")),
+/// How a run ends when its box ends first. `Done` only when the session ended its own turn:
+/// - `End::Done`: it opened its pull request and stopped working → Done.
+/// - `End::TabClosed`, `Exited` or `Idle` after its last turn ended (Stop hook, `LastTurn::Ended`) → Done.
+/// - `End::TabClosed` that a person closed before its turn ended (`LastTurn::ClosedByPerson`) → Stopped.
+/// - `End::TabClosed` that went away mid-turn, or whose turn the hub cannot tell → Failed.
+/// - `End::Exited` or `Idle` mid-turn, or whose turn the hub cannot tell → Failed.
+/// - `End::Removed` (someone removed its box) or `Disconnected` (the team's Upstash Box) → Stopped.
+/// - `End::Expired` (max life or budget), `Offline`, `Vanished` (deleted outside pinned), `Failed` → Failed.
+fn ended_by_box(why: &End, turn: LastTurn) -> (RunState, String) {
+    const FINISHED: &str = "its session finished";
+    match (why, turn) {
+        (End::Done, _) => (RunState::Done, FINISHED.into()),
+        (End::TabClosed | End::Exited | End::Idle, LastTurn::Ended) => (RunState::Done, FINISHED.into()),
+        (End::TabClosed, LastTurn::ClosedByPerson) => (RunState::Stopped, "its session's tab was closed before it finished".into()),
+        (End::TabClosed, _) => (RunState::Failed, "its session's tab went away before it finished".into()),
+        (End::Exited, _) => (RunState::Failed, "its session exited before it finished".into()),
+        (End::Idle, _) => (RunState::Failed, "its session sat idle before it finished".into()),
+        (End::Removed, _) => (RunState::Stopped, "its box was removed".into()),
+        (End::Disconnected, _) => (RunState::Stopped, "the team's Upstash Box was disconnected".into()),
+        (End::Expired, _) => (RunState::Failed, "its box ran out of time or budget".into()),
+        (End::Offline, _) => (RunState::Failed, "its box went offline".into()),
+        (End::Vanished, _) => (RunState::Failed, "its box was deleted outside pinned".into()),
+        (End::Failed(e), _) => (RunState::Failed, format!("its box failed: {e}")),
     }
 }
 
@@ -526,4 +537,27 @@ fn parse_id(id: &str, what: &str) -> Result<Uuid, String> {
 
 fn now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every row of `ended_by_box`'s rule: Done only when the session ended its own turn.
+    #[test]
+    fn a_run_is_done_only_when_its_session_ended_its_own_turn() {
+        let state = |why: End, turn| ended_by_box(&why, turn).0;
+        assert_eq!(state(End::Done, LastTurn::Unknown), RunState::Done, "it opened its pull request and stopped");
+        for why in [End::TabClosed, End::Exited, End::Idle] {
+            assert_eq!(state(why.clone(), LastTurn::Ended), RunState::Done, "{why:?} after its turn ended");
+            assert_eq!(state(why.clone(), LastTurn::Unknown), RunState::Failed, "{why:?} mid-turn or untold");
+        }
+        assert_eq!(state(End::TabClosed, LastTurn::ClosedByPerson), RunState::Stopped, "a person closed it mid-turn");
+        assert_eq!(state(End::Exited, LastTurn::ClosedByPerson), RunState::Failed, "only a tab is closed by a person");
+        assert_eq!(state(End::Removed, LastTurn::Ended), RunState::Stopped);
+        assert_eq!(state(End::Disconnected, LastTurn::Ended), RunState::Stopped);
+        for why in [End::Expired, End::Offline, End::Vanished, End::Failed("x".into())] {
+            assert_eq!(state(why.clone(), LastTurn::Ended), RunState::Failed, "{why:?}");
+        }
+    }
 }
