@@ -39,6 +39,12 @@ impl Held {
         self.runtime.block_on(db.query_one("select count(*) from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'", &[])).unwrap().get(0)
     }
 
+    /// Runs `statements` in the transaction and commits it, as another hub that wins a race does.
+    pub(super) fn commit(mut self, statements: &str) {
+        let db = self.db.take().unwrap();
+        self.runtime.block_on(db.batch_execute(&format!("{statements}; commit"))).unwrap();
+    }
+
     /// Ends the transaction, and with it what it held.
     pub(super) fn release(mut self) {
         let db = self.db.take().unwrap();
@@ -466,23 +472,94 @@ fn open_write_busy(crew: &Crew, times: u32) {
     );
 }
 
-/// A Run now whose session started but whose open write was refused `times` times: the run opens
-/// on a later try, or its box ends. A session never keeps working on a run that only holds its place.
-fn an_open_write_refused(name: &str, times: u32) {
-    let crew = Crew::new(name);
-    let pages = crew.on_bot("Pages");
-    open_write_busy(&crew, times);
-    let _ = crew.call(&crew.bob, TeamOp::RunNow { workflow: pages.clone() });
-    wait_for("the run to open, or its box to end", || opened(&crew, &pages) == 1 || crew.hub.boxes.live().is_empty());
-    assert!(opened(&crew, &pages) == 1 || crew.hub.boxes.live().is_empty(), "no session keeps working on a run that only holds its place");
+/// How many times the open write of a reserved run was tried (`open_write_busy`'s sequence).
+fn open_tries(crew: &Crew) -> i64 {
+    let rows = super::teams_calls::rows(&crew.hub, "select (case when is_called then last_value else 0 end)::text from open_tries");
+    rows[0][0].as_deref().unwrap().parse().unwrap()
 }
 
 #[test]
 fn a_session_whose_open_write_is_busy_once_never_keeps_working_on_a_reserved_run() {
-    an_open_write_refused("tl_open_busy_once", 1);
+    let crew = Crew::new("tl_open_busy_once");
+    let pages = crew.on_bot("Pages");
+    open_write_busy(&crew, 1);
+    let reply = crew.call(&crew.bob, TeamOp::RunNow { workflow: pages.clone() });
+    assert_eq!(reply.map(|r| (r["workflow"].clone(), r.get("waiting").cloned())), Ok((json!(pages), None)), "the Run now started its run, not queued it");
+    assert_eq!(opened(&crew, &pages), 1, "the second try opened the run");
+    assert_eq!(crew.hub.boxes.live().len(), 1, "its box is live");
+    assert_eq!(open_tries(&crew), 2, "one refused try, then the one that opened it");
 }
 
 #[test]
 fn a_session_whose_open_write_is_busy_twice_never_keeps_working_on_a_reserved_run() {
-    an_open_write_refused("tl_open_busy_twice", 2);
+    let crew = Crew::new("tl_open_busy_twice");
+    let pages = crew.on_bot("Pages");
+    open_write_busy(&crew, 2);
+    let boxes = crew.boxes_created();
+    let reply = crew.call(&crew.bob, TeamOp::RunNow { workflow: pages.clone() });
+    assert_eq!(reply, Err(BUSY.to_owned()), "the Run now hears that the hub was busy");
+    wait_for("the box of the run that never opened to end", || crew.hub.boxes.live().is_empty());
+    assert_eq!(crew.boxes_created(), boxes + 1, "one box was created");
+    assert_eq!(opened(&crew, &pages), 0, "no run opened");
+    assert_eq!(crew.live_of(&pages), Vec::<String>::new(), "the run is no longer live");
+    assert_eq!(open_tries(&crew), 2);
+}
+
+/// The open write of a reserved run is written by another connection, which commits, while the
+/// hub's own first try fails as a connection that dropped after its commit would. Needs `dblink`.
+fn open_written_elsewhere(crew: &Crew) {
+    let url = format!("{}/{}", postgres(), crew.hub.database);
+    admin_on(
+        &crew.hub.database,
+        &format!(
+            "create extension if not exists dblink;
+             create sequence open_tries;
+             create function open_elsewhere() returns trigger language plpgsql as $$
+               begin
+                 if current_query() like 'update team_runs set box = $3, reserved = false%' and nextval('open_tries') = 1 then
+                   perform dblink_exec('{url}', 'update team_runs set reserved = false, reserved_at = null, opened_at = now() where reserved and box is not null');
+                   raise exception 'the connection to the server was lost' using errcode = '08006';
+                 end if;
+                 return null;
+               end $$;
+             create trigger open_elsewhere before update on team_runs for each statement execute function open_elsewhere()"
+        ),
+    );
+}
+
+#[test]
+fn a_run_whose_open_write_committed_though_its_try_failed_keeps_its_box() {
+    let crew = Crew::new("tl_open_committed");
+    let pages = crew.on_bot("Pages");
+    open_written_elsewhere(&crew);
+    let reply = crew.call(&crew.bob, TeamOp::RunNow { workflow: pages.clone() });
+    assert_eq!(reply.map(|r| (r["workflow"].clone(), r.get("waiting").cloned())), Ok((json!(pages), None)), "the Run now started its run, not queued it");
+    assert_eq!(open_tries(&crew), 2, "the failed try, then the one that found the run opened");
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(crew.hub.boxes.live().len(), 1, "the box of the run that opened stays live");
+    assert_eq!(crew.live_of(&pages).len(), 1, "the run stays working");
+    assert_eq!(opened(&crew, &pages), 1);
+}
+
+// ---- a waiting row that can never start leaves the line ----
+
+#[test]
+fn a_waiting_run_whose_bot_never_reads_is_dropped_and_the_next_one_starts() {
+    let crew = Crew::new("tl_wait_unreadable");
+    let (holder, x, z) = (crew.on_bot("Docs"), crew.on_bot("Pages"), crew.on_bot("Notes"));
+    admin_on(&crew.hub.database, &format!("update teams set max_live_runs = 1 where id = '{}'", crew.team));
+    assert_eq!(crew.found(crew.labeled(&holder, 9)), Ok(()));
+    for bot in [&x, &z] {
+        let reply = crew.call(&crew.bob, TeamOp::RunNow { workflow: bot.clone() }).unwrap();
+        assert_eq!(reply["waiting"], json!(true), "a Run now waits behind the holder");
+    }
+    // A row only SQL could write: X's limits no longer read, on every pass.
+    admin_on(&crew.hub.database, &format!("update team_bots set limits = '{{\"usd\":1,\"minutes\":\"x\"}}' where team = '{}' and workflow = '{x}'", crew.team));
+    crew.stop(&crew.live_of(&holder)[0]);
+    crew.reaper_pass();
+
+    wait_for("Notes's waiting run to open its session", || opened(&crew, &z) == 1);
+    assert_eq!(crew.waiting(&x), 0, "X's run left the line");
+    admin_on(&crew.hub.database, &format!("update team_bots set limits = '{{\"usd\":1,\"minutes\":5}}' where team = '{}' and workflow = '{x}'", crew.team));
+    assert_eq!(crew.skipped(&x), json!([{ "reason": "start_failed", "count": 1 }]), "X's dropped run is counted once");
 }

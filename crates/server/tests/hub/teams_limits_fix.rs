@@ -358,3 +358,86 @@ fn a_stop_answered_but_not_ended_spends_the_runs_go_ahead() {
     assert_eq!(listed(&mut tb, run)["state"], json!("waiting"), "the run is left waiting");
     assert!(try_step(&hub, &tb, DEPLOY).is_some(), "the deploy does not run on the Go ahead of a run a person stopped");
 }
+
+#[test]
+fn a_limit_out_of_float_range_stops_no_other_teams_limit_call() {
+    let hub = start("teams_limfix_out_of_range");
+    let broken = TeamBox::new(&hub);
+    let broken_run = broken.run(&hub);
+    let mut limited = TeamBox::new_as(&hub, "lena@example.test");
+    let limited_run = limited.run(&hub);
+    limited_bot(&hub, &limited, json!({ "usd": 5.0, "minutes": 1 }), json!({ "kind": "owner" }));
+    limited_bot(&hub, &broken, json!({ "usd": 1.0, "minutes": 1 }), json!({ "kind": "owner" }));
+    // A row only SQL could write: a JSON number no float holds.
+    sql(&hub, &format!("update team_bots set limits = '{{\"usd\":1e-400,\"minutes\":1}}' where team = '{}'", broken.team));
+    backdate(&hub, broken_run, 120);
+    backdate(&hub, limited_run, 70);
+    tick(&hub);
+    let limit = on_limit_calls(&calls_of(limited.team, &mut limited.owner.client));
+    assert_eq!(limit.len(), 1, "the other team's run at its limit is called in the same tick: {limit:?}");
+    assert_eq!(limit[0]["question"], json!(minutes_question("1 minute")));
+}
+
+#[test]
+fn a_stop_that_loses_the_answer_race_spends_no_go_ahead() {
+    use super::teams_go_ahead::{answer, ask, released, DEPLOY};
+    let hub = start("teams_limfix_stop_loses");
+    let mut tb = TeamBox::new(&hub);
+    limited_bot(&hub, &tb, json!({ "usd": 5.0, "minutes": 30 }), json!({ "kind": "owner" }));
+    tb.run(&hub);
+    let deploy = ask(&hub, &mut tb, DEPLOY);
+    answer(&mut tb, &deploy, choice("Go ahead", ""));
+    let doubt = tb.ask(&hub, "Red or blue footer?", &[]).unwrap()["call"].as_str().unwrap().to_owned();
+    // Another hub holds the doubt call's row, then answers it and commits while the stop waits on it.
+    let held = super::teams_locks::Held::new(&hub, &format!("select 1 from team_calls where id = '{doubt}' for update"));
+    let team = tb.team;
+    let stopped = std::thread::scope(|s| {
+        let stop = s.spawn(|| op(team, &mut tb.owner.client, json!({ "op": "answer_call", "id": doubt, "answer": { "choice": null, "text": "", "kind": { "kind": "stop" } } })));
+        wait_for("the stop to wait on the held call", || held.waiters() >= 1);
+        held.commit(&format!("update team_calls set answered_at = now(), outcome = 'answered', answer = '{{\"kind\":{{\"kind\":\"choice\"}},\"choice\":\"Blue\",\"text\":\"\"}}' where id = '{doubt}'"));
+        stop.join().unwrap()
+    });
+    assert!(stopped.is_err(), "the stop lost the race: {stopped:?}");
+    assert!(!released(&hub, &deploy), "the Go ahead of a run nobody stopped is not spent");
+}
+
+#[test]
+fn a_limit_calls_stop_it_whose_end_failed_spends_the_runs_go_ahead() {
+    use super::teams_go_ahead::{answer, ask, released, try_step, DEPLOY};
+    let hub = start("teams_limfix_stop_it_go_ahead");
+    let mut tb = TeamBox::new(&hub);
+    limited_bot(&hub, &tb, json!({ "usd": 5.0, "minutes": 1 }), json!({ "kind": "owner" }));
+    let run = tb.run(&hub);
+    let deploy = ask(&hub, &mut tb, DEPLOY);
+    answer(&mut tb, &deploy, choice("Go ahead", ""));
+    backdate(&hub, run, 70);
+    tick(&hub);
+    let limit = on_limit_calls(&calls_of(tb.team, &mut tb.owner.client));
+    assert_eq!(limit.len(), 1, "{limit:?}");
+    // "Stop it" is stored on the limit call, then the run's end waits on another connection's lock.
+    let held = super::teams_locks::Held::new(&hub, &format!("select 1 from team_runs where id = '{run}' for update"));
+    let stopped = op(tb.team, &mut tb.owner.client, json!({ "op": "answer_call", "id": limit[0]["id"], "answer": choice("Stop it", "") }));
+    held.release();
+    assert!(stopped.is_err(), "the Stop it's end failed: {stopped:?}");
+    assert!(released(&hub, &deploy), "the Go ahead is spent");
+    assert!(try_step(&hub, &tb, DEPLOY).is_some(), "the deploy does not run on the Go ahead of a run a person stopped");
+}
+
+#[test]
+fn a_stop_run_whose_end_failed_spends_the_runs_go_ahead() {
+    use super::teams_go_ahead::{answer, ask, released, try_step, DEPLOY};
+    let hub = start("teams_limfix_stop_run_go_ahead");
+    let mut tb = TeamBox::new(&hub);
+    limited_bot(&hub, &tb, json!({ "usd": 5.0, "minutes": 30 }), json!({ "kind": "owner" }));
+    let run = tb.run(&hub);
+    let deploy = ask(&hub, &mut tb, DEPLOY);
+    answer(&mut tb, &deploy, choice("Go ahead", ""));
+    tb.ask(&hub, "Red or blue footer?", &[]).unwrap();
+    // The stop closes the open call, then the run's end waits on another connection's lock.
+    let held = super::teams_locks::Held::new(&hub, &format!("select 1 from team_runs where id = '{run}' for update"));
+    let stopped = op(tb.team, &mut tb.owner.client, json!({ "op": "stop_run", "run": run.to_string() }));
+    held.release();
+    assert!(stopped.is_err(), "the stop's end failed: {stopped:?}");
+    assert!(released(&hub, &deploy), "the Go ahead is spent");
+    assert!(try_step(&hub, &tb, DEPLOY).is_some(), "the deploy does not run on the Go ahead of a run a person stopped");
+}
