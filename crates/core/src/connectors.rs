@@ -3774,18 +3774,7 @@ impl Connectors {
         Fut: Future<Output = R>,
         R: Taken,
     {
-        {
-            let mut known = self.known_tabs.lock().unwrap();
-            if known.get(machine).is_none_or(|(at, _)| *at <= observed) {
-                let replaced = known.insert(machine.to_owned(), (observed, after.to_vec()));
-                let mut facts = self.tab_facts.lock().unwrap();
-                let facts = facts.entry(machine.to_owned()).or_default();
-                if let Some((_, replaced)) = replaced.filter(|_| facts.unread) {
-                    facts.keep(&replaced);
-                }
-                facts.unread = true;
-            }
-        }
+        self.note_tabs(machine, observed, after);
         if self.tab_drive_queued.swap(true, Ordering::AcqRel) {
             self.tab_drives_coalesced.fetch_add(1, Ordering::Relaxed);
             return Ok(());
@@ -3796,6 +3785,21 @@ impl Connectors {
         let _guard = self.lock_driving().await;
         drop(queued);
         self.drive_locked(&open).await
+    }
+
+    /// Keeps `machine`'s tab list, observed at `observed`, for the next drive to read. The hub also
+    /// hands in the lists its machines reported before the account's workflows were loaded.
+    pub fn note_tabs(&self, machine: &str, observed: u64, after: &[TabView]) {
+        let mut known = self.known_tabs.lock().unwrap();
+        if known.get(machine).is_none_or(|(at, _)| *at <= observed) {
+            let replaced = known.insert(machine.to_owned(), (observed, after.to_vec()));
+            let mut facts = self.tab_facts.lock().unwrap();
+            let facts = facts.entry(machine.to_owned()).or_default();
+            if let Some((_, replaced)) = replaced.filter(|_| facts.unread) {
+                facts.keep(&replaced);
+            }
+            facts.unread = true;
+        }
     }
 
     /// Takes `driving`, counted in `drive_waiters` while it waits.
@@ -8867,6 +8871,29 @@ mod tests {
         assert_eq!(woken.status, Status::Failed { why: "no session answers that thread".into() });
         assert_eq!(after.status, woken.status);
         assert_eq!(prompts, ["two"], "a failed run is not tried again");
+    }
+
+    #[test]
+    fn a_tab_list_kept_without_a_drive_wakes_its_run_at_the_next_pass() {
+        let mut connector = linear_connector();
+        connector.graph = Some(talks(&["one", "two"]));
+        let (connectors, dir) = stored("graph-noted-tabs", vec![connector]);
+        connectors.begin("c1".into(), Subject::LinearIssue { issue: "uuid".into() }, issue_trigger(), "2026-10-29T12:00:00Z").unwrap();
+        let prompts = std::sync::Mutex::new(Vec::<String>::new());
+        let open = |work: Work| {
+            if let Work::Prompt { text, .. } = &work {
+                prompts.lock().unwrap().push(text.clone());
+            }
+            placed(work)
+        };
+        block_on(connectors.drive(&open)).unwrap();
+        assert_eq!(connectors.runs.lock().unwrap()[0].status, Status::Waiting);
+        let done = session_tab(Some(AgentStatus::Done), Some("claude-1"));
+        connectors.note_tabs("m1", unix_millis(), std::slice::from_ref(&done));
+        assert!(prompts.lock().unwrap().is_empty(), "keeping the list drives nothing");
+        block_on(connectors.drive(&open)).unwrap();
+        assert_eq!(*prompts.lock().unwrap(), ["two"], "the next pass read the kept list and typed the next step once");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn copy_dir(from: &std::path::Path, to: &std::path::Path) {

@@ -563,6 +563,14 @@ impl Hub {
                 let storage = PgStorage::new(self.db.clone(), account.id, stored, self.refuse_run_saves.clone());
                 self.persisted.lock().unwrap().insert(account.id, storage.0.clone());
                 let connectors = Arc::new(Connectors::new(storage, EXE_PLACEHOLDER.into()));
+                // A tab list a machine sent before this load found no workflows to wake: the next
+                // pass reads the lists the account's machines last reported.
+                let observed = pinned_core::connectors::unix_millis();
+                for (machine, _) in account.online() {
+                    if let Some(tabs) = account.tabs_of(&machine) {
+                        connectors.note_tabs(&machine, observed, &tabs);
+                    }
+                }
                 // A team's events ask its bots' lines first, before anything outside pinned.
                 if account.team {
                     connectors.set_admission(Arc::new(crate::teams::triggers::TeamAdmission { hub: self.me.clone(), team: account.id }));
