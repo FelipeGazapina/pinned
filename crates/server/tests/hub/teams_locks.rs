@@ -486,11 +486,12 @@ fn bot_reads_again(crew: &Crew) {
 #[test]
 fn a_waiting_run_whose_ready_read_is_busy_after_its_skip_check_still_waits_and_starts_later() {
     let crew = Crew::new("tl_wait_busy_ready");
-    let pages = crew.on_bot("Pages");
-    assert_eq!(crew.found(crew.labeled(&pages, 1)), Ok(()));
+    let (holder, pages) = (crew.on_bot("Docs"), crew.on_bot("Pages"));
+    admin_on(&crew.hub.database, &format!("update teams set max_live_runs = 1 where id = '{}'", crew.team));
+    assert_eq!(crew.found(crew.labeled(&holder, 9)), Ok(()));
     let reply = crew.call(&crew.bob, TeamOp::RunNow { workflow: pages.clone() }).unwrap();
-    assert_eq!(reply["waiting"], json!(true), "bob's Run now waits behind the live run");
-    let live = crew.live_of(&pages);
+    assert_eq!(reply["waiting"], json!(true), "bob's Run now waits behind the holder");
+    let live = crew.live_of(&holder);
     let skipped = crew.skipped(&pages);
     // The skip check reads the bot's row; `bots::ready`'s own read of it, next, is refused.
     bot_read_busy_after_first(&crew, &pages);
