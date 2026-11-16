@@ -531,6 +531,16 @@ mod tests {
     }
 
     #[test]
+    fn an_ask_people_message_reads_its_literal_line_and_choices_default_to_none() {
+        let line = r#"{"kind":"ask-people","situation":"in_doubt","question":"Which color?","choices":["red","blue"]}"#;
+        let message: Message = serde_json::from_str(line).unwrap();
+        assert!(matches!(&message, Message::AskPeople { situation: crate::teams::Situation::InDoubt, question, choices } if question == "Which color?" && choices == &["red", "blue"]));
+        assert_eq!(serde_json::to_string(&message).unwrap(), line);
+        let bare: Message = serde_json::from_str(r#"{"kind":"ask-people","situation":"before_irreversible","question":"Deploy?"}"#).unwrap();
+        assert!(matches!(bare, Message::AskPeople { choices, .. } if choices.is_empty()));
+    }
+
+    #[test]
     fn a_project_tool_message_names_the_tab_and_the_tool() {
         let line = r#"{"kind":"project","tab":"tab-3","tool":{"name":"agents"}}"#;
         let message: Message = serde_json::from_str(line).unwrap();
