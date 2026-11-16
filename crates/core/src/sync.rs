@@ -54,6 +54,11 @@ pub struct File {
     /// The contents gzipped, in base64; none for a deleted file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<String>,
+    /// On a deleted file sent to the hub, the sha its sender last agreed on with the hub. The hub
+    /// keeps a file whose sha changed since, another machine's newer copy, instead of deleting it.
+    /// A sender that leaves it out has its deletion applied whatever the hub holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agreed: Option<String>,
 }
 
 /// Sets the executable bit on a file the hub already stores, without sending bytes.
@@ -394,7 +399,11 @@ fn exchange(
                 break;
             }
             let file = match resolve(&path).filter(|f| f.is_file()) {
-                None => File { entry: Entry { path: path.clone(), sha: String::new(), modified: millis(now), size: 0, executable: None }, data: None },
+                None => File {
+                    entry: Entry { path: path.clone(), sha: String::new(), modified: millis(now), size: 0, executable: None },
+                    data: None,
+                    agreed: agreed.get(&path).cloned(),
+                },
                 Some(target) => {
                     let Some((sha, modified)) = state.hash(&target) else { continue };
                     let data = pack(&std::fs::read(&target).map_err(|e| e.to_string())?);
@@ -410,6 +419,7 @@ fn exchange(
                     File {
                         entry: Entry { path: path.clone(), sha, modified, size: data.len() as u64, executable: mode },
                         data: Some(base64::engine::general_purpose::STANDARD.encode(data)),
+                        agreed: None,
                     }
                 }
             };
@@ -1668,7 +1678,7 @@ mod tests {
     fn a_skill_written_again_after_the_hub_lost_it_is_shared() {
         let root = root("rewritten-skill");
         let hub = MemHub::default();
-        let gone = File { entry: Entry { path: "user-skills/use-railway/SKILL.md".into(), sha: String::new(), modified: 1, size: 0, executable: None }, data: None };
+        let gone = File { entry: Entry { path: "user-skills/use-railway/SKILL.md".into(), sha: String::new(), modified: 1, size: 0, executable: None }, data: None, agreed: None };
         hub.push(PLUGINS_KEY, vec![gone]).unwrap();
         let mac = PluginShare { claude_home: root.join("mac/.claude"), dir: root.join("mac/synced-plugins") };
         let mini = PluginShare { claude_home: root.join("mini/.claude"), dir: root.join("mini/synced-plugins") };
@@ -1901,6 +1911,7 @@ mod tests {
         File {
             entry: Entry { path: HOOK.into(), sha: sha(bytes), modified, size: data.len() as u64, executable },
             data: Some(base64::engine::general_purpose::STANDARD.encode(data)),
+            agreed: None,
         }
     }
 

@@ -7691,6 +7691,13 @@
                   "string",
                   "null"
                 ]
+              },
+              "agreed": {
+                "description": "On a deleted file sent to the hub, the sha its sender last agreed on with the hub. The hub\nkeeps a file whose sha changed since, another machine's newer copy, instead of deleting it.\nA sender that leaves it out has its deletion applied whatever the hub holds.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -18501,6 +18508,13 @@
                   "string",
                   "null"
                 ]
+              },
+              "agreed": {
+                "description": "On a deleted file sent to the hub, the sha its sender last agreed on with the hub. The hub\nkeeps a file whose sha changed since, another machine's newer copy, instead of deleting it.\nA sender that leaves it out has its deletion applied whatever the hub holds.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -25569,6 +25583,13 @@
               },
               "data": {
                 "description": "The contents gzipped, in base64; none for a deleted file.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "agreed": {
+                "description": "On a deleted file sent to the hub, the sha its sender last agreed on with the hub. The hub\nkeeps a file whose sha changed since, another machine's newer copy, instead of deleting it.\nA sender that leaves it out has its deletion applied whatever the hub holds.",
                 "type": [
                   "string",
                   "null"
@@ -33243,6 +33264,13 @@
               },
               "data": {
                 "description": "The contents gzipped, in base64; none for a deleted file.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "agreed": {
+                "description": "On a deleted file sent to the hub, the sha its sender last agreed on with the hub. The hub\nkeeps a file whose sha changed since, another machine's newer copy, instead of deleting it.\nA sender that leaves it out has its deletion applied whatever the hub holds.",
                 "type": [
                   "string",
                   "null"
@@ -52243,6 +52271,13 @@
               "string",
               "null"
             ]
+          },
+          "agreed": {
+            "description": "On a deleted file sent to the hub, the sha its sender last agreed on with the hub. The hub\nkeeps a file whose sha changed since, another machine's newer copy, instead of deleting it.\nA sender that leaves it out has its deletion applied whatever the hub holds.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -52286,6 +52321,13 @@
           },
           "data": {
             "description": "The contents gzipped, in base64; none for a deleted file.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "agreed": {
+            "description": "On a deleted file sent to the hub, the sha its sender last agreed on with the hub. The hub\nkeeps a file whose sha changed since, another machine's newer copy, instead of deleting it.\nA sender that leaves it out has its deletion applied whatever the hub holds.",
             "type": [
               "string",
               "null"

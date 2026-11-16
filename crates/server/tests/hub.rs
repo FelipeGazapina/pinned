@@ -1040,7 +1040,7 @@ fn machines_share_a_projects_memory_through_the_hub_wherever_they_keep_it() {
     assert_eq!(pulled, vec!["claude/memory/MEMORY.md"]);
     assert_eq!(std::fs::read_to_string(memory(&on_mini)).unwrap(), "- deploys go through the VPS");
 
-    let outside = sync::File { entry: sync::Entry { path: "../.ssh/authorized_keys".into(), sha: "x".into(), modified: 1, size: 1, executable: None }, data: Some("eA==".into()) };
+    let outside = sync::File { entry: sync::Entry { path: "../.ssh/authorized_keys".into(), sha: "x".into(), modified: 1, size: 1, executable: None }, data: Some("eA==".into()), agreed: None };
     assert_eq!(
         mac_link.call_hub(HubCall::SyncPush { project: project.key.clone(), files: vec![outside] }),
         Err("../.ssh/authorized_keys is not a file a project shares".into())
@@ -1114,7 +1114,7 @@ fn a_plugin_tree_is_stored_without_settings_env_or_claude_json() {
     pulled.sort();
     assert_eq!(pulled, stored);
     assert_eq!(std::fs::read_to_string(mini_home.join("synced-plugins/plugins/toy@demo/skills/greet/SKILL.md")).unwrap(), skill);
-    let secret = |path: &str| sync::File { entry: sync::Entry { path: path.into(), sha: "x".into(), modified: 1, size: 1, executable: None }, data: Some("eA==".into()) };
+    let secret = |path: &str| sync::File { entry: sync::Entry { path: path.into(), sha: "x".into(), modified: 1, size: 1, executable: None }, data: Some("eA==".into()), agreed: None };
     for path in [
         "plugins/toy@demo/settings.json",
         "plugins/toy@demo/.claude.json",
@@ -1137,6 +1137,7 @@ fn a_plugin_tree_is_stored_without_settings_env_or_claude_json() {
     let oversized = sync::File {
         entry: sync::Entry { path: "plugins/toy@demo/skills/greet/blob.bin".into(), sha: "x".into(), modified: 1, size: raw.len() as u64, executable: None },
         data: Some(base64::engine::general_purpose::STANDARD.encode(&raw)),
+        agreed: None,
     };
     assert_eq!(
         mac_link.call_hub(HubCall::SyncPush { project: sync::PLUGINS_KEY.into(), files: vec![oversized] }),
@@ -1465,6 +1466,7 @@ fn plugin_hook(body: &[u8], modified: u64, executable: bool) -> sync::File {
     sync::File {
         entry: sync::Entry { path: HOOK_PATH.into(), sha: sha256_hex(body), modified, size: packed.len() as u64, executable: Some(executable) },
         data: Some(base64::engine::general_purpose::STANDARD.encode(packed)),
+        agreed: None,
     }
 }
 
@@ -11639,4 +11641,31 @@ fn a_deletion_sent_after_another_machine_changed_the_file_keeps_the_change() {
     let (mut mac, mut mini) = (mac, mini);
     mac.kill();
     mini.kill();
+}
+
+#[test]
+fn a_deletion_naming_a_sha_the_hub_no_longer_holds_is_skipped_and_one_naming_none_applies_as_before() {
+    let hub = TestHub::start("sync_delete_agreed");
+    let url = hub.url.clone();
+    let (_, _, mut ana) = signed_in(&url, "ana@example.test");
+    let project = "github.com/acme/site";
+    let file = |path: &str, text: &str| {
+        json!({ "path": path, "sha": sha256_hex(text.as_bytes()), "modified": 1, "data": base64::engine::general_purpose::STANDARD.encode(gzip_bytes(text.as_bytes())) })
+    };
+    let push = |client: &mut Client, files: Vec<Value>| client.hub(json!({ "cmd": "sync_push", "project": project, "files": files }));
+    let sha_of = |client: &mut Client, path: &str| {
+        let listed = client.hub(json!({ "cmd": "sync_list", "project": project })).unwrap();
+        listed.as_array().unwrap().iter().find(|e| e["path"] == path).map(|e| e["sha"].as_str().unwrap().to_owned())
+    };
+    let (kept, gone, old) = ("claude/memory/kept.md", "claude/memory/gone.md", "claude/memory/old.md");
+    push(&mut ana, vec![file(kept, "second"), file(gone, "first"), file(old, "second")]).unwrap();
+    let first = sha256_hex(b"first");
+
+    let stale = json!({ "path": kept, "sha": "", "modified": 2, "agreed": first });
+    let current = json!({ "path": gone, "sha": "", "modified": 2, "agreed": first });
+    let from_an_older_app = json!({ "path": old, "sha": "", "modified": 2 });
+    assert_eq!(push(&mut ana, vec![stale, current, from_an_older_app]), Ok(Value::Null));
+    assert_eq!(sha_of(&mut ana, kept), Some(sha256_hex(b"second")), "changed since the sender agreed on it");
+    assert_eq!(sha_of(&mut ana, gone), Some(String::new()));
+    assert_eq!(sha_of(&mut ana, old), Some(String::new()), "a deletion without `agreed` applies whatever the hub holds");
 }
