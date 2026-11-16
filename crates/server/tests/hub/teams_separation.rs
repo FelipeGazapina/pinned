@@ -349,8 +349,9 @@ fn a_workflow_a_member_saves_on_the_team_is_the_teams_and_not_the_members() {
     let workflow = json!({ "name": "team-flow", "enabled": false, "trigger": { "kind": "linear-label", "label": "agent" },
         "folder": "/w/team", "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false, "instructions": "" });
     // A team's workflow is saved with its bot; a team keeps no schedules.
-    assert_eq!(team_op(&mut s.a, &team, json!({ "op": "save_bot", "bot": { "workflow": "" }, "connector": workflow })), Ok(Value::Null));
+    let saved = team_op(&mut s.a, &team, json!({ "op": "save_bot", "bot": { "workflow": "" }, "connector": workflow }));
     let id = team_workflows(&s.hub, Uuid::parse_str(&team).unwrap())[0]["id"].as_str().unwrap().to_owned();
+    assert_eq!(saved, Ok(json!({ "workflow": id })));
     assert_eq!(via(&mut s.b, &team, json!({ "cmd": "save_schedule", "task": task_body("team-schedule") })), Err("save_schedule does not run on a team".into()));
 
     for client in [&mut s.a, &mut s.b] {

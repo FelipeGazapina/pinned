@@ -10,7 +10,7 @@ use pinned_core::connectors::{BoxStep, Connector, Placement, Trigger};
 use pinned_core::graph::migrate::migrate;
 use pinned_core::graph::runner::{session_steps, Library, NOT_AN_ON_BOT};
 use pinned_core::graph::{NodeKind, Watch};
-use pinned_core::teams::{Bot, BotLimits, CallRules, Run, SkipReason, TeamEvent, TeamProject, Who, CEILING_TIMES};
+use pinned_core::teams::{Bot, BotLimits, CallRules, Run, SavedBot, SkipReason, TeamEvent, TeamProject, Who, CEILING_TIMES};
 use pinned_core::wire::HubCall;
 use serde_json::Value;
 use std::sync::Arc;
@@ -177,8 +177,9 @@ async fn check_who(hub: &Arc<Hub>, team: Uuid, calls: &CallRules) -> Result<(), 
 /// id is empty, else one the team already keeps (an id the team does not keep is refused as an
 /// unknown workflow). The bot goes back to a draft, its workflow disabled, whoever saves it: `on`
 /// and `on_by` of `bot` are never read, and turning it on again is `turn_bot_on`. A limit above
-/// the hub's team policy is the owner's to give. Nothing is saved when a check refuses.
-pub async fn save_bot(hub: &Arc<Hub>, scope: &Scope, mut bot: Bot, connector: Option<Connector>) -> Result<(), String> {
+/// the hub's team policy is the owner's to give. Nothing is saved when a check refuses. Answers the
+/// bot's workflow.
+pub async fn save_bot(hub: &Arc<Hub>, scope: &Scope, mut bot: Bot, connector: Option<Connector>) -> Result<SavedBot, String> {
     let team = scope.team.id;
     let mut workflows = workflows(hub, &scope.team).await?;
     let connector = match connector {
@@ -236,7 +237,8 @@ pub async fn save_bot(hub: &Arc<Hub>, scope: &Scope, mut bot: Bot, connector: Op
     let owner = existing.and_then(|b| b.owner).or_else(|| Some(scope.member.to_string()));
     let saved = Bot { name: String::new(), owner, on: false, on_by: None, off_note: None, ..bot };
     db::save_bot(&hub.db, team, &saved).await?;
-    draft(hub, scope, &saved.workflow).await
+    draft(hub, scope, &saved.workflow).await?;
+    Ok(SavedBot { workflow: saved.workflow })
 }
 
 /// Whether `usd` and `minutes` are a bot's limits a team's owner may give: finite, above 0,

@@ -276,8 +276,9 @@ pub(super) fn team_box_with_on_bot(name: &str) -> (TestHub, String, String, Clie
     assert_eq!(via(&mut ana, &team, json!({ "cmd": "connect_upstash", "key": BOX_KEY, "claude_token": CLAUDE_TOKEN })), Ok(credential(true, true)));
     let workflow = json!({ "name": "Fix bugs", "enabled": false, "trigger": { "kind": "linear-label", "label": "agent" },
         "folder": "/w/team", "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false, "instructions": "Fix the bug." });
-    assert_eq!(team_op(&mut ana, &team, json!({ "op": "save_bot", "bot": { "workflow": "" }, "connector": workflow })), Ok(Value::Null));
+    let saved = team_op(&mut ana, &team, json!({ "op": "save_bot", "bot": { "workflow": "" }, "connector": workflow }));
     let id = team_workflows(&hub, uuid::Uuid::parse_str(&team).unwrap())[0]["id"].as_str().unwrap().to_owned();
+    assert_eq!(saved, Ok(json!({ "workflow": id })));
     assert_eq!(team_op(&mut ana, &team, json!({ "op": "turn_bot_on", "workflow": id, "on": true })), Ok(Value::Null));
     assert_eq!(bot_on_at(&hub, &team, &id), "set");
     (hub, team, id, bruno)

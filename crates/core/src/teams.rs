@@ -93,6 +93,14 @@ pub struct OpenInvite {
     pub made_by: String,
 }
 
+/// What a saved bot answers: the id of its workflow, the one the hub named for a new workflow.
+///
+/// `{"workflow":"c1790000000000"}`
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct SavedBot {
+    pub workflow: String,
+}
+
 /// A member's shared project attached to the team: its bots work in it.
 ///
 /// `{"key":"github.com/acme/site","name":"site","repo":"github.com/acme/site","member":"0b7e…"}`
@@ -535,9 +543,11 @@ pub enum TeamOp {
     LeaveGroup { handle: String },
     /// `Vec<Bot>`.
     Bots,
-    /// Saves the bot, as a draft. With `connector`, the team's workflow itself (the `Connector`
-    /// `HubCall::SaveConnector` takes, new when its `id` is empty) is saved with it: the one way a
-    /// member changes a team's workflows. The bot then is that workflow's.
+    /// `SavedBot`. Saves the bot, as a draft. With `connector`, the team's workflow itself (the
+    /// `Connector` `HubCall::SaveConnector` takes) is saved with it: the one way a member changes a
+    /// team's workflows. The bot then is that workflow's. A new workflow has an empty `id`, which
+    /// the hub names, or a uuid the app made (lowercase, hyphenated) that it keeps: the same save
+    /// sent again then saves that workflow, never a second one.
     SaveBot {
         bot: Bot,
         #[serde(default, skip_serializing_if = "Option::is_none")]

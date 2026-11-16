@@ -277,10 +277,10 @@ fn limits_above_the_policy_ceiling_are_the_owners_to_give() {
         "a bot may spend at most $5 and run 30 minutes unless the team's owner sets more"
     );
     assert_eq!(crew.bot(&id).limits, BotLimits { usd: 5.0, minutes: 30 });
-    assert_eq!(crew.save_bot(&crew.ana, &big), Ok(Value::Null));
+    assert_eq!(crew.save_bot(&crew.ana, &big), Ok(json!({ "workflow": id })));
     assert_eq!(crew.bot(&id).limits, BotLimits { usd: 20.0, minutes: 120 });
     let rules = Bot { calls: CallRules { in_doubt: Who::Owner, ..CallRules::default() }, ..big.clone() };
-    assert_eq!(crew.save_bot(&crew.bob, &rules), Ok(Value::Null), "a member keeps what the owner gave");
+    assert_eq!(crew.save_bot(&crew.bob, &rules), Ok(json!({ "workflow": id })), "a member keeps what the owner gave");
     let more = Bot { limits: BotLimits { usd: 30.0, minutes: 120 }, ..big };
     assert!(crew.save_bot(&crew.bob, &more).is_err(), "but does not raise it");
     let none = Bot { limits: BotLimits { usd: 0.0, minutes: 10 }, ..bot_of(&id) };
