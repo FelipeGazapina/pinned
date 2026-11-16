@@ -475,6 +475,40 @@ fn a_project_known_only_through_a_machines_list_is_scrubbed() {
 }
 
 #[test]
+fn a_listed_projects_repository_owner_and_name_are_scrubbed_on_their_own() {
+    let fake = Fake::start();
+    let hub = reporting("reports_listed_repo", Some(&fake));
+    let token = signed_up(&hub, "ana@example.test");
+    let mut ana = agent_of(&hub.url, &token, "ana@example.test", "ana-repo-mac");
+    let books = ana.dir.join("books-checkout");
+    std::fs::create_dir_all(&books).unwrap();
+    for args in [&["init", "-q"][..], &["remote", "add", "origin", "https://github.com/ozzy-lab/kestrel-books.git"][..]] {
+        assert!(std::process::Command::new("git").args(args).current_dir(&books).status().unwrap().success());
+    }
+    ana.node.machine.open_project(books);
+    let tab = ana.tab.clone();
+    let (_, held) = held_report(&mut ana, &tab, problem("ozzy-lab said kestrel-books and ozzy-lab/kestrel-books fail", "It closes."));
+    assert_eq!(held["title"], "[project] said [project] and [project] fail", "{held}");
+}
+
+#[test]
+fn an_agents_environment_line_is_scrubbed_with_the_accounts_words() {
+    let fake = Fake::start();
+    let hub = reporting("reports_env_scrub", Some(&fake));
+    let token = signed_up(&hub, "ana@example.test");
+    // A checkout named like the machine's system: the held line must not say it.
+    let (mut ana, tabs) = agents_in(&hub.url, &token, "ana@example.test", "ana-env-mac", &["linux"]);
+    let mut draft = problem("It crashes", "It closes.");
+    draft["attach"] = json!({ "environment": true });
+    let (id, held) = held_report(&mut ana, &tabs[0], draft);
+    assert_eq!(held["attach"]["environment"], "pinned 0.0.0-test · [project]", "{held}");
+    ana.client.hub(json!({ "cmd": "unlock", "password": PASSWORD })).unwrap();
+    ana.client.hub(json!({ "cmd": "decide_confirmation", "id": id, "approve": true })).unwrap();
+    let hub_line = format!("hub {}", env!("CARGO_PKG_VERSION"));
+    assert!(fake.github.body(1).contains(&format!("### Environment\n\npinned 0.0.0-test · [project] · {hub_line}\n\n---")), "{}", fake.github.body(1));
+}
+
+#[test]
 fn a_machines_name_is_scrubbed_on_its_own() {
     let fake = Fake::start();
     let hub = reporting("reports_machine_name", Some(&fake));
