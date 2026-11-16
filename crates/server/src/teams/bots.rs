@@ -10,7 +10,7 @@ use pinned_core::connectors::{BoxStep, Connector, Placement, Trigger};
 use pinned_core::graph::migrate::migrate;
 use pinned_core::graph::runner::{session_steps, Library, NOT_AN_ON_BOT};
 use pinned_core::graph::{NodeKind, Watch};
-use pinned_core::teams::{Bot, BotLimits, CallRules, Run, SkipReason, TeamEvent, TeamProject, Who};
+use pinned_core::teams::{Bot, BotLimits, CallRules, Run, SkipReason, TeamEvent, TeamProject, Who, CEILING_TIMES};
 use pinned_core::wire::HubCall;
 use serde_json::Value;
 use std::sync::Arc;
@@ -213,6 +213,8 @@ pub async fn save_bot(hub: &Arc<Hub>, scope: &Scope, mut bot: Bot, connector: Op
         if scope.owner_only().is_err() {
             return Err(format!("a bot may spend at most ${} and run {} minutes unless the team's owner sets more", policy.usd, policy.minutes));
         }
+        // Not even the owner passes the ceiling `set_bot_ceiling` holds.
+        ceiling(hub, usd, f64::from(minutes))?;
     }
     if !bot.workflow.is_empty() {
         // Off before its workflow changes, so no trigger runs the new workflow as an on bot.
@@ -228,6 +230,33 @@ pub async fn save_bot(hub: &Arc<Hub>, scope: &Scope, mut bot: Bot, connector: Op
     db::save_bot(&hub.db, team, &saved).await?;
     draft(hub, scope, &saved.workflow).await
 }
+
+/// Whether `usd` and `minutes` are a bot's limits a team's owner may give: finite, above 0,
+/// `minutes` whole, and at most `CEILING_TIMES` the hub's `TeamPolicy::run_usd` and `run_minutes`.
+fn ceiling(hub: &Hub, usd: f64, minutes: f64) -> Result<BotLimits, String> {
+    if !(usd.is_finite() && usd > 0.0 && minutes.is_finite() && minutes >= 1.0 && minutes.fract() == 0.0) {
+        return Err("a bot's ceiling needs dollars and whole minutes above 0".into());
+    }
+    let policy = default_limits(hub);
+    let (most_usd, most_minutes) = (policy.usd * f64::from(CEILING_TIMES), policy.minutes.saturating_mul(CEILING_TIMES));
+    if usd > most_usd || minutes > f64::from(most_minutes) {
+        return Err(format!("a bot's ceiling is at most ${most_usd} and {most_minutes} minutes"));
+    }
+    Ok(BotLimits { usd, minutes: minutes as u32 })
+}
+
+/// The team's owner only (a locked login unlocks first, `super::owner_only`): sets the
+/// `BotLimits` each run of the bot of `workflow_id` may spend, at most `CEILING_TIMES` the hub's
+/// policy (`ceiling`). The bot must be saved; it stays on or off as it was.
+pub async fn set_bot_ceiling(hub: &Arc<Hub>, scope: &Scope, workflow_id: &str, usd: f64, minutes: f64) -> Result<(), String> {
+    scope.owner_only()?;
+    let limits = ceiling(hub, usd, minutes)?;
+    let bot = db::bot(&hub.db, scope.team.id, workflow_id).await?.ok_or_else(|| format!("the team has no bot for workflow {workflow_id}"))?;
+    db::save_bot(&hub.db, scope.team.id, &Bot { limits, ..bot }).await
+}
+
+/// What a bot whose stored limits are not above 0 hears when it would start.
+pub const NO_LIMIT: &str = "this bot has no limit to run with: the team's owner sets one";
 
 /// What a team's owner reads for "One box, reused" on a team: each run opens a fresh box.
 pub const OWN_BOX_EACH: &str = "a team's runs each get a box of their own";
@@ -343,14 +372,19 @@ pub async fn run_now(hub: &Arc<Hub>, scope: &Scope, workflow_id: &str) -> Result
     }
 }
 
-/// Whether bot `workflow_id` may start a run now: it is on, its workflow is one a bot can have,
-/// and the team keeps its Upstash key and Claude token.
+/// Whether bot `workflow_id` may start a run now: it is on, its limits are above 0 (`NO_LIMIT`),
+/// its workflow is one a bot can have, and the team keeps its Upstash key and Claude token.
 pub async fn ready(hub: &Arc<Hub>, team: &Account, workflow_id: &str) -> Result<(), String> {
     let workflows = workflows(hub, team).await?;
     let workflow = find(&workflows, workflow_id)?;
     let on = db::bot(&hub.db, team.id, workflow_id).await?.is_some_and(|b| b.on);
     if !on || !workflow.enabled {
         return Err(IS_A_DRAFT.into());
+    }
+    // A run is held by its limits (`calls::tick`): a bot without them never starts one.
+    let limits = db::bot(&hub.db, team.id, workflow_id).await?.map(|b| b.limits);
+    if !limits.is_some_and(|l| l.usd.is_finite() && l.usd > 0.0 && l.minutes > 0) {
+        return Err(NO_LIMIT.into());
     }
     available(workflow, &workflows)?;
     callees_on(hub, team.id, workflow, &workflows).await?;

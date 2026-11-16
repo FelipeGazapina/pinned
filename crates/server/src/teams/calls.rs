@@ -316,11 +316,31 @@ pub async fn ask_people(
         }
     }
     if run.state == RunState::Waiting {
-        return Err("this run already waits on a call".into());
+        return Err(WAITS_ALREADY.into());
     }
     if question.is_empty() {
         return Err("say what you ask".into());
     }
+    open_call(hub, team, run, run_id, situation, question, choices, step).await
+}
+
+/// What a run that already waits on a call hears when it asks again: at most one wait at a time.
+const WAITS_ALREADY: &str = "this run already waits on a call";
+
+/// Opens a call of live run `run` for `situation`, as `ask_people` does once its checks passed,
+/// and as the limits tick does for `Situation::OnLimit`: the run moves to `Waiting` in one write,
+/// so of two at once only one opens a call.
+#[allow(clippy::too_many_arguments)]
+async fn open_call(
+    hub: &Arc<Hub>,
+    team: &Arc<Account>,
+    run: Run,
+    run_id: Uuid,
+    situation: Situation,
+    question: &str,
+    choices: Vec<String>,
+    step: Option<&str>,
+) -> Result<Asked, String> {
     let choices: Vec<String> = choices.iter().map(|c| c.trim().to_owned()).filter(|c| !c.is_empty()).collect();
     let asked = match &run.controller {
         Some(controller) => vec![Who::Person { account: controller.clone() }],
@@ -332,7 +352,7 @@ pub async fn ask_people(
     let Some(waiting) = db::start_waiting(&hub.db, team.id, run_id).await? else {
         let now = db::run(&hub.db, team.id, run_id).await?;
         return Err(match now.map(|r| r.state) {
-            Some(RunState::Waiting) => "this run already waits on a call".into(),
+            Some(RunState::Waiting) => WAITS_ALREADY.into(),
             _ => "this run has ended".into(),
         });
     };
@@ -415,8 +435,8 @@ fn notify_slack(hub: &Arc<Hub>, team: &Arc<Account>, call: &Call) {
 /// `policy.escalate_after_secs` goes to the owner too (escalated, `TeamEvent::CallOpened` again).
 /// One open longer than `policy.give_up_after_secs` closes as gave-up, with the same guard as an
 /// answer, so only one of them wins; its run ends as `RunState::GaveUp`, its session is told to
-/// end without the step, and its box ends. Then no run or box is left behind (`reap`). Run limits
-/// are not checked here.
+/// end without the step, and its box ends. Then each run's limits are held (`limits`), and no run
+/// or box is left behind (`reap`).
 pub async fn tick(hub: &Arc<Hub>, policy: &TeamPolicy) -> Result<(), String> {
     for row in db::escalate_due(&hub.db, policy.escalate_after_secs).await? {
         push_logged(hub, row.team, TeamEvent::CallOpened { call: row.call }).await;
@@ -432,7 +452,55 @@ pub async fn tick(hub: &Arc<Hub>, policy: &TeamPolicy) -> Result<(), String> {
             }
         });
     }
+    limits(hub, policy).await?;
     reap(hub, policy).await
+}
+
+/// What a run that lived `TeamPolicy::max_life_secs` ends with.
+pub const MAX_LIFE_REACHED: &str = "it reached the most time a run may take, waiting included";
+
+/// The limits half of `tick`:
+/// - a live run whose start is `policy.max_life_secs` ago ends (`RunState::Failed`,
+///   `MAX_LIFE_REACHED`) with its box, whatever it does: waiting counts toward its max life;
+/// - each run at work is charged its box's rate for its active time (`db::charge_working_runs`);
+///   a waiting run is not, and its wait is not active time, so a wait counts toward neither limit;
+/// - a run at work that reached its bot's `BotLimits` (minutes of work, or dollars) stops working:
+///   it waits on an `OnLimit` call to whom the bot's `CallRules::on_limit` names, and its session
+///   is told to stop and wait. Nobody answering ends it at give-up as any call does; an answer
+///   lets it go on, called no more for its limits (one limit call per run), up to its max life.
+async fn limits(hub: &Arc<Hub>, policy: &TeamPolicy) -> Result<(), String> {
+    for (team, run) in db::runs_past_max_life(&hub.db, policy.max_life_secs).await? {
+        let ended = async { end_run(hub, &hub.account(team).await?, run, RunState::Failed, MAX_LIFE_REACHED, Some(End::Expired)).await };
+        match ended.await {
+            Err(e) if e != RUN_ENDED => eprintln!("pinned-server: run {run} of team {team} reached its max life but did not end yet: {e}"),
+            _ => {}
+        }
+    }
+    use pinned_core::wire::box_usd_per_hour;
+    use pinned_core::connectors::BoxSize::{Large, Medium, Small};
+    db::charge_working_runs(&hub.db, [box_usd_per_hour(Small), box_usd_per_hour(Medium), box_usd_per_hour(Large)]).await?;
+    for at in db::runs_at_limit(&hub.db).await? {
+        if let Err(e) = limit_reached(hub, &at).await {
+            eprintln!("pinned-server: run {} of team {} reached a limit but was not called for it: {e}", at.run, at.team);
+        }
+    }
+    Ok(())
+}
+
+/// Opens the `OnLimit` call of a run that reached a limit and tells its session to stop.
+async fn limit_reached(hub: &Arc<Hub>, at: &db::AtLimit) -> Result<(), String> {
+    let team = hub.account(at.team).await?;
+    let Some(run) = db::run(&hub.db, at.team, at.run).await? else { return Ok(()) };
+    let what = match (at.spent, at.limits.minutes) {
+        (true, _) => format!("${} spent", at.limits.usd),
+        (false, 1) => "1 minute of work".to_owned(),
+        (false, minutes) => format!("{minutes} minutes of work"),
+    };
+    let question = format!("The run reached its limit: {what}. Let it go on, or stop it?");
+    if let Asked::Call { call, .. } = open_call(hub, &team, run, at.run, Situation::OnLimit, &question, vec![], None).await? {
+        tell_session(hub, &team, at.run, &format!("limit-{call}"), format!("[The run reached its limit: {what}. Stop and wait for the answer]")).await;
+    }
+    Ok(())
 }
 
 /// What a run that never had a box, or whose box went without ending it, ends with.

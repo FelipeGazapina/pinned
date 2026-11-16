@@ -6,7 +6,7 @@ use crate::db::{err, Db};
 use tokio_postgres::Client;
 use pinned_core::agent::Subject;
 use pinned_core::preauth::team_hook::GO_AHEAD;
-use pinned_core::teams::{Answer, Bot, Call, Group, Role, Run, RunState, SkipReason, Skipped, TeamProject, Who};
+use pinned_core::teams::{Answer, Bot, BotLimits, Call, Group, Role, Run, RunState, SkipReason, Skipped, TeamProject, Who};
 use tokio_postgres::error::SqlState;
 use uuid::Uuid;
 
@@ -522,7 +522,7 @@ pub async fn open_reserved(db: &Db, team: Uuid, run: Uuid, machine: &str) -> Res
         .client()
         .await?
         .execute(
-            &format!("update team_runs set box = $3, reserved = false, reserved_at = null where team = $1 and id = $2 and reserved and state in {LIVE}"),
+            &format!("update team_runs set box = $3, reserved = false, reserved_at = null, opened_at = now() where team = $1 and id = $2 and reserved and state in {LIVE}"),
             &[&team, &run, &machine],
         )
         .await
@@ -584,9 +584,24 @@ pub async fn fail_reserved_start(db: &Db, team: Uuid, run: Uuid, never_opened: &
 use pinned_core::teams::CallRules;
 use tokio_postgres::Row;
 
-/// A `team_runs` row as `run_of` reads it.
-const RUN_COLUMNS: &str = "id, workflow, state, controller, cost_usd, active_secs, extract(epoch from started_at)::bigint, \
-     extract(epoch from ended_at)::bigint, outcome, started_by #>> '{}'";
+/// The seconds a `team_runs` row waited on people: its closed waits and the open one. In an
+/// `update`'s `set`, it reads the row as it was, so a run moved out of `waiting` adds its wait.
+macro_rules! waited {
+    () => {
+        "(waiting_secs + case when state = 'waiting' and waiting_since is not null then extract(epoch from now() - waiting_since)::bigint else 0 end)"
+    };
+}
+
+/// A `team_runs` row as `run_of` reads it. Its waiting time is its closed waits (`waiting_secs`)
+/// and the open one (since `waiting_since`); its active time is the rest of the time from its
+/// session's open (`opened_at`, or its start for a run that opened with its row) to its end, or
+/// now while it is live: 0 while its place is only reserved.
+const RUN_COLUMNS: &str = concat!(
+    "id, workflow, state, controller, cost_usd, case when reserved then 0 else greatest(0, extract(epoch from coalesce(ended_at, now()) - coalesce(opened_at, started_at))::bigint - ",
+    waited!(),
+    ") end, extract(epoch from started_at)::bigint, extract(epoch from ended_at)::bigint, outcome, started_by #>> '{}', ",
+    waited!()
+);
 
 /// A `team_calls` row `c` with its run `r`, as `call_of` reads it.
 const CALL_COLUMNS: &str = "c.id, c.run, r.workflow, c.situation, c.asked, c.question, c.choices, extract(epoch from c.created_at)::bigint, \
@@ -608,6 +623,7 @@ fn run_of(r: &Row) -> Run {
         ended_at: r.get(7),
         outcome: r.get(8),
         started_by: r.get::<_, Option<String>>(9).unwrap_or_default(),
+        waiting_secs: r.get::<_, i64>(10).max(0) as u64,
     }
 }
 
@@ -739,8 +755,10 @@ pub async fn set_run_state(db: &Db, team: Uuid, run: Uuid, state: RunState, cont
         .execute(
             &format!(
                 "update team_runs set state = $3, controller = $4, ended_at = case when $5 then now() else ended_at end,
-                   outcome = case when $5 then $6 else outcome end
-                 where team = $1 and id = $2 and state in {LIVE}"
+                   outcome = case when $5 then $6 else outcome end,
+                   waiting_secs = case when $3 = 'waiting' then waiting_secs else {} end
+                 where team = $1 and id = $2 and state in {LIVE}",
+                waited!()
             ),
             &[&team, &run, &state.as_str(), &controller, &ends, &outcome],
         )
@@ -772,8 +790,9 @@ pub async fn stop_waiting(db: &Db, team: Uuid, run: Uuid) -> Result<Option<Run>,
         .await?
         .query_opt(
             &format!(
-                "update team_runs set state = case when controller is null then 'working' else 'taken_over' end
-                 where team = $1 and id = $2 and state = 'waiting' returning {RUN_COLUMNS}"
+                "update team_runs set state = case when controller is null then 'working' else 'taken_over' end, waiting_secs = {}
+                 where team = $1 and id = $2 and state = 'waiting' returning {RUN_COLUMNS}",
+                waited!()
             ),
             &[&team, &run],
         )
@@ -1464,4 +1483,69 @@ pub async fn skipped(db: &Db, team: Uuid, workflow: &str) -> Result<Vec<Skipped>
         .iter()
         .filter_map(|r| SkipReason::parse(r.get(0)).map(|reason| Skipped { reason, count: u64::try_from(r.get::<_, i64>(1)).unwrap_or(0) }))
         .collect())
+}
+
+// ---- limits (calls::tick) ----
+
+/// Charges each run at work (`working` or `taken_over`) in a box for its active time at its box's
+/// hourly rate (`small`, `medium`, `large` in `rates`): its `cost_usd` never goes down, and a
+/// waiting run is not charged, so a wait costs nothing toward its `BotLimits::usd`.
+pub async fn charge_working_runs(db: &Db, rates: [f64; 3]) -> Result<(), String> {
+    db.client()
+        .await?
+        .execute(
+            "update team_runs r set cost_usd = greatest(r.cost_usd,
+                   greatest(0, extract(epoch from now() - coalesce(r.opened_at, r.started_at))::bigint - r.waiting_secs)::float8
+                   * case lower(b.size) when 'medium' then $2::float8 when 'large' then $3::float8 else $1::float8 end / 3600.0)
+                 from boxes b where b.account = r.team and b.machine::text = r.box and r.state in ('working', 'taken_over') and not r.reserved",
+            &[&rates[0], &rates[1], &rates[2]],
+        )
+        .await
+        .map_err(err)?;
+    Ok(())
+}
+
+/// A run at work that reached a limit of its bot and was not called for it yet.
+pub struct AtLimit {
+    pub team: Uuid,
+    pub run: Uuid,
+    pub limits: BotLimits,
+    /// True for its dollars, false for its minutes.
+    pub spent: bool,
+}
+
+/// The runs at work (not reserved) whose active time reached their bot's `minutes`, or whose
+/// `cost_usd` its `usd`, and that have no `on_limit` call yet: one limit call per run.
+pub async fn runs_at_limit(db: &Db) -> Result<Vec<AtLimit>, String> {
+    let rows = db
+        .client()
+        .await?
+        .query(
+            "select r.team, r.id, b.limits, r.cost_usd >= (b.limits->>'usd')::float8
+                 from team_runs r join team_bots b on b.team = r.team and b.workflow = r.workflow
+                 where r.state in ('working', 'taken_over') and not r.reserved
+                   and (r.cost_usd >= (b.limits->>'usd')::float8
+                        or extract(epoch from now() - coalesce(r.opened_at, r.started_at))::bigint - r.waiting_secs >= (b.limits->>'minutes')::bigint * 60)
+                   and not exists (select 1 from team_calls c where c.run = r.id and c.situation = 'on_limit')",
+            &[],
+        )
+        .await
+        .map_err(err)?;
+    let mut found = Vec::with_capacity(rows.len());
+    for r in &rows {
+        let limits = serde_json::from_value(r.get(2)).map_err(|e| e.to_string())?;
+        found.push(AtLimit { team: r.get(0), run: r.get(1), limits, spent: r.get(3) });
+    }
+    Ok(found)
+}
+
+/// The live runs started at least `secs` ago, waits included (`TeamPolicy::max_life_secs`).
+pub async fn runs_past_max_life(db: &Db, secs: u64) -> Result<Vec<(Uuid, Uuid)>, String> {
+    let rows = db
+        .client()
+        .await?
+        .query(&format!("select team, id from team_runs where state in {LIVE} and started_at <= now() - make_interval(secs => $1)"), &[&(secs as f64)])
+        .await
+        .map_err(err)?;
+    Ok(rows.iter().map(|r| (r.get(0), r.get(1))).collect())
 }

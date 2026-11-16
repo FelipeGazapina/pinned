@@ -256,7 +256,7 @@ fn a_once_bot_is_discarded_when_its_run_ends() {
     crew.save_bot(&crew.bob, &Bot { once: true, ..bot_of(&once) }).unwrap();
     assert_eq!(crew.bots().iter().map(|b| (b.name.as_str(), b.once)).collect::<Vec<_>>(), vec![("Keep", false), ("Once", true)]);
 
-    let ended = |workflow: &str, state: RunState| TeamRun { id: Uuid::new_v4().to_string(), workflow: workflow.into(), state, controller: None, cost_usd: 0.0, active_secs: 0, started_at: 1, ended_at: Some(2), outcome: None, started_by: crew.bob.id.to_string() };
+    let ended = |workflow: &str, state: RunState| TeamRun { id: Uuid::new_v4().to_string(), workflow: workflow.into(), state, controller: None, cost_usd: 0.0, active_secs: 0, waiting_secs: 0, started_at: 1, ended_at: Some(2), outcome: None, started_by: crew.bob.id.to_string() };
     let ended_run = |workflow: &str, state: RunState| crew.hub.runtime.block_on(teams::bots::run_ended(crew.hub.hub(), crew.team, &ended(workflow, state))).unwrap();
     ended_run(&once, RunState::Working);
     assert_eq!(crew.bots().len(), 2, "a run that has not ended discards nothing");
