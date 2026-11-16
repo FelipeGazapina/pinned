@@ -62,9 +62,11 @@ impl Crew {
         })
     }
 
-    /// A workflow in the team's store, saved by `who`; answers what the hub stored.
+    /// A workflow in the team's store, saved by `who` with its bot (`TeamOp::SaveBot`); answers
+    /// what the hub stored.
     fn save_workflow(&self, who: &Arc<Account>, connector: Value) -> Result<Value, String> {
-        self.hub_op(who, json!({ "cmd": "save_connector", "connector": connector }))
+        let id = save_team_workflow(&self.hub, who, self.team, connector)?;
+        Ok(self.stored(&id).expect("stored"))
     }
 
     fn workflow(&self, name: &str) -> String {
@@ -74,8 +76,7 @@ impl Crew {
 
     /// The stored workflow `id` as the team's settings list it.
     fn stored(&self, id: &str) -> Option<Value> {
-        let settings = self.hub_op(&self.bob, json!({ "cmd": "get_settings" })).unwrap();
-        settings["connectors"].as_array().unwrap().iter().find(|c| c["id"] == id).cloned()
+        team_workflows(&self.hub, self.team).into_iter().find(|c| c["id"] == id)
     }
 
     fn bots(&self) -> Vec<Bot> {
@@ -87,7 +88,7 @@ impl Crew {
     }
 
     fn save_bot(&self, who: &Arc<Account>, bot: &Bot) -> Result<Value, String> {
-        self.call(who, TeamOp::SaveBot { bot: bot.clone() })
+        self.call(who, TeamOp::SaveBot { bot: bot.clone(), connector: None })
     }
 
     fn turn_on(&self, who: &Arc<Account>, id: &str, on: bool) -> Result<Value, String> {
@@ -126,11 +127,11 @@ fn a_draft_bot_cannot_run_by_run_now_or_run_workflow() {
     crew.give_keys();
     let id = crew.workflow("Fix bugs");
     let bare = crew.call(&crew.bob, TeamOp::RunNow { workflow: id.clone() });
-    assert_eq!(bare.unwrap_err(), DRAFT, "a workflow with no bot row is a draft");
+    assert_eq!(bare.unwrap_err(), DRAFT, "a workflow saved with its bot is a draft");
     crew.save_bot(&crew.bob, &bot_of(&id)).unwrap();
     assert!(!crew.bot(&id).on);
     assert_eq!(crew.call(&crew.bob, TeamOp::RunNow { workflow: id.clone() }).unwrap_err(), DRAFT);
-    assert_eq!(crew.hub_op(&crew.bob, json!({ "cmd": "run_workflow", "id": id })).unwrap_err(), DRAFT);
+    assert_eq!(crew.hub_op(&crew.bob, json!({ "cmd": "run_workflow", "id": id })).unwrap_err(), "run_workflow does not run on a team");
     assert_eq!(crew.runs(), vec![], "nothing started");
     assert_eq!(crew.hub.boxes.live(), Vec::<String>::new());
 }
@@ -239,10 +240,9 @@ fn a_run_now_opens_a_box_on_the_teams_claude_token_not_a_members() {
     assert_eq!(crew.hub.runtime.block_on(crew.hub.hub().db.boxes(crew.team)).unwrap().len(), 1, "the box is the team's");
     assert_eq!(crew.hub.runtime.block_on(crew.hub.hub().db.boxes(crew.bob.id)).unwrap().len(), 0, "and none is bob's");
 
-    // The same run through the personal door lists a second run.
-    let again = crew.hub_op(&crew.bob, json!({ "cmd": "run_workflow", "id": id })).unwrap();
-    assert_eq!((again["workflow"].as_str(), again["state"].as_str(), again["started_by"].as_str()), (Some(id.as_str()), Some("working"), Some(crew.bob.id.to_string().as_str())));
-    assert_eq!(crew.runs().len(), 2);
+    // The personal door does not run a team's workflow: Run now is the one way.
+    assert_eq!(crew.hub_op(&crew.bob, json!({ "cmd": "run_workflow", "id": id })).unwrap_err(), "run_workflow does not run on a team");
+    assert_eq!(crew.runs().len(), 1);
 }
 
 #[test]
@@ -302,7 +302,9 @@ fn deleting_the_workflow_removes_the_bot() {
     let id = crew.workflow("Fix bugs");
     crew.save_bot(&crew.bob, &bot_of(&id)).unwrap();
     assert_eq!(crew.bots().len(), 1);
-    crew.hub_op(&crew.carl, json!({ "cmd": "delete_connector", "id": id })).unwrap();
+    assert_eq!(crew.hub_op(&crew.carl, json!({ "cmd": "delete_connector", "id": id })).unwrap_err(), "delete_connector does not run on a team");
+    assert_eq!(crew.bots().len(), 1, "the personal door deletes nothing");
+    crew.call(&crew.bob, TeamOp::DeleteBot { workflow: id.clone() }).unwrap();
     assert_eq!(crew.bots(), vec![]);
     assert_eq!(crew.hub.runtime.block_on(teams::db::bots(&crew.hub.hub().db, crew.team)).unwrap(), vec![], "and its row");
 }

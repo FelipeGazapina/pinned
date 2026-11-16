@@ -65,13 +65,14 @@ impl TeamBox {
         let mut on_team = |call: Value| owner.client.hub(json!({ "cmd": "team", "team": team.to_string(), "op": { "op": "hub", "call": call } }));
         on_team(json!({ "cmd": "connect_upstash", "key": BOX_KEY, "claude_token": CLAUDE_TOKEN })).unwrap();
         let repo = temp(&format!("team-repo-{}", hub.database));
-        let saved = on_team(json!({ "cmd": "save_connector", "connector": {
+        // A team's workflow is saved with its bot: `save_bot` with the workflow in `connector`.
+        owner.client.hub(json!({ "cmd": "team", "team": team.to_string(), "op": { "op": "save_bot", "bot": { "workflow": "" }, "connector": {
             "name": "Footer", "enabled": false, "trigger": { "kind": "linear-label", "label": "agent" },
             "folder": repo, "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false,
             "instructions": "", "machine": { "kind": "upstash-box", "size": "small" },
-        } }))
+        } } }))
         .unwrap();
-        let workflow = saved["id"].as_str().unwrap().to_owned();
+        let workflow = team_workflows(hub, team)[0]["id"].as_str().unwrap().to_owned();
         let run = Run {
             cwd: repo,
             repo: None,

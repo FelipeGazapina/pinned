@@ -180,6 +180,43 @@ fn admin_on(database: &str, sql: &str) {
     });
 }
 
+/// The team's workflows as its own account stores them: a read for tests, as no member reads a
+/// team's settings.
+fn team_workflows(hub: &TestHub, team: uuid::Uuid) -> Vec<Value> {
+    team_settings(hub, team)["connectors"].as_array().unwrap().clone()
+}
+
+/// The team's settings as its own account reads them, for tests only.
+fn team_settings(hub: &TestHub, team: uuid::Uuid) -> Value {
+    let account = hub.runtime.block_on(hub.hub().account(team)).unwrap();
+    hub.runtime.block_on(hub.hub().hub_call(&account, HubCall::GetSettings)).unwrap()
+}
+
+/// Stores `connector` on the team's account directly, past every check of a member's save, as a
+/// workflow an older hub let a member save. Answers its id.
+fn store_on_team(hub: &TestHub, team: uuid::Uuid, connector: Value) -> String {
+    let account = hub.runtime.block_on(hub.hub().account(team)).unwrap();
+    let connector = serde_json::from_value(connector).unwrap();
+    let saved = hub.runtime.block_on(hub.hub().hub_call(&account, HubCall::SaveConnector { connector })).unwrap();
+    saved["id"].as_str().unwrap().to_owned()
+}
+
+/// `who` saves the workflow `connector` (the JSON `save_connector` takes) on `team` with its bot,
+/// by `TeamOp::SaveBot`, the one way a member saves a team's workflow. Answers its id.
+fn save_team_workflow(hub: &TestHub, who: &Arc<pinned_server::hub::Account>, team: uuid::Uuid, connector: Value) -> Result<String, String> {
+    let ids = |hub: &TestHub| team_workflows(hub, team).iter().map(|c| c["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    let before = ids(hub);
+    let given = connector["id"].as_str().unwrap_or_default().to_owned();
+    let bot = pinned_core::teams::Bot { workflow: given.clone(), name: String::new(), owner: None, calls: Default::default(), limits: pinned_core::teams::BotLimits { usd: 5.0, minutes: 30 }, on: false, on_by: None, once: false, off_note: None };
+    let connector = Some(serde_json::from_value(connector).map_err(|e| e.to_string())?);
+    let op = pinned_server::teams::Op::read(pinned_core::teams::TeamOp::SaveBot { bot, connector })?;
+    hub.runtime.block_on(pinned_server::teams::call(hub.hub(), who, Some(team), op))?;
+    if !given.is_empty() {
+        return Ok(given);
+    }
+    Ok(ids(hub).into_iter().find(|id| !before.contains(id)).expect("a new workflow"))
+}
+
 /// A fresh folder for one node of one test. Parallel tests reuse machine names, so a counter
 /// keeps two nodes named alike from sharing a config folder.
 fn node_dir(name: &str) -> PathBuf {
@@ -11565,3 +11602,4 @@ mod teams_hardening;
 #[path = "hub/teams_triggers.rs"] mod teams_triggers;
 #[path = "hub/teams_run_log.rs"] mod teams_run_log;
 #[path = "hub/teams_slack_notice.rs"] mod teams_slack_notice;
+#[path = "hub/teams_hardening_a.rs"] mod teams_hardening_a;

@@ -50,14 +50,12 @@ impl Crew {
 
     /// A bot of a workflow with `trigger`, saved by bob: a draft until someone turns it on.
     fn draft_bot(&self, name: &str, trigger: Value) -> String {
-        let saved = self
-            .hub_op(&self.bob, json!({ "cmd": "save_connector", "connector": {
-                "name": name, "enabled": false, "trigger": trigger,
-                "folder": self.folder, "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false,
-                "instructions": "", "machine": { "kind": "upstash-box", "size": "small" },
-            } }))
-            .unwrap();
-        let id = saved["id"].as_str().unwrap().to_owned();
+        let id = save_team_workflow(&self.hub, &self.bob, self.team, json!({
+            "name": name, "enabled": false, "trigger": trigger,
+            "folder": self.folder, "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false,
+            "instructions": "", "machine": { "kind": "upstash-box", "size": "small" },
+        }))
+        .unwrap();
         self.save_bot(&id);
         id
     }
@@ -65,6 +63,11 @@ impl Crew {
     /// A workflow bob saves with a graph of `steps` after its trigger, one after another, each
     /// `(id, step)` without its name and position. Its trigger watches `watch`.
     fn graph_workflow(&self, name: &str, watch: Value, steps: &[(&str, Value)]) -> String {
+        save_team_workflow(&self.hub, &self.bob, self.team, self.graph(name, watch, steps)).unwrap()
+    }
+
+    /// The workflow `graph_workflow` saves, as the JSON a save sends.
+    fn graph(&self, name: &str, watch: Value, steps: &[(&str, Value)]) -> Value {
         let mut nodes = vec![json!({ "id": "t", "name": "Trigger", "position": [0, 0], "type": "trigger", "watch": watch })];
         let mut edges = vec![];
         let mut from = "t".to_owned();
@@ -77,20 +80,17 @@ impl Crew {
             edges.push(json!({ "from": from, "port": "out", "to": id }));
             from = (*id).to_owned();
         }
-        let saved = self
-            .hub_op(&self.bob, json!({ "cmd": "save_connector", "connector": {
-                "name": name, "enabled": false, "trigger": watch,
-                "folder": self.folder, "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false,
-                "instructions": "", "machine": { "kind": "upstash-box", "size": "small" },
-                "graph": { "nodes": nodes, "edges": edges },
-            } }))
-            .unwrap();
-        saved["id"].as_str().unwrap().to_owned()
+        json!({
+            "name": name, "enabled": false, "trigger": watch,
+            "folder": self.folder, "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false,
+            "instructions": "", "machine": { "kind": "upstash-box", "size": "small" },
+            "graph": { "nodes": nodes, "edges": edges },
+        })
     }
 
     fn try_save_bot(&self, id: &str) -> Result<Value, String> {
         let bot = Bot { workflow: id.to_owned(), name: String::new(), owner: None, calls: CallRules::default(), limits: BotLimits { usd: 5.0, minutes: 30 }, on: false, on_by: None, once: false, off_note: None };
-        self.call(&self.bob, TeamOp::SaveBot { bot })
+        self.call(&self.bob, TeamOp::SaveBot { bot, connector: None })
     }
 
     fn try_turn_on(&self, id: &str) -> Result<Value, String> {
@@ -100,7 +100,7 @@ impl Crew {
     /// bob saves the bot of workflow `id` again, which puts it back to a draft.
     fn save_bot(&self, id: &str) {
         let bot = Bot { workflow: id.to_owned(), name: String::new(), owner: None, calls: CallRules::default(), limits: BotLimits { usd: 5.0, minutes: 30 }, on: false, on_by: None, once: false, off_note: None };
-        self.call(&self.bob, TeamOp::SaveBot { bot }).unwrap();
+        self.call(&self.bob, TeamOp::SaveBot { bot, connector: None }).unwrap();
     }
 
     fn turn_on(&self, id: &str, on: bool) {
@@ -256,7 +256,7 @@ fn new_thread_messages_for_a_bot_with_no_live_run_are_dropped_and_start_nothing(
 fn a_manual_bot_gets_no_run_from_its_poller_and_runs_only_by_run_now() {
     let crew = Crew::new("tt_manual");
     let id = crew.draft_bot("Release notes", json!({ "kind": "manual" }));
-    let checked = || crew.hub_op(&crew.bob, json!({ "cmd": "get_settings" })).unwrap()["checked"].clone();
+    let checked = || team_settings(&crew.hub, crew.team)["checked"].clone();
     let before = checked();
     // Turning the bot on saves its workflow, which wakes the team's poller for a check.
     crew.turn_on(&id, true);
@@ -279,12 +279,19 @@ fn a_bot_whose_workflow_reaches_its_session_twice_is_refused_and_a_one_session_b
     let crew = Crew::new("tt_sessions");
     let linear = json!({ "kind": "linear-label", "label": "agent" });
     let talk = |prompt: &str| json!({ "type": "talk", "prompt": prompt });
-    let two = crew.graph_workflow("Two talks", linear.clone(), &[("a", talk("Look.")), ("b", json!({ "type": "session", "prompt": "Fix." }))]);
+    let two = crew.graph("Two talks", linear.clone(), &[("a", talk("Look.")), ("b", json!({ "type": "session", "prompt": "Fix." }))]);
     let helper = crew.graph_workflow("Helper", json!({ "kind": "called" }), &[("h", talk("Help."))]);
-    let calls = crew.graph_workflow("Talk and call", linear.clone(), &[("a", talk("Look.")), ("c", json!({ "type": "call", "workflow": helper }))]);
+    let calls = crew.graph("Talk and call", linear.clone(), &[("a", talk("Look.")), ("c", json!({ "type": "call", "workflow": helper }))]);
     let one = crew.graph_workflow("One session", linear, &[("s", json!({ "type": "session", "prompt": "Fix." }))]);
     let refused = Err("a bot's workflow may have only one session or talk step, counting the workflows it calls: a workflow with more is not available as a bot yet".to_owned());
 
+    // A member's save of the workflow with its bot is refused, and nothing is stored.
+    for workflow in [&two, &calls] {
+        assert_eq!(save_team_workflow(&crew.hub, &crew.bob, crew.team, workflow.clone()).map(drop), refused, "saving the workflow with its bot");
+    }
+    assert_eq!(team_workflows(&crew.hub, crew.team).len(), 2, "only Helper and One session are stored");
+    // Such workflows stored before (as an older hub let a member) are refused as bots.
+    let (two, calls) = (store_on_team(&crew.hub, crew.team, two), store_on_team(&crew.hub, crew.team, calls));
     for id in [&two, &calls] {
         assert_eq!(crew.try_save_bot(id).map(drop), refused, "saving the bot");
         assert_eq!(crew.try_turn_on(id).map(drop), refused, "turning it on");

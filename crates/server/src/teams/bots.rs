@@ -154,11 +154,34 @@ async fn check_who(hub: &Arc<Hub>, team: Uuid, calls: &CallRules) -> Result<(), 
 }
 
 /// Any member. Saves who the bot asks and its limits for workflow `bot.workflow` of the team's
-/// account. The bot goes back to a draft: `on` and `on_by` of `bot` are never read, and turning it
-/// on again is `turn_bot_on`. A limit above the hub's team policy is the owner's to give.
-pub async fn save_bot(hub: &Arc<Hub>, scope: &Scope, bot: Bot) -> Result<(), String> {
+/// account, and with `connector` that workflow itself, on the team's account: a new one when its
+/// id is empty, else one the team already keeps (an id the team does not keep is refused as an
+/// unknown workflow). The bot goes back to a draft, its workflow disabled, whoever saves it: `on`
+/// and `on_by` of `bot` are never read, and turning it on again is `turn_bot_on`. A limit above
+/// the hub's team policy is the owner's to give. Nothing is saved when a check refuses.
+pub async fn save_bot(hub: &Arc<Hub>, scope: &Scope, mut bot: Bot, connector: Option<Connector>) -> Result<(), String> {
     let team = scope.team.id;
-    let workflows = workflows(hub, &scope.team).await?;
+    let mut workflows = workflows(hub, &scope.team).await?;
+    let connector = match connector {
+        Some(mut connector) => {
+            if !connector.id.is_empty() {
+                find(&workflows, &connector.id)?;
+            }
+            if !bot.workflow.is_empty() && bot.workflow != connector.id {
+                return Err(format!("this bot is for workflow {}, not the workflow it saves", bot.workflow));
+            }
+            connector.enabled = false;
+            if !matches!(connector.runs_on, pinned_core::connectors::RunsOn::FreshBox(_)) {
+                connector.runs_on = pinned_core::connectors::RunsOn::FreshBox(BoxStep::default());
+            }
+            bot.workflow = connector.id.clone();
+            // The checks below read the workflow as it is about to be saved.
+            workflows.retain(|c| c.id != connector.id);
+            workflows.push(connector.clone());
+            Some(connector)
+        }
+        None => None,
+    };
     let workflow = find(&workflows, &bot.workflow)?;
     available(workflow, &workflows)?;
     check_who(hub, team, &bot.calls).await?;
@@ -166,7 +189,10 @@ pub async fn save_bot(hub: &Arc<Hub>, scope: &Scope, bot: Bot) -> Result<(), Str
     if !usd.is_finite() || usd <= 0.0 || minutes == 0 {
         return Err("a run needs a limit above 0 dollars and 0 minutes".into());
     }
-    let existing = db::bot(&hub.db, team, &bot.workflow).await?;
+    let existing = match bot.workflow.is_empty() {
+        true => None,
+        false => db::bot(&hub.db, team, &bot.workflow).await?,
+    };
     let kept = existing.as_ref().map(|b| &b.limits);
     let policy = default_limits(hub);
     // A member may keep a limit the owner gave, not raise it.
@@ -176,10 +202,44 @@ pub async fn save_bot(hub: &Arc<Hub>, scope: &Scope, bot: Bot) -> Result<(), Str
             return Err(format!("a bot may spend at most ${} and run {} minutes unless the team's owner sets more", policy.usd, policy.minutes));
         }
     }
+    if !bot.workflow.is_empty() {
+        // Off before its workflow changes, so no trigger runs the new workflow as an on bot.
+        db::turn_bot_on(&hub.db, team, &bot.workflow, false, scope.member).await?;
+    }
+    if let Some(connector) = connector {
+        // `Hub::hub_call` on the team's account, as the team's own save: it tells the team's apps.
+        let saved = Box::pin(hub.hub_call(&scope.team, HubCall::SaveConnector { connector })).await?;
+        bot.workflow = saved["id"].as_str().ok_or("the saved workflow has no id")?.to_owned();
+    }
     let owner = existing.and_then(|b| b.owner).or_else(|| Some(scope.member.to_string()));
     let saved = Bot { name: String::new(), owner, on: false, on_by: None, off_note: None, ..bot };
     db::save_bot(&hub.db, team, &saved).await?;
     draft(hub, scope, &saved.workflow).await
+}
+
+/// What a refused delete of a bot that is on, or has a live run, says.
+pub const TURN_OFF_FIRST: &str = "turn the bot off first";
+
+/// Deletes a bot that is off and has no live run: its `team_bots` row and its team workflow. Only
+/// its owner (the member who answers for it) or the team's owner; anyone else is answered as if
+/// the team had no such workflow. Its past runs stay listed: `team_runs` names the workflow by id
+/// only.
+pub async fn delete_bot(hub: &Arc<Hub>, scope: &Scope, workflow_id: &str) -> Result<(), String> {
+    let team = scope.team.id;
+    let unknown = format!("this team has no workflow {workflow_id}");
+    let workflows = workflows(hub, &scope.team).await?;
+    let workflow = find(&workflows, workflow_id)?;
+    let row = db::bot(&hub.db, team, workflow_id).await?;
+    if workflow.enabled || row.as_ref().is_some_and(|b| b.on) || !db::live_runs_of(&hub.db, team, workflow_id).await?.is_empty() {
+        return Err(TURN_OFF_FIRST.into());
+    }
+    let owns = row.as_ref().and_then(|b| b.owner.as_deref()) == Some(scope.member.to_string().as_str());
+    if !owns && scope.owner_only().is_err() {
+        return Err(unknown);
+    }
+    Box::pin(hub.hub_call(&scope.team, HubCall::DeleteConnector { id: workflow_id.to_owned() })).await?;
+    db::delete_bot(&hub.db, team, workflow_id).await?;
+    Ok(())
 }
 
 /// Turns the bot on or off, keeping who did it (`on_by`), and enables or disables the team
@@ -329,40 +389,9 @@ pub async fn run_ended(hub: &Hub, team: Uuid, run: &Run) -> Result<(), String> {
     Ok(())
 }
 
-/// A personal `HubCall` a member runs on the team's account (`TeamOp::Hub`). Where it would let a
-/// member act around a bot's rules it is held to them:
-/// - `SaveConnector` always stores the workflow to run in a box, keeps its stored `enabled` (a new
-///   workflow is saved off), and puts a bot back to a draft;
-/// - `RunWorkflow` runs only a bot that is on, and records the run (`run_now`);
-/// - `DeleteConnector` of a bot deletes its row too.
+/// A personal `HubCall` a member runs on the team's account (`TeamOp::Hub`), once `hub_rule`
+/// let it. None of the calls that save, delete or run a workflow is let: a team's workflows
+/// change and run only as its bots (`save_bot`, `delete_bot`, `run_now`).
 pub async fn hub_call(hub: &Arc<Hub>, scope: &Scope, call: HubCall) -> Result<Value, String> {
-    let team = scope.team.id;
-    match call {
-        HubCall::SaveConnector { mut connector } => {
-            let stored = match connector.id.is_empty() {
-                true => None,
-                false => workflows(hub, &scope.team).await?.into_iter().find(|c| c.id == connector.id),
-            };
-            let is_bot = match &stored {
-                Some(stored) => db::bot(&hub.db, team, &stored.id).await?.is_some(),
-                None => false,
-            };
-            connector.enabled = !is_bot && stored.as_ref().is_some_and(|c| c.enabled);
-            if !matches!(connector.runs_on, pinned_core::connectors::RunsOn::FreshBox(_)) {
-                connector.runs_on = pinned_core::connectors::RunsOn::FreshBox(BoxStep::default());
-            }
-            let saved = Box::pin(hub.hub_call(&scope.team, HubCall::SaveConnector { connector })).await?;
-            if is_bot {
-                db::turn_bot_on(&hub.db, team, saved["id"].as_str().unwrap_or_default(), false, scope.member).await?;
-            }
-            Ok(saved)
-        }
-        HubCall::DeleteConnector { id } => {
-            let gone = Box::pin(hub.hub_call(&scope.team, HubCall::DeleteConnector { id: id.clone() })).await?;
-            db::delete_bot(&hub.db, team, &id).await?;
-            Ok(gone)
-        }
-        HubCall::RunWorkflow { id } => super::json(run_now(hub, scope, &id).await?),
-        call => Box::pin(hub.hub_call(&scope.team, call)).await,
-    }
+    Box::pin(hub.hub_call(&scope.team, call)).await
 }

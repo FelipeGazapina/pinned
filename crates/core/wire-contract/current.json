@@ -11230,6 +11230,7 @@
                 ]
               },
               {
+                "description": "Saves the bot, as a draft. With `connector`, the team's workflow itself (the `Connector`\n`HubCall::SaveConnector` takes, new when its `id` is empty) is saved with it: the one way a\nmember changes a team's workflows. The bot then is that workflow's.",
                 "type": "object",
                 "properties": {
                   "op": {
@@ -11238,6 +11239,16 @@
                   },
                   "bot": {
                     "$ref": "#/$defs/Bot"
+                  },
+                  "connector": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Connector"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
@@ -11263,6 +11274,23 @@
                   "op",
                   "workflow",
                   "on"
+                ]
+              },
+              {
+                "description": "Deletes a bot that is off, and its team workflow. Past runs stay listed.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "delete_bot"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow"
                 ]
               },
               {
@@ -22805,6 +22833,7 @@
                 ]
               },
               {
+                "description": "Saves the bot, as a draft. With `connector`, the team's workflow itself (the `Connector`\n`HubCall::SaveConnector` takes, new when its `id` is empty) is saved with it: the one way a\nmember changes a team's workflows. The bot then is that workflow's.",
                 "type": "object",
                 "properties": {
                   "op": {
@@ -22813,6 +22842,16 @@
                   },
                   "bot": {
                     "$ref": "#/$defs/Bot"
+                  },
+                  "connector": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Connector"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
@@ -22838,6 +22877,23 @@
                   "op",
                   "workflow",
                   "on"
+                ]
+              },
+              {
+                "description": "Deletes a bot that is off, and its team workflow. Past runs stay listed.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "delete_bot"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow"
                 ]
               },
               {
@@ -31540,6 +31596,7 @@
                 ]
               },
               {
+                "description": "Saves the bot, as a draft. With `connector`, the team's workflow itself (the `Connector`\n`HubCall::SaveConnector` takes, new when its `id` is empty) is saved with it: the one way a\nmember changes a team's workflows. The bot then is that workflow's.",
                 "type": "object",
                 "properties": {
                   "op": {
@@ -31548,6 +31605,16 @@
                   },
                   "bot": {
                     "$ref": "#/$defs/Bot"
+                  },
+                  "connector": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Connector"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
@@ -31573,6 +31640,23 @@
                   "op",
                   "workflow",
                   "on"
+                ]
+              },
+              {
+                "description": "Deletes a bot that is off, and its team workflow. Past runs stay listed.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "delete_bot"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow"
                 ]
               },
               {
@@ -39967,6 +40051,7 @@
                 ]
               },
               {
+                "description": "Saves the bot, as a draft. With `connector`, the team's workflow itself (the `Connector`\n`HubCall::SaveConnector` takes, new when its `id` is empty) is saved with it: the one way a\nmember changes a team's workflows. The bot then is that workflow's.",
                 "type": "object",
                 "properties": {
                   "op": {
@@ -39975,6 +40060,16 @@
                   },
                   "bot": {
                     "$ref": "#/$defs/Bot"
+                  },
+                  "connector": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/$defs/Connector"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": [
@@ -40000,6 +40095,23 @@
                   "op",
                   "workflow",
                   "on"
+                ]
+              },
+              {
+                "description": "Deletes a bot that is off, and its team workflow. Past runs stay listed.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "delete_bot"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow"
                 ]
               },
               {
