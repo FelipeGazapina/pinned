@@ -13,11 +13,11 @@ use pinned_server::db::{Db, Sealer};
 use pinned_server::teams;
 use uuid::Uuid;
 
-const DEPLOY: &str = "vercel deploy --prod site-a";
+pub(super) const DEPLOY: &str = "vercel deploy --prod site-a";
 
 /// What the bot reads when it runs `command` in the team's box: `None` when the step runs, else
 /// the hook's reason for denying it.
-fn try_step(hub: &TestHub, tb: &TeamBox, command: &str) -> Option<String> {
+pub(super) fn try_step(hub: &TestHub, tb: &TeamBox, command: &str) -> Option<String> {
     let payload = json!({ "tool_name": "Bash", "tool_input": { "command": command }, "cwd": "/work/site" }).to_string();
     let env = HookEnv { team_box: true, project_dir: Some(PathBuf::from("/work/site")), home: PathBuf::from("/home/box") };
     let out = on_node(hub, &tb.box_id, |node| team_hook::decide(&payload, &env, |m| node.link.as_ref().unwrap().forward(m)))?;
@@ -27,18 +27,18 @@ fn try_step(hub: &TestHub, tb: &TeamBox, command: &str) -> Option<String> {
 }
 
 /// What the bot reads when its step went to the team as call `id`.
-fn asked(id: &str) -> String {
+pub(super) fn asked(id: &str) -> String {
     format!("Asked the team before this step (call {id}). End your turn and wait for the answer; only if it says go ahead, make this exact tool call again, unchanged.")
 }
 
 /// The team's open calls as its owner lists them: id and question.
-fn open_calls(tb: &mut TeamBox) -> Vec<(String, String)> {
+pub(super) fn open_calls(tb: &mut TeamBox) -> Vec<(String, String)> {
     let listed = calls_of(tb.team, &mut tb.owner.client);
     listed.iter().filter(|c| c["answer"].is_null()).map(|c| (c["id"].as_str().unwrap().to_owned(), c["question"].as_str().unwrap().to_owned())).collect()
 }
 
 /// The bot tries `command`, which goes to the team as one new call; its id.
-fn ask(hub: &TestHub, tb: &mut TeamBox, command: &str) -> String {
+pub(super) fn ask(hub: &TestHub, tb: &mut TeamBox, command: &str) -> String {
     ask_shown(hub, tb, command, command)
 }
 
@@ -64,16 +64,16 @@ fn ask_op(command: &str, question: &str) -> TeamOp {
 }
 
 /// The team's owner answers call `call`.
-fn answer(tb: &mut TeamBox, call: &str, answer: Value) -> Value {
+pub(super) fn answer(tb: &mut TeamBox, call: &str, answer: Value) -> Value {
     op(tb.team, &mut tb.owner.client, json!({ "op": "answer_call", "id": call, "answer": answer })).unwrap()
 }
 
 /// Whether the "Go ahead" on call `call` was used.
-fn released(hub: &TestHub, call: &str) -> bool {
+pub(super) fn released(hub: &TestHub, call: &str) -> bool {
     rows(hub, &format!("select (released_at is not null)::text from team_calls where id = '{call}'"))[0][0].as_deref() == Some("true")
 }
 
-fn now() -> i64 {
+pub(super) fn now() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
 }
 

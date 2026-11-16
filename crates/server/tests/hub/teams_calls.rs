@@ -59,7 +59,12 @@ pub(super) struct TeamBox {
 
 impl TeamBox {
     pub(super) fn new(hub: &TestHub) -> TeamBox {
-        let mut owner = person(hub, "olga@example.test");
+        TeamBox::new_as(hub, "olga@example.test")
+    }
+
+    /// A team of its own, whose owner signs up as `email`: a second team box in one hub.
+    pub(super) fn new_as(hub: &TestHub, email: &str) -> TeamBox {
+        let mut owner = person(hub, email);
         let made = owner.client.hub(json!({ "cmd": "team", "op": { "op": "create", "name": "Acme" } })).unwrap();
         let team = Uuid::parse_str(made["id"].as_str().unwrap()).unwrap();
         let mut on_team = |call: Value| owner.client.hub(json!({ "cmd": "team", "team": team.to_string(), "op": { "op": "hub", "call": call } }));
