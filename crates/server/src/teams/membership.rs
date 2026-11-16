@@ -3,7 +3,7 @@
 use super::{db, Scope};
 use crate::db::{invite_code, invite_hash};
 use crate::hub::{Account, Hub};
-use pinned_core::teams::{CredentialState, Member, Role, Team, TeamInvite};
+use pinned_core::teams::{CredentialState, Member, OpenInvite, Role, Team, TeamInvite};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -186,6 +186,20 @@ pub async fn invite(hub: &Arc<Hub>, scope: &Scope) -> Result<TeamInvite, String>
     }
     eprintln!("pinned-server: account {} made an invite to team {}", scope.member, scope.team.id);
     Ok(TeamInvite { code, hint })
+}
+
+/// Owner only. The open invites (not used, not revoked), newest first: each one's hint, when it
+/// was made and who made it, never its code.
+pub async fn invites(hub: &Arc<Hub>, scope: &Scope) -> Result<Vec<OpenInvite>, String> {
+    scope.owner_only()?;
+    Ok(db::open_invites(&hub.db, scope.team.id)
+        .await?
+        .into_iter()
+        .map(|row| {
+            let name = row.email.as_deref().and_then(|e| e.split('@').next()).filter(|n| !n.is_empty()).map(str::to_owned);
+            OpenInvite { hint: row.hint, created: row.created, made_by: name.unwrap_or_else(|| row.made_by.to_string()) }
+        })
+        .collect())
 }
 
 /// Owner only. Revokes the open invites whose hint is `hint`; an error when there was none.

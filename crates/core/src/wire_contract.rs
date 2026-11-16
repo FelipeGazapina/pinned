@@ -120,9 +120,11 @@ pub fn current(version: &str, routes: &[&str]) -> Contract {
     outbound.insert("Team".into(), schemas::<crate::teams::Team>());
     outbound.insert("TeamMember".into(), schemas::<crate::teams::Member>());
     outbound.insert("TeamInvite".into(), schemas::<crate::teams::TeamInvite>());
+    outbound.insert("TeamOpenInvite".into(), schemas::<crate::teams::OpenInvite>());
     outbound.insert("TeamProject".into(), schemas::<crate::teams::TeamProject>());
     outbound.insert("TeamGroup".into(), schemas::<crate::teams::Group>());
     outbound.insert("TeamBot".into(), schemas::<crate::teams::Bot>());
+    outbound.insert("TeamSavedBot".into(), schemas::<crate::teams::SavedBot>());
     outbound.insert("TeamRun".into(), schemas::<crate::teams::Run>());
     outbound.insert("TeamCall".into(), schemas::<crate::teams::Call>());
     outbound.insert("TeamRunLogLine".into(), schemas::<crate::teams::RunLogLine>());

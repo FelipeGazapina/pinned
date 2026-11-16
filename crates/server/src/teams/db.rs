@@ -25,6 +25,15 @@ pub struct MemberRow {
     pub role: Role,
 }
 
+/// An open invite of a team, with its maker's email from `accounts`.
+pub struct OpenInviteRow {
+    pub hint: String,
+    /// Unix seconds.
+    pub created: i64,
+    pub made_by: Uuid,
+    pub email: Option<String>,
+}
+
 // ---- mod.rs ----
 
 /// The member's role on the team, or None when it is not a member (or the team does not exist).
@@ -126,7 +135,7 @@ pub async fn create_invite(db: &Db, team: Uuid, made_by: Uuid, code_hash: &[u8],
     tx.execute("select pg_advisory_xact_lock(hashtext($1::text))", &[&format!("team_invites:{team}")]).await.map_err(err)?;
     let open: i64 = tx
         .query_one(
-            "select count(*) from team_invites where team = $1 and used_by is null and not revoked",
+            "select count(*) from team_invites where team = $1 and used_at is null and not revoked",
             &[&team],
         )
         .await
@@ -148,11 +157,12 @@ pub async fn create_invite(db: &Db, team: Uuid, made_by: Uuid, code_hash: &[u8],
 /// that case answers the team without spending it.
 pub async fn take_invite(db: &Db, code_hash: &[u8], member: Uuid) -> Result<Option<Uuid>, String> {
     let client = db.client().await?;
-    // A racing second spend finds `used_by` set when its row lock comes free, so only one join lands.
+    // A racing second spend finds `used_at` set when its row lock comes free, so only one join lands.
+    // Used is `used_at`, never `used_by`: deleting the joiner clears `used_by` and must not reopen the code.
     let joined = client
         .query_opt(
             "with spent as (update team_invites set used_by = $2, used_at = now()
-                 where code_hash = $1 and used_by is null and not revoked
+                 where code_hash = $1 and used_at is null and not revoked
                  and exists (select 1 from accounts where id = $2 and kind = 'person')
                  and not exists (select 1 from team_members where team = team_invites.team and member = $2)
                  returning team),
@@ -169,12 +179,28 @@ pub async fn take_invite(db: &Db, code_hash: &[u8], member: Uuid) -> Result<Opti
     let again = client
         .query_opt(
             "select i.team from team_invites i join team_members m on m.team = i.team and m.member = $2
-             where i.code_hash = $1 and i.used_by is null and not i.revoked",
+             where i.code_hash = $1 and i.used_at is null and not i.revoked",
             &[&code_hash, &member],
         )
         .await
         .map_err(err)?;
     Ok(again.map(|r| r.get(0)))
+}
+
+/// The team's open invites (unused and unrevoked), newest first.
+pub async fn open_invites(db: &Db, team: Uuid) -> Result<Vec<OpenInviteRow>, String> {
+    let rows = db
+        .client()
+        .await?
+        .query(
+            "select i.hint, extract(epoch from i.created_at)::bigint, i.made_by, a.email from team_invites i
+             left join accounts a on a.id = i.made_by
+             where i.team = $1 and i.used_at is null and not i.revoked order by i.created_at desc, i.hint",
+            &[&team],
+        )
+        .await
+        .map_err(err)?;
+    Ok(rows.iter().map(|r| OpenInviteRow { hint: r.get(0), created: r.get(1), made_by: r.get(2), email: r.get(3) }).collect())
 }
 
 /// Revokes the team's open invites (unused and unrevoked, however old) whose hint is `hint`;
@@ -184,7 +210,7 @@ pub async fn revoke_invite(db: &Db, team: Uuid, hint: &str) -> Result<u64, Strin
         .await?
         .execute(
             "update team_invites set revoked = true
-             where team = $1 and hint = $2 and used_by is null and not revoked",
+             where team = $1 and hint = $2 and used_at is null and not revoked",
             &[&team, &hint],
         )
         .await
@@ -386,6 +412,19 @@ pub async fn bots(db: &Db, team: Uuid) -> Result<Vec<Bot>, String> {
 pub async fn bot(db: &Db, team: Uuid, workflow: &str) -> Result<Option<Bot>, String> {
     let row = db.client().await?.query_opt(&format!("select {BOT_COLUMNS} from team_bots where team = $1 and workflow = $2"), &[&team, &workflow]).await.map_err(err)?;
     row.as_ref().map(bot_row).transpose()
+}
+
+/// Whether an account other than `team` stores a workflow (connector) with id `id`, as its store
+/// document was last written.
+pub async fn workflow_elsewhere(db: &Db, team: Uuid, id: &str) -> Result<bool, String> {
+    let wanted = serde_json::json!([{ "id": id }]);
+    let row = db
+        .client()
+        .await?
+        .query_one("select exists (select 1 from accounts where id <> $1 and store -> 'connectors' @> $2)", &[&team, &wanted])
+        .await
+        .map_err(err)?;
+    Ok(row.get(0))
 }
 
 /// Inserts or replaces the row of `bot.workflow`, leaving `on_by` and `on_at` as they are.

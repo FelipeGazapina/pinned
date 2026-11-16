@@ -10,7 +10,7 @@ use pinned_core::connectors::{BoxStep, Connector, Placement, Trigger};
 use pinned_core::graph::migrate::migrate;
 use pinned_core::graph::runner::{session_steps, Library, NOT_AN_ON_BOT};
 use pinned_core::graph::{NodeKind, Watch};
-use pinned_core::teams::{Bot, BotLimits, CallRules, Run, SkipReason, TeamEvent, TeamProject, Who, CEILING_TIMES};
+use pinned_core::teams::{Bot, BotLimits, CallRules, Run, SavedBot, SkipReason, TeamEvent, TeamProject, Who, CEILING_TIMES};
 use pinned_core::wire::HubCall;
 use serde_json::Value;
 use std::sync::Arc;
@@ -184,19 +184,33 @@ async fn check_who(hub: &Arc<Hub>, team: Uuid, calls: &CallRules) -> Result<(), 
     Ok(())
 }
 
+/// Whether `id`, which the team does not keep, may name a new workflow the app made: a uuid
+/// (`connectors::is_uuid`) no other account's workflow has. Else it is an unknown workflow.
+async fn app_named(hub: &Arc<Hub>, team: Uuid, id: &str) -> Result<(), String> {
+    if !pinned_core::connectors::is_uuid(id) || db::workflow_elsewhere(&hub.db, team, id).await? {
+        return Err(format!("this team has no workflow {id}"));
+    }
+    Ok(())
+}
+
 /// Any member. Saves who the bot asks and its limits for workflow `bot.workflow` of the team's
 /// account, and with `connector` that workflow itself, on the team's account: a new one when its
-/// id is empty, else one the team already keeps (an id the team does not keep is refused as an
-/// unknown workflow). The bot goes back to a draft, its workflow disabled, whoever saves it: `on`
+/// id is empty or a uuid the app made (`app_named`), which it keeps so the same save sent again
+/// saves that workflow, else one the team already keeps (any other id is refused as an unknown
+/// workflow). The bot goes back to a draft, its workflow disabled, whoever saves it: `on`
 /// and `on_by` of `bot` are never read, and turning it on again is `turn_bot_on`. A limit above
-/// the hub's team policy is the owner's to give. Nothing is saved when a check refuses.
-pub async fn save_bot(hub: &Arc<Hub>, scope: &Scope, mut bot: Bot, connector: Option<Connector>) -> Result<(), String> {
+/// the hub's team policy is the owner's to give. Nothing is saved when a check refuses. Answers the
+/// bot's workflow.
+pub async fn save_bot(hub: &Arc<Hub>, scope: &Scope, mut bot: Bot, connector: Option<Connector>) -> Result<SavedBot, String> {
     let team = scope.team.id;
     let mut workflows = workflows(hub, &scope.team).await?;
+    // A new workflow: no row of its bot to turn off first.
+    let mut new = false;
     let connector = match connector {
         Some(mut connector) => {
-            if !connector.id.is_empty() {
-                find(&workflows, &connector.id)?;
+            new = !workflows.iter().any(|c| c.id == connector.id);
+            if new && !connector.id.is_empty() {
+                app_named(hub, team, &connector.id).await?;
             }
             if !bot.workflow.is_empty() && bot.workflow != connector.id {
                 return Err(format!("this bot is for workflow {}, not the workflow it saves", bot.workflow));
@@ -236,7 +250,7 @@ pub async fn save_bot(hub: &Arc<Hub>, scope: &Scope, mut bot: Bot, connector: Op
         // Not even the owner passes the ceiling `set_bot_ceiling` holds.
         ceiling(hub, usd, f64::from(minutes))?;
     }
-    if !bot.workflow.is_empty() {
+    if !new {
         // Off before its workflow changes, so no trigger runs the new workflow as an on bot.
         db::turn_bot_on(&hub.db, team, &bot.workflow, false, scope.member).await?;
     }
@@ -249,7 +263,8 @@ pub async fn save_bot(hub: &Arc<Hub>, scope: &Scope, mut bot: Bot, connector: Op
     let limits = held(&hub.team_policy, bot.limits.clone());
     let saved = Bot { name: String::new(), owner, on: false, on_by: None, off_note: None, limits, ..bot };
     db::save_bot(&hub.db, team, &saved).await?;
-    draft(hub, scope, &saved.workflow).await
+    draft(hub, scope, &saved.workflow).await?;
+    Ok(SavedBot { workflow: saved.workflow })
 }
 
 /// Whether `usd` and `minutes` are a bot's limits a team's owner may give: finite, above 0,

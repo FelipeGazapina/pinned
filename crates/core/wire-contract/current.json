@@ -11080,6 +11080,19 @@
                 ]
               },
               {
+                "description": "Owner only. `Vec<OpenInvite>`: the invites not used and not revoked, newest first.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "invites"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
                 "description": "Owner only.",
                 "type": "object",
                 "properties": {
@@ -11230,7 +11243,7 @@
                 ]
               },
               {
-                "description": "Saves the bot, as a draft. With `connector`, the team's workflow itself (the `Connector`\n`HubCall::SaveConnector` takes, new when its `id` is empty) is saved with it: the one way a\nmember changes a team's workflows. The bot then is that workflow's.",
+                "description": "`SavedBot`. Saves the bot, as a draft. With `connector`, the team's workflow itself (the\n`Connector` `HubCall::SaveConnector` takes) is saved with it: the one way a member changes a\nteam's workflows. The bot then is that workflow's. A new workflow has an empty `id`, which\nthe hub names, or a uuid the app made (lowercase, hyphenated) that it keeps: the same save\nsent again then saves that workflow, never a second one.",
                 "type": "object",
                 "properties": {
                   "op": {
@@ -22749,6 +22762,19 @@
                 ]
               },
               {
+                "description": "Owner only. `Vec<OpenInvite>`: the invites not used and not revoked, newest first.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "invites"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
                 "description": "Owner only.",
                 "type": "object",
                 "properties": {
@@ -22899,7 +22925,7 @@
                 ]
               },
               {
-                "description": "Saves the bot, as a draft. With `connector`, the team's workflow itself (the `Connector`\n`HubCall::SaveConnector` takes, new when its `id` is empty) is saved with it: the one way a\nmember changes a team's workflows. The bot then is that workflow's.",
+                "description": "`SavedBot`. Saves the bot, as a draft. With `connector`, the team's workflow itself (the\n`Connector` `HubCall::SaveConnector` takes) is saved with it: the one way a member changes a\nteam's workflows. The bot then is that workflow's. A new workflow has an empty `id`, which\nthe hub names, or a uuid the app made (lowercase, hyphenated) that it keeps: the same save\nsent again then saves that workflow, never a second one.",
                 "type": "object",
                 "properties": {
                   "op": {
@@ -31578,6 +31604,19 @@
                 ]
               },
               {
+                "description": "Owner only. `Vec<OpenInvite>`: the invites not used and not revoked, newest first.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "invites"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
                 "description": "Owner only.",
                 "type": "object",
                 "properties": {
@@ -31728,7 +31767,7 @@
                 ]
               },
               {
-                "description": "Saves the bot, as a draft. With `connector`, the team's workflow itself (the `Connector`\n`HubCall::SaveConnector` takes, new when its `id` is empty) is saved with it: the one way a\nmember changes a team's workflows. The bot then is that workflow's.",
+                "description": "`SavedBot`. Saves the bot, as a draft. With `connector`, the team's workflow itself (the\n`Connector` `HubCall::SaveConnector` takes) is saved with it: the one way a member changes a\nteam's workflows. The bot then is that workflow's. A new workflow has an empty `id`, which\nthe hub names, or a uuid the app made (lowercase, hyphenated) that it keeps: the same save\nsent again then saves that workflow, never a second one.",
                 "type": "object",
                 "properties": {
                   "op": {
@@ -40099,6 +40138,19 @@
                 ]
               },
               {
+                "description": "Owner only. `Vec<OpenInvite>`: the invites not used and not revoked, newest first.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "invites"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
                 "description": "Owner only.",
                 "type": "object",
                 "properties": {
@@ -40249,7 +40301,7 @@
                 ]
               },
               {
-                "description": "Saves the bot, as a draft. With `connector`, the team's workflow itself (the `Connector`\n`HubCall::SaveConnector` takes, new when its `id` is empty) is saved with it: the one way a\nmember changes a team's workflows. The bot then is that workflow's.",
+                "description": "`SavedBot`. Saves the bot, as a draft. With `connector`, the team's workflow itself (the\n`Connector` `HubCall::SaveConnector` takes) is saved with it: the one way a member changes a\nteam's workflows. The bot then is that workflow's. A new workflow has an empty `id`, which\nthe hub names, or a uuid the app made (lowercase, hyphenated) that it keeps: the same save\nsent again then saves that workflow, never a second one.",
                 "type": "object",
                 "properties": {
                   "op": {
@@ -59695,6 +59747,54 @@
         }
       }
     },
+    "TeamOpenInvite": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "OpenInvite",
+        "description": "An invite not used and not revoked, as the owner lists it: never its code. `created` is unix\nseconds; `made_by` is the maker's name as members see it, or its account id when it has none.\n\n`{\"hint\":\"ABCD\",\"created\":1790000000,\"made_by\":\"ana\"}`",
+        "type": "object",
+        "properties": {
+          "hint": {
+            "type": "string"
+          },
+          "created": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "made_by": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "hint",
+          "created",
+          "made_by"
+        ]
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "OpenInvite",
+        "description": "An invite not used and not revoked, as the owner lists it: never its code. `created` is unix\nseconds; `made_by` is the maker's name as members see it, or its account id when it has none.\n\n`{\"hint\":\"ABCD\",\"created\":1790000000,\"made_by\":\"ana\"}`",
+        "type": "object",
+        "properties": {
+          "hint": {
+            "type": "string"
+          },
+          "created": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "made_by": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "hint",
+          "created",
+          "made_by"
+        ]
+      }
+    },
     "TeamProject": {
       "send": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -60015,6 +60115,36 @@
           "at",
           "who",
           "text"
+        ]
+      }
+    },
+    "TeamSavedBot": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "SavedBot",
+        "description": "What a saved bot answers: the id of its workflow, the one the hub named for a new workflow.\n\n`{\"workflow\":\"c1790000000000\"}`",
+        "type": "object",
+        "properties": {
+          "workflow": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "workflow"
+        ]
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "SavedBot",
+        "description": "What a saved bot answers: the id of its workflow, the one the hub named for a new workflow.\n\n`{\"workflow\":\"c1790000000000\"}`",
+        "type": "object",
+        "properties": {
+          "workflow": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "workflow"
         ]
       }
     },

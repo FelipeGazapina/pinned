@@ -105,10 +105,10 @@ fn a_member_saves_a_bot_with_its_workflow_as_a_draft_and_the_team_lists_it() {
     let team = make_team(&mut ana, "Acme");
     let (mut bruno, bruno_id) = member(&hub, &team, "bruno@example.test");
     let saved = team_op(&mut bruno, &team, json!({ "op": "save_bot", "bot": { "workflow": "" }, "connector": workflow_json("Fix bugs") }));
-    assert_eq!(saved, Ok(Value::Null));
     let flows = team_workflows(&hub, Uuid::parse_str(&team).unwrap());
     assert_eq!(flows.len(), 1);
     let id = flows[0]["id"].as_str().unwrap().to_owned();
+    assert_eq!(saved, Ok(json!({ "workflow": id })));
     assert_eq!((flows[0]["name"].clone(), flows[0]["enabled"].clone(), flows[0]["machine"].clone()), (json!("Fix bugs"), json!(false), json!({ "kind": "upstash-box" })), "saved off and in a box, whatever the member asked");
     assert_eq!(listed(&mut bruno, &team), vec![(id.clone(), "Fix bugs".to_owned(), false, Some(bruno_id.clone()))], "a draft bot, answered for by bruno");
     assert_eq!(bot_on_at(&hub, &team, &id), "null");
@@ -120,7 +120,7 @@ fn a_member_saves_a_bot_with_its_workflow_as_a_draft_and_the_team_lists_it() {
 fn save_bot_on_a_bot_that_is_on_puts_it_back_to_a_draft_with_or_without_its_workflow() {
     let (hub, team, id, mut bruno) = team_box_with_on_bot("hard_a_end_b");
     let bot = json!({ "workflow": id });
-    assert_eq!(team_op(&mut bruno, &team, json!({ "op": "save_bot", "bot": bot })), Ok(Value::Null));
+    assert_eq!(team_op(&mut bruno, &team, json!({ "op": "save_bot", "bot": bot })), Ok(json!({ "workflow": id })));
     assert_eq!(bot_on_at(&hub, &team, &id), "null", "off");
     assert_eq!(team_workflow(&hub, &team, &id)["enabled"], false, "its workflow with it");
     assert_eq!(listed(&mut bruno, &team).iter().map(|b| b.2).collect::<Vec<_>>(), vec![false]);
@@ -132,7 +132,7 @@ fn save_bot_on_a_bot_that_is_on_puts_it_back_to_a_draft_with_or_without_its_work
     let mut changed = team_workflow(&hub, &team, &id);
     changed["instructions"] = json!("Fix the bug and open a pull request.");
     changed["enabled"] = json!(true);
-    assert_eq!(team_op(&mut bruno, &team, json!({ "op": "save_bot", "bot": bot, "connector": changed })), Ok(Value::Null));
+    assert_eq!(team_op(&mut bruno, &team, json!({ "op": "save_bot", "bot": bot, "connector": changed })), Ok(json!({ "workflow": id })));
     let stored = team_workflow(&hub, &team, &id);
     assert_eq!((stored["instructions"].clone(), stored["enabled"].clone()), (json!("Fix the bug and open a pull request."), json!(false)));
     assert_eq!(bot_on_at(&hub, &team, &id), "null", "a changed workflow is a draft until someone turns it on");
