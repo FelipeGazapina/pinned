@@ -406,7 +406,7 @@ test("step 4 makes invite codes one by one, shows each with Copy, and Skip is ju
   await flush();
   const t = text(a.page());
   assert.match(t, /Who works with you\?/);
-  assert.ok(!/e-?mail/i.test(t.replace(/The hub sends no e-mail/, "")), "no e-mail field");
+  assert.ok(!/e-?mail/i.test(t), "no e-mail field");
   assert.ok(!/<input/.test(a.page()));
   a.click("invite");
   await flush();
@@ -415,7 +415,7 @@ test("step 4 makes invite codes one by one, shows each with Copy, and Skip is ju
   assert.deepEqual(a.frames.filter((f) => f.op.op === "invite"), [{ cmd: "team", team: "t1", op: { op: "invite" } }, { cmd: "team", team: "t1", op: { op: "invite" } }]);
   assert.match(a.page(), /<code>CODE-0001<\/code>/);
   assert.match(a.page(), /<code>CODE-0002<\/code>/);
-  assert.match(text(a.page()), /Send this code to the person\. It works once\./);
+  assert.match(text(a.page()), /Send this code to the person\. It works once\. Shown only now\./);
   a.click("copy", { i: "1" });
   await flush();
   assert.equal(a.context.copied, "CODE-0002");
@@ -442,7 +442,7 @@ test("Finish leads to the Done screen with a truthful summary, and the team is c
   assert.match(t, /‹ Back/, "the prototype's Back stays on the last screen");
   assert.match(t, /1 project added\./);
   assert.match(t, /The team's AI account is not connected yet, so no bot runs until it is\./);
-  assert.match(t, /1 invite code made\. Nothing is sent: you pass it on yourself\./);
+  assert.match(t, /1 invite code made\. You pass it on yourself\./);
   assert.ok(!/e-mail.*invit|receive the invit/i.test(t));
   assert.match(t, /Create the first bot/);
   assert.equal(a.context.teamsCurrent(), null, "the team is not current until the person opens it");
@@ -632,100 +632,122 @@ const OWNER_STORED = { id: "t1", name: "North Studio", role: "owner", credential
 const MEMBER_STORED = { id: "t2", name: "Side Gig", role: "member", credential: {} };
 const submit = (a, tm) => a.listeners.submit({ target: { closest: () => ({ dataset: { tm } }) }, preventDefault() {} });
 
-test("the invites page says a code works once and never that it expires", () => {
-  const a = app({ stored: OWNER_STORED, pages: ["team-invites"] });
+const NOW = 1790000000;
+const when = (unix) => new Date(unix * 1000).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+const OPEN = [
+  { hint: "WXYZ", created: NOW, made_by: "ana" },
+  { hint: "ABCD", created: NOW - 86400, made_by: "0b7e5d1c" },
+];
+
+test("the invites page says a code works once and never that it expires or what the hub does not do", async () => {
+  const a = app({ stored: OWNER_STORED, pages: ["team-invites"], answers: { invites: [] } });
   a.show("team-invites");
+  await flush();
   const t = text(a.page());
   assert.ok(t.includes("A code works once. It stays open until the person uses it or you revoke it."), t);
   assert.ok(!/expir|valid for|days|hours/i.test(t), "there is no expiry");
-  assert.ok(t.includes("the hub sends no e-mail"), t);
+  assert.ok(!/does not|sends no|no copy|on this device|first characters/i.test(t), t);
+  assert.ok(t.includes("No open invites."), t);
 });
 
-test("an invite is one invite op; its code is shown once and the open list keeps only its first characters", async () => {
-  let n = 0;
-  const a = app({ stored: OWNER_STORED, pages: ["team-invites"], answers: { invite: () => ({ code: ["ABCD-EFGH-JKMN-PQRS", "WXYZ-2345-6789-KMNP"][n++], hint: ["ABCD", "WXYZ"][n - 1] }) } });
+test("the owner's page lists the open invites with {op:\"invites\"}: hint, when made, who made it, Revoke", async () => {
+  const a = app({ stored: OWNER_STORED, pages: ["team-invites"], answers: { invites: OPEN } });
   a.show("team-invites");
-  assert.ok(text(a.page()).includes("No open invites made on this device."));
-  a.click("invite-make", {}, "team-invites");
   await flush();
-  assert.deepEqual(a.frames, [{ cmd: "team", team: "t1", op: { op: "invite" } }]);
-  let t = text(a.page());
-  assert.ok(t.includes("ABCD-EFGH-JKMN-PQRS"), "the code is shown now");
-  assert.ok(t.includes("Shown only now"), t);
-  assert.ok(t.includes("ABCD…"), "and the open list names it by its first characters");
-  a.click("invite-make", {}, "team-invites");
-  await flush();
-  t = text(a.page());
-  assert.ok(!t.includes("ABCD-EFGH-JKMN-PQRS"), "the first code is gone once a second is made");
-  assert.ok(t.includes("WXYZ-2345-6789-KMNP") && t.includes("ABCD…") && t.includes("WXYZ…"), t);
-  assert.deepEqual(JSON.parse(a.store.get("team-invites:t1")).map((x) => x.hint), ["ABCD", "WXYZ"]);
-  assert.ok(!a.store.get("team-invites:t1").includes("EFGH"), "a code is never kept");
-});
-
-test("Revoke sends revoke_invite with the hint and takes the invite off the list", async () => {
-  const a = app({ stored: OWNER_STORED, pages: ["team-invites"], answers: { invite: { code: "ABCD-EFGH-JKMN-PQRS", hint: "ABCD" }, revoke_invite: null } });
-  a.show("team-invites");
-  a.click("invite-make", {}, "team-invites");
-  await flush();
-  a.frames.length = 0;
-  a.click("invite-revoke", { hint: "ABCD" }, "team-invites");
-  await flush();
-  assert.deepEqual(a.frames, [{ cmd: "team", team: "t1", op: { op: "revoke_invite", hint: "ABCD" } }]);
+  assert.deepEqual(a.frames, [{ cmd: "team", team: "t1", op: { op: "invites" } }]);
+  assert.equal(JSON.stringify(a.frames[0].op), '{"op":"invites"}');
   const t = text(a.page());
-  assert.ok(t.includes("Revoked ABCD…") && t.includes("No open invites made on this device."), t);
-  assert.ok(!t.includes("ABCD-EFGH-JKMN-PQRS"), "the code it showed is gone too");
-  assert.equal(a.store.has("team-invites:t1"), false);
+  assert.ok(t.includes(`WXYZ… Made ${when(NOW)} by ana`), t);
+  assert.ok(t.includes(`ABCD… Made ${when(NOW - 86400)} by 0b7e5d1c`), t);
+  assert.ok(t.indexOf("WXYZ…") < t.indexOf("ABCD…"), "in the order the hub sends: newest first");
+  assert.equal((a.page().match(/data-tm="invite-revoke"/g) ?? []).length, 2);
+  assert.ok(!/<input/.test(a.page()), "no revoke-by-characters field");
+  assert.equal(a.store.size, 1, "nothing about invites is kept on the device");
 });
 
-test("an invite made elsewhere is revoked by typing its first characters", async () => {
-  const a = app({ stored: OWNER_STORED, pages: ["team-invites"], answers: { revoke_invite: (c) => (c.op.hint.toUpperCase() === "K7QM" ? null : new Error("there is no unused invite with that hint")) } });
+test("an invite is one invite op; its code is shown once, then the list is read again", async () => {
+  let open = [];
+  const a = app({ stored: OWNER_STORED, pages: ["team-invites"], answers: { invites: () => open, invite: () => ((open = [{ hint: "ABCD", created: NOW, made_by: "ana" }, ...open]), { code: "ABCD-EFGH-JKMN-PQRS", hint: "ABCD" }) } });
   a.show("team-invites");
-  a.listeners.input({ target: { id: "tm-invite-hint", value: "k7qm" } });
-  submit(a, "invite-form");
   await flush();
-  assert.deepEqual(a.frames, [{ cmd: "team", team: "t1", op: { op: "revoke_invite", hint: "k7qm" } }]);
-  assert.ok(text(a.page()).includes("Revoked K7QM…"));
   a.frames.length = 0;
-  a.listeners.input({ target: { id: "tm-invite-hint", value: "ZZZZ" } });
-  submit(a, "invite-form");
+  a.click("invite-make", {}, "team-invites");
+  await flush();
+  assert.deepEqual(a.frames.map((f) => f.op), [{ op: "invite" }, { op: "invites" }]);
+  const t = text(a.page());
+  assert.ok(t.includes("ABCD-EFGH-JKMN-PQRS"), "the code is shown now");
+  assert.ok(t.includes("Shown only now."), t);
+  assert.ok(t.includes("ABCD… Made"), "and the open list names it by its first characters");
+  assert.equal(a.page().match(/EFGH/g).length, 1, "a code is shown once");
+});
+
+test("Revoke sends revoke_invite with the hint, then reads the list again", async () => {
+  let open = OPEN.slice();
+  const a = app({ stored: OWNER_STORED, pages: ["team-invites"], answers: { invites: () => open, revoke_invite: (c) => ((open = open.filter((x) => x.hint !== c.op.hint)), null) } });
+  a.show("team-invites");
+  await flush();
+  a.frames.length = 0;
+  a.click("invite-revoke", { hint: "WXYZ" }, "team-invites");
+  await flush();
+  assert.deepEqual(a.frames.map((f) => f.op), [{ op: "revoke_invite", hint: "WXYZ" }, { op: "invites" }]);
+  const t = text(a.page());
+  assert.ok(t.includes("Revoked WXYZ…") && t.includes("ABCD…") && !t.includes("WXYZ… Made"), t);
+});
+
+test("a revoke the hub refuses shows the hub's words and the list as the hub has it", async () => {
+  const a = app({ stored: OWNER_STORED, pages: ["team-invites"], answers: { invites: [], revoke_invite: new Error("there is no unused invite with that hint") } });
+  a.show("team-invites");
+  await flush();
+  a.click("invite-revoke", { hint: "ZZZZ" }, "team-invites");
   await flush();
   assert.ok(text(a.page()).includes("there is no unused invite with that hint"), "the hub's words, as sent");
-  a.listeners.input({ target: { id: "tm-invite-hint", value: "" } });
-  a.frames.length = 0;
-  submit(a, "invite-form");
+});
+
+test("text a person typed (the maker's name) reaches the page escaped", async () => {
+  const a = app({ stored: OWNER_STORED, pages: ["team-invites"], answers: { invites: [{ hint: "ABCD", created: NOW, made_by: "<img src=x onerror=1>" }] } });
+  a.show("team-invites");
   await flush();
-  assert.deepEqual(a.frames, [], "an empty hint sends nothing");
-  assert.ok(text(a.page()).includes("Type the first characters of the code."));
+  assert.ok(!a.page().includes("<img"), a.page());
+  assert.ok(a.page().includes("&#60;img"));
+});
+
+test("a list the hub refuses shows the hub's words", async () => {
+  const a = app({ stored: OWNER_STORED, pages: ["team-invites"], answers: { invites: new Error("only the owner lists invites") } });
+  a.show("team-invites");
+  await flush();
+  assert.match(a.page(), /<p class="tm-error" role="alert">only the owner lists invites<\/p>/);
 });
 
 test("at 20 open invites the hub's refusal is shown as it was sent", async () => {
   const refusal = "this team has 20 open invite codes; revoke some first";
-  const a = app({ stored: OWNER_STORED, pages: ["team-invites"], answers: { invite: new Error(refusal) } });
+  const a = app({ stored: OWNER_STORED, pages: ["team-invites"], answers: { invites: [], invite: new Error(refusal) } });
   a.show("team-invites");
+  await flush();
   a.click("invite-make", {}, "team-invites");
   await flush();
   assert.ok(text(a.page()).includes(refusal), text(a.page()));
   assert.match(a.page(), /<p class="tm-error" role="alert">this team has 20 open invite codes; revoke some first<\/p>/);
-  assert.equal(a.store.has("team-invites:t1"), false, "nothing was made, nothing is kept");
 });
 
-test("a member is told that only the owner makes invites, and sees no controls", async () => {
-  const a = app({ stored: MEMBER_STORED, pages: ["team-invites"] });
+test("a member is told that only the owner makes invites, and sees no list and no controls", async () => {
+  const a = app({ stored: MEMBER_STORED, pages: ["team-invites"], answers: { invites: OPEN } });
   a.show("team-invites");
+  await flush();
   assert.ok(text(a.page()).includes("Only the team's owner makes invite codes."));
-  assert.ok(!a.page().includes('data-tm="invite-make"'));
+  assert.ok(!a.page().includes('data-tm="invite-make"') && !a.page().includes("WXYZ") && !a.page().includes("Open invites"));
   a.click("invite-make", {}, "team-invites");
+  a.click("invite-revoke", { hint: "WXYZ" }, "team-invites");
   await flush();
   assert.deepEqual(a.frames, [], "no invite op leaves a member's page");
 });
 
-test("an invite made in the create wizard lands on the owner's open list", async () => {
+test("an invite made in the create wizard keeps nothing on the device", async () => {
   const a = app({ answers: { create: ACME, invite: { code: "ABCD-EFGH-JKMN-PQRS", hint: "ABCD" } } });
   a.show("team-create");
   a.run('teamWizard.team = { id: "t1", name: "North Studio" }; teamWizard.step = 4; renderCreate()');
   a.click("invite");
   await flush();
-  assert.deepEqual(JSON.parse(a.store.get("team-invites:t1")).map((x) => x.hint), ["ABCD"]);
+  assert.equal(a.store.has("team-invites:t1"), false);
 });
 
 test("the create wizard no longer promises a team chat", () => {

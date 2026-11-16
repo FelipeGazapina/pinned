@@ -92,30 +92,27 @@ const TEAMS_TEXT = {
   inviteSend: "Send this code to the person. It works once.",
   inviteCopy: "Copy",
   inviteCopied: "Copied",
-  inviteAbout: "Each person signs in with their own pinned account, pastes the code and picks which of their projects belong to the team. The hub sends no e-mail, so you pass each code on yourself. The bots call people through groups. You can skip this step.",
-  inviteShown: "Shown only now: the hub keeps no copy you can read back.",
+  inviteAbout: "Each person signs in with their own pinned account, pastes the code and picks which of their projects belong to the team. You pass each code on to the person yourself. The bots call people through groups. You can skip this step.",
+  inviteShown: "Shown only now.",
 
   invitesTitle: "Invite people",
-  invitesAbout: "Make an invite code and pass it on yourself: the hub sends no e-mail. A code works once. It stays open until the person uses it or you revoke it.",
+  invitesAbout: "Make an invite code and pass it on to the person yourself. A code works once. It stays open until the person uses it or you revoke it.",
   invitesOwnerOnly: "Only the team's owner makes invite codes.",
   invitesOpen: "Open invites",
-  invitesNone: "No open invites made on this device.",
-  invitesWhy: "The hub does not list invites. This shows the ones made here, by their first characters. To revoke one made somewhere else, type its first characters below.",
-  invitesMade: (when) => `made ${when}`,
+  invitesNone: "No open invites.",
+  invitesLoading: "Loading the open invites…",
+  invitesMade: (when) => `Made ${when}`,
+  invitesBy: (by) => `by ${by}`,
   invitesCount: (n) => `${n} of ${TEAM_INVITES_MAX} open`,
   inviteRevoke: "Revoke",
   inviteRevoking: "Revoking…",
-  inviteRevokeBy: "Revoke by its first characters",
-  inviteHintLabel: "First characters of the code",
-  inviteHintPlaceholder: "ABCD",
-  inviteHintEmpty: "Type the first characters of the code.",
   inviteRevoked: (hint) => `Revoked ${hint}…`,
 
   readyTitle: (team) => `${team} is ready`,
   readyNoBot: "The team has no bots yet. Start with one, or open the team and look around. To go back to your account, use the same account menu.",
   readyProjects: (n) => (n === 0 ? "No projects added." : n === 1 ? "1 project added." : `${n} projects added.`),
   readyAi: (have, all) => (have === all ? " The team's AI account is connected." : have === 0 ? " The team's AI account is not connected yet, so no bot runs until it is." : ` ${have} of ${all} keys of the team's AI account are connected, so no bot runs until the rest are.`),
-  readyInvites: (n) => (n === 0 ? " No invite codes made." : n === 1 ? " 1 invite code made. Nothing is sent: you pass it on yourself." : ` ${n} invite codes made. Nothing is sent: you pass them on yourself.`),
+  readyInvites: (n) => (n === 0 ? " No invite codes made." : n === 1 ? " 1 invite code made. You pass it on yourself." : ` ${n} invite codes made. You pass them on yourself.`),
   firstBot: "Create the first bot",
   openTeam: "Open the team",
 
@@ -564,7 +561,6 @@ async function teamWizardInvite() {
   try {
     const made = await teamCall({ op: "invite" }, teamWizard.team.id);
     teamWizard.invites.push({ code: String(made.code), hint: String(made.hint ?? "") });
-    teamInvitesAdd(teamWizard.team.id, String(made.hint ?? ""));
   } catch (e) {
     teamWizard.inviteError = teamsErrorText(e);
   }
@@ -709,35 +705,16 @@ function showTeamJoin() {
 
 // ---- Invites (owner only) -----------------------------------------------------------------------
 
-/** The hub keeps an invite's hash and its first four characters, and has no op that lists them. So the
- * open invites this page shows are the ones made on this device, by those characters (never the code),
- * kept per team in the viewer's own storage; one made elsewhere is revoked by typing its characters. */
-const teamInvitesKey = (team) => `team-invites:${team}`;
-function teamInvitesKept(team) {
-  try {
-    const list = JSON.parse(load(teamInvitesKey(team)) ?? "[]");
-    return (Array.isArray(list) ? list : []).filter((x) => x && typeof x.hint === "string" && x.hint).map((x) => ({ hint: x.hint, at: Number(x.at) || 0 }));
-  } catch {
-    return [];
-  }
-}
-function teamInvitesStore(team, list) {
-  try {
-    save(teamInvitesKey(team), list.length ? JSON.stringify(list) : null);
-  } catch {}
-}
-function teamInvitesAdd(team, hint) {
-  if (!hint) return;
-  const list = teamInvitesKept(team).filter((x) => x.hint !== hint);
-  list.push({ hint, at: Math.floor(Date.now() / 1000) });
-  teamInvitesStore(team, list);
-}
-const teamInvitesDrop = (team, hint) => teamInvitesStore(team, teamInvitesKept(team).filter((x) => x.hint !== hint));
-
-const teamInvites = { team: "", list: [], made: null, copied: false, busy: "", error: "", note: "", hint: "" };
+/** `{op:"invites"}` lists the open invites, newest first: `{hint, created, made_by}`, never a code. */
+const teamInvites = { team: "", list: [], loading: false, loadError: "", made: null, copied: false, busy: "", error: "", note: "" };
 function resetInvites() {
-  const team = teamsNow?.id ?? "";
-  Object.assign(teamInvites, { team, list: team ? teamInvitesKept(team) : [], made: null, copied: false, busy: "", error: "", note: "", hint: "" });
+  Object.assign(teamInvites, { team: teamsNow?.id ?? "", list: [], loading: false, loadError: "", made: null, copied: false, busy: "", error: "", note: "" });
+}
+
+function teamsWhen(unix) {
+  const at = new Date(Number(unix) * 1000);
+  if (!unix || Number.isNaN(at.getTime())) return "";
+  return at.toLocaleString(typeof APP_LOCALE === "string" ? APP_LOCALE : undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
 function teamInvitesHtml() {
@@ -749,23 +726,41 @@ function teamInvitesHtml() {
     : "";
   const rows = teamInvites.list
     .map((inv) => {
-      const when = inv.at ? new Date(inv.at * 1000).toLocaleDateString(typeof APP_LOCALE === "string" ? APP_LOCALE : undefined, { month: "short", day: "numeric" }) : "";
+      const when = teamsWhen(inv.created);
+      const by = String(inv.made_by ?? "");
       const revoking = teamInvites.busy === `revoke:${inv.hint}`;
-      return `<div class="tm-code tm-invite" data-hint="${teamsEsc(inv.hint)}"><span class="tm-texts"><code>${teamsEsc(inv.hint)}…</code>${when ? `<span class="tm-about">${teamsEsc(t.invitesMade(when))}</span>` : ""}</span>${tmButton(`data-tm="invite-revoke" data-hint="${teamsEsc(inv.hint)}"`, revoking ? t.inviteRevoking : t.inviteRevoke, "secondary", !!teamInvites.busy)}</div>`;
+      const about = [when ? t.invitesMade(when) : "", by ? t.invitesBy(by) : ""].filter(Boolean).join(" ");
+      return `<div class="tm-code tm-invite" data-hint="${teamsEsc(inv.hint)}"><span class="tm-texts"><code>${teamsEsc(inv.hint)}…</code>${about ? `<span class="tm-about">${teamsEsc(about)}</span>` : ""}</span>${tmButton(`data-tm="invite-revoke" data-hint="${teamsEsc(inv.hint)}"`, revoking ? t.inviteRevoking : t.inviteRevoke, "secondary", !!teamInvites.busy)}</div>`;
     })
     .join("");
+  const open = teamInvites.list.length ? `<div class="tm-list">${rows}</div>` : teamInvites.loading ? `<p class="tm-note">${t.invitesLoading}</p>` : teamInvites.loadError ? "" : `<p class="tm-note">${t.invitesNone}</p>`;
   return `${head}
     <section class="tm-section">${made}${tmError(teamInvites.error)}<div class="tm-actions">${tmButton('data-tm="invite-make"', teamInvites.busy === "make" ? t.inviteMaking : t.inviteMake, "primary", !!teamInvites.busy)}</div></section>
-    <section class="tm-section"><h2>${t.invitesOpen}</h2>${teamInvites.list.length ? `<div class="tm-list">${rows}</div>` : `<p class="tm-note">${t.invitesNone}</p>`}${teamInvites.note ? `<p class="tm-ok" role="status">${teamsEsc(teamInvites.note)}</p>` : ""}<p class="tm-note">${t.invitesWhy}</p>
-      <form class="tm-form flat" data-tm="invite-form" autocomplete="off"><label class="tm-field"><span>${t.inviteHintLabel}</span><input id="tm-invite-hint" type="text" value="${teamsEsc(teamInvites.hint)}" placeholder="${t.inviteHintPlaceholder}" autocomplete="off" spellcheck="false" maxlength="12"></label>
-      <div class="tm-actions"><button type="submit" class="tm-btn secondary"${teamInvites.busy ? " disabled" : ""}>${t.inviteRevokeBy}</button></div></form></section>`;
+    <section class="tm-section"><h2>${t.invitesOpen}</h2>${open}${tmError(teamInvites.loadError)}${teamInvites.note ? `<p class="tm-ok" role="status">${teamsEsc(teamInvites.note)}</p>` : ""}</section>`;
 }
 
 function renderInvites() {
   if (document.body.dataset.page !== "team-invites") return;
-  const focused = document.activeElement?.id === "tm-invite-hint";
   setPage(`${headHtml(TEAMS_TEXT.invitesTitle)}<div class="page-body"><div class="tm-join-page">${teamInvitesHtml()}</div></div>`);
-  if (focused) document.getElementById("tm-invite-hint")?.focus();
+}
+
+/** Reads the open invites again; an answer for a team the person has since left is dropped. */
+async function loadInvites() {
+  const team = teamsNow?.id;
+  if (!team || teamsNow.role !== "owner") return;
+  teamInvites.loading = true;
+  teamInvites.loadError = "";
+  renderInvites();
+  try {
+    const list = await teamCall({ op: "invites" }, team);
+    if (teamInvites.team !== team) return;
+    teamInvites.list = (Array.isArray(list) ? list : []).filter((x) => x && typeof x.hint === "string" && x.hint);
+  } catch (e) {
+    if (teamInvites.team !== team) return;
+    teamInvites.loadError = teamsErrorText(e);
+  }
+  teamInvites.loading = false;
+  renderInvites();
 }
 
 async function makeInvite() {
@@ -775,42 +770,32 @@ async function makeInvite() {
   renderInvites();
   try {
     const made = await teamCall({ op: "invite" }, team);
-    teamInvitesAdd(team, String(made.hint ?? ""));
     teamInvites.made = { code: String(made.code), hint: String(made.hint ?? "") };
     teamInvites.copied = false;
-    teamInvites.list = teamInvitesKept(team);
   } catch (e) {
     // The hub's own words, as sent: at 20 open invites it says so.
     teamInvites.error = teamsErrorText(e);
   }
   teamInvites.busy = "";
-  renderInvites();
+  await loadInvites();
 }
 
 async function revokeInvite(hint) {
   const team = teamsNow?.id;
-  if (teamInvites.busy || !team) return;
+  if (teamInvites.busy || !team || teamsNow.role !== "owner") return;
   hint = String(hint ?? "").trim();
-  if (!hint) {
-    teamInvites.error = TEAMS_TEXT.inviteHintEmpty;
-    return renderInvites();
-  }
+  if (!hint) return;
   Object.assign(teamInvites, { busy: `revoke:${hint}`, error: "", note: "" });
   renderInvites();
   try {
     await teamCall({ op: "revoke_invite", hint }, team);
-    teamInvitesDrop(team, hint.toUpperCase());
-    teamInvites.note = TEAMS_TEXT.inviteRevoked(hint.toUpperCase());
-    teamInvites.hint = "";
-    if (teamInvites.made?.hint === hint.toUpperCase()) teamInvites.made = null;
+    teamInvites.note = TEAMS_TEXT.inviteRevoked(hint);
+    if (teamInvites.made?.hint === hint) teamInvites.made = null;
   } catch (e) {
     teamInvites.error = teamsErrorText(e);
-    // An invite that is no longer open (used, or revoked elsewhere) leaves the list.
-    if (/no unused invite/.test(teamInvites.error)) teamInvitesDrop(team, hint.toUpperCase());
   }
-  teamInvites.list = teamInvitesKept(team);
   teamInvites.busy = "";
-  renderInvites();
+  await loadInvites();
 }
 
 function copyInvite() {
@@ -827,6 +812,7 @@ function copyInvite() {
 function showTeamInvites() {
   resetInvites();
   renderInvites();
+  loadInvites();
 }
 
 // ---- The pages' events --------------------------------------------------------------------------
@@ -838,7 +824,7 @@ pageView.addEventListener("click", (e) => {
   const page = document.body.dataset.page;
   const act = el.dataset.tm;
   if (act === "leave") return closePage();
-  if (act === "form" || act === "join-form" || act === "invite-form") return;
+  if (act === "form" || act === "join-form") return;
   if (page === "team-invites") {
     if (act === "invite-make") makeInvite();
     else if (act === "invite-copy") copyInvite();
@@ -887,14 +873,12 @@ pageView.addEventListener("input", (e) => {
   if (!teamsPageOpen()) return;
   if (e.target.id === "tm-team-name") teamWizard.name = e.target.value;
   else if (e.target.id === "tm-join-code") teamJoining.code = e.target.value;
-  else if (e.target.id === "tm-invite-hint") teamInvites.hint = e.target.value;
 });
 pageView.addEventListener("submit", (e) => {
   const form = teamsPageOpen() && e.target.closest("[data-tm]");
   if (!form) return;
   e.preventDefault();
   if (form.dataset.tm === "join-form") return joinTeam();
-  if (form.dataset.tm === "invite-form") return revokeInvite(teamInvites.hint);
   if (form.dataset.tm !== "form") return;
   const values = {};
   for (const input of form.querySelectorAll("input[data-field]")) {
