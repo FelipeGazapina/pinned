@@ -453,6 +453,58 @@ fn a_waiting_run_now_whose_bot_read_is_busy_still_waits_and_starts_later() {
     wait_for("bob's Run now to open its session", || opened(&crew, &pages) == 1 && crew.waiting(&pages) == 0);
 }
 
+/// Bot `bot`'s row reads once, then every later read of it is refused as a lock wait that timed
+/// out: `team_bots` is swapped for a view whose filter counts the reads of that row. A sequence
+/// counts them. `bot_reads_again` puts the table back.
+fn bot_read_busy_after_first(crew: &Crew, bot: &str) {
+    admin_on(
+        &crew.hub.database,
+        &format!(
+            "create sequence bot_reads;
+             create function bot_read(w text) returns boolean language plpgsql cost 10000 as $$
+               begin
+                 if w = '{bot}' and nextval('bot_reads') >= 2 then
+                   raise exception 'lock held elsewhere' using errcode = '55P03';
+                 end if;
+                 return true;
+               end $$;
+             alter table team_bots rename to team_bots_t;
+             create view team_bots as select * from team_bots_t where bot_read(workflow)"
+        ),
+    );
+}
+
+fn bot_reads(crew: &Crew) -> i64 {
+    let rows = super::teams_calls::rows(&crew.hub, "select (case when is_called then last_value else 0 end)::text from bot_reads");
+    rows[0][0].as_deref().unwrap().parse().unwrap()
+}
+
+fn bot_reads_again(crew: &Crew) {
+    admin_on(&crew.hub.database, "drop view team_bots; alter table team_bots_t rename to team_bots");
+}
+
+#[test]
+fn a_waiting_run_whose_ready_read_is_busy_after_its_skip_check_still_waits_and_starts_later() {
+    let crew = Crew::new("tl_wait_busy_ready");
+    let pages = crew.on_bot("Pages");
+    assert_eq!(crew.found(crew.labeled(&pages, 1)), Ok(()));
+    let reply = crew.call(&crew.bob, TeamOp::RunNow { workflow: pages.clone() }).unwrap();
+    assert_eq!(reply["waiting"], json!(true), "bob's Run now waits behind the live run");
+    let live = crew.live_of(&pages);
+    let skipped = crew.skipped(&pages);
+    // The skip check reads the bot's row; `bots::ready`'s own read of it, next, is refused.
+    bot_read_busy_after_first(&crew, &pages);
+    crew.stop(&live[0]);
+    wait_for("the start after the end to read the bot's row twice", || bot_reads(&crew) >= 2);
+    std::thread::sleep(Duration::from_millis(500));
+    bot_reads_again(&crew);
+
+    assert_eq!(crew.waiting(&pages), 1, "bob's Run now still waits");
+    assert_eq!(crew.skipped(&pages), skipped, "nothing was counted as skipped");
+    crew.reaper_pass();
+    wait_for("bob's Run now to open its session", || opened(&crew, &pages) == 1 && crew.waiting(&pages) == 0);
+}
+
 /// The write that a reserved run opened its session (`reserved` set false) is refused as a lock
 /// wait that timed out, its first `times` tries. A sequence counts them: it is not rolled back.
 fn open_write_busy(crew: &Crew, times: u32) {
