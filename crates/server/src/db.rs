@@ -28,7 +28,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio_postgres::{Client, NoTls};
+use tokio_postgres::{Client, GenericClient, NoTls};
 use uuid::Uuid;
 
 const SCHEMA: &str = "
@@ -1979,6 +1979,85 @@ pub struct AgentGrant {
     pub projects: Vec<AgentProject>,
 }
 
+// An OAuth exchange runs these in one transaction (`oauth::exchange`); `Db`'s methods of the same
+// names run each alone.
+
+/// Spends an authorization code. A second use, or a late one, is `Replayed`.
+pub(crate) async fn take_agent_code_in(client: &impl GenericClient, code: &str) -> Result<Spent<AgentCode>, String> {
+    let row = client
+        .query_opt(
+            "with old as (select used from agent_codes where code_hash = $1 for update) \
+             update agent_codes c set used = true from old where c.code_hash = $1 \
+             returning c.grant_id, c.redirect_uri, c.code_challenge, c.resource, c.expires_at > now(), old.used, \
+             (select client from agent_grants g where g.id = c.grant_id)",
+            &[&hash(code)],
+        )
+        .await
+        .map_err(err)?;
+    let Some(r) = row else { return Ok(Spent::Unknown) };
+    let (grant, live, used): (Uuid, bool, bool) = (r.get(0), r.get(4), r.get(5));
+    if used || !live {
+        return Ok(Spent::Replayed(grant));
+    }
+    Ok(Spent::Fresh(AgentCode { grant, redirect_uri: r.get(1), code_challenge: r.get(2), resource: r.get(3), client: r.get(6) }))
+}
+
+/// A fresh access token and refresh token for the grant, unless it was revoked.
+pub(crate) async fn issue_agent_tokens_in(client: &impl GenericClient, grant: Uuid) -> Result<Option<(String, String)>, String> {
+    let live = client
+        .query_opt(
+            "select 1 from agent_grants g where g.id = $1 and not g.revoked \
+             and exists (select 1 from accounts a where a.id = g.account and a.kind = 'person')",
+            &[&grant],
+        )
+        .await
+        .map_err(err)?;
+    if live.is_none() {
+        return Ok(None);
+    }
+    // Expired rows go; a rotated refresh token stays until it expires, so its replay is still caught.
+    client.execute("delete from agent_tokens where grant_id = $1 and expires_at < now()", &[&grant]).await.map_err(err)?;
+    client.execute("delete from agent_codes where grant_id = $1 and expires_at < now()", &[&grant]).await.map_err(err)?;
+    let (access, refresh) = (Token::new(), Token::new());
+    client
+        .execute(
+            "insert into agent_tokens (token_hash, grant_id, kind, expires_at) values \
+             ($1, $3, 'access', now() + make_interval(secs => $4)), ($2, $3, 'refresh', now() + make_interval(days => $5))",
+            &[&access.hash, &refresh.hash, &grant, &(AGENT_ACCESS_SECS as f64), &AGENT_REFRESH_DAYS],
+        )
+        .await
+        .map_err(err)?;
+    Ok(Some((access.text, refresh.text)))
+}
+
+/// Spends a refresh token: its grant and client. One already rotated is `Replayed`.
+pub(crate) async fn take_agent_refresh_in(client: &impl GenericClient, token: &str) -> Result<Spent<(Uuid, String)>, String> {
+    let row = client
+        .query_opt(
+            "with old as (select rotated from agent_tokens where token_hash = $1 and kind = 'refresh' for update) \
+             update agent_tokens t set rotated = true from old where t.token_hash = $1 and t.kind = 'refresh' \
+             returning t.grant_id, t.expires_at > now(), old.rotated, (select client from agent_grants g where g.id = t.grant_id)",
+            &[&hash(token)],
+        )
+        .await
+        .map_err(err)?;
+    let Some(r) = row else { return Ok(Spent::Unknown) };
+    let (grant, live, rotated): (Uuid, bool, bool) = (r.get(0), r.get(1), r.get(2));
+    if rotated {
+        return Ok(Spent::Replayed(grant));
+    }
+    if !live {
+        return Ok(Spent::Unknown);
+    }
+    Ok(Spent::Fresh((grant, r.get(3))))
+}
+
+/// The scopes and account of a grant that still stands.
+pub(crate) async fn agent_grant_scopes_in(client: &impl GenericClient, grant: Uuid) -> Result<Option<(Vec<String>, Uuid)>, String> {
+    let row = client.query_opt("select scopes, account from agent_grants where id = $1 and not revoked", &[&grant]).await.map_err(err)?;
+    Ok(row.map(|r| (strings(r.get(0)), r.get(1))))
+}
+
 pub struct AgentCode {
     pub grant: Uuid,
     pub client: String,
@@ -2115,75 +2194,17 @@ impl Db {
 
     /// Spends an authorization code. A second use, or a late one, is `Replayed`.
     pub async fn take_agent_code(&self, code: &str) -> Result<Spent<AgentCode>, String> {
-        let row = self
-            .client().await?
-            .query_opt(
-                "with old as (select used from agent_codes where code_hash = $1 for update) \
-                 update agent_codes c set used = true from old where c.code_hash = $1 \
-                 returning c.grant_id, c.redirect_uri, c.code_challenge, c.resource, c.expires_at > now(), old.used, \
-                 (select client from agent_grants g where g.id = c.grant_id)",
-                &[&hash(code)],
-            )
-            .await
-            .map_err(err)?;
-        let Some(r) = row else { return Ok(Spent::Unknown) };
-        let (grant, live, used): (Uuid, bool, bool) = (r.get(0), r.get(4), r.get(5));
-        if used || !live {
-            return Ok(Spent::Replayed(grant));
-        }
-        Ok(Spent::Fresh(AgentCode { grant, redirect_uri: r.get(1), code_challenge: r.get(2), resource: r.get(3), client: r.get(6) }))
+        take_agent_code_in(&*self.client().await?, code).await
     }
 
     /// A fresh access token and refresh token for the grant, unless it was revoked.
     pub async fn issue_agent_tokens(&self, grant: Uuid) -> Result<Option<(String, String)>, String> {
-        let client = self.client().await?;
-        let live = client
-            .query_opt(
-                "select 1 from agent_grants g where g.id = $1 and not g.revoked \
-                 and exists (select 1 from accounts a where a.id = g.account and a.kind = 'person')",
-                &[&grant],
-            )
-            .await
-            .map_err(err)?;
-        if live.is_none() {
-            return Ok(None);
-        }
-        // Expired rows go; a rotated refresh token stays until it expires, so its replay is still caught.
-        client.execute("delete from agent_tokens where grant_id = $1 and expires_at < now()", &[&grant]).await.map_err(err)?;
-        client.execute("delete from agent_codes where grant_id = $1 and expires_at < now()", &[&grant]).await.map_err(err)?;
-        let (access, refresh) = (Token::new(), Token::new());
-        client
-            .execute(
-                "insert into agent_tokens (token_hash, grant_id, kind, expires_at) values \
-                 ($1, $3, 'access', now() + make_interval(secs => $4)), ($2, $3, 'refresh', now() + make_interval(days => $5))",
-                &[&access.hash, &refresh.hash, &grant, &(AGENT_ACCESS_SECS as f64), &AGENT_REFRESH_DAYS],
-            )
-            .await
-            .map_err(err)?;
-        Ok(Some((access.text, refresh.text)))
+        issue_agent_tokens_in(&*self.client().await?, grant).await
     }
 
     /// Spends a refresh token: its grant and client. One already rotated is `Replayed`.
     pub async fn take_agent_refresh(&self, token: &str) -> Result<Spent<(Uuid, String)>, String> {
-        let row = self
-            .client().await?
-            .query_opt(
-                "with old as (select rotated from agent_tokens where token_hash = $1 and kind = 'refresh' for update) \
-                 update agent_tokens t set rotated = true from old where t.token_hash = $1 and t.kind = 'refresh' \
-                 returning t.grant_id, t.expires_at > now(), old.rotated, (select client from agent_grants g where g.id = t.grant_id)",
-                &[&hash(token)],
-            )
-            .await
-            .map_err(err)?;
-        let Some(r) = row else { return Ok(Spent::Unknown) };
-        let (grant, live, rotated): (Uuid, bool, bool) = (r.get(0), r.get(1), r.get(2));
-        if rotated {
-            return Ok(Spent::Replayed(grant));
-        }
-        if !live {
-            return Ok(Spent::Unknown);
-        }
-        Ok(Spent::Fresh((grant, r.get(3))))
+        take_agent_refresh_in(&*self.client().await?, token).await
     }
 
     /// Whether `token` is a live refresh token of `client`'s that was never used, read without spending
@@ -2217,8 +2238,7 @@ impl Db {
 
     /// The scopes and account of a grant that still stands.
     pub async fn agent_grant_scopes(&self, grant: Uuid) -> Result<Option<(Vec<String>, Uuid)>, String> {
-        let row = self.client().await?.query_opt("select scopes, account from agent_grants where id = $1 and not revoked", &[&grant]).await.map_err(err)?;
-        Ok(row.map(|r| (strings(r.get(0)), r.get(1))))
+        agent_grant_scopes_in(&*self.client().await?, grant).await
     }
 
     /// RFC 7009: forgets one token, of whichever kind. Unknown tokens are no error.

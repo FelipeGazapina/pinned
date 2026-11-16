@@ -158,7 +158,6 @@ fn no_store(mut response: Response) -> Response {
     response
 }
 
-/// RFC 6749's error body.
 /// A token request the hub could not answer: a busy lock is a refusal the client retries.
 fn token_failed(e: String) -> Response {
     if e == db::BUSY {
@@ -167,6 +166,7 @@ fn token_failed(e: String) -> Response {
     crate::http::internal_response(e)
 }
 
+/// RFC 6749's error body.
 fn oauth_error(status: StatusCode, error: &str, description: &str) -> Response {
     no_store((status, Json(json!({ "error": error, "error_description": description }))).into_response())
 }
@@ -344,6 +344,11 @@ async fn refresh_is_current(hub: &Hub, params: &HashMap<String, String>) -> bool
 }
 
 /// Trades a code or a refresh token for tokens: the grant's account and the answer, or the error answer.
+///
+/// A lock refusal never lands after the spend: the spend, the grant's scopes and the new tokens run
+/// in one transaction, and any failure in it rolls the spend back, so the client's retry with the
+/// same code or refresh token gets what it would have got. Only an answer about the code or token
+/// itself (replayed, another client's, a wrong verifier) keeps the spend.
 async fn exchange(hub: &Hub, params: &HashMap<String, String>) -> Result<(Uuid, Response), Response> {
     let db = &hub.db;
     let param = |k: &str| params.get(k).map(String::as_str).filter(|v| !v.is_empty());
@@ -353,12 +358,21 @@ async fn exchange(hub: &Hub, params: &HashMap<String, String>) -> Result<(Uuid, 
             return Err(oauth_error(StatusCode::BAD_REQUEST, "invalid_target", "this hub only issues tokens for its MCP endpoint"));
         }
     }
+    let mut held = db.transaction_client().await.map_err(token_failed)?;
+    let tx = held.as_mut().expect("opened above").transaction().await.map_err(|e| token_failed(db::err(e)))?;
+    // Ends the transaction keeping the spend, then answers `answer`.
+    async fn kept(tx: tokio_postgres::Transaction<'_>, answer: Response) -> Response {
+        match tx.commit().await {
+            Ok(()) => answer,
+            Err(e) => token_failed(db::err(e)),
+        }
+    }
     let grant = match param("grant_type") {
         Some("authorization_code") => {
             let (Some(code), Some(verifier)) = (param("code"), param("code_verifier")) else {
                 return Err(oauth_error(StatusCode::BAD_REQUEST, "invalid_request", "code and code_verifier are required"));
             };
-            let spent = match db.take_agent_code(code).await {
+            let spent = match db::take_agent_code_in(&tx, code).await {
                 Ok(spent) => spent,
                 Err(e) => return Err(token_failed(e)),
             };
@@ -366,33 +380,35 @@ async fn exchange(hub: &Hub, params: &HashMap<String, String>) -> Result<(Uuid, 
                 Spent::Fresh(code) => code,
                 // RFC 6749 4.1.2: a code used twice ends what it granted, since one of the uses was not the client's.
                 Spent::Replayed(grant) => {
+                    let refused = kept(tx, oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "the code was already used or expired")).await;
                     let _ = db.revoke_agent_grant(grant, None).await;
                     eprintln!("pinned-server: an authorization code was reused; revoked agent grant {grant}");
-                    return Err(oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "the code was already used or expired"));
+                    return Err(refused);
                 }
                 Spent::Unknown => return Err(oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "unknown code")),
             };
             if code.client != client_id {
-                return Err(oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "the code was issued to another client"));
+                return Err(kept(tx, oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "the code was issued to another client")).await);
             }
             if param("redirect_uri").is_some_and(|uri| uri != code.redirect_uri) {
-                return Err(oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "redirect_uri does not match the authorization request"));
+                return Err(kept(tx, oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "redirect_uri does not match the authorization request")).await);
             }
             if !pkce_matches(verifier, &code.code_challenge) {
-                return Err(oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "the code_verifier does not match the code_challenge"));
+                return Err(kept(tx, oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "the code_verifier does not match the code_challenge")).await);
             }
             code.grant
         }
         Some("refresh_token") => {
             let Some(refresh) = param("refresh_token") else { return Err(oauth_error(StatusCode::BAD_REQUEST, "invalid_request", "refresh_token is required")) };
-            match db.take_agent_refresh(refresh).await {
+            match db::take_agent_refresh_in(&tx, refresh).await {
                 Ok(Spent::Fresh((grant, client))) if client == client_id => grant,
-                Ok(Spent::Fresh(_)) => return Err(oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "the refresh token was issued to another client")),
+                Ok(Spent::Fresh(_)) => return Err(kept(tx, oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "the refresh token was issued to another client")).await),
                 // A rotated refresh token came back: someone holds a copy, so the grant ends (OAuth 2.1 4.3.1).
                 Ok(Spent::Replayed(grant)) => {
+                    let refused = kept(tx, oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "the refresh token was already used")).await;
                     let _ = db.revoke_agent_grant(grant, None).await;
                     eprintln!("pinned-server: a rotated refresh token was reused; revoked agent grant {grant}");
-                    return Err(oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "the refresh token was already used"));
+                    return Err(refused);
                 }
                 Ok(Spent::Unknown) => return Err(oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "unknown or expired refresh token")),
                 Err(e) => return Err(token_failed(e)),
@@ -400,16 +416,19 @@ async fn exchange(hub: &Hub, params: &HashMap<String, String>) -> Result<(Uuid, 
         }
         _ => return Err(oauth_error(StatusCode::BAD_REQUEST, "unsupported_grant_type", "use authorization_code or refresh_token")),
     };
-    let (scopes, account) = match db.agent_grant_scopes(grant).await {
+    // From here every failure drops `tx`, which rolls the spend back.
+    let (scopes, account) = match db::agent_grant_scopes_in(&tx, grant).await {
         Ok(Some(found)) => found,
         Ok(None) => return Err(oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "the access was revoked")),
         Err(e) => return Err(token_failed(e)),
     };
-    match db.issue_agent_tokens(grant).await {
-        Ok(Some((access, refresh))) => Ok((account, tokens(access, refresh, &scopes))),
-        Ok(None) => Err(oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "the access was revoked")),
-        Err(e) => Err(token_failed(e)),
-    }
+    let (access, refresh) = match db::issue_agent_tokens_in(&tx, grant).await {
+        Ok(Some(issued)) => issued,
+        Ok(None) => return Err(oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "the access was revoked")),
+        Err(e) => return Err(token_failed(e)),
+    };
+    tx.commit().await.map_err(|e| token_failed(db::err(e)))?;
+    Ok((account, tokens(access, refresh, &scopes)))
 }
 
 /// RFC 7009. Answers 200 for an unknown token too, so it tells nobody which tokens exist.
