@@ -985,6 +985,12 @@ async function send() {
     return clearComposer(tab);
   }
   if (!text || sendBlocked(tab)) return;
+  // The words as typed, before attachment paths; a slash command writes no prompt to wait for.
+  const typed = expandChips(tab, prompt.value).trim();
+  if (typed && !files.length && pendingHas(t, typed)) {
+    clearComposer(tab);
+    return showComposerNote("Already queued.", true);
+  }
   tab.prompts = (tab.prompts ?? 0) + 1;
   const draft = prompt.value;
   const chips = { ...chipsOf(tab) };
@@ -995,21 +1001,77 @@ async function send() {
     return showComposerNote("Claude's dialog didn't close. Your message is still here.", true);
   }
   clearComposer(tab, false);
+  const row = typed && !typed.startsWith("/") ? raisePending(tab, t, typed) : null;
   try {
     // claude takes the message typed while it compacts as the next prompt.
     if (compactFirst) await callOn(tab.machine, { cmd: "prompt", tab: tab.view.id, text: "/compact" });
     await callOn(tab.machine, { cmd: "prompt", tab: tab.view.id, text });
+    if (row) row.sent = true;
     for (const f of files) if (f.url) URL.revokeObjectURL(f.url);
   } catch (e) {
-    Object.assign(t, { attachments: files });
-    Object.assign(chipsOf(tab), chips);
-    saveDraft(tab, draft);
-    if (active === tab) prompt.value = draft;
-    showComposerNote(String(e), true);
+    // The socket dropped after the machine may have typed it: the draft stays gone, and the row asks.
+    if (row && LOST.test(String(e))) {
+      row.state = "unconfirmed";
+      for (const f of files) if (f.url) URL.revokeObjectURL(f.url);
+    } else {
+      dropPending(tab, t, row);
+      Object.assign(t, { attachments: files });
+      Object.assign(chipsOf(tab), chips);
+      saveDraft(tab, draft);
+      if (active === tab) prompt.value = draft;
+      showComposerNote(String(e), true);
+    }
   } finally {
     delete composer.dataset.sending;
     autosize();
   }
+  if (row && active === tab) renderThread();
+  setTimeout(() => fetchThread(tab), 300);
+}
+
+/** The hub link dropping with a call out: the message may or may not have reached the machine. */
+const LOST = /lost the connection to the hub/;
+/** A pending row older than this no longer blocks the same words, so a prompt claude dropped can go again. */
+const PENDING_GUARD_MS = 120_000;
+let pendingSeq = 0;
+
+/** Whether `text` is still waiting to reach the transcript, so a second send would type it twice. */
+const pendingHas = (t, text) => !!t.pending?.some((p) => squashed(p.text) === squashed(text) && Date.now() - p.at < PENDING_GUARD_MS);
+
+/** Shows `text` as sent at once, in the thread, until the transcript has it. */
+function raisePending(tab, t, text) {
+  const row = { id: `pending:${++pendingSeq}`, text, at: Date.now(), state: "sending", sent: false };
+  t.pending = [...(t.pending ?? []), row];
+  if (active === tab) renderThread();
+  return row;
+}
+
+function dropPending(tab, t, row) {
+  if (!row) return;
+  t.pending = (t.pending ?? []).filter((p) => p !== row);
+  if (active === tab) renderThread();
+}
+
+/** "Send again" on a pending row: types its words once more, whatever the row's guard says. */
+async function sendAgain(tab, id) {
+  const t = threadOf(tab);
+  const row = t.pending?.find((p) => p.id === id);
+  if (!row || row.again) return;
+  const why = sendBlocked(tab);
+  if (why) return showComposerNote(why, true);
+  Object.assign(row, { again: true, state: "sending", sent: false, at: Date.now() });
+  if (active === tab) renderThread();
+  try {
+    await callOn(tab.machine, { cmd: "prompt", tab: tab.view.id, text: row.text });
+    row.sent = true;
+  } catch (e) {
+    row.state = "unconfirmed";
+    row.sent = false;
+    if (!LOST.test(String(e))) showComposerNote(String(e), true);
+  } finally {
+    row.again = false;
+  }
+  if (active === tab) renderThread();
   setTimeout(() => fetchThread(tab), 300);
 }
 
