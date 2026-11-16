@@ -42,6 +42,14 @@ fn kind(trigger: &Trigger) -> &'static str {
 async fn run_fired(hub: &Arc<Hub>, team: &Arc<Account>, work: Run) -> Result<Option<Placement>, String> {
     let id = work.connector.clone();
     let reserved = db::reserved_run_for(&hub.db, team.id, &id, &work.subject).await?;
+    // An admitted event whose reservation is gone (the backstop ended it, or a stop) is consumed,
+    // never started anew: its newest run on the subject held a place and ended before its session
+    // opened. It is counted once, by the path that ended it (`calls::end_reservation` counts
+    // `NeverStarted`; a stop is not counted), never again here.
+    if reserved.is_none() && db::reservation_ended_for(&hub.db, team.id, &id, &work.subject).await? {
+        eprintln!("pinned-server: team {} workflow {id}: an admitted event's place ended before its session opened: the event is consumed", team.id);
+        return Ok(None);
+    }
     if let Some(reason) = queue::skip_reason(hub, team, &id, true).await? {
         // Turned off after its event was admitted: the place it held is freed.
         queue::release(hub, team, &id, &work.subject).await?;

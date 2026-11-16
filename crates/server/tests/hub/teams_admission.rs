@@ -1107,10 +1107,12 @@ fn a_reply_to_a_granted_event_waits_with_it_and_the_event_runs_once() {
     assert_eq!(crew.found(crew.labeled(&holder, 9)), Ok(()));
     assert_eq!(crew.found(crew.mentioned(&footer, thread)), Ok(()));
     assert_eq!(crew.waiting(&footer), 1, "the thread's event waits");
-    POLLS_HELD.lock().unwrap().push(crew.name.clone());
+    // The test holds the thread's row, so every claim skips it: granted, and not claimed.
+    let gate = ClaimGate::hold(&crew);
     let held = crew.live_of(&holder);
     crew.stop(&held[0]);
-    wait_for("the thread's grant", || crew.reserved_at(&footer) == vec!["set".to_owned()]);
+    wait_for("the thread's grant", || gate.granted() == 1);
+    assert_eq!(crew.reserved_at(&footer), vec!["set".to_owned()], "its place is held");
     assert_eq!(crew.waiting(&footer), 1, "granted, its row waits for a claim");
     let boxes_before = crew.boxes_created();
 
@@ -1126,7 +1128,10 @@ fn a_reply_to_a_granted_event_waits_with_it_and_the_event_runs_once() {
     assert_eq!(crew.boxes_created() - boxes_before, 0, "no session opened for the reply");
     assert_eq!(crew.kept(&footer), (vec!["[Slack reply from Dina] still broken".to_owned()], 0), "the reply waits with the event");
 
-    POLLS_HELD.lock().unwrap().retain(|t| t != &crew.name);
+    gate.release();
+    // The team's poller looks now, as a grant wakes it.
+    let hub = crew.hub.hub().clone();
+    crew.hub.runtime.block_on(async { hub.connectors(&hub.account(crew.team).await.unwrap()).await.unwrap().wake() });
     wait_for("the thread's box", || crew.box_prompt(thread).is_some());
     std::thread::sleep(Duration::from_secs(3));
     assert_eq!(
