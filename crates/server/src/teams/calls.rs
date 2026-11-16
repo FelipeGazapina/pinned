@@ -328,7 +328,8 @@ fn notify_slack(hub: &Arc<Hub>, team: &Arc<Account>, call: &Call) {
 /// `policy.escalate_after_secs` goes to the owner too (escalated, `TeamEvent::CallOpened` again).
 /// One open longer than `policy.give_up_after_secs` closes as gave-up, with the same guard as an
 /// answer, so only one of them wins; its run ends as `RunState::GaveUp`, its session is told to
-/// end without the step, and its box ends. Run limits are not checked here.
+/// end without the step, and its box ends. Then no run or box is left behind (`reap`). Run limits
+/// are not checked here.
 pub async fn tick(hub: &Arc<Hub>, policy: &TeamPolicy) -> Result<(), String> {
     for row in db::escalate_due(&hub.db, policy.escalate_after_secs).await? {
         push_logged(hub, row.team, TeamEvent::CallOpened { call: row.call }).await;
@@ -344,7 +345,64 @@ pub async fn tick(hub: &Arc<Hub>, policy: &TeamPolicy) -> Result<(), String> {
             }
         });
     }
+    reap(hub).await
+}
+
+/// What a run that never had a box, or whose box went without ending it, ends with.
+const NEVER_STARTED: &str = "its box never started";
+const BOX_GONE: &str = "its box is gone";
+
+/// How long a run waits with no open call, and with no call of it closed meanwhile, before `reap`
+/// moves it on. A give-up tells the session before it ends the run, which can take this long.
+const STALE_WAIT: Duration = Duration::from_secs(300);
+
+/// The reaper's half of `tick`. Every end goes through `end_run`, so no run outlives its box and
+/// no box outlives its run:
+/// - a running box of a team that no live run holds ends, as a stopped run's box does (`End::Removed`);
+/// - a live run still without a box after the box boot wait and `RUN_WAIT` fails (`NEVER_STARTED`),
+///   and one whose box has no row fails (`BOX_GONE`);
+/// - a run left waiting with no open call goes back to work while its box runs, else ends (`BOX_GONE`).
+///
+/// A failure is logged and leaves the rest of the pass to run; the next tick tries again.
+async fn reap(hub: &Arc<Hub>) -> Result<(), String> {
+    for (team, machine) in db::unheld_team_boxes(&hub.db).await? {
+        let hub = hub.clone();
+        // Each on its own, as a give-up's: one box slow to end holds up no other.
+        tokio::spawn(async move {
+            let ended = async {
+                let account = hub.account(team).await?;
+                hub.boxes.end_machine(&hub, &account, machine, End::Removed).await
+            };
+            if let Err(e) = ended.await {
+                eprintln!("pinned-server: box {machine} of team {team} has no live run but did not end yet: {e}");
+            }
+        });
+    }
+    let boot = hub.boxes.policy.boot_wait + crate::hub::RUN_WAIT;
+    for (team, run, never_started) in db::boxless_runs(&hub.db, boot.as_secs()).await? {
+        let outcome = if never_started { NEVER_STARTED } else { BOX_GONE };
+        reap_run(hub, team, run, outcome).await;
+    }
+    for (team, run, box_runs) in db::stale_waiting(&hub.db, STALE_WAIT.as_secs()).await? {
+        if !box_runs {
+            reap_run(hub, team, run, BOX_GONE).await;
+            continue;
+        }
+        let moved = async { back_to_work(hub, &hub.account(team).await?, run).await };
+        if let Err(e) = moved.await {
+            eprintln!("pinned-server: run {run} of team {team} waits on no call but did not go back to work: {e}");
+        }
+    }
     Ok(())
+}
+
+/// Ends a run whose box is not there as `RunState::Failed` with `outcome`, leaving one that ended meanwhile.
+async fn reap_run(hub: &Arc<Hub>, team: Uuid, run: Uuid, outcome: &str) {
+    let ended = async { end_run(hub, &hub.account(team).await?, run, RunState::Failed, outcome, None).await };
+    match ended.await {
+        Err(e) if e != RUN_ENDED => eprintln!("pinned-server: run {run} of team {team} has no box but did not end yet: {e}"),
+        _ => {}
+    }
 }
 
 /// Ends the run of a call nobody answered: the session hears it first, then its box ends.
