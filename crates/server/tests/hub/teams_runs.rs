@@ -299,3 +299,31 @@ fn taking_a_project_out_of_the_team_stops_the_live_runs_of_its_bots_and_ends_the
     assert_eq!((&call["answer"]["kind"], &call["answer"]["text"]), (&json!({ "kind": "stop" }), &json!(outcome)));
     assert_eq!(state(&docs_run.id), ("working".to_owned(), None), "a run of another project's bot goes on");
 }
+
+#[test]
+fn a_stop_that_ended_the_run_is_answered_as_done_though_a_later_step_was_busy() {
+    let crew = Crew::new("tr_stop_busy", fast());
+    let share = json!({ "cmd": "share_project", "project": { "key": SITE, "name": "site", "repo": format!("https://{SITE}.git") } });
+    crew.hub.runtime.block_on(crew.hub.hub().hub_call(&crew.bob, serde_json::from_value(share).unwrap())).unwrap();
+    crew.op(&crew.bob, json!({ "op": "attach_project", "key": SITE })).unwrap();
+    let (_, cara_id, mut cara) = signed_in(&crew.hub.url, "cara@example.test");
+    admin_on(&crew.hub.database, &format!("insert into team_members (team, member, role) values ('{}', '{cara_id}', 'member')", crew.team));
+    let site = crew.on_bot("Site bot", &format!("https://{SITE}"), false);
+    let run = crew.run_now(&site);
+    wait_for("the run's node", || crew.node().is_some());
+    let asked = crew.ask("Red or blue footer?").unwrap();
+    let call = asked["call"].as_str().unwrap().to_owned();
+    // Another connection holds the open call's row: the run's state is written, then closing the
+    // call waits on that row and is refused as busy.
+    let held = super::teams_locks::Held::new(&crew.hub, &format!("select 1 from team_calls where id = '{call}' for update"));
+
+    assert_eq!(crew.op(&crew.bob, json!({ "op": "detach_project", "key": SITE })), Ok(Value::Null), "the stop worked, so it is answered as done");
+    let outcome = "Stopped: project site was taken out of the team.";
+    let runs = crew.op(&crew.bob, json!({ "op": "runs" })).unwrap();
+    let listed = runs.as_array().unwrap().iter().find(|r| r["id"] == json!(run.id)).unwrap().clone();
+    assert_eq!((listed["state"].as_str(), listed["outcome"].as_str()), (Some("stopped"), Some(outcome)));
+    let id = json!(run.id);
+    let pushed = cara.wait("the stopped run", |f| f["type"] == "team" && f["event"]["kind"] == "run_changed" && f["event"]["run"]["id"] == id && f["event"]["run"]["state"] == "stopped");
+    assert_eq!(pushed["event"]["run"]["outcome"], json!(outcome));
+    held.release();
+}

@@ -165,6 +165,32 @@ fn an_event_left_waiting_by_a_busy_turn_after_a_run_ends_starts_on_the_next_reap
     assert_eq!(crew.waiting(&pages), 0);
 }
 
+/// How many runs of bot `bot` are live and opened their session (no longer only reserved).
+fn opened(crew: &Crew, bot: &str) -> i64 {
+    let rows = super::teams_calls::rows(&crew.hub, &format!("select count(*)::text from team_runs where team = '{}' and workflow = '{bot}' and state = 'working' and not reserved", crew.team));
+    rows[0][0].as_deref().unwrap_or("0").parse().unwrap()
+}
+
+#[test]
+fn a_waiting_run_reserved_by_a_turn_that_then_fails_still_starts_at_once() {
+    let crew = Crew::new("tl_reserved_start");
+    let (holder, pages, notes) = (crew.on_bot("Docs"), crew.on_bot("Pages"), crew.on_bot("Notes"));
+    admin_on(&crew.hub.database, &format!("update teams set max_live_runs = 1 where id = '{}'", crew.team));
+    assert_eq!(crew.found(crew.labeled(&holder, 9)), Ok(()));
+    for bot in [&pages, &notes] {
+        let reply = crew.call(&crew.bob, TeamOp::RunNow { workflow: bot.clone() }).unwrap();
+        assert_eq!(reply["waiting"], json!(true), "a Run now waits behind the holder");
+    }
+    // Two places once the holder ends: the turn reserves Pages's run first, then reads Notes's bot
+    // row, which no longer reads, and fails after its reservation committed.
+    admin_on(&crew.hub.database, &format!("update teams set max_live_runs = 2 where id = '{}'; update team_bots set limits = '\"unreadable\"' where team = '{}' and workflow = '{notes}'", crew.team, crew.team));
+    let boxes = crew.boxes_created();
+    crew.stop(&crew.live_of(&holder)[0]);
+
+    wait_for("the reserved Pages run to open its session in a box of its own", || opened(&crew, &pages) == 1 && crew.boxes_created() > boxes);
+    assert_eq!(crew.reserved_at(&pages), Vec::<String>::new(), "no Pages run is left only holding its place");
+}
+
 // ---- the claim of a granted event ----
 
 #[test]
