@@ -126,7 +126,7 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
     // The confirmation holds the public text, scrubbed with what this session's tab and the account know.
     let held_args = if admitted.action.name == "report_issue" {
         let cwd = account.tab(origin, &caller.tab).map(|tab| tab.cwd).unwrap_or_default();
-        match crate::reports::prepare(hub, account, &cwd, &act.args).await {
+        match crate::reports::prepare(hub, account, origin, &cwd, &act.args).await {
             Ok(args) => args,
             Err(refusal) => {
                 let refusal = surface::mask_secrets(&refusal);
@@ -269,7 +269,14 @@ async fn run(hub: &Arc<Hub>, account: &Arc<Account>, caller_tab: &str, actor: Ac
         // An idea made by an agent says which one.
         Parsed::Hub(HubCall::SaveIdea { id, title, text, project, status }) => json(hub.save_idea(account, actor, id.as_deref(), &title, &text, project.as_deref(), status).await?),
         // What an agent reads of a report is where it is, and a report it sends says so.
-        Parsed::Hub(HubCall::Reports { ask }) => hub.reports_ask(account, ask, true).await,
+        // A search leaves out the words of the asking session's folder, as its report would.
+        Parsed::Hub(HubCall::Reports { ask }) => {
+            let cwd = match &actor {
+                Actor::Agent { machine, tab, .. } => account.tab(machine, tab).map(|tab| tab.cwd).unwrap_or_default(),
+                _ => String::new(),
+            };
+            hub.reports_ask(account, crate::reports::with_cwd(ask, &cwd), true).await
+        }
         Parsed::Hub(HubCall::ReportIssue { draft, shown, draft_id, request_id }) => hub.report_issue(account, draft, shown, draft_id, request_id, true).await,
         Parsed::Hub(call) => Box::pin(hub.hub_call(account, call)).await,
         Parsed::Node(call) => {

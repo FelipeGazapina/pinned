@@ -5,7 +5,8 @@
 use super::github::{Error as GithubError, Github};
 use crate::db::Db;
 use crate::hub::{Account, Hub};
-use pinned_core::reports::{self, Ask, Context, Draft, Kind, Preview, Report, ReportState, Similar};
+use pinned_core::reports::{self, Ask, Context, Draft, Environment, Kind, Preview, Report, ReportState, Similar};
+use pinned_core::wire::{Call, ProjectView};
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
@@ -30,7 +31,13 @@ const SEARCHES_PER_MINUTE: usize = 20;
 const SIMILAR_KEPT: usize = 200;
 /// How long a preview's words stay known, for the send that follows it.
 const PREVIEW_FRESH: Duration = Duration::from_secs(60 * 60);
-const PREVIEWS_KEPT: usize = 500;
+/// Most previews kept for one account, so one account cannot push out another's.
+const PREVIEWS_KEPT: usize = 20;
+/// Most words in each list of the context an app sends, and the longest word, in characters.
+const CONTEXT_WORDS: usize = 500;
+const CONTEXT_WORD_CHARS: usize = 200;
+/// How long the hub waits for an online machine to list its projects before a report goes on without them.
+const PROJECTS_WAIT: Duration = Duration::from_secs(2);
 /// The footer reference of a preview: the report's own id exists only once it is sent, so the hash the person
 /// reviewed (`shown`) is of the issue with this one.
 const PREVIEW_REF: &str = "r-xxxxxxxx";
@@ -130,14 +137,17 @@ pub struct Reports {
     searches: Mutex<VecDeque<Instant>>,
     /// The words a preview scrubbed with, by account and the hash it showed, so the send that follows renders it alike.
     previews: Mutex<HashMap<(Uuid, String), (Instant, Context)>>,
+    /// The repository reports go to, `owner/name`, lower case. It is public, so its names are never scrubbed.
+    own_repo: Option<String>,
 }
 
 impl Reports {
     /// Creates the table and keeps the GitHub client, when there is a token.
     pub async fn start(db: &Db, config: Option<Config>) -> Result<Reports, String> {
         db.run_schema(SCHEMA).await?;
+        let own_repo = config.as_ref().map(|c| c.repo.to_lowercase());
         let github = config.map(|c| Github::with_api(&c.api, &c.repo, &c.token));
-        Ok(Reports { github, sending: Mutex::default(), similar: Mutex::default(), searches: Mutex::default(), previews: Mutex::default() })
+        Ok(Reports { github, sending: Mutex::default(), similar: Mutex::default(), searches: Mutex::default(), previews: Mutex::default(), own_repo })
     }
 
     pub fn available(&self) -> bool {
@@ -160,12 +170,28 @@ impl Reports {
     fn remember_preview(&self, account: Uuid, shown: &str, ctx: Context) {
         let mut previews = self.previews.lock().unwrap();
         previews.retain(|_, (at, _)| at.elapsed() < PREVIEW_FRESH);
-        if previews.len() >= PREVIEWS_KEPT {
-            if let Some(oldest) = previews.iter().min_by_key(|(_, (at, _))| *at).map(|(key, _)| key.clone()) {
+        let key = (account, shown.to_owned());
+        let own = previews.keys().filter(|(of, _)| *of == account).count();
+        if own >= PREVIEWS_KEPT && !previews.contains_key(&key) {
+            let oldest = previews.iter().filter(|((of, _), _)| *of == account).min_by_key(|(_, (at, _))| *at).map(|(key, _)| key.clone());
+            if let Some(oldest) = oldest {
                 previews.remove(&oldest);
             }
         }
-        previews.insert((account, shown.to_owned()), (Instant::now(), ctx));
+        previews.insert(key, (Instant::now(), ctx));
+    }
+
+    /// `ctx` without the names of the repository reports go to: its owner, its name and the two together, in any
+    /// form. They are public, and scrubbing them would spoil every report about pinned itself.
+    fn without_own(&self, mut ctx: Context) -> Context {
+        let Some(own) = &self.own_repo else { return ctx };
+        let (owner, name) = own.split_once('/').unwrap_or(("", own));
+        ctx.projects.retain(|word| {
+            let word = word.trim().trim_end_matches('/').to_lowercase();
+            let word = word.strip_suffix(".git").unwrap_or(&word);
+            !(word == own || word == name || word == owner || word.ends_with(&format!("/{own}")) || word.ends_with(&format!(":{own}")))
+        });
+        ctx
     }
 
     fn preview_context(&self, account: Uuid, shown: &str) -> Option<Context> {
@@ -235,9 +261,17 @@ fn state_name(state: &ReportState) -> String {
     json(state).ok().and_then(|v| v["state"].as_str().map(str::to_owned)).unwrap_or_default()
 }
 
-/// The environment section of a report: all the hub knows of the app.
+/// The hub's line of a report's environment section, after the reporter's own.
 fn environment() -> String {
-    format!("pinned hub {}", env!("CARGO_PKG_VERSION"))
+    format!("hub {}", env!("CARGO_PKG_VERSION"))
+}
+
+/// The environment of an agent's report: the app version and system of the machine its session runs on, as the hub
+/// knows them. Never the machine's name.
+fn machine_environment(machine: Option<&pinned_core::wire::MachineView>) -> String {
+    let Some(machine) = machine else { return String::new() };
+    let version = (!machine.version.is_empty()).then(|| format!("pinned {}", machine.version));
+    version.into_iter().chain((!machine.os.is_empty()).then(|| machine.os.clone())).collect::<Vec<_>>().join(" · ")
 }
 
 /// What an agent reads of a report: where it is, never its text or anything GitHub said.
@@ -285,6 +319,58 @@ fn too_long(draft: &Draft) -> Result<(), String> {
     Ok(())
 }
 
+/// Refuses a context from the app with more than `CONTEXT_WORDS` words in a list, or a word over `CONTEXT_WORD_CHARS`.
+fn too_large(ctx: &Context) -> Result<(), String> {
+    let lists = [&ctx.projects, &ctx.folders, &ctx.files, &ctx.names];
+    if lists.iter().any(|list| list.len() > CONTEXT_WORDS || list.iter().any(|word| word.chars().count() > CONTEXT_WORD_CHARS)) {
+        return Err("The report's context is too large.".into());
+    }
+    Ok(())
+}
+
+/// The words of a session's folder a public report must not hold: the folder, its name, and for a worktree
+/// (`<project>/.claude/worktrees/<name>` or `<project>/.worktrees/<name>`) the project's folder and name too. A
+/// Windows folder splits on `\` as well.
+pub fn cwd_context(cwd: &str) -> Context {
+    let mut ctx = Context::default();
+    let cwd = cwd.trim().trim_end_matches(['/', '\\']);
+    let parts: Vec<&str> = cwd.split(['/', '\\']).filter(|part| !part.is_empty()).collect();
+    if parts.is_empty() {
+        return ctx;
+    }
+    ctx.folders.push(cwd.to_owned());
+    let n = parts.len();
+    let project = match parts.as_slice() {
+        [.., project, ".worktrees", _] | [.., project, ".claude", "worktrees", _] => Some(*project),
+        _ => None,
+    };
+    for name in parts.last().into_iter().chain(project.as_ref()) {
+        // A drive such as `C:` names nothing private.
+        if !name.ends_with(':') {
+            ctx.projects.push((*name).to_owned());
+        }
+    }
+    if let Some(project) = project {
+        let depth = if parts[n - 2] == ".worktrees" { 2 } else { 3 };
+        let mut end = cwd.len();
+        for _ in 0..depth {
+            end = cwd[..end].rfind(['/', '\\']).unwrap_or(0);
+        }
+        if end > 0 && cwd[..end].ends_with(project) {
+            ctx.folders.push(cwd[..end].to_owned());
+        }
+    }
+    ctx
+}
+
+/// `ask` with the words of the asking session's folder, so a search an agent asks for leaves them out too.
+pub fn with_cwd(ask: Ask, cwd: &str) -> Ask {
+    match ask {
+        Ask::Similar { title, context } => Ask::Similar { title, context: merged(context, &cwd_context(cwd)) },
+        ask => ask,
+    }
+}
+
 /// `ctx` with the words of `more` too, each once.
 fn merged(mut ctx: Context, more: &Context) -> Context {
     fn add(into: &mut Vec<String>, from: &[String]) {
@@ -301,61 +387,80 @@ fn merged(mut ctx: Context, more: &Context) -> Context {
     ctx
 }
 
-fn scrubbed(draft: &Draft, ctx: &Context) -> Draft {
-    Draft {
-        title: reports::scrub(&draft.title, ctx),
-        happened: reports::scrub(&draft.happened, ctx),
-        expected: reports::scrub(&draft.expected, ctx),
-        repeat: reports::scrub(&draft.repeat, ctx),
+fn scrubbed(draft: &Draft, ctx: &Context) -> Result<Draft, String> {
+    Ok(Draft {
+        title: reports::scrub(&draft.title, ctx)?,
+        happened: reports::scrub(&draft.happened, ctx)?,
+        expected: reports::scrub(&draft.expected, ctx)?,
+        repeat: reports::scrub(&draft.repeat, ctx)?,
         ..draft.clone()
-    }
+    })
 }
 
 /// The scrubbed copy of an agent's `report_issue` arguments, which a confirmation then holds: the user reads, and
-/// approving sends, exactly this public text. `cwd` is the folder of the session that asks; it, and the folder's
-/// name, never reach GitHub. Refuses when reporting is not available on this hub.
-pub async fn prepare(hub: &Hub, account: &Account, cwd: &str, args: &Value) -> Result<Value, String> {
+/// approving sends, exactly this public text. `cwd` is the folder of the session that asks, on `machine`; it, and the
+/// folder's name, never reach GitHub. The environment, when the agent asks for one, is `machine`'s app version and
+/// system, whatever the agent wrote there. Refuses when reporting is not available on this hub.
+pub async fn prepare(hub: &Hub, account: &Account, machine: &str, cwd: &str, args: &Value) -> Result<Value, String> {
     hub.reports.github()?;
-    let mut ctx = hub.report_context(account).await?;
-    let cwd = cwd.trim().trim_end_matches('/');
-    if !cwd.is_empty() {
-        ctx.folders.push(cwd.to_owned());
-        if let Some(name) = cwd.rsplit('/').next().filter(|name| !name.is_empty()) {
-            ctx.projects.push(name.to_owned());
-        }
-    }
+    let ctx = hub.reports.without_own(merged(hub.report_context(account).await?, &cwd_context(cwd)));
     let mut fields = args.as_object().cloned().ok_or("report_issue: args must be an object of the action's fields")?;
     let draft: Draft = serde_json::from_value(fields.get("draft").cloned().unwrap_or(Value::Null)).map_err(|e| format!("report_issue: {e}"))?;
-    let mut draft = scrubbed(&draft, &ctx);
+    let mut draft = scrubbed(&draft, &ctx)?;
     draft.attach.errors.clear();
+    draft.attach.environment = match draft.attach.environment.chosen() {
+        true => {
+            let machines = hub.machines(account).await?;
+            Environment::Shown(reports::scrub(&machine_environment(machines.iter().find(|m| m.id == machine)), &ctx)?)
+        }
+        false => Environment::Chosen(false),
+    };
     fields.insert("draft".into(), json(&draft)?);
     Ok(Value::Object(fields))
 }
 
 impl Hub {
     /// The words a public report must not hold, as the hub knows them: the account's e-mail address and its local
-    /// part, its machines' names, and its projects' names, repositories and folders.
+    /// part, its machines' names, the folder of every open tab on every machine, and the projects each online machine
+    /// lists now (asked here, briefly) or listed last: their names, folders, repositories, and each repository's owner
+    /// and name. The hub's own repository is left out.
     pub(crate) async fn report_context(&self, account: &Account) -> Result<Context, String> {
         let mut ctx = Context::default();
         ctx.names.push(account.email.clone());
         if let Some((local, _)) = account.email.split_once('@') {
             ctx.names.push(local.to_owned());
         }
-        for machine in self.db.machines(account.id).await? {
-            ctx.names.push(machine.name);
-        }
-        let own = self.reports.github.as_ref().map(|g| g.repo_name().to_lowercase());
-        for project in account.listed_projects() {
-            ctx.folders.push(project.path);
-            let mut names = vec![project.name];
-            if let Some(repo) = project.repo {
-                names.extend(repo.rsplit('/').next().map(str::to_owned));
-                names.push(repo);
+        let machines = self.machines(account).await?;
+        ctx.names.extend(machines.iter().map(|m| m.name.clone()));
+        for (machine, _) in account.online() {
+            for tab in account.tabs_of(&machine).unwrap_or_default() {
+                ctx = merged(ctx, &cwd_context(&tab.cwd));
             }
-            // The hub's own repository is public: its name is no secret, and scrubbing it would spoil every report.
-            ctx.projects.extend(names.into_iter().filter(|n| !n.is_empty() && own.as_deref() != Some(&n.to_lowercase())));
         }
-        Ok(ctx)
+        // A machine that is offline, or slow to answer, adds what it listed last, or nothing; it never fails the call.
+        let asked = futures_util::future::join_all(machines.iter().filter(|m| m.online).map(|m| async move {
+            let listed = self.call_machine(account, &m.id, Call::ListProjects, PROJECTS_WAIT).await.ok();
+            (m.id.clone(), listed.and_then(|v| serde_json::from_value::<Vec<ProjectView>>(v).ok()))
+        }))
+        .await;
+        for (machine, listed) in asked {
+            if let Some(projects) = listed {
+                account.listed(&machine, projects);
+            }
+        }
+        for project in account.listed_projects() {
+            ctx = merged(ctx, &cwd_context(&project.path));
+            ctx.projects.push(project.name);
+            if let Some(repo) = project.repo {
+                let parts: Vec<&str> = repo.trim_end_matches('/').split('/').collect();
+                if let [.., owner, name] = parts.as_slice() {
+                    ctx.projects.extend([owner.to_string(), name.trim_end_matches(".git").to_owned(), format!("{owner}/{}", name.trim_end_matches(".git"))]);
+                }
+                ctx.projects.push(repo);
+            }
+        }
+        ctx.projects.retain(|word| !word.trim().is_empty());
+        Ok(self.reports.without_own(merged(Context::default(), &ctx)))
     }
 
     /// What the app (or, with `agent`, a session) asks about reporting.
@@ -370,12 +475,15 @@ impl Hub {
         match ask {
             Ask::Status => unreachable!("answered above"),
             Ask::Preview { draft, context } => json(self.preview(account, draft, context).await?),
-            Ask::Similar { title } => {
-                let ctx = self.report_context(account).await?;
-                let query = reports::search_query(&reports::scrub(&title, &ctx));
+            Ask::Similar { title, context } => {
+                too_large(&context)?;
+                let ctx = self.reports.without_own(merged(self.report_context(account).await?, &context));
+                let query = reports::search_query(&reports::scrub(&title, &ctx)?);
                 let found = self.reports.similar(&query).await?;
                 if agent {
-                    return Ok(Value::Array(found.iter().map(|s| json!({ "number": s.number, "url": s.url, "state": "open", "public_title": reports::scrub(&s.title, &ctx) })).collect()));
+                    // A title that does not scrub clean reads as none.
+                    let public_title = |title: &str| reports::public_title(title, &ctx).unwrap_or_default();
+                    return Ok(Value::Array(found.iter().map(|s| json!({ "number": s.number, "url": s.url, "state": "open", "public_title": public_title(&s.title) })).collect()));
                 }
                 json(found)
             }
@@ -414,8 +522,9 @@ impl Hub {
 
     async fn preview(&self, account: &Account, draft: Draft, app: Context) -> Result<Preview, String> {
         too_long(&draft)?;
-        let ctx = merged(self.report_context(account).await?, &app);
-        let (title, body, labels) = reports::render(&draft, &ctx, Some(&environment()), PREVIEW_REF);
+        too_large(&app)?;
+        let ctx = self.reports.without_own(merged(self.report_context(account).await?, &app));
+        let (title, body, labels) = reports::render(&draft, &ctx, Some(&environment()), PREVIEW_REF)?;
         let shown = reports::shown(&title, &body);
         self.reports.remember_preview(account.id, &shown, ctx.clone());
         let query = reports::search_query(&title);
@@ -469,6 +578,9 @@ impl Hub {
         if draft.title.trim().is_empty() {
             return Err("Give the report a title.".into());
         }
+        if !by_agent && shown.is_none() {
+            return Err("Review the report before sending it.".into());
+        }
         too_long(&draft)?;
         let request_id = request_id.map(|id| id.trim().to_owned()).filter(|id| !id.is_empty());
         if request_id.as_ref().is_some_and(|id| id.chars().count() > 200) {
@@ -493,7 +605,7 @@ impl Hub {
             if let Some(known) = self.reports.preview_context(account.id, shown) {
                 ctx = merged(ctx, &known);
             }
-            let (title, body, _) = reports::render(&draft, &ctx, Some(&environment()), PREVIEW_REF);
+            let (title, body, _) = reports::render(&draft, &ctx, Some(&environment()), PREVIEW_REF)?;
             if &reports::shown(&title, &body) != shown {
                 return Err("The report changed since you reviewed it. Review it again.".into());
             }
@@ -508,7 +620,7 @@ impl Hub {
             None => None,
         };
         let id = saved_as.unwrap_or_else(Uuid::new_v4);
-        let (title, body, labels) = reports::render(&draft, &ctx, Some(&environment()), &reports::ref_of(&id.to_string()));
+        let (title, body, labels) = reports::render(&draft, &ctx, Some(&environment()), &reports::ref_of(&id.to_string()))?;
         // An issue that cannot take a comment is refused before the report counts.
         let target = match draft.to_issue {
             Some(number) => {
@@ -612,6 +724,65 @@ mod tests {
             assert!(Config::from_env(true, &env(&[(TOKEN_VARIABLE, "t"), (API_VARIABLE, api)])).is_some(), "{api}");
         }
         assert_eq!(Config::from_env(true, &env(&[(TOKEN_VARIABLE, "t"), (REPO_VARIABLE, "../x")])), None);
+    }
+
+    fn reports(own: Option<&str>) -> Reports {
+        Reports { github: None, sending: Mutex::default(), similar: Mutex::default(), searches: Mutex::default(), previews: Mutex::default(), own_repo: own.map(str::to_lowercase) }
+    }
+
+    fn scrubbed_text(text: &str, ctx: &Context) -> String {
+        reports::scrub(text, ctx).unwrap()
+    }
+
+    #[test]
+    fn a_worktree_folder_names_its_project_too() {
+        let ctx = cwd_context("/home/x/projetos/loja-web/.claude/worktrees/fix-1");
+        assert_eq!(ctx.projects, ["fix-1", "loja-web"]);
+        assert_eq!(ctx.folders, ["/home/x/projetos/loja-web/.claude/worktrees/fix-1", "/home/x/projetos/loja-web"]);
+        assert_eq!(scrubbed_text("loja-web crashes on save", &ctx), "[project] crashes on save");
+        let ctx = cwd_context("/srv/code/loja-web/.worktrees/fix-2/");
+        assert_eq!(ctx.projects, ["fix-2", "loja-web"]);
+        assert_eq!(scrubbed_text("loja-web crashes on save in fix-2", &ctx), "[project] crashes on save in [project]");
+    }
+
+    #[test]
+    fn a_windows_folder_splits_on_backslashes() {
+        let ctx = cwd_context("C:\\Users\\x\\proj\\loja-web");
+        assert_eq!(ctx.projects, ["loja-web"]);
+        assert_eq!(scrubbed_text("loja-web crashes on save", &ctx), "[project] crashes on save");
+        assert_eq!(cwd_context("C:\\").projects, Vec::<String>::new(), "a drive names nothing");
+        assert_eq!(cwd_context("  "), Context::default());
+    }
+
+    #[test]
+    fn an_apps_context_over_500_words_or_with_a_word_over_200_characters_is_refused() {
+        let too_large = |ctx: &Context| super::too_large(ctx).unwrap_err();
+        let words = |n: usize, len: usize| (0..n).map(|i| format!("{i:0len$}")).collect::<Vec<String>>();
+        assert!(super::too_large(&Context { names: words(500, 200), ..Context::default() }).is_ok());
+        assert_eq!(too_large(&Context { projects: words(501, 3), ..Context::default() }), "The report's context is too large.");
+        assert_eq!(too_large(&Context { files: words(1, 201), ..Context::default() }), "The report's context is too large.");
+    }
+
+    #[test]
+    fn previews_are_kept_per_account_so_one_account_cannot_push_out_anothers() {
+        let kept = reports(None);
+        let (ana, bob) = (Uuid::new_v4(), Uuid::new_v4());
+        kept.remember_preview(bob, "bob-1", Context { names: vec!["bob-word".into()], ..Context::default() });
+        for n in 0..(PREVIEWS_KEPT + 30) {
+            kept.remember_preview(ana, &format!("ana-{n}"), Context::default());
+        }
+        assert_eq!(kept.preview_context(bob, "bob-1").unwrap().names, ["bob-word"], "ana's previews never push out bob's");
+        assert!(kept.preview_context(ana, "ana-0").is_none(), "ana's oldest went first");
+        assert!(kept.preview_context(ana, &format!("ana-{}", PREVIEWS_KEPT + 29)).is_some());
+        assert_eq!(kept.previews.lock().unwrap().keys().filter(|(of, _)| *of == ana).count(), PREVIEWS_KEPT);
+    }
+
+    #[test]
+    fn the_hubs_own_repository_is_never_scrubbed_in_any_form() {
+        let own = reports(Some("FelipeGazapina/pinned"));
+        let words = ["pinned", "FelipeGazapina", "FelipeGazapina/pinned", "github.com/FelipeGazapina/pinned", "https://github.com/FelipeGazapina/pinned.git", "git@github.com:FelipeGazapina/pinned.git", "loja-web", "pinned-fork"];
+        let ctx = own.without_own(Context { projects: words.iter().map(|w| w.to_string()).collect(), ..Context::default() });
+        assert_eq!(ctx.projects, ["loja-web", "pinned-fork"]);
     }
 
     #[test]

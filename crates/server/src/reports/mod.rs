@@ -3,4 +3,4 @@ pub mod github;
 pub mod fake_github;
 mod hub;
 
-pub use hub::{prepare, Config, Reports, DAILY_LIMIT, NOT_AVAILABLE, TOKEN_VARIABLE};
+pub use hub::{cwd_context, prepare, with_cwd, Config, Reports, DAILY_LIMIT, NOT_AVAILABLE, TOKEN_VARIABLE};
