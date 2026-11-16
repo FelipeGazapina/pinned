@@ -2354,6 +2354,9 @@ function drawCount(el, n, title) {
   el.title = n ? title : "";
 }
 function drawNav() {
+  // teams-calls: start
+  globalThis.tcNavDraw?.();
+  // teams-calls: end
   askGlobalSettings();
   const counts = navCounts();
   const page = shellPage();
