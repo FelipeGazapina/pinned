@@ -30,6 +30,9 @@ const LIMIT_MARGIN_SECS: u64 = 5;
 /// How long a session that took the terminal must show no menu or dialog before its held prompts
 /// are typed, as `menu_watch::SETTLE` waits out a redraw.
 const HELD_SETTLE: Duration = Duration::from_millis(300);
+/// How long the usage-limit continue text sits before its Enter. Tests lengthen it so a menu shown
+/// in the gap is not raced on a loaded machine.
+const CONTINUE_ENTER_GAP: Duration = if cfg!(test) { Duration::from_millis(2000) } else { Duration::from_millis(300) };
 const UNWATCHED: (u16, u16) = (120, 32);
 /// How long input for a session waits for a start under way to give it a process.
 const START_WAIT: Duration = Duration::from_secs(5);
@@ -4348,6 +4351,14 @@ impl Machine {
         }
     }
 
+    /// Which running session the tab's screen belongs to: it changes each time the tab starts one.
+    /// None for a tab that is gone. The screen lock is taken alone, after the tabs lock is let go.
+    fn screen_session(&self, tab: &str) -> Option<u64> {
+        let screen = self.tab(tab, |t| t.screen.clone()).ok()?;
+        let session = screen.lock().unwrap().session;
+        Some(session)
+    }
+
     /// The menu or dialog the tab's screen shows, if any. The screen lock is taken alone, after the
     /// tabs lock is let go, as the reader thread takes it.
     /// Only Claude Code's screens are known: another provider's tab is never held back.
@@ -6630,6 +6641,8 @@ impl Machine {
                     return;
                 }
             }
+            // The session the text goes to: the Enter must reach the same one, not a session that replaced it.
+            let session = machine.screen_session(&tab);
             let fired = machine.tab(&tab, |t| !t.held_at_limit && t.session.is_some() && t.resume_at == Some(at) && t.resume_at.take().is_some());
             if fired != Ok(true) {
                 return;
@@ -6637,13 +6650,16 @@ impl Machine {
             let type_into = |data: &str| machine.tab(&tab, |t| t.session.as_mut().map(|s| s.write(data.as_bytes())));
             let _ = type_into(sessions::CONTINUE_PROMPT);
             // Enter arrives separately, or the TUI takes it as part of a paste.
-            std::thread::sleep(std::time::Duration::from_millis(300));
+            std::thread::sleep(CONTINUE_ENTER_GAP);
             // A menu or dialog that opened meanwhile would take the Enter: it waits for the screen too.
             while machine.blocker(&tab).is_some() {
-                if machine.tab(&tab, |t| t.session.is_none()) != Ok(false) {
+                if machine.tab(&tab, |t| t.session.is_none()) != Ok(false) || machine.screen_session(&tab) != session {
                     return;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            if machine.screen_session(&tab) != session {
+                return;
             }
             let _ = type_into("\r");
             machine.save_sessions();
@@ -14522,11 +14538,31 @@ Have another model review a risky change before it goes ahead.";
         // A menu that opens between the text and its Enter holds the Enter back.
         wait_for("the continue text", || kept(&claude, "typed", &tab) == sessions::CONTINUE_PROMPT);
         show(&m, &tab, MENU);
-        std::thread::sleep(Duration::from_millis(1200));
+        // The gap before the Enter is long under test, so the menu is up well before the screen is looked at.
+        std::thread::sleep(CONTINUE_ENTER_GAP + Duration::from_millis(1200));
         assert_eq!(kept(&claude, "typed", &tab), sessions::CONTINUE_PROMPT, "no Enter reached the menu");
         show(&m, &tab, ERASE);
         wait_for("the Enter", || kept(&claude, "typed", &tab).ends_with('\r'));
         assert_eq!(kept(&claude, "typed", &tab), format!("{}\r", sessions::CONTINUE_PROMPT));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_enter_of_a_usage_limit_continue_does_not_reach_a_session_that_replaced_its_own() {
+        let (m, dir, claude, tabs) = woken("guard-limit-replaced", &["s1"]);
+        let tab = tabs[0].clone();
+        let at = unix_now() - LIMIT_MARGIN_SECS - 1;
+        m.tab(&tab, |t| (t.resume_at, t.held_at_limit) = (Some(at), false)).unwrap();
+        m.continue_when_limit_lifts(&tab);
+        wait_for("the continue text", || kept(&claude, "typed", &tab) == sessions::CONTINUE_PROMPT);
+        // Another session takes the tab between the text and its Enter.
+        let replacement = dir.join("replacement.bin");
+        m.spawn(&tab, sh(&format!("stty raw -echo; echo ready; exec cat > '{}'", replacement.display())), pty::size(80, 24)).unwrap();
+        std::thread::sleep(CONTINUE_ENTER_GAP + Duration::from_millis(1200));
+        assert_eq!(read_pty(&replacement), "", "no Enter reached the new session");
+        assert_eq!(kept(&claude, "typed", &tab), sessions::CONTINUE_PROMPT, "nor the old one");
+        assert_eq!(m.tab(&tab, |t| t.resume_at).unwrap(), None, "the continue was spent");
         let _ = std::fs::remove_dir_all(dir);
     }
 
