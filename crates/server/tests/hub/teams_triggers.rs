@@ -117,6 +117,7 @@ impl Crew {
     /// The run the team's Linear poller hands over for issue `issue` labeled for workflow `id`.
     fn labeled(&self, id: &str, issue: &str) -> Work {
         Work::Run(Run {
+            reservation: None,
             cwd: self.folder.clone(),
             repo: None,
             args: vec!["--name".into(), "ENG-7 Fix the footer".into(), "Fix it.\n\nLinear issue ENG-7: Fix the footer\nhttps://linear.example.test/acme/issue/ENG-7\n\n(no description)".into()],

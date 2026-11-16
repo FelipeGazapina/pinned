@@ -78,6 +78,7 @@ impl Crew {
     fn labeled(&self, id: &str, issue: &str) -> Work {
         let n = issue.trim_start_matches("eng-");
         Work::Run(Run {
+            reservation: None,
             cwd: self.folder.clone(),
             repo: None,
             args: vec!["--name".into(), format!("ENG-{n} Fix page {n}"), format!("Fix it.\n\nLinear issue ENG-{n}: Fix page {n}\nhttps://linear.example.test/acme/issue/ENG-{n}\n\n(no description)")],

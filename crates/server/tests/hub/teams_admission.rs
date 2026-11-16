@@ -282,6 +282,7 @@ impl Crew {
     /// The event the team's Slack poller finds for a mention that starts thread `thread`.
     fn mentioned(&self, id: &str, thread: &str) -> Event {
         Event::Run(Run {
+            reservation: None,
             cwd: self.folder.clone(),
             repo: None,
             args: vec!["--name".into(), format!("Thread {thread}"), "Answer the thread.\n\nSlack thread in #acme, oldest first:\nENG-0: a thread".into()],
@@ -335,6 +336,7 @@ impl Crew {
     /// The event the team's Linear poller finds for label `agent` on issue `ENG-n`.
     pub(crate) fn labeled(&self, id: &str, n: u32) -> Event {
         Event::Run(Run {
+            reservation: None,
             cwd: self.folder.clone(),
             repo: None,
             args: vec!["--name".into(), format!("ENG-{n} Fix page {n}"), format!("Fix it.\n\nLinear issue ENG-{n}: Fix page {n}\nhttps://linear.example.test/acme/issue/ENG-{n}\n\n(no description)")],
@@ -1197,6 +1199,16 @@ fn a_turn_that_fails_after_taking_a_waiting_event_leaves_it_waiting() {
     assert_eq!(crew.skipped(&pages), Value::Null);
 }
 
+/// Another hub on `hub`'s database, as `TestHub::twin`, whose box tick and sweep do not run
+/// during a test: it never boots again a box the first hub is booting.
+fn quiet_twin(hub: &TestHub) -> (tokio::runtime::Runtime, pinned_server::Running) {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut config = hub.config("127.0.0.1:0");
+    config.box_policy = Policy { tick: Duration::from_secs(3600), sweep: Duration::from_secs(3600), ..config.box_policy.clone() };
+    let running = runtime.block_on(pinned_server::start(config)).unwrap();
+    (runtime, running)
+}
+
 impl Crew {
     /// A second event on ENG-1, after the first: its prompt and its Ask step's text say `ENG-1 again:`.
     fn again(&self, id: &str) -> Event {
@@ -1251,19 +1263,20 @@ impl Crew {
 fn a_new_event_on_a_subject_whose_last_reservation_was_ended_runs() {
     let crew = Crew::new("ta_rc2_ended");
     let pages = crew.on_bot("Pages");
-    let (twin, running) = crew.hub.twin();
+    let (twin, running) = quiet_twin(&crew.hub);
     let boxes_before = crew.boxes_created();
     THINKING.lock().unwrap().push("ta_rc2_ended".into());
     AGAIN_THINKING.lock().unwrap().push("ta_rc2_ended".into());
     std::thread::scope(|scope| {
-        // The first event is admitted; its Ask step thinks past the limit, and the backstop ends its place.
-        let first = scope.spawn(|| crew.found(crew.labeled(&pages, 1)));
+        // The first event (another hub of the team found it) is admitted; its Ask step thinks past
+        // the limit, and the backstop ends its place.
+        let first = scope.spawn(|| crew.found_on(&twin, &running.hub, crew.labeled(&pages, 1)));
         wait_for("the first event's model call", || crew.outside(1) == vec!["model".to_owned()]);
         crew.past_limit(&pages);
         crew.reaper_pass();
         assert_eq!(crew.states_of(&pages), never_started(), "the backstop ended the first event's place");
-        // A new event on ENG-1 (another hub of the team found it) is admitted to a place of its own.
-        let second = scope.spawn(|| crew.found_on(&twin, &running.hub, crew.again(&pages)));
+        // A new event on ENG-1 is admitted to a place of its own.
+        let second = scope.spawn(|| crew.found(crew.again(&pages)));
         wait_for("the new event's place", || crew.reserved_at(&pages) == vec!["set".to_owned()]);
         // The first event is fired now: its own place ended, so it is consumed and takes no other.
         THINKING.lock().unwrap().retain(|t| t != "ta_rc2_ended");
@@ -1274,9 +1287,9 @@ fn a_new_event_on_a_subject_whose_last_reservation_was_ended_runs() {
     });
     crew.reaper_pass();
     assert_eq!(crew.boxes_created() - boxes_before, 1, "one session, in one box");
-    assert_eq!(crew.box_prompts(), vec![format!("Fix it again.\n\n{}", pinned_core::untrusted::frame("a Linear issue", "ENG-1 again: Fix page 1"))], "the box runs the new event");
+    assert_eq!(crew.box_prompts(), vec![format!("Fix it again.\n\n{}", pinned_core::untrusted::frame("a Linear issue", "ENG-1 again: Fix page 1") + "\n\nBefore this session, acme/sorter on Vercel's AI Gateway read the issue and answered:\n- kind: bug")], "the box runs the new event");
     assert_eq!(crew.states_of(&pages), vec![("working".to_owned(), None), ("failed".to_owned(), Some("it never started".to_owned()))]);
-    assert_eq!(crew.reserved_at(&pages), none(), "its session opened in its own place");
+    assert_eq!(crew.unopened(), vec!["failed"], "only the first event's ended place is left unopened: the new event's session opened in its own place");
     assert_eq!(crew.skipped(&pages), json!([{ "reason": "never_started", "count": 1 }]), "counts unchanged");
     twin.shutdown_background();
 }
@@ -1306,6 +1319,9 @@ fn a_reply_after_the_claim_waits_for_the_session_and_starts_nothing() {
     let crew = Crew::new("ta_rc2_reply");
     let (holder, footer) = (crew.on_bot("Docs"), crew.slack_bot("Footer"));
     let thread = "1792400090.000100";
+    // Another hub of the team, up from the start: its own checks wait their interval, so the grant
+    // below wakes only this hub's poller, which claims the thread's event.
+    let (twin, running) = quiet_twin(&crew.hub);
     admin_on(&crew.hub.database, &format!("update teams set max_live_runs = 1 where id = '{}'", crew.team));
     assert_eq!(crew.found(crew.labeled(&holder, 9)), Ok(()));
     assert_eq!(crew.found(crew.mentioned(&footer, thread)), Ok(()));
@@ -1320,7 +1336,6 @@ fn a_reply_after_the_claim_waits_for_the_session_and_starts_nothing() {
     assert_eq!(crew.reserved_at(&footer), vec!["set".to_owned()], "claimed: its place is held while its box boots");
 
     // A reply in the thread, found by another hub of the team while the claimed run's box boots.
-    let (twin, running) = crew.hub.twin();
     let delivery = Delivery {
         connector: footer.clone(),
         channel: "C0ACME001".into(),
@@ -1330,7 +1345,7 @@ fn a_reply_after_the_claim_waits_for_the_session_and_starts_nothing() {
         mentioned: vec![],
     };
     assert_eq!(crew.handed_on(&twin, &running.hub, Work::Delivery(delivery.clone())), Ok(()), "the reply is held for the claimed run");
-    assert_eq!(crew.boots() - boots_before, 1, "the reply booted no box");
+    assert_eq!(crew.boxes_created() - boxes_before, 1, "the reply opened no box: the claimed run's is the only one");
     assert_eq!(crew.reserved_at(&footer), vec!["set".to_owned()], "the claimed run still holds its place");
 
     // The box boots: the claimed run's session opens in its place.
@@ -1349,7 +1364,6 @@ fn a_reply_after_the_claim_waits_for_the_session_and_starts_nothing() {
     });
     assert_eq!(typed, json!(pinned_core::untrusted::frame("a Slack reply in this thread", "[Slack reply from Dina] still broken")), "the reply reaches the session framed, once");
     assert_eq!(crew.boxes_created() - boxes_before, 1, "one box");
-    assert_eq!(crew.boots() - boots_before, 1, "one boot");
     assert_eq!(crew.live_of(&footer).len(), 1, "one session");
     assert_eq!(crew.skipped(&footer), Value::Null, "nothing counted");
     twin.shutdown_background();

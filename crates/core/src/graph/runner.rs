@@ -50,6 +50,11 @@ pub struct Run {
     /// (`NOT_AN_ON_BOT`). `None` on a person's account. Set before each `drive`, never stored.
     #[serde(skip)]
     pub callable: Option<std::collections::BTreeSet<String>>,
+    /// On a hub's team, the reserved run whose place this run's admitted event holds: each of its
+    /// sessions opens only in that place (`connectors::Run::reservation`). Stored with the run, so
+    /// a hub that restarts keeps it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reservation: Option<String>,
     /// The classify `pending` is asking. `supply` has no library, so the gate travels with the run.
     ready: Option<ReadyClassify>,
     /// Set once a claim has been supplied, so a finished run does not claim twice.
@@ -270,6 +275,7 @@ impl Run {
 pub fn start(library: &Library, connector: &str, subject: Subject, input: Value, at: &str) -> Run {
     let mut run = Run {
         callable: None,
+        reservation: None,
         id: RunId(format!("{connector}:{}:{at}", subject_key(&subject))),
         connector: connector.to_owned(),
         subject,

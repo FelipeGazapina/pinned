@@ -41,15 +41,34 @@ fn kind(trigger: &Trigger) -> &'static str {
 
 async fn run_fired(hub: &Arc<Hub>, team: &Arc<Account>, work: Run) -> Result<Option<Placement>, String> {
     let id = work.connector.clone();
-    let reserved = db::reserved_run_for(&hub.db, team.id, &id, &work.subject).await?;
-    // An admitted event whose reservation is gone (the backstop ended it, or a stop) is consumed,
-    // never started anew: its newest run on the subject held a place and ended before its session
-    // opened. It is counted once, by the path that ended it (`calls::end_reservation` counts
-    // `NeverStarted`; a stop is not counted), never again here.
-    if reserved.is_none() && db::reservation_ended_for(&hub.db, team.id, &id, &work.subject).await? {
-        eprintln!("pinned-server: team {} workflow {id}: an admitted event's place ended before its session opened: the event is consumed", team.id);
-        return Ok(None);
-    }
+    // The place THIS event holds is the one its admission reserved or its claim took
+    // (`Run::reservation`), never one the subject's history or another event holds.
+    // - Its place ended before its session opened (the backstop, a stop, a failed start): the
+    //   event is consumed, never started anew. It was counted once, by the path that ended it
+    //   (`calls::end_reservation` counts `NeverStarted`, a failed start `StartFailed`; a stop is
+    //   not counted), never again here. A new event on the same subject has a place of its own.
+    // - Its place's session opened (a graph's later session): it goes on as a run with no place.
+    // - With no place of its own, it never starts in a place another event holds: a run still
+    //   reserved on the subject is still starting, and the next check tries again.
+    let reserved = match work.reservation.as_deref() {
+        Some(own) => {
+            let own = Uuid::parse_str(own).map_err(|e| e.to_string())?;
+            match db::reservation_of(&hub.db, team.id, own).await? {
+                db::Reservation::Held => Some(own),
+                db::Reservation::Opened => None,
+                db::Reservation::Ended => {
+                    eprintln!("pinned-server: team {} workflow {id}: an admitted event's place ended before its session opened: the event is consumed", team.id);
+                    return Ok(None);
+                }
+            }
+        }
+        None => {
+            if db::reserved_run_for(&hub.db, team.id, &id, &work.subject).await?.is_some() {
+                return Err(format!("the bot of workflow {id} has a run on this {} that is still starting; the next check tries again", subject_name(&work.subject)));
+            }
+            None
+        }
+    };
     if let Some(reason) = queue::skip_reason(hub, team, &id, true).await? {
         // Turned off after its event was admitted: the place it held is freed.
         queue::release(hub, team, &id, &work.subject).await?;
@@ -131,7 +150,7 @@ impl Admission for TeamAdmission {
         Box::pin(async move { db::granted(&hub.ok_or("the hub is stopping")?.db, team).await })
     }
 
-    fn claim(&self, id: i64) -> Pending<Result<Option<Event>, String>> {
+    fn claim(&self, id: i64) -> Pending<Result<Option<(Event, Option<String>)>, String>> {
         let (hub, team) = (self.hub.upgrade(), self.team);
         Box::pin(async move {
             let hub = hub.ok_or("the hub is stopping")?;

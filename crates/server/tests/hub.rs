@@ -867,7 +867,7 @@ fn a_connector_run_goes_to_its_machine_else_another_online_one() {
     client.wait("the saved connector", |f| f["type"] == "settings" && f["settings"]["connectors"][0]["id"] == id);
     let account_id = uuid::Uuid::parse_str(&account.id).unwrap();
     let run = |subject: Subject| {
-        Work::Run(Run { cwd: repo.clone(), repo: None, args: vec![], connector: id.clone(), subject, mentioned: vec![], account: None, runs_on: RunsOn::Machine(mac_mini.clone()), input: String::new() })
+        Work::Run(Run { cwd: repo.clone(), repo: None, args: vec![], connector: id.clone(), subject, mentioned: vec![], account: None, runs_on: RunsOn::Machine(mac_mini.clone()), input: String::new(), reservation: None })
     };
     let open = |work| hub.runtime.block_on(hub.hub().open(account_id, work));
     let connector_tabs = |node: &Node| node.machine.tabs().into_iter().filter(|t| t.connector.as_deref() == Some(&id) && t.running).count();
@@ -917,6 +917,7 @@ fn a_connector_run_goes_to_its_machine_else_another_online_one() {
     assert_eq!(open(delivery("1792499999.000100")), Err("no session answers that thread".into()));
 
     let work = Run {
+        reservation: None,
         cwd: repo.clone(),
         repo: None,
         args: vec![],
@@ -2923,7 +2924,7 @@ impl BoxAccount {
 
     fn run(&self, subject: Subject, runs_on: RunsOn) -> Work {
         let args = vec!["--name".into(), "ENG-7 Fix login".into()];
-        Work::Run(Run { cwd: self.repo.clone(), repo: None, args, connector: self.connector.clone(), subject, mentioned: vec![], account: None, runs_on, input: String::new() })
+        Work::Run(Run { cwd: self.repo.clone(), repo: None, args, connector: self.connector.clone(), subject, mentioned: vec![], account: None, runs_on, input: String::new(), reservation: None })
     }
 
     fn box_run(&self, subject: Subject) -> Work {
@@ -9202,7 +9203,7 @@ fn every_box_signs_in_with_the_claude_token_of_its_projects_account_and_refuses_
         "permissionMode": "acceptEdits", "worktree": false, "instructions": "", "machine": { "kind": "upstash-box", "size": "small" },
     } })).unwrap()["id"].as_str().unwrap().to_owned();
     let triggered = |issue_id: &str| {
-        let run = Run { cwd: site.clone().into(), repo: None, args: vec!["--name".into(), "ENG-9 Site".into()], connector: on_site.clone(), subject: issue(issue_id), mentioned: vec![], account: None, runs_on: RunsOn::FreshBox(BoxStep { size: Some(BoxSize::Small) }), input: String::new() };
+        let run = Run { cwd: site.clone().into(), repo: None, args: vec!["--name".into(), "ENG-9 Site".into()], connector: on_site.clone(), subject: issue(issue_id), mentioned: vec![], account: None, runs_on: RunsOn::FreshBox(BoxStep { size: Some(BoxSize::Small) }), input: String::new(), reservation: None };
         hub.runtime.block_on(hub.hub().open(ana.id, Work::Run(run)))
     };
     let open_box = |client: &mut Client| client.hub(json!({ "cmd": "open_box", "repo": "acme/site", "size": "small", "budget_usd": 2.0 }));

@@ -515,20 +515,27 @@ pub async fn open_reserved(db: &Db, team: Uuid, run: Uuid, machine: &str) -> Res
     Ok(set == 1)
 }
 
-/// Whether the newest run of bot `workflow` on `subject` held a place and ended before its
-/// session opened: the admitted event whose reservation was ended (by the backstop, a stop, or a
-/// failed start) before its run was fired. That event is consumed, never started anew.
-pub async fn reservation_ended_for(db: &Db, team: Uuid, workflow: &str, subject: &Subject) -> Result<bool, String> {
+/// What became of the place reserved run `run` held: still held (live and reserved), its session
+/// opened, or ended before its session opened (ended while reserved, or deleted by a failed start).
+pub enum Reservation {
+    Held,
+    Opened,
+    Ended,
+}
+
+/// `Reservation` of run `run`, read from its own row only.
+pub async fn reservation_of(db: &Db, team: Uuid, run: Uuid) -> Result<Reservation, String> {
     let row = db
         .client()
         .await?
-        .query_opt(
-            &format!("select reserved and state not in {LIVE} from team_runs where team = $1 and workflow = $2 and subject = $3 order by started_at desc limit 1"),
-            &[&team, &workflow, &json(subject)?],
-        )
+        .query_opt(&format!("select reserved, state in {LIVE} from team_runs where team = $1 and id = $2"), &[&team, &run])
         .await
         .map_err(err)?;
-    Ok(row.is_some_and(|r| r.get(0)))
+    Ok(match row.map(|r| (r.get::<_, bool>(0), r.get::<_, bool>(1))) {
+        Some((true, true)) => Reservation::Held,
+        Some((false, _)) => Reservation::Opened,
+        Some((true, false)) | None => Reservation::Ended,
+    })
 }
 
 /// Reserved run `run`'s session did not open. One statement on the run's row decides whether this
