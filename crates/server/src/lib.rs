@@ -7,6 +7,7 @@ pub mod hub;
 pub mod mcp;
 pub mod oauth;
 pub mod relay;
+pub mod reports;
 pub mod remote;
 pub mod self_update;
 mod store_writes;
