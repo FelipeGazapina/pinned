@@ -4130,11 +4130,8 @@ impl Machine {
             let delivery = match nudge {
                 skills::Nudge::NextStart => skills::Delivery::NextStart,
                 skills::Nudge::ReloadSkills => {
-                    let typed = self.tab(&tab, |t| {
-                        t.owes_reload = true;
-                        t.reload_if_idle()
-                    });
-                    if typed.unwrap_or(false) {
+                    let _ = self.tab(&tab, |t| t.owes_reload = true);
+                    if self.reload_unless_blocked(&tab) {
                         skills::Delivery::Reloaded
                     } else {
                         self.arm_delegate_pass();
@@ -4146,6 +4143,13 @@ impl Machine {
         }
         nudged.sort_by_key(|n| tab_number(&n.tab));
         nudged
+    }
+
+    /// Types the `/reload-skills` a tab owes, unless its screen shows a menu or dialog. The screen
+    /// is read before the tabs lock is taken, and only when a reload is owed.
+    fn reload_unless_blocked(&self, tab: &str) -> bool {
+        let owes = self.tab(tab, |t| t.owes_reload && t.notice_idle()).unwrap_or(false);
+        owes && self.blocker(tab).is_none() && self.tab(tab, Tab::reload_if_idle).unwrap_or(false)
     }
 
     fn wake_sync(&self) {
@@ -5908,6 +5912,10 @@ impl Machine {
             }
             return;
         }
+        // A menu or dialog holds the news back: a claim made now would be released, and saved, again.
+        if self.blocker(tab).is_some() {
+            return;
+        }
         let Some((text, ids)) = self.delegates.claim_notice(tab) else { return };
         if self.write_notice(tab, &text) != Ok(true) {
             self.delegates.release_notice(&ids);
@@ -5991,8 +5999,7 @@ impl Machine {
                 let tabs: Vec<String> = machine.tabs.lock().unwrap().keys().cloned().collect();
                 for tab in tabs {
                     // The screen is read before the tabs lock is taken, and only when a reload is owed.
-                    let owes = machine.tab(&tab, |t| t.owes_reload && t.notice_idle()).unwrap_or(false);
-                    if !(owes && machine.blocker(&tab).is_none() && machine.tab(&tab, Tab::reload_if_idle).unwrap_or(false)) {
+                    if !machine.reload_unless_blocked(&tab) {
                         machine.maybe_deliver(&tab);
                     }
                 }
@@ -14495,6 +14502,82 @@ Have another model review a risky change before it goes ahead.";
         show(&m, &tab, ERASE);
         wait_for("the continue", || kept(&claude, "typed", &tab).ends_with('\r'));
         assert_eq!(kept(&claude, "typed", &tab), format!("{}\r", sessions::CONTINUE_PROMPT));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// How many times `needle` was typed into the tab's session.
+    #[cfg(unix)]
+    fn typed_times(claude: &Path, tab: &str, needle: &str) -> usize {
+        kept(claude, "typed", tab).matches(needle).count()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_skills_change_types_no_reload_into_a_menu_and_types_it_once_the_menu_is_gone() {
+        let (m, dir, claude, tabs) = woken("guard-reload", &["s1"]);
+        let tab = tabs[0].clone();
+        m.tab(&tab, |t| (t.status, t.turn_pending) = (Some(AgentStatus::Done), None)).unwrap();
+        show(&m, &tab, PICKER);
+        let account = Account::builtin(Provider::Claude);
+        let nudged = m.skills_changed(&[personal_skills(&m, &account)]);
+        assert_eq!(nudged.iter().map(|n| n.nudge).collect::<Vec<_>>(), [skills::Delivery::AfterTurn], "an idle tab behind a menu reloads after it");
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(kept(&claude, "typed", &tab), "", "nothing reached the picker");
+        assert!(m.tab(&tab, |t| t.owes_reload).unwrap(), "the reload is still owed");
+        show(&m, &tab, ERASE);
+        wait_for("the reload", || kept(&claude, "typed", &tab).contains("/reload-skills"));
+        std::thread::sleep(Duration::from_millis(1200));
+        assert_eq!(typed_times(&claude, &tab, "/reload-skills"), 1, "typed once: {:?}", kept(&claude, "typed", &tab));
+        assert!(!m.tab(&tab, |t| t.owes_reload).unwrap());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_delegate_pass_leaves_an_owed_reload_while_a_menu_is_up() {
+        let (m, dir, claude, tabs) = woken("guard-reload-pass", &["s1"]);
+        let tab = tabs[0].clone();
+        m.tab(&tab, |t| (t.status, t.turn_pending, t.owes_reload) = (Some(AgentStatus::Done), None, true)).unwrap();
+        show(&m, &tab, PICKER);
+        m.arm_delegate_pass();
+        std::thread::sleep(Duration::from_millis(2300));
+        assert_eq!(kept(&claude, "typed", &tab), "", "two passes found the menu and typed nothing");
+        assert!(m.tab(&tab, |t| t.owes_reload).unwrap(), "the reload is still owed");
+        show(&m, &tab, ERASE);
+        wait_for("the reload", || kept(&claude, "typed", &tab).contains("/reload-skills"));
+        std::thread::sleep(Duration::from_millis(1200));
+        assert_eq!(typed_times(&claude, &tab, "/reload-skills"), 1, "typed once: {:?}", kept(&claude, "typed", &tab));
+        assert!(!m.tab(&tab, |t| t.owes_reload).unwrap());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_blocked_idle_tab_with_news_leaves_the_delegates_file_alone() {
+        let (m, dir, claude, tabs) = woken("guard-news-file", &["s1"]);
+        let tab = tabs[0].clone();
+        m.tab(&tab, |t| (t.status, t.turn_pending) = (Some(AgentStatus::Done), None)).unwrap();
+        show(&m, &tab, PICKER);
+        let session = m.tab(&tab, |t| t.claude_session.clone()).unwrap();
+        m.delegates.queue_report(&tab, session, "[pinned] Worker tab-9 finished".into());
+        let file = dir.join("config/tasks.json");
+        let (before, saved) = (std::fs::metadata(&file).unwrap().modified().unwrap(), std::fs::read_to_string(&file).unwrap());
+        m.arm_delegate_pass();
+        // Three passes run in this time, and the file is read often enough to catch a claim between its two writes.
+        let until = Instant::now() + Duration::from_millis(3300);
+        while Instant::now() < until {
+            assert!(!std::fs::read_to_string(&file).unwrap_or_default().contains("\"claimed\": true"), "the news was claimed while a menu was up");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(std::fs::metadata(&file).unwrap().modified().unwrap(), before, "the file was written again");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), saved);
+        assert!(m.delegates.has_news(&tab), "the news stays queued");
+        assert_eq!(kept(&claude, "typed", &tab), "", "nothing reached the session");
+        show(&m, &tab, ERASE);
+        wait_for("the news", || kept(&claude, "typed", &tab).contains("tab-9 finished"));
+        std::thread::sleep(Duration::from_millis(1200));
+        assert_eq!(typed_times(&claude, &tab, "tab-9 finished"), 1, "typed once: {:?}", kept(&claude, "typed", &tab));
+        assert!(!m.delegates.has_news(&tab));
         let _ = std::fs::remove_dir_all(dir);
     }
 
