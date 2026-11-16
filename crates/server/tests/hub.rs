@@ -11534,3 +11534,5 @@ mod teams_membership;
 mod teams_groups;
 #[path = "hub/teams_separation.rs"] mod teams_separation;
 #[path = "hub/teams_bots.rs"] mod teams_bots;
+#[path = "hub/teams_box_call.rs"]
+mod teams_box_call;
