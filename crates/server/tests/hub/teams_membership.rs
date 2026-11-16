@@ -7,7 +7,6 @@ use uuid::Uuid;
 const NO_INVITE: &str = "that invite code is unknown, used or revoked";
 const NOT_A_MEMBER: &str = "you are not a member of that team";
 const NOT_OWNER: &str = "only the team's owner does this";
-const NOT_ON_TEAM: &str = "that person is not a member of the team";
 const OWNER_LEAVES: &str = "the owner cannot leave the team; remove the others first";
 const OWNER_REMOVED: &str = "the owner cannot be removed from the team";
 const NO_UNUSED_INVITE: &str = "there is no unused invite with that hint";
@@ -16,40 +15,40 @@ const WRONG_LOGIN: &str = "wrong email or password";
 const UNKNOWN_PAIR_CODE: &str = "that pairing code is unknown, used or expired";
 
 /// A person who signed up as `email` and is signed in on the hub, with its account id.
-fn person(url: &str, email: &str) -> (Client, String) {
+pub(super) fn person(url: &str, email: &str) -> (Client, String) {
     let (token, view) = account::signup(url, email, "correct horse").unwrap();
     (signed_in_client(url, &token), view.id)
 }
 
 /// One member's call of `op` on `team`, answered as the hub answers it.
-fn team_op(client: &mut Client, team: &str, op: Value) -> Result<Value, String> {
+pub(super) fn team_op(client: &mut Client, team: &str, op: Value) -> Result<Value, String> {
     client.hub(json!({ "cmd": "team", "team": team, "op": op }))
 }
 
 /// The owner makes a team named `name`; its id.
-fn make_team(owner: &mut Client, name: &str) -> String {
+pub(super) fn make_team(owner: &mut Client, name: &str) -> String {
     let team = owner.hub(json!({ "cmd": "team", "op": { "op": "create", "name": name } })).unwrap();
     team["id"].as_str().unwrap().to_owned()
 }
 
 /// A new invite code the owner makes, shown once.
-fn new_invite(owner: &mut Client, team: &str) -> String {
+pub(super) fn new_invite(owner: &mut Client, team: &str) -> String {
     let invite = team_op(owner, team, json!({ "op": "invite" })).unwrap();
     invite["code"].as_str().unwrap().to_owned()
 }
 
 /// Joins the team of `code` as `client`: the team as the hub shows it to the joiner.
-fn join_team(client: &mut Client, code: &str) -> Result<Value, String> {
+pub(super) fn join_team(client: &mut Client, code: &str) -> Result<Value, String> {
     client.hub(json!({ "cmd": "team", "op": { "op": "join", "code": code } }))
 }
 
 /// The team's members as one of them reads them.
-fn roster(client: &mut Client, team: &str) -> Result<Value, String> {
+pub(super) fn roster(client: &mut Client, team: &str) -> Result<Value, String> {
     team_op(client, team, json!({ "op": "members" }))
 }
 
 /// The first column of each row `sql` returns on the hub's database, as text.
-fn db_text(database: &str, sql: &str) -> Vec<String> {
+pub(super) fn db_text(database: &str, sql: &str) -> Vec<String> {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
         let (client, connection) = tokio_postgres::connect(&format!("{}/{database}", postgres()), tokio_postgres::NoTls).await.unwrap();
@@ -205,8 +204,8 @@ fn a_member_who_leaves_loses_the_team_and_the_owner_removes_another_and_cannot_l
 
     assert_eq!(team_op(&mut ana, &team, json!({ "op": "remove_member", "account": carla_id })), Ok(Value::Null));
     assert_eq!(roster(&mut carla, &team), Err(NOT_A_MEMBER.into()));
-    assert_eq!(team_op(&mut ana, &team, json!({ "op": "remove_member", "account": carla_id })), Err(NOT_ON_TEAM.into()));
-    assert_eq!(team_op(&mut ana, &team, json!({ "op": "remove_member", "account": "not-an-account" })), Err(NOT_ON_TEAM.into()));
+    assert_eq!(team_op(&mut ana, &team, json!({ "op": "remove_member", "account": carla_id })), Err(format!("no member {carla_id} on this team")));
+    assert_eq!(team_op(&mut ana, &team, json!({ "op": "remove_member", "account": "not-an-account" })), Err("no member not-an-account on this team".into()));
 
     assert_eq!(team_op(&mut ana, &team, json!({ "op": "leave" })), Err(OWNER_LEAVES.into()));
     assert_eq!(team_op(&mut ana, &team, json!({ "op": "remove_member", "account": ana_id })), Err(OWNER_REMOVED.into()));
