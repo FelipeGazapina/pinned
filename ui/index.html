@@ -39,6 +39,7 @@
 <link rel="stylesheet" href="gui-keybindings.css">
 <link rel="stylesheet" href="gui-pulls.css">
 <link rel="stylesheet" href="gui-needs-you.css">
+<link rel="stylesheet" href="gui-reports.css">
 <link rel="stylesheet" href="gui-phone.css">
 <link rel="stylesheet" href="gui-phone-thread.css">
 </head>
@@ -90,6 +91,10 @@
             <button type="button" role="menuitem" data-open-page="global-projects"><span class="label">Projects</span><span class="hint" data-hint="projects"></span></button>
             <button type="button" role="menuitem" data-settings="machines"><span class="label">Machines</span><span class="hint" data-hint="machines"></span></button>
             <button type="button" role="menuitem" data-settings="archive"><span class="label">Archive</span><span class="hint"></span></button>
+            <!-- reports: start -->
+            <button type="button" role="menuitem" data-open-page="reports"><span class="label">My reports</span><span class="hint"></span></button>
+            <button type="button" role="menuitem" data-report-new><span class="label">Report a problem</span><span class="hint"></span></button>
+            <!-- reports: end -->
             <button type="button" role="menuitem" data-update-check><span class="label">Check for updates</span><span class="hint" data-hint="version"></span></button>
           </div></footer>
       </aside>
@@ -194,6 +199,7 @@
     <button type="button" class="retry" name="retry" hidden>Retry</button>
     <div class="actions"><button type="button" class="secondary" name="signup">Create account</button><button class="primary">Sign in</button></div>
   </form>
+<script src="report-errors.js"></script>
 <script src="vendor/xterm.js"></script>
 <script src="vendor/addon-fit.js"></script>
 <script src="transport.js"></script>
@@ -262,6 +268,7 @@
 <script src="gui-taste.js"></script>
 <script src="gui-delegation.js"></script>
 <script src="gui-needs-you.js"></script>
+<script src="gui-reports.js"></script>
 <script src="gui-phone.js"></script>
 <script src="vendor/theme-palettes.js"></script>
 <script src="theme-colors.js"></script>

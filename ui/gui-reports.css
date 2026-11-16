@@ -1,0 +1,99 @@
+/* Report a problem (gui-reports.js): the dialog, the agent's request card and My reports. */
+
+/* The dialog */
+#shell-dialog .popup.rp-popup { max-width: 540px; overflow-y: auto; }
+.rp-dialog { display: flex; flex-direction: column; font-size: 13px; }
+.rp-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 18px 52px 0 20px; }
+.rp-head h2 { margin: 0; font-size: 16px; font-weight: 600; }
+.rp-seg { display: flex; gap: 2px; padding: 2px; border-radius: 8px; background: var(--g-control, rgb(var(--g-ink-rgb) / 0.06)); }
+.rp-seg button { height: 24px; padding: 0 10px; border-radius: 6px; color: var(--g-side-muted); font-size: 13px; font-weight: 500; }
+.rp-seg button[aria-pressed="true"] { background: var(--g-primary); color: var(--g-on-primary); }
+.rp-body { display: flex; flex-direction: column; gap: 12px; padding: 14px 20px 20px; }
+.rp-field { display: flex; flex-direction: column; gap: 4px; }
+.rp-field label, .rp-label { color: var(--g-side-muted); font-size: 12px; }
+.rp-field :is(input, textarea) { width: 100%; box-sizing: border-box; min-height: 32px; padding: 6px 10px; border: 1px solid var(--g-input); border-radius: 8px; outline: 0;
+  background: rgb(var(--g-ink-rgb) / 0.03); color: var(--g-fg); font: inherit; font-size: 13px; line-height: 1.45; resize: vertical; }
+.rp-field :is(input, textarea):hover { border-color: rgb(var(--g-ink-rgb) / 0.14); }
+.rp-field :is(input, textarea):focus { border-color: rgb(var(--g-primary-rgb) / 0.8); box-shadow: 0 0 0 3px rgb(var(--g-primary-rgb) / 0.2); }
+.rp-hint { color: var(--g-muted); font-size: 12px; }
+.rp-text { margin: 0; color: var(--g-text); font-size: 13px; line-height: 1.5; }
+.rp-note { margin: 0; color: var(--g-side-muted); font-size: 12px; line-height: 1.5; }
+.rp-error { margin: 0; color: var(--g-error); font-size: 12px; overflow-wrap: anywhere; }
+.rp-error:empty { display: none; }
+
+.rp-similar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 8px 10px; border-radius: 10px; background: rgb(var(--g-ink-rgb) / 0.04); }
+.rp-similar + .rp-similar { margin-top: -6px; }
+.rp-similar-text { flex: 1 1 220px; min-width: 0; display: flex; flex-direction: column; }
+.rp-similar-title { overflow-wrap: anywhere; }
+.rp-similar .outline { height: 26px; font-size: 12px; }
+
+.rp-extras { display: flex; flex-direction: column; gap: 2px; }
+.rp-extra { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 32px; padding: 4px 6px; border-radius: 8px; text-align: left; }
+.rp-extra:hover:not(:disabled) { background: var(--g-hover); }
+.rp-extra:disabled { opacity: 0.55; cursor: default; }
+.rp-box { flex: none; display: grid; place-items: center; width: 16px; height: 16px; border-radius: 4px; border: 1.5px solid rgb(var(--g-ink-rgb) / 0.4); color: var(--g-on-primary); }
+.rp-box .i { width: 12px; height: 12px; }
+.rp-extra[aria-checked="true"] .rp-box { background: var(--g-primary); border-color: var(--g-primary); }
+.rp-extra-name { flex: 1 1 auto; min-width: 0; }
+.rp-extra-detail { flex: 0 1 auto; min-width: 0; color: var(--g-muted); font-size: 12px; text-align: right; }
+
+.rp-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.rp-actions .primary, .rp-actions .outline, .rp-actions .rp-link { height: 30px; }
+.rp-actions button:disabled { opacity: 0.55; cursor: default; }
+.rp-quiet { height: 28px; padding: 0 8px; border-radius: 8px; color: var(--g-side-muted); font-size: 13px; }
+.rp-quiet:hover { color: var(--g-fg); }
+.rp-link { display: inline-flex; align-items: center; gap: 5px; padding: 0 4px; color: var(--g-link); font-size: 13px; }
+.rp-link:hover { text-decoration: underline; }
+.rp-link .i { width: 12px; height: 12px; }
+.rp-link.primary-link { padding: 0 12px; border-radius: 8px; background: var(--g-primary); color: var(--g-on-primary); font-weight: 500; }
+.rp-link.primary-link:hover { background: var(--g-primary-hover); text-decoration: none; }
+
+/* The issue as GitHub will hold it (preview) */
+.rp-issue { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--g-border); background: rgb(var(--g-ink-rgb) / 0.02); max-height: 320px; overflow-y: auto; }
+.rp-issue-head, .rp-card-labels { display: flex; flex-wrap: wrap; gap: 6px; }
+.rp-issue-title { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.rp-chip { padding: 1px 8px; border-radius: 999px; background: rgb(var(--g-ink-rgb) / 0.08); color: var(--g-text); font-size: 12px; }
+.rp-chip.public { background: rgb(var(--g-primary-rgb) / 0.22); color: var(--g-link); }
+.rp-chip.kind-problem { background: rgb(var(--g-warning-rgb) / 0.18); color: var(--g-warning-fg); border-radius: 6px; }
+.rp-chip.kind-idea { background: rgb(var(--g-info-rgb) / 0.18); color: var(--g-link); border-radius: 6px; }
+.rp-section { display: flex; flex-direction: column; gap: 2px; }
+.rp-section-head { font-weight: 600; }
+.rp-section-text { color: var(--g-text); white-space: pre-wrap; overflow-wrap: anywhere; }
+.rp-lines { margin: 4px 0 0; padding: 8px 10px; border-radius: 8px; background: var(--g-canvas); color: var(--g-code-fg, var(--g-side-muted)); font: 12px/1.45 var(--g-mono); white-space: pre-wrap; overflow-wrap: anywhere; max-height: 160px; overflow-y: auto; }
+
+/* The agent's request */
+.rp-card { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--g-border); background: rgb(var(--g-ink-rgb) / 0.02); font-size: 13px; text-align: left; }
+.rp-card:empty { display: none; }
+.rp-card-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.rp-card-title { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.rp-card-sections { display: flex; flex-direction: column; gap: 8px; }
+.rp-card-note { padding: 8px 10px; border-radius: 8px; background: rgb(var(--g-ink-rgb) / 0.04); color: var(--g-side-muted); font-size: 12px; }
+.rp-card-similar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; color: var(--g-side-muted); font-size: 12px; }
+.rp-card-similar .outline { height: 26px; font-size: 12px; }
+.ny-card .rp-card { padding: 10px 12px; border-radius: 10px; font-size: 14px; }
+.ny-card .rp-card-similar .outline { height: 36px; border-radius: 10px; }
+.agent-confirm .rp-card { margin: 4px 0; }
+
+/* My reports */
+.rp-page { display: flex; flex-direction: column; gap: 20px; max-width: 720px; margin: 0 auto; padding: 20px 20px 48px; color: var(--g-fg); font-size: 13px; }
+.rp-page-head { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px; }
+.rp-page-head h1 { margin: 0; font-size: 20px; font-weight: 600; }
+.rp-page-head p { margin: 4px 0 0; color: var(--g-side-muted); }
+.rp-page-head .primary { height: 30px; }
+.rp-group { display: flex; flex-direction: column; gap: 2px; }
+.rp-group h2 { margin: 0 0 4px; color: var(--g-side-muted); font-size: 12px; font-weight: 500; }
+.rp-group[data-group="news"] .rp-row { border: 1px solid var(--g-border); background: var(--g-raised); }
+.rp-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; min-height: 40px; padding: 6px 12px; border-radius: 8px; }
+.rp-group[data-group="news"] .rp-row:has([data-tone="good"]) { border-color: rgb(var(--g-success-rgb, 0 188 125) / 0.4); }
+.rp-num { flex: none; width: 40px; color: var(--g-side-muted); font-variant-numeric: tabular-nums; }
+.rp-row-texts { flex: 1 1 240px; min-width: 0; display: flex; flex-direction: column; }
+.rp-row-title { overflow-wrap: anywhere; }
+.rp-group[data-group="news"] .rp-row-title { font-weight: 600; }
+.rp-row-line { font-size: 12px; color: var(--g-side-muted); overflow-wrap: anywhere; }
+.rp-row-line[data-tone="good"] { color: var(--g-success); }
+.rp-row-line[data-tone="warn"] { color: var(--g-warning-fg); }
+.rp-row-line[data-tone="error"] { color: var(--g-error); }
+.rp-row-actions { display: flex; align-items: center; gap: 8px; }
+.rp-row-actions .outline { height: 26px; font-size: 12px; }
+.rp-tag { margin-right: 6px; padding: 0 6px; border-radius: 6px; background: rgb(var(--g-info-rgb) / 0.18); color: var(--g-link); font-size: 11px; }
+.rp-foot { margin: 0; color: var(--g-muted); font-size: 12px; }

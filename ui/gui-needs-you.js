@@ -100,6 +100,8 @@ function needsYouActionsHtml(card) {
   switch (card.kind) {
     case "agent": {
       const busy = agentDeciding.has(card.confirmation.id) ? " disabled" : "";
+      const custom = globalThis.agentCards?.[card.confirmation.action];
+      if (custom) return custom.actions(card.confirmation, busy, true);
       return row(`${nyButton("deny", "Deny", "ny-secondary", ` data-agent="deny"${busy}`)}${nyButton("approve", "Approve", "ny-primary", ` data-agent="approve"${busy}`)}`);
     }
     case "approval":
@@ -137,6 +139,7 @@ function needsYouCardHtml(card, answer = null) {
   }
   const body =
     card.kind === "approval" && card.ask?.command ? `<pre>${esc(card.ask.command)}</pre>`
+      : card.kind === "agent" && globalThis.agentCards?.[card.confirmation.action] ? globalThis.agentCards[card.confirmation.action].body(card.confirmation)
       : card.kind === "agent" && Object.keys(card.confirmation.args ?? {}).length && !AGENT_TITLE_ONLY.has(card.confirmation.action) ? `<pre>${esc(JSON.stringify(card.confirmation.args, null, 2))}</pre>`
       : card.line && card.line !== card.title ? `<p class="ny-line">${esc(card.line)}</p>`
       : "";

@@ -53,7 +53,7 @@ const AGENT_AUDIT_PAGE = 50;
 const AGENT_OUTCOME_TONES = { done: "success", approved: "success", pending: "primary", failed: "error", refused: "warning", denied: "muted" };
 
 /** Actions whose words alone read wrong. */
-const AGENT_LABELS = { update_self: "Update pinned", pair_code: "Pair a machine", set_box_claude_token: "Keep box Claude token", remove_box_claude_token: "Forget box Claude token", list_mcp_servers: "List MCP servers" };
+const AGENT_LABELS = { report_issue: "Report to pinned", update_self: "Update pinned", pair_code: "Pair a machine", set_box_claude_token: "Keep box Claude token", remove_box_claude_token: "Forget box Claude token", list_mcp_servers: "List MCP servers" };
 /** What each MCP server action does, in words, with the server named as the MCP page lists it. */
 const AGENT_MCP_COPY = {
   save_mcp_server: (a) => `${a.id ? "Change" : "Add"} MCP server ${a.server?.name ?? ""}`.trim(),
@@ -163,14 +163,15 @@ const agentQuoted = (c) => `\u201c${(c.title || c.tab).replace(/[\s.!?,;:\u2026]
 
 function agentConfirmationHtml(c) {
   const busy = agentDeciding.has(c.id) ? " disabled" : "";
+  const custom = globalThis.agentCards?.[c.action];
   const who = `Asked by ${agentQuoted(c)} · ${agentWords(c.role)} on ${c.machine_name || "removed machine"} · ${agentSince(c.at)}`;
   return `<div class="agent-confirm" data-confirmation="${esc(c.id)}" role="group" aria-label="${esc(`Approve ${c.action}?`)}">
     <span class="dot"></span>
     <div class="texts">
       <b class="title" title="${esc(c.about)}">${esc(agentActionTitle(c.action, c.args, c.machine))}${c.target ? ` on ${esc(agentMachineName(c.target) || c.target)}` : ""}</b>
-      ${Object.keys(c.args ?? {}).length && !AGENT_TITLE_ONLY.has(c.action) ? `<pre class="args">${esc(JSON.stringify(c.args, null, 2))}</pre>` : ""}
+      ${custom ? custom.body(c) : Object.keys(c.args ?? {}).length && !AGENT_TITLE_ONLY.has(c.action) ? `<pre class="args">${esc(JSON.stringify(c.args, null, 2))}</pre>` : ""}
       <span class="who">${esc(who)}</span>
-      <div class="actions start"><button type="button" class="primary" data-agent="approve"${busy}>Approve</button><button type="button" class="outline" data-agent="deny"${busy}>Deny</button></div>
+      ${custom ? custom.actions(c, busy, false) : `<div class="actions start"><button type="button" class="primary" data-agent="approve"${busy}>Approve</button><button type="button" class="outline" data-agent="deny"${busy}>Deny</button></div>`}
     </div>
   </div>`;
 }

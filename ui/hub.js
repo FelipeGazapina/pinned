@@ -102,7 +102,10 @@ class Hub {
         const waiting = this.pending.get(frame.id);
         if (!waiting) break;
         this.pending.delete(frame.id);
-        if ("err" in frame) waiting.reject(frame.err);
+        if ("err" in frame) {
+          if (typeof reportErrors !== "undefined") reportErrors.record(`hub error: ${frame.err}`);
+          waiting.reject(frame.err);
+        }
         else waiting.resolve(frame.ok);
         break;
       }
