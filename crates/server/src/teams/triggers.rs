@@ -1,7 +1,7 @@
 //! Triggers: what the team account's own pollers and tab wakes find (`Hub::open_found`). A trigger
 //! of a team's workflow starts a run only through its bot (`bots::start_run`), and only while the
 //! bot is on. An event for a bot that is off, a draft, or gone is consumed: one log line, never
-//! queued, never replayed.
+//! queued, never replayed. A manual workflow is never started here: it runs only by Run now.
 
 use super::bots::{self, Start};
 use super::db;
@@ -32,6 +32,8 @@ fn kind(trigger: &Trigger) -> &'static str {
         Trigger::SlackMention { .. } => "slack_mention",
         Trigger::SlackMessage { .. } => "slack_message",
         Trigger::Called => "called",
+        // Refused before a start: a manual workflow runs only by Run now.
+        Trigger::Manual => "manual",
     }
 }
 
@@ -43,6 +45,10 @@ async fn run_fired(hub: &Arc<Hub>, team: &Arc<Account>, work: Run) -> Result<Opt
         eprintln!("pinned-server: team {} workflow {id} is off: its trigger's event is consumed", team.id);
         return Ok(None);
     };
+    if matches!(workflow.trigger, Trigger::Manual) {
+        eprintln!("pinned-server: team {} workflow {id} is manual: it runs only by Run now, so a found run is consumed", team.id);
+        return Ok(None);
+    }
     // A poller that sends a thread's run again while the bot's run on it lives starts no second one.
     if db::live_run_for(&hub.db, team.id, &id, &work.subject).await?.is_some() {
         return Err(format!("the bot of workflow {id} already has a live run on this {}", subject_name(&work.subject)));

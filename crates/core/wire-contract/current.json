@@ -7978,6 +7978,19 @@
                 "required": [
                   "kind"
                 ]
+              },
+              {
+                "description": "No poller: the workflow runs only when someone runs it now.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "manual"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
               }
             ]
           },
@@ -8652,6 +8665,19 @@
                   "kind": {
                     "type": "string",
                     "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "No poller: runs only when someone runs it now.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "manual"
                   }
                 },
                 "required": [
@@ -19596,6 +19622,19 @@
                 "required": [
                   "kind"
                 ]
+              },
+              {
+                "description": "No poller: the workflow runs only when someone runs it now.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "manual"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
               }
             ]
           },
@@ -20254,6 +20293,19 @@
                   "kind": {
                     "type": "string",
                     "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "No poller: runs only when someone runs it now.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "manual"
                   }
                 },
                 "required": [
@@ -27487,6 +27539,19 @@
                 "required": [
                   "kind"
                 ]
+              },
+              {
+                "description": "No poller: the workflow runs only when someone runs it now.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "manual"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
               }
             ]
           },
@@ -28170,6 +28235,19 @@
                   "kind": {
                     "type": "string",
                     "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "No poller: runs only when someone runs it now.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "manual"
                   }
                 },
                 "required": [
@@ -35969,6 +36047,19 @@
                 "required": [
                   "kind"
                 ]
+              },
+              {
+                "description": "No poller: the workflow runs only when someone runs it now.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "manual"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
               }
             ]
           },
@@ -36636,6 +36727,19 @@
                   "kind": {
                     "type": "string",
                     "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "No poller: runs only when someone runs it now.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "manual"
                   }
                 },
                 "required": [
@@ -42079,6 +42183,19 @@
                 "required": [
                   "kind"
                 ]
+              },
+              {
+                "description": "No poller: the workflow runs only when someone runs it now.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "manual"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
               }
             ]
           },
@@ -42767,6 +42884,19 @@
                 "required": [
                   "kind"
                 ]
+              },
+              {
+                "description": "No poller: runs only when someone runs it now.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "manual"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
               }
             ]
           },
@@ -43294,6 +43424,19 @@
                   "kind": {
                     "type": "string",
                     "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "No poller: the workflow runs only when someone runs it now.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "manual"
                   }
                 },
                 "required": [
@@ -43966,6 +44109,19 @@
                   "kind": {
                     "type": "string",
                     "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "No poller: runs only when someone runs it now.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "manual"
                   }
                 },
                 "required": [
@@ -50875,6 +51031,19 @@
                 "required": [
                   "kind"
                 ]
+              },
+              {
+                "description": "No poller: the workflow runs only when someone runs it now.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "manual"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
               }
             ]
           },
@@ -51558,6 +51727,19 @@
                   "kind": {
                     "type": "string",
                     "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "No poller: runs only when someone runs it now.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "manual"
                   }
                 },
                 "required": [
@@ -53144,6 +53326,19 @@
                 "required": [
                   "kind"
                 ]
+              },
+              {
+                "description": "No poller: the workflow runs only when someone runs it now.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "manual"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
               }
             ]
           },
@@ -53811,6 +54006,19 @@
                   "kind": {
                     "type": "string",
                     "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "No poller: runs only when someone runs it now.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "manual"
                   }
                 },
                 "required": [
@@ -61201,6 +61409,19 @@
                 "required": [
                   "kind"
                 ]
+              },
+              {
+                "description": "No poller: the workflow runs only when someone runs it now.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "manual"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
               }
             ]
           },
@@ -61884,6 +62105,19 @@
                   "kind": {
                     "type": "string",
                     "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "No poller: runs only when someone runs it now.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "manual"
                   }
                 },
                 "required": [
@@ -65544,6 +65778,19 @@
                 "required": [
                   "kind"
                 ]
+              },
+              {
+                "description": "No poller: the workflow runs only when someone runs it now.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "manual"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
               }
             ]
           },
@@ -66211,6 +66458,19 @@
                   "kind": {
                     "type": "string",
                     "const": "called"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "No poller: runs only when someone runs it now.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "manual"
                   }
                 },
                 "required": [

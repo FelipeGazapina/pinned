@@ -32,12 +32,12 @@ async fn workflow(hub: &Arc<Hub>, team: &Account, id: &str) -> Result<Connector,
 }
 
 /// Refuses a workflow whose trigger is not one a bot can have yet ("scheduled and GitHub-event bots
-/// are not available yet"). Linear and Slack triggers are fine, and today they are the only kinds.
+/// are not available yet"). Linear, Slack and manual triggers are fine, and today they are the only kinds.
 /// The matches name every kind on purpose: a schedule or GitHub-event trigger added later does not
 /// compile until it is refused here.
 fn available(workflow: &Connector) -> Result<(), String> {
     match &workflow.trigger {
-        Trigger::LinearLabel { .. } | Trigger::SlackMention { .. } | Trigger::SlackMessage { .. } | Trigger::Called => {}
+        Trigger::LinearLabel { .. } | Trigger::SlackMention { .. } | Trigger::SlackMessage { .. } | Trigger::Called | Trigger::Manual => {}
     }
     let triggers = workflow.graph.iter().flat_map(|g| g.nodes.iter()).filter_map(|n| match &n.kind {
         NodeKind::Trigger { watch } => Some(watch),
@@ -45,7 +45,7 @@ fn available(workflow: &Connector) -> Result<(), String> {
     });
     for watch in triggers {
         match watch {
-            Watch::LinearLabel { .. } | Watch::SlackMention { .. } | Watch::SlackMessage { .. } | Watch::Called => {}
+            Watch::LinearLabel { .. } | Watch::SlackMention { .. } | Watch::SlackMessage { .. } | Watch::Called | Watch::Manual => {}
         }
     }
     Ok(())

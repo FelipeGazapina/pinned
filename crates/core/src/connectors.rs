@@ -118,6 +118,8 @@ pub enum Trigger {
     /// A Slack thread a message workflow's category hands it, which its session answers as a
     /// mention's session would. It watches no channel of its own.
     Called,
+    /// No poller: the workflow runs only when someone runs it now.
+    Manual,
 }
 
 impl Trigger {
@@ -125,13 +127,14 @@ impl Trigger {
         match self {
             Trigger::LinearLabel { .. } => "Linear",
             Trigger::SlackMention { .. } | Trigger::SlackMessage { .. } | Trigger::Called => "Slack",
+            Trigger::Manual => "pinned",
         }
     }
 
     fn answers_threads(&self) -> bool {
         match self {
             Trigger::SlackMention { .. } | Trigger::Called => true,
-            Trigger::LinearLabel { .. } | Trigger::SlackMessage { .. } => false,
+            Trigger::LinearLabel { .. } | Trigger::SlackMessage { .. } | Trigger::Manual => false,
         }
     }
 }
@@ -728,7 +731,7 @@ impl Connector {
     fn advance(&mut self, watermark: DateTime<Utc>, opening: bool) -> bool {
         let watched = match self.trigger {
             Trigger::SlackMention { .. } | Trigger::SlackMessage { .. } => true,
-            Trigger::LinearLabel { .. } | Trigger::Called => false,
+            Trigger::LinearLabel { .. } | Trigger::Called | Trigger::Manual => false,
         };
         let behind = DateTime::parse_from_rfc3339(&self.since).map_or(true, |since| since < watermark);
         if !watched || !behind || opening {
@@ -1870,8 +1873,9 @@ impl Connectors {
     async fn poll(&self) -> (Vec<Work>, Option<String>) {
         self.fill_bots().await;
         let now = Utc::now();
+        // A manual workflow has no poller: it runs only when someone runs it now.
         let watching: Vec<Connector> =
-            self.store.lock().unwrap().connectors.iter().filter(|c| c.enabled).cloned().collect();
+            self.store.lock().unwrap().connectors.iter().filter(|c| c.enabled && !matches!(c.trigger, Trigger::Manual)).cloned().collect();
         let (mut found, mut checked, mut limited, mut errors) = (vec![], vec![], vec![], vec![]);
         for connector in watching {
             // Each Slack bot is its own app with its own rate limit.
@@ -2063,7 +2067,7 @@ impl Connectors {
         let watched = match &c.trigger {
             Trigger::SlackMention { channel } => Some(channel.as_str()),
             Trigger::Called => None,
-            Trigger::LinearLabel { .. } | Trigger::SlackMessage { .. } => return Err("the workflow no longer answers Slack threads".into()),
+            Trigger::LinearLabel { .. } | Trigger::SlackMessage { .. } | Trigger::Manual => return Err("the workflow no longer answers Slack threads".into()),
         };
         let bot = self.thread_bot(Some(&d.connector), &d.channel, &d.thread)?;
         let token = bot.token.clone();
@@ -2166,6 +2170,8 @@ impl Connectors {
                 let Some(bot) = self.scan_bot(c)? else { return Ok(None) };
                 Ok(Some(self.follow_ups(&bot, c, None, now).await?))
             }
+            // No poller watches it: it runs only when someone runs it now.
+            Trigger::Manual => Ok(Some(vec![])),
         }
     }
 
@@ -5047,7 +5053,7 @@ impl Connectors {
             Trigger::Called => {
                 return Err(format!("workflow {:?} answers only the Slack threads another workflow hands it, so Run now has no thread to give it", workflow.name))
             }
-            Trigger::LinearLabel { .. } | Trigger::SlackMention { .. } => {}
+            Trigger::LinearLabel { .. } | Trigger::SlackMention { .. } | Trigger::Manual => {}
         }
         let (owner, setup, proof) = manual_start(&self.library(), &self.names(), id)?;
         let mut owner = merge_session(&self.store.lock().unwrap().connector(&owner).cloned()?, &setup).map_err(|e| format!("the workflow's session step can't run: {e}"))?;
@@ -7278,6 +7284,8 @@ mod tests {
         assert_eq!(serde_json::from_value::<Trigger>(json).unwrap(), trigger);
         assert_eq!(serde_json::to_value(Trigger::Called).unwrap(), serde_json::json!({ "kind": "called" }));
         assert_eq!(serde_json::from_value::<Trigger>(serde_json::json!({ "kind": "called" })).unwrap(), Trigger::Called);
+        assert_eq!(serde_json::to_value(Trigger::Manual).unwrap(), serde_json::json!({ "kind": "manual" }));
+        assert_eq!(serde_json::from_value::<Trigger>(serde_json::json!({ "kind": "manual" })).unwrap(), Trigger::Manual);
         assert!(serde_json::from_value::<Trigger>(serde_json::json!({ "kind": "slack-message", "channel": "support" })).is_err(), "a message trigger needs its decision");
     }
 

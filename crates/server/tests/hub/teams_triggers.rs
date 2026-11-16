@@ -189,3 +189,25 @@ fn new_thread_messages_for_a_bot_with_no_live_run_are_dropped_and_start_nothing(
     assert_eq!(crew.runs(), vec![]);
     assert_eq!(crew.hub.boxes.live(), Vec::<String>::new());
 }
+
+#[test]
+fn a_manual_bot_gets_no_run_from_its_poller_and_runs_only_by_run_now() {
+    let crew = Crew::new("tt_manual");
+    let id = crew.draft_bot("Release notes", json!({ "kind": "manual" }));
+    let checked = || crew.hub_op(&crew.bob, json!({ "cmd": "get_settings" })).unwrap()["checked"].clone();
+    let before = checked();
+    // Turning the bot on saves its workflow, which wakes the team's poller for a check.
+    crew.turn_on(&id, true);
+    wait_for("a check of the team's poller", || checked() != before && !checked().is_null());
+    assert_eq!(checked()["error"], Value::Null, "the poller checks nothing for a manual workflow");
+    assert_eq!(crew.runs(), vec![]);
+    assert_eq!(crew.hub.boxes.live(), Vec::<String>::new());
+
+    assert_eq!(crew.fired(crew.labeled(&id, "eng-7")), Ok(None), "a run found for it is consumed");
+    assert_eq!(crew.runs(), vec![]);
+    assert_eq!(crew.hub.boxes.live(), Vec::<String>::new());
+
+    crew.call(&crew.bob, TeamOp::RunNow { workflow: id.clone() }).unwrap();
+    assert_eq!(crew.runs(), vec![("working".to_owned(), crew.bob.id.to_string())]);
+    assert_eq!(crew.hub.boxes.live().len(), 1);
+}
