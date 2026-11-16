@@ -383,13 +383,23 @@ async fn start_waiting(hub: &Arc<Hub>, team: &Arc<Account>, ended: &str) -> Resu
     let mut taken = Taken::default();
     let decided = take_and_start(hub, &turn, team, ended, &mut taken).await;
     turn.end().await?;
-    decided?;
+    // What the turn reserved and committed starts even when a step after a reservation failed:
+    // left, a reserved run would hold its place until the backstop ends it as never started.
     // A grant is in Postgres once the turn committed: the team's poller looks now.
     if taken.granted {
-        hub.connectors(team).await?.wake();
+        match hub.connectors(team).await {
+            Ok(connectors) => connectors.wake(),
+            Err(e) => eprintln!("pinned-server: team {}: a granted event waits for its poller's next check: {e}", team.id),
+        }
     }
     // Each reserved run's box starts outside the turn, on its own, so one slow boot holds up no other.
     for (id, work, told) in taken.starts {
+        // A turn whose statement failed rolled back with it: only a run still reserved starts.
+        match db::is_reserved(&hub.db, team.id, id).await {
+            Ok(false) => continue,
+            Ok(true) => {}
+            Err(e) => eprintln!("pinned-server: team {}: reserved run {id} starts unchecked: {e}", team.id),
+        }
         let (hub, team) = (hub.clone(), team.clone());
         tokio::spawn(async move {
             let workflow = work.connector.clone();
@@ -408,7 +418,7 @@ async fn start_waiting(hub: &Arc<Hub>, team: &Arc<Account>, ended: &str) -> Resu
             }
         });
     }
-    Ok(())
+    decided
 }
 
 /// What `take_and_start` decided in the team's turn: whether it granted an event a place, and the
