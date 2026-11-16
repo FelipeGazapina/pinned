@@ -819,14 +819,18 @@ pub fn start_script(login: &str, repo: Option<&str>) -> String {
 
 /// What the node and its sessions run with, as `start.sh` sources it: the secrets, and, when
 /// `leaves`, `PINNED_BOX=1`, which tells the node it runs in a box and may exit for good once the hub
-/// has refused it for 15 minutes.
-fn box_env(keys: &Keys, github: Option<&str>, leaves: bool) -> String {
+/// has refused it for 15 minutes. A team's box also gets `PINNED_TEAM_BOX=1`, which turns on
+/// `pinned call` and the hook that asks the team before a step only people may approve.
+fn box_env(keys: &Keys, github: Option<&str>, leaves: bool, team: bool) -> String {
     let mut env = format!("CLAUDE_CODE_OAUTH_TOKEN='{}'\n", quoted(&keys.claude_token));
     if let Some(token) = github {
         env += &format!("GH_TOKEN='{}'\n", quoted(token));
     }
     if leaves {
         env += &format!("{}=1\n", crate::box_exit::BOX_ENV);
+    }
+    if team {
+        env += &format!("{}=1\n", pinned_core::team_call::TEAM_BOX_ENV);
     }
     env
 }
@@ -1489,7 +1493,8 @@ impl Boxes {
         let claude_token = connectors.box_claude_token(&signs_in).ok_or_else(|| format!("No Claude token is kept for {signs_in}: {ADD_TOKEN}."))?;
         let keys = Keys { api_key: keys.api_key.clone(), claude_token };
         let leaves = leaves_when_refused(&connectors.box_access(), &row.id);
-        self.api.write(key, id, &format!("{DIR}/box.env"), box_env(&keys, connectors.github_token().as_deref(), leaves)).await?;
+        let team = crate::teams::db::is_team(&hub.db, account.id).await?;
+        self.api.write(key, id, &format!("{DIR}/box.env"), box_env(&keys, connectors.github_token().as_deref(), leaves, team)).await?;
         self.api.write(key, id, &format!("{DIR}/start.sh"), start_script(&login, row.spec.repo.as_deref())).await?;
         let exec = self.api.exec(key, id, bootstrap_script(&hub.public_url)).await?;
         if exec.exit_code != 0 {
@@ -2637,7 +2642,7 @@ mod tests {
         assert!(scripts[1].contains(r#"const clones = ["app"].map"#), "{}", scripts[1]);
         assert!(start_script("felipe", None).contains("const clones = [].map"));
         assert_eq!(
-            box_env(&keys, Some("ghp_SECRETGITHUB"), true),
+            box_env(&keys, Some("ghp_SECRETGITHUB"), true, false),
             "CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-SECRETCLAUDE'\nGH_TOKEN='ghp_SECRETGITHUB'\nPINNED_BOX=1\n"
         );
         assert_eq!(start_script("o'brien", None).lines().find(|l| l.contains("user.name")), Some("git config --global user.name 'o'\\''brien'"));
@@ -2647,10 +2652,24 @@ mod tests {
     fn a_box_env_tells_its_node_it_runs_in_a_box() {
         let keys = Keys { api_key: "box_SECRETKEY".into(), claude_token: "sk-ant-oat01-SECRETCLAUDE".into() };
         for github in [None, Some("ghp_SECRETGITHUB")] {
-            let env = box_env(&keys, github, true);
+            let env = box_env(&keys, github, true, false);
             assert!(env.lines().any(|line| line == "PINNED_BOX=1"), "{env}");
             assert!(!env.contains("box_SECRETKEY"), "{env}");
         }
+    }
+
+    #[test]
+    fn a_teams_box_env_sets_pinned_team_box_and_a_persons_does_not() {
+        let keys = Keys { api_key: "box_SECRETKEY".into(), claude_token: "sk-ant-oat01-SECRETCLAUDE".into() };
+        for leaves in [true, false] {
+            let team = box_env(&keys, Some("ghp_SECRETGITHUB"), leaves, true);
+            assert!(team.lines().any(|line| line == "PINNED_TEAM_BOX=1"), "{team}");
+            assert!(team.lines().any(|line| line.starts_with("CLAUDE_CODE_OAUTH_TOKEN=")), "{team}");
+            let person = box_env(&keys, Some("ghp_SECRETGITHUB"), leaves, false);
+            assert!(!person.contains("PINNED_TEAM_BOX"), "{person}");
+        }
+        assert_eq!(box_env(&keys, None, true, true), "CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-SECRETCLAUDE'\nPINNED_BOX=1\nPINNED_TEAM_BOX=1\n");
+        assert_eq!(pinned_core::team_call::TEAM_BOX_ENV, "PINNED_TEAM_BOX");
     }
 
     fn fixed_access(row: &str) -> BoxAccess {
@@ -2661,11 +2680,11 @@ mod tests {
     fn a_fixed_box_env_does_not_mark_its_node_to_leave_and_a_fresh_box_env_does() {
         let keys = Keys { api_key: "fake-api-key".into(), claude_token: "fake-claude-token".into() };
         let access = fixed_access("fixed-row");
-        let fixed = box_env(&keys, None, leaves_when_refused(&access, "fixed-row"));
+        let fixed = box_env(&keys, None, leaves_when_refused(&access, "fixed-row"), false);
         assert!(!fixed.contains("PINNED_BOX"), "{fixed}");
         assert!(fixed.lines().any(|line| line.starts_with("CLAUDE_CODE_OAUTH_TOKEN=")), "{fixed}");
         for (access, row) in [(&access, "fresh-row"), (&BoxAccess::default(), "fresh-row")] {
-            let fresh = box_env(&keys, None, leaves_when_refused(access, row));
+            let fresh = box_env(&keys, None, leaves_when_refused(access, row), false);
             assert!(fresh.lines().any(|line| line == "PINNED_BOX=1"), "{fresh}");
         }
     }
@@ -2684,7 +2703,7 @@ mod tests {
     impl StartRun {
         fn new() -> StartRun {
             let keys = Keys { api_key: "fake-api-key".into(), claude_token: "fake-claude-token".into() };
-            StartRun::with_env(box_env(&keys, None, true))
+            StartRun::with_env(box_env(&keys, None, true, false))
         }
 
         /// As `new`, with `env` as the box's `box.env`.
@@ -2762,7 +2781,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     async fn refused_for_an_hour(access: &BoxAccess, row: &str) -> (bool, usize, bool) {
         let keys = Keys { api_key: "fake-api-key".into(), claude_token: "fake-claude-token".into() };
-        let run = StartRun::with_env(box_env(&keys, None, leaves_when_refused(access, row)));
+        let run = StartRun::with_env(box_env(&keys, None, leaves_when_refused(access, row), false));
         pair_fake(&run.dir);
         let seen = run.start().expect("the start script did not launch the node");
         let refused = tokio::time::sleep(pinned_core::link::BOX_REFUSED_FOR + Duration::from_secs(30));

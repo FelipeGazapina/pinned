@@ -390,6 +390,14 @@ pub enum Message {
         thread: String,
         issue: String,
     },
+    /// `pinned call` and the team-box hook: a team bot's session asks the team's people. The node
+    /// sends it to the hub as `TeamOp::AskPeople` and returns the hub's immediate answer.
+    AskPeople {
+        situation: crate::teams::Situation,
+        question: String,
+        #[serde(default)]
+        choices: Vec<String>,
+    },
     /// `pinned run set <name> <value>`: a value the session's graph run reads as `{{vars.<name>}}`.
     RunSet {
         connector: String,
