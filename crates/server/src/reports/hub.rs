@@ -2,7 +2,7 @@
 //! confirmation) files an issue in pinned's public GitHub repository. The hub files it with its own token, never the
 //! person's, and everything public is scrubbed first (`pinned_core::reports`).
 
-use super::github::{Error as GithubError, Github};
+use super::github::{Error as GithubError, Github, IssueInfo};
 use crate::db::Db;
 use crate::hub::{Account, Hub};
 use pinned_core::reports::{self, Ask, Context, Draft, Environment, Kind, Preview, Report, ReportState, Similar};
@@ -27,6 +27,9 @@ const API_VARIABLE: &str = "PINNED_REPORTS_GITHUB_API";
 const SIMILAR_FRESH: Duration = Duration::from_secs(60);
 /// Most searches the hub makes in any minute, for all accounts together.
 const SEARCHES_PER_MINUTE: usize = 20;
+/// Most searches the hub makes in any minute for one account.
+const ACCOUNT_SEARCHES_PER_MINUTE: usize = 5;
+const SEARCH_BUSY: &str = "Searching the issues is busy. Try again in a minute.";
 /// Most search answers kept.
 const SIMILAR_KEPT: usize = 200;
 /// How long a preview's words stay known, for the send that follows it.
@@ -45,10 +48,12 @@ const PREVIEW_REF: &str = "r-xxxxxxxx";
 const DRAFT_CHARS: usize = 64_000;
 /// Most drafts one account keeps.
 const DRAFTS_KEPT: i64 = 50;
+/// Most of those drafts its agents saved.
+const AGENT_DRAFTS_KEPT: i64 = 10;
+/// The error a send left when the hub stopped before GitHub answered.
+pub const RESTARTED: &str = "the hub restarted while sending; check My reports before trying again";
 /// Most reports `list` answers.
 const LIST_LIMIT: i64 = 200;
-/// Longest error kept on a failed report, in characters.
-const ERROR_CHARS: usize = 200;
 
 pub const SCHEMA: &str = "
 create table if not exists reports (id uuid primary key, account uuid not null references accounts on delete cascade,
@@ -59,9 +64,13 @@ create table if not exists reports (id uuid primary key, account uuid not null r
 create index if not exists reports_by_account on reports (account, updated_at desc);
 create index if not exists reports_by_issue on reports (issue) where issue is not null;
 create unique index if not exists reports_request on reports (account, request_id) where request_id is not null;
+alter table reports add column if not exists counts boolean not null default true;
+alter table reports add column if not exists hidden boolean not null default false;
 ";
 
 const COLUMNS: &str = "id, kind, title, draft, state, issue, url, followed, by_agent, created_at, updated_at";
+/// `COLUMNS`, then whether the row counts toward the daily limit and when it was sent.
+const SEND_COLUMNS: &str = "id, kind, title, draft, state, issue, url, followed, by_agent, created_at, updated_at, counts, sent_at";
 
 /// Where the hub files reports: the GitHub API, the repository (`owner/name`) and the hub's own token.
 #[derive(Clone, PartialEq, Eq)]
@@ -69,6 +78,8 @@ pub struct Config {
     pub api: String,
     pub repo: String,
     pub token: String,
+    /// How long one call to GitHub may take.
+    pub timeout: Duration,
 }
 
 // Not derived, so the token never reaches a log.
@@ -100,7 +111,7 @@ impl Config {
                 return None;
             }
         }
-        Some(Config { api, repo, token })
+        Some(Config { api, repo, token, timeout: pinned_core::github::CALL_TIMEOUT })
     }
 }
 
@@ -135,19 +146,35 @@ pub struct Reports {
     sending: Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>,
     similar: Mutex<HashMap<String, (Instant, Vec<Similar>)>>,
     searches: Mutex<VecDeque<Instant>>,
+    /// The searches made for each account in the last minute.
+    account_searches: Mutex<HashMap<Uuid, VecDeque<Instant>>>,
     /// The words a preview scrubbed with, by account and the hash it showed, so the send that follows renders it alike.
     previews: Mutex<HashMap<(Uuid, String), (Instant, Context)>>,
     /// The repository reports go to, `owner/name`, lower case. It is public, so its names are never scrubbed.
     own_repo: Option<String>,
 }
 
+tokio::task_local! {
+    /// The account a `reports` ask runs for, so its searches count against its own budget too.
+    static SEARCHER: Uuid;
+}
+
 impl Reports {
-    /// Creates the table and keeps the GitHub client, when there is a token.
-    pub async fn start(db: &Db, config: Option<Config>) -> Result<Reports, String> {
-        db.run_schema(SCHEMA).await?;
+    /// Keeps the GitHub client when there is a token, once the table is ready and the sends a stopped hub left are
+    /// failed. With no token it touches nothing; a table it cannot ready leaves reporting not available.
+    pub async fn start(db: &Db, config: Option<Config>) -> Reports {
         let own_repo = config.as_ref().map(|c| c.repo.to_lowercase());
-        let github = config.map(|c| Github::with_api(&c.api, &c.repo, &c.token));
-        Ok(Reports { github, sending: Mutex::default(), similar: Mutex::default(), searches: Mutex::default(), previews: Mutex::default(), own_repo })
+        let github = match config {
+            Some(c) => match ready(db).await {
+                Ok(()) => Some(Github::with_api(&c.api, &c.repo, &c.token).with_timeout(c.timeout)),
+                Err(e) => {
+                    eprintln!("pinned-server: reporting an issue from the app is not available: {e}");
+                    None
+                }
+            },
+            None => None,
+        };
+        Reports { github, sending: Mutex::default(), similar: Mutex::default(), searches: Mutex::default(), account_searches: Mutex::default(), previews: Mutex::default(), own_repo }
     }
 
     pub fn available(&self) -> bool {
@@ -212,19 +239,32 @@ impl Reports {
         }
         let github = self.github()?;
         {
+            let fresh = |searches: &mut VecDeque<Instant>| {
+                while searches.front().is_some_and(|at| at.elapsed() >= Duration::from_secs(60)) {
+                    searches.pop_front();
+                }
+            };
             let mut searches = self.searches.lock().unwrap();
-            while searches.front().is_some_and(|at| at.elapsed() >= Duration::from_secs(60)) {
-                searches.pop_front();
-            }
-            if searches.len() >= SEARCHES_PER_MINUTE {
-                return Err("Searching the issues is busy. Try again in a minute.".into());
+            let mut accounts = self.account_searches.lock().unwrap();
+            fresh(&mut searches);
+            accounts.retain(|_, own| {
+                fresh(own);
+                !own.is_empty()
+            });
+            let own = SEARCHER.try_with(|account| *account).ok().map(|account| accounts.entry(account).or_default());
+            if searches.len() >= SEARCHES_PER_MINUTE || own.as_ref().is_some_and(|own| own.len() >= ACCOUNT_SEARCHES_PER_MINUTE) {
+                return Err(SEARCH_BUSY.into());
             }
             searches.push_back(Instant::now());
+            own.into_iter().for_each(|own| own.push_back(Instant::now()));
         }
         let found: Vec<Similar> = github
             .search_open(query)
             .await
-            .map_err(|e| format!("Could not search the issues: {e}"))?
+            .map_err(|e| {
+                eprintln!("pinned-server: could not search the issues: {e}");
+                format!("Could not search the issues: {}", e.public())
+            })?
             .into_iter()
             .map(|hit| Similar { number: hit.number, title: hit.title, url: hit.html_url, comments: u32::try_from(hit.comments).unwrap_or(u32::MAX) })
             .collect();
@@ -236,6 +276,18 @@ impl Reports {
         cache.insert(query.to_owned(), (Instant::now(), found.clone()));
         Ok(found)
     }
+}
+
+/// Creates the table and fails every send a hub that stopped left in `sending`: it may have reached GitHub, so it
+/// still counts, and the person checks before trying again.
+async fn ready(db: &Db) -> Result<(), String> {
+    db.run_schema(SCHEMA).await?;
+    let failed = json(ReportState::Failed { error: RESTARTED.into() })?;
+    let swept = db.client().await?.execute("update reports set state = $1, updated_at = $2 where state->>'state' = 'sending'", &[&failed, &now_secs()]).await.map_err(err)?;
+    if swept > 0 {
+        eprintln!("pinned-server: {swept} report(s) were sending when a hub stopped; they read as failed");
+    }
+    Ok(())
 }
 
 fn now_secs() -> i64 {
@@ -306,10 +358,32 @@ fn clock(at: i64) -> String {
     format!("{:02}:{:02} UTC", day / 3600, day % 3600 / 60)
 }
 
-fn short(error: &GithubError) -> String {
-    let text = error.to_string();
-    text.chars().take(ERROR_CHARS).collect()
+/// A stored report with what its next send needs: whether it counts toward the daily limit and when it was sent.
+struct SendRow {
+    key: Uuid,
+    report: Report,
+    counts: bool,
+    sent_at: Option<i64>,
 }
+
+/// A row of `SEND_COLUMNS`.
+fn send_row(row: &tokio_postgres::Row) -> Result<SendRow, String> {
+    Ok(SendRow { key: row.get(0), report: stored(row)?, counts: row.get(11), sent_at: row.get(12) })
+}
+
+fn could_not_send(error: &str) -> String {
+    format!("Could not send the report: {error}")
+}
+
+/// The refusal of a send over the daily limit, given when the counted sends in the window were made, oldest first.
+fn over_limit(sent: &[i64]) -> Option<String> {
+    (sent.len() >= DAILY_LIMIT).then(|| {
+        let again = sent.first().map_or(0, |first| first + WINDOW_SECS);
+        format!("You sent {DAILY_LIMIT} reports in the last day. You can send again at {}.", clock(again))
+    })
+}
+
+const COUNTED_SENDS: &str = "select sent_at from reports where account = $1 and sent_at > $2 and counts order by sent_at";
 
 fn too_long(draft: &Draft) -> Result<(), String> {
     let size = serde_json::to_string(draft).map_err(|e| e.to_string())?.chars().count();
@@ -472,7 +546,8 @@ impl Hub {
             return Ok(json!({ "available": true, "left_today": self.left_today(account).await? }));
         }
         self.reports.github()?;
-        match ask {
+        // A search made for this ask counts against the account's own budget too.
+        SEARCHER.scope(account.id, async move { match ask {
             Ask::Status => unreachable!("answered above"),
             Ask::Preview { draft, context } => json(self.preview(account, draft, context).await?),
             Ask::Similar { title, context } => {
@@ -488,23 +563,36 @@ impl Hub {
                 json(found)
             }
             Ask::List => {
-                let rows = self.db.client().await?.query(&format!("select {COLUMNS} from reports where account = $1 order by updated_at desc limit $2"), &[&account.id, &LIST_LIMIT]).await.map_err(err)?;
+                let rows = self.db.client().await?.query(&format!("select {COLUMNS} from reports where account = $1 and not hidden order by updated_at desc limit $2"), &[&account.id, &LIST_LIMIT]).await.map_err(err)?;
                 let list: Vec<Report> = rows.iter().map(|r| stored(r)).collect::<Result<_, _>>()?;
                 if agent {
                     return Ok(Value::Array(list.iter().map(agent_report).collect()));
                 }
                 json(list)
             }
-            Ask::SaveDraft { id, draft } => json(self.save_draft(account, id.as_deref(), draft).await?),
+            Ask::SaveDraft { id, draft } => json(self.save_draft(account, id.as_deref(), draft, agent).await?),
             Ask::DeleteDraft { id } => {
                 let key = Uuid::parse_str(&id).map_err(|_| no_draft(&id))?;
-                let deleted = self.db.client().await?.execute("delete from reports where id = $1 and account = $2 and state->>'state' = 'draft'", &[&key, &account.id]).await.map_err(err)?;
+                let client = self.db.client().await?;
+                // A failed send that still counts toward the daily limit leaves the list but stays, so deleting it
+                // frees no send.
+                let hidden = client
+                    .execute(
+                        "update reports set hidden = true, draft = null, updated_at = $4 where id = $1 and account = $2 and state->>'state' = 'failed' and counts and sent_at > $3 and not hidden",
+                        &[&key, &account.id, &(now_secs() - WINDOW_SECS), &now_secs()],
+                    )
+                    .await
+                    .map_err(err)?;
+                let deleted = match hidden {
+                    0 => client.execute("delete from reports where id = $1 and account = $2 and state->>'state' in ('draft', 'failed') and not hidden", &[&key, &account.id]).await.map_err(err)?,
+                    hidden => hidden,
+                };
                 if deleted == 0 {
                     return Err(no_draft(&id));
                 }
                 Ok(Value::Null)
             }
-        }
+        } }).await
     }
 
     /// How many reports the account may still send today.
@@ -513,10 +601,11 @@ impl Hub {
         Ok(DAILY_LIMIT.saturating_sub(sent) as u32)
     }
 
-    /// When the account's sends in the last 24 hours were made, oldest first. A failed one counts too.
+    /// When the account's sends in the last 24 hours were made, oldest first. A failed one counts when it may have
+    /// reached GitHub.
     async fn sends_in_window(&self, account: &Account) -> Result<Vec<i64>, String> {
         let since = now_secs() - WINDOW_SECS;
-        let rows = self.db.client().await?.query("select sent_at from reports where account = $1 and sent_at > $2 order by sent_at", &[&account.id, &since]).await.map_err(err)?;
+        let rows = self.db.client().await?.query(COUNTED_SENDS, &[&account.id, &since]).await.map_err(err)?;
         Ok(rows.iter().map(|r| r.get(0)).collect())
     }
 
@@ -534,7 +623,9 @@ impl Hub {
         Ok(Preview { title, body, labels: labels.into_iter().collect(), similar, left_today: self.left_today(account).await?, shown })
     }
 
-    async fn save_draft(&self, account: &Account, id: Option<&str>, draft: Draft) -> Result<Report, String> {
+    /// Saves `draft`, new or over draft `id`. A new one an agent saves is marked as its, and agents keep at most
+    /// `AGENT_DRAFTS_KEPT` of the account's drafts.
+    async fn save_draft(&self, account: &Account, id: Option<&str>, draft: Draft, by_agent: bool) -> Result<Report, String> {
         too_long(&draft)?;
         let client = self.db.client().await?;
         let (now, saved) = (now_secs(), json(&draft)?);
@@ -552,16 +643,19 @@ impl Hub {
                 row.ok_or_else(|| no_draft(id))?
             }
             None => {
-                let kept: i64 = client.query_one("select count(*) from reports where account = $1 and state->>'state' = 'draft'", &[&account.id]).await.map_err(err)?.get(0);
-                if kept >= DRAFTS_KEPT {
+                let kept = client.query_one("select count(*), count(*) filter (where by_agent) from reports where account = $1 and state->>'state' = 'draft'", &[&account.id]).await.map_err(err)?;
+                if by_agent && kept.get::<_, i64>(1) >= AGENT_DRAFTS_KEPT {
+                    return Err(format!("There are {AGENT_DRAFTS_KEPT} drafts from agents. Delete one first."));
+                }
+                if kept.get::<_, i64>(0) >= DRAFTS_KEPT {
                     return Err(format!("You have {DRAFTS_KEPT} drafts. Delete one to save another."));
                 }
                 client
                     .query_one(
                         &format!(
-                            "insert into reports (id, account, kind, title, draft, state, created_at, updated_at) values ($1, $2, $3, $4, $5, $6, $7, $7) returning {COLUMNS}"
+                            "insert into reports (id, account, kind, title, draft, state, by_agent, created_at, updated_at) values ($1, $2, $3, $4, $5, $6, $7, $8, $8) returning {COLUMNS}"
                         ),
-                        &[&Uuid::new_v4(), &account.id, &kind_name(&draft.kind), &draft.title, &saved, &state, &now],
+                        &[&Uuid::new_v4(), &account.id, &kind_name(&draft.kind), &draft.title, &saved, &state, &by_agent, &now],
                     )
                     .await
                     .map_err(err)?
@@ -570,8 +664,37 @@ impl Hub {
         Ok(stored(&row)?)
     }
 
+    /// Saves the draft an agent's `report_issue` confirmation held, once the person denied it, as a draft of the
+    /// account that its agents saved.
+    pub(crate) async fn keep_denied_report(&self, account: &Account, args: &Value) -> Result<(), String> {
+        self.reports.github()?;
+        let draft: Draft = serde_json::from_value(args["draft"].clone()).map_err(|e| format!("the held report does not read: {e}"))?;
+        self.save_draft(account, None, draft, true).await.map(drop)
+    }
+
+    /// The account's report sent with `request_id`, if one was.
+    async fn request_row(&self, account: &Account, request_id: &str) -> Result<Option<SendRow>, String> {
+        let row = self.db.client().await?.query_opt(&format!("select {SEND_COLUMNS} from reports where account = $1 and request_id = $2"), &[&account.id, &request_id]).await.map_err(err)?;
+        row.as_ref().map(send_row).transpose()
+    }
+
+    /// Runs `sql` on report `key` of `account` once more when the database fails the first time.
+    async fn record(&self, sql: &str, params: &[&(dyn tokio_postgres::types::ToSql + Sync)]) -> Result<Option<tokio_postgres::Row>, String> {
+        match self.db.client().await?.query_opt(sql, params).await {
+            Ok(row) => Ok(row),
+            Err(first) => {
+                eprintln!("pinned-server: could not record a report's outcome, trying once more: {first}");
+                self.db.client().await?.query_opt(sql, params).await.map_err(err)
+            }
+        }
+    }
+
     /// Files `draft` as an issue, or with `to_issue` as a comment on that open issue, once the person (or the agent
     /// they approved) sent it. All of it runs under the account's send lock, so the daily limit sees every send.
+    ///
+    /// A send that failed is tried again in its own row, under the same footer reference, when it is sent again with
+    /// its `request_id` or as `draft_id`; that row counts toward the limit once, whatever happens. Before it posts
+    /// again, it looks on GitHub for what the failed try may have filed.
     pub(crate) async fn report_issue(&self, account: &Account, draft: Draft, shown: Option<String>, draft_id: Option<String>, request_id: Option<String>, by_agent: bool) -> Result<Value, String> {
         let github = self.reports.github()?;
         let answer = |report: &Report| if by_agent { Ok(json!({ "number": report.issue, "url": report.url })) } else { json(report) };
@@ -586,18 +709,48 @@ impl Hub {
         if request_id.as_ref().is_some_and(|id| id.chars().count() > 200) {
             return Err("The request id is too long.".into());
         }
+        // A send of this request already under way: once it ends, its outcome is the answer.
+        let in_flight = match &request_id {
+            Some(id) => self.request_row(account, id).await?.is_some_and(|row| row.report.state == ReportState::Sending),
+            None => false,
+        };
         let _sending = self.reports.hold(account.id).await;
-        let client = self.db.client().await?;
+        // The failed row this send tries again, if it is one.
+        let mut again = None;
         if let Some(id) = &request_id {
-            let earlier = client.query_opt(&format!("select {COLUMNS} from reports where account = $1 and request_id = $2"), &[&account.id, id]).await.map_err(err)?;
-            if let Some(row) = earlier {
-                return answer(&stored(&row)?);
+            if let Some(row) = self.request_row(account, id).await? {
+                match &row.report.state {
+                    ReportState::Failed { error } if in_flight => return Err(could_not_send(error)),
+                    ReportState::Failed { .. } => again = Some(row),
+                    _ => return answer(&row.report),
+                }
             }
         }
-        let sent = self.sends_in_window(account).await?;
-        if sent.len() >= DAILY_LIMIT {
-            let again = sent.first().map_or(0, |first| first + WINDOW_SECS);
-            return Err(format!("You sent {DAILY_LIMIT} reports in the last day. You can send again at {}.", clock(again)));
+        let client = self.db.client().await?;
+        let saved_as = match &draft_id {
+            Some(id) => {
+                let key = Uuid::parse_str(id).map_err(|_| no_draft(id))?;
+                let row = client
+                    .query_opt(&format!("select {SEND_COLUMNS} from reports where id = $1 and account = $2 and state->>'state' in ('draft', 'failed') and not hidden"), &[&key, &account.id])
+                    .await
+                    .map_err(err)?;
+                let row = send_row(&row.ok_or_else(|| no_draft(id))?)?;
+                if again.as_ref().is_some_and(|again: &SendRow| again.key != key) {
+                    return Err("This request id was sent with another report.".into());
+                }
+                if matches!(row.report.state, ReportState::Failed { .. }) {
+                    again = Some(row);
+                }
+                Some(key)
+            }
+            None => again.as_ref().map(|again| again.key),
+        };
+        // A row that already counts in the window is not counted, nor held to the limit, again.
+        let already = again.as_ref().is_some_and(|row| row.counts && row.sent_at.is_some_and(|at| at > now_secs() - WINDOW_SECS));
+        if !already {
+            if let Some(refusal) = over_limit(&self.sends_in_window(account).await?) {
+                return Err(refusal);
+            }
         }
         let mut ctx = self.report_context(account).await?;
         if let Some(shown) = &shown {
@@ -610,77 +763,155 @@ impl Hub {
                 return Err("The report changed since you reviewed it. Review it again.".into());
             }
         }
-        let saved_as = match &draft_id {
-            Some(id) => {
-                let key = Uuid::parse_str(id).map_err(|_| no_draft(id))?;
-                let found = client.query_opt("select 1 from reports where id = $1 and account = $2 and state->>'state' = 'draft'", &[&key, &account.id]).await.map_err(err)?;
-                found.ok_or_else(|| no_draft(id))?;
-                Some(key)
-            }
-            None => None,
-        };
         let id = saved_as.unwrap_or_else(Uuid::new_v4);
-        let (title, body, labels) = reports::render(&draft, &ctx, Some(&environment()), &reports::ref_of(&id.to_string()))?;
+        let report_ref = reports::ref_of(&id.to_string());
+        let (title, body, labels) = reports::render(&draft, &ctx, Some(&environment()), &report_ref)?;
         // An issue that cannot take a comment is refused before the report counts.
         let target = match draft.to_issue {
             Some(number) => {
-                let info = github.issue(number).await.map_err(|e| format!("Could not read issue #{number}: {e}"))?;
+                let info = github.issue(number).await.map_err(|e| {
+                    eprintln!("pinned-server: could not read issue #{number} for account {}'s report: {e}", account.id);
+                    match e {
+                        GithubError::Refused { status: 404, .. } => format!("There is no issue #{number}."),
+                        e => format!("Could not read issue #{number}: {}", e.public()),
+                    }
+                })?;
+                if info.pull_request.is_some() {
+                    return Err(format!("#{number} is a pull request, not an issue."));
+                }
                 if info.state != "open" {
                     return Err(format!("Issue #{number} is closed. Send this as a new report instead."));
+                }
+                if info.locked {
+                    return Err(format!("Issue #{number} is locked. Send this as a new report instead."));
                 }
                 Some(info)
             }
             None => None,
         };
-        let now = now_secs();
-        let kept = json(&draft)?;
-        let sending = json(ReportState::Sending)?;
-        let by_agent_flag = by_agent;
-        if saved_as.is_some() {
-            client
-                .execute(
-                    "update reports set kind = $3, title = $4, draft = $5, state = $6, by_agent = $7, sent_at = $8, updated_at = $8, request_id = $9 where id = $1 and account = $2",
-                    &[&id, &account.id, &kind_name(&draft.kind), &title, &kept, &sending, &by_agent_flag, &now, &request_id],
-                )
-                .await
-                .map_err(err)?;
-        } else {
-            client
-                .execute(
-                    "insert into reports (id, account, kind, title, draft, state, by_agent, sent_at, created_at, updated_at, request_id) values ($1, $2, $3, $4, $5, $6, $7, $8, $8, $8, $9)",
-                    &[&id, &account.id, &kind_name(&draft.kind), &title, &kept, &sending, &by_agent_flag, &now, &request_id],
-                )
-                .await
-                .map_err(err)?;
+        if let Some(earlier) = self.mark_sending(account, id, &draft, &title, saved_as.is_some(), already, again.as_ref(), request_id.as_deref(), by_agent).await? {
+            return answer(&earlier);
         }
-        let posted: Result<(u64, String, Option<u64>), GithubError> = match &target {
-            Some(info) => {
+        // What a failed try may have filed already: the issue, or the comment, that carries this report's reference.
+        let found = match &again {
+            Some(row) => match self.filed_before(github, row, target.as_ref(), &report_ref).await {
+                Ok(found) => found,
+                // A look that fails filed nothing.
+                Err(e) => return self.failed(account, id, &e, already).await,
+            },
+            None => None,
+        };
+        let posted: Result<(u64, String, Option<u64>), GithubError> = match (found, &target) {
+            (Some(found), _) => Ok(found),
+            (None, Some(info)) => {
                 let text = format!("### Another case from the pinned app\n\n**{title}**\n\n{body}");
                 github.add_comment(info.number, &text).await.map(|comment| (info.number, info.html_url.clone(), Some(comment)))
             }
-            None => github.create_issue(&title, &body, &labels).await.map(|issue| (issue.number, issue.html_url, None)),
+            (None, None) => github.create_issue(&title, &body, &labels).await.map(|issue| (issue.number, issue.html_url, None)),
+        };
+        let (number, url, comment) = match posted {
+            Ok(posted) => posted,
+            Err(e) => {
+                let counts = already || e.may_have_reached();
+                return self.failed(account, id, &e, counts).await;
+            }
         };
         let now = now_secs();
-        match posted {
-            Ok((number, url, comment)) => {
-                let open = json(ReportState::Open)?;
-                let (number, own) = (i64::try_from(number).map_err(|e| e.to_string())?, comment.map(|c| c as i64).into_iter().collect::<Vec<i64>>());
-                let row = client
-                    .query_one(
-                        &format!("update reports set draft = null, state = $3, issue = $4, url = $5, followed = $6, own_comments = $7, updated_at = $8 where id = $1 and account = $2 returning {COLUMNS}"),
-                        &[&id, &account.id, &open, &number, &url, &target.is_some(), &own, &now],
-                    )
-                    .await
-                    .map_err(err)?;
-                answer(&stored(&row)?)
-            }
-            Err(e) => {
-                let failed = json(ReportState::Failed { error: short(&e) })?;
-                client.execute("update reports set state = $3, updated_at = $4 where id = $1 and account = $2", &[&id, &account.id, &failed, &now]).await.map_err(err)?;
-                eprintln!("pinned-server: could not file account {}'s report: {e}", account.id);
-                Err(format!("Could not send the report: {}", short(&e)))
+        let open = json(ReportState::Open)?;
+        let (stored_number, own) = (i64::try_from(number).map_err(|e| e.to_string())?, comment.map(|c| c as i64).into_iter().collect::<Vec<i64>>());
+        let followed = draft.to_issue.is_some() || again.as_ref().is_some_and(|row| row.report.draft.as_ref().is_some_and(|d| d.to_issue.is_some()));
+        let recorded = self
+            .record(
+                &format!("update reports set draft = null, state = $3, issue = $4, url = $5, followed = $6, own_comments = $7, counts = true, updated_at = $8 where id = $1 and account = $2 returning {COLUMNS}"),
+                &[&id, &account.id, &open, &stored_number, &url, &followed, &own, &now],
+            )
+            .await;
+        match recorded {
+            Ok(Some(row)) => answer(&stored(&row)?),
+            outcome => {
+                // It is on GitHub: the answer says where, and the hub's next start fails the row that still reads sending.
+                let why = outcome.err().unwrap_or_else(|| "the row is gone".into());
+                eprintln!("pinned-server: account {}'s report {id} went to GitHub as #{number} but could not be recorded: {why}", account.id);
+                let report = Report { id: id.to_string(), kind: draft.kind.clone(), title, issue: Some(number), url: Some(url), followed, by_agent, state: ReportState::Open, draft: None, created_at: now, updated_at: now };
+                answer(&report)
             }
         }
+    }
+
+    /// Marks report `id` as sending, counted toward the daily limit, in one transaction that holds the account's
+    /// advisory lock, so two hubs on one database never both pass the limit. Some(report) when another send of
+    /// `request_id` got there first: that report is the answer.
+    #[allow(clippy::too_many_arguments)]
+    async fn mark_sending(&self, account: &Account, id: Uuid, draft: &Draft, title: &str, saved: bool, already: bool, again: Option<&SendRow>, request_id: Option<&str>, by_agent: bool) -> Result<Option<Report>, String> {
+        let (now, kept, sending) = (now_secs(), json(draft)?, json(ReportState::Sending)?);
+        let mut held = self.db.transaction_client().await?;
+        let tx = held.transaction().await.map_err(err)?;
+        tx.execute("select pg_advisory_xact_lock(hashtextextended('pinned-reports:' || $1::uuid::text, 0))", &[&account.id]).await.map_err(err)?;
+        if let Some(request_id) = request_id {
+            let row = tx.query_opt(&format!("select {SEND_COLUMNS} from reports where account = $1 and request_id = $2"), &[&account.id, &request_id]).await.map_err(err)?;
+            if let Some(row) = row.as_ref().map(send_row).transpose()? {
+                let ours = again.is_some_and(|again| again.key == row.key) && matches!(row.report.state, ReportState::Failed { .. });
+                if !ours {
+                    return Ok(Some(row.report));
+                }
+            }
+        }
+        if !already {
+            let sent: Vec<i64> = tx.query(COUNTED_SENDS, &[&account.id, &(now - WINDOW_SECS)]).await.map_err(err)?.iter().map(|r| r.get(0)).collect();
+            if let Some(refusal) = over_limit(&sent) {
+                return Err(refusal);
+            }
+        }
+        if saved {
+            let updated = tx
+                .execute(
+                    "update reports set kind = $3, title = $4, draft = $5, state = $6, by_agent = by_agent or $7, counts = true, sent_at = case when $10 then sent_at else $8 end, \
+                     updated_at = $8, request_id = coalesce($9, request_id), hidden = false where id = $1 and account = $2 and state->>'state' in ('draft', 'failed')",
+                    &[&id, &account.id, &kind_name(&draft.kind), &title, &kept, &sending, &by_agent, &now, &request_id, &already],
+                )
+                .await
+                .map_err(err)?;
+            if updated == 0 {
+                return Err(no_draft(&id.to_string()));
+            }
+        } else {
+            tx.execute(
+                "insert into reports (id, account, kind, title, draft, state, by_agent, sent_at, created_at, updated_at, request_id) values ($1, $2, $3, $4, $5, $6, $7, $8, $8, $8, $9)",
+                &[&id, &account.id, &kind_name(&draft.kind), &title, &kept, &sending, &by_agent, &now, &request_id],
+            )
+            .await
+            .map_err(err)?;
+        }
+        tx.commit().await.map_err(err)?;
+        Ok(None)
+    }
+
+    /// Where the failed try of `row` may have landed: the issue whose body carries `report_ref`, or, when it was a
+    /// case for an issue, the comment there that does.
+    async fn filed_before(&self, github: &Github, row: &SendRow, target: Option<&IssueInfo>, report_ref: &str) -> Result<Option<(u64, String, Option<u64>)>, GithubError> {
+        let tried = row.report.draft.as_ref().and_then(|draft| draft.to_issue).or(target.map(|info| info.number));
+        match tried {
+            Some(number) => {
+                let Some(comment) = github.comment_with_ref(number, report_ref).await? else { return Ok(None) };
+                let url = match target.filter(|info| info.number == number) {
+                    Some(info) => info.html_url.clone(),
+                    None => github.issue(number).await?.html_url,
+                };
+                Ok(Some((number, url, Some(comment))))
+            }
+            None => Ok(github.issue_with_ref(report_ref).await?.map(|issue| (issue.number, issue.html_url, None))),
+        }
+    }
+
+    /// Fails report `id` with what a person may read of `error`; it keeps counting toward the daily limit when
+    /// `counts`.
+    async fn failed(&self, account: &Account, id: Uuid, error: &GithubError, counts: bool) -> Result<Value, String> {
+        eprintln!("pinned-server: could not file account {}'s report {id}: {error}", account.id);
+        let failed = json(ReportState::Failed { error: error.public().into() })?;
+        if let Err(e) = self.record("update reports set state = $3, counts = $4, updated_at = $5 where id = $1 and account = $2 returning id", &[&id, &account.id, &failed, &counts, &now_secs()]).await {
+            eprintln!("pinned-server: account {}'s report {id} failed and could not be recorded; the hub's next start fails it: {e}", account.id);
+        }
+        Err(could_not_send(error.public()))
     }
 }
 
@@ -714,7 +945,7 @@ mod tests {
     #[test]
     fn under_dev_the_overrides_count_and_the_api_must_be_loopback() {
         let vars = [(TOKEN_VARIABLE, "fake-1"), (REPO_VARIABLE, "acme/app"), (API_VARIABLE, "http://127.0.0.1:4010")];
-        assert_eq!(Config::from_env(true, &env(&vars)), Some(Config { api: "http://127.0.0.1:4010".into(), repo: "acme/app".into(), token: "fake-1".into() }));
+        assert_eq!(Config::from_env(true, &env(&vars)), Some(Config { api: "http://127.0.0.1:4010".into(), repo: "acme/app".into(), token: "fake-1".into(), timeout: pinned_core::github::CALL_TIMEOUT }));
         let only_repo = [(TOKEN_VARIABLE, "t"), (REPO_VARIABLE, "acme/app")];
         assert_eq!(Config::from_env(true, &env(&only_repo)).map(|c| (c.api, c.repo)), Some(("https://api.github.com".into(), "acme/app".into())));
         for api in ["https://evil.example.test", "http://127.0.0.1.example.test:9", "http://169.254.169.254", "ftp://127.0.0.1", "not a url"] {
@@ -727,7 +958,7 @@ mod tests {
     }
 
     fn reports(own: Option<&str>) -> Reports {
-        Reports { github: None, sending: Mutex::default(), similar: Mutex::default(), searches: Mutex::default(), previews: Mutex::default(), own_repo: own.map(str::to_lowercase) }
+        Reports { github: None, sending: Mutex::default(), similar: Mutex::default(), searches: Mutex::default(), account_searches: Mutex::default(), previews: Mutex::default(), own_repo: own.map(str::to_lowercase) }
     }
 
     fn scrubbed_text(text: &str, ctx: &Context) -> String {

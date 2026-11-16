@@ -32,12 +32,28 @@ pub struct Repo {
 pub enum Error {
     /// GitHub answered 401, or 403 for a reason other than a rate limit: the token is refused or may not do this.
     Unauthorized(String),
+    /// The outcome is unknown: the connection broke once the request was out, or the answer did not read. GitHub may
+    /// have done what was asked.
     Failed(String),
+    /// GitHub answered `status`, which is not a success, a 401 or a token's 403, so it did nothing. `busy` for a rate
+    /// limit (a 403 that says so, or a 429) and for a 5xx.
+    Answered { status: u16, busy: bool, text: String },
+    /// The request never left: the name did not resolve or the connection was refused.
+    Unreachable(String),
+    /// No answer in time: GitHub may have done what was asked.
+    TimedOut(String),
+}
+
+impl Error {
+    /// Whether GitHub may have done what was asked: the request went out and no answer said it did not.
+    pub fn may_have_reached(&self) -> bool {
+        matches!(self, Error::Failed(_) | Error::TimedOut(_))
+    }
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let (Error::Unauthorized(text) | Error::Failed(text)) = self;
+        let (Error::Unauthorized(text) | Error::Failed(text) | Error::Answered { text, .. } | Error::Unreachable(text) | Error::TimedOut(text)) = self;
         f.write_str(text)
     }
 }
@@ -58,6 +74,8 @@ pub const CALL_TIMEOUT: std::time::Duration = crate::connectors::CALL_TIMEOUT;
 pub struct Client {
     pub api: String,
     pub token: String,
+    /// How long one call may take; `CALL_TIMEOUT` unless a caller asks for another.
+    pub timeout: std::time::Duration,
 }
 
 impl std::fmt::Debug for Client {
@@ -69,7 +87,7 @@ impl std::fmt::Debug for Client {
 impl Client {
     /// The real GitHub.
     pub fn new(token: &str) -> Client {
-        Client { api: API.into(), token: token.into() }
+        Client { api: API.into(), token: token.into(), timeout: CALL_TIMEOUT }
     }
 
     pub async fn get(&self, path: &str) -> Result<Value, Error> {
@@ -91,9 +109,11 @@ impl Client {
     }
 
     async fn call(&self, agent: &str, method: reqwest::Method, path: &str, body: Option<&Value>) -> Result<Value, Error> {
-        let mut request = reqwest::Client::new()
+        // No redirect is followed: a 307 would resend the token and the body to wherever it points.
+        let http = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().map_err(|e| Error::Unreachable(format!("GitHub unreachable: {e}")))?;
+        let mut request = http
             .request(method, format!("{}{path}", self.api))
-            .timeout(CALL_TIMEOUT)
+            .timeout(self.timeout)
             .bearer_auth(&self.token)
             .header("User-Agent", agent)
             .header("Accept", "application/vnd.github+json")
@@ -102,19 +122,30 @@ impl Client {
             request = request.json(body);
         }
         // reqwest's error names the URL, never a header, so the token stays out of it.
-        let response = request.send().await.map_err(|e| Error::Failed(format!("GitHub unreachable: {e}")))?;
+        let response = request.send().await.map_err(|e| match () {
+            _ if e.is_timeout() => Error::TimedOut(format!("GitHub did not answer in time: {e}")),
+            _ if e.is_connect() => Error::Unreachable(format!("GitHub unreachable: {e}")),
+            _ => Error::Failed(format!("GitHub unreachable: {e}")),
+        })?;
         let status = response.status();
         let remaining = response.headers().get("x-ratelimit-remaining").and_then(|v| v.to_str().ok()).map(str::to_owned);
-        let body: Value = response.json().await.map_err(|e| Error::Failed(format!("GitHub sent a bad response: {e}")))?;
-        match status.as_u16() {
-            200..=299 => Ok(body),
-            401 => Err(Error::Unauthorized("GitHub refused the token".into())),
-            403 if rate_limited(remaining.as_deref(), body["message"].as_str().unwrap_or_default()) => {
-                Err(Error::Failed(format!("GitHub rate limit reached, try again later: {}", body["message"].as_str().unwrap_or_default())))
-            }
-            403 => Err(Error::Unauthorized(format!("GitHub answered {status}: {}", body["message"].as_str().unwrap_or_default()))),
-            _ => Err(Error::Failed(format!("GitHub answered {status}: {}", body["message"].as_str().unwrap_or_default()))),
+        let read = response.json::<Value>().await;
+        if status.as_u16() == 401 {
+            return Err(Error::Unauthorized("GitHub refused the token".into()));
         }
+        if !status.is_success() {
+            // An answer that is not a success did nothing, whatever its body holds.
+            let message = read.as_ref().ok().and_then(|body| body["message"].as_str()).unwrap_or_default().to_owned();
+            return Err(match status.as_u16() {
+                403 if rate_limited(remaining.as_deref(), &message) => Error::Answered { status: 403, busy: true, text: format!("GitHub rate limit reached, try again later: {message}") },
+                403 => Error::Unauthorized(format!("GitHub answered {status}: {message}")),
+                code => Error::Answered { status: code, busy: code == 429 || code >= 500, text: format!("GitHub answered {status}: {message}") },
+            });
+        }
+        read.map_err(|e| match () {
+            _ if e.is_timeout() => Error::TimedOut(format!("GitHub did not answer in time: {e}")),
+            _ => Error::Failed(format!("GitHub sent a bad response: {e}")),
+        })
     }
 }
 
