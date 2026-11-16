@@ -64,15 +64,17 @@ const GO_ON: &str = "it can now run until the 4 hour limit";
 #[test]
 fn an_unreadable_limit_stops_no_other_teams_part_of_the_tick() {
     let hub = start("teams_limfix_unreadable");
+    // Each box gets its run at once, so none is ended as unheld before the test looks.
     let broken = TeamBox::new(&hub);
+    let broken_run = broken.run(&hub);
     let mut limited = TeamBox::new_as(&hub, "lena@example.test");
+    let limited_run = limited.run(&hub);
     let idle = TeamBox::new_as(&hub, "ivo@example.test");
+    let idle_run = idle.run(&hub);
     limited_bot(&hub, &limited, json!({ "usd": 5.0, "minutes": 1 }), json!({ "kind": "owner" }));
     limited_bot(&hub, &idle, json!({ "usd": 5.0, "minutes": 30 }), json!({ "kind": "owner" }));
-    let (idle_run, limited_run) = (idle.run(&hub), limited.run(&hub));
     // A row only SQL could write: no `usd`, on a live run past its minute.
     limited_bot(&hub, &broken, json!({ "minutes": 1 }), json!({ "kind": "owner" }));
-    let broken_run = broken.run(&hub);
     backdate(&hub, broken_run, 120);
     backdate(&hub, limited_run, 70);
     sql(&hub, &format!("update team_runs set state = 'stopped', ended_at = now(), outcome = 'stopped by olga' where id = '{idle_run}'"));

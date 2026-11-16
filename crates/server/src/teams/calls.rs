@@ -110,6 +110,12 @@ pub async fn answer_call(hub: &Arc<Hub>, scope: &Scope, id: &str, mut answer: An
     answer.by = scope.member.to_string();
     answer.at = now();
     answer.text = answer.text.trim().to_owned();
+    // A limit call's "Let it go on" lets the run go on to its max life: the members read that.
+    let limit_choice = (call.situation == Situation::OnLimit).then_some(answer.choice.as_deref()).flatten().filter(|c| [GO_ON, STOP_IT].contains(c)).map(str::to_owned);
+    if limit_choice.as_deref() == Some(GO_ON) {
+        let goes_on = format!("it can now run until the {} limit", life_limit(hub.team_policy.max_life_secs));
+        answer.text = if answer.text.is_empty() { goes_on } else { format!("{goes_on}. {}", answer.text) };
+    }
     let Some(answered) = db::answer_call(&hub.db, team, id, &answer, outcome).await? else {
         let row = db::call(&hub.db, team, id).await?.ok_or("the team has no such call")?;
         return Err(already_answered(hub, &row).await);
@@ -117,8 +123,14 @@ pub async fn answer_call(hub: &Arc<Hub>, scope: &Scope, id: &str, mut answer: An
     push_logged(hub, team, TeamEvent::CallResolved { call: answered.clone() }).await;
     let who = name_of(hub, &answer.by).await;
     match &answer.kind {
+        AnswerKind::Choice if limit_choice.as_deref() == Some(STOP_IT) => {
+            end_run(hub, &scope.team, run_id, RunState::Stopped, &format!("stopped by {who}"), Some(End::Removed)).await?;
+        }
         AnswerKind::Choice => {
-            let said = [answer.choice.as_deref().unwrap_or_default(), answer.text.as_str()].join(" ").trim().to_owned();
+            let said = match limit_choice {
+                Some(choice) => format!("{choice}: {}", answer.text),
+                None => [answer.choice.as_deref().unwrap_or_default(), answer.text.as_str()].join(" ").trim().to_owned(),
+            };
             back_to_work(hub, &scope.team, run_id).await?;
             tell_session(hub, &scope.team, run_id, &format!("call-{id}"), format!("[Answer from {who} on call {id}: {said}]")).await;
         }
@@ -457,7 +469,7 @@ pub async fn tick(hub: &Arc<Hub>, policy: &TeamPolicy) -> Result<(), String> {
     logged("escalate", escalate(hub, policy).await);
     logged("give-up", give_up(hub, policy).await);
     logged("charge", charge(hub).await);
-    logged("at-limit", at_limit(hub).await);
+    logged("at-limit", at_limit(hub, policy).await);
     logged("reap", reap(hub, policy).await);
     Ok(())
 }
@@ -500,8 +512,9 @@ pub const MAX_LIFE_REACHED: &str = "it reached the most time a run may take, wai
 ///   a waiting run is not, and its wait is not active time, so a wait counts toward neither limit;
 /// - a run at work that reached its bot's `BotLimits` (minutes of work, or dollars) stops working:
 ///   it waits on an `OnLimit` call to whom the bot's `CallRules::on_limit` names, and its session
-///   is told to stop and wait. Nobody answering ends it at give-up as any call does; an answer
-///   lets it go on, called no more for its limits (one limit call per run), up to its max life.
+///   is told to stop and wait. Nobody answering ends it at give-up as any call does; "Stop it"
+///   ends it as `stop_run` does; "Let it go on" lets it go on, called no more for its limits
+///   (one limit call per run), up to its max life.
 async fn max_life(hub: &Arc<Hub>, policy: &TeamPolicy) -> Result<(), String> {
     for (team, run) in db::runs_past_max_life(&hub.db, policy.max_life_secs).await? {
         let hub = hub.clone();
@@ -523,26 +536,47 @@ async fn charge(hub: &Arc<Hub>) -> Result<(), String> {
     db::charge_working_runs(&hub.db, [box_usd_per_hour(Small), box_usd_per_hour(Medium), box_usd_per_hour(Large)]).await
 }
 
-async fn at_limit(hub: &Arc<Hub>) -> Result<(), String> {
+async fn at_limit(hub: &Arc<Hub>, policy: &TeamPolicy) -> Result<(), String> {
     for at in db::runs_at_limit(&hub.db).await? {
-        if let Err(e) = limit_reached(hub, &at).await {
+        if let Err(e) = limit_reached(hub, policy, &at).await {
             eprintln!("pinned-server: run {} of team {} reached a limit but was not called for it: {e}", at.run, at.team);
         }
     }
     Ok(())
 }
 
-/// Opens the `OnLimit` call of a run that reached a limit and tells its session to stop.
-async fn limit_reached(hub: &Arc<Hub>, at: &db::AtLimit) -> Result<(), String> {
+/// The choices of a limit call: "Let it go on" until the run's max life, or "Stop it" as `stop_run`.
+const GO_ON: &str = "Let it go on";
+const STOP_IT: &str = "Stop it";
+
+/// `secs` of `TeamPolicy::max_life_secs` as a limit reads it: "4 hour", "90 minute", "8 second".
+fn life_limit(secs: u64) -> String {
+    match secs {
+        s if s >= 3600 && s % 3600 == 0 => format!("{} hour", s / 3600),
+        s if s >= 60 && s % 60 == 0 => format!("{} minute", s / 60),
+        s => format!("{s} second"),
+    }
+}
+
+/// Dollars as a limit reads them: cents shown ($0.40, $5.00), or every digit a smaller limit has ($0.001).
+fn dollars(usd: f64) -> String {
+    let cents = usd * 100.0;
+    if (cents - cents.round()).abs() < 1e-9 { format!("${usd:.2}") } else { format!("${usd}") }
+}
+
+/// Opens the `OnLimit` call of a run that reached a limit and tells its session to stop. Its
+/// dollars are the box's time only: no model usage is counted.
+async fn limit_reached(hub: &Arc<Hub>, policy: &TeamPolicy, at: &db::AtLimit) -> Result<(), String> {
     let team = hub.account(at.team).await?;
     let Some(run) = db::run(&hub.db, at.team, at.run).await? else { return Ok(()) };
     let what = match (at.spent, at.limits.minutes) {
-        (true, _) => format!("${} spent", at.limits.usd),
+        (true, _) => format!("{} of box time (model usage is not counted)", dollars(at.limits.usd)),
         (false, 1) => "1 minute of work".to_owned(),
         (false, minutes) => format!("{minutes} minutes of work"),
     };
-    let question = format!("The run reached its limit: {what}. Let it go on, or stop it?");
-    if let Asked::Call { call, .. } = open_call(hub, &team, run, at.run, Situation::OnLimit, &question, vec![], None, true).await? {
+    let question = format!("The run reached its limit: {what}. Let it go on until the {} limit, or stop it?", life_limit(policy.max_life_secs));
+    let choices = vec![GO_ON.to_owned(), STOP_IT.to_owned()];
+    if let Asked::Call { call, .. } = open_call(hub, &team, run, at.run, Situation::OnLimit, &question, choices, None, true).await? {
         tell_session(hub, &team, at.run, &format!("limit-{call}"), format!("[The run reached its limit: {what}. Stop and wait for the answer]")).await;
     }
     Ok(())
