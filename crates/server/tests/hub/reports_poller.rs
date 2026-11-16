@@ -17,11 +17,12 @@ struct Fake {
 }
 
 impl Fake {
-    /// A fake GitHub whose token is the owner's, as the hub's is.
+    /// A fake GitHub whose token is the owner's, as the hub's is. Its clock starts a minute on, so what it dates
+    /// (the hub's comments among it) is later than any report a test sends, however long the hub took to start.
     fn start() -> Fake {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let github = runtime.block_on(fake_github::start());
-        github.set_clock(now());
+        github.set_clock(now() + 60);
         github.set_hub_association("OWNER");
         Fake { _runtime: runtime, github }
     }
