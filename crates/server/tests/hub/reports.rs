@@ -22,7 +22,7 @@ impl Fake {
     }
 
     fn config(&self) -> Config {
-        Config { api: self.github.url.clone(), repo: "acme/app".into(), token: "fake-hub-token".into() }
+        Config { api: self.github.url.clone(), repo: "acme/app".into(), token: "fake-hub-token".into(), poll: Duration::from_secs(600) }
     }
 
     /// The issues the hub made, and the comments it added.

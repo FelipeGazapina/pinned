@@ -22,6 +22,8 @@ const DEFAULT_API: &str = "https://api.github.com";
 pub const TOKEN_VARIABLE: &str = "PINNED_REPORTS_GITHUB_TOKEN";
 const REPO_VARIABLE: &str = "PINNED_REPORTS_REPO";
 const API_VARIABLE: &str = "PINNED_REPORTS_GITHUB_API";
+const POLL_VARIABLE: &str = "PINNED_REPORTS_POLL_SECS";
+const POLL_DEFAULT: Duration = Duration::from_secs(10 * 60);
 /// How long a search answer is reused.
 const SIMILAR_FRESH: Duration = Duration::from_secs(60);
 /// Most searches the hub makes in any minute, for all accounts together.
@@ -62,6 +64,8 @@ pub struct Config {
     pub api: String,
     pub repo: String,
     pub token: String,
+    /// How often the poller looks at the issues the reports became. Not a wire value.
+    pub poll: Duration,
 }
 
 // Not derived, so the token never reaches a log.
@@ -93,7 +97,26 @@ impl Config {
                 return None;
             }
         }
-        Some(Config { api, repo, token })
+        Some(Config { api, repo, token, poll: poll_every(dev, env) })
+    }
+}
+
+/// How often the poller runs: ten minutes, or `PINNED_REPORTS_POLL_SECS` under `dev`.
+fn poll_every(dev: bool, env: &dyn Fn(&str) -> Option<String>) -> Duration {
+    let given = env(POLL_VARIABLE).map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());
+    match given {
+        Some(secs) if dev => match secs.parse::<u64>() {
+            Ok(secs) if secs > 0 => Duration::from_secs(secs),
+            _ => {
+                eprintln!("pinned-server: {POLL_VARIABLE} is ignored: it is not a number of seconds");
+                POLL_DEFAULT
+            }
+        },
+        Some(_) => {
+            eprintln!("pinned-server: {POLL_VARIABLE} is ignored: it counts only under --dev");
+            POLL_DEFAULT
+        }
+        None => POLL_DEFAULT,
     }
 }
 
@@ -136,6 +159,7 @@ impl Reports {
     /// Creates the table and keeps the GitHub client, when there is a token.
     pub async fn start(db: &Db, config: Option<Config>) -> Result<Reports, String> {
         db.run_schema(SCHEMA).await?;
+        db.run_schema(super::poller::SCHEMA).await?;
         let github = config.map(|c| Github::with_api(&c.api, &c.repo, &c.token));
         Ok(Reports { github, sending: Mutex::default(), similar: Mutex::default(), searches: Mutex::default(), previews: Mutex::default() })
     }
@@ -602,7 +626,7 @@ mod tests {
     #[test]
     fn under_dev_the_overrides_count_and_the_api_must_be_loopback() {
         let vars = [(TOKEN_VARIABLE, "fake-1"), (REPO_VARIABLE, "acme/app"), (API_VARIABLE, "http://127.0.0.1:4010")];
-        assert_eq!(Config::from_env(true, &env(&vars)), Some(Config { api: "http://127.0.0.1:4010".into(), repo: "acme/app".into(), token: "fake-1".into() }));
+        assert_eq!(Config::from_env(true, &env(&vars)), Some(Config { api: "http://127.0.0.1:4010".into(), repo: "acme/app".into(), token: "fake-1".into(), poll: POLL_DEFAULT }));
         let only_repo = [(TOKEN_VARIABLE, "t"), (REPO_VARIABLE, "acme/app")];
         assert_eq!(Config::from_env(true, &env(&only_repo)).map(|c| (c.api, c.repo)), Some(("https://api.github.com".into(), "acme/app".into())));
         for api in ["https://evil.example.test", "http://127.0.0.1.example.test:9", "http://169.254.169.254", "ftp://127.0.0.1", "not a url"] {
@@ -612,6 +636,17 @@ mod tests {
             assert!(Config::from_env(true, &env(&[(TOKEN_VARIABLE, "t"), (API_VARIABLE, api)])).is_some(), "{api}");
         }
         assert_eq!(Config::from_env(true, &env(&[(TOKEN_VARIABLE, "t"), (REPO_VARIABLE, "../x")])), None);
+    }
+
+    #[test]
+    fn the_poll_interval_is_ten_minutes_and_only_dev_shortens_it() {
+        let secs = [(TOKEN_VARIABLE, "t"), ("PINNED_REPORTS_POLL_SECS", "3")];
+        assert_eq!(Config::from_env(true, &env(&secs)).map(|c| c.poll), Some(Duration::from_secs(3)));
+        assert_eq!(Config::from_env(false, &env(&secs)).map(|c| c.poll), Some(Duration::from_secs(600)));
+        assert_eq!(Config::from_env(true, &env(&[(TOKEN_VARIABLE, "t")])).map(|c| c.poll), Some(Duration::from_secs(600)));
+        for bad in ["0", "soon", "-1"] {
+            assert_eq!(Config::from_env(true, &env(&[(TOKEN_VARIABLE, "t"), ("PINNED_REPORTS_POLL_SECS", bad)])).map(|c| c.poll), Some(Duration::from_secs(600)), "{bad}");
+        }
     }
 
     #[test]

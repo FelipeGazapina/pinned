@@ -58,12 +58,17 @@ struct Repo {
     /// Answers the next request with this instead of serving it: status, message and `x-ratelimit-remaining`.
     fail: Option<(u16, String, Option<String>)>,
     last_headers: Vec<(String, String)>,
+    /// Seconds since the Unix epoch where the clock starts; `CLOCK_START` unless a test moved it.
+    clock_start: Option<i64>,
+    /// The `author_association` of the comments the hub posts: `NONE` unless a test says the token is the owner's,
+    /// as it is on GitHub.
+    hub_association: Option<String>,
 }
 
 impl Repo {
     fn now(&mut self) -> String {
         self.ticks += 1;
-        iso(CLOCK_START + self.ticks)
+        iso(self.clock_start.unwrap_or(CLOCK_START) + self.ticks)
     }
 
     fn comment(&mut self, number: u64, login: &str, association: &str, body: &str, created_at: Option<&str>) -> Option<u64> {
@@ -79,21 +84,7 @@ impl Repo {
     }
 }
 
-/// `2026-03-02T10:00:00Z` for a count of seconds since the Unix epoch.
-fn iso(seconds: i64) -> String {
-    let (days, rest) = (seconds.div_euclid(86_400), seconds.rem_euclid(86_400));
-    // Civil date from a day count (Howard Hinnant's algorithm).
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z", rest / 3600, rest % 3600 / 60, rest % 60)
-}
+pub use super::poller::iso;
 
 type Shared = Arc<Mutex<Repo>>;
 
@@ -180,6 +171,35 @@ impl FakeGithub {
         issue.timeline.push(json!({ "event": "closed", "created_at": at, "commit_id": commit, "state_reason": reason }));
     }
 
+    /// Reopens issue `number` as GitHub does.
+    pub fn reopen(&self, number: u64) {
+        let mut repo = self.repo();
+        let at = repo.now();
+        let issue = repo.issues.get_mut(number as usize - 1).expect("no such issue in the fake");
+        issue.open = true;
+        issue.state_reason = Some("reopened".into());
+        issue.closed_at = None;
+        issue.timeline.push(json!({ "event": "reopened", "created_at": at }));
+    }
+
+    /// Puts `label` on issue `number`.
+    pub fn add_label(&self, number: u64, label: &str) {
+        let mut repo = self.repo();
+        let issue = repo.issues.get_mut(number as usize - 1).expect("no such issue in the fake");
+        issue.labels.push(label.into());
+    }
+
+    /// Starts the clock at `seconds` since the Unix epoch instead of 2026-01-01, so what happens in the fake is dated
+    /// like what a hub under test does. Moves nothing already dated.
+    pub fn set_clock(&self, seconds: i64) {
+        self.repo().clock_start = Some(seconds);
+    }
+
+    /// From now on the comments the hub posts say they are by `association` (`OWNER`: the hub's token is the owner's).
+    pub fn set_hub_association(&self, association: &str) {
+        self.repo().hub_association = Some(association.into());
+    }
+
     /// A pull request #`pull` that mentions the issue and was merged at `merged_at`.
     pub fn add_merged_pull(&self, number: u64, pull: u64, merged_at: &str) {
         let mut repo = self.repo();
@@ -211,7 +231,12 @@ impl FakeGithub {
     }
 
     pub fn add_release(&self, tag: &str, published_at: &str) {
-        self.repo().releases.push(json!({ "tag_name": tag, "published_at": published_at, "draft": false, "prerelease": false }));
+        self.add_release_as(tag, published_at, false, false);
+    }
+
+    /// A release that may be a draft or a prerelease.
+    pub fn add_release_as(&self, tag: &str, published_at: &str, draft: bool, prerelease: bool) {
+        self.repo().releases.push(json!({ "tag_name": tag, "published_at": published_at, "draft": draft, "prerelease": prerelease }));
     }
 
     /// A comment by `login` with GitHub's `author_association` (`OWNER`, `NONE`, ...), written now; returns its id.
@@ -290,7 +315,8 @@ async fn handle(State(shared): State<Shared>, method: Method, uri: Uri, headers:
             let Some(text) = sent["body"].as_str().filter(|t| !t.is_empty()) else {
                 return reply(StatusCode::UNPROCESSABLE_ENTITY, json!({ "message": "Validation Failed" }));
             };
-            let id = repo.comment(n as u64, "pinned-hub", "NONE", text, None).expect("the issue exists");
+            let association = repo.hub_association.clone().unwrap_or_else(|| "NONE".into());
+            let id = repo.comment(n as u64, "pinned-hub", &association, text, None).expect("the issue exists");
             let made = repo.issues[n - 1].comments.last().cloned().expect("just added");
             reply(StatusCode::CREATED, json!({ "id": id, "body": made.body, "created_at": made.created_at, "author_association": made.association, "user": { "login": made.login } }))
         }

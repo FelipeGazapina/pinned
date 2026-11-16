@@ -63,6 +63,27 @@ pub struct IssueInfo {
     pub closed_at: Option<String>,
 }
 
+/// An issue as the poller reads it: where it stands, how many comments it has and its label names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tracked {
+    pub number: u64,
+    pub open: bool,
+    /// `completed`, `not_planned`, `duplicate`, `reopened`, ... as GitHub says; anything may come.
+    pub state_reason: Option<String>,
+    pub comments: u64,
+    pub labels: Vec<String>,
+}
+
+fn tracked(item: &Value) -> Option<Tracked> {
+    Some(Tracked {
+        number: item["number"].as_u64()?,
+        open: item["state"].as_str()? == "open",
+        state_reason: text(&item["state_reason"]),
+        comments: item["comments"].as_u64().unwrap_or_default(),
+        labels: item["labels"].as_array().map(|l| l.iter().filter_map(|l| text(&l["name"])).collect()).unwrap_or_default(),
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Hit {
     pub number: u64,
@@ -191,6 +212,25 @@ impl Github {
         let q: String = url::form_urlencoded::byte_serialize(q.as_bytes()).collect();
         let mut found = self.get(&format!("/search/issues?q={q}&per_page={SEARCH_LIMIT}")).await?;
         decode_list(found["items"].take())
+    }
+
+    /// One page (`per_page` issues) of the issues changed at or after `since_iso`. The query holds nothing else,
+    /// so no word of any report goes to GitHub's search.
+    pub async fn search_updated(&self, since_iso: &str, per_page: usize, page: u32) -> Result<Vec<Tracked>> {
+        let q = format!("repo:{} is:issue updated:>={since_iso}", self.repo);
+        let q: String = url::form_urlencoded::byte_serialize(q.as_bytes()).collect();
+        let found = self.get(&format!("/search/issues?q={q}&per_page={per_page}&page={page}")).await?;
+        let Some(items) = found["items"].as_array() else { return Err(Error::Failed("GitHub sent an unexpected answer: no items".into())) };
+        Ok(items.iter().filter_map(tracked).collect())
+    }
+
+    /// One issue as the poller reads it; None when GitHub has no such issue any more.
+    pub async fn tracked(&self, number: u64) -> Result<Option<Tracked>> {
+        match self.get(&format!("/repos/{}/issues/{number}", self.repo)).await {
+            Ok(item) => Ok(tracked(&item)),
+            Err(Error::Failed(text)) if text.starts_with("GitHub answered 404") => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// The comments written at or after `since_iso`, oldest first.
