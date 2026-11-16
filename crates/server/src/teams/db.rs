@@ -596,6 +596,21 @@ pub async fn run_on_machine(db: &Db, team: Uuid, machine: &str) -> Result<Option
     Ok(row.as_ref().map(run_of))
 }
 
+/// The workflow and subject of each live run of the team bound to `machine` (its `box`), which
+/// a team box's session callbacks are held to. A run with no subject recorded has None.
+pub async fn bound_runs(db: &Db, team: Uuid, machine: &str) -> Result<Vec<(String, Option<Subject>)>, String> {
+    let rows = db
+        .client()
+        .await?
+        .query(&format!("select workflow, subject from team_runs where team = $1 and box = $2 and state in {LIVE}"), &[&team, &machine])
+        .await
+        .map_err(err)?;
+    Ok(rows
+        .iter()
+        .map(|r| (r.get(0), r.get::<_, Option<serde_json::Value>>(1).and_then(|subject| serde_json::from_value(subject).ok())))
+        .collect())
+}
+
 /// Moves a run that has not ended to `state` with `controller`; sets `ended_at` and `outcome`
 /// when `state` ends it. False when the run had already ended.
 pub async fn set_run_state(db: &Db, team: Uuid, run: Uuid, state: RunState, controller: Option<Uuid>, outcome: Option<&str>) -> Result<bool, String> {

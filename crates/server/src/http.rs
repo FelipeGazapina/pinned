@@ -1215,7 +1215,8 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
 /// A hub call from the machine of a team's box. Deny by default: only what its session needs to
 /// run on the team's account goes on to `forward`, which checks each as it does a person's
 /// machine's: a workflow session's callbacks, its own tabs' archive, its task records, and asking
-/// the team's people. No agent act, import, tastes, sync, sharing, delegation, MCP secrets or
+/// the team's people. A session callback must also name the workflow and subject of a live run
+/// the hub bound to this machine (`teams::db::bound_runs`): the tabs a box reports vouch for nothing. No agent act, import, tastes, sync, sharing, delegation, MCP secrets or
 /// global orchestrator.
 async fn forward_team_box(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: u64, id: u64, call: HubCall) {
     let allowed = matches!(
@@ -1229,12 +1230,40 @@ async fn forward_team_box(hub: Arc<Hub>, account: Arc<Account>, machine: String,
             | HubCall::RecordTasks { .. }
             | HubCall::Team { .. }
     );
-    if allowed {
-        return forward(hub, account, machine, socket, id, call).await;
+    if !allowed {
+        let refused = format!("a team's box may not send {}", surface::cmd_of(&call));
+        eprintln!("pinned-server: machine {machine} of team {} was refused: {refused}", account.id);
+        return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, Err(refused))));
     }
-    let refused = format!("a team's box may not send {}", surface::cmd_of(&call));
+    // A run's callback is held to the run the hub bound to this machine (`team_runs.box`), never
+    // to the tabs the box reports: a box vouches for nothing of its own.
+    let Some((connector, subject)) = run_work(&call) else {
+        return forward(hub, account, machine, socket, id, call).await;
+    };
+    let refused = match crate::teams::db::bound_runs(&hub.db, account.id, &machine).await {
+        Ok(runs) if runs.is_empty() => "this box has no live run of the team".to_owned(),
+        Ok(runs) if runs.iter().any(|(workflow, bound)| *workflow == connector && bound.as_ref() == Some(&subject)) => {
+            return forward(hub, account, machine, socket, id, call).await;
+        }
+        Ok(_) => "this box's run is not of that workflow on that subject".to_owned(),
+        Err(e) => e,
+    };
     eprintln!("pinned-server: machine {machine} of team {} was refused: {refused}", account.id);
     account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, Err(refused))));
+}
+
+/// The workflow and subject a workflow session's callback acts for: a stage or a run variable for
+/// its subject, a Slack reply or a Linear issue for its Slack thread. None for any other call.
+fn run_work(call: &HubCall) -> Option<(String, Subject)> {
+    match call {
+        HubCall::Stage { connector, subject, .. } | HubCall::RunSet { connector, subject, .. } => Some((connector.clone(), subject.clone())),
+        HubCall::SlackReply { connector, channel, thread, .. }
+        | HubCall::LinearCreate { connector, channel, thread, .. }
+        | HubCall::LinearTake { connector, channel, thread, .. } => {
+            Some((connector.clone(), Subject::SlackThread { channel: channel.clone(), thread: thread.clone() }))
+        }
+        _ => None,
+    }
 }
 
 /// A machine's hub call other than an agent's act: only the callbacks its sessions may pass on.
@@ -1288,16 +1317,7 @@ async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: 
         }
         return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
     }
-    let work = match &call {
-        HubCall::Stage { connector, subject, .. } | HubCall::RunSet { connector, subject, .. } => Some((connector.clone(), subject.clone())),
-        HubCall::SlackReply { connector, channel, thread, .. }
-        | HubCall::LinearCreate { connector, channel, thread, .. }
-        | HubCall::LinearTake { connector, channel, thread, .. } => {
-            Some((connector.clone(), Subject::SlackThread { channel: channel.clone(), thread: thread.clone() }))
-        }
-        _ => None,
-    };
-    let result = match work {
+    let result = match run_work(&call) {
         Some((connector, subject)) if account.working_on(&connector, &subject, |id| *id == machine) => hub.hub_call(&account, call).await,
         Some(_) => Err("this machine runs no session of that workflow on that subject".into()),
         // An app's first sign-in moves its own connectors and tastes in, which only an empty account

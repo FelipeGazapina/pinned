@@ -2,7 +2,7 @@
 //! a team op runs only on the app's own path, invite codes never expire, a member who leaves
 //! hands back what it held, and a team's box acts only for the run bound to it.
 
-use super::teams_calls::{design, op, patient, sql, TeamBox};
+use super::teams_calls::{design, op, patient, rows, sql, TeamBox};
 use super::*;
 use uuid::Uuid;
 
@@ -237,4 +237,143 @@ fn a_call_whose_only_asked_member_is_removed_goes_to_the_owner_at_once() {
     assert_eq!(tb.run_state(&hub, run), ("waiting".to_owned(), None));
     let answered = op(tb.team, &mut tb.owner.client, json!({ "op": "answer_call", "id": call, "answer": { "kind": { "kind": "choice" }, "choice": "blue", "text": "" } })).unwrap();
     assert_eq!(answered["answer"]["choice"], json!("blue"));
+}
+
+const NO_RUN: &str = "this box has no live run of the team";
+const NOT_ITS_RUN: &str = "this box's run is not of that workflow on that subject";
+
+/// Signs in a machine of the team's own account, as a team's box is, with `token`, and reports
+/// `tabs` as running sessions of (workflow, subject) pairs that the box itself claims.
+fn team_machine(hub: &TestHub, team: Uuid, id: &str, token: &str, tabs: &[(&str, Value)]) -> WebSocket<MaybeTlsStream<TcpStream>> {
+    admin_on(&hub.database, &format!("insert into machines (id, account, name, os, token_hash) values ('{id}', '{team}', 'box {id}', 'linux', sha256('{token}'::bytea)) on conflict do nothing"));
+    let (mut ws, _) = tungstenite::connect(format!("{}/ws/machine", hub.url.replace("http://", "ws://"))).unwrap();
+    if let MaybeTlsStream::Plain(stream) = ws.get_mut() {
+        stream.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+    }
+    ws.send(Message::text(json!({ "type": "auth", "token": token, "name": "box", "os": "linux", "version": "test" }).to_string())).unwrap();
+    read_machine(&mut ws, |frame| frame["type"] == "hello");
+    let tabs: Vec<Value> = tabs
+        .iter()
+        .enumerate()
+        .map(|(n, (workflow, subject))| {
+            let mut tab = json!({ "id": format!("tab-{n}"), "cwd": "/w", "bypass": false, "running": true, "status": null, "title": null, "message": null,
+                "resume_at": null, "connector": workflow, "opened": 1 });
+            tab["subject"] = subject.clone();
+            tab
+        })
+        .collect();
+    ws.send(Message::text(json!({ "type": "event", "event": { "kind": "tabs", "tabs": tabs } }).to_string())).unwrap();
+    let account = hub.runtime.block_on(hub.hub().account(team)).unwrap();
+    wait_for("the machine's tabs at the hub", || account.tabs_of(id).is_some_and(|t| t.len() == tabs.len()));
+    ws
+}
+
+/// A hub call the machine socket sends, and the hub's answer.
+fn machine_call(ws: &mut WebSocket<MaybeTlsStream<TcpStream>>, id: u64, call: Value) -> Result<Value, String> {
+    ws.send(Message::text(json!({ "type": "call", "id": id, "call": call }).to_string())).unwrap();
+    let reply = read_machine(ws, |frame| frame["type"] == "reply" && frame["id"] == id);
+    match reply.get("err") {
+        Some(err) => Err(err.as_str().unwrap().to_owned()),
+        None => Ok(reply["ok"].clone()),
+    }
+}
+
+/// Every per-run callback a session sends, for `workflow` on Slack thread `C0B00001`/`1.2` or
+/// on Linear issue `issue`.
+fn callbacks(workflow: &str, issue: &str) -> Vec<Value> {
+    vec![
+        json!({ "cmd": "stage", "connector": workflow, "issue": issue, "stage": "coding" }),
+        json!({ "cmd": "run_set", "connector": workflow, "issue": issue, "name": "title", "value": "hijacked" }),
+        json!({ "cmd": "slack_reply", "connector": workflow, "channel": "C0B00001", "thread": "1.2", "text": "from the wrong box" }),
+        json!({ "cmd": "linear_create", "connector": workflow, "channel": "C0B00001", "thread": "1.2", "title": "Sneak", "description": "" }),
+        json!({ "cmd": "linear_take", "connector": workflow, "channel": "C0B00001", "thread": "1.2", "issue": "ENG-1" }),
+    ]
+}
+
+/// A team box (bot B, with its run bound to its own box) whose team has a Slack bot on the
+/// stand-in Slack, and machine A of the same team with a live run of its own workflow `wf-a` on
+/// issue `team-2`.
+fn two_boxes(name: &str, slack_token: &str) -> (TestHub, TeamBox, Uuid) {
+    super::teams_slack_notice::slack_standin();
+    let hub = TestHub::start_with_team_policy(name, fast(), patient());
+    let mut tb = TeamBox::new(&hub);
+    let team = tb.team.to_string();
+    tb.owner.client.hub(json!({ "cmd": "team", "team": team, "op": { "op": "hub", "call": { "cmd": "connect_slack", "token": slack_token } } })).unwrap();
+    tb.bot(&hub, design(), None);
+    let run_b = tb.run(&hub);
+    sql(&hub, &format!(
+        "update team_runs set subject = '{{\"issue\":\"team-1\"}}'::jsonb where id = '{run_b}';
+         insert into team_runs (id, team, workflow, box, started_by, state, subject)
+           values ('{}', '{team}', 'wf-a', '{BOX_A}', '\"{}\"'::jsonb, 'working', '{{\"issue\":\"team-2\"}}'::jsonb)",
+        Uuid::new_v4(),
+        tb.owner.id
+    ));
+    (hub, tb, run_b)
+}
+
+const BOX_A: &str = "6f1c0b1e-0000-4000-8000-0000000000aa";
+const BOX_A_TOKEN: &str = "team-box-a-machine-token";
+
+/// The team account's stored workflow runs, with their variables.
+fn stored_runs(hub: &TestHub, team: Uuid) -> String {
+    rows(hub, &format!("select coalesce(store->'runs', 'null'::jsonb)::text from accounts where id = '{team}'"))[0][0].clone().unwrap()
+}
+
+#[test]
+fn a_team_box_cannot_act_for_another_bots_run_by_reporting_its_tab() {
+    let (hub, tb, _) = two_boxes("teams_b_box_vouch", "xoxb-dev-vouch-one");
+    let thread = json!({ "channel": "C0B00001", "thread": "1.2" });
+    let mut a = team_machine(&hub, tb.team, BOX_A, BOX_A_TOKEN, &[("wf-a", json!({ "issue": "team-2" })), (&tb.workflow, json!({ "issue": "team-1" })), (&tb.workflow, thread)]);
+    let before = stored_runs(&hub, tb.team);
+
+    let set = json!({ "cmd": "run_set", "connector": tb.workflow, "issue": "team-1", "name": "title", "value": "hijacked" });
+    assert_eq!(machine_call(&mut a, 1, set), Err(NOT_ITS_RUN.into()), "RunSet for bot B's run");
+    let reply = json!({ "cmd": "slack_reply", "connector": tb.workflow, "channel": "C0B00001", "thread": "1.2", "text": "from the wrong box" });
+    assert_eq!(machine_call(&mut a, 2, reply), Err(NOT_ITS_RUN.into()), "SlackReply as bot B");
+    for (n, call) in callbacks(&tb.workflow, "team-1").into_iter().enumerate() {
+        assert_eq!(machine_call(&mut a, 10 + n as u64, call.clone()), Err(NOT_ITS_RUN.into()), "{call}");
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(super::teams_slack_notice::posts("xoxb-dev-vouch-one").len(), 0, "nothing was posted to Slack");
+    assert_eq!(stored_runs(&hub, tb.team), before, "bot B's run variables are untouched");
+    assert!(!stored_runs(&hub, tb.team).contains("hijacked"));
+
+    // Its own bound run's callback passes the box check and reaches the workflow's own answer.
+    let own = json!({ "cmd": "run_set", "connector": "wf-a", "issue": "team-2", "name": "title", "value": "mine" });
+    assert_eq!(machine_call(&mut a, 30, own), Err("this session was not started by a workflow run, so it has no run variables to set".into()));
+}
+
+#[test]
+fn a_second_socket_of_the_same_box_is_held_to_the_run_bound_to_that_machine() {
+    let (hub, tb, _) = two_boxes("teams_b_box_mirror", "xoxb-dev-vouch-two");
+    let first = team_machine(&hub, tb.team, BOX_A, BOX_A_TOKEN, &[("wf-a", json!({ "issue": "team-2" }))]);
+    // The same machine's second socket claims a tab of bot B's workflow it does not have.
+    let mut second = team_machine(&hub, tb.team, BOX_A, BOX_A_TOKEN, &[("wf-a", json!({ "issue": "team-2" })), (&tb.workflow, json!({ "issue": "team-1" })), ("wf-a", json!({ "issue": "team-9" }))]);
+    drop(first);
+    let before = stored_runs(&hub, tb.team);
+    for (n, call) in callbacks(&tb.workflow, "team-1").into_iter().enumerate() {
+        assert_eq!(machine_call(&mut second, 1 + n as u64, call.clone()), Err(NOT_ITS_RUN.into()), "{call}");
+    }
+    let other_subject = json!({ "cmd": "run_set", "connector": "wf-a", "issue": "team-9", "name": "title", "value": "hijacked" });
+    assert_eq!(machine_call(&mut second, 20, other_subject), Err(NOT_ITS_RUN.into()), "its own workflow on a subject its run is not on");
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(super::teams_slack_notice::posts("xoxb-dev-vouch-two").len(), 0);
+    assert_eq!(stored_runs(&hub, tb.team), before);
+}
+
+#[test]
+fn a_team_machine_with_no_live_run_bound_to_it_gets_every_session_callback_refused() {
+    let (hub, tb, _) = two_boxes("teams_b_box_unbound", "xoxb-dev-vouch-three");
+    let idle = "6f1c0b1e-0000-4000-8000-0000000000cc";
+    let mut c = team_machine(&hub, tb.team, idle, "team-box-c-machine-token", &[(&tb.workflow, json!({ "issue": "team-1" })), (&tb.workflow, json!({ "channel": "C0B00001", "thread": "1.2" }))]);
+    let before = stored_runs(&hub, tb.team);
+    for (n, call) in callbacks(&tb.workflow, "team-1").into_iter().chain(callbacks("wf-a", "team-2")).enumerate() {
+        assert_eq!(machine_call(&mut c, 1 + n as u64, call.clone()), Err(NO_RUN.into()), "{call}");
+    }
+    // A run that ended no longer binds its box either.
+    sql(&hub, &format!("update team_runs set box = '{idle}', state = 'stopped' where workflow = 'wf-a'"));
+    assert_eq!(machine_call(&mut c, 40, callbacks("wf-a", "team-2")[1].clone()), Err(NO_RUN.into()));
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(super::teams_slack_notice::posts("xoxb-dev-vouch-three").len(), 0);
+    assert_eq!(stored_runs(&hub, tb.team), before);
 }
