@@ -131,6 +131,7 @@ pub fn owner_only(op: &Op, locked: bool) -> bool {
             TeamOp::List
             | TeamOp::Create { .. }
             | TeamOp::Members
+            | TeamOp::Invites
             | TeamOp::Projects
             | TeamOp::Groups
             | TeamOp::Bots
@@ -175,6 +176,7 @@ pub async fn call(hub: &Arc<Hub>, person: &Arc<Account>, team: Option<Uuid>, op:
         TeamOp::Members => json(membership::members(hub, s).await?),
         TeamOp::Invite => json(membership::invite(hub, s).await?),
         TeamOp::RevokeInvite { hint } => json(membership::revoke_invite(hub, s, &hint).await?),
+        TeamOp::Invites => json(membership::invites(hub, s).await?),
         TeamOp::RemoveMember { account } => json(membership::remove_member(hub, s, &account).await?),
         TeamOp::Leave => json(membership::leave(hub, s).await?),
         TeamOp::AttachProject { key } => json(projects::attach_project(hub, s, &key).await?),
@@ -546,6 +548,7 @@ mod tests {
         let reads = [
             json!({ "op": "list" }),
             json!({ "op": "members" }),
+            json!({ "op": "invites" }),
             json!({ "op": "projects" }),
             json!({ "op": "groups" }),
             json!({ "op": "bots" }),

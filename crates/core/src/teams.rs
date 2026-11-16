@@ -82,6 +82,17 @@ pub struct TeamInvite {
     pub hint: String,
 }
 
+/// An invite not used and not revoked, as the owner lists it: never its code. `created` is unix
+/// seconds; `made_by` is the maker's name as members see it, or its account id when it has none.
+///
+/// `{"hint":"ABCD","created":1790000000,"made_by":"ana"}`
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct OpenInvite {
+    pub hint: String,
+    pub created: i64,
+    pub made_by: String,
+}
+
 /// A member's shared project attached to the team: its bots work in it.
 ///
 /// `{"key":"github.com/acme/site","name":"site","repo":"github.com/acme/site","member":"0b7e…"}`
@@ -506,6 +517,8 @@ pub enum TeamOp {
     Invite,
     /// Owner only: the invite whose code starts with `hint`.
     RevokeInvite { hint: String },
+    /// Owner only. `Vec<OpenInvite>`: the invites not used and not revoked, newest first.
+    Invites,
     /// Owner only.
     RemoveMember { account: String },
     /// A member leaves; the owner cannot.
@@ -628,6 +641,7 @@ mod tests {
             json!({ "op": "members" }),
             json!({ "op": "invite" }),
             json!({ "op": "revoke_invite", "hint": "ABCD" }),
+            json!({ "op": "invites" }),
             json!({ "op": "remove_member", "account": "a1" }),
             json!({ "op": "leave" }),
             json!({ "op": "attach_project", "key": "github.com/acme/site" }),

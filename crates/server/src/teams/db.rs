@@ -25,6 +25,15 @@ pub struct MemberRow {
     pub role: Role,
 }
 
+/// An open invite of a team, with its maker's email from `accounts`.
+pub struct OpenInviteRow {
+    pub hint: String,
+    /// Unix seconds.
+    pub created: i64,
+    pub made_by: Uuid,
+    pub email: Option<String>,
+}
+
 // ---- mod.rs ----
 
 /// The member's role on the team, or None when it is not a member (or the team does not exist).
@@ -175,6 +184,22 @@ pub async fn take_invite(db: &Db, code_hash: &[u8], member: Uuid) -> Result<Opti
         .await
         .map_err(err)?;
     Ok(again.map(|r| r.get(0)))
+}
+
+/// The team's open invites (unused and unrevoked), newest first.
+pub async fn open_invites(db: &Db, team: Uuid) -> Result<Vec<OpenInviteRow>, String> {
+    let rows = db
+        .client()
+        .await?
+        .query(
+            "select i.hint, extract(epoch from i.created_at)::bigint, i.made_by, a.email from team_invites i
+             left join accounts a on a.id = i.made_by
+             where i.team = $1 and i.used_by is null and not i.revoked order by i.created_at desc, i.hint",
+            &[&team],
+        )
+        .await
+        .map_err(err)?;
+    Ok(rows.iter().map(|r| OpenInviteRow { hint: r.get(0), created: r.get(1), made_by: r.get(2), email: r.get(3) }).collect())
 }
 
 /// Revokes the team's open invites (unused and unrevoked, however old) whose hint is `hint`;

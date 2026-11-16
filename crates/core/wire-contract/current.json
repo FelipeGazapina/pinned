@@ -11080,6 +11080,19 @@
                 ]
               },
               {
+                "description": "Owner only. `Vec<OpenInvite>`: the invites not used and not revoked, newest first.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "invites"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
                 "description": "Owner only.",
                 "type": "object",
                 "properties": {
@@ -22749,6 +22762,19 @@
                 ]
               },
               {
+                "description": "Owner only. `Vec<OpenInvite>`: the invites not used and not revoked, newest first.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "invites"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
                 "description": "Owner only.",
                 "type": "object",
                 "properties": {
@@ -31578,6 +31604,19 @@
                 ]
               },
               {
+                "description": "Owner only. `Vec<OpenInvite>`: the invites not used and not revoked, newest first.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "invites"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
                 "description": "Owner only.",
                 "type": "object",
                 "properties": {
@@ -40096,6 +40135,19 @@
                 "required": [
                   "op",
                   "hint"
+                ]
+              },
+              {
+                "description": "Owner only. `Vec<OpenInvite>`: the invites not used and not revoked, newest first.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "invites"
+                  }
+                },
+                "required": [
+                  "op"
                 ]
               },
               {
@@ -59693,6 +59745,54 @@
             ]
           }
         }
+      }
+    },
+    "TeamOpenInvite": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "OpenInvite",
+        "description": "An invite not used and not revoked, as the owner lists it: never its code. `created` is unix\nseconds; `made_by` is the maker's name as members see it, or its account id when it has none.\n\n`{\"hint\":\"ABCD\",\"created\":1790000000,\"made_by\":\"ana\"}`",
+        "type": "object",
+        "properties": {
+          "hint": {
+            "type": "string"
+          },
+          "created": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "made_by": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "hint",
+          "created",
+          "made_by"
+        ]
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "OpenInvite",
+        "description": "An invite not used and not revoked, as the owner lists it: never its code. `created` is unix\nseconds; `made_by` is the maker's name as members see it, or its account id when it has none.\n\n`{\"hint\":\"ABCD\",\"created\":1790000000,\"made_by\":\"ana\"}`",
+        "type": "object",
+        "properties": {
+          "hint": {
+            "type": "string"
+          },
+          "created": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "made_by": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "hint",
+          "created",
+          "made_by"
+        ]
       }
     },
     "TeamProject": {
