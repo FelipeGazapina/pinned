@@ -204,7 +204,6 @@ const tbErrorText = (e) => String(e?.message ?? e ?? TB_TEXT.noHub);
 const tbCall = (op) => (typeof teamCall === "function" ? teamCall(op) : Promise.reject(TB_TEXT.unavailable));
 const tbTeam = () => (typeof teamsCurrent === "function" ? teamsCurrent() : null);
 const tbDocument = () => (typeof document !== "undefined" ? document : null);
-const tbHas = (page) => typeof SHELL_PAGES !== "undefined" && page in SHELL_PAGES;
 const tbShown = () => (typeof shellPage === "function" ? shellPage() : null);
 
 /** `ana.prado@acme.dev` is shown as "Ana Prado". */
@@ -408,11 +407,9 @@ function tbDraw(title, body, wide = true) {
 }
 const tbAsk = (title, text, extra = "") => tbDraw(title, `<div class="tb-empty"><h2>${tbEsc(title)}</h2><p>${tbEsc(text)}</p>${extra}</div>`);
 
-/** Opens the first Teams page that exists beside these, else goes back to the threads. */
+/** The team's home is its Calls page. */
 function tbOpenHome() {
-  const home = ["team-calls", "team-home", "team-runs"].find(tbHas);
-  if (home) openPage(home);
-  else if (typeof closePage === "function") closePage();
+  openPage("team-calls");
 }
 
 const tbBotUi = { id: "", state: "idle", error: "", data: null, busy: "", note: "", started: null };
@@ -429,12 +426,7 @@ function openTeamGroup(handle) {
 function openTeamBotNew() {
   if (typeof openPage === "function") openPage("team-bot-new");
 }
-/** Follows a run on the page the calls worker owns, when there is one. */
-function tbOpenRun(run) {
-  if (typeof openTeamRun === "function") return openTeamRun(run);
-  if (tbHas("team-run")) openPage("team-run");
-}
-const tbRunLink = (run, label, cls = "") => (tbHas("team-run") || typeof openTeamRun === "function" ? `<button type="button" class="${cls}" data-tb="open-run" data-run="${tbEsc(run)}">${label}</button>` : "");
+const tbRunLink = (run, label, cls = "") => `<button type="button" class="${cls}" data-tb="open-run" data-run="${tbEsc(run)}">${label}</button>`;
 
 // ---- The bot page -------------------------------------------------------------------------------
 
@@ -497,7 +489,7 @@ function tbBotHtml(ui, team) {
   const needKeys = team.credential && !(team.credential.upstash && team.credential.claude);
 
   const runBtn = running
-    ? tbRunLink(running.id, tbEsc(t.follow), "tb-btn follow") || `<span class="tb-btn follow static">${tbEsc(t.follow)}</span>`
+    ? tbRunLink(running.id, tbEsc(t.follow), "tb-btn follow")
     : ui.busy === "run"
       ? tbButton("disabled", t.starting, "secondary", true)
       : `<button type="button" class="tb-btn primary" data-tb="run-now"${bot.on ? "" : ` disabled title="${tbEsc(t.runNowDraft)}"`}>${tbEsc(t.runNow)}</button>`;
@@ -529,7 +521,7 @@ function tbBotHtml(ui, team) {
   const runRows = runs.slice(0, 8).map((r) => {
     const line = tbRunLine(r, { members, open: openCalls.find((c) => c.run === r.id) });
     const row = `<span class="tb-when">${tbEsc(tbWhen(r.started_at))}</span><span class="tb-line" data-tone="${line.tone}">${tbEsc(line.text)}</span>`;
-    return tbHas("team-run") || typeof openTeamRun === "function" ? `<button type="button" class="tb-listrow" data-tb="open-run" data-run="${tbEsc(r.id)}">${row}</button>` : `<div class="tb-listrow">${row}</div>`;
+    return `<button type="button" class="tb-listrow" data-tb="open-run" data-run="${tbEsc(r.id)}">${row}</button>`;
   });
 
   const notice = bot.on ? "" : may ? "" : `<p class="tb-note">${tbEsc(t.cannotTurnOn(tbAskText(rules, members)))}</p>`;
@@ -554,7 +546,7 @@ function drawBotPage() {
 const TB_BOT_ACTS = {
   reload: () => tbLoadBot(),
   "open-group": (b) => openTeamGroup(b.dataset.handle),
-  "open-run": (b) => tbOpenRun(b.dataset.run),
+  "open-run": (b) => openTeamRun(b.dataset.run),
   async "run-now"() {
     const ui = tbBotUi;
     ui.busy = "run";
@@ -665,7 +657,7 @@ function tbGroupHtml(ui, team) {
   const callRows = week.map((c) => {
     const line = tbCallLine(c, { members, bots, me });
     const row = `<span class="tb-when">${tbEsc(tbWhen(c.created_at))}</span><span class="tb-line" data-tone="${line.tone}">${tbEsc(line.text)}</span>`;
-    return !c.answer && c.run && (tbHas("team-run") || typeof openTeamRun === "function") ? `<button type="button" class="tb-listrow" data-tb="open-run" data-run="${tbEsc(c.run)}">${row}</button>` : `<div class="tb-listrow">${row}</div>`;
+    return !c.answer && c.run ? `<button type="button" class="tb-listrow" data-tb="open-run" data-run="${tbEsc(c.run)}">${row}</button>` : `<div class="tb-listrow">${row}</div>`;
   });
 
   return `<div class="tb-head">
@@ -706,7 +698,7 @@ async function tbSetMembers(members) {
 const TB_GROUP_ACTS = {
   reload: () => tbLoadGroup(),
   "open-bot": (b) => openTeamBot(b.dataset.workflow),
-  "open-run": (b) => tbOpenRun(b.dataset.run),
+  "open-run": (b) => openTeamRun(b.dataset.run),
   "show-add"() {
     tbGroupUi.adding = !tbGroupUi.adding;
     drawGroupPage();

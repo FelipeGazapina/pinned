@@ -61,6 +61,12 @@ function app({ answers = {}, team = OWNER_TEAM, email = "bruno@acme.dev", pages 
       context.SHELL_PAGES[name]?.show?.();
     },
     closePage: () => context.opened.push("closed"),
+    // The calls UI's run opener, a cross-file global.
+    runsOpened: [],
+    openTeamRun: (id) => {
+      context.runsOpened.push(id);
+      context.opened.push("team-run");
+    },
     teamsCurrent: () => team,
     teamCall: async (op) => {
       frames.push(here(op));
@@ -340,15 +346,11 @@ test("seeing the bot's page opens it by the workflow's id", async () => {
   assert.ok(text(a.page()).includes("Test publisher"));
 });
 
-test("back goes to the team's calls page when there is one, else to the threads", async () => {
-  let a = app({ answers: wizardAnswers() });
+test("back goes to the team's calls page", async () => {
+  const a = app({ answers: wizardAnswers() });
   await a.open("team-bot-new");
   await a.click("back-team");
   assert.deepEqual(a.context.opened, ["team-calls"]);
-  a = app({ answers: wizardAnswers(), pages: [] });
-  await a.open("team-bot-new");
-  await a.click("back-team");
-  assert.deepEqual(a.context.opened, ["closed"]);
 });
 
 test("text people typed stays text in the wizard", async () => {
@@ -434,6 +436,7 @@ test("an on bot runs now, then shows Running, follow it, which opens the run", a
   assert.match(text(a.page()), /Running, follow it/);
   assert.match(a.page(), /data-tb="open-run" data-run="r5"/);
   await a.click("open-run", { run: "r5" });
+  assert.deepEqual(a.context.runsOpened, ["r5"], "the run opener of the calls UI is called with the run");
   assert.equal(a.context.opened.at(-1), "team-run");
 });
 

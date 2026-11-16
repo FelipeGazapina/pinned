@@ -57,6 +57,10 @@ function page(world = {}) {
     setPage() {},
     headHtml: (t) => t,
     openPage: (p) => ops.push({ opened: p }),
+    // The bots UI's openers, cross-file globals.
+    openTeamBot: (id) => ops.push({ bot: id }),
+    openTeamGroup: (handle) => ops.push({ group: handle }),
+    openTeamBotNew: () => ops.push({ botNew: true }),
     account: { email: world.email ?? "bruno.lima@north.example" },
     document: { addEventListener: (type, fn) => (listeners[type] ??= []).push(fn), body: { dataset: {} }, getElementById: () => ({ before() {} }), createElement: () => ({ remove() {}, setAttribute() {}, dataset: {} }) },
     teamsCurrent: () => (world.team === null ? null : { id: "team-1", name: "North Studio", role: world.role ?? "member", credential: {} }),
@@ -380,9 +384,23 @@ test("run_log is asked as {op:run_log,run} and its failure leaves the log empty"
 
 test("opening a run from another screen remembers it and opens the page", () => {
   const p = page();
-  p.eval(`teamRunOpen("r7")`);
+  p.eval(`openTeamRun("r7")`);
   assert.equal(p.eval("tcRunShown"), "r7");
   assert.deepEqual(here(p.ops), [{ opened: "team-run" }]);
+});
+
+test("a bot, a group, a run and Create a bot open through the one openTeamX style, with no alias", () => {
+  const p = page();
+  const nav = (key, dataset) => p.eval(`tcNavOpen(${JSON.stringify({ dataset: { tcNav: key, ...dataset } })})`);
+  nav("team-bot", { workflow: "w2" });
+  nav("team-group", { handle: "reviewers" });
+  nav("team-bot-new", {});
+  nav("team-calls", {});
+  p.eval(`tcOpenTarget(${JSON.stringify({ dataset: { tcOpen: "bot", value: "w1" } })})`);
+  p.eval(`tcOpenTarget(${JSON.stringify({ dataset: { tcOpen: "group", value: "publishing" } })})`);
+  p.eval(`tcOpenTarget(${JSON.stringify({ dataset: { tcOpen: "run", value: "r1" } })})`);
+  assert.deepEqual(here(p.ops), [{ bot: "w2" }, { group: "reviewers" }, { botNew: true }, { opened: "team-calls" }, { bot: "w1" }, { group: "publishing" }, { opened: "team-run" }]);
+  for (const name of ["gui-team-store.js", "gui-team-nav.js", "gui-team-calls.js", "gui-team-run.js", "gui-teams.js", "gui-teams-bots.js"]) assert.ok(!/teamRunOpen|teamBotOpen|teamGroupOpen/.test(read(name)), `${name} keeps no old name`);
 });
 
 test("refresh reads the five lists, and one that fails keeps what it had", async () => {

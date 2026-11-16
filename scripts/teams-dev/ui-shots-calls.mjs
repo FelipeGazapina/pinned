@@ -282,7 +282,7 @@ for (const scheme of ["dark", "light"]) {
     });
     await page.click('#team-nav [data-tc-nav="team-calls"]');
     await page.waitForSelector(".tc-card");
-    await page.evaluate(() => teamRunOpen("r2"));
+    await page.evaluate(() => openTeamRun("r2"));
     await page.waitForSelector(".tc-timeline .tc-call");
     check((await page.locator(".tc-head-actions button").count()) === 0, "an ended run has no buttons");
     await shot(page, "run-gave-up", scheme);

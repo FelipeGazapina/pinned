@@ -9,8 +9,6 @@
 
 const TEAMS_KEY = "teams-current";
 const TEAM_PAGES = ["team-create", "team-join"];
-/** The pages another Teams worker may register, the first that exists is where "Open the team" goes. */
-const TEAM_HOMES = ["team-home", "team-runs", "team-bots"];
 const TEAM_HUES = ["#f0a35e", "#5fd4b8", "#c7a6ff", "#6ea8ff", "#f08aa8", "#e3cf6a"];
 
 const TEAMS_TEXT = {
@@ -296,11 +294,9 @@ const tmError = (text) => (text ? `<p class="tm-error" role="alert">${teamsEsc(t
 const tmCheckRow = (attrs, on, name, about, state) =>
   `<button type="button" class="tm-check" role="switch" aria-checked="${on}" ${attrs}><span class="tm-box" aria-hidden="true"></span><span class="tm-texts"><span class="tm-name">${teamsEsc(name)}</span>${about ? `<span class="tm-about">${teamsEsc(about)}</span>` : ""}</span><span class="tm-state">${teamsEsc(state)}</span></button>`;
 
-/** Opens the first Teams page that exists beside this one, else goes back to the threads. */
+/** The team's home is its Calls page. */
 function teamsOpenHome() {
-  const home = TEAM_HOMES.find((name) => name in SHELL_PAGES);
-  if (home) openPage(home);
-  else closePage();
+  openPage("team-calls");
 }
 
 // ---- Create a team ------------------------------------------------------------------------------
@@ -415,10 +411,9 @@ function teamWizardBodyHtml() {
   }
   const people = teamWizard.invites.slice(0, 2).map(() => `<span class="tm-avatar big ghost" aria-hidden="true">+</span>`).join("");
   const summary = t.readyProjects(teamWizard.attached.size) + t.readyAi(connectedCount(), t.creds.length) + t.readyInvites(teamWizard.invites.length);
-  const bots = "team-bots" in SHELL_PAGES;
   return `<div class="tm-faces">${teamsAvatar(teamsPerson(), "big", TEAM_HUES[0])}${people}</div>
     <h2>${t.readyTitle(team)}</h2><p class="tm-lede big">${teamsEsc(summary)}</p><p class="tm-note">${t.readyNoBot}</p>
-    <div class="tm-actions">${bots ? tmButton('data-tm="first-bot"', t.firstBot, "primary") : ""}${tmButton('data-tm="open-team"', t.openTeam, bots ? "secondary" : "primary")}</div>`;
+    <div class="tm-actions">${tmButton('data-tm="first-bot"', t.firstBot, "primary")}${tmButton('data-tm="open-team"', t.openTeam)}</div>`;
 }
 
 function teamWizardNavHtml() {
@@ -733,7 +728,7 @@ pageView.addEventListener("click", (e) => {
     renderCreate();
   } else if (act === "invite") teamWizardInvite();
   else if (act === "copy") teamWizardCopy(Number(el.dataset.i));
-  else if (act === "first-bot") teamWizardFinish(() => openPage("team-bots"));
+  else if (act === "first-bot") teamWizardFinish(openTeamBotNew);
   else if (act === "open-team") teamWizardFinish(teamsOpenHome);
 });
 pageView.addEventListener("input", (e) => {

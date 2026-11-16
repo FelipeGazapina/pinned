@@ -371,9 +371,9 @@ function tcCanAnswer(call) {
 }
 
 const tcPageOpens = (key) => typeof SHELL_PAGES !== "undefined" && key in SHELL_PAGES;
-/** The run page opens the run it was last given; `teamRunOpen(id)` is how another screen sends one. */
+/** The run page opens the run it was last given; `openTeamRun(id)` is how another screen sends one. */
 let tcRunShown = null;
-function teamRunOpen(id) {
+function openTeamRun(id) {
   tcRunShown = id;
   if (tcPageOpens("team-run")) openPage("team-run");
 }
@@ -385,9 +385,9 @@ function tcLinkHtml(kind, value, label, cls) {
 /** What a link made by `tcLinkHtml` does. */
 function tcOpenTarget(button) {
   const { tcOpen: kind, value } = button.dataset;
-  if (kind === "run") teamRunOpen(value);
-  else if (kind === "bot") globalThis.teamBotOpen ? globalThis.teamBotOpen(value) : openPage("team-bot");
-  else if (kind === "group") globalThis.teamGroupOpen ? globalThis.teamGroupOpen(value) : openPage("team-group");
+  if (kind === "run") openTeamRun(value);
+  else if (kind === "bot") openTeamBot(value);
+  else if (kind === "group") openTeamGroup(value);
 }
 /** Everyone a call went to, as chips: the groups by `@handle`, people by `@Name`, the owner once it escalated. */
 function tcAskedChips(call) {

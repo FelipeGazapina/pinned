@@ -63,14 +63,13 @@ function tcNavDraw() {
   }
 }
 
-/** Opens the page a row names. The Bots and Groups pages choose the bot or group themselves when
- * they publish `teamBotOpen(workflow)` / `teamGroupOpen(handle)`; otherwise the row opens the page. */
+/** Opens the page a row names: a bot or a group through `openTeamBot(workflow)` / `openTeamGroup(handle)`. */
 function tcNavOpen(button) {
   const key = button.dataset.tcNav;
   if (!tcNavOpens(key)) return;
-  const opener = key === "team-bot" && button.dataset.workflow ? () => globalThis.teamBotOpen?.(button.dataset.workflow) : key === "team-group" && button.dataset.handle ? () => globalThis.teamGroupOpen?.(button.dataset.handle) : null;
-  const published = key === "team-bot" ? globalThis.teamBotOpen : key === "team-group" ? globalThis.teamGroupOpen : null;
-  if (opener && published) opener();
+  if (key === "team-bot" && button.dataset.workflow) openTeamBot(button.dataset.workflow);
+  else if (key === "team-group" && button.dataset.handle) openTeamGroup(button.dataset.handle);
+  else if (key === "team-bot-new") openTeamBotNew();
   else openPage(key);
 }
 

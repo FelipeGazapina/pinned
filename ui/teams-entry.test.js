@@ -51,6 +51,8 @@ function app({ answers = {}, projects = [], pages = [], stored = null, raw = nul
     closed: 0,
     openPage: (name) => context.opened.push(name),
     closePage: () => context.closed++,
+    // The bots UI's opener of the Create a bot page, a cross-file global.
+    openTeamBotNew: () => context.opened.push("team-bot-new"),
     hub: {
       hub: async (call) => {
         frames.push(here(call));
@@ -422,22 +424,23 @@ test("Finish leads to the Done screen with a truthful summary, and the team is c
   assert.match(t, /The team's AI account is not connected yet, so no bot runs until it is\./);
   assert.match(t, /1 invite code made\. Nothing is sent: you pass it on yourself\./);
   assert.ok(!/e-mail.*invit|receive the invit/i.test(t));
-  assert.ok(!/Create the first bot/.test(t), "no bots page, no button");
+  assert.match(t, /Create the first bot/);
   assert.equal(a.context.teamsCurrent(), null, "the team is not current until the person opens it");
   a.click("open-team");
   assert.equal(a.context.teamsCurrent().id, "t1");
-  assert.equal(a.context.closed, 1, "no team page yet: back to the threads");
+  assert.deepEqual(a.context.opened, ["team-calls"], "Open the team is the team's Calls page");
 });
 
-test("Create the first bot and Open the team go to the pages that exist", async () => {
-  const a = await atStep3(ACME, { pages: ["team-bots", "team-runs"] });
+test("Create the first bot opens the Create a bot page, and Open the team opens the Calls page", async () => {
+  const a = await atStep3(ACME);
   a.run("teamWizard.step = 5");
   a.run("renderCreate()");
   assert.match(a.page(), />Create the first bot</);
   a.click("first-bot");
-  assert.deepEqual(a.context.opened, ["team-bots"]);
+  assert.deepEqual(a.context.opened, ["team-bot-new"]);
   a.click("open-team");
-  assert.deepEqual(a.context.opened, ["team-bots", "team-runs"]);
+  assert.deepEqual(a.context.opened, ["team-bot-new", "team-calls"]);
+  assert.ok(!/team-home|team-runs|team-bots"/.test(src), "no guessed page id is left");
 });
 
 test("the step list on the left is the prototype's five steps; steps ahead stay shut, steps behind open", async () => {
@@ -532,7 +535,7 @@ test("after joining: the team's name, the person's projects marked by what the t
 });
 
 test("Join with N projects sends attach_project for each turned on, then opens the team", async () => {
-  const a = await joined({ pages: ["team-runs"] });
+  const a = await joined();
   a.click("toggle", { key: "github.com/acme/orders-api" }, "team-join");
   assert.match(a.page(), />Join with 2 projects</);
   a.click("join-with", {}, "team-join");
@@ -542,7 +545,7 @@ test("Join with N projects sends attach_project for each turned on, then opens t
     { cmd: "team", team: "t2", op: { op: "attach_project", key: "github.com/acme/orders-api" } },
   ]);
   assert.equal(a.context.teamsCurrent().id, "t2");
-  assert.deepEqual(a.context.opened, ["team-runs"]);
+  assert.deepEqual(a.context.opened, ["team-calls"]);
   assert.equal(a.events.length, 1);
 });
 
@@ -552,7 +555,7 @@ test("Continue without any attaches nothing and still joins", async () => {
   await flush();
   assert.equal(a.frames.filter((f) => f.op.op === "attach_project").length, 0);
   assert.equal(a.context.teamsCurrent().name, "Side Gig");
-  assert.equal(a.context.closed, 1);
+  assert.deepEqual(a.context.opened, ["team-calls"]);
 });
 
 test("an attach that fails stays on the page with the hub's words and sends no repeat", async () => {
