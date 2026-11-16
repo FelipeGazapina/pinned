@@ -188,14 +188,23 @@ fn the_tick_moves_a_run_left_waiting_with_no_open_call_back_to_work() {
     let crew = Crew::new("tl_stale_wait", fast(), patient());
     let run = crew.running();
     crew.ask("Red or blue footer?").unwrap();
-    assert_eq!(crew.runs(), vec![("waiting".to_owned(), None)]);
+    let (old_wait, new_wait) = ("waiting_since = now() - interval '1 hour'", "waiting_since = now()");
+    let wait = |since: &str| crew.sql(&format!("update team_runs set {since} where id = '{}'", run.id));
+    wait(old_wait);
+    crew.tick();
+    assert_eq!(crew.runs(), vec![("waiting".to_owned(), None)], "a run whose call is open waits on");
+
     // The call closed as a give-up whose run never ended, as when the hub restarted in between.
     crew.sql(&format!("update team_calls set answered_at = now(), outcome = 'gave-up' where run = '{}'", run.id));
     crew.tick();
     assert_eq!(crew.runs(), vec![("waiting".to_owned(), None)], "a call that just closed may still move its run on");
 
     crew.sql(&format!("update team_calls set answered_at = now() - interval '1 hour' where run = '{}'", run.id));
-    crew.sql(&format!("update team_runs set waiting_since = now() - interval '1 hour' where id = '{}'", run.id));
+    wait(new_wait);
+    crew.tick();
+    assert_eq!(crew.runs(), vec![("waiting".to_owned(), None)], "a run that just began to wait may be opening its call");
+
+    wait(old_wait);
     crew.tick();
     assert_eq!(crew.runs(), vec![("working".to_owned(), None)]);
     assert_eq!(crew.hub.boxes.live().len(), 1, "its box goes on");
