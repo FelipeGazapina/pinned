@@ -24,16 +24,24 @@ function rig() {
   const paints = [];
   const timers = [];
   const script = { prompt: () => Promise.resolve(null), pages: [] };
+  const clock = { now: Date.now() };
+  class FakeDate extends Date {
+    static now() {
+      return clock.now;
+    }
+  }
   const prompt = { value: "" };
   const context = {
     calls,
     notes,
     paints,
     timers,
+    clock,
+    Date: FakeDate,
     script,
     prompt,
     active: null,
-    performance: { now: () => Date.now() },
+    performance: { now: () => clock.now },
     THREAD_READ_GAP_MS: 0,
     THREAD_PAGE: 50,
     composer: { dataset: {} },
@@ -55,7 +63,20 @@ function rig() {
     clearComposer: () => {
       prompt.value = "";
     },
-    showComposerNote: (text, error) => notes.push({ text, error }),
+    composerNoteTimer: 0,
+    composerNote: {
+      text: "",
+      error: false,
+      set textContent(v) {
+        this.text = v;
+      },
+      toggleAttribute(_name, on) {
+        this.error = on;
+      },
+      set hidden(hidden) {
+        notes.push({ text: hidden ? "" : this.text, error: this.error });
+      },
+    },
     renderThread: () => paints.push(1),
     esc: (text) => String(text ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`),
     markdown: (text) => `<p>${context.esc(text)}</p>`,
@@ -80,7 +101,8 @@ function rig() {
   };
   vm.createContext(context);
   vm.runInContext(
-    `${between(gui, "const drawnOf", "/** Threads that keep their whole transcript")}
+    `${between(composerSrc, "function showComposerNote", "/** What claude's menu asks")}
+${between(gui, "const drawnOf", "/** Threads that keep their whole transcript")}
 ${between(composerSrc, "async function send()", "/** T3 Code's ⌘⌥Enter")}
 ${between(timeline, "const QUEUED_HINT", "/** The prompt bubble as every")}`,
     context,
@@ -108,6 +130,9 @@ async function typeAndSend(r, text) {
 const transcript = (...items) => ({ session: "s", items, next: 1, reset: false, agents: [] });
 const rows = (r, tab) => [...r.pendingState(tab, tab.thread).rows];
 const html = (r, tab) => r.pendingHtml(r.pendingState(tab, tab.thread));
+const later = (r, ms) => {
+  r.clock.now += ms;
+};
 const promptCalls = (r) => r.calls.filter((c) => c.cmd === "prompt");
 
 test("a sent message is a pending row at once, whatever the thread is doing", async () => {
@@ -166,9 +191,45 @@ test("two identical sends make one prompt call and say it is already queued", as
   await typeAndSend(r, "run the tests");
   await typeAndSend(r, "run   the tests ");
   assert.equal(promptCalls(r).length, 1);
-  assert.deepEqual(r.notes.at(-1), { text: "Already queued.", error: true });
+  assert.equal(r.notes.at(-1).text, "Already queued.");
+  assert.notEqual(r.notes.at(-1).error, true, "not an error: it is drawn in the muted colour");
   assert.equal(r.prompt.value, "", "the retyped draft is cleared");
   assert.equal(rows(r, tab).length, 1);
+});
+
+test("the Already queued note goes when its row settles, and when the draft changes", async () => {
+  const r = rig();
+  const tab = open(r, tabOf("t1", { status: "working" }));
+  await typeAndSend(r, "run the tests");
+  await typeAndSend(r, "run the tests");
+  assert.equal(r.notes.at(-1).text, "Already queued.");
+  r.script.pages.push(transcript({ kind: "user", id: "u1", at: "t1", text: "run the tests" }));
+  await r.fetchThread(tab);
+  assert.equal(r.notes.at(-1).text, "", "the row settled, so its note goes");
+
+  await typeAndSend(r, "lint it");
+  await typeAndSend(r, "lint it");
+  assert.equal(r.notes.at(-1).text, "Already queued.");
+  r.clearQueuedNote();
+  assert.equal(r.notes.at(-1).text, "", "typing in the composer clears it");
+
+  const before = r.notes.length;
+  r.clearQueuedNote();
+  assert.equal(r.notes.length, before, "nothing to clear once it is gone");
+});
+
+test("settling another row leaves the Already queued note of a row still waiting", async () => {
+  const r = rig();
+  const tab = open(r, tabOf("t1", { status: "working" }));
+  await typeAndSend(r, "first");
+  await typeAndSend(r, "second");
+  await typeAndSend(r, "second");
+  assert.equal(r.notes.at(-1).text, "Already queued.");
+  const before = r.notes.length;
+  r.script.pages.push(transcript({ kind: "user", id: "u1", at: "t1", text: "first" }));
+  await r.fetchThread(tab);
+  assert.equal(rows(r, tab).length, 1);
+  assert.equal(r.notes.length, before, "its own row still waits");
 });
 
 test("once the row settles the same words go out again", async () => {
@@ -284,14 +345,107 @@ test("Send again that fails again goes back to unconfirmed", async () => {
   assert.equal(rows(r, tab)[0].state, "unconfirmed");
 });
 
-test("a queued row offers Send again once its call went through", async () => {
+test("Send again is only on an unconfirmed or a stale row, never on a queued or sending one", async () => {
+  const r = rig();
+  const busy = open(r, tabOf("t1", { status: "working" }));
+  await typeAndSend(r, "later");
+  assert.match(html(r, busy), /data-state="queued"/);
+  assert.doesNotMatch(html(r, busy), /data-send-again/, "queued: delivered and claude is busy");
+  const idle = open(r, tabOf("t2"));
+  r.script.prompt = () => new Promise(() => {});
+  r.prompt.value = "now";
+  r.send();
+  await new Promise((done) => setImmediate(done));
+  assert.match(html(r, idle), /data-state="sending"/);
+  assert.doesNotMatch(html(r, idle), /data-send-again/, "sending: the call is still out");
+  delete r.composer.dataset.sending;
+  const lost = open(r, tabOf("t3"));
+  r.script.prompt = () => Promise.reject("lost the connection to the hub");
+  await typeAndSend(r, "dropped");
+  assert.match(html(r, lost), /data-state="unconfirmed"[\s\S]*data-send-again/);
+  const slow = open(r, tabOf("t4"));
+  r.script.prompt = () => Promise.resolve(null);
+  await typeAndSend(r, "delivered");
+  later(r, 31_000);
+  assert.match(html(r, slow), /data-state="stale"[\s\S]*data-send-again/);
+});
+
+test("a delivered row on an idle tab turns stale after 30 s and redraws on its own", async () => {
+  const r = rig();
+  const tab = open(r);
+  await typeAndSend(r, "rename the helper");
+  assert.match(html(r, tab), /data-state="sending"[\s\S]*Sending…/);
+  later(r, 29_000);
+  assert.doesNotMatch(html(r, tab), /not in the session yet/);
+  const timer = r.timers.find((t) => t.ms > 30_000);
+  assert.ok(timer, "a timer is set for the 30 s mark");
+  const painted = r.paints.length;
+  later(r, 2_000);
+  timer.run();
+  assert.equal(r.paints.length, painted + 1, "the thread redraws when the 30 s pass");
+  const drawn = html(r, tab);
+  assert.match(drawn, /data-state="stale"[\s\S]*Sent · not in the session yet[\s\S]*data-send-again="pending:\d+">Send again<\/button>/);
+  assert.doesNotMatch(drawn, /Sending…|Queued/);
+});
+
+test("the stale state is part of the thread's render key, so the change is drawn", async () => {
+  const r = rig();
+  const tab = open(r);
+  await typeAndSend(r, "rename the helper");
+  const key = () => JSON.stringify(r.pendingState(tab, tab.thread).stale);
+  const before = key();
+  later(r, 31_000);
+  assert.notEqual(key(), before);
+  assert.match(timeline, /waiting\.busy, waiting\.stale\]/);
+});
+
+test("a delivered row on a busy tab stays queued, with no button, however long it waits", async () => {
   const r = rig();
   const tab = open(r, tabOf("t1", { status: "working" }));
   await typeAndSend(r, "later");
-  assert.match(html(r, tab), /data-send-again/);
-  const idle = open(r, tabOf("t2"));
-  await typeAndSend(r, "now");
-  assert.doesNotMatch(html(r, idle), /data-send-again/, "an idle thread writes it at once, so no button");
+  later(r, 10 * 60_000);
+  const drawn = html(r, tab);
+  assert.match(drawn, /data-state="queued"[\s\S]*Queued · claude is busy/);
+  assert.doesNotMatch(drawn, /data-send-again|not in the session yet/);
+});
+
+test("a stale row goes back to queued when claude turns busy, and settles when the transcript has it", async () => {
+  const r = rig();
+  const tab = open(r);
+  await typeAndSend(r, "rename the helper");
+  later(r, 31_000);
+  assert.match(html(r, tab), /data-state="stale"/);
+  tab.view.status = "working";
+  assert.match(html(r, tab), /data-state="queued"/);
+  tab.view.status = "idle";
+  r.script.pages.push(transcript({ kind: "user", id: "u1", at: "t1", text: "rename the helper" }));
+  await r.fetchThread(tab);
+  assert.equal(html(r, tab), "");
+});
+
+test("a row the transcript brings in before the 30 s never turns stale", async () => {
+  const r = rig();
+  const tab = open(r);
+  await typeAndSend(r, "rename the helper");
+  r.script.pages.push(transcript({ kind: "user", id: "u1", at: "t1", text: "rename the helper" }));
+  await r.fetchThread(tab);
+  later(r, 31_000);
+  const painted = r.paints.length;
+  r.timers.filter((t) => t.ms > 30_000).forEach((t) => t.run());
+  assert.equal(r.paints.length, painted, "nothing to redraw for a settled row");
+  assert.equal(html(r, tab), "");
+});
+
+test("Send again on a stale row types it once more and the 30 s start over", async () => {
+  const r = rig();
+  const tab = open(r);
+  await typeAndSend(r, "rename the helper");
+  later(r, 31_000);
+  await r.sendAgain(tab, rows(r, tab)[0].id);
+  assert.deepEqual(promptCalls(r).map((c) => c.text), ["rename the helper", "rename the helper"]);
+  assert.match(html(r, tab), /data-state="sending"/);
+  later(r, 31_000);
+  assert.match(html(r, tab), /data-state="stale"/);
 });
 
 test("a slash command is not a prompt to wait for", async () => {

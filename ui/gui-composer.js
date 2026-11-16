@@ -144,6 +144,7 @@ const composerNote = document.getElementById("composer-note");
 let composerNoteTimer;
 function showComposerNote(text, error = false) {
   clearTimeout(composerNoteTimer);
+  queuedNoteFor = null;
   composerNote.textContent = text;
   composerNote.toggleAttribute("data-error", error);
   composerNote.hidden = !text;
@@ -902,6 +903,7 @@ prompt.addEventListener("input", () => {
     if (t.recall !== null && prompt.value !== recallable(active)[t.recall]) t.recall = null;
   }
   autosize();
+  clearQueuedNote();
   showTrigger();
   tagDismissed = false;
   showTagPopover();
@@ -987,9 +989,12 @@ async function send() {
   if (!text || sendBlocked(tab)) return;
   // The words as typed, before attachment paths; a slash command writes no prompt to wait for.
   const typed = expandChips(tab, prompt.value).trim();
-  if (typed && !files.length && pendingHas(t, typed)) {
+  const waiting = typed && !files.length ? pendingMatch(t, typed) : null;
+  if (waiting) {
     clearComposer(tab);
-    return showComposerNote("Already queued.", true);
+    showComposerNote("Already queued.");
+    queuedNoteFor = waiting.id;
+    return;
   }
   tab.prompts = (tab.prompts ?? 0) + 1;
   const draft = prompt.value;
@@ -1006,7 +1011,7 @@ async function send() {
     // claude takes the message typed while it compacts as the next prompt.
     if (compactFirst) await callOn(tab.machine, { cmd: "prompt", tab: tab.view.id, text: "/compact" });
     await callOn(tab.machine, { cmd: "prompt", tab: tab.view.id, text });
-    if (row) row.sent = true;
+    if (row) markSent(tab, row);
     for (const f of files) if (f.url) URL.revokeObjectURL(f.url);
   } catch (e) {
     // The socket dropped after the machine may have typed it: the draft stays gone, and the row asks.
@@ -1035,8 +1040,26 @@ const LOST = /lost the connection to the hub/;
 const PENDING_GUARD_MS = 120_000;
 let pendingSeq = 0;
 
-/** Whether `text` is still waiting to reach the transcript, so a second send would type it twice. */
-const pendingHas = (t, text) => !!t.pending?.some((p) => squashed(p.text) === squashed(text) && Date.now() - p.at < PENDING_GUARD_MS);
+/** The pending row still waiting for `text`, so a second send would type it twice. */
+const pendingMatch = (t, text) => t.pending?.find((p) => squashed(p.text) === squashed(text) && Date.now() - p.at < PENDING_GUARD_MS);
+
+/** The row whose "Already queued." the composer shows, if it still does. */
+let queuedNoteFor = null;
+
+/** Takes the "Already queued." note down: the row it names settled or was dropped (`ids`), or the
+ * draft changed (no `ids`). Any other note stays. */
+function clearQueuedNote(ids) {
+  if (queuedNoteFor === null || (ids && !ids.includes(queuedNoteFor))) return;
+  showComposerNote("");
+}
+
+/** The prompt call went through: the row is a message in claude's hands, and drawn again as stale
+ * if the transcript still lacks it after PENDING_STALE_MS on an idle tab. */
+function markSent(tab, row) {
+  row.sent = true;
+  row.sentAt = Date.now();
+  setTimeout(() => active === tab && threadOf(tab).pending?.includes(row) && renderThread(), PENDING_STALE_MS + 50);
+}
 
 /** Shows `text` as sent at once, in the thread, until the transcript has it. */
 function raisePending(tab, t, text) {
@@ -1049,6 +1072,7 @@ function raisePending(tab, t, text) {
 function dropPending(tab, t, row) {
   if (!row) return;
   t.pending = (t.pending ?? []).filter((p) => p !== row);
+  clearQueuedNote([row.id]);
   if (active === tab) renderThread();
 }
 
@@ -1063,7 +1087,7 @@ async function sendAgain(tab, id) {
   if (active === tab) renderThread();
   try {
     await callOn(tab.machine, { cmd: "prompt", tab: tab.view.id, text: row.text });
-    row.sent = true;
+    markSent(tab, row);
   } catch (e) {
     row.state = "unconfirmed";
     row.sent = false;

@@ -1084,3 +1084,16 @@ test("a Captain thread draws the pending row as a plain thread does", async () =
   sandbox.renderThread();
   assert.match(textOf(blocks(threadView.innerHTML, '<section class="pending-turn"')[0]), /check the board\s*Sending…/);
 });
+
+test("a delivered message an idle thread still lacks after 30 s is drawn as stale, with Send again", async () => {
+  clearScreen();
+  const idle = tabFor("tab-8", "idle");
+  idle.thread = { ...idle.thread, loaded: true, session: "s", pending: [{ id: "pending:4", text: "bump the version", at: Date.now() - 40_000, state: "sending", sent: true, sentAt: Date.now() - 40_000 }] };
+  sandbox.tabs = [idle];
+  sandbox.active = idle;
+  sandbox.renderThread();
+  assert.match(textOf(blocks(threadView.innerHTML, '<section class="pending-turn"')[0]), /bump the version\s*Sent · not in the session yet\s*Send again/);
+  idle.thread.pending[0].sentAt = Date.now();
+  sandbox.renderThread();
+  assert.match(textOf(blocks(threadView.innerHTML, '<section class="pending-turn"')[0]), /bump the version\s*Sending…/, "the render key carries the stale state both ways");
+});

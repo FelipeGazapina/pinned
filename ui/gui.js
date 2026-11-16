@@ -140,7 +140,11 @@ const squashed = (text) => String(text ?? "").replace(/\s+/g, " ").trim();
 function settlePending(t, items) {
   if (!t.pending?.length) return;
   const said = items.filter((i) => i.kind === "user" || i.kind === "steer").map((i) => squashed(i.text));
-  if (said.length) t.pending = t.pending.filter((p) => !said.some((text) => text.includes(squashed(p.text))));
+  if (!said.length) return;
+  const gone = t.pending.filter((p) => said.some((text) => text.includes(squashed(p.text))));
+  if (!gone.length) return;
+  t.pending = t.pending.filter((p) => !gone.includes(p));
+  clearQueuedNote(gone.map((p) => p.id));
 }
 
 async function fetchThread(tab) {

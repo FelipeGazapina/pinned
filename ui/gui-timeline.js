@@ -1030,27 +1030,35 @@ const isLongText = (text) => text.length > 600 || text.split("\n").length > 8;
 /** claude's hint on its screen while it holds prompts typed during a turn or a compaction. */
 const QUEUED_HINT = /edit queued messages/i;
 
+/** How long a delivered prompt may stay out of the transcript on an idle tab before the row says so. */
+const PENDING_STALE_MS = 30_000;
+
 /** Prompts sent but not yet in the transcript, as `renderThread` draws them: dimmed, after the turns.
- * claude is busy when the thread is mid-turn or its screen shows the queued-messages hint. */
+ * claude is busy when the thread is mid-turn or its screen shows the queued-messages hint. `stale`
+ * names the delivered rows an idle tab still has not written. */
 function pendingState(tab, t) {
   const rows = t.pending ?? [];
-  if (!rows.length) return { rows, busy: false };
+  if (!rows.length) return { rows, busy: false, stale: [] };
   let hint = false;
   try {
     hint = !!tab.term && screenLines(tab).some((l) => QUEUED_HINT.test(l));
   } catch {}
-  return { rows, busy: turnLive(tab) || hint };
+  const busy = turnLive(tab) || hint;
+  const stale = busy ? [] : rows.filter((p) => p.sent && p.state !== "unconfirmed" && Date.now() - p.sentAt >= PENDING_STALE_MS).map((p) => p.id);
+  return { rows, busy, stale };
 }
 
 const PENDING_UNCONFIRMED = "Could not confirm it was delivered. Check the session before sending again.";
 
-function pendingHtml({ rows, busy }) {
+function pendingHtml({ rows, busy, stale }) {
   return rows
     .map((p) => {
       const lost = p.state === "unconfirmed";
-      const label = lost ? PENDING_UNCONFIRMED : busy ? "Queued · claude is busy; it goes in when it's free" : "Sending…";
-      const again = lost || (busy && p.sent);
-      return `<section class="pending-turn" data-pending="${esc(p.id)}" data-state="${lost ? "unconfirmed" : busy ? "queued" : "sending"}"><div class="user"><div class="bubble"><div class="body md">${markdown(p.text, promptMarked)}</div></div>
+      const late = stale.includes(p.id);
+      const state = lost ? "unconfirmed" : late ? "stale" : busy ? "queued" : "sending";
+      const label = lost ? PENDING_UNCONFIRMED : late ? "Sent · not in the session yet" : busy ? "Queued · claude is busy; it goes in when it's free" : "Sending…";
+      const again = lost || late;
+      return `<section class="pending-turn" data-pending="${esc(p.id)}" data-state="${state}"><div class="user"><div class="bubble"><div class="body md">${markdown(p.text, promptMarked)}</div></div>
         <div class="pending-note" role="status"><span>${esc(label)}</span>${again ? `<button type="button" class="pending-again" data-send-again="${esc(p.id)}">Send again</button>` : ""}</div></div></section>`;
     })
     .join("");
@@ -1241,14 +1249,14 @@ function renderThread() {
   const resume = !sub && resumeOffered(tab);
   const box = !sub && boxSoon(tab);
   const convex = !sub && convexBannerFor(tab);
-  const waiting = sub ? { rows: [], busy: false } : pendingState(tab, t);
+  const waiting = sub ? { rows: [], busy: false, stale: [] } : pendingState(tab, t);
   const limit = finder.open ? Infinity : t.limit ?? TURNS_SHOWN;
   const turns = turnsFor(t);
   if (globalLane(tab) && !sub) speakGlobalTexts(tab, turns);
   const first = Math.max(0, turns.length - limit);
   const shown = turns.slice(first);
   const place = sub ? `${tab.key}:${sub.tool}` : tab.key;
-  const content = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, t.start, !!t.fetchingOlder, t.olderError, t.resets, !!t.history, [...t.open], limit, t.agentsKey, t.sendErrors ?? null, phaseOf(tab), resume, boxKey(box), convex && [convex.repo, convex.deployment], globalLane(tab) ? globalLaneKey() : null, workersKey(tab), workerViewKey(tab), panelTurn(tab), waiting.rows.map((p) => [p.id, p.state, p.sent, p.text]), waiting.busy]);
+  const content = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, t.start, !!t.fetchingOlder, t.olderError, t.resets, !!t.history, [...t.open], limit, t.agentsKey, t.sendErrors ?? null, phaseOf(tab), resume, boxKey(box), convex && [convex.repo, convex.deployment], globalLane(tab) ? globalLaneKey() : null, workersKey(tab), workerViewKey(tab), panelTurn(tab), waiting.rows.map((p) => [p.id, p.state, p.sent, p.text]), waiting.busy, waiting.stale]);
   // A render that brings nothing new keeps the drawn turns while they cover the screen, so a menu
   // open in them survives; heights measured since the last draw would otherwise shift the window.
   if (threadView.dataset.key && threadView.dataset.content === content && !windowStale()) return renderComposer(tab);
