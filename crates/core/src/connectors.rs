@@ -2110,9 +2110,10 @@ impl Connectors {
     {
         match work {
             Work::Run(run) => self.hand_over_run(run, open, false).await,
-            Work::Delivery(d) => {
+            Work::Delivery(mut d) => {
                 // A hub's team keeps the replies of a thread whose event waits, before any
-                // session or Slack hears of them.
+                // session or Slack hears of them. It keeps them raw: they are framed where they
+                // reach the run that waited (`with_replies` in the hub's team queue).
                 if let Some(admission) = self.admission.get().cloned() {
                     match admission.replies(d.clone()).await? {
                         Replies::Pass => {}
@@ -2120,6 +2121,7 @@ impl Connectors {
                         Replies::Dropped => return self.keep_stopped(&d.connector, &Subject::SlackThread { channel: d.channel.clone(), thread: d.thread.clone() }),
                     }
                 }
+                d.messages = self.shown_replies(d.messages);
                 let cursor = if open(Work::Delivery(d.clone())).await.taken().is_ok() {
                     d.cursor.clone()
                 } else {
@@ -3921,12 +3923,24 @@ impl Connectors {
         }
     }
 
-    fn enqueue(&self, item: GraphInbox) {
+    /// Every reply enters the graph inbox here, once, so it is framed once on a hub's team.
+    fn enqueue(&self, mut item: GraphInbox) {
         let mut inbox = self.inbox.lock().unwrap();
         if inbox.iter().any(|have| have.channel == item.channel && have.thread == item.thread && have.cursor == item.cursor) {
             return;
         }
+        item.messages = self.shown_replies(item.messages);
         inbox.push(item);
+    }
+
+    /// The thread's new replies (`reply_block`s) as its live run's session gets them: on a hub's
+    /// team each framed as data from outside pinned, the author's name in its header included. A
+    /// person's connectors hand them as they are.
+    fn shown_replies(&self, messages: Vec<String>) -> Vec<String> {
+        match self.admission.get().is_some() {
+            true => messages.iter().map(|message| crate::untrusted::frame(crate::untrusted::SLACK_REPLY, message)).collect(),
+            false => messages,
+        }
     }
 
     fn library(&self) -> runner::Library {

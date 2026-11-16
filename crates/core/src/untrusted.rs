@@ -4,6 +4,9 @@
 /// The line that opens and closes the framed text.
 pub const FENCE: &str = "=====pinned-untrusted-text=====";
 
+/// The source of a Slack thread's later reply, which reaches the thread's run.
+pub const SLACK_REPLY: &str = "a Slack reply in this thread";
+
 /// `text` from `source`, under a header line and inside a fence. A line of `text` that equals or
 /// starts with the fence (leading spaces included) gets a `\` in front, so it never closes it.
 pub fn frame(source: &str, text: &str) -> String {
