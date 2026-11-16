@@ -4,6 +4,9 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 
 const API: &str = "https://slack.com/api/";
+/// Overrides `API` (a root ending in `/api/`), so a hub test points Slack at a stand-in. Honoured
+/// only in a debug build and only for an http(s) loopback host, since every call carries a bot token.
+pub const API_ROOT_ENV: &str = "PINNED_SLACK_API_ROOT";
 /// How far back a channel's history is read to find threads that got a new reply. A thread
 /// older than this, or past the newest `HISTORY_PAGES` pages, that gets a new mention or reply
 /// is missed. Slack's history lists only top-level messages, each with its thread's latest reply,
@@ -115,7 +118,42 @@ fn api_root() -> String {
     if let Some(root) = API_ROOT.lock().unwrap().clone() {
         return root;
     }
-    API.to_owned()
+    let set = std::env::var(API_ROOT_ENV).ok();
+    let (root, ignored) = resolve_root(set.as_deref(), cfg!(debug_assertions));
+    if ignored {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| eprintln!("pinned: {API_ROOT_ENV} is set but ignored, Slack calls go to {API}"));
+    }
+    root
+}
+
+/// The root Slack calls go to, and whether `set` was ignored. A release build, or a root that is
+/// not http(s) on a loopback host, keeps the real API so a token never goes to a stranger.
+fn resolve_root(set: Option<&str>, debug: bool) -> (String, bool) {
+    let Some(set) = set.map(|r| r.trim().trim_end_matches('/')).filter(|r| !r.is_empty()) else {
+        return (API.to_owned(), false);
+    };
+    match debug.then(|| loopback_http(set)).flatten() {
+        Some(()) => (format!("{set}/"), false),
+        None => (API.to_owned(), true),
+    }
+}
+
+/// Where calls go instead of `api` when a debug build's `env` names an http(s) root on a
+/// loopback host, as the hub tests' stand-ins; otherwise `api`, so a key never goes to a stranger.
+pub(crate) fn loopback_root(env: &str, api: &str) -> String {
+    let set = std::env::var(env).ok();
+    match set.as_deref().map(|r| r.trim().trim_end_matches('/')).filter(|r| !r.is_empty()) {
+        Some(set) if cfg!(debug_assertions) && loopback_http(set).is_some() => set.to_owned(),
+        _ => api.to_owned(),
+    }
+}
+
+fn loopback_http(root: &str) -> Option<()> {
+    let url = reqwest::Url::parse(root).ok()?;
+    let host = url.host_str()?.trim_start_matches('[').trim_end_matches(']');
+    let loopback = host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    (matches!(url.scheme(), "http" | "https") && loopback).then_some(())
 }
 
 /// Points Slack calls at `root` for a test. `None` restores the real API.
@@ -513,6 +551,16 @@ pub async fn post(token: &str, channel: &str, thread: &str, text: &str) -> Resul
     write(token, "chat.postMessage", json!({ "channel": channel, "thread_ts": thread, "text": text })).await.map(drop)
 }
 
+/// A new message in `channel`, not in a thread.
+pub async fn announce(token: &str, channel: &str, text: &str) -> Result<(), String> {
+    write(token, "chat.postMessage", json!({ "channel": channel, "text": text })).await.map(drop)
+}
+
+/// Whether `handle` is a Slack user-group handle: 1 to 80 of `a-z`, `0-9`, `.`, `_` and `-`.
+pub fn is_group_handle(handle: &str) -> bool {
+    (1..=80).contains(&handle.len()) && handle.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
+}
+
 /// Reacts to the message `ts` with the emoji `name`. A reaction the bot already left counts as
 /// done, so a retry after a crash converges.
 pub async fn react(token: &str, channel: &str, ts: &str, name: &str) -> Result<(), String> {
@@ -549,6 +597,44 @@ mod tests {
             { "ts": "1792400090.000000", "user": "U3", "text": "<@UBOT> why did the deploy fail?", "thread_ts": "1792390000.000100" },
         ]);
         (history, replies)
+    }
+
+    #[test]
+    fn the_api_root_override_only_reaches_a_loopback_host_in_a_debug_build() {
+        assert_eq!(resolve_root(None, true), (API.to_owned(), false));
+        assert_eq!(resolve_root(Some("  "), true), (API.to_owned(), false));
+        for root in ["http://127.0.0.1:5000/api/", "http://localhost:5000/api", "https://[::1]:5000/api/", "http://127.0.0.2/api/"] {
+            let (used, ignored) = resolve_root(Some(root), true);
+            assert_eq!((used, ignored), (format!("{}/", root.trim_end_matches('/')), false), "{root}");
+            assert_eq!(resolve_root(Some(root), false), (API.to_owned(), true), "{root} in a release build");
+        }
+        for root in [
+            "https://evil.example.test/api/",
+            "http://127.0.0.1.example.test/api/",
+            "http://169.254.169.254/api/",
+            "http://localhost@evil.example.test/api/",
+            "ftp://127.0.0.1/api/",
+            "not a url",
+        ] {
+            assert_eq!(resolve_root(Some(root), true), (API.to_owned(), true), "{root}");
+        }
+    }
+
+    #[test]
+    fn the_api_root_comes_from_the_environment_only_for_loopback() {
+        let _api = lock_api();
+        set_api_root(None);
+        let was = std::env::var(API_ROOT_ENV).ok();
+        std::env::remove_var(API_ROOT_ENV);
+        assert_eq!(api_root(), API);
+        std::env::set_var(API_ROOT_ENV, "http://127.0.0.1:9/api/");
+        assert_eq!(api_root(), "http://127.0.0.1:9/api/");
+        std::env::set_var(API_ROOT_ENV, "https://evil.example.test/api/");
+        assert_eq!(api_root(), API);
+        match was {
+            Some(value) => std::env::set_var(API_ROOT_ENV, value),
+            None => std::env::remove_var(API_ROOT_ENV),
+        }
     }
 
     #[test]

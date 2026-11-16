@@ -12,7 +12,7 @@ use pinned_core::sync;
 use pinned_core::taste::{TastePatch, TasteScope, Tastes};
 use pinned_core::upstash::{BoxId, Exec, Listed, NewBox};
 use pinned_core::sessions::Saved;
-use pinned_core::wire::{Call, HubCall, MachineView, NEVER_EXPIRES};
+use pinned_core::wire::{Call, HubCall, MachineEvent, MachineView, NEVER_EXPIRES};
 use pinned_server::boxes::{BoxApi, Policy};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
@@ -48,6 +48,8 @@ struct TestHub {
     learning: Option<String>,
     signup: Signup,
     access: pinned_server::http::Access,
+    /// The teams' call timings: the hub's default unless `start_with_team_policy` names others.
+    team_policy: pinned_core::teams::TeamPolicy,
 }
 
 impl TestHub {
@@ -80,7 +82,16 @@ impl TestHub {
         hub
     }
 
+    /// A hub whose boxes follow `policy` and whose teams' calls escalate and give up as `teams` says.
+    fn start_with_team_policy(name: &str, policy: Policy, teams: pinned_core::teams::TeamPolicy) -> TestHub {
+        TestHub::start_every(name, Signup::Open, policy, false, Default::default(), "127.0.0.1:0", teams)
+    }
+
     fn start_all(name: &str, signup: Signup, policy: Policy, with_learning: bool, access: pinned_server::http::Access, listen: &str) -> TestHub {
+        TestHub::start_every(name, signup, policy, with_learning, access, listen, Default::default())
+    }
+
+    fn start_every(name: &str, signup: Signup, policy: Policy, with_learning: bool, access: pinned_server::http::Access, listen: &str, team_policy: pinned_core::teams::TeamPolicy) -> TestHub {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let database = format!("pinned_test_{name}_{}", std::process::id());
         admin(&format!("drop database if exists {database} with (force)"));
@@ -96,30 +107,16 @@ impl TestHub {
         std::fs::create_dir_all(dir.join("downloads")).unwrap();
         std::fs::write(dir.join("downloads/pinned-server-x86_64-unknown-linux-musl"), "ELF").unwrap();
         let boxes = FakeBoxes::new(dir.join("boxes"));
-        let mut hub = TestHub { runtime: tokio::runtime::Runtime::new().unwrap(), running: None, url: String::new(), database, dir, boxes, policy, learning, signup, access };
+        let mut hub = TestHub { runtime: tokio::runtime::Runtime::new().unwrap(), running: None, url: String::new(), database, dir, boxes, policy, learning, signup, access, team_policy };
         hub.serve(listen);
         hub
     }
 
     fn serve(&mut self, listen: &str) {
-        let config = || pinned_server::Config {
-            db: format!("{}/{}", postgres(), self.database),
-            listen: listen.into(),
-            ui: self.dir.join("ui"),
-            downloads: self.dir.join("downloads"),
-            public_url: None,
-            key_file: self.dir.join("hub.key"),
-            signup: self.signup,
-            box_api: self.boxes.clone(),
-            box_policy: self.policy.clone(),
-            convex_http: Arc::new(Replay::new(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../core/tests/fixtures/convex"), CONVEX_KEY).unwrap()),
-            learning_db: self.learning.as_ref().map(|learning| format!("{}/{learning}", postgres())),
-            access: self.access.clone(),
-        };
         let start = Instant::now();
         // A restarted hub takes its old address, which the dying runtime may not have let go of yet.
         let running = loop {
-            match self.runtime.block_on(pinned_server::start(config())) {
+            match self.runtime.block_on(pinned_server::start(self.config(listen))) {
                 Ok(running) => break running,
                 Err(e) if e.contains("could not listen") && start.elapsed() < WAIT => std::thread::sleep(Duration::from_millis(50)),
                 Err(e) => panic!("{e}"),
@@ -129,12 +126,44 @@ impl TestHub {
         self.running = Some(running);
     }
 
+    /// A second hub on this hub's database, key and boxes, as another replica: its runtime and
+    /// what it runs. Dropping the runtime stops it.
+    fn twin(&self) -> (tokio::runtime::Runtime, pinned_server::Running) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let running = runtime.block_on(pinned_server::start(self.config("127.0.0.1:0"))).unwrap();
+        (runtime, running)
+    }
+
+    fn config(&self, listen: &str) -> pinned_server::Config {
+        pinned_server::Config {
+            db: format!("{}/{}", postgres(), self.database),
+            listen: listen.into(),
+            ui: self.dir.join("ui"),
+            downloads: self.dir.join("downloads"),
+            public_url: None,
+            key_file: self.dir.join("hub.key"),
+            signup: self.signup,
+            box_api: self.boxes.clone(),
+            box_policy: self.policy.clone(),
+            team_policy: self.team_policy.clone(),
+            convex_http: Arc::new(Replay::new(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../core/tests/fixtures/convex"), CONVEX_KEY).unwrap()),
+            learning_db: self.learning.as_ref().map(|learning| format!("{}/{learning}", postgres())),
+            access: self.access.clone(),
+        }
+    }
+
     /// Kills the hub mid-whatever, as a deploy does, and starts another on its database and address.
     fn restart(&mut self) {
+        let addr = self.stop();
+        self.serve(&addr);
+    }
+
+    /// Kills the hub mid-whatever, as a deploy does; answers its address for the next (`serve`).
+    fn stop(&mut self) -> String {
         let addr = self.running.take().unwrap().addr;
         let old = std::mem::replace(&mut self.runtime, tokio::runtime::Runtime::new().unwrap());
         old.shutdown_background();
-        self.serve(&addr.to_string());
+        addr.to_string()
     }
 
     fn hub(&self) -> &Arc<pinned_server::hub::Hub> {
@@ -166,6 +195,43 @@ fn admin_on(database: &str, sql: &str) {
         tokio::spawn(connection);
         client.batch_execute(sql).await.unwrap();
     });
+}
+
+/// The team's workflows as its own account stores them: a read for tests, as no member reads a
+/// team's settings.
+fn team_workflows(hub: &TestHub, team: uuid::Uuid) -> Vec<Value> {
+    team_settings(hub, team)["connectors"].as_array().unwrap().clone()
+}
+
+/// The team's settings as its own account reads them, for tests only.
+fn team_settings(hub: &TestHub, team: uuid::Uuid) -> Value {
+    let account = hub.runtime.block_on(hub.hub().account(team)).unwrap();
+    hub.runtime.block_on(hub.hub().hub_call(&account, HubCall::GetSettings)).unwrap()
+}
+
+/// Stores `connector` on the team's account directly, past every check of a member's save, as a
+/// workflow an older hub let a member save. Answers its id.
+fn store_on_team(hub: &TestHub, team: uuid::Uuid, connector: Value) -> String {
+    let account = hub.runtime.block_on(hub.hub().account(team)).unwrap();
+    let connector = serde_json::from_value(connector).unwrap();
+    let saved = hub.runtime.block_on(hub.hub().hub_call(&account, HubCall::SaveConnector { connector })).unwrap();
+    saved["id"].as_str().unwrap().to_owned()
+}
+
+/// `who` saves the workflow `connector` (the JSON `save_connector` takes) on `team` with its bot,
+/// by `TeamOp::SaveBot`, the one way a member saves a team's workflow. Answers its id.
+fn save_team_workflow(hub: &TestHub, who: &Arc<pinned_server::hub::Account>, team: uuid::Uuid, connector: Value) -> Result<String, String> {
+    let ids = |hub: &TestHub| team_workflows(hub, team).iter().map(|c| c["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    let before = ids(hub);
+    let given = connector["id"].as_str().unwrap_or_default().to_owned();
+    let bot = pinned_core::teams::Bot { workflow: given.clone(), name: String::new(), owner: None, calls: Default::default(), limits: pinned_core::teams::BotLimits { usd: 5.0, minutes: 30 }, on: false, on_by: None, once: false, off_note: None, skipped: vec![] };
+    let connector = Some(serde_json::from_value(connector).map_err(|e| e.to_string())?);
+    let op = pinned_server::teams::Op::read(pinned_core::teams::TeamOp::SaveBot { bot, connector })?;
+    hub.runtime.block_on(pinned_server::teams::call(hub.hub(), who, Some(team), op))?;
+    if !given.is_empty() {
+        return Ok(given);
+    }
+    Ok(ids(hub).into_iter().find(|id| !before.contains(id)).expect("a new workflow"))
 }
 
 /// A fresh folder for one node of one test. Parallel tests reuse machine names, so a counter
@@ -332,12 +398,24 @@ struct Node {
 }
 
 fn launched(dir: &Path) -> Arc<Machine> {
+    launched_with(dir, |_| {})
+}
+
+/// A machine that tells `events` what it reports.
+fn launched_with(dir: &Path, events: impl Fn(MachineEvent) + Send + Sync + 'static) -> Arc<Machine> {
     let claude = dir.join("claude");
     std::fs::write(&claude, "#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && { echo '{\"loggedIn\":true}'; exit 0; }\nexec cat\n").unwrap();
     std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    // The other providers' CLIs are signed out stand-ins, so a node never runs one found on the PATH, which keeps its login and scratch files in the process's HOME.
+    let signed_out = |name: &str| {
+        let bin = dir.join(name);
+        std::fs::write(&bin, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        bin
+    };
     let launch = Launch {
         exe: "/opt/pinned/bin/pinned-server".into(),
-        bins: BTreeMap::from([(Provider::Claude, claude)]),
+        bins: BTreeMap::from([(Provider::Claude, claude), (Provider::Codex, signed_out("codex")), (Provider::Cursor, signed_out("cursor-agent"))]),
         path_env: None,
         settings: dir.join("settings.json"),
         mcp_config: None,
@@ -348,13 +426,19 @@ fn launched(dir: &Path) -> Arc<Machine> {
         vector_search: false,
         first_run_wait: std::time::Duration::from_secs(60),
         starting_limit: std::time::Duration::from_secs(600),
+        // Each node reads and writes its transcripts under its own folder, never the process's HOME.
+        claude_home: Some(dir.join(".claude")),
     };
-    Machine::new(launch, Some(dir.to_owned()), Some(dir.to_owned()), |_| {})
+    Machine::new(launch, Some(dir.to_owned()), Some(dir.to_owned()), events)
 }
 
 impl Node {
     fn start(dir: &Path, creds: Credentials) -> Node {
-        let machine = launched(dir);
+        Node::start_with(dir, creds, |_| {})
+    }
+
+    fn start_with(dir: &Path, creds: Credentials, events: impl Fn(MachineEvent) + Send + Sync + 'static) -> Node {
+        let machine = launched_with(dir, events);
         let link = link::spawn(creds, machine.clone(), "0.0.0-test");
         Node { machine, link: Some(link) }
     }
@@ -783,7 +867,7 @@ fn a_connector_run_goes_to_its_machine_else_another_online_one() {
     client.wait("the saved connector", |f| f["type"] == "settings" && f["settings"]["connectors"][0]["id"] == id);
     let account_id = uuid::Uuid::parse_str(&account.id).unwrap();
     let run = |subject: Subject| {
-        Work::Run(Run { cwd: repo.clone(), repo: None, args: vec![], connector: id.clone(), subject, mentioned: vec![], account: None, runs_on: RunsOn::Machine(mac_mini.clone()), input: String::new() })
+        Work::Run(Run { cwd: repo.clone(), repo: None, args: vec![], connector: id.clone(), subject, mentioned: vec![], account: None, runs_on: RunsOn::Machine(mac_mini.clone()), input: String::new(), reservation: None })
     };
     let open = |work| hub.runtime.block_on(hub.hub().open(account_id, work));
     let connector_tabs = |node: &Node| node.machine.tabs().into_iter().filter(|t| t.connector.as_deref() == Some(&id) && t.running).count();
@@ -833,6 +917,7 @@ fn a_connector_run_goes_to_its_machine_else_another_online_one() {
     assert_eq!(open(delivery("1792499999.000100")), Err("no session answers that thread".into()));
 
     let work = Run {
+        reservation: None,
         cwd: repo.clone(),
         repo: None,
         args: vec![],
@@ -2629,9 +2714,14 @@ struct FakeState {
     failing: Option<Exec>,
     /// The next bootstrap never answers, as when the hub dies during it. Other scripts answer at once.
     hanging: bool,
+    /// The next bootstrap waits until this is notified, then boots as usual.
+    gate: Option<Arc<tokio::sync::Notify>>,
     /// A checkout each booted node already knows, as `(folder name, git origin)`, so the node finds
     /// the repo a worker or a Captain needs without cloning from the network.
     checkout: Option<(String, String)>,
+    /// Runs on the next booted node's machine thread, inside the call that opens its first tab and
+    /// before that call answers the hub: what a session does as its first act.
+    first_tab: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 /// Upstash's Box API in memory. Running the bootstrap starts a node from the account.json the hub
@@ -2671,19 +2761,27 @@ impl FakeBoxes {
     }
 
     async fn boot(&self, id: &BoxId) -> Result<Exec, String> {
-        let (dir, creds, checkout) = {
+        let (dir, creds, checkout, first_tab) = {
             let mut state = self.state.lock().unwrap();
             if let Some(failing) = state.failing.take() {
                 return Ok(failing);
             }
+            let first_tab = state.first_tab.take();
             let fake = state.boxes.get(&id.0).ok_or("no such box")?;
             let creds: Credentials = serde_json::from_str(&fake.files[&format!("{BOX_DIR}/account.json")]).unwrap();
             assert!(fake.files[&format!("{BOX_DIR}/start.sh")].contains("pinned-server\" node --config-dir"));
-            (self.root.join(&id.0), creds, state.checkout.clone())
+            (self.root.join(&id.0), creds, state.checkout.clone(), first_tab)
         };
         std::fs::create_dir_all(&dir).unwrap();
         let node = tokio::task::spawn_blocking(move || {
-            let node = Node::start(&dir, creds);
+            let opened = std::sync::atomic::AtomicBool::new(false);
+            let node = Node::start_with(&dir, creds, move |event| {
+                if let (Some(first), MachineEvent::Tabs { tabs }) = (&first_tab, &event) {
+                    if !tabs.is_empty() && !opened.swap(true, Ordering::SeqCst) {
+                        first();
+                    }
+                }
+            });
             // A delivery is a prompt, which the node holds until claude takes the terminal, as this stand-in does.
             std::fs::write(dir.join("claude"), "#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && { echo '{\"loggedIn\":true}'; exit 0; }\nstty raw -echo; exec cat\n").unwrap();
             if let Some((name, remote)) = checkout {
@@ -2739,11 +2837,15 @@ impl BoxApi for FakeBoxes {
     fn exec<'a>(&'a self, key: &'a str, id: &'a BoxId, script: String) -> BoxFuture<'a, Result<Exec, String>> {
         Box::pin(async move {
             Self::refuse(key)?;
-            let hanging = {
+            let (hanging, gate) = {
                 let mut state = self.state.lock().unwrap();
                 state.scripts.push(script.clone());
-                script.contains("start.sh") && std::mem::take(&mut state.hanging)
+                let boots = script.contains("start.sh");
+                (boots && std::mem::take(&mut state.hanging), if boots { state.gate.take() } else { None })
             };
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
             if !script.contains("start.sh") {
                 return Ok(Exec { exit_code: 0, output: String::new(), error: String::new() });
             }
@@ -2822,7 +2924,7 @@ impl BoxAccount {
 
     fn run(&self, subject: Subject, runs_on: RunsOn) -> Work {
         let args = vec!["--name".into(), "ENG-7 Fix login".into()];
-        Work::Run(Run { cwd: self.repo.clone(), repo: None, args, connector: self.connector.clone(), subject, mentioned: vec![], account: None, runs_on, input: String::new() })
+        Work::Run(Run { cwd: self.repo.clone(), repo: None, args, connector: self.connector.clone(), subject, mentioned: vec![], account: None, runs_on, input: String::new(), reservation: None })
     }
 
     fn box_run(&self, subject: Subject) -> Work {
@@ -9101,7 +9203,7 @@ fn every_box_signs_in_with_the_claude_token_of_its_projects_account_and_refuses_
         "permissionMode": "acceptEdits", "worktree": false, "instructions": "", "machine": { "kind": "upstash-box", "size": "small" },
     } })).unwrap()["id"].as_str().unwrap().to_owned();
     let triggered = |issue_id: &str| {
-        let run = Run { cwd: site.clone().into(), repo: None, args: vec!["--name".into(), "ENG-9 Site".into()], connector: on_site.clone(), subject: issue(issue_id), mentioned: vec![], account: None, runs_on: RunsOn::FreshBox(BoxStep { size: Some(BoxSize::Small) }), input: String::new() };
+        let run = Run { cwd: site.clone().into(), repo: None, args: vec!["--name".into(), "ENG-9 Site".into()], connector: on_site.clone(), subject: issue(issue_id), mentioned: vec![], account: None, runs_on: RunsOn::FreshBox(BoxStep { size: Some(BoxSize::Small) }), input: String::new(), reservation: None };
         hub.runtime.block_on(hub.hub().open(ana.id, Work::Run(run)))
     };
     let open_box = |client: &mut Client| client.hub(json!({ "cmd": "open_box", "repo": "acme/site", "size": "small", "budget_usd": 2.0 }));
@@ -11526,3 +11628,35 @@ fn an_agent_saves_and_lists_ideas_through_act_and_its_role_is_kept() {
     assert_eq!(deleted["outcome"], "done");
     assert_eq!(act(&ana.dir, &ana.tab, "list_ideas", json!({})).unwrap()["result"], json!([]));
 }
+
+#[path = "hub/teams_membership.rs"]
+mod teams_membership;
+#[path = "hub/teams_groups.rs"]
+mod teams_groups;
+#[path = "hub/teams_separation.rs"] mod teams_separation;
+#[path = "hub/teams_bots.rs"] mod teams_bots;
+#[path = "hub/teams_box_call.rs"]
+mod teams_box_call;
+#[path = "hub/teams_calls.rs"] mod teams_calls;
+#[path = "hub/teams_runs.rs"] mod teams_runs;
+#[path = "hub/teams_go_ahead.rs"] mod teams_go_ahead;
+#[path = "hub/teams_separation_fixes.rs"] mod teams_separation_fixes;
+#[path = "hub/teams_hardening.rs"]
+mod teams_hardening;
+#[path = "hub/teams_triggers.rs"] mod teams_triggers;
+#[path = "hub/teams_run_log.rs"] mod teams_run_log;
+#[path = "hub/teams_slack_notice.rs"] mod teams_slack_notice;
+#[path = "hub/teams_hardening_a.rs"] mod teams_hardening_a;
+#[path = "hub/teams_hardening_b.rs"] mod teams_hardening_b;
+#[path = "hub/teams_lifecycle.rs"] mod teams_lifecycle;
+#[path = "hub/teams_flood.rs"] mod teams_flood;
+#[path = "hub/teams_admission.rs"] mod teams_admission;
+#[path = "hub/teams_backstop.rs"] mod teams_backstop;
+#[path = "hub/teams_guard_tests.rs"] mod teams_guard_tests;
+#[path = "hub/teams_calls_guards.rs"] mod teams_calls_guards;
+#[path = "hub/teams_locks.rs"] mod teams_locks;
+#[path = "hub/teams_locks_boot.rs"] mod teams_locks_boot;
+#[path = "hub/teams_locks_callers.rs"] mod teams_locks_callers;
+#[path = "hub/teams_limits.rs"] mod teams_limits;
+#[path = "hub/teams_limits_fix.rs"] mod teams_limits_fix;
+#[path = "hub/teams_wire.rs"] mod teams_wire;

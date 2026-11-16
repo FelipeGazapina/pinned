@@ -28,6 +28,7 @@ pub fn project(graph: &Graph) -> Projected {
         Watch::LinearLabel { label } => Trigger::LinearLabel { label: label.clone() },
         Watch::SlackMention { channel } => Trigger::SlackMention { channel: channel.clone() },
         Watch::Called => Trigger::Called,
+        Watch::Manual => Trigger::Manual,
         Watch::SlackMessage { channel } => Trigger::SlackMessage { channel: channel.clone(), decide: decide.clone().unwrap_or_else(empty_decide) },
     };
     Projected { ask: asks.first().map(|node| ask_of(graph, node)), decide, trigger }

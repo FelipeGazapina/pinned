@@ -117,6 +117,7 @@ impl Labeled for ToClient {
             ToClient::Settings { .. } => "client_settings",
             ToClient::SessionMarks { .. } => "client_session_marks",
             ToClient::Confirmations { .. } => "client_confirmations",
+            ToClient::Team { .. } => "client_team",
         }
     }
 }

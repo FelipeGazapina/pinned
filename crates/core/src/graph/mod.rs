@@ -186,6 +186,8 @@ pub enum Watch {
     SlackMessage { channel: String },
     /// Runs only when another graph `call`s it.
     Called,
+    /// No poller: runs only when someone runs it now.
+    Manual,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]

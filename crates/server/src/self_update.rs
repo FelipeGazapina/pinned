@@ -871,6 +871,7 @@ mod tests {
             vector_search: false,
             first_run_wait: std::time::Duration::from_secs(60),
             starting_limit: std::time::Duration::from_secs(600),
+            claude_home: None,
         };
         let (nudge, nudges) = std::sync::mpsc::channel();
         let nudge = Mutex::new(nudge);

@@ -12,6 +12,7 @@ pub mod self_update;
 mod store_writes;
 pub mod traffic;
 pub mod surface;
+pub mod teams;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -32,6 +33,8 @@ pub struct Config {
     /// Upstash's Box API; tests pass a fake.
     pub box_api: Arc<dyn boxes::BoxApi>,
     pub box_policy: boxes::Policy,
+    /// Every team's call timings and default bot limits.
+    pub team_policy: pinned_core::teams::TeamPolicy,
     /// Convex, which the hub reads for sessions with the keys it keeps; tests replay fixtures.
     pub convex_http: Arc<dyn pinned_core::convex::client::Http>,
     /// A second Postgres for what users share to improve the app; without it the hub keeps none.
@@ -64,7 +67,7 @@ pub async fn start(config: Config) -> Result<Running, String> {
     let listener = tokio::net::TcpListener::bind(&config.listen).await.map_err(|e| format!("could not listen on {}: {e}", config.listen))?;
     let addr = listener.local_addr().map_err(|e| e.to_string())?;
     let public_url = config.public_url.unwrap_or_else(|| format!("http://{addr}"));
-    let hub = hub::Hub::new(db, public_url, config.signup, config.box_api, config.box_policy, config.convex_http);
+    let hub = hub::Hub::new(db, public_url, config.signup, config.box_api, config.box_policy, config.team_policy, config.convex_http);
     surface::finish_interrupted(&hub).await?;
     // Again once a decision the hub before this one ran can no longer be running.
     let later = hub.clone();
@@ -75,6 +78,7 @@ pub async fn start(config: Config) -> Result<Running, String> {
         }
     });
     hub.watch_all().await?;
+    teams::spawn_tick(&hub);
     // Counts of what the hub holds, so memory that grows can be told apart by cause.
     let census = Arc::downgrade(&hub);
     tokio::spawn(async move {

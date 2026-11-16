@@ -28,7 +28,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio_postgres::{Client, NoTls};
+use tokio_postgres::{Client, GenericClient, NoTls};
 use uuid::Uuid;
 
 const SCHEMA: &str = "
@@ -157,6 +157,75 @@ create table if not exists ideas (id uuid primary key, account uuid not null ref
   title text not null, text text not null default '', project text, status text not null default 'open',
   task text, created_by jsonb not null, created_at bigint not null, updated_at bigint not null);
 create index if not exists ideas_by_account on ideas (account, updated_at desc);
+-- pinned Teams. A team is an accounts row of kind 'team' with no login and no password ('!'): its
+-- members act on it through the hub (`teams::team_scope`), never by signing in or pairing.
+alter table accounts add column if not exists kind text not null default 'person';
+create table if not exists teams (id uuid primary key references accounts on delete cascade, name text not null,
+  owner uuid not null references accounts, created_at timestamptz not null default now());
+create table if not exists team_members (team uuid not null references teams on delete cascade,
+  member uuid not null references accounts on delete cascade, role text not null,
+  joined_at timestamptz not null default now(), primary key (team, member));
+create index if not exists team_members_by_member on team_members (member);
+create table if not exists team_invites (code_hash bytea primary key, team uuid not null references teams on delete cascade,
+  made_by uuid not null references accounts, hint text not null, created_at timestamptz not null default now(),
+  used_by uuid references accounts on delete set null, used_at timestamptz, revoked boolean not null default false);
+create table if not exists team_projects (team uuid not null references teams on delete cascade, key text not null,
+  name text not null, repo text not null, member uuid not null references accounts on delete cascade,
+  attached_at timestamptz not null default now(), primary key (team, key));
+create table if not exists team_groups (team uuid not null references teams on delete cascade, handle text not null,
+  about text not null default '', fallback uuid references accounts on delete set null,
+  slack_group text not null default '', primary key (team, handle));
+create table if not exists team_group_members (team uuid not null, handle text not null, member uuid not null,
+  primary key (team, handle, member), foreign key (team, handle) references team_groups on delete cascade,
+  foreign key (team, member) references team_members on delete cascade);
+create table if not exists team_bots (team uuid not null references teams on delete cascade, workflow text not null,
+  owner uuid references accounts on delete set null, calls jsonb not null, limits jsonb not null,
+  on_by uuid references accounts on delete set null, on_at timestamptz, primary key (team, workflow));
+create table if not exists team_runs (id uuid primary key, team uuid not null references teams on delete cascade,
+  workflow text not null, box text, started_by jsonb not null, state text not null, controller uuid references accounts,
+  cost_usd double precision not null default 0, active_secs bigint not null default 0,
+  started_at timestamptz not null default now(), ended_at timestamptz, outcome text);
+create index if not exists team_runs_live on team_runs (team, started_at desc);
+create table if not exists team_calls (id uuid primary key, team uuid not null references teams on delete cascade,
+  run uuid not null references team_runs on delete cascade, situation text not null, asked jsonb not null,
+  question text not null, choices jsonb not null, created_at timestamptz not null default now(),
+  escalated_at timestamptz, answered_by uuid references accounts, answered_at timestamptz, answer jsonb, outcome text);
+create index if not exists team_calls_open on team_calls (created_at) where answered_at is null;
+alter table team_bots add column if not exists once boolean not null default false;
+alter table team_runs add column if not exists subject jsonb;
+alter table team_bots add column if not exists off_note text;
+-- The hash of the exact step a team-box hook asked about, and when its Go ahead let that step run
+-- (unix seconds): each Go ahead lets its step run once (`teams::db::use_go_ahead`).
+alter table team_calls add column if not exists step_hash text;
+alter table team_calls add column if not exists released_at bigint;
+-- When a run last moved to waiting, so the calls tick tells a run left waiting with no open call
+-- from one whose call is being opened (`teams::db::stale_waiting`).
+alter table team_runs add column if not exists waiting_since timestamptz;
+-- Seconds a run waited on its closed calls; with `waiting_since` it gives the run's waiting
+-- and active time (`teams::db::RUN_COLUMNS`), which survive a restart.
+alter table team_runs add column if not exists waiting_secs bigint not null default 0;
+-- When a reserved run's session opened (`teams::db::open_reserved`): its active time counts from
+-- then, not from the place it held. Null for a run that opened with its row.
+alter table team_runs add column if not exists opened_at timestamptz;
+-- One live run per bot and at most `max_live_runs` per team: the events past that wait in their
+-- bot's line (`teams::queue`), and the events that started no run are counted by why.
+alter table teams add column if not exists max_live_runs integer not null default 3;
+create table if not exists team_run_queue (id bigserial primary key, team uuid not null references teams on delete cascade,
+  workflow text not null, start jsonb not null, queued_at timestamptz not null default now());
+create index if not exists team_run_queue_line on team_run_queue (team, workflow, id);
+create table if not exists team_bot_skips (team uuid not null references teams on delete cascade, workflow text not null,
+  reason text not null, count bigint not null default 0, primary key (team, workflow, reason));
+-- A run whose place a trigger's event holds before its session opens (`teams::queue::admit`):
+-- the team's cap counts it from then, and its session's `open` starts it without deciding again.
+alter table team_runs add column if not exists reserved boolean not null default false;
+-- A waiting event whose turn came (`teams::queue::take_and_start`) stays in its line, granted, with the
+-- reserved run that holds its place, until its team's poller claims it (`teams::db::claim`).
+alter table team_run_queue add column if not exists granted_at timestamptz;
+alter table team_run_queue add column if not exists run uuid;
+alter table team_runs add column if not exists reserved_at timestamptz;
+-- A run's limit call the limits tick opened (`teams::calls::tick`): the only call that counts as
+-- its limit call (`teams::db::runs_at_limit`). A session's own ask never sets it.
+alter table team_calls add column if not exists opened_by_hub boolean not null default false;
 ";
 /// How long the hub keeps an end that its machine never came back for.
 const HELD_FOR: &str = "interval '30 days'";
@@ -234,11 +303,23 @@ const STATEMENT_LIMIT: Duration = Duration::from_secs(120);
 /// connection up. Longer than `STATEMENT_LIMIT`, so Postgres has cancelled a statement it was
 /// running by then.
 const WRITE_WAIT: Duration = Duration::from_secs(150);
+/// Postgres refuses a statement of the hub's that waits longer on a lock (`lock_timeout`): the
+/// shared connections pipeline every account's statements, so one waiting stalls them all.
+const LOCK_LIMIT: Duration = Duration::from_secs(2);
+/// What a statement refused by `LOCK_LIMIT` answers, as an ordinary error. The hub does not
+/// repeat the statement itself: the caller hears it and decides. A person's or a bot's call is
+/// refused with it and tried again by them, a trigger's check finds its event again on its next
+/// pass, and the store writer (`store_writes`) keeps the document and resends it.
+pub const BUSY: &str = pinned_core::wire::HUB_BUSY;
 
 impl Connection {
     async fn open(url: &str, schema: &str) -> Result<Connection, String> {
         let client = open(url).await?;
-        client.batch_execute(schema).await.map_err(|e| format!("could not create the tables: {e}"))?;
+        // The schema waits on locks as long as it must: a hub starting while another still runs
+        // must not fail its migration on that hub's short lock waits. Bounded again after it.
+        client.batch_execute("set lock_timeout = 0").await.map_err(|e| format!("could not create the tables: {e}"))?;
+        create(&client, schema).await.map_err(|e| format!("could not create the tables: {e}"))?;
+        bound_lock_waits(&client).await?;
         Ok(Connection { url: url.into(), client: Arc::new(tokio::sync::Mutex::new(Some(Arc::new(client)))), write_wait_ms: Arc::default() })
     }
 
@@ -428,7 +509,7 @@ impl WriteFailure {
     fn of(e: tokio_postgres::Error) -> WriteFailure {
         match e.code().map(|code| code.code()) {
             Some(sqlstate) if ["22", "23"].iter().any(|class| sqlstate.starts_with(class)) => WriteFailure::Refused { sqlstate: sqlstate.to_owned() },
-            _ => WriteFailure::Failed(e.to_string()),
+            _ => WriteFailure::Failed(err(e)),
         }
     }
 }
@@ -497,17 +578,109 @@ async fn open(url: &str) -> Result<Client, String> {
             eprintln!("pinned-server: Postgres connection ended: {e}");
         }
     });
-    // A plain statement rather than a startup option, which a pooler in front of Postgres may refuse.
-    // Bounded like the connect: `client` runs this holding the lock every caller waits on.
-    match tokio::time::timeout(CONNECT_WAIT, client.batch_execute(&format!("set statement_timeout = {}", STATEMENT_LIMIT.as_millis()))).await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => eprintln!("pinned-server: Postgres keeps its own statement timeout: {e}"),
-        Err(_) => return Err("could not connect to Postgres: it did not answer the statement timeout".into()),
-    }
+    let session = &client;
+    session_limits(|sql| async move { session.batch_execute(&sql).await }).await?;
     Ok(client)
 }
 
-fn err(e: tokio_postgres::Error) -> String {
+/// Sets `STATEMENT_LIMIT` and `LOCK_LIMIT` on a session through `run`. Plain statements rather
+/// than startup options, which a pooler in front of Postgres may refuse. A session without
+/// either is refused: one statement of the hub's that runs or waits too long stalls every
+/// account's statements behind it.
+async fn session_limits<F: std::future::Future<Output = Result<(), E>>, E: std::fmt::Display>(run: impl Fn(String) -> F) -> Result<(), String> {
+    limit("statement timeout", run(format!("set statement_timeout = {}", STATEMENT_LIMIT.as_millis()))).await?;
+    limit("lock timeout", run(lock_limit())).await
+}
+
+/// Sets `LOCK_LIMIT` on `client` for its session again.
+async fn bound_lock_waits(client: &Client) -> Result<(), String> {
+    limit("lock timeout", client.batch_execute(&lock_limit())).await
+}
+
+pub(crate) fn lock_limit() -> String {
+    format!("set lock_timeout = {}", LOCK_LIMIT.as_millis())
+}
+
+/// What setting the session limit `what` answered: an error unless Postgres took it. Bounded like
+/// the connect: `client` runs this holding the lock every caller waits on.
+async fn limit<E: std::fmt::Display>(what: &str, set: impl std::future::Future<Output = Result<(), E>>) -> Result<(), String> {
+    match tokio::time::timeout(CONNECT_WAIT, set).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(format!("could not connect to Postgres: it refused the {what}: {e}")),
+        Err(_) => Err(format!("could not connect to Postgres: it did not answer the {what}")),
+    }
+}
+
+/// Runs `schema` one statement at a time, each only when the catalog says it would change
+/// something. A statement that changes nothing may still take a lock that waits on another hub's
+/// rows (`add column if not exists` takes its table's exclusive lock; `create index if not
+/// exists` waits on its table's writes), and while it waits every statement of a hub still
+/// running on that table queues behind it. One that is needed waits as long as it must.
+async fn create(client: &Client, schema: &str) -> Result<(), tokio_postgres::Error> {
+    for statement in statements(schema) {
+        if needed(client, &needs(&statement)).await? {
+            client.batch_execute(&statement).await?;
+        }
+    }
+    Ok(())
+}
+
+/// The statements of `schema`, in order, without its comment lines.
+fn statements(schema: &str) -> Vec<String> {
+    let text = schema.lines().filter(|line| !line.trim_start().starts_with("--")).collect::<Vec<_>>().join("\n");
+    text.split(';').map(str::trim).filter(|statement| !statement.is_empty()).map(String::from).collect()
+}
+
+/// What the catalog must lack for a schema statement to run.
+#[derive(Debug, PartialEq)]
+enum Needs<'a> {
+    /// Nothing: it takes no lock that waits on another hub's rows when it changes nothing
+    /// (`create table if not exists` on a table that exists; an `update` that matches no row).
+    Nothing,
+    /// `alter table <table> add column if not exists <column>, ...`: any of the columns.
+    Columns(&'a str, Vec<&'a str>),
+    /// `create index if not exists <index> ...`: the index.
+    Index(&'a str),
+    /// `alter table <table> alter column <column> drop not null`: the column's being nullable.
+    Nullable(&'a str, &'a str),
+}
+
+fn needs(statement: &str) -> Needs<'_> {
+    const ADD: [&str; 5] = ["add", "column", "if", "not", "exists"];
+    let words: Vec<&str> = statement.split_whitespace().collect();
+    match words[..] {
+        ["create", "index", "if", "not", "exists", index, ..] => Needs::Index(index),
+        ["alter", "table", table, "alter", "column", column, "drop", "not", "null"] => Needs::Nullable(table, column),
+        ["alter", "table", table, ..] if words[3..].starts_with(&ADD) => {
+            Needs::Columns(table, words.windows(ADD.len() + 1).filter(|w| w[..ADD.len()] == ADD).map(|w| w[ADD.len()].trim_end_matches(',')).collect())
+        }
+        _ => Needs::Nothing,
+    }
+}
+
+/// Whether the catalog lacks what `needs` names, so its statement would change something.
+async fn needed(client: &Client, needs: &Needs<'_>) -> Result<bool, tokio_postgres::Error> {
+    const COLUMN: &str = "from pg_attribute where attrelid = to_regclass($1::text) and attnum > 0 and not attisdropped";
+    Ok(match needs {
+        Needs::Nothing => true,
+        Needs::Columns(table, columns) => {
+            let found: i64 = client.query_one(&format!("select count(*) {COLUMN} and attname::text = any($2::text[])"), &[table, columns]).await?.get(0);
+            found < columns.len() as i64
+        }
+        Needs::Index(index) => client.query_one("select to_regclass($1::text) is null", &[index]).await?.get(0),
+        Needs::Nullable(table, column) => client.query_one(&format!("select coalesce(bool_or(attnotnull), true) {COLUMN} and attname::text = $2::text"), &[table, column]).await?.get(0),
+    })
+}
+
+/// Whether Postgres refused `e` for waiting on a lock past `LOCK_LIMIT`.
+fn lock_refused(e: &tokio_postgres::Error) -> bool {
+    e.code() == Some(&tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE)
+}
+
+pub(crate) fn err(e: tokio_postgres::Error) -> String {
+    if lock_refused(&e) {
+        return BUSY.into();
+    }
     e.to_string()
 }
 
@@ -596,8 +769,24 @@ impl Db {
         Ok(Db { sealer, connection: Connection::open(url, SCHEMA).await?, transactions: Arc::default() })
     }
 
-    async fn client(&self) -> Result<Arc<Client>, String> {
+    pub(crate) async fn client(&self) -> Result<Arc<Client>, String> {
         self.connection.client().await
+    }
+
+    /// The connection kept for transactions, opened if closed. Hold the guard for the whole
+    /// transaction: `held.as_mut().unwrap().transaction()`.
+    /// A connection of its own, for a transaction held while other statements run on the shared
+    /// one (a lock). Dropping it ends the transaction and frees what it held.
+    pub async fn own_client(&self) -> Result<Client, String> {
+        open(&self.connection.url).await
+    }
+
+    pub async fn transaction_client(&self) -> Result<tokio::sync::MutexGuard<'_, Option<Client>>, String> {
+        let mut held = self.transactions.lock().await;
+        if held.as_ref().map_or(true, Client::is_closed) {
+            *held = Some(open(&self.connection.url).await?);
+        }
+        Ok(held)
     }
 
     /// The new account, or None when the email is taken.
@@ -612,27 +801,31 @@ impl Db {
     }
 
     pub async fn account_by_email(&self, email: &str) -> Result<Option<(AccountView, String)>, String> {
-        let row = self.client().await?.query_opt("select id, password_hash from accounts where email = $1", &[&email]).await.map_err(err)?;
+        // A team has no password and never signs in: its email reads as unknown.
+        let row = self.client().await?.query_opt("select id, password_hash from accounts where email = $1 and kind = 'person'", &[&email]).await.map_err(err)?;
         Ok(row.map(|r| (AccountView { id: r.get::<_, Uuid>(0).to_string(), email: email.to_owned() }, r.get(1))))
     }
 
+    /// Whether any person has signed up. A team is no one's sign up: `--signup first` looks at people.
     pub async fn has_accounts(&self) -> Result<bool, String> {
-        let row = self.client().await?.query_one("select exists (select 1 from accounts)", &[]).await.map_err(err)?;
+        let row = self.client().await?.query_one("select exists (select 1 from accounts where kind = 'person')", &[]).await.map_err(err)?;
         Ok(row.get(0))
     }
 
+    /// The people on the hub, which `--max-accounts` caps. A team is made by a person and is no account of its own.
     pub async fn account_count(&self) -> Result<i64, String> {
-        let row = self.client().await?.query_one("select count(*) from accounts", &[]).await.map_err(err)?;
+        let row = self.client().await?.query_one("select count(*) from accounts where kind = 'person'", &[]).await.map_err(err)?;
         Ok(row.get(0))
     }
 
+    /// A person's email and password hash; None for a team, which has no password to check.
     pub async fn account(&self, account: Uuid) -> Result<Option<(AccountView, String)>, String> {
-        let row = self.client().await?.query_opt("select email, password_hash from accounts where id = $1", &[&account]).await.map_err(err)?;
+        let row = self.client().await?.query_opt("select email, password_hash from accounts where id = $1 and kind = 'person'", &[&account]).await.map_err(err)?;
         Ok(row.map(|r| (AccountView { id: account.to_string(), email: r.get(0) }, r.get(1))))
     }
 
     pub async fn set_password(&self, account: Uuid, password_hash: &str) -> Result<(), String> {
-        self.client().await?.execute("update accounts set password_hash = $2 where id = $1", &[&account, &password_hash]).await.map_err(err).map(drop)
+        self.client().await?.execute("update accounts set password_hash = $2 where id = $1 and kind = 'person'", &[&account, &password_hash]).await.map_err(err).map(drop)
     }
 
     pub async fn sync_list(&self, account: Uuid, project: &str) -> Result<Vec<sync::Entry>, String> {
@@ -738,7 +931,15 @@ impl Db {
 
     pub async fn create_login(&self, account: Uuid) -> Result<String, String> {
         let token = Token::new();
-        self.client().await?.execute("insert into logins (token_hash, account) values ($1, $2)", &[&token.hash, &account]).await.map_err(err)?;
+        // A team never gets a login.
+        let made = self
+            .client().await?
+            .execute("insert into logins (token_hash, account) select $1, id from accounts where id = $2 and kind = 'person'", &[&token.hash, &account])
+            .await
+            .map_err(err)?;
+        if made != 1 {
+            return Err(format!("account {account} cannot sign in"));
+        }
         Ok(token.text)
     }
 
@@ -748,7 +949,8 @@ impl Db {
             .client().await?
             .query_opt(
                 "update logins set last_used = now(), locked = locked or $3 where token_hash = $1 \
-                 and coalesce(last_used, created_at) > now() - make_interval(days => $2) returning account, locked",
+                 and coalesce(last_used, created_at) > now() - make_interval(days => $2) \
+                 and account in (select id from accounts where kind = 'person') returning account, locked",
                 &[&hash(token), &LOGIN_IDLE_DAYS, &lock],
             )
             .await
@@ -1586,7 +1788,7 @@ impl Db {
             .client().await?
             .query_opt(
                 "with taken as (delete from pair_codes where code = $1 returning account, expires_at)
-                 select a.id, a.email from taken join accounts a on a.id = taken.account where taken.expires_at > now()",
+                 select a.id, a.email from taken join accounts a on a.id = taken.account where taken.expires_at > now() and a.kind = 'person'",
                 &[&code],
             )
             .await
@@ -1864,6 +2066,85 @@ pub struct AgentGrant {
     pub projects: Vec<AgentProject>,
 }
 
+// An OAuth exchange runs these in one transaction (`oauth::exchange`); `Db`'s methods of the same
+// names run each alone.
+
+/// Spends an authorization code. A second use, or a late one, is `Replayed`.
+pub(crate) async fn take_agent_code_in(client: &impl GenericClient, code: &str) -> Result<Spent<AgentCode>, String> {
+    let row = client
+        .query_opt(
+            "with old as (select used from agent_codes where code_hash = $1 for update) \
+             update agent_codes c set used = true from old where c.code_hash = $1 \
+             returning c.grant_id, c.redirect_uri, c.code_challenge, c.resource, c.expires_at > now(), old.used, \
+             (select client from agent_grants g where g.id = c.grant_id)",
+            &[&hash(code)],
+        )
+        .await
+        .map_err(err)?;
+    let Some(r) = row else { return Ok(Spent::Unknown) };
+    let (grant, live, used): (Uuid, bool, bool) = (r.get(0), r.get(4), r.get(5));
+    if used || !live {
+        return Ok(Spent::Replayed(grant));
+    }
+    Ok(Spent::Fresh(AgentCode { grant, redirect_uri: r.get(1), code_challenge: r.get(2), resource: r.get(3), client: r.get(6) }))
+}
+
+/// A fresh access token and refresh token for the grant, unless it was revoked.
+pub(crate) async fn issue_agent_tokens_in(client: &impl GenericClient, grant: Uuid) -> Result<Option<(String, String)>, String> {
+    let live = client
+        .query_opt(
+            "select 1 from agent_grants g where g.id = $1 and not g.revoked \
+             and exists (select 1 from accounts a where a.id = g.account and a.kind = 'person')",
+            &[&grant],
+        )
+        .await
+        .map_err(err)?;
+    if live.is_none() {
+        return Ok(None);
+    }
+    // Expired rows go; a rotated refresh token stays until it expires, so its replay is still caught.
+    client.execute("delete from agent_tokens where grant_id = $1 and expires_at < now()", &[&grant]).await.map_err(err)?;
+    client.execute("delete from agent_codes where grant_id = $1 and expires_at < now()", &[&grant]).await.map_err(err)?;
+    let (access, refresh) = (Token::new(), Token::new());
+    client
+        .execute(
+            "insert into agent_tokens (token_hash, grant_id, kind, expires_at) values \
+             ($1, $3, 'access', now() + make_interval(secs => $4)), ($2, $3, 'refresh', now() + make_interval(days => $5))",
+            &[&access.hash, &refresh.hash, &grant, &(AGENT_ACCESS_SECS as f64), &AGENT_REFRESH_DAYS],
+        )
+        .await
+        .map_err(err)?;
+    Ok(Some((access.text, refresh.text)))
+}
+
+/// Spends a refresh token: its grant and client. One already rotated is `Replayed`.
+pub(crate) async fn take_agent_refresh_in(client: &impl GenericClient, token: &str) -> Result<Spent<(Uuid, String)>, String> {
+    let row = client
+        .query_opt(
+            "with old as (select rotated from agent_tokens where token_hash = $1 and kind = 'refresh' for update) \
+             update agent_tokens t set rotated = true from old where t.token_hash = $1 and t.kind = 'refresh' \
+             returning t.grant_id, t.expires_at > now(), old.rotated, (select client from agent_grants g where g.id = t.grant_id)",
+            &[&hash(token)],
+        )
+        .await
+        .map_err(err)?;
+    let Some(r) = row else { return Ok(Spent::Unknown) };
+    let (grant, live, rotated): (Uuid, bool, bool) = (r.get(0), r.get(1), r.get(2));
+    if rotated {
+        return Ok(Spent::Replayed(grant));
+    }
+    if !live {
+        return Ok(Spent::Unknown);
+    }
+    Ok(Spent::Fresh((grant, r.get(3))))
+}
+
+/// The scopes and account of a grant that still stands.
+pub(crate) async fn agent_grant_scopes_in(client: &impl GenericClient, grant: Uuid) -> Result<Option<(Vec<String>, Uuid)>, String> {
+    let row = client.query_opt("select scopes, account from agent_grants where id = $1 and not revoked", &[&grant]).await.map_err(err)?;
+    Ok(row.map(|r| (strings(r.get(0)), r.get(1))))
+}
+
 pub struct AgentCode {
     pub grant: Uuid,
     pub client: String,
@@ -1974,10 +2255,18 @@ impl Db {
         let client = self.client().await?;
         let grant = Uuid::new_v4();
         let (scopes, projects) = (serde_json::to_value(scopes).map_err(|e| e.to_string())?, serde_json::to_value(projects).map_err(|e| e.to_string())?);
-        client
-            .execute("insert into agent_grants (id, account, client, scopes, projects) values ($1, $2, $3, $4, $5)", &[&grant, &account, &request.client, &scopes, &projects])
+        // Only a person lets an agent in: a team's account has no owner of its own to act for.
+        let made = client
+            .execute(
+                "insert into agent_grants (id, account, client, scopes, projects) select $1, $2, $3, $4, $5 \
+                 where exists (select 1 from accounts where id = $2 and kind = 'person')",
+                &[&grant, &account, &request.client, &scopes, &projects],
+            )
             .await
             .map_err(err)?;
+        if made != 1 {
+            return Err(format!("account {account} cannot let an agent in"));
+        }
         let code = Token::new();
         client
             .execute(
@@ -1992,68 +2281,17 @@ impl Db {
 
     /// Spends an authorization code. A second use, or a late one, is `Replayed`.
     pub async fn take_agent_code(&self, code: &str) -> Result<Spent<AgentCode>, String> {
-        let row = self
-            .client().await?
-            .query_opt(
-                "with old as (select used from agent_codes where code_hash = $1 for update) \
-                 update agent_codes c set used = true from old where c.code_hash = $1 \
-                 returning c.grant_id, c.redirect_uri, c.code_challenge, c.resource, c.expires_at > now(), old.used, \
-                 (select client from agent_grants g where g.id = c.grant_id)",
-                &[&hash(code)],
-            )
-            .await
-            .map_err(err)?;
-        let Some(r) = row else { return Ok(Spent::Unknown) };
-        let (grant, live, used): (Uuid, bool, bool) = (r.get(0), r.get(4), r.get(5));
-        if used || !live {
-            return Ok(Spent::Replayed(grant));
-        }
-        Ok(Spent::Fresh(AgentCode { grant, redirect_uri: r.get(1), code_challenge: r.get(2), resource: r.get(3), client: r.get(6) }))
+        take_agent_code_in(&*self.client().await?, code).await
     }
 
     /// A fresh access token and refresh token for the grant, unless it was revoked.
     pub async fn issue_agent_tokens(&self, grant: Uuid) -> Result<Option<(String, String)>, String> {
-        let client = self.client().await?;
-        let live = client.query_opt("select 1 from agent_grants where id = $1 and not revoked", &[&grant]).await.map_err(err)?;
-        if live.is_none() {
-            return Ok(None);
-        }
-        // Expired rows go; a rotated refresh token stays until it expires, so its replay is still caught.
-        client.execute("delete from agent_tokens where grant_id = $1 and expires_at < now()", &[&grant]).await.map_err(err)?;
-        client.execute("delete from agent_codes where grant_id = $1 and expires_at < now()", &[&grant]).await.map_err(err)?;
-        let (access, refresh) = (Token::new(), Token::new());
-        client
-            .execute(
-                "insert into agent_tokens (token_hash, grant_id, kind, expires_at) values \
-                 ($1, $3, 'access', now() + make_interval(secs => $4)), ($2, $3, 'refresh', now() + make_interval(days => $5))",
-                &[&access.hash, &refresh.hash, &grant, &(AGENT_ACCESS_SECS as f64), &AGENT_REFRESH_DAYS],
-            )
-            .await
-            .map_err(err)?;
-        Ok(Some((access.text, refresh.text)))
+        issue_agent_tokens_in(&*self.client().await?, grant).await
     }
 
     /// Spends a refresh token: its grant and client. One already rotated is `Replayed`.
     pub async fn take_agent_refresh(&self, token: &str) -> Result<Spent<(Uuid, String)>, String> {
-        let row = self
-            .client().await?
-            .query_opt(
-                "with old as (select rotated from agent_tokens where token_hash = $1 and kind = 'refresh' for update) \
-                 update agent_tokens t set rotated = true from old where t.token_hash = $1 and t.kind = 'refresh' \
-                 returning t.grant_id, t.expires_at > now(), old.rotated, (select client from agent_grants g where g.id = t.grant_id)",
-                &[&hash(token)],
-            )
-            .await
-            .map_err(err)?;
-        let Some(r) = row else { return Ok(Spent::Unknown) };
-        let (grant, live, rotated): (Uuid, bool, bool) = (r.get(0), r.get(1), r.get(2));
-        if rotated {
-            return Ok(Spent::Replayed(grant));
-        }
-        if !live {
-            return Ok(Spent::Unknown);
-        }
-        Ok(Spent::Fresh((grant, r.get(3))))
+        take_agent_refresh_in(&*self.client().await?, token).await
     }
 
     /// Whether `token` is a live refresh token of `client`'s that was never used, read without spending
@@ -2087,8 +2325,7 @@ impl Db {
 
     /// The scopes and account of a grant that still stands.
     pub async fn agent_grant_scopes(&self, grant: Uuid) -> Result<Option<(Vec<String>, Uuid)>, String> {
-        let row = self.client().await?.query_opt("select scopes, account from agent_grants where id = $1 and not revoked", &[&grant]).await.map_err(err)?;
-        Ok(row.map(|r| (strings(r.get(0)), r.get(1))))
+        agent_grant_scopes_in(&*self.client().await?, grant).await
     }
 
     /// RFC 7009: forgets one token, of whichever kind. Unknown tokens are no error.
@@ -2103,6 +2340,7 @@ impl Db {
             .query_opt(
                 "update agent_grants g set last_used = now() from agent_tokens t, agent_clients c \
                  where t.token_hash = $1 and t.kind = 'access' and t.expires_at > now() and t.grant_id = g.id and c.id = g.client and not g.revoked \
+                 and exists (select 1 from accounts a where a.id = g.account and a.kind = 'person') \
                  returning g.id, g.account, c.name, g.scopes, g.projects",
                 &[&hash(token)],
             )
@@ -2213,6 +2451,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_schema_statement_that_alters_or_indexes_is_checked_first() {
+        for statement in statements(SCHEMA).iter().chain(&statements(LEARNING_SCHEMA)) {
+            let checked = needs(statement) != Needs::Nothing;
+            let plain = statement.starts_with("create table if not exists ") || statement.starts_with("update ");
+            assert!(checked != plain, "{statement}");
+        }
+        assert_eq!(
+            needs("alter table team_calls add column if not exists step_hash text, add column if not exists released_at bigint"),
+            Needs::Columns("team_calls", vec!["step_hash", "released_at"])
+        );
+        assert_eq!(needs("alter table invites alter column expires_at drop not null"), Needs::Nullable("invites", "expires_at"));
+        assert_eq!(needs("create index if not exists tasks_due on tasks (next_at) where enabled and next_at is not null"), Needs::Index("tasks_due"));
+    }
+
+    #[test]
+    fn no_schema_statement_alters_a_table_in_more_than_one_clause() {
+        // The boot checks each statement on its own (`needs`): a second clause after a comma
+        // would run, and lock its table, whenever the first one's check says it is needed, or
+        // would be skipped with it.
+        for statement in statements(SCHEMA).iter().chain(&statements(LEARNING_SCHEMA)) {
+            let words = statement.split_whitespace().collect::<Vec<_>>().join(" ");
+            if words.starts_with("alter table ") {
+                assert!(![", add ", ", alter ", ", drop ", ", rename ", ", set "].iter().any(|clause| words.contains(clause)), "one clause per statement: {words}");
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_session_without_its_statement_timeout_is_refused() {
+        let refused = session_limits(|sql| async move { if sql.starts_with("set statement_timeout") { Err("permission denied") } else { Ok(()) } }).await;
+        assert_eq!(refused, Err("could not connect to Postgres: it refused the statement timeout: permission denied".to_string()));
+        let unanswered = session_limits(|sql| async move { if sql.starts_with("set statement_timeout") { std::future::pending().await } else { Ok::<(), &str>(()) } }).await;
+        assert_eq!(unanswered, Err("could not connect to Postgres: it did not answer the statement timeout".to_string()));
+        let no_lock_limit = session_limits(|sql| async move { if sql.starts_with("set lock_timeout") { Err("permission denied") } else { Ok(()) } }).await;
+        assert_eq!(no_lock_limit, Err("could not connect to Postgres: it refused the lock timeout: permission denied".to_string()));
+        assert_eq!(session_limits(|_| async { Ok::<(), &str>(()) }).await, Ok(()));
+    }
+
+    #[test]
     fn a_secret_is_sealed_with_the_key_file_made_on_first_start() {
         let dir = std::env::temp_dir().join(format!("pinned-sealer-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2270,3 +2547,4 @@ fn idea_of(row: &tokio_postgres::Row) -> Result<Idea, String> {
         updated_at: row.get(8),
     })
 }
+

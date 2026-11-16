@@ -290,6 +290,9 @@ async fn limited(hub: &Arc<Hub>, account: &Arc<Account>, caller: &Caller, action
 /// An agent's Run now of workflow `id`: on its own machine, as its own task, held to the limits it
 /// runs under (`Call::RunNow` inside `ActFor`), and never with wider permissions than its own.
 async fn run_workflow(hub: &Arc<Hub>, account: &Arc<Account>, caller: &Caller, id: &str) -> Result<RunStarted, String> {
+    if account.team {
+        return Err(crate::hub::TEAM_RUNS.into());
+    }
     let title = if caller.title.is_empty() { caller.tab.clone() } else { caller.title.clone() };
     let by = format!("{} {title:?} through run_workflow", caller.role.label());
     let run = hub.connectors(account).await?.run_now(id, &by)?;

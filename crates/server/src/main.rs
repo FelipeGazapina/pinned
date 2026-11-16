@@ -114,6 +114,7 @@ fn hub(args: &[String]) -> Result<(), String> {
         signup,
         box_api: std::sync::Arc::new(pinned_server::boxes::Upstash),
         box_policy: pinned_server::boxes::Policy::default(),
+        team_policy: pinned_core::teams::TeamPolicy::default(),
         convex_http: std::sync::Arc::new(pinned_core::convex::client::Reqwest),
         learning_db: args.flags.get("learning-db").cloned(),
         access: pinned_server::http::Access { trusted_proxy, max_accounts, hashing: None },

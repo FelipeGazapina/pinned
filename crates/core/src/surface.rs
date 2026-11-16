@@ -359,6 +359,7 @@ pub const ACTIONS: &[Action] = &[
     h("list_ideas", Read, "The account's ideas, most recently changed first, or with project (a repository like github.com/owner/repo) only that project's: id, title, text, project, status (open, done or dropped), task, who made it, and times. An idea is something that might be done; it is never recalled into a prompt, and facts go to memory (memory_save) instead.").wired(),
     h("save_idea", Write, "Saves an idea: title, text and an optional project (a repository like github.com/owner/repo), or with id changes that one (status: open, done or dropped). An idea is something that might be done; it is never recalled into a prompt, and facts go to memory (memory_save) instead.").wired(),
     h("delete_idea", Write, "Deletes an idea of the account. An idea is something that might be done; it is never recalled into a prompt, and facts go to memory (memory_save) instead.").wired(),
+    h("team", Excluded, "a member's own calls about a team, which only the app sends"),
     h("convex", Excluded, "a session's Convex read, which its machine sends: call the convex_ tools"),
 ];
 

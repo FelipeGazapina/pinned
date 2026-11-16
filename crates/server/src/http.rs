@@ -226,6 +226,10 @@ pub(crate) fn internal_response(e: String) -> Response {
 
 fn internal(e: String) -> Error {
     eprintln!("pinned-server: {e}");
+    // Refused for a busy lock: nothing was done, and the client may send the same request again.
+    if e == db::BUSY {
+        return Error(StatusCode::SERVICE_UNAVAILABLE, e);
+    }
     Error(StatusCode::INTERNAL_SERVER_ERROR, "the hub failed; try again".into())
 }
 
@@ -971,6 +975,31 @@ fn client_frame(server: &Arc<Server>, account: &Arc<Account>, client: u64, text:
     crate::traffic::received(parsed.as_ref().map_or(crate::traffic::UNREADABLE, crate::traffic::Labeled::label), text.len());
     match parsed {
         Ok(ClientFrame::Call { id, call, .. }) if account.needs_unlock(client, Side::Node, &call) => locked(id),
+        // A team's op is read once, the personal call inside it into its type, and the unlock
+        // check and the run both take that one read.
+        Ok(ClientFrame::Hub { id, call: HubCall::Team { team, op } }) => {
+            // This connection asks about teams, so it hears their events from now on.
+            account.hears_teams(client);
+            let reply = |result| account.to_client(client, &ToClient::Reply(Reply::new(id, result)));
+            let op = match crate::teams::Op::read(op) {
+                Ok(op) => op,
+                Err(e) => return reply(Err(e)),
+            };
+            if account.needs_unlock_for(client, |locked| crate::teams::owner_only(&op, locked)) {
+                return locked(id);
+            }
+            let (hub, account) = (hub.clone(), account.clone());
+            tokio::spawn(async move {
+                let result = match crate::teams::team_id(team) {
+                    Ok(team) => crate::teams::call(&hub, &account, team, op).await,
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = &result {
+                    eprintln!("pinned-server: client {client}'s team call failed: {e}");
+                }
+                account.to_client(client, &ToClient::Reply(Reply::new(id, result)));
+            });
+        }
         Ok(ClientFrame::Hub { id, call }) if account.needs_unlock(client, Side::Hub, &call) => locked(id),
         Ok(ClientFrame::Hub { id, call: HubCall::Unlock { password } }) => {
             let (server, account) = (server.clone(), account.clone());
@@ -1056,6 +1085,11 @@ async fn serve_machine(hub: Arc<Hub>, mut socket: WebSocket) {
         Ok(account) => account,
         Err(e) => return eprintln!("pinned-server: machine sign in failed: {e}"),
     };
+    // A team's box calls only what its sessions need on the team's account (`forward_team_box`).
+    let team = match crate::teams::db::is_team(&hub.db, account.id).await {
+        Ok(team) => team,
+        Err(e) => return eprintln!("pinned-server: machine sign in failed: {e}"),
+    };
     let (machine, socket_id) = (row.id.to_string(), hub.next_socket());
     let (out, mut outbox, overflowed) = Outbox::new();
     let view = MachineView { id: machine.clone(), name: row.name.clone(), os, online: true, last_seen: 0, upstash_box: None, version: version.clone(), update: None, state: None, background: None };
@@ -1084,7 +1118,7 @@ async fn serve_machine(hub: Arc<Hub>, mut socket: WebSocket) {
                 break;
             }
             frame = tokio::time::timeout(MACHINE_SILENT, stream.next()) => match frame {
-                Ok(Some(Ok(Message::Text(text)))) => machine_frame(&hub, &account, &machine, socket_id, &text),
+                Ok(Some(Ok(Message::Text(text)))) => machine_frame(&hub, &account, &machine, socket_id, team, &text),
                 Ok(Some(Ok(Message::Close(_)) | Err(_)) | None) | Err(_) => break,
                 Ok(Some(Ok(_))) => {}
             },
@@ -1105,7 +1139,7 @@ async fn serve_machine(hub: Arc<Hub>, mut socket: WebSocket) {
     eprintln!("pinned-server: machine {machine} of account {} disconnected", account.id);
 }
 
-fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: u64, text: &str) {
+fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: u64, team: bool, text: &str) {
     let parsed = serde_json::from_str::<MachineFrame>(text);
     crate::traffic::received(parsed.as_ref().map_or(crate::traffic::UNREADABLE, crate::traffic::Labeled::label), text.len());
     match parsed {
@@ -1137,11 +1171,23 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
                 let observed = pinned_core::connectors::unix_millis();
                 let (hub, account, machine) = (hub.clone(), account.clone(), machine.to_owned());
                 tokio::spawn(async move {
-                    let Ok(connectors) = hub.connectors(&account).await else { return };
+                    // Nothing is lost: no run waits before the workflows load, and the load that
+                    // succeeds next keeps every online machine's last list (`Hub::connectors`).
+                    let connectors = match hub.connectors(&account).await {
+                        Ok(connectors) => connectors,
+                        Err(e) => {
+                            let class = match e == crate::db::BUSY {
+                                true => "the hub was busy",
+                                false => "its workflows could not be read",
+                            };
+                            eprintln!("pinned-server: account {}: a machine's tab list wakes no workflow until the next pass: {class}", account.id);
+                            return;
+                        }
+                    };
                     let id = account.id;
                     let open = move |work| {
                         let hub = hub.clone();
-                        async move { hub.open_placed(id, work).await }
+                        async move { hub.open_found(id, work).await }
                     };
                     if let Err(e) = connectors.on_tabs(&machine, observed, &after, open).await {
                         eprintln!("pinned-server: could not wake a workflow run: {e}");
@@ -1161,6 +1207,7 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
                 // Its sessions act as the user only through `surface`, which checks, audits and holds
                 // each act, and never decide a confirmation.
                 let surfaced = match call {
+                    call if team => return forward_team_box(hub, account, machine, socket, id, call).await,
                     HubCall::Act { act } => crate::surface::act(&hub, &account, &machine, act).await,
                     HubCall::Confirmations => hub.hub_call(&account, HubCall::Confirmations).await,
                     HubCall::DecideConfirmation { .. } => Err("only the account's owner decides, in the app".to_owned()),
@@ -1178,6 +1225,61 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
                 account.to_machine(machine, socket, &ToMachine::Reply(unknown_call(id, e)));
             }
         }
+    }
+}
+
+/// A hub call from the machine of a team's box. Deny by default: only what its session needs to
+/// run on the team's account goes on to `forward`, which checks each as it does a person's
+/// machine's: a workflow session's callbacks, its own tabs' archive, its task records, and asking
+/// the team's people. A session callback must also name the workflow and subject of a live run
+/// the hub bound to this machine (`teams::db::bound_runs`): the tabs a box reports vouch for
+/// nothing. No agent act, import, tastes, sync, sharing, delegation, MCP secrets or global
+/// orchestrator.
+async fn forward_team_box(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: u64, id: u64, call: HubCall) {
+    let allowed = matches!(
+        call,
+        HubCall::Stage { .. }
+            | HubCall::SlackReply { .. }
+            | HubCall::LinearCreate { .. }
+            | HubCall::LinearTake { .. }
+            | HubCall::RunSet { .. }
+            | HubCall::AutoArchive { .. }
+            | HubCall::RecordTasks { .. }
+            | HubCall::Team { .. }
+    );
+    if !allowed {
+        let refused = format!("a team's box may not send {}", surface::cmd_of(&call));
+        eprintln!("pinned-server: machine {machine} of team {} was refused: {refused}", account.id);
+        return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, Err(refused))));
+    }
+    // A run's callback is held to the run the hub bound to this machine (`team_runs.box`), never
+    // to the tabs the box reports: a box vouches for nothing of its own.
+    let Some((connector, subject)) = run_work(&call) else {
+        return forward(hub, account, machine, socket, id, call).await;
+    };
+    let refused = match crate::teams::db::bound_runs(&hub.db, account.id, &machine).await {
+        Ok(runs) if runs.is_empty() => "this box has no live run of the team".to_owned(),
+        Ok(runs) if runs.iter().any(|(workflow, bound)| *workflow == connector && bound.as_ref() == Some(&subject)) => {
+            return forward(hub, account, machine, socket, id, call).await;
+        }
+        Ok(_) => "this box's run is not of that workflow on that subject".to_owned(),
+        Err(e) => e,
+    };
+    eprintln!("pinned-server: machine {machine} of team {} was refused: {refused}", account.id);
+    account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, Err(refused))));
+}
+
+/// The workflow and subject a workflow session's callback acts for: a stage or a run variable for
+/// its subject, a Slack reply or a Linear issue for its Slack thread. None for any other call.
+fn run_work(call: &HubCall) -> Option<(String, Subject)> {
+    match call {
+        HubCall::Stage { connector, subject, .. } | HubCall::RunSet { connector, subject, .. } => Some((connector.clone(), subject.clone())),
+        HubCall::SlackReply { connector, channel, thread, .. }
+        | HubCall::LinearCreate { connector, channel, thread, .. }
+        | HubCall::LinearTake { connector, channel, thread, .. } => {
+            Some((connector.clone(), Subject::SlackThread { channel: channel.clone(), thread: thread.clone() }))
+        }
+        _ => None,
     }
 }
 
@@ -1217,6 +1319,14 @@ async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: 
         let result = hub.auto_archive(&account, &machine, &tab).await.and_then(|marks| serde_json::to_value(marks).map_err(|e| e.to_string()));
         return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
     }
+    // A team's box asks its people; no other team op comes from a machine.
+    if let HubCall::Team { op, .. } = call {
+        let result = crate::teams::machine_call(&hub, &account, &machine, op).await;
+        if let Err(e) = &result {
+            eprintln!("pinned-server: machine {machine}'s team call failed: {e}");
+        }
+        return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
+    }
     if let HubCall::RecordTasks { records } = call {
         let result = hub.record_tasks(&account, &machine, records).await.map(|()| Value::Null);
         if let Err(e) = &result {
@@ -1224,16 +1334,7 @@ async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: 
         }
         return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
     }
-    let work = match &call {
-        HubCall::Stage { connector, subject, .. } | HubCall::RunSet { connector, subject, .. } => Some((connector.clone(), subject.clone())),
-        HubCall::SlackReply { connector, channel, thread, .. }
-        | HubCall::LinearCreate { connector, channel, thread, .. }
-        | HubCall::LinearTake { connector, channel, thread, .. } => {
-            Some((connector.clone(), Subject::SlackThread { channel: channel.clone(), thread: thread.clone() }))
-        }
-        _ => None,
-    };
-    let result = match work {
+    let result = match run_work(&call) {
         Some((connector, subject)) if account.working_on(&connector, &subject, |id| *id == machine) => hub.hub_call(&account, call).await,
         Some(_) => Err("this machine runs no session of that workflow on that subject".into()),
         // An app's first sign-in moves its own connectors and tastes in, which only an empty account
