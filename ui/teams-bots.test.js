@@ -101,6 +101,20 @@ function app({ answers = {}, team = OWNER_TEAM, email = "bruno@acme.dev", pages 
   return { context, frames, shown, page, open, click, input, control, docListeners, listeners, read: (code) => here(vm.runInContext(code, context)) };
 }
 
+const ASKS_LEAD = "It asks the team before the steps on this list:";
+const ASKS_ITEMS = ["Delete outside the worktree", "Force-push", "Push to main", "Release", "Deploy", "Production", "Secrets", "Payment", "Write outside the worktree", "Change its own permissions", "Network install", "Machine-wide change"];
+const ASKS_KEYS = "The bot can do whatever the team's keys allow, so connect keys with the least access the bot needs.";
+/** The page says what the bot asks the team before, as a visible list of twelve, then the advice on keys, in this order. */
+function assertAsksList(html, where) {
+  const t = text(html);
+  const list = html.match(/<ul class="tb-asks">([\s\S]*?)<\/ul>/)?.[1] ?? "";
+  assert.deepEqual([...list.matchAll(/<li>([^<]*)<\/li>/g)].map((m) => m[1]), ASKS_ITEMS, `${where}: the twelve items`);
+  assert.ok(t.indexOf(ASKS_LEAD) >= 0 && t.indexOf(ASKS_LEAD) < t.indexOf("Delete outside the worktree"), `${where}: the lead comes first`);
+  assert.ok(t.indexOf("Machine-wide change") < t.indexOf(ASKS_KEYS), `${where}: the advice on keys follows the list`);
+  assert.ok(!t.includes("It never deploys"), `${where}: the old sentence is gone`);
+  assert.ok(!/\b(cannot|blocked|prevents?|never|won't)\b/i.test(t), `${where}: none of the words the guard may not be described with`);
+}
+
 /** The ops a page asks to draw itself. */
 const wizardAnswers = (over = {}) => ({ members: MEMBERS, groups: [PUBLISH, REVIEWERS], projects: PROJECTS, ...over });
 
@@ -217,7 +231,7 @@ test("creating a bot saves the workflow in the team's store through hub, then th
   let t = text(a.page());
   assert.match(t, /Step 4 of 4 How far can it go on its own\?/);
   assert.ok(t.includes("up to US$ 5") && t.includes("up to 30 minutes"));
-  assert.ok(t.includes("It never deploys to production, releases or pushes to main without calling a person."));
+  assertAsksList(a.page(), "step 4");
   assert.ok(t.includes("The bot starts as a draft. It runs on its own only after someone in @publish or @reviewers (or the owner) turns it on."), t);
   assert.deepEqual(a.control("next"), { disabled: true }, "two projects and none picked");
   await a.click("project", { key: "github.com/acme/orders-api" });
@@ -395,6 +409,12 @@ const openBot = async (a, id = "c1") => {
   a.context.openTeamBot(id);
   await flush();
 };
+
+test("the bot page says what the bot asks the team before, with the twelve steps listed", async () => {
+  const a = app({ answers: botAnswers({ runs: [run()], calls: [] }) });
+  await openBot(a);
+  assertAsksList(a.page(), "the bot page");
+});
 
 test("the bot page reads the bot, people, groups, projects, runs and calls of the team", async () => {
   const a = app({ answers: botAnswers() });

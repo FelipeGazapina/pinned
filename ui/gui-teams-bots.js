@@ -35,7 +35,7 @@ const TB_TEXT = {
     turnOff: "Turn the bot off",
     turnOn: "Off, turn it on",
     switching: "Working…",
-    cannotTurnOn: (who) => `Ask ${who} to turn it on.`,
+    askToTurnOn: (who) => `Ask ${who} to turn it on.`,
     needKeys: "The team needs its Upstash key and Claude token before a bot can run. The owner connects them in the team's settings.",
     does: "What it does",
     doesManual: "What it does, only when someone runs it",
@@ -50,6 +50,7 @@ const TB_TEXT = {
     },
     limits: (usd, minutes) => `up to US$ ${usd} or ${minutes} minutes per run`,
     callsNote: "Outside those moments it works alone, and anyone on the team can follow or take over.",
+    asks: "What it asks first",
     runs: "Latest runs",
     noRuns: "No runs yet.",
   },
@@ -148,7 +149,6 @@ const TB_TEXT = {
     spendValue: (usd) => `up to US$ ${usd}`,
     time: "Time per run",
     timeValue: (minutes) => `up to ${minutes} minutes`,
-    never: "It never deploys to production, releases or pushes to main without calling a person.",
     draftNote: (who) => `The bot starts as a draft. It runs on its own only after ${who} turns it on.`,
     doneDraft: (name) => `${name} is ready, as a draft`,
     doneOn: (name) => `${name} is on`,
@@ -165,6 +165,31 @@ const TB_TEXT = {
     turnFailed: (e) => `Could not turn the bot on: ${e}`,
   },
 };
+
+/** The steps a bot asks the team before, one label per item of the hub's never list
+ * (crates/core/src/preauth/never.rs, `NeverItem::label`), as short phrases for people. */
+const TB_ASKS = {
+  lead: "It asks the team before the steps on this list:",
+  items: [
+    "Delete outside the worktree",
+    "Force-push",
+    "Push to main",
+    "Release",
+    "Deploy",
+    "Production",
+    "Secrets",
+    "Payment",
+    "Write outside the worktree",
+    "Change its own permissions",
+    "Network install",
+    "Machine-wide change",
+  ],
+  keys: "The bot can do whatever the team's keys allow, so connect keys with the least access the bot needs.",
+};
+
+/** The sentence, the list of the twelve steps, and the advice on keys: the same on the bot page and in the wizard. */
+const tbAsksHtml = () =>
+  `<p class="tb-asks-lead">${tbEsc(TB_ASKS.lead)}</p><ul class="tb-asks">${TB_ASKS.items.map((x) => `<li>${tbEsc(x)}</li>`).join("")}</ul><p class="tb-foot">${tbEsc(TB_ASKS.keys)}</p>`;
 
 /** The hub's `TeamPolicy::default()`, which is not on the wire: the numbers a call and a new bot start from. */
 const TB_POLICY = { escalateSecs: 1800, giveUpSecs: 7200, usd: 5, minutes: 30 };
@@ -524,7 +549,7 @@ function tbBotHtml(ui, team) {
     return `<button type="button" class="tb-listrow" data-tb="open-run" data-run="${tbEsc(r.id)}">${row}</button>`;
   });
 
-  const notice = bot.on ? "" : may ? "" : `<p class="tb-note">${tbEsc(t.cannotTurnOn(tbAskText(rules, members)))}</p>`;
+  const notice = bot.on ? "" : may ? "" : `<p class="tb-note">${tbEsc(t.askToTurnOn(tbAskText(rules, members)))}</p>`;
   return `<div class="tb-head">
       <div class="tb-who">${tbMono(name, "big")}<div class="tb-titles"><h1>${tbEsc(name)}${bot.on ? "" : ` <span class="tb-tag draft">${tbEsc(t.draft)}</span>`}</h1>
         <div class="tb-sub">${tbEsc(t.of(project, owner))}${bot.once ? ` <span class="tb-tag">${tbEsc(t.once)}</span>` : ""}</div></div></div>
@@ -533,6 +558,7 @@ function tbBotHtml(ui, team) {
     ${tbError(ui.error && ui.state === "ready" ? ui.error : "")}${notice}${needKeys && !bot.on ? `<p class="tb-note">${tbEsc(t.needKeys)}</p>` : ""}
     <section class="tb-section"><h2>${tbEsc(manual ? t.doesManual : t.does)}</h2>${stepRows.length ? `<ol class="tb-steps">${stepRows.join("")}</ol>` : `<p class="tb-hint">${tbEsc(t.noSteps)}</p>`}</section>
     <section class="tb-section"><h2>${tbEsc(t.calls)}</h2><div class="tb-card">${moments.map(moment).join("")}</div><p class="tb-foot">${tbEsc(t.callsNote)}</p></section>
+    <section class="tb-section tb-guard"><h2>${tbEsc(t.asks)}</h2>${tbAsksHtml()}</section>
     <section class="tb-section"><h2>${tbEsc(t.runs)}</h2>${runRows.length ? `<div class="tb-list">${runRows.join("")}</div>` : `<p class="tb-hint">${tbEsc(t.noRuns)}</p>`}</section>`;
 }
 
@@ -839,7 +865,7 @@ function tbWizHtml(team) {
           ? `<span class="tb-pills">${s.data.projects.map((p) => `<button type="button" class="tb-opt" data-tb="project" data-key="${tbEsc(p.key)}" aria-pressed="${s.project === p.key}">${tbEsc(p.name)}</button>`).join("")}</span>`
           : `<span class="tb-value">${tbEsc(w.noProjects)}</span>`
       }</div><div class="tb-row"><span>${tbEsc(w.spend)}</span><span class="tb-value">${tbEsc(w.spendValue(TB_POLICY.usd))}</span></div><div class="tb-row"><span>${tbEsc(w.time)}</span><span class="tb-value">${tbEsc(w.timeValue(TB_POLICY.minutes))}</span></div></div>
-      <p class="tb-lede">${tbEsc(w.never)}</p><p class="tb-lede">${tbEsc(w.draftNote(`${who}${groups.length ? " (or the owner)" : ""}`))}</p>`;
+      <div class="tb-card tb-guard">${tbAsksHtml()}</div><p class="tb-lede">${tbEsc(w.draftNote(`${who}${groups.length ? " (or the owner)" : ""}`))}</p>`;
   } else {
     const name = s.saved?.name ?? s.name;
     const turn = tbWizTurnOn(s.saved?.calls ?? calls, s.data, team.role);

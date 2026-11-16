@@ -142,3 +142,11 @@ button.tb-listrow { cursor: pointer; }
   .tb-page { padding: 20px 16px 48px; }
   .tb-when { width: auto; }
 }
+
+/* What the bot asks the team before: a visible list of twelve, in the bot page and in the wizard. */
+.tb-asks-lead { margin: 0; font-size: 14px; }
+.tb-asks { margin: 0; padding: 0; list-style: none; display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 6px 14px; font-size: 13px; }
+.tb-asks li { position: relative; padding-left: 14px; min-width: 0; overflow-wrap: anywhere; }
+.tb-asks li::before { content: ""; position: absolute; left: 2px; top: 0.55em; width: 5px; height: 5px; border-radius: 50%; background: var(--g-warning); }
+.tb-card.tb-guard { padding: 14px 16px; gap: 10px; }
+.tb-guard .tb-foot { margin: 0; }
