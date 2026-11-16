@@ -305,7 +305,7 @@ impl Connection {
         // The schema waits on locks as long as it must: a hub starting while another still runs
         // must not fail its migration on that hub's short lock waits. Bounded again after it.
         client.batch_execute("set lock_timeout = 0").await.map_err(|e| format!("could not create the tables: {e}"))?;
-        client.batch_execute(schema).await.map_err(|e| format!("could not create the tables: {e}"))?;
+        create(&client, schema).await.map_err(|e| format!("could not create the tables: {e}"))?;
         bound_lock_waits(&client).await?;
         Ok(Connection { url: url.into(), client: Arc::new(tokio::sync::Mutex::new(Some(Arc::new(client)))), write_wait_ms: Arc::default() })
     }
@@ -565,24 +565,98 @@ async fn open(url: &str) -> Result<Client, String> {
             eprintln!("pinned-server: Postgres connection ended: {e}");
         }
     });
-    // A plain statement rather than a startup option, which a pooler in front of Postgres may refuse.
-    // Bounded like the connect: `client` runs this holding the lock every caller waits on.
-    match tokio::time::timeout(CONNECT_WAIT, client.batch_execute(&format!("set statement_timeout = {}", STATEMENT_LIMIT.as_millis()))).await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => eprintln!("pinned-server: Postgres keeps its own statement timeout: {e}"),
-        Err(_) => return Err("could not connect to Postgres: it did not answer the statement timeout".into()),
-    }
-    bound_lock_waits(&client).await?;
+    let session = &client;
+    session_limits(|sql| async move { session.batch_execute(&sql).await }).await?;
     Ok(client)
 }
 
-/// Sets `LOCK_LIMIT` on `client` for its session, bounded like the statement timeout.
+/// Sets `STATEMENT_LIMIT` and `LOCK_LIMIT` on a session through `run`. Plain statements rather
+/// than startup options, which a pooler in front of Postgres may refuse. A session without
+/// either is refused: one statement of the hub's that runs or waits too long stalls every
+/// account's statements behind it.
+async fn session_limits<F: std::future::Future<Output = Result<(), E>>, E: std::fmt::Display>(run: impl Fn(String) -> F) -> Result<(), String> {
+    limit("statement timeout", run(format!("set statement_timeout = {}", STATEMENT_LIMIT.as_millis()))).await?;
+    limit("lock timeout", run(lock_limit())).await
+}
+
+/// Sets `LOCK_LIMIT` on `client` for its session again.
 async fn bound_lock_waits(client: &Client) -> Result<(), String> {
-    match tokio::time::timeout(CONNECT_WAIT, client.batch_execute(&format!("set lock_timeout = {}", LOCK_LIMIT.as_millis()))).await {
+    limit("lock timeout", client.batch_execute(&lock_limit())).await
+}
+
+fn lock_limit() -> String {
+    format!("set lock_timeout = {}", LOCK_LIMIT.as_millis())
+}
+
+/// What setting the session limit `what` answered: an error unless Postgres took it. Bounded like
+/// the connect: `client` runs this holding the lock every caller waits on.
+async fn limit<E: std::fmt::Display>(what: &str, set: impl std::future::Future<Output = Result<(), E>>) -> Result<(), String> {
+    match tokio::time::timeout(CONNECT_WAIT, set).await {
         Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => Err(format!("could not connect to Postgres: it refused the lock timeout: {e}")),
-        Err(_) => Err("could not connect to Postgres: it did not answer the lock timeout".into()),
+        Ok(Err(e)) => Err(format!("could not connect to Postgres: it refused the {what}: {e}")),
+        Err(_) => Err(format!("could not connect to Postgres: it did not answer the {what}")),
     }
+}
+
+/// Runs `schema` one statement at a time, each only when the catalog says it would change
+/// something. A statement that changes nothing may still take a lock that waits on another hub's
+/// rows (`add column if not exists` takes its table's exclusive lock; `create index if not
+/// exists` waits on its table's writes), and while it waits every statement of a hub still
+/// running on that table queues behind it. One that is needed waits as long as it must.
+async fn create(client: &Client, schema: &str) -> Result<(), tokio_postgres::Error> {
+    for statement in statements(schema) {
+        if needed(client, &needs(&statement)).await? {
+            client.batch_execute(&statement).await?;
+        }
+    }
+    Ok(())
+}
+
+/// The statements of `schema`, in order, without its comment lines.
+fn statements(schema: &str) -> Vec<String> {
+    let text = schema.lines().filter(|line| !line.trim_start().starts_with("--")).collect::<Vec<_>>().join("\n");
+    text.split(';').map(str::trim).filter(|statement| !statement.is_empty()).map(String::from).collect()
+}
+
+/// What the catalog must lack for a schema statement to run.
+#[derive(Debug, PartialEq)]
+enum Needs<'a> {
+    /// Nothing: it takes no lock that waits on another hub's rows when it changes nothing
+    /// (`create table if not exists` on a table that exists; an `update` that matches no row).
+    Nothing,
+    /// `alter table <table> add column if not exists <column>, ...`: any of the columns.
+    Columns(&'a str, Vec<&'a str>),
+    /// `create index if not exists <index> ...`: the index.
+    Index(&'a str),
+    /// `alter table <table> alter column <column> drop not null`: the column's being nullable.
+    Nullable(&'a str, &'a str),
+}
+
+fn needs(statement: &str) -> Needs<'_> {
+    const ADD: [&str; 5] = ["add", "column", "if", "not", "exists"];
+    let words: Vec<&str> = statement.split_whitespace().collect();
+    match words[..] {
+        ["create", "index", "if", "not", "exists", index, ..] => Needs::Index(index),
+        ["alter", "table", table, "alter", "column", column, "drop", "not", "null"] => Needs::Nullable(table, column),
+        ["alter", "table", table, ..] if words[3..].starts_with(&ADD) => {
+            Needs::Columns(table, words.windows(ADD.len() + 1).filter(|w| w[..ADD.len()] == ADD).map(|w| w[ADD.len()].trim_end_matches(',')).collect())
+        }
+        _ => Needs::Nothing,
+    }
+}
+
+/// Whether the catalog lacks what `needs` names, so its statement would change something.
+async fn needed(client: &Client, needs: &Needs<'_>) -> Result<bool, tokio_postgres::Error> {
+    const COLUMN: &str = "from pg_attribute where attrelid = to_regclass($1::text) and attnum > 0 and not attisdropped";
+    Ok(match needs {
+        Needs::Nothing => true,
+        Needs::Columns(table, columns) => {
+            let found: i64 = client.query_one(&format!("select count(*) {COLUMN} and attname::text = any($2::text[])"), &[table, columns]).await?.get(0);
+            found < columns.len() as i64
+        }
+        Needs::Index(index) => client.query_one("select to_regclass($1::text) is null", &[index]).await?.get(0),
+        Needs::Nullable(table, column) => client.query_one(&format!("select coalesce(bool_or(attnotnull), true) {COLUMN} and attname::text = $2::text"), &[table, column]).await?.get(0),
+    })
 }
 
 /// Whether Postgres refused `e` for waiting on a lock past `LOCK_LIMIT`.
@@ -2344,6 +2418,32 @@ mod tests {
     use super::*;
 
     #[test]
+    fn every_schema_statement_that_alters_or_indexes_is_checked_first() {
+        for statement in statements(SCHEMA).iter().chain(&statements(LEARNING_SCHEMA)) {
+            let checked = needs(statement) != Needs::Nothing;
+            let plain = statement.starts_with("create table if not exists ") || statement.starts_with("update ");
+            assert!(checked != plain, "{statement}");
+        }
+        assert_eq!(
+            needs("alter table team_calls add column if not exists step_hash text, add column if not exists released_at bigint"),
+            Needs::Columns("team_calls", vec!["step_hash", "released_at"])
+        );
+        assert_eq!(needs("alter table invites alter column expires_at drop not null"), Needs::Nullable("invites", "expires_at"));
+        assert_eq!(needs("create index if not exists tasks_due on tasks (next_at) where enabled and next_at is not null"), Needs::Index("tasks_due"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_session_without_its_statement_timeout_is_refused() {
+        let refused = session_limits(|sql| async move { if sql.starts_with("set statement_timeout") { Err("permission denied") } else { Ok(()) } }).await;
+        assert_eq!(refused, Err("could not connect to Postgres: it refused the statement timeout: permission denied".to_string()));
+        let unanswered = session_limits(|sql| async move { if sql.starts_with("set statement_timeout") { std::future::pending().await } else { Ok::<(), &str>(()) } }).await;
+        assert_eq!(unanswered, Err("could not connect to Postgres: it did not answer the statement timeout".to_string()));
+        let no_lock_limit = session_limits(|sql| async move { if sql.starts_with("set lock_timeout") { Err("permission denied") } else { Ok(()) } }).await;
+        assert_eq!(no_lock_limit, Err("could not connect to Postgres: it refused the lock timeout: permission denied".to_string()));
+        assert_eq!(session_limits(|_| async { Ok::<(), &str>(()) }).await, Ok(()));
+    }
+
+    #[test]
     fn a_secret_is_sealed_with_the_key_file_made_on_first_start() {
         let dir = std::env::temp_dir().join(format!("pinned-sealer-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -2401,3 +2501,4 @@ fn idea_of(row: &tokio_postgres::Row) -> Result<Idea, String> {
         updated_at: row.get(8),
     })
 }
+
