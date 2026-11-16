@@ -299,7 +299,8 @@ test("creating a bot sends one save_bot with the workflow as its connector, as a
   // Step 4: how far.
   let t = text(a.page());
   assert.match(t, /Step 4 of 4 How far can it go on its own\?/);
-  assert.ok(t.includes("up to US$ 5") && t.includes("up to 30 minutes"));
+  assert.ok(t.includes("Time per run up to 30 minutes") && t.includes("Every run also stops at 4 hours."), t);
+  assert.ok(!/US\$|spend|usd|dollar/i.test(t) && !/<input[^>]*usd/i.test(a.page()), "no spend limit on step 4");
   assertAsksList(a.page(), "step 4");
   assert.ok(t.includes("The bot starts as a draft. It runs on its own only after someone in @publish or @reviewers (or the owner) turns it on."), t);
   assert.deepEqual(a.control("next"), { disabled: true }, "two projects and none picked");
@@ -610,7 +611,7 @@ test("Who it calls has a row for each moment, a person's name, the owner's, and 
   assert.deepEqual(rows, [
     ["before_irreversible", "Before something that can't be undone @publish"],
     ["in_doubt", "When in doubt @publish"],
-    ["on_limit", "At a limit (up to US$ 5 or 30 minutes per run) Ana Prado (owner)"],
+    ["on_limit", "At a limit Ana Prado (owner)"],
     ["on_failure", "On failure Carla"],
   ]);
   assert.ok(text(a.page()).includes("Outside those moments it works alone, and anyone on the team can follow or take over."));
@@ -621,7 +622,7 @@ test("a limit and a failure that go to the same person are one row", async () =>
   await openBot(a);
   const rows = [...a.page().matchAll(/<div class="tb-row" data-moment="(\w+)">/g)].map((m) => m[1]);
   assert.deepEqual(rows, ["before_irreversible", "in_doubt", "on_limit"]);
-  assert.ok(text(a.page()).includes("At a limit or on failure (up to US$ 5 or 30 minutes per run)"));
+  assert.ok(text(a.page()).includes("At a limit or on failure Ana Prado (owner)"));
 });
 
 test("Latest runs are this bot's own, newest first, each outcome in words", async () => {
@@ -929,4 +930,28 @@ test("the group page does not name the team as the one who stopped a run the hub
   const rows = [...a.page().matchAll(/<span class="tb-line" data-tone="(\w*)">([^<]*)<\/span>/g)].map((m) => m[2]);
   assert.deepEqual(rows, ["Test publisher&#39;s call was closed: the run ended · its session&#39;s tab went away before it finished."]);
   assert.ok(!/A former member/.test(text(a.page())));
+});
+
+test("the bot page shows the time limit and the 4 hour line, and no spend, whatever the bot's usd is", async () => {
+  const a = app({ answers: botAnswers({ bots: [bot({ limits: { usd: 12.5, minutes: 45 } })] }) });
+  await openBot(a);
+  const t = text(a.page());
+  assert.ok(t.includes("Limit per run Time per run up to 45 minutes Every run also stops at 4 hours."), t);
+  assert.ok(!/US\$|spend|usd|dollar|12\.5/i.test(t), t);
+  assert.ok(!/<input[^>]*(usd|spend)/i.test(a.page()));
+  assert.equal(a.page().match(/data-limit="/g).length, 1, "one limit row");
+});
+
+test("step 4 draws no USD input or row while the save still sends limits.usd 5", async () => {
+  const a = app({ answers: wizardAnswers(saving()) });
+  await a.open("team-bot-new");
+  await a.click("idea", { idea: "weekly" });
+  for (let i = 0; i < 3; i++) await a.click("next");
+  assert.match(text(a.page()), /Step 4 of 4/);
+  assert.ok(!/US\$|spend|usd|dollar/i.test(text(a.page())) && !/usd/i.test(a.page()), "nothing on the page names money");
+  assert.equal(a.page().match(/<input/g)?.length ?? 0, 0, "no input on step 4");
+  await a.click("project", { key: "github.com/acme/site" });
+  await a.click("next");
+  const sent = a.frames.find((f) => f.op === "save_bot");
+  assert.deepEqual(sent.bot.limits, { usd: 5, minutes: 30 }, "sent silently with the policy default");
 });

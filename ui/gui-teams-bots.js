@@ -49,7 +49,10 @@ const TB_TEXT = {
       on_failure: "On failure",
       limit_or_failure: "At a limit or on failure",
     },
-    limits: (usd, minutes) => `up to US$ ${usd} or ${minutes} minutes per run`,
+    limits: "Limit per run",
+    time: "Time per run",
+    timeValue: (minutes) => `up to ${minutes} minutes`,
+    maxLife: "Every run also stops at 4 hours.",
     callsNote: "Outside those moments it works alone, and anyone on the team can follow or take over.",
     asks: "What it asks first",
     skipped: "Events that started no run",
@@ -169,10 +172,9 @@ const TB_TEXT = {
     s4Title: "How far can it go on its own?",
     project: "Project it touches",
     noProjects: "The team has no projects yet: attach one first. Until then the bot has nothing to work on.",
-    spend: "Spend per run",
-    spendValue: (usd) => `up to US$ ${usd}`,
     time: "Time per run",
     timeValue: (minutes) => `up to ${minutes} minutes`,
+    maxLife: "Every run also stops at 4 hours.",
     draftNote: (who) => `The bot starts as a draft. It runs on its own only after ${who} turns it on.`,
     doneDraft: (name) => `${name} is ready, as a draft`,
     doneOn: (name) => `${name} is on`,
@@ -611,9 +613,9 @@ function tbBotHtml(ui, team) {
     ["before_irreversible", t.moments.before_irreversible, rules.before_irreversible],
     ["in_doubt", t.moments.in_doubt, rules.in_doubt],
   ];
-  if (tbSameWho(rules.on_limit, rules.on_failure)) moments.push(["on_limit", `${t.moments.limit_or_failure} (${t.limits(bot.limits?.usd ?? TB_POLICY.usd, bot.limits?.minutes ?? TB_POLICY.minutes)})`, rules.on_limit]);
+  if (tbSameWho(rules.on_limit, rules.on_failure)) moments.push(["on_limit", t.moments.limit_or_failure, rules.on_limit]);
   else {
-    moments.push(["on_limit", `${t.moments.on_limit} (${t.limits(bot.limits?.usd ?? TB_POLICY.usd, bot.limits?.minutes ?? TB_POLICY.minutes)})`, rules.on_limit]);
+    moments.push(["on_limit", t.moments.on_limit, rules.on_limit]);
     moments.push(["on_failure", t.moments.on_failure, rules.on_failure]);
   }
   const moment = ([k, label, who]) => `<div class="tb-row" data-moment="${k}"><span>${tbEsc(label)}</span>${tbWhoChip(who, members)}</div>`;
@@ -645,6 +647,7 @@ function tbBotHtml(ui, team) {
     ${tbError(ui.error && ui.state === "ready" ? ui.error : "")}${offNote}${notice}${needKeys && !bot.on ? `<p class="tb-note">${tbEsc(t.needKeys)}</p>` : ""}
     <section class="tb-section"><h2>${tbEsc(manual ? t.doesManual : firesOn ? t.doesOn(firesOn) : t.does)}</h2>${stepRows.length ? `<ol class="tb-steps">${stepRows.join("")}</ol>` : `<p class="tb-hint">${tbEsc(t.noSteps)}</p>`}</section>
     <section class="tb-section"><h2>${tbEsc(t.calls)}</h2><div class="tb-card">${moments.map(moment).join("")}</div><p class="tb-foot">${tbEsc(t.callsNote)}</p></section>
+    <section class="tb-section" data-limits><h2>${tbEsc(t.limits)}</h2><div class="tb-card"><div class="tb-row" data-limit="time"><span>${tbEsc(t.time)}</span><span class="tb-value">${tbEsc(t.timeValue(bot.limits?.minutes ?? TB_POLICY.minutes))}</span></div></div><p class="tb-foot">${tbEsc(t.maxLife)}</p></section>
     <section class="tb-section tb-guard"><h2>${tbEsc(t.asks)}</h2>${tbAsksHtml()}</section>
     ${skippedHtml}
     <section class="tb-section"><h2>${tbEsc(t.runs)}</h2>${runRows.length ? `<div class="tb-list">${runRows.join("")}</div>` : `<p class="tb-hint">${tbEsc(t.noRuns)}</p>`}</section>
@@ -987,7 +990,7 @@ function tbWizHtml(team) {
         s.data.projects.length
           ? `<span class="tb-pills">${s.data.projects.map((p) => `<button type="button" class="tb-opt" data-tb="project" data-key="${tbEsc(p.key)}" aria-pressed="${s.project === p.key}">${tbEsc(p.name)}</button>`).join("")}</span>`
           : `<span class="tb-value">${tbEsc(w.noProjects)}</span>`
-      }</div><div class="tb-row"><span>${tbEsc(w.spend)}</span><span class="tb-value">${tbEsc(w.spendValue(TB_POLICY.usd))}</span></div><div class="tb-row"><span>${tbEsc(w.time)}</span><span class="tb-value">${tbEsc(w.timeValue(TB_POLICY.minutes))}</span></div></div>
+      }</div><div class="tb-row"><span>${tbEsc(w.time)}</span><span class="tb-value">${tbEsc(w.timeValue(TB_POLICY.minutes))}</span></div><p class="tb-foot tb-limit-note">${tbEsc(w.maxLife)}</p></div>
       <div class="tb-card tb-guard">${tbAsksHtml()}</div><p class="tb-lede">${tbEsc(w.draftNote(`${who}${groups.length ? " (or the owner)" : ""}`))}</p>`;
   } else {
     const name = s.saved?.name ?? s.name;
