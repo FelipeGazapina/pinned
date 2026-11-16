@@ -550,3 +550,15 @@ fn a_search_for_similar_issues_holds_only_scrubbed_words() {
     }
     assert!(log[0].contains("q=export+fails+repo"), "{log:?}");
 }
+
+#[test]
+fn another_tabs_folder_that_no_project_list_names_is_scrubbed() {
+    let fake = Fake::start();
+    let hub = reporting("reports_tabs", Some(&fake));
+    let token = signed_up(&hub, "ana@example.test");
+    let (mut ana, tabs) = agents_in(&hub.url, &token, "ana@example.test", "ana-tabs-mac", &["notes", "pardal-shop"]);
+    // Gone from disk, so the machine no longer lists it as a project; its tab stays open.
+    std::fs::remove_dir_all(ana.dir.join("pardal-shop")).unwrap();
+    let (_, held) = held_report(&mut ana, &tabs[0], problem("pardal-shop broke", "It closes."));
+    assert_eq!(held["title"], "[project] broke", "{held}");
+}
