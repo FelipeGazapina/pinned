@@ -499,10 +499,20 @@ pub async fn is_reserved(db: &Db, team: Uuid, run: Uuid) -> Result<bool, String>
     Ok(row.is_some_and(|r| r.get(0)))
 }
 
-/// Run `run` opened its session on `machine`: it no longer only holds a place.
-pub async fn open_reserved(db: &Db, team: Uuid, run: Uuid, machine: &str) -> Result<(), String> {
-    db.client().await?.execute("update team_runs set box = $3, reserved = false, reserved_at = null where team = $1 and id = $2", &[&team, &run, &machine]).await.map_err(err)?;
-    Ok(())
+/// Run `run` opened its session on `machine`: it no longer only holds a place. Written only
+/// while the run is live and still reserved, like `set_run_box`: false when it ended meanwhile,
+/// as when someone stopped it or the backstop ended it while its box booted, so it gets no box.
+pub async fn open_reserved(db: &Db, team: Uuid, run: Uuid, machine: &str) -> Result<bool, String> {
+    let set = db
+        .client()
+        .await?
+        .execute(
+            &format!("update team_runs set box = $3, reserved = false, reserved_at = null where team = $1 and id = $2 and reserved and state in {LIVE}"),
+            &[&team, &run, &machine],
+        )
+        .await
+        .map_err(err)?;
+    Ok(set == 1)
 }
 
 /// Forgets a run that never started.
@@ -1264,11 +1274,20 @@ pub async fn granted(db: &Db, team: Uuid) -> Result<Vec<i64>, String> {
 
 /// Claims granted event `id` for the poller that runs it: only the claim that deletes the row
 /// gets its stored event and the reserved run that holds its place, so of two hubs exactly one runs it.
+/// Only while that run is still live and reserved: a claim that races the backstop, or a stop, at
+/// the limit gets nothing, so the event never runs without its place.
 pub async fn claim(db: &Db, team: Uuid, id: i64) -> Result<Option<(serde_json::Value, Option<Uuid>)>, String> {
     let row = db
         .client()
         .await?
-        .query_opt("delete from team_run_queue where team = $1 and id = $2 and granted_at is not null returning start, run", &[&team, &id])
+        .query_opt(
+            &format!(
+                "delete from team_run_queue where team = $1 and id = $2 and granted_at is not null
+                   and exists (select 1 from team_runs r where r.id = team_run_queue.run and r.reserved and r.state in {LIVE})
+                 returning start, run"
+            ),
+            &[&team, &id],
+        )
         .await
         .map_err(err)?;
     Ok(row.map(|r| (r.get(0), r.get(1))))

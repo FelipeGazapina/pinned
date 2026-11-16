@@ -393,15 +393,20 @@ pub async fn start_run(hub: &Arc<Hub>, team: &Arc<Account>, workflow_id: &str, s
     };
     // Read again now that the box runs: a run stopped while it booted gets no box, and its box ends at once.
     if !db::set_run_box(&hub.db, team.id, id, &placed.machine).await? {
-        if let Ok(machine) = Uuid::parse_str(&placed.machine) {
-            if let Err(e) = hub.boxes.end_machine(hub, team, machine, crate::boxes::End::Removed).await {
-                eprintln!("pinned-server: the box of run {id} of team {} did not end yet: {e}", team.id);
-            }
-        }
+        end_box_of_ended_run(hub, team, id, &placed.machine).await;
         return Err(super::calls::ENDED_WHILE_BOOTING.into());
     }
     super::push(hub, team.id, TeamEvent::RunChanged { run: run.clone() }).await?;
     Ok((run, placed))
+}
+
+/// Ends the box `machine` of run `id`, which ended while its box booted: its session is not the run's.
+async fn end_box_of_ended_run(hub: &Arc<Hub>, team: &Arc<Account>, id: Uuid, machine: &str) {
+    if let Ok(machine) = Uuid::parse_str(machine) {
+        if let Err(e) = hub.boxes.end_machine(hub, team, machine, crate::boxes::End::Removed).await {
+            eprintln!("pinned-server: the box of run {id} of team {} did not end yet: {e}", team.id);
+        }
+    }
 }
 
 /// Opens the session of run `id`, whose place its trigger's event was given before anything
@@ -432,7 +437,14 @@ pub async fn start_reserved(hub: &Arc<Hub>, team: &Arc<Account>, id: Uuid, mut w
         }
     };
     super::queue::take_claimed(id);
-    db::open_reserved(&hub.db, team.id, id, &placed.machine).await?;
+    // Stopped, or ended by the backstop, since its session started: it gets no box, and its box ends
+    // at once. In a task of its own: the poller's check that opens this holds its subject while it
+    // runs, and ending the box needs that subject to fail the runs the box held.
+    if !db::open_reserved(&hub.db, team.id, id, &placed.machine).await? {
+        let (hub, team, machine) = (hub.clone(), team.clone(), placed.machine.clone());
+        tokio::spawn(async move { end_box_of_ended_run(&hub, &team, id, &machine).await });
+        return Err(super::calls::ENDED_WHILE_BOOTING.into());
+    }
     if let Some(run) = db::run(&hub.db, team.id, id).await? {
         super::push(hub, team.id, TeamEvent::RunChanged { run }).await?;
     }

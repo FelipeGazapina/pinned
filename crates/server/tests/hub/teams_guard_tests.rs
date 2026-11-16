@@ -1,7 +1,7 @@
 //! Teams: guards the code has and no test proved. Each test asserts what a member or a box sees,
 //! and names the guard it holds; the mutation row of each is in the commit that added it.
 
-use super::teams_admission::Crew;
+use super::teams_admission::{Crew, POLLS_HELD};
 use super::teams_calls::{calls_of, choice, design, op, patient, rows, sql, TeamBox};
 use super::teams_go_ahead::{answer, ask, asked, open_calls, released, try_step, DEPLOY};
 use pinned_core::teams::{Answer, AnswerKind, Run as TeamRun, RunState, Situation, TeamOp};
@@ -312,4 +312,70 @@ fn a_restart_after_a_box_failed_does_not_leave_its_run_working_forever() {
     crew.hub.runtime.block_on(teams::calls::tick(crew.hub.hub(), &crew.hub.team_policy)).unwrap();
     assert_eq!(listed(&crew, &holder), [("failed".to_owned(), Some("its box never started".to_owned()))]);
     wait_for("ENG-1 to take the freed place", || crew.live_of(&pages).len() == 1 && crew.waiting(&pages) == 0);
+}
+
+// ---- reservation races ----
+
+/// Ends a reserved run of the team the moment its box is recorded on it, as a stop or the backstop
+/// does between the box's claim of its run and its session's open: in the same transaction, so
+/// the claim answers that the run is live, and the run ended right after.
+fn end_reserved_run_after_its_box_claim(crew: &Crew) {
+    admin_on(
+        &crew.hub.database,
+        "create function end_after_claim() returns trigger language plpgsql as $$ begin
+           update team_runs set state = 'failed', ended_at = now(), outcome = 'it never started' where id = new.id; return null; end $$;
+         create trigger end_after_claim after update on team_runs for each row
+           when (new.reserved and old.box is null and new.box is not null and new.state = 'working') execute function end_after_claim()",
+    );
+}
+
+/// `open_reserved` writes the box only while the run is live and reserved: a reserved run that
+/// ended (stopped, or by the backstop) while its box booted gets no session, its box ends, and
+/// the run stays listed as it ended.
+#[test]
+fn a_reserved_run_that_ended_while_its_box_booted_gets_no_session_and_its_box_ends() {
+    let crew = Crew::new("tg_open_reserved");
+    let bot = crew.on_bot("Pages");
+    end_reserved_run_after_its_box_claim(&crew);
+    let found = crew.found(crew.labeled(&bot, 1)).expect_err("its session did not open");
+    assert!(found.contains("the run ended before its box started, so its box was ended"), "no session opened for it: {found}");
+    wait_for("its box to be deleted", || crew.hub.boxes.live().is_empty());
+    let listed = crew.call(&crew.bob, TeamOp::Runs).unwrap();
+    let listed: Vec<_> = listed.as_array().unwrap().iter().map(|r| (r["state"].clone(), r["outcome"].clone())).collect();
+    assert_eq!(listed, [(json!("failed"), json!("it never started"))], "the run stays listed as it ended");
+    assert_eq!(crew.live_of(&bot), Vec::<String>::new());
+}
+
+/// `claim` takes a granted event only while its reserved run is live and reserved: the run ended
+/// (as the backstop ends it) before the poller's claim, so the claim answers nothing, and nothing
+/// outside pinned is called for the event.
+#[test]
+fn a_claim_after_its_reserved_run_ended_gets_nothing_and_calls_nothing_outside_pinned() {
+    let crew = Crew::new("tg_claim_ended");
+    let (holder, triage) = (crew.on_bot("Docs"), crew.graph_bot("Triage"));
+    admin_on(&crew.hub.database, &format!("update teams set max_live_runs = 1 where id = '{}'", crew.team));
+    assert_eq!(crew.found(crew.labeled(&holder, 9)), Ok(()));
+    assert_eq!(crew.found(crew.graph_labeled(&triage, 1)), Ok(()));
+    assert_eq!(crew.waiting(&triage), 1, "ENG-1 waits");
+    // No check of the team's triggers gets past its Linear poll, so none claims the grant yet.
+    POLLS_HELD.lock().unwrap().push("tg_claim_ended".into());
+    let held = crew.live_of(&holder);
+    crew.stop(&held[0]);
+    wait_for("ENG-1's grant", || crew.reserved_at(&triage) == vec!["set".to_owned()]);
+    assert_eq!(crew.waiting(&triage), 1, "granted, its row waits for a claim");
+    let boxes_before = crew.boxes_created();
+    admin_on(
+        &crew.hub.database,
+        &format!("update team_runs set state = 'failed', ended_at = now(), outcome = 'it never started' where team = '{}' and workflow = '{triage}' and reserved", crew.team),
+    );
+    POLLS_HELD.lock().unwrap().retain(|t| t != "tg_claim_ended");
+
+    // The held check goes on, and a few more pass.
+    std::thread::sleep(Duration::from_secs(4));
+    assert_eq!(crew.outside(1), Vec::<String>::new(), "nothing outside pinned was called for ENG-1");
+    assert_eq!(crew.boxes_created() - boxes_before, 0, "no session opened");
+    assert_eq!(crew.live_of(&triage), Vec::<String>::new());
+    let runs = crew.call(&crew.bob, TeamOp::Runs).unwrap();
+    let ended: Vec<_> = runs.as_array().unwrap().iter().filter(|r| r["workflow"] == json!(triage)).map(|r| (r["state"].clone(), r["outcome"].clone())).collect();
+    assert_eq!(ended, [(json!("failed"), json!("it never started"))], "the run stays listed as it ended");
 }
