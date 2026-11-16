@@ -62,7 +62,7 @@ function page(world = {}) {
     openTeamGroup: (handle) => ops.push({ group: handle }),
     openTeamBotNew: () => ops.push({ botNew: true }),
     account: { email: world.email ?? "bruno.lima@north.example" },
-    document: { addEventListener: (type, fn) => (listeners[type] ??= []).push(fn), body: { dataset: {} }, getElementById: () => ({ before() {} }), createElement: () => ({ remove() {}, setAttribute() {}, dataset: {} }) },
+    document: { addEventListener: (type, fn) => (listeners[type] ??= []).push(fn), body: { dataset: {} }, getElementById: () => ({ before() {} }), createElement: () => ({ remove() {}, setAttribute() {}, dataset: {}, querySelector: () => null, querySelectorAll: () => [] }) },
     teamsCurrent: () => (world.team === null ? null : { id: "team-1", name: "North Studio", role: world.role ?? "member", credential: {} }),
     teamCall: async (op) => {
       ops.push(op);
@@ -254,12 +254,76 @@ test("live pushes: a call opened, a call resolved and a run changed", () => {
 test("the nav: team, calls badge, bots with a dot each, groups, no chat, the person", () => {
   const p = page({ calls: [call(), call({ id: "c2", workflow: "w2", run: "r2", asked: [{ kind: "person", account: ME }] })] });
   const html = p.eval("tcNavHtml(tcCurrent(), 'team-calls')");
-  assert.match(text(html), /^North Studio Calls 2 Bots Test publisher PR reviewer Friday summary Create a bot Groups @publishing @reviewers Bruno Lima$/);
+  assert.match(text(html), /^North Studio Calls 2 Bots Test publisher PR reviewer Friday summary Create a bot Groups @publishing @reviewers Projects No projects in the team yet\. Bruno Lima$/);
   assert.deepEqual(here(p.eval("tcStore.bots.map(tcBotDot)")).map((d) => d.tone), ["call", "call", "off"]);
   assert.ok(!/chat/i.test(html), "no chat item");
   assert.match(html, /data-tc-nav="team-calls"/);
   assert.match(html, /class="nav-row tc-row active"/);
   assert.match(html, /<span class="count" title="2 waiting on you">2<\/span>/);
+});
+
+const sitePs = [
+  { key: "github.com/north/site", name: "site", repo: "github.com/north/site", member: ME },
+  { key: "github.com/north/api", name: "api", repo: "github.com/north/api", member: "acc-ana" },
+  { key: "github.com/north/<b>x</b>", name: "<b>x</b>", repo: "", member: "acc-carla" },
+];
+const projectRows = (html) => [...html.matchAll(/<div class="nav-row tc-row tc-plain tc-project[^"]*"[^>]*data-project="([^"]*)"[\s\S]*?<\/div>/g)].map((m) => ({ key: m[1], html: m[0] }));
+
+test("the nav lists the team's projects, each with Take out of the team for who attached it and for the owner", () => {
+  const member = page({ projects: sitePs });
+  member.set("projects", sitePs);
+  const rows = projectRows(member.eval("tcNavHtml(tcCurrent(), 'team-calls')"));
+  assert.equal(rows.length, 3);
+  assert.deepEqual(rows.map((r) => /Take out of the team/.test(r.html)), [true, false, false], "a member: only the project they attached");
+  const owner = page({ role: "owner", email: "ana.souza@north.example" });
+  owner.set("projects", sitePs);
+  const all = projectRows(owner.eval("tcNavHtml(tcCurrent(), 'team-calls')"));
+  assert.deepEqual(all.map((r) => /Take out of the team/.test(r.html)), [true, true, true], "the owner: every project");
+  const html = owner.eval("tcNavHtml(tcCurrent(), 'team-calls')");
+  assert.ok(!html.includes("<b>x</b>"), "a name people typed is escaped");
+  assert.match(html, /&#60;b&#62;x&#60;\/b&#62;/);
+});
+
+test("Take out of the team asks in the row, Keep puts it back, Take it out sends detach_project", async () => {
+  const p = page({ role: "owner", email: "ana.souza@north.example", reply: (op) => (op.op === "projects" ? sitePs.slice(1) : []) });
+  p.set("projects", sitePs);
+  const ask = { dataset: { tcDetach: "ask", key: "github.com/north/site" } };
+  p.eval(`tcNavDetach(${JSON.stringify(ask)})`);
+  let row = projectRows(p.eval("tcNavHtml(tcCurrent(), 'team-calls')")).find((r) => r.key === "github.com/north/site");
+  assert.equal(text(row.html), "Take site out of the team? Bots that work in it go back to draft. Take it out Keep");
+  assert.match(row.html, /data-tc-detach="confirm"[^>]*>Take it out</);
+  assert.match(row.html, /data-tc-detach="keep"[^>]*>Keep</);
+  assert.deepEqual(p.sent(), [], "asking sends nothing");
+  p.eval(`tcNavDetach(${JSON.stringify({ dataset: { tcDetach: "keep" } })})`);
+  assert.equal(p.eval("tcStore.detach"), null);
+  assert.match(projectRows(p.eval("tcNavHtml(tcCurrent(), 'team-calls')")).find((r) => r.key === "github.com/north/site").html, />Take out of the team</);
+  assert.deepEqual(p.sent(), [], "Keep sends nothing");
+  p.eval(`tcNavDetach(${JSON.stringify(ask)})`);
+  await p.eval(`tcNavDetach(${JSON.stringify({ dataset: { tcDetach: "confirm" } })})`);
+  await flush();
+  assert.deepEqual(here(p.sent()[0]), { op: "detach_project", key: "github.com/north/site" });
+  assert.equal(p.eval("tcStore.detach"), null);
+  assert.deepEqual(here(p.eval("tcStore.projects.map((x) => x.key)")), ["github.com/north/api", "github.com/north/<b>x</b>"]);
+});
+
+test("a project the hub will not take out keeps its question open with the hub's words", async () => {
+  const p = page({ role: "owner", email: "ana.souza@north.example", reply: (op) => (op.op === "detach_project" ? new Error("only the member who attached it, or the owner, may take it out") : []) });
+  p.set("projects", sitePs);
+  p.eval(`tcDetachAsk("github.com/north/api")`);
+  await p.eval("tcDetachConfirm()");
+  const row = projectRows(p.eval("tcNavHtml(tcCurrent(), 'team-calls')")).find((r) => r.key === "github.com/north/api");
+  assert.match(text(row.html), /Could not take it out: only the member who attached it, or the owner, may take it out/);
+  assert.equal(p.eval("tcStore.projects.length"), 3, "the project stays in the list");
+  assert.match(row.html, /data-tc-detach="confirm"/);
+});
+
+test("the team nav has no chat item", () => {
+  const p = page({ calls: [call()] });
+  p.set("projects", sitePs);
+  const html = p.eval("tcNavHtml(tcCurrent(), 'team-calls')");
+  assert.ok(!/chat/i.test(html), "no chat row, link or label");
+  assert.deepEqual([...html.matchAll(/data-tc-nav="([^"]+)"/g)].map((m) => m[1]).filter((k, i, all) => all.indexOf(k) === i).sort(), ["team-bot", "team-bot-new", "team-calls", "team-group"]);
+  assert.ok(!/chat/i.test(read("gui-team-nav.js").replace(/\/\*\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "")), "and no code for one");
 });
 
 test("on a run's page the nav marks the bot that ran it", () => {
@@ -428,10 +492,10 @@ test("me is the account id teamsCurrent gives; the e-mail is the way only when i
   assert.equal(page({ email: "bruno.lima@north.example" }).eval("tcMe().account"), ME);
 });
 
-test("refresh reads the five lists, and one that fails keeps what it had", async () => {
+test("refresh reads the six lists, and one that fails keeps what it had", async () => {
   const p = page({ reply: (op) => (op.op === "calls" ? new Error("down") : op.op === "runs" ? [run({ id: "fresh" })] : []) });
   await p.eval("tcRefresh()");
-  assert.deepEqual(here(p.sent().map((o) => o.op)).sort(), ["bots", "calls", "groups", "members", "runs"]);
+  assert.deepEqual(here(p.sent().map((o) => o.op)).sort(), ["bots", "calls", "groups", "members", "projects", "runs"]);
   assert.equal(p.eval("tcStore.runs[0].id"), "fresh");
   assert.equal(p.eval("tcStore.members.length"), 0, "an empty list replaces");
 });

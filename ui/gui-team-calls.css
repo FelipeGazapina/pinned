@@ -111,3 +111,16 @@ button.tc-item:hover { background: var(--g-hover); }
 .tc-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .tc-call { padding: 12px; margin: 0 -12px; border: 1px solid var(--tc-line); border-radius: 12px; background: var(--g-raised); }
 .tc-footer { margin: 0; font-size: 12px; color: var(--g-muted); }
+
+/* The team's projects in the nav: a plain list, and the question asked in the row itself. */
+#team-nav .tc-project { flex-wrap: wrap; align-items: baseline; gap: 2px 8px; height: auto; min-height: 0; padding-top: 4px; padding-bottom: 4px; color: var(--g-side-fg); }
+#team-nav .tc-project .label { min-width: 0; flex: 1 1 auto; overflow-wrap: anywhere; }
+#team-nav .tc-none { padding: 0 8px; font-size: 12px; color: var(--g-side-muted); }
+#team-nav .tc-detach, #team-nav .tc-detach-keep, #team-nav .tc-detach-yes { padding: 0; border: 0; background: none; font: inherit; font-size: 12px; cursor: pointer; color: var(--g-link); text-align: left; }
+#team-nav .tc-detach { color: var(--g-side-muted); }
+#team-nav .tc-detach:hover, #team-nav .tc-detach-keep:hover, #team-nav .tc-detach-yes:hover { text-decoration: underline; }
+#team-nav .tc-detach-yes { color: color-mix(in srgb, var(--g-error) 70%, var(--g-fg)); font-weight: 600; }
+#team-nav .tc-detach:disabled, #team-nav .tc-detach-keep:disabled, #team-nav .tc-detach-yes:disabled { opacity: 0.6; cursor: default; text-decoration: none; }
+#team-nav .tc-confirm { flex-direction: column; align-items: stretch; gap: 6px; border: 1px solid rgb(var(--g-warning-rgb) / 0.5); border-radius: 8px; padding: 8px; font-size: 12.5px; line-height: 1.4; overflow-wrap: anywhere; }
+#team-nav .tc-ask-error { color: color-mix(in srgb, var(--g-error) 70%, var(--g-fg)); }
+#team-nav .tc-ask-actions { display: flex; gap: 14px; }

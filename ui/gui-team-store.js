@@ -16,6 +16,10 @@ const tcStore = {
   bots: [],
   groups: [],
   members: [],
+  /** The team's attached projects (`TeamProject`), for the nav's list. */
+  projects: [],
+  /** A project being taken out of the team: `{ key, state: "asking" | "sending" | "error", line }`, or null. */
+  detach: null,
   loaded: false,
   /** What an answer from this page came to, by call id: `{ state: "sending" | "done" | "taken" | "error", line, kind }`. */
   answers: new Map(),
@@ -232,6 +236,37 @@ async function tcRunOp(op, run) {
   }
 }
 
+/** Whether the viewer may take `project` out of the team: the member who attached it, or the owner. */
+function tcCanDetach(project) {
+  const me = tcMe();
+  return me.owner || (!!me.account && project.member === me.account);
+}
+/** Asks in place before a project goes out; `null` closes the question. */
+function tcDetachAsk(key) {
+  tcStore.detach = key ? { key, state: "asking", line: "" } : null;
+  tcNotify();
+}
+/** Sends `detach_project` for the project being asked about. The list is read again after, since the bots that worked in it changed. */
+async function tcDetachConfirm() {
+  const asked = tcStore.detach;
+  if (!asked || asked.state === "sending") return;
+  const team = tcStore.team;
+  tcStore.detach = { ...asked, state: "sending", line: "" };
+  tcNotify();
+  try {
+    await tcCall({ op: "detach_project", key: asked.key });
+    if (tcStore.team !== team) return;
+    tcStore.projects = tcStore.projects.filter((p) => p.key !== asked.key);
+    tcStore.detach = null;
+    tcNotify();
+    tcRefresh();
+  } catch (e) {
+    if (tcStore.team !== team) return;
+    tcStore.detach = { ...asked, state: "error", line: `Could not take it out: ${String(e?.message ?? e)}` };
+    tcNotify();
+  }
+}
+
 /** One run's log: `[{ at, who, text }]`, or null when the hub has no `run_log` yet. */
 async function tcLoadLog(run) {
   const team = tcStore.team;
@@ -256,7 +291,7 @@ async function tcRefresh() {
   if (!team) return tcReset(null);
   if (tcStore.team !== team.id) tcReset(team.id);
   const ticket = ++tcRefreshing;
-  const lists = { calls: "calls", runs: "runs", bots: "bots", groups: "groups", members: "members" };
+  const lists = { calls: "calls", runs: "runs", bots: "bots", groups: "groups", members: "members", projects: "projects" };
   const got = await Promise.all(Object.values(lists).map((op) => tcCall({ op }).then((v) => (Array.isArray(v) ? v : null), () => null)));
   if (ticket !== tcRefreshing || tcStore.team !== team.id) return;
   Object.keys(lists).forEach((key, i) => got[i] && (tcStore[key] = got[i]));
@@ -266,7 +301,7 @@ async function tcRefresh() {
 }
 function tcReset(team) {
   tcStore.team = team;
-  Object.assign(tcStore, { calls: [], runs: [], bots: [], groups: [], members: [], loaded: false, runError: null });
+  Object.assign(tcStore, { calls: [], runs: [], bots: [], groups: [], members: [], projects: [], detach: null, loaded: false, runError: null });
   for (const key of ["answers", "seen", "stopped", "logs"]) tcStore[key].clear();
   tcNotify();
 }
