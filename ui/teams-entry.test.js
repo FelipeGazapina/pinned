@@ -1,0 +1,572 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import test from "node:test";
+import vm from "node:vm";
+
+const src = readFileSync(new URL("./gui-teams.js", import.meta.url), "utf8");
+const flush = () => new Promise((resolve) => setImmediate(resolve));
+const here = (value) => JSON.parse(JSON.stringify(value));
+const text = (html) => html.replace(/<[^>]+>/g, " ").replace(/&#(\d+);/g, (_, c) => String.fromCharCode(c)).replace(/\s+/g, " ").trim();
+
+const ACME = { id: "t1", name: "North Studio", owner: "a1", role: "owner", credential: { upstash: false, claude: false, github: false, slack: false } };
+const SOLO = { id: "t2", name: "Side Gig", owner: "a9", role: "member", credential: { upstash: true, claude: true, github: true, slack: false } };
+
+/** gui-teams.js in a page whose hub answers each team op from `answers` (a value, or a function of the call),
+ * with `projects` as the person's own projects (name, repo) and `pages` as the registered shell pages. */
+function app({ answers = {}, projects = [], pages = [], stored = null, raw = null, body = {} } = {}) {
+  const frames = [];
+  const listeners = {};
+  const events = [];
+  const store = new Map(stored ? [["teams-current", JSON.stringify(stored)]] : raw ? [["teams-current", raw]] : []);
+  const shown = [];
+  const context = {
+    console,
+    CustomEvent: class {
+      constructor(type, init) {
+        this.type = type;
+        this.detail = init?.detail;
+      }
+    },
+    document: {
+      body: { dataset: { page: "", ...body } },
+      getElementById: () => null,
+      dispatchEvent: (e) => events.push(e),
+      activeElement: null,
+    },
+    SHELL_PAGES: Object.fromEntries(pages.map((p) => [p, {}])),
+    pageView: { addEventListener: (type, fn) => (listeners[type] = fn), querySelector: () => null },
+    setPage: (html) => shown.push(html),
+    headHtml: (title) => `<header class="page-head"><h1>${title}</h1></header>`,
+    esc: (v) => String(v ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`),
+    load: (key) => store.get(key),
+    save: (key, value) => (value === null ? store.delete(key) : store.set(key, value)),
+    globalProjectsCatalog: () => ({ projects: projects.map(([name, repo]) => ({ slug: name, name, repo, machines: [] })), machines: [] }),
+    account: { email: "ana.prado@acme.dev" },
+    navigator: { clipboard: { writeText: (t) => ((context.copied = t), Promise.resolve()) } },
+    opened: [],
+    closed: 0,
+    openPage: (name) => context.opened.push(name),
+    closePage: () => context.closed++,
+    hub: {
+      hub: async (call) => {
+        frames.push(here(call));
+        if (call.cmd !== "team") throw new Error(`unexpected ${call.cmd}`);
+        const answer = answers[call.op.op];
+        const out = typeof answer === "function" ? answer(call) : answer;
+        if (out instanceof Error) throw out.message;
+        return here(out ?? null);
+      },
+    },
+  };
+  context.globalThis = context;
+  vm.createContext(context);
+  vm.runInContext(src, context);
+  const run = (code) => vm.runInContext(code, context);
+  const page = () => shown[shown.length - 1] ?? "";
+  /** A click on the element that carries `data-tm` and these attributes. */
+  const click = (tm, data = {}, page = "team-create") => {
+    context.document.body.dataset.page = page;
+    const el = { dataset: { tm, ...data }, disabled: false };
+    listeners.click({ target: { closest: (sel) => (sel === "[data-tm]" ? el : null) } });
+  };
+  return { context, run, frames, events, store, shown, page, listeners, click, show: (name) => (context.document.body.dataset.page = name, context.SHELL_PAGES[name].show()) };
+}
+
+const created = (over = {}) => ({ ...ACME, ...over });
+
+test("a team call carries the team for every op but List, Create and Join", async () => {
+  const a = app({ answers: { list: [ACME], create: ACME, join: SOLO, members: [] }, stored: { id: "t1", name: "North Studio", role: "owner", credential: {} } });
+  await a.context.teamsList();
+  await a.context.teamCall({ op: "create", name: "North Studio" });
+  await a.context.teamCall({ op: "join", code: "ABCD-EFGH" });
+  await a.context.teamCall({ op: "members" });
+  assert.deepEqual(a.frames, [
+    { cmd: "team", op: { op: "list" } },
+    { cmd: "team", op: { op: "create", name: "North Studio" } },
+    { cmd: "team", op: { op: "join", code: "ABCD-EFGH" } },
+    { cmd: "team", team: "t1", op: { op: "members" } },
+  ]);
+});
+
+test("a team call with no team chosen is refused before it reaches the hub", async () => {
+  const a = app();
+  await assert.rejects(a.context.teamCall({ op: "members" }), /no team/);
+  assert.deepEqual(a.frames, []);
+});
+
+test("the current team is kept per viewer, read back, and fires teams:changed only when it changes", async () => {
+  const a = app({ answers: { list: [ACME, SOLO] } });
+  assert.equal(a.context.teamsCurrent(), null);
+  await a.context.teamsList();
+  a.run("teamsSelect(teamsKnown[1])");
+  assert.deepEqual(here(a.context.teamsCurrent()), { id: "t2", name: "Side Gig", role: "member", credential: SOLO.credential });
+  assert.equal(JSON.parse(a.store.get("teams-current")).id, "t2");
+  a.run("teamsSelect(teamsKnown[1])");
+  a.run("teamsSelect(null)");
+  assert.equal(a.context.teamsCurrent(), null);
+  assert.equal(a.store.has("teams-current"), false);
+  assert.deepEqual(a.events.map((e) => [e.type, e.detail?.id ?? null]), [["teams:changed", "t2"], ["teams:changed", null]]);
+  assert.equal(globalThis.teamsCurrent, undefined, "the vm's globals stay in the vm");
+});
+
+test("a saved team is current at start, and refreshed from the list; one the person left falls back to Just me", async () => {
+  const saved = { id: "t1", name: "Old name", role: "member", credential: {} };
+  const a = app({ answers: { list: [created({ name: "New name" })] }, stored: saved });
+  assert.equal(a.context.teamsCurrent().name, "Old name");
+  await a.context.teamsList();
+  assert.deepEqual(here(a.context.teamsCurrent()), { id: "t1", name: "New name", role: "owner", credential: ACME.credential });
+  assert.equal(a.events.length, 0, "a refresh is not a change of team");
+  const b = app({ answers: { list: [SOLO] }, stored: saved });
+  await b.context.teamsList();
+  assert.equal(b.context.teamsCurrent(), null);
+  assert.equal(b.events.length, 1);
+});
+
+test("a saved value that is not a team leaves no team chosen and breaks nothing", () => {
+  for (const raw of ["{not json", "42", '{"id":7}', "null"]) assert.equal(app({ raw }).context.teamsCurrent(), null, raw);
+});
+
+test("the menu block lists Just me, each team with its role, Create a team and Join a team", async () => {
+  const a = app({ answers: { list: [ACME, SOLO] }, stored: { id: "t2", name: "Side Gig", role: "member", credential: {} } });
+  await a.context.teamsList();
+  const html = a.run("teamsWhereHtml()");
+  assert.match(text(html), /^Where you work AP Just me NS North Studio Owner SG Side Gig you are here \+ Create a team → Join a team/);
+  assert.match(html, /data-team-pick="t2"[^>]*aria-current="true"/);
+  assert.match(html, /class="tm-create"[^>]*data-team-page="team-create"/);
+  assert.match(html, /class="tm-join"[^>]*data-team-page="team-join"/);
+  const solo = app({ answers: { list: [ACME] } });
+  await solo.context.teamsList();
+  assert.match(text(solo.run("teamsWhereHtml()")), /Just me you are here NS North Studio Owner/);
+});
+
+test("a team's name typed by a person never lands in the markup raw", async () => {
+  const evil = { ...ACME, name: `<img src=x onerror=alert(1)>` };
+  const a = app({ answers: { list: [evil] } });
+  await a.context.teamsList();
+  assert.ok(!a.run("teamsWhereHtml()").includes("<img"));
+  a.run("teamsSelect(teamsKnown[0])");
+  a.run("resetWizard()");
+  a.context.args = "x";
+  a.run("teamWizard.name = args; teamWizard.team = teamsKnown[0]; teamWizard.step = 5");
+  a.run("renderCreate()");
+  assert.ok(!a.page().includes("<img"));
+});
+
+test("step 1 asks the name, and Continue sends create once with the exact name", async () => {
+  const a = app({ answers: { create: ACME, list: [ACME] } });
+  a.show("team-create");
+  assert.match(a.page(), /What is the team called\?/);
+  assert.match(text(a.page()), /Step 1 of 4/);
+  assert.match(text(a.page()), /You are the owner\. You can rename it later\./);
+  assert.match(text(a.page()), /Bots that do the repeated work/);
+  // An empty name never reaches the hub.
+  a.click("next");
+  await flush();
+  assert.match(a.page(), /Give the team a name\./);
+  assert.deepEqual(a.frames, []);
+  a.listeners.input({ target: { id: "tm-team-name", value: "North Studio" } });
+  a.click("next");
+  await flush();
+  assert.deepEqual(a.frames[0], { cmd: "team", op: { op: "create", name: "North Studio" } });
+  assert.match(text(a.page()), /Step 2 of 4/);
+});
+
+test("going back and forward never repeats the create; a changed name renames", async () => {
+  const a = app({ answers: { create: ACME, list: [ACME], rename: null } });
+  a.show("team-create");
+  a.listeners.input({ target: { id: "tm-team-name", value: "North Studio" } });
+  a.click("next");
+  await flush();
+  a.click("prev");
+  assert.match(text(a.page()), /Step 1 of 4/);
+  a.click("next");
+  await flush();
+  assert.equal(a.frames.filter((f) => f.op.op === "create").length, 1);
+  a.click("prev");
+  a.listeners.input({ target: { id: "tm-team-name", value: "North Studio Two" } });
+  a.click("next");
+  await flush();
+  assert.equal(a.frames.filter((f) => f.op.op === "create").length, 1);
+  assert.deepEqual(a.frames.find((f) => f.op.op === "rename"), { cmd: "team", team: "t1", op: { op: "rename", name: "North Studio Two" } });
+  assert.match(a.page(), /Which of your projects go to North Studio Two\?/);
+});
+
+test("a create the hub refuses shows its words inline and stays on step 1", async () => {
+  const a = app({ answers: { create: new Error("you already own a team with that name") } });
+  a.show("team-create");
+  a.listeners.input({ target: { id: "tm-team-name", value: "Dup" } });
+  a.click("next");
+  await flush();
+  assert.match(a.page(), /<p class="tm-error" role="alert">you already own a team with that name<\/p>/);
+  assert.match(text(a.page()), /Step 1 of 4/);
+});
+
+async function atStep2(extra = {}) {
+  const a = app({
+    answers: { create: ACME, list: [ACME], attach_project: null, detach_project: null, ...extra.answers },
+    projects: [["storefront", "git@github.com:acme/storefront.git"], ["orders-api", "https://github.com/Acme/orders-api"], ["notes", ""], ["dup", "https://github.com/acme/orders-api.git"]],
+    pages: extra.pages ?? [],
+  });
+  a.show("team-create");
+  a.listeners.input({ target: { id: "tm-team-name", value: "North Studio" } });
+  a.click("next");
+  await flush();
+  return a;
+}
+
+test("step 2 lists the person's own projects, one per repository, a project with no remote shut", async () => {
+  const a = await atStep2();
+  const t = text(a.page());
+  assert.match(t, /Which of your projects go to North Studio\?/);
+  assert.match(t, /In the projects that go in, the team's bots can work\. The others stay yours\./);
+  assert.ok(!/summary/i.test(t), "the team is promised no summary of what you finish");
+  assert.equal((a.page().match(/data-tm="toggle"/g) ?? []).length, 3);
+  assert.match(a.page(), /data-key="github.com\/acme\/storefront"/);
+  assert.match(a.page(), /data-key="github.com\/acme\/orders-api"/);
+  assert.match(a.page(), /data-key="notes" disabled/);
+  assert.match(t, /notes no remote/);
+});
+
+test("Continue on step 2 sends attach_project for each project turned on, and for no other", async () => {
+  const a = await atStep2();
+  a.click("toggle", { key: "github.com/acme/orders-api" });
+  a.click("toggle", { key: "github.com/acme/storefront" });
+  assert.match(a.page(), /aria-checked="true"[^>]*data-key="github.com\/acme\/storefront"/);
+  a.click("next");
+  await flush();
+  assert.deepEqual(a.frames.filter((f) => f.op.op === "attach_project"), [
+    { cmd: "team", team: "t1", op: { op: "attach_project", key: "github.com/acme/storefront" } },
+    { cmd: "team", team: "t1", op: { op: "attach_project", key: "github.com/acme/orders-api" } },
+  ]);
+  assert.match(text(a.page()), /Step 3 of 4/);
+});
+
+test("an attach that fails stops on step 2 with the hub's words, and a retry skips what went in", async () => {
+  let n = 0;
+  const a = await atStep2({ answers: { attach_project: () => (++n === 2 ? new Error("the team has one with that key") : null) } });
+  a.click("toggle", { key: "github.com/acme/storefront" });
+  a.click("toggle", { key: "github.com/acme/orders-api" });
+  a.click("next");
+  await flush();
+  assert.match(text(a.page()), /Could not add orders-api: the team has one with that key/);
+  assert.match(text(a.page()), /Step 2 of 4/);
+  a.click("toggle", { key: "github.com/acme/orders-api" });
+  a.click("next");
+  await flush();
+  const keys = a.frames.filter((f) => f.op.op === "attach_project").map((f) => f.op.key);
+  assert.deepEqual(keys, ["github.com/acme/storefront", "github.com/acme/orders-api"]);
+  assert.match(text(a.page()), /Step 3 of 4/);
+});
+
+test("a project turned off after it went in is detached, not left behind", async () => {
+  const a = await atStep2();
+  a.click("toggle", { key: "github.com/acme/storefront" });
+  a.click("next");
+  await flush();
+  a.click("prev");
+  a.click("toggle", { key: "github.com/acme/storefront" });
+  a.click("next");
+  await flush();
+  assert.deepEqual(a.frames.filter((f) => f.op.op === "detach_project"), [{ cmd: "team", team: "t1", op: { op: "detach_project", key: "github.com/acme/storefront" } }]);
+});
+
+async function atStep3(team = ACME, extra = {}) {
+  const a = await atStep2({ answers: { create: team, list: [team], ...extra.answers }, pages: extra.pages });
+  a.click("next");
+  await flush();
+  return a;
+}
+
+test("step 3 is the team's AI account: three rows with the state of Team.credential, and no plan choice", async () => {
+  const a = await atStep3(created({ credential: { upstash: true, claude: false, github: false, slack: false } }));
+  const t = text(a.page());
+  assert.match(t, /The team has its own AI account/);
+  assert.match(t, /Upstash key Opens the boxes the bots work in Connected/);
+  assert.match(t, /Claude token for boxes Signs the bots in to Claude inside the box Connect now/);
+  assert.match(t, /GitHub token Clones the team's repositories Connect now/);
+  assert.match(t, /No rush: you can connect later\. Until then you can set up bots and groups, but no bot runs\./);
+  assert.ok(!/API key|team plan/i.test(t));
+  assert.match(a.page(), /data-tm="connect" data-cred="claude"/);
+  assert.ok(!/data-tm="connect" data-cred="upstash"/.test(a.page()));
+  assert.match(a.page(), />Connect later</);
+});
+
+test("a member sees the states and no Connect now", async () => {
+  const a = await atStep3(created({ role: "member" }));
+  assert.ok(!/Connect now/.test(a.page()));
+  assert.match(text(a.page()), /Only the owner connects these\./);
+});
+
+test("Connect now opens a password form per credential and sends the personal call through the team", async () => {
+  const done = { id: "t1" };
+  const a = await atStep3(ACME, { answers: { hub: null, list: () => [done.cred ? { ...ACME, credential: { ...ACME.credential, ...done.cred } } : ACME] } });
+  const submit = async (cred, fields) => {
+    a.click("connect", { cred });
+    assert.match(a.page(), new RegExp(`<form class="tm-form" data-tm="form" data-cred="${cred}"`));
+    const form = { dataset: { tm: "form", cred }, querySelectorAll: () => Object.entries(fields).map(([k, v]) => ({ dataset: { field: k }, value: v })) };
+    const inputs = form.querySelectorAll();
+    form.querySelectorAll = () => inputs;
+    let prevented = false;
+    a.listeners.submit({ preventDefault: () => (prevented = true), target: { closest: () => form } });
+    assert.ok(prevented);
+    assert.deepEqual(inputs.map((i) => i.value), inputs.map(() => ""), "the field is emptied once sent");
+    await flush();
+  };
+  const forms = a.page();
+  assert.equal((forms.match(/type="password"/g) ?? []).length, 0, "no form is open before Connect now");
+  a.click("connect", { cred: "upstash" });
+  assert.equal((a.page().match(/type="password"/g) ?? []).length, 2);
+  assert.ok(!/value="[^"]*(box_|sk-ant)/.test(a.page()));
+
+  done.cred = { upstash: true };
+  await submit("upstash", { key: "box_SECRET1", claude_token: "sk-ant-oat01-SECRET2" });
+  done.cred = { upstash: true, claude: true };
+  await submit("claude", { name: "team", token: "sk-ant-oat01-SECRET3" });
+  done.cred = { upstash: true, claude: true, github: true };
+  await submit("github", { token: "ghp_SECRET4" });
+
+  const hubs = a.frames.filter((f) => f.op.op === "hub");
+  assert.deepEqual(hubs, [
+    { cmd: "team", team: "t1", op: { op: "hub", call: { cmd: "connect_upstash", key: "box_SECRET1", claude_token: "sk-ant-oat01-SECRET2" } } },
+    { cmd: "team", team: "t1", op: { op: "hub", call: { cmd: "set_box_claude_token", name: "team", token: "sk-ant-oat01-SECRET3" } } },
+    { cmd: "team", team: "t1", op: { op: "hub", call: { cmd: "connect_github", token: "ghp_SECRET4" } } },
+  ]);
+  assert.ok(!/SECRET/.test(a.page()), "a key is never drawn again");
+  assert.ok(!a.shown.some((h) => /SECRET/.test(h)), "nor was it ever drawn");
+  const t = text(a.page());
+  assert.match(t, /Upstash key[^|]*Connected/);
+  assert.match(t, /GitHub token[^|]*Connected/);
+  assert.match(a.page(), />Continue</, "all three connected: no more Connect later");
+});
+
+test("a key the hub refuses shows its words inline and keeps the form open without the key", async () => {
+  const a = await atStep3(ACME, { answers: { hub: new Error("only the team's owner runs connect_github on the team") } });
+  a.click("connect", { cred: "github" });
+  const input = { dataset: { field: "token" }, value: "ghp_WRONG" };
+  const form = { dataset: { tm: "form", cred: "github" }, querySelectorAll: () => [input] };
+  a.listeners.submit({ preventDefault() {}, target: { closest: () => form } });
+  await flush();
+  assert.match(text(a.page()), /only the team's owner runs connect_github on the team/);
+  assert.match(a.page(), /data-cred="github"/);
+  assert.ok(!a.page().includes("ghp_WRONG"));
+  // A blank field is caught before the hub sees it.
+  const before = a.frames.length;
+  const blank = { dataset: { field: "token" }, value: "  " };
+  a.listeners.submit({ preventDefault() {}, target: { closest: () => ({ dataset: { tm: "form", cred: "github" }, querySelectorAll: () => [blank] }) } });
+  await flush();
+  assert.equal(a.frames.length, before);
+  assert.match(text(a.page()), /Fill in every field\./);
+});
+
+test("step 4 makes invite codes one by one, shows each with Copy, and Skip is just Finish", async () => {
+  let n = 0;
+  const a = await atStep3(ACME, { answers: { invite: () => ({ code: `CODE-000${++n}`, hint: `…000${n}` }) } });
+  a.click("next");
+  await flush();
+  const t = text(a.page());
+  assert.match(t, /Who works with you\?/);
+  assert.ok(!/e-?mail/i.test(t.replace(/The hub sends no e-mail/, "")), "no e-mail field");
+  assert.ok(!/<input/.test(a.page()));
+  a.click("invite");
+  await flush();
+  a.click("invite");
+  await flush();
+  assert.deepEqual(a.frames.filter((f) => f.op.op === "invite"), [{ cmd: "team", team: "t1", op: { op: "invite" } }, { cmd: "team", team: "t1", op: { op: "invite" } }]);
+  assert.match(a.page(), /<code>CODE-0001<\/code>/);
+  assert.match(a.page(), /<code>CODE-0002<\/code>/);
+  assert.match(text(a.page()), /Send this code to the person\. It works once\./);
+  a.click("copy", { i: "1" });
+  await flush();
+  assert.equal(a.context.copied, "CODE-0002");
+  assert.match(a.page(), /Copied/);
+});
+
+test("Finish leads to the Done screen with a truthful summary, and the team is current once the person opens it", async () => {
+  let n = 0;
+  const a = await atStep3(ACME, { answers: { invite: () => ({ code: `C${++n}`, hint: "" }) } });
+  a.click("toggle", { key: "github.com/acme/storefront" });
+  a.click("prev");
+  a.click("next");
+  await flush();
+  a.click("next");
+  await flush();
+  a.click("next");
+  await flush();
+  a.click("invite");
+  await flush();
+  a.click("next");
+  await flush();
+  const t = text(a.page());
+  assert.match(t, /North Studio is ready/);
+  assert.match(t, /1 project added\./);
+  assert.match(t, /The team's AI account is not connected yet, so no bot runs until it is\./);
+  assert.match(t, /1 invite code made\. Nothing is sent: you pass it on yourself\./);
+  assert.ok(!/e-mail.*invit|receive the invit/i.test(t));
+  assert.ok(!/Create the first bot/.test(t), "no bots page, no button");
+  assert.equal(a.context.teamsCurrent(), null, "the team is not current until the person opens it");
+  a.click("open-team");
+  assert.equal(a.context.teamsCurrent().id, "t1");
+  assert.equal(a.context.closed, 1, "no team page yet: back to the threads");
+});
+
+test("Create the first bot and Open the team go to the pages that exist", async () => {
+  const a = await atStep3(ACME, { pages: ["team-bots", "team-runs"] });
+  a.run("teamWizard.step = 5");
+  a.run("renderCreate()");
+  assert.match(a.page(), />Create the first bot</);
+  a.click("first-bot");
+  assert.deepEqual(a.context.opened, ["team-bots"]);
+  a.click("open-team");
+  assert.deepEqual(a.context.opened, ["team-bots", "team-runs"]);
+});
+
+test("the step list on the left is the prototype's five steps; steps ahead stay shut, steps behind open", async () => {
+  const a = await atStep3();
+  const html = a.page();
+  const t = text(html);
+  assert.match(t, /Create a team Four steps, about 2 minutes\. You can go back and change any of them\./);
+  for (const name of ["Name", "Projects", "The team's AI account", "People", "Done"]) assert.ok(t.includes(name), name);
+  assert.match(html, /class="tm-step current" data-tm="go" data-step="3" aria-current="step"/);
+  assert.match(html, /class="tm-step todo" data-tm="go" data-step="4"[^>]*disabled/);
+  assert.match(html, /class="tm-step done" data-tm="go" data-step="1"/);
+  a.click("go", { step: "1" });
+  assert.match(text(a.page()), /Step 1 of 4/);
+  const frames = a.frames.length;
+  a.click("go", { step: "3" });
+  assert.equal(a.frames.length, frames, "visiting a step sends nothing");
+});
+
+test("Back to my account and Cancel leave the page", async () => {
+  const a = app();
+  a.show("team-create");
+  assert.match(text(a.page()), /‹ Back to my account/);
+  a.click("leave");
+  assert.equal(a.context.closed, 1);
+});
+
+// ---- Join ----------------------------------------------------------------------------------------
+
+const THEIRS = [
+  { key: "github.com/acme/storefront", name: "storefront", repo: "https://github.com/acme/storefront", member: "a1" },
+  { key: "github.com/acme/mobile", name: "mobile", repo: "https://github.com/acme/mobile", member: "a2" },
+];
+function joinApp(extra = {}) {
+  return app({
+    answers: { join: SOLO, projects: THEIRS, list: [SOLO], attach_project: null, ...extra.answers },
+    projects: [["storefront", "git@github.com:acme/storefront.git"], ["orders-api", "https://github.com/acme/orders-api"], ["notes", ""]],
+    pages: extra.pages ?? [],
+  });
+}
+
+test("Join asks the code first and sends join with exactly what was pasted", async () => {
+  const a = joinApp();
+  a.show("team-join");
+  assert.match(text(a.page()), /Join a team Someone on the team makes you an invite code\. It works once\./);
+  assert.match(text(a.page()), /Paste the invite code/);
+  a.listeners.input({ target: { id: "tm-join-code", value: " ABCD-EFGH " } });
+  const form = { dataset: { tm: "join-form" } };
+  a.context.document.body.dataset.page = "team-join";
+  a.listeners.submit({ preventDefault() {}, target: { closest: () => form } });
+  await flush();
+  assert.deepEqual(a.frames[0], { cmd: "team", op: { op: "join", code: "ABCD-EFGH" } });
+  assert.deepEqual(a.frames[1], { cmd: "team", team: "t2", op: { op: "projects" } });
+});
+
+test("a bad code shows the hub's words inline and keeps the code field", async () => {
+  const a = joinApp({ answers: { join: new Error("that code is not valid or was used") } });
+  a.show("team-join");
+  a.listeners.input({ target: { id: "tm-join-code", value: "NOPE" } });
+  a.context.document.body.dataset.page = "team-join";
+  a.listeners.submit({ preventDefault() {}, target: { closest: () => ({ dataset: { tm: "join-form" } }) } });
+  await flush();
+  assert.match(a.page(), /<p class="tm-error" role="alert">that code is not valid or was used<\/p>/);
+  assert.match(a.page(), /value="NOPE"/);
+  assert.equal(a.frames.length, 1);
+});
+
+async function joined(extra) {
+  const a = joinApp(extra);
+  a.show("team-join");
+  a.listeners.input({ target: { id: "tm-join-code", value: "ABCD-EFGH" } });
+  a.listeners.submit({ preventDefault() {}, target: { closest: () => ({ dataset: { tm: "join-form" } }) } });
+  await flush();
+  return a;
+}
+
+test("after joining: the team's name, the person's projects marked by what the team already has, and what the team sees", async () => {
+  const a = await joined();
+  const t = text(a.page());
+  assert.match(t, /You joined Side Gig/);
+  assert.match(t, /Which of your projects belong to the team\?/);
+  assert.match(t, /1 of yours matches a project the team already has\./);
+  assert.match(t, /storefront The team already has it The team sees/);
+  assert.match(t, /orders-api https:\/\/github.com\/acme\/orders-api Only you/);
+  assert.match(t, /notes no remote[^|]* Only you/);
+  assert.match(t, /What the team will see The names and repositories of the projects you add, and the runs of the team's bots in them\./);
+  assert.match(t, /Never your conversations, your other projects or your passwords\. You can take a project out any time\./);
+  assert.ok(!/summary|what you finish|tells the team/i.test(t), "no promise of summaries");
+  assert.match(a.page(), /data-key="github.com\/acme\/storefront"[^>]*>|aria-checked="true"[^>]*data-key="github.com\/acme\/storefront"/);
+  assert.match(a.page(), />Join with 1 project</);
+  assert.match(a.page(), />Continue without any</);
+  assert.equal(a.context.teamsCurrent(), null, "the team becomes current once the person continues");
+});
+
+test("Join with N projects sends attach_project for each turned on, then opens the team", async () => {
+  const a = await joined({ pages: ["team-runs"] });
+  a.click("toggle", { key: "github.com/acme/orders-api" }, "team-join");
+  assert.match(a.page(), />Join with 2 projects</);
+  a.click("join-with", {}, "team-join");
+  await flush();
+  assert.deepEqual(a.frames.filter((f) => f.op.op === "attach_project"), [
+    { cmd: "team", team: "t2", op: { op: "attach_project", key: "github.com/acme/storefront" } },
+    { cmd: "team", team: "t2", op: { op: "attach_project", key: "github.com/acme/orders-api" } },
+  ]);
+  assert.equal(a.context.teamsCurrent().id, "t2");
+  assert.deepEqual(a.context.opened, ["team-runs"]);
+  assert.equal(a.events.length, 1);
+});
+
+test("Continue without any attaches nothing and still joins", async () => {
+  const a = await joined();
+  a.click("join-without", {}, "team-join");
+  await flush();
+  assert.equal(a.frames.filter((f) => f.op.op === "attach_project").length, 0);
+  assert.equal(a.context.teamsCurrent().name, "Side Gig");
+  assert.equal(a.context.closed, 1);
+});
+
+test("an attach that fails stays on the page with the hub's words and sends no repeat", async () => {
+  let n = 0;
+  const a = await joined({ answers: { attach_project: () => (++n === 1 ? new Error("you already shared that project") : null) } });
+  a.click("join-with", {}, "team-join");
+  await flush();
+  assert.match(text(a.page()), /Could not add storefront: you already shared that project/);
+  assert.equal(a.context.teamsCurrent(), null);
+  a.click("join-with", {}, "team-join");
+  await flush();
+  assert.equal(a.frames.filter((f) => f.op.op === "attach_project").length, 2);
+  assert.equal(a.context.teamsCurrent().id, "t2");
+});
+
+test("a team whose projects can't be read still lets the person pick their own", async () => {
+  const a = await joined({ answers: { projects: new Error("not built yet") } });
+  const t = text(a.page());
+  assert.match(t, /Could not read the team's projects: not built yet/);
+  assert.match(t, />?storefront/);
+  assert.match(a.page(), />Join the team</);
+});
+
+test("a team with nothing in common says so", async () => {
+  const a = await joined({ answers: { projects: [] } });
+  assert.match(text(a.page()), /The team has no project that matches yours yet\. You can still add some\./);
+});
+
+test("repository keys are the hub's spelling whichever way a machine wrote the remote", () => {
+  const a = app();
+  const key = (r) => a.run(`teamsRepoKey(${JSON.stringify(r)})`);
+  assert.equal(key("git@github.com:Acme/Site.git"), "github.com/acme/site");
+  assert.equal(key("https://github.com/acme/site/"), "github.com/acme/site");
+  assert.equal(key("https://user:tok@github.com/acme/site.git"), "github.com/acme/site");
+  assert.equal(key(""), "");
+  assert.equal(key(null), "");
+});
