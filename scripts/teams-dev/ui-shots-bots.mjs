@@ -93,8 +93,12 @@ const waiting = () => {
 };
 const working = () => world.runs.unshift({ id: "r5", workflow: "c1", state: "working", controller: null, cost_usd: 0.1, active_secs: 20, started_at: NOW() - 20, ended_at: null, outcome: null, started_by: world.me });
 
+/** The team as the hub's List answers it for the person looking. */
+const teamRow = () => ({ id: "t1", name: "Acme Orders", owner: "a1", role: world.role, credential: { upstash: world.keys, claude: world.keys, github: true, slack: world.slack } });
+
 function teamOp(op) {
   switch (op.op) {
+    case "list": return [teamRow()];
     case "members": return world.members;
     case "groups": return world.groups;
     case "projects": return world.projects;
@@ -127,10 +131,8 @@ async function session(theme) {
   page.on("pageerror", (e) => failures.push(`${theme}: page error: ${e}`));
   await page.addInitScript(() => {
     localStorage.setItem("hub-token", "fake");
-    // The entry worker's contract, which this branch does not carry: the current team, and a team call over the hub.
-    window.__team = { id: "t1", name: "Acme Orders", role: "owner", credential: { upstash: true, claude: true, github: true, slack: false } };
-    window.teamsCurrent = () => window.__team;
-    window.teamCall = (op) => hub.hub({ cmd: "team", team: "t1", op });
+    // The real entry code (ui/gui-teams.js) owns the current team and the team call; it reads the team from here.
+    localStorage.setItem("teams-current", JSON.stringify({ id: "t1", name: "Acme Orders", role: "owner", credential: { upstash: true, claude: true, github: true, slack: false }, me: "a1" }));
   });
   await page.routeWebSocket(/\/ws\/client/, (ws) => {
     ws.onMessage((raw) => {
@@ -154,10 +156,10 @@ async function session(theme) {
 }
 
 // Who is looking: the team's role and keys for them, and the e-mail the app signed in with.
-const as = (page) => page.evaluate(([role, slack, keys, email]) => {
-  window.__team = { id: "t1", name: "Acme Orders", role, credential: { upstash: keys, claude: keys, github: true, slack } };
+const as = (page) => page.evaluate(([team, email]) => {
+  teamsSelect(team);
   account.email = email;
-}, [world.role, world.slack, world.keys, world.members.find((m) => m.account === world.me).email]);
+}, [teamRow(), world.members.find((m) => m.account === world.me).email]);
 const open = async (page, code, ready) => {
   await as(page);
   await page.evaluate(code);

@@ -54,6 +54,11 @@ function world() {
       { account: ME, email: "bruno.lima@northstudio.example", role: "member", groups: ["publishing"] },
       { account: "acc-carla", email: "carla.santos@northstudio.example", role: "member", groups: ["reviewers"] },
     ],
+    projects: [
+      { key: "github.com/north/api-orders", name: "api-orders", repo: "github.com/north/api-orders", member: ME },
+      { key: "github.com/north/app-deliveries", name: "app-deliveries", repo: "github.com/north/app-deliveries", member: "acc-ana" },
+      { key: "github.com/north/shop-web", name: "shop-web", repo: "github.com/north/shop-web", member: ME },
+    ],
     groups: [
       { handle: "publishing", about: "Who can publish", members: ["acc-ana", ME], fallback: null, slack_group: "" },
       { handle: "reviewers", about: "Code review", members: ["acc-carla", "acc-ana"], fallback: null, slack_group: "" },
@@ -96,11 +101,10 @@ async function open(browser, scheme, setup = () => {}, opts = {}) {
   const sent = [];
   const sockets = [];
   const context = await browser.newContext({ viewport: { width: 1360, height: 900 }, colorScheme: scheme, locale: "en-US", timezoneId: "UTC", serviceWorkers: "block" });
+  // The real entry code (ui/gui-teams.js) owns the current team: it is read from the key it keeps it under.
   await context.addInitScript(({ team }) => {
     localStorage.setItem("hub-token", "fake-token");
-    globalThis.__team = team;
-    globalThis.teamsCurrent = () => globalThis.__team;
-    globalThis.teamCall = (op) => hub.request({ cmd: "team", team: globalThis.__team.id, op });
+    localStorage.setItem("teams-current", JSON.stringify({ id: team.id, name: team.name, role: team.role, credential: team.credential, me: null }));
   }, { team: { id: w.team.id, name: w.team.name, role: w.team.role, credential: w.team.credential } });
   const page = await context.newPage();
   await page.clock.setFixedTime(new Date(NOW * 1000));
@@ -112,6 +116,12 @@ async function open(browser, scheme, setup = () => {}, opts = {}) {
     return run;
   };
   const ops = {
+    list: () => [w.team],
+    projects: () => w.projects,
+    detach_project: (op) => {
+      w.projects = w.projects.filter((p) => p.key !== op.key);
+      return null;
+    },
     members: () => w.members,
     groups: () => w.groups,
     bots: () => w.bots,
@@ -151,10 +161,14 @@ async function open(browser, scheme, setup = () => {}, opts = {}) {
       if (frame.type === "auth") return ws.send(JSON.stringify({ type: "hello", account: { id: ME, email: "bruno.lima@northstudio.example" }, machines: [], tabs: {} }));
       if (frame.id === undefined) return;
       const reply = (body) => ws.send(JSON.stringify({ type: "reply", id: frame.id, ...body }));
-      if (frame.cmd !== "team") return reply({ err: "not in this fake hub" });
-      sent.push(frame.op);
+      // A team call is {type:"hub", call:{cmd:"team", team, op}}, as hub.hub() sends it.
+      if (frame.type !== "hub" || frame.call?.cmd !== "team") return reply({ err: "not in this fake hub" });
+      const op = frame.call.op;
+      if (op.op !== "list") check(frame.call.team === w.team.id, `the ${op.op} call names the team`);
+      sent.push(op);
       try {
-        reply({ ok: ops[frame.op.op](frame.op) });
+        if (!ops[op.op]) throw `unknown team op: ${op.op}`;
+        reply({ ok: ops[op.op](op) });
       } catch (e) {
         reply({ err: String(e) });
       }
@@ -231,6 +245,40 @@ for (const scheme of ["dark", "light"]) {
     push({ kind: "call_resolved", call: { ...call, answer: { by: "acc-ana", choice: "Only the orders page", text: "", kind: { kind: "choice" }, at: NOW } } });
     await page.waitForSelector('[data-call="c9"] .tc-result[data-state="other"]');
     check((await text(page, '[data-call="c9"] .tc-result')) === "Ana Souza already answered “Only the orders page”.", "a call answered by someone else shows who");
+    await context.close();
+  }
+  // A long question, shown whole on its card.
+  {
+    const long = "All 212 api-orders tests passed. I want to run the migration that renames orders.total to orders.amount_cents, then the backfill that rewrites 48,000 rows, then restart the three workers that read it, and only then publish the new payment notice and the queue fix to the test environment. If the backfill stops halfway the table keeps both columns until I run it again, and the workers stay on the old build. Can I go ahead with all of it, in that order?";
+    const { page, context } = await open(browser, scheme, (w) => (w.calls.find((c) => c.id === "c1").question = long));
+    await page.click('#team-nav [data-tc-nav="team-calls"]');
+    await page.waitForSelector(".tc-card");
+    check((await text(page, '[data-call="c1"] .tc-question')) === long, "the card shows the whole question");
+    check((await page.locator('[data-call="c1"] .tc-question').evaluate((el) => el.scrollHeight <= el.clientHeight + 1)), "the question is not clipped");
+    await shot(page, "calls-long-question", scheme);
+    await context.close();
+  }
+  // The team's projects in the nav: Take out of the team for the ones this member attached, asked in the row.
+  {
+    const { page, context, sent } = await open(browser, scheme);
+    await page.click('#team-nav [data-tc-nav="team-calls"]');
+    await page.waitForSelector(".tc-card");
+    await page.waitForSelector("#team-nav .tc-project");
+    check((await page.locator("#team-nav .tc-project").count()) === 3, "the nav lists the team's 3 projects");
+    check((await page.locator('#team-nav [data-tc-detach="ask"]').count()) === 2, "a member can take out only the 2 projects they attached");
+    check((await page.locator("#team-nav").innerText()).includes("Take out of the team"), "the row says Take out of the team");
+    await shot(page, "nav-projects", scheme);
+    await page.click('#team-nav [data-project="github.com/north/shop-web"] [data-tc-detach="ask"]');
+    await page.waitForSelector("#team-nav .tc-confirm");
+    check((await text(page, "#team-nav .tc-confirm .tc-ask")) === "Take shop-web out of the team? Bots that work in it go back to draft.", "the row asks in place");
+    await shot(page, "nav-projects-confirm", scheme);
+    await page.click('#team-nav [data-tc-detach="keep"]');
+    check((await page.locator("#team-nav .tc-confirm").count()) === 0, "Keep closes the question");
+    check(!sent.some((o) => o.op === "detach_project"), "Keep sends nothing");
+    await page.click('#team-nav [data-project="github.com/north/shop-web"] [data-tc-detach="ask"]');
+    await page.click('#team-nav [data-tc-detach="confirm"]');
+    await page.waitForFunction(() => document.querySelectorAll("#team-nav .tc-project").length === 2);
+    check(sent.some((o) => JSON.stringify(o) === JSON.stringify({ op: "detach_project", key: "github.com/north/shop-web" })), "Take it out sends {op:detach_project,key}");
     await context.close();
   }
   // A run: waiting, answered, taken over, stopped, without a log.
