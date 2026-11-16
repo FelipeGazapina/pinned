@@ -118,6 +118,8 @@ pub enum Trigger {
     /// A Slack thread a message workflow's category hands it, which its session answers as a
     /// mention's session would. It watches no channel of its own.
     Called,
+    /// No poller: the workflow runs only when someone runs it now.
+    Manual,
 }
 
 impl Trigger {
@@ -125,13 +127,14 @@ impl Trigger {
         match self {
             Trigger::LinearLabel { .. } => "Linear",
             Trigger::SlackMention { .. } | Trigger::SlackMessage { .. } | Trigger::Called => "Slack",
+            Trigger::Manual => "pinned",
         }
     }
 
     fn answers_threads(&self) -> bool {
         match self {
             Trigger::SlackMention { .. } | Trigger::Called => true,
-            Trigger::LinearLabel { .. } | Trigger::SlackMessage { .. } => false,
+            Trigger::LinearLabel { .. } | Trigger::SlackMessage { .. } | Trigger::Manual => false,
         }
     }
 }
@@ -728,7 +731,7 @@ impl Connector {
     fn advance(&mut self, watermark: DateTime<Utc>, opening: bool) -> bool {
         let watched = match self.trigger {
             Trigger::SlackMention { .. } | Trigger::SlackMessage { .. } => true,
-            Trigger::LinearLabel { .. } | Trigger::Called => false,
+            Trigger::LinearLabel { .. } | Trigger::Called | Trigger::Manual => false,
         };
         let behind = DateTime::parse_from_rfc3339(&self.since).map_or(true, |since| since < watermark);
         if !watched || !behind || opening {
@@ -1319,6 +1322,12 @@ pub struct Placement {
 /// What `open` answered. A hub returns the tab it used. The desktop app returns `()`.
 pub trait Taken {
     fn taken(self) -> Result<Option<Placement>, String>;
+
+    /// True when `open` consumed a run and opened nothing: a hub's team answers a run of an off
+    /// bot with no placement. An `open` that answers `()` always opened its run.
+    fn consumed(&self) -> bool {
+        false
+    }
 }
 
 impl Taken for Result<(), String> {
@@ -1330,6 +1339,10 @@ impl Taken for Result<(), String> {
 impl Taken for Result<Option<Placement>, String> {
     fn taken(self) -> Result<Option<Placement>, String> {
         self
+    }
+
+    fn consumed(&self) -> bool {
+        matches!(self, Ok(None))
     }
 }
 
@@ -1870,8 +1883,9 @@ impl Connectors {
     async fn poll(&self) -> (Vec<Work>, Option<String>) {
         self.fill_bots().await;
         let now = Utc::now();
+        // A manual workflow has no poller: it runs only when someone runs it now.
         let watching: Vec<Connector> =
-            self.store.lock().unwrap().connectors.iter().filter(|c| c.enabled).cloned().collect();
+            self.store.lock().unwrap().connectors.iter().filter(|c| c.enabled && !matches!(c.trigger, Trigger::Manual)).cloned().collect();
         let (mut found, mut checked, mut limited, mut errors) = (vec![], vec![], vec![], vec![]);
         for connector in watching {
             // Each Slack bot is its own app with its own rate limit.
@@ -1943,7 +1957,8 @@ impl Connectors {
 
     /// Gives `work` to the tabs. A thread's cursor moves only once its messages reached a session,
     /// its own or a new one, so messages that didn't are passed on again at the next check. A run
-    /// no tab took gives its subject back, so the next check tries it again.
+    /// no tab took gives its subject back, so the next check tries it again. A run `open` consumed
+    /// keeps its subject handled and touches neither Linear nor Slack.
     async fn hand_over<F, Fut, R>(&self, work: Work, open: &F) -> Result<(), String>
     where
         F: Fn(Work) -> Fut,
@@ -1964,7 +1979,13 @@ impl Connectors {
                     }
                     Err(why) => return Err(self.unclaim(&connector, &subject, &folder, &why)),
                 }
-                if let Err(why) = open(Work::Run(run)).await.taken() {
+                let answer = open(Work::Run(run)).await;
+                // Consumed: nothing opened, so Linear and Slack are left as they are, and the
+                // subject stays handled so the next check does not send it again.
+                if answer.consumed() {
+                    return self.keep_stopped(&connector, &subject);
+                }
+                if let Err(why) = answer.taken() {
                     return Err(self.unclaim(&connector, &subject, &folder, &why));
                 }
                 // The session starts even when Linear won't move the issue or Slack won't take the
@@ -2063,7 +2084,7 @@ impl Connectors {
         let watched = match &c.trigger {
             Trigger::SlackMention { channel } => Some(channel.as_str()),
             Trigger::Called => None,
-            Trigger::LinearLabel { .. } | Trigger::SlackMessage { .. } => return Err("the workflow no longer answers Slack threads".into()),
+            Trigger::LinearLabel { .. } | Trigger::SlackMessage { .. } | Trigger::Manual => return Err("the workflow no longer answers Slack threads".into()),
         };
         let bot = self.thread_bot(Some(&d.connector), &d.channel, &d.thread)?;
         let token = bot.token.clone();
@@ -2166,6 +2187,8 @@ impl Connectors {
                 let Some(bot) = self.scan_bot(c)? else { return Ok(None) };
                 Ok(Some(self.follow_ups(&bot, c, None, now).await?))
             }
+            // No poller watches it: it runs only when someone runs it now.
+            Trigger::Manual => Ok(Some(vec![])),
         }
     }
 
@@ -5047,7 +5070,7 @@ impl Connectors {
             Trigger::Called => {
                 return Err(format!("workflow {:?} answers only the Slack threads another workflow hands it, so Run now has no thread to give it", workflow.name))
             }
-            Trigger::LinearLabel { .. } | Trigger::SlackMention { .. } => {}
+            Trigger::LinearLabel { .. } | Trigger::SlackMention { .. } | Trigger::Manual => {}
         }
         let (owner, setup, proof) = manual_start(&self.library(), &self.names(), id)?;
         let mut owner = merge_session(&self.store.lock().unwrap().connector(&owner).cloned()?, &setup).map_err(|e| format!("the workflow's session step can't run: {e}"))?;
@@ -6107,6 +6130,53 @@ mod tests {
         assert!(!slack.advance(at("2026-10-22T16:20:00Z"), false), "it never moves back");
         let mut linear = Connector { since: "2026-10-22T16:18:15+00:00".into(), ..linear_connector() };
         assert!(!linear.advance(at("2026-10-22T16:21:22Z"), false), "Linear asks by creation time, not this watermark");
+    }
+
+    /// A hub's team answers a run of an off bot with no placement: the event is consumed. Linear
+    /// and Slack hear nothing, the subject stays handled so the next check does not send it again,
+    /// and the thread's cursor is dropped. The same runs placed move the issue and react, as before.
+    #[test]
+    fn a_consumed_run_moves_no_issue_and_reacts_to_nothing() {
+        let _api = slack::lock_api();
+        let _restore = (RestoreSlack, RestoreLinear);
+        install_rustls();
+        let seen = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let root = serve_slack_and_linear(seen.clone(), stop.clone());
+        slack::set_api_root(Some(root.clone()));
+        linear::set_api(Some(format!("{root}graphql")));
+        const THREAD: &str = "1792400050.000200";
+        let key = format!("C0123ABCD:{THREAD}");
+        let linear = Connector { handled: vec!["uuid".into()], ..linear_connector() };
+        let mut slack = Connector { handled: vec![key.clone()], ..slack_connector() };
+        slack.followed.insert(key.clone(), Followed { cursor: "1792400060.000000".into(), seen: None, replied: false });
+        let (connectors, dir) = stored("consumed", vec![linear, slack]);
+        for (name, secret) in [("slack-key", "xoxb-test"), ("linear-key", "lin-test")] {
+            std::fs::write(dir.join(name), secret).unwrap();
+        }
+        let thread_run = || Run { mentioned: vec![THREAD.into()], ..slack_run(&slack_connector(), "C0123ABCD", "support", THREAD, &posts(), None, "/bin/pinned") };
+
+        let consumed = |_: Work| async { Ok::<Option<Placement>, String>(None) };
+        assert_eq!(block_on(connectors.hand_over(Work::Run(run(&linear_connector(), &issue(), "/bin/pinned")), &consumed)), Ok(()));
+        assert_eq!(block_on(connectors.hand_over(Work::Run(thread_run()), &consumed)), Ok(()));
+        assert_eq!(*seen.lock().unwrap(), Vec::<String>::new(), "Linear and Slack heard nothing");
+        let reloaded = Connectors::new(FileStorage::new(dir.clone()), "/bin/pinned".into()).get_settings().connectors;
+        assert_eq!(reloaded[0].handled, ["uuid"], "the issue stays handled");
+        assert_eq!(next_check_starts(&connectors), 0, "the next check does not send the issue again");
+        assert_eq!(reloaded[1].handled, [key.clone()], "the thread stays handled");
+        assert_eq!(reloaded[1].followed.len(), 0, "the thread's cursor is not followed");
+
+        let placed = |_: Work| async { Ok::<Option<Placement>, String>(Some(Placement { machine: "m1".into(), tab: "tab-1".into() })) };
+        assert_eq!(
+            block_on(connectors.hand_over(Work::Run(run(&linear_connector(), &issue(), "/bin/pinned")), &placed)),
+            Err("team ? has no column named \"Analyzing\"".into()),
+            "a placed run asks Linear to move its issue"
+        );
+        assert_eq!(block_on(connectors.hand_over(Work::Run(thread_run()), &placed)), Ok(()));
+        let paths: Vec<String> = seen.lock().unwrap().iter().map(|line| line.split(' ').next().unwrap_or_default().to_owned()).collect();
+        assert_eq!(paths, ["/graphql", "/reactions.add"], "a placed run moves the issue and reacts");
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -7278,6 +7348,8 @@ mod tests {
         assert_eq!(serde_json::from_value::<Trigger>(json).unwrap(), trigger);
         assert_eq!(serde_json::to_value(Trigger::Called).unwrap(), serde_json::json!({ "kind": "called" }));
         assert_eq!(serde_json::from_value::<Trigger>(serde_json::json!({ "kind": "called" })).unwrap(), Trigger::Called);
+        assert_eq!(serde_json::to_value(Trigger::Manual).unwrap(), serde_json::json!({ "kind": "manual" }));
+        assert_eq!(serde_json::from_value::<Trigger>(serde_json::json!({ "kind": "manual" })).unwrap(), Trigger::Manual);
         assert!(serde_json::from_value::<Trigger>(serde_json::json!({ "kind": "slack-message", "channel": "support" })).is_err(), "a message trigger needs its decision");
     }
 

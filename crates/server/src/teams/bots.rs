@@ -6,7 +6,9 @@
 
 use super::{db, Scope};
 use crate::hub::{Account, Hub};
-use pinned_core::connectors::{BoxStep, Connector, Trigger, Work};
+use pinned_core::connectors::{BoxStep, Connector, Placement, Trigger};
+use pinned_core::graph::migrate::migrate;
+use pinned_core::graph::runner::{session_steps, Library};
 use pinned_core::graph::{NodeKind, Watch};
 use pinned_core::teams::{Bot, BotLimits, CallRules, Run, RunState, TeamEvent, TeamProject, Who};
 use pinned_core::wire::HubCall;
@@ -16,7 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 /// What a refused run of a bot that is not on says, whichever way it was asked for.
-const IS_A_DRAFT: &str = "this bot is a draft: it has to be turned on before it can run";
+pub const IS_A_DRAFT: &str = "this bot is a draft: it has to be turned on before it can run";
 const NEEDS_KEYS: &str = "the team needs its Upstash key and Claude token before a bot can run";
 
 fn unix_secs() -> i64 {
@@ -28,16 +30,26 @@ async fn workflows(hub: &Arc<Hub>, team: &Account) -> Result<Vec<Connector>, Str
 }
 
 async fn workflow(hub: &Arc<Hub>, team: &Account, id: &str) -> Result<Connector, String> {
-    workflows(hub, team).await?.into_iter().find(|c| c.id == id).ok_or_else(|| format!("this team has no workflow {id}"))
+    find(&workflows(hub, team).await?, id).cloned()
 }
 
+fn find<'a>(workflows: &'a [Connector], id: &str) -> Result<&'a Connector, String> {
+    workflows.iter().find(|c| c.id == id).ok_or_else(|| format!("this team has no workflow {id}"))
+}
+
+/// What a bot whose workflow would reach its session more than once is refused with. On a team,
+/// each later reach would type into no session or open a new run in a new box.
+pub const MORE_THAN_ONE_SESSION: &str =
+    "a bot's workflow may have only one session or talk step, counting the workflows it calls: a workflow with more is not available as a bot yet";
+
 /// Refuses a workflow whose trigger is not one a bot can have yet ("scheduled and GitHub-event bots
-/// are not available yet"). Linear and Slack triggers are fine, and today they are the only kinds.
+/// are not available yet"). Linear, Slack and manual triggers are fine, and today they are the only kinds.
 /// The matches name every kind on purpose: a schedule or GitHub-event trigger added later does not
-/// compile until it is refused here.
-fn available(workflow: &Connector) -> Result<(), String> {
+/// compile until it is refused here. Refuses a graph that holds more than one session or talk step,
+/// with those of the team's `workflows` it calls (`MORE_THAN_ONE_SESSION`).
+fn available(workflow: &Connector, workflows: &[Connector]) -> Result<(), String> {
     match &workflow.trigger {
-        Trigger::LinearLabel { .. } | Trigger::SlackMention { .. } | Trigger::SlackMessage { .. } | Trigger::Called => {}
+        Trigger::LinearLabel { .. } | Trigger::SlackMention { .. } | Trigger::SlackMessage { .. } | Trigger::Called | Trigger::Manual => {}
     }
     let triggers = workflow.graph.iter().flat_map(|g| g.nodes.iter()).filter_map(|n| match &n.kind {
         NodeKind::Trigger { watch } => Some(watch),
@@ -45,8 +57,12 @@ fn available(workflow: &Connector) -> Result<(), String> {
     });
     for watch in triggers {
         match watch {
-            Watch::LinearLabel { .. } | Watch::SlackMention { .. } | Watch::SlackMessage { .. } | Watch::Called => {}
+            Watch::LinearLabel { .. } | Watch::SlackMention { .. } | Watch::SlackMessage { .. } | Watch::Called | Watch::Manual => {}
         }
+    }
+    let library: Library = workflows.iter().map(|c| (c.id.clone(), c.graph.clone().unwrap_or_else(|| migrate(c)))).collect();
+    if session_steps(&library, &workflow.id) > 1 {
+        return Err(MORE_THAN_ONE_SESSION.into());
     }
     Ok(())
 }
@@ -142,8 +158,9 @@ async fn check_who(hub: &Arc<Hub>, team: Uuid, calls: &CallRules) -> Result<(), 
 /// on again is `turn_bot_on`. A limit above the hub's team policy is the owner's to give.
 pub async fn save_bot(hub: &Arc<Hub>, scope: &Scope, bot: Bot) -> Result<(), String> {
     let team = scope.team.id;
-    let workflow = workflow(hub, &scope.team, &bot.workflow).await?;
-    available(&workflow)?;
+    let workflows = workflows(hub, &scope.team).await?;
+    let workflow = find(&workflows, &bot.workflow)?;
+    available(workflow, &workflows)?;
     check_who(hub, team, &bot.calls).await?;
     let BotLimits { usd, minutes } = bot.limits;
     if !usd.is_finite() || usd <= 0.0 || minutes == 0 {
@@ -171,13 +188,14 @@ pub async fn save_bot(hub: &Arc<Hub>, scope: &Scope, bot: Bot) -> Result<(), Str
 /// Upstash key and Claude token its boxes sign in with.
 pub async fn turn_bot_on(hub: &Arc<Hub>, scope: &Scope, workflow_id: &str, on: bool) -> Result<(), String> {
     let team = scope.team.id;
-    let workflow = workflow(hub, &scope.team, workflow_id).await?;
+    let workflows = workflows(hub, &scope.team).await?;
+    let workflow = find(&workflows, workflow_id)?;
     let row = db::bot(&hub.db, team, workflow_id).await?;
     if !on {
         draft(hub, scope, workflow_id).await?;
         return Ok(());
     }
-    available(&workflow)?;
+    available(workflow, &workflows)?;
     let calls = row.as_ref().map(|b| b.calls.clone()).unwrap_or_default();
     if !asked_by(hub, scope, &calls).await? {
         return Err("only the team's owner, or someone this bot asks, turns it on".into());
@@ -221,20 +239,48 @@ async fn asked_by(hub: &Arc<Hub>, scope: &Scope, calls: &CallRules) -> Result<bo
     Ok(false)
 }
 
-/// Any member. Runs the bot now, as its workflow's Run now would on the team's account: a box on
-/// the team's Upstash key and Claude token. The bot must be on. Records the run (`db::insert_run`,
-/// started by the member, with the subject its box opens for, so the box sets its machine on the
-/// run before the session starts: `db::claim_run_box`) and pushes
-/// `TeamEvent::RunChanged`. The bot's `BotLimits` are held by `calls::tick`.
+/// What `Hub::open_team_run` asks for. Only `start_run` makes one, so a team's run opens through
+/// no other path.
+pub struct TeamRunPass(());
+
+/// How a team's run was asked for.
+pub enum Start {
+    /// A member's Run now, by the member's id.
+    Member(Uuid),
+    /// A trigger of the bot's workflow fired (`triggers::fired`): `kind` names it (`linear_label`,
+    /// `slack_mention`, `slack_message`, `called`), and `work` is the session its poller found.
+    Trigger { kind: &'static str, work: pinned_core::connectors::Run },
+}
+
+/// Any member. Runs the bot now, as its workflow's Run now would on the team's account
+/// (`start_run`, started by the member).
 pub async fn run_now(hub: &Arc<Hub>, scope: &Scope, workflow_id: &str) -> Result<Run, String> {
-    let team = scope.team.id;
-    let workflow = workflow(hub, &scope.team, workflow_id).await?;
-    let on = db::bot(&hub.db, team, workflow_id).await?.is_some_and(|b| b.on);
+    start_run(hub, &scope.team, workflow_id, Start::Member(scope.member)).await.map(|(run, _)| run)
+}
+
+/// The one way a team's run starts, from a member's Run now or a trigger that fired. The bot must
+/// be on and the team must keep its Upstash key and Claude token. Whatever the stored workflow
+/// says, the run opens in a fresh box of the team's own. Records the run (`db::insert_run`, started
+/// by the member or `trigger:<kind>`, with the subject its box opens for, so the box sets its
+/// machine on the run before the session starts: `db::claim_run_box`) and pushes
+/// `TeamEvent::RunChanged`. Answers the run and where it opened. The bot's `BotLimits` are held by
+/// `calls::tick`.
+pub async fn start_run(hub: &Arc<Hub>, team: &Arc<Account>, workflow_id: &str, start: Start) -> Result<(Run, Placement), String> {
+    let workflows = workflows(hub, team).await?;
+    let workflow = find(&workflows, workflow_id)?;
+    let on = db::bot(&hub.db, team.id, workflow_id).await?.is_some_and(|b| b.on);
     if !on || !workflow.enabled {
         return Err(IS_A_DRAFT.into());
     }
-    available(&workflow)?;
-    let mut work = hub.connectors(&scope.team).await?.run_now(workflow_id, "a member of the team, from its bots")?;
+    available(workflow, &workflows)?;
+    let credential = super::membership::credential(hub, team).await?;
+    if !(credential.upstash && credential.claude) {
+        return Err(NEEDS_KEYS.into());
+    }
+    let (mut work, started_by) = match start {
+        Start::Member(member) => (hub.connectors(team).await?.run_now(workflow_id, "a member of the team, from its bots")?, member.to_string()),
+        Start::Trigger { kind, work } => (work, format!("trigger:{kind}")),
+    };
     // Whatever the stored workflow says, a bot never runs on a member's machine.
     if !matches!(work.runs_on, pinned_core::connectors::RunsOn::FreshBox(_)) {
         work.runs_on = pinned_core::connectors::RunsOn::FreshBox(BoxStep::default());
@@ -249,29 +295,25 @@ pub async fn run_now(hub: &Arc<Hub>, scope: &Scope, workflow_id: &str) -> Result
         started_at: unix_secs(),
         ended_at: None,
         outcome: None,
-        started_by: scope.member.to_string(),
+        started_by,
     };
     let id = Uuid::parse_str(&run.id).map_err(|e| e.to_string())?;
-    db::insert_run(&hub.db, team, &run, None).await?;
+    db::insert_run(&hub.db, team.id, &run, None).await?;
     // The box sets its machine on the run (`db::claim_run_box`) before it starts the session.
-    if let Err(e) = db::set_run_subject(&hub.db, team, id, &work.subject).await {
-        db::delete_run(&hub.db, team, id).await?;
+    if let Err(e) = db::set_run_subject(&hub.db, team.id, id, &work.subject).await {
+        db::delete_run(&hub.db, team.id, id).await?;
         return Err(e);
     }
-    let placed = match hub.open_placed(team, Work::Run(work)).await {
-        Ok(Some(placed)) => placed,
-        Ok(None) => {
-            db::delete_run(&hub.db, team, id).await?;
-            return Err("no box started the run".into());
-        }
+    let placed = match hub.open_team_run(TeamRunPass(()), team, work).await {
+        Ok(placed) => placed,
         Err(e) => {
-            db::delete_run(&hub.db, team, id).await?;
+            db::delete_run(&hub.db, team.id, id).await?;
             return Err(e);
         }
     };
-    db::set_run_box(&hub.db, team, id, &placed.machine).await?;
-    super::push(hub, team, TeamEvent::RunChanged { run: run.clone() }).await?;
-    Ok(run)
+    db::set_run_box(&hub.db, team.id, id, &placed.machine).await?;
+    super::push(hub, team.id, TeamEvent::RunChanged { run: run.clone() }).await?;
+    Ok((run, placed))
 }
 
 /// A run of the team ended (`run.state.ended()`): a bot made to run once is discarded, its row and

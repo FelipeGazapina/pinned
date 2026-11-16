@@ -34,6 +34,8 @@ const MINT_WAIT: Duration = Duration::from_secs(pinned_core::setup_token::WAIT.a
 /// How long importing an MCP server waits for the machine to read its account's config.
 const MCP_IMPORT_WAIT: Duration = Duration::from_secs(20);
 const MAX_RECORDS_PER_CALL: usize = 500;
+/// Why `open_placed` refuses a run on a team's account.
+pub const TEAM_RUNS: &str = "a team's runs start only through its bots";
 /// How long the password the app took counts as the owner being there.
 const UNLOCK_FOR: Duration = Duration::from_secs(12 * 60 * 60);
 /// A run may clone a large repository before its session starts.
@@ -216,6 +218,9 @@ struct Unlock {
 pub struct Account {
     pub id: Uuid,
     pub email: String,
+    /// A team's account (kind `team`), read once when the hub loads it: a kind never changes. Its
+    /// runs start only through its bots (`teams::bots::start_run`), never through `open_placed`.
+    pub team: bool,
     live: Mutex<Live>,
     connectors: OnceCell<Arc<Connectors>>,
     watching: AtomicBool,
@@ -519,7 +524,8 @@ impl Hub {
             return Ok(account.clone());
         }
         let email = self.db.email(id).await?.ok_or("the account was deleted")?;
-        let fresh = Arc::new(Account { id, email, live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() });
+        let team = crate::teams::db::is_team(&self.db, id).await?;
+        let fresh = Arc::new(Account { id, email, team, live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() });
         Ok(self.accounts.lock().unwrap().entry(id).or_insert(fresh).clone())
     }
 
@@ -546,7 +552,7 @@ impl Hub {
         tokio::spawn(async move {
             let open = |work| {
                 let hub = hub.clone();
-                async move { hub.open_placed(id, work).await }
+                async move { hub.open_found(id, work).await }
             };
             let on_check = |_: &pinned_core::connectors::Check| {
                 let (hub, account) = checked.clone();
@@ -575,22 +581,41 @@ impl Hub {
         self.open_placed(account, work).await.map(drop)
     }
 
-    /// Hands `work` to a machine and returns the tab that took a run, or none for a delivery.
+    /// Hands `work` to a machine and returns the tab that took a run, or none for a delivery. A
+    /// team's account takes no run here: its runs start only through its bots (`open_team_run`).
     pub async fn open_placed(&self, account: Uuid, work: Work) -> Result<Option<Placement>, String> {
         let account = self.account(account).await?;
         match work {
-            Work::Run(run) => {
-                if let Some((machine, tab)) = account.placed(&run.connector, &run.subject) {
-                    return Ok(Some(Placement { machine, tab }));
-                }
-                match run.runs_on.clone() {
-                    RunsOn::FreshBox(step) => self.boxes.open(self, &account, run, step).await.map(Some),
-                    RunsOn::Any => self.open_on_pool(&account, run, "").await.map(Some),
-                    RunsOn::Machine(id) => self.open_on_pool(&account, run, &id).await.map(Some),
-                }
-            }
+            Work::Run(_) if account.team => Err(TEAM_RUNS.into()),
+            Work::Run(run) => self.place_run(&account, run).await.map(Some),
             Work::Delivery(d) => self.deliver(&account, d).await.map(|()| None),
             Work::Prompt { env, text } => self.type_prompt(&account, &env, &text).await.map(|()| None),
+        }
+    }
+
+    /// What an account's own pollers and tab wakes found: a person's goes to `open_placed`, a
+    /// team's to its bots (`teams::triggers::fired`).
+    pub async fn open_found(self: &Arc<Self>, account: Uuid, work: Work) -> Result<Option<Placement>, String> {
+        match self.account(account).await?.team {
+            true => crate::teams::triggers::fired(self, account, work).await,
+            false => self.open_placed(account, work).await,
+        }
+    }
+
+    /// Opens a team's run, which only `teams::bots::start_run` asks for: the pass is its proof.
+    pub async fn open_team_run(&self, _pass: crate::teams::bots::TeamRunPass, team: &Arc<Account>, run: Run) -> Result<Placement, String> {
+        self.place_run(team, run).await
+    }
+
+    /// A run goes to the tab that already has it, else where its workflow says.
+    async fn place_run(&self, account: &Arc<Account>, run: Run) -> Result<Placement, String> {
+        if let Some((machine, tab)) = account.placed(&run.connector, &run.subject) {
+            return Ok(Placement { machine, tab });
+        }
+        match run.runs_on.clone() {
+            RunsOn::FreshBox(step) => self.boxes.open(self, account, run, step).await,
+            RunsOn::Any => self.open_on_pool(account, run, "").await,
+            RunsOn::Machine(id) => self.open_on_pool(account, run, &id).await,
         }
     }
 
@@ -2088,7 +2113,7 @@ mod tests {
 
     #[test]
     fn a_machine_back_before_a_client_saw_it_leave_gets_that_clients_watch() {
-        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() };
+        let account = Account { id: Uuid::nil(), email: String::new(), team: false, live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() };
         for client in [1, 2] {
             account.client_connected(client, vec![], false, None, Outbox::new().0, vec![]);
         }
@@ -2109,7 +2134,7 @@ mod tests {
 
     #[test]
     fn a_machine_reports_run_in_the_background_on_its_view_while_it_is_online() {
-        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() };
+        let account = Account { id: Uuid::nil(), email: String::new(), team: false, live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() };
         let (client, mut heard, _) = Outbox::new();
         account.client_connected(1, vec![], false, None, client, vec![]);
         let (out, _sent, _) = Outbox::new();
@@ -2133,7 +2158,7 @@ mod tests {
 
     #[test]
     fn a_call_cut_off_by_its_machine_going_offline_is_lost_not_refused() {
-        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() };
+        let account = Account { id: Uuid::nil(), email: String::new(), team: false, live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() };
         let (out, _sent, _) = Outbox::new();
         account.came_online("m", 1, "box".into(), false, "0.17.14".into(), out);
         let (_, mut answered) = account.send_call("m", Call::Tabs).unwrap();
@@ -2160,7 +2185,7 @@ mod tests {
     /// questionnaire when `asked`, as the node shows a tab whose worker called `question_user`.
     fn box_showing(status: AgentStatus, asked: bool, running: bool) -> Account {
         use pinned_core::questions::{self, QOption, Question, Questionnaire};
-        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() };
+        let account = Account { id: Uuid::nil(), email: String::new(), team: false, live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() };
         let (out, _sent, _) = Outbox::new();
         account.came_online("box", 1, "box".into(), true, "0.18.2".into(), out);
         let mut tab: TabView = serde_json::from_value(serde_json::json!({

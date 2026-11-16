@@ -3,7 +3,7 @@
 //! op the team's account. An op never sees the member's own account, only its id (`Scope::member`).
 //!
 //! Each op is one function in one file: membership.rs, projects.rs, groups.rs, bots.rs, calls.rs,
-//! chat.rs. Their SQL lives in db.rs, one function per query.
+//! chat.rs, triggers.rs. Their SQL lives in db.rs, one function per query.
 
 pub mod bots;
 pub mod calls;
@@ -12,6 +12,7 @@ pub mod db;
 pub mod groups;
 pub mod membership;
 pub mod projects;
+pub mod triggers;
 
 use crate::hub::{Account, Hub};
 use pinned_core::surface::{self, Side};

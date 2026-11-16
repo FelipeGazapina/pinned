@@ -917,3 +917,19 @@ pub async fn waiting_boxes(db: &Db, account: Uuid) -> Result<std::collections::H
         .map_err(err)?;
     Ok(rows.iter().map(|r| r.get(0)).collect())
 }
+
+// ---- triggers.rs ----
+
+/// The live run of the team's workflow `workflow` opened for `subject`, if any.
+pub async fn live_run_for(db: &Db, team: Uuid, workflow: &str, subject: &Subject) -> Result<Option<Run>, String> {
+    let row = db
+        .client()
+        .await?
+        .query_opt(
+            &format!("select {RUN_COLUMNS} from team_runs where team = $1 and workflow = $2 and subject = $3 and state in {LIVE} order by started_at desc limit 1"),
+            &[&team, &workflow, &json(subject)?],
+        )
+        .await
+        .map_err(err)?;
+    Ok(row.as_ref().map(run_of))
+}

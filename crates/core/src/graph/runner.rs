@@ -409,6 +409,31 @@ pub fn classify_port(library: &Library, connector: &str, node: &NodeId, classify
     port_for(classify, answers, &|port| branch_pages(library, connector, node, port))
 }
 
+/// How many talk and session steps `connector`'s graph holds, counting a called graph's again at
+/// each call step. The first a run walks opens its session, and every later one reaches that
+/// session again: it types into it, or opens it anew when its tab or conversation is gone. A call
+/// back into a graph already being counted adds nothing; the save refuses that cycle anyway.
+pub fn session_steps(library: &Library, connector: &str) -> usize {
+    fn count(library: &Library, connector: &str, counting: &mut Vec<String>) -> usize {
+        let Some(graph) = library.get(connector).filter(|_| !counting.iter().any(|c| c == connector)) else {
+            return 0;
+        };
+        counting.push(connector.to_owned());
+        let steps = graph
+            .nodes
+            .iter()
+            .map(|node| match &node.kind {
+                NodeKind::Talk { .. } | NodeKind::Session(_) => 1,
+                NodeKind::Call { workflow } => count(library, workflow, counting),
+                _ => 0,
+            })
+            .sum();
+        counting.pop();
+        steps
+    }
+    count(library, connector, &mut Vec::new())
+}
+
 /// Whether the branch out of `port` acts on its own, hub-side: it reaches a reply, a file-issue or
 /// a page, and no talk, session or call, which would need the thread's session.
 pub fn branch_without_session(library: &Library, connector: &str, from: &NodeId, port: &PortId) -> bool {

@@ -11553,3 +11553,4 @@ mod teams_box_call;
 #[path = "hub/teams_separation_fixes.rs"] mod teams_separation_fixes;
 #[path = "hub/teams_hardening.rs"]
 mod teams_hardening;
+#[path = "hub/teams_triggers.rs"] mod teams_triggers;
