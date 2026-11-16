@@ -1419,6 +1419,9 @@ impl Boxes {
                     let mut row = row.clone();
                     row.phase = failed.clone();
                     self.tell_origin(hub, account, &row, &End::Failed(e.clone())).await;
+                    if let Err(failed) = crate::teams::calls::box_failed(hub, account, row.machine, &row.connector, &row.subject, e).await {
+                        eprintln!("pinned-server: box {} of account {} failed, but its team run did not end yet: {failed}", row.id, account.id);
+                    }
                     if row.work == BoxWork::Run && row.connector != INTERACTIVE_CONNECTOR && !run_ended {
                         if let Ok(connectors) = hub.connectors(account).await {
                             connectors.box_boot_failed(&row.subject);

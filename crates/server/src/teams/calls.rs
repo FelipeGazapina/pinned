@@ -14,6 +14,7 @@ use super::{db, push, Scope};
 use crate::boxes::End;
 use crate::hub::{Account, Hub, LastTurn};
 use futures_util::future::BoxFuture;
+use pinned_core::agent::Subject;
 use pinned_core::teams::{Answer, AnswerKind, Call, Role, Run, RunState, Situation, TeamEvent, TeamPolicy, Who};
 use pinned_core::wire::{Call as MachineCall, TabView};
 use serde::Serialize;
@@ -473,6 +474,29 @@ pub fn box_ended<'a>(hub: &'a Hub, account: &'a Account, machine: Uuid, why: &'a
             _ => Ok(()),
         }
     })
+}
+
+/// The box `machine` of `account` failed to boot or to start its session (`boxes::Boxes::drive`).
+/// When it is a team's box, its live run ends as `box_ended` ends it for `End::Failed`, so it does
+/// not stay working: the run the box claimed, else the one with no box yet that it was opened for
+/// (the team's workflow `workflow` and `subject`).
+pub async fn box_failed(hub: &Hub, account: &Account, machine: Uuid, workflow: &str, subject: &Subject, error: &str) -> Result<(), String> {
+    if !account.team {
+        return Ok(());
+    }
+    let run = match db::run_on_machine(&hub.db, account.id, &machine.to_string()).await? {
+        Some(run) => run,
+        None => match db::live_run_for(&hub.db, account.id, workflow, subject).await? {
+            Some(run) if db::run_box(&hub.db, account.id, parse_id(&run.id, "run")?).await?.is_none() => run,
+            _ => return Ok(()),
+        },
+    };
+    let team = hub.account(account.id).await?;
+    let (state, outcome) = ended_by_box(&End::Failed(error.to_owned()), LastTurn::Unknown);
+    match end_run(hub, &team, parse_id(&run.id, "run")?, state, &outcome, None).await {
+        Err(e) if e != RUN_ENDED => Err(e),
+        _ => Ok(()),
+    }
 }
 
 /// How a run ends when its box ends first. `Done` only when the session ended its own turn:

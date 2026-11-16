@@ -279,3 +279,17 @@ fn a_run_stopped_while_its_box_boots_stays_stopped_and_its_box_ends_without_a_se
     crew.run_now(&id);
     wait_for("the next run's session, with no cooldown", || crew.node().is_some_and(|n| !n.machine.tabs().is_empty()));
 }
+
+// ---- 3. a box that fails to boot ----
+
+#[test]
+fn a_run_whose_box_fails_to_boot_fails_with_why() {
+    let crew = Crew::new("tl_boot_fails", fast(), patient());
+    let id = crew.on_bot("Footer");
+    let failing = Exec { exit_code: 22, output: "Downloading pinned-server\n".into(), error: "curl: (22) The requested URL returned error: 404\n".into() };
+    crew.hub.boxes.state.lock().unwrap().failing = Some(failing);
+    let why = "the bootstrap failed: Downloading pinned-server\ncurl: (22) The requested URL returned error: 404";
+    assert_eq!(crew.op(&crew.bob, json!({ "op": "run_now", "workflow": id })), Err(format!("Upstash Box: {why}")));
+    assert_eq!(crew.runs(), vec![("failed".to_owned(), Some(format!("its box failed: {why}")))], "the run does not stay working");
+    wait_for("the box to be deleted", || crew.hub.boxes.live().is_empty());
+}
