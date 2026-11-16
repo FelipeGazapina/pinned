@@ -593,7 +593,7 @@ async fn bound_lock_waits(client: &Client) -> Result<(), String> {
     limit("lock timeout", client.batch_execute(&lock_limit())).await
 }
 
-fn lock_limit() -> String {
+pub(crate) fn lock_limit() -> String {
     format!("set lock_timeout = {}", LOCK_LIMIT.as_millis())
 }
 

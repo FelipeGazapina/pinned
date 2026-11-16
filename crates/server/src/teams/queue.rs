@@ -97,8 +97,8 @@ pub const TURN_KEY: &str = "hashtextextended('pinned-team-runs:' || $1::uuid::te
 /// A team's turn to decide what runs: this hub's line, and a transaction on a connection of its
 /// own holding the team's `pg_advisory_xact_lock`, so another hub on the database waits too.
 /// `end` commits it; a turn dropped on an error closes its connection, which frees the lock.
-/// Both waits are bounded: a turn not had within `TURN_WAIT` (this hub's line), or within the
-/// connection's lock timeout (the advisory lock), is refused as `crate::db::BUSY`, never retried.
+/// Both waits together are bounded by `TURN_WAIT`: a turn not had by then (this hub's line, then
+/// the advisory lock for what is left) is refused as `crate::db::BUSY`, never retried.
 /// A turn only decides and reserves: nothing outside pinned is called while one is held.
 struct Turn {
     _line: tokio::sync::OwnedMutexGuard<()>,
@@ -110,10 +110,17 @@ const TURN_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
 impl Turn {
     async fn take(hub: &Hub, team: Uuid) -> Result<Turn, String> {
-        let line = tokio::time::timeout(TURN_WAIT, line(team).lock_owned()).await.map_err(|_| crate::db::BUSY.to_string())?;
+        // The connection opens before the line is taken, so a slow connect never holds the line.
         let held = hub.db.own_client().await?;
-        held.batch_execute("begin").await.map_err(crate::db::err)?;
+        // One deadline for both waits: a task that got the line late waits on the advisory lock
+        // only for what is left, so the turns queued behind another hub's are all refused in time.
+        let deadline = tokio::time::Instant::now() + TURN_WAIT;
+        let line = tokio::time::timeout_at(deadline, line(team).lock_owned()).await.map_err(|_| crate::db::BUSY.to_string())?;
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis().max(1);
+        held.batch_execute(&format!("begin; set local lock_timeout = {left}")).await.map_err(crate::db::err)?;
         held.execute(&format!("select pg_advisory_xact_lock({TURN_KEY})"), &[&team]).await.map_err(crate::db::err)?;
+        // The turn's own statements wait on locks as every statement of the hub's does.
+        held.batch_execute(&crate::db::lock_limit()).await.map_err(crate::db::err)?;
         Ok(Turn { _line: line, held })
     }
 

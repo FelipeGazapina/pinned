@@ -104,6 +104,20 @@ fn run_now_is_refused_while_another_hub_holds_the_teams_turn_and_the_hub_answers
 }
 
 #[test]
+fn run_nows_queued_behind_a_turn_another_hub_holds_are_all_refused_within_three_seconds() {
+    let crew = Crew::new("tl_turn_wait");
+    let bot = crew.on_bot("Pages");
+    let held = Held::new(&crew.hub, &turn_of(crew.team));
+    let since = Instant::now();
+    let asked: Vec<_> = [&crew.bob, &crew.ana, &crew.bob].into_iter().map(|who| spawn_op(&crew, who, TeamOp::RunNow { workflow: bot.clone() })).collect();
+    for (n, ask) in asked.into_iter().enumerate() {
+        assert_eq!(within(&crew.hub, "a Run now", ask).unwrap(), Err(BUSY.to_owned()), "Run now {n}");
+    }
+    assert!(since.elapsed() < Duration::from_secs(3), "all three were refused within 3 s, not {:?}", since.elapsed());
+    held.release();
+}
+
+#[test]
 fn the_teams_turn_is_not_held_while_a_box_boots() {
     let crew = Crew::new("tl_boot");
     let bot = crew.on_bot("Pages");
