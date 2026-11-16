@@ -1134,7 +1134,7 @@ fn machines_share_a_projects_memory_through_the_hub_wherever_they_keep_it() {
     assert_eq!(pulled, vec!["claude/memory/MEMORY.md"]);
     assert_eq!(std::fs::read_to_string(memory(&on_mini)).unwrap(), "- deploys go through the VPS");
 
-    let outside = sync::File { entry: sync::Entry { path: "../.ssh/authorized_keys".into(), sha: "x".into(), modified: 1, size: 1, executable: None }, data: Some("eA==".into()) };
+    let outside = sync::File { entry: sync::Entry { path: "../.ssh/authorized_keys".into(), sha: "x".into(), modified: 1, size: 1, executable: None }, data: Some("eA==".into()), agreed: None };
     assert_eq!(
         mac_link.call_hub(HubCall::SyncPush { project: project.key.clone(), files: vec![outside] }),
         Err("../.ssh/authorized_keys is not a file a project shares".into())
@@ -1208,7 +1208,7 @@ fn a_plugin_tree_is_stored_without_settings_env_or_claude_json() {
     pulled.sort();
     assert_eq!(pulled, stored);
     assert_eq!(std::fs::read_to_string(mini_home.join("synced-plugins/plugins/toy@demo/skills/greet/SKILL.md")).unwrap(), skill);
-    let secret = |path: &str| sync::File { entry: sync::Entry { path: path.into(), sha: "x".into(), modified: 1, size: 1, executable: None }, data: Some("eA==".into()) };
+    let secret = |path: &str| sync::File { entry: sync::Entry { path: path.into(), sha: "x".into(), modified: 1, size: 1, executable: None }, data: Some("eA==".into()), agreed: None };
     for path in [
         "plugins/toy@demo/settings.json",
         "plugins/toy@demo/.claude.json",
@@ -1231,6 +1231,7 @@ fn a_plugin_tree_is_stored_without_settings_env_or_claude_json() {
     let oversized = sync::File {
         entry: sync::Entry { path: "plugins/toy@demo/skills/greet/blob.bin".into(), sha: "x".into(), modified: 1, size: raw.len() as u64, executable: None },
         data: Some(base64::engine::general_purpose::STANDARD.encode(&raw)),
+        agreed: None,
     };
     assert_eq!(
         mac_link.call_hub(HubCall::SyncPush { project: sync::PLUGINS_KEY.into(), files: vec![oversized] }),
@@ -1559,6 +1560,7 @@ fn plugin_hook(body: &[u8], modified: u64, executable: bool) -> sync::File {
     sync::File {
         entry: sync::Entry { path: HOOK_PATH.into(), sha: sha256_hex(body), modified, size: packed.len() as u64, executable: Some(executable) },
         data: Some(base64::engine::general_purpose::STANDARD.encode(packed)),
+        agreed: None,
     }
 }
 
@@ -11674,3 +11676,183 @@ mod teams_hardening;
 mod reports;
 #[path = "hub/reports_poller.rs"]
 mod reports_poller;
+
+#[test]
+fn an_account_over_the_sync_limit_takes_a_push_that_does_not_grow_it_and_refuses_one_that_does() {
+    let hub = TestHub::start("sync_quota");
+    let url = hub.url.clone();
+    let (_, _, mut ana) = signed_in(&url, "ana@example.test");
+    let project = "github.com/acme/site";
+    let file = |path: &str, text: &str| {
+        json!({ "path": path, "sha": sha256_hex(text.as_bytes()), "modified": 1, "data": base64::engine::general_purpose::STANDARD.encode(gzip_bytes(text.as_bytes())) })
+    };
+    let tombstone = |path: &str| json!({ "path": path, "sha": "", "modified": 2 });
+    let push = |client: &mut Client, files: Vec<Value>| client.hub(json!({ "cmd": "sync_push", "project": project, "files": files }));
+    let (notes, plan) = ("claude/memory/notes.md", "claude/memory/plan.md");
+    push(&mut ana, vec![file(notes, "ana's notes"), file(plan, "plan: ship 0.18.6")]).unwrap();
+    // Thirteen sessions of 100 MiB: 1363148800 bytes, past the 1073741824 the account may keep.
+    admin_on(
+        &hub.database,
+        &format!(
+            "insert into project_files (account, project, path, sha, modified, data) \
+             select a.id, '{project}', 'claude/big-' || n || '.jsonl', 'big' || n, 1, convert_to(repeat('x', 104857600), 'UTF8') \
+             from accounts a, generate_series(1, 13) n where a.email = 'ana@example.test'"
+        ),
+    );
+    let refused = Err("the account's synced projects would pass 1024 MB; delete old sessions to sync more".to_owned());
+    let sha_of = |client: &mut Client, path: &str| {
+        let listed = client.hub(json!({ "cmd": "sync_list", "project": project })).unwrap();
+        listed.as_array().unwrap().iter().find(|e| e["path"] == path).map(|e| e["sha"].as_str().unwrap().to_owned())
+    };
+
+    assert_eq!(push(&mut ana, vec![tombstone(notes)]), Ok(Value::Null), "a deletion frees bytes even past the limit");
+    assert_eq!(sha_of(&mut ana, notes), Some(String::new()));
+    assert_eq!(gzip_bytes(b"plan: ship 0.18.6").len(), gzip_bytes(b"plan: ship 0.18.7").len());
+    assert_eq!(push(&mut ana, vec![file(plan, "plan: ship 0.18.7")]), Ok(Value::Null), "a file replaced by one of the same size grows nothing");
+    assert_eq!(push(&mut ana, vec![file("claude/big-1.jsonl", "{}")]), Ok(Value::Null), "a session shrunk from 100 MiB to a few bytes");
+    assert_eq!(push(&mut ana, vec![file("claude/memory/more.md", "one more note")]), refused, "a push that grows the account stays refused");
+    assert_eq!(sha_of(&mut ana, "claude/memory/more.md"), None);
+    let mixed = vec![tombstone("claude/big-2.jsonl"), file("claude/memory/more.md", "one more note")];
+    assert_eq!(push(&mut ana, mixed), Ok(Value::Null), "freeing 104857600 bytes while adding a few is taken whole, 11 sessions still past the limit");
+    assert_eq!(sha_of(&mut ana, "claude/memory/more.md"), Some(sha256_hex(b"one more note")));
+    assert_eq!(push(&mut ana, vec![tombstone("claude/big-3.jsonl"), tombstone("claude/big-4.jsonl")]), Ok(Value::Null));
+    assert_eq!(push(&mut ana, vec![file("claude/memory/later.md", "under the limit again")]), Ok(Value::Null), "9 sessions of 100 MiB leave room");
+}
+
+/// Runs `then` right after the hub answers a list, so another machine's push lands between this
+/// machine's list and its push.
+struct ListThen<'a> {
+    link: &'a Link,
+    then: std::cell::RefCell<Option<Box<dyn FnOnce() + 'a>>>,
+}
+
+impl sync::Hub for ListThen<'_> {
+    fn list(&self, project: &str) -> Result<Vec<sync::Entry>, String> {
+        let listed = sync::Hub::list(self.link, project);
+        if let Some(then) = self.then.borrow_mut().take() {
+            then();
+        }
+        listed
+    }
+    fn push(&self, project: &str, files: Vec<sync::File>) -> Result<(), String> {
+        sync::Hub::push(self.link, project, files)
+    }
+    fn pull(&self, project: &str, paths: Vec<String>) -> Result<Vec<sync::File>, String> {
+        sync::Hub::pull(self.link, project, paths)
+    }
+    fn mark_executable(&self, project: &str, repairs: Vec<sync::ModeRepair>) -> Result<(), String> {
+        sync::Hub::mark_executable(self.link, project, repairs)
+    }
+}
+
+#[test]
+fn a_deletion_sent_after_another_machine_changed_the_file_keeps_the_change() {
+    let hub = TestHub::start("sync_delete_race");
+    let url = hub.url.clone();
+    let (token, account) = account::signup(&url, "ana@example.test", "correct horse").unwrap();
+    let start = |name: &str| {
+        let dir = temp(&format!("race-{name}"));
+        let (machine, machine_token) = account::register_machine(&url, &token, name, "macos").unwrap();
+        let creds = Credentials { hub: url.clone(), email: account.email.clone(), user_token: token.clone(), machine_id: machine.id, machine_token };
+        creds.save(&dir).unwrap();
+        let node = Node::start(&dir, creds);
+        wait_for("the machine online", || node.online());
+        (node, dir)
+    };
+    let ((mac, mac_home), (mini, mini_home)) = (start("mac"), start("mini"));
+    let project = sync::Project { key: "github.com/acme/app".into(), name: "app".into(), repo: "git@github.com:acme/app.git".into() };
+    let checkout = |home: &Path| sync::Checkout { project: project.clone(), path: home.join("app"), history: None, claude_home: Some(home.join(".claude")) };
+    let (on_mac, on_mini) = (checkout(&mac_home), checkout(&mini_home));
+    let notes = |c: &sync::Checkout| sync::claude_dir(c.claude_home.as_ref().unwrap(), &c.path).join("memory/notes.md");
+    std::fs::create_dir_all(notes(&on_mac).parent().unwrap()).unwrap();
+    std::fs::write(notes(&on_mac), "first").unwrap();
+    let (mac_link, mini_link) = (mac.link.as_ref().unwrap(), mini.link.as_ref().unwrap());
+    let now = std::time::SystemTime::now();
+    let (mut mac_state, mut mini_state) = (sync::State::default(), sync::State::default());
+    assert_eq!(sync::sync(&Through(mac_link), &mut mac_state, &on_mac, now).unwrap().pushed, vec!["claude/memory/notes.md"]);
+    assert_eq!(sync::sync(&Through(mini_link), &mut mini_state, &on_mini, now).unwrap().pulled, vec!["claude/memory/notes.md"]);
+    std::fs::remove_file(notes(&on_mac)).unwrap();
+
+    let mini_changes = || {
+        std::fs::write(notes(&on_mini), "second, from mini").unwrap();
+        let pushed = sync::sync(&Through(mini_link), &mut mini_state, &on_mini, now).unwrap().pushed;
+        assert_eq!(pushed, vec!["claude/memory/notes.md"]);
+    };
+    let racing = ListThen { link: mac_link, then: std::cell::RefCell::new(Some(Box::new(mini_changes))) };
+    sync::sync(&racing, &mut mac_state, &on_mac, now).unwrap();
+    drop(racing);
+    let listed = mac_link.call_hub(HubCall::SyncList { project: project.key.clone() }).unwrap();
+    assert_eq!(listed[0]["sha"], json!(sha256_hex(b"second, from mini")), "the deletion was sent for the first version only");
+
+    assert_eq!(sync::sync(&Through(mac_link), &mut mac_state, &on_mac, now).unwrap().pulled, vec!["claude/memory/notes.md"]);
+    assert_eq!(std::fs::read_to_string(notes(&on_mac)).unwrap(), "second, from mini");
+    let (mut mac, mut mini) = (mac, mini);
+    mac.kill();
+    mini.kill();
+}
+
+#[test]
+fn a_deletion_naming_a_sha_the_hub_no_longer_holds_is_skipped_and_one_naming_none_applies_as_before() {
+    let hub = TestHub::start("sync_delete_agreed");
+    let url = hub.url.clone();
+    let (_, _, mut ana) = signed_in(&url, "ana@example.test");
+    let project = "github.com/acme/site";
+    let file = |path: &str, text: &str| {
+        json!({ "path": path, "sha": sha256_hex(text.as_bytes()), "modified": 1, "data": base64::engine::general_purpose::STANDARD.encode(gzip_bytes(text.as_bytes())) })
+    };
+    let push = |client: &mut Client, files: Vec<Value>| client.hub(json!({ "cmd": "sync_push", "project": project, "files": files }));
+    let sha_of = |client: &mut Client, path: &str| {
+        let listed = client.hub(json!({ "cmd": "sync_list", "project": project })).unwrap();
+        listed.as_array().unwrap().iter().find(|e| e["path"] == path).map(|e| e["sha"].as_str().unwrap().to_owned())
+    };
+    let (kept, gone, old) = ("claude/memory/kept.md", "claude/memory/gone.md", "claude/memory/old.md");
+    push(&mut ana, vec![file(kept, "second"), file(gone, "first"), file(old, "second")]).unwrap();
+    let first = sha256_hex(b"first");
+
+    let stale = json!({ "path": kept, "sha": "", "modified": 2, "agreed": first });
+    let current = json!({ "path": gone, "sha": "", "modified": 2, "agreed": first });
+    let from_an_older_app = json!({ "path": old, "sha": "", "modified": 2 });
+    assert_eq!(push(&mut ana, vec![stale, current, from_an_older_app]), Ok(Value::Null));
+    assert_eq!(sha_of(&mut ana, kept), Some(sha256_hex(b"second")), "changed since the sender agreed on it");
+    assert_eq!(sha_of(&mut ana, gone), Some(String::new()));
+    assert_eq!(sha_of(&mut ana, old), Some(String::new()), "a deletion without `agreed` applies whatever the hub holds");
+}
+
+#[test]
+fn over_the_sync_limit_a_stale_deletion_frees_nothing_and_agreed_on_a_file_is_ignored() {
+    let hub = TestHub::start("sync_quota_stale");
+    let url = hub.url.clone();
+    let (_, _, mut ana) = signed_in(&url, "ana@example.test");
+    let project = "github.com/acme/site";
+    let file = |path: &str, text: &str| {
+        json!({ "path": path, "sha": sha256_hex(text.as_bytes()), "modified": 1, "data": base64::engine::general_purpose::STANDARD.encode(gzip_bytes(text.as_bytes())) })
+    };
+    let push = |client: &mut Client, files: Vec<Value>| client.hub(json!({ "cmd": "sync_push", "project": project, "files": files }));
+    let sha_of = |client: &mut Client, path: &str| {
+        let listed = client.hub(json!({ "cmd": "sync_list", "project": project })).unwrap();
+        listed.as_array().unwrap().iter().find(|e| e["path"] == path).map(|e| e["sha"].as_str().unwrap().to_owned())
+    };
+    let plan = "claude/memory/plan.md";
+    push(&mut ana, vec![file(plan, "plan: ship 0.18.6")]).unwrap();
+    let mut changed = file(plan, "plan: ship 0.18.7");
+    changed["agreed"] = json!(sha256_hex(b"an older plan"));
+    assert_eq!(push(&mut ana, vec![changed]), Ok(Value::Null));
+    assert_eq!(sha_of(&mut ana, plan), Some(sha256_hex(b"plan: ship 0.18.7")), "`agreed` is only compared on a deletion");
+
+    // Eleven sessions of 100 MiB: 1153433600 bytes, past the 1073741824 the account may keep.
+    admin_on(
+        &hub.database,
+        &format!(
+            "insert into project_files (account, project, path, sha, modified, data) \
+             select a.id, '{project}', 'claude/big-' || n || '.jsonl', 'big' || n, 1, convert_to(repeat('x', 104857600), 'UTF8') \
+             from accounts a, generate_series(1, 11) n where a.email = 'ana@example.test'"
+        ),
+    );
+    let stale = json!({ "path": "claude/big-1.jsonl", "sha": "", "modified": 2, "agreed": "big0" });
+    let refused = push(&mut ana, vec![stale, file("claude/memory/more.md", "one more note")]);
+    assert_eq!(refused, Err("the account's synced projects would pass 1024 MB; delete old sessions to sync more".to_owned()), "the skipped deletion frees nothing");
+    assert_eq!(sha_of(&mut ana, "claude/big-1.jsonl"), Some("big1".to_owned()));
+    assert_eq!(sha_of(&mut ana, "claude/memory/more.md"), None);
+    let current = json!({ "path": "claude/big-1.jsonl", "sha": "", "modified": 2, "agreed": "big1" });
+    assert_eq!(push(&mut ana, vec![current, file("claude/memory/more.md", "one more note")]), Ok(Value::Null));
+}

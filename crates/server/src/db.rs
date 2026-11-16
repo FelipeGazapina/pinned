@@ -22,7 +22,7 @@ use pinned_core::surface::{ActorRole, AuditEntry, AuditOutcome, Confirmation, De
 use pinned_core::wire::{AccountView, AgentProject, AgentView, InviteView, MachineView, NewInvite, NEVER_EXPIRES};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
@@ -845,26 +845,39 @@ impl Db {
             .collect())
     }
 
-    /// Keeps the files, unless they would take the account past its quota. Two pushes at once may
-    /// pass it by a batch, which is fine for a guard against filling the disk.
-    pub async fn sync_push(&self, account: Uuid, project: &str, files: Vec<(sync::Entry, Vec<u8>)>) -> Result<(), String> {
+    /// Keeps the files, unless they would take the account past its quota. A push that does not
+    /// grow the account is always kept, even past the quota, so deleting is a way out. Two pushes
+    /// at once may pass it by a batch, which is fine for a guard against filling the disk.
+    ///
+    /// A deletion that names the sha its sender `agreed` on is skipped when the hub holds another
+    /// sha by then: another machine changed the file after the sender last saw it.
+    pub async fn sync_push(&self, account: Uuid, project: &str, files: Vec<(sync::Entry, Vec<u8>, Option<String>)>) -> Result<(), String> {
         let client = self.client().await?;
-        let paths: Vec<&str> = files.iter().map(|(e, _)| e.path.as_str()).collect();
-        let row = client
-            .query_one(
-                "select coalesce(sum(octet_length(data)), 0)::bigint, \
-                 coalesce(sum(octet_length(data)) filter (where project = $2 and path = any($3)), 0)::bigint \
-                 from project_files where account = $1",
-                &[&account, &project, &paths],
-            )
+        let paths: Vec<&str> = files.iter().map(|(e, _, _)| e.path.as_str()).collect();
+        let used: i64 = client
+            .query_one("select coalesce(sum(octet_length(data)), 0)::bigint from project_files where account = $1", &[&account])
             .await
-            .map_err(err)?;
-        let (used, replaced): (i64, i64) = (row.get(0), row.get(1));
-        let incoming: i64 = files.iter().map(|(_, data)| data.len() as i64).sum();
-        if used - replaced + incoming > SYNC_QUOTA {
-            return Err(format!("the account's synced projects would pass {} MB; delete old sessions to sync more", SYNC_QUOTA >> 20));
+            .map_err(err)?
+            .get(0);
+        let stored: BTreeMap<String, (String, i64)> = client
+            .query("select path, sha, octet_length(data)::bigint from project_files where account = $1 and project = $2 and path = any($3)", &[&account, &project, &paths])
+            .await
+            .map_err(err)?
+            .iter()
+            .map(|r| (r.get(0), (r.get(1), r.get(2))))
+            .collect();
+        let kept = |path: &str, agreed: &Option<String>| match (agreed, stored.get(path)) {
+            (Some(agreed), Some((sha, _))) => agreed == sha,
+            _ => true,
+        };
+        // The paths this push replaces: a deletion skipped for its stale `agreed` replaces nothing.
+        let replacing: BTreeSet<&str> = files.iter().filter(|(e, _, agreed)| kept(&e.path, agreed)).map(|(e, _, _)| e.path.as_str()).collect();
+        let replaced: i64 = stored.iter().filter(|(path, _)| replacing.contains(path.as_str())).map(|(_, (_, size))| size).sum();
+        let incoming: i64 = files.iter().map(|(_, data, _)| data.len() as i64).sum();
+        if incoming > replaced && used - replaced + incoming > SYNC_QUOTA {
+            return Err(format!("{}{} MB; delete old sessions to sync more", sync::LIMIT_REFUSAL, SYNC_QUOTA >> 20));
         }
-        for (entry, data) in &files {
+        for (entry, data, agreed) in &files {
             // `known` is false when the sender omitted the mode, so a stored true survives. A null column would be omitted on the way out, and a unix machine would never send the bit.
             let known = entry.executable.is_some();
             let bit = entry.executable.unwrap_or(false);
@@ -872,8 +885,9 @@ impl Db {
                 .execute(
                     "insert into project_files (account, project, path, sha, modified, data, executable) values ($1, $2, $3, $4, $5, $6, $7) \
                      on conflict (account, project, path) do update set sha = excluded.sha, modified = excluded.modified, data = excluded.data, \
-                     executable = case when $8 then excluded.executable else project_files.executable end",
-                    &[&account, &project, &entry.path, &entry.sha, &(entry.modified as i64), data, &bit, &known],
+                     executable = case when $8 then excluded.executable else project_files.executable end \
+                     where $9::text is null or project_files.sha = $9",
+                    &[&account, &project, &entry.path, &entry.sha, &(entry.modified as i64), data, &bit, &known, agreed],
                 )
                 .await
                 .map_err(err)?;
