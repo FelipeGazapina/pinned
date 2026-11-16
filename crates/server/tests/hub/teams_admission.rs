@@ -66,6 +66,7 @@ fn answer(mut stream: TcpStream) {
     // A model call about ENG-1 that stops its run (`ta_rel_stop`) or fails (`ta_rel_model`).
     let (status, special) = match (service, path.as_str()) {
         ("model", "/v1/chat/completions") if body.contains("ENG-1:") && key.ends_with("ta_rel_stop") => ("200 OK", Some(json!({ "choices": [{ "message": { "content": "{\"kind\":\"stop\"}" } }] }))),
+        ("model", "/v1/chat/completions") if body.contains("ENG-1:") && key.ends_with("ta_cnt_stop") => ("200 OK", Some(json!({ "choices": [{ "message": { "content": "{\"kind\":\"stop\"}" } }] }))),
         ("model", "/v1/chat/completions") if body.contains("ENG-1:") && key.ends_with("ta_rel_model") => ("500 Internal Server Error", Some(json!({ "error": { "message": "the model is down" } }))),
         _ => ("200 OK", None),
     };
@@ -796,4 +797,27 @@ fn a_claimed_event_is_not_run_again_after_a_restart() {
     assert_eq!(crew.boxes_created() - boxes_before, 0, "no session opened");
     assert_eq!(crew.reserved_at(&pages), vec!["set".to_owned()], "its reserved run is left for the backstop");
     assert_eq!(crew.live_of(&pages).len(), 1);
+}
+
+#[test]
+fn a_granted_event_whose_box_does_not_boot_is_counted_as_start_failed() {
+    let crew = Crew::new("ta_cnt_open");
+    let (holder, pages) = (crew.on_bot("Docs"), crew.on_bot("Pages"));
+    two_wait_behind(&crew, &holder, &pages, false);
+    crew.hub.boxes.state.lock().unwrap().failing = Some(Exec { exit_code: 22, output: "Downloading pinned-server\n".into(), error: "curl: (22) The requested URL returned error: 404\n".into() });
+
+    assert_place_freed_for_eng_2(&crew, &pages, &[]);
+    assert_eq!(crew.skipped(&pages), json!([{ "reason": "start_failed", "count": 1 }]), "ENG-1's box did not boot: counted once");
+    assert_eq!(crew.skipped(&holder), Value::Null);
+}
+
+#[test]
+fn a_granted_event_its_ask_step_stops_is_not_counted() {
+    let crew = Crew::new("ta_cnt_stop");
+    let (holder, pages) = (crew.on_bot("Docs"), crew.ask_bot("Pages", &["stop"]));
+    two_wait_behind(&crew, &holder, &pages, false);
+
+    assert_place_freed_for_eng_2(&crew, &pages, &["done"]);
+    assert_eq!(crew.outside(1), vec!["model".to_owned()], "ENG-1's Ask step stopped it");
+    assert_eq!(crew.skipped(&pages), Value::Null, "a stop by its Ask step is not a failed start");
 }

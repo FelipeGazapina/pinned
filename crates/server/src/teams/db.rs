@@ -1079,15 +1079,15 @@ pub async fn granted(db: &Db, team: Uuid) -> Result<Vec<i64>, String> {
 }
 
 /// Claims granted event `id` for the poller that runs it: only the claim that deletes the row
-/// gets its stored event, so of two hubs exactly one runs it.
-pub async fn claim(db: &Db, team: Uuid, id: i64) -> Result<Option<serde_json::Value>, String> {
+/// gets its stored event and the reserved run that holds its place, so of two hubs exactly one runs it.
+pub async fn claim(db: &Db, team: Uuid, id: i64) -> Result<Option<(serde_json::Value, Option<Uuid>)>, String> {
     let row = db
         .client()
         .await?
-        .query_opt("delete from team_run_queue where team = $1 and id = $2 and granted_at is not null returning start", &[&team, &id])
+        .query_opt("delete from team_run_queue where team = $1 and id = $2 and granted_at is not null returning start, run", &[&team, &id])
         .await
         .map_err(err)?;
-    Ok(row.map(|r| r.get(0)))
+    Ok(row.map(|r| (r.get(0), r.get(1))))
 }
 
 /// Takes waiting event `id` out of its line.

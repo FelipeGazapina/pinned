@@ -290,6 +290,7 @@ pub const ENDED_UNOPENED: &str = "the workflow ended before it opened a session"
 /// run ends (`calls::end_run`), so what waits starts (`next`). A run whose session opened is left.
 pub async fn release(hub: &Arc<Hub>, team: &Arc<Account>, workflow: &str, subject: &Subject) -> Result<(), String> {
     let Some(id) = db::reserved_run_for(&hub.db, team.id, workflow, subject).await? else { return Ok(()) };
+    take_claimed(id);
     match calls::end_run(hub, team, id, RunState::Done, ENDED_UNOPENED, None).await {
         Err(e) if e != calls::RUN_ENDED => Err(e),
         _ => Ok(()),
@@ -303,7 +304,10 @@ pub async fn release(hub: &Arc<Hub>, team: &Arc<Account>, workflow: &str, subjec
 /// opens does not run it again: its reserved run (`reserved_at`) is left, and ended by the hub's
 /// backstop for reservations that never opened.
 pub async fn claim(hub: &Arc<Hub>, team: &Arc<Account>, id: i64) -> Result<Option<Event>, String> {
-    let Some(start) = db::claim(&hub.db, team.id, id).await? else { return Ok(None) };
+    let Some((start, run)) = db::claim(&hub.db, team.id, id).await? else { return Ok(None) };
+    if let Some(run) = run {
+        CLAIMED.lock().unwrap().insert(run);
+    }
     match serde_json::from_value(start) {
         Ok(Stored::Event { event, replies, earlier, .. }) => Ok(Some(with_replies(event, &replies, earlier))),
         _ => {
@@ -311,6 +315,17 @@ pub async fn claim(hub: &Arc<Hub>, team: &Arc<Account>, id: i64) -> Result<Optio
             Ok(None)
         }
     }
+}
+
+/// The reserved runs of claimed events (`claim`) whose session has not opened yet: one whose session
+/// fails to open counts on its bot as `SkipReason::StartFailed`. A restart forgets them with the
+/// claimed events, which it does not run again.
+static CLAIMED: LazyLock<Mutex<std::collections::HashSet<Uuid>>> = LazyLock::new(Mutex::default);
+
+/// Reserved run `run` opened its session, or ended without one: answers whether it held the place
+/// of a claimed granted event, and forgets it.
+pub fn take_claimed(run: Uuid) -> bool {
+    CLAIMED.lock().unwrap().remove(&run)
 }
 
 /// A run of bot `ended` ended: starts what waits while the team has a free place, in a task of its

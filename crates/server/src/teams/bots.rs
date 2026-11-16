@@ -10,7 +10,7 @@ use pinned_core::connectors::{BoxStep, Connector, Placement, Trigger};
 use pinned_core::graph::migrate::migrate;
 use pinned_core::graph::runner::{session_steps, Library};
 use pinned_core::graph::{NodeKind, Watch};
-use pinned_core::teams::{Bot, BotLimits, CallRules, Run, RunState, TeamEvent, TeamProject, Who};
+use pinned_core::teams::{Bot, BotLimits, CallRules, Run, RunState, SkipReason, TeamEvent, TeamProject, Who};
 use pinned_core::wire::HubCall;
 use serde_json::Value;
 use std::sync::Arc;
@@ -348,10 +348,15 @@ pub async fn start_reserved(hub: &Arc<Hub>, team: &Arc<Account>, id: Uuid, mut w
         Ok(placed) => placed,
         Err(e) => {
             db::delete_run(&hub.db, team.id, id).await?;
+            // A granted event that waited for its place and then did not start is counted.
+            if super::queue::take_claimed(id) {
+                db::count_skipped(&hub.db, team.id, &work.connector, SkipReason::StartFailed, 1).await?;
+            }
             super::queue::next(hub, team, &work.connector);
             return Err(e);
         }
     };
+    super::queue::take_claimed(id);
     db::open_reserved(&hub.db, team.id, id, &placed.machine).await?;
     if let Some(run) = db::run(&hub.db, team.id, id).await? {
         super::push(hub, team.id, TeamEvent::RunChanged { run }).await?;
