@@ -1051,3 +1051,49 @@ test("a thread from a machine that ignores the limit holds all of it and reads n
   assert.equal(machine.calls.length, 1);
   assert.doesNotMatch(threadView.innerHTML, /Start of conversation|earlier messages/);
 });
+
+test("a sent message the transcript has not written yet is drawn after the turns, in an empty thread too, and goes once it is written", async () => {
+  const { tab, s, net } = await opened();
+  tab.thread.pending = [{ id: "pending:1", text: "rename the helper", at: Date.now(), state: "sending", sent: true }];
+  sandbox.renderThread();
+  const row = () => blocks(threadView.innerHTML, '<section class="pending-turn"')[0] ?? "";
+  assert.match(textOf(row()), /rename the helper\s*Queued · claude is busy/, "the tab is working");
+  assert.ok(threadView.innerHTML.indexOf('<section class="turn"') < threadView.innerHTML.indexOf('<section class="pending-turn"'), "after the turns");
+  s.append({ item: { kind: "user", at: "t1", text: "rename the helper" } });
+  await poll(tab, net);
+  assert.equal(row(), "");
+  assert.deepEqual(painted().items, ["start", "rename the helper"]);
+
+  clearScreen();
+  const empty = tabFor("tab-2", "idle");
+  empty.thread = { ...empty.thread, loaded: true, session: "s", pending: [{ id: "pending:2", text: "first words", at: Date.now(), state: "unconfirmed", sent: false }] };
+  sandbox.tabs = [empty];
+  sandbox.active = empty;
+  sandbox.renderThread();
+  assert.doesNotMatch(threadView.innerHTML, /Send a message to start the conversation/);
+  assert.match(textOf(row()), /first words\s*Could not confirm it was delivered\. Check the session before sending again\.\s*Send again/);
+});
+
+test("a Captain thread draws the pending row as a plain thread does", async () => {
+  clearScreen();
+  const captain = tabFor("tab-9", "idle");
+  captain.view.role = "orchestrator";
+  captain.thread = { ...captain.thread, loaded: true, session: "s", pending: [{ id: "pending:3", text: "check the board", at: Date.now(), state: "sending", sent: false }] };
+  sandbox.tabs = [captain];
+  sandbox.active = captain;
+  sandbox.renderThread();
+  assert.match(textOf(blocks(threadView.innerHTML, '<section class="pending-turn"')[0]), /check the board\s*Sending…/);
+});
+
+test("a delivered message an idle thread still lacks after 30 s is drawn as stale, with Send again", async () => {
+  clearScreen();
+  const idle = tabFor("tab-8", "idle");
+  idle.thread = { ...idle.thread, loaded: true, session: "s", pending: [{ id: "pending:4", text: "bump the version", at: Date.now() - 40_000, state: "sending", sent: true, sentAt: Date.now() - 40_000 }] };
+  sandbox.tabs = [idle];
+  sandbox.active = idle;
+  sandbox.renderThread();
+  assert.match(textOf(blocks(threadView.innerHTML, '<section class="pending-turn"')[0]), /bump the version\s*Sent · not in the session yet\s*Send again/);
+  idle.thread.pending[0].sentAt = Date.now();
+  sandbox.renderThread();
+  assert.match(textOf(blocks(threadView.innerHTML, '<section class="pending-turn"')[0]), /bump the version\s*Sending…/, "the render key carries the stale state both ways");
+});
