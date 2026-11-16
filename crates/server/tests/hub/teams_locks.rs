@@ -14,13 +14,13 @@ const BUSY: &str = "the hub is busy with this right now; try again in a moment";
 const ANSWER: Duration = Duration::from_secs(5);
 
 /// A transaction on a connection of the test's own that holds what `statements` lock, until dropped.
-struct Held {
+pub(super) struct Held {
     runtime: tokio::runtime::Runtime,
     db: Option<tokio_postgres::Client>,
 }
 
 impl Held {
-    fn new(hub: &TestHub, statements: &str) -> Held {
+    pub(super) fn new(hub: &TestHub, statements: &str) -> Held {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let url = format!("{}/{}", postgres(), hub.database);
         let db = runtime.block_on(async {
@@ -33,14 +33,14 @@ impl Held {
     }
 
     /// How many server processes of the hub's database wait on a lock now.
-    fn waiters(&self) -> i64 {
+    pub(super) fn waiters(&self) -> i64 {
         let db = self.db.as_ref().unwrap();
         self.runtime.block_on(db.batch_execute("select pg_stat_clear_snapshot()")).unwrap();
         self.runtime.block_on(db.query_one("select count(*) from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'", &[])).unwrap().get(0)
     }
 
     /// Ends the transaction, and with it what it held.
-    fn release(mut self) {
+    pub(super) fn release(mut self) {
         let db = self.db.take().unwrap();
         self.runtime.block_on(db.batch_execute("rollback")).unwrap();
     }
@@ -52,14 +52,14 @@ fn within<T>(hub: &TestHub, what: &str, call: impl std::future::Future<Output = 
 }
 
 /// A person who is in no team, as the hub knows it.
-fn person(hub: &TestHub, email: &str) -> Arc<pinned_server::hub::Account> {
+pub(super) fn person(hub: &TestHub, email: &str) -> Arc<pinned_server::hub::Account> {
     let (_, view) = account::signup(&hub.url, email, "correct horse").unwrap();
     hub.runtime.block_on(hub.hub().account(Uuid::parse_str(&view.id).unwrap())).unwrap()
 }
 
 /// Another account's own calls, on the shared statement connection (its schedules) and on the
 /// shared transaction connection (its session marks), are answered within 5 s.
-fn others_answered(hub: &TestHub, carl: &Arc<pinned_server::hub::Account>) {
+pub(super) fn others_answered(hub: &TestHub, carl: &Arc<pinned_server::hub::Account>) {
     let hub_arc = hub.hub().clone();
     let listed = within(hub, "another account's schedules", hub_arc.hub_call(carl, serde_json::from_value(json!({ "cmd": "list_schedules" })).unwrap()));
     assert_eq!(listed, Ok(json!([])));
