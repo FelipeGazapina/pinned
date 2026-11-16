@@ -77,6 +77,45 @@ fn the_owner_lists_the_open_invites_only_and_a_member_hears_the_refusal() {
     assert_eq!(team_op(&mut bruno, &team, json!({ "op": "invites" })), Err(NOT_OWNER.into()));
 }
 
+const NO_INVITE: &str = "that invite code is unknown, used or revoked";
+const NOT_A_MEMBER: &str = "you are not a member of that team";
+const FULL: &str = "this team has 20 open invite codes; revoke some first";
+
+/// The hub has no call that deletes an account, so the joiner's account goes by `delete from
+/// accounts` on the hub's database, as the account's own cascade would remove it.
+#[test]
+fn a_used_invite_stays_used_when_its_joiner_is_deleted() {
+    let hub = TestHub::start("teams_wire_invite_used");
+    let url = hub.url.clone();
+    let (mut ana, _) = person(&url, "ana@example.test");
+    let (mut bruno, bruno_id) = person(&url, "bruno@example.test");
+    let (mut carla, _) = person(&url, "carla@example.test");
+    let team = make_team(&mut ana, "Acme");
+
+    let used = new_invite(&mut ana, &team);
+    join_team(&mut bruno, &used).unwrap();
+    admin_on(&hub.database, &format!("delete from accounts where id = '{bruno_id}'"));
+    assert_eq!(db_text(&hub.database, "select count(*)::text from accounts where email = 'bruno@example.test'"), vec!["0"], "the joiner is gone");
+    assert_eq!(db_text(&hub.database, "select (used_by is null)::text || ',' || (used_at is not null)::text from team_invites"), vec!["true,true"], "the invite lost its joiner but kept when it was spent");
+
+    // (a) Another person with the same code is refused like an unknown code and is not a member.
+    assert_eq!(join_team(&mut carla, &used), Err(NO_INVITE.into()));
+    assert_eq!(team_op(&mut carla, &team, json!({ "op": "members" })), Err(NOT_A_MEMBER.into()));
+    assert_eq!(db_text(&hub.database, "select count(*)::text from team_members where team::text = (select id::text from accounts where kind = 'team')"), vec!["1"], "only the owner");
+
+    // (b) The owner's list of open invites does not show it.
+    assert_eq!(team_op(&mut ana, &team, json!({ "op": "invites" })), Ok(json!([])));
+
+    // (c) It does not count toward the limit of 20 open invites: 19 others and one more are fine.
+    for _ in 0..19 {
+        new_invite(&mut ana, &team);
+    }
+    let last = team_op(&mut ana, &team, json!({ "op": "invite" })).unwrap();
+    assert_eq!(last["hint"].as_str().map(str::len), Some(4), "the 20th open invite is made: {last}");
+    assert_eq!(team_op(&mut ana, &team, json!({ "op": "invite" })), Err(FULL.into()), "the 21st open one is refused");
+    assert_eq!(team_op(&mut ana, &team, json!({ "op": "invites" })).unwrap().as_array().unwrap().len(), 20);
+}
+
 #[test]
 fn saving_a_new_bot_answers_its_workflow() {
     let hub = TestHub::start("teams_wire_saved");
