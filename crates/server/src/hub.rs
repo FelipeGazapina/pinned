@@ -207,6 +207,11 @@ pub struct Hub {
     /// it: a queued Postgres write cannot fail on its own at the moment a box ends.
     #[doc(hidden)]
     pub refuse_run_saves: Arc<AtomicBool>,
+    /// When set, the next backstop for reservations (`teams::calls::reap`) that read a reservation
+    /// as past its limit tells the first, then waits for the second before it ends it. Only a test
+    /// sets it, to run a claim between the backstop's read and its end; it is taken on use.
+    #[doc(hidden)]
+    pub hold_backstop: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
     /// Every account's `PgStorage` state, for the census and the flush on stop.
     persisted: Mutex<HashMap<Uuid, Arc<Persisted>>>,
 }
@@ -336,7 +341,7 @@ impl Hub {
     pub fn new(db: Db, public_url: String, signup: Signup, box_api: Arc<dyn BoxApi>, box_policy: boxes::Policy, team_policy: pinned_core::teams::TeamPolicy, convex_http: Arc<dyn ConvexHttp>) -> Arc<Hub> {
         let public_url = public_url.trim_end_matches('/').to_owned();
         let boxes = Boxes::new(box_api, box_policy, &public_url);
-        Arc::new_cyclic(|me| Hub { me: me.clone(), db, public_url, signup, boxes, team_policy, team_join_fails: Mutex::default(), convex_http, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default(), unlocks: Mutex::default(), going_away: tokio::sync::watch::channel(false).0, held_expired: Mutex::default(), refuse_run_saves: Arc::default(), persisted: Mutex::default() })
+        Arc::new_cyclic(|me| Hub { me: me.clone(), db, public_url, signup, boxes, team_policy, team_join_fails: Mutex::default(), convex_http, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default(), unlocks: Mutex::default(), going_away: tokio::sync::watch::channel(false).0, held_expired: Mutex::default(), refuse_run_saves: Arc::default(), hold_backstop: Mutex::default(), persisted: Mutex::default() })
     }
 
     /// Tells every socket to close with a going away frame. The hub stops serving afterwards.

@@ -943,41 +943,20 @@ fn a_backstop_at_the_limit_beats_the_claim_and_the_run_is_counted_once() {
 fn a_claim_between_the_backstops_read_and_its_end_wins_alone() {
     let crew = Crew::new("ta_race_between");
     let (holder, pages) = (crew.on_bot("Docs"), crew.on_bot("Pages"));
-    // A second hub on the same database runs the backstop: its first write after its read of the
-    // stale runs (the unclaimed grant's drop) waits for an advisory lock the test holds, so this
-    // hub's claim runs between that read and the backstop's end. Each hub has one connection, so
-    // only the second hub's statements wait. It starts before the place is past the limit, so
-    // its first tick finds nothing stale.
-    granted_unclaimed(&crew, &holder, &pages);
-    let (twin, running) = crew.hub.twin();
-    let gate = past_the_limit(&crew, &pages);
-    admin_on(
-        &crew.hub.database,
-        "create function hold_backstop() returns trigger language plpgsql as $$ begin
-           if current_query() like '%delete from team_run_queue where team = $1 and run = $2%' then
-             perform pg_advisory_lock_shared(4242); perform pg_advisory_unlock_shared(4242);
-           end if; return null; end $$;
-         create trigger hold_backstop before delete on team_run_queue for each statement execute function hold_backstop()",
-    );
-    let held = tokio::runtime::Runtime::new().unwrap();
-    let lock = held.block_on(async {
-        let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), crew.hub.database), tokio_postgres::NoTls).await.unwrap();
-        tokio::spawn(connection);
-        db.query("select pg_advisory_lock(4242)", &[]).await.unwrap();
-        db
-    });
-    let backstop_waits = || -> bool {
-        held.block_on(lock.query_one("select count(*) from pg_stat_activity where datname = current_database() and wait_event = 'advisory' and query like '%and run = $2%'", &[])).unwrap().get::<_, i64>(0) == 1
-    };
+    let gate = granted_past_the_limit(&crew, &holder, &pages);
+
+    // The backstop reads ENG-1's reservation as past the limit, then waits (`Hub::hold_backstop`)
+    // while the poller claims it, then goes on to end it.
+    let (read, go) = (Arc::new(tokio::sync::Notify::new()), Arc::new(tokio::sync::Notify::new()));
+    *crew.hub.hub().hold_backstop.lock().unwrap() = Some((read.clone(), go.clone()));
     std::thread::scope(|scope| {
-        let pass = scope.spawn(|| twin.block_on(teams::calls::tick(&running.hub, &crew.hub.team_policy)).unwrap());
-        wait_for("the backstop to read ENG-1's run as stale and wait", backstop_waits);
+        let pass = scope.spawn(|| crew.reaper_pass());
+        crew.hub.runtime.block_on(async { tokio::time::timeout(WAIT, read.notified()).await }).expect("the backstop read ENG-1's run as stale");
+        assert_eq!(crew.states_of(&pages), vec![("working".to_owned(), None)], "read as stale, not ended yet");
         claimed_and_booting(&crew, &pages);
-        held.block_on(lock.query("select pg_advisory_unlock(4242)", &[])).unwrap();
+        go.notify_one();
         pass.join().unwrap();
     });
-    admin_on(&crew.hub.database, "drop trigger hold_backstop on team_run_queue");
-    twin.shutdown_background();
 
     assert_eq!(crew.states_of(&pages), vec![("working".to_owned(), None)], "the claim won: the backstop's end found its place refreshed");
     assert_eq!(crew.skipped(&pages), Value::Null, "nothing counted");

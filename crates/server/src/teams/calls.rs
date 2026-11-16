@@ -466,6 +466,11 @@ async fn reap(hub: &Arc<Hub>, policy: &TeamPolicy) -> Result<(), String> {
         reap_run(hub, team, run, outcome).await;
     }
     for (team, run, workflow) in db::stale_reservations(&hub.db, policy.reservation_limit_secs).await? {
+        let held = hub.hold_backstop.lock().unwrap().take();
+        if let Some((read, go)) = held {
+            read.notify_one();
+            go.notified().await;
+        }
         end_reservation(hub, team, run, &workflow).await;
     }
     for (team, run, box_runs) in db::stale_waiting(&hub.db, STALE_WAIT.as_secs()).await? {
