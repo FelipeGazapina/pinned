@@ -277,7 +277,7 @@ impl Crew {
         Event::Run(Run {
             cwd: self.folder.clone(),
             repo: None,
-            args: vec!["--name".into(), format!("Thread {thread}"), "Answer the thread.".into()],
+            args: vec!["--name".into(), format!("Thread {thread}"), "Answer the thread.\n\nSlack thread in #acme, oldest first:\nENG-0: a thread".into()],
             connector: id.to_owned(),
             subject: Subject::SlackThread { channel: "C0ACME001".into(), thread: thread.into() },
             mentioned: vec![],
@@ -330,7 +330,7 @@ impl Crew {
         Event::Run(Run {
             cwd: self.folder.clone(),
             repo: None,
-            args: vec!["--name".into(), format!("ENG-{n} Fix page {n}")],
+            args: vec!["--name".into(), format!("ENG-{n} Fix page {n}"), format!("Fix it.\n\nLinear issue ENG-{n}: Fix page {n}\nhttps://linear.example.test/acme/issue/ENG-{n}\n\n(no description)")],
             connector: id.to_owned(),
             subject: super::issue(&format!("eng-{n}")),
             mentioned: vec![],
@@ -522,7 +522,7 @@ fn replies_to_a_waiting_thread_wait_with_it_and_reach_its_run_framed() {
     let framed: Vec<String> = (6..=25).map(|n| pinned_core::untrusted::frame("a Slack reply in this thread", &format!("[Slack reply from Dina] reply {n}"))).collect();
     assert_eq!(
         crew.box_prompt("1792400050.000200").unwrap(),
-        format!("Answer the thread.\n\nReplies the thread got while this run waited to start:\n\n5 earlier replies not shown\n\n{}", framed.join("\n\n"))
+        format!("Answer the thread.\n\nSlack thread in #acme, oldest first:\n{}\n\nReplies the thread got while this run waited to start:\n\n5 earlier replies not shown\n\n{}", pinned_core::untrusted::frame("a Slack thread", "ENG-0: a thread"), framed.join("\n\n"))
     );
 }
 

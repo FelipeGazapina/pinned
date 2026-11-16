@@ -119,7 +119,7 @@ impl Crew {
         Work::Run(Run {
             cwd: self.folder.clone(),
             repo: None,
-            args: vec!["--name".into(), "ENG-7 Fix the footer".into()],
+            args: vec!["--name".into(), "ENG-7 Fix the footer".into(), "Fix it.\n\nLinear issue ENG-7: Fix the footer\nhttps://linear.example.test/acme/issue/ENG-7\n\n(no description)".into()],
             connector: id.to_owned(),
             subject: super::issue(issue),
             mentioned: vec![],
