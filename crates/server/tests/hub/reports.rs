@@ -1171,7 +1171,10 @@ fn a_hub_without_reports_makes_no_table_and_one_whose_table_fails_still_serves()
     hub.restart();
     let mut ana = Client::connect(&hub.url, &signed_up(&hub, "ana@example.test"));
     assert_eq!(ask(&mut ana, json!({ "op": "status" })), Ok(json!({ "available": false })));
-    assert_eq!(reviewed_send(&mut ana, problem("Crash", "It closes."), json!({})), Err(NOT_AVAILABLE.into()));
+    assert_eq!(ask(&mut ana, json!({ "op": "preview", "draft": problem("Crash", "It closes.") })), Err(NOT_AVAILABLE.into()));
+    // The send's own refusal, past any preview.
+    assert_eq!(report_issue(&mut ana, problem("Crash", "It closes."), json!({ "shown": "x" })), Err(NOT_AVAILABLE.into()));
+    assert_eq!(fake.github.requests().len(), 0);
 }
 
 #[test]
@@ -1203,7 +1206,9 @@ fn a_send_with_no_title_or_too_long_is_refused_and_a_sent_report_is_no_draft() {
     assert_eq!(report_issue(&mut ana, problem("   ", "It closes."), json!({})), Err("Give the report a title.".into()));
     let long = problem("Long", &"x".repeat(64_001));
     let too_long: Result<Value, String> = Err("The report is too long: keep it under 64000 characters.".into());
-    assert_eq!(reviewed_send(&mut ana, long.clone(), json!({})), too_long);
+    assert_eq!(ask(&mut ana, json!({ "op": "preview", "draft": long.clone() })), too_long);
+    // The send's own refusal, past the preview's.
+    assert_eq!(report_issue(&mut ana, long.clone(), json!({ "shown": "x" })), too_long);
     assert_eq!(ask(&mut ana, json!({ "op": "save_draft", "draft": long })), too_long);
     assert_eq!((fake.github.requests().len(), listed(&mut ana).len(), left_today(&mut ana)), (0, 0, json!(5)));
 
