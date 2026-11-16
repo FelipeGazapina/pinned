@@ -133,8 +133,9 @@ test("deleting a box kills what its commands left running and nothing else", asy
       return false;
     }
   };
-  const sleeper = fs.readdirSync("/proc").filter((n) => /^\d+$/.test(n) && mine(n));
-  assert.ok(sleeper.length >= 1, "the box has a running process");
+  const running = () => fs.readdirSync("/proc").filter((n) => /^\d+$/.test(n) && mine(n));
+  for (let i = 0; i < 50 && !running().length; i++) await new Promise((r) => setTimeout(r, 100)); // setsid forks first
+  assert.ok(running().length >= 1, "the box has a running process");
   assert.equal((await api("DELETE", `/v2/box/${id}`)).status, 200);
   assert.equal(fs.existsSync(path.join(STACK, "boxes", id)), false);
   assert.deepEqual(fs.readdirSync("/proc").filter((n) => /^\d+$/.test(n) && mine(n)).filter((n) => fs.existsSync(`/proc/${n}/cmdline`) && !fs.readFileSync(`/proc/${n}/stat`, "utf8").includes(") Z ")), []);

@@ -13,9 +13,9 @@ scripts/teams-dev/dev.sh down     # stops only the processes it started
 
 | What | Where |
 | --- | --- |
-| hub (`--ui ./ui --signup open`, serves `ui/` and the pinned-server download) | http://127.0.0.1:8811 |
+| hub (`--ui ./ui --signup open --dev`, serves `ui/` and the pinned-server download) | http://127.0.0.1:8811 |
 | fake Upstash Box (`fake-box`) | http://127.0.0.1:8812 |
-| fake Slack, only when `scripts/teams-dev/fake-slack` exists | http://127.0.0.1:8813 |
+| fake Slack (`fake-slack`, log in `$TEAMS_DEV_DIR/fake-slack.log.jsonl`, `GET /sink` lists the calls it got) | http://127.0.0.1:8813 |
 | Postgres, empty, user `pinned`, database `pinned` | 127.0.0.1:5611 |
 
 Open http://127.0.0.1:8811 and sign in as `ana@example.test` (the team owner), `bruno@example.test`
@@ -24,8 +24,13 @@ which `urls` names. Add more seeding as a step in `STEPS` of `seed.mjs`; `dev.sh
 
 `TEAMS_DEV_DIR` (default a mktemp dir, recorded in `.dev/teams-dev.dir`) holds every file: database,
 logs, the hub key, each fake box's directory. `TEAMS_DEV_BIN=<pinned-server>` skips the cargo build;
-`TEAMS_DEV_HUB_PORT`, `_BOX_PORT`, `_SLACK_PORT` and `_PG_PORT` change the ports. When the hub has a
-`--dev` flag, `up` passes it with `PINNED_DEV_TIME_SCALE=${TEAMS_DEV_TIME_SCALE:-60}`.
+`TEAMS_DEV_HUB_PORT`, `_BOX_PORT`, `_SLACK_PORT` and `_PG_PORT` change the ports. The hub always
+starts with `--dev` and `PINNED_DEV_TIME_SCALE=${TEAMS_DEV_TIME_SCALE:-60}` (a box's idle and
+lifetime timers run 60 times faster), and sends every Slack call to the fake Slack.
+
+**Slack:** a team or account connects Slack with the token `xoxb-dev-<anything>`; the fake answers
+it as the workspace "Pinned Dev". Any other token (say `xoxb-real-…`) gets `invalid_auth`, so a real
+token typed by mistake goes nowhere.
 
 The fake box keeps boxes under `$TEAMS_DEV_DIR/boxes/<id>/`: `/workspace/home` in a path, command or
 file the hub sends is the box's `home/`, `/tmp` its `tmp/`. It runs the real bootstrap, so a box
@@ -33,6 +38,25 @@ downloads this checkout's pinned-server and its node signs in to the dev hub, wi
 `claude` and `gh` first on its PATH. `https://github.com/example/{alpha,beta}` clone from local
 repositories in `$TEAMS_DEV_DIR/git`. Try it: `node scripts/teams-dev/smoke.mjs open` (connects
 Upstash as ana with made-up keys and opens a box; `disconnect` ends it).
+
+The stack never touches anything outside its own directory:
+
+- `dev.sh` resolves the directory (symlinks followed, nothing created yet) and exits 2 when it is, or
+  is inside, `~/.pinned`, `~/.config/pinned`, the desktop app's data folder, `/workspace/home`, or is
+  your home folder or `/`. It also refuses to empty a folder that is neither empty nor an earlier
+  stack's (a `.teams-dev-stack` file marks one). It does not rely on a running node as a guard.
+- `fake-box` resolves `TEAMS_DEV_DIR` with realpath at start. `files/write` refuses (400) a target
+  that is not inside the box's own directory, symlinks followed. `exec` refuses (400) an argument that
+  names an absolute path outside the box (also inside an `sh -c` string), a `..` that leaves it, or a
+  `/workspace/home` or `~/.pinned` that the rewrite did not turn into the box's own; only `/bin/`,
+  `/usr/`, `/lib/`, `/lib64/`, `/etc/`, `/dev/null`, `/proc/self/`, node, git and the fake's own bin
+  are allowed besides. This reads the command line; it is a guard against a stale path, not a sandbox.
+  Deleting a box signals only the pids the fake spawned for it and what those started, each checked
+  in `/proc/<pid>/environ`; no pid is read from a file.
+
+Tests: `node --test scripts/teams-dev/fake-box.test.mjs scripts/teams-dev/fake-slack.test.mjs`,
+`sh scripts/teams-dev/dev-guard.test.sh`, and `TEAMS_DEV_BIN=<pinned-server> sh scripts/teams-dev/e2e-empty.sh`
+(up, status, sign-in, a box opened and ended, Slack through the hub, down, reset, in a fresh dir).
 
 Safety rules: only `box_dev-…` keys work, and `UPSTASH_BOX_BASE_URL` always points at the fake, so no
 real Upstash, Slack or production hub is reached; accounts are `@example.test`; every child runs with
