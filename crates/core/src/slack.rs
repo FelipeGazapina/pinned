@@ -127,9 +127,13 @@ fn api_root() -> String {
 /// Where calls go instead of `api` when a debug build's `env` names an http(s) root on a
 /// loopback host, as the hub tests' stand-ins; otherwise `api`, so a key never goes to a stranger.
 pub(crate) fn loopback_root(env: &str, api: &str) -> String {
-    let set = std::env::var(env).ok();
-    match set.as_deref().map(|r| r.trim().trim_end_matches('/')).filter(|r| !r.is_empty()) {
-        Some(set) if cfg!(debug_assertions) && loopback_http(set).is_some() => set.to_owned(),
+    root_for(std::env::var(env).ok().as_deref(), cfg!(debug_assertions), api)
+}
+
+/// `loopback_root` with the variable's value and whether this is a debug build given.
+fn root_for(set: Option<&str>, debug: bool, api: &str) -> String {
+    match set.map(|r| r.trim().trim_end_matches('/')).filter(|r| !r.is_empty()) {
+        Some(set) if debug && loopback_http(set).is_some() => set.to_owned(),
         _ => api.to_owned(),
     }
 }
@@ -775,6 +779,20 @@ mod tests {
         let root = api_root();
         std::env::remove_var("PINNED_SLACK_API_BASE");
         assert_eq!(root, "https://slack.com/api/");
+    }
+
+    /// Linear's and Vercel's stand-ins (`loopback_root`): a debug build's loopback address only.
+    #[test]
+    fn a_stand_in_root_reaches_only_a_loopback_host_in_a_debug_build() {
+        const REAL: &str = "https://api.example.test";
+        for set in ["http://127.0.0.1:5000/graphql", "http://localhost:5000/v1/", "https://[::1]:5000"] {
+            assert_eq!(root_for(Some(set), true, REAL), set.trim_end_matches('/'), "{set}");
+            assert_eq!(root_for(Some(set), false, REAL), REAL, "{set} in a release build");
+        }
+        for set in ["https://evil.example.test/v1", "http://127.0.0.1.example.test/", "http://169.254.169.254/", "ftp://127.0.0.1/", "not a url"] {
+            assert_eq!(root_for(Some(set), true, REAL), REAL, "{set}");
+        }
+        assert_eq!(root_for(None, true, REAL), REAL);
     }
 
     /// The only way to point Slack elsewhere is `hub --dev`'s root: the variable older hub tests
