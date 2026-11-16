@@ -49,9 +49,14 @@ async fn run_fired(hub: &Arc<Hub>, team: &Arc<Account>, work: Run) -> Result<Opt
         eprintln!("pinned-server: team {} workflow {id} is manual: it runs only by Run now, so a found run is consumed", team.id);
         return Ok(None);
     }
-    // A poller that sends a thread's run again while the bot's run on it lives starts no second one.
+    // A poller that sends a subject's run again while the bot's run on it lives starts no second
+    // one: the run's tab takes it, as `place_run` answers for a person. A run whose box has not
+    // placed it yet is still starting, so the subject is given back for the next check.
     if db::live_run_for(&hub.db, team.id, &id, &work.subject).await?.is_some() {
-        return Err(format!("the bot of workflow {id} already has a live run on this {}", subject_name(&work.subject)));
+        if let Some((machine, tab)) = team.placed(&id, &work.subject) {
+            return Ok(Some(Placement { machine, tab }));
+        }
+        return Err(format!("the bot of workflow {id} already has a live run on this {} that is still starting; the next check tries again", subject_name(&work.subject)));
     }
     let start = Start::Trigger { kind: kind(&workflow.trigger), work };
     match bots::start_run(hub, team, &id, start).await {

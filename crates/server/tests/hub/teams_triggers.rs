@@ -97,6 +97,15 @@ impl Crew {
         self.hub.runtime.block_on(teams::triggers::fired(self.hub.hub(), self.team, work))
     }
 
+    /// How many `team_runs` rows the team has, whatever their state.
+    fn team_runs(&self) -> i64 {
+        self.hub.runtime.block_on(async {
+            let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), self.hub.database), tokio_postgres::NoTls).await.unwrap();
+            tokio::spawn(connection);
+            db.query_one("select count(*) from team_runs where team = $1", &[&self.team]).await.unwrap().get::<_, i64>(0)
+        })
+    }
+
     /// The team's runs as a member lists them: (state, started_by) of each, newest first.
     fn runs(&self) -> Vec<(String, String)> {
         let runs = self.call(&self.bob, TeamOp::Runs).unwrap();
@@ -129,9 +138,26 @@ fn an_on_bots_linear_label_fires_one_run_in_a_fresh_box() {
     assert_eq!(placed.machine, row.machine.to_string(), "the run is in the team's box");
 
     let again = crew.fired(crew.labeled(&id, "eng-7"));
-    assert_eq!(again, Err(format!("the bot of workflow {id} already has a live run on this issue")), "the same event starts no second run");
+    assert_eq!(again, Ok(Some(placed.clone())), "the same event goes to the live run's tab");
+    assert_eq!(crew.team_runs(), 1, "the same event starts no second run");
     assert_eq!(crew.runs(), vec![("working".to_owned(), "trigger:linear_label".to_owned())]);
     assert_eq!(crew.hub.boxes.live().len(), 1);
+}
+
+#[test]
+fn an_event_for_a_run_its_box_has_not_placed_yet_is_given_back_and_starts_nothing() {
+    let crew = Crew::new("tt_starting");
+    let id = crew.on_bot("Footer");
+    let subject = serde_json::to_string(&super::issue("eng-7")).unwrap();
+    admin_on(
+        &crew.hub.database,
+        &format!("insert into team_runs (id, team, workflow, started_by, state, subject) values ('{}', '{}', '{id}', '\"trigger:linear_label\"', 'working', '{subject}')", Uuid::new_v4(), crew.team),
+    );
+
+    let again = crew.fired(crew.labeled(&id, "eng-7"));
+    assert_eq!(again, Err(format!("the bot of workflow {id} already has a live run on this issue that is still starting; the next check tries again")));
+    assert_eq!(crew.team_runs(), 1, "no second run");
+    assert_eq!(crew.hub.boxes.live(), Vec::<String>::new(), "no box opens");
 }
 
 #[test]
