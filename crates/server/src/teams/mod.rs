@@ -442,4 +442,76 @@ mod tests {
             }
         }
     }
+
+    fn read(call: Value) -> Result<Op, String> {
+        Op::read(TeamOp::Hub { call })
+    }
+
+    #[test]
+    fn a_teams_hub_call_is_read_once_from_an_object_and_its_odd_forms_get_no_way_around_the_unlock() {
+        let plain = read(json!({ "cmd": "disconnect_upstash" })).unwrap();
+        assert!(owner_only(&plain, true), "a locked login unlocks first");
+        assert!(!owner_only(&plain, false));
+        let extra = read(json!({ "cmd": "disconnect_upstash", "extra": 1, "cmd2": "get_settings" })).unwrap();
+        assert!(matches!(extra, Op::Hub(HubCall::DisconnectUpstash)) && owner_only(&extra, true), "extra keys read as the plain form");
+        for odd in [json!(["disconnect_upstash"]), json!(["run_workflow", "c1"]), json!({ "cmd": "Disconnect_Upstash" }), json!("disconnect_upstash")] {
+            assert!(read(odd.clone()).is_err(), "{odd} is refused before any check or run");
+        }
+    }
+
+    #[test]
+    fn a_locked_login_unlocks_before_a_team_op_that_changes_people_keys_bots_or_workflows() {
+        let group = json!({ "handle": "design" });
+        let changes = [
+            json!({ "op": "rename", "name": "Acme 2" }),
+            json!({ "op": "invite" }),
+            json!({ "op": "revoke_invite", "hint": "ABCD" }),
+            json!({ "op": "remove_member", "account": "a1" }),
+            json!({ "op": "join", "code": "ABCD-EFGH" }),
+            json!({ "op": "leave" }),
+            json!({ "op": "save_group", "group": group }),
+            json!({ "op": "save_bot", "bot": { "workflow": "c1" } }),
+            json!({ "op": "turn_bot_on", "workflow": "c1", "on": true }),
+            json!({ "op": "hub", "call": { "cmd": "connect_upstash", "key": "k", "claude_token": "t" } }),
+            json!({ "op": "hub", "call": { "cmd": "set_box_claude_token", "name": "n", "token": "t" } }),
+            json!({ "op": "hub", "call": { "cmd": "disconnect_slack" } }),
+            json!({ "op": "hub", "call": { "cmd": "extend_box", "machine": "m1", "extra_usd": 1.0 } }),
+            json!({ "op": "hub", "call": { "cmd": "delete_connector", "id": "c1" } }),
+            json!({ "op": "hub", "call": { "cmd": "pause_schedule", "id": "t1", "paused": true } }),
+        ];
+        for op in changes {
+            let op = Op::read(serde_json::from_value(op.clone()).unwrap()).unwrap_or_else(|e| panic!("{e}"));
+            assert!(owner_only(&op, true), "locked");
+            assert!(!owner_only(&op, false), "an older app's login keeps it");
+        }
+        let reads = [
+            json!({ "op": "list" }),
+            json!({ "op": "members" }),
+            json!({ "op": "projects" }),
+            json!({ "op": "groups" }),
+            json!({ "op": "bots" }),
+            json!({ "op": "runs" }),
+            json!({ "op": "calls" }),
+            json!({ "op": "hub", "call": { "cmd": "get_settings" } }),
+            json!({ "op": "hub", "call": { "cmd": "list_schedules" } }),
+            json!({ "op": "hub", "call": { "cmd": "box_status", "machine": "m1" } }),
+        ];
+        for op in reads {
+            let op = Op::read(serde_json::from_value(op).unwrap()).unwrap();
+            assert!(!owner_only(&op, true));
+        }
+        // A decision needs the password on any login, as on a person's own account.
+        let decide = read(json!({ "cmd": "decide_confirmation", "id": "c1", "approve": true })).unwrap();
+        assert!(owner_only(&decide, false));
+    }
+
+    #[test]
+    fn an_owners_key_call_answers_only_which_keys_are_set() {
+        for call in [json!({ "cmd": "connect_upstash", "key": "k", "claude_token": "t" }), json!({ "cmd": "remove_box_claude_token", "name": "n" }), json!({ "cmd": "connect_github", "token": "t" })] {
+            assert_eq!(hub_rule(&hub_call(call.clone())), Rule { gate: Gate::OwnerKey, unlock: true }, "{call}");
+        }
+        for call in [json!({ "cmd": "mint_box_claude_token", "machine": "m1", "account": "a" }), json!({ "cmd": "load_mcp_servers" }), json!({ "cmd": "connect_linear", "key": "k" })] {
+            assert_eq!(hub_rule(&hub_call(call.clone())).gate, Gate::Never, "{call}");
+        }
+    }
 }
