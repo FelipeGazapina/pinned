@@ -169,13 +169,12 @@ fn hides_command(text: &str) -> bool {
     })
 }
 
-/// Whether the variable name ending `name` says secret: one of its `_`/`-` parts is a secret word,
-/// so `API_KEY` and `--password` do, `AUTHOR` and `MONKEY` do not.
+/// Whether the variable name `name` says secret: its uppercase, after any leading `-`, contains a
+/// secret word anywhere. Broad on purpose: `DBPASSWORD`, `MYTOKEN` and `AUTHOR` all do, since
+/// hiding too much only costs a person a look at the step.
 fn secret_name(name: &str) -> bool {
-    let tail = name.len() - name.chars().rev().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-').map(char::len_utf8).sum::<usize>();
-    name[tail..].to_ascii_uppercase().split(['_', '-']).any(|part| {
-        ["TOKEN", "SECRET", "PASSWORD", "PASSWD", "KEY", "CREDENTIAL", "CREDENTIALS", "AUTH", "APIKEY", "ACCESSKEY", "PRIVATEKEY", "AUTHTOKEN", "ACCESSTOKEN"].contains(&part)
-    })
+    let name = name.trim_start_matches('-').to_ascii_uppercase();
+    ["TOKEN", "SECRET", "PASSWORD", "PASSWD", "KEY", "CREDENTIAL", "AUTH"].iter().any(|word| name.contains(word))
 }
 
 /// The folder holding `.git` at or above `start`.
@@ -338,12 +337,18 @@ mod tests {
         let (_, message) = decision(&payload("Bash", json!({ "command": "SECRET_KEY=abc.def/1+2:x@y%z-_ vercel deploy --prod" })), true, Ok(r#"{"id":"k1"}"#));
         let Some(Message::AskPeople { question, .. }) = message else { panic!("no ask") };
         assert_eq!(question, "deploy: SECRET_KEY=[hidden] vercel deploy --prod");
-        // A name that only contains a secret word is no secret: shown, never denied.
-        let (_, message) = decision(&payload("Bash", json!({ "command": "AUTHOR=$(whoami) MONKEY=x vercel deploy --prod" })), true, Ok(r#"{"id":"k1"}"#));
+        // A name that contains a secret word anywhere is a secret: hiding more is safer.
+        let (out, message) = decision(&payload("Bash", json!({ "command": "AUTHOR=$(whoami) MONKEY=x vercel deploy --prod" })), true, Ok(r#"{"id":"k1"}"#));
+        assert_eq!(denied(&out.unwrap()), "this step hides a command in a secret");
+        assert!(message.is_none());
+        assert_eq!(scrub("AUTHOR=x MONKEY=y KEY=z"), "AUTHOR=[hidden] MONKEY=[hidden] KEY=[hidden]");
+        assert!(hides_command("AUTHOR=$(x) MONKEY=`y` NOTE=a;b"));
+        assert!(!hides_command("NOTE=$(x) USER=`y`"));
+        // A one-word name is hidden from the members asked, and from the notice built from it.
+        let (_, message) = decision(&payload("Bash", json!({ "command": "DBPASSWORD=hunter2 vercel deploy --prod" })), true, Ok(r#"{"id":"k1"}"#));
         let Some(Message::AskPeople { question, .. }) = message else { panic!("no ask") };
-        assert_eq!(question, "deploy: AUTHOR=$(whoami) MONKEY=x vercel deploy --prod");
-        assert_eq!(scrub("AUTHOR=x MONKEY=y KEY=z"), "AUTHOR=x MONKEY=y KEY=[hidden]");
-        assert!(!hides_command("AUTHOR=$(x) MONKEY=`y` NOTE=a;b"));
+        assert_eq!(question, "deploy: DBPASSWORD=[hidden] vercel deploy --prod");
+        assert_eq!(scrub("STRIPEKEY=abc MYTOKEN=xyz"), "STRIPEKEY=[hidden] MYTOKEN=[hidden]");
         assert!(hides_command("--password='$(x)'"));
     }
 
