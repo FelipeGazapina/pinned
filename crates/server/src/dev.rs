@@ -46,7 +46,10 @@ impl Dev {
 
 /// Checks a dev start. `env` is a lookup so tests pass a map. A refusal names the kind of value
 /// that is wrong, never the value, since the database URL may carry a password.
+/// A release build is refused first: the dev stack is only meant for a debug build, and a binary of
+/// unknown build must not be started on keys that could reach a real service.
 pub fn check(db_url: &str, listen: &str, public_url: &str, env: &dyn Fn(&str) -> Option<String>) -> Result<Dev, String> {
+    check_build(cfg!(debug_assertions))?;
     check_db(db_url)?;
     if !loopback_listen(listen) {
         return Err("--listen must bind a loopback address, not a wildcard or remote one".into());
@@ -66,6 +69,16 @@ pub fn check(db_url: &str, listen: &str, public_url: &str, env: &dyn Fn(&str) ->
         },
     };
     Ok(Dev { time_scale, slack_root: Some(slack_root) })
+}
+
+/// `debug` is whether this binary was built with debug assertions (`cargo build` without `--release`).
+/// `scripts/teams-dev/check-bin.sh` looks for this text, so a change here changes it too.
+fn check_build(debug: bool) -> Result<(), String> {
+    if debug {
+        Ok(())
+    } else {
+        Err("this is a release build: --dev needs a debug build (cargo build -p pinned-server, without --release)".into())
+    }
 }
 
 fn check_db(db_url: &str) -> Result<(), String> {

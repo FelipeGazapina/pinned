@@ -3,7 +3,35 @@
 import fs from "node:fs";
 import path from "node:path";
 
-export const HUB = process.env.TEAMS_DEV_HUB || "http://127.0.0.1:8811";
+const LOOPBACK = ["127.0.0.1", "[::1]", "localhost"];
+
+/**
+ * The http address of the hub named by TEAMS_DEV_HUB, or an Error. Only a loopback host over ws or http
+ * with no user name or password is accepted: the dev stack's accounts and keys must never reach a real
+ * hub. The message names the variable and never its value, which could hold a credential.
+ */
+export function checkHub(address) {
+  let url;
+  try {
+    url = new URL(address);
+  } catch {
+    throw new Error("TEAMS_DEV_HUB is not an address (use http://127.0.0.1:<port>)");
+  }
+  if (url.protocol !== "http:" && url.protocol !== "ws:") throw new Error("TEAMS_DEV_HUB must use ws:// or http://");
+  if (url.username || url.password || /^[a-z]+:\/\/[^/?#]*@/i.test(address)) throw new Error("TEAMS_DEV_HUB must not contain a user name or password");
+  if (!LOOPBACK.includes(url.hostname)) throw new Error("TEAMS_DEV_HUB must name a loopback host (127.0.0.1, ::1 or localhost)");
+  return `http://${url.host}${url.pathname.replace(/\/+$/, "")}`;
+}
+
+/** The hub every client call goes to, as an http address (a ws one is turned into it). Exits 1 on a refused address. */
+export const HUB = (() => {
+  try {
+    return checkHub(process.env.TEAMS_DEV_HUB || "http://127.0.0.1:8811");
+  } catch (e) {
+    console.error(`hub-client: ${e.message}`);
+    process.exit(1);
+  }
+})();
 export const DIR = process.env.TEAMS_DEV_DIR;
 export const ACCOUNTS = DIR && path.join(DIR, "accounts.json");
 

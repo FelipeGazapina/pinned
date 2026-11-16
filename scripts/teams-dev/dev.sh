@@ -11,7 +11,8 @@
 #
 # TEAMS_DEV_DIR (default: a fresh mktemp dir, recorded in .dev/teams-dev.dir) holds every file the
 # stack writes; every child runs with HOME, TMPDIR and CLAUDE_CONFIG_DIR inside it and with the
-# developer's tokens unset. TEAMS_DEV_BIN=<pinned-server> skips the cargo build. Ports:
+# developer's tokens unset. TEAMS_DEV_BIN=<pinned-server> skips the cargo build; the binary must be a
+# debug build (check-bin.sh asks it, and exits 2 for anything else). Ports:
 # TEAMS_DEV_HUB_PORT 8811, TEAMS_DEV_BOX_PORT 8812, TEAMS_DEV_SLACK_PORT 8813, TEAMS_DEV_PG_PORT 5611.
 # The hub always starts with --dev and PINNED_DEV_TIME_SCALE=${TEAMS_DEV_TIME_SCALE:-60}.
 # The stack refuses (exit 2) a dir that is, or is inside, a real pinned home: ~/.pinned,
@@ -144,6 +145,8 @@ up() {
   if [ ! -e "$DIR/.teams-dev-stack" ] && [ -n "$(ls -A "$DIR")" ]; then
     echo "refusing to empty a folder that is not an empty dir or a dev stack's" >&2; exit 2
   fi
+  # Only a debug build is started: it is asked, before anything is emptied, created or started.
+  sh "$HERE/check-bin.sh" "$SERVER" || exit 2
   find "$DIR" -mindepth 1 -maxdepth 1 ! -name '*.log' -exec rm -rf {} + 2>/dev/null || true
   : >"$DIR/.teams-dev-stack"
   chmod 700 "$DIR"
