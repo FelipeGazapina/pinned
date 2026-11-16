@@ -346,3 +346,40 @@ fn two_hubs_reaper_passes_start_at_most_the_teams_free_places() {
     }
     twin.shutdown_background();
 }
+
+// ---- J. a refusal after the spend ----
+
+/// The id of the one agent grant the hub holds.
+fn the_grant(hub: &TestHub) -> String {
+    rows(hub, "select id::text from agent_grants")[0][0].clone().unwrap()
+}
+
+#[test]
+fn an_agent_code_exchange_refused_after_the_spend_leaves_the_code_unspent_and_the_retry_gets_tokens() {
+    let hub = TestHub::start("tlc_code_after");
+    let (url, http, client_id, code, verifier) = approved_code(&hub);
+    let form = [("grant_type", "authorization_code"), ("client_id", client_id.as_str()), ("code", code.as_str()), ("code_verifier", verifier.as_str()), ("redirect_uri", AGENT_REDIRECT)];
+    // The code's spend reads the grant without a lock; only the new tokens' key check waits on it.
+    let held = Held::new(&hub, &format!("select 1 from agent_grants where id = '{}' for update", the_grant(&hub)));
+    assert_eq!(timed("the code exchange", || exchange(&url, &http, &form)), busy_oauth());
+    held.release();
+
+    let (status, tokens) = exchange(&url, &http, &form);
+    assert_eq!((status, tokens["token_type"].as_str()), (200, Some("Bearer")), "the retry with the same code gets tokens: {}", tokens["error"]);
+}
+
+#[test]
+fn an_agent_refresh_refused_after_the_spend_leaves_the_token_unspent_and_the_retry_gets_tokens() {
+    let hub = TestHub::start("tlc_refresh_after");
+    let (url, http, client_id, code, verifier) = approved_code(&hub);
+    let (status, tokens) = exchange(&url, &http, &[("grant_type", "authorization_code"), ("client_id", &client_id), ("code", &code), ("code_verifier", &verifier), ("redirect_uri", AGENT_REDIRECT)]);
+    assert_eq!(status, 200, "{}", tokens["error"]);
+    let refresh = tokens["refresh_token"].as_str().unwrap().to_owned();
+    let form = [("grant_type", "refresh_token"), ("client_id", client_id.as_str()), ("refresh_token", refresh.as_str())];
+    let held = Held::new(&hub, &format!("select 1 from agent_grants where id = '{}' for update", the_grant(&hub)));
+    assert_eq!(timed("the refresh", || exchange(&url, &http, &form)), busy_oauth());
+    held.release();
+
+    let (status, tokens) = exchange(&url, &http, &form);
+    assert_eq!((status, tokens["token_type"].as_str()), (200, Some("Bearer")), "the retry with the same refresh token gets tokens: {}", tokens["error"]);
+}
