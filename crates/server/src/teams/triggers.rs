@@ -1,13 +1,15 @@
 //! Triggers: what the team account's own pollers and tab wakes find (`Hub::open_found`). A trigger
 //! of a team's workflow starts a run only through its bot (`bots::start_run`), and only while the
-//! bot is on. An event for a bot that is off, a draft, or gone is consumed: one log line, never
-//! queued, never replayed. A manual workflow is never started here: it runs only by Run now.
+//! bot is on, through its waiting line (`queue::ask`). An event for a bot that is off, a draft, or
+//! gone is consumed: one log line and a count on the bot, never queued, never replayed. A manual
+//! workflow is never started here: it runs only by Run now.
 
 use super::bots::{self, Start};
-use super::db;
+use super::{db, queue};
 use crate::hub::{Account, Hub};
 use pinned_core::agent::Subject;
 use pinned_core::connectors::{Delivery, Placement, Run, Trigger, Work};
+use pinned_core::teams::SkipReason;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -39,16 +41,10 @@ fn kind(trigger: &Trigger) -> &'static str {
 
 async fn run_fired(hub: &Arc<Hub>, team: &Arc<Account>, work: Run) -> Result<Option<Placement>, String> {
     let id = work.connector.clone();
-    let workflow = hub.connectors(team).await?.get_settings().connectors.into_iter().find(|c| c.id == id);
-    let on = db::bot(&hub.db, team.id, &id).await?.is_some_and(|b| b.on);
-    let Some(workflow) = workflow.filter(|w| on && w.enabled) else {
-        eprintln!("pinned-server: team {} workflow {id} is off: its trigger's event is consumed", team.id);
-        return Ok(None);
-    };
-    if matches!(workflow.trigger, Trigger::Manual) {
-        eprintln!("pinned-server: team {} workflow {id} is manual: it runs only by Run now, so a found run is consumed", team.id);
-        return Ok(None);
+    if let Some(reason) = queue::skip_reason(hub, team, &id, true).await? {
+        return consumed(hub, team, &id, reason).await;
     }
+    let workflow = hub.connectors(team).await?.get_settings().connectors.into_iter().find(|c| c.id == id).ok_or("the workflow is gone")?;
     // A poller that sends a subject's run again while the bot's run on it lives starts no second
     // one: the run's tab takes it, as `place_run` answers for a person. A run whose box has not
     // placed it yet is still starting, so the subject is given back for the next check.
@@ -58,16 +54,22 @@ async fn run_fired(hub: &Arc<Hub>, team: &Arc<Account>, work: Run) -> Result<Opt
         }
         return Err(format!("the bot of workflow {id} already has a live run on this {} that is still starting; the next check tries again", subject_name(&work.subject)));
     }
-    let start = Start::Trigger { kind: kind(&workflow.trigger), work };
-    match bots::start_run(hub, team, &id, start).await {
-        Ok((_, placed)) => Ok(Some(placed)),
+    let start = Start::Trigger { kind: kind(&workflow.trigger).to_owned(), work };
+    match queue::ask(hub, team, &id, start).await {
+        Ok(queue::Asked::Started(_, placed)) => Ok(Some(placed)),
+        // Waiting: answered as consumed, so nothing outside pinned hears of it until it starts.
+        Ok(queue::Asked::Waiting { .. }) => Ok(None),
         // Turned off between the check above and the start.
-        Err(e) if e == bots::IS_A_DRAFT => {
-            eprintln!("pinned-server: team {} workflow {id} is off: its trigger's event is consumed", team.id);
-            Ok(None)
-        }
+        Err(e) if e == bots::IS_A_DRAFT => consumed(hub, team, &id, SkipReason::Off).await,
         Err(e) => Err(e),
     }
+}
+
+/// An event of bot `id` that starts no run for `reason`: counted, and answered as consumed.
+async fn consumed(hub: &Arc<Hub>, team: &Arc<Account>, id: &str, reason: SkipReason) -> Result<Option<Placement>, String> {
+    eprintln!("pinned-server: team {} workflow {id} is {}: its trigger's event is consumed", team.id, reason.as_str());
+    db::count_skipped(&hub.db, team.id, id, reason, 1).await?;
+    Ok(None)
 }
 
 /// New messages of a Slack thread go in only while the bot has a live run on that thread, and

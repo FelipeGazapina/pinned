@@ -11570,6 +11570,14 @@
                   "string",
                   "null"
                 ]
+              },
+              "skipped": {
+                "description": "The events that started no run of the bot, counted by why. The hub sets it: one a member\nsends is not read.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Skipped"
+                },
+                "default": []
               }
             },
             "required": [
@@ -11580,7 +11588,8 @@
               "limits",
               "on",
               "on_by",
-              "once"
+              "once",
+              "skipped"
             ]
           },
           "CallRules": {
@@ -11685,6 +11694,35 @@
             "required": [
               "usd",
               "minutes"
+            ]
+          },
+          "Skipped": {
+            "description": "How many events of a bot started no run for `reason`.\n\n`{\"reason\":\"queue_full\",\"count\":2}`",
+            "type": "object",
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/SkipReason"
+              },
+              "count": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "reason",
+              "count"
+            ]
+          },
+          "SkipReason": {
+            "description": "Why an event of a bot started no run: `\"off\"`, `\"draft\"`, `\"manual\"` (a trigger of a workflow\nthat runs only by Run now), `\"queue_full\"` (the oldest of 20 waiting events, dropped for a\nnewer one) or `\"bot_removed\"` (its workflow was deleted before its turn).",
+            "type": "string",
+            "enum": [
+              "off",
+              "draft",
+              "manual",
+              "queue_full",
+              "bot_removed"
             ]
           },
           "Answer2": {
@@ -23140,6 +23178,14 @@
                   "string",
                   "null"
                 ]
+              },
+              "skipped": {
+                "description": "The events that started no run of the bot, counted by why. The hub sets it: one a member\nsends is not read.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Skipped"
+                },
+                "default": []
               }
             },
             "required": [
@@ -23242,6 +23288,35 @@
             "required": [
               "usd",
               "minutes"
+            ]
+          },
+          "Skipped": {
+            "description": "How many events of a bot started no run for `reason`.\n\n`{\"reason\":\"queue_full\",\"count\":2}`",
+            "type": "object",
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/SkipReason"
+              },
+              "count": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "reason",
+              "count"
+            ]
+          },
+          "SkipReason": {
+            "description": "Why an event of a bot started no run: `\"off\"`, `\"draft\"`, `\"manual\"` (a trigger of a workflow\nthat runs only by Run now), `\"queue_full\"` (the oldest of 20 waiting events, dropped for a\nnewer one) or `\"bot_removed\"` (its workflow was deleted before its turn).",
+            "type": "string",
+            "enum": [
+              "off",
+              "draft",
+              "manual",
+              "queue_full",
+              "bot_removed"
             ]
           },
           "Answer2": {
@@ -31880,6 +31955,14 @@
                   "string",
                   "null"
                 ]
+              },
+              "skipped": {
+                "description": "The events that started no run of the bot, counted by why. The hub sets it: one a member\nsends is not read.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Skipped"
+                },
+                "default": []
               }
             },
             "required": [
@@ -31890,7 +31973,8 @@
               "limits",
               "on",
               "on_by",
-              "once"
+              "once",
+              "skipped"
             ]
           },
           "CallRules": {
@@ -31995,6 +32079,35 @@
             "required": [
               "usd",
               "minutes"
+            ]
+          },
+          "Skipped": {
+            "description": "How many events of a bot started no run for `reason`.\n\n`{\"reason\":\"queue_full\",\"count\":2}`",
+            "type": "object",
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/SkipReason"
+              },
+              "count": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "reason",
+              "count"
+            ]
+          },
+          "SkipReason": {
+            "description": "Why an event of a bot started no run: `\"off\"`, `\"draft\"`, `\"manual\"` (a trigger of a workflow\nthat runs only by Run now), `\"queue_full\"` (the oldest of 20 waiting events, dropped for a\nnewer one) or `\"bot_removed\"` (its workflow was deleted before its turn).",
+            "type": "string",
+            "enum": [
+              "off",
+              "draft",
+              "manual",
+              "queue_full",
+              "bot_removed"
             ]
           },
           "Answer": {
@@ -40302,6 +40415,14 @@
                   "string",
                   "null"
                 ]
+              },
+              "skipped": {
+                "description": "The events that started no run of the bot, counted by why. The hub sets it: one a member\nsends is not read.",
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Skipped"
+                },
+                "default": []
               }
             },
             "required": [
@@ -40404,6 +40525,35 @@
             "required": [
               "usd",
               "minutes"
+            ]
+          },
+          "Skipped": {
+            "description": "How many events of a bot started no run for `reason`.\n\n`{\"reason\":\"queue_full\",\"count\":2}`",
+            "type": "object",
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/SkipReason"
+              },
+              "count": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "reason",
+              "count"
+            ]
+          },
+          "SkipReason": {
+            "description": "Why an event of a bot started no run: `\"off\"`, `\"draft\"`, `\"manual\"` (a trigger of a workflow\nthat runs only by Run now), `\"queue_full\"` (the oldest of 20 waiting events, dropped for a\nnewer one) or `\"bot_removed\"` (its workflow was deleted before its turn).",
+            "type": "string",
+            "enum": [
+              "off",
+              "draft",
+              "manual",
+              "queue_full",
+              "bot_removed"
             ]
           },
           "Answer": {
@@ -58297,6 +58447,14 @@
               "string",
               "null"
             ]
+          },
+          "skipped": {
+            "description": "The events that started no run of the bot, counted by why. The hub sets it: one a member\nsends is not read.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Skipped"
+            },
+            "default": []
           }
         },
         "required": [
@@ -58307,7 +58465,8 @@
           "limits",
           "on",
           "on_by",
-          "once"
+          "once",
+          "skipped"
         ],
         "$defs": {
           "CallRules": {
@@ -58413,6 +58572,35 @@
               "usd",
               "minutes"
             ]
+          },
+          "Skipped": {
+            "description": "How many events of a bot started no run for `reason`.\n\n`{\"reason\":\"queue_full\",\"count\":2}`",
+            "type": "object",
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/SkipReason"
+              },
+              "count": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "reason",
+              "count"
+            ]
+          },
+          "SkipReason": {
+            "description": "Why an event of a bot started no run: `\"off\"`, `\"draft\"`, `\"manual\"` (a trigger of a workflow\nthat runs only by Run now), `\"queue_full\"` (the oldest of 20 waiting events, dropped for a\nnewer one) or `\"bot_removed\"` (its workflow was deleted before its turn).",
+            "type": "string",
+            "enum": [
+              "off",
+              "draft",
+              "manual",
+              "queue_full",
+              "bot_removed"
+            ]
           }
         }
       },
@@ -58485,6 +58673,14 @@
               "string",
               "null"
             ]
+          },
+          "skipped": {
+            "description": "The events that started no run of the bot, counted by why. The hub sets it: one a member\nsends is not read.",
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Skipped"
+            },
+            "default": []
           }
         },
         "required": [
@@ -58587,6 +58783,35 @@
             "required": [
               "usd",
               "minutes"
+            ]
+          },
+          "Skipped": {
+            "description": "How many events of a bot started no run for `reason`.\n\n`{\"reason\":\"queue_full\",\"count\":2}`",
+            "type": "object",
+            "properties": {
+              "reason": {
+                "$ref": "#/$defs/SkipReason"
+              },
+              "count": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "reason",
+              "count"
+            ]
+          },
+          "SkipReason": {
+            "description": "Why an event of a bot started no run: `\"off\"`, `\"draft\"`, `\"manual\"` (a trigger of a workflow\nthat runs only by Run now), `\"queue_full\"` (the oldest of 20 waiting events, dropped for a\nnewer one) or `\"bot_removed\"` (its workflow was deleted before its turn).",
+            "type": "string",
+            "enum": [
+              "off",
+              "draft",
+              "manual",
+              "queue_full",
+              "bot_removed"
             ]
           }
         }

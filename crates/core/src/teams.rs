@@ -237,6 +237,48 @@ pub struct Bot {
     /// sets it: one a member sends is not read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub off_note: Option<String>,
+    /// The events that started no run of the bot, counted by why. The hub sets it: one a member
+    /// sends is not read.
+    #[serde(default)]
+    pub skipped: Vec<Skipped>,
+}
+
+/// How many events of a bot started no run for `reason`.
+///
+/// `{"reason":"queue_full","count":2}`
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct Skipped {
+    pub reason: SkipReason,
+    pub count: u64,
+}
+
+/// Why an event of a bot started no run: `"off"`, `"draft"`, `"manual"` (a trigger of a workflow
+/// that runs only by Run now), `"queue_full"` (the oldest of 20 waiting events, dropped for a
+/// newer one) or `"bot_removed"` (its workflow was deleted before its turn).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SkipReason {
+    Off,
+    Draft,
+    Manual,
+    QueueFull,
+    BotRemoved,
+}
+
+impl SkipReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SkipReason::Off => "off",
+            SkipReason::Draft => "draft",
+            SkipReason::Manual => "manual",
+            SkipReason::QueueFull => "queue_full",
+            SkipReason::BotRemoved => "bot_removed",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<SkipReason> {
+        [SkipReason::Off, SkipReason::Draft, SkipReason::Manual, SkipReason::QueueFull, SkipReason::BotRemoved].into_iter().find(|r| r.as_str() == text)
+    }
 }
 
 /// `"working"`, `"waiting"`, `"taken_over"`, `"done"`, `"stopped"`, `"gave_up"`, `"failed"`

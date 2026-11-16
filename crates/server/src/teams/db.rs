@@ -5,7 +5,7 @@
 use crate::db::{err, Db};
 use pinned_core::agent::Subject;
 use pinned_core::preauth::team_hook::GO_AHEAD;
-use pinned_core::teams::{Answer, Bot, Call, Group, Role, Run, RunState, TeamProject};
+use pinned_core::teams::{Answer, Bot, Call, Group, Role, Run, RunState, SkipReason, Skipped, TeamProject};
 use tokio_postgres::error::SqlState;
 use uuid::Uuid;
 
@@ -369,6 +369,7 @@ fn bot_row(r: &tokio_postgres::Row) -> Result<Bot, String> {
         on_by: on_by.map(|o| o.to_string()),
         once: r.get("once"),
         off_note: r.get("off_note"),
+        skipped: vec![],
     })
 }
 
@@ -938,4 +939,92 @@ pub async fn live_run_for(db: &Db, team: Uuid, workflow: &str, subject: &Subject
         .await
         .map_err(err)?;
     Ok(row.as_ref().map(run_of))
+}
+
+/// An event waiting in its bot's line (`team_run_queue`), oldest first by `id`.
+pub struct Waiting {
+    pub id: i64,
+    pub workflow: String,
+    /// What `teams::queue` stored to start it with.
+    pub start: serde_json::Value,
+}
+
+/// How many runs of the team are live.
+pub async fn live_count(db: &Db, team: Uuid) -> Result<i64, String> {
+    let row = db.client().await?.query_one(&format!("select count(*) from team_runs where team = $1 and state in {LIVE}"), &[&team]).await.map_err(err)?;
+    Ok(row.get(0))
+}
+
+/// The most runs the team may have live at once.
+pub async fn max_live_runs(db: &Db, team: Uuid) -> Result<i64, String> {
+    let row = db.client().await?.query_opt("select max_live_runs from teams where id = $1", &[&team]).await.map_err(err)?;
+    Ok(row.map_or(3, |r| i64::from(r.get::<_, i32>(0))))
+}
+
+/// How many events wait in the line of bot `workflow`.
+pub async fn waiting_count(db: &Db, team: Uuid, workflow: &str) -> Result<i64, String> {
+    let row = db.client().await?.query_one("select count(*) from team_run_queue where team = $1 and workflow = $2", &[&team, &workflow]).await.map_err(err)?;
+    Ok(row.get(0))
+}
+
+/// Puts `start` at the end of the line of bot `workflow`, and drops its oldest beyond `most`.
+/// Answers how many it dropped.
+pub async fn enqueue(db: &Db, team: Uuid, workflow: &str, start: &serde_json::Value, most: i64) -> Result<u64, String> {
+    let client = db.client().await?;
+    client.execute("insert into team_run_queue (team, workflow, start) values ($1, $2, $3)", &[&team, &workflow, start]).await.map_err(err)?;
+    client
+        .execute(
+            "delete from team_run_queue where id in (select id from team_run_queue where team = $1 and workflow = $2 order by id desc offset $3)",
+            &[&team, &workflow, &most],
+        )
+        .await
+        .map_err(err)
+}
+
+/// The oldest waiting event of a bot of the team that has no live run, `first`'s before any
+/// other bot's.
+pub async fn next_waiting(db: &Db, team: Uuid, first: &str) -> Result<Option<Waiting>, String> {
+    let row = db
+        .client()
+        .await?
+        .query_opt(
+            &format!(
+                "select id, workflow, start from team_run_queue q where team = $1
+                 and not exists (select 1 from team_runs r where r.team = q.team and r.workflow = q.workflow and r.state in {LIVE})
+                 order by (workflow = $2) desc, id limit 1"
+            ),
+            &[&team, &first],
+        )
+        .await
+        .map_err(err)?;
+    Ok(row.map(|r| Waiting { id: r.get(0), workflow: r.get(1), start: r.get(2) }))
+}
+
+/// Takes waiting event `id` out of its line.
+pub async fn take_waiting(db: &Db, id: i64) -> Result<(), String> {
+    db.client().await?.execute("delete from team_run_queue where id = $1", &[&id]).await.map_err(err).map(drop)
+}
+
+/// Counts `count` more events of bot `workflow` that started no run for `reason`.
+pub async fn count_skipped(db: &Db, team: Uuid, workflow: &str, reason: SkipReason, count: u64) -> Result<(), String> {
+    let count = i64::try_from(count).unwrap_or(i64::MAX);
+    db.client()
+        .await?
+        .execute(
+            "insert into team_bot_skips (team, workflow, reason, count) values ($1, $2, $3, $4)
+             on conflict (team, workflow, reason) do update set count = team_bot_skips.count + excluded.count",
+            &[&team, &workflow, &reason.as_str(), &count],
+        )
+        .await
+        .map_err(err)
+        .map(drop)
+}
+
+/// The skipped events of bot `workflow`, by reason.
+pub async fn skipped(db: &Db, team: Uuid, workflow: &str) -> Result<Vec<Skipped>, String> {
+    let rows = db.client().await?.query("select reason, count from team_bot_skips where team = $1 and workflow = $2 order by reason", &[&team, &workflow]).await.map_err(err)?;
+    Ok(rows
+        .iter()
+        .filter_map(|r| SkipReason::parse(r.get(0)).map(|reason| Skipped { reason, count: u64::try_from(r.get::<_, i64>(1)).unwrap_or(0) }))
+        .collect())
 }

@@ -383,6 +383,7 @@ pub async fn end_run(hub: &Hub, team: &Arc<Account>, run_id: Uuid, state: RunSta
     if let Err(e) = super::bots::run_ended(hub, team.id, &run).await {
         eprintln!("pinned-server: run {run_id} of team {} ended but its run-once bot stays: {e}", team.id);
     }
+    super::queue::next(hub, team, &run.workflow);
     Ok(run)
 }
 

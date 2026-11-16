@@ -107,7 +107,7 @@ impl Crew {
 }
 
 fn bot_of(workflow: &str) -> Bot {
-    Bot { workflow: workflow.into(), name: String::new(), owner: None, calls: CallRules::default(), limits: BotLimits { usd: 5.0, minutes: 30 }, on: false, on_by: None, once: false, off_note: None }
+    Bot { workflow: workflow.into(), name: String::new(), owner: None, calls: CallRules::default(), limits: BotLimits { usd: 5.0, minutes: 30 }, on: false, on_by: None, once: false, off_note: None, skipped: vec![] }
 }
 
 /// A bot that is on, made the way a team does: keys, a saved bot, the owner's yes.

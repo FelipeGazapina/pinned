@@ -1989,12 +1989,8 @@ impl Connectors {
                     return Err(self.unclaim(&connector, &subject, &folder, &why));
                 }
                 // The session starts even when Linear won't move the issue or Slack won't take the
-                // reaction; the check reports why. A Slack thread has no issue to pick until its
-                // session files one.
-                match &subject {
-                    Subject::LinearIssue { .. } => self.stage(&connector, &subject, Stage::Picked).await.map(drop),
-                    Subject::SlackThread { channel, thread } => self.acknowledge(&connector, channel, thread, &mentioned).await,
-                }
+                // reaction; the check reports why.
+                self.acknowledge_run(&connector, &subject, &mentioned).await
             }
             Work::Delivery(d) => {
                 let cursor = if open(Work::Delivery(d.clone())).await.taken().is_ok() {
@@ -2012,6 +2008,21 @@ impl Connectors {
             }
             Work::Prompt { env, text } => open(Work::Prompt { env, text }).await.taken().map(drop),
         }
+    }
+
+    /// Tells Linear and Slack a run started: its issue moves to picked, or its thread's messages get
+    /// the working reaction. A Slack thread has no issue to pick until its session files one.
+    async fn acknowledge_run(&self, connector: &str, subject: &Subject, mentioned: &[String]) -> Result<(), String> {
+        match subject {
+            Subject::LinearIssue { .. } => self.stage(connector, subject, Stage::Picked).await.map(drop),
+            Subject::SlackThread { channel, thread } => self.acknowledge(connector, channel, thread, mentioned).await,
+        }
+    }
+
+    /// A run a hub's team kept waiting (its `open` consumed it then) started later: Linear and
+    /// Slack hear of it now, as `hand_over` tells them of a run a tab took at once.
+    pub async fn started(&self, run: &Run) -> Result<(), String> {
+        self.acknowledge_run(&run.connector, &run.subject, &run.mentioned).await
     }
 
     /// Reacts to the messages a session took, so people can tell the bot didn't ignore them.

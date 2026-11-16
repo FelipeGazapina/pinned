@@ -197,6 +197,14 @@ alter table team_bots add column if not exists off_note text;
 -- The hash of the exact step a team-box hook asked about, and when its Go ahead let that step run
 -- (unix seconds): each Go ahead lets its step run once (`teams::db::use_go_ahead`).
 alter table team_calls add column if not exists step_hash text, add column if not exists released_at bigint;
+-- One live run per bot and at most `max_live_runs` per team: the events past that wait in their
+-- bot's line (`teams::queue`), and the events that started no run are counted by why.
+alter table teams add column if not exists max_live_runs integer not null default 3;
+create table if not exists team_run_queue (id bigserial primary key, team uuid not null references teams on delete cascade,
+  workflow text not null, start jsonb not null, queued_at timestamptz not null default now());
+create index if not exists team_run_queue_line on team_run_queue (team, workflow, id);
+create table if not exists team_bot_skips (team uuid not null references teams on delete cascade, workflow text not null,
+  reason text not null, count bigint not null default 0, primary key (team, workflow, reason));
 ";
 /// How long the hub keeps an end that its machine never came back for.
 const HELD_FOR: &str = "interval '30 days'";
