@@ -24,7 +24,11 @@ struct Call {
 static CALLS: Mutex<Vec<Call>> = Mutex::new(Vec::new());
 /// The tests whose model call about ENG-1 gets no answer while they are listed here, as a model
 /// that is still thinking when its hub stops.
-static THINKING: Mutex<Vec<String>> = Mutex::new(Vec::new());
+pub(crate) static THINKING: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// The tests whose Linear polls get no answer while they are listed here, so a check of the
+/// team's triggers claims no granted event meanwhile.
+pub(crate) static POLLS_HELD: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// Starts the Linear and model stand-ins once, and the Slack one. Each test names its own keys,
 /// so they share the servers.
@@ -60,6 +64,9 @@ fn answer(mut stream: TcpStream) {
     let key = header("authorization").trim_start_matches("Bearer ").to_owned();
     let service = if path.starts_with("/graphql") { "linear" } else { "model" };
     CALLS.lock().unwrap().push(Call { service, key: key.clone(), path: path.clone(), body: body.clone() });
+    while service == "linear" && body.contains("issues(") && POLLS_HELD.lock().unwrap().iter().any(|t| key.ends_with(t.as_str())) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
     while service == "model" && body.contains("ENG-1:") && THINKING.lock().unwrap().iter().any(|t| key.ends_with(t.as_str())) {
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -106,17 +113,17 @@ fn outside(name: &str, n: u32) -> Vec<String> {
 
 /// A hub with a team that keeps the Upstash key and Claude token, and has Linear, Slack and the
 /// model gateway connected with keys ending in `name`: ana owns it, bob is a member.
-struct Crew {
-    hub: TestHub,
-    team: Uuid,
-    ana: Arc<Account>,
-    bob: Arc<Account>,
+pub(crate) struct Crew {
+    pub(crate) hub: TestHub,
+    pub(crate) team: Uuid,
+    pub(crate) ana: Arc<Account>,
+    pub(crate) bob: Arc<Account>,
     folder: PathBuf,
     name: String,
 }
 
 impl Crew {
-    fn new(name: &str) -> Crew {
+    pub(crate) fn new(name: &str) -> Crew {
         standins();
         let patient = TeamPolicy { escalate_after_secs: 3600, give_up_after_secs: 7200, ..TeamPolicy::default() };
         // A box that fails to boot cools its bot down for an hour; these tests start the next event right after.
@@ -147,14 +154,14 @@ impl Crew {
         self.call(&self.ana, TeamOp::Hub { call }).unwrap()
     }
 
-    fn call(&self, who: &Arc<Account>, op: TeamOp) -> Result<Value, String> {
+    pub(crate) fn call(&self, who: &Arc<Account>, op: TeamOp) -> Result<Value, String> {
         let op = teams::Op::read(op)?;
         self.hub.runtime.block_on(teams::call(self.hub.hub(), who, Some(self.team), op))
     }
 
     /// A Linear label bot whose Ask step asks the model what kind of issue it is, and whose
     /// session moves the issue to "In Progress"; bob saved it and ana turned it on.
-    fn on_bot(&self, name: &str) -> String {
+    pub(crate) fn on_bot(&self, name: &str) -> String {
         self.ask_bot(name, &[])
     }
 
@@ -180,7 +187,7 @@ impl Crew {
 
     /// A Linear label bot whose graph moves the issue to "In Progress", asks the model what kind
     /// of issue it is, then opens its session; bob saved it and ana turned it on.
-    fn graph_bot(&self, name: &str) -> String {
+    pub(crate) fn graph_bot(&self, name: &str) -> String {
         self.graph_of(
             name,
             vec![
@@ -225,7 +232,7 @@ impl Crew {
     }
 
     /// What the graph bot's Linear poller finds for issue `ENG-n`.
-    fn graph_labeled(&self, id: &str, n: u32) -> Event {
+    pub(crate) fn graph_labeled(&self, id: &str, n: u32) -> Event {
         let input = pinned_core::connectors::TriggerInput::Issue {
             id: format!("eng-{n}"),
             identifier: format!("ENG-{n}"),
@@ -237,12 +244,12 @@ impl Crew {
     }
 
     /// The ids of the team's live runs of bot `id`.
-    fn live_of(&self, id: &str) -> Vec<String> {
+    pub(crate) fn live_of(&self, id: &str) -> Vec<String> {
         let runs = self.call(&self.bob, TeamOp::Runs).unwrap();
         runs.as_array().unwrap().iter().filter(|r| r["workflow"] == id && r["state"] == "working").map(|r| r["id"].as_str().unwrap().to_owned()).collect()
     }
 
-    fn stop(&self, run: &str) {
+    pub(crate) fn stop(&self, run: &str) {
         self.call(&self.ana, serde_json::from_value(json!({ "op": "stop_run", "run": run })).unwrap()).unwrap();
     }
 
@@ -314,7 +321,7 @@ impl Crew {
     }
 
     /// The event the team's Linear poller finds for label `agent` on issue `ENG-n`.
-    fn labeled(&self, id: &str, n: u32) -> Event {
+    pub(crate) fn labeled(&self, id: &str, n: u32) -> Event {
         Event::Run(Run {
             cwd: self.folder.clone(),
             repo: None,
@@ -330,7 +337,7 @@ impl Crew {
 
     /// Hands the team's connectors `event` as a check that found it would, with the hub's own
     /// `open`; answers what the check would report.
-    fn found(&self, event: Event) -> Result<(), String> {
+    pub(crate) fn found(&self, event: Event) -> Result<(), String> {
         let hub = self.hub.hub().clone();
         let team = self.team;
         self.hub.runtime.block_on(async move {
@@ -355,7 +362,7 @@ impl Crew {
     }
 
     /// How many events wait in bot `id`'s line.
-    fn waiting(&self, id: &str) -> i64 {
+    pub(crate) fn waiting(&self, id: &str) -> i64 {
         self.hub.runtime.block_on(async {
             let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), self.hub.database), tokio_postgres::NoTls).await.unwrap();
             tokio::spawn(connection);
@@ -374,17 +381,17 @@ impl Crew {
     }
 
     /// The skipped counts of bot `id` as the bot page lists them.
-    fn skipped(&self, id: &str) -> Value {
+    pub(crate) fn skipped(&self, id: &str) -> Value {
         let bots = self.call(&self.bob, TeamOp::Bots).unwrap();
         bots.as_array().unwrap().iter().find(|b| b["workflow"] == id).unwrap()["skipped"].clone()
     }
 
-    fn outside(&self, n: u32) -> Vec<String> {
+    pub(crate) fn outside(&self, n: u32) -> Vec<String> {
         outside(&self.name, n)
     }
 }
 
-fn none() -> Vec<String> {
+pub(crate) fn none() -> Vec<String> {
     vec![]
 }
 
@@ -690,12 +697,12 @@ impl ClaimGate {
 
 impl Crew {
     /// How many boxes were created for sessions so far.
-    fn boxes_created(&self) -> usize {
+    pub(crate) fn boxes_created(&self) -> usize {
         self.hub.boxes.state.lock().unwrap().created.len()
     }
 
     /// When each reserved run of bot `id` got its place (`reserved_at`), as `set` or `null`.
-    fn reserved_at(&self, id: &str) -> Vec<String> {
+    pub(crate) fn reserved_at(&self, id: &str) -> Vec<String> {
         self.hub.runtime.block_on(async {
             let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), self.hub.database), tokio_postgres::NoTls).await.unwrap();
             tokio::spawn(connection);

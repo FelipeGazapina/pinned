@@ -419,11 +419,12 @@ pub async fn start_reserved(hub: &Arc<Hub>, team: &Arc<Account>, id: Uuid, mut w
         Ok(placed) => placed,
         Err(e) => {
             // A run that ended meanwhile, as one stopped while its box booted, stays as it ended.
-            if !db::run(&hub.db, team.id, id).await?.is_some_and(|r| r.state.ended()) {
+            let ended = db::run(&hub.db, team.id, id).await?.map(|r| r.state).filter(|s| s.ended());
+            if ended.is_none() {
                 db::delete_run(&hub.db, team.id, id).await?;
             }
-            // A granted event that waited for its place and then did not start is counted.
-            if super::queue::take_claimed(id) {
+            // A granted event that waited for its place and then did not start is counted; a stop is not.
+            if super::queue::take_claimed(id) && ended != Some(RunState::Stopped) {
                 db::count_skipped(&hub.db, team.id, &work.connector, SkipReason::StartFailed, 1).await?;
             }
             super::queue::next(hub, team, &work.connector);
