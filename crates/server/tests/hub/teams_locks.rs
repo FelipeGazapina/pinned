@@ -195,6 +195,9 @@ fn a_claim_skips_a_granted_row_another_holds_and_the_hub_answers_others() {
     others_answered(&crew.hub, &carl);
     assert_eq!(held.waiters(), 0, "no claim waits on the held row");
     held.release();
+    // The poller's own claim may have skipped the row while it was held, and it looks again only
+    // on its next check (a minute): wake it, as a grant does, so the event does not wait for that.
+    crew.hub.runtime.block_on(async { hub.connectors(&hub.account(team).await.unwrap()).await.unwrap().wake() });
 
     wait_for("ENG-1 to run", || crew.outside(1).len() == 2 && crew.live_of(&pages).len() == 1);
     std::thread::sleep(Duration::from_secs(3));
