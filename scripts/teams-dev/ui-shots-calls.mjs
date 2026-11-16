@@ -128,7 +128,8 @@ async function open(browser, scheme, setup = () => {}, opts = {}) {
     runs: () => w.runs,
     calls: () => w.calls,
     run_log: (op) => {
-      if (opts.noLog) throw "unknown team op: run_log";
+      // The hub reads a run's log from the run's own box: an ended run it can no longer find has lost it.
+      if (opts.logGone) throw "the team has no such run";
       return w.logs[op.run] ?? [];
     },
     answer_call: (op) => {
@@ -312,14 +313,65 @@ for (const scheme of ["dark", "light"]) {
     await context.close();
   }
   {
-    const { page, context } = await open(browser, scheme, () => {}, { noLog: true });
+    // An ended run whose log went away with its box.
+    const { page, context } = await open(browser, scheme, () => {}, { logGone: true });
     await page.click('#team-nav [data-tc-nav="team-calls"]');
     await page.waitForSelector(".tc-card");
-    await page.click('[data-call="c2"] .tc-seerun');
+    await page.evaluate(() => openTeamRun("r5"));
+    await page.waitForSelector("[data-log-note]");
+    check((await text(page, "[data-log-note]")) === "The log went away with the run's box.", "an ended run whose log is gone says so");
+    check(!(await page.locator(".tc-wrap").innerText()).includes("the team has no such run"), "the raw refusal is not shown");
+    await shot(page, "run-log-gone", scheme);
+    await context.close();
+  }
+  {
+    // The run's log is present: the bot's own lines are in the timeline.
+    const { page, context } = await open(browser, scheme);
+    await page.click('#team-nav [data-tc-nav="team-calls"]');
+    await page.waitForSelector(".tc-card");
+    await page.evaluate(() => openTeamRun("r1"));
     await page.waitForSelector(".tc-timeline .tc-call");
-    await page.waitForSelector(".tc-timeline .tc-note");
-    check((await page.locator(".tc-timeline .tc-event").count()) === 1, "without a run log only the call is drawn");
-    await shot(page, "run-nolog", scheme);
+    check((await page.locator(".tc-timeline .tc-event").count()) >= 3, "the log's lines and the call are drawn");
+    await shot(page, "run-log-present", scheme);
+    await context.close();
+  }
+  {
+    // A step to approve, whole and as sent: a Bash command, and a non-Bash tool with its input.
+    const bash = 'release: GH_TOKEN=[hidden] gh release create v1.4.0 --title "Spring" --notes "Fixes the queue."\n  --target main && echo "<done>"';
+    const edit = 'secrets: Edit {"file_path":"/work/api-orders/.env.production","new_string":"PAYMENT_KEY=[hidden]","old_string":"PAYMENT_KEY=test"}';
+    const { page, context } = await open(browser, scheme, (w) => {
+      w.calls.find((c) => c.id === "c1").question = bash;
+      w.calls.find((c) => c.id === "c1").choices = ["Go ahead", "Don't"];
+      w.calls.push({ id: "c3", run: "r3", workflow: "w2", situation: "before_irreversible", asked: [{ kind: "person", account: ME }], question: edit, choices: ["Go ahead", "Don't"], created_at: at(15, 6), escalated: false, answer: null });
+    });
+    await page.click('#team-nav [data-tc-nav="team-calls"]');
+    await page.waitForSelector('[data-call="c3"] .tc-step');
+    check((await text(page, '[data-call="c1"] .tc-step-text')) === bash.slice("release: ".length), "the Bash step is on the card whole, as sent");
+    check((await page.locator('[data-call="c1"] .tc-step-tool').textContent()) === "Bash", "a command is a Bash step");
+    check((await page.locator('[data-call="c3"] .tc-step-tool').textContent()) === "Edit", "a non-Bash step names its tool");
+    check((await page.locator('[data-call="c3"] .tc-step-text').textContent()) === edit.slice("secrets: Edit ".length), "and shows its whole input");
+    check((await page.locator('[data-call="c1"] .tc-step-text').evaluate((el) => el.scrollHeight <= el.clientHeight + 1)), "the step is not clipped");
+    await shot(page, "call-card-steps", scheme);
+    await context.close();
+  }
+  {
+    // A call closed because its run ended: the card, then the run page.
+    const cause = "its session's tab went away before it finished";
+    const { page, context, w, push, setRun } = await open(browser, scheme);
+    await page.click('#team-nav [data-tc-nav="team-calls"]');
+    await page.waitForSelector('[data-call="c1"] .tc-actions, [data-call="c1"] [data-choice="0"]');
+    const run = setRun("r1", { state: "failed", ended_at: NOW - 30, outcome: cause });
+    const call = { ...w.calls.find((c) => c.id === "c1"), answer: { by: w.team.id, choice: null, text: cause, kind: { kind: "stop" }, at: NOW - 30 } };
+    push({ kind: "call_resolved", call });
+    push({ kind: "run_changed", run });
+    await page.waitForSelector('[data-call="c1"] .tc-result[data-state="other"]');
+    check((await text(page, '[data-call="c1"] .tc-result')) === `Closed: the run ended · ${cause}`, "the card says the run ended and the cause");
+    check(!(await page.locator(".tc-wrap").innerText()).includes("A former member"), "the team is never the answerer");
+    await shot(page, "call-card-closed-by-run", scheme);
+    await page.click('[data-call="c1"] .tc-seerun, .tc-card[data-call="c1"] a, .tc-card[data-call="c1"] button.tc-seerun').catch(() => {});
+    await page.evaluate(() => openTeamRun("r1"));
+    await page.waitForSelector(".tc-timeline .tc-call");
+    await shot(page, "run-closed-by-run", scheme);
     await context.close();
   }
   {

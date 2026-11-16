@@ -498,6 +498,7 @@ test("a call closed because its run ended says Closed: the run ended and the cau
   const resolved = text(p.eval("tcResolvedHtml()"));
   assert.ok(resolved.includes("Test publisher's call was closed: the run ended · its session's tab went away before it finished."), resolved);
   assert.ok(!/A former member|stopped Test publisher/.test(resolved), resolved);
+  assert.ok(/<div class="tc-item tc-plain"><span class="tc-mark " aria-hidden="true">TP<\/span>/.test(p.eval("tcResolvedHtml()")), "the closed call is the bot's, not a person's avatar");
 });
 
 test("a stop by a person who is not the team is still that person's stop", () => {

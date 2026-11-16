@@ -51,8 +51,8 @@ const PROMPT = [
   "Tell whoever made the changes the result.",
 ].map((s, i) => `${i + 1}. ${s}`).join("\n");
 const workflow = (id, name, prompt, repo) => ({
-  id, name, enabled: true, trigger: { kind: "linear-label", label: "pinned-run-now-only" }, repo,
-  graph: { nodes: [{ id: "trigger-1", type: "trigger", name: "Trigger", position: [0, 0], watch: { kind: "linear-label", label: "pinned-run-now-only" } }, { id: "session-1", type: "session", name: "Run session", position: [230, 0], prompt, repo }], edges: [] },
+  id, name, enabled: true, trigger: { kind: "manual" }, repo,
+  graph: { nodes: [{ id: "trigger-1", type: "trigger", name: "Trigger", position: [0, 0], watch: { kind: "manual" } }, { id: "session-1", type: "session", name: "Run session", position: [230, 0], prompt, repo }], edges: [] },
 });
 
 let world;
@@ -109,11 +109,23 @@ function teamOp(op) {
     case "leave_group": { const g = world.groups.find((x) => x.handle === op.handle); g.members = g.members.filter((m) => m !== world.me); return null; }
     case "save_group": Object.assign(world.groups.find((g) => g.handle === op.group.handle), op.group); return null;
     case "turn_bot_on": world.bots.find((b) => b.workflow === op.workflow).on = op.on; return null;
-    case "run_now": working(); return world.runs[0];
-    case "save_bot": world.bots.push({ ...op.bot, on: false }); return null;
+    case "run_now":
+      if (world.busy) throw "the hub is busy with this right now; try again in a moment";
+      working();
+      return world.runs[0];
+    case "delete_bot":
+      if (world.bots.find((b) => b.workflow === op.workflow)?.on) throw "turn the bot off first";
+      world.bots = world.bots.filter((b) => b.workflow !== op.workflow);
+      return null;
+    // save_bot answers nothing: the new workflow's id is the one `bots` lists afterwards.
+    case "save_bot": {
+      const id = "c1700";
+      world.workflows.push({ ...op.connector, id });
+      world.bots.push({ ...op.bot, workflow: id, name: op.connector.name, on: false });
+      return null;
+    }
     case "hub":
       if (op.call.cmd === "get_settings") return { connectors: world.workflows };
-      if (op.call.cmd === "save_connector") { world.workflows.push({ ...op.call.connector, id: "c1700" }); return { id: "c1700", name: op.call.connector.name }; }
       throw `unexpected hub call ${op.call.cmd}`;
     default: throw `unexpected team op ${op.op}`;
   }
@@ -179,13 +191,17 @@ const click = async (page, selector) => {
   await page.waitForTimeout(80);
 };
 
-async function wizard(page, theme, name, { idea = "publish", own = "", who = {}, project = "orders-api", turnOn = false } = {}) {
+async function wizard(page, theme, name, { idea = "publish", own = "", who = {}, project = "orders-api", turnOn = false, trigger = null } = {}) {
   await open(page, "openTeamBotNew()", ".tb-wiz");
   if (name === "wizard-1-empty") await shot(page, theme, name);
   if (own) await page.fill("#tb-desc", own);
   else await click(page, `[data-tb="idea"][data-idea="${idea}"]`);
   if (name === "wizard-1-idea") return shot(page, theme, name);
   await click(page, '[data-tb="next"]');
+  if (trigger) {
+    await click(page, `[data-tb="trigger"][data-kind="${trigger.kind}"]`);
+    await page.fill(trigger.kind === "linear-label" ? "#tb-label-in" : "#tb-channel-in", trigger.value);
+  }
   if (name.startsWith("wizard-2")) return shot(page, theme, name);
   await click(page, '[data-tb="next"]');
   for (const [moment, id] of Object.entries(who)) await click(page, `[data-tb="who"][data-moment="${moment}"][data-id="${id}"]`);
@@ -215,6 +231,10 @@ for (const theme of ["dark", "light"]) {
   await wizard(page, theme, "wizard-2-idea");
   reset();
   await wizard(page, theme, "wizard-2-own", { own: "whenever a PR is open, check that it has tests" });
+  reset();
+  await wizard(page, theme, "wizard-2-linear", { trigger: { kind: "linear-label", value: "bot-review" } });
+  reset();
+  await wizard(page, theme, "wizard-2-slack", { trigger: { kind: "slack-mention", value: "#releases" } });
   reset();
   await wizard(page, theme, "wizard-3", { who: { before: "publish", doubt: "reviewers", limit: "b2" } });
   reset();
@@ -256,6 +276,32 @@ for (const theme of ["dark", "light"]) {
   world.bots[0].once = true;
   world.keys = false;
   await bot("bot-draft-once-no-keys");
+
+  // Skipped events per reason, an unknown reason among them, and the off note.
+  reset();
+  world.bots[0].skipped = [{ reason: "off", count: 3 }, { reason: "queue_full", count: 2 }, { reason: "start_failed", count: 1 }, { reason: "never_started", count: 4 }, { reason: "burnt_toast", count: 7 }];
+  await bot("bot-skipped");
+  reset();
+  world.bots[0].on = false;
+  world.bots[0].off_note = "the team's Claude token stopped working, so the bot was turned off";
+  world.bots[0].skipped = [{ reason: "off", count: 5 }];
+  await bot("bot-off-note");
+  // Delete a draft: asked in place, then the hub's refusal when the bot is on.
+  reset();
+  world.bots[0].on = false;
+  await bot("bot-delete-ask", { steps: async () => { await click(page, '[data-tb="delete-ask"]'); await page.waitForSelector("[data-delete]"); } });
+  reset();
+  world.bots[0].on = false;
+  await bot("bot-delete-refused", { steps: async () => {
+    await click(page, '[data-tb="delete-ask"]');
+    world.bots[0].on = true;
+    await click(page, '[data-tb="delete"]');
+    await page.waitForSelector(".tb-error");
+  } });
+  // Run now, busy.
+  reset();
+  world.busy = true;
+  await bot("bot-run-now-busy", { steps: async () => { await click(page, '[data-tb="run-now"]'); await page.waitForSelector(".tb-error"); } });
 
   // The group page
   const group = async (name, handle = "publish", steps = async () => {}) => {

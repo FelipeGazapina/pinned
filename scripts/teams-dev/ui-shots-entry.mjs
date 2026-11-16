@@ -54,7 +54,12 @@ function fakeHub(world) {
       world.teams = [...world.teams, t];
       return t;
     }
-    if (op === "invite") return { code: world.codes.shift() ?? "QRST-UVWX", hint: "…UVWX" };
+    if (op === "invite") {
+      if (world.full) throw "this team has 20 open invite codes; revoke some first";
+      const code = world.codes.shift() ?? "QRST-UVWX";
+      return { code, hint: code.slice(0, 4) };
+    }
+    if (op === "revoke_invite") return null;
     if (op === "projects") return THEIR_PROJECTS;
     if (op === "attach_project" || op === "rename" || op === "detach_project") return null;
     if (op === "hub") {
@@ -141,6 +146,31 @@ for (const scheme of ["dark", "light"]) {
     await page.locator(".tm-row", { hasText: "Studio Two" }).click();
     await page.click("#account-pages");
     await shot(page, `app-entrada-team-${scheme}`);
+    await context.close();
+  }
+  // Invites (owner only): the empty page, two codes made with one revoked, and the hub's refusal at 20.
+  {
+    const world = freshWorld();
+    world.codes.push("MNPK-7714");
+    const { context, page } = await newApp(scheme, world);
+    await page.click("#account-pages");
+    await page.locator(".tm-row", { hasText: "Studio Two" }).click();
+    await page.evaluate(() => openPage("team-invites"));
+    await page.waitForSelector("text=No open invites made on this device.");
+    await shot(page, `app-invites-empty-${scheme}`);
+    await page.locator('[data-tm="invite-make"]').click();
+    await page.waitForSelector("[data-invite-made]");
+    await page.locator('[data-tm="invite-make"]').click();
+    await page.waitForFunction(() => document.querySelectorAll(".tm-invite").length === 2);
+    await page.locator('.tm-invite[data-hint="WXYZ"] [data-tm="invite-revoke"]').click();
+    await page.waitForSelector("text=Revoked WXYZ…");
+    await page.locator('[data-tm="invite-make"]').click();
+    await page.waitForFunction(() => document.querySelectorAll(".tm-invite").length === 2);
+    await shot(page, `app-invites-list-${scheme}`);
+    world.full = true;
+    await page.locator('[data-tm="invite-make"]').click();
+    await page.waitForSelector(".tm-error");
+    await shot(page, `app-invites-refused-${scheme}`);
     await context.close();
   }
   // Criar: every step, the key form, an invite code, and the end.

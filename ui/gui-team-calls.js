@@ -65,7 +65,7 @@ function tcResolvedHtml() {
         : said === "take_over" ? `${who} took over ${bot}'s run.`
         : said === "stop" ? `${who} stopped ${bot}'s run.`
         : `${who} answered ${bot}'s call${to}: “${[a.choice, a.text].filter(Boolean).join(": ")}”.`;
-    items.push(`<div class="tc-item tc-plain">${tcPersonMark(a.by)}<span class="tc-line"><span class="tc-line-main">${esc(text)}</span></span><span class="tc-time">${esc(tcClock(a.at))}</span></div>`);
+    items.push(`<div class="tc-item tc-plain">${tcClosedByRun(call) ? tcBotMark(bot) : tcPersonMark(a.by)}<span class="tc-line"><span class="tc-line-main">${esc(text)}</span></span><span class="tc-time">${esc(tcClock(a.at))}</span></div>`);
   }
   const called = new Set(tcStore.calls.map((c) => c.run));
   const done = new Map();
