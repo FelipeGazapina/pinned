@@ -11,7 +11,7 @@ use super::bots::{self, Start};
 use super::{calls, db};
 use crate::hub::{Account, Hub};
 use pinned_core::agent::Subject;
-use pinned_core::connectors::{Admitted, Event, Placement, RunsOn, Trigger};
+use pinned_core::connectors::{Admitted, Delivery, Event, Placement, Replies, RunsOn, Trigger, TriggerInput};
 use pinned_core::teams::{Run, RunState, SkipReason};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -21,6 +21,8 @@ use uuid::Uuid;
 
 /// The most events that wait in one bot's line.
 pub const MOST_WAITING: i64 = 20;
+/// The most replies of a Slack thread kept with its waiting event: older ones are only counted.
+pub const MOST_REPLIES: usize = 20;
 
 /// What `ask` did with a run.
 pub enum Asked {
@@ -37,7 +39,16 @@ enum Stored {
     Trigger { kind: String, cwd: PathBuf, repo: Option<String>, args: Vec<String>, subject: Subject, mentioned: Vec<String>, account: Option<String>, runs_on: RunsOn, input: String },
     /// A trigger's raw event, as its poller found it before its Ask step or any graph step
     /// (`admit`): its turn runs it whole, from the start (`Connectors::granted`).
-    Event { kind: String, event: Event },
+    /// The replies its Slack thread got while it waited, the newest `MOST_REPLIES`, and how many
+    /// older ones were dropped.
+    Event {
+        kind: String,
+        event: Event,
+        #[serde(default)]
+        replies: Vec<String>,
+        #[serde(default)]
+        earlier: u64,
+    },
 }
 
 impl Stored {
@@ -142,13 +153,13 @@ pub async fn admit(hub: &Arc<Hub>, team: &Arc<Account>, kind: &str, event: Event
     let busy = !db::live_runs_of(&hub.db, team.id, &workflow).await?.is_empty();
     let full = db::live_count(&hub.db, team.id).await? >= db::max_live_runs(&hub.db, team.id).await?;
     if waiting > 0 || busy || full {
-        let stored = serde_json::to_value(Stored::Event { kind: kind.to_owned(), event }).map_err(|e| e.to_string())?;
+        let stored = serde_json::to_value(Stored::Event { kind: kind.to_owned(), event, replies: vec![], earlier: 0 }).map_err(|e| e.to_string())?;
         let dropped = db::enqueue(&hub.db, team.id, &workflow, &stored, MOST_WAITING).await?;
         if dropped > 0 {
             eprintln!("pinned-server: team {} bot {workflow}: its line is full, so its oldest waiting event was dropped", team.id);
             db::count_skipped(&hub.db, team.id, &workflow, SkipReason::QueueFull, dropped).await?;
         }
-        return Ok(Admitted::Held);
+        return Ok(Admitted::Waiting);
     }
     reserve(hub, team, kind, &event).await?;
     Ok(Admitted::Go)
@@ -169,6 +180,59 @@ async fn reserve(hub: &Arc<Hub>, team: &Arc<Account>, kind: &str, event: &Event)
         started_by: format!("trigger:{kind}"),
     };
     db::insert_reserved(&hub.db, team.id, &run, event.subject()).await
+}
+
+/// New replies of a Slack thread: kept with the thread's waiting event, the newest
+/// `MOST_REPLIES`; passed on when the bot runs the thread; dropped when nothing does.
+pub async fn keep_replies(hub: &Arc<Hub>, team: &Arc<Account>, delivery: &Delivery) -> Result<Replies, String> {
+    let subject = Subject::SlackThread { channel: delivery.channel.clone(), thread: delivery.thread.clone() };
+    if db::live_run_for(&hub.db, team.id, &delivery.connector, &subject).await?.is_some() {
+        return Ok(Replies::Pass);
+    }
+    let line = line(team.id);
+    let _turn = line.lock().await;
+    let Some(waiting) = db::waiting_event_for(&hub.db, team.id, &delivery.connector, &subject).await? else {
+        eprintln!("pinned-server: team {} workflow {}: new thread messages dropped: the thread has no run and no waiting event", team.id, delivery.connector);
+        return Ok(Replies::Dropped);
+    };
+    let Ok(Stored::Event { kind, event, mut replies, mut earlier }) = serde_json::from_value(waiting.start) else {
+        return Ok(Replies::Dropped);
+    };
+    replies.extend(delivery.messages.iter().cloned());
+    let over = replies.len().saturating_sub(MOST_REPLIES);
+    replies.drain(..over);
+    earlier += over as u64;
+    let stored = serde_json::to_value(Stored::Event { kind, event, replies, earlier }).map_err(|e| e.to_string())?;
+    db::set_waiting(&hub.db, waiting.id, &stored).await?;
+    Ok(Replies::Kept)
+}
+
+/// `event` with the replies its thread got while it waited, each framed as untrusted text, after
+/// its first prompt: a plain run's prompt, or a graph's Slack trigger note.
+pub fn with_replies(event: Event, replies: &[String], earlier: u64) -> Event {
+    if replies.is_empty() && earlier == 0 {
+        return event;
+    }
+    let mut text = vec!["Replies the thread got while this run waited to start:".to_owned()];
+    if earlier > 0 {
+        text.push(format!("{earlier} earlier replies not shown"));
+    }
+    text.extend(replies.iter().map(|reply| pinned_core::untrusted::frame("a Slack reply in this thread", reply)));
+    let text = text.join("\n\n");
+    match event {
+        Event::Run(mut run) => {
+            if let Some(last) = run.args.last_mut() {
+                *last = format!("{last}\n\n{text}");
+            }
+            Event::Run(run)
+        }
+        Event::Graph { connector, subject, mut input, at } => {
+            if let TriggerInput::Slack { note, .. } = &mut input {
+                *note = Some(note.take().map_or(text.clone(), |n| format!("{n}\n\n{text}")));
+            }
+            Event::Graph { connector, subject, input, at }
+        }
+    }
 }
 
 /// What an admitted event's run ends with when it ends before its session opened.
@@ -212,7 +276,7 @@ async fn start_waiting(hub: &Arc<Hub>, team: &Arc<Account>, ended: &str) -> Resu
                 continue;
             }
         };
-        if let Stored::Event { kind, event } = stored {
+        if let Stored::Event { kind, event, replies, earlier } = stored {
             if let Some(reason) = skip_reason(hub, team, &waiting.workflow, true).await? {
                 eprintln!("pinned-server: team {} bot {}: a waiting event is dropped: the bot is {}", team.id, waiting.workflow, reason.as_str());
                 db::count_skipped(&hub.db, team.id, &waiting.workflow, reason, 1).await?;
@@ -220,7 +284,7 @@ async fn start_waiting(hub: &Arc<Hub>, team: &Arc<Account>, ended: &str) -> Resu
             }
             // Its place is held now, and the team's poller runs it whole, from the start.
             reserve(hub, team, &kind, &event).await?;
-            hub.connectors(team).await?.granted(event);
+            hub.connectors(team).await?.granted(with_replies(event, &replies, earlier));
             continue;
         }
         let Some(start) = stored.start(&waiting.workflow) else { continue };
@@ -249,5 +313,39 @@ async fn start_waiting(hub: &Arc<Hub>, team: &Arc<Account>, ended: &str) -> Resu
             }
             Err(e) => eprintln!("pinned-server: team {} bot {}: a waiting run did not start and is dropped: {e}", team.id, waiting.workflow),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn slack_run(prompt: &str) -> Event {
+        Event::Run(pinned_core::connectors::Run {
+            cwd: PathBuf::from("/work/acme"),
+            repo: None,
+            args: vec!["--name".into(), "Footer".into(), prompt.into()],
+            connector: "footer".into(),
+            subject: Subject::SlackThread { channel: "C0ACME001".into(), thread: "1792400050.000200".into() },
+            mentioned: vec![],
+            account: None,
+            runs_on: RunsOn::Any,
+            input: String::new(),
+        })
+    }
+
+    #[test]
+    fn the_replies_a_waiting_run_kept_follow_its_first_prompt_each_framed() {
+        let replies: Vec<String> = (6..=25).map(|n| format!("reply {n}")).collect();
+        let Event::Run(run) = with_replies(slack_run("Fix the footer."), &replies, 5) else { panic!("a run") };
+        let prompt = run.args.last().unwrap();
+        let framed: Vec<String> = replies.iter().map(|r| pinned_core::untrusted::frame("a Slack reply in this thread", r)).collect();
+        assert_eq!(prompt, &format!("Fix the footer.\n\nReplies the thread got while this run waited to start:\n\n5 earlier replies not shown\n\n{}", framed.join("\n\n")));
+    }
+
+    #[test]
+    fn a_waiting_run_without_replies_keeps_its_prompt() {
+        let Event::Run(run) = with_replies(slack_run("Fix the footer."), &[], 0) else { panic!("a run") };
+        assert_eq!(run.args.last().unwrap(), "Fix the footer.");
     }
 }

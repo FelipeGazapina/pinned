@@ -1383,8 +1383,24 @@ impl Event {
 pub enum Admitted {
     /// It may run now: its place is held until its session opens or its run ends without one.
     Go,
-    /// It waits, was dropped or skipped: nothing outside pinned hears of it.
+    /// It was dropped or skipped: nothing outside pinned hears of it, and a Slack thread's later
+    /// replies are not followed.
     Held,
+    /// It waits in its bot's line: nothing outside pinned hears of it yet, and a Slack thread's
+    /// replies are kept with it (`Admission::replies`).
+    Waiting,
+}
+
+/// What an `Admission` did with new replies of a Slack thread.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Replies {
+    /// They go on as today, to the thread's live session or a new one.
+    Pass,
+    /// The thread's event waits, and they wait with it: nothing outside pinned hears of them.
+    Kept,
+    /// The thread has neither a run nor a waiting event: they are dropped, and the thread is no
+    /// longer followed.
+    Dropped,
 }
 
 pub type Pending<T> = std::pin::Pin<Box<dyn Future<Output = T> + Send>>;
@@ -1397,6 +1413,11 @@ pub trait Admission: Send + Sync {
     /// The admitted event of `connector` on `subject` ended before a session opened: its place is
     /// freed. A place whose session opened is left as it is.
     fn release(&self, connector: String, subject: Subject) -> Pending<()>;
+    /// New replies of a Slack thread, before they go to a session or Slack hears of them.
+    fn replies(&self, delivery: Delivery) -> Pending<Result<Replies, String>> {
+        let _ = delivery;
+        Box::pin(async { Ok(Replies::Pass) })
+    }
 }
 
 /// Runs `work` off the async worker. Resume detection sleeps, and a desktop watcher must not block on it.
@@ -2056,6 +2077,15 @@ impl Connectors {
         match work {
             Work::Run(run) => self.hand_over_run(run, open, false).await,
             Work::Delivery(d) => {
+                // A hub's team keeps the replies of a thread whose event waits, before any
+                // session or Slack hears of them.
+                if let Some(admission) = self.admission.get().cloned() {
+                    match admission.replies(d.clone()).await? {
+                        Replies::Pass => {}
+                        Replies::Kept => return self.follow(&d.connector, &d.channel, &d.thread, d.cursor.clone()),
+                        Replies::Dropped => return self.keep_stopped(&d.connector, &Subject::SlackThread { channel: d.channel.clone(), thread: d.thread.clone() }),
+                    }
+                }
                 let cursor = if open(Work::Delivery(d.clone())).await.taken().is_ok() {
                     d.cursor.clone()
                 } else {
@@ -2088,6 +2118,8 @@ impl Connectors {
             match self.admit(&Event::Run(run.clone())).await {
                 Ok(Admitted::Go) => {}
                 Ok(Admitted::Held) => return self.keep_stopped(&connector, &subject),
+                // The subject stays handled, and a thread stays followed for its replies.
+                Ok(Admitted::Waiting) => return Ok(()),
                 Err(why) => return Err(self.unclaim(&connector, &subject, &folder, &why)),
             }
         }
@@ -3686,7 +3718,7 @@ impl Connectors {
     async fn start_graph(&self, event: Event) -> Result<(), String> {
         match self.admit(&event).await? {
             Admitted::Go => self.begin_admitted(event).await,
-            Admitted::Held => Ok(()),
+            Admitted::Held | Admitted::Waiting => Ok(()),
         }
     }
 
@@ -3707,6 +3739,18 @@ impl Connectors {
                 self.drive_locked(open).await
             }
         }
+    }
+
+    /// Hands over `work` as a check would: the hub tests hand a team's thread replies in here.
+    #[doc(hidden)]
+    pub async fn handed<F, Fut, R>(&self, work: Work, open: &F) -> Result<(), String>
+    where
+        F: Fn(Work) -> Fut,
+        Fut: Future<Output = R>,
+        R: Taken,
+    {
+        let _guard = self.lock_driving().await;
+        self.hand_over(work, open).await
     }
 
     /// `begin` of an admitted graph event. Its place is held until its session opens; a run that

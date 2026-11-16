@@ -1042,6 +1042,25 @@ pub async fn next_waiting(db: &Db, team: Uuid, first: &str) -> Result<Option<Wai
     Ok(row.map(|r| Waiting { id: r.get(0), workflow: r.get(1), start: r.get(2) }))
 }
 
+/// The waiting event of bot `workflow` on `subject` (`queue::Stored::Event`), if one waits.
+pub async fn waiting_event_for(db: &Db, team: Uuid, workflow: &str, subject: &Subject) -> Result<Option<Waiting>, String> {
+    let row = db
+        .client()
+        .await?
+        .query_opt(
+            "select id, workflow, start from team_run_queue where team = $1 and workflow = $2 and start->>'by' = 'event' and start->'event'->'subject' = $3 order by id limit 1",
+            &[&team, &workflow, &json(subject)?],
+        )
+        .await
+        .map_err(err)?;
+    Ok(row.map(|r| Waiting { id: r.get(0), workflow: r.get(1), start: r.get(2) }))
+}
+
+/// Stores what waiting event `id` starts with.
+pub async fn set_waiting(db: &Db, id: i64, start: &serde_json::Value) -> Result<(), String> {
+    db.client().await?.execute("update team_run_queue set start = $2 where id = $1", &[&id, start]).await.map_err(err).map(drop)
+}
+
 /// Takes waiting event `id` out of its line.
 pub async fn take_waiting(db: &Db, id: i64) -> Result<(), String> {
     db.client().await?.execute("delete from team_run_queue where id = $1", &[&id]).await.map_err(err).map(drop)

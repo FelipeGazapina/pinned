@@ -216,6 +216,73 @@ impl Crew {
         self.call(&self.ana, serde_json::from_value(json!({ "op": "stop_run", "run": run })).unwrap()).unwrap();
     }
 
+    /// A Slack mention bot of channel `C0ACME001`; bob saved it and ana turned it on.
+    fn slack_bot(&self, name: &str) -> String {
+        let saved = self.hub_call(json!({ "cmd": "save_connector", "connector": {
+            "name": name, "enabled": false, "trigger": { "kind": "slack-mention", "channel": "C0ACME001" },
+            "folder": self.folder, "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false,
+            "instructions": "", "machine": { "kind": "upstash-box", "size": "small" },
+        } }));
+        let id = saved["id"].as_str().unwrap().to_owned();
+        let bot = Bot { workflow: id.clone(), name: String::new(), owner: None, calls: CallRules::default(), limits: BotLimits { usd: 5.0, minutes: 30 }, on: false, on_by: None, once: false, off_note: None, skipped: vec![] };
+        self.call(&self.bob, TeamOp::SaveBot { bot }).unwrap();
+        self.turn_on(&id, true);
+        id
+    }
+
+    /// The event the team's Slack poller finds for a mention that starts thread `thread`.
+    fn mentioned(&self, id: &str, thread: &str) -> Event {
+        Event::Run(Run {
+            cwd: self.folder.clone(),
+            repo: None,
+            args: vec!["--name".into(), format!("Thread {thread}"), "Answer the thread.".into()],
+            connector: id.to_owned(),
+            subject: Subject::SlackThread { channel: "C0ACME001".into(), thread: thread.into() },
+            mentioned: vec![],
+            account: None,
+            runs_on: RunsOn::FreshBox(BoxStep { size: Some(BoxSize::Small) }),
+            input: "ENG-0: a thread".into(),
+        })
+    }
+
+    /// Hands the team's connectors `work` as a check would, with the hub's own `open`.
+    fn handed(&self, work: Work) -> Result<(), String> {
+        let hub = self.hub.hub().clone();
+        let team = self.team;
+        self.hub.runtime.block_on(async move {
+            let account = hub.account(team).await?;
+            let connectors = hub.connectors(&account).await?;
+            let open = |work| {
+                let hub = hub.clone();
+                async move { hub.open_found(team, work).await }
+            };
+            connectors.handed(work, &open).await
+        })
+    }
+
+    /// The prompt the box of thread `thread` was opened with, once one was.
+    fn box_prompt(&self, thread: &str) -> Option<String> {
+        let subject = serde_json::to_value(Subject::SlackThread { channel: "C0ACME001".into(), thread: thread.into() }).unwrap();
+        self.hub.runtime.block_on(async {
+            let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), self.hub.database), tokio_postgres::NoTls).await.unwrap();
+            tokio::spawn(connection);
+            let row = db.query_opt("select spec from boxes where account = $1 and subject = $2", &[&self.team, &subject]).await.unwrap()?;
+            let spec: Value = row.get(0);
+            spec["args"].as_array()?.last()?.as_str().map(str::to_owned)
+        })
+    }
+
+    /// What the waiting event of bot `id` keeps: its replies and how many older ones it dropped.
+    fn kept(&self, id: &str) -> (Vec<String>, u64) {
+        self.hub.runtime.block_on(async {
+            let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), self.hub.database), tokio_postgres::NoTls).await.unwrap();
+            tokio::spawn(connection);
+            let start: Value = db.query_one("select start from team_run_queue where team = $1 and workflow = $2", &[&self.team, &id]).await.unwrap().get(0);
+            let replies = start["replies"].as_array().unwrap().iter().map(|r| r.as_str().unwrap().to_owned()).collect();
+            (replies, start["earlier"].as_u64().unwrap())
+        })
+    }
+
     /// The event the team's Linear poller finds for label `agent` on issue `ENG-n`.
     fn labeled(&self, id: &str, n: u32) -> Event {
         Event::Run(Run {
@@ -369,4 +436,40 @@ fn a_waiting_graph_event_runs_every_step_once_when_its_turn_comes() {
     assert_eq!(crew.waiting(&id), 0);
     assert_eq!(crew.live_of(&id).len(), 1, "its session opened in the place it was granted");
     assert_eq!(crew.outside(1), vec!["linear move".to_owned(), "model".to_owned()], "the first event's steps did not run again");
+}
+
+#[test]
+fn replies_to_a_waiting_thread_wait_with_it_and_reach_its_run_framed() {
+    let crew = Crew::new("ta_replies");
+    let id = crew.slack_bot("Footer");
+    assert_eq!(crew.found(crew.mentioned(&id, "1792400050.000100")), Ok(()));
+    assert_eq!(crew.found(crew.mentioned(&id, "1792400050.000200")), Ok(()));
+    assert_eq!(crew.waiting(&id), 1, "the second thread's event waits");
+
+    for n in 1..=25 {
+        let ts = format!("1792400060.{n:06}");
+        let delivery = Delivery {
+            connector: id.clone(),
+            channel: "C0ACME001".into(),
+            thread: "1792400050.000200".into(),
+            messages: vec![format!("[Slack reply from Dina] reply {n}")],
+            cursor: ts.clone(),
+            mentioned: vec![ts],
+        };
+        assert_eq!(crew.handed(Work::Delivery(delivery)), Ok(()), "reply {n}");
+    }
+    let reached: Vec<String> = seen("xoxb-dev-ta_replies").into_iter().map(|s| s.method).filter(|m| m == "reactions.add" || m == "chat.postMessage").collect();
+    assert_eq!(reached, Vec::<String>::new(), "no reaction or comment while it waits");
+    let (replies, earlier) = crew.kept(&id);
+    assert_eq!(replies, (6..=25).map(|n| format!("[Slack reply from Dina] reply {n}")).collect::<Vec<_>>());
+    assert_eq!(earlier, 5);
+
+    let first = crew.live_of(&id);
+    crew.stop(&first[0]);
+    wait_for("the waiting thread's box", || crew.box_prompt("1792400050.000200").is_some());
+    let framed: Vec<String> = (6..=25).map(|n| pinned_core::untrusted::frame("a Slack reply in this thread", &format!("[Slack reply from Dina] reply {n}"))).collect();
+    assert_eq!(
+        crew.box_prompt("1792400050.000200").unwrap(),
+        format!("Answer the thread.\n\nReplies the thread got while this run waited to start:\n\n5 earlier replies not shown\n\n{}", framed.join("\n\n"))
+    );
 }

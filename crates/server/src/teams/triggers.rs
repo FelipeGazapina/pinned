@@ -8,7 +8,7 @@ use super::bots::{self, Start};
 use super::{db, queue};
 use crate::hub::{Account, Hub};
 use pinned_core::agent::Subject;
-use pinned_core::connectors::{Admission, Admitted, Delivery, Event, Pending, Placement, Run, Trigger, Work};
+use pinned_core::connectors::{Admission, Admitted, Delivery, Event, Pending, Placement, Replies, Run, Trigger, Work};
 use pinned_core::teams::SkipReason;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -107,6 +107,14 @@ impl Admission for TeamAdmission {
             let workflow = hub.connectors(&team).await?.get_settings().connectors.into_iter().find(|c| c.id == event.connector()).map(|c| c.trigger);
             let kind = workflow.as_ref().map_or("manual", kind);
             queue::admit(&hub, &team, kind, event).await
+        })
+    }
+
+    fn replies(&self, delivery: Delivery) -> Pending<Result<Replies, String>> {
+        let (hub, team) = (self.hub.upgrade(), self.team);
+        Box::pin(async move {
+            let hub = hub.ok_or("the hub is stopping")?;
+            queue::keep_replies(&hub, &hub.account(team).await?, &delivery).await
         })
     }
 
