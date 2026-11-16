@@ -466,24 +466,36 @@ async fn take_and_start(hub: &Arc<Hub>, turn: &Turn, team: &Arc<Account>, ended:
             taken.granted = true;
             continue;
         }
-        // Taken in the turn's transaction (`turn.held`), with its counts and its reservation: a
-        // turn that fails after the take (a refused reservation, a refused commit, a lock wait
-        // that times out) rolls the take back, and the event still waits, counted by nobody.
-        db::take_waiting(&turn.held, waiting.id).await?;
-        let Some(start) = stored.start(&waiting.workflow) else { continue };
-        let by_trigger = matches!(start, Start::Trigger { .. });
-        if let Some(reason) = skip_reason(hub, team, &waiting.workflow, by_trigger).await? {
-            eprintln!("pinned-server: team {} bot {}: a waiting event is dropped: the bot is {}", team.id, waiting.workflow, reason.as_str());
-            db::count_skipped_on(&turn.held, team.id, &waiting.workflow, reason, 1).await?;
+        // Every read on the shared connection comes before the take: one that fails (a busy read)
+        // returns before the row is taken, so the run still waits, counted by nobody. Only what
+        // the take is written with (`turn.held`: its counts and its reservation) rolls back with a
+        // turn that fails after it, and the turn commits whatever this returns.
+        let Some(start) = stored.start(&waiting.workflow) else {
+            db::take_waiting(&turn.held, waiting.id).await?;
             continue;
-        }
+        };
+        let by_trigger = matches!(start, Start::Trigger { .. });
         let told = match &start {
             Start::Trigger { work, .. } => Some(work.clone()),
             Start::Member(_) => None,
         };
-        let reserved = match bots::ready(hub, team, &waiting.workflow).await {
-            Ok(()) => bots::work_of(&*hub.connectors(team).await?, &waiting.workflow, start),
-            Err(e) => Err(e),
+        let read = match skip_reason(hub, team, &waiting.workflow, by_trigger).await? {
+            Some(reason) => Err(reason),
+            None => Ok(match bots::ready(hub, team, &waiting.workflow).await {
+                Ok(()) => bots::work_of(&*hub.connectors(team).await?, &waiting.workflow, start),
+                // A busy read says nothing of the bot: the run still waits.
+                Err(e) if e == crate::db::BUSY => return Err(e),
+                Err(e) => Err(e),
+            }),
+        };
+        db::take_waiting(&turn.held, waiting.id).await?;
+        let reserved = match read {
+            Ok(reserved) => reserved,
+            Err(reason) => {
+                eprintln!("pinned-server: team {} bot {}: a waiting event is dropped: the bot is {}", team.id, waiting.workflow, reason.as_str());
+                db::count_skipped_on(&turn.held, team.id, &waiting.workflow, reason, 1).await?;
+                continue;
+            }
         };
         let (work, started_by) = match reserved {
             Ok(reserved) => reserved,
