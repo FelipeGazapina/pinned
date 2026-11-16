@@ -254,8 +254,9 @@ pub struct Skipped {
 
 /// Why an event of a bot started no run: `"off"`, `"draft"`, `"manual"` (a trigger of a workflow
 /// that runs only by Run now), `"queue_full"` (the oldest of 20 waiting events, dropped for a
-/// newer one), `"bot_removed"` (its workflow was deleted before its turn) or `"start_failed"` (its
-/// turn came and its run did not start).
+/// newer one), `"bot_removed"` (its workflow was deleted before its turn), `"start_failed"` (its
+/// turn came and its run did not start) or `"never_started"` (its place was held and its session
+/// never opened within `TeamPolicy::reservation_limit_secs`).
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SkipReason {
@@ -265,6 +266,7 @@ pub enum SkipReason {
     QueueFull,
     BotRemoved,
     StartFailed,
+    NeverStarted,
 }
 
 impl SkipReason {
@@ -276,11 +278,13 @@ impl SkipReason {
             SkipReason::QueueFull => "queue_full",
             SkipReason::BotRemoved => "bot_removed",
             SkipReason::StartFailed => "start_failed",
+            SkipReason::NeverStarted => "never_started",
         }
     }
 
     pub fn parse(text: &str) -> Option<SkipReason> {
-        [SkipReason::Off, SkipReason::Draft, SkipReason::Manual, SkipReason::QueueFull, SkipReason::BotRemoved, SkipReason::StartFailed].into_iter().find(|r| r.as_str() == text)
+        [SkipReason::Off, SkipReason::Draft, SkipReason::Manual, SkipReason::QueueFull, SkipReason::BotRemoved, SkipReason::StartFailed, SkipReason::NeverStarted]
+            .into_iter().find(|r| r.as_str() == text)
     }
 }
 
@@ -420,11 +424,25 @@ pub struct TeamPolicy {
     /// A new bot's `BotLimits`.
     pub run_usd: f64,
     pub run_minutes: u32,
+    /// A run whose place is held (reserved) and whose session did not open after this long ends
+    /// (`RunState::Failed`), counted as `SkipReason::NeverStarted`.
+    #[serde(default = "default_reservation_limit_secs")]
+    pub reservation_limit_secs: u64,
+}
+
+fn default_reservation_limit_secs() -> u64 {
+    900
 }
 
 impl Default for TeamPolicy {
     fn default() -> Self {
-        TeamPolicy { escalate_after_secs: 1800, give_up_after_secs: 7200, run_usd: 5.0, run_minutes: 30 }
+        TeamPolicy {
+            escalate_after_secs: 1800,
+            give_up_after_secs: 7200,
+            run_usd: 5.0,
+            run_minutes: 30,
+            reservation_limit_secs: default_reservation_limit_secs(),
+        }
     }
 }
 
@@ -438,6 +456,7 @@ impl TeamPolicy {
             give_up_after_secs: (self.give_up_after_secs / u64::from(divide_by)).max(1),
             run_usd: self.run_usd,
             run_minutes: (self.run_minutes / divide_by).max(1),
+            reservation_limit_secs: (self.reservation_limit_secs / u64::from(divide_by)).max(1),
         }
     }
 }
@@ -660,9 +679,9 @@ mod tests {
     #[test]
     fn a_scaled_policy_divides_times_only() {
         let fast = TeamPolicy::default().scaled(60);
-        assert_eq!(fast, TeamPolicy { escalate_after_secs: 30, give_up_after_secs: 120, run_usd: 5.0, run_minutes: 1 });
+        assert_eq!(fast, TeamPolicy { escalate_after_secs: 30, give_up_after_secs: 120, run_usd: 5.0, run_minutes: 1, reservation_limit_secs: 15 });
         let tiny = TeamPolicy::default().scaled(100_000);
-        assert_eq!((tiny.escalate_after_secs, tiny.give_up_after_secs, tiny.run_minutes), (1, 1, 1));
+        assert_eq!((tiny.escalate_after_secs, tiny.give_up_after_secs, tiny.run_minutes, tiny.reservation_limit_secs), (1, 1, 1, 1));
         assert_eq!(TeamPolicy::default().scaled(0), TeamPolicy::default());
     }
 

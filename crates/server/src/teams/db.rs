@@ -1092,7 +1092,8 @@ pub async fn unheld_team_boxes(db: &Db) -> Result<Vec<(Uuid, Uuid)>, String> {
 }
 
 /// Live runs whose box is not there, as (team, run, never started): one with no box that started
-/// more than `secs` ago (true), and one whose box has no `boxes` row (false). For `calls::tick`.
+/// more than `secs` ago (true), and one whose box has no `boxes` row (false). A reserved run is
+/// left to `stale_reservations`, its own bound. For `calls::tick`.
 pub async fn boxless_runs(db: &Db, secs: u64) -> Result<Vec<(Uuid, Uuid, bool)>, String> {
     let rows = db
         .client()
@@ -1100,7 +1101,7 @@ pub async fn boxless_runs(db: &Db, secs: u64) -> Result<Vec<(Uuid, Uuid, bool)>,
         .query(
             &format!(
                 "select r.team, r.id, r.box is null from team_runs r
-                 where r.state in {LIVE} and case when r.box is null then r.started_at <= now() - make_interval(secs => $1)
+                 where r.state in {LIVE} and not r.reserved and case when r.box is null then r.started_at <= now() - make_interval(secs => $1)
                    else not exists (select 1 from boxes b where b.account = r.team and b.machine::text = r.box) end"
             ),
             &[&(secs as f64)],
@@ -1108,6 +1109,27 @@ pub async fn boxless_runs(db: &Db, secs: u64) -> Result<Vec<(Uuid, Uuid, bool)>,
         .await
         .map_err(err)?;
     Ok(rows.iter().map(|r| (r.get(0), r.get(1), r.get(2))).collect())
+}
+
+/// Live reserved runs whose place was held more than `secs` ago and whose session never opened,
+/// as (team, run, workflow). For `calls::tick`.
+pub async fn stale_reservations(db: &Db, secs: u64) -> Result<Vec<(Uuid, Uuid, String)>, String> {
+    let rows = db
+        .client()
+        .await?
+        .query(
+            &format!("select team, id, workflow from team_runs where state in {LIVE} and reserved and reserved_at <= now() - make_interval(secs => $1)"),
+            &[&(secs as f64)],
+        )
+        .await
+        .map_err(err)?;
+    Ok(rows.iter().map(|r| (r.get(0), r.get(1), r.get(2))).collect())
+}
+
+/// Takes out of its line the granted event that reserved run `run` holds the place of, if no
+/// poller claimed it yet, so it never runs without its place.
+pub async fn drop_grant(db: &Db, team: Uuid, run: Uuid) -> Result<(), String> {
+    db.client().await?.execute("delete from team_run_queue where team = $1 and run = $2 and granted_at is not null", &[&team, &run]).await.map_err(err).map(drop)
 }
 
 /// Runs left waiting with no open call for more than `secs`, none of whose calls closed within

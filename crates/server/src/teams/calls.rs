@@ -15,7 +15,7 @@ use crate::boxes::End;
 use crate::hub::{Account, Hub, LastTurn};
 use futures_util::future::BoxFuture;
 use pinned_core::agent::Subject;
-use pinned_core::teams::{Answer, AnswerKind, Call, Role, Run, RunState, Situation, TeamEvent, TeamPolicy, Who};
+use pinned_core::teams::{Answer, AnswerKind, Call, Role, Run, RunState, Situation, SkipReason, TeamEvent, TeamPolicy, Who};
 use pinned_core::wire::{Call as MachineCall, TabView};
 use serde::Serialize;
 use serde_json::Value;
@@ -422,12 +422,14 @@ pub async fn tick(hub: &Arc<Hub>, policy: &TeamPolicy) -> Result<(), String> {
             }
         });
     }
-    reap(hub).await
+    reap(hub, policy).await
 }
 
 /// What a run that never had a box, or whose box went without ending it, ends with.
 const NEVER_STARTED: &str = "its box never started";
 const BOX_GONE: &str = "its box is gone";
+/// What a reserved run whose session never opened within `TeamPolicy::reservation_limit_secs` ends with.
+pub const NEVER_OPENED: &str = "it never started";
 
 /// How long a run waits with no open call, and with no call of it closed meanwhile, before `reap`
 /// moves it on. A give-up tells the session before it ends the run, which can take this long.
@@ -437,11 +439,14 @@ const STALE_WAIT: Duration = Duration::from_secs(300);
 /// no box outlives its run:
 /// - a running box of a team that no live run holds ends, as a stopped run's box does (`End::Removed`);
 /// - a live run still without a box after the box boot wait and `RUN_WAIT` fails (`NEVER_STARTED`),
-///   and one whose box has no row fails (`BOX_GONE`);
+///   and one whose box has no row fails (`BOX_GONE`); a reserved run is not one of them;
+/// - a reserved run whose session did not open within `policy.reservation_limit_secs` fails
+///   (`NEVER_OPENED`), counted as `SkipReason::NeverStarted`, and a granted event no poller
+///   claimed for it leaves its line, so it never runs without its place;
 /// - a run left waiting with no open call goes back to work while its box runs, else ends (`BOX_GONE`).
 ///
 /// A failure is logged and leaves the rest of the pass to run; the next tick tries again.
-async fn reap(hub: &Arc<Hub>) -> Result<(), String> {
+async fn reap(hub: &Arc<Hub>, policy: &TeamPolicy) -> Result<(), String> {
     for (team, machine) in db::unheld_team_boxes(&hub.db).await? {
         let hub = hub.clone();
         // Each on its own, as a give-up's: one box slow to end holds up no other.
@@ -459,6 +464,9 @@ async fn reap(hub: &Arc<Hub>) -> Result<(), String> {
     for (team, run, never_started) in db::boxless_runs(&hub.db, boot.as_secs()).await? {
         let outcome = if never_started { NEVER_STARTED } else { BOX_GONE };
         reap_run(hub, team, run, outcome).await;
+    }
+    for (team, run, workflow) in db::stale_reservations(&hub.db, policy.reservation_limit_secs).await? {
+        end_reservation(hub, team, run, &workflow).await;
     }
     for (team, run, box_runs) in db::stale_waiting(&hub.db, STALE_WAIT.as_secs()).await? {
         if !box_runs {
@@ -479,6 +487,29 @@ async fn reap_run(hub: &Arc<Hub>, team: Uuid, run: Uuid, outcome: &str) {
     match ended.await {
         Err(e) if e != RUN_ENDED => eprintln!("pinned-server: run {run} of team {team} has no box but did not end yet: {e}"),
         _ => {}
+    }
+}
+
+/// Ends reserved run `run` of bot `workflow`, whose session never opened, as `RunState::Failed`
+/// (`NEVER_OPENED`) and counts it, after taking out an unclaimed granted event that holds its
+/// place. A run that opened or ended meanwhile is left as it is.
+async fn end_reservation(hub: &Arc<Hub>, team: Uuid, run: Uuid, workflow: &str) {
+    let ended = async {
+        db::drop_grant(&hub.db, team, run).await?;
+        if !db::is_reserved(&hub.db, team, run).await? {
+            return Ok(());
+        }
+        match end_run(hub, &hub.account(team).await?, run, RunState::Failed, NEVER_OPENED, None).await {
+            Ok(_) => {}
+            Err(e) if e == RUN_ENDED => return Ok(()),
+            Err(e) => return Err(e),
+        }
+        // Counted here only: a claim still booting this run counts no failed start on top.
+        super::queue::take_claimed(run);
+        db::count_skipped(&hub.db, team, workflow, SkipReason::NeverStarted, 1).await
+    };
+    if let Err(e) = ended.await {
+        eprintln!("pinned-server: reserved run {run} of team {team} never opened but did not end yet: {e}");
     }
 }
 
