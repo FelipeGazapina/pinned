@@ -169,6 +169,128 @@ fn the_tick_ends_a_team_box_that_no_run_holds() {
     assert_eq!(crew.runs(), vec![]);
 }
 
+// ---- 1b. what the reaper spares: each test ends one box in the same tick as its control ----
+
+/// The box rows the reaper tests write straight into the database, beside a fake Upstash box each.
+impl Crew {
+    /// A hub whose own box pass runs once and then sleeps an hour, so only the calls tick touches the rows.
+    fn still(name: &str) -> Crew {
+        Crew::new(name, Policy { tick: Duration::from_secs(3600), ..fast() }, patient())
+    }
+
+    /// A `boxes` row of `account` in `phase` (and `reason`) for `connector` and the `subject` json, naming the fake Upstash box `upstash`.
+    fn insert_box(&self, account: Uuid, id: &str, machine: Uuid, phase: &str, reason: Option<&str>, connector: &str, subject: &str) {
+        let reason = reason.map_or("null".to_owned(), |r| format!("'{r}'"));
+        self.hub.boxes.add(&format!("up-{id}"), &[]);
+        self.sql(&format!(
+            "insert into boxes (id, account, machine, upstash, connector, subject, spec, size, phase, reason)
+             values ('{id}', '{account}', '{machine}', 'up-{id}', '{connector}', '{subject}', '{{\"folder\":\"/w\",\"args\":[]}}', 'small', '{phase}', {reason})"
+        ));
+    }
+
+    /// A live run of the team that holds the box `machine`, or, with none, the one box a run opened for `workflow` and `subject`.
+    fn insert_holding_run(&self, workflow: &str, state: &str, machine: Option<Uuid>, subject: &str) {
+        let machine = machine.map_or("null".to_owned(), |m| format!("'{m}'"));
+        self.sql(&format!(
+            "insert into team_runs (id, team, workflow, box, subject, started_by, state, started_at, waiting_since)
+             values ('{}', '{}', '{workflow}', {machine}, '{subject}', '\"trigger:linear_label\"', '{state}', now() - interval '1 second', now() - interval '1 second')",
+            Uuid::new_v4(),
+            self.team
+        ));
+    }
+
+    /// A running box of the team that no run holds: the control, which the tick must end.
+    fn insert_control(&self) {
+        self.insert_box(self.team, "ctl", Uuid::new_v4(), "running", None, "wf-ctl", r#"{"issue":"ctl"}"#);
+    }
+
+    /// One tick, once the control is gone, which says the tick ran its reaper and its spawned ends finished.
+    fn tick_until_control_ends(&self) {
+        self.tick();
+        wait_for("the control box to be deleted", || !self.hub.boxes.live().contains(&"up-ctl".to_owned()));
+        wait_for("the control's row to go", || self.box_rows(self.team).iter().all(|(id, _, _)| id != "ctl"));
+    }
+
+    /// The account's `boxes` rows as (id, phase, reason), by id.
+    fn box_rows(&self, account: Uuid) -> Vec<(String, String, Option<String>)> {
+        let rows = self.hub.runtime.block_on(self.connect().query("select id, phase, reason from boxes where account = $1::text::uuid order by id", &[&account.to_string()])).unwrap();
+        rows.iter().map(|r| (r.get(0), r.get(1), r.get(2))).collect()
+    }
+
+    fn live_upstash(&self) -> Vec<String> {
+        let mut live = self.hub.boxes.live();
+        live.sort();
+        live
+    }
+}
+
+#[test]
+fn the_reaper_spares_the_box_of_a_live_run() {
+    let crew = Crew::still("tl_spares_live");
+    let (held, early) = (Uuid::new_v4(), Uuid::new_v4());
+    crew.insert_box(crew.team, "held", held, "running", None, "wf-held", r#"{"issue":"h1"}"#);
+    crew.insert_holding_run("wf-held", "working", Some(held), r#"{"issue":"h1"}"#);
+    // A run's box is set once its session starts: until then the run holds the box opened for its workflow and subject.
+    crew.insert_box(crew.team, "early", early, "running", None, "wf-early", r#"{"issue":"e1"}"#);
+    crew.insert_holding_run("wf-early", "waiting", None, r#"{"issue":"e1"}"#);
+    crew.insert_control();
+    assert_eq!(crew.live_upstash(), vec!["up-ctl", "up-early", "up-held"]);
+
+    crew.tick_until_control_ends();
+    assert_eq!(crew.live_upstash(), vec!["up-early", "up-held"], "no box of a live run was deleted");
+    assert_eq!(
+        crew.box_rows(crew.team),
+        vec![("early".to_owned(), "running".to_owned(), None), ("held".to_owned(), "running".to_owned(), None)],
+        "both rows stay running"
+    );
+    assert_eq!(crew.runs(), vec![("waiting".to_owned(), None), ("working".to_owned(), None)], "and both runs go on");
+}
+
+#[test]
+fn the_reaper_spares_a_team_box_still_booting() {
+    let crew = Crew::still("tl_spares_booting");
+    crew.insert_box(crew.team, "booting", Uuid::new_v4(), "booting", None, "wf-booting", r#"{"issue":"b1"}"#);
+    crew.insert_control();
+    assert_eq!(crew.live_upstash(), vec!["up-booting", "up-ctl"]);
+
+    crew.tick_until_control_ends();
+    assert_eq!(crew.live_upstash(), vec!["up-booting"], "a box still booting was not deleted");
+    assert_eq!(crew.box_rows(crew.team), vec![("booting".to_owned(), "booting".to_owned(), None)], "its row stays booting");
+}
+
+#[test]
+fn the_reaper_spares_every_box_of_a_personal_account() {
+    let crew = Crew::still("tl_spares_personal");
+    let ana = crew.ana.id;
+    // One row in each phase the hub stores: `phase` is creating, booting, running or ending, and an ending row
+    // names why. No run holds any of them.
+    for (id, phase, reason) in [
+        ("p-creating", "creating", None),
+        ("p-booting", "booting", None),
+        ("p-running", "running", None),
+        ("p-ending-idle", "ending", Some("idle")),
+        ("p-ending-failed", "ending", Some("failed: the bootstrap failed")),
+    ] {
+        crew.insert_box(ana, id, Uuid::new_v4(), phase, reason, &format!("c-{id}"), &format!(r#"{{"issue":"{id}"}}"#));
+    }
+    crew.insert_control();
+    assert_eq!(crew.live_upstash().len(), 6);
+
+    crew.tick_until_control_ends();
+    assert_eq!(crew.live_upstash(), vec!["up-p-booting", "up-p-creating", "up-p-ending-failed", "up-p-ending-idle", "up-p-running"], "nothing was deleted on the fake Upstash");
+    assert_eq!(
+        crew.box_rows(ana),
+        vec![
+            ("p-booting".to_owned(), "booting".to_owned(), None),
+            ("p-creating".to_owned(), "creating".to_owned(), None),
+            ("p-ending-failed".to_owned(), "ending".to_owned(), Some("failed: the bootstrap failed".to_owned())),
+            ("p-ending-idle".to_owned(), "ending".to_owned(), Some("idle".to_owned())),
+            ("p-running".to_owned(), "running".to_owned(), None),
+        ],
+        "every row keeps its phase"
+    );
+}
+
 #[test]
 fn the_tick_fails_a_run_whose_box_never_started() {
     let crew = Crew::new("tl_never_started", fast(), patient());
