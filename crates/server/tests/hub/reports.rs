@@ -1221,3 +1221,140 @@ fn a_send_with_no_title_or_too_long_is_refused_and_a_sent_report_is_no_draft() {
     assert_eq!(listed_row(&mut ana, &id)["title"], "Sent");
     assert_eq!(fake.posts(), (1, 0));
 }
+
+/// A second connection to `hub`'s database, in a transaction that holds what `sql` locks until it is released or
+/// dropped, as another hub's send would.
+struct Holder {
+    runtime: tokio::runtime::Runtime,
+    db: tokio_postgres::Client,
+}
+
+impl Holder {
+    fn begin(hub: &TestHub, sql: &str) -> Holder {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let db = runtime.block_on(async {
+            let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), hub.database), tokio_postgres::NoTls).await.unwrap();
+            tokio::spawn(connection);
+            db.batch_execute(&format!("begin; {sql}")).await.unwrap();
+            db
+        });
+        Holder { runtime, db }
+    }
+
+    fn release(self) {
+        self.runtime.block_on(self.db.batch_execute("rollback")).unwrap();
+    }
+}
+
+/// Holds the reports lock of the account of `email`, as a send of that account on another hub does.
+fn holding_reports_of(hub: &TestHub, email: &str) -> Holder {
+    Holder::begin(hub, &format!("select pg_advisory_xact_lock(hashtextextended('pinned-reports:' || id::text, 0)) from accounts where email = '{email}';"))
+}
+
+/// What `call` answers, on a thread of its own, or None when it has not answered within five seconds.
+fn within_5s<T: Send + 'static>(call: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+    let (sent, answer) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sent.send(call());
+    });
+    answer.recv_timeout(Duration::from_secs(5)).ok()
+}
+
+/// `draft` sent, reviewed, by a new connection of `token` to `url`, within five seconds.
+fn send_within_5s(url: &str, token: &str, draft: Value, extra: Value) -> Option<Result<Value, String>> {
+    let (url, token) = (url.to_owned(), token.to_owned());
+    within_5s(move || reviewed_send(&mut Client::connect(&url, &token), draft, extra))
+}
+
+const SEND_BUSY: &str = "Another report of yours is being sent. Try again in a moment.";
+
+#[test]
+fn a_send_while_another_hub_sends_for_the_account_is_refused_at_once_and_counts_nothing_then_goes_through() {
+    let fake = Fake::start();
+    let hub = reporting("reports_lock_busy", Some(&fake));
+    let token = signed_up(&hub, "ana@example.test");
+    let mut ana = Client::connect(&hub.url, &token);
+    let holder = holding_reports_of(&hub, "ana@example.test");
+
+    let busy = send_within_5s(&hub.url, &token, problem("Crash on launch", "It closes."), json!({ "request_id": "first" }));
+    assert_eq!(busy, Some(Err(SEND_BUSY.into())), "answered at once");
+    assert_eq!(fake.posts(), (0, 0));
+    assert_eq!(sql_text(&hub, "select count(*)::text from reports"), Some("0".into()), "no row is written");
+    assert_eq!(left_today(&mut ana), json!(5), "nothing counts");
+
+    holder.release();
+    let sent = send_within_5s(&hub.url, &token, problem("Crash on launch", "It closes."), json!({ "request_id": "first" })).expect("an answer within 5 s").unwrap();
+    assert_eq!((sent["state"].clone(), sent["issue"].clone()), (json!({ "state": "open" }), json!(1)), "{sent}");
+    assert_eq!(left_today(&mut ana), json!(4), "counted once");
+    assert_eq!(sql_text(&hub, "select count(*)::text from reports where counts"), Some("1".into()));
+
+    for n in 2..=5 {
+        reviewed_send(&mut ana, problem(&format!("Crash number {n}"), "It closes."), json!({})).unwrap();
+    }
+    assert_eq!(left_today(&mut ana), json!(0));
+    let sixth = reviewed_send(&mut ana, problem("Sixth", "It closes."), json!({})).unwrap_err();
+    assert!(sixth.starts_with("You sent 5 reports in the last day. You can send again at "), "{sixth}");
+    assert_eq!(fake.posts(), (5, 0));
+}
+
+#[test]
+fn a_send_held_up_by_another_hub_never_holds_up_another_accounts_transaction_or_send() {
+    let fake = Fake::start();
+    let hub = reporting("reports_lock_others", Some(&fake));
+    let ana = signed_up(&hub, "ana@example.test");
+    let bob = signed_up(&hub, "bob@example.test");
+    let mut bob_app = Client::app(&hub.url, &bob);
+    bob_app.hub(json!({ "cmd": "unlock", "password": PASSWORD })).unwrap();
+    let holder = holding_reports_of(&hub, "ana@example.test");
+
+    // Ana's send, on its own thread: refused at once, or waiting on her lock.
+    let (url, token) = (hub.url.clone(), ana.clone());
+    let (sent, ana_answer) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sent.send(reviewed_send(&mut Client::connect(&url, &token), problem("Crash on launch", "It closes."), json!({})));
+    });
+    let start = Instant::now();
+    let mut answered = None;
+    while answered.is_none() && start.elapsed() < Duration::from_secs(5) {
+        answered = ana_answer.try_recv().ok();
+        if sql_text(&hub, "select count(*)::text from pg_locks where locktype = 'advisory' and not granted and database = (select oid from pg_database where datname = current_database())").as_deref() == Some("1") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let (mut bob_app, protection) = within_5s(move || {
+        let on = bob_app.hub(json!({ "cmd": "set_release_protection", "on": true }));
+        (bob_app, on)
+    })
+    .expect("bob's transaction answers within 5 s");
+    assert_eq!(protection, Ok(json!(true)));
+    let bobs = within_5s(move || reviewed_send(&mut bob_app, problem("Bob's own", "It closes."), json!({}))).expect("bob's send answers within 5 s").unwrap();
+    assert_eq!((bobs["state"].clone(), bobs["issue"].clone()), (json!({ "state": "open" }), json!(1)), "{bobs}");
+    let ana_answer = answered.or_else(|| ana_answer.recv_timeout(Duration::from_secs(5)).ok());
+    assert_eq!(ana_answer, Some(Err(SEND_BUSY.into())));
+    assert_eq!(fake.posts(), (1, 0));
+    holder.release();
+}
+
+#[test]
+fn a_send_whose_draft_another_transaction_is_writing_is_refused_after_a_short_wait_and_counts_nothing() {
+    let fake = Fake::start();
+    let hub = reporting("reports_lock_row", Some(&fake));
+    let token = signed_up(&hub, "ana@example.test");
+    let mut ana = Client::connect(&hub.url, &token);
+    let saved = ask(&mut ana, json!({ "op": "save_draft", "draft": problem("Held draft", "It closes.") })).unwrap();
+    let id = saved["id"].as_str().unwrap().to_owned();
+    let holder = Holder::begin(&hub, &format!("update reports set updated_at = updated_at where id = '{id}';"));
+
+    let busy = send_within_5s(&hub.url, &token, problem("Held draft", "It closes."), json!({ "draft_id": id }));
+    assert_eq!(busy, Some(Err("Your reports are busy right now. Try again in a moment.".into())), "answered within 5 s");
+    assert_eq!(fake.posts(), (0, 0));
+    assert_eq!(left_today(&mut ana), json!(5), "nothing counts");
+    assert_eq!(listed_row(&mut ana, &id)["state"], json!({ "state": "draft" }), "still a draft");
+
+    holder.release();
+    let sent = send_within_5s(&hub.url, &token, problem("Held draft", "It closes."), json!({ "draft_id": id })).expect("an answer within 5 s").unwrap();
+    assert_eq!((sent["id"].clone(), sent["state"].clone(), sent["issue"].clone()), (json!(id), json!({ "state": "open" }), json!(1)), "{sent}");
+    assert_eq!(left_today(&mut ana), json!(4));
+}
