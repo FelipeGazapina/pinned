@@ -377,23 +377,37 @@ fn exchange(
     // copy of a change, so the pull leaves them alone until a push is taken.
     let changed_here: BTreeSet<String> = pull.iter().filter(|path| local.get(*path).map(|(sha, _)| sha) != agreed.get(*path)).cloned().collect();
     let mut synced = Synced::default();
+    // `local` is what this machine has to send: a merged history is written here only once the hub
+    // took it, so turns that came only from the hub never change `sending`.
     let sending = fingerprint(push.iter().chain(&merge), local);
     let held = hold == Some(sending) && !(push.is_empty() && merge.is_empty());
-    for path in merge {
-        let theirs = hub.pull(key, vec![path.clone()])?.into_iter().next().and_then(|f| f.data).map(|d| unpack(&d)).transpose()?.unwrap_or_default();
-        let target = resolve(&path).ok_or("no history here")?;
-        let mine = std::fs::read(&target).unwrap_or_default();
-        crate::fsx::replace(&target, &merge_history(&mine, &theirs), None, None)?;
-        push.push(path);
-    }
-
+    // A history's own turns and both sides' turns merged, by path.
+    let mut merged: BTreeMap<String, (Vec<u8>, Vec<u8>)> = BTreeMap::new();
     if held {
         push.clear();
         synced.push = Push::Held;
+    } else {
+        for path in merge {
+            let theirs = hub.pull(key, vec![path.clone()])?.into_iter().next().and_then(|f| f.data).map(|d| unpack(&d)).transpose()?.unwrap_or_default();
+            let target = resolve(&path).ok_or("no history here")?;
+            let mine = std::fs::read(&target).unwrap_or_default();
+            let both = merge_history(&mine, &theirs);
+            merged.insert(path.clone(), (mine, both));
+            push.push(path);
+        }
     }
+    // Writes a merged history here once the hub took it, keeping any turn added since it was read.
+    let land = |path: &str| -> Result<(), String> {
+        let Some((mine, both)) = merged.get(path) else { return Ok(()) };
+        let target = resolve(path).ok_or("no history here")?;
+        let now = std::fs::read(&target).unwrap_or_default();
+        crate::fsx::replace(&target, &if now == *mine { both.clone() } else { merge_history(&now, both) }, None, None)
+    };
+
     // Deletions go first, in batches of their own: they never grow the account, so a hub at its
     // limit still takes them, and a refused addition never holds one back.
-    let (deletions, additions): (Vec<String>, Vec<String>) = push.into_iter().partition(|path| resolve(path).filter(|f| f.is_file()).is_none());
+    let (deletions, additions): (Vec<String>, Vec<String>) =
+        push.into_iter().partition(|path| !merged.contains_key(path) && resolve(path).filter(|f| f.is_file()).is_none());
     for group in [deletions, additions] {
         let mut batch: Vec<File> = vec![];
         let mut pending: Vec<(String, Option<String>)> = vec![];
@@ -402,15 +416,21 @@ fn exchange(
             if synced.push != Push::Done {
                 break;
             }
-            let file = match resolve(&path).filter(|f| f.is_file()) {
+            let file = match resolve(&path).filter(|f| f.is_file() || merged.contains_key(&path)) {
                 None => File {
                     entry: Entry { path: path.clone(), sha: String::new(), modified: millis(now), size: 0, executable: None },
                     data: None,
                     agreed: agreed.get(&path).cloned(),
                 },
                 Some(target) => {
-                    let Some((sha, modified)) = state.hash(&target) else { continue };
-                    let data = pack(&std::fs::read(&target).map_err(|e| e.to_string())?);
+                    let (sha, modified, bytes) = match merged.get(&path) {
+                        Some((_, both)) => (sha(both), millis(now), both.clone()),
+                        None => {
+                            let Some((sha, modified)) = state.hash(&target) else { continue };
+                            (sha, modified, std::fs::read(&target).map_err(|e| e.to_string())?)
+                        }
+                    };
+                    let data = pack(&bytes);
                     if data.len() as u64 > FILE_LIMIT {
                         continue;
                     }
@@ -431,12 +451,12 @@ fn exchange(
             pending.push((file.entry.path.clone(), file.data.as_ref().map(|_| file.entry.sha.clone())));
             batch.push(file);
             if size >= BATCH {
-                send(hub, state, key, agreed_key, agreed, &mut synced, sending, std::mem::take(&mut batch), std::mem::take(&mut pending))?;
+                send(hub, state, key, agreed_key, agreed, &mut synced, sending, std::mem::take(&mut batch), std::mem::take(&mut pending), &land)?;
                 size = 0;
             }
         }
         if !batch.is_empty() && synced.push == Push::Done {
-            send(hub, state, key, agreed_key, agreed, &mut synced, sending, batch, pending)?;
+            send(hub, state, key, agreed_key, agreed, &mut synced, sending, batch, pending, &land)?;
         }
     }
 
@@ -486,9 +506,9 @@ fn exchange(
     Ok(synced)
 }
 
-/// Pushes one batch and takes its files as agreed once the hub has them. A refusal is kept in
-/// `synced` for the caller instead of ending the sync, so the pull still happens; only an older
-/// hub's refusal of the whole kind of file ends it.
+/// Pushes one batch; once the hub has it, lands its merged histories here and takes its files as
+/// agreed. A refusal is kept in `synced` for the caller instead of ending the sync, so the pull
+/// still happens; only an older hub's refusal of the whole kind of file ends it.
 #[allow(clippy::too_many_arguments)]
 fn send(
     hub: &impl Hub,
@@ -500,9 +520,13 @@ fn send(
     sending: u64,
     batch: Vec<File>,
     pending: Vec<(String, Option<String>)>,
+    land: &dyn Fn(&str) -> Result<(), String>,
 ) -> Result<(), String> {
     match hub.push(key, batch) {
         Ok(()) => {
+            for (path, _) in &pending {
+                land(path)?;
+            }
             commit_agreed(state, agreed_key, agreed, &pending)?;
             synced.pushed.extend(pending.into_iter().map(|(path, _)| path));
             Ok(())
