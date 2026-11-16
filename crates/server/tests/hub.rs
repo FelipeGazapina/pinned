@@ -11530,3 +11530,5 @@ fn an_agent_saves_and_lists_ideas_through_act_and_its_role_is_kept() {
 
 #[path = "hub/teams_membership.rs"]
 mod teams_membership;
+#[path = "hub/teams_groups.rs"]
+mod teams_groups;

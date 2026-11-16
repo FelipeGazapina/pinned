@@ -4,6 +4,7 @@
 
 use crate::db::{err, Db};
 use pinned_core::teams::{Answer, Bot, Call, Group, Role, Run, RunState, TeamProject};
+use tokio_postgres::error::SqlState;
 use uuid::Uuid;
 
 /// A team the member is in, as `team_members` joined to `teams` holds it.
@@ -190,24 +191,104 @@ pub async fn projects(_db: &Db, _team: Uuid) -> Result<Vec<TeamProject>, String>
 
 // ---- groups.rs ----
 
-/// Every group with its members' account ids, by handle.
-pub async fn groups(_db: &Db, _team: Uuid) -> Result<Vec<Group>, String> {
-    Err("not built yet".into())
+/// Who sets a group's members in `save_group`.
+pub enum Members<'a> {
+    /// Replaces the stored members (the owner's save).
+    Replace(&'a [Uuid]),
+    /// Keeps the members of a group that exists. A group made by this save starts with `new`
+    /// (a member's save).
+    Keep { new: &'a [Uuid] },
+}
+
+/// Every group by handle, with its members' account ids sorted. A fallback that is no longer a
+/// member of the team reads as None.
+pub async fn groups(db: &Db, team: Uuid) -> Result<Vec<Group>, String> {
+    let rows = db
+        .client()
+        .await?
+        .query(
+            "select g.handle, g.about, g.slack_group,
+                    case when exists (select 1 from team_members m where m.team = g.team and m.member = g.fallback) then g.fallback::text end,
+                    array(select gm.member::text from team_group_members gm where gm.team = g.team and gm.handle = g.handle order by gm.member)
+             from team_groups g where g.team = $1 order by g.handle",
+            &[&team],
+        )
+        .await
+        .map_err(err)?;
+    Ok(rows
+        .iter()
+        .map(|r| Group { handle: r.get(0), about: r.get(1), slack_group: r.get(2), fallback: r.get(3), members: r.get(4) })
+        .collect())
 }
 
 /// Inserts or replaces the group `group.handle` and its members, in one transaction
-/// (`Db::transaction_client`).
-pub async fn save_group(_db: &Db, _team: Uuid, _group: &Group) -> Result<(), String> {
-    Err("not built yet".into())
+/// (`Db::transaction_client`). `group.fallback` must be a member's account id (checked by the
+/// caller); `group.members` is ignored, `members` decides them. A member who is not on the team
+/// fails the foreign key on `team_group_members`, which is answered as a readable error.
+pub async fn save_group(db: &Db, team: Uuid, group: &Group, members: Members<'_>) -> Result<(), String> {
+    let fallback = group.fallback.as_deref().map(Uuid::parse_str).transpose().map_err(|e| e.to_string())?;
+    let mut held = db.transaction_client().await?;
+    let tx = held.as_mut().expect("opened above").transaction().await.map_err(err)?;
+    let created: bool = tx
+        .query_one(
+            "insert into team_groups (team, handle, about, fallback, slack_group) values ($1, $2, $3, $4, $5)
+             on conflict (team, handle) do update set about = excluded.about, fallback = excluded.fallback, slack_group = excluded.slack_group
+             returning xmax = 0",
+            &[&team, &group.handle, &group.about, &fallback, &group.slack_group],
+        )
+        .await
+        .map_err(err)?
+        .get(0);
+    let list: Option<&[Uuid]> = match members {
+        Members::Replace(list) => Some(list),
+        Members::Keep { new } if created => Some(new),
+        Members::Keep { .. } => None,
+    };
+    if let Some(list) = list {
+        tx.execute("delete from team_group_members where team = $1 and handle = $2", &[&team, &group.handle]).await.map_err(err)?;
+        let added = tx
+            .execute(
+                "insert into team_group_members (team, handle, member) select $1, $2, m from unnest($3::uuid[]) as m",
+                &[&team, &group.handle, &list],
+            )
+            .await;
+        added.map_err(|e| {
+            if e.code() == Some(&SqlState::FOREIGN_KEY_VIOLATION) {
+                format!("@{} has someone who is not a member of this team", group.handle)
+            } else {
+                err(e)
+            }
+        })?;
+    }
+    tx.commit().await.map_err(err)?;
+    Ok(())
 }
 
-/// False when the group does not exist.
-pub async fn join_group(_db: &Db, _team: Uuid, _handle: &str, _member: Uuid) -> Result<bool, String> {
-    Err("not built yet".into())
+/// Adds `member` to group `handle`, once; false when the group does not exist.
+pub async fn join_group(db: &Db, team: Uuid, handle: &str, member: Uuid) -> Result<bool, String> {
+    let row = db
+        .client()
+        .await?
+        .query_one(
+            "with g as (select handle from team_groups where team = $1 and handle = $2),
+                  joined as (insert into team_group_members (team, handle, member) select $1, handle, $3 from g on conflict do nothing)
+             select exists (select 1 from g)",
+            &[&team, &handle, &member],
+        )
+        .await
+        .map_err(err)?;
+    Ok(row.get(0))
 }
 
-pub async fn leave_group(_db: &Db, _team: Uuid, _handle: &str, _member: Uuid) -> Result<bool, String> {
-    Err("not built yet".into())
+/// Removes `member` from group `handle`; false when it was not in the group.
+pub async fn leave_group(db: &Db, team: Uuid, handle: &str, member: Uuid) -> Result<bool, String> {
+    let removed = db
+        .client()
+        .await?
+        .execute("delete from team_group_members where team = $1 and handle = $2 and member = $3", &[&team, &handle, &member])
+        .await
+        .map_err(err)?;
+    Ok(removed == 1)
 }
 
 // ---- bots.rs ----
