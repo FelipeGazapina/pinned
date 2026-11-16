@@ -11520,8 +11520,7 @@
                 "type": [
                   "string",
                   "null"
-                ],
-                "default": null
+                ]
               }
             },
             "required": [
@@ -11532,8 +11531,7 @@
               "limits",
               "on",
               "on_by",
-              "once",
-              "off_note"
+              "once"
             ]
           },
           "CallRules": {
@@ -23043,8 +23041,7 @@
                 "type": [
                   "string",
                   "null"
-                ],
-                "default": null
+                ]
               }
             },
             "required": [
@@ -31735,8 +31732,7 @@
                 "type": [
                   "string",
                   "null"
-                ],
-                "default": null
+                ]
               }
             },
             "required": [
@@ -31747,8 +31743,7 @@
               "limits",
               "on",
               "on_by",
-              "once",
-              "off_note"
+              "once"
             ]
           },
           "CallRules": {
@@ -40110,8 +40105,7 @@
                 "type": [
                   "string",
                   "null"
-                ],
-                "default": null
+                ]
               }
             },
             "required": [
@@ -58002,8 +57996,7 @@
             "type": [
               "string",
               "null"
-            ],
-            "default": null
+            ]
           }
         },
         "required": [
@@ -58014,8 +58007,7 @@
           "limits",
           "on",
           "on_by",
-          "once",
-          "off_note"
+          "once"
         ],
         "$defs": {
           "CallRules": {
@@ -58192,8 +58184,7 @@
             "type": [
               "string",
               "null"
-            ],
-            "default": null
+            ]
           }
         },
         "required": [

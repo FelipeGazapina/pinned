@@ -235,7 +235,7 @@ pub struct Bot {
     pub once: bool,
     /// Why the hub turned it off, as members see it; cleared when it is turned on again. The hub
     /// sets it: one a member sends is not read.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub off_note: Option<String>,
 }
 
