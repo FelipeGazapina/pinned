@@ -79,6 +79,8 @@ struct Repo {
     blind_searches: u32,
     /// Serves the next POST, then answers it with a success whose body does not read.
     garble: bool,
+    /// Serves the next POST, then answers it with this status, as a GitHub that did the work and then failed.
+    fail_after_post: Option<u16>,
 }
 
 impl Repo {
@@ -316,6 +318,11 @@ impl FakeGithub {
         self.repo().garble = true;
     }
 
+    /// Serves the next POST as usual (the issue or comment it creates exists), then answers it `status`.
+    pub fn fail_after_next_post(&self, status: u16) {
+        self.repo().fail_after_post = Some(status);
+    }
+
     /// A comment by `login` that says it was written at `created_at`.
     pub fn add_comment_at(&self, number: u64, login: &str, body: &str, created_at: &str) -> u64 {
         self.repo().comment(number, login, "NONE", body, Some(created_at)).expect("no such issue in the fake")
@@ -362,11 +369,18 @@ async fn handle(State(shared): State<Shared>, method: Method, uri: Uri, headers:
     if let Some(wait) = slow {
         tokio::time::sleep(wait).await;
     }
-    let garble = method == Method::POST && std::mem::take(&mut lock(&shared).garble);
+    let (garble, fail_after) = match method == Method::POST {
+        true => {
+            let mut repo = lock(&shared);
+            (std::mem::take(&mut repo.garble), repo.fail_after_post.take())
+        }
+        false => (false, None),
+    };
     let response = serve_now(&shared, method, uri, headers, body);
-    let response = match garble {
-        true => (StatusCode::CREATED, [("content-type", "application/json")], "{\"number\": ").into_response(),
-        false => response,
+    let response = match (garble, fail_after) {
+        (true, _) => (StatusCode::CREATED, [("content-type", "application/json")], "{\"number\": ").into_response(),
+        (false, Some(status)) => reply(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), json!({ "message": "Server Error" })),
+        (false, None) => response,
     };
     if let Some(wait) = hang {
         tokio::time::sleep(wait).await;

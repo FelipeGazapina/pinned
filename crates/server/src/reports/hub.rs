@@ -68,11 +68,12 @@ create index if not exists reports_by_issue on reports (issue) where issue is no
 create unique index if not exists reports_request on reports (account, request_id) where request_id is not null;
 alter table reports add column if not exists counts boolean not null default true;
 alter table reports add column if not exists hidden boolean not null default false;
+alter table reports add column if not exists first_sent_at bigint;
 ";
 
 const COLUMNS: &str = "id, kind, title, draft, state, issue, url, followed, by_agent, created_at, updated_at";
-/// `COLUMNS`, then whether the row counts toward the daily limit and when it was sent.
-const SEND_COLUMNS: &str = "id, kind, title, draft, state, issue, url, followed, by_agent, created_at, updated_at, counts, sent_at";
+/// `COLUMNS`, then whether the row counts toward the daily limit, when it was sent and when it was first sent.
+const SEND_COLUMNS: &str = "id, kind, title, draft, state, issue, url, followed, by_agent, created_at, updated_at, counts, sent_at, first_sent_at";
 
 /// Where the hub files reports: the GitHub API, the repository (`owner/name`) and the hub's own token.
 #[derive(Clone, PartialEq, Eq)]
@@ -409,11 +410,13 @@ struct SendRow {
     report: Report,
     counts: bool,
     sent_at: Option<i64>,
+    /// When its first try was sent; a try again never moves it.
+    first_sent_at: Option<i64>,
 }
 
 /// A row of `SEND_COLUMNS`.
 fn send_row(row: &tokio_postgres::Row) -> Result<SendRow, String> {
-    Ok(SendRow { key: row.get(0), report: stored(row)?, counts: row.get(11), sent_at: row.get(12) })
+    Ok(SendRow { key: row.get(0), report: stored(row)?, counts: row.get(11), sent_at: row.get(12), first_sent_at: row.get(13) })
 }
 
 fn could_not_send(error: &str) -> String {
@@ -911,7 +914,7 @@ impl Hub {
             let updated = tx
                 .execute(
                     "update reports set kind = $3, title = $4, draft = $5, state = $6, by_agent = by_agent or $7, counts = true, sent_at = case when $10 then sent_at else $8 end, \
-                     updated_at = $8, request_id = coalesce($9, request_id), hidden = false where id = $1 and account = $2 and state->>'state' in ('draft', 'failed')",
+                     first_sent_at = coalesce(first_sent_at, sent_at, $8), updated_at = $8, request_id = coalesce($9, request_id), hidden = false where id = $1 and account = $2 and state->>'state' in ('draft', 'failed')",
                     &[&id, &account.id, &kind_name(&draft.kind), &title, &kept, &sending, &by_agent, &now, &request_id, &already],
                 )
                 .await
@@ -921,7 +924,7 @@ impl Hub {
             }
         } else {
             tx.execute(
-                "insert into reports (id, account, kind, title, draft, state, by_agent, sent_at, created_at, updated_at, request_id) values ($1, $2, $3, $4, $5, $6, $7, $8, $8, $8, $9)",
+                "insert into reports (id, account, kind, title, draft, state, by_agent, sent_at, first_sent_at, created_at, updated_at, request_id) values ($1, $2, $3, $4, $5, $6, $7, $8, $8, $8, $8, $9)",
                 &[&id, &account.id, &kind_name(&draft.kind), &title, &kept, &sending, &by_agent, &now, &request_id],
             )
             .await
@@ -931,21 +934,33 @@ impl Hub {
         Ok(None)
     }
 
-    /// Where the failed try of `row` may have landed: the issue whose body carries `report_ref`, or, when it was a
-    /// case for an issue, the comment there that does.
+    /// Where the failed try of `row` may have landed, by what that try sent, whatever this one sends: the issue whose
+    /// body carries `report_ref`, or, when it was a case for an issue, the comment there that does. A row whose draft
+    /// is gone may have been either, so it looks for the issue, then among the comments of `target`.
     async fn filed_before(&self, github: &Github, row: &SendRow, target: Option<&IssueInfo>, report_ref: &str) -> Result<Option<(u64, String, Option<u64>)>, GithubError> {
-        let tried = row.report.draft.as_ref().and_then(|draft| draft.to_issue).or(target.map(|info| info.number));
-        match tried {
-            Some(number) => {
-                let Some(comment) = github.comment_with_ref(number, report_ref).await? else { return Ok(None) };
-                let url = match target.filter(|info| info.number == number) {
-                    Some(info) => info.html_url.clone(),
-                    None => github.issue(number).await?.html_url,
-                };
-                Ok(Some((number, url, Some(comment))))
-            }
-            None => Ok(github.issue_with_ref(report_ref, row.sent_at).await?.map(|issue| (issue.number, issue.html_url, None))),
+        let tried = row.report.draft.as_ref().map(|draft| draft.to_issue);
+        if let Some(Some(number)) = tried {
+            return self.comment_before(github, number, target, report_ref).await;
         }
+        // Since the first try: a later one that failed may have moved `sent_at`.
+        let first = row.first_sent_at.or(row.sent_at);
+        if let Some(issue) = github.issue_with_ref(report_ref, first).await? {
+            return Ok(Some((issue.number, issue.html_url, None)));
+        }
+        match (tried, target) {
+            (None, Some(info)) => self.comment_before(github, info.number, target, report_ref).await,
+            _ => Ok(None),
+        }
+    }
+
+    /// The comment on issue `number` that carries `report_ref`, with the issue's address.
+    async fn comment_before(&self, github: &Github, number: u64, target: Option<&IssueInfo>, report_ref: &str) -> Result<Option<(u64, String, Option<u64>)>, GithubError> {
+        let Some(comment) = github.comment_with_ref(number, report_ref).await? else { return Ok(None) };
+        let url = match target.filter(|info| info.number == number) {
+            Some(info) => info.html_url.clone(),
+            None => github.issue(number).await?.html_url,
+        };
+        Ok(Some((number, url, Some(comment))))
     }
 
     /// Fails report `id` with what a person may read of `error`; it keeps counting toward the daily limit when

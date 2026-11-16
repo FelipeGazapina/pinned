@@ -764,6 +764,57 @@ fn try_again_soon_after_a_timeout_finds_the_filed_issue_in_the_list_while_search
 }
 
 #[test]
+fn try_again_as_a_case_after_a_new_issue_timed_out_links_the_filed_issue_and_adds_no_comment() {
+    let fake = Fake::start();
+    fake.github.add_issue_numbered(7, "Diff slow", "The diff takes a minute.");
+    let hub = TestHub::start_reports("reports_again_target", Signup::Open, Policy::default(), false, Default::default(), "127.0.0.1:0", Some(fake.impatient()));
+    let mut ana = Client::connect(&hub.url, &signed_up(&hub, "ana@example.test"));
+
+    // The first try is a new issue: GitHub files it but answers too late.
+    fake.github.hang_next_post(Duration::from_secs(3));
+    let draft = problem("Crash on launch", "It closes.");
+    assert_eq!(reviewed_send(&mut ana, draft.clone(), json!({ "request_id": "try-1" })), could_not_send("GitHub may have filed this report. Check My reports before trying again."));
+    assert_eq!(fake.github.issue_count(), 8, "GitHub made it");
+
+    // Try again as a case for #7: what the first try sent is looked for, so the issue it filed is the report.
+    let mut case = draft;
+    case["to_issue"] = json!(7);
+    let again = reviewed_send(&mut ana, case, json!({ "request_id": "try-1" })).unwrap();
+    assert_eq!((again["issue"].clone(), again["url"].clone(), again["state"].clone()), (json!(8), json!("https://github.com/acme/app/issues/8"), json!({ "state": "open" })), "{again}");
+    assert_eq!((fake.github.issue_count(), fake.posts(), fake.github.comment_bodies(7).len()), (8, (1, 0), 0), "no second issue and no comment on #7");
+}
+
+#[test]
+fn a_third_try_looks_from_the_first_try_after_a_failed_look_and_finds_the_issue_a_5xx_filed() {
+    let fake = Fake::start();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    // The first try was ten minutes ago: GitHub dates what it files then, and so does the row below.
+    fake.github.set_clock(now - 600);
+    let hub = TestHub::start_reports("reports_again_first_try", Signup::Open, Policy::default(), false, Default::default(), "127.0.0.1:0", Some(fake.impatient()));
+    let mut ana = Client::connect(&hub.url, &signed_up(&hub, "ana@example.test"));
+    let draft = problem("Crash on launch", "It closes.");
+
+    // GitHub files it, then answers 502: a busy answer, which does not count.
+    let extra = reviewed(&mut ana, &draft, json!({ "request_id": "try-1" })).unwrap();
+    fake.github.fail_after_next_post(502);
+    assert_eq!(report_issue(&mut ana, draft.clone(), extra), could_not_send("GitHub is busy. Try again later."));
+    assert_eq!(fake.github.issue_count(), 1, "GitHub made it all the same");
+    admin_on(&hub.database, "update reports set sent_at = sent_at - 600, first_sent_at = first_sent_at - 600, created_at = created_at - 600, updated_at = updated_at - 600");
+
+    // The second try: the look for what the first one filed fails, so nothing is posted.
+    let extra = reviewed(&mut ana, &draft, json!({ "request_id": "try-1" })).unwrap();
+    fake.github.fail_next(500, "Server Error", None);
+    assert_eq!(report_issue(&mut ana, draft.clone(), extra), could_not_send("GitHub is busy. Try again later."));
+    assert_eq!(fake.posts(), (1, 0));
+
+    // The third: search has not caught up, and the list since the first try has the issue.
+    fake.github.set_search_blind(true);
+    let again = reviewed_send(&mut ana, draft, json!({ "request_id": "try-1" })).unwrap();
+    assert_eq!((again["issue"].clone(), again["state"].clone()), (json!(1), json!({ "state": "open" })), "{again}");
+    assert_eq!((fake.github.issue_count(), fake.posts()), (1, (1, 0)), "nothing is posted again");
+}
+
+#[test]
 fn a_send_that_may_have_reached_github_says_to_check_my_reports_and_one_that_never_left_keeps_its_text() {
     let fake = Fake::start();
     let hub = TestHub::start_reports("reports_may_have_filed", Signup::Open, Policy::default(), false, Default::default(), "127.0.0.1:0", Some(fake.impatient()));
