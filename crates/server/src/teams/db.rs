@@ -536,6 +536,17 @@ pub async fn run_box(db: &Db, team: Uuid, run: Uuid) -> Result<Option<String>, S
     Ok(row.and_then(|r| r.get(0)))
 }
 
+/// The ids of the team's live runs of bot `workflow`.
+pub async fn live_runs_of(db: &Db, team: Uuid, workflow: &str) -> Result<Vec<Uuid>, String> {
+    let rows = db
+        .client()
+        .await?
+        .query(&format!("select id from team_runs where team = $1 and workflow = $2 and state in {LIVE}"), &[&team, &workflow])
+        .await
+        .map_err(err)?;
+    Ok(rows.iter().map(|r| r.get(0)).collect())
+}
+
 /// The team's live run whose session runs on `machine`, if any.
 pub async fn run_on_machine(db: &Db, team: Uuid, machine: &str) -> Result<Option<Run>, String> {
     let row = db

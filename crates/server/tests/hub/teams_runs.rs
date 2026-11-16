@@ -199,3 +199,37 @@ fn the_hubs_ask_reply_is_what_a_box_session_reads() {
     let read = pinned_core::team_call::parse_asked(&reply.to_string()).unwrap();
     assert_eq!((read.id.as_str(), read.who), (reply["call"].as_str().unwrap(), vec!["@design".to_owned()]));
 }
+
+#[test]
+fn taking_a_project_out_of_the_team_stops_the_live_runs_of_its_bots_and_ends_their_boxes() {
+    let crew = Crew::new("tr_detach_runs", fast());
+    for (key, name) in [(SITE, "site"), (DOCS, "docs")] {
+        let share = json!({ "cmd": "share_project", "project": { "key": key, "name": name, "repo": format!("https://{key}.git") } });
+        crew.hub.runtime.block_on(crew.hub.hub().hub_call(&crew.bob, serde_json::from_value(share).unwrap())).unwrap();
+        crew.op(&crew.bob, json!({ "op": "attach_project", "key": key })).unwrap();
+    }
+    let site = crew.on_bot("Site bot", &format!("https://{SITE}"), false);
+    let docs = crew.on_bot("Docs bot", &format!("https://{DOCS}"), false);
+    let site_run = crew.run_now(&site);
+    wait_for("the site run's node", || crew.node().is_some());
+    let asked = crew.ask("Red or blue footer?").unwrap();
+    let site_box = crew.hub.boxes.live();
+    let docs_run = crew.run_now(&docs);
+    wait_for("both boxes", || crew.hub.boxes.live().len() == 2);
+    let state = |id: &str| {
+        let runs = crew.op(&crew.bob, json!({ "op": "runs" })).unwrap();
+        let run = runs.as_array().unwrap().iter().find(|r| r["id"] == json!(id)).unwrap().clone();
+        (run["state"].as_str().unwrap().to_owned(), run["outcome"].as_str().map(str::to_owned))
+    };
+    assert_eq!(state(&site_run.id).0, "waiting");
+
+    assert_eq!(crew.op(&crew.bob, json!({ "op": "detach_project", "key": SITE })), Ok(Value::Null));
+    let outcome = "Stopped: project site was taken out of the team.".to_owned();
+    assert_eq!(state(&site_run.id), ("stopped".to_owned(), Some(outcome.clone())));
+    wait_for("the site run's box to be deleted", || crew.hub.boxes.live().len() == 1);
+    assert!(!crew.hub.boxes.live().contains(&site_box[0]), "the site run's box is the one gone");
+    let calls = crew.op(&crew.bob, json!({ "op": "calls" })).unwrap();
+    let call = calls.as_array().unwrap().iter().find(|c| c["id"] == asked["call"]).unwrap().clone();
+    assert_eq!((&call["answer"]["kind"], &call["answer"]["text"]), (&json!({ "kind": "stop" }), &json!(outcome)));
+    assert_eq!(state(&docs_run.id), ("working".to_owned(), None), "a run of another project's bot goes on");
+}

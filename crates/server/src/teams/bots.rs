@@ -88,21 +88,25 @@ pub async fn bots(hub: &Arc<Hub>, scope: &Scope) -> Result<Vec<Bot>, String> {
 
 /// Project `project` was taken out of the team: every bot that is on and works in it (its
 /// workflow's `repo` is the project's, by `boxes::project_key`) goes back to a draft, with a note
-/// that says why. Answers the workflows it turned off.
-pub async fn project_detached(hub: &Hub, team: &Account, project: &TeamProject) -> Result<Vec<String>, String> {
+/// that says why, and every live run of a bot that works in it ends as `Stopped`, its box with it
+/// (`calls::stop_live_runs`). Answers the workflows it turned off.
+pub async fn project_detached(hub: &Hub, team: &Arc<Account>, project: &TeamProject) -> Result<Vec<String>, String> {
     let note = format!("Turned off: project {} was taken out of the team.", project.name);
+    let stopped = format!("Stopped: project {} was taken out of the team.", project.name);
     let mut off = Vec::new();
     let connectors = hub.connectors(team).await?;
     for workflow in connectors.get_settings().connectors {
         if crate::boxes::project_key(&workflow.repo).as_deref() != Some(project.key.as_str()) {
             continue;
         }
+        let id = workflow.id.clone();
         if db::turn_bot_off_noted(&hub.db, team.id, &workflow.id, &note).await? {
             let mut stored = workflow;
             stored.enabled = false;
             off.push(stored.id.clone());
             connectors.save_connector(stored)?;
         }
+        super::calls::stop_live_runs(hub, team, &id, &stopped).await?;
     }
     Ok(off)
 }

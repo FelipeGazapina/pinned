@@ -343,6 +343,18 @@ pub async fn end_run(hub: &Hub, team: &Arc<Account>, run_id: Uuid, state: RunSta
     Ok(run)
 }
 
+/// Ends every live run of bot `workflow` as `Stopped` with `outcome`, ending its box
+/// (`End::Removed`). A run that ends meanwhile is left as it ended.
+pub async fn stop_live_runs(hub: &Hub, team: &Arc<Account>, workflow: &str, outcome: &str) -> Result<(), String> {
+    for run_id in db::live_runs_of(&hub.db, team.id, workflow).await? {
+        match end_run(hub, team, run_id, RunState::Stopped, outcome, Some(End::Removed)).await {
+            Err(e) if e != RUN_ENDED => return Err(e),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 /// The box `machine` of `account` ends for `why` (`boxes::Boxes` calls it on every end, before
 /// the box goes). When it is a team's box whose run has not ended, the run ends with it, so no
 /// run stays `waiting` or `working` once its box is gone; the state follows `ended_by_box`.
