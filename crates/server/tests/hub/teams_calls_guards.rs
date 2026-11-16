@@ -303,6 +303,28 @@ fn a_team_run_whose_prompt_holds_its_trigger_text_changed_opens_no_session() {
 }
 
 #[test]
+fn a_graphs_trigger_values_reach_its_session_prompt_and_its_classify_model_framed() {
+    let crew = super::teams_admission::Crew::new("teams_guards_framed_vars");
+    let id = crew.graph_of(
+        "Vars",
+        vec![
+            json!({ "type": "classify", "model": "acme/sorter", "instructions": "Sort the issue.", "questions": [{ "name": "kind", "ask": "What kind of issue is it?" }] }),
+            json!({ "type": "session", "prompt": "Fix {{trigger.title}} ({{trigger.identifier}})." }),
+        ],
+    );
+    assert_eq!(crew.found(crew.graph_labeled(&id, 5)), Ok(()));
+    wait_for("the graph run's box", || box_prompt(&crew, &issue("eng-5")).is_some());
+    let prompt = box_prompt(&crew, &issue("eng-5")).unwrap();
+    let title = pinned_core::untrusted::frame("a Linear issue", "Fix page 5");
+    assert!(prompt.ends_with(&format!("Fix {title} (ENG-5).")), "the title is framed, the template's own text is not: {prompt}");
+    let text = pinned_core::untrusted::frame("a Linear issue", "ENG-5: Fix page 5\nhttps://linear.example.test/acme/issue/ENG-5\n\n(no description)");
+    let escaped = serde_json::to_string(&text).unwrap();
+    let bodies = super::teams_admission::model_bodies("teams_guards_framed_vars");
+    assert!(!bodies.is_empty() && bodies.iter().all(|body| body.contains(&escaped[1..escaped.len() - 1])), "{bodies:?}");
+    assert!(bodies.iter().all(|body| body.contains("Sort the issue.")), "pinned's own instructions are not wrapped: {bodies:?}");
+}
+
+#[test]
 fn a_graph_runs_trigger_text_reaches_its_session_framed_as_outside_data() {
     let crew = super::teams_admission::Crew::new("teams_guards_framed_graph");
     let id = crew.graph_bot("Pages");

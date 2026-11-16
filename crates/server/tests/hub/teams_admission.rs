@@ -91,6 +91,11 @@ fn answer(mut stream: TcpStream) {
     let _ = write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}", answer.len());
 }
 
+/// The bodies of the model questions asked with keys of test `name`.
+pub(crate) fn model_bodies(name: &str) -> Vec<String> {
+    CALLS.lock().unwrap().iter().filter(|c| c.service == "model" && c.path == "/v1/chat/completions" && c.key.ends_with(name)).map(|c| c.body.clone()).collect()
+}
+
 /// What reached outside pinned for issue `ENG-n` with keys of test `name`: each model question
 /// about it, each Linear move of it, and each Slack reaction or post.
 fn outside(name: &str, n: u32) -> Vec<String> {
@@ -203,7 +208,7 @@ impl Crew {
         self.graph_of(name, vec![json!({ "type": "stage-picked" })])
     }
 
-    fn graph_of(&self, name: &str, steps: Vec<Value>) -> String {
+    pub(crate) fn graph_of(&self, name: &str, steps: Vec<Value>) -> String {
         let watch = json!({ "kind": "linear-label", "label": "agent" });
         let mut nodes = vec![json!({ "id": "t", "name": "Trigger", "position": [0, 0], "type": "trigger", "watch": watch })];
         let mut edges = vec![];

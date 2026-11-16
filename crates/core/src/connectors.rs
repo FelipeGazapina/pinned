@@ -3041,6 +3041,14 @@ fn trigger_of(run: &runner::Run) -> Result<TriggerInput, String> {
     serde_json::from_value(run.context.get("trigger").cloned().unwrap_or(Value::Null)).map_err(|e| format!("the run has no trigger input: {e}"))
 }
 
+/// Where a trigger's text came from, as `untrusted::frame` names it.
+fn trigger_source(input: &TriggerInput) -> &'static str {
+    match input {
+        TriggerInput::Issue { .. } => "a Linear issue",
+        TriggerInput::Slack { .. } => "a Slack thread",
+    }
+}
+
 fn trigger_text(input: &TriggerInput) -> String {
     match input {
         TriggerInput::Issue { identifier, title, url, description, .. } => {
@@ -3113,22 +3121,33 @@ fn join_text(left: &str, right: &str) -> String {
 /// variables the session set with `pinned run set`. An unset `vars.` span is empty; other
 /// unknown spans stay literal.
 pub(crate) fn render_template(text: &str, run: &runner::Run) -> String {
+    render_for(text, run, false)
+}
+
+/// `render_template` for text that goes to a session. On a hub's team (`team`) each trigger value
+/// written outside pinned (the issue's or thread's text, the mention, the title, the channel's
+/// name) is filled in framed as data from outside pinned; the template's own text is not.
+fn render_for(text: &str, run: &runner::Run, team: bool) -> String {
     if !text.contains("{{") {
         return text.to_owned();
     }
     let mut trigger = serde_json::Map::new();
     if let Ok(input) = trigger_of(run) {
-        trigger.insert("text".into(), trigger_text(&input).into());
-        trigger.insert("mention".into(), trigger_mention(&input).into());
-        match input {
+        let outside = |value: String| match team && !value.trim().is_empty() {
+            true => crate::untrusted::frame(trigger_source(&input), &value),
+            false => value,
+        };
+        trigger.insert("text".into(), outside(trigger_text(&input)).into());
+        trigger.insert("mention".into(), outside(trigger_mention(&input)).into());
+        match input.clone() {
             TriggerInput::Issue { identifier, title, url, .. } => {
                 trigger.insert("identifier".into(), identifier.into());
-                trigger.insert("title".into(), title.into());
+                trigger.insert("title".into(), outside(title).into());
                 trigger.insert("url".into(), url.into());
             }
             TriggerInput::Slack { channel, channel_name, thread, .. } => {
                 trigger.insert("channel".into(), channel.into());
-                trigger.insert("channel_name".into(), channel_name.into());
+                trigger.insert("channel_name".into(), outside(channel_name).into());
                 trigger.insert("thread".into(), thread.into());
             }
         }
@@ -3183,8 +3202,8 @@ fn lookup_path(data: &Value, path: &str) -> Option<String> {
     }
 }
 
-fn talk_text(run: &runner::Run, prompt: &str, seeded: bool) -> String {
-    let prompt = render_template(prompt, run);
+fn talk_text(run: &runner::Run, prompt: &str, seeded: bool, team: bool) -> String {
+    let prompt = render_for(prompt, run, team);
     if !seeded {
         return prompt;
     }
@@ -3209,15 +3228,35 @@ fn ask_from(classify: &crate::graph::Classify) -> Ask {
     }
 }
 
-fn decide_state(trigger: &TriggerInput) -> Value {
+/// What a deciding classify shows its model of `trigger`. On a hub's team (`team`) each text
+/// written outside pinned is framed as data from outside pinned.
+fn decide_state(trigger: &TriggerInput, team: bool) -> Value {
+    let outside = |value: &str| match team && !value.trim().is_empty() {
+        true => crate::untrusted::frame(trigger_source(trigger), value),
+        false => value.to_owned(),
+    };
     match trigger {
         TriggerInput::Slack { channel_name, posts, request, .. } => {
             let posts = split_at_request(posts, request.as_deref()).1;
             let author = posts.first().map(|post| post.author.as_str()).unwrap_or("");
             let message = posts.first().map(|post| post.text.as_str()).unwrap_or("");
-            json!({ "channel": format!("#{channel_name}"), "author": author, "message": message })
+            json!({ "channel": format!("#{}", outside(channel_name)), "author": outside(author), "message": outside(message) })
         }
-        TriggerInput::Issue { .. } => json!({ "message": trigger_text(trigger) }),
+        TriggerInput::Issue { .. } => json!({ "message": outside(&trigger_text(trigger)) }),
+    }
+}
+
+/// What a direct classify asks its model about: the trigger's text, then the thread before the
+/// request. On a hub's team (`team`) both are framed as data from outside pinned.
+fn classify_text(trigger: &TriggerInput, thread: Option<&str>, team: bool) -> String {
+    let outside = |value: String| match team && !value.trim().is_empty() {
+        true => crate::untrusted::frame(trigger_source(trigger), &value),
+        false => value,
+    };
+    let text = outside(trigger_text(trigger));
+    match thread {
+        Some(thread) => format!("{text}\n\n{FOLLOW_UP_CONTEXT}\n{}", outside(thread.to_owned())),
+        None => text,
     }
 }
 
@@ -3392,7 +3431,7 @@ fn run_opening(run: &runner::Run, owner: &Connector, prompt: &str, seeded: bool,
         }
     }
     // The session's own copy of the rendered text, guarded after `talk_text` took the history off it.
-    let talk = pinned_lines::guard(&talk_text(run, prompt, seeded));
+    let talk = pinned_lines::guard(&talk_text(run, prompt, seeded, team));
     let history = seeded.then(|| runner::history(run));
     let mut opened = graph_opening(owner, &trigger, &direct_answers(run, library), &talk, history.as_deref(), exe, team)?;
     let names = library.get(&run.connector).map(issue_vars).unwrap_or_default();
@@ -4262,12 +4301,11 @@ impl Connectors {
     /// mention is sorted against without being part of the message.
     async fn classify(&self, classify: &crate::graph::Classify, trigger: &TriggerInput, thread: Option<&str>) -> Result<Answers, String> {
         let key = self.key(VERCEL_KEY).ok_or_else(|| "Vercel AI Gateway is not connected: connect it in pinned's Connectors settings".to_owned())?;
+        // On a hub's team the trigger's text reaches the model framed as data from outside pinned.
+        let team = self.admission.get().is_some();
         match &classify.gate {
             Gate::Direct => {
-                let mut text = trigger_text(trigger);
-                if let Some(thread) = thread {
-                    text = format!("{text}\n\n{FOLLOW_UP_CONTEXT}\n{thread}");
-                }
+                let text = classify_text(trigger, thread, team);
                 Ok(Answers { answers: vercel::ask(&key, &ask_from(classify), &text).await?, chosen: None })
             }
             Gate::Decide { .. } => {
@@ -4278,9 +4316,12 @@ impl Connectors {
                     .find(|question| question.name == name)
                     .ok_or_else(|| format!("the classify branches on {name:?}, which is not one of its questions"))?;
                 let choices: Vec<(&str, &str)> = question.choices.iter().map(|choice| (choice.label.as_str(), choice.description.as_str())).collect();
-                let mut state = decide_state(trigger);
+                let mut state = decide_state(trigger, team);
                 if let Some(thread) = thread {
-                    state["thread"] = json!(thread);
+                    state["thread"] = json!(match team {
+                        true => crate::untrusted::frame(trigger_source(trigger), thread),
+                        false => thread.to_owned(),
+                    });
                 }
                 let chosen = vercel::choose(&key, classify.model.trim(), &classify.instructions, &choices, &state).await?;
                 let label = question.choices.get(chosen.index).map(|choice| choice.label.clone()).unwrap_or_default();
@@ -4485,7 +4526,7 @@ impl Connectors {
         spec.args.pop();
         spec.args.extend(["--resume".into(), claude.to_owned()]);
         let inbox = self.take_inbox(&run.subject);
-        let text = render_template(text, run);
+        let text = render_for(text, run, self.admission.get().is_some());
         let answer = open(Work::Run(spec)).await;
         if answer.consumed() {
             self.restore_inbox(inbox);
@@ -4636,7 +4677,7 @@ impl Connectors {
     {
         // `later` is the thread's replies as `reply_block` built them: already guarded, and typed as
         // built. Rendering it here would fill a `{{...}}` someone posted in after its guard.
-        let typed = join_text(&pinned_lines::guard(&render_template(text, run)), later);
+        let typed = join_text(&pinned_lines::guard(&render_for(text, run, self.admission.get().is_some())), later);
         let text = render_template(&join_text(text, later), run);
         if text.is_empty() || runner::already_sent(run, &text) {
             return Ok(());
@@ -8513,6 +8554,31 @@ mod tests {
             mentioned: vec!["1792400050.000200".into()],
             request: None,
         }
+    }
+
+    #[test]
+    fn on_a_team_trigger_values_reach_a_session_and_a_classify_model_framed_and_a_persons_do_not() {
+        let graph = runner::start(&runner::Library::new(), "c1", Subject::LinearIssue { issue: "eng-7".into() }, serde_json::json!(issue_trigger()), "2026-11-16T10:00:00Z");
+        let template = "Fix {{trigger.title}} ({{trigger.identifier}}, {{trigger.url}}) now.";
+        let title = crate::untrusted::frame("a Linear issue", "Broken button");
+        assert_eq!(render_for(template, &graph, true), format!("Fix {title} (ENG-7, https://linear.app/x/issue/ENG-7) now."));
+        assert_eq!(render_for(template, &graph, false), "Fix Broken button (ENG-7, https://linear.app/x/issue/ENG-7) now.");
+        assert_eq!(render_template(template, &graph), render_for(template, &graph, false), "a person's account is unchanged");
+        assert_eq!(talk_text(&graph, template, false, true), format!("Fix {title} (ENG-7, https://linear.app/x/issue/ENG-7) now."));
+        let text = "ENG-7: Broken button\nhttps://linear.app/x/issue/ENG-7\n\n(no description)";
+        assert_eq!(render_for("{{trigger.text}}", &graph, true), crate::untrusted::frame("a Linear issue", text));
+        // The classify step's model input.
+        assert_eq!(classify_text(&issue_trigger(), None, true), crate::untrusted::frame("a Linear issue", text));
+        assert_eq!(classify_text(&issue_trigger(), None, false), text);
+        assert_eq!(
+            classify_text(&slack_trigger(None), Some("ana: earlier"), true),
+            format!("{}\n\n{FOLLOW_UP_CONTEXT}\n{}", crate::untrusted::frame("a Slack thread", &trigger_text(&slack_trigger(None))), crate::untrusted::frame("a Slack thread", "ana: earlier"))
+        );
+        assert_eq!(decide_state(&issue_trigger(), true), serde_json::json!({ "message": crate::untrusted::frame("a Linear issue", text) }));
+        assert_eq!(decide_state(&issue_trigger(), false), serde_json::json!({ "message": text }));
+        let first = &posts()[0];
+        assert_eq!(decide_state(&slack_trigger(None), true)["message"], serde_json::json!(crate::untrusted::frame("a Slack thread", &first.text)));
+        assert_eq!(decide_state(&slack_trigger(None), false)["message"], serde_json::json!(first.text));
     }
 
     #[test]
