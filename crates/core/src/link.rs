@@ -349,6 +349,9 @@ impl Syncer {
                     if !done.pushed.is_empty() || !done.pulled.is_empty() {
                         eprintln!("pinned: synced {key}: {} up, {} down", done.pushed.len(), done.pulled.len())
                     }
+                    if let sync::Push::Refused { error } = &done.push {
+                        eprintln!("pinned: could not send {key}'s changes: {error}");
+                    }
                 }
                 Err(e) => eprintln!("pinned: could not sync {key}: {e}"),
             }
@@ -360,6 +363,9 @@ impl Syncer {
                     machine.skills_changed(&skills::pulled_by_plugin_sync(&share, &done.pulled));
                     if !done.pushed.is_empty() || !done.pulled.is_empty() {
                         eprintln!("pinned: synced plugins: {} up, {} down", done.pushed.len(), done.pulled.len());
+                    }
+                    if let sync::Push::Refused { error } = &done.push {
+                        eprintln!("pinned: could not send the plugins' changes: {error}");
                     }
                 }
                 Err(e) if sync::old_hub(&e) => {

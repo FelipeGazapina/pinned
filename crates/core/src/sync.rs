@@ -236,8 +236,21 @@ pub trait Hub {
 
 #[derive(Debug, Default, PartialEq)]
 pub struct Synced {
+    /// The files the hub took.
     pub pushed: Vec<String>,
     pub pulled: Vec<String>,
+    pub push: Push,
+}
+
+/// What became of the files a sync had to send.
+#[derive(Debug, Default, PartialEq)]
+pub enum Push {
+    /// The hub took them all, or there were none.
+    #[default]
+    Done,
+    /// The hub refused a batch, so it and the ones after it wait for a later sync. Their agreed
+    /// baseline stays as it was, and the sync still pulled.
+    Refused { error: String },
 }
 
 /// Claude Code's folder for a project's sessions and memory in `claude_home`: the path with every
@@ -353,43 +366,48 @@ fn exchange(
         push.push(path);
     }
 
-    let mut batch: Vec<File> = vec![];
-    let mut pending: Vec<(String, Option<String>)> = vec![];
-    let mut size = 0;
-    for path in push {
-        let file = match resolve(&path).filter(|f| f.is_file()) {
-            None => File { entry: Entry { path: path.clone(), sha: String::new(), modified: millis(now), size: 0, executable: None }, data: None },
-            Some(target) => {
-                let Some((sha, modified)) = state.hash(&target) else { continue };
-                let data = pack(&std::fs::read(&target).map_err(|e| e.to_string())?);
-                if data.len() as u64 > FILE_LIMIT {
-                    continue;
-                }
-                let mode = if key == PLUGINS_KEY {
-                    heal_owner_execute(&target)?;
-                    executable(&target)?
-                } else {
-                    None
-                };
-                File {
-                    entry: Entry { path: path.clone(), sha, modified, size: data.len() as u64, executable: mode },
-                    data: Some(base64::engine::general_purpose::STANDARD.encode(data)),
-                }
+    // Deletions go first, in batches of their own: they never grow the account, so a hub at its
+    // limit still takes them, and a refused addition never holds one back.
+    let (deletions, additions): (Vec<String>, Vec<String>) = push.into_iter().partition(|path| resolve(path).filter(|f| f.is_file()).is_none());
+    for group in [deletions, additions] {
+        let mut batch: Vec<File> = vec![];
+        let mut pending: Vec<(String, Option<String>)> = vec![];
+        let mut size = 0;
+        for path in group {
+            if synced.push != Push::Done {
+                break;
             }
-        };
-        size += file.entry.size;
-        pending.push((file.entry.path.clone(), file.data.as_ref().map(|_| file.entry.sha.clone())));
-        batch.push(file);
-        synced.pushed.push(path);
-        if size >= BATCH {
-            hub.push(key, std::mem::take(&mut batch))?;
-            commit_agreed(state, agreed_key, agreed, &std::mem::take(&mut pending))?;
-            size = 0;
+            let file = match resolve(&path).filter(|f| f.is_file()) {
+                None => File { entry: Entry { path: path.clone(), sha: String::new(), modified: millis(now), size: 0, executable: None }, data: None },
+                Some(target) => {
+                    let Some((sha, modified)) = state.hash(&target) else { continue };
+                    let data = pack(&std::fs::read(&target).map_err(|e| e.to_string())?);
+                    if data.len() as u64 > FILE_LIMIT {
+                        continue;
+                    }
+                    let mode = if key == PLUGINS_KEY {
+                        heal_owner_execute(&target)?;
+                        executable(&target)?
+                    } else {
+                        None
+                    };
+                    File {
+                        entry: Entry { path: path.clone(), sha, modified, size: data.len() as u64, executable: mode },
+                        data: Some(base64::engine::general_purpose::STANDARD.encode(data)),
+                    }
+                }
+            };
+            size += file.entry.size;
+            pending.push((file.entry.path.clone(), file.data.as_ref().map(|_| file.entry.sha.clone())));
+            batch.push(file);
+            if size >= BATCH {
+                send(hub, state, key, agreed_key, agreed, &mut synced, std::mem::take(&mut batch), std::mem::take(&mut pending))?;
+                size = 0;
+            }
         }
-    }
-    if !batch.is_empty() {
-        hub.push(key, std::mem::take(&mut batch))?;
-        commit_agreed(state, agreed_key, agreed, &std::mem::take(&mut pending))?;
+        if !batch.is_empty() && synced.push == Push::Done {
+            send(hub, state, key, agreed_key, agreed, &mut synced, batch, pending)?;
+        }
     }
 
     let mut wanted: Vec<String> = vec![];
@@ -433,6 +451,34 @@ fn exchange(
         fetch(wanted, &mut agreed, &mut synced, state)?;
     }
     Ok(synced)
+}
+
+/// Pushes one batch and takes its files as agreed once the hub has them. A refusal is kept in
+/// `synced` for the caller instead of ending the sync, so the pull still happens; only an older
+/// hub's refusal of the whole kind of file ends it.
+#[allow(clippy::too_many_arguments)]
+fn send(
+    hub: &impl Hub,
+    state: &mut State,
+    key: &str,
+    agreed_key: &str,
+    agreed: &mut BTreeMap<String, String>,
+    synced: &mut Synced,
+    batch: Vec<File>,
+    pending: Vec<(String, Option<String>)>,
+) -> Result<(), String> {
+    match hub.push(key, batch) {
+        Ok(()) => {
+            commit_agreed(state, agreed_key, agreed, &pending)?;
+            synced.pushed.extend(pending.into_iter().map(|(path, _)| path));
+            Ok(())
+        }
+        Err(e) if old_hub(&e) => Err(e),
+        Err(error) => {
+            synced.push = Push::Refused { error };
+            Ok(())
+        }
+    }
 }
 
 fn skill_file(key: &str, path: &str) -> bool {
@@ -2549,7 +2595,7 @@ mod tests {
         std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o755)).unwrap();
         let next = mac.sync(&hub);
         assert_eq!(hub.0.borrow()["claude/memory/MEMORY.md"].entry.sha, "", "the hub still holds the delete");
-        assert_eq!(next, Synced { pushed: vec![], pulled: vec!["claude/memory/MEMORY.md".into()] });
+        assert_eq!(next, Synced { pushed: vec![], pulled: vec!["claude/memory/MEMORY.md".into()], push: Push::Done });
         assert_eq!(memory.exists(), false);
         assert_eq!(blocked, Err(format!("could not delete {}: Permission denied (os error 13)", memory.display())));
         let _ = std::fs::remove_dir_all(root);
