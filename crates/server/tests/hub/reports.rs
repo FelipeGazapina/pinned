@@ -22,7 +22,7 @@ impl Fake {
     }
 
     fn config(&self) -> Config {
-        Config { api: self.github.url.clone(), repo: "acme/app".into(), token: "fake-hub-token".into(), timeout: pinned_core::github::CALL_TIMEOUT }
+        Config { api: self.github.url.clone(), repo: "acme/app".into(), token: "fake-hub-token".into(), timeout: pinned_core::github::CALL_TIMEOUT, poll: Duration::from_secs(600) }
     }
 
     /// `config` with calls to GitHub that give up after one second.

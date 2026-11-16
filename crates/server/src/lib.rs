@@ -67,7 +67,12 @@ pub async fn start(config: Config) -> Result<Running, String> {
     let listener = tokio::net::TcpListener::bind(&config.listen).await.map_err(|e| format!("could not listen on {}: {e}", config.listen))?;
     let addr = listener.local_addr().map_err(|e| e.to_string())?;
     let public_url = config.public_url.unwrap_or_else(|| format!("http://{addr}"));
+    let polling = config.reports.clone();
     let hub = hub::Hub::new(db, public_url, config.signup, config.box_api, config.box_policy, config.convex_http, config.reports).await?;
+    // Only where reporting is available: no token, or a table that could not be readied, nothing to ask GitHub.
+    if let Some(reports) = polling.filter(|_| hub.reports.available()) {
+        reports::poller::spawn(&hub, reports);
+    }
     surface::finish_interrupted(&hub).await?;
     // Again once a decision the hub before this one ran can no longer be running.
     let later = hub.clone();
