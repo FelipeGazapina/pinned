@@ -341,6 +341,12 @@ fn on() -> bool {
 
 /// What an app reads. A connector that has no stored graph still sends the graph `migrate` builds,
 /// so a new app always sees one. The store keeps `None` until someone edits the graph.
+/// Whether `id` is a uuid in its lowercase hyphenated form (`0b7e…-…`): a new connector's id an
+/// app made itself. The store's own ids start with `c`.
+pub fn is_uuid(id: &str) -> bool {
+    id.len() == 36 && id.char_indices().all(|(i, c)| if matches!(i, 8 | 13 | 18 | 23) { c == '-' } else { matches!(c, '0'..='9' | 'a'..='f') })
+}
+
 fn presented(mut connector: Connector) -> Connector {
     if connector.graph.is_none() {
         connector.graph = Some(migrate(&connector));
@@ -5382,7 +5388,8 @@ impl Connectors {
         slack::member_channels(&token).await
     }
 
-    /// Adds or replaces a connector. Its watermark, handled issues, filed issues, thread cursors and pages stay with the stored copy.
+    /// Adds or replaces a connector. A new one keeps its id when that is a uuid the app made
+    /// (`is_uuid`), else it gets one of the store's own. Its watermark, handled issues, filed issues, thread cursors and pages stay with the stored copy.
     ///
     /// An older app omits `graph`. When the stored graph is exactly `migrate` of the stored
     /// connector, that graph was never edited, so the save replaces it. An edited graph stays,
@@ -5405,15 +5412,19 @@ impl Connectors {
                 *existing = connector.clone();
             }
             None => {
-                let millis = chrono::Utc::now().timestamp_millis();
-                let mut bump = 0;
-                connector.id = loop {
-                    let id = if bump == 0 { format!("c{millis}") } else { format!("c{millis}-{bump}") };
-                    if !store.connectors.iter().any(|existing| existing.id == id) {
-                        break id;
-                    }
-                    bump += 1;
-                };
+                // A new connector the app named itself (`is_uuid`) keeps its id, so the same save
+                // sent again finds it; any other gets an id of the store's own.
+                if !is_uuid(&connector.id) {
+                    let millis = chrono::Utc::now().timestamp_millis();
+                    let mut bump = 0;
+                    connector.id = loop {
+                        let id = if bump == 0 { format!("c{millis}") } else { format!("c{millis}-{bump}") };
+                        if !store.connectors.iter().any(|existing| existing.id == id) {
+                            break id;
+                        }
+                        bump += 1;
+                    };
+                }
                 connector.since = chrono::Utc::now().to_rfc3339();
                 connector.handled.clear();
                 connector.created.clear();

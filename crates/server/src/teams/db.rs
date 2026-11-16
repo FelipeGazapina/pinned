@@ -413,6 +413,19 @@ pub async fn bot(db: &Db, team: Uuid, workflow: &str) -> Result<Option<Bot>, Str
     row.as_ref().map(bot_row).transpose()
 }
 
+/// Whether an account other than `team` stores a workflow (connector) with id `id`, as its store
+/// document was last written.
+pub async fn workflow_elsewhere(db: &Db, team: Uuid, id: &str) -> Result<bool, String> {
+    let wanted = serde_json::json!([{ "id": id }]);
+    let row = db
+        .client()
+        .await?
+        .query_one("select exists (select 1 from accounts where id <> $1 and store -> 'connectors' @> $2)", &[&team, &wanted])
+        .await
+        .map_err(err)?;
+    Ok(row.get(0))
+}
+
 /// Inserts or replaces the row of `bot.workflow`, leaving `on_by` and `on_at` as they are.
 pub async fn save_bot(db: &Db, team: Uuid, bot: &Bot) -> Result<(), String> {
     let owner = bot.owner.as_deref().map(Uuid::parse_str).transpose().map_err(|_| "the bot's owner is not an account id".to_owned())?;

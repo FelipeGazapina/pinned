@@ -122,3 +122,26 @@ fn a_save_sent_again_after_its_bot_row_failed_keeps_one_workflow() {
     assert_eq!(bots.as_array().unwrap().iter().map(|b| b["workflow"].clone()).collect::<Vec<_>>(), vec![json!(fresh)], "one bot");
     assert_eq!(db_text(&hub.database, &format!("select workflow from team_bots where team = '{team}'")), vec![fresh.clone()], "one bot row");
 }
+
+#[test]
+fn a_new_workflow_keeps_only_a_fresh_uuid_its_app_made() {
+    let hub = TestHub::start("teams_wire_named");
+    let (mut ana, _) = person(&hub.url, "ana@example.test");
+    let first = make_team(&mut ana, "Acme");
+    let second = make_team(&mut ana, "Beta");
+    let fresh = Uuid::new_v4().to_string();
+    assert_eq!(team_op(&mut ana, &first, save_bot(&fresh)), Ok(json!({ "workflow": fresh })));
+
+    // Another team's workflow id, once its store is written, is no new id for this team.
+    let deadline = Instant::now() + WAIT;
+    while db_text(&hub.database, &format!("select count(*)::text from accounts where id = '{first}' and store::text like '%{fresh}%'")) != vec!["1"] {
+        assert!(Instant::now() < deadline, "the first team's store is written");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(team_op(&mut ana, &second, save_bot(&fresh)), Err(format!("this team has no workflow {fresh}")));
+    // Not a uuid in its lowercase hyphenated form: unknown, as before.
+    for odd in [fresh.to_uppercase(), fresh.replace('-', ""), "c1790000000000".to_owned()] {
+        assert_eq!(team_op(&mut ana, &second, save_bot(&odd)), Err(format!("this team has no workflow {odd}")), "{odd}");
+    }
+    assert_eq!(team_workflows(&hub, Uuid::parse_str(&second).unwrap()), Vec::<Value>::new(), "nothing saved");
+}
