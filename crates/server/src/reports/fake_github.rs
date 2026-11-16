@@ -14,6 +14,10 @@ use std::sync::{Arc, Mutex, MutexGuard};
 const HTML_BASE: &str = "https://github.com/acme/app";
 /// Seconds since the Unix epoch of 2026-01-01T00:00:00Z, where the fake's clock starts.
 const CLOCK_START: i64 = 1_767_225_600;
+/// The login of the hub's token, as `GET /user` says it: the author of what the hub posts.
+pub const HUB_LOGIN: &str = "pinned-hub";
+/// The author of the issues a test puts in the repository unless it names one.
+const OTHER_LOGIN: &str = "octo-reporter";
 /// The only headers kept of a request besides method, path and body.
 const KEPT_HEADERS: [&str; 3] = ["accept", "user-agent", "x-github-api-version"];
 
@@ -48,6 +52,8 @@ struct StoredIssue {
     locked: bool,
     /// The number is a pull request's.
     pull: bool,
+    /// Who opened it.
+    login: String,
     /// When it was made and last changed, by the fake's clock.
     created_at: String,
     updated_at: String,
@@ -243,12 +249,20 @@ impl FakeGithub {
     pub fn add_issue_numbered(&self, number: u64, title: &str, body: &str) {
         let mut repo = self.repo();
         let at = repo.clock();
-        let blank = |open| StoredIssue { title: String::new(), body: String::new(), labels: vec![], open, state_reason: None, closed_at: None, comments: vec![], timeline: vec![], locked: false, pull: false, created_at: at.clone(), updated_at: at.clone() };
+        let blank = |open| StoredIssue { title: String::new(), body: String::new(), labels: vec![], open, state_reason: None, closed_at: None, comments: vec![], timeline: vec![], locked: false, pull: false, login: OTHER_LOGIN.into(), created_at: at.clone(), updated_at: at.clone() };
         assert!(repo.issues.len() < number as usize, "issue {number} is taken in the fake");
         while repo.issues.len() + 1 < number as usize {
             repo.issues.push(blank(false));
         }
         repo.issues.push(StoredIssue { title: title.into(), body: body.into(), ..blank(true) });
+    }
+
+    /// Opens the next issue, or with `pull` pull request, as `login`, now; returns its number.
+    pub fn add_issue_by(&self, login: &str, title: &str, body: &str, pull: bool) -> u64 {
+        let mut repo = self.repo();
+        let at = repo.now();
+        repo.issues.push(StoredIssue { title: title.into(), body: body.into(), labels: vec![], open: true, state_reason: None, closed_at: None, comments: vec![], timeline: vec![], locked: false, pull, login: login.into(), created_at: at.clone(), updated_at: at });
+        repo.issues.len() as u64
     }
 
     /// The next request is answered `status` with `message`, and `remaining` as `x-ratelimit-remaining`; the ones
@@ -349,6 +363,7 @@ fn issue_json(number: usize, issue: &StoredIssue) -> Value {
         "closed_at": issue.closed_at,
         "locked": issue.locked,
         "pull_request": issue.pull.then(|| json!({ "url": format!("{HTML_BASE}/pull/{number}") })),
+        "user": { "login": issue.login },
         "created_at": issue.created_at,
         "updated_at": issue.updated_at,
         "labels": issue.labels.iter().map(|name| json!({ "name": name })).collect::<Vec<_>>(),
@@ -415,7 +430,7 @@ fn serve_now(shared: &Shared, method: Method, uri: Uri, headers: HeaderMap, body
             };
             let labels = sent["labels"].as_array().map(|l| l.iter().filter_map(|l| l.as_str().map(str::to_owned)).collect()).unwrap_or_default();
             let at = repo.clock();
-            let issue = StoredIssue { title: title.into(), body: sent["body"].as_str().unwrap_or_default().into(), labels, open: true, state_reason: None, closed_at: None, comments: vec![], timeline: vec![], locked: false, pull: false, created_at: at.clone(), updated_at: at };
+            let issue = StoredIssue { title: title.into(), body: sent["body"].as_str().unwrap_or_default().into(), labels, open: true, state_reason: None, closed_at: None, comments: vec![], timeline: vec![], locked: false, pull: false, login: HUB_LOGIN.into(), created_at: at.clone(), updated_at: at };
             repo.issues.push(issue.clone());
             reply(StatusCode::CREATED, issue_json(repo.issues.len(), &issue))
         }
@@ -449,7 +464,7 @@ fn serve_now(shared: &Shared, method: Method, uri: Uri, headers: HeaderMap, body
                 return reply(StatusCode::UNPROCESSABLE_ENTITY, json!({ "message": "Validation Failed" }));
             };
             let association = repo.hub_association.clone().unwrap_or_else(|| "NONE".into());
-            let id = repo.comment(n as u64, "pinned-hub", &association, text, None).expect("the issue exists");
+            let id = repo.comment(n as u64, HUB_LOGIN, &association, text, None).expect("the issue exists");
             let made = repo.issues[n - 1].comments.last().cloned().expect("just added");
             reply(StatusCode::CREATED, json!({ "id": id, "body": made.body, "created_at": made.created_at, "author_association": made.association, "user": { "login": made.login } }))
         }
@@ -463,6 +478,7 @@ fn serve_now(shared: &Shared, method: Method, uri: Uri, headers: HeaderMap, body
             Some(n) => reply(StatusCode::OK, Value::Array(repo.issues[n - 1].timeline.clone())),
             None => not_found(),
         },
+        ("GET", ["user"]) => reply(StatusCode::OK, json!({ "login": HUB_LOGIN })),
         ("GET", ["repos", _, _, "releases"]) => reply(StatusCode::OK, Value::Array(repo.releases.clone())),
         ("GET", ["search", "issues"]) => {
             let q = query.iter().find(|(k, _)| k == "q").map(|(_, v)| v.to_lowercase()).unwrap_or_default();
@@ -470,9 +486,10 @@ fn serve_now(shared: &Shared, method: Method, uri: Uri, headers: HeaderMap, body
             let blind = repo.search_blind || repo.blind_searches > 0;
             repo.blind_searches = repo.blind_searches.saturating_sub(1);
             let mut words = vec![];
-            let (mut want_open, mut want_closed) = (false, false);
+            let (mut want_open, mut want_closed, mut want_issue) = (false, false, false);
             for word in q.split_whitespace() {
                 match word {
+                    "is:issue" => want_issue = true,
                     "is:open" => want_open = true,
                     "is:closed" => want_closed = true,
                     _ if word.contains(':') => {}
@@ -484,7 +501,7 @@ fn serve_now(shared: &Shared, method: Method, uri: Uri, headers: HeaderMap, body
                 .iter()
                 .enumerate()
                 .filter(|_| !blind)
-                .filter(|(_, issue)| (!want_open || issue.open) && (!want_closed || !issue.open))
+                .filter(|(_, issue)| (!want_open || issue.open) && (!want_closed || !issue.open) && !(want_issue && issue.pull))
                 .filter(|(_, issue)| {
                     let text = format!("{} {}", issue.title, issue.body).to_lowercase();
                     words.iter().all(|word| text.contains(word))

@@ -787,9 +787,8 @@ fn try_again_as_a_case_after_a_new_issue_timed_out_links_the_filed_issue_and_add
 #[test]
 fn a_third_try_looks_from_the_first_try_after_a_failed_look_and_finds_the_issue_a_5xx_filed() {
     let fake = Fake::start();
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
     // The first try was ten minutes ago: GitHub dates what it files then, and so does the row below.
-    fake.github.set_clock(now - 600);
+    fake.github.set_clock(now_secs() - 600);
     let hub = TestHub::start_reports("reports_again_first_try", Signup::Open, Policy::default(), false, Default::default(), "127.0.0.1:0", Some(fake.impatient()));
     let mut ana = Client::connect(&hub.url, &signed_up(&hub, "ana@example.test"));
     let draft = problem("Crash on launch", "It closes.");
@@ -812,6 +811,77 @@ fn a_third_try_looks_from_the_first_try_after_a_failed_look_and_finds_the_issue_
     let again = reviewed_send(&mut ana, draft, json!({ "request_id": "try-1" })).unwrap();
     assert_eq!((again["issue"].clone(), again["state"].clone()), (json!(1), json!({ "state": "open" })), "{again}");
     assert_eq!((fake.github.issue_count(), fake.posts()), (1, (1, 0)), "nothing is posted again");
+}
+
+/// Seconds since the Unix epoch now.
+fn now_secs() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64
+}
+
+#[test]
+fn try_again_links_the_hubs_own_older_issue_and_never_a_newer_copy_of_its_footer() {
+    let fake = Fake::start();
+    // The fake dates its issues by the hub's clock, so the list, newest first, is what answers.
+    fake.github.set_clock(now_secs());
+    let hub = TestHub::start_reports("reports_copied_footer", Signup::Open, Policy::default(), false, Default::default(), "127.0.0.1:0", Some(fake.impatient()));
+    let mut ana = Client::connect(&hub.url, &signed_up(&hub, "ana@example.test"));
+
+    fake.github.hang_next_post(Duration::from_secs(3));
+    let draft = problem("Crash on launch", "It closes.");
+    assert_eq!(reviewed_send(&mut ana, draft.clone(), json!({ "request_id": "try-1" })), could_not_send("GitHub may have filed this report. Check My reports before trying again."));
+    let id = listed(&mut ana)[0]["id"].as_str().unwrap().to_owned();
+    let copied = fake.github.body(1);
+    assert!(copied.ends_with(&format!("report {}", reports::ref_of(&id))), "{copied}");
+    // Newer issues that carry the same footer: one by someone else, one opened by hand with the hub's login.
+    assert_eq!(fake.github.add_issue_by("someone-else", "Crash on launch", &copied, false), 2);
+    assert_eq!(fake.github.add_issue_by(fake_github::HUB_LOGIN, "Crash on launch, again", &copied, false), 3);
+
+    let again = reviewed_send(&mut ana, draft, json!({ "request_id": "try-1" })).unwrap();
+    assert_eq!((again["issue"].clone(), again["url"].clone(), again["state"].clone()), (json!(1), json!("https://github.com/acme/app/issues/1"), json!({ "state": "open" })), "{again}");
+    assert_eq!((fake.github.issue_count(), fake.posts()), (3, (1, 0)));
+}
+
+#[test]
+fn try_again_ignores_a_pull_request_that_carries_the_footer_and_files_the_issue() {
+    let fake = Fake::start();
+    fake.github.set_clock(now_secs());
+    let hub = TestHub::start_reports("reports_footer_pull", Signup::Open, Policy::default(), false, Default::default(), "127.0.0.1:0", Some(fake.impatient()));
+    let mut ana = Client::connect(&hub.url, &signed_up(&hub, "ana@example.test"));
+
+    // A 500: GitHub filed nothing.
+    let draft = problem("Crash on launch", "It closes.");
+    let extra = reviewed(&mut ana, &draft, json!({ "request_id": "try-1" })).unwrap();
+    fake.github.fail_next(500, "Server Error", None);
+    assert_eq!(report_issue(&mut ana, draft.clone(), extra), could_not_send("GitHub is busy. Try again later."));
+    let id = listed(&mut ana)[0]["id"].as_str().unwrap().to_owned();
+    // A pull request, by the token's own login, that quotes the footer.
+    let quoted = format!("Fixes the crash.\n\n---\n\nSent from the pinned app · report {}", reports::ref_of(&id));
+    assert_eq!(fake.github.add_issue_by(fake_github::HUB_LOGIN, "Fix the crash on launch", &quoted, true), 1);
+
+    let again = reviewed_send(&mut ana, draft, json!({ "request_id": "try-1" })).unwrap();
+    assert_eq!((again["issue"].clone(), again["url"].clone(), again["state"].clone()), (json!(2), json!("https://github.com/acme/app/issues/2"), json!({ "state": "open" })), "{again}");
+    assert_eq!((fake.github.issue_count(), fake.posts()), (2, (2, 0)), "the refused post, then the one that filed");
+}
+
+#[test]
+fn try_again_finds_nothing_in_a_copy_of_the_footer_by_someone_else_and_files_the_issue() {
+    let fake = Fake::start();
+    fake.github.set_clock(now_secs());
+    let hub = TestHub::start_reports("reports_footer_foreign", Signup::Open, Policy::default(), false, Default::default(), "127.0.0.1:0", Some(fake.impatient()));
+    let mut ana = Client::connect(&hub.url, &signed_up(&hub, "ana@example.test"));
+
+    let draft = problem("Crash on launch", "It closes.");
+    let extra = reviewed(&mut ana, &draft, json!({ "request_id": "try-1" })).unwrap();
+    fake.github.fail_next(500, "Server Error", None);
+    assert_eq!(report_issue(&mut ana, draft.clone(), extra), could_not_send("GitHub is busy. Try again later."));
+    let id = listed(&mut ana)[0]["id"].as_str().unwrap().to_owned();
+    let copied = format!("Same crash here.\n\n---\n\nSent from the pinned app · report {}", reports::ref_of(&id));
+    assert_eq!(fake.github.add_issue_by("someone-else", "Crash on launch", &copied, false), 1);
+
+    let again = reviewed_send(&mut ana, draft, json!({ "request_id": "try-1" })).unwrap();
+    assert_eq!((again["issue"].clone(), again["url"].clone(), again["state"].clone()), (json!(2), json!("https://github.com/acme/app/issues/2"), json!({ "state": "open" })), "{again}");
+    assert!(fake.github.body(2).ends_with(&format!("report {}", reports::ref_of(&id))));
+    assert_eq!((fake.github.issue_count(), fake.posts()), (2, (2, 0)));
 }
 
 #[test]

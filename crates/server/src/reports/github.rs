@@ -189,6 +189,8 @@ pub struct Github {
     repo: String,
     token: String,
     timeout: std::time::Duration,
+    /// The login of the hub's token, once `GET /user` said it.
+    own_login: std::sync::Arc<std::sync::Mutex<Option<String>>>,
 }
 
 // Not derived, so the token never reaches a log.
@@ -198,9 +200,17 @@ impl std::fmt::Debug for Github {
     }
 }
 
-/// Whether the body of issue or comment `item` carries the footer reference `report_ref`.
-fn carries_ref(item: &Value, report_ref: &str) -> bool {
-    item["body"].as_str().is_some_and(|body| body.contains(&format!("report {report_ref}")))
+/// Whether issue or comment `item` is the hub's, by `login`, and its body carries the footer reference `report_ref`.
+/// A pull request never is: anyone may copy a footer into one.
+fn carries_ref(item: &Value, report_ref: &str, login: &str) -> bool {
+    item["pull_request"].is_null()
+        && item["user"]["login"].as_str().is_some_and(|author| author.eq_ignore_ascii_case(login))
+        && item["body"].as_str().is_some_and(|body| body.contains(&format!("report {report_ref}")))
+}
+
+/// The oldest of `items` that `carries_ref`: GitHub numbers issues in the order it makes them.
+fn oldest_with_ref<'a>(items: &'a [Value], report_ref: &str, login: &str) -> Option<&'a Value> {
+    items.iter().filter(|item| carries_ref(item, report_ref, login)).min_by_key(|item| item["number"].as_u64().unwrap_or(u64::MAX))
 }
 
 fn decode<T: DeserializeOwned>(value: Value) -> Result<T> {
@@ -226,12 +236,28 @@ impl Github {
 
     /// `repo` on another API root, such as `fake_github`'s.
     pub fn with_api(api: &str, repo: &str, token: &str) -> Github {
-        Github { api: api.trim_end_matches('/').to_owned(), repo: repo.to_owned(), token: token.to_owned(), timeout: pinned_core::github::CALL_TIMEOUT }
+        Github { api: api.trim_end_matches('/').to_owned(), repo: repo.to_owned(), token: token.to_owned(), timeout: pinned_core::github::CALL_TIMEOUT, own_login: Default::default() }
     }
 
     /// This client with calls that give up after `timeout`.
     pub fn with_timeout(self, timeout: std::time::Duration) -> Github {
         Github { timeout, ..self }
+    }
+
+    /// How long one call may take.
+    pub fn timeout(&self) -> std::time::Duration {
+        self.timeout
+    }
+
+    /// The login of the hub's token, asked of GitHub once.
+    async fn own_login(&self) -> Result<String> {
+        if let Some(login) = self.own_login.lock().unwrap().clone() {
+            return Ok(login);
+        }
+        let user = self.get("/user").await?;
+        let login = user["login"].as_str().filter(|login| !login.is_empty()).ok_or_else(|| Error::Failed("GitHub sent a user without a login".into()))?.to_owned();
+        *self.own_login.lock().unwrap() = Some(login.clone());
+        Ok(login)
     }
 
     /// `name` of the repository `owner/name`.
@@ -273,36 +299,43 @@ impl Github {
         decode_list(found["items"].take())
     }
 
-    /// The issue, open or closed, whose body carries `report_ref`, the footer reference of a report sent at
-    /// `sent_at`. It looks first in the issues changed since a minute before then, newest first, which GitHub answers
-    /// at once; only when they hold none does it ask search, whose index lags.
+    /// The issue, open or closed, that the hub's token made and whose body carries `report_ref`, the footer
+    /// reference of a report first sent at `sent_at`; the oldest, when a copy of the footer is about. It looks first
+    /// in the issues changed since a minute before then, which GitHub answers at once; only when they hold none does
+    /// it ask search, whose index lags.
     pub async fn issue_with_ref(&self, report_ref: &str, sent_at: Option<i64>) -> Result<Option<Issue>> {
+        let login = self.own_login().await?;
         if let Some(sent_at) = sent_at {
             let since: String = url::form_urlencoded::byte_serialize(super::poller::iso(sent_at - 60).as_bytes()).collect();
+            let mut found: Vec<Value> = vec![];
             for page in 1..=10 {
-                let found = self.get(&format!("/repos/{}/issues?state=all&since={since}&sort=created&direction=desc&per_page=100&page={page}", self.repo)).await?;
-                let Value::Array(items) = found else { return Err(Error::Failed("GitHub sent an unexpected answer: not a list".into())) };
-                if let Some(item) = items.iter().find(|item| carries_ref(item, report_ref)) {
-                    return decode(item.clone()).map(Some);
-                }
-                if items.len() < 100 {
+                let listed = self.get(&format!("/repos/{}/issues?state=all&since={since}&sort=created&direction=desc&per_page=100&page={page}", self.repo)).await?;
+                let Value::Array(items) = listed else { return Err(Error::Failed("GitHub sent an unexpected answer: not a list".into())) };
+                let full = items.len() == 100;
+                found.extend(items.into_iter().filter(|item| carries_ref(item, report_ref, &login)));
+                if !full {
                     break;
                 }
+            }
+            if let Some(item) = oldest_with_ref(&found, report_ref, &login) {
+                return decode(item.clone()).map(Some);
             }
         }
         let q = format!("\"{report_ref}\" repo:{} is:issue in:body", self.repo);
         let q: String = url::form_urlencoded::byte_serialize(q.as_bytes()).collect();
         let mut found = self.get(&format!("/search/issues?q={q}&per_page={SEARCH_LIMIT}")).await?;
         let Value::Array(items) = found["items"].take() else { return Err(Error::Failed("GitHub sent an unexpected answer: not a list".into())) };
-        items.into_iter().find(|item| carries_ref(item, report_ref)).map(decode).transpose()
+        oldest_with_ref(&items, report_ref, &login).cloned().map(decode).transpose()
     }
 
-    /// The id of the comment on issue `number` whose body carries `report_ref`.
+    /// The id of the comment on issue `number` that the hub's token wrote and whose body carries `report_ref`; the
+    /// first such, as GitHub lists comments oldest first.
     pub async fn comment_with_ref(&self, number: u64, report_ref: &str) -> Result<Option<u64>> {
+        let login = self.own_login().await?;
         for page in 1..=10 {
             let found = self.get(&format!("/repos/{}/issues/{number}/comments?per_page=100&page={page}", self.repo)).await?;
             let Value::Array(items) = found else { return Err(Error::Failed("GitHub sent an unexpected answer: not a list".into())) };
-            if let Some(comment) = items.iter().find(|c| carries_ref(c, report_ref)) {
+            if let Some(comment) = items.iter().find(|c| carries_ref(c, report_ref, &login)) {
                 return comment["id"].as_u64().map(Some).ok_or_else(|| Error::Failed("GitHub sent a comment without an id".into()));
             }
             if items.len() < 100 {
