@@ -92,13 +92,17 @@ pub fn team_name(name: &str) -> Result<&str, String> {
 /// Which of the team account's keys are set: Upstash, a Claude token for boxes (the Upstash one
 /// or a named one), GitHub, Slack. Never a value.
 pub async fn credential(hub: &Arc<Hub>, team: &Account) -> Result<CredentialState, String> {
-    let settings = hub.connectors(team).await?.get_settings();
-    Ok(CredentialState {
+    Ok(credential_in(&hub.connectors(team).await?.get_settings()))
+}
+
+/// `credential` of the team's settings as already read.
+pub fn credential_in(settings: &pinned_core::connectors::Settings) -> CredentialState {
+    CredentialState {
         upstash: settings.upstash.is_some(),
         claude: settings.upstash.as_ref().is_some_and(|u| !u.claude_hint.is_empty()) || !settings.box_claude_tokens.is_empty(),
         github: settings.github.is_some(),
         slack: settings.slack.is_some() || !settings.slack_bots.is_empty(),
-    })
+    }
 }
 
 /// A team as `member` sees it, from its `teams_of` row.

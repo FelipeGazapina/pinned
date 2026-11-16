@@ -11,7 +11,7 @@ use super::bots::{self, Start};
 use super::{calls, db};
 use crate::hub::{Account, Hub};
 use pinned_core::agent::Subject;
-use pinned_core::connectors::{Admitted, Delivery, Event, Placement, Replies, RunsOn, Trigger, TriggerInput};
+use pinned_core::connectors::{Admitted, Connectors, Delivery, Event, Placement, Replies, RunsOn, Trigger, TriggerInput};
 use pinned_core::teams::{Run, RunState, SkipReason};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -132,7 +132,13 @@ impl Turn {
 /// Why an event of bot `workflow` would start no run now, if it would not: its workflow is gone,
 /// it is not a bot yet (a draft), it is off, or (for a trigger's event) it runs only by Run now.
 pub async fn skip_reason(hub: &Arc<Hub>, team: &Account, workflow: &str, by_trigger: bool) -> Result<Option<SkipReason>, String> {
-    let Some(stored) = hub.connectors(team).await?.get_settings().connectors.into_iter().find(|c| c.id == workflow) else {
+    skip_reason_in(hub, &*hub.connectors(team).await?, team, workflow, by_trigger).await
+}
+
+/// `skip_reason` with the team's workflows as already read (`connectors`): what it reads itself
+/// is only the bot's own row.
+async fn skip_reason_in(hub: &Arc<Hub>, connectors: &Connectors, team: &Account, workflow: &str, by_trigger: bool) -> Result<Option<SkipReason>, String> {
+    let Some(stored) = connectors.get_settings().connectors.into_iter().find(|c| c.id == workflow) else {
         return Ok(Some(SkipReason::BotRemoved));
     };
     let Some(bot) = db::bot(&hub.db, team.id, workflow).await? else { return Ok(Some(SkipReason::Draft)) };
@@ -439,6 +445,7 @@ struct Taken {
 /// `start_waiting`'s takes, inside the team's turn: each waiting event or run that has a free
 /// place gets it reserved, and nothing outside pinned is called.
 async fn take_and_start(hub: &Arc<Hub>, turn: &Turn, team: &Arc<Account>, ended: &str, taken: &mut Taken) -> Result<(), String> {
+    let mut team_wide: Option<Arc<Connectors>> = None;
     loop {
         if db::live_count_on(&turn.held, team.id).await? >= db::max_live_runs(&hub.db, team.id).await? {
             return Ok(());
@@ -452,14 +459,21 @@ async fn take_and_start(hub: &Arc<Hub>, turn: &Turn, team: &Arc<Account>, ended:
                 continue;
             }
         };
-        // Every read on the shared connection comes before the take: a busy read returns before
-        // the row is taken, so the event or run still waits, counted by nobody. Any other failed
-        // read is taken and counted `StartFailed`, so a row that never reads holds up no row
-        // behind it. Only what the take is written with (`turn.held`: its counts and its
-        // reservation) rolls back with a turn that fails after it, and the turn commits whatever
-        // this returns.
+        // Every read on the shared connection comes before the take. A read of the whole team
+        // (its workflows, keys and settings: `hub.connectors`) is made once, before the turn's
+        // first take: when it fails, busy or not, this returns and every row still waits, counted
+        // by nobody, as it says nothing of any one row. The reads left per row are of bot rows
+        // only (the bot's own, and those of the bots its workflow calls): a busy one returns
+        // before the row is taken, so it still waits; any other failed one is taken and counted
+        // `StartFailed`, so a row that never reads holds up no row behind it. Only what the take
+        // is written with (`turn.held`: its counts and its reservation) rolls back with a turn
+        // that fails after it, and the turn commits whatever this returns.
+        let connectors = match &team_wide {
+            Some(connectors) => connectors.clone(),
+            None => team_wide.insert(read_team(hub, team).await?).clone(),
+        };
         if let Stored::Event { kind, event, .. } = stored {
-            let dropped = match skip_reason(hub, team, &waiting.workflow, true).await {
+            let dropped = match skip_reason_in(hub, &connectors, team, &waiting.workflow, true).await {
                 Ok(None) => None,
                 Ok(Some(reason)) => {
                     eprintln!("pinned-server: team {} bot {}: a waiting event is dropped: the bot is {}", team.id, waiting.workflow, reason.as_str());
@@ -493,14 +507,10 @@ async fn take_and_start(hub: &Arc<Hub>, turn: &Turn, team: &Arc<Account>, ended:
             Start::Member(_) => None,
         };
         // A busy read says nothing of the bot: the run still waits.
-        let read = match skip_reason(hub, team, &waiting.workflow, by_trigger).await {
+        let read = match skip_reason_in(hub, &connectors, team, &waiting.workflow, by_trigger).await {
             Ok(Some(reason)) => Err(reason),
-            Ok(None) => Ok(match bots::ready(hub, team, &waiting.workflow).await {
-                Ok(()) => match hub.connectors(team).await {
-                    Ok(connectors) => bots::work_of(&connectors, &waiting.workflow, start),
-                    Err(e) if e == crate::db::BUSY => return Err(e),
-                    Err(e) => Err(e),
-                },
+            Ok(None) => Ok(match bots::ready_in(hub, team, &connectors, &waiting.workflow).await {
+                Ok(()) => bots::work_of(&connectors, &waiting.workflow, start),
                 Err(e) if e == crate::db::BUSY => return Err(e),
                 Err(e) => Err(e),
             }),
@@ -527,6 +537,15 @@ async fn take_and_start(hub: &Arc<Hub>, turn: &Turn, team: &Arc<Account>, ended:
         let run = reserve(turn, team, &waiting.workflow, started_by, &work.subject).await?;
         taken.starts.push((Uuid::parse_str(&run.id).map_err(|e| e.to_string())?, work, told));
     }
+}
+
+/// What a turn whose read of the whole team failed answers (`next` logs it): no row was taken.
+const TEAM_UNREAD: &str = "the team's workflows or keys could not be read, so everything waiting stays in line";
+
+/// The team's workflows, keys and settings, read once for a turn's takes: busy as it is, or
+/// `TEAM_UNREAD` for any other failure, whose own text is never logged: it may quote a stored value.
+async fn read_team(hub: &Arc<Hub>, team: &Account) -> Result<Arc<Connectors>, String> {
+    hub.connectors(team).await.map_err(|e| if e == crate::db::BUSY { e } else { TEAM_UNREAD.to_owned() })
 }
 
 #[cfg(test)]

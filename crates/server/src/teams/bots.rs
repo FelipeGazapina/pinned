@@ -414,8 +414,15 @@ pub async fn run_now(hub: &Arc<Hub>, scope: &Scope, workflow_id: &str) -> Result
 /// Whether bot `workflow_id` may start a run now: it is on, its limits are above 0 (`NO_LIMIT`),
 /// its workflow is one a bot can have, and the team keeps its Upstash key and Claude token.
 pub async fn ready(hub: &Arc<Hub>, team: &Account, workflow_id: &str) -> Result<(), String> {
-    let workflows = workflows(hub, team).await?;
-    let workflow = find(&workflows, workflow_id)?;
+    ready_in(hub, team, &*hub.connectors(team).await?, workflow_id).await
+}
+
+/// `ready` with the team's workflows and keys as already read (`connectors`): what it reads
+/// itself is only bot rows, `workflow_id`'s and those of the bots its workflow calls.
+pub async fn ready_in(hub: &Arc<Hub>, team: &Account, connectors: &pinned_core::connectors::Connectors, workflow_id: &str) -> Result<(), String> {
+    let settings = connectors.get_settings();
+    let workflows = &settings.connectors;
+    let workflow = find(workflows, workflow_id)?;
     let on = db::bot(&hub.db, team.id, workflow_id).await?.is_some_and(|b| b.on);
     if !on || !workflow.enabled {
         return Err(IS_A_DRAFT.into());
@@ -425,9 +432,9 @@ pub async fn ready(hub: &Arc<Hub>, team: &Account, workflow_id: &str) -> Result<
     if !limits.is_some_and(|l| l.usd.is_finite() && l.usd > 0.0 && l.minutes > 0) {
         return Err(NO_LIMIT.into());
     }
-    available(workflow, &workflows)?;
-    callees_on(hub, team.id, workflow, &workflows).await?;
-    let credential = super::membership::credential(hub, team).await?;
+    available(workflow, workflows)?;
+    callees_on(hub, team.id, workflow, workflows).await?;
+    let credential = super::membership::credential_in(&settings);
     if !(credential.upstash && credential.claude) {
         return Err(NEEDS_KEYS.into());
     }
