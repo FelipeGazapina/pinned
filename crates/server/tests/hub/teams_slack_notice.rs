@@ -200,6 +200,10 @@ fn a_members_own_slack_bot_is_never_used() {
 fn a_team_without_its_own_slack_bot_posts_nothing_even_when_a_member_has_one() {
     let (hub, mut tb, _dina, _omar) = slack_team("teams_slack_notice_nobot", "", Some("C0FOOTER01"), true, design());
     tb.owner.client.hub(json!({ "cmd": "connect_slack", "token": "xoxb-dev-notice-lonely" })).unwrap();
+    tb.owner.client.hub(json!({ "cmd": "save_connector", "connector": {
+        "name": "Mine", "enabled": false, "trigger": { "kind": "slack-mention", "channel": "C0FOOTER01" },
+        "folder": temp(&format!("own-repo-{}", hub.database)), "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false, "instructions": "",
+    } })).unwrap();
     let before = seen("xoxb-dev-notice-lonely").len();
     tb.ask(&hub, "Red or blue footer?", &[]).unwrap();
     settle();
