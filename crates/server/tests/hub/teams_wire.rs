@@ -101,6 +101,8 @@ fn a_used_invite_stays_used_when_its_joiner_is_deleted() {
     // (a) Another person with the same code is refused like an unknown code and is not a member.
     assert_eq!(join_team(&mut carla, &used), Err(NO_INVITE.into()));
     assert_eq!(team_op(&mut carla, &team, json!({ "op": "members" })), Err(NOT_A_MEMBER.into()));
+    // A member of the team who tries the used code again is refused too, as it is not an open invite.
+    assert_eq!(join_team(&mut ana, &used), Err(NO_INVITE.into()));
     assert_eq!(db_text(&hub.database, "select count(*)::text from team_members where team::text = (select id::text from accounts where kind = 'team')"), vec!["1"], "only the owner");
 
     // (b) The owner's list of open invites does not show it.
