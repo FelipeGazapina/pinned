@@ -338,7 +338,7 @@ fn an_answer_racing_the_give_up_leaves_exactly_one_outcome() {
             escalated: false,
             answer: None,
         };
-        let call = Uuid::parse_str(&hub.runtime.block_on(teams::db::insert_call(db, tb.team, &open, None)).unwrap().id).unwrap();
+        let call = Uuid::parse_str(&hub.runtime.block_on(teams::db::insert_call(db, tb.team, &open, None, false)).unwrap().id).unwrap();
         let answer = pinned_core::teams::Answer { by: tb.owner.id.to_string(), choice: None, text: "ship".into(), kind: pinned_core::teams::AnswerKind::Choice, at: 0 };
         let (answered, gave_up) = hub.runtime.block_on(async { tokio::join!(teams::db::answer_call(db, tb.team, call, &answer, "answered"), teams::db::give_up_due(db, 0)) });
         let (answered, gave_up) = (answered.unwrap().is_some(), gave_up.unwrap().iter().any(|row| row.call.id == call.to_string()));

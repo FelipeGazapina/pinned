@@ -916,18 +916,19 @@ pub async fn email(db: &Db, account: Uuid) -> Result<Option<String>, String> {
 }
 
 /// Opens a call on its run, created now by Postgres's clock; answers it as kept. `step` is the
-/// hash of the exact step the team-box hook asks about.
-pub async fn insert_call(db: &Db, team: Uuid, call: &Call, step: Option<&str>) -> Result<Call, String> {
+/// hash of the exact step the team-box hook asks about; `by_hub` marks the limits tick's own call
+/// (`opened_by_hub`), the only one `runs_at_limit` counts.
+pub async fn insert_call(db: &Db, team: Uuid, call: &Call, step: Option<&str>, by_hub: bool) -> Result<Call, String> {
     let (id, run) = (Uuid::parse_str(&call.id).map_err(|_| "a call's id is a uuid")?, Uuid::parse_str(&call.run).map_err(|_| "a run's id is a uuid")?);
     let row = db
         .client()
         .await?
         .query_one(
             &format!(
-                "with c as (insert into team_calls (id, team, run, situation, asked, question, choices, step_hash) values ($1, $2, $3, $4, $5, $6, $7, $8) returning *)
+                "with c as (insert into team_calls (id, team, run, situation, asked, question, choices, step_hash, opened_by_hub) values ($1, $2, $3, $4, $5, $6, $7, $8, $9) returning *)
                  select {CALL_COLUMNS} from c join team_runs r on r.id = c.run"
             ),
-            &[&id, &team, &run, &call.situation.as_str(), &json(&call.asked)?, &call.question, &json(&call.choices)?, &step],
+            &[&id, &team, &run, &call.situation.as_str(), &json(&call.asked)?, &call.question, &json(&call.choices)?, &step, &by_hub],
         )
         .await
         .map_err(err)?;
@@ -944,8 +945,8 @@ pub async fn pass_call(db: &Db, team: Uuid, call: &Call, step: Option<&str>, fir
         .await?
         .query_opt(
             &format!(
-                "with c as (insert into team_calls (id, team, run, situation, asked, question, choices, step_hash, created_at)
-                   select $1, $2, $3, $4, $5, $6, $7, $8, f.created_at from team_runs w, team_calls f
+                "with c as (insert into team_calls (id, team, run, situation, asked, question, choices, step_hash, created_at, opened_by_hub)
+                   select $1, $2, $3, $4, $5, $6, $7, $8, f.created_at, f.opened_by_hub from team_runs w, team_calls f
                    where w.team = $2 and w.id = $3 and w.state = 'waiting' and f.team = $2 and f.id = $9
                    returning *)
                  select {CALL_COLUMNS} from c join team_runs r on r.id = c.run"
@@ -1518,7 +1519,8 @@ pub struct AtLimit {
 }
 
 /// The runs at work (not reserved) whose active time reached their bot's `minutes`, or whose
-/// `cost_usd` its `usd`, and that have no `on_limit` call yet: one limit call per run.
+/// `cost_usd` its `usd`, and that have no `on_limit` call the hub opened yet (`opened_by_hub`):
+/// one limit call per run, and none a session opened counts.
 pub async fn runs_at_limit(db: &Db) -> Result<Vec<AtLimit>, String> {
     let rows = db
         .client()
@@ -1529,7 +1531,7 @@ pub async fn runs_at_limit(db: &Db) -> Result<Vec<AtLimit>, String> {
                  where r.state in ('working', 'taken_over') and not r.reserved
                    and (r.cost_usd >= (b.limits->>'usd')::float8
                         or extract(epoch from now() - coalesce(r.opened_at, r.started_at))::bigint - r.waiting_secs >= (b.limits->>'minutes')::bigint * 60)
-                   and not exists (select 1 from team_calls c where c.run = r.id and c.situation = 'on_limit')",
+                   and not exists (select 1 from team_calls c where c.run = r.id and c.situation = 'on_limit' and c.opened_by_hub)",
             &[],
         )
         .await
