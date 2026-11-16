@@ -6,6 +6,7 @@
 //! The `join` op may be a stub too, so a member is put on a team with SQL (`join_team`).
 
 use super::*;
+use uuid::Uuid;
 
 const B_TOKEN: &str = "sk-ant-oat01-bprivatesecret";
 const B_HINT: &str = "…cret";
@@ -141,6 +142,11 @@ fn nothing_of_a_members_own_account_shows_in_what_the_team_answers() {
             let answer = team_op(client, &team, op.clone());
             let text = match &answer {
                 Ok(value) => value.to_string(),
+                // A team's settings and schedules are no member's to read: refused, naming the call only.
+                Err(e) if label.starts_with("hub ") => {
+                    assert_eq!(e, &format!("{} does not run on a team", &label[4..]), "{who} {label}");
+                    e.clone()
+                }
                 Err(e) if e == NOT_BUILT && STUBS.contains(label) => {
                     stubs_seen.push(format!("{who} {label}"));
                     continue;
@@ -175,7 +181,8 @@ fn nothing_of_a_members_own_account_shows_in_what_the_team_answers() {
     }
     // B's real workflow, run on the team by B itself, is one the team's account does not have.
     let b_flow = before["settings"]["connectors"][0]["id"].as_str().unwrap().to_owned();
-    assert_eq!(via(&mut s.b, &team, json!({ "cmd": "run_workflow", "id": b_flow })), Err(format!("this team has no workflow {b_flow}")));
+    assert_eq!(via(&mut s.b, &team, json!({ "cmd": "run_workflow", "id": b_flow })), Err("run_workflow does not run on a team".into()));
+    assert_eq!(team_op(&mut s.b, &team, json!({ "op": "run_now", "workflow": b_flow })), Err(format!("this team has no workflow {b_flow}")));
 
     assert_eq!(personal(&mut s.b), before, "B's own account is as it was");
 }
@@ -251,7 +258,8 @@ fn a_member_cannot_set_the_teams_keys_but_its_owner_can() {
         assert_eq!(via(&mut s.b, &team, call.clone()), Err(format!("{OWNER_ONLY} {cmd} on the team")), "member {cmd}");
     }
     // Refused before it ran: the team holds none of it.
-    let team_settings = via(&mut s.b, &team, json!({ "cmd": "get_settings" })).unwrap();
+    let team_id = Uuid::parse_str(&team).unwrap();
+    let team_settings = team_settings(&s.hub, team_id);
     assert_eq!(team_settings["upstash"], Value::Null);
     assert_eq!(no_tokens(&team_settings["box_claude_tokens"]), true);
 
@@ -268,7 +276,7 @@ fn a_member_cannot_set_the_teams_keys_but_its_owner_can() {
     assert_eq!(extended, Err("this machine is no box".into()), "the owner passes the gate and finds B's machine is no team box");
     assert_eq!(extended, unknown, "B's machine answers as one nobody has");
 
-    let team_settings = via(&mut s.a, &team, json!({ "cmd": "get_settings" })).unwrap();
+    let team_settings = self::team_settings(&s.hub, team_id);
     assert_eq!(team_settings["box_claude_tokens"], json!({ "team-claude": "…oken" }));
     assert!(!team_settings["upstash"].is_null());
     assert!(!team_settings.to_string().contains(BOX_KEY) && !team_settings.to_string().contains("teamtoken"), "the team's keys show only as hints: {team_settings}");
@@ -321,15 +329,15 @@ fn a_team_the_person_is_not_in_refuses_every_op_and_a_removed_member_is_refused_
     assert_eq!(team_op(&mut s.b, "6f1c0b1e-0000-4000-8000-0000000000ff", json!({ "op": "members" })), Err(NOT_MEMBER.into()), "a team that does not exist answers the same");
     assert_eq!(team_op(&mut s.b, "not-a-team", json!({ "op": "members" })), Err("not-a-team is not a team id".into()));
     // The refused calls changed nothing on the other team.
-    assert_eq!(via(&mut s.a, &other, json!({ "cmd": "get_settings" })).unwrap()["connectors"], json!([]), "no sneaked workflow");
+    assert_eq!(team_workflows(&s.hub, Uuid::parse_str(&other).unwrap()), Vec::<Value>::new(), "no sneaked workflow");
 
     // A member on T reads it; the row goes; the very next call is refused.
     let team = s.team.clone();
-    assert!(via(&mut s.b, &team, json!({ "cmd": "get_settings" })).is_ok());
+    assert!(team_op(&mut s.b, &team, json!({ "op": "members" })).is_ok());
     run_sql(&s.hub, &format!("delete from team_members where team = '{team}' and member = '{}'", s.b_id));
-    assert_eq!(via(&mut s.b, &team, json!({ "cmd": "get_settings" })), Err(NOT_MEMBER.into()));
+    assert_eq!(via(&mut s.b, &team, json!({ "cmd": "box_status", "machine": "6f1c0b1e-0000-4000-8000-0000000000ee" })), Err(NOT_MEMBER.into()));
     assert_eq!(team_op(&mut s.b, &team, json!({ "op": "projects" })), Err(NOT_MEMBER.into()));
-    assert_eq!(via(&mut s.a, &team, json!({ "cmd": "get_settings" })).map(|_| ()), Ok(()), "the owner is still in");
+    assert_eq!(team_op(&mut s.a, &team, json!({ "op": "members" })).map(|_| ()), Ok(()), "the owner is still in");
 }
 
 #[test]
@@ -340,16 +348,15 @@ fn a_workflow_a_member_saves_on_the_team_is_the_teams_and_not_the_members() {
     let team = s.team.clone();
     let workflow = json!({ "name": "team-flow", "enabled": false, "trigger": { "kind": "linear-label", "label": "agent" },
         "folder": "/w/team", "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false, "instructions": "" });
-    let saved = via(&mut s.a, &team, json!({ "cmd": "save_connector", "connector": workflow })).unwrap();
-    let id = saved["id"].as_str().unwrap().to_owned();
-    save_schedule_via(&mut s.b, &team, "team-schedule");
+    // A team's workflow is saved with its bot; a team keeps no schedules.
+    assert_eq!(team_op(&mut s.a, &team, json!({ "op": "save_bot", "bot": { "workflow": "" }, "connector": workflow })), Ok(Value::Null));
+    let id = team_workflows(&s.hub, Uuid::parse_str(&team).unwrap())[0]["id"].as_str().unwrap().to_owned();
+    assert_eq!(via(&mut s.b, &team, json!({ "cmd": "save_schedule", "task": task_body("team-schedule") })), Err("save_schedule does not run on a team".into()));
 
-    let names = |settings: &Value| settings["connectors"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
     for client in [&mut s.a, &mut s.b] {
-        let team_settings = via(client, &team, json!({ "cmd": "get_settings" })).unwrap();
-        assert_eq!(names(&team_settings), ["team-flow"], "both members see the team's workflow, and only it");
-        let schedules = via(client, &team, json!({ "cmd": "list_schedules" })).unwrap().to_string();
-        assert!(schedules.contains("team-schedule") && !schedules.contains(B_SCHEDULE), "{schedules}");
+        let bots = team_op(client, &team, json!({ "op": "bots" })).unwrap();
+        let names = bots.as_array().unwrap().iter().map(|b| (b["workflow"].as_str().unwrap().to_owned(), b["name"].as_str().unwrap().to_owned())).collect::<Vec<_>>();
+        assert_eq!(names, [(id.clone(), "team-flow".to_owned())], "both members see the team's workflow, and only it");
     }
     let a_after = s.a.hub(json!({ "cmd": "get_settings" })).unwrap();
     assert_eq!(a_after, a_before, "A's own settings did not get the team's workflow");
@@ -359,10 +366,6 @@ fn a_workflow_a_member_saves_on_the_team_is_the_teams_and_not_the_members() {
     // It is stored under the team's account, by SQL as well.
     assert_eq!(sql_text(&s.hub, &format!("select count(*)::text from accounts where id = '{team}' and store::text like '%team-flow%'")), "1");
     assert_eq!(sql_text(&s.hub, &format!("select count(*)::text from accounts where id <> '{team}' and store::text like '%team-flow%'")), "0");
-}
-
-fn save_schedule_via(client: &mut Client, team: &str, title: &str) {
-    via(client, team, json!({ "cmd": "save_schedule", "task": task_body(title) })).unwrap();
 }
 
 #[test]

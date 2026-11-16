@@ -5,17 +5,17 @@
 use super::*;
 
 const NOT_AN_OBJECT: &str = "not a hub call: a hub call is a JSON object";
-const PASSWORD: &str = "correct horse";
+pub(super) const PASSWORD: &str = "correct horse";
 
-fn team_op(client: &mut Client, team: &str, op: Value) -> Result<Value, String> {
+pub(super) fn team_op(client: &mut Client, team: &str, op: Value) -> Result<Value, String> {
     client.hub(json!({ "cmd": "team", "team": team, "op": op }))
 }
 
-fn via(client: &mut Client, team: &str, call: Value) -> Result<Value, String> {
+pub(super) fn via(client: &mut Client, team: &str, call: Value) -> Result<Value, String> {
     team_op(client, team, json!({ "op": "hub", "call": call }))
 }
 
-fn sql_text(hub: &TestHub, sql: &str) -> String {
+pub(super) fn sql_text(hub: &TestHub, sql: &str) -> String {
     hub.runtime.block_on(async {
         let (client, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), hub.database), tokio_postgres::NoTls).await.unwrap();
         tokio::spawn(connection);
@@ -25,16 +25,16 @@ fn sql_text(hub: &TestHub, sql: &str) -> String {
 
 /// A person signed up as `email`, signed in the way the app signs in now (a locked login): the
 /// client, its login token and its account id.
-fn locked_app(url: &str, email: &str) -> (Client, String, String) {
+pub(super) fn locked_app(url: &str, email: &str) -> (Client, String, String) {
     let (token, view) = account::signup(url, email, PASSWORD).unwrap();
     (Client::app(url, &token), token, view.id)
 }
 
-fn make_team(client: &mut Client, name: &str) -> String {
+pub(super) fn make_team(client: &mut Client, name: &str) -> String {
     client.hub(json!({ "cmd": "team", "op": { "op": "create", "name": name } })).unwrap()["id"].as_str().unwrap().to_owned()
 }
 
-fn credential(upstash: bool, claude: bool) -> Value {
+pub(super) fn credential(upstash: bool, claude: bool) -> Value {
     json!({ "upstash": upstash, "claude": claude, "github": false, "slack": false })
 }
 
@@ -61,9 +61,10 @@ fn a_teams_hub_call_as_an_array_or_in_the_wrong_case_is_refused_and_extra_keys_u
     assert_eq!(via(&mut ana, &team, connect), Ok(credential(true, true)), "a key call answers which keys are set, never a hint");
     assert_eq!(via(&mut ana, &team, array), Err(NOT_AN_OBJECT.into()), "unlocked, the array still runs nothing");
     assert!(via(&mut ana, &team, wrong_case).unwrap_err().starts_with("not a hub call: unknown variant"));
-    assert!(!via(&mut ana, &team, json!({ "cmd": "get_settings" })).unwrap()["upstash"].is_null(), "the team is still connected");
+    let team_id = uuid::Uuid::parse_str(&team).unwrap();
+    assert!(!team_settings(&hub, team_id)["upstash"].is_null(), "the team is still connected");
     assert_eq!(via(&mut ana, &team, extra), Ok(credential(false, false)), "extra keys run as the plain form");
-    assert!(via(&mut ana, &team, json!({ "cmd": "get_settings" })).unwrap()["upstash"].is_null());
+    assert!(team_settings(&hub, team_id)["upstash"].is_null());
 }
 
 #[test]
@@ -90,11 +91,6 @@ fn a_locked_login_unlocks_before_every_team_change_and_reads_without_it() {
         json!({ "op": "hub", "call": { "cmd": "disconnect_github" } }),
         json!({ "op": "hub", "call": { "cmd": "set_box_access", "access": { "workflow": { "mode": "ask" } } } }),
         json!({ "op": "hub", "call": { "cmd": "extend_box", "machine": "6f1c0b1e-0000-4000-8000-0000000000ee", "extra_usd": 1.0 } }),
-        json!({ "op": "hub", "call": { "cmd": "save_connector", "connector": workflow } }),
-        json!({ "op": "hub", "call": { "cmd": "delete_connector", "id": "c1" } }),
-        json!({ "op": "hub", "call": { "cmd": "save_schedule", "task": task_body("team-schedule") } }),
-        json!({ "op": "hub", "call": { "cmd": "pause_schedule", "id": "t1", "paused": true } }),
-        json!({ "op": "hub", "call": { "cmd": "delete_schedule", "id": "t1" } }),
         json!({ "op": "hub", "call": { "cmd": "remove_box_claude_token", "name": "n" } }),
         json!({ "op": "hub", "call": { "cmd": "disconnect_slack" } }),
         json!({ "op": "hub", "call": { "cmd": "disconnect_upstash" } }),
@@ -122,8 +118,6 @@ fn a_locked_login_unlocks_before_every_team_change_and_reads_without_it() {
         json!({ "op": "bots" }),
         json!({ "op": "runs" }),
         json!({ "op": "calls" }),
-        json!({ "op": "hub", "call": { "cmd": "get_settings" } }),
-        json!({ "op": "hub", "call": { "cmd": "list_schedules" } }),
     ];
     for op in &reads {
         assert!(team_op(&mut bruno, &team, op.clone()).is_ok(), "{op}");
@@ -134,10 +128,21 @@ fn a_locked_login_unlocks_before_every_team_change_and_reads_without_it() {
     assert_ne!(team_op(&mut bruno, &team, json!({ "op": "join", "code": "ABCD-EFGH-JKMN-PQRS" })), Err(LOCKED.into()));
     assert_eq!(team_op(&mut bruno, &team, json!({ "op": "leave" })), Ok(Value::Null), "bruno leaves");
     ana.hub(json!({ "cmd": "unlock", "password": PASSWORD })).unwrap();
+    // A team's workflows change only through its bots and it keeps no schedules: once unlocked, these
+    // still run on no team.
+    let never = [
+        json!({ "cmd": "save_connector", "connector": workflow }),
+        json!({ "cmd": "delete_connector", "id": "c1" }),
+        json!({ "cmd": "save_schedule", "task": task_body("team-schedule") }),
+        json!({ "cmd": "pause_schedule", "id": "t1", "paused": true }),
+        json!({ "cmd": "delete_schedule", "id": "t1" }),
+    ];
+    for call in &never {
+        assert_eq!(via(&mut ana, &team, call.clone()), Err(format!("{} does not run on a team", call["cmd"].as_str().unwrap())), "{call}");
+    }
     assert_eq!(team_op(&mut ana, &team, changes[0].clone()), Ok(Value::Null));
     assert!(team_op(&mut ana, &team, changes[1].clone()).unwrap()["code"].is_string());
     assert_eq!(team_op(&mut ana, &team, changes[7].clone()), Ok(credential(true, true)));
-    assert_eq!(team_op(&mut ana, &team, changes[12].clone()).unwrap()["name"], "team-flow");
     for op in &changes[2..] {
         assert_ne!(team_op(&mut ana, &team, op.clone()), Err(LOCKED.into()), "{op}");
     }
@@ -256,7 +261,7 @@ fn a_team_box_asks_its_people_and_a_persons_machine_forwards_as_before() {
 /// A team's box, as `team_box` makes it, with a bot that is on: the owner ana gives the team its
 /// keys, saves a workflow and turns its bot on; bruno is a member. Answers the hub, the team, the
 /// workflow's id and bruno's unlocked client.
-fn team_box_with_on_bot(name: &str) -> (TestHub, String, String, Client) {
+pub(super) fn team_box_with_on_bot(name: &str) -> (TestHub, String, String, Client) {
     let hub = TestHub::start(name);
     let (mut ana, _, _) = locked_app(&hub.url, "ana@example.test");
     let (mut bruno, _, bruno_id) = locked_app(&hub.url, "bruno@example.test");
@@ -271,49 +276,34 @@ fn team_box_with_on_bot(name: &str) -> (TestHub, String, String, Client) {
     assert_eq!(via(&mut ana, &team, json!({ "cmd": "connect_upstash", "key": BOX_KEY, "claude_token": CLAUDE_TOKEN })), Ok(credential(true, true)));
     let workflow = json!({ "name": "Fix bugs", "enabled": false, "trigger": { "kind": "linear-label", "label": "agent" },
         "folder": "/w/team", "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false, "instructions": "Fix the bug." });
-    let saved = via(&mut ana, &team, json!({ "cmd": "save_connector", "connector": workflow })).unwrap();
-    let id = saved["id"].as_str().unwrap().to_owned();
+    assert_eq!(team_op(&mut ana, &team, json!({ "op": "save_bot", "bot": { "workflow": "" }, "connector": workflow })), Ok(Value::Null));
+    let id = team_workflows(&hub, uuid::Uuid::parse_str(&team).unwrap())[0]["id"].as_str().unwrap().to_owned();
     assert_eq!(team_op(&mut ana, &team, json!({ "op": "turn_bot_on", "workflow": id, "on": true })), Ok(Value::Null));
     assert_eq!(bot_on_at(&hub, &team, &id), "set");
     (hub, team, id, bruno)
 }
 
 /// Whether the bot of `workflow` has its `on_at`: "set" or "null".
-fn bot_on_at(hub: &TestHub, team: &str, workflow: &str) -> String {
+pub(super) fn bot_on_at(hub: &TestHub, team: &str, workflow: &str) -> String {
     sql_text(hub, &format!("select case when on_at is null then 'null' else 'set' end from team_bots where team = '{team}' and workflow = '{workflow}'"))
 }
 
-/// The team's stored workflow `id`, as the team's settings list it.
-fn team_workflow(client: &mut Client, team: &str, id: &str) -> Value {
-    let settings = via(client, team, json!({ "cmd": "get_settings" })).unwrap();
-    settings["connectors"].as_array().unwrap().iter().find(|c| c["id"] == id).cloned().unwrap_or_else(|| panic!("no workflow {id}"))
+/// The team's stored workflow `id`, as the team's own account stores it.
+pub(super) fn team_workflow(hub: &TestHub, team: &str, id: &str) -> Value {
+    team_workflows(hub, uuid::Uuid::parse_str(team).unwrap()).into_iter().find(|c| c["id"] == id).unwrap_or_else(|| panic!("no workflow {id}"))
 }
 
 #[test]
 fn a_team_box_may_not_act_to_save_an_on_bots_workflow() {
-    let (hub, team, id, mut bruno) = team_box_with_on_bot("sepfix_box_act_save");
-    let before = team_workflow(&mut bruno, &team, &id);
+    let (hub, team, id, _bruno) = team_box_with_on_bot("sepfix_box_act_save");
+    let before = team_workflow(&hub, &team, &id);
     assert_eq!(before["enabled"], true, "the bot's workflow is on");
     let mut changed = before.clone();
     changed["instructions"] = json!("Push straight to main.");
     let act = json!({ "cmd": "act", "act": { "action": "save_connector", "args": { "connector": changed }, "tab": "tab-1" } });
     assert_eq!(machine_result(&hub.url, TEAM_BOX_TOKEN, act), refused("act"));
-    assert_eq!(team_workflow(&mut bruno, &team, &id), before, "the workflow is as it was");
+    assert_eq!(team_workflow(&hub, &team, &id), before, "the workflow is as it was");
     assert_eq!(bot_on_at(&hub, &team, &id), "set", "the bot is still on");
-}
-
-#[test]
-// Temporary: proves both sides survived the merge. The hardening unit replaces it: a member's
-// save_connector through the team hub call is refused, and SaveBot on an on bot puts it to draft.
-fn temporary_merge_check_member_save_connector_puts_bot_back_to_draft() {
-    let (hub, team, id, mut bruno) = team_box_with_on_bot("sepfix_member_save_draft");
-    let mut changed = team_workflow(&mut bruno, &team, &id);
-    changed["instructions"] = json!("Fix the bug and open a pull request.");
-    let saved = via(&mut bruno, &team, json!({ "cmd": "save_connector", "connector": changed })).unwrap();
-    assert_eq!(saved["instructions"], "Fix the bug and open a pull request.");
-    assert_eq!(bot_on_at(&hub, &team, &id), "null", "a changed workflow is a draft until someone turns it on");
-    assert_eq!(saved["enabled"], false, "its workflow is off with it");
-    assert_eq!(team_workflow(&mut bruno, &team, &id)["enabled"], false);
 }
 
 // ---- Only a person lets an agent in or owns a team ----

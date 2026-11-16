@@ -99,7 +99,8 @@ pub fn team_id(team: Option<String>) -> Result<Option<Uuid>, String> {
 
 /// Whether a client on a `locked` login unlocks with its password before `op`: a personal call
 /// needs what it needs on the person's own account (`surface::owner_only`), and the team asks too
-/// before anything that changes who is on it, its keys, which bots run, or what they may spend.
+/// before anything that changes who is on it, its projects, groups, keys or bots, starts or steers
+/// a run, answers a call or talks in its chat. A stop, giving a run back and the reads do not ask.
 /// Exhaustive on purpose: a new op does not compile until it is placed here.
 pub fn owner_only(op: &Op, locked: bool) -> bool {
     let team = match op {
@@ -111,29 +112,31 @@ pub fn owner_only(op: &Op, locked: bool) -> bool {
             | TeamOp::RemoveMember { .. }
             | TeamOp::Join { .. }
             | TeamOp::Leave
+            | TeamOp::AttachProject { .. }
+            | TeamOp::DetachProject { .. }
             | TeamOp::SaveGroup { .. }
+            | TeamOp::JoinGroup { .. }
+            | TeamOp::LeaveGroup { .. }
             | TeamOp::SaveBot { .. }
             | TeamOp::TurnBotOn { .. }
+            | TeamOp::DeleteBot { .. }
+            | TeamOp::RunNow { .. }
+            | TeamOp::AnswerCall { .. }
+            | TeamOp::TakeOver { .. }
+            | TeamOp::Chat { .. }
             | TeamOp::Hub { .. } => true,
+            // A stop, giving a run back, and what only reads.
             TeamOp::List
             | TeamOp::Create { .. }
             | TeamOp::Members
-            | TeamOp::AttachProject { .. }
-            | TeamOp::DetachProject { .. }
             | TeamOp::Projects
             | TeamOp::Groups
-            | TeamOp::JoinGroup { .. }
-            | TeamOp::LeaveGroup { .. }
             | TeamOp::Bots
-            | TeamOp::RunNow { .. }
             | TeamOp::Runs
             | TeamOp::Calls
-            | TeamOp::AnswerCall { .. }
-            | TeamOp::TakeOver { .. }
             | TeamOp::GiveBack { .. }
             | TeamOp::StopRun { .. }
             | TeamOp::RunLog { .. }
-            | TeamOp::Chat { .. }
             | TeamOp::AskPeople { .. } => false,
         },
     };
@@ -180,8 +183,9 @@ pub async fn call(hub: &Arc<Hub>, person: &Arc<Account>, team: Option<Uuid>, op:
         TeamOp::JoinGroup { handle } => json(groups::join_group(hub, s, &handle).await?),
         TeamOp::LeaveGroup { handle } => json(groups::leave_group(hub, s, &handle).await?),
         TeamOp::Bots => json(bots::bots(hub, s).await?),
-        TeamOp::SaveBot { bot } => json(bots::save_bot(hub, s, bot).await?),
+        TeamOp::SaveBot { bot, connector } => json(bots::save_bot(hub, s, bot, connector).await?),
         TeamOp::TurnBotOn { workflow, on } => json(bots::turn_bot_on(hub, s, &workflow, on).await?),
+        TeamOp::DeleteBot { workflow } => json(bots::delete_bot(hub, s, &workflow).await?),
         TeamOp::RunNow { workflow } => json(bots::run_now(hub, s, &workflow).await?),
         TeamOp::Runs => json(calls::runs(hub, s).await?),
         TeamOp::Calls => json(calls::calls(hub, s).await?),
@@ -238,15 +242,14 @@ pub struct Rule {
     pub unlock: bool,
 }
 
-/// The team's rule for `call`. Members read the settings, keep workflows and schedules and run
-/// them; only the owner sets the team's keys and box access and spends more on a box. Everything
+/// The team's rule for `call`. Members read a box's status; only the owner sets the team's keys
+/// and box access and spends more on a box. A team's workflows are kept and run as its bots. Everything
 /// else is refused: a team has no machines but its boxes, no files, no password, no agents and
 /// no sessions of its own. Exhaustive on purpose, with no catch-all: a new `HubCall` does not
 /// compile until it is placed here.
 pub fn hub_rule(call: &HubCall) -> Rule {
     let (gate, unlock) = match call {
-        HubCall::GetSettings { .. } | HubCall::ListSchedules { .. } | HubCall::ScheduleRuns { .. } | HubCall::RunWorkflow { .. } | HubCall::BoxStatus { .. } => (Gate::Member, false),
-        HubCall::SaveConnector { .. } | HubCall::DeleteConnector { .. } | HubCall::SaveSchedule { .. } | HubCall::PauseSchedule { .. } | HubCall::DeleteSchedule { .. } => (Gate::Member, true),
+        HubCall::BoxStatus { .. } => (Gate::Member, false),
         HubCall::SetBoxAccess { .. } | HubCall::ExtendBox { .. } => (Gate::Owner, true),
         HubCall::ConnectUpstash { .. }
         | HubCall::DisconnectUpstash { .. }
@@ -256,8 +259,19 @@ pub fn hub_rule(call: &HubCall) -> Rule {
         | HubCall::DisconnectGithub { .. }
         | HubCall::ConnectSlack { .. }
         | HubCall::DisconnectSlack { .. } => (Gate::OwnerKey, true),
+        // A team's workflows change only through its bots (`TeamOp::SaveBot`, `DeleteBot`, `RunNow`),
+        // it keeps no schedules yet, and its settings show its keys' hints.
+        HubCall::GetSettings { .. }
+        | HubCall::ListSchedules { .. }
+        | HubCall::ScheduleRuns { .. }
+        | HubCall::RunWorkflow { .. }
+        | HubCall::SaveConnector { .. }
+        | HubCall::DeleteConnector { .. }
+        | HubCall::SaveSchedule { .. }
+        | HubCall::PauseSchedule { .. }
+        | HubCall::DeleteSchedule { .. }
         // Keys the team does not keep, and reads made with a key.
-        HubCall::ConnectLinear { .. }
+        | HubCall::ConnectLinear { .. }
         | HubCall::DisconnectLinear { .. }
         | HubCall::LinearSuggestions { .. }
         | HubCall::SlackSuggestions { .. }
@@ -410,8 +424,13 @@ mod tests {
     }
 
     #[test]
-    fn a_member_runs_workflows_and_only_the_owner_sets_keys() {
-        let members = [
+    fn a_member_reads_a_boxs_status_only_the_owner_sets_keys_and_nobody_keeps_workflows_by_hub() {
+        let box_status = json!({ "cmd": "box_status", "machine": "m1" });
+        assert_eq!(hub_call_allowed(&hub_call(box_status.clone()), Role::Member), Ok(()));
+        assert_eq!(hub_call_allowed(&hub_call(box_status), Role::Owner), Ok(()));
+        // A team's workflows change only through its bots, it keeps no schedules, and its
+        // settings show its keys' hints: refused for every role, the owner too.
+        let workflows = [
             json!({ "cmd": "get_settings" }),
             json!({ "cmd": "save_connector", "connector": {
                 "name": "Bugs", "enabled": false, "trigger": { "kind": "linear-label", "label": "agent" },
@@ -429,11 +448,12 @@ mod tests {
             json!({ "cmd": "delete_schedule", "id": "t1" }),
             json!({ "cmd": "schedule_runs", "id": "t1" }),
             json!({ "cmd": "run_workflow", "id": "c1" }),
-            json!({ "cmd": "box_status", "machine": "m1" }),
         ];
-        for call in members {
-            assert_eq!(hub_call_allowed(&hub_call(call.clone()), Role::Member), Ok(()), "{call}");
-            assert_eq!(hub_call_allowed(&hub_call(call.clone()), Role::Owner), Ok(()), "{call}");
+        for call in workflows {
+            let cmd = call["cmd"].as_str().unwrap().to_owned();
+            for role in [Role::Owner, Role::Member] {
+                assert_eq!(hub_call_allowed(&hub_call(call.clone()), role), Err(format!("{cmd} does not run on a team")), "{call}");
+            }
         }
         let owners = [
             json!({ "cmd": "connect_upstash", "key": "k", "claude_token": "t" }),
@@ -504,8 +524,15 @@ mod tests {
             json!({ "op": "hub", "call": { "cmd": "set_box_claude_token", "name": "n", "token": "t" } }),
             json!({ "op": "hub", "call": { "cmd": "disconnect_slack" } }),
             json!({ "op": "hub", "call": { "cmd": "extend_box", "machine": "m1", "extra_usd": 1.0 } }),
-            json!({ "op": "hub", "call": { "cmd": "delete_connector", "id": "c1" } }),
-            json!({ "op": "hub", "call": { "cmd": "pause_schedule", "id": "t1", "paused": true } }),
+            json!({ "op": "attach_project", "key": "github.com/acme/site" }),
+            json!({ "op": "detach_project", "key": "github.com/acme/site" }),
+            json!({ "op": "join_group", "handle": "design" }),
+            json!({ "op": "leave_group", "handle": "design" }),
+            json!({ "op": "delete_bot", "workflow": "c1" }),
+            json!({ "op": "run_now", "workflow": "c1" }),
+            json!({ "op": "answer_call", "id": "k1", "answer": { "kind": { "kind": "pass_to", "handle": "design" } } }),
+            json!({ "op": "take_over", "run": "r1" }),
+            json!({ "op": "chat", "text": "hi" }),
         ];
         for op in changes {
             let op = Op::read(serde_json::from_value(op.clone()).unwrap()).unwrap_or_else(|e| panic!("{e}"));
@@ -520,8 +547,9 @@ mod tests {
             json!({ "op": "bots" }),
             json!({ "op": "runs" }),
             json!({ "op": "calls" }),
-            json!({ "op": "hub", "call": { "cmd": "get_settings" } }),
-            json!({ "op": "hub", "call": { "cmd": "list_schedules" } }),
+            json!({ "op": "stop_run", "run": "r1" }),
+            json!({ "op": "give_back", "run": "r1" }),
+            json!({ "op": "run_log", "run": "r1" }),
             json!({ "op": "hub", "call": { "cmd": "box_status", "machine": "m1" } }),
         ];
         for op in reads {

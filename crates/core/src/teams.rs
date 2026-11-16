@@ -435,8 +435,17 @@ pub enum TeamOp {
     LeaveGroup { handle: String },
     /// `Vec<Bot>`.
     Bots,
-    SaveBot { bot: Bot },
+    /// Saves the bot, as a draft. With `connector`, the team's workflow itself (the `Connector`
+    /// `HubCall::SaveConnector` takes, new when its `id` is empty) is saved with it: the one way a
+    /// member changes a team's workflows. The bot then is that workflow's.
+    SaveBot {
+        bot: Bot,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        connector: Option<crate::connectors::Connector>,
+    },
     TurnBotOn { workflow: String, on: bool },
+    /// Deletes a bot that is off, and its team workflow. Past runs stay listed.
+    DeleteBot { workflow: String },
     /// `Run`.
     RunNow { workflow: String },
     /// `Vec<Run>`.
@@ -540,6 +549,7 @@ mod tests {
             json!({ "op": "bots" }),
             json!({ "op": "save_bot", "bot": bot }),
             json!({ "op": "turn_bot_on", "workflow": "c1", "on": true }),
+            json!({ "op": "delete_bot", "workflow": "c1" }),
             json!({ "op": "run_now", "workflow": "c1" }),
             json!({ "op": "runs" }),
             json!({ "op": "calls" }),
@@ -570,6 +580,13 @@ mod tests {
     fn a_short_answer_and_bot_read_their_defaults() {
         let TeamOp::AnswerCall { answer, .. } = serde_json::from_value(json!({ "op": "answer_call", "id": "k1", "answer": { "kind": { "kind": "pass_to", "handle": "design" } } })).unwrap() else { panic!() };
         assert_eq!(answer, Answer { by: String::new(), choice: None, text: String::new(), kind: AnswerKind::PassTo { handle: "design".into() }, at: 0 });
+        let TeamOp::SaveBot { connector: None, .. } = serde_json::from_value(json!({ "op": "save_bot", "bot": { "workflow": "c1" } })).unwrap() else { panic!("an older app's save_bot has no connector") };
+        let with = json!({ "op": "save_bot", "bot": { "workflow": "" }, "connector": {
+            "name": "Fix", "enabled": false, "trigger": { "kind": "linear-label", "label": "agent" },
+            "folder": "/w", "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false, "instructions": "",
+        } });
+        let TeamOp::SaveBot { connector: Some(connector), .. } = serde_json::from_value(with).unwrap() else { panic!("save_bot with its workflow") };
+        assert_eq!((connector.id.as_str(), connector.name.as_str()), ("", "Fix"));
         let bot: Bot = serde_json::from_value(json!({ "workflow": "c1" })).unwrap();
         assert_eq!(bot.calls, CallRules::default());
         assert_eq!(bot.limits, BotLimits { usd: 5.0, minutes: 30 });

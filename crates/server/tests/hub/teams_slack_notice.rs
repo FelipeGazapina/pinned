@@ -86,12 +86,14 @@ fn slack_team(name: &str, token: &str, channel: Option<&str>, slack_groups: bool
     }
     if let Some(channel) = channel {
         let repo = temp(&format!("team-repo-{}", hub.database));
-        on_team(json!({ "cmd": "save_connector", "connector": {
+        tb.owner.client.hub(json!({ "cmd": "team", "team": team, "op": { "op": "save_bot", "bot": { "workflow": tb.workflow }, "connector": {
             "id": tb.workflow, "name": "Footer", "enabled": false, "trigger": { "kind": "slack-mention", "channel": channel },
             "folder": repo, "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false,
             "instructions": "", "machine": { "kind": "upstash-box", "size": "small" },
-        } }))
+        } } }))
         .unwrap();
+        // `tb.bot` writes the bot row this test needs.
+        sql(&hub, &format!("delete from team_bots where team = '{}'", tb.team));
     }
     let dina = tb.member(&hub, "dina@example.test", &["design"]);
     let omar = tb.member(&hub, "omar@example.test", &["ops"]);

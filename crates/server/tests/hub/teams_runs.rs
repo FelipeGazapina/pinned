@@ -53,17 +53,15 @@ impl Crew {
 
     /// A bot that is on, its workflow working in `repo` (empty: no project), asking @design in doubt.
     fn on_bot(&self, name: &str, repo: &str, once: bool) -> String {
-        let saved = self
-            .hub_op(&self.bob, json!({ "cmd": "save_connector", "connector": {
-                "name": name, "enabled": false, "trigger": { "kind": "linear-label", "label": "agent" },
-                "folder": self.folder, "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false,
-                "instructions": "", "machine": { "kind": "upstash-box", "size": "small" }, "repo": repo,
-            } }))
-            .unwrap();
-        let id = saved["id"].as_str().unwrap().to_owned();
+        let id = save_team_workflow(&self.hub, &self.bob, self.team, json!({
+            "name": name, "enabled": false, "trigger": { "kind": "linear-label", "label": "agent" },
+            "folder": self.folder, "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false,
+            "instructions": "", "machine": { "kind": "upstash-box", "size": "small" }, "repo": repo,
+        }))
+        .unwrap();
         let calls = CallRules { in_doubt: Who::Group { handle: "design".into() }, ..CallRules::default() };
         let bot = Bot { workflow: id.clone(), name: String::new(), owner: None, calls, limits: BotLimits { usd: 5.0, minutes: 30 }, on: false, on_by: None, once, off_note: None };
-        self.call(&self.bob, TeamOp::SaveBot { bot }).unwrap();
+        self.call(&self.bob, TeamOp::SaveBot { bot, connector: None }).unwrap();
         self.call(&self.ana, TeamOp::TurnBotOn { workflow: id.clone(), on: true }).unwrap();
         id
     }
