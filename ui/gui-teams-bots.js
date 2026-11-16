@@ -914,6 +914,7 @@ async function tbWizCreate() {
   s.error = "";
   tbWizDraw();
   try {
+    // adapts to SaveBot.connector
     if (!s.workflow) {
       const saved = await tbCall(tbSaveConnectorOp(tbConnector({ name: s.name.trim(), steps, repo: project?.repo ?? "" })));
       s.workflow = String(saved?.id ?? "");
