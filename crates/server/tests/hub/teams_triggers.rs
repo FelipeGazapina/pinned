@@ -1,0 +1,135 @@
+//! pinned Teams, triggers: a team's runs open only through its bots. `open_placed` refuses a run
+//! on a team's account, and what the team's own pollers find goes to `teams::triggers::fired`,
+//! which starts a run only for a bot that is on.
+//!
+//! The hub reaches no fake Linear or Slack (their API addresses are fixed), so each test hands
+//! `fired` the `Work` the team's poller would produce for the event.
+
+use super::*;
+use pinned_core::connectors::Placement;
+use pinned_core::teams::{Bot, BotLimits, CallRules, TeamOp, TeamPolicy};
+use pinned_server::hub::Account;
+use pinned_server::teams;
+use uuid::Uuid;
+
+/// A hub with a team that keeps the Upstash key and Claude token: ana owns it, bob is a member.
+struct Crew {
+    hub: TestHub,
+    team: Uuid,
+    ana: Arc<Account>,
+    bob: Arc<Account>,
+    folder: PathBuf,
+}
+
+impl Crew {
+    fn new(name: &str) -> Crew {
+        let patient = TeamPolicy { escalate_after_secs: 3600, give_up_after_secs: 7200, ..TeamPolicy::default() };
+        let hub = TestHub::start_with_team_policy(name, fast(), patient);
+        let sign_up = |email: &str| {
+            let (_, view) = account::signup(&hub.url, email, "correct horse").unwrap();
+            hub.runtime.block_on(hub.hub().account(Uuid::parse_str(&view.id).unwrap())).unwrap()
+        };
+        let (ana, bob) = (sign_up("ana@example.test"), sign_up("bob@example.test"));
+        let made = hub.runtime.block_on(teams::call(hub.hub(), &ana, None, TeamOp::Create { name: "Acme".into() })).unwrap();
+        let team = Uuid::parse_str(made["id"].as_str().unwrap()).unwrap();
+        admin_on(&hub.database, &format!("insert into team_members (team, member, role) values ('{team}', '{}', 'member')", bob.id));
+        let folder = temp(&format!("teams-triggers-{name}"));
+        let crew = Crew { hub, team, ana, bob, folder };
+        crew.hub_op(&crew.ana, json!({ "cmd": "connect_upstash", "key": BOX_KEY, "claude_token": CLAUDE_TOKEN })).unwrap();
+        crew
+    }
+
+    fn call(&self, who: &Arc<Account>, op: TeamOp) -> Result<Value, String> {
+        self.hub.runtime.block_on(teams::call(self.hub.hub(), who, Some(self.team), op))
+    }
+
+    fn hub_op(&self, who: &Arc<Account>, call: Value) -> Result<Value, String> {
+        self.call(who, TeamOp::Hub { call })
+    }
+
+    /// A bot of a workflow with `trigger`, saved by bob: a draft until someone turns it on.
+    fn draft_bot(&self, name: &str, trigger: Value) -> String {
+        let saved = self
+            .hub_op(&self.bob, json!({ "cmd": "save_connector", "connector": {
+                "name": name, "enabled": false, "trigger": trigger,
+                "folder": self.folder, "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false,
+                "instructions": "", "machine": { "kind": "upstash-box", "size": "small" },
+            } }))
+            .unwrap();
+        let id = saved["id"].as_str().unwrap().to_owned();
+        self.save_bot(&id);
+        id
+    }
+
+    /// bob saves the bot of workflow `id` again, which puts it back to a draft.
+    fn save_bot(&self, id: &str) {
+        let bot = Bot { workflow: id.to_owned(), name: String::new(), owner: None, calls: CallRules::default(), limits: BotLimits { usd: 5.0, minutes: 30 }, on: false, on_by: None, once: false, off_note: None };
+        self.call(&self.bob, TeamOp::SaveBot { bot }).unwrap();
+    }
+
+    fn turn_on(&self, id: &str, on: bool) {
+        self.call(&self.ana, TeamOp::TurnBotOn { workflow: id.to_owned(), on }).unwrap();
+    }
+
+    /// A bot of a Linear label workflow that ana turned on.
+    fn on_bot(&self, name: &str) -> String {
+        let id = self.draft_bot(name, json!({ "kind": "linear-label", "label": "agent" }));
+        self.turn_on(&id, true);
+        id
+    }
+
+    /// The run the team's Linear poller hands over for issue `issue` labeled for workflow `id`.
+    fn labeled(&self, id: &str, issue: &str) -> Work {
+        Work::Run(Run {
+            cwd: self.folder.clone(),
+            repo: None,
+            args: vec!["--name".into(), "ENG-7 Fix the footer".into()],
+            connector: id.to_owned(),
+            subject: super::issue(issue),
+            mentioned: vec![],
+            account: None,
+            runs_on: RunsOn::FreshBox(BoxStep { size: Some(BoxSize::Small) }),
+            input: "ENG-7: Fix the footer\nhttps://linear.example.test/acme/issue/ENG-7\n\n(no description)".into(),
+        })
+    }
+
+    fn fired(&self, work: Work) -> Result<Option<Placement>, String> {
+        self.hub.runtime.block_on(teams::triggers::fired(self.hub.hub(), self.team, work))
+    }
+
+    /// The team's runs as a member lists them: (state, started_by) of each, newest first.
+    fn runs(&self) -> Vec<(String, String)> {
+        let runs = self.call(&self.bob, TeamOp::Runs).unwrap();
+        runs.as_array().unwrap().iter().map(|r| (r["state"].as_str().unwrap().to_owned(), r["started_by"].as_str().unwrap().to_owned())).collect()
+    }
+}
+
+#[test]
+fn open_placed_refuses_a_run_on_a_teams_account_and_opens_no_box() {
+    let crew = Crew::new("tt_gate");
+    let id = crew.on_bot("Footer");
+
+    let refused = crew.hub.runtime.block_on(crew.hub.hub().open_placed(crew.team, crew.labeled(&id, "eng-7")));
+    assert_eq!(refused, Err("a team's runs start only through its bots".to_owned()));
+    let refused = crew.hub.runtime.block_on(crew.hub.hub().open(crew.team, crew.labeled(&id, "eng-7")));
+    assert_eq!(refused, Err("a team's runs start only through its bots".to_owned()));
+    assert_eq!(crew.hub.boxes.live(), Vec::<String>::new(), "no box opens");
+    assert_eq!(crew.runs(), vec![], "no run is recorded");
+}
+
+#[test]
+fn an_on_bots_linear_label_fires_one_run_in_a_fresh_box() {
+    let crew = Crew::new("tt_linear");
+    let id = crew.on_bot("Footer");
+
+    let placed = crew.fired(crew.labeled(&id, "eng-7")).unwrap().expect("the run's box took it");
+    assert_eq!(crew.runs(), vec![("working".to_owned(), "trigger:linear_label".to_owned())]);
+    assert_eq!(crew.hub.boxes.live().len(), 1, "the run opened in a fresh box");
+    let row = crew.hub.runtime.block_on(crew.hub.hub().db.boxes(crew.team)).unwrap().into_iter().next().unwrap().unwrap();
+    assert_eq!(placed.machine, row.machine.to_string(), "the run is in the team's box");
+
+    let again = crew.fired(crew.labeled(&id, "eng-7"));
+    assert_eq!(again, Err(format!("the bot of workflow {id} already has a live run on this issue")), "the same event starts no second run");
+    assert_eq!(crew.runs(), vec![("working".to_owned(), "trigger:linear_label".to_owned())]);
+    assert_eq!(crew.hub.boxes.live().len(), 1);
+}

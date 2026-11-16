@@ -83,7 +83,11 @@ impl TeamBox {
             runs_on: RunsOn::FreshBox(BoxStep { size: Some(BoxSize::Small) }),
             input: String::new(),
         };
-        hub.runtime.block_on(hub.hub().open(team, Work::Run(run))).unwrap();
+        // A team's box opens only for a run of its bot: the bot is turned on and its trigger fires.
+        // Its run and bot rows are cleared again, as each test writes the ones it needs.
+        owner.client.hub(json!({ "cmd": "team", "team": team.to_string(), "op": { "op": "turn_bot_on", "workflow": workflow, "on": true } })).unwrap();
+        hub.runtime.block_on(teams::triggers::fired(hub.hub(), team, Work::Run(run))).unwrap();
+        sql(hub, &format!("delete from team_runs where team = '{team}'; delete from team_bots where team = '{team}'"));
         let row = hub.runtime.block_on(hub.hub().db.boxes(team)).unwrap().into_iter().next().unwrap().unwrap();
         let (machine, box_id) = (row.machine.to_string(), row.upstash.unwrap().0);
         let dir = hub.boxes.root.join(&box_id);

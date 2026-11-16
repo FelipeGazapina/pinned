@@ -1144,7 +1144,7 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
                     let id = account.id;
                     let open = move |work| {
                         let hub = hub.clone();
-                        async move { hub.open_placed(id, work).await }
+                        async move { hub.open_found(id, work).await }
                     };
                     if let Err(e) = connectors.on_tabs(&machine, observed, &after, open).await {
                         eprintln!("pinned-server: could not wake a workflow run: {e}");

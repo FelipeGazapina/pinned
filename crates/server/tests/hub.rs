@@ -11549,3 +11549,4 @@ mod teams_groups;
 mod teams_box_call;
 #[path = "hub/teams_calls.rs"] mod teams_calls;
 #[path = "hub/teams_runs.rs"] mod teams_runs;
+#[path = "hub/teams_triggers.rs"] mod teams_triggers;
