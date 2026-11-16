@@ -327,9 +327,11 @@ fn a_team_box_cannot_act_for_another_bots_run_by_reporting_its_tab() {
     let before = stored_runs(&hub, tb.team);
 
     let set = json!({ "cmd": "run_set", "connector": tb.workflow, "issue": "team-1", "name": "title", "value": "hijacked" });
-    assert_eq!(machine_call(&mut a, 1, set), Err(NOT_ITS_RUN.into()), "RunSet for bot B's run");
     let reply = json!({ "cmd": "slack_reply", "connector": tb.workflow, "channel": "C0B00001", "thread": "1.2", "text": "from the wrong box" });
-    assert_eq!(machine_call(&mut a, 2, reply), Err(NOT_ITS_RUN.into()), "SlackReply as bot B");
+    let (set, reply) = (machine_call(&mut a, 1, set), machine_call(&mut a, 2, reply));
+    std::thread::sleep(Duration::from_millis(500));
+    let posted = super::teams_slack_notice::posts("xoxb-dev-vouch-one").len();
+    assert_eq!((set, reply, posted), (Err(NOT_ITS_RUN.into()), Err(NOT_ITS_RUN.into()), 0), "RunSet for bot B's run, SlackReply as bot B, and Slack posts");
     for (n, call) in callbacks(&tb.workflow, "team-1").into_iter().enumerate() {
         assert_eq!(machine_call(&mut a, 10 + n as u64, call.clone()), Err(NOT_ITS_RUN.into()), "{call}");
     }
