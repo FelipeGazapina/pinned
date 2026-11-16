@@ -126,6 +126,9 @@ class Hub {
       case "confirmations":
         this.on.confirmations?.(frame.items);
         break;
+      case "team":
+        this.on.team?.(frame);
+        break;
     }
   }
 
