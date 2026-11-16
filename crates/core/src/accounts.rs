@@ -242,6 +242,8 @@ impl View {
 pub struct Accounts {
     dir: Option<PathBuf>,
     home: PathBuf,
+    /// Where the built-in Claude account's home is, instead of the environment's or `~/.claude`.
+    claude_home: Option<PathBuf>,
     added: Mutex<Vec<Account>>,
 }
 
@@ -250,7 +252,13 @@ impl Accounts {
     /// where the built-in accounts' CLIs keep their logins.
     pub fn load(dir: Option<&Path>, home: PathBuf) -> Accounts {
         let added = dir.and_then(|d| std::fs::read(d.join(FILE)).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
-        Accounts { dir: dir.map(Path::to_path_buf), home, added: Mutex::new(added) }
+        Accounts { dir: dir.map(Path::to_path_buf), home, claude_home: None, added: Mutex::new(added) }
+    }
+
+    /// The built-in Claude account's home moved to `home`, when there is one.
+    pub fn with_claude_home(mut self, home: Option<PathBuf>) -> Accounts {
+        self.claude_home = home;
+        self
     }
 
     /// The built-in accounts, then the added ones in the order they were added.
@@ -355,8 +363,9 @@ impl Accounts {
     /// own `home_env`, when it has one.
     pub fn home(&self, account: &Account) -> PathBuf {
         let spec = account.provider.spec();
-        match &self.dir {
-            Some(dir) if !account.is_builtin() => dir.join("accounts").join(&account.id),
+        match (&self.dir, &self.claude_home) {
+            (Some(dir), _) if !account.is_builtin() => dir.join("accounts").join(&account.id),
+            (_, Some(claude_home)) if account.provider == Provider::Claude => claude_home.clone(),
             _ if spec.home_env.is_empty() => self.home.clone(),
             _ => std::env::var_os(spec.home_env).map_or_else(|| self.home.join(spec.default_home), PathBuf::from),
         }

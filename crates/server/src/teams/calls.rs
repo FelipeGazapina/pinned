@@ -15,7 +15,7 @@ use crate::boxes::End;
 use crate::hub::{Account, Hub, LastTurn};
 use futures_util::future::BoxFuture;
 use pinned_core::teams::{Answer, AnswerKind, Call, Role, Run, RunState, Situation, TeamEvent, TeamPolicy, Who};
-use pinned_core::wire::Call as MachineCall;
+use pinned_core::wire::{Call as MachineCall, TabView};
 use serde::Serialize;
 use serde_json::Value;
 use std::sync::Arc;
@@ -508,13 +508,7 @@ async fn tell_session_now(hub: &Arc<Hub>, team: &Arc<Account>, run_id: Uuid, id:
     let mut last = String::from("its box had no session");
     for wait in NOTICE_TRIES {
         tokio::time::sleep(wait).await;
-        // The run's session: the tab of its workflow, else the box's only tab.
-        let tabs = team.tabs_of(&machine).unwrap_or_default();
-        let tab = tabs.iter().find(|t| t.connector.as_deref() == Some(workflow.as_str())).or(match tabs.as_slice() {
-            [only] => Some(only),
-            _ => None,
-        });
-        let Some(tab) = tab else { continue };
+        let Some(tab) = session_tab(team, &machine, &workflow) else { continue };
         let call = MachineCall::Notice { tab: tab.id.clone(), session: tab.session.clone(), text: text.clone(), id: id.to_owned() };
         match hub.call_machine(team, &machine, call, NOTICE_WAIT).await {
             Ok(Value::Bool(true)) => return,
@@ -523,6 +517,16 @@ async fn tell_session_now(hub: &Arc<Hub>, team: &Arc<Account>, run_id: Uuid, id:
         }
     }
     eprintln!("pinned-server: run {run_id} of team {} was not told of {id}: {last}", team.id);
+}
+
+/// The run's session in its box: the tab of its workflow, else the box's only tab.
+pub(super) fn session_tab(team: &Account, machine: &str, workflow: &str) -> Option<TabView> {
+    let tabs = team.tabs_of(machine).unwrap_or_default();
+    let found = tabs.iter().find(|t| t.connector.as_deref() == Some(workflow)).or(match tabs.as_slice() {
+        [only] => Some(only),
+        _ => None,
+    });
+    found.cloned()
 }
 
 async fn push_logged(hub: &Hub, team: Uuid, event: TeamEvent) {

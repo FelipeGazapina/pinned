@@ -19,7 +19,7 @@ pub(super) struct Person {
     pub(super) client: Client,
 }
 
-fn person(hub: &TestHub, email: &str) -> Person {
+pub(super) fn person(hub: &TestHub, email: &str) -> Person {
     let (token, account) = account::signup(&hub.url, email, "correct horse").unwrap();
     let mut client = Client::connect(&hub.url, &token);
     client.wait("hello", |f| f["type"] == "hello");
@@ -49,12 +49,12 @@ pub(super) fn rows(hub: &TestHub, query: &str) -> Vec<Vec<Option<String>>> {
 pub(super) struct TeamBox {
     pub(super) owner: Person,
     pub(super) team: Uuid,
-    workflow: String,
+    pub(super) workflow: String,
     pub(super) machine: String,
     pub(super) box_id: String,
     /// The box node's folder, where its socket is.
-    dir: PathBuf,
-    tab: String,
+    pub(super) dir: PathBuf,
+    pub(super) tab: String,
 }
 
 impl TeamBox {
@@ -116,7 +116,7 @@ impl TeamBox {
     }
 
     /// The bot of the box's workflow, asking `in_doubt` and answered for by `owner`.
-    fn bot(&self, hub: &TestHub, in_doubt: Value, owner: Option<Uuid>) {
+    pub(super) fn bot(&self, hub: &TestHub, in_doubt: Value, owner: Option<Uuid>) {
         let owner = owner.map_or("null".to_owned(), |o| format!("'{o}'"));
         let calls = json!({ "in_doubt": in_doubt });
         sql(hub, &format!(

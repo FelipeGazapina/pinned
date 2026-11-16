@@ -11377,6 +11377,23 @@
                 ]
               },
               {
+                "description": "`Vec<RunLogLine>`: the last 200 lines of what the run's bot did, oldest first, read from the\nsession in the run's own box. `[]` while the run has no box or session yet.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "run_log"
+                  },
+                  "run": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "run"
+                ]
+              },
+              {
                 "description": "Text to the team's chat; answers its reply.",
                 "type": "object",
                 "properties": {
@@ -22935,6 +22952,23 @@
                 ]
               },
               {
+                "description": "`Vec<RunLogLine>`: the last 200 lines of what the run's bot did, oldest first, read from the\nsession in the run's own box. `[]` while the run has no box or session yet.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "run_log"
+                  },
+                  "run": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "run"
+                ]
+              },
+              {
                 "description": "Text to the team's chat; answers its reply.",
                 "type": "object",
                 "properties": {
@@ -31653,6 +31687,23 @@
                 ]
               },
               {
+                "description": "`Vec<RunLogLine>`: the last 200 lines of what the run's bot did, oldest first, read from the\nsession in the run's own box. `[]` while the run has no box or session yet.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "run_log"
+                  },
+                  "run": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "run"
+                ]
+              },
+              {
                 "description": "Text to the team's chat; answers its reply.",
                 "type": "object",
                 "properties": {
@@ -40052,6 +40103,23 @@
                   "op": {
                     "type": "string",
                     "const": "stop_run"
+                  },
+                  "run": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "run"
+                ]
+              },
+              {
+                "description": "`Vec<RunLogLine>`: the last 200 lines of what the run's bot did, oldest first, read from the\nsession in the run's own box. `[]` while the run has no box or session yet.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "run_log"
                   },
                   "run": {
                     "type": "string"
@@ -59429,6 +59497,54 @@
             ]
           }
         }
+      }
+    },
+    "TeamRunLogLine": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "RunLogLine",
+        "description": "One line of a run's log: plain text on one line, secrets hidden, at most 500 characters.\n`who` is `bot` for what the bot wrote, the tool's name for a tool it ran, `person` for what a\nperson typed into the session. `at` is unix seconds, 0 when the session did not date it.\n\n`{\"at\":1763300000,\"who\":\"bot\",\"text\":\"The footer is fixed.\"}`",
+        "type": "object",
+        "properties": {
+          "at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "who": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "at",
+          "who",
+          "text"
+        ]
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "RunLogLine",
+        "description": "One line of a run's log: plain text on one line, secrets hidden, at most 500 characters.\n`who` is `bot` for what the bot wrote, the tool's name for a tool it ran, `person` for what a\nperson typed into the session. `at` is unix seconds, 0 when the session did not date it.\n\n`{\"at\":1763300000,\"who\":\"bot\",\"text\":\"The footer is fixed.\"}`",
+        "type": "object",
+        "properties": {
+          "at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "who": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "at",
+          "who",
+          "text"
+        ]
       }
     },
     "ToClient": {

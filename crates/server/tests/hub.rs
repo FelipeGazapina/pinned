@@ -347,9 +347,16 @@ fn launched(dir: &Path) -> Arc<Machine> {
     let claude = dir.join("claude");
     std::fs::write(&claude, "#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && { echo '{\"loggedIn\":true}'; exit 0; }\nexec cat\n").unwrap();
     std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    // The other providers' CLIs are signed out stand-ins, so a node never runs one found on the PATH, which keeps its login and scratch files in the process's HOME.
+    let signed_out = |name: &str| {
+        let bin = dir.join(name);
+        std::fs::write(&bin, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        bin
+    };
     let launch = Launch {
         exe: "/opt/pinned/bin/pinned-server".into(),
-        bins: BTreeMap::from([(Provider::Claude, claude)]),
+        bins: BTreeMap::from([(Provider::Claude, claude), (Provider::Codex, signed_out("codex")), (Provider::Cursor, signed_out("cursor-agent"))]),
         path_env: None,
         settings: dir.join("settings.json"),
         mcp_config: None,
@@ -360,6 +367,8 @@ fn launched(dir: &Path) -> Arc<Machine> {
         vector_search: false,
         first_run_wait: std::time::Duration::from_secs(60),
         starting_limit: std::time::Duration::from_secs(600),
+        // Each node reads and writes its transcripts under its own folder, never the process's HOME.
+        claude_home: Some(dir.join(".claude")),
     };
     Machine::new(launch, Some(dir.to_owned()), Some(dir.to_owned()), |_| {})
 }
@@ -11554,3 +11563,4 @@ mod teams_box_call;
 #[path = "hub/teams_hardening.rs"]
 mod teams_hardening;
 #[path = "hub/teams_triggers.rs"] mod teams_triggers;
+#[path = "hub/teams_run_log.rs"] mod teams_run_log;
