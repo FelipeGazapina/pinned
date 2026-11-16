@@ -753,6 +753,29 @@ pub async fn insert_call(db: &Db, team: Uuid, call: &Call, step: Option<&str>) -
     Ok(call_of(&row)?.call)
 }
 
+/// Opens `call`, passed on from call `first`, keeping `first`'s `created_at`, so passing restarts
+/// neither the escalation nor the give-up clock. Only while the run still waits, in one statement:
+/// None when it ended meanwhile, as when someone stopped it between the pass and this.
+pub async fn pass_call(db: &Db, team: Uuid, call: &Call, step: Option<&str>, first: Uuid) -> Result<Option<Call>, String> {
+    let (id, run) = (Uuid::parse_str(&call.id).map_err(|_| "a call's id is a uuid")?, Uuid::parse_str(&call.run).map_err(|_| "a run's id is a uuid")?);
+    let row = db
+        .client()
+        .await?
+        .query_opt(
+            &format!(
+                "with c as (insert into team_calls (id, team, run, situation, asked, question, choices, step_hash, created_at)
+                   select $1, $2, $3, $4, $5, $6, $7, $8, f.created_at from team_runs w, team_calls f
+                   where w.team = $2 and w.id = $3 and w.state = 'waiting' and f.team = $2 and f.id = $9
+                   returning *)
+                 select {CALL_COLUMNS} from c join team_runs r on r.id = c.run"
+            ),
+            &[&id, &team, &run, &call.situation.as_str(), &json(&call.asked)?, &call.question, &json(&call.choices)?, &step, &first],
+        )
+        .await
+        .map_err(err)?;
+    row.as_ref().map(call_of).transpose().map(|row| row.map(|row| row.call))
+}
+
 /// Uses the "Go ahead" a person gave on a `before_irreversible` call of run `run` about the step
 /// hashed `step` and shown as `question`: the call's id, once, and only within 10 minutes of the
 /// answer's `at` (`now` is unix seconds). One statement, so of two asks at once only one uses it.

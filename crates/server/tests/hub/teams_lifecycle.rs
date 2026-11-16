@@ -128,22 +128,6 @@ impl Crew {
         client
     }
 
-    /// Holds every write to `table` whose new row matches `when` (SQL on `new`) until the answered
-    /// connection runs `select pg_advisory_unlock(<key>)`, so a test orders two things the hub does.
-    fn hold(&self, key: i64, table: &str, when: &str) -> tokio_postgres::Client {
-        let held = self.connect();
-        self.hub.runtime.block_on(held.batch_execute(&format!(
-            "select pg_advisory_lock({key});
-             create function hold_{table}() returns trigger language plpgsql as $$ begin
-               if {when} then perform pg_advisory_lock({key}); perform pg_advisory_unlock({key}); end if;
-               return new;
-             end $$;
-             create trigger hold_{table} before insert or update on {table} for each row execute function hold_{table}();"
-        )))
-        .unwrap();
-        held
-    }
-
     /// The box the run is recorded with.
     fn run_box(&self, run: &str) -> Option<String> {
         let row = self.hub.runtime.block_on(self.connect().query_one("select box from team_runs where id = $1::text::uuid", &[&run])).unwrap();
@@ -292,4 +276,52 @@ fn a_run_whose_box_fails_to_boot_fails_with_why() {
     assert_eq!(crew.op(&crew.bob, json!({ "op": "run_now", "workflow": id })), Err(format!("Upstash Box: {why}")));
     assert_eq!(crew.runs(), vec![("failed".to_owned(), Some(format!("its box failed: {why}")))], "the run does not stay working");
     wait_for("the box to be deleted", || crew.hub.boxes.live().is_empty());
+}
+
+// ---- 4. a passed call ----
+
+/// bob passes call `call` to @legal, as the app sends it.
+fn pass(crew: &Crew, call: &Value) -> Result<Value, String> {
+    crew.op(&crew.bob, json!({ "op": "answer_call", "id": call, "answer": { "kind": { "kind": "pass_to", "handle": "legal" } } }))
+}
+
+#[test]
+fn a_passed_call_gives_up_at_the_first_calls_deadline() {
+    let crew = Crew::new("tl_pass_clock", fast(), patient());
+    crew.running();
+    let asked = crew.ask("Red or blue footer?").unwrap();
+    // Opened past its give-up (7200 s): the tick would close it now, and the pass does not restart that.
+    crew.sql(&format!("update team_calls set created_at = now() - interval '7300 seconds' where id = '{}'", asked["call"].as_str().unwrap()));
+    pass(&crew, &asked["call"]).unwrap();
+    let calls = crew.op(&crew.bob, json!({ "op": "calls" })).unwrap();
+    let (next, first) = (&calls[0], &calls[1]);
+    assert_eq!((&next["asked"], &next["answer"]), (&json!([{ "kind": "group", "handle": "legal" }]), &Value::Null), "the passed call is open");
+    assert_eq!(next["created_at"], first["created_at"], "it keeps the first call's clock");
+
+    crew.tick();
+    wait_for("the run to give up", || crew.runs()[0].0 != "waiting");
+    assert_eq!(crew.runs(), vec![("gave_up".to_owned(), Some(format!("nobody answered call {}", next["id"].as_str().unwrap())))]);
+}
+
+#[test]
+fn a_stop_between_a_pass_and_its_new_call_leaves_no_open_call() {
+    let crew = Crew::new("tl_pass_stop", fast(), patient());
+    crew.running();
+    let asked = crew.ask("Red or blue footer?").unwrap();
+    // The hub's statements share one connection, so a lock held on the pass's insert would hold the
+    // Stop's statements behind it too. Instead the Stop's end of the run lands in the database the
+    // moment the pass closes the call, before the pass opens its new call.
+    crew.sql(
+        "create function stop_on_pass() returns trigger language plpgsql as $$ begin
+           if new.outcome = 'passed' then
+             update team_runs set state = 'stopped', ended_at = now(), outcome = 'stopped by ana' where id = new.run;
+           end if;
+           return new;
+         end $$;
+         create trigger stop_on_pass after update on team_calls for each row execute function stop_on_pass();",
+    );
+    assert_eq!(pass(&crew, &asked["call"]), Err("the call was closed, but its run has ended, so @legal was not asked".into()));
+    assert_eq!(crew.runs(), vec![("stopped".to_owned(), Some("stopped by ana".to_owned()))]);
+    let design = json!([{ "kind": "group", "handle": "design" }]);
+    assert_eq!(crew.calls(), vec![("Red or blue footer?".to_owned(), design, json!({ "kind": "pass_to", "handle": "legal" }))], "no call is open on the ended run");
 }

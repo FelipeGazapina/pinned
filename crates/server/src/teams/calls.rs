@@ -64,7 +64,8 @@ pub async fn calls(hub: &Arc<Hub>, scope: &Scope) -> Result<Vec<Call>, String> {
 /// group's fallback while it has no member) or the team's owner answers it; the first answer
 /// wins and any later one is refused with the first. The hub sets `answer.by` and `answer.at`.
 /// `Choice` (one of the call's choices, when it has some) types the choice and text into the
-/// session; `PassTo` closes the call and opens one to group `handle` on the same run; `TakeOver`
+/// session; `PassTo` closes the call and opens one to group `handle` on the same run, with the
+/// first call's clocks, while the run still waits; `TakeOver`
 /// makes the member the run's controller and tells the session; `Stop` is `stop_run`. Pushes
 /// `TeamEvent::CallResolved` and `RunChanged`, and answers the call as it is now.
 pub async fn answer_call(hub: &Arc<Hub>, scope: &Scope, id: &str, mut answer: Answer) -> Result<Call, String> {
@@ -123,11 +124,13 @@ pub async fn answer_call(hub: &Arc<Hub>, scope: &Scope, id: &str, mut answer: An
         }
         AnswerKind::PassTo { handle } => {
             let next = Call { id: Uuid::new_v4().to_string(), asked: vec![Who::Group { handle: handle.clone() }], escalated: false, answer: None, ..answered.clone() };
-            match db::insert_call(&hub.db, team, &next, step.as_deref()).await {
-                Ok(next) => {
+            match db::pass_call(&hub.db, team, &next, step.as_deref(), id).await {
+                Ok(Some(next)) => {
                     push_logged(hub, team, TeamEvent::CallOpened { call: next.clone() }).await;
                     notify_slack(hub, &scope.team, &next);
                 }
+                // Stopped, or ended otherwise, since the answer: nobody is asked on a run that ended.
+                Ok(None) => return Err(format!("the call was closed, but its run has ended, so @{handle} was not asked")),
                 Err(e) => {
                     // The run cannot wait on a call that was never opened.
                     back_to_work(hub, &scope.team, run_id).await?;
