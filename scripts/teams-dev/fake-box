@@ -122,7 +122,8 @@ function realResolve(p) {
 /** Whether `target` is inside the box's own directory once symlinks are followed. */
 const inBoxDir = (id, target) => inside(fs.realpathSync(dirOf(id)), realResolve(target));
 
-const SYSTEM_PREFIXES = ["/bin/", "/usr/", "/lib/", "/lib64/", "/etc/", "/proc/self/"];
+// /proc/$ is /proc/$(cat pid-file)/cmdline: the box's scripts read a pid's command line there.
+const SYSTEM_PREFIXES = ["/bin/", "/usr/", "/lib/", "/lib64/", "/etc/", "/proc/self/", "/proc/$"];
 const SYSTEM_FILES = ["/dev/null", "/dev/stdout", "/dev/stderr"];
 const sh = (name) => {
   try {
@@ -133,27 +134,31 @@ const sh = (name) => {
 };
 const SYSTEM_PATHS = [process.execPath, sh("git"), sh("node")].filter(Boolean);
 const TOKEN_END = "\\s'\"`;|&<>(){}\\\\,:";
-/** A `/`-rooted token: not after a word character, `.`, `-`, `~`, `$`, `}` or `/`. */
-const ABSOLUTE = new RegExp(`(?<![\\w.~$}\\]\\-/])(/[^${TOKEN_END}]*)`, "g");
+/** A `/`-rooted token: not after a word character, `.`, `-`, `~`, `$`, `}`, `)` (the rest of `$(…)/x`) or `/`. */
+const ABSOLUTE = new RegExp(`(?<![\\w.~$}\\]\\-/)])(/[^${TOKEN_END}]*)`, "g");
 /** A relative token with a `..` segment. */
 const PARENT = new RegExp(`(?<![^${TOKEN_END}=:])((?:[^${TOKEN_END}]*/)?\\.\\.(?:/[^${TOKEN_END}]*)?)(?=$|[${TOKEN_END}])`, "g");
 
 /** Refuses (400) an exec whose rewritten arguments reach outside the box. */
 function checkExec(id, args) {
   const home = homeOf(id);
-  const refuse = () => fail(400, "the fake Box refuses a command that names a path outside the box");
+  // The log names the path so a refused command can be fixed; the answer does not repeat it.
+  const refuse = (named) => {
+    console.log(`refused a command that names ${String(named).slice(0, 120)}`);
+    return fail(400, "the fake Box refuses a command that names a path outside the box");
+  };
   for (const arg of args) {
-    if (arg.includes("/workspace/home") || arg.includes("~/.pinned") || arg.includes("/.config/pinned")) throw refuse();
+    if (arg.includes("/workspace/home") || arg.includes("~/.pinned") || arg.includes("/.config/pinned")) throw refuse("a real pinned home");
     for (const { 1: token, index } of arg.matchAll(ABSOLUTE)) {
       if (token.startsWith("//") && arg[index - 1] === ":") continue; // https://host/...
       if (SYSTEM_FILES.includes(token) || SYSTEM_PATHS.includes(token) || SYSTEM_PREFIXES.some((p) => token.startsWith(p) && !token.split("/").includes(".."))) continue;
       if (inside(BIN, path.resolve(token)) || inBoxDir(id, token)) continue;
-      throw refuse();
+      throw refuse(token);
     }
     for (const [, token] of arg.matchAll(PARENT)) {
       if (token.startsWith("/")) continue; // an absolute one was judged above
       const real = token.startsWith("~/") ? path.join(home, token.slice(2)) : path.resolve(home, token);
-      if (!inBoxDir(id, real)) throw refuse();
+      if (!inBoxDir(id, real)) throw refuse(token);
     }
   }
 }

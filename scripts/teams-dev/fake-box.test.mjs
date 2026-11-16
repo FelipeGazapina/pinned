@@ -114,6 +114,9 @@ test("a write and an exec inside the box work, and /workspace/home is the box's 
   assert.equal(inBox.status, 200, JSON.stringify(inBox.body));
   assert.ok(inBox.body.output.includes(home), inBox.body.output);
   assert.equal(fs.readFileSync(path.join(home, "inside.txt"), "utf8"), "done\n");
+  // What the hub's real bootstrap does: read /proc/<pid>/cmdline of the pid a file names, curl a URL, untar into /tmp.
+  const boot = await exec("sh", "-c", 'DIR=/workspace/home/.pinned; mkdir -p "$DIR/bin"; [ -f "$DIR/node.pid" ] && { grep -qs pinned-server "/proc/$(cat "$DIR/node.pid")/cmdline" && kill "$(cat "$DIR/node.pid")" 2>/dev/null || true; }; curl -fsSL http://127.0.0.1:1/download/x -o "$DIR/x.part" 2>/dev/null; ls /tmp >/dev/null; tar -tzf /dev/null -C /tmp 2>/dev/null; true');
+  assert.equal(boot.status, 200, JSON.stringify(boot.body));
   // URLs and system paths are not paths of the box.
   assert.equal((await exec("sh", "-c", "echo https://github.com/example/alpha http://127.0.0.1:1/download/x >/dev/null; ls /usr/bin >/dev/null; ls /bin/sh /etc/hostname")).status, 200);
 });
