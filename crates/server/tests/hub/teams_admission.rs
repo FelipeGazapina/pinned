@@ -668,7 +668,7 @@ impl ClaimGate {
         // Inside a transaction, Postgres keeps the first read of its activity view unless told not to.
         self.runtime.block_on(self.db.query("select pg_stat_clear_snapshot()", &[])).unwrap();
         let rows = self.runtime.block_on(self.db.query(
-            "select pid from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock' and query like 'delete from team_run_queue where team = $1 and id = $2%'",
+            "select pid from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock' and query like '% team_run_queue where team = $1 and id = $2%'",
             &[],
         ));
         rows.unwrap().iter().map(|r| r.get(0)).collect()
