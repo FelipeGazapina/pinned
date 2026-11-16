@@ -716,6 +716,12 @@ pub async fn group_exists(db: &Db, team: Uuid, handle: &str) -> Result<bool, Str
     Ok(row.get(0))
 }
 
+/// The Slack user-group handle of group `handle`, empty when it has none or the team has no such group.
+pub async fn slack_group(db: &Db, team: Uuid, handle: &str) -> Result<String, String> {
+    let row = db.client().await?.query_opt("select slack_group from team_groups where team = $1 and handle = $2", &[&team, &handle]).await.map_err(err)?;
+    Ok(row.map(|r| r.get(0)).unwrap_or_default())
+}
+
 /// The account's email, for its name (`calls::name_of`).
 pub async fn email(db: &Db, account: Uuid) -> Result<Option<String>, String> {
     let row = db.client().await?.query_opt("select email from accounts where id = $1", &[&account]).await.map_err(err)?;

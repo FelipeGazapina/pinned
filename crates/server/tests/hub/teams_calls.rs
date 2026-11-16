@@ -145,7 +145,7 @@ impl TeamBox {
     }
 
     /// What the box's session sends the hub with `ask_people`.
-    fn ask(&self, hub: &TestHub, question: &str, choices: &[&str]) -> Result<Value, String> {
+    pub(super) fn ask(&self, hub: &TestHub, question: &str, choices: &[&str]) -> Result<Value, String> {
         ask_from(hub, &self.box_id, question, choices)
     }
 
@@ -161,7 +161,7 @@ impl TeamBox {
     }
 
     /// What the box's session got typed for it, read until it holds `text`.
-    fn told(&self, hub: &TestHub, text: &str) -> String {
+    pub(super) fn told(&self, hub: &TestHub, text: &str) -> String {
         let mut told = String::new();
         wait_for(&format!("{text:?} in the session"), || {
             if on_node(hub, &self.box_id, |node| node.machine.view(&self.tab).is_ok_and(|v| v.queued > 0)) {
@@ -188,7 +188,7 @@ pub(super) fn choice(choice: &str, text: &str) -> Value {
     json!({ "kind": { "kind": "choice" }, "choice": choice, "text": text })
 }
 
-fn design() -> Value {
+pub(super) fn design() -> Value {
     json!({ "kind": "group", "handle": "design" })
 }
 

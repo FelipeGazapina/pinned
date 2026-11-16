@@ -11564,3 +11564,4 @@ mod teams_box_call;
 mod teams_hardening;
 #[path = "hub/teams_triggers.rs"] mod teams_triggers;
 #[path = "hub/teams_run_log.rs"] mod teams_run_log;
+#[path = "hub/teams_slack_notice.rs"] mod teams_slack_notice;
