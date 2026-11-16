@@ -209,6 +209,8 @@ impl Crew {
         self.tick();
         wait_for("the control box to be deleted", || !self.hub.boxes.live().contains(&"up-ctl".to_owned()));
         wait_for("the control's row to go", || self.box_rows(self.team).iter().all(|(id, _, _)| id != "ctl"));
+        // Each end runs in its own spawned task, so a wrongly ended box may be a moment behind the control.
+        std::thread::sleep(Duration::from_millis(500));
     }
 
     /// The account's `boxes` rows as (id, phase, reason), by id.
