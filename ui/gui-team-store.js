@@ -384,11 +384,11 @@ const tcBotMark = (name, cls = "") => `<span class="tc-mark ${cls}" aria-hidden=
 const tcPersonMark = (accountId, cls = "") => `<span class="tc-mark tc-person ${cls}" style="--tc-hue:${tcHue(accountId || "?")}" aria-hidden="true">${esc(tcInitials(tcPerson(accountId) === "You" ? tcMe().name : tcPerson(accountId)))}</span>`;
 const tcChip = (label, handle) => `<span class="tc-chip" data-handle="${esc(handle ?? "")}">${esc(label)}</span>`;
 
-/** The controls of an open call that asks me: one button per choice (the first is primary), a pass
+/** The controls of an open call that asks me: one plain button per choice (the hub marks no default answer), a pass
  * to each other group of the bot, and a field for a typed answer when the call has no choices or
  * `typed` asks for one (the person who took the run over answers in their own words). */
 function tcActionsHtml(call, { typed = false, disabled = false, extra = "" } = {}) {
-  const choices = call.choices.map((c, i) => `<button type="button" class="${i === 0 ? "tc-primary" : "tc-secondary"}" data-tc="choice" data-choice="${i}">${esc(c)}</button>`);
+  const choices = call.choices.map((c, i) => `<button type="button" class="tc-secondary" data-tc="choice" data-choice="${i}">${esc(c)}</button>`);
   const passes = tcPassTargets(call).map((h) => `<button type="button" class="tc-quiet" data-tc="pass" data-handle="${esc(h)}">Pass to @${esc(h)}</button>`);
   const form = !call.choices.length || typed ? `<form class="tc-typed" data-tc-form><input type="text" name="answer" placeholder="Type an answer" aria-label="Type an answer" autocomplete="off" enterkeyhint="send"><button type="submit" class="tc-secondary">Send</button></form>` : "";
   const buttons = choices.length || passes.length || extra ? `<div class="tc-actions">${choices.join("")}${passes.join("")}${extra}</div>` : "";

@@ -136,10 +136,11 @@ test("a call card shows the whole question, with no line clamp", () => {
   assert.match(css, /\.tc-question \{[^}]*white-space: pre-line/);
 });
 
-test("the first choice is the primary button and each other group of the bot is a pass", () => {
+test("every choice is a plain button, none is primary, and each other group of the bot is a pass", () => {
   const p = page({ calls: [call({ id: "c2", run: "r2", workflow: "w2", asked: [{ kind: "person", account: ME }], choices: ["Yes", "No"] })] });
   const html = p.eval("tcCardHtml(tcStore.calls[0])");
-  assert.match(html, /class="tc-primary" data-tc="choice" data-choice="0">Yes</);
+  assert.match(html, /class="tc-secondary" data-tc="choice" data-choice="0">Yes</);
+  assert.ok(!html.includes("tc-primary"), "no primary button on a call card");
   assert.match(html, /class="tc-secondary" data-tc="choice" data-choice="1">No</);
   assert.deepEqual(buttons(html).filter((b) => /^Pass/.test(b)), ["Pass to @reviewers"]);
   const asked = page({ calls: [call({ id: "c2", workflow: "w2", asked: [{ kind: "group", handle: "reviewers" }, { kind: "person", account: ME }] })] });
