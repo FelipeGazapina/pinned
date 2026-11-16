@@ -112,7 +112,10 @@ pub async fn answer_call(hub: &Arc<Hub>, scope: &Scope, id: &str, mut answer: An
         AnswerKind::PassTo { handle } => {
             let next = Call { id: Uuid::new_v4().to_string(), asked: vec![Who::Group { handle: handle.clone() }], escalated: false, answer: None, ..answered.clone() };
             match db::insert_call(&hub.db, team, &next).await {
-                Ok(next) => push_logged(hub, team, TeamEvent::CallOpened { call: next }).await,
+                Ok(next) => {
+                    push_logged(hub, team, TeamEvent::CallOpened { call: next.clone() }).await;
+                    notify_slack(hub, &scope.team, &next);
+                }
                 Err(e) => {
                     // The run cannot wait on a call that was never opened.
                     back_to_work(hub, &scope.team, run_id).await?;
@@ -246,12 +249,52 @@ pub async fn ask_people(hub: &Arc<Hub>, team: &Arc<Account>, machine: &str, situ
         }
     };
     push_logged(hub, team.id, TeamEvent::CallOpened { call: call.clone() }).await;
+    notify_slack(hub, team, &call);
     push_logged(hub, team.id, TeamEvent::RunChanged { run: waiting }).await;
     let mut shown = Vec::with_capacity(call.asked.len());
     for who in &call.asked {
         shown.push(shown_who(hub, who).await);
     }
     Ok(Asked { call: call.id, asked: shown })
+}
+
+/// The most characters of a call's question a Slack notice carries.
+const NOTICE_QUESTION: usize = 300;
+
+/// The notice a call to a group posts in Slack: one line, the question without secrets and cut.
+fn slack_notice(bot: &str, mention: &str, question: &str) -> String {
+    let masked = pinned_core::surface::mask_secrets(question);
+    let line: String = masked.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(NOTICE_QUESTION).collect();
+    format!("{bot} needs {mention}: {line}. Answer in pinned.")
+}
+
+/// A newly opened call that asks a group with a Slack user group tells that group in Slack, in the
+/// background: one message in the channel of the call's own workflow, through the Slack bot of that
+/// workflow in the team's store (`Connectors::announce_to_group`), never a member's. Nothing waits
+/// on it, and a failure only logs. Answers stay in the app.
+fn notify_slack(hub: &Arc<Hub>, team: &Arc<Account>, call: &Call) {
+    let groups: Vec<String> = call.asked.iter().filter_map(|who| if let Who::Group { handle } = who { Some(handle.clone()) } else { None }).collect();
+    if groups.is_empty() {
+        return;
+    }
+    let (hub, team, workflow, question, call_id) = (hub.clone(), team.clone(), call.workflow.clone(), call.question.clone(), call.id.clone());
+    tokio::spawn(async move {
+        for handle in groups {
+            let said = async {
+                let slack_group = db::slack_group(&hub.db, team.id, &handle).await?;
+                if !pinned_core::slack::is_group_handle(&slack_group) {
+                    return Ok(false);
+                }
+                let connectors = hub.connectors(&team).await?;
+                connectors.announce_to_group(&workflow, &slack_group, |bot, mention| slack_notice(bot, mention, &question)).await
+            };
+            match said.await {
+                Ok(true) => {}
+                Ok(false) => eprintln!("pinned-server: call {call_id} of team {} has no Slack notice for @{handle}", team.id),
+                Err(e) => eprintln!("pinned-server: call {call_id} of team {} could not tell @{handle} in Slack: {e}", team.id),
+            }
+        }
+    });
 }
 
 /// Runs every few seconds (`super::spawn_tick`), across every team. A call open longer than

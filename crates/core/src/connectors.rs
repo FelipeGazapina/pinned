@@ -2392,6 +2392,35 @@ impl Connectors {
         Ok("posted the reply in the Slack thread".into())
     }
 
+    /// Posts one message in the Slack channel the workflow `workflow` watches, through the bot it is
+    /// bound to, mentioning the Slack user group `handle` (`@handle` as plain text when Slack
+    /// won't name it). `text` gets the workflow's name and that mention. False, and nothing posted,
+    /// when the workflow has no channel (a Linear or called workflow) or no connected bot. Never
+    /// reads another workflow's channel or another bot's token.
+    pub async fn announce_to_group(&self, workflow: &str, handle: &str, text: impl FnOnce(&str, &str) -> String) -> Result<bool, String> {
+        let (bot, name, channel) = {
+            let store = self.store.lock().unwrap();
+            let Some(c) = store.connectors.iter().find(|c| c.id == workflow) else { return Ok(false) };
+            let channel = match &c.trigger {
+                Trigger::SlackMention { channel } | Trigger::SlackMessage { channel, .. } => channel.clone(),
+                Trigger::LinearLabel { .. } | Trigger::Called => return Ok(false),
+            };
+            if channel_name(&channel).is_empty() {
+                return Ok(false);
+            }
+            let Some(bot) = store.workflow_bot(c)? else { return Ok(false) };
+            (bot, c.name.clone(), channel)
+        };
+        let Some(bot) = self.with_token(bot) else { return Ok(false) };
+        let channel = self.channel_id(&bot, &channel).await?;
+        let mention = match slack::group_id(&bot.token, handle).await {
+            Ok(id) => slack::group_mention(&id),
+            Err(_) => format!("@{}", handle.trim().trim_start_matches('@')),
+        };
+        slack::announce(&bot.token, &channel, &text(&name, &mention)).await?;
+        Ok(true)
+    }
+
     /// Stores `value` as `{{vars.<name>}}` of the live graph run whose session `connector` runs
     /// on `subject`, for its later steps to read. Grants nothing else: a workflow with fix off
     /// still files nothing and changes no code.

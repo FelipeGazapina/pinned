@@ -4,6 +4,8 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 
 const API: &str = "https://slack.com/api/";
+/// Overrides `API` (a root ending in `/api/`), so a hub test points Slack at a stand-in.
+pub const API_ROOT_ENV: &str = "PINNED_SLACK_API_ROOT";
 /// How far back a channel's history is read to find threads that got a new reply. A thread
 /// older than this, or past the newest `HISTORY_PAGES` pages, that gets a new mention or reply
 /// is missed. Slack's history lists only top-level messages, each with its thread's latest reply,
@@ -115,7 +117,10 @@ fn api_root() -> String {
     if let Some(root) = API_ROOT.lock().unwrap().clone() {
         return root;
     }
-    API.to_owned()
+    match std::env::var(API_ROOT_ENV).ok().map(|r| r.trim().trim_end_matches('/').to_owned()).filter(|r| !r.is_empty()) {
+        Some(root) => format!("{root}/"),
+        None => API.to_owned(),
+    }
 }
 
 /// Points Slack calls at `root` for a test. `None` restores the real API.
@@ -511,6 +516,16 @@ pub async fn permalink(token: &str, channel: &str, thread: &str) -> Result<Strin
 
 pub async fn post(token: &str, channel: &str, thread: &str, text: &str) -> Result<(), String> {
     write(token, "chat.postMessage", json!({ "channel": channel, "thread_ts": thread, "text": text })).await.map(drop)
+}
+
+/// A new message in `channel`, not in a thread.
+pub async fn announce(token: &str, channel: &str, text: &str) -> Result<(), String> {
+    write(token, "chat.postMessage", json!({ "channel": channel, "text": text })).await.map(drop)
+}
+
+/// Whether `handle` is a Slack user-group handle: 1 to 80 of `a-z`, `0-9`, `.`, `_` and `-`.
+pub fn is_group_handle(handle: &str) -> bool {
+    (1..=80).contains(&handle.len()) && handle.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
 }
 
 /// Reacts to the message `ts` with the emoji `name`. A reaction the bot already left counts as
