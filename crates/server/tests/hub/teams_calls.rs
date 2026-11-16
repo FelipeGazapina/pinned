@@ -10,16 +10,16 @@ use pinned_server::teams;
 use uuid::Uuid;
 
 /// Long enough that no call escalates or gives up while a test that does not wait for it runs.
-fn patient() -> TeamPolicy {
+pub(super) fn patient() -> TeamPolicy {
     TeamPolicy { escalate_after_secs: 3600, give_up_after_secs: 7200, ..TeamPolicy::default() }
 }
 
-struct Person {
-    id: Uuid,
-    client: Client,
+pub(super) struct Person {
+    pub(super) id: Uuid,
+    pub(super) client: Client,
 }
 
-fn person(hub: &TestHub, email: &str) -> Person {
+pub(super) fn person(hub: &TestHub, email: &str) -> Person {
     let (token, account) = account::signup(&hub.url, email, "correct horse").unwrap();
     let mut client = Client::connect(&hub.url, &token);
     client.wait("hello", |f| f["type"] == "hello");
@@ -27,7 +27,7 @@ fn person(hub: &TestHub, email: &str) -> Person {
 }
 
 /// Runs SQL on the hub's database, as the teams' other ops would write it.
-fn sql(hub: &TestHub, statement: &str) {
+pub(super) fn sql(hub: &TestHub, statement: &str) {
     hub.runtime.block_on(async {
         let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), hub.database), tokio_postgres::NoTls).await.unwrap();
         tokio::spawn(connection);
@@ -36,7 +36,7 @@ fn sql(hub: &TestHub, statement: &str) {
 }
 
 /// Each row of `query`, its columns as text.
-fn rows(hub: &TestHub, query: &str) -> Vec<Vec<Option<String>>> {
+pub(super) fn rows(hub: &TestHub, query: &str) -> Vec<Vec<Option<String>>> {
     hub.runtime.block_on(async {
         let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), hub.database), tokio_postgres::NoTls).await.unwrap();
         tokio::spawn(connection);
@@ -46,19 +46,19 @@ fn rows(hub: &TestHub, query: &str) -> Vec<Vec<Option<String>>> {
 }
 
 /// A team whose owner connected Upstash and keeps a box workflow, with one box booted for it.
-struct TeamBox {
-    owner: Person,
-    team: Uuid,
-    workflow: String,
-    machine: String,
-    box_id: String,
+pub(super) struct TeamBox {
+    pub(super) owner: Person,
+    pub(super) team: Uuid,
+    pub(super) workflow: String,
+    pub(super) machine: String,
+    pub(super) box_id: String,
     /// The box node's folder, where its socket is.
-    dir: PathBuf,
-    tab: String,
+    pub(super) dir: PathBuf,
+    pub(super) tab: String,
 }
 
 impl TeamBox {
-    fn new(hub: &TestHub) -> TeamBox {
+    pub(super) fn new(hub: &TestHub) -> TeamBox {
         let mut owner = person(hub, "olga@example.test");
         let made = owner.client.hub(json!({ "cmd": "team", "op": { "op": "create", "name": "Acme" } })).unwrap();
         let team = Uuid::parse_str(made["id"].as_str().unwrap()).unwrap();
@@ -98,7 +98,7 @@ impl TeamBox {
     }
 
     /// A member of the team, in the groups `groups`.
-    fn member(&self, hub: &TestHub, email: &str, groups: &[&str]) -> Person {
+    pub(super) fn member(&self, hub: &TestHub, email: &str, groups: &[&str]) -> Person {
         let member = person(hub, email);
         sql(hub, &format!("insert into team_members (team, member, role) values ('{}', '{}', 'member')", self.team, member.id));
         for group in groups {
@@ -112,7 +112,7 @@ impl TeamBox {
     }
 
     /// The bot of the box's workflow, asking `in_doubt` and answered for by `owner`.
-    fn bot(&self, hub: &TestHub, in_doubt: Value, owner: Option<Uuid>) {
+    pub(super) fn bot(&self, hub: &TestHub, in_doubt: Value, owner: Option<Uuid>) {
         let owner = owner.map_or("null".to_owned(), |o| format!("'{o}'"));
         let calls = json!({ "in_doubt": in_doubt });
         sql(hub, &format!(
@@ -122,7 +122,7 @@ impl TeamBox {
     }
 
     /// A run of the bot working in this box.
-    fn run(&self, hub: &TestHub) -> Uuid {
+    pub(super) fn run(&self, hub: &TestHub) -> Uuid {
         let id = Uuid::new_v4();
         let run = TeamRun {
             id: id.to_string(),
@@ -141,7 +141,7 @@ impl TeamBox {
     }
 
     /// What the box's session sends the hub with `ask_people`.
-    fn ask(&self, hub: &TestHub, question: &str, choices: &[&str]) -> Result<Value, String> {
+    pub(super) fn ask(&self, hub: &TestHub, question: &str, choices: &[&str]) -> Result<Value, String> {
         ask_from(hub, &self.box_id, question, choices)
     }
 
@@ -151,13 +151,13 @@ impl TeamBox {
         teams::call(hub, &person, Some(self.team), serde_json::from_value::<TeamOp>(op).unwrap()).await
     }
 
-    fn run_state(&self, hub: &TestHub, run: Uuid) -> (String, Option<String>) {
+    pub(super) fn run_state(&self, hub: &TestHub, run: Uuid) -> (String, Option<String>) {
         let found = rows(hub, &format!("select state, controller::text from team_runs where id = '{run}'"));
         (found[0][0].clone().unwrap(), found[0][1].clone())
     }
 
     /// What the box's session got typed for it, read until it holds `text`.
-    fn told(&self, hub: &TestHub, text: &str) -> String {
+    pub(super) fn told(&self, hub: &TestHub, text: &str) -> String {
         let mut told = String::new();
         wait_for(&format!("{text:?} in the session"), || {
             if on_node(hub, &self.box_id, |node| node.machine.view(&self.tab).is_ok_and(|v| v.queued > 0)) {
@@ -180,21 +180,21 @@ fn ask_from(hub: &TestHub, box_id: &str, question: &str, choices: &[&str]) -> Re
     on_node(hub, box_id, |node| node.link.as_ref().unwrap().call_hub(HubCall::Team { team: None, op }))
 }
 
-fn choice(choice: &str, text: &str) -> Value {
+pub(super) fn choice(choice: &str, text: &str) -> Value {
     json!({ "kind": { "kind": "choice" }, "choice": choice, "text": text })
 }
 
-fn design() -> Value {
+pub(super) fn design() -> Value {
     json!({ "kind": "group", "handle": "design" })
 }
 
 /// A member's op on team `team`, from their app.
-fn op(team: Uuid, client: &mut Client, op: Value) -> Result<Value, String> {
+pub(super) fn op(team: Uuid, client: &mut Client, op: Value) -> Result<Value, String> {
     client.hub(json!({ "cmd": "team", "team": team.to_string(), "op": op }))
 }
 
 /// The team's calls as a member lists them.
-fn calls_of(team: Uuid, client: &mut Client) -> Vec<Value> {
+pub(super) fn calls_of(team: Uuid, client: &mut Client) -> Vec<Value> {
     op(team, client, json!({ "op": "calls" })).unwrap().as_array().unwrap().clone()
 }
 
