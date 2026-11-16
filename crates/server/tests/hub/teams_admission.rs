@@ -56,8 +56,14 @@ fn answer(mut stream: TcpStream) {
     let path = head.split_whitespace().nth(1).unwrap_or_default().to_owned();
     let key = header("authorization").trim_start_matches("Bearer ").to_owned();
     let service = if path.starts_with("/graphql") { "linear" } else { "model" };
-    CALLS.lock().unwrap().push(Call { service, key, path: path.clone(), body: body.clone() });
-    let answer = match (service, path.as_str()) {
+    CALLS.lock().unwrap().push(Call { service, key: key.clone(), path: path.clone(), body: body.clone() });
+    // A model call about ENG-1 that stops its run (`ta_rel_stop`) or fails (`ta_rel_model`).
+    let (status, special) = match (service, path.as_str()) {
+        ("model", "/v1/chat/completions") if body.contains("ENG-1:") && key.ends_with("ta_rel_stop") => ("200 OK", Some(json!({ "choices": [{ "message": { "content": "{\"kind\":\"stop\"}" } }] }))),
+        ("model", "/v1/chat/completions") if body.contains("ENG-1:") && key.ends_with("ta_rel_model") => ("500 Internal Server Error", Some(json!({ "error": { "message": "the model is down" } }))),
+        _ => ("200 OK", None),
+    };
+    let answer = special.unwrap_or_else(|| match (service, path.as_str()) {
         ("linear", _) if body.contains("viewer") => json!({ "data": { "viewer": { "name": "Acme bot", "email": "", "organization": { "name": "Acme" } } } }),
         ("linear", _) if body.contains("issues(") => json!({ "data": { "issues": { "nodes": [] } } }),
         ("linear", _) if body.contains("issueUpdate") => json!({ "data": { "issueUpdate": { "success": true } } }),
@@ -66,9 +72,9 @@ fn answer(mut stream: TcpStream) {
         (_, p) if p.starts_with("/v1/models/") => json!({ "id": "acme/sorter", "type": "language" }),
         (_, "/v1/chat/completions") => json!({ "choices": [{ "message": { "content": "{\"kind\":\"bug\"}" } }] }),
         _ => json!({}),
-    };
+    });
     let answer = answer.to_string();
-    let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}", answer.len());
+    let _ = write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}", answer.len());
 }
 
 /// What reached outside pinned for issue `ENG-n` with keys of test `name`: each model question
@@ -106,7 +112,8 @@ impl Crew {
     fn new(name: &str) -> Crew {
         standins();
         let patient = TeamPolicy { escalate_after_secs: 3600, give_up_after_secs: 7200, ..TeamPolicy::default() };
-        let hub = TestHub::start_with_team_policy(name, fast(), patient);
+        // A box that fails to boot cools its bot down for an hour; these tests start the next event right after.
+        let hub = TestHub::start_with_team_policy(name, Policy { cooldown: Duration::ZERO, ..fast() }, patient);
         let sign_up = |email: &str| {
             let (_, view) = account::signup(&hub.url, email, "correct horse").unwrap();
             hub.runtime.block_on(hub.hub().account(Uuid::parse_str(&view.id).unwrap())).unwrap()
@@ -141,12 +148,17 @@ impl Crew {
     /// A Linear label bot whose Ask step asks the model what kind of issue it is, and whose
     /// session moves the issue to "In Progress"; bob saved it and ana turned it on.
     fn on_bot(&self, name: &str) -> String {
+        self.ask_bot(name, &[])
+    }
+
+    /// `on_bot` whose Ask step ends the run, without a session, on any of the answers `stop_on`.
+    fn ask_bot(&self, name: &str, stop_on: &[&str]) -> String {
         let saved = self.hub_call(json!({ "cmd": "save_connector", "connector": {
             "name": name, "enabled": false, "trigger": { "kind": "linear-label", "label": "agent" },
             "folder": self.folder, "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false,
             "instructions": "", "machine": { "kind": "upstash-box", "size": "small" },
             "columns": { "picked": "In Progress", "coding": "", "review": "" },
-            "ask": { "model": "acme/sorter", "instructions": "Sort the issue.", "questions": [{ "name": "kind", "ask": "What kind of issue is it?" }] },
+            "ask": { "model": "acme/sorter", "instructions": "Sort the issue.", "questions": [{ "name": "kind", "ask": "What kind of issue is it?", "stopOn": stop_on }] },
         } }));
         let id = saved["id"].as_str().unwrap().to_owned();
         let bot = Bot { workflow: id.clone(), name: String::new(), owner: None, calls: CallRules::default(), limits: BotLimits { usd: 5.0, minutes: 30 }, on: false, on_by: None, once: false, off_note: None, skipped: vec![] };
@@ -162,12 +174,23 @@ impl Crew {
     /// A Linear label bot whose graph moves the issue to "In Progress", asks the model what kind
     /// of issue it is, then opens its session; bob saved it and ana turned it on.
     fn graph_bot(&self, name: &str) -> String {
+        self.graph_of(
+            name,
+            vec![
+                json!({ "type": "stage-picked" }),
+                json!({ "type": "classify", "model": "acme/sorter", "instructions": "Sort the issue.", "questions": [{ "name": "kind", "ask": "What kind of issue is it?" }] }),
+                json!({ "type": "session", "prompt": "Fix the issue." }),
+            ],
+        )
+    }
+
+    /// A Linear label bot whose graph only moves the issue to "In Progress": it ends before any session.
+    fn sessionless_graph_bot(&self, name: &str) -> String {
+        self.graph_of(name, vec![json!({ "type": "stage-picked" })])
+    }
+
+    fn graph_of(&self, name: &str, steps: Vec<Value>) -> String {
         let watch = json!({ "kind": "linear-label", "label": "agent" });
-        let steps = [
-            json!({ "type": "stage-picked" }),
-            json!({ "type": "classify", "model": "acme/sorter", "instructions": "Sort the issue.", "questions": [{ "name": "kind", "ask": "What kind of issue is it?" }] }),
-            json!({ "type": "session", "prompt": "Fix the issue." }),
-        ];
         let mut nodes = vec![json!({ "id": "t", "name": "Trigger", "position": [0, 0], "type": "trigger", "watch": watch })];
         let mut edges = vec![];
         let mut from = "t".to_owned();
@@ -330,6 +353,16 @@ impl Crew {
             let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), self.hub.database), tokio_postgres::NoTls).await.unwrap();
             tokio::spawn(connection);
             db.query_one("select count(*) from team_run_queue where team = $1 and workflow = $2", &[&self.team, &id]).await.unwrap().get::<_, i64>(0)
+        })
+    }
+
+    /// The state of every run row of the team that was reserved and whose session never opened.
+    fn unopened(&self) -> Vec<String> {
+        self.hub.runtime.block_on(async {
+            let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), self.hub.database), tokio_postgres::NoTls).await.unwrap();
+            tokio::spawn(connection);
+            let rows = db.query("select state from team_runs where team = $1 and reserved order by state", &[&self.team]).await.unwrap();
+            rows.iter().map(|r| r.get::<_, String>(0)).collect()
         })
     }
 
@@ -523,4 +556,74 @@ fn a_waiting_run_whose_start_fails_is_counted_on_its_bot() {
     assert_eq!(crew.skipped(&id), json!([{ "reason": "start_failed", "count": 1 }]));
     assert_eq!(crew.waiting(&id), 0, "it is dropped, not kept");
     assert_eq!(crew.live(), 0, "no run started");
+}
+
+/// A team that may run one at a time, whose only place a run of bot `holder` takes; two events of
+/// `bot` (ENG-1, ENG-2) wait behind it. Stopping the holder gives ENG-1 the place first.
+fn two_wait_behind(crew: &Crew, holder: &str, bot: &str, graph: bool) {
+    admin_on(&crew.hub.database, &format!("update teams set max_live_runs = 1 where id = '{}'", crew.team));
+    assert_eq!(crew.found(crew.labeled(holder, 9)), Ok(()));
+    for n in 1..=2 {
+        let event = if graph { crew.graph_labeled(bot, n) } else { crew.labeled(bot, n) };
+        assert_eq!(crew.found(event), Ok(()), "ENG-{n}");
+    }
+    assert_eq!((crew.live(), crew.waiting(bot)), (1, 2), "the holder's run is the only one, both events wait");
+    assert_eq!((crew.outside(1), crew.outside(2)), (none(), none()), "nothing reached outside pinned while they wait");
+    let held = crew.live_of(holder);
+    crew.stop(&held[0]);
+}
+
+/// What a freed place does after ENG-1 was admitted and its run ended or never opened: its
+/// reserved row is gone, and ENG-2 got the place.
+fn assert_place_freed_for_eng_2(crew: &Crew, bot: &str, unopened: &[&str]) {
+    wait_for("ENG-2 to take the place", || crew.live_of(bot).len() == 1);
+    std::thread::sleep(Duration::from_secs(1));
+    assert_eq!(crew.unopened(), unopened, "ENG-1's reserved row ended, none is left holding the place");
+    assert_eq!(crew.live(), 1, "the place ENG-1 held is back: only ENG-2's run lives");
+    assert_eq!(crew.waiting(bot), 0);
+    assert_eq!(crew.outside(2), vec!["model".to_owned(), "linear move".to_owned()], "ENG-2 asked once and moved its issue once");
+}
+
+#[test]
+fn an_ask_step_that_stops_the_run_frees_its_reserved_place() {
+    let crew = Crew::new("ta_rel_stop");
+    let (holder, pages) = (crew.on_bot("Docs"), crew.ask_bot("Pages", &["stop"]));
+    two_wait_behind(&crew, &holder, &pages, false);
+
+    assert_place_freed_for_eng_2(&crew, &pages, &["done"]);
+    assert_eq!(crew.outside(1), vec!["model".to_owned()], "ENG-1 asked the model, was told to stop, and its issue stayed where it was");
+}
+
+#[test]
+fn a_failed_model_call_frees_its_reserved_place() {
+    let crew = Crew::new("ta_rel_model");
+    let (holder, pages) = (crew.on_bot("Docs"), crew.on_bot("Pages"));
+    two_wait_behind(&crew, &holder, &pages, false);
+
+    assert_place_freed_for_eng_2(&crew, &pages, &["done"]);
+    assert_eq!(crew.outside(1), vec!["model".to_owned()], "ENG-1's model call failed and its issue stayed where it was");
+}
+
+#[test]
+fn a_session_that_does_not_open_frees_its_reserved_place() {
+    let crew = Crew::new("ta_rel_open");
+    let (holder, pages) = (crew.on_bot("Docs"), crew.on_bot("Pages"));
+    two_wait_behind(&crew, &holder, &pages, false);
+    crew.hub.boxes.state.lock().unwrap().failing = Some(Exec { exit_code: 22, output: "Downloading pinned-server\n".into(), error: "curl: (22) The requested URL returned error: 404\n".into() });
+
+    assert_place_freed_for_eng_2(&crew, &pages, &[]);
+    assert_eq!(crew.outside(1), vec!["model".to_owned()], "ENG-1 asked the model, its box did not boot, and its issue stayed where it was");
+}
+
+#[test]
+fn a_graph_that_ends_before_any_session_frees_its_reserved_place() {
+    let crew = Crew::new("ta_rel_graph");
+    let (holder, pages) = (crew.on_bot("Docs"), crew.sessionless_graph_bot("Triage"));
+    two_wait_behind(&crew, &holder, &pages, true);
+
+    wait_for("both graphs to run", || crew.outside(1).len() == 1 && crew.outside(2).len() == 1);
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(crew.unopened(), vec!["done", "done"], "both reserved rows ended, none is left holding a place");
+    assert_eq!((crew.live(), crew.waiting(&pages)), (0, 0), "both graphs ended, neither holds a place");
+    assert_eq!((crew.outside(1), crew.outside(2)), (vec!["linear move".to_owned()], vec!["linear move".to_owned()]), "each graph moved its issue once");
 }
