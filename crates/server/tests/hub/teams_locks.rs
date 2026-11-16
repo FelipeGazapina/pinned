@@ -118,6 +118,22 @@ fn run_nows_queued_behind_a_turn_another_hub_holds_are_all_refused_within_three_
 }
 
 #[test]
+fn a_connection_opened_again_after_a_drop_still_refuses_a_held_lock_in_time() {
+    let crew = Crew::new("tl_reconnect");
+    let bot = crew.on_bot("Pages");
+    assert_eq!(crew.found(crew.labeled(&bot, 1)), Ok(()));
+    let run = crew.live_of(&bot)[0].clone();
+    // Every connection of the hub's is dropped; the next statement opens one again.
+    admin_on(&crew.hub.database, "select pg_terminate_backend(pid) from pg_stat_activity where datname = current_database() and pid <> pg_backend_pid()");
+    wait_for("the hub to answer again", || crew.call(&crew.bob, TeamOp::Runs).is_ok());
+    let held = Held::new(&crew.hub, &format!("select 1 from team_runs where id = '{run}' for update"));
+
+    let stopped = spawn_op(&crew, &crew.ana, serde_json::from_value(json!({ "op": "stop_run", "run": run })).unwrap());
+    assert_eq!(within(&crew.hub, "the stop on a connection opened again", stopped).unwrap(), Err(BUSY.to_owned()));
+    held.release();
+}
+
+#[test]
 fn the_teams_turn_is_not_held_while_a_box_boots() {
     let crew = Crew::new("tl_boot");
     let bot = crew.on_bot("Pages");
