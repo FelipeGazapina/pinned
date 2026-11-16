@@ -4,6 +4,11 @@
 //! and denies the tool call until the answer comes back as a message. It fails closed: when the
 //! hub can't be asked, the step is denied.
 //!
+//! The question shows the exact step (secrets hidden), and carries the hash of the exact tool call
+//! (`step_hash`). A "Go ahead" lets that one tool call run once, in the same run, within 10
+//! minutes: when the bot makes it again, the hub answers `granted` and the hook lets it through.
+//! Any other step, or the same one again, is asked again.
+//!
 //! Outside a team box (`PINNED_TEAM_BOX` not `1`) the hook does nothing, and no settings file
 //! registers it: the never list is still only a pure function there.
 
@@ -12,6 +17,7 @@ use crate::agent::Message;
 use crate::team_call;
 use crate::teams::Situation;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 pub const SUBCOMMAND: &str = "team-guard";
@@ -21,8 +27,11 @@ pub const COULD_NOT_ASK: &str = "Could not ask the team; do not do this step.";
 /// The choices every step's question offers.
 pub const GO_AHEAD: &str = "Go ahead";
 pub const DONT: &str = "Don't";
+/// What a session reads for a step longer than `STEP_CHARS`, which nobody is asked about.
+pub const TOO_LONG: &str = "This step is too long to show to the team; split it into shorter steps.";
 
-const QUESTION_CHARS: usize = 300;
+/// The longest step, secrets hidden, a person is asked to approve whole.
+const STEP_CHARS: usize = 4000;
 
 /// What the hook knows besides the payload.
 #[derive(Debug, Clone, Default)]
@@ -70,44 +79,72 @@ pub fn decide(payload: &str, env: &HookEnv, ask: impl FnOnce(Message) -> Result<
     let default_branch = repo_top(&cwd).and_then(|top| default_branch(&top)).unwrap_or_else(|| "main".into());
     let ctx = AskCtx { worktree: &worktree, scratch: None, home: &env.home, cwd: &cwd, default_branch: &default_branch, current_branch: current_branch.as_deref() };
     let hit = never(&ctx, &tool_ask)?;
-    let question = format!("{}: {}", hit.item.label(), step(&tool_ask, input));
-    let reason = match ask(Message::AskPeople { situation: Situation::BeforeIrreversible, question, choices: vec![GO_AHEAD.into(), DONT.into()] })
-        .and_then(|reply| team_call::parse_asked(&reply))
-    {
-        Ok(asked) => format!("Asked the team before this step (call {}). End your turn and wait for the answer; do it only if the answer says go ahead.", asked.id),
-        Err(_) => COULD_NOT_ASK.to_owned(),
-    };
-    Some(json!({ "hookSpecificOutput": { "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason } }).to_string())
+    let tool = hook["tool_name"].as_str()?;
+    let shown = step(tool, &tool_ask, input);
+    if shown.chars().count() > STEP_CHARS {
+        return Some(deny(TOO_LONG));
+    }
+    let question = format!("{}: {shown}", hit.item.label());
+    let message = Message::AskPeople { situation: Situation::BeforeIrreversible, question, choices: vec![GO_AHEAD.into(), DONT.into()], step: Some(step_hash(tool, input)) };
+    match ask(message).and_then(|reply| team_call::parse_asked(&reply)) {
+        Ok(asked) if asked.granted => None,
+        Ok(asked) => Some(deny(&format!(
+            "Asked the team before this step (call {}). End your turn and wait for the answer; only if it says go ahead, make this exact tool call again, unchanged.",
+            asked.id
+        ))),
+        Err(_) => Some(deny(COULD_NOT_ASK)),
+    }
 }
 
-/// The step on one line, with tokens and secret-named assignments hidden, cut to a length a person
-/// reads in a notification.
-fn step(ask: &Ask, input: &Value) -> String {
+fn deny(reason: &str) -> String {
+    json!({ "hookSpecificOutput": { "hookEventName": "PreToolUse", "permissionDecision": "deny", "permissionDecisionReason": reason } }).to_string()
+}
+
+/// The hex SHA-256 of `tool` and its input with every object's keys sorted, before anything is
+/// hidden: the same tool call hashes the same, a byte changed anywhere does not.
+pub fn step_hash(tool: &str, input: &Value) -> String {
+    Sha256::digest(format!("{tool}\n{}", canonical(input))).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// `value` as JSON with every object's keys sorted.
+fn canonical(value: &Value) -> String {
+    fn sorted(value: &Value) -> Value {
+        match value {
+            Value::Object(map) => {
+                let mut keys: Vec<_> = map.keys().collect();
+                keys.sort();
+                Value::Object(keys.into_iter().map(|k| (k.clone(), sorted(&map[k]))).collect())
+            }
+            Value::Array(items) => Value::Array(items.iter().map(sorted).collect()),
+            other => other.clone(),
+        }
+    }
+    sorted(value).to_string()
+}
+
+/// The exact step as it will run, with tokens and secret-named assignments hidden: a command as
+/// the bot wrote it, any other tool call as its name and input.
+fn step(tool: &str, ask: &Ask, input: &Value) -> String {
     let text = match ask {
         Ask::Bash { command } => (*command).to_owned(),
-        Ask::Edit { path } | Ask::Read { path } => path.display().to_string(),
-        Ask::WebFetch { url } => (*url).to_owned(),
-        Ask::Mcp { name, .. } => format!("{name} {input}"),
+        Ask::Edit { .. } | Ask::Read { .. } | Ask::WebFetch { .. } | Ask::Mcp { .. } => format!("{tool} {}", canonical(input)),
     };
     scrub(&text)
 }
 
-/// `text` on one line with keys and tokens hidden, and the value of any `NAME=value` whose name says
-/// secret.
+/// `text` whole, with keys and tokens hidden, and the value of any `NAME=value` whose name says
+/// secret. Every space and line break stays where it was.
 fn scrub(text: &str) -> String {
-    let masked = crate::surface::mask_secrets(text);
-    let line = masked
-        .split_whitespace()
-        .map(|word| match word.split_once('=') {
-            Some((name, value)) if !value.is_empty() && secret_name(name) => format!("{name}=[hidden]"),
-            _ => word.to_owned(),
+    crate::surface::mask_secrets(text)
+        .split_inclusive(char::is_whitespace)
+        .map(|piece| {
+            let word = piece.trim_end();
+            match word.split_once('=') {
+                Some((name, value)) if !value.is_empty() && secret_name(name) => format!("{name}=[hidden]{}", &piece[word.len()..]),
+                _ => piece.to_owned(),
+            }
         })
-        .collect::<Vec<_>>()
-        .join(" ");
-    match line.char_indices().nth(QUESTION_CHARS) {
-        Some((at, _)) => format!("{}…", &line[..at]),
-        None => line,
-    }
+        .collect()
 }
 
 fn secret_name(name: &str) -> bool {
@@ -174,12 +211,74 @@ mod tests {
     fn a_deploy_in_a_team_box_asks_the_team_and_is_denied() {
         let deploy = payload("Bash", json!({ "command": "vercel deploy --prod --token vca_abc" }));
         let (out, message) = decision(&deploy, true, Ok(r#"{"id":"k7","asked":["the owner"]}"#));
-        assert_eq!(denied(&out.unwrap()), "Asked the team before this step (call k7). End your turn and wait for the answer; do it only if the answer says go ahead.");
-        let Some(Message::AskPeople { situation, question, choices }) = message else { panic!("no ask") };
+        assert_eq!(
+            denied(&out.unwrap()),
+            "Asked the team before this step (call k7). End your turn and wait for the answer; only if it says go ahead, make this exact tool call again, unchanged."
+        );
+        let Some(Message::AskPeople { situation, question, choices, step }) = message else { panic!("no ask") };
         assert_eq!(situation, Situation::BeforeIrreversible);
         assert_eq!(choices, ["Go ahead", "Don't"]);
-        assert!(question.starts_with("deploy: vercel deploy --prod"), "{question}");
-        assert!(!question.contains('\n'));
+        assert_eq!(question, "deploy: vercel deploy --prod --token vca_abc");
+        assert_eq!(step, Some(step_hash("Bash", &json!({ "command": "vercel deploy --prod --token vca_abc" }))));
+    }
+
+    #[test]
+    fn a_granted_reply_lets_the_step_run_with_no_output() {
+        let deploy = payload("Bash", json!({ "command": "vercel deploy --prod" }));
+        let (out, message) = decision(&deploy, true, Ok(r#"{"granted":true,"call":"k7"}"#));
+        assert_eq!(out, None);
+        assert!(matches!(message, Some(Message::AskPeople { step: Some(_), .. })), "the hub was asked, with the step");
+        for not_granted in [r#"{"granted":false,"call":"k7"}"#, r#"{"call":"k7","asked":["the owner"]}"#] {
+            let (out, _) = decision(&deploy, true, Ok(not_granted));
+            assert!(denied(&out.unwrap()).starts_with("Asked the team before this step (call k7)."), "{not_granted}");
+        }
+    }
+
+    #[test]
+    fn the_step_hash_is_the_same_for_the_same_call_and_differs_by_one_byte() {
+        let input = json!({ "command": "vercel deploy --prod", "description": "Deploy", "timeout": 60000 });
+        let reordered: Value = serde_json::from_str(r#"{"timeout":60000,"description":"Deploy","command":"vercel deploy --prod"}"#).unwrap();
+        let hash = step_hash("Bash", &input);
+        assert_eq!(hash.len(), 64);
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()), "{hash}");
+        assert_eq!(step_hash("Bash", &input), hash);
+        assert_eq!(step_hash("Bash", &reordered), hash, "the keys' order does not count");
+        assert_ne!(step_hash("Bash", &json!({ "command": "vercel deploy --prod ", "description": "Deploy", "timeout": 60000 })), hash);
+        assert_ne!(step_hash("Bash", &json!({ "command": "vercel deploy --prod", "description": "Deploy", "timeout": 60001 })), hash);
+        assert_ne!(step_hash("mcp__x__Bash", &input), hash);
+        // The hash is of the input as it runs, not of what the person reads with secrets hidden.
+        let with_token = |token: &str| step_hash("Bash", &json!({ "command": format!("vercel deploy --prod --token vca_{token}") }));
+        assert_ne!(with_token("abc"), with_token("abd"));
+    }
+
+    #[test]
+    fn the_whole_step_is_asked_and_a_step_too_long_to_show_is_denied_without_asking() {
+        let long = format!("vercel deploy --prod --build-env NOTE={}", "a".repeat(3900));
+        let (out, message) = decision(&payload("Bash", json!({ "command": long })), true, Ok(r#"{"id":"k1"}"#));
+        assert!(out.is_some());
+        let Some(Message::AskPeople { question, .. }) = message else { panic!("no ask") };
+        assert_eq!(question, format!("deploy: {long}"), "no cut at 300 characters");
+        let multi = "vercel deploy --prod \\\n  --yes";
+        let (_, message) = decision(&payload("Bash", json!({ "command": multi })), true, Ok(r#"{"id":"k1"}"#));
+        assert!(matches!(message, Some(Message::AskPeople { question, .. }) if question == format!("deploy: {multi}")), "line breaks stay");
+
+        let too_long = format!("vercel deploy --prod --build-env NOTE={}", "a".repeat(4000));
+        let (out, message) = decision(&payload("Bash", json!({ "command": too_long })), true, Ok(r#"{"id":"k1"}"#));
+        assert_eq!(denied(&out.unwrap()), "This step is too long to show to the team; split it into shorter steps.");
+        assert!(message.is_none(), "nobody is asked");
+        // 4000 characters is the most, counted as characters, not bytes.
+        let at_most = format!("vercel deploy --prod --x {}", "é".repeat(4000 - 25));
+        let (_, message) = decision(&payload("Bash", json!({ "command": at_most })), true, Ok(r#"{"id":"k1"}"#));
+        assert!(message.is_some());
+    }
+
+    #[test]
+    fn a_tool_call_other_than_a_command_is_shown_as_its_name_and_input() {
+        let read = payload("Read", json!({ "file_path": "/home/box/.ssh/id_ed25519" }));
+        let (out, message) = decision(&read, true, Ok(r#"{"id":"k1"}"#));
+        assert!(out.is_some());
+        let Some(Message::AskPeople { question, .. }) = message else { panic!("no ask") };
+        assert_eq!(question, r#"secrets: Read {"file_path":"/home/box/.ssh/id_ed25519"}"#);
     }
 
     #[test]
@@ -192,7 +291,8 @@ mod tests {
         assert!(question.contains("gh release create v1.0.0"), "{question}");
         assert!(!question.contains("ghp_") && !question.contains("0123456789"), "{question}");
         assert_eq!(scrub("curl -H 'x' API_KEY=abc123 --password=hunter2 sk-0123456789abcdefghij0123"), "curl -H 'x' API_KEY=[hidden] --password=[hidden] [hidden]");
-        assert_eq!(scrub(&"a ".repeat(400)).chars().count(), QUESTION_CHARS + 1);
+        assert_eq!(scrub("a  TOKEN=x\n\tb=c "), "a  TOKEN=[hidden]\n\tb=c ");
+        assert_eq!(scrub(&"a ".repeat(400)), "a ".repeat(400));
     }
 
     #[test]

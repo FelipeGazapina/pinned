@@ -176,7 +176,7 @@ fn on_node<T>(hub: &TestHub, box_id: &str, f: impl FnOnce(&Node) -> T) -> T {
 }
 
 fn ask_from(hub: &TestHub, box_id: &str, question: &str, choices: &[&str]) -> Result<Value, String> {
-    let op = TeamOp::AskPeople { situation: Situation::InDoubt, question: question.into(), choices: choices.iter().map(|c| c.to_string()).collect() };
+    let op = TeamOp::AskPeople { situation: Situation::InDoubt, question: question.into(), choices: choices.iter().map(|c| c.to_string()).collect(), step: None };
     on_node(hub, box_id, |node| node.link.as_ref().unwrap().call_hub(HubCall::Team { team: None, op }))
 }
 

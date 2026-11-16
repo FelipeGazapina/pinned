@@ -438,11 +438,18 @@ pub enum TeamOp {
     /// `CallRules` name for `situation`. The session never names people. The hub replies at once
     /// with the call's id and who it asks (`{"call":"…","asked":["@design"]}`); the answer, or
     /// that nobody answered in time, is typed into the session later.
+    ///
+    /// `step`, from the team-box hook only: the hash of the exact tool call it asks about. A
+    /// "Go ahead" on a `BeforeIrreversible` call with the same step, in the same run, in the last
+    /// 10 minutes and not used yet, lets that step run once: the hub answers
+    /// `{"granted":true,"call":"…"}` and opens no call.
     AskPeople {
         situation: Situation,
         question: String,
         #[serde(default)]
         choices: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        step: Option<String>,
     },
 }
 

@@ -397,6 +397,9 @@ pub enum Message {
         question: String,
         #[serde(default)]
         choices: Vec<String>,
+        /// The hook's hash of the exact step, which a "Go ahead" lets run once (`TeamOp::AskPeople`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        step: Option<String>,
     },
     /// `pinned run set <name> <value>`: a value the session's graph run reads as `{{vars.<name>}}`.
     RunSet {
@@ -534,10 +537,12 @@ mod tests {
     fn an_ask_people_message_reads_its_literal_line_and_choices_default_to_none() {
         let line = r#"{"kind":"ask-people","situation":"in_doubt","question":"Which color?","choices":["red","blue"]}"#;
         let message: Message = serde_json::from_str(line).unwrap();
-        assert!(matches!(&message, Message::AskPeople { situation: crate::teams::Situation::InDoubt, question, choices } if question == "Which color?" && choices == &["red", "blue"]));
+        assert!(matches!(&message, Message::AskPeople { situation: crate::teams::Situation::InDoubt, question, choices, step: None } if question == "Which color?" && choices == &["red", "blue"]));
         assert_eq!(serde_json::to_string(&message).unwrap(), line);
         let bare: Message = serde_json::from_str(r#"{"kind":"ask-people","situation":"before_irreversible","question":"Deploy?"}"#).unwrap();
         assert!(matches!(bare, Message::AskPeople { choices, .. } if choices.is_empty()));
+        let hooked: Message = serde_json::from_str(r#"{"kind":"ask-people","situation":"before_irreversible","question":"Deploy?","step":"9f2c"}"#).unwrap();
+        assert!(matches!(hooked, Message::AskPeople { step: Some(step), .. } if step == "9f2c"));
     }
 
     #[test]
