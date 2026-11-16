@@ -14435,7 +14435,7 @@ Have another model review a risky change before it goes ahead.";
         let erased = Instant::now();
         show(&m, &tab, ERASE);
         wait_for("the held prompt", || kept(&claude, "typed", &tab).ends_with('\r'));
-        assert!(erased.elapsed() >= HELD_SETTLE, "typed only once the screen stayed clear: {:?}", erased.elapsed());
+        assert!(erased.elapsed() >= Duration::from_millis(300), "typed only once the screen stayed clear for 300 ms: {:?}", erased.elapsed());
         assert_eq!(kept(&claude, "typed", &tab), pasted("Where were we?"));
         let _ = std::fs::remove_dir_all(dir);
     }
