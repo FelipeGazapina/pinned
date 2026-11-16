@@ -60,8 +60,9 @@ fn answer(mut stream: TcpStream) {
     let answer = match (service, path.as_str()) {
         ("linear", _) if body.contains("viewer") => json!({ "data": { "viewer": { "name": "Acme bot", "email": "", "organization": { "name": "Acme" } } } }),
         ("linear", _) if body.contains("issues(") => json!({ "data": { "issues": { "nodes": [] } } }),
-        // Moving an issue: refused, so each move is one call.
-        ("linear", _) => json!({ "errors": [{ "message": "the stand-in moves no issue" }] }),
+        ("linear", _) if body.contains("issueUpdate") => json!({ "data": { "issueUpdate": { "success": true } } }),
+        ("linear", _) if body.contains("issue(id") => json!({ "data": { "issue": { "identifier": "ENG", "team": { "name": "Eng", "states": { "nodes": [{ "id": "state-1", "name": "In Progress" }] } } } } }),
+        ("linear", _) => json!({ "errors": [{ "message": "the stand-in knows no such query" }] }),
         (_, p) if p.starts_with("/v1/models/") => json!({ "id": "acme/sorter", "type": "language" }),
         (_, "/v1/chat/completions") => json!({ "choices": [{ "message": { "content": "{\"kind\":\"bug\"}" } }] }),
         _ => json!({}),
@@ -82,7 +83,7 @@ fn outside(name: &str, n: u32) -> Vec<String> {
         .filter(|c| c.key.ends_with(name))
         .filter_map(|c| match c.service {
             "model" if c.path == "/v1/chat/completions" && c.body.contains(&text) => Some("model".to_owned()),
-            "linear" if c.body.contains("issue(id") && c.body.contains(&issue) => Some("linear move".to_owned()),
+            "linear" if c.body.contains("issueUpdate") && c.body.contains(&issue) => Some("linear move".to_owned()),
             _ => None,
         })
         .collect();
@@ -158,6 +159,63 @@ impl Crew {
         self.call(&self.ana, TeamOp::TurnBotOn { workflow: id.to_owned(), on }).unwrap();
     }
 
+    /// A Linear label bot whose graph moves the issue to "In Progress", asks the model what kind
+    /// of issue it is, then opens its session; bob saved it and ana turned it on.
+    fn graph_bot(&self, name: &str) -> String {
+        let watch = json!({ "kind": "linear-label", "label": "agent" });
+        let steps = [
+            json!({ "type": "stage-picked" }),
+            json!({ "type": "classify", "model": "acme/sorter", "instructions": "Sort the issue.", "questions": [{ "name": "kind", "ask": "What kind of issue is it?" }] }),
+            json!({ "type": "session", "prompt": "Fix the issue." }),
+        ];
+        let mut nodes = vec![json!({ "id": "t", "name": "Trigger", "position": [0, 0], "type": "trigger", "watch": watch })];
+        let mut edges = vec![];
+        let mut from = "t".to_owned();
+        for (i, mut step) in steps.into_iter().enumerate() {
+            let id = format!("s{i}");
+            step["id"] = json!(id);
+            step["name"] = json!(format!("Step {i}"));
+            step["position"] = json!([i + 1, 0]);
+            nodes.push(step);
+            edges.push(json!({ "from": from, "port": "out", "to": id }));
+            from = id;
+        }
+        let saved = self.hub_call(json!({ "cmd": "save_connector", "connector": {
+            "name": name, "enabled": false, "trigger": watch,
+            "folder": self.folder, "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false,
+            "instructions": "", "machine": { "kind": "upstash-box", "size": "small" },
+            "columns": { "picked": "In Progress", "coding": "", "review": "" },
+            "graph": { "nodes": nodes, "edges": edges },
+        } }));
+        let id = saved["id"].as_str().unwrap().to_owned();
+        let bot = Bot { workflow: id.clone(), name: String::new(), owner: None, calls: CallRules::default(), limits: BotLimits { usd: 5.0, minutes: 30 }, on: false, on_by: None, once: false, off_note: None, skipped: vec![] };
+        self.call(&self.bob, TeamOp::SaveBot { bot }).unwrap();
+        self.turn_on(&id, true);
+        id
+    }
+
+    /// What the graph bot's Linear poller finds for issue `ENG-n`.
+    fn graph_labeled(&self, id: &str, n: u32) -> Event {
+        let input = pinned_core::connectors::TriggerInput::Issue {
+            id: format!("eng-{n}"),
+            identifier: format!("ENG-{n}"),
+            title: format!("Fix page {n}"),
+            description: None,
+            url: format!("https://linear.example.test/acme/issue/ENG-{n}"),
+        };
+        Event::Graph { connector: id.to_owned(), subject: super::issue(&format!("eng-{n}")), input, at: "2026-11-16T10:00:00Z".into() }
+    }
+
+    /// The ids of the team's live runs of bot `id`.
+    fn live_of(&self, id: &str) -> Vec<String> {
+        let runs = self.call(&self.bob, TeamOp::Runs).unwrap();
+        runs.as_array().unwrap().iter().filter(|r| r["workflow"] == id && r["state"] == "working").map(|r| r["id"].as_str().unwrap().to_owned()).collect()
+    }
+
+    fn stop(&self, run: &str) {
+        self.call(&self.ana, serde_json::from_value(json!({ "op": "stop_run", "run": run })).unwrap()).unwrap();
+    }
+
     /// The event the team's Linear poller finds for label `agent` on issue `ENG-n`.
     fn labeled(&self, id: &str, n: u32) -> Event {
         Event::Run(Run {
@@ -228,9 +286,7 @@ fn an_admitted_event_asks_the_model_once_and_moves_its_issue_once() {
     let crew = Crew::new("ta_admitted");
     let id = crew.on_bot("Pages");
 
-    // The stand-in refuses the move, which the check reports; the session started anyway.
-    let found = crew.found(crew.labeled(&id, 1));
-    assert_eq!(found, Err("Linear: the stand-in moves no issue".to_owned()));
+    assert_eq!(crew.found(crew.labeled(&id, 1)), Ok(()));
     assert_eq!(crew.runs(), vec![("working".to_owned(), "trigger:linear_label".to_owned())]);
     assert_eq!(crew.outside(1), vec!["model".to_owned(), "linear move".to_owned()]);
 }
@@ -289,4 +345,28 @@ fn an_event_of_an_off_bot_reaches_nothing_outside_pinned() {
     assert_eq!(crew.waiting(&id), 0, "never queued");
     assert_eq!(crew.skipped(&id), json!([{ "reason": "off", "count": 1 }]));
     assert_eq!(crew.outside(1), none());
+}
+
+#[test]
+fn a_waiting_graph_event_runs_every_step_once_when_its_turn_comes() {
+    let crew = Crew::new("ta_graph");
+    let id = crew.graph_bot("Triage");
+
+    assert_eq!(crew.found(crew.graph_labeled(&id, 1)), Ok(()));
+    assert_eq!(crew.outside(1), vec!["linear move".to_owned(), "model".to_owned()], "the first event's graph ran");
+    assert_eq!(crew.live_of(&id).len(), 1);
+
+    assert_eq!(crew.found(crew.graph_labeled(&id, 2)), Ok(()));
+    assert_eq!(crew.waiting(&id), 1, "the raw event waits");
+    assert_eq!(crew.outside(2), none(), "no step of the waiting event ran");
+
+    let first = crew.live_of(&id);
+    crew.stop(&first[0]);
+    wait_for("the waiting event's graph to run", || crew.outside(2).len() >= 2 && crew.live_of(&id).len() == 1);
+    // Another check or two pass meanwhile: nothing runs a second time.
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(crew.outside(2), vec!["linear move".to_owned(), "model".to_owned()], "each outside step exactly once");
+    assert_eq!(crew.waiting(&id), 0);
+    assert_eq!(crew.live_of(&id).len(), 1, "its session opened in the place it was granted");
+    assert_eq!(crew.outside(1), vec!["linear move".to_owned(), "model".to_owned()], "the first event's steps did not run again");
 }
