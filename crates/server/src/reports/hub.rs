@@ -94,47 +94,73 @@ impl std::fmt::Debug for Config {
 }
 
 impl Config {
-    /// The configuration `env` asks for, or None when reporting is not available: no token. The token is
-    /// `PINNED_REPORTS_GITHUB_TOKEN`; the repository is pinned's own and the API GitHub's. Under `dev`, in a debug
-    /// build, `PINNED_REPORTS_GITHUB_API` may name an http(s) API on this machine, and only then does
-    /// `PINNED_REPORTS_REPO` count, so a real token never files anywhere but pinned's repository. An override that
-    /// does not count is ignored with one warning that names it, never its value.
+    /// The configuration `env` asks for, or None when reporting is not available. The token is
+    /// `PINNED_REPORTS_GITHUB_TOKEN`; without it there is no reporting. Outside `dev` the repository is pinned's own
+    /// and the API GitHub's, and `PINNED_REPORTS_GITHUB_API` and `PINNED_REPORTS_REPO` are ignored, each with one
+    /// warning that names it, never its value. A dev hub never talks to the real GitHub: under `dev`, reporting is
+    /// available only when `PINNED_REPORTS_GITHUB_API` is an http(s) address on this machine, with no user or
+    /// password, in a debug build. Then `PINNED_REPORTS_REPO` is the repository when it is `owner/name`, else pinned's
+    /// own name, filed against that local API. A `dev` override that is refused, or no override at all, turns
+    /// reporting off with a warning, and never falls back to the real API or repository.
     pub fn from_env(dev: bool, env: &dyn Fn(&str) -> Option<String>) -> Option<Config> {
         Config::from_env_warning(dev, env, &mut |line| eprintln!("pinned-server: {line}"))
     }
 
-    /// `from_env`, telling `warn` each override it ignores.
+    /// `from_env`, telling `warn` each override it refuses.
     fn from_env_warning(dev: bool, env: &dyn Fn(&str) -> Option<String>, warn: &mut dyn FnMut(&str)) -> Option<Config> {
+        Config::resolve(dev, cfg!(debug_assertions), env, warn)
+    }
+
+    /// `from_env_warning`, with whether this is a debug build given.
+    fn resolve(dev: bool, debug: bool, env: &dyn Fn(&str) -> Option<String>, warn: &mut dyn FnMut(&str)) -> Option<Config> {
         let given = |name: &str| env(name).map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());
         let token = given(TOKEN_VARIABLE)?;
-        let (mut repo, mut api) = (default_repo(), DEFAULT_API.to_owned());
         let (api_given, repo_given) = (given(API_VARIABLE), given(REPO_VARIABLE));
-        if !(dev && cfg!(debug_assertions)) {
+        let poll = poll_every(dev, env);
+        if !dev {
             for (name, value) in [(API_VARIABLE, &api_given), (REPO_VARIABLE, &repo_given)] {
                 if value.is_some() {
                     warn(&format!("{name} is ignored: it counts only under --dev in a debug build"));
                 }
             }
-        } else {
-            let accepted = match api_given {
-                Some(value) if is_loopback(&value) => Some(value),
-                Some(_) => {
-                    warn(&format!("{API_VARIABLE} is ignored: the API must be an http(s) address on this machine, with no user or password"));
-                    None
-                }
-                None => None,
-            };
-            match repo_given {
-                Some(_) if accepted.is_none() => warn(&format!("{REPO_VARIABLE} is ignored: it counts only with an accepted {API_VARIABLE}")),
-                Some(value) if !is_repo(&value) => warn(&format!("{REPO_VARIABLE} is ignored: it is not owner/name")),
-                Some(value) => repo = value,
-                None => {}
-            }
-            if let Some(value) = accepted {
-                api = value;
-            }
+            return Some(Config { api: DEFAULT_API.to_owned(), repo: default_repo(), token, timeout: pinned_core::github::CALL_TIMEOUT, poll });
         }
-        Some(Config { api, repo, token, timeout: pinned_core::github::CALL_TIMEOUT, poll: poll_every(dev, env) })
+        let off = |warn: &mut dyn FnMut(&str), what: &str| warn(&format!("reporting is off under --dev: {what}"));
+        let mut refused = false;
+        let accepted = match api_given {
+            Some(_) if !debug => {
+                off(warn, &format!("{API_VARIABLE} counts only in a debug build"));
+                refused = true;
+                None
+            }
+            Some(value) if !is_loopback(&value) => {
+                off(warn, &format!("{API_VARIABLE} must be an http(s) address on this machine, with no user or password"));
+                refused = true;
+                None
+            }
+            other => other,
+        };
+        let mut repo = default_repo();
+        match repo_given {
+            Some(_) if accepted.is_none() => {
+                off(warn, &format!("{REPO_VARIABLE} counts only with an accepted {API_VARIABLE}"));
+                refused = true;
+            }
+            Some(value) if !is_repo(&value) => {
+                off(warn, &format!("{REPO_VARIABLE} is not owner/name"));
+                refused = true;
+            }
+            Some(value) => repo = value,
+            None => {}
+        }
+        if refused {
+            return None;
+        }
+        let Some(api) = accepted else {
+            off(warn, &format!("set {API_VARIABLE} to a local fake"));
+            return None;
+        };
+        Some(Config { api, repo, token, timeout: pinned_core::github::CALL_TIMEOUT, poll })
     }
 }
 
@@ -988,52 +1014,97 @@ mod tests {
     }
 
     #[test]
-    fn under_dev_the_overrides_count_and_the_api_must_be_loopback() {
+    fn under_dev_only_a_loopback_api_turns_reporting_on() {
         let vars = [(TOKEN_VARIABLE, "fake-1"), (REPO_VARIABLE, "acme/app"), (API_VARIABLE, "http://127.0.0.1:4010")];
         assert_eq!(Config::from_env(true, &env(&vars)), Some(Config { api: "http://127.0.0.1:4010".into(), repo: "acme/app".into(), token: "fake-1".into(), timeout: pinned_core::github::CALL_TIMEOUT, poll: POLL_DEFAULT }));
-        let fixed = Some((DEFAULT_API.to_owned(), default_repo()));
-        for api in ["https://evil.example.test", "http://127.0.0.1.example.test:9", "http://169.254.169.254", "ftp://127.0.0.1", "not a url", "http://user:pw@127.0.0.1:9", "http://user@localhost:9"] {
-            assert_eq!(Config::from_env(true, &env(&[(TOKEN_VARIABLE, "t"), (API_VARIABLE, api)])).map(|c| (c.api, c.repo)), fixed, "{api}");
+        for api in ["https://evil.example.test", "http://127.0.0.1.example.test:9", "http://169.254.169.254", "ftp://127.0.0.1", "not a url", "http://user:pw@127.0.0.1:9", "http://user@localhost:9", "http://127.0.0.1@evil.example.test"] {
+            assert_eq!(Config::from_env(true, &env(&[(TOKEN_VARIABLE, "t"), (API_VARIABLE, api)])), None, "{api}");
         }
         for api in ["http://localhost:9", "http://[::1]:9", "https://127.0.0.1"] {
             assert_eq!(Config::from_env(true, &env(&[(TOKEN_VARIABLE, "t"), (API_VARIABLE, api)])).map(|c| c.api), Some(api.to_owned()), "{api}");
         }
         let not_a_repo = [(TOKEN_VARIABLE, "t"), (API_VARIABLE, "http://127.0.0.1:9"), (REPO_VARIABLE, "../x")];
-        assert_eq!(Config::from_env(true, &env(&not_a_repo)).map(|c| c.repo), Some(default_repo()));
+        assert_eq!(Config::from_env(true, &env(&not_a_repo)), None);
     }
 
-    /// The configuration `vars` give under `dev`, and the warnings it gave.
-    fn warned(dev: bool, vars: &[(&str, &str)]) -> (Config, Vec<String>) {
+    /// The configuration `vars` give under `dev` in a debug build or not, and the warnings it gave.
+    fn warned_in(dev: bool, debug: bool, vars: &[(&str, &str)]) -> (Option<Config>, Vec<String>) {
         let mut lines = vec![];
-        let config = Config::from_env_warning(dev, &env(vars), &mut |line| lines.push(line.to_owned())).unwrap();
+        let config = Config::resolve(dev, debug, &env(vars), &mut |line| lines.push(line.to_owned()));
         (config, lines)
     }
 
+    fn warned(dev: bool, vars: &[(&str, &str)]) -> (Option<Config>, Vec<String>) {
+        warned_in(dev, true, vars)
+    }
+
+    const TOKEN: (&str, &str) = (TOKEN_VARIABLE, "real-looking-token");
+    const REPO: (&str, &str) = (REPO_VARIABLE, "octo-labs/tracker");
+    const FAKE: (&str, &str) = (API_VARIABLE, "http://127.0.0.1:4010");
+    const REFUSED_API: &str = "reporting is off under --dev: PINNED_REPORTS_GITHUB_API must be an http(s) address on this machine, with no user or password";
+    const REPO_NEEDS_API: &str = "reporting is off under --dev: PINNED_REPORTS_REPO counts only with an accepted PINNED_REPORTS_GITHUB_API";
+    const NOT_A_REPO: &str = "reporting is off under --dev: PINNED_REPORTS_REPO is not owner/name";
+    const NO_FAKE: &str = "reporting is off under --dev: set PINNED_REPORTS_GITHUB_API to a local fake";
+
+    fn pair(config: &Option<Config>) -> Option<(&str, &str)> {
+        config.as_ref().map(|c| (c.api.as_str(), c.repo.as_str()))
+    }
+
     #[test]
-    fn the_repo_override_counts_only_with_an_accepted_api_and_a_refused_override_warns_by_its_name_alone() {
-        let fixed = (DEFAULT_API, "FelipeGazapina/pinned");
-        let token = (TOKEN_VARIABLE, "real-looking-token");
-        let repo = (REPO_VARIABLE, "octo-labs/tracker");
-        let ignored_repo = "PINNED_REPORTS_REPO is ignored: it counts only with an accepted PINNED_REPORTS_GITHUB_API";
-        let refused_api = "PINNED_REPORTS_GITHUB_API is ignored: the API must be an http(s) address on this machine, with no user or password";
-
-        let (config, lines) = warned(true, &[token, repo]);
-        assert_eq!((config.api.as_str(), config.repo.as_str()), fixed, "the repository alone never counts");
-        assert_eq!(lines, [ignored_repo]);
-
-        for api in ["https://api.example.test", "http://user:pw@127.0.0.1:4010"] {
-            let (config, lines) = warned(true, &[token, repo, (API_VARIABLE, api)]);
-            assert_eq!((config.api.as_str(), config.repo.as_str()), fixed, "{api}");
-            assert_eq!(lines, [refused_api, ignored_repo], "{api}");
+    fn a_release_start_ignores_every_override_and_warns_by_name_alone() {
+        let fixed = Some((DEFAULT_API, "FelipeGazapina/pinned"));
+        let api_ignored = "PINNED_REPORTS_GITHUB_API is ignored: it counts only under --dev in a debug build";
+        let repo_ignored = "PINNED_REPORTS_REPO is ignored: it counts only under --dev in a debug build";
+        for debug in [true, false] {
+            let (config, lines) = warned_in(false, debug, &[TOKEN, REPO, FAKE]);
+            assert_eq!(pair(&config), fixed);
+            assert_eq!(lines, [api_ignored, repo_ignored]);
+            let (config, lines) = warned_in(false, debug, &[TOKEN, ("PINNED_REPORTS_GITHUB_API", "https://api.example.test"), ("PINNED_REPORTS_REPO", "../x")]);
+            assert_eq!(pair(&config), fixed);
+            assert_eq!(lines, [api_ignored, repo_ignored]);
+            let (config, lines) = warned_in(false, debug, &[TOKEN, REPO]);
+            assert_eq!((pair(&config), lines), (fixed, vec![repo_ignored.to_owned()]));
+            let (config, lines) = warned_in(false, debug, &[TOKEN, FAKE]);
+            assert_eq!((pair(&config), lines), (fixed, vec![api_ignored.to_owned()]));
+            let (config, lines) = warned_in(false, debug, &[TOKEN]);
+            assert_eq!((pair(&config), lines), (fixed, vec![]));
         }
+    }
 
-        let (config, lines) = warned(true, &[token, repo, (API_VARIABLE, "http://127.0.0.1:4010")]);
-        assert_eq!((config.api.as_str(), config.repo.as_str()), ("http://127.0.0.1:4010", "octo-labs/tracker"));
-        assert_eq!(lines, Vec::<String>::new());
+    #[test]
+    fn under_dev_a_refused_override_turns_reporting_off_and_warns_by_name_alone() {
+        for api in ["https://api.example.test", "http://user:pw@127.0.0.1:4010", "http://127.0.0.1@evil.example.test"] {
+            let (config, lines) = warned(true, &[TOKEN, (API_VARIABLE, api)]);
+            assert_eq!((config, lines), (None, vec![REFUSED_API.to_owned()]), "{api}");
+            let (config, lines) = warned(true, &[TOKEN, REPO, (API_VARIABLE, api)]);
+            assert_eq!((config, lines), (None, vec![REFUSED_API.to_owned(), REPO_NEEDS_API.to_owned()]), "{api}");
+            assert!(!REFUSED_API.contains(api) && !REPO_NEEDS_API.contains("octo-labs"), "a warning never carries a value");
+        }
+        let (config, lines) = warned(true, &[TOKEN, REPO]);
+        assert_eq!((config, lines), (None, vec![REPO_NEEDS_API.to_owned()]), "the repository alone never counts");
+        let (config, lines) = warned(true, &[TOKEN, FAKE, ("PINNED_REPORTS_REPO", "../x")]);
+        assert_eq!((config, lines), (None, vec![NOT_A_REPO.to_owned()]));
+        // A good API does not count in a release build.
+        let (config, lines) = warned_in(true, false, &[TOKEN, REPO, FAKE]);
+        assert_eq!(config, None);
+        assert_eq!(lines, ["reporting is off under --dev: PINNED_REPORTS_GITHUB_API counts only in a debug build", REPO_NEEDS_API]);
+    }
 
-        let (config, lines) = warned(false, &[token, repo, (API_VARIABLE, "http://127.0.0.1:4010")]);
-        assert_eq!((config.api.as_str(), config.repo.as_str()), fixed);
-        assert_eq!(lines, ["PINNED_REPORTS_GITHUB_API is ignored: it counts only under --dev in a debug build", "PINNED_REPORTS_REPO is ignored: it counts only under --dev in a debug build"]);
+    #[test]
+    fn under_dev_with_no_override_reporting_is_off_even_with_a_token() {
+        for debug in [true, false] {
+            let (config, lines) = warned_in(true, debug, &[TOKEN]);
+            assert_eq!((config, lines), (None, vec![NO_FAKE.to_owned()]));
+        }
+        assert_eq!(warned(true, &[]), (None, vec![]), "without a token there is nothing to say");
+    }
+
+    #[test]
+    fn under_dev_a_loopback_api_files_in_the_override_repository_or_pinneds_name() {
+        let (config, lines) = warned(true, &[TOKEN, REPO, FAKE]);
+        assert_eq!((pair(&config), lines), (Some(("http://127.0.0.1:4010", "octo-labs/tracker")), vec![]));
+        let (config, lines) = warned(true, &[TOKEN, FAKE]);
+        assert_eq!((pair(&config), lines), (Some(("http://127.0.0.1:4010", "FelipeGazapina/pinned")), vec![]), "the fixed name, against a local API");
     }
 
     fn reports(own: Option<&str>) -> Reports {
@@ -1109,12 +1180,13 @@ mod tests {
 
     #[test]
     fn the_poll_interval_is_ten_minutes_and_only_dev_shortens_it() {
-        let secs = [(TOKEN_VARIABLE, "t"), ("PINNED_REPORTS_POLL_SECS", "3")];
+        // Under --dev reporting needs the local fake; the poll interval is read from the same environment.
+        let secs = [TOKEN, FAKE, ("PINNED_REPORTS_POLL_SECS", "3")];
         assert_eq!(Config::from_env(true, &env(&secs)).map(|c| c.poll), Some(Duration::from_secs(3)));
         assert_eq!(Config::from_env(false, &env(&secs)).map(|c| c.poll), Some(Duration::from_secs(600)));
-        assert_eq!(Config::from_env(true, &env(&[(TOKEN_VARIABLE, "t")])).map(|c| c.poll), Some(Duration::from_secs(600)));
+        assert_eq!(Config::from_env(true, &env(&[TOKEN, FAKE])).map(|c| c.poll), Some(Duration::from_secs(600)));
         for bad in ["0", "soon", "-1"] {
-            assert_eq!(Config::from_env(true, &env(&[(TOKEN_VARIABLE, "t"), ("PINNED_REPORTS_POLL_SECS", bad)])).map(|c| c.poll), Some(Duration::from_secs(600)), "{bad}");
+            assert_eq!(Config::from_env(true, &env(&[TOKEN, FAKE, ("PINNED_REPORTS_POLL_SECS", bad)])).map(|c| c.poll), Some(Duration::from_secs(600)), "{bad}");
         }
     }
 

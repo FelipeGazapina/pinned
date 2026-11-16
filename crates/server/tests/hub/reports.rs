@@ -357,7 +357,7 @@ fn an_agent_reads_only_where_a_report_is_never_its_text_or_what_github_said() {
 }
 
 #[test]
-fn the_reports_environment_reads_a_token_alone_and_overrides_only_under_dev() {
+fn the_reports_environment_reads_a_token_alone_and_a_dev_hub_needs_a_local_fake() {
     use pinned_server::reports::Config;
     let vars = |pairs: &'static [(&'static str, &'static str)]| move |name: &str| pairs.iter().find(|(k, _)| *k == name).map(|(_, v)| v.to_string());
     let overrides = vars(&[("PINNED_REPORTS_GITHUB_TOKEN", "fake-1"), ("PINNED_REPORTS_REPO", "acme/app"), ("PINNED_REPORTS_GITHUB_API", "http://127.0.0.1:4010")]);
@@ -366,24 +366,25 @@ fn the_reports_environment_reads_a_token_alone_and_overrides_only_under_dev() {
     let dev = Config::from_env(true, &overrides).unwrap();
     assert_eq!((dev.api.as_str(), dev.repo.as_str()), ("http://127.0.0.1:4010", "acme/app"));
     let remote = vars(&[("PINNED_REPORTS_GITHUB_TOKEN", "fake-1"), ("PINNED_REPORTS_GITHUB_API", "https://api.example.test")]);
-    let remote = Config::from_env(true, &remote).unwrap();
-    assert_eq!((remote.api.as_str(), remote.repo.as_str()), ("https://api.github.com", "FelipeGazapina/pinned"), "a token never goes to a host that is not this machine");
+    assert_eq!(Config::from_env(true, &remote), None, "a dev hub never files to a host that is not this machine, and never falls back to GitHub");
+    let token_alone = vars(&[("PINNED_REPORTS_GITHUB_TOKEN", "fake-1")]);
+    assert_eq!(Config::from_env(true, &token_alone), None, "a dev hub with no local fake has reporting off, even with a token");
+    assert!(Config::from_env(false, &token_alone).is_some());
     assert_eq!(Config::from_env(true, &vars(&[])), None);
 }
 
 #[test]
-fn a_dev_hub_files_in_the_override_repository_only_with_an_accepted_api() {
+fn a_dev_hub_files_in_the_override_repository_only_with_an_accepted_api_and_is_off_without_one() {
     use pinned_server::reports::Config;
     let fake = Fake::start();
     let env = |pairs: Vec<(&'static str, String)>| move |name: &str| pairs.iter().find(|(k, _)| *k == name).map(|(_, v)| v.clone());
     let token = ("PINNED_REPORTS_GITHUB_TOKEN", "fake-1".to_owned());
     let repo = ("PINNED_REPORTS_REPO", "octo-labs/tracker".to_owned());
 
-    // No accepted API: unset, or not on this machine. Reports go to the fixed repository, on GitHub's API.
+    // No accepted API: unset, or not on this machine. Reporting is off; the hub never files on GitHub's API.
     for api in [None, Some("https://api.example.test")] {
         let pairs = [token.clone(), repo.clone()].into_iter().chain(api.map(|api| ("PINNED_REPORTS_GITHUB_API", api.to_owned()))).collect();
-        let config = Config::from_env(true, &env(pairs)).unwrap();
-        assert_eq!((config.api.as_str(), config.repo.as_str()), ("https://api.github.com", "FelipeGazapina/pinned"), "{api:?}");
+        assert_eq!(Config::from_env(true, &env(pairs)), None, "{api:?}");
     }
 
     // Both, and the API is on this machine: the hub files in the override repository.
