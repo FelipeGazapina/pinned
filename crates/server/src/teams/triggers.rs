@@ -55,7 +55,7 @@ async fn run_fired(hub: &Arc<Hub>, team: &Arc<Account>, work: Run) -> Result<Opt
             let own = Uuid::parse_str(own).map_err(|e| e.to_string())?;
             match db::reservation_of(&hub.db, team.id, own).await? {
                 db::Reservation::Held => Some(own),
-                db::Reservation::Opened => None,
+                db::Reservation::Opened(_) => None,
                 db::Reservation::Ended => {
                     eprintln!("pinned-server: team {} workflow {id}: an admitted event's place ended before its session opened: the event is consumed", team.id);
                     return Ok(None);

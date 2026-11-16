@@ -577,10 +577,11 @@ pub async fn open_reserved(db: &Db, team: Uuid, run: Uuid, machine: &str) -> Res
 }
 
 /// What became of the place reserved run `run` held: still held (live and reserved), its session
-/// opened, or ended before its session opened (ended while reserved, or deleted by a failed start).
+/// opened (on the machine it names), or ended before its session opened (ended while reserved,
+/// or deleted by a failed start).
 pub enum Reservation {
     Held,
-    Opened,
+    Opened(Option<String>),
     Ended,
 }
 
@@ -589,13 +590,13 @@ pub async fn reservation_of(db: &Db, team: Uuid, run: Uuid) -> Result<Reservatio
     let row = db
         .client()
         .await?
-        .query_opt(&format!("select reserved, state in {LIVE} from team_runs where team = $1 and id = $2"), &[&team, &run])
+        .query_opt(&format!("select reserved, state in {LIVE}, box from team_runs where team = $1 and id = $2"), &[&team, &run])
         .await
         .map_err(err)?;
-    Ok(match row.map(|r| (r.get::<_, bool>(0), r.get::<_, bool>(1))) {
-        Some((true, true)) => Reservation::Held,
-        Some((false, _)) => Reservation::Opened,
-        Some((true, false)) | None => Reservation::Ended,
+    Ok(match row.map(|r| (r.get::<_, bool>(0), r.get::<_, bool>(1), r.get::<_, Option<String>>(2))) {
+        Some((true, true, _)) => Reservation::Held,
+        Some((false, _, machine)) => Reservation::Opened(machine),
+        Some((true, false, _)) | None => Reservation::Ended,
     })
 }
 
