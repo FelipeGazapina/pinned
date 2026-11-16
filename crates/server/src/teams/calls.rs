@@ -369,10 +369,17 @@ pub async fn ask_people(
 const NOTICE_QUESTION: usize = 300;
 
 /// The notice a call to a group posts in Slack: one line, the question without secrets and cut.
+/// The bot's name and question are escaped as Slack text, so a `<!channel>` or `<@U123>` in them
+/// pings nobody; only `mention`, pinned's own, stays live.
 fn slack_notice(bot: &str, mention: &str, question: &str) -> String {
     let masked = pinned_core::surface::mask_secrets(question);
     let line: String = masked.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(NOTICE_QUESTION).collect();
-    format!("{bot} needs {mention}: {line}. Answer in pinned.")
+    format!("{} needs {mention}: {}. Answer in pinned.", slack_escape(bot), slack_escape(&line))
+}
+
+/// `text` as Slack shows it literally: `&`, `<` and `>` as `&amp;`, `&lt;` and `&gt;`.
+fn slack_escape(text: &str) -> String {
+    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
 /// A newly opened call that asks a group with a Slack user group tells that group in Slack, in the
