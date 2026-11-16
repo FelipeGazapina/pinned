@@ -773,20 +773,25 @@ impl Db {
         self.connection.client().await
     }
 
-    /// The connection kept for transactions, opened if closed. Hold the guard for the whole
-    /// transaction: `held.as_mut().unwrap().transaction()`.
     /// A connection of its own, for a transaction held while other statements run on the shared
     /// one (a lock). Dropping it ends the transaction and frees what it held.
     pub async fn own_client(&self) -> Result<Client, String> {
         open(&self.connection.url).await
     }
 
+    /// The connection kept for transactions, opened if closed. Hold the guard for the whole
+    /// transaction: `held.as_mut().unwrap().transaction()`.
     pub async fn transaction_client(&self) -> Result<tokio::sync::MutexGuard<'_, Option<Client>>, String> {
         let mut held = self.transactions.lock().await;
         if held.as_ref().map_or(true, Client::is_closed) {
             *held = Some(open(&self.connection.url).await?);
         }
         Ok(held)
+    }
+
+    /// Runs `sql` (statements that are safe to run again), for a module that keeps its own tables.
+    pub async fn run_schema(&self, sql: &str) -> Result<(), String> {
+        self.client().await?.batch_execute(sql).await.map_err(|e| format!("could not create the tables: {e}"))
     }
 
     /// The new account, or None when the email is taken.

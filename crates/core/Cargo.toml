@@ -25,6 +25,8 @@ tempfile = "3"
 flate2 = "1"
 dunce = "1"
 sha2 = "0.10"
+# NFKC for the report scrubber, so look-alike characters cannot hide a private word.
+unicode-normalization = "0.1"
 # Bundled, so FTS5 is there and the musl and Windows builds need no system SQLite.
 rusqlite = { version = "0.41", features = ["bundled"] }
 # fancy-regex instead of the default onig, and no esaxx C++, so the musl and Windows builds stay pure Rust.

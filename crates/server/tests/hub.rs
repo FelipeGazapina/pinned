@@ -50,6 +50,8 @@ struct TestHub {
     access: pinned_server::http::Access,
     /// The teams' call timings: the hub's default unless `start_with_team_policy` names others.
     team_policy: pinned_core::teams::TeamPolicy,
+    /// Where the hub files reports; a test points it at a fake GitHub.
+    reports: Option<pinned_server::reports::Config>,
 }
 
 impl TestHub {
@@ -84,14 +86,19 @@ impl TestHub {
 
     /// A hub whose boxes follow `policy` and whose teams' calls escalate and give up as `teams` says.
     fn start_with_team_policy(name: &str, policy: Policy, teams: pinned_core::teams::TeamPolicy) -> TestHub {
-        TestHub::start_every(name, Signup::Open, policy, false, Default::default(), "127.0.0.1:0", teams)
+        TestHub::start_every(name, Signup::Open, policy, false, Default::default(), "127.0.0.1:0", teams, None)
     }
 
     fn start_all(name: &str, signup: Signup, policy: Policy, with_learning: bool, access: pinned_server::http::Access, listen: &str) -> TestHub {
-        TestHub::start_every(name, signup, policy, with_learning, access, listen, Default::default())
+        TestHub::start_every(name, signup, policy, with_learning, access, listen, Default::default(), None)
     }
 
-    fn start_every(name: &str, signup: Signup, policy: Policy, with_learning: bool, access: pinned_server::http::Access, listen: &str, team_policy: pinned_core::teams::TeamPolicy) -> TestHub {
+    fn start_reports(name: &str, signup: Signup, policy: Policy, with_learning: bool, access: pinned_server::http::Access, listen: &str, reports: Option<pinned_server::reports::Config>) -> TestHub {
+        TestHub::start_every(name, signup, policy, with_learning, access, listen, Default::default(), reports)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_every(name: &str, signup: Signup, policy: Policy, with_learning: bool, access: pinned_server::http::Access, listen: &str, team_policy: pinned_core::teams::TeamPolicy, reports: Option<pinned_server::reports::Config>) -> TestHub {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let database = format!("pinned_test_{name}_{}", std::process::id());
         admin(&format!("drop database if exists {database} with (force)"));
@@ -107,7 +114,7 @@ impl TestHub {
         std::fs::create_dir_all(dir.join("downloads")).unwrap();
         std::fs::write(dir.join("downloads/pinned-server-x86_64-unknown-linux-musl"), "ELF").unwrap();
         let boxes = FakeBoxes::new(dir.join("boxes"));
-        let mut hub = TestHub { runtime: tokio::runtime::Runtime::new().unwrap(), running: None, url: String::new(), database, dir, boxes, policy, learning, signup, access, team_policy };
+        let mut hub = TestHub { runtime: tokio::runtime::Runtime::new().unwrap(), running: None, url: String::new(), database, dir, boxes, policy, learning, signup, access, team_policy, reports };
         hub.serve(listen);
         hub
     }
@@ -149,6 +156,7 @@ impl TestHub {
             convex_http: Arc::new(Replay::new(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../core/tests/fixtures/convex"), CONVEX_KEY).unwrap()),
             learning_db: self.learning.as_ref().map(|learning| format!("{}/{learning}", postgres())),
             access: self.access.clone(),
+            reports: self.reports.clone(),
         }
     }
 
@@ -9100,6 +9108,7 @@ fn a_locked_app_still_needs_the_password_for_every_confirm_action_and_never_for_
         ("set_convex_repos", json!({ "id": "quick-lemur-789", "repos": [] })),
         ("disconnect_convex", json!({ "id": "quick-lemur-789" })),
         ("extend_box", json!({ "machine": machine, "extra_usd": 1.0 })),
+        ("report_issue", json!({ "draft": { "kind": "problem", "title": "Crash" } })),
     ]
     .into_iter()
     .collect();
@@ -11660,3 +11669,7 @@ mod teams_hardening;
 #[path = "hub/teams_limits.rs"] mod teams_limits;
 #[path = "hub/teams_limits_fix.rs"] mod teams_limits_fix;
 #[path = "hub/teams_wire.rs"] mod teams_wire;
+#[path = "hub/reports.rs"]
+mod reports;
+#[path = "hub/reports_poller.rs"]
+mod reports_poller;

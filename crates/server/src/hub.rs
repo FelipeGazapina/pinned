@@ -226,6 +226,8 @@ pub struct Hub {
     pub hold_backstop: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
     /// Every account's `PgStorage` state, for the census and the flush on stop.
     persisted: Mutex<HashMap<Uuid, Arc<Persisted>>>,
+    /// Reporting an issue from the app: pinned's GitHub repository and what the hub keeps about it.
+    pub(crate) reports: crate::reports::Reports,
 }
 
 struct Unlock {
@@ -350,10 +352,11 @@ fn json<T: Serialize>(value: T) -> Result<Value, String> {
 pub const TEAM_CALL_ELSEWHERE: &str = "a team's ops run only from the pinned app";
 
 impl Hub {
-    pub fn new(db: Db, public_url: String, signup: Signup, box_api: Arc<dyn BoxApi>, box_policy: boxes::Policy, team_policy: pinned_core::teams::TeamPolicy, convex_http: Arc<dyn ConvexHttp>) -> Arc<Hub> {
+    pub async fn new(db: Db, public_url: String, signup: Signup, box_api: Arc<dyn BoxApi>, box_policy: boxes::Policy, team_policy: pinned_core::teams::TeamPolicy, convex_http: Arc<dyn ConvexHttp>, reports: Option<crate::reports::Config>) -> Result<Arc<Hub>, String> {
         let public_url = public_url.trim_end_matches('/').to_owned();
         let boxes = Boxes::new(box_api, box_policy, &public_url);
-        Arc::new_cyclic(|me| Hub { me: me.clone(), db, public_url, signup, boxes, team_policy, team_join_fails: Mutex::default(), convex_http, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default(), unlocks: Mutex::default(), going_away: tokio::sync::watch::channel(false).0, held_expired: Mutex::default(), refuse_run_saves: Arc::default(), hold_backstop: Mutex::default(), persisted: Mutex::default() })
+        let reports = crate::reports::Reports::start(&db, reports).await;
+        Ok(Arc::new_cyclic(|me| Hub { me: me.clone(), db, public_url, signup, boxes, team_policy, team_join_fails: Mutex::default(), convex_http, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default(), unlocks: Mutex::default(), going_away: tokio::sync::watch::channel(false).0, held_expired: Mutex::default(), refuse_run_saves: Arc::default(), hold_backstop: Mutex::default(), persisted: Mutex::default(), reports }))
     }
 
     /// Tells every socket to close with a going away frame. The hub stops serving afterwards.
@@ -1051,6 +1054,8 @@ impl Hub {
                 self.push_settings(account).await;
                 return Ok(Value::Null);
             }
+            HubCall::Reports { ask } => return self.reports_ask(account, ask, false).await,
+            HubCall::ReportIssue { draft, shown, draft_id, request_id } => return self.report_issue(account, draft, shown, draft_id, request_id, false).await,
             HubCall::ListMcpServers => return json(c().await?.mcp_servers()),
             HubCall::SaveMcpServer { id, server, secrets } => return json(c().await?.save_mcp_server(id.as_deref(), server, &secrets)?),
             HubCall::EnableMcpServer { id, enabled } => return json(c().await?.enable_mcp_server(&id, enabled)?),
@@ -1572,6 +1577,11 @@ impl Account {
     /// The projects `machine` listed, kept for when it can't list them.
     pub fn listed(&self, machine: &str, projects: Vec<ProjectView>) {
         self.projects.lock().unwrap().insert(machine.to_owned(), projects);
+    }
+
+    /// Every project any machine of the account listed since the hub started.
+    pub(crate) fn listed_projects(&self) -> Vec<ProjectView> {
+        self.projects.lock().unwrap().values().flatten().cloned().collect()
     }
 
     /// The projects `machine` listed last, or none if it never did since the hub started.

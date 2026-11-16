@@ -370,6 +370,9 @@ pub fn hub_rule(call: &HubCall) -> Rule {
         | HubCall::SaveIdea { .. }
         | HubCall::DeleteIdea { .. }
         | HubCall::SetReleaseProtection { .. }
+        // A person's reports to pinned's issues.
+        | HubCall::Reports { .. }
+        | HubCall::ReportIssue { .. }
         // The password, and a team inside a team.
         | HubCall::Unlock { .. }
         | HubCall::Team { .. } => (Gate::Never, false),

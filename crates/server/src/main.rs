@@ -34,6 +34,8 @@ fn main() {
             "pair" => pair(rest),
             "login" => login(rest),
             "node" => node(rest),
+            #[cfg(debug_assertions)]
+            "fake-github" => fake_github(rest),
             "--version" | "version" => Ok(println!("pinned-server {VERSION}")),
             _ => Err(USAGE.into()),
         },
@@ -118,6 +120,8 @@ fn hub(args: &[String]) -> Result<(), String> {
         convex_http: std::sync::Arc::new(pinned_core::convex::client::Reqwest),
         learning_db: args.flags.get("learning-db").cloned(),
         access: pinned_server::http::Access { trusted_proxy, max_accounts, hashing: None },
+        // This hub has no --dev, so the repository and API overrides are never honoured here.
+        reports: reports_config(false),
     };
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     runtime.block_on(async {
@@ -143,6 +147,36 @@ fn hub(args: &[String]) -> Result<(), String> {
             eprintln!("pinned-server: stopped with saves not written after {}s", pinned_server::FLUSH_WITHIN.as_secs());
         }
         ended.map_err(|e| e.to_string())
+    })
+}
+
+/// Where reports are filed, from the environment (`PINNED_REPORTS_GITHUB_TOKEN` and, under `--dev`, a local fake API and repository).
+fn reports_config(dev: bool) -> Option<pinned_server::reports::Config> {
+    let config = pinned_server::reports::Config::from_env(dev, &|name| std::env::var(name).ok());
+    if config.is_none() {
+        // With a token set, `from_env` has already said under `--dev` why reporting is off.
+        match std::env::var(pinned_server::reports::TOKEN_VARIABLE).map(|v| v.trim().is_empty()) {
+            Ok(false) => eprintln!("pinned-server: reporting an issue from the app is not available"),
+            _ => eprintln!("pinned-server: reporting an issue from the app is not available: {} is not set", pinned_server::reports::TOKEN_VARIABLE),
+        }
+    }
+    config
+}
+
+/// `pinned-server fake-github --listen <addr>`: the in-memory GitHub the dev stack and the tests file reports in.
+#[cfg(debug_assertions)]
+fn fake_github(args: &[String]) -> Result<(), String> {
+    let args = Args::parse(args, &["listen"], 0)?;
+    let listen = args.flags.get("listen").cloned().unwrap_or_else(|| "127.0.0.1:0".into());
+    if !listen.starts_with("127.0.0.1:") && !listen.starts_with("localhost:") && !listen.starts_with("[::1]:") {
+        return Err("fake-github listens on a loopback address only".into());
+    }
+    let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+    runtime.block_on(async {
+        let fake = pinned_server::reports::fake_github::serve(&listen).await?;
+        eprintln!("pinned-server: fake GitHub listening on {}; use a token that starts fake-", fake.url);
+        let _ = tokio::signal::ctrl_c().await;
+        Ok(())
     })
 }
 

@@ -123,6 +123,20 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
             return Err(refusal);
         }
     };
+    // The confirmation holds the public text, scrubbed with what this session's tab and the account know.
+    let held_args = if admitted.action.name == "report_issue" {
+        let cwd = account.tab(origin, &caller.tab).map(|tab| tab.cwd).unwrap_or_default();
+        match crate::reports::prepare(hub, account, origin, &cwd, &act.args).await {
+            Ok(args) => args,
+            Err(refusal) => {
+                let refusal = surface::mask_secrets(&refusal);
+                trail.write(AuditOutcome::Refused, &refusal).await?;
+                return Err(refusal);
+            }
+        }
+    } else {
+        act.args.clone()
+    };
     if surface::held_for_owner(admitted.action) || why.is_some() {
         let asked = Confirmation {
             id: String::new(),
@@ -134,7 +148,7 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
             role: caller.role,
             action: admitted.action.name.to_owned(),
             about: why.as_deref().map(surface::mask_secrets).unwrap_or_default(),
-            args: match surface::without_asked(admitted.action, &act.args) {
+            args: match surface::without_asked(admitted.action, &held_args) {
                 Value::Null => Value::Object(Default::default()),
                 // The held copy is listed to every app of the account, and an approval runs it, so a
                 // schedule act holds what the user sees: the stored task is masked the same way.
@@ -254,6 +268,16 @@ async fn run(hub: &Arc<Hub>, account: &Arc<Account>, caller_tab: &str, actor: Ac
         Parsed::Hub(HubCall::UnarchiveSession { session }) => json(hub.unarchive_session(account, &session, false).await?),
         // An idea made by an agent says which one.
         Parsed::Hub(HubCall::SaveIdea { id, title, text, project, status }) => json(hub.save_idea(account, actor, id.as_deref(), &title, &text, project.as_deref(), status).await?),
+        // What an agent reads of a report is where it is, and a report it sends says so.
+        // A search leaves out the words of the asking session's folder, as its report would.
+        Parsed::Hub(HubCall::Reports { ask }) => {
+            let cwd = match &actor {
+                Actor::Agent { machine, tab, .. } => account.tab(machine, tab).map(|tab| tab.cwd).unwrap_or_default(),
+                _ => String::new(),
+            };
+            hub.reports_ask(account, crate::reports::with_cwd(ask, &cwd), true).await
+        }
+        Parsed::Hub(HubCall::ReportIssue { draft, shown, draft_id, request_id }) => hub.report_issue(account, draft, shown, draft_id, request_id, true).await,
         Parsed::Hub(call) => Box::pin(hub.hub_call(account, call)).await,
         Parsed::Node(call) => {
             let call = stamped(call, caller_tab, on_origin)?;
@@ -330,7 +354,7 @@ pub async fn decide(hub: &Arc<Hub>, account: &Arc<Account>, id: &str, approve: b
     trail.write(if approve { AuditOutcome::Approved } else { AuditOutcome::Denied }, "").await?;
     let action = surface::find(&asked.action);
     let (decision, outcome, result) = match (approve, action) {
-        (false, _) => (Decision::Denied, "denied".to_owned(), Value::Null),
+        (false, _) => (Decision::Denied, "denied".to_owned(), denied_kept(hub, account, asked).await),
         (true, None) => (Decision::Approved, format!("failed: no action {} any more", asked.action), Value::Null),
         (true, Some(action)) => match rerun(hub, account, action, asked, typed.as_ref().unwrap_or(&asked.args)).await {
             Ok(result) => (Decision::Approved, "done".to_owned(), result),
@@ -385,6 +409,24 @@ pub async fn finish_interrupted(hub: &Arc<Hub>) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// What a denial keeps of the request: an agent's report, already scrubbed, becomes a draft of the account its agents
+/// saved, and the agent hears so. Null when nothing is kept.
+async fn denied_kept(hub: &Hub, account: &Account, asked: &Confirmation) -> Value {
+    if asked.action != "report_issue" {
+        return Value::Null;
+    }
+    match hub.keep_denied_report(account, &asked.args).await {
+        Ok(()) => Value::String(DENIED_REPORT_KEPT.into()),
+        Err(e) => {
+            eprintln!("pinned-server: the report of confirmation {} was denied and could not be kept as a draft: {e}", asked.id);
+            Value::Null
+        }
+    }
+}
+
+/// What the agent hears when the person denies its report and the hub keeps it as a draft.
+const DENIED_REPORT_KEPT: &str = "Not sent. Saved as a draft in My reports.";
 
 /// The arguments an approval runs with when the user typed some in the app: the stored ones with
 /// `entered`, checked before the confirmation is taken, so one that lacks a field still waits.
