@@ -415,6 +415,13 @@ pub async fn turn_bot_on(db: &Db, team: Uuid, workflow: &str, on: bool, by: Uuid
     Ok(changed.map_err(err)? == 1)
 }
 
+/// Sets only the `limits` of the bot of `workflow`; false when the team has no such bot.
+pub async fn set_bot_limits(db: &Db, team: Uuid, workflow: &str, limits: &BotLimits) -> Result<bool, String> {
+    let limits = serde_json::to_value(limits).map_err(|e| e.to_string())?;
+    let changed = db.client().await?.execute("update team_bots set limits = $3 where team = $1 and workflow = $2", &[&team, &workflow, &limits]).await.map_err(err)?;
+    Ok(changed == 1)
+}
+
 /// Turns the bot off with `note`, which members see on it; false when it was not on.
 pub async fn turn_bot_off_noted(db: &Db, team: Uuid, workflow: &str, note: &str) -> Result<bool, String> {
     let changed = db

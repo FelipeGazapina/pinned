@@ -272,8 +272,11 @@ fn ceiling(hub: &Hub, usd: f64, minutes: f64) -> Result<BotLimits, String> {
 pub async fn set_bot_ceiling(hub: &Arc<Hub>, scope: &Scope, workflow_id: &str, usd: f64, minutes: f64) -> Result<(), String> {
     scope.owner_only()?;
     let limits = ceiling(hub, usd, minutes)?;
-    let bot = db::bot(&hub.db, scope.team.id, workflow_id).await?.ok_or_else(|| format!("the team has no bot for workflow {workflow_id}"))?;
-    db::save_bot(&hub.db, scope.team.id, &Bot { limits, ..bot }).await
+    // Only the row's limits, in one write: a save of the bot's rules at the same time stays.
+    if !db::set_bot_limits(&hub.db, scope.team.id, workflow_id, &limits).await? {
+        return Err("the team has no such bot".into());
+    }
+    Ok(())
 }
 
 /// What a bot whose stored limits are not above 0 hears when it would start.
