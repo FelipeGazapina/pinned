@@ -10751,11 +10751,22 @@
                   },
                   "title": {
                     "type": "string"
+                  },
+                  "context": {
+                    "description": "Words the app knows must not reach the search, merged with the hub's own as a preview's are.",
+                    "$ref": "#/$defs/Context",
+                    "default": {
+                      "projects": [],
+                      "folders": [],
+                      "files": [],
+                      "names": []
+                    }
                   }
                 },
                 "required": [
                   "op",
-                  "title"
+                  "title",
+                  "context"
                 ]
               },
               {
@@ -10874,7 +10885,7 @@
             "type": "object",
             "properties": {
               "environment": {
-                "type": "boolean",
+                "$ref": "#/$defs/Environment",
                 "default": false
               },
               "errors": {
@@ -10888,6 +10899,19 @@
             "required": [
               "environment",
               "errors"
+            ]
+          },
+          "Environment": {
+            "description": "The environment section a report carries, after the reporter's choice: none (`false`), the hub's version alone\n(`true`), or the reporter's app version, system and architecture as the app's dialog shows them, the hub's\nversion after it. Scrubbed like every other part.",
+            "anyOf": [
+              {
+                "title": "Chosen",
+                "type": "boolean"
+              },
+              {
+                "title": "Shown",
+                "type": "string"
+              }
             ]
           },
           "Context": {
@@ -21744,6 +21768,16 @@
                   },
                   "title": {
                     "type": "string"
+                  },
+                  "context": {
+                    "description": "Words the app knows must not reach the search, merged with the hub's own as a preview's are.",
+                    "$ref": "#/$defs/Context",
+                    "default": {
+                      "projects": [],
+                      "folders": [],
+                      "files": [],
+                      "names": []
+                    }
                   }
                 },
                 "required": [
@@ -21861,7 +21895,7 @@
             "type": "object",
             "properties": {
               "environment": {
-                "type": "boolean",
+                "$ref": "#/$defs/Environment",
                 "default": false
               },
               "errors": {
@@ -21872,6 +21906,19 @@
                 "default": []
               }
             }
+          },
+          "Environment": {
+            "description": "The environment section a report carries, after the reporter's choice: none (`false`), the hub's version alone\n(`true`), or the reporter's app version, system and architecture as the app's dialog shows them, the hub's\nversion after it. Scrubbed like every other part.",
+            "anyOf": [
+              {
+                "title": "Chosen",
+                "type": "boolean"
+              },
+              {
+                "title": "Shown",
+                "type": "string"
+              }
+            ]
           },
           "Context": {
             "description": "What the caller knows must never appear in a public report: the words to replace, by kind.",
@@ -29890,11 +29937,22 @@
                   },
                   "title": {
                     "type": "string"
+                  },
+                  "context": {
+                    "description": "Words the app knows must not reach the search, merged with the hub's own as a preview's are.",
+                    "$ref": "#/$defs/Context",
+                    "default": {
+                      "projects": [],
+                      "folders": [],
+                      "files": [],
+                      "names": []
+                    }
                   }
                 },
                 "required": [
                   "op",
-                  "title"
+                  "title",
+                  "context"
                 ]
               },
               {
@@ -30013,7 +30071,7 @@
             "type": "object",
             "properties": {
               "environment": {
-                "type": "boolean",
+                "$ref": "#/$defs/Environment",
                 "default": false
               },
               "errors": {
@@ -30027,6 +30085,19 @@
             "required": [
               "environment",
               "errors"
+            ]
+          },
+          "Environment": {
+            "description": "The environment section a report carries, after the reporter's choice: none (`false`), the hub's version alone\n(`true`), or the reporter's app version, system and architecture as the app's dialog shows them, the hub's\nversion after it. Scrubbed like every other part.",
+            "anyOf": [
+              {
+                "title": "Chosen",
+                "type": "boolean"
+              },
+              {
+                "title": "Shown",
+                "type": "string"
+              }
             ]
           },
           "Context": {
@@ -37735,6 +37806,16 @@
                   },
                   "title": {
                     "type": "string"
+                  },
+                  "context": {
+                    "description": "Words the app knows must not reach the search, merged with the hub's own as a preview's are.",
+                    "$ref": "#/$defs/Context",
+                    "default": {
+                      "projects": [],
+                      "folders": [],
+                      "files": [],
+                      "names": []
+                    }
                   }
                 },
                 "required": [
@@ -37852,7 +37933,7 @@
             "type": "object",
             "properties": {
               "environment": {
-                "type": "boolean",
+                "$ref": "#/$defs/Environment",
                 "default": false
               },
               "errors": {
@@ -37863,6 +37944,19 @@
                 "default": []
               }
             }
+          },
+          "Environment": {
+            "description": "The environment section a report carries, after the reporter's choice: none (`false`), the hub's version alone\n(`true`), or the reporter's app version, system and architecture as the app's dialog shows them, the hub's\nversion after it. Scrubbed like every other part.",
+            "anyOf": [
+              {
+                "title": "Chosen",
+                "type": "boolean"
+              },
+              {
+                "title": "Shown",
+                "type": "string"
+              }
+            ]
           },
           "Context": {
             "description": "What the caller knows must never appear in a public report: the words to replace, by kind.",
