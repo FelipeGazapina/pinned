@@ -83,10 +83,36 @@ impl Stored {
     }
 }
 
-/// One turn at a time per team, so two events never both take the last free place.
+/// One turn at a time per team, so two events never both take the last free place: in this
+/// hub, and across the hubs on one database by the team's advisory lock (`Turn`).
 fn line(team: Uuid) -> Arc<tokio::sync::Mutex<()>> {
     static LINES: LazyLock<Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>> = LazyLock::new(Mutex::default);
     LINES.lock().unwrap().entry(team).or_default().clone()
+}
+
+/// The key of team `team`'s advisory lock: what `Turn` holds while it decides.
+pub const TURN_KEY: &str = "hashtextextended('pinned-team-runs:' || $1::uuid::text, 0)";
+
+/// A team's turn to decide what runs: this hub's line, and a transaction on a connection of its
+/// own holding the team's `pg_advisory_xact_lock`, so another hub on the database waits too.
+/// `end` commits it; a turn dropped on an error closes its connection, which frees the lock.
+struct Turn {
+    _line: tokio::sync::OwnedMutexGuard<()>,
+    held: tokio_postgres::Client,
+}
+
+impl Turn {
+    async fn take(hub: &Hub, team: Uuid) -> Result<Turn, String> {
+        let line = line(team).lock_owned().await;
+        let held = hub.db.own_client().await?;
+        held.batch_execute("begin").await.map_err(|e| e.to_string())?;
+        held.execute(&format!("select pg_advisory_xact_lock({TURN_KEY})"), &[&team]).await.map_err(|e| e.to_string())?;
+        Ok(Turn { _line: line, held })
+    }
+
+    async fn end(self) -> Result<(), String> {
+        self.held.batch_execute("commit").await.map_err(|e| e.to_string())
+    }
 }
 
 /// Why an event of bot `workflow` would start no run now, if it would not: its workflow is gone,
@@ -109,8 +135,13 @@ pub async fn skip_reason(hub: &Arc<Hub>, team: &Account, workflow: &str, by_trig
 /// in its line, and the team has a free place; otherwise it waits at the end of the bot's line.
 /// Refused, as `start_run` refuses, when the bot cannot run at all.
 pub async fn ask(hub: &Arc<Hub>, team: &Arc<Account>, workflow: &str, start: Start) -> Result<Asked, String> {
-    let line = line(team.id);
-    let _turn = line.lock().await;
+    let turn = Turn::take(hub, team.id).await?;
+    let asked = ask_in_turn(hub, team, workflow, start).await;
+    turn.end().await?;
+    asked
+}
+
+async fn ask_in_turn(hub: &Arc<Hub>, team: &Arc<Account>, workflow: &str, start: Start) -> Result<Asked, String> {
     bots::ready(hub, team, workflow).await?;
     let waiting = db::waiting_count(&hub.db, team.id, workflow).await?;
     let busy = !db::live_runs_of(&hub.db, team.id, workflow).await?.is_empty();
@@ -146,8 +177,15 @@ pub async fn admit(hub: &Arc<Hub>, team: &Arc<Account>, kind: &str, event: Event
             false => Admitted::Go,
         });
     }
-    let line = line(team.id);
-    let _turn = line.lock().await;
+    let turn = Turn::take(hub, team.id).await?;
+    let admitted = decide(hub, team, kind, event, &workflow).await;
+    turn.end().await?;
+    admitted
+}
+
+/// `admit`'s decision, inside the team's turn.
+async fn decide(hub: &Arc<Hub>, team: &Arc<Account>, kind: &str, event: Event, workflow: &str) -> Result<Admitted, String> {
+    let workflow = workflow.to_owned();
     bots::ready(hub, team, &workflow).await?;
     let waiting = db::waiting_count(&hub.db, team.id, &workflow).await?;
     let busy = !db::live_runs_of(&hub.db, team.id, &workflow).await?.is_empty();
@@ -189,8 +227,14 @@ pub async fn keep_replies(hub: &Arc<Hub>, team: &Arc<Account>, delivery: &Delive
     if db::live_run_for(&hub.db, team.id, &delivery.connector, &subject).await?.is_some() {
         return Ok(Replies::Pass);
     }
-    let line = line(team.id);
-    let _turn = line.lock().await;
+    let turn = Turn::take(hub, team.id).await?;
+    let kept = keep_in_turn(hub, team, delivery, &subject).await;
+    turn.end().await?;
+    kept
+}
+
+async fn keep_in_turn(hub: &Arc<Hub>, team: &Arc<Account>, delivery: &Delivery, subject: &Subject) -> Result<Replies, String> {
+    let subject = subject.clone();
     let Some(waiting) = db::waiting_event_for(&hub.db, team.id, &delivery.connector, &subject).await? else {
         eprintln!("pinned-server: team {} workflow {}: new thread messages dropped: the thread has no run and no waiting event", team.id, delivery.connector);
         return Ok(Replies::Dropped);
@@ -261,8 +305,14 @@ pub fn next(hub: &Hub, team: &Arc<Account>, ended: &str) {
 }
 
 async fn start_waiting(hub: &Arc<Hub>, team: &Arc<Account>, ended: &str) -> Result<(), String> {
-    let line = line(team.id);
-    let _turn = line.lock().await;
+    let turn = Turn::take(hub, team.id).await?;
+    let started = take_and_start(hub, team, ended).await;
+    turn.end().await?;
+    started
+}
+
+/// `start_waiting`'s takes and starts, inside the team's turn.
+async fn take_and_start(hub: &Arc<Hub>, team: &Arc<Account>, ended: &str) -> Result<(), String> {
     loop {
         if db::live_count(&hub.db, team.id).await? >= db::max_live_runs(&hub.db, team.id).await? {
             return Ok(());

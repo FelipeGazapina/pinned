@@ -473,3 +473,36 @@ fn replies_to_a_waiting_thread_wait_with_it_and_reach_its_run_framed() {
         format!("Answer the thread.\n\nReplies the thread got while this run waited to start:\n\n5 earlier replies not shown\n\n{}", framed.join("\n\n"))
     );
 }
+
+#[test]
+fn another_hub_deciding_holds_the_last_place_and_this_event_waits() {
+    let crew = Crew::new("ta_lock");
+    let (a, b) = (crew.on_bot("Pages"), crew.on_bot("Docs"));
+    admin_on(&crew.hub.database, &format!("update teams set max_live_runs = 1 where id = '{}'", crew.team));
+    // Another hub on the same database, deciding for the team: it holds the team's lock.
+    let other = crew.hub.runtime.block_on(async {
+        let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), crew.hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        db.execute(&format!("select pg_advisory_lock({})", teams::queue::TURN_KEY), &[&crew.team]).await.unwrap();
+        db
+    });
+
+    std::thread::scope(|scope| {
+        let ours = scope.spawn(|| crew.found(crew.labeled(&a, 1)));
+        std::thread::sleep(Duration::from_secs(2));
+        assert_eq!(crew.live(), 0, "this hub waits for the other's decision");
+        assert!(!ours.is_finished());
+        // The other hub takes the last free place, then lets go.
+        crew.hub.runtime.block_on(async {
+            other
+                .execute("insert into team_runs (id, team, workflow, started_by, state) values (gen_random_uuid(), $1, $2, '\"trigger:linear_label\"', 'working')", &[&crew.team, &b])
+                .await
+                .unwrap();
+            other.execute(&format!("select pg_advisory_unlock({})", teams::queue::TURN_KEY), &[&crew.team]).await.unwrap();
+        });
+        assert_eq!(ours.join().unwrap(), Ok(()));
+    });
+    assert_eq!(crew.live(), 1, "exactly one run: the other hub's");
+    assert_eq!(crew.waiting(&a), 1, "this event waits");
+    assert_eq!(crew.outside(1), none());
+}
