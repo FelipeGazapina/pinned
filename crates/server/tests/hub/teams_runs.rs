@@ -95,7 +95,7 @@ impl Crew {
 
     /// What the box's session sends the hub to ask people, over its machine link.
     fn ask(&self, question: &str) -> Result<Value, String> {
-        let op = TeamOp::AskPeople { situation: Situation::InDoubt, question: question.into(), choices: vec![] };
+        let op = TeamOp::AskPeople { situation: Situation::InDoubt, question: question.into(), choices: vec![], step: None };
         self.node().expect("a box runs a node").link.as_ref().unwrap().call_hub(HubCall::Team { team: None, op })
     }
 }
