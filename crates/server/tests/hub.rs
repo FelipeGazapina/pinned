@@ -113,7 +113,29 @@ impl TestHub {
     }
 
     fn serve(&mut self, listen: &str) {
-        let config = || pinned_server::Config {
+        let start = Instant::now();
+        // A restarted hub takes its old address, which the dying runtime may not have let go of yet.
+        let running = loop {
+            match self.runtime.block_on(pinned_server::start(self.config(listen))) {
+                Ok(running) => break running,
+                Err(e) if e.contains("could not listen") && start.elapsed() < WAIT => std::thread::sleep(Duration::from_millis(50)),
+                Err(e) => panic!("{e}"),
+            }
+        };
+        self.url = format!("http://{}", running.addr);
+        self.running = Some(running);
+    }
+
+    /// A second hub on this hub's database, key and boxes, as another replica: its runtime and
+    /// what it runs. Dropping the runtime stops it.
+    fn twin(&self) -> (tokio::runtime::Runtime, pinned_server::Running) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let running = runtime.block_on(pinned_server::start(self.config("127.0.0.1:0"))).unwrap();
+        (runtime, running)
+    }
+
+    fn config(&self, listen: &str) -> pinned_server::Config {
+        pinned_server::Config {
             db: format!("{}/{}", postgres(), self.database),
             listen: listen.into(),
             ui: self.dir.join("ui"),
@@ -127,26 +149,21 @@ impl TestHub {
             convex_http: Arc::new(Replay::new(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../core/tests/fixtures/convex"), CONVEX_KEY).unwrap()),
             learning_db: self.learning.as_ref().map(|learning| format!("{}/{learning}", postgres())),
             access: self.access.clone(),
-        };
-        let start = Instant::now();
-        // A restarted hub takes its old address, which the dying runtime may not have let go of yet.
-        let running = loop {
-            match self.runtime.block_on(pinned_server::start(config())) {
-                Ok(running) => break running,
-                Err(e) if e.contains("could not listen") && start.elapsed() < WAIT => std::thread::sleep(Duration::from_millis(50)),
-                Err(e) => panic!("{e}"),
-            }
-        };
-        self.url = format!("http://{}", running.addr);
-        self.running = Some(running);
+        }
     }
 
     /// Kills the hub mid-whatever, as a deploy does, and starts another on its database and address.
     fn restart(&mut self) {
+        let addr = self.stop();
+        self.serve(&addr);
+    }
+
+    /// Kills the hub mid-whatever, as a deploy does; answers its address for the next (`serve`).
+    fn stop(&mut self) -> String {
         let addr = self.running.take().unwrap().addr;
         let old = std::mem::replace(&mut self.runtime, tokio::runtime::Runtime::new().unwrap());
         old.shutdown_background();
-        self.serve(&addr.to_string());
+        addr.to_string()
     }
 
     fn hub(&self) -> &Arc<pinned_server::hub::Hub> {
@@ -207,7 +224,7 @@ fn save_team_workflow(hub: &TestHub, who: &Arc<pinned_server::hub::Account>, tea
     let ids = |hub: &TestHub| team_workflows(hub, team).iter().map(|c| c["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
     let before = ids(hub);
     let given = connector["id"].as_str().unwrap_or_default().to_owned();
-    let bot = pinned_core::teams::Bot { workflow: given.clone(), name: String::new(), owner: None, calls: Default::default(), limits: pinned_core::teams::BotLimits { usd: 5.0, minutes: 30 }, on: false, on_by: None, once: false, off_note: None };
+    let bot = pinned_core::teams::Bot { workflow: given.clone(), name: String::new(), owner: None, calls: Default::default(), limits: pinned_core::teams::BotLimits { usd: 5.0, minutes: 30 }, on: false, on_by: None, once: false, off_note: None, skipped: vec![] };
     let connector = Some(serde_json::from_value(connector).map_err(|e| e.to_string())?);
     let op = pinned_server::teams::Op::read(pinned_core::teams::TeamOp::SaveBot { bot, connector })?;
     hub.runtime.block_on(pinned_server::teams::call(hub.hub(), who, Some(team), op))?;
@@ -11611,3 +11628,5 @@ mod teams_hardening;
 #[path = "hub/teams_hardening_a.rs"] mod teams_hardening_a;
 #[path = "hub/teams_hardening_b.rs"] mod teams_hardening_b;
 #[path = "hub/teams_lifecycle.rs"] mod teams_lifecycle;
+#[path = "hub/teams_flood.rs"] mod teams_flood;
+#[path = "hub/teams_admission.rs"] mod teams_admission;

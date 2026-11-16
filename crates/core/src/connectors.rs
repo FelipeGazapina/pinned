@@ -1271,7 +1271,7 @@ pub struct Keys {
 }
 
 /// A session a connector wants opened.
-#[derive(Clone)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Run {
     pub cwd: PathBuf,
     pub repo: Option<String>,
@@ -1343,6 +1343,93 @@ impl Taken for Result<Option<Placement>, String> {
 
     fn consumed(&self) -> bool {
         matches!(self, Ok(None))
+    }
+}
+
+/// Why a graph run ended when its session's `open` was consumed (a hub's team bot that is off or
+/// busy): nothing opened, so nothing is typed, acknowledged or placed.
+pub const CONSUMED: &str = "no session opened: the bot did not take the run";
+
+/// A trigger's event as its poller found it, before its Ask step or any graph step: what a hub's
+/// team admits, keeps waiting or drops (`Admission`), and hands back whole when its turn comes
+/// (`Admission::claim`).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Event {
+    /// A workflow without a graph: the session to open.
+    Run(Run),
+    /// A graph workflow's start.
+    Graph { connector: String, subject: Subject, input: TriggerInput, at: String },
+}
+
+impl Event {
+    pub fn connector(&self) -> &str {
+        match self {
+            Event::Run(run) => &run.connector,
+            Event::Graph { connector, .. } => connector,
+        }
+    }
+
+    pub fn subject(&self) -> &Subject {
+        match self {
+            Event::Run(run) => &run.subject,
+            Event::Graph { subject, .. } => subject,
+        }
+    }
+}
+
+/// What an `Admission` answered an event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Admitted {
+    /// It may run now: its place is held until its session opens or its run ends without one.
+    Go,
+    /// It was dropped or skipped: nothing outside pinned hears of it, and a Slack thread's later
+    /// replies are not followed.
+    Held,
+    /// It waits in its bot's line: nothing outside pinned hears of it yet, and a Slack thread's
+    /// replies are kept with it (`Admission::replies`).
+    Waiting,
+}
+
+/// What an `Admission` did with new replies of a Slack thread.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Replies {
+    /// They go on as today, to the thread's live session or a new one.
+    Pass,
+    /// The thread's event waits, and they wait with it: nothing outside pinned hears of them.
+    Kept,
+    /// The thread has neither a run nor a waiting event: they are dropped, and the thread is no
+    /// longer followed.
+    Dropped,
+}
+
+pub type Pending<T> = std::pin::Pin<Box<dyn Future<Output = T> + Send>>;
+
+/// A hub's team decides, once per event and before anything outside pinned happens for it (no
+/// Ask model call, no graph step, no Linear or Slack call), whether it runs now. A person's
+/// connectors have none, so they run every event as before.
+pub trait Admission: Send + Sync {
+    fn admit(&self, event: Event) -> Pending<Result<Admitted, String>>;
+    /// The admitted event of `connector` on `subject` ended before a session opened: its place is
+    /// freed. A place whose session opened is left as it is.
+    fn release(&self, connector: String, subject: Subject) -> Pending<()>;
+    /// New replies of a Slack thread, before they go to a session or Slack hears of them.
+    fn replies(&self, delivery: Delivery) -> Pending<Result<Replies, String>> {
+        let _ = delivery;
+        Box::pin(async { Ok(Replies::Pass) })
+    }
+
+    /// The events whose place was granted while they waited, oldest first: kept by the hub, not
+    /// in memory, so a hub that restarts before its poller claims one still runs it.
+    fn granted(&self) -> Pending<Result<Vec<i64>, String>> {
+        Box::pin(async { Ok(vec![]) })
+    }
+
+    /// Claims granted event `id` right before it runs: answered to exactly one claim, so of two
+    /// pollers only one runs it, and none after it was claimed.
+    fn claim(&self, id: i64) -> Pending<Result<Option<Event>, String>> {
+        let _ = id;
+        Box::pin(async { Ok(None) })
     }
 }
 
@@ -1730,6 +1817,11 @@ pub struct Connectors {
     /// Subjects, by `subject_key`, whose box failed to boot while a run opened it: that open's
     /// failure frees the subject once per 30 days (`BoxEndRelease::Once`).
     boot_failed: Mutex<std::collections::HashSet<String>>,
+    /// A hub's team's admission (`Admission`); none on a person's account.
+    admission: std::sync::OnceLock<std::sync::Arc<dyn Admission>>,
+    /// Admitted graph runs whose session has not opened, by connector and `subject_key`: a run
+    /// that ends before one releases its place.
+    holding: Mutex<std::collections::HashSet<(String, String)>>,
 }
 
 /// What a box's end does to the subject of the run it failed.
@@ -1866,6 +1958,56 @@ impl Connectors {
             bots_filled: Mutex::new(std::collections::HashSet::new()),
             box_failures: Mutex::new(vec![]),
             boot_failed: Mutex::new(std::collections::HashSet::new()),
+            admission: std::sync::OnceLock::new(),
+            holding: Mutex::new(std::collections::HashSet::new()),
+        }
+    }
+
+    /// Makes every event of these connectors ask `admission` first. Set once, by a hub, for a team.
+    pub fn set_admission(&self, admission: std::sync::Arc<dyn Admission>) {
+        let _ = self.admission.set(admission);
+    }
+
+    /// An event waited and its place is now granted (`Admission::granted`): checks now, so it
+    /// runs from the start, its Ask step and every graph step included, without asking again.
+    pub fn wake(&self) {
+        self.wake.notify_one();
+    }
+
+    /// Runs every granted event this check claims (`Admission::claim`), each claimed right before
+    /// it runs. A granted event a restart left unclaimed runs on the new hub's first check; one
+    /// claimed before a restart is not run again, and its reserved run is left to the hub.
+    async fn run_granted<F, Fut, R>(&self, open: &F) -> Result<(), String>
+    where
+        F: Fn(Work) -> Fut,
+        Fut: Future<Output = R>,
+        R: Taken,
+    {
+        let Some(admission) = self.admission.get().cloned() else { return Ok(()) };
+        let mut error = None;
+        for id in admission.granted().await? {
+            let ran = match admission.claim(id).await {
+                Ok(Some(Event::Run(run))) => self.hand_over_run(run, open, true).await,
+                Ok(Some(graph @ Event::Graph { .. })) => self.begin_admitted(graph).await,
+                Ok(None) => Ok(()),
+                Err(e) => Err(e),
+            };
+            if let Err(e) = ran {
+                error.get_or_insert(e);
+            }
+        }
+        error.map_or(Ok(()), Err)
+    }
+
+    /// Asks the admission about `event`; a person's connectors have none and always go.
+    async fn admit(&self, event: &Event) -> Result<Admitted, String> {
+        let Some(admission) = self.admission.get().cloned() else { return Ok(Admitted::Go) };
+        admission.admit(event.clone()).await
+    }
+
+    async fn release(&self, connector: &str, subject: &Subject) {
+        if let Some(admission) = self.admission.get().cloned() {
+            admission.release(connector.to_owned(), subject.clone()).await;
         }
     }
 
@@ -1924,7 +2066,8 @@ impl Connectors {
             settled
         };
         for start in settled.starts {
-            if let Err(e) = self.begin(start.connector, start.subject, start.input, &now.to_rfc3339()) {
+            let event = Event::Graph { connector: start.connector, subject: start.subject, input: start.input, at: now.to_rfc3339() };
+            if let Err(e) = self.start_graph(event).await {
                 errors.push(e);
             }
         }
@@ -1966,37 +2109,17 @@ impl Connectors {
         R: Taken,
     {
         match work {
-            Work::Run(mut run) => {
-                let (connector, subject, folder, mentioned) = (run.connector.clone(), run.subject.clone(), run.cwd.clone(), run.mentioned.clone());
-                match self.consult(&connector, &run.input).await {
-                    Ok(None) => {}
-                    Ok(Some((ask, answers))) => {
-                        if stops(&ask, &answers).is_some() {
-                            self.keep_stopped(&connector, &subject)?;
-                            return Ok(());
-                        }
-                        append_answers(&mut run, &ask, &answers);
-                    }
-                    Err(why) => return Err(self.unclaim(&connector, &subject, &folder, &why)),
-                }
-                let answer = open(Work::Run(run)).await;
-                // Consumed: nothing opened, so Linear and Slack are left as they are, and the
-                // subject stays handled so the next check does not send it again.
-                if answer.consumed() {
-                    return self.keep_stopped(&connector, &subject);
-                }
-                if let Err(why) = answer.taken() {
-                    return Err(self.unclaim(&connector, &subject, &folder, &why));
-                }
-                // The session starts even when Linear won't move the issue or Slack won't take the
-                // reaction; the check reports why. A Slack thread has no issue to pick until its
-                // session files one.
-                match &subject {
-                    Subject::LinearIssue { .. } => self.stage(&connector, &subject, Stage::Picked).await.map(drop),
-                    Subject::SlackThread { channel, thread } => self.acknowledge(&connector, channel, thread, &mentioned).await,
-                }
-            }
+            Work::Run(run) => self.hand_over_run(run, open, false).await,
             Work::Delivery(d) => {
+                // A hub's team keeps the replies of a thread whose event waits, before any
+                // session or Slack hears of them.
+                if let Some(admission) = self.admission.get().cloned() {
+                    match admission.replies(d.clone()).await? {
+                        Replies::Pass => {}
+                        Replies::Kept => return self.follow(&d.connector, &d.channel, &d.thread, d.cursor.clone()),
+                        Replies::Dropped => return self.keep_stopped(&d.connector, &Subject::SlackThread { channel: d.channel.clone(), thread: d.thread.clone() }),
+                    }
+                }
                 let cursor = if open(Work::Delivery(d.clone())).await.taken().is_ok() {
                     d.cursor.clone()
                 } else {
@@ -2012,6 +2135,78 @@ impl Connectors {
             }
             Work::Prompt { env, text } => open(Work::Prompt { env, text }).await.taken().map(drop),
         }
+    }
+
+    /// `hand_over` of a run: `granted` when a hub's team already gave the event its place.
+    async fn hand_over_run<F, Fut, R>(&self, mut run: Run, open: &F, granted: bool) -> Result<(), String>
+    where
+        F: Fn(Work) -> Fut,
+        Fut: Future<Output = R>,
+        R: Taken,
+    {
+        let (connector, subject, folder, mentioned) = (run.connector.clone(), run.subject.clone(), run.cwd.clone(), run.mentioned.clone());
+        // A hub's team decides here, once, before the Ask step's model call and before Linear or
+        // Slack hear of the event, whether it runs now; one that waits, is dropped or skipped
+        // touches nothing outside pinned. An event whose place was granted is not asked again.
+        if !granted {
+            match self.admit(&Event::Run(run.clone())).await {
+                Ok(Admitted::Go) => {}
+                Ok(Admitted::Held) => return self.keep_stopped(&connector, &subject),
+                // The subject stays handled, and a thread stays followed for its replies.
+                Ok(Admitted::Waiting) => return Ok(()),
+                Err(why) => return Err(self.unclaim(&connector, &subject, &folder, &why)),
+            }
+        }
+        // A connector that is off (a hub's team bot that is not on) takes no run, so its
+        // Ask step asks no model: the event is consumed before anything outside pinned
+        // hears of it.
+        let (asks, enabled) = self.store.lock().unwrap().connectors.iter().find(|c| c.id == connector).map_or((false, false), |c| (c.ask.is_some(), c.enabled));
+        if asks && !enabled {
+            self.release(&connector, &subject).await;
+            return self.keep_stopped(&connector, &subject);
+        }
+        match self.consult(&connector, &run.input).await {
+            Ok(None) => {}
+            Ok(Some((ask, answers))) => {
+                if stops(&ask, &answers).is_some() {
+                    self.release(&connector, &subject).await;
+                    self.keep_stopped(&connector, &subject)?;
+                    return Ok(());
+                }
+                append_answers(&mut run, &ask, &answers);
+            }
+            Err(why) => {
+                self.release(&connector, &subject).await;
+                return Err(self.unclaim(&connector, &subject, &folder, &why));
+            }
+        }
+        let answer = open(Work::Run(run)).await;
+        // Consumed: nothing opened, so Linear and Slack are left as they are, and the
+        // subject stays handled so the next check does not send it again.
+        if answer.consumed() {
+            return self.keep_stopped(&connector, &subject);
+        }
+        if let Err(why) = answer.taken() {
+            return Err(self.unclaim(&connector, &subject, &folder, &why));
+        }
+        // The session starts even when Linear won't move the issue or Slack won't take the
+        // reaction; the check reports why.
+        self.acknowledge_run(&connector, &subject, &mentioned).await
+    }
+
+    /// Tells Linear and Slack a run started: its issue moves to picked, or its thread's messages get
+    /// the working reaction. A Slack thread has no issue to pick until its session files one.
+    async fn acknowledge_run(&self, connector: &str, subject: &Subject, mentioned: &[String]) -> Result<(), String> {
+        match subject {
+            Subject::LinearIssue { .. } => self.stage(connector, subject, Stage::Picked).await.map(drop),
+            Subject::SlackThread { channel, thread } => self.acknowledge(connector, channel, thread, mentioned).await,
+        }
+    }
+
+    /// A run a hub's team kept waiting (its `open` consumed it then) started later: Linear and
+    /// Slack hear of it now, as `hand_over` tells them of a run a tab took at once.
+    pub async fn started(&self, run: &Run) -> Result<(), String> {
+        self.acknowledge_run(&run.connector, &run.subject, &run.mentioned).await
     }
 
     /// Reacts to the messages a session took, so people can tell the bot didn't ignore them.
@@ -3339,6 +3534,9 @@ impl Connectors {
     {
         let _guard = self.lock_driving().await;
         let (work, mut error) = self.poll().await;
+        if let Err(e) = self.run_granted(open).await {
+            error.get_or_insert(e);
+        }
         for work in work {
             if let Err(e) = self.hand_over(work, open).await {
                 error.get_or_insert(e);
@@ -3542,6 +3740,75 @@ impl Connectors {
         self.save_runs()
     }
 
+    /// A graph's start: a hub's team decides before its first step, which may move an issue,
+    /// classify with a model or post to Slack.
+    async fn start_graph(&self, event: Event) -> Result<(), String> {
+        match self.admit(&event).await? {
+            Admitted::Go => self.begin_admitted(event).await,
+            Admitted::Held | Admitted::Waiting => Ok(()),
+        }
+    }
+
+    /// Takes `event` as a check that found it would, then drives the graph runs: the hub tests
+    /// hand a team's events in here, since their pollers reach no Linear or Slack of their own.
+    #[doc(hidden)]
+    pub async fn found<F, Fut, R>(&self, event: Event, open: &F) -> Result<(), String>
+    where
+        F: Fn(Work) -> Fut,
+        Fut: Future<Output = R>,
+        R: Taken,
+    {
+        let _guard = self.lock_driving().await;
+        match event {
+            Event::Run(run) => self.hand_over_run(run, open, false).await,
+            graph @ Event::Graph { .. } => {
+                self.start_graph(graph).await?;
+                self.drive_locked(open).await
+            }
+        }
+    }
+
+    /// Hands over `work` as a check would: the hub tests hand a team's thread replies in here.
+    #[doc(hidden)]
+    pub async fn handed<F, Fut, R>(&self, work: Work, open: &F) -> Result<(), String>
+    where
+        F: Fn(Work) -> Fut,
+        Fut: Future<Output = R>,
+        R: Taken,
+    {
+        let _guard = self.lock_driving().await;
+        self.hand_over(work, open).await
+    }
+
+    /// `begin` of an admitted graph event. Its place is held until its session opens; a run that
+    /// does not start, or ends before a session (`drive_locked`), releases it.
+    async fn begin_admitted(&self, event: Event) -> Result<(), String> {
+        let Event::Graph { connector, subject, input, at } = event else { return Err("not a graph event".into()) };
+        let fresh = !run_open(&self.runs.lock().unwrap(), &connector, &subject);
+        let begun = self.begin(connector.clone(), subject.clone(), input, &at);
+        let started = begun.is_ok() && fresh && run_open(&self.runs.lock().unwrap(), &connector, &subject);
+        match started && self.admission.get().is_some() {
+            true => {
+                self.holding.lock().unwrap().insert((connector, subject_key(&subject)));
+            }
+            false => self.release(&connector, &subject).await,
+        }
+        begun
+    }
+
+    /// An admitted graph run ended or opened its session: an end before a session frees its place.
+    async fn settle_hold(&self, run: &runner::Run) {
+        let key = (run.connector.clone(), subject_key(&run.subject));
+        let opened = matches!(run.session, Session::Live { .. });
+        let ended = matches!(run.status, Status::Done | Status::Failed { .. });
+        if !(opened || ended) || !self.holding.lock().unwrap().remove(&key) {
+            return;
+        }
+        if !opened {
+            self.release(&run.connector, &run.subject).await;
+        }
+    }
+
     fn enqueue(&self, item: GraphInbox) {
         let mut inbox = self.inbox.lock().unwrap();
         if inbox.iter().any(|have| have.channel == item.channel && have.thread == item.thread && have.cursor == item.cursor) {
@@ -3682,10 +3949,12 @@ impl Connectors {
                     if let Status::Failed { why } = &run.status {
                         failed.push(why.clone());
                     }
+                    self.settle_hold(&run).await;
                     self.replace_run(run)?;
                 }
                 Drive::Park | Drive::Done => {
                     Self::stamp_wait(&mut run);
+                    self.settle_hold(&run).await;
                     self.replace_run(run)?;
                 }
             }
@@ -3778,7 +4047,11 @@ impl Connectors {
             let mut spec = graph_opening(&owner_c, &trigger, &[], "", None, &self.exe)?;
             spec.args.pop();
             spec.args.extend(["--resume".into(), claude.clone()]);
-            match open(Work::Run(spec)).await.taken() {
+            let answer = open(Work::Run(spec)).await;
+            if answer.consumed() {
+                return self.keep_stopped(owner, &run.subject);
+            }
+            match answer.taken() {
                 Ok(place) => {
                     let place = place.unwrap_or(Placement { machine: "local".into(), tab: "local".into() });
                     if !text.is_empty() {
@@ -3792,7 +4065,11 @@ impl Connectors {
             }
         }
         let spec = graph_opening(&owner_c, &trigger, &direct_answers(run, &self.library()), text, Some(&runner::history(run)), &self.exe)?;
-        let place = open(Work::Run(spec)).await.taken()?.unwrap_or(Placement { machine: "local".into(), tab: "local".into() });
+        let answer = open(Work::Run(spec)).await;
+        if answer.consumed() {
+            return self.keep_stopped(owner, &run.subject);
+        }
+        let place = answer.taken()?.unwrap_or(Placement { machine: "local".into(), tab: "local".into() });
         self.mark_live(&run.id.0, place, None)
     }
 
@@ -4084,7 +4361,13 @@ impl Connectors {
         };
         let folder = spec.cwd.clone();
         let mentioned = spec.mentioned.clone();
-        match open(Work::Run(spec)).await.taken() {
+        let answer = open(Work::Run(spec)).await;
+        // Consumed: nothing opened, so the run ends without a session and Slack hears nothing.
+        if answer.consumed() {
+            self.restore_inbox(inbox);
+            return Ok(Supplied::Failed(CONSUMED.into()));
+        }
+        match answer.taken() {
             Ok(place) => {
                 if let Subject::SlackThread { channel, thread } = &run.subject {
                     let _ = self.acknowledge(owner, channel, thread, &mentioned).await;
@@ -4113,7 +4396,12 @@ impl Connectors {
         spec.args.extend(["--resume".into(), claude.to_owned()]);
         let inbox = self.take_inbox(&run.subject);
         let text = render_template(text, run);
-        let place = match open(Work::Run(spec)).await.taken() {
+        let answer = open(Work::Run(spec)).await;
+        if answer.consumed() {
+            self.restore_inbox(inbox);
+            return Ok(Supplied::Failed(CONSUMED.into()));
+        }
+        let place = match answer.taken() {
             Err(why) if why.contains("No conversation found") => {
                 self.restore_inbox(inbox);
                 return Ok(Supplied::NoConversation);
@@ -9890,6 +10178,47 @@ mod tests {
         block_on(connectors.perform_resume(&mut run, "c2", "claude-1", FORGED_TEMPLATE, &open)).unwrap();
         assert_eq!(*typed.lock().unwrap(), [FORGED_TYPED]);
         assert!(runner::already_sent(&run, FORGED_RAW));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_off_connectors_ask_step_asks_no_model_and_its_run_is_consumed() {
+        let _model = TestReply::set(r#"{"kind":"bug","agent":"yes"}"#.into());
+        crate::vercel::take_test_inputs();
+        let off = Connector { enabled: false, ask: Some(classifying()), handled: vec!["uuid".into()], ..linear_connector() };
+        let (connectors, dir) = stored("off-ask", vec![off]);
+        std::fs::write(dir.join("vercel-key"), "vck-test").unwrap();
+        let opened = Mutex::new(0);
+        let open = |work: Work| {
+            *opened.lock().unwrap() += 1;
+            placed(work)
+        };
+        assert_eq!(block_on(connectors.hand_over(Work::Run(run(&linear_connector(), &issue(), "/bin/pinned")), &open)), Ok(()));
+        assert_eq!(crate::vercel::take_test_inputs(), Vec::<String>::new(), "no model was asked");
+        assert_eq!(*opened.lock().unwrap(), 0, "no session was asked for");
+        assert_eq!(connectors.get_settings().connectors[0].handled, ["uuid"], "the issue stays handled");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_consumed_open_or_resume_of_a_graph_step_places_nothing_and_types_nothing() {
+        let (connector, mut run) = forged_template_run();
+        let (connectors, dir) = stored("consumed-graph", vec![connector.clone()]);
+        let sent = Mutex::new(Vec::<&'static str>::new());
+        let consumed = |work: Work| {
+            sent.lock().unwrap().push(match work {
+                Work::Run(_) => "run",
+                Work::Prompt { .. } => "prompt",
+                Work::Delivery(_) => "delivery",
+            });
+            async { Ok::<Option<Placement>, String>(None) }
+        };
+        let resumed = block_on(connectors.perform_resume(&mut run, "c2", "claude-1", FORGED_TEMPLATE, &consumed));
+        assert_eq!(resumed, Ok(Supplied::Failed(CONSUMED.into())), "no local placement");
+        let library: runner::Library = [("c2".to_owned(), connector.graph.clone().unwrap())].into_iter().collect();
+        let opened = block_on(connectors.perform_open(&run, "c2", FORGED_TEMPLATE, false, &SessionSetup::default(), &library, &consumed));
+        assert_eq!(opened, Ok(Supplied::Failed(CONSUMED.into())), "no local placement");
+        assert_eq!(*sent.lock().unwrap(), ["run", "run"], "nothing typed into a session that never opened");
         let _ = std::fs::remove_dir_all(dir);
     }
 

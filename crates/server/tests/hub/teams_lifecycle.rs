@@ -72,7 +72,7 @@ impl Crew {
             "instructions": "", "machine": { "kind": "upstash-box", "size": "small" }, "repo": "",
         }));
         let calls = CallRules { in_doubt: Who::Group { handle: "design".into() }, ..CallRules::default() };
-        let bot = Bot { workflow: id.clone(), name: String::new(), owner: None, calls, limits: BotLimits { usd: 5.0, minutes: 30 }, on: false, on_by: None, once: false, off_note: None };
+        let bot = Bot { workflow: id.clone(), name: String::new(), owner: None, calls, limits: BotLimits { usd: 5.0, minutes: 30 }, on: false, on_by: None, once: false, off_note: None, skipped: vec![] };
         self.call(&self.bob, TeamOp::SaveBot { bot, connector: None }).unwrap();
         self.call(&self.ana, TeamOp::TurnBotOn { workflow: id.clone(), on: true }).unwrap();
         id

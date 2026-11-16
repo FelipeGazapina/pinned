@@ -3,9 +3,10 @@
 //! The tables are in `db::SCHEMA`.
 
 use crate::db::{err, Db};
+use tokio_postgres::Client;
 use pinned_core::agent::Subject;
 use pinned_core::preauth::team_hook::GO_AHEAD;
-use pinned_core::teams::{Answer, Bot, Call, Group, Role, Run, RunState, TeamProject, Who};
+use pinned_core::teams::{Answer, Bot, Call, Group, Role, Run, RunState, SkipReason, Skipped, TeamProject, Who};
 use tokio_postgres::error::SqlState;
 use uuid::Uuid;
 
@@ -369,6 +370,7 @@ fn bot_row(r: &tokio_postgres::Row) -> Result<Bot, String> {
         on_by: on_by.map(|o| o.to_string()),
         once: r.get("once"),
         off_note: r.get("off_note"),
+        skipped: vec![],
     })
 }
 
@@ -458,6 +460,48 @@ pub async fn set_run_box(db: &Db, team: Uuid, run: Uuid, machine: &str) -> Resul
 /// its session starts (`claim_run_box`).
 pub async fn set_run_subject(db: &Db, team: Uuid, run: Uuid, subject: &Subject) -> Result<(), String> {
     db.client().await?.execute("update team_runs set subject = $3 where team = $1 and id = $2", &[&team, &run, &json(subject)?]).await.map_err(err)?;
+    Ok(())
+}
+
+/// Holds a place for run `run` of an admitted trigger's event on `subject`, before anything
+/// outside pinned hears of the event: the cap counts it, and its session's `open` takes it.
+/// Written on `held`, the connection of the team's turn, so it commits with the turn.
+pub async fn insert_reserved(held: &Client, team: Uuid, run: &Run, subject: &Subject) -> Result<(), String> {
+    let id = Uuid::parse_str(&run.id).map_err(|_| "a run's id is a uuid")?;
+    let started_by = serde_json::Value::String(run.started_by.clone());
+    held
+        .execute(
+            "insert into team_runs (id, team, workflow, started_by, state, subject, reserved, reserved_at) values ($1, $2, $3, $4, 'working', $5, true, now())",
+            &[&id, &team, &run.workflow, &started_by, &json(subject)?],
+        )
+        .await
+        .map_err(err)
+        .map(drop)
+}
+
+/// The live run of bot `workflow` that holds a place for `subject` and has opened no session yet.
+pub async fn reserved_run_for(db: &Db, team: Uuid, workflow: &str, subject: &Subject) -> Result<Option<Uuid>, String> {
+    let row = db
+        .client()
+        .await?
+        .query_opt(
+            &format!("select id from team_runs where team = $1 and workflow = $2 and subject = $3 and reserved and state in {LIVE} limit 1"),
+            &[&team, &workflow, &json(subject)?],
+        )
+        .await
+        .map_err(err)?;
+    Ok(row.map(|r| r.get(0)))
+}
+
+/// Whether live run `run` still only holds its place.
+pub async fn is_reserved(db: &Db, team: Uuid, run: Uuid) -> Result<bool, String> {
+    let row = db.client().await?.query_opt("select reserved from team_runs where team = $1 and id = $2", &[&team, &run]).await.map_err(err)?;
+    Ok(row.is_some_and(|r| r.get(0)))
+}
+
+/// Run `run` opened its session on `machine`: it no longer only holds a place.
+pub async fn open_reserved(db: &Db, team: Uuid, run: Uuid, machine: &str) -> Result<(), String> {
+    db.client().await?.execute("update team_runs set box = $3, reserved = false, reserved_at = null where team = $1 and id = $2", &[&team, &run, &machine]).await.map_err(err)?;
     Ok(())
 }
 
@@ -1100,4 +1144,139 @@ pub async fn live_run_for(db: &Db, team: Uuid, workflow: &str, subject: &Subject
         .await
         .map_err(err)?;
     Ok(row.as_ref().map(run_of))
+}
+
+/// An event waiting in its bot's line (`team_run_queue`), oldest first by `id`.
+pub struct Waiting {
+    pub id: i64,
+    pub workflow: String,
+    /// What `teams::queue` stored to start it with.
+    pub start: serde_json::Value,
+}
+
+/// How many runs of the team are live.
+pub async fn live_count(db: &Db, team: Uuid) -> Result<i64, String> {
+    live_count_on(&*db.client().await?, team).await
+}
+
+/// `live_count` on `client`: in a team's turn, its own reservations count.
+pub async fn live_count_on(client: &Client, team: Uuid) -> Result<i64, String> {
+    let row = client.query_one(&format!("select count(*) from team_runs where team = $1 and state in {LIVE}"), &[&team]).await.map_err(err)?;
+    Ok(row.get(0))
+}
+
+/// The most runs the team may have live at once.
+pub async fn max_live_runs(db: &Db, team: Uuid) -> Result<i64, String> {
+    let row = db.client().await?.query_opt("select max_live_runs from teams where id = $1", &[&team]).await.map_err(err)?;
+    Ok(row.map_or(3, |r| i64::from(r.get::<_, i32>(0))))
+}
+
+/// How many events wait in the line of bot `workflow`.
+pub async fn waiting_count(db: &Db, team: Uuid, workflow: &str) -> Result<i64, String> {
+    let row = db.client().await?.query_one("select count(*) from team_run_queue where team = $1 and workflow = $2 and granted_at is null", &[&team, &workflow]).await.map_err(err)?;
+    Ok(row.get(0))
+}
+
+/// Puts `start` at the end of the line of bot `workflow`, and drops its oldest beyond `most`.
+/// Answers how many it dropped.
+pub async fn enqueue(db: &Db, team: Uuid, workflow: &str, start: &serde_json::Value, most: i64) -> Result<u64, String> {
+    let client = db.client().await?;
+    client.execute("insert into team_run_queue (team, workflow, start) values ($1, $2, $3)", &[&team, &workflow, start]).await.map_err(err)?;
+    client
+        .execute(
+            "delete from team_run_queue where id in (select id from team_run_queue where team = $1 and workflow = $2 and granted_at is null order by id desc offset $3)",
+            &[&team, &workflow, &most],
+        )
+        .await
+        .map_err(err)
+}
+
+/// The oldest waiting event, not granted yet, of a bot of the team that has no live run, `first`'s
+/// before any other bot's. Read on `held`, the connection of the team's turn.
+pub async fn next_waiting(held: &Client, team: Uuid, first: &str) -> Result<Option<Waiting>, String> {
+    let row = held
+        .query_opt(
+            &format!(
+                "select id, workflow, start from team_run_queue q where team = $1 and granted_at is null
+                 and not exists (select 1 from team_runs r where r.team = q.team and r.workflow = q.workflow and r.state in {LIVE})
+                 order by (workflow = $2) desc, id limit 1"
+            ),
+            &[&team, &first],
+        )
+        .await
+        .map_err(err)?;
+    Ok(row.map(|r| Waiting { id: r.get(0), workflow: r.get(1), start: r.get(2) }))
+}
+
+/// The waiting event of bot `workflow` on `subject` (`queue::Stored::Event`), if one waits.
+pub async fn waiting_event_for(db: &Db, team: Uuid, workflow: &str, subject: &Subject) -> Result<Option<Waiting>, String> {
+    let row = db
+        .client()
+        .await?
+        .query_opt(
+            "select id, workflow, start from team_run_queue where team = $1 and workflow = $2 and granted_at is null and start->>'by' = 'event' and start->'event'->'subject' = $3 order by id limit 1",
+            &[&team, &workflow, &json(subject)?],
+        )
+        .await
+        .map_err(err)?;
+    Ok(row.map(|r| Waiting { id: r.get(0), workflow: r.get(1), start: r.get(2) }))
+}
+
+/// Stores what waiting event `id` starts with.
+pub async fn set_waiting(db: &Db, id: i64, start: &serde_json::Value) -> Result<(), String> {
+    db.client().await?.execute("update team_run_queue set start = $2 where id = $1", &[&id, start]).await.map_err(err).map(drop)
+}
+
+/// Waiting event `id`'s turn came: it stays in its line, granted the place reserved run `run`
+/// holds, until its team's poller claims it (`claim`). Written on `held`, in the team's turn,
+/// with the reserved run's insert, so a hub that stops keeps both or neither.
+pub async fn grant(held: &Client, id: i64, run: Uuid) -> Result<(), String> {
+    held.execute("update team_run_queue set granted_at = now(), run = $2 where id = $1", &[&id, &run]).await.map_err(err).map(drop)
+}
+
+/// The team's granted events (`grant`) that no poller claimed yet, oldest first.
+pub async fn granted(db: &Db, team: Uuid) -> Result<Vec<i64>, String> {
+    let rows = db.client().await?.query("select id from team_run_queue where team = $1 and granted_at is not null order by id", &[&team]).await.map_err(err)?;
+    Ok(rows.iter().map(|r| r.get(0)).collect())
+}
+
+/// Claims granted event `id` for the poller that runs it: only the claim that deletes the row
+/// gets its stored event and the reserved run that holds its place, so of two hubs exactly one runs it.
+pub async fn claim(db: &Db, team: Uuid, id: i64) -> Result<Option<(serde_json::Value, Option<Uuid>)>, String> {
+    let row = db
+        .client()
+        .await?
+        .query_opt("delete from team_run_queue where team = $1 and id = $2 and granted_at is not null returning start, run", &[&team, &id])
+        .await
+        .map_err(err)?;
+    Ok(row.map(|r| (r.get(0), r.get(1))))
+}
+
+/// Takes waiting event `id` out of its line.
+pub async fn take_waiting(db: &Db, id: i64) -> Result<(), String> {
+    db.client().await?.execute("delete from team_run_queue where id = $1", &[&id]).await.map_err(err).map(drop)
+}
+
+/// Counts `count` more events of bot `workflow` that started no run for `reason`.
+pub async fn count_skipped(db: &Db, team: Uuid, workflow: &str, reason: SkipReason, count: u64) -> Result<(), String> {
+    let count = i64::try_from(count).unwrap_or(i64::MAX);
+    db.client()
+        .await?
+        .execute(
+            "insert into team_bot_skips (team, workflow, reason, count) values ($1, $2, $3, $4)
+             on conflict (team, workflow, reason) do update set count = team_bot_skips.count + excluded.count",
+            &[&team, &workflow, &reason.as_str(), &count],
+        )
+        .await
+        .map_err(err)
+        .map(drop)
+}
+
+/// The skipped events of bot `workflow`, by reason.
+pub async fn skipped(db: &Db, team: Uuid, workflow: &str) -> Result<Vec<Skipped>, String> {
+    let rows = db.client().await?.query("select reason, count from team_bot_skips where team = $1 and workflow = $2 order by reason", &[&team, &workflow]).await.map_err(err)?;
+    Ok(rows
+        .iter()
+        .filter_map(|r| SkipReason::parse(r.get(0)).map(|reason| Skipped { reason, count: u64::try_from(r.get::<_, i64>(1)).unwrap_or(0) }))
+        .collect())
 }

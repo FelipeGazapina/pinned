@@ -6,12 +6,12 @@ use super::*;
 
 /// A request the stand-in Slack got.
 #[derive(Clone, Debug)]
-pub(super) struct Seen {
-    method: String,
-    token: String,
+pub(crate) struct Seen {
+    pub(crate) method: String,
+    pub(crate) token: String,
     channel: String,
     thread: String,
-    text: String,
+    pub(crate) text: String,
 }
 
 static SEEN: Mutex<Vec<Seen>> = Mutex::new(Vec::new());
@@ -19,7 +19,7 @@ static SEEN: Mutex<Vec<Seen>> = Mutex::new(Vec::new());
 /// The stand-in Slack's address as a root for `PINNED_SLACK_API_ROOT`, starting it on first use.
 /// Each test names its own tokens, so they share the one server. A token holding `500` gets a
 /// failing `chat.postMessage`.
-pub(super) fn slack_standin() {
+pub(crate) fn slack_standin() {
     static SERVER: OnceLock<()> = OnceLock::new();
     SERVER.get_or_init(|| {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -63,7 +63,7 @@ fn slack_answer(mut stream: TcpStream) {
 }
 
 /// What the stand-in got with a token starting `prefix`, oldest first.
-fn seen(prefix: &str) -> Vec<Seen> {
+pub(crate) fn seen(prefix: &str) -> Vec<Seen> {
     SEEN.lock().unwrap().iter().filter(|s| s.token.starts_with(prefix)).cloned().collect()
 }
 

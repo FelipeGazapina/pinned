@@ -12,6 +12,7 @@ pub mod db;
 pub mod groups;
 pub mod membership;
 pub mod projects;
+pub mod queue;
 pub mod run_log;
 pub mod triggers;
 
@@ -186,7 +187,7 @@ pub async fn call(hub: &Arc<Hub>, person: &Arc<Account>, team: Option<Uuid>, op:
         TeamOp::SaveBot { bot, connector } => json(bots::save_bot(hub, s, bot, connector).await?),
         TeamOp::TurnBotOn { workflow, on } => json(bots::turn_bot_on(hub, s, &workflow, on).await?),
         TeamOp::DeleteBot { workflow } => json(bots::delete_bot(hub, s, &workflow).await?),
-        TeamOp::RunNow { workflow } => json(bots::run_now(hub, s, &workflow).await?),
+        TeamOp::RunNow { workflow } => bots::run_now(hub, s, &workflow).await,
         TeamOp::Runs => json(calls::runs(hub, s).await?),
         TeamOp::Calls => json(calls::calls(hub, s).await?),
         TeamOp::AnswerCall { id, answer } => json(calls::answer_call(hub, s, &id, answer).await?),

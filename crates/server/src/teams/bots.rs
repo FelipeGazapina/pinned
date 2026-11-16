@@ -10,7 +10,7 @@ use pinned_core::connectors::{BoxStep, Connector, Placement, Trigger};
 use pinned_core::graph::migrate::migrate;
 use pinned_core::graph::runner::{session_steps, Library};
 use pinned_core::graph::{NodeKind, Watch};
-use pinned_core::teams::{Bot, BotLimits, CallRules, Run, RunState, TeamEvent, TeamProject, Who};
+use pinned_core::teams::{Bot, BotLimits, CallRules, Run, RunState, SkipReason, TeamEvent, TeamProject, Who};
 use pinned_core::wire::HubCall;
 use serde_json::Value;
 use std::sync::Arc;
@@ -95,9 +95,10 @@ pub async fn bots(hub: &Arc<Hub>, scope: &Scope) -> Result<Vec<Bot>, String> {
     for workflow in workflows(hub, &scope.team).await? {
         let bot = match rows.iter().find(|b| b.workflow == workflow.id) {
             Some(row) => Bot { name: workflow.name.clone(), ..row.clone() },
-            None => Bot { workflow: workflow.id.clone(), name: workflow.name.clone(), owner: None, calls: CallRules::default(), limits: default_limits(hub), on: false, on_by: None, once: false, off_note: None },
+            None => Bot { workflow: workflow.id.clone(), name: workflow.name.clone(), owner: None, calls: CallRules::default(), limits: default_limits(hub), on: false, on_by: None, once: false, off_note: None, skipped: vec![] },
         };
-        bots.push(bot);
+        let skipped = db::skipped(&hub.db, scope.team.id, &workflow.id).await?;
+        bots.push(Bot { skipped, ..bot });
     }
     Ok(bots)
 }
@@ -265,7 +266,7 @@ pub async fn turn_bot_on(hub: &Arc<Hub>, scope: &Scope, workflow_id: &str, on: b
         return Err(NEEDS_KEYS.into());
     }
     if row.is_none() {
-        let fresh = Bot { workflow: workflow_id.to_owned(), name: String::new(), owner: Some(scope.member.to_string()), calls, limits: default_limits(hub), on: false, on_by: None, once: false, off_note: None };
+        let fresh = Bot { workflow: workflow_id.to_owned(), name: String::new(), owner: Some(scope.member.to_string()), calls, limits: default_limits(hub), on: false, on_by: None, once: false, off_note: None, skipped: vec![] };
         db::save_bot(&hub.db, team, &fresh).await?;
     }
     set_enabled(hub, &scope.team, workflow_id, true).await?;
@@ -309,23 +310,27 @@ pub enum Start {
     Member(Uuid),
     /// A trigger of the bot's workflow fired (`triggers::fired`): `kind` names it (`linear_label`,
     /// `slack_mention`, `slack_message`, `called`), and `work` is the session its poller found.
-    Trigger { kind: &'static str, work: pinned_core::connectors::Run },
+    Trigger { kind: String, work: pinned_core::connectors::Run },
 }
 
 /// Any member. Runs the bot now, as its workflow's Run now would on the team's account
-/// (`start_run`, started by the member).
-pub async fn run_now(hub: &Arc<Hub>, scope: &Scope, workflow_id: &str) -> Result<Run, String> {
-    start_run(hub, &scope.team, workflow_id, Start::Member(scope.member)).await.map(|(run, _)| run)
+/// (`start_run`, started by the member), or puts it in the bot's line (`queue::ask`): then the
+/// reply says it waits, `{"waiting":true,"workflow":"c1","place":2,"message":"…"}`.
+pub async fn run_now(hub: &Arc<Hub>, scope: &Scope, workflow_id: &str) -> Result<Value, String> {
+    match super::queue::ask(hub, &scope.team, workflow_id, Start::Member(scope.member)).await? {
+        super::queue::Asked::Started(run, _) => super::json(run),
+        super::queue::Asked::Waiting { place } => Ok(serde_json::json!({
+            "waiting": true,
+            "workflow": workflow_id,
+            "place": place,
+            "message": format!("This bot is busy or the team has as many runs going as it may: your run waits in line (number {place}) and starts when one ends."),
+        })),
+    }
 }
 
-/// The one way a team's run starts, from a member's Run now or a trigger that fired. The bot must
-/// be on and the team must keep its Upstash key and Claude token. Whatever the stored workflow
-/// says, the run opens in a fresh box of the team's own. Records the run (`db::insert_run`, started
-/// by the member or `trigger:<kind>`, with the subject its box opens for, so the box sets its
-/// machine on the run before the session starts: `db::claim_run_box`) and pushes
-/// `TeamEvent::RunChanged`. Answers the run and where it opened. The bot's `BotLimits` are held by
-/// `calls::tick`.
-pub async fn start_run(hub: &Arc<Hub>, team: &Arc<Account>, workflow_id: &str, start: Start) -> Result<(Run, Placement), String> {
+/// Whether bot `workflow_id` may start a run now: it is on, its workflow is one a bot can have,
+/// and the team keeps its Upstash key and Claude token.
+pub async fn ready(hub: &Arc<Hub>, team: &Account, workflow_id: &str) -> Result<(), String> {
     let workflows = workflows(hub, team).await?;
     let workflow = find(&workflows, workflow_id)?;
     let on = db::bot(&hub.db, team.id, workflow_id).await?.is_some_and(|b| b.on);
@@ -337,6 +342,18 @@ pub async fn start_run(hub: &Arc<Hub>, team: &Arc<Account>, workflow_id: &str, s
     if !(credential.upstash && credential.claude) {
         return Err(NEEDS_KEYS.into());
     }
+    Ok(())
+}
+
+/// The one way a team's run starts, from a member's Run now or a trigger that fired. The bot must
+/// be on and the team must keep its Upstash key and Claude token. Whatever the stored workflow
+/// says, the run opens in a fresh box of the team's own. Records the run (`db::insert_run`, started
+/// by the member or `trigger:<kind>`, with the subject its box opens for, so the box sets its
+/// machine on the run before the session starts: `db::claim_run_box`) and pushes
+/// `TeamEvent::RunChanged`. Answers the run and where it opened. The bot's `BotLimits` are held by
+/// `calls::tick`.
+pub async fn start_run(hub: &Arc<Hub>, team: &Arc<Account>, workflow_id: &str, start: Start) -> Result<(Run, Placement), String> {
+    ready(hub, team, workflow_id).await?;
     let (mut work, started_by) = match start {
         Start::Member(member) => (hub.connectors(team).await?.run_now(workflow_id, "a member of the team, from its bots")?, member.to_string()),
         Start::Trigger { kind, work } => (work, format!("trigger:{kind}")),
@@ -385,6 +402,37 @@ pub async fn start_run(hub: &Arc<Hub>, team: &Arc<Account>, workflow_id: &str, s
     }
     super::push(hub, team.id, TeamEvent::RunChanged { run: run.clone() }).await?;
     Ok((run, placed))
+}
+
+/// Opens the session of run `id`, whose place its trigger's event was given before anything
+/// outside pinned heard of it (`queue::admit`). A session that does not open frees the place, and
+/// what waits in the bot's line goes next.
+pub async fn start_reserved(hub: &Arc<Hub>, team: &Arc<Account>, id: Uuid, mut work: pinned_core::connectors::Run) -> Result<Placement, String> {
+    let opened = async {
+        ready(hub, team, &work.connector).await?;
+        if !matches!(work.runs_on, pinned_core::connectors::RunsOn::FreshBox(_)) {
+            work.runs_on = pinned_core::connectors::RunsOn::FreshBox(BoxStep::default());
+        }
+        hub.open_team_run(TeamRunPass(()), team, work.clone()).await
+    };
+    let placed = match opened.await {
+        Ok(placed) => placed,
+        Err(e) => {
+            db::delete_run(&hub.db, team.id, id).await?;
+            // A granted event that waited for its place and then did not start is counted.
+            if super::queue::take_claimed(id) {
+                db::count_skipped(&hub.db, team.id, &work.connector, SkipReason::StartFailed, 1).await?;
+            }
+            super::queue::next(hub, team, &work.connector);
+            return Err(e);
+        }
+    };
+    super::queue::take_claimed(id);
+    db::open_reserved(&hub.db, team.id, id, &placed.machine).await?;
+    if let Some(run) = db::run(&hub.db, team.id, id).await? {
+        super::push(hub, team.id, TeamEvent::RunChanged { run }).await?;
+    }
+    Ok(placed)
 }
 
 /// A run of the team ended (`run.state.ended()`): a bot made to run once is discarded, its row and

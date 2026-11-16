@@ -89,7 +89,7 @@ impl Crew {
     }
 
     fn try_save_bot(&self, id: &str) -> Result<Value, String> {
-        let bot = Bot { workflow: id.to_owned(), name: String::new(), owner: None, calls: CallRules::default(), limits: BotLimits { usd: 5.0, minutes: 30 }, on: false, on_by: None, once: false, off_note: None };
+        let bot = Bot { workflow: id.to_owned(), name: String::new(), owner: None, calls: CallRules::default(), limits: BotLimits { usd: 5.0, minutes: 30 }, on: false, on_by: None, once: false, off_note: None, skipped: vec![] };
         self.call(&self.bob, TeamOp::SaveBot { bot, connector: None })
     }
 
@@ -99,7 +99,7 @@ impl Crew {
 
     /// bob saves the bot of workflow `id` again, which puts it back to a draft.
     fn save_bot(&self, id: &str) {
-        let bot = Bot { workflow: id.to_owned(), name: String::new(), owner: None, calls: CallRules::default(), limits: BotLimits { usd: 5.0, minutes: 30 }, on: false, on_by: None, once: false, off_note: None };
+        let bot = Bot { workflow: id.to_owned(), name: String::new(), owner: None, calls: CallRules::default(), limits: BotLimits { usd: 5.0, minutes: 30 }, on: false, on_by: None, once: false, off_note: None, skipped: vec![] };
         self.call(&self.bob, TeamOp::SaveBot { bot, connector: None }).unwrap();
     }
 

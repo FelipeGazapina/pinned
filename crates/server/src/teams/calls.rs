@@ -31,7 +31,7 @@ const NOTICE_TRIES: [Duration; 4] = [Duration::ZERO, Duration::from_secs(3), Dur
 /// The most runs `runs` lists.
 const RUNS_LISTED: i64 = 50;
 
-const RUN_ENDED: &str = "this run has ended";
+pub(crate) const RUN_ENDED: &str = "this run has ended";
 
 /// Why a team's box got no session: its run was stopped, or ended otherwise, while the box booted.
 pub const ENDED_WHILE_BOOTING: &str = "the run ended before its box started, so its box was ended";
@@ -518,6 +518,7 @@ pub async fn end_run(hub: &Hub, team: &Arc<Account>, run_id: Uuid, state: RunSta
     if let Err(e) = super::bots::run_ended(hub, team.id, &run).await {
         eprintln!("pinned-server: run {run_id} of team {} ended but its run-once bot stays: {e}", team.id);
     }
+    super::queue::next(hub, team, &run.workflow);
     Ok(run)
 }
 

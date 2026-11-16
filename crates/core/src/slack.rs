@@ -139,6 +139,16 @@ fn resolve_root(set: Option<&str>, debug: bool) -> (String, bool) {
     }
 }
 
+/// Where calls go instead of `api` when a debug build's `env` names an http(s) root on a
+/// loopback host, as the hub tests' stand-ins; otherwise `api`, so a key never goes to a stranger.
+pub(crate) fn loopback_root(env: &str, api: &str) -> String {
+    let set = std::env::var(env).ok();
+    match set.as_deref().map(|r| r.trim().trim_end_matches('/')).filter(|r| !r.is_empty()) {
+        Some(set) if cfg!(debug_assertions) && loopback_http(set).is_some() => set.to_owned(),
+        _ => api.to_owned(),
+    }
+}
+
 fn loopback_http(root: &str) -> Option<()> {
     let url = reqwest::Url::parse(root).ok()?;
     let host = url.host_str()?.trim_start_matches('[').trim_end_matches(']');

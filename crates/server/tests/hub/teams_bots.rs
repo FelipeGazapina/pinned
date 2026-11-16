@@ -108,7 +108,7 @@ impl Crew {
 }
 
 fn bot_of(workflow: &str) -> Bot {
-    Bot { workflow: workflow.into(), name: String::new(), owner: None, calls: CallRules::default(), limits: BotLimits { usd: 5.0, minutes: 30 }, on: false, on_by: None, once: false, off_note: None }
+    Bot { workflow: workflow.into(), name: String::new(), owner: None, calls: CallRules::default(), limits: BotLimits { usd: 5.0, minutes: 30 }, on: false, on_by: None, once: false, off_note: None, skipped: vec![] }
 }
 
 /// A bot that is on, made the way a team does: keys, a saved bot, the owner's yes.
@@ -242,6 +242,9 @@ fn a_run_now_opens_a_box_on_the_teams_claude_token_not_a_members() {
 
     // The personal door does not run a team's workflow: Run now is the one way.
     assert_eq!(crew.hub_op(&crew.bob, json!({ "cmd": "run_workflow", "id": id })).unwrap_err(), "run_workflow does not run on a team");
+    // Run now again, while that run is live, joins the bot's line behind it.
+    let again = crew.call(&crew.carl, TeamOp::RunNow { workflow: id.clone() }).unwrap();
+    assert_eq!((again["workflow"].as_str(), again["waiting"].as_bool(), again["place"].as_i64()), (Some(id.as_str()), Some(true), Some(1)));
     assert_eq!(crew.runs().len(), 1);
 }
 

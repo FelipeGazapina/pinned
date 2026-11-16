@@ -70,6 +70,7 @@ pub mod teams;
 pub mod thread;
 pub mod titles;
 pub mod uploads;
+pub mod untrusted;
 pub mod upstash;
 pub mod usage;
 pub mod vercel;

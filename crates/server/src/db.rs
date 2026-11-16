@@ -200,6 +200,22 @@ alter table team_calls add column if not exists step_hash text, add column if no
 -- When a run last moved to waiting, so the calls tick tells a run left waiting with no open call
 -- from one whose call is being opened (`teams::db::stale_waiting`).
 alter table team_runs add column if not exists waiting_since timestamptz;
+-- One live run per bot and at most `max_live_runs` per team: the events past that wait in their
+-- bot's line (`teams::queue`), and the events that started no run are counted by why.
+alter table teams add column if not exists max_live_runs integer not null default 3;
+create table if not exists team_run_queue (id bigserial primary key, team uuid not null references teams on delete cascade,
+  workflow text not null, start jsonb not null, queued_at timestamptz not null default now());
+create index if not exists team_run_queue_line on team_run_queue (team, workflow, id);
+create table if not exists team_bot_skips (team uuid not null references teams on delete cascade, workflow text not null,
+  reason text not null, count bigint not null default 0, primary key (team, workflow, reason));
+-- A run whose place a trigger's event holds before its session opens (`teams::queue::admit`):
+-- the team's cap counts it from then, and its session's `open` starts it without deciding again.
+alter table team_runs add column if not exists reserved boolean not null default false;
+-- A waiting event whose turn came (`teams::queue::take_and_start`) stays in its line, granted, with the
+-- reserved run that holds its place, until its team's poller claims it (`teams::db::claim`).
+alter table team_run_queue add column if not exists granted_at timestamptz;
+alter table team_run_queue add column if not exists run uuid;
+alter table team_runs add column if not exists reserved_at timestamptz;
 ";
 /// How long the hub keeps an end that its machine never came back for.
 const HELD_FOR: &str = "interval '30 days'";
@@ -645,6 +661,12 @@ impl Db {
 
     /// The connection kept for transactions, opened if closed. Hold the guard for the whole
     /// transaction: `held.as_mut().unwrap().transaction()`.
+    /// A connection of its own, for a transaction held while other statements run on the shared
+    /// one (a lock). Dropping it ends the transaction and frees what it held.
+    pub async fn own_client(&self) -> Result<Client, String> {
+        open(&self.connection.url).await
+    }
+
     pub async fn transaction_client(&self) -> Result<tokio::sync::MutexGuard<'_, Option<Client>>, String> {
         let mut held = self.transactions.lock().await;
         if held.as_ref().map_or(true, Client::is_closed) {
