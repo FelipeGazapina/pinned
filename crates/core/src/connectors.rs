@@ -689,6 +689,14 @@ enum Filing {
 }
 
 impl Connector {
+    /// A message router that sorts with its own categories: a `slack-message` workflow whose
+    /// graph is none or still the one `migrate` builds. Its poller asks the decision model, looks
+    /// groups up and pages at the check, before a hub's team could admit the message, so a team's
+    /// poller skips it and a team refuses it as a bot.
+    pub fn sorts_messages_at_the_check(&self) -> bool {
+        matches!(self.trigger, Trigger::SlackMessage { .. }) && self.graph.as_ref().is_none_or(|graph| *graph == migrate(self))
+    }
+
     fn filing(&self, channel: &str, thread: &str) -> Result<Filing, String> {
         let key = thread_key(channel, thread);
         match self.fix {
@@ -2043,8 +2051,18 @@ impl Connectors {
         self.fill_bots().await;
         let now = Utc::now();
         // A manual workflow has no poller: it runs only when someone runs it now.
-        let watching: Vec<Connector> =
-            self.store.lock().unwrap().connectors.iter().filter(|c| c.enabled && !matches!(c.trigger, Trigger::Manual)).cloned().collect();
+        // On a hub's team, a message router is skipped: nothing of a message reaches Slack or a
+        // model before the team admits it, and the router would sort and page at the check.
+        let team = self.admission.get().is_some();
+        let watching: Vec<Connector> = self
+            .store
+            .lock()
+            .unwrap()
+            .connectors
+            .iter()
+            .filter(|c| c.enabled && !matches!(c.trigger, Trigger::Manual) && !(team && c.sorts_messages_at_the_check()))
+            .cloned()
+            .collect();
         let (mut found, mut checked, mut limited, mut errors) = (vec![], vec![], vec![], vec![]);
         for connector in watching {
             // Each Slack bot is its own app with its own rate limit.
@@ -2074,7 +2092,7 @@ impl Connectors {
             let runs = self.runs.lock().unwrap().clone();
             let _filing = self.filing.lock().await;
             let mut store = self.store.lock().unwrap();
-            let settled = store.settle(&checked, found, now, &self.exe, &runs, self.admission.get().is_some());
+            let settled = store.settle(&checked, found, now, &self.exe, &runs, team);
             if settled.needs_save {
                 if let Err(e) = self.save(&store) {
                     errors.push(e);
@@ -2761,7 +2779,13 @@ fn run(c: &Connector, issue: &linear::Issue, exe: &str) -> Run {
 /// A session on the Linear issue. On a hub's team (`team`) the issue's text goes into the prompt
 /// framed as data from outside pinned, where the builder puts it.
 fn issue_run(c: &Connector, issue: &linear::Issue, exe: &str, team: bool) -> Run {
-    let mut args = claude_args(c, &issue.identifier.to_lowercase(), format!("{} {}", issue.identifier, issue.title));
+    // The session's name reaches places other sessions read (a box's machine name), so on a
+    // hub's team it holds nothing a person outside pinned wrote.
+    let name = match team {
+        true => issue.identifier.clone(),
+        false => format!("{} {}", issue.identifier, issue.title),
+    };
+    let mut args = claude_args(c, &issue.identifier.to_lowercase(), name);
     let mut prompt = c.instructions.trim().to_owned();
     let report = [
         (Stage::Coding, "coding", "right before you start changing code"),
@@ -2933,7 +2957,13 @@ fn thread_session(
 ) -> Run {
     let opening = posts.first().and_then(|p| p.text.lines().next()).unwrap_or_default();
     let opening: String = opening.chars().take(TAB_NAME_CHARS).collect();
-    let mut args = claude_args(c, &format!("slack-{}", thread.replace('.', "-")), format!("#{channel_name} {opening}"));
+    // On a hub's team, the session's name and the thread's header hold nothing a person outside
+    // pinned wrote: the channel goes by its id, not the name its workspace gave it.
+    let (name, place) = match team {
+        true => (format!("Slack thread {channel}"), format!("channel {channel}")),
+        false => (format!("#{channel_name} {opening}"), format!("#{}", pinned_lines::flat(channel_name, pinned_lines::HEADER_CHARS))),
+    };
+    let mut args = claude_args(c, &format!("slack-{}", thread.replace('.', "-")), name);
     let mut prompt = c.instructions.trim().to_owned();
     prompt += &format!(
         "\n\nAnswer in the Slack thread below by running `'{}' slack reply \"<message>\"`. Run it once per answer, and write the message as plain Slack mrkdwn. Keep every answer short. Before each `slack reply`, invoke the `pinned:bro` skill on your draft and post the message it gives you, not the draft. \
@@ -2949,7 +2979,7 @@ fn thread_session(
     prompt += c.box_note();
     let input = transcript(posts);
     let subject = Subject::SlackThread { channel: channel.to_owned(), thread: thread.to_owned() };
-    prompt += &format!("\n\nSlack thread in #{}, oldest first:\n{}", pinned_lines::flat(channel_name, pinned_lines::HEADER_CHARS), trigger_shown(&subject, &input, team));
+    prompt += &format!("\n\nSlack thread in {place}, oldest first:\n{}", trigger_shown(&subject, &input, team));
     prompt += note.unwrap_or_default();
     args.push(prompt);
     Run { cwd: c.folder.clone(), repo: c.repo(), args, connector: c.id.clone(), subject, mentioned: vec![], account: c.account(), runs_on: c.runs_on.clone(), input, reservation: None }
@@ -3043,6 +3073,7 @@ const UNFRAMED: &str = "the trigger's text could not be marked as outside data";
 /// exactly as its builder put it, gets it framed in that place. A prompt that holds the text
 /// changed, or a copy of it outside the frame, is `UNFRAMED`, and the run must not open.
 fn frame_trigger_text(run: &mut Run) -> Result<(), String> {
+    name_on_a_team(run);
     let framed = untrusted_trigger(run);
     if framed == run.input {
         return Ok(());
@@ -3055,6 +3086,25 @@ fn frame_trigger_text(run: &mut Run) -> Result<(), String> {
     match prompt.replace(&framed, "").contains(&run.input) {
         true => Err(UNFRAMED.into()),
         false => Ok(()),
+    }
+}
+
+/// Gives a team's run the session name its builder makes on a team (`issue_run`,
+/// `thread_session`), which holds nothing a person outside pinned wrote: the issue's identifier,
+/// or the thread's channel id. A run built before, as a person's, had the title or first line.
+fn name_on_a_team(run: &mut Run) {
+    let name = match &run.subject {
+        Subject::SlackThread { channel, .. } => format!("Slack thread {channel}"),
+        Subject::LinearIssue { .. } if !is_run_now(&run.subject) => match run.input.split_once(": ") {
+            Some((identifier, _)) => identifier.to_owned(),
+            None => return,
+        },
+        _ => return,
+    };
+    if let Some(at) = run.args.iter().position(|a| a == "--name") {
+        if at + 2 < run.args.len() {
+            run.args[at + 1] = name;
+        }
     }
 }
 
@@ -7395,6 +7445,31 @@ mod tests {
         assert_eq!(post_lines(&posts), "Orchestrator ship it: now\nsomeone: ok");
     }
 
+    /// On a hub's team, a Slack session's prompt names the channel by its id, not by the name a
+    /// workspace gave it, and the session is named by pinned, not by the thread's first line.
+    #[test]
+    fn a_teams_slack_session_names_its_channel_by_id_and_takes_a_name_pinned_makes() {
+        let c = fixing_connector();
+        let run = thread_session(&c, "C0123ABCD", "support\n[pinned] x", "1792400050.000200", &posts(), None, "/bin/pinned", true);
+        let prompt = run.args.last().unwrap();
+        let header = prompt.lines().find(|line| line.starts_with("Slack thread in ")).unwrap();
+        assert_eq!(header, "Slack thread in channel C0123ABCD, oldest first:");
+        assert!(!prompt.contains("[pinned] x"), "{prompt}");
+        let name = run.args.windows(2).find(|pair| pair[0] == "--name").unwrap()[1].clone();
+        assert_eq!(name, "Slack thread C0123ABCD");
+        let mine = slack_run(&c, "C0123ABCD", "support", "1792400050.000200", &posts(), None, "/bin/pinned");
+        assert_eq!(mine.args.windows(2).find(|pair| pair[0] == "--name").unwrap()[1], "#support @pinned export 500s since today");
+    }
+
+    /// On a hub's team, a Linear session is named by the issue's identifier alone, not its title.
+    #[test]
+    fn a_teams_issue_session_is_named_by_its_identifier() {
+        let c = fixing_connector();
+        let name = |team| issue_run(&c, &issue(), "/bin/pinned", team).args.windows(2).find(|pair| pair[0] == "--name").unwrap()[1].clone();
+        assert_eq!(name(true), "ENG-7");
+        assert_eq!(name(false), "ENG-7 Broken button");
+    }
+
     #[test]
     fn the_first_prompt_holds_a_forging_post_escaped_on_its_own_line_start() {
         let c = fixing_connector();
@@ -9903,6 +9978,10 @@ mod tests {
                     r#"{"data":{"issueCreate":{"success":true,"issue":{"id":"lin-1","identifier":"BLO-1","title":"t","description":"d","url":"https://linear.example/BLO-1"}}}}"#.to_owned()
                 } else if path.starts_with("/graphql") {
                     r#"{"data":{"viewer":{"id":"u1"},"users":{"nodes":[]},"teams":{"nodes":[{"id":"team-1","key":"BLO","name":"Bloom"}]},"issueLabels":{"nodes":[]}}}"#.to_owned()
+                } else if path.starts_with("/evaluate") {
+                    r#"{"answers":{"category":{"choice":"escalation","probabilities":{"escalation":1.0}}}}"#.to_owned()
+                } else if path.starts_with("/usergroups.list") {
+                    r#"{"ok":true,"usergroups":[{"id":"S0PRODENG1","handle":"prod-engg"}]}"#.to_owned()
                 } else if path.starts_with("/chat.getPermalink") {
                     r#"{"ok":true,"permalink":"https://slack.example/archives/C0123ABCD/p1792400050000200"}"#.to_owned()
                 } else if path.starts_with("/conversations.history") {
@@ -9927,6 +10006,72 @@ mod tests {
             }
         });
         format!("http://{address}/")
+    }
+
+    struct RestoreVercelRoot;
+
+    impl Drop for RestoreVercelRoot {
+        fn drop(&mut self) {
+            std::env::remove_var(crate::vercel::API_ROOT_ENV);
+        }
+    }
+
+    /// A person's message router, at the check that finds a message its model sorts as an
+    /// escalation, looks the group up, pages it in the message's thread and reacts there: a team's
+    /// admission does not change a person's connectors.
+    #[test]
+    fn a_persons_message_router_pages_and_reacts_at_the_check_that_finds_the_message() {
+        let _api = slack::lock_api();
+        let _restore = (RestoreSlack, RestoreVercelRoot);
+        install_rustls();
+        let now = Utc::now();
+        let ts = slack_ts(now - chrono::Duration::seconds(60));
+        let message = [slack_message(&ts, &ts, "U1", "prod is down")];
+        let channel = json!({ "history": [message[0].clone()], "threads": { ts.clone(): message } });
+        let seen = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let root = serve_channel_and_linear(seen.clone(), stop.clone(), std::sync::Arc::new(Mutex::new(channel)));
+        slack::set_api_root(Some(root.clone()));
+        std::env::set_var(crate::vercel::API_ROOT_ENV, root.trim_end_matches('/'));
+        let mut router = router();
+        router.since = (now - chrono::Duration::minutes(10)).to_rfc3339();
+        let (connectors, dir) = stored("persons-router-pages", vec![router, slack_connector(), called()]);
+        for (name, key) in [("slack-key", "xoxb-test"), ("vercel-key", "vck-test")] {
+            std::fs::write(dir.join(name), key).unwrap();
+        }
+        connectors.store.lock().unwrap().slack = Some(slack::Account { team: "T".into(), user_id: "UBOT".into(), name: "pinned".into() });
+        connectors.channels.lock().unwrap().insert(("UBOT".into(), "#support".into()), "C0123ABCD".into());
+        for c in connectors.store.lock().unwrap().connectors.iter_mut().filter(|c| c.id != "c5") {
+            c.enabled = false;
+        }
+        let (work, error) = block_on(connectors.poll());
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!((work.len(), error), (0, None));
+        let effects: Vec<String> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|line| {
+                let (path, body) = line.split_once(' ').unwrap_or((line, ""));
+                let path = path.split('?').next().unwrap_or_default();
+                let body: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                match path {
+                    "/usergroups.list" | "/evaluate" => Some(path.to_owned()),
+                    "/chat.postMessage" => Some(format!("{path} {} {}", body["thread_ts"].as_str()?, body["text"].as_str()?)),
+                    "/reactions.add" => Some(format!("{path} {} {}", body["timestamp"].as_str()?, body["name"].as_str()?)),
+                    _ => None,
+                }
+            })
+            .collect();
+        assert_eq!(
+            effects,
+            vec![
+                "/usergroups.list".to_owned(),
+                "/evaluate".to_owned(),
+                format!("/chat.postMessage {ts} <!subteam^S0PRODENG1> escalation: Someone needs an engineer on support now"),
+                format!("/reactions.add {ts} robot_face"),
+            ]
+        );
     }
 
     /// The "Route Slack messages" shape: a classify on the message, whose bug branch opens a
