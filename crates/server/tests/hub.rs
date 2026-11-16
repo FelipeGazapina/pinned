@@ -11540,13 +11540,13 @@ fn an_account_over_the_sync_limit_takes_a_push_that_does_not_grow_it_and_refuses
     let push = |client: &mut Client, files: Vec<Value>| client.hub(json!({ "cmd": "sync_push", "project": project, "files": files }));
     let (notes, plan) = ("claude/memory/notes.md", "claude/memory/plan.md");
     push(&mut ana, vec![file(notes, "ana's notes"), file(plan, "plan: ship 0.18.6")]).unwrap();
-    // Eleven sessions of 100 MiB: 1153433600 bytes, past the 1073741824 the account may keep.
+    // Thirteen sessions of 100 MiB: 1363148800 bytes, past the 1073741824 the account may keep.
     admin_on(
         &hub.database,
         &format!(
             "insert into project_files (account, project, path, sha, modified, data) \
              select a.id, '{project}', 'claude/big-' || n || '.jsonl', 'big' || n, 1, convert_to(repeat('x', 104857600), 'UTF8') \
-             from accounts a, generate_series(1, 11) n where a.email = 'ana@example.test'"
+             from accounts a, generate_series(1, 13) n where a.email = 'ana@example.test'"
         ),
     );
     let refused = Err("the account's synced projects would pass 1024 MB; delete old sessions to sync more".to_owned());
@@ -11563,7 +11563,8 @@ fn an_account_over_the_sync_limit_takes_a_push_that_does_not_grow_it_and_refuses
     assert_eq!(push(&mut ana, vec![file("claude/memory/more.md", "one more note")]), refused, "a push that grows the account stays refused");
     assert_eq!(sha_of(&mut ana, "claude/memory/more.md"), None);
     let mixed = vec![tombstone("claude/big-2.jsonl"), file("claude/memory/more.md", "one more note")];
-    assert_eq!(push(&mut ana, mixed), Ok(Value::Null), "freeing 104857600 bytes while adding a few is taken whole");
+    assert_eq!(push(&mut ana, mixed), Ok(Value::Null), "freeing 104857600 bytes while adding a few is taken whole, 11 sessions still past the limit");
     assert_eq!(sha_of(&mut ana, "claude/memory/more.md"), Some(sha256_hex(b"one more note")));
+    assert_eq!(push(&mut ana, vec![tombstone("claude/big-3.jsonl"), tombstone("claude/big-4.jsonl")]), Ok(Value::Null));
     assert_eq!(push(&mut ana, vec![file("claude/memory/later.md", "under the limit again")]), Ok(Value::Null), "9 sessions of 100 MiB leave room");
 }

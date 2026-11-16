@@ -647,8 +647,9 @@ impl Db {
             .collect())
     }
 
-    /// Keeps the files, unless they would take the account past its quota. Two pushes at once may
-    /// pass it by a batch, which is fine for a guard against filling the disk.
+    /// Keeps the files, unless they would take the account past its quota. A push that does not
+    /// grow the account is always kept, even past the quota, so deleting is a way out. Two pushes
+    /// at once may pass it by a batch, which is fine for a guard against filling the disk.
     pub async fn sync_push(&self, account: Uuid, project: &str, files: Vec<(sync::Entry, Vec<u8>)>) -> Result<(), String> {
         let client = self.client().await?;
         let paths: Vec<&str> = files.iter().map(|(e, _)| e.path.as_str()).collect();
@@ -663,7 +664,7 @@ impl Db {
             .map_err(err)?;
         let (used, replaced): (i64, i64) = (row.get(0), row.get(1));
         let incoming: i64 = files.iter().map(|(_, data)| data.len() as i64).sum();
-        if used - replaced + incoming > SYNC_QUOTA {
+        if incoming > replaced && used - replaced + incoming > SYNC_QUOTA {
             return Err(format!("the account's synced projects would pass {} MB; delete old sessions to sync more", SYNC_QUOTA >> 20));
         }
         for (entry, data) in &files {
