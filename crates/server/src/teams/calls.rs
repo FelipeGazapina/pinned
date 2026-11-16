@@ -351,12 +351,15 @@ async fn open_call(
     by_hub: bool,
 ) -> Result<Asked, String> {
     let choices: Vec<String> = choices.iter().map(|c| c.trim().to_owned()).filter(|c| !c.is_empty()).collect();
+    let named = async { Ok::<_, String>(db::bot_calls(&hub.db, team.id, &run.workflow).await?.map(|(rules, _)| rules).unwrap_or_default().who(situation).clone()) };
+    // A limit call asks whom `on_limit` names even while someone took the run over, and them too.
     let asked = match &run.controller {
-        Some(controller) => vec![Who::Person { account: controller.clone() }],
-        None => {
-            let rules = db::bot_calls(&hub.db, team.id, &run.workflow).await?.map(|(rules, _)| rules).unwrap_or_default();
-            vec![rules.who(situation).clone()]
+        Some(controller) if situation == Situation::OnLimit => {
+            let (named, controller) = (named.await?, Who::Person { account: controller.clone() });
+            if named == controller { vec![named] } else { vec![named, controller] }
         }
+        Some(controller) => vec![Who::Person { account: controller.clone() }],
+        None => vec![named.await?],
     };
     let Some(waiting) = db::start_waiting(&hub.db, team.id, run_id).await? else {
         let now = db::run(&hub.db, team.id, run_id).await?;
