@@ -307,11 +307,22 @@ pub async fn start_run(hub: &Arc<Hub>, team: &Arc<Account>, workflow_id: &str, s
     let placed = match hub.open_team_run(TeamRunPass(()), team, work).await {
         Ok(placed) => placed,
         Err(e) => {
-            db::delete_run(&hub.db, team.id, id).await?;
+            // A run that ended meanwhile, as one stopped while its box booted, stays as it ended.
+            if !db::run(&hub.db, team.id, id).await?.is_some_and(|r| r.state.ended()) {
+                db::delete_run(&hub.db, team.id, id).await?;
+            }
             return Err(e);
         }
     };
-    db::set_run_box(&hub.db, team.id, id, &placed.machine).await?;
+    // Read again now that the box runs: a run stopped while it booted gets no box, and its box ends at once.
+    if !db::set_run_box(&hub.db, team.id, id, &placed.machine).await? {
+        if let Ok(machine) = Uuid::parse_str(&placed.machine) {
+            if let Err(e) = hub.boxes.end_machine(hub, team, machine, crate::boxes::End::Removed).await {
+                eprintln!("pinned-server: the box of run {id} of team {} did not end yet: {e}", team.id);
+            }
+        }
+        return Err(super::calls::ENDED_WHILE_BOOTING.into());
+    }
     super::push(hub, team.id, TeamEvent::RunChanged { run: run.clone() }).await?;
     Ok((run, placed))
 }

@@ -120,6 +120,36 @@ impl Crew {
         self.hub.runtime.block_on(teams::calls::tick(self.hub.hub(), &self.hub.team_policy)).unwrap();
     }
 
+    /// A connection to the hub's database, for what a test reads or holds there.
+    fn connect(&self) -> tokio_postgres::Client {
+        let url = format!("{}/{}", postgres(), self.hub.database);
+        let (client, connection) = self.hub.runtime.block_on(tokio_postgres::connect(&url, tokio_postgres::NoTls)).unwrap();
+        self.hub.runtime.spawn(connection);
+        client
+    }
+
+    /// Holds every write to `table` whose new row matches `when` (SQL on `new`) until the answered
+    /// connection runs `select pg_advisory_unlock(<key>)`, so a test orders two things the hub does.
+    fn hold(&self, key: i64, table: &str, when: &str) -> tokio_postgres::Client {
+        let held = self.connect();
+        self.hub.runtime.block_on(held.batch_execute(&format!(
+            "select pg_advisory_lock({key});
+             create function hold_{table}() returns trigger language plpgsql as $$ begin
+               if {when} then perform pg_advisory_lock({key}); perform pg_advisory_unlock({key}); end if;
+               return new;
+             end $$;
+             create trigger hold_{table} before insert or update on {table} for each row execute function hold_{table}();"
+        )))
+        .unwrap();
+        held
+    }
+
+    /// The box the run is recorded with.
+    fn run_box(&self, run: &str) -> Option<String> {
+        let row = self.hub.runtime.block_on(self.connect().query_one("select box from team_runs where id = $1::text::uuid", &[&run])).unwrap();
+        row.get(0)
+    }
+
     /// A run the tests write straight into the database: `state`, started `age` ago, in box `machine`.
     fn insert_run(&self, workflow: &str, state: &str, age: &str, machine: Option<&str>) -> Uuid {
         let id = Uuid::new_v4();
@@ -219,4 +249,33 @@ fn the_tick_ends_a_run_left_waiting_whose_box_is_gone() {
     crew.insert_run(&bot, "waiting", "1 hour", Some(&Uuid::new_v4().to_string()));
     crew.tick();
     assert_eq!(crew.runs(), vec![("failed".to_owned(), Some("its box is gone".to_owned()))]);
+}
+
+// ---- 2. a run stopped while its box boots ----
+
+#[test]
+fn a_run_stopped_while_its_box_boots_stays_stopped_and_its_box_ends_without_a_session() {
+    let crew = Crew::new("tl_stop_booting", fast(), patient());
+    let id = crew.on_bot("Footer");
+    let gate = Arc::new(tokio::sync::Notify::new());
+    crew.hub.boxes.state.lock().unwrap().gate = Some(gate.clone());
+    let (hub, bob, team, workflow) = (crew.hub.hub().clone(), crew.bob.clone(), crew.team, id.clone());
+    let started = crew.hub.runtime.spawn(async move { teams::call(&hub, &bob, Some(team), teams::Op::Team(TeamOp::RunNow { workflow })).await });
+    wait_for("the box's bootstrap to start", || crew.hub.boxes.state.lock().unwrap().scripts.iter().any(|s| s.contains("start.sh")));
+    let runs = crew.op(&crew.bob, json!({ "op": "runs" })).unwrap();
+    assert_eq!((&runs[0]["state"], &runs[0]["outcome"]), (&json!("working"), &Value::Null), "the run is listed while its box boots");
+
+    let stopped = crew.op(&crew.ana, json!({ "op": "stop_run", "run": runs[0]["id"] })).unwrap();
+    assert_eq!((&stopped["state"], &stopped["outcome"]), (&json!("stopped"), &json!("stopped by ana")));
+    gate.notify_one();
+    let answered = crew.hub.runtime.block_on(started).unwrap();
+    // Only the box's claim of its run answers this, and it comes before the session's run is sent.
+    assert_eq!(answered, Err("Upstash Box: the run ended before its box started, so its box was ended".into()), "no session opened");
+
+    wait_for("the box to be deleted", || crew.hub.boxes.live().is_empty());
+    assert_eq!(crew.runs(), vec![("stopped".to_owned(), Some("stopped by ana".to_owned()))]);
+    assert_eq!(crew.run_box(runs[0]["id"].as_str().unwrap()), None, "the run never got the box");
+
+    crew.run_now(&id);
+    wait_for("the next run's session, with no cooldown", || crew.node().is_some_and(|n| !n.machine.tabs().is_empty()));
 }

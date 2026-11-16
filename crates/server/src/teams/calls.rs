@@ -32,6 +32,9 @@ const RUNS_LISTED: i64 = 50;
 
 const RUN_ENDED: &str = "this run has ended";
 
+/// Why a team's box got no session: its run was stopped, or ended otherwise, while the box booted.
+pub const ENDED_WHILE_BOOTING: &str = "the run ended before its box started, so its box was ended";
+
 /// What `ask_people` answers at once.
 #[derive(Serialize, Debug, PartialEq)]
 #[serde(untagged)]

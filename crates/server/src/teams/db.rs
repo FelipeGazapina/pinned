@@ -442,10 +442,16 @@ pub async fn in_group(db: &Db, team: Uuid, handle: &str, member: Uuid) -> Result
     Ok(row.is_some())
 }
 
-/// Records the box a run opened (the id of its machine), once it is known.
-pub async fn set_run_box(db: &Db, team: Uuid, run: Uuid, machine: &str) -> Result<(), String> {
-    db.client().await?.execute("update team_runs set box = $3 where team = $1 and id = $2", &[&team, &run, &machine]).await.map_err(err)?;
-    Ok(())
+/// Records the box a live run opened (the id of its machine), once it is known. False when the
+/// run ended meanwhile, as when someone stopped it while its box booted: it gets no box.
+pub async fn set_run_box(db: &Db, team: Uuid, run: Uuid, machine: &str) -> Result<bool, String> {
+    let set = db
+        .client()
+        .await?
+        .execute(&format!("update team_runs set box = $3 where team = $1 and id = $2 and state in {LIVE}"), &[&team, &run, &machine])
+        .await
+        .map_err(err)?;
+    Ok(set == 1)
 }
 
 /// Records the subject a run's box is opened for, so the box's machine is set on the run before
@@ -895,17 +901,19 @@ pub async fn stop_open_call(db: &Db, team: Uuid, run: Uuid, answer: &Answer) -> 
 
 /// Sets `machine` on the live run of the team's workflow `workflow` opened for `subject` that has
 /// no box yet, just before the box's session starts (`boxes::Boxes`), so a session that asks
-/// people at once finds its run. Nothing for a person's account.
-pub async fn claim_run_box(db: &Db, account: Uuid, workflow: &str, subject: &Subject, machine: &str) -> Result<(), String> {
-    db.client()
+/// people at once finds its run. Answers whether a live run has the box now: false for a person's
+/// account, and for a team's run that ended while its box booted.
+pub async fn claim_run_box(db: &Db, account: Uuid, workflow: &str, subject: &Subject, machine: &str) -> Result<bool, String> {
+    let claimed = db
+        .client()
         .await?
         .execute(
-            &format!("update team_runs set box = $4 where team = $1 and workflow = $2 and subject = $3 and box is null and state in {LIVE}"),
+            &format!("update team_runs set box = $4 where team = $1 and workflow = $2 and subject = $3 and (box is null or box = $4) and state in {LIVE}"),
             &[&account, &workflow, &json(subject)?, &machine],
         )
         .await
         .map_err(err)?;
-    Ok(())
+    Ok(claimed > 0)
 }
 
 /// The machines of the account's boxes whose run waits on an open call, which the box reaper
