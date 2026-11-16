@@ -324,8 +324,44 @@ enum Status {
     Failed,
 }
 
+/// The Box API root. `BASE_URL_ENV` is honoured in a debug build only, and only for a loopback address.
 fn base_url() -> String {
-    std::env::var(BASE_URL_ENV).ok().filter(|u| !u.trim().is_empty()).unwrap_or_else(|| API.into()).trim_end_matches('/').to_owned()
+    let set = std::env::var(BASE_URL_ENV).ok().filter(|u| !u.trim().is_empty());
+    if cfg!(debug_assertions) {
+        return box_base(set.as_deref());
+    }
+    if set.is_some() {
+        ignored_override();
+    }
+    API.to_owned()
+}
+
+fn ignored_override() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| eprintln!("pinned: {BASE_URL_ENV} is ignored: it only applies in a development build, to a loopback address"));
+}
+
+/// `value` when it is an http(s) URL on a loopback host without userinfo, else the real API root.
+fn box_base(value: Option<&str>) -> String {
+    let Some(value) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+        return API.to_owned();
+    };
+    match loopback_root(value) {
+        Some(root) => root,
+        None => {
+            ignored_override();
+            API.to_owned()
+        }
+    }
+}
+
+fn loopback_root(value: &str) -> Option<String> {
+    use reqwest::Url;
+    let url = Url::parse(value).ok()?;
+    let host = url.host_str()?.trim_start_matches('[').trim_end_matches(']');
+    let loopback = host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    let plain = matches!(url.scheme(), "http" | "https") && url.username().is_empty() && url.password().is_none();
+    (loopback && plain).then(|| url.as_str().trim_end_matches('/').to_owned())
 }
 
 /// A failure the API answered, with its status, or one that never reached it.
@@ -494,6 +530,26 @@ fn urlencode(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn box_base_unset_is_the_real_base() {
+        assert_eq!(box_base(None), API);
+        assert_eq!(box_base(Some("  ")), API);
+    }
+
+    #[test]
+    fn box_base_uses_a_loopback_address() {
+        assert_eq!(box_base(Some("http://127.0.0.1:9")), "http://127.0.0.1:9");
+        assert_eq!(box_base(Some("http://localhost:9/")), "http://localhost:9");
+        assert_eq!(box_base(Some("http://[::1]:9")), "http://[::1]:9");
+    }
+
+    #[test]
+    fn box_base_refuses_any_other_address() {
+        for value in ["https://evil.example.test", "http://127.0.0.1.example.test", "http://169.254.169.254", "http://user@127.0.0.1:9", "ftp://127.0.0.1", "http://:pw@127.0.0.1:9", "not a url"] {
+            assert_eq!(box_base(Some(value)), API, "{value}");
+        }
+    }
 
     #[test]
     fn a_refusal_that_echoes_the_key_does_not_carry_it() {
