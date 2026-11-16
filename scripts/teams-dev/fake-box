@@ -3,7 +3,7 @@
 // 127.0.0.1 only, keeps its boxes in memory and under $TEAMS_DEV_DIR/boxes/<id>/, and runs a box's
 // commands as plain local processes whose HOME is the box's home directory.
 //
-//   fake-box [port]        port defaults to $FAKE_BOX_PORT, then 8812
+//   fake-box [port]        port defaults to $FAKE_BOX_PORT, then 8812; 0 picks a free one
 //
 // Endpoints, as crates/core/src/upstash.rs calls them (all need X-Box-Api-Key: box_dev-…):
 //   GET    /v2/box[?label=L]      the boxes (`id`, `labels`, and what the Usage page reads)
@@ -18,6 +18,16 @@
 // SHELL, CLAUDE_CONFIG_DIR and the box's id: no token of the developer's, no real Upstash.
 // A box clones https://github.com/example/alpha (and beta) from local repositories under <dir>/git.
 // FAKE_BOX_CREATE_MS (default 0) keeps a new box `creating` that long, to exercise the hub's polling.
+//
+// Nothing here may touch anything outside $TEAMS_DEV_DIR (resolved with realpath at start):
+//   files/write  refuses (400) a target that, symlinks followed, is not inside the box's own directory;
+//   exec         refuses (400) an argument that names an absolute path outside the box's directory (a
+//                `/`-rooted token, also inside an `sh -c` string) other than read-only system paths, a
+//                literal /workspace/home or ~/.pinned that survived the rewrite, or a `..` that leaves
+//                the box. This reads the command line only: it is a guard against a stale path, not a sandbox;
+//   DELETE       signals only the pids this fake spawned for the box and the processes that inherited
+//                that box's directory marker from them, each re-checked in /proc/<pid>/environ.
+//                No pid is ever read from a file.
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
@@ -26,9 +36,14 @@ const { spawn, execFileSync } = require("child_process");
 
 const KEY_PREFIX = "box_dev-";
 const REPO = path.resolve(__dirname, "../..");
-const ROOT = process.env.TEAMS_DEV_DIR;
-if (!ROOT) {
+if (!process.env.TEAMS_DEV_DIR) {
   console.error("fake-box: TEAMS_DEV_DIR is not set");
+  process.exit(2);
+}
+fs.mkdirSync(process.env.TEAMS_DEV_DIR, { recursive: true });
+const ROOT = fs.realpathSync(process.env.TEAMS_DEV_DIR);
+if (ROOT === "/" || ROOT === "/workspace/home" || ROOT.startsWith("/workspace/home/") || /(^|\/)(\.pinned|\.config\/pinned|dev\.personal-harness\.pinned)(\/|$)/.test(ROOT)) {
+  console.error("fake-box: TEAMS_DEV_DIR is a real pinned home or the filesystem root");
   process.exit(2);
 }
 const BOXES = path.join(ROOT, "boxes");
@@ -37,6 +52,7 @@ const GIT = path.join(ROOT, "git");
 const port = Number(process.argv[2] || process.env.FAKE_BOX_PORT || 8812);
 const CREATE_MS = Number(process.env.FAKE_BOX_CREATE_MS || 0);
 const ID_ENV = "PINNED_FAKE_BOX_ID";
+const DIR_ENV = "PINNED_FAKE_BOX_DIR";
 
 /** The box's commands run by `claude`, `gh`, `npx` and the login `shell` the sweep's node expects. */
 function installBin() {
@@ -79,6 +95,69 @@ function inBox(id, text) {
   return String(text).replace(/(?<![\w.\-/])\/workspace\/home(?![\w.\-])|(?<![\w.\-/])\/tmp(?![\w.\-])/g, (m) => (m === "/tmp" ? tmpOf(id) : homeOf(id)));
 }
 
+const inside = (root, target) => target === root || target.startsWith(root + path.sep);
+
+/** `p` made absolute with every symlink that exists followed; the part that does not exist yet is kept as written. */
+function realResolve(p) {
+  let rest = "";
+  let head = path.resolve(p);
+  for (;;) {
+    try {
+      return path.join(fs.realpathSync(head), rest);
+    } catch (e) {
+      if (e.code !== "ENOENT" && e.code !== "ENOTDIR") throw fail(400, "the fake Box cannot resolve that path");
+    }
+    try {
+      if (fs.lstatSync(head).isSymbolicLink()) throw fail(400, "the fake Box refuses a dangling symlink");
+    } catch (e) {
+      if (e.status) throw e;
+    }
+    const parent = path.dirname(head);
+    if (parent === head) return path.join(head, rest);
+    rest = path.join(path.basename(head), rest);
+    head = parent;
+  }
+}
+
+/** Whether `target` is inside the box's own directory once symlinks are followed. */
+const inBoxDir = (id, target) => inside(fs.realpathSync(dirOf(id)), realResolve(target));
+
+const SYSTEM_PREFIXES = ["/bin/", "/usr/", "/lib/", "/lib64/", "/etc/", "/proc/self/"];
+const SYSTEM_FILES = ["/dev/null", "/dev/stdout", "/dev/stderr"];
+const sh = (name) => {
+  try {
+    return execFileSync("sh", ["-c", `command -v ${name}`], { encoding: "utf8" }).trim();
+  } catch {
+    return "";
+  }
+};
+const SYSTEM_PATHS = [process.execPath, sh("git"), sh("node")].filter(Boolean);
+const TOKEN_END = "\\s'\"`;|&<>(){}\\\\,:";
+/** A `/`-rooted token: not after a word character, `.`, `-`, `~`, `$`, `}` or `/`. */
+const ABSOLUTE = new RegExp(`(?<![\\w.~$}\\]\\-/])(/[^${TOKEN_END}]*)`, "g");
+/** A relative token with a `..` segment. */
+const PARENT = new RegExp(`(?<![^${TOKEN_END}=:])((?:[^${TOKEN_END}]*/)?\\.\\.(?:/[^${TOKEN_END}]*)?)(?=$|[${TOKEN_END}])`, "g");
+
+/** Refuses (400) an exec whose rewritten arguments reach outside the box. */
+function checkExec(id, args) {
+  const home = homeOf(id);
+  const refuse = () => fail(400, "the fake Box refuses a command that names a path outside the box");
+  for (const arg of args) {
+    if (arg.includes("/workspace/home") || arg.includes("~/.pinned") || arg.includes("/.config/pinned")) throw refuse();
+    for (const { 1: token, index } of arg.matchAll(ABSOLUTE)) {
+      if (token.startsWith("//") && arg[index - 1] === ":") continue; // https://host/...
+      if (SYSTEM_FILES.includes(token) || SYSTEM_PATHS.includes(token) || SYSTEM_PREFIXES.some((p) => token.startsWith(p) && !token.split("/").includes(".."))) continue;
+      if (inside(BIN, path.resolve(token)) || inBoxDir(id, token)) continue;
+      throw refuse();
+    }
+    for (const [, token] of arg.matchAll(PARENT)) {
+      if (token.startsWith("/")) continue; // an absolute one was judged above
+      const real = token.startsWith("~/") ? path.join(home, token.slice(2)) : path.resolve(home, token);
+      if (!inBoxDir(id, real)) throw refuse();
+    }
+  }
+}
+
 function envOf(id) {
   const env = {
     PATH: `${BIN}:/usr/local/bin:/usr/bin:/bin`,
@@ -90,6 +169,8 @@ function envOf(id) {
     USER: "box",
     UPSTASH_BOX_BASE_URL: process.env.UPSTASH_BOX_BASE_URL || `http://127.0.0.1:${port}`,
     [ID_ENV]: id,
+    [DIR_ENV]: dirOf(id),
+    TEAMS_DEV_DIR: ROOT,
     GIT_TERMINAL_PROMPT: "0",
     GIT_CONFIG_COUNT: "1",
     GIT_CONFIG_KEY_0: `url.${GIT}/.insteadOf`,
@@ -102,13 +183,15 @@ function envOf(id) {
 let execs = 0;
 /** Runs `argv` in the box. Output goes to files, not pipes, so a node the command leaves running holds nothing open. */
 function run(id, argv, wait = 5 * 60 * 1000) {
+  const args = argv.map((a) => inBox(id, a));
+  checkExec(id, args);
   return new Promise((resolve) => {
     const n = ++execs;
     const out = path.join(tmpOf(id), `exec-${n}.out`);
     const err = path.join(tmpOf(id), `exec-${n}.err`);
     const [fo, fe] = [fs.openSync(out, "w"), fs.openSync(err, "w")];
-    const args = argv.map((a) => inBox(id, a));
     const child = spawn(args[0], args.slice(1), { cwd: homeOf(id), env: envOf(id), stdio: ["ignore", fo, fe], detached: true });
+    if (child.pid) spawned.get(id)?.add(child.pid);
     fs.closeSync(fo);
     fs.closeSync(fe);
     const timer = setTimeout(() => child.kill("SIGKILL"), wait);
@@ -125,26 +208,37 @@ function run(id, argv, wait = 5 * 60 * 1000) {
   });
 }
 
-/** Every process whose environment carries this box's id: what its commands started, however deep. */
+/** The pids this fake spawned for each box, by id. */
+const spawned = new Map();
+
+/** Whether `pid` still runs with this box's directory in its environment, i.e. descends from a command the fake ran for it. */
+function carriesBox(id, pid) {
+  try {
+    return fs.readFileSync(`/proc/${pid}/environ`, "latin1").includes(`${DIR_ENV}=${dirOf(id)}\0`);
+  } catch {
+    return false;
+  }
+}
+
+/** The box's processes: what the fake spawned for it, and what those started, however deep, each checked in /proc. */
 function processesOf(id) {
-  const marker = `${ID_ENV}=${id}\0`;
-  const found = [];
+  const found = new Set([...(spawned.get(id) ?? [])].filter((pid) => carriesBox(id, pid)));
   for (const name of fs.readdirSync("/proc")) {
     if (!/^\d+$/.test(name) || Number(name) === process.pid) continue;
-    try {
-      if (fs.readFileSync(`/proc/${name}/environ`, "latin1").includes(marker)) found.push(Number(name));
-    } catch {}
+    if (carriesBox(id, name)) found.add(Number(name));
   }
-  return found;
+  found.delete(process.pid);
+  return [...found];
 }
 
 async function killProcesses(id) {
   for (const signal of ["SIGTERM", "SIGKILL"]) {
     const pids = processesOf(id);
-    if (!pids.length) return;
+    if (!pids.length) break;
     for (const pid of pids) try { process.kill(pid, signal); } catch {}
     await new Promise((r) => setTimeout(r, signal === "SIGTERM" ? 1500 : 200));
   }
+  spawned.delete(id);
 }
 
 function view(box) {
@@ -157,6 +251,7 @@ function load() {
   for (const id of fs.readdirSync(BOXES)) {
     try {
       boxes.set(id, JSON.parse(fs.readFileSync(path.join(dirOf(id), "box.json"), "utf8")));
+      spawned.set(id, new Set());
     } catch {}
   }
 }
@@ -197,6 +292,7 @@ async function handle(req, res) {
       const box = { id: `devbox-${crypto.randomBytes(4).toString("hex")}`, name: String(body.name || ""), labels: Array.isArray(body.labels) ? body.labels : [], size: body.size ?? "small", keep_alive: !!body.keep_alive, init_command: String(body.init_command || ""), status: "creating", created_at: Date.now(), last_activity_at: Date.now() };
       for (const d of [homeOf(box.id), tmpOf(box.id), path.join(homeOf(box.id), ".claude")]) fs.mkdirSync(d, { recursive: true });
       boxes.set(box.id, box);
+      spawned.set(box.id, new Set());
       save(box);
       if (CREATE_MS <= 0) box.status = "running";
       setTimeout(() => {
@@ -225,7 +321,7 @@ async function handle(req, res) {
     const body = await readJson(req);
     if (typeof body.path !== "string" || !path.isAbsolute(body.path) || typeof body.content !== "string") throw fail(400, "files/write takes an absolute path and a string content");
     const target = path.resolve(inBox(id, body.path));
-    if (![homeOf(id), tmpOf(id)].some((root) => target === root || target.startsWith(root + path.sep))) throw fail(400, `the fake Box writes only under /workspace/home and /tmp, not ${body.path}`);
+    if (![homeOf(id), tmpOf(id)].some((root) => inside(root, target)) || !inBoxDir(id, target)) throw fail(400, "the fake Box writes only inside the box's own directory");
     fs.mkdirSync(path.dirname(target), { recursive: true });
     // The content too: start.sh names /workspace/home/.pinned, which on this machine is a real directory.
     fs.writeFileSync(target, inBox(id, body.content), { mode: 0o644 });
@@ -269,7 +365,7 @@ installBin();
 installRepos();
 load();
 server.listen(port, "127.0.0.1", async () => {
-  console.log(`fake-box listening on 127.0.0.1:${port}, boxes in ${BOXES}`);
+  console.log(`fake-box listening on 127.0.0.1:${server.address().port}, boxes in ${BOXES}`);
   // Upstash runs a box's init_command on every container start: a restarted fake resumes its boxes.
   for (const box of boxes.values()) {
     if (box.init_command) run(box.id, ["sh", "-c", box.init_command]).then((r) => console.log(`resumed ${box.id}: exit ${r.exit_code}`));
