@@ -28,7 +28,7 @@ impl Crew {
             hub.runtime.block_on(hub.hub().account(Uuid::parse_str(&view.id).unwrap())).unwrap()
         };
         let (ana, bob) = (sign_up("ana@example.test"), sign_up("bob@example.test"));
-        let made = hub.runtime.block_on(teams::call(hub.hub(), &ana, None, TeamOp::Create { name: "Acme".into() })).unwrap();
+        let made = hub.runtime.block_on(teams::call(hub.hub(), &ana, None, teams::Op::Team(TeamOp::Create { name: "Acme".into() }))).unwrap();
         let team = Uuid::parse_str(made["id"].as_str().unwrap()).unwrap();
         admin_on(&hub.database, &format!("insert into team_members (team, member, role) values ('{team}', '{}', 'member')", bob.id));
         let folder = temp(&format!("teams-runs-{name}"));
@@ -39,6 +39,7 @@ impl Crew {
     }
 
     fn call(&self, who: &Arc<Account>, op: TeamOp) -> Result<Value, String> {
+        let op = teams::Op::read(op)?;
         self.hub.runtime.block_on(teams::call(self.hub.hub(), who, Some(self.team), op))
     }
 
@@ -221,7 +222,7 @@ fn a_session_that_asks_as_its_first_act_gets_a_call() {
     )))
     .unwrap();
     let (hub, bob, team) = (crew.hub.hub().clone(), crew.bob.clone(), crew.team);
-    let started = crew.hub.runtime.spawn(async move { teams::call(&hub, &bob, Some(team), TeamOp::RunNow { workflow: id }).await });
+    let started = crew.hub.runtime.spawn(async move { teams::call(&hub, &bob, Some(team), teams::Op::Team(TeamOp::RunNow { workflow: id })).await });
     wait_for("the box's session", || crew.node().is_some_and(|n| !n.machine.tabs().is_empty()));
     let asked = crew.ask("Red or blue footer?").unwrap();
     assert!(!started.is_finished(), "the session asked before Run now answered");

@@ -148,7 +148,7 @@ impl TeamBox {
     /// The op run by account `who` straight on the hub, for two at once.
     async fn op_of(&self, hub: &Arc<pinned_server::hub::Hub>, who: Uuid, op: Value) -> Result<Value, String> {
         let person = hub.account(who).await?;
-        teams::call(hub, &person, Some(self.team), serde_json::from_value::<TeamOp>(op).unwrap()).await
+        teams::call(hub, &person, Some(self.team), teams::Op::read(serde_json::from_value::<TeamOp>(op).unwrap())?).await
     }
 
     pub(super) fn run_state(&self, hub: &TestHub, run: Uuid) -> (String, Option<String>) {

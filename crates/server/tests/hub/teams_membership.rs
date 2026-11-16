@@ -7,7 +7,6 @@ use uuid::Uuid;
 const NO_INVITE: &str = "that invite code is unknown, used or revoked";
 const NOT_A_MEMBER: &str = "you are not a member of that team";
 const NOT_OWNER: &str = "only the team's owner does this";
-const NOT_ON_TEAM: &str = "that person is not a member of the team";
 const OWNER_LEAVES: &str = "the owner cannot leave the team; remove the others first";
 const OWNER_REMOVED: &str = "the owner cannot be removed from the team";
 const NO_UNUSED_INVITE: &str = "there is no unused invite with that hint";
@@ -16,40 +15,40 @@ const WRONG_LOGIN: &str = "wrong email or password";
 const UNKNOWN_PAIR_CODE: &str = "that pairing code is unknown, used or expired";
 
 /// A person who signed up as `email` and is signed in on the hub, with its account id.
-fn person(url: &str, email: &str) -> (Client, String) {
+pub(super) fn person(url: &str, email: &str) -> (Client, String) {
     let (token, view) = account::signup(url, email, "correct horse").unwrap();
     (signed_in_client(url, &token), view.id)
 }
 
 /// One member's call of `op` on `team`, answered as the hub answers it.
-fn team_op(client: &mut Client, team: &str, op: Value) -> Result<Value, String> {
+pub(super) fn team_op(client: &mut Client, team: &str, op: Value) -> Result<Value, String> {
     client.hub(json!({ "cmd": "team", "team": team, "op": op }))
 }
 
 /// The owner makes a team named `name`; its id.
-fn make_team(owner: &mut Client, name: &str) -> String {
+pub(super) fn make_team(owner: &mut Client, name: &str) -> String {
     let team = owner.hub(json!({ "cmd": "team", "op": { "op": "create", "name": name } })).unwrap();
     team["id"].as_str().unwrap().to_owned()
 }
 
 /// A new invite code the owner makes, shown once.
-fn new_invite(owner: &mut Client, team: &str) -> String {
+pub(super) fn new_invite(owner: &mut Client, team: &str) -> String {
     let invite = team_op(owner, team, json!({ "op": "invite" })).unwrap();
     invite["code"].as_str().unwrap().to_owned()
 }
 
 /// Joins the team of `code` as `client`: the team as the hub shows it to the joiner.
-fn join_team(client: &mut Client, code: &str) -> Result<Value, String> {
+pub(super) fn join_team(client: &mut Client, code: &str) -> Result<Value, String> {
     client.hub(json!({ "cmd": "team", "op": { "op": "join", "code": code } }))
 }
 
 /// The team's members as one of them reads them.
-fn roster(client: &mut Client, team: &str) -> Result<Value, String> {
+pub(super) fn roster(client: &mut Client, team: &str) -> Result<Value, String> {
     team_op(client, team, json!({ "op": "members" }))
 }
 
 /// The first column of each row `sql` returns on the hub's database, as text.
-fn db_text(database: &str, sql: &str) -> Vec<String> {
+pub(super) fn db_text(database: &str, sql: &str) -> Vec<String> {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     runtime.block_on(async {
         let (client, connection) = tokio_postgres::connect(&format!("{}/{database}", postgres()), tokio_postgres::NoTls).await.unwrap();
@@ -205,8 +204,8 @@ fn a_member_who_leaves_loses_the_team_and_the_owner_removes_another_and_cannot_l
 
     assert_eq!(team_op(&mut ana, &team, json!({ "op": "remove_member", "account": carla_id })), Ok(Value::Null));
     assert_eq!(roster(&mut carla, &team), Err(NOT_A_MEMBER.into()));
-    assert_eq!(team_op(&mut ana, &team, json!({ "op": "remove_member", "account": carla_id })), Err(NOT_ON_TEAM.into()));
-    assert_eq!(team_op(&mut ana, &team, json!({ "op": "remove_member", "account": "not-an-account" })), Err(NOT_ON_TEAM.into()));
+    assert_eq!(team_op(&mut ana, &team, json!({ "op": "remove_member", "account": carla_id })), Err(format!("no member {carla_id} on this team")));
+    assert_eq!(team_op(&mut ana, &team, json!({ "op": "remove_member", "account": "not-an-account" })), Err("no member not-an-account on this team".into()));
 
     assert_eq!(team_op(&mut ana, &team, json!({ "op": "leave" })), Err(OWNER_LEAVES.into()));
     assert_eq!(team_op(&mut ana, &team, json!({ "op": "remove_member", "account": ana_id })), Err(OWNER_REMOVED.into()));
@@ -284,14 +283,16 @@ fn a_team_account_cannot_sign_in_with_its_email_and_any_password() {
     let team = make_team(&mut ana, "Acme");
     let team_email = format!("team-{team}@teams.invalid");
     assert_eq!(db_text(&hub.database, &format!("select email from accounts where id::text = '{team}'")), vec![team_email.clone()]);
+    // The team's row gets a real hash, the hub's own of ana's password, so only its kind refuses it.
+    admin_on(&hub.database, &format!("update accounts set password_hash = (select password_hash from accounts where email = 'ana@example.test') where id::text = '{team}'"));
 
-    for password in ["any password", "!"] {
+    for password in ["correct horse", "any password", "!"] {
         let as_team = post_with(&url, "/api/login", &[], json!({ "email": team_email, "password": password }));
         let as_stranger = post_with(&url, "/api/login", &[], json!({ "email": "nobody@example.test", "password": password }));
         assert_eq!(as_team, (401, json!({ "error": WRONG_LOGIN })));
         assert_eq!(as_team, as_stranger, "a team's email answers exactly as an unknown email does");
     }
-    assert_eq!(account::login(&url, &team_email, "any password").map(|_| ()), Err(WRONG_LOGIN.into()));
+    assert_eq!(account::login(&url, &team_email, "correct horse").map(|_| ()), Err(WRONG_LOGIN.into()));
     assert_eq!(team_logins(&hub.database, &team), vec!["0"]);
 }
 
@@ -352,8 +353,14 @@ fn a_team_cannot_register_a_machine_on_the_machines_route() {
     let team = make_team(&mut ana, "Acme");
 
     assert_eq!(post_with(&url, "/api/machines", &[], json!({ "name": "vps", "os": "linux" })), (401, json!({ "error": SIGN_IN_FIRST })));
+    // A login row for the team, made by SQL as no route makes one: its bearer still signs nothing in.
+    admin_on(&hub.database, &format!("insert into logins (token_hash, account) values (sha256('team-login-token'::bytea), '{team}')"));
+    assert_eq!(
+        post_with(&url, "/api/machines", &[("authorization", "Bearer team-login-token")], json!({ "name": "vps", "os": "linux" })),
+        (401, json!({ "error": SIGN_IN_FIRST }))
+    );
     assert_eq!(db_text(&hub.database, "select count(*)::text from machines"), vec!["0"]);
-    assert_eq!(team_logins(&hub.database, &team), vec!["0"]);
+    assert_eq!(team_logins(&hub.database, &team), vec!["1"]);
 }
 
 #[test]
@@ -373,6 +380,20 @@ fn a_team_cannot_get_an_agent_token_from_the_token_route_or_an_approval() {
         (400, json!({ "error": "invalid_grant", "error_description": "unknown code" }))
     );
     assert_eq!(db_text(&hub.database, &format!("select count(*)::text from agent_grants where account::text = '{team}'")), vec!["0"]);
+
+    // A grant and a live code for the team, made by SQL as no approval makes one: the exchange
+    // passes every check of the code and still gets no token.
+    let (verifier, challenge) = pkce();
+    admin_on(&hub.database, "insert into agent_clients (id, name, redirect_uris) values ('agent-x', 'Agent X', '[\"http://localhost/cb\"]')");
+    admin_on(&hub.database, &format!("insert into agent_grants (id, account, client, scopes, projects) values ('6f1c0b1e-0000-4000-8000-00000000a9a9', '{team}', 'agent-x', '[\"sessions\"]', '[]')"));
+    admin_on(&hub.database, &format!(
+        "insert into agent_codes (code_hash, grant_id, redirect_uri, code_challenge, resource, expires_at) values \
+         (sha256('TEAMCODE'::bytea), '6f1c0b1e-0000-4000-8000-00000000a9a9', 'http://localhost/cb', '{challenge}', '{url}/mcp', now() + interval '10 minutes')"
+    ));
+    let http = reqwest::blocking::Client::new();
+    let form = [("grant_type", "authorization_code"), ("client_id", "agent-x"), ("code", "TEAMCODE"), ("code_verifier", verifier.as_str()), ("redirect_uri", "http://localhost/cb")];
+    assert_eq!(super::exchange(&url, &http, &form), (400, json!({ "error": "invalid_grant", "error_description": "the access was revoked" })));
+    assert_eq!(db_text(&hub.database, "select count(*)::text from agent_tokens"), vec!["0"]);
 }
 
 #[test]

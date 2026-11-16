@@ -17,6 +17,8 @@ const B_EMAIL: &str = "b@example.test";
 const B_PROJ_1: &str = "github.com/b-corp/b-proj-1";
 const B_PROJ_2: &str = "github.com/b-corp/b-proj-2";
 const NOT_BUILT: &str = "not built yet";
+/// The reads still stubbed on this base, the only ones that may answer `NOT_BUILT`.
+const STUBS: [&str; 3] = ["bots", "runs", "calls"];
 const NOT_MEMBER: &str = "you are not a member of that team";
 const OWNER_ONLY: &str = "only the team's owner runs";
 
@@ -85,6 +87,14 @@ fn cast(name: &str, b_joins: bool) -> Cast {
     Cast { hub, a, a_id, b, b_id, b_machine: machine.id, team }
 }
 
+/// Makes B's machine a box of B's own account, so B's own `box_status` and `extend_box` find it.
+fn make_b_machine_a_box(s: &Cast) {
+    run_sql(&s.hub, &format!(
+        "insert into boxes (id, account, machine, upstash, connector, subject, spec, size, phase) values ('b-box', '{}', '{}', 'box_b', 'c-b', '{{\"issue\":\"b1\"}}', '{{\"folder\":\"/w\",\"args\":[]}}', 'small', 'running')",
+        s.b_id, s.b_machine
+    ));
+}
+
 /// Everything B's own account holds that a team must never take or change.
 fn personal(b: &mut Client) -> Value {
     json!({
@@ -107,6 +117,7 @@ fn assert_b_personal_is_whole(snapshot: &Value) {
 #[test]
 fn nothing_of_a_members_own_account_shows_in_what_the_team_answers() {
     let mut s = cast("sep_reads", true);
+    make_b_machine_a_box(&s);
     let before = personal(&mut s.b);
     assert_b_personal_is_whole(&before);
     let team = s.team.clone();
@@ -130,7 +141,7 @@ fn nothing_of_a_members_own_account_shows_in_what_the_team_answers() {
             let answer = team_op(client, &team, op.clone());
             let text = match &answer {
                 Ok(value) => value.to_string(),
-                Err(e) if e == NOT_BUILT => {
+                Err(e) if e == NOT_BUILT && STUBS.contains(label) => {
                     stubs_seen.push(format!("{who} {label}"));
                     continue;
                 }
@@ -154,15 +165,17 @@ fn nothing_of_a_members_own_account_shows_in_what_the_team_answers() {
         );
     }
 
-    // A box's status takes a machine id: the team has none of B's.
+    // A box's status takes a machine id: the team has none of B's, though B's own account finds its box.
     let unknown = "6f1c0b1e-0000-4000-8000-0000000000ee";
+    let status = json!({ "cmd": "box_status", "machine": s.b_machine });
+    assert_eq!(s.b.hub(status.clone()).map(|box_status| box_status["phase"].is_string()), Ok(true), "B's machine is a box of B's own account");
     assert_eq!(via(&mut s.a, &team, json!({ "cmd": "box_status", "machine": unknown })), Err("this machine is no box".into()));
-    assert_eq!(
-        via(&mut s.a, &team, json!({ "cmd": "box_status", "machine": s.b_machine })),
-        Err("this machine is no box".into()),
-        "B's machine answers as a machine nobody has: the team has none of its own"
-    );
-    assert_eq!(via(&mut s.a, &team, json!({ "cmd": "run_workflow", "id": "anything" })).map_err(|e| e.contains(B_FLOW)), Err(false));
+    for client in [&mut s.a, &mut s.b] {
+        assert_eq!(via(client, &team, status.clone()), Err("this machine is no box".into()), "B's machine answers as a machine nobody has: the team has none of its own");
+    }
+    // B's real workflow, run on the team by B itself, is one the team's account does not have.
+    let b_flow = before["settings"]["connectors"][0]["id"].as_str().unwrap().to_owned();
+    assert_eq!(via(&mut s.b, &team, json!({ "cmd": "run_workflow", "id": b_flow })), Err(format!("this account has no workflow {b_flow}")));
 
     assert_eq!(personal(&mut s.b), before, "B's own account is as it was");
 }
@@ -220,6 +233,7 @@ fn no_tokens(tokens: &Value) -> bool {
 #[test]
 fn a_member_cannot_set_the_teams_keys_but_its_owner_can() {
     let mut s = cast("sep_owner", true);
+    make_b_machine_a_box(&s);
     let before = personal(&mut s.b);
     let team = s.team.clone();
     let owner_calls = [
@@ -243,12 +257,14 @@ fn a_member_cannot_set_the_teams_keys_but_its_owner_can() {
 
     // The owner's same calls pass the gate. connect_github and connect_slack would reach GitHub and
     // Slack, so they are only refused above, never run for the owner here.
+    // A key call answers which keys are set, never a hint of one.
     let connected = via(&mut s.a, &team, owner_calls[0].clone()).unwrap();
-    assert_eq!(connected, json!({ "key_hint": "…tkey", "claude_hint": "…oken" }));
-    assert_eq!(via(&mut s.a, &team, owner_calls[1].clone()), Ok(json!({ "team-claude": "…oken" })));
+    assert_eq!(connected, json!({ "upstash": true, "claude": true, "github": false, "slack": false }));
+    assert_eq!(via(&mut s.a, &team, owner_calls[1].clone()), Ok(connected));
     via(&mut s.a, &team, owner_calls[4].clone()).unwrap();
     let extended = via(&mut s.a, &team, owner_calls[5].clone());
     let unknown = via(&mut s.a, &team, json!({ "cmd": "extend_box", "machine": "6f1c0b1e-0000-4000-8000-0000000000ee", "extra_usd": 1.0 }));
+    assert_eq!(s.b.hub(json!({ "cmd": "box_status", "machine": s.b_machine })).map(|status| status["phase"].is_string()), Ok(true), "B's machine is a box of B's own account");
     assert_eq!(extended, Err("this machine is no box".into()), "the owner passes the gate and finds B's machine is no team box");
     assert_eq!(extended, unknown, "B's machine answers as one nobody has");
 
@@ -451,10 +467,18 @@ fn a_team_has_no_password_to_check_or_set_and_no_login() {
     let url = hub.url.clone();
     let team = make_team_account_row(&hub);
     let id: uuid::Uuid = team.parse().unwrap();
+    // The team's row gets a real hash, the hub's own of a known password, so only its kind refuses it.
+    account::signup(&url, "someone@example.test", "correct horse").unwrap();
+    run_sql(&hub, &format!("update accounts set password_hash = (select password_hash from accounts where email = 'someone@example.test') where id = '{team}'"));
     let db = &hub.hub().db;
     assert_eq!(hub.runtime.block_on(db.account(id)), Ok(None), "the password check finds no team");
+    assert_eq!(account::login(&url, &format!("team-{team}@teams.invalid"), "correct horse"), Err("wrong email or password".into()), "the right password signs no team in");
     assert_eq!(hub.runtime.block_on(db.set_password(id, "$argon2id$not-a-hash")), Ok(()));
-    assert_eq!(sql_text(&hub, &format!("select password_hash from accounts where id = '{team}'")), "!", "the team's password is still the one no hash matches");
+    assert_eq!(
+        sql_text(&hub, &format!("select password_hash from accounts where id = '{team}'")),
+        sql_text(&hub, "select password_hash from accounts where email = 'someone@example.test'"),
+        "set_password left the team's row as it was"
+    );
     assert_eq!(account::login(&url, &format!("team-{team}@teams.invalid"), "!"), Err("wrong email or password".into()));
     assert_eq!(hub.runtime.block_on(db.create_login(id)), Err(format!("account {team} cannot sign in")));
 }

@@ -30,7 +30,7 @@ impl Crew {
             hub.runtime.block_on(hub.hub().account(Uuid::parse_str(&view.id).unwrap())).unwrap()
         };
         let (ana, bob, carl, dan) = (sign_up("ana@example.test"), sign_up("bob@example.test"), sign_up("carl@example.test"), sign_up("dan@example.test"));
-        let made = hub.runtime.block_on(teams::call(hub.hub(), &ana, None, TeamOp::Create { name: "Acme".into() })).unwrap();
+        let made = hub.runtime.block_on(teams::call(hub.hub(), &ana, None, teams::Op::Team(TeamOp::Create { name: "Acme".into() }))).unwrap();
         let team = Uuid::parse_str(made["id"].as_str().unwrap()).unwrap();
         for member in [&bob, &carl, &dan] {
             admin_on(&hub.database, &format!("insert into team_members (team, member, role) values ('{team}', '{}', 'member')", member.id));
@@ -40,6 +40,7 @@ impl Crew {
     }
 
     fn call(&self, who: &Arc<Account>, op: TeamOp) -> Result<Value, String> {
+        let op = teams::Op::read(op)?;
         self.hub.runtime.block_on(teams::call(self.hub.hub(), who, Some(self.team), op))
     }
 

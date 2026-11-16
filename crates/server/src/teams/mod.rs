@@ -14,6 +14,7 @@ pub mod membership;
 pub mod projects;
 
 use crate::hub::{Account, Hub};
+use pinned_core::surface::{self, Side};
 use pinned_core::teams::{Role, TeamEvent, TeamOp};
 use pinned_core::wire::{HubCall, ToClient};
 use serde::Serialize;
@@ -48,10 +49,107 @@ pub async fn team_scope(hub: &Arc<Hub>, person: &Arc<Account>, team: Uuid) -> Re
     Ok((hub.account(team).await?, role))
 }
 
-/// Runs a person's `HubCall::Team`. `List`, `Create` and `Join` need no team; every other op
-/// names one the person is a member of. The client's own unlock check ran before this, on the
-/// `Team` call and on the personal call inside `TeamOp::Hub`.
-pub async fn call(hub: &Arc<Hub>, person: &Arc<Account>, team: Option<Uuid>, op: TeamOp) -> Result<Value, String> {
+/// Parses each client-sent account id and checks that every one is a current member of `team`,
+/// answering them in order without repeats. An id that is malformed, unknown or a member of
+/// another team only gets the one message, so the answer never says which accounts exist or who is
+/// on another team. Every account id a client sends to a team op goes through it at save time.
+pub async fn members_only(hub: &Arc<Hub>, team: Uuid, ids: &[&str]) -> Result<Vec<Uuid>, String> {
+    let refused = |raw: &str| format!("no member {} on this team", raw.chars().take(64).collect::<String>());
+    let mut parsed = Vec::with_capacity(ids.len());
+    for raw in ids {
+        parsed.push(Uuid::parse_str(raw).map_err(|_| refused(raw))?);
+    }
+    let members = db::members_among(&hub.db, team, &parsed).await?;
+    let mut kept: Vec<Uuid> = Vec::with_capacity(parsed.len());
+    for (raw, id) in ids.iter().zip(parsed) {
+        if !members.contains(&id) {
+            return Err(refused(raw));
+        }
+        if !kept.contains(&id) {
+            kept.push(id);
+        }
+    }
+    Ok(kept)
+}
+
+/// A member's team op with the personal call inside `TeamOp::Hub` read into its type, once, by
+/// `Op::read`: the unlock check (`owner_only`), the allowlist (`hub_rule`) and the run all see
+/// that one typed call, and nothing in Teams reads a field of the JSON it came as.
+pub enum Op {
+    /// Every op but `TeamOp::Hub`.
+    Team(TeamOp),
+    Hub(HubCall),
+}
+
+impl Op {
+    pub fn read(op: TeamOp) -> Result<Op, String> {
+        match op {
+            TeamOp::Hub { call } => TeamOp::hub_call(call).map(Op::Hub),
+            op => Ok(Op::Team(op)),
+        }
+    }
+}
+
+/// The team a `HubCall::Team` names, read as an id.
+pub fn team_id(team: Option<String>) -> Result<Option<Uuid>, String> {
+    team.map(|id| Uuid::parse_str(&id).map_err(|_| format!("{id} is not a team id"))).transpose()
+}
+
+/// Whether a client on a `locked` login unlocks with its password before `op`: a personal call
+/// needs what it needs on the person's own account (`surface::owner_only`), and the team asks too
+/// before anything that changes who is on it, its keys, which bots run, or what they may spend.
+/// Exhaustive on purpose: a new op does not compile until it is placed here.
+pub fn owner_only(op: &Op, locked: bool) -> bool {
+    let team = match op {
+        Op::Hub(call) => return surface::owner_only(Side::Hub, &surface::cmd_of(call), locked) || (locked && hub_rule(call).unlock),
+        Op::Team(op) => match op {
+            TeamOp::Rename { .. }
+            | TeamOp::Invite
+            | TeamOp::RevokeInvite { .. }
+            | TeamOp::RemoveMember { .. }
+            | TeamOp::Join { .. }
+            | TeamOp::Leave
+            | TeamOp::SaveGroup { .. }
+            | TeamOp::SaveBot { .. }
+            | TeamOp::TurnBotOn { .. }
+            | TeamOp::Hub { .. } => true,
+            TeamOp::List
+            | TeamOp::Create { .. }
+            | TeamOp::Members
+            | TeamOp::AttachProject { .. }
+            | TeamOp::DetachProject { .. }
+            | TeamOp::Projects
+            | TeamOp::Groups
+            | TeamOp::JoinGroup { .. }
+            | TeamOp::LeaveGroup { .. }
+            | TeamOp::Bots
+            | TeamOp::RunNow { .. }
+            | TeamOp::Runs
+            | TeamOp::Calls
+            | TeamOp::AnswerCall { .. }
+            | TeamOp::TakeOver { .. }
+            | TeamOp::GiveBack { .. }
+            | TeamOp::StopRun { .. }
+            | TeamOp::Chat { .. }
+            | TeamOp::AskPeople { .. } => false,
+        },
+    };
+    locked && team
+}
+
+/// Runs a person's team op, read by `Op::read`. `List`, `Create` and `Join` need no team; every
+/// other op names one the person is a member of. The client's unlock check (`owner_only`) ran
+/// before this on the same `op`.
+pub async fn call(hub: &Arc<Hub>, person: &Arc<Account>, team: Option<Uuid>, op: Op) -> Result<Value, String> {
+    let op = match op {
+        Op::Hub(call) => {
+            let team = team.ok_or("name the team")?;
+            let (team, role) = team_scope(hub, person, team).await?;
+            return run_hub_call(hub, &Scope { team, member: person.id, role }, call).await;
+        }
+        Op::Team(TeamOp::Hub { .. }) => return Err("a team's hub call is read by Op::read first".into()),
+        Op::Team(op) => op,
+    };
     match op {
         TeamOp::List => return json(membership::list(hub, person.id).await?),
         TeamOp::Create { name } => return json(membership::create(hub, person.id, &name).await?),
@@ -64,7 +162,7 @@ pub async fn call(hub: &Arc<Hub>, person: &Arc<Account>, team: Option<Uuid>, op:
     let scope = Scope { team, member: person.id, role };
     let s = &scope;
     match op {
-        TeamOp::List | TeamOp::Create { .. } | TeamOp::Join { .. } | TeamOp::AskPeople { .. } => unreachable!("answered above"),
+        TeamOp::List | TeamOp::Create { .. } | TeamOp::Join { .. } | TeamOp::AskPeople { .. } | TeamOp::Hub { .. } => unreachable!("answered above"),
         TeamOp::Rename { name } => json(membership::rename(hub, s, &name).await?),
         TeamOp::Members => json(membership::members(hub, s).await?),
         TeamOp::Invite => json(membership::invite(hub, s).await?),
@@ -89,13 +187,21 @@ pub async fn call(hub: &Arc<Hub>, person: &Arc<Account>, team: Option<Uuid>, op:
         TeamOp::GiveBack { run } => json(calls::give_back(hub, s, &run).await?),
         TeamOp::StopRun { run } => json(calls::stop_run(hub, s, &run).await?),
         TeamOp::Chat { text } => json(chat::chat(hub, s, &text).await?),
-        TeamOp::Hub { call } => {
-            let call = TeamOp::hub_call(call)?;
-            hub_call_allowed(&call, s.role)?;
-            // A bot's rules hold on the team's workflows: `bots::hub_call` boxes the recursion, as `hub_call` called this.
-            bots::hub_call(hub, s, call).await
-        }
     }
+}
+
+/// Runs the personal `call` on the team's account if `hub_rule` lets the member's role, held to a
+/// bot's rules on the team's workflows (`bots::hub_call`). A call that sets one of the team's keys
+/// answers which keys are set, never what the call answers.
+async fn run_hub_call(hub: &Arc<Hub>, s: &Scope, call: HubCall) -> Result<Value, String> {
+    hub_call_allowed(&call, s.role)?;
+    let key = hub_rule(&call).gate == Gate::OwnerKey;
+    // `bots::hub_call` boxes the recursion, as `hub_call` is what called this.
+    let answer = bots::hub_call(hub, s, call).await?;
+    if key {
+        return json(membership::credential(hub, &s.team).await?);
+    }
+    Ok(answer)
 }
 
 /// Runs a machine's `HubCall::Team`: only `AskPeople`, from a machine of a team's own account.
@@ -106,43 +212,154 @@ pub async fn machine_call(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str,
     }
 }
 
-/// Whether a member with `role` may run the personal `call` on the team's account. Members
-/// read the settings, keep workflows and schedules and run them; only the owner sets the team's
-/// keys and box access and spends more on a box. Everything else, such as machines, pairing,
-/// imports, unlocking, delegation and sync, is refused: a team has no machines of its own but
-/// its boxes, no files and no password.
-pub fn hub_call_allowed(call: &HubCall, role: Role) -> Result<(), String> {
-    let member = matches!(
-        call,
-        HubCall::GetSettings
-            | HubCall::SaveConnector { .. }
-            | HubCall::DeleteConnector { .. }
-            | HubCall::ListSchedules
-            | HubCall::SaveSchedule { .. }
-            | HubCall::PauseSchedule { .. }
-            | HubCall::DeleteSchedule { .. }
-            | HubCall::ScheduleRuns { .. }
-            | HubCall::RunWorkflow { .. }
-            | HubCall::BoxStatus { .. }
-    );
-    let owner = matches!(
-        call,
+/// Who runs a personal call on a team's account.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gate {
+    /// Every member.
+    Member,
+    /// The owner only.
+    Owner,
+    /// The owner only, and it sets or drops one of the team's keys: it answers which keys are
+    /// set (`CredentialState`), never a value.
+    OwnerKey,
+    /// Nobody: it belongs to a person, a machine or a session, or reads or mints a key.
+    Never,
+}
+
+/// How a team takes one personal call: who runs it, and whether a locked login unlocks first
+/// (beside what `surface::owner_only` asks of the call on a person's own account).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rule {
+    pub gate: Gate,
+    pub unlock: bool,
+}
+
+/// The team's rule for `call`. Members read the settings, keep workflows and schedules and run
+/// them; only the owner sets the team's keys and box access and spends more on a box. Everything
+/// else is refused: a team has no machines but its boxes, no files, no password, no agents and
+/// no sessions of its own. Exhaustive on purpose, with no catch-all: a new `HubCall` does not
+/// compile until it is placed here.
+pub fn hub_rule(call: &HubCall) -> Rule {
+    let (gate, unlock) = match call {
+        HubCall::GetSettings { .. } | HubCall::ListSchedules { .. } | HubCall::ScheduleRuns { .. } | HubCall::RunWorkflow { .. } | HubCall::BoxStatus { .. } => (Gate::Member, false),
+        HubCall::SaveConnector { .. } | HubCall::DeleteConnector { .. } | HubCall::SaveSchedule { .. } | HubCall::PauseSchedule { .. } | HubCall::DeleteSchedule { .. } => (Gate::Member, true),
+        HubCall::SetBoxAccess { .. } | HubCall::ExtendBox { .. } => (Gate::Owner, true),
         HubCall::ConnectUpstash { .. }
-            | HubCall::DisconnectUpstash
-            | HubCall::SetBoxClaudeToken { .. }
-            | HubCall::RemoveBoxClaudeToken { .. }
-            | HubCall::ConnectGithub { .. }
-            | HubCall::DisconnectGithub
-            | HubCall::ConnectSlack { .. }
-            | HubCall::DisconnectSlack { .. }
-            | HubCall::SetBoxAccess { .. }
-            | HubCall::ExtendBox { .. }
-    );
-    let cmd = pinned_core::surface::cmd_of(call);
-    match (member, owner, role) {
-        (true, _, _) | (_, true, Role::Owner) => Ok(()),
-        (_, true, Role::Member) => Err(format!("only the team's owner runs {cmd} on the team")),
-        _ => Err(format!("{cmd} does not run on a team")),
+        | HubCall::DisconnectUpstash { .. }
+        | HubCall::SetBoxClaudeToken { .. }
+        | HubCall::RemoveBoxClaudeToken { .. }
+        | HubCall::ConnectGithub { .. }
+        | HubCall::DisconnectGithub { .. }
+        | HubCall::ConnectSlack { .. }
+        | HubCall::DisconnectSlack { .. } => (Gate::OwnerKey, true),
+        // Keys the team does not keep, and reads made with a key.
+        HubCall::ConnectLinear { .. }
+        | HubCall::DisconnectLinear { .. }
+        | HubCall::LinearSuggestions { .. }
+        | HubCall::SlackSuggestions { .. }
+        | HubCall::GithubRepos { .. }
+        | HubCall::ConnectVercel { .. }
+        | HubCall::DisconnectVercel { .. }
+        | HubCall::VercelModels { .. }
+        | HubCall::ConnectConvex { .. }
+        | HubCall::SetConvexRepos { .. }
+        | HubCall::DisconnectConvex { .. }
+        | HubCall::ConvexTables { .. }
+        | HubCall::Convex { .. }
+        | HubCall::SetRepoInsight { .. }
+        | HubCall::GenerateWorkflow { .. }
+        // A token minted on a machine, MCP servers and their secrets.
+        | HubCall::MintBoxClaudeToken { .. }
+        | HubCall::CancelBoxClaudeToken { .. }
+        | HubCall::ListMcpServers { .. }
+        | HubCall::SaveMcpServer { .. }
+        | HubCall::EnableMcpServer { .. }
+        | HubCall::RemoveMcpServer { .. }
+        | HubCall::ImportMcpServer { .. }
+        | HubCall::LoadMcpServers { .. }
+        // Machines, pairing, the hub's invites, a box opened by hand and its answers.
+        | HubCall::Machines { .. }
+        | HubCall::MachineStates { .. }
+        | HubCall::Place { .. }
+        | HubCall::RenameMachine { .. }
+        | HubCall::RemoveMachine { .. }
+        | HubCall::PairCode { .. }
+        | HubCall::CreateInvite { .. }
+        | HubCall::Invites { .. }
+        | HubCall::RevokeInvite { .. }
+        | HubCall::OpenBox { .. }
+        | HubCall::AnswerBox { .. }
+        | HubCall::GetBoxSize { .. }
+        | HubCall::SetBoxSize { .. }
+        | HubCall::BoxUsage { .. }
+        | HubCall::StuckBoxes { .. }
+        // Projects and their files.
+        | HubCall::Clone { .. }
+        | HubCall::SharedProjects { .. }
+        | HubCall::ShareProject { .. }
+        | HubCall::SyncList { .. }
+        | HubCall::SyncPush { .. }
+        | HubCall::SyncPull { .. }
+        | HubCall::SyncMarkExecutable { .. }
+        // A signed-out app's one-time moves.
+        | HubCall::Import { .. }
+        | HubCall::ImportTastes { .. }
+        // A workflow session's callbacks, which only its machine sends.
+        | HubCall::Stage { .. }
+        | HubCall::SlackReply { .. }
+        | HubCall::LinearCreate { .. }
+        | HubCall::LinearTake { .. }
+        | HubCall::RunSet { .. }
+        // External agents and the acts, confirmations and audit of agents.
+        | HubCall::ExternalAgents { .. }
+        | HubCall::AgentRequest { .. }
+        | HubCall::ApproveAgent { .. }
+        | HubCall::DenyAgent { .. }
+        | HubCall::RevokeAgent { .. }
+        | HubCall::Act { .. }
+        | HubCall::Confirmations { .. }
+        | HubCall::DecideConfirmation { .. }
+        | HubCall::AgentAudit { .. }
+        // The global orchestrator, the Capitães, tastes, delegation and its records.
+        | HubCall::Relay { .. }
+        | HubCall::Overview { .. }
+        | HubCall::ReadCaptain { .. }
+        | HubCall::RepoLook { .. }
+        | HubCall::ReadSession { .. }
+        | HubCall::GetTastes { .. }
+        | HubCall::SetTaste { .. }
+        | HubCall::ResetTasteField { .. }
+        | HubCall::Delegate { .. }
+        | HubCall::RemoteTask { .. }
+        | HubCall::RemoteEnded { .. }
+        | HubCall::RemoteAsked { .. }
+        | HubCall::RecordTasks { .. }
+        | HubCall::DelegationStats { .. }
+        | HubCall::UnclaimedEnds { .. }
+        // A person's sessions, ideas and switches.
+        | HubCall::SessionMarks { .. }
+        | HubCall::MarkSessions { .. }
+        | HubCall::ArchiveSession { .. }
+        | HubCall::AutoArchive { .. }
+        | HubCall::UnarchiveSession { .. }
+        | HubCall::DeleteSession { .. }
+        | HubCall::ListIdeas { .. }
+        | HubCall::SaveIdea { .. }
+        | HubCall::DeleteIdea { .. }
+        | HubCall::SetReleaseProtection { .. }
+        // The password, and a team inside a team.
+        | HubCall::Unlock { .. }
+        | HubCall::Team { .. } => (Gate::Never, false),
+    };
+    Rule { gate, unlock }
+}
+
+/// Whether a member with `role` may run the personal `call` on the team's account (`hub_rule`).
+pub fn hub_call_allowed(call: &HubCall, role: Role) -> Result<(), String> {
+    match (hub_rule(call).gate, role) {
+        (Gate::Member, _) | (Gate::Owner | Gate::OwnerKey, Role::Owner) => Ok(()),
+        (Gate::Owner | Gate::OwnerKey, Role::Member) => Err(format!("only the team's owner runs {} on the team", surface::cmd_of(call))),
+        (Gate::Never, _) => Err(format!("{} does not run on a team", surface::cmd_of(call))),
     }
 }
 
@@ -247,6 +464,78 @@ mod tests {
                 let refused = hub_call_allowed(&hub_call(call.clone()), role).unwrap_err();
                 assert!(refused.contains("does not run on a team"), "{call}: {refused}");
             }
+        }
+    }
+
+    fn read(call: Value) -> Result<Op, String> {
+        Op::read(TeamOp::Hub { call })
+    }
+
+    #[test]
+    fn a_teams_hub_call_is_read_once_from_an_object_and_its_odd_forms_get_no_way_around_the_unlock() {
+        let plain = read(json!({ "cmd": "disconnect_upstash" })).unwrap();
+        assert!(owner_only(&plain, true), "a locked login unlocks first");
+        assert!(!owner_only(&plain, false));
+        let extra = read(json!({ "cmd": "disconnect_upstash", "extra": 1, "cmd2": "get_settings" })).unwrap();
+        assert!(matches!(extra, Op::Hub(HubCall::DisconnectUpstash)) && owner_only(&extra, true), "extra keys read as the plain form");
+        for odd in [json!(["disconnect_upstash"]), json!(["run_workflow", "c1"]), json!({ "cmd": "Disconnect_Upstash" }), json!("disconnect_upstash")] {
+            assert!(read(odd.clone()).is_err(), "{odd} is refused before any check or run");
+        }
+    }
+
+    #[test]
+    fn a_locked_login_unlocks_before_a_team_op_that_changes_people_keys_bots_or_workflows() {
+        let group = json!({ "handle": "design" });
+        let changes = [
+            json!({ "op": "rename", "name": "Acme 2" }),
+            json!({ "op": "invite" }),
+            json!({ "op": "revoke_invite", "hint": "ABCD" }),
+            json!({ "op": "remove_member", "account": "a1" }),
+            json!({ "op": "join", "code": "ABCD-EFGH" }),
+            json!({ "op": "leave" }),
+            json!({ "op": "save_group", "group": group }),
+            json!({ "op": "save_bot", "bot": { "workflow": "c1" } }),
+            json!({ "op": "turn_bot_on", "workflow": "c1", "on": true }),
+            json!({ "op": "hub", "call": { "cmd": "connect_upstash", "key": "k", "claude_token": "t" } }),
+            json!({ "op": "hub", "call": { "cmd": "set_box_claude_token", "name": "n", "token": "t" } }),
+            json!({ "op": "hub", "call": { "cmd": "disconnect_slack" } }),
+            json!({ "op": "hub", "call": { "cmd": "extend_box", "machine": "m1", "extra_usd": 1.0 } }),
+            json!({ "op": "hub", "call": { "cmd": "delete_connector", "id": "c1" } }),
+            json!({ "op": "hub", "call": { "cmd": "pause_schedule", "id": "t1", "paused": true } }),
+        ];
+        for op in changes {
+            let op = Op::read(serde_json::from_value(op.clone()).unwrap()).unwrap_or_else(|e| panic!("{e}"));
+            assert!(owner_only(&op, true), "locked");
+            assert!(!owner_only(&op, false), "an older app's login keeps it");
+        }
+        let reads = [
+            json!({ "op": "list" }),
+            json!({ "op": "members" }),
+            json!({ "op": "projects" }),
+            json!({ "op": "groups" }),
+            json!({ "op": "bots" }),
+            json!({ "op": "runs" }),
+            json!({ "op": "calls" }),
+            json!({ "op": "hub", "call": { "cmd": "get_settings" } }),
+            json!({ "op": "hub", "call": { "cmd": "list_schedules" } }),
+            json!({ "op": "hub", "call": { "cmd": "box_status", "machine": "m1" } }),
+        ];
+        for op in reads {
+            let op = Op::read(serde_json::from_value(op).unwrap()).unwrap();
+            assert!(!owner_only(&op, true));
+        }
+        // A decision needs the password on any login, as on a person's own account.
+        let decide = read(json!({ "cmd": "decide_confirmation", "id": "c1", "approve": true })).unwrap();
+        assert!(owner_only(&decide, false));
+    }
+
+    #[test]
+    fn an_owners_key_call_answers_only_which_keys_are_set() {
+        for call in [json!({ "cmd": "connect_upstash", "key": "k", "claude_token": "t" }), json!({ "cmd": "remove_box_claude_token", "name": "n" }), json!({ "cmd": "connect_github", "token": "t" })] {
+            assert_eq!(hub_rule(&hub_call(call.clone())), Rule { gate: Gate::OwnerKey, unlock: true }, "{call}");
+        }
+        for call in [json!({ "cmd": "mint_box_claude_token", "machine": "m1", "account": "a" }), json!({ "cmd": "load_mcp_servers" }), json!({ "cmd": "connect_linear", "key": "k" })] {
+            assert_eq!(hub_rule(&hub_call(call.clone())).gate, Gate::Never, "{call}");
         }
     }
 }

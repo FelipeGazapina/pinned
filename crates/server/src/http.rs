@@ -13,7 +13,6 @@ use pinned_core::account::{DictationFeedback, Failure, NewMachine, NewPassword, 
 use pinned_core::link::UNAUTHORIZED;
 use pinned_core::surface::{self, Side};
 use pinned_core::sync;
-use pinned_core::teams::TeamOp;
 use pinned_core::wire::{AccountView, Call, ClientFrame, HubCall, MachineEvent, MachineFrame, MachineView, Reply, ToClient, ToMachine, UpdateStatus};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -972,9 +971,30 @@ fn client_frame(server: &Arc<Server>, account: &Arc<Account>, client: u64, text:
     crate::traffic::received(parsed.as_ref().map_or(crate::traffic::UNREADABLE, crate::traffic::Labeled::label), text.len());
     match parsed {
         Ok(ClientFrame::Call { id, call, .. }) if account.needs_unlock(client, Side::Node, &call) => locked(id),
+        // A team's op is read once, the personal call inside it into its type, and the unlock
+        // check and the run both take that one read.
+        Ok(ClientFrame::Hub { id, call: HubCall::Team { team, op } }) => {
+            let reply = |result| account.to_client(client, &ToClient::Reply(Reply::new(id, result)));
+            let op = match crate::teams::Op::read(op) {
+                Ok(op) => op,
+                Err(e) => return reply(Err(e)),
+            };
+            if account.needs_unlock_for(client, |locked| crate::teams::owner_only(&op, locked)) {
+                return locked(id);
+            }
+            let (hub, account) = (hub.clone(), account.clone());
+            tokio::spawn(async move {
+                let result = match crate::teams::team_id(team) {
+                    Ok(team) => crate::teams::call(&hub, &account, team, op).await,
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = &result {
+                    eprintln!("pinned-server: client {client}'s team call failed: {e}");
+                }
+                account.to_client(client, &ToClient::Reply(Reply::new(id, result)));
+            });
+        }
         Ok(ClientFrame::Hub { id, call }) if account.needs_unlock(client, Side::Hub, &call) => locked(id),
-        // A personal call run on a team's account needs what it needs on the person's own.
-        Ok(ClientFrame::Hub { id, call: HubCall::Team { op: TeamOp::Hub { call }, .. } }) if account.needs_unlock(client, Side::Hub, &call) => locked(id),
         Ok(ClientFrame::Hub { id, call: HubCall::Unlock { password } }) => {
             let (server, account) = (server.clone(), account.clone());
             tokio::spawn(async move {
@@ -1059,6 +1079,11 @@ async fn serve_machine(hub: Arc<Hub>, mut socket: WebSocket) {
         Ok(account) => account,
         Err(e) => return eprintln!("pinned-server: machine sign in failed: {e}"),
     };
+    // A team's box calls only what its sessions need on the team's account (`forward_team_box`).
+    let team = match crate::teams::db::is_team(&hub.db, account.id).await {
+        Ok(team) => team,
+        Err(e) => return eprintln!("pinned-server: machine sign in failed: {e}"),
+    };
     let (machine, socket_id) = (row.id.to_string(), hub.next_socket());
     let (out, mut outbox, overflowed) = Outbox::new();
     let view = MachineView { id: machine.clone(), name: row.name.clone(), os, online: true, last_seen: 0, upstash_box: None, version: version.clone(), update: None, state: None, background: None };
@@ -1087,7 +1112,7 @@ async fn serve_machine(hub: Arc<Hub>, mut socket: WebSocket) {
                 break;
             }
             frame = tokio::time::timeout(MACHINE_SILENT, stream.next()) => match frame {
-                Ok(Some(Ok(Message::Text(text)))) => machine_frame(&hub, &account, &machine, socket_id, &text),
+                Ok(Some(Ok(Message::Text(text)))) => machine_frame(&hub, &account, &machine, socket_id, team, &text),
                 Ok(Some(Ok(Message::Close(_)) | Err(_)) | None) | Err(_) => break,
                 Ok(Some(Ok(_))) => {}
             },
@@ -1108,7 +1133,7 @@ async fn serve_machine(hub: Arc<Hub>, mut socket: WebSocket) {
     eprintln!("pinned-server: machine {machine} of account {} disconnected", account.id);
 }
 
-fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: u64, text: &str) {
+fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: u64, team: bool, text: &str) {
     let parsed = serde_json::from_str::<MachineFrame>(text);
     crate::traffic::received(parsed.as_ref().map_or(crate::traffic::UNREADABLE, crate::traffic::Labeled::label), text.len());
     match parsed {
@@ -1164,6 +1189,7 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
                 // Its sessions act as the user only through `surface`, which checks, audits and holds
                 // each act, and never decide a confirmation.
                 let surfaced = match call {
+                    call if team => return forward_team_box(hub, account, machine, socket, id, call).await,
                     HubCall::Act { act } => crate::surface::act(&hub, &account, &machine, act).await,
                     HubCall::Confirmations => hub.hub_call(&account, HubCall::Confirmations).await,
                     HubCall::DecideConfirmation { .. } => Err("only the account's owner decides, in the app".to_owned()),
@@ -1182,6 +1208,31 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
             }
         }
     }
+}
+
+/// A hub call from the machine of a team's box. Deny by default: only what its session needs to
+/// run on the team's account goes on to `forward`, which checks each as it does a person's
+/// machine's: a workflow session's callbacks, its own tabs' archive, its task records, and asking
+/// the team's people. No agent act, import, tastes, sync, sharing, delegation, MCP secrets or
+/// global orchestrator.
+async fn forward_team_box(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: u64, id: u64, call: HubCall) {
+    let allowed = matches!(
+        call,
+        HubCall::Stage { .. }
+            | HubCall::SlackReply { .. }
+            | HubCall::LinearCreate { .. }
+            | HubCall::LinearTake { .. }
+            | HubCall::RunSet { .. }
+            | HubCall::AutoArchive { .. }
+            | HubCall::RecordTasks { .. }
+            | HubCall::Team { .. }
+    );
+    if allowed {
+        return forward(hub, account, machine, socket, id, call).await;
+    }
+    let refused = format!("a team's box may not send {}", surface::cmd_of(&call));
+    eprintln!("pinned-server: machine {machine} of team {} was refused: {refused}", account.id);
+    account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, Err(refused))));
 }
 
 /// A machine's hub call other than an agent's act: only the callbacks its sessions may pass on.
