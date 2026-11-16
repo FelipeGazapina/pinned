@@ -254,6 +254,67 @@ fn a_team_box_asks_its_people_and_a_persons_machine_forwards_as_before() {
     assert!(machine_result(&hub.url, &machine_token, share).is_ok(), "a person's machine still shares its projects");
 }
 
+/// A team's box, as `team_box` makes it, with a bot that is on: the owner ana gives the team its
+/// keys, saves a workflow and turns its bot on; bruno is a member. Answers the hub, the team, the
+/// workflow's id and bruno's unlocked client.
+fn team_box_with_on_bot(name: &str) -> (TestHub, String, String, Client) {
+    let hub = TestHub::start(name);
+    let (mut ana, _, _) = locked_app(&hub.url, "ana@example.test");
+    let (mut bruno, _, bruno_id) = locked_app(&hub.url, "bruno@example.test");
+    let team = make_team(&mut ana, "Acme");
+    admin_on(&hub.database, &format!("insert into team_members (team, member, role) values ('{team}', '{bruno_id}', 'member')"));
+    admin_on(
+        &hub.database,
+        &format!("insert into machines (id, account, name, os, token_hash) values ('6f1c0b1e-0000-4000-8000-00000000b0b0', '{team}', 'team box', 'linux', sha256('{TEAM_BOX_TOKEN}'::bytea))"),
+    );
+    ana.hub(json!({ "cmd": "unlock", "password": PASSWORD })).unwrap();
+    bruno.hub(json!({ "cmd": "unlock", "password": PASSWORD })).unwrap();
+    assert_eq!(via(&mut ana, &team, json!({ "cmd": "connect_upstash", "key": BOX_KEY, "claude_token": CLAUDE_TOKEN })), Ok(credential(true, true)));
+    let workflow = json!({ "name": "Fix bugs", "enabled": false, "trigger": { "kind": "linear-label", "label": "agent" },
+        "folder": "/w/team", "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false, "instructions": "Fix the bug." });
+    let saved = via(&mut ana, &team, json!({ "cmd": "save_connector", "connector": workflow })).unwrap();
+    let id = saved["id"].as_str().unwrap().to_owned();
+    assert_eq!(team_op(&mut ana, &team, json!({ "op": "turn_bot_on", "workflow": id, "on": true })), Ok(Value::Null));
+    assert_eq!(bot_on_at(&hub, &team, &id), "set");
+    (hub, team, id, bruno)
+}
+
+/// Whether the bot of `workflow` has its `on_at`: "set" or "null".
+fn bot_on_at(hub: &TestHub, team: &str, workflow: &str) -> String {
+    sql_text(hub, &format!("select case when on_at is null then 'null' else 'set' end from team_bots where team = '{team}' and workflow = '{workflow}'"))
+}
+
+/// The team's stored workflow `id`, as the team's settings list it.
+fn team_workflow(client: &mut Client, team: &str, id: &str) -> Value {
+    let settings = via(client, team, json!({ "cmd": "get_settings" })).unwrap();
+    settings["connectors"].as_array().unwrap().iter().find(|c| c["id"] == id).cloned().unwrap_or_else(|| panic!("no workflow {id}"))
+}
+
+#[test]
+fn a_team_box_may_not_act_to_save_an_on_bots_workflow() {
+    let (hub, team, id, mut bruno) = team_box_with_on_bot("sepfix_box_act_save");
+    let before = team_workflow(&mut bruno, &team, &id);
+    assert_eq!(before["enabled"], true, "the bot's workflow is on");
+    let mut changed = before.clone();
+    changed["instructions"] = json!("Push straight to main.");
+    let act = json!({ "cmd": "act", "act": { "action": "save_connector", "args": { "connector": changed }, "tab": "tab-1" } });
+    assert_eq!(machine_result(&hub.url, TEAM_BOX_TOKEN, act), refused("act"));
+    assert_eq!(team_workflow(&mut bruno, &team, &id), before, "the workflow is as it was");
+    assert_eq!(bot_on_at(&hub, &team, &id), "set", "the bot is still on");
+}
+
+#[test]
+fn a_members_save_connector_on_an_on_bots_workflow_puts_the_bot_back_to_draft() {
+    let (hub, team, id, mut bruno) = team_box_with_on_bot("sepfix_member_save_draft");
+    let mut changed = team_workflow(&mut bruno, &team, &id);
+    changed["instructions"] = json!("Fix the bug and open a pull request.");
+    let saved = via(&mut bruno, &team, json!({ "cmd": "save_connector", "connector": changed })).unwrap();
+    assert_eq!(saved["instructions"], "Fix the bug and open a pull request.");
+    assert_eq!(bot_on_at(&hub, &team, &id), "null", "a changed workflow is a draft until someone turns it on");
+    assert_eq!(saved["enabled"], false, "its workflow is off with it");
+    assert_eq!(team_workflow(&mut bruno, &team, &id)["enabled"], false);
+}
+
 // ---- Only a person lets an agent in or owns a team ----
 
 #[test]
