@@ -531,14 +531,20 @@ impl Hub {
         Ok(self.accounts.lock().unwrap().entry(id).or_insert(fresh).clone())
     }
 
-    pub(crate) async fn connectors(&self, account: &Account) -> Result<Arc<Connectors>, String> {
+    #[doc(hidden)]
+    pub async fn connectors(&self, account: &Account) -> Result<Arc<Connectors>, String> {
         let connectors = account
             .connectors
             .get_or_try_init(|| async {
                 let stored = self.db.connectors(account.id).await?;
                 let storage = PgStorage::new(self.db.clone(), account.id, stored, self.refuse_run_saves.clone());
                 self.persisted.lock().unwrap().insert(account.id, storage.0.clone());
-                Ok::<_, String>(Arc::new(Connectors::new(storage, EXE_PLACEHOLDER.into())))
+                let connectors = Arc::new(Connectors::new(storage, EXE_PLACEHOLDER.into()));
+                // A team's events ask its bots' lines first, before anything outside pinned.
+                if account.team {
+                    connectors.set_admission(Arc::new(crate::teams::triggers::TeamAdmission { hub: self.me.clone(), team: account.id }));
+                }
+                Ok::<_, String>(connectors)
             })
             .await?;
         Ok(connectors.clone())

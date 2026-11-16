@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
 const API: &str = "https://api.linear.app/graphql";
+/// A debug build's stand-in for `API`, a loopback http(s) address only (`slack::loopback_root`).
+pub const API_ENV: &str = "PINNED_LINEAR_API";
 /// Where a signed-in user creates the personal API key pinned asks for.
 pub const KEY_PAGE: &str = "https://linear.app/settings/account/security";
 
@@ -27,7 +29,7 @@ fn api() -> String {
     if let Some(root) = API_ROOT.lock().unwrap().clone() {
         return root;
     }
-    API.to_owned()
+    crate::slack::loopback_root(API_ENV, API)
 }
 
 /// Points Linear calls at `url` for a test. `None` restores the real API.

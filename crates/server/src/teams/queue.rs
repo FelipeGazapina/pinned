@@ -8,11 +8,11 @@
 //! (`db::count_skipped`), and a bot's page shows the counts.
 
 use super::bots::{self, Start};
-use super::db;
+use super::{calls, db};
 use crate::hub::{Account, Hub};
 use pinned_core::agent::Subject;
-use pinned_core::connectors::{Placement, RunsOn, Trigger};
-use pinned_core::teams::{Run, SkipReason};
+use pinned_core::connectors::{Admitted, Event, Placement, RunsOn, Trigger};
+use pinned_core::teams::{Run, RunState, SkipReason};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -35,6 +35,9 @@ pub enum Asked {
 enum Stored {
     Member { member: String },
     Trigger { kind: String, cwd: PathBuf, repo: Option<String>, args: Vec<String>, subject: Subject, mentioned: Vec<String>, account: Option<String>, runs_on: RunsOn, input: String },
+    /// A trigger's raw event, as its poller found it before its Ask step or any graph step
+    /// (`admit`): its turn runs it whole, from the start (`Connectors::granted`).
+    Event { kind: String, event: Event },
 }
 
 impl Stored {
@@ -55,13 +58,16 @@ impl Stored {
         }
     }
 
-    fn start(self, workflow: &str) -> Start {
+    /// What a member's or an older trigger's waiting run starts with; an event (`Stored::Event`)
+    /// runs through the team's poller instead.
+    fn start(self, workflow: &str) -> Option<Start> {
         match self {
-            Stored::Member { member } => Start::Member(Uuid::parse_str(&member).unwrap_or_default()),
-            Stored::Trigger { kind, cwd, repo, args, subject, mentioned, account, runs_on, input } => Start::Trigger {
+            Stored::Member { member } => Some(Start::Member(Uuid::parse_str(&member).unwrap_or_default())),
+            Stored::Trigger { kind, cwd, repo, args, subject, mentioned, account, runs_on, input } => Some(Start::Trigger {
                 kind,
                 work: pinned_core::connectors::Run { cwd, repo, args, connector: workflow.to_owned(), subject, mentioned, account, runs_on, input },
-            },
+            }),
+            Stored::Event { .. } => None,
         }
     }
 }
@@ -111,6 +117,73 @@ pub async fn ask(hub: &Arc<Hub>, team: &Arc<Account>, workflow: &str, start: Sta
     Ok(Asked::Started(run, placed))
 }
 
+/// Decides, once and before anything outside pinned happens for it, what trigger `kind`'s event
+/// does: it runs now (its place held by a reserved run the cap counts), or it waits at the end of
+/// its bot's line, or it is skipped (counted on the bot) for a bot that would not run it. A
+/// subject the bot already runs goes to that run, as before.
+pub async fn admit(hub: &Arc<Hub>, team: &Arc<Account>, kind: &str, event: Event) -> Result<Admitted, String> {
+    let workflow = event.connector().to_owned();
+    if let Some(reason) = skip_reason(hub, team, &workflow, true).await? {
+        eprintln!("pinned-server: team {} workflow {workflow} is {}: its trigger's event is consumed", team.id, reason.as_str());
+        db::count_skipped(&hub.db, team.id, &workflow, reason, 1).await?;
+        return Ok(Admitted::Held);
+    }
+    if let Some(live) = db::live_run_for(&hub.db, team.id, &workflow, event.subject()).await? {
+        let reserved = Uuid::parse_str(&live.id).map_err(|e| e.to_string())?;
+        return Ok(match db::is_reserved(&hub.db, team.id, reserved).await? {
+            true => Admitted::Held,
+            false => Admitted::Go,
+        });
+    }
+    let line = line(team.id);
+    let _turn = line.lock().await;
+    bots::ready(hub, team, &workflow).await?;
+    let waiting = db::waiting_count(&hub.db, team.id, &workflow).await?;
+    let busy = !db::live_runs_of(&hub.db, team.id, &workflow).await?.is_empty();
+    let full = db::live_count(&hub.db, team.id).await? >= db::max_live_runs(&hub.db, team.id).await?;
+    if waiting > 0 || busy || full {
+        let stored = serde_json::to_value(Stored::Event { kind: kind.to_owned(), event }).map_err(|e| e.to_string())?;
+        let dropped = db::enqueue(&hub.db, team.id, &workflow, &stored, MOST_WAITING).await?;
+        if dropped > 0 {
+            eprintln!("pinned-server: team {} bot {workflow}: its line is full, so its oldest waiting event was dropped", team.id);
+            db::count_skipped(&hub.db, team.id, &workflow, SkipReason::QueueFull, dropped).await?;
+        }
+        return Ok(Admitted::Held);
+    }
+    reserve(hub, team, kind, &event).await?;
+    Ok(Admitted::Go)
+}
+
+/// Holds a place for `event`: a live run with no session yet, which the team's cap counts.
+async fn reserve(hub: &Arc<Hub>, team: &Arc<Account>, kind: &str, event: &Event) -> Result<(), String> {
+    let run = Run {
+        id: Uuid::new_v4().to_string(),
+        workflow: event.connector().to_owned(),
+        state: RunState::Working,
+        controller: None,
+        cost_usd: 0.0,
+        active_secs: 0,
+        started_at: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64),
+        ended_at: None,
+        outcome: None,
+        started_by: format!("trigger:{kind}"),
+    };
+    db::insert_reserved(&hub.db, team.id, &run, event.subject()).await
+}
+
+/// What an admitted event's run ends with when it ends before its session opened.
+pub const ENDED_UNOPENED: &str = "the workflow ended before it opened a session";
+
+/// The admitted event of `workflow` on `subject` ended before its session opened: its reserved
+/// run ends (`calls::end_run`), so what waits starts (`next`). A run whose session opened is left.
+pub async fn release(hub: &Arc<Hub>, team: &Arc<Account>, workflow: &str, subject: &Subject) -> Result<(), String> {
+    let Some(id) = db::reserved_run_for(&hub.db, team.id, workflow, subject).await? else { return Ok(()) };
+    match calls::end_run(hub, team, id, RunState::Done, ENDED_UNOPENED, None).await {
+        Err(e) if e != calls::RUN_ENDED => Err(e),
+        _ => Ok(()),
+    }
+}
+
 /// A run of bot `ended` ended: starts what waits while the team has a free place, in a task of its
 /// own, so the end never waits on a box opening. Only `calls::end_run` calls it.
 pub fn next(hub: &Hub, team: &Arc<Account>, ended: &str) {
@@ -139,7 +212,18 @@ async fn start_waiting(hub: &Arc<Hub>, team: &Arc<Account>, ended: &str) -> Resu
                 continue;
             }
         };
-        let start = stored.start(&waiting.workflow);
+        if let Stored::Event { kind, event } = stored {
+            if let Some(reason) = skip_reason(hub, team, &waiting.workflow, true).await? {
+                eprintln!("pinned-server: team {} bot {}: a waiting event is dropped: the bot is {}", team.id, waiting.workflow, reason.as_str());
+                db::count_skipped(&hub.db, team.id, &waiting.workflow, reason, 1).await?;
+                continue;
+            }
+            // Its place is held now, and the team's poller runs it whole, from the start.
+            reserve(hub, team, &kind, &event).await?;
+            hub.connectors(team).await?.granted(event);
+            continue;
+        }
+        let Some(start) = stored.start(&waiting.workflow) else { continue };
         let by_trigger = matches!(start, Start::Trigger { .. });
         if let Some(reason) = skip_reason(hub, team, &waiting.workflow, by_trigger).await? {
             eprintln!("pinned-server: team {} bot {}: a waiting event is dropped: the bot is {}", team.id, waiting.workflow, reason.as_str());

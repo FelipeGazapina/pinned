@@ -333,6 +333,32 @@ pub async fn start_run(hub: &Arc<Hub>, team: &Arc<Account>, workflow_id: &str, s
     Ok((run, placed))
 }
 
+/// Opens the session of run `id`, whose place its trigger's event was given before anything
+/// outside pinned heard of it (`queue::admit`). A session that does not open frees the place, and
+/// what waits in the bot's line goes next.
+pub async fn start_reserved(hub: &Arc<Hub>, team: &Arc<Account>, id: Uuid, mut work: pinned_core::connectors::Run) -> Result<Placement, String> {
+    let opened = async {
+        ready(hub, team, &work.connector).await?;
+        if !matches!(work.runs_on, pinned_core::connectors::RunsOn::FreshBox(_)) {
+            work.runs_on = pinned_core::connectors::RunsOn::FreshBox(BoxStep::default());
+        }
+        hub.open_team_run(TeamRunPass(()), team, work.clone()).await
+    };
+    let placed = match opened.await {
+        Ok(placed) => placed,
+        Err(e) => {
+            db::delete_run(&hub.db, team.id, id).await?;
+            super::queue::next(hub, team, &work.connector);
+            return Err(e);
+        }
+    };
+    db::open_reserved(&hub.db, team.id, id, &placed.machine).await?;
+    if let Some(run) = db::run(&hub.db, team.id, id).await? {
+        super::push(hub, team.id, TeamEvent::RunChanged { run }).await?;
+    }
+    Ok(placed)
+}
+
 /// A run of the team ended (`run.state.ended()`): a bot made to run once is discarded, its row and
 /// its workflow. `calls::end_run`, which every end of a run goes through, calls it.
 pub async fn run_ended(hub: &Hub, team: Uuid, run: &Run) -> Result<(), String> {

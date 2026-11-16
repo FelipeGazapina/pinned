@@ -8,6 +8,8 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 const API: &str = "https://ai-gateway.vercel.sh/v1";
+/// A debug build's stand-in for `API`, a loopback http(s) root only (`slack::loopback_root`).
+pub const API_ROOT_ENV: &str = "PINNED_VERCEL_API_ROOT";
 const CALL_WAIT: Duration = Duration::from_secs(60);
 /// The one question a router asks: which category fits.
 const CATEGORY: &str = "category";
@@ -64,7 +66,7 @@ async fn exchange(
         .timeout(CALL_WAIT)
         .build()
         .map_err(|e| format!("Vercel AI Gateway: {e}"))?;
-    let mut request = client.request(method, format!("{API}{path}"));
+    let mut request = client.request(method, format!("{}{path}", crate::slack::loopback_root(API_ROOT_ENV, API)));
     if let Some(key) = key {
         request = request.bearer_auth(key);
     }

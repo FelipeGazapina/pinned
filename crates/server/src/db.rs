@@ -205,6 +205,9 @@ create table if not exists team_run_queue (id bigserial primary key, team uuid n
 create index if not exists team_run_queue_line on team_run_queue (team, workflow, id);
 create table if not exists team_bot_skips (team uuid not null references teams on delete cascade, workflow text not null,
   reason text not null, count bigint not null default 0, primary key (team, workflow, reason));
+-- A run whose place a trigger's event holds before its session opens (`teams::queue::admit`):
+-- the team's cap counts it from then, and its session's `open` starts it without deciding again.
+alter table team_runs add column if not exists reserved boolean not null default false;
 ";
 /// How long the hub keeps an end that its machine never came back for.
 const HELD_FOR: &str = "interval '30 days'";

@@ -11566,3 +11566,4 @@ mod teams_hardening;
 #[path = "hub/teams_run_log.rs"] mod teams_run_log;
 #[path = "hub/teams_slack_notice.rs"] mod teams_slack_notice;
 #[path = "hub/teams_flood.rs"] mod teams_flood;
+#[path = "hub/teams_admission.rs"] mod teams_admission;

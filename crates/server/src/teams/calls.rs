@@ -30,7 +30,7 @@ const NOTICE_TRIES: [Duration; 4] = [Duration::ZERO, Duration::from_secs(3), Dur
 /// The most runs `runs` lists.
 const RUNS_LISTED: i64 = 50;
 
-const RUN_ENDED: &str = "this run has ended";
+pub(crate) const RUN_ENDED: &str = "this run has ended";
 
 /// What `ask_people` answers at once.
 #[derive(Serialize, Debug, PartialEq)]

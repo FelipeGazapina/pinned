@@ -456,6 +456,48 @@ pub async fn set_run_subject(db: &Db, team: Uuid, run: Uuid, subject: &Subject) 
     Ok(())
 }
 
+/// Holds a place for run `run` of an admitted trigger's event on `subject`, before anything
+/// outside pinned hears of the event: the cap counts it, and its session's `open` takes it.
+pub async fn insert_reserved(db: &Db, team: Uuid, run: &Run, subject: &Subject) -> Result<(), String> {
+    let id = Uuid::parse_str(&run.id).map_err(|_| "a run's id is a uuid")?;
+    let started_by = serde_json::Value::String(run.started_by.clone());
+    db.client()
+        .await?
+        .execute(
+            "insert into team_runs (id, team, workflow, started_by, state, subject, reserved) values ($1, $2, $3, $4, 'working', $5, true)",
+            &[&id, &team, &run.workflow, &started_by, &json(subject)?],
+        )
+        .await
+        .map_err(err)
+        .map(drop)
+}
+
+/// The live run of bot `workflow` that holds a place for `subject` and has opened no session yet.
+pub async fn reserved_run_for(db: &Db, team: Uuid, workflow: &str, subject: &Subject) -> Result<Option<Uuid>, String> {
+    let row = db
+        .client()
+        .await?
+        .query_opt(
+            &format!("select id from team_runs where team = $1 and workflow = $2 and subject = $3 and reserved and state in {LIVE} limit 1"),
+            &[&team, &workflow, &json(subject)?],
+        )
+        .await
+        .map_err(err)?;
+    Ok(row.map(|r| r.get(0)))
+}
+
+/// Whether live run `run` still only holds its place.
+pub async fn is_reserved(db: &Db, team: Uuid, run: Uuid) -> Result<bool, String> {
+    let row = db.client().await?.query_opt("select reserved from team_runs where team = $1 and id = $2", &[&team, &run]).await.map_err(err)?;
+    Ok(row.is_some_and(|r| r.get(0)))
+}
+
+/// Run `run` opened its session on `machine`: it no longer only holds a place.
+pub async fn open_reserved(db: &Db, team: Uuid, run: Uuid, machine: &str) -> Result<(), String> {
+    db.client().await?.execute("update team_runs set box = $3, reserved = false where team = $1 and id = $2", &[&team, &run, &machine]).await.map_err(err)?;
+    Ok(())
+}
+
 /// Forgets a run that never started.
 pub async fn delete_run(db: &Db, team: Uuid, run: Uuid) -> Result<(), String> {
     db.client().await?.execute("delete from team_runs where team = $1 and id = $2", &[&team, &run]).await.map_err(err)?;
