@@ -24,6 +24,8 @@ pub const SUBCOMMAND: &str = "team-guard";
 
 /// What a session reads when the hub could not be asked.
 pub const COULD_NOT_ASK: &str = "Could not ask the team; do not do this step.";
+/// The reason the bot reads when the hub was too busy to ask: the same step may be tried again.
+pub const ASK_AGAIN: &str = "The hub is busy right now and could not ask the team. Wait a moment, then make this exact tool call again, unchanged.";
 /// The choices every step's question offers.
 pub const GO_AHEAD: &str = "Go ahead";
 pub const DONT: &str = "Don't";
@@ -99,6 +101,7 @@ pub fn decide(payload: &str, env: &HookEnv, ask: impl FnOnce(Message) -> Result<
             "Asked the team before this step (call {}). End your turn and wait for the answer; only if it says go ahead, make this exact tool call again, unchanged.",
             asked.id
         ))),
+        Err(e) if e == crate::wire::HUB_BUSY => Some(deny(ASK_AGAIN)),
         Err(_) => Some(deny(COULD_NOT_ASK)),
     }
 }

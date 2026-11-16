@@ -297,7 +297,7 @@ const WRITE_WAIT: Duration = Duration::from_secs(150);
 /// shared connections pipeline every account's statements, so one waiting stalls them all.
 const LOCK_LIMIT: Duration = Duration::from_secs(2);
 /// What a statement refused by `LOCK_LIMIT` answers, as an ordinary error. Nothing retries it.
-pub const BUSY: &str = "the hub is busy with this right now; try again in a moment";
+pub const BUSY: &str = pinned_core::wire::HUB_BUSY;
 
 impl Connection {
     async fn open(url: &str, schema: &str) -> Result<Connection, String> {

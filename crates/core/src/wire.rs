@@ -1650,6 +1650,10 @@ pub struct Target {
     pub tab: TabId,
 }
 
+/// What the hub answers for a call it refused because a lock it needed was busy: nothing was
+/// done, and the same call may be sent again.
+pub const HUB_BUSY: &str = "the hub is busy with this right now; try again in a moment";
+
 /// The answer to the call that carried `id`: `{"id":4,"ok":…}` or `{"id":4,"err":"…"}`.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Reply {

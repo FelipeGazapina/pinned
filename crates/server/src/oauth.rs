@@ -159,6 +159,14 @@ fn no_store(mut response: Response) -> Response {
 }
 
 /// RFC 6749's error body.
+/// A token request the hub could not answer: a busy lock is a refusal the client retries.
+fn token_failed(e: String) -> Response {
+    if e == db::BUSY {
+        return oauth_error(StatusCode::SERVICE_UNAVAILABLE, "temporarily_unavailable", db::BUSY);
+    }
+    crate::http::internal_response(e)
+}
+
 fn oauth_error(status: StatusCode, error: &str, description: &str) -> Response {
     no_store((status, Json(json!({ "error": error, "error_description": description }))).into_response())
 }
@@ -352,7 +360,7 @@ async fn exchange(hub: &Hub, params: &HashMap<String, String>) -> Result<(Uuid, 
             };
             let spent = match db.take_agent_code(code).await {
                 Ok(spent) => spent,
-                Err(e) => return Err(crate::http::internal_response(e)),
+                Err(e) => return Err(token_failed(e)),
             };
             let code = match spent {
                 Spent::Fresh(code) => code,
@@ -387,7 +395,7 @@ async fn exchange(hub: &Hub, params: &HashMap<String, String>) -> Result<(Uuid, 
                     return Err(oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "the refresh token was already used"));
                 }
                 Ok(Spent::Unknown) => return Err(oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "unknown or expired refresh token")),
-                Err(e) => return Err(crate::http::internal_response(e)),
+                Err(e) => return Err(token_failed(e)),
             }
         }
         _ => return Err(oauth_error(StatusCode::BAD_REQUEST, "unsupported_grant_type", "use authorization_code or refresh_token")),
@@ -395,12 +403,12 @@ async fn exchange(hub: &Hub, params: &HashMap<String, String>) -> Result<(Uuid, 
     let (scopes, account) = match db.agent_grant_scopes(grant).await {
         Ok(Some(found)) => found,
         Ok(None) => return Err(oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "the access was revoked")),
-        Err(e) => return Err(crate::http::internal_response(e)),
+        Err(e) => return Err(token_failed(e)),
     };
     match db.issue_agent_tokens(grant).await {
         Ok(Some((access, refresh))) => Ok((account, tokens(access, refresh, &scopes))),
         Ok(None) => Err(oauth_error(StatusCode::BAD_REQUEST, "invalid_grant", "the access was revoked")),
-        Err(e) => Err(crate::http::internal_response(e)),
+        Err(e) => Err(token_failed(e)),
     }
 }
 

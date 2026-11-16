@@ -226,6 +226,10 @@ pub(crate) fn internal_response(e: String) -> Response {
 
 fn internal(e: String) -> Error {
     eprintln!("pinned-server: {e}");
+    // Refused for a busy lock: nothing was done, and the client may send the same request again.
+    if e == db::BUSY {
+        return Error(StatusCode::SERVICE_UNAVAILABLE, e);
+    }
     Error(StatusCode::INTERNAL_SERVER_ERROR, "the hub failed; try again".into())
 }
 
