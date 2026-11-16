@@ -8,7 +8,7 @@ use super::{db, Scope};
 use crate::hub::{Account, Hub};
 use pinned_core::connectors::{BoxStep, Connector, Placement, Trigger};
 use pinned_core::graph::migrate::migrate;
-use pinned_core::graph::runner::{session_steps, Library};
+use pinned_core::graph::runner::{session_steps, Library, NOT_AN_ON_BOT};
 use pinned_core::graph::{NodeKind, Watch};
 use pinned_core::teams::{Bot, BotLimits, CallRules, Run, RunState, SkipReason, TeamEvent, TeamProject, Who};
 use pinned_core::wire::HubCall;
@@ -63,6 +63,21 @@ fn available(workflow: &Connector, workflows: &[Connector]) -> Result<(), String
     let library: Library = workflows.iter().map(|c| (c.id.clone(), c.graph.clone().unwrap_or_else(|| migrate(c)))).collect();
     if session_steps(&library, &workflow.id) > 1 {
         return Err(MORE_THAN_ONE_SESSION.into());
+    }
+    Ok(())
+}
+
+/// Refuses `workflow` when one of its Call steps calls a workflow that is not an on bot of this
+/// team: a draft, an off bot, or one the team does not have (deleted, or another account's).
+/// Checked at save, at turn-on and when a run starts; the graph runner checks again at the step.
+async fn callees_on(hub: &Arc<Hub>, team: Uuid, workflow: &Connector, workflows: &[Connector]) -> Result<(), String> {
+    let graph = workflow.graph.clone().unwrap_or_else(|| migrate(workflow));
+    for node in &graph.nodes {
+        let NodeKind::Call { workflow: target } = &node.kind else { continue };
+        let enabled = workflows.iter().any(|c| &c.id == target && c.enabled);
+        if !enabled || !db::bot(&hub.db, team, target).await?.is_some_and(|b| b.on) {
+            return Err(NOT_AN_ON_BOT.into());
+        }
     }
     Ok(())
 }
@@ -185,6 +200,7 @@ pub async fn save_bot(hub: &Arc<Hub>, scope: &Scope, mut bot: Bot, connector: Op
     };
     let workflow = find(&workflows, &bot.workflow)?;
     available(workflow, &workflows)?;
+    callees_on(hub, team, workflow, &workflows).await?;
     check_who(hub, team, &bot.calls).await?;
     let BotLimits { usd, minutes } = bot.limits;
     if !usd.is_finite() || usd <= 0.0 || minutes == 0 {
@@ -257,6 +273,7 @@ pub async fn turn_bot_on(hub: &Arc<Hub>, scope: &Scope, workflow_id: &str, on: b
         return Ok(());
     }
     available(workflow, &workflows)?;
+    callees_on(hub, team, workflow, &workflows).await?;
     let calls = row.as_ref().map(|b| b.calls.clone()).unwrap_or_default();
     if !asked_by(hub, scope, &calls).await? {
         return Err("only the team's owner, or someone this bot asks, turns it on".into());
@@ -338,6 +355,7 @@ pub async fn ready(hub: &Arc<Hub>, team: &Account, workflow_id: &str) -> Result<
         return Err(IS_A_DRAFT.into());
     }
     available(workflow, &workflows)?;
+    callees_on(hub, team.id, workflow, &workflows).await?;
     let credential = super::membership::credential(hub, team).await?;
     if !(credential.upstash && credential.claude) {
         return Err(NEEDS_KEYS.into());

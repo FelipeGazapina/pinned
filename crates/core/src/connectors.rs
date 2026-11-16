@@ -3821,6 +3821,13 @@ impl Connectors {
         self.store.lock().unwrap().connectors.iter().map(|c| (c.id.clone(), run_graph(c))).collect()
     }
 
+    /// On a hub's team, the workflows a Call step may call: its on bots, whose workflows are the
+    /// enabled ones. `None` on a person's account, which calls any workflow it has.
+    fn callable(&self) -> Option<std::collections::BTreeSet<String>> {
+        self.admission.get()?;
+        Some(self.store.lock().unwrap().connectors.iter().filter(|c| c.enabled).map(|c| c.id.clone()).collect())
+    }
+
     fn names(&self) -> BTreeMap<String, String> {
         self.store.lock().unwrap().connectors.iter().map(|c| (c.id.clone(), c.name.clone())).collect()
     }
@@ -3938,6 +3945,7 @@ impl Connectors {
             let index = self.runs.lock().unwrap().iter().position(|run| matches!(run.status, Status::Running));
             let Some(index) = index else { break };
             let mut run = self.runs.lock().unwrap()[index].clone();
+            run.callable = self.callable();
             match runner::drive(&mut run, &library) {
                 Drive::Act(effect) => {
                     let supplied = match self.perform(&mut run, effect, &library, open).await {
