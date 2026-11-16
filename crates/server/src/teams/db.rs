@@ -1591,16 +1591,22 @@ pub struct AtLimit {
 /// one limit call per run, and none a session opened counts. A limit above `most` (the ceiling)
 /// is held at it.
 pub async fn runs_at_limit(db: &Db, most: &BotLimits) -> Result<Vec<AtLimit>, String> {
+    // Each limit is read only when it is a JSON number, and compared as `numeric`: a row edited
+    // by hand to text or a fraction raises no cast error, and falls to the skip below.
+    let usd = "least(case when jsonb_typeof(b.limits->'usd') = 'number' then (b.limits->>'usd')::numeric end, $1::float8::numeric)::float8";
+    let minutes = "least(case when jsonb_typeof(b.limits->'minutes') = 'number' then (b.limits->>'minutes')::numeric end, $2::bigint::numeric)";
     let rows = db
         .client()
         .await?
         .query(
-            "select r.team, r.id, b.limits, coalesce(r.cost_usd >= least((b.limits->>'usd')::float8, $1), false), b.workflow
+            &format!(
+                "select r.team, r.id, b.limits, coalesce(r.cost_usd >= {usd}, false), b.workflow
                  from team_runs r join team_bots b on b.team = r.team and b.workflow = r.workflow
                  where r.state in ('working', 'taken_over') and not r.reserved
-                   and (r.cost_usd >= least((b.limits->>'usd')::float8, $1)
-                        or extract(epoch from now() - coalesce(r.opened_at, r.started_at))::bigint - r.waiting_secs >= least((b.limits->>'minutes')::bigint, $2) * 60)
-                   and not exists (select 1 from team_calls c where c.run = r.id and c.situation = 'on_limit' and c.opened_by_hub)",
+                   and (r.cost_usd >= {usd}
+                        or extract(epoch from now() - coalesce(r.opened_at, r.started_at))::bigint - r.waiting_secs >= {minutes} * 60)
+                   and not exists (select 1 from team_calls c where c.run = r.id and c.situation = 'on_limit' and c.opened_by_hub)"
+            ),
             &[&most.usd, &i64::from(most.minutes)],
         )
         .await
