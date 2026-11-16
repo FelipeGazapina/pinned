@@ -383,3 +383,28 @@ fn an_agent_refresh_refused_after_the_spend_leaves_the_token_unspent_and_the_ret
     let (status, tokens) = exchange(&url, &http, &form);
     assert_eq!((status, tokens["token_type"].as_str()), (200, Some("Bearer")), "the retry with the same refresh token gets tokens: {}", tokens["error"]);
 }
+
+// ---- K. an exchange waiting on a lock holds no other transaction ----
+
+#[test]
+fn an_agent_code_exchange_waiting_on_a_lock_leaves_a_team_invite_answered_within_1_s() {
+    let hub = TestHub::start("tlc_own_connection");
+    let (url, http, client_id, code, verifier) = approved_code(&hub);
+    let (mut bruno, _) = super::teams_membership::person(&url, "bruno@example.test");
+    let team = super::teams_membership::make_team(&mut bruno, "Crew");
+    let form = [("grant_type", "authorization_code"), ("client_id", client_id.as_str()), ("code", code.as_str()), ("code_verifier", verifier.as_str()), ("redirect_uri", AGENT_REDIRECT)];
+    let held = Held::new(&hub, &format!("select 1 from agent_grants where id = '{}' for update", the_grant(&hub)));
+    let waiting = "select count(*)::text from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'";
+    std::thread::scope(|scope| {
+        let exchanged = scope.spawn(|| exchange(&url, &http, &form));
+        wait_for("the exchange to wait on the lock", || rows(&hub, waiting)[0][0].as_deref() == Some("1"));
+        // A team invite runs its count and insert in one transaction (`teams::db::create_invite`).
+        let started = Instant::now();
+        let invite = super::teams_membership::team_op(&mut bruno, &team, json!({ "op": "invite" }));
+        let took = started.elapsed();
+        assert!(invite.as_ref().is_ok_and(|invite| invite["code"].is_string()), "{:?}", invite.err());
+        assert!(took < Duration::from_secs(1), "the invite waited {took:?} behind the exchange");
+        assert_eq!(exchanged.join().unwrap(), busy_oauth());
+    });
+    held.release();
+}

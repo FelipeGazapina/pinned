@@ -346,7 +346,7 @@ async fn refresh_is_current(hub: &Hub, params: &HashMap<String, String>) -> bool
 /// Trades a code or a refresh token for tokens: the grant's account and the answer, or the error answer.
 ///
 /// A lock refusal never lands after the spend: the spend, the grant's scopes and the new tokens run
-/// in one transaction, and any failure in it rolls the spend back, so the client's retry with the
+/// in one transaction on a connection of the exchange's own, and any failure in it rolls the spend back, so the client's retry with the
 /// same code or refresh token gets what it would have got. Only an answer about the code or token
 /// itself (replayed, another client's, a wrong verifier) keeps the spend.
 async fn exchange(hub: &Hub, params: &HashMap<String, String>) -> Result<(Uuid, Response), Response> {
@@ -358,8 +358,10 @@ async fn exchange(hub: &Hub, params: &HashMap<String, String>) -> Result<(Uuid, 
             return Err(oauth_error(StatusCode::BAD_REQUEST, "invalid_target", "this hub only issues tokens for its MCP endpoint"));
         }
     }
-    let mut held = db.transaction_client().await.map_err(token_failed)?;
-    let tx = held.as_mut().expect("opened above").transaction().await.map_err(|e| token_failed(db::err(e)))?;
+    // A connection of its own, with the hub's statement and lock bounds: an exchange waiting on a
+    // lock never holds the connection every other hub transaction shares.
+    let mut own = db.own_client().await.map_err(token_failed)?;
+    let tx = own.transaction().await.map_err(|e| token_failed(db::err(e)))?;
     // Ends the transaction keeping the spend, then answers `answer`.
     async fn kept(tx: tokio_postgres::Transaction<'_>, answer: Response) -> Response {
         match tx.commit().await {
