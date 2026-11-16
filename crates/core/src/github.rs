@@ -30,7 +30,7 @@ pub struct Repo {
 /// Why a GitHub call failed; `Display` is the text `account` and `repos` have always returned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
-    /// GitHub answered 401 or 403: the token is refused or may not do this.
+    /// GitHub answered 401, or 403 for a reason other than a rate limit: the token is refused or may not do this.
     Unauthorized(String),
     Failed(String),
 }
@@ -104,14 +104,24 @@ impl Client {
         // reqwest's error names the URL, never a header, so the token stays out of it.
         let response = request.send().await.map_err(|e| Error::Failed(format!("GitHub unreachable: {e}")))?;
         let status = response.status();
+        let remaining = response.headers().get("x-ratelimit-remaining").and_then(|v| v.to_str().ok()).map(str::to_owned);
         let body: Value = response.json().await.map_err(|e| Error::Failed(format!("GitHub sent a bad response: {e}")))?;
         match status.as_u16() {
             200..=299 => Ok(body),
             401 => Err(Error::Unauthorized("GitHub refused the token".into())),
+            403 if rate_limited(remaining.as_deref(), body["message"].as_str().unwrap_or_default()) => {
+                Err(Error::Failed(format!("GitHub rate limit reached, try again later: {}", body["message"].as_str().unwrap_or_default())))
+            }
             403 => Err(Error::Unauthorized(format!("GitHub answered {status}: {}", body["message"].as_str().unwrap_or_default()))),
             _ => Err(Error::Failed(format!("GitHub answered {status}: {}", body["message"].as_str().unwrap_or_default()))),
         }
     }
+}
+
+/// Whether a 403 means "too many requests" (a temporary failure) rather than "this token may not": GitHub sends
+/// `x-ratelimit-remaining: 0`, or says so in the message.
+pub fn rate_limited(remaining_header: Option<&str>, message: &str) -> bool {
+    remaining_header.is_some_and(|v| v.trim() == "0") || message.to_lowercase().contains("rate limit")
 }
 
 async fn get(token: &str, path: &str) -> Result<Value, String> {
@@ -181,6 +191,16 @@ mod tests {
         assert_eq!(clone_url("git@github.com:acme/app.git"), "git@github.com:acme/app.git");
         assert_eq!(clone_url("https://gitlab.com/acme/app.git"), "https://gitlab.com/acme/app.git");
         assert_eq!(clone_url("acme/app/extra"), "acme/app/extra");
+    }
+
+    #[test]
+    fn a_403_is_a_rate_limit_by_its_header_or_its_message() {
+        assert!(rate_limited(Some("0"), "Forbidden"));
+        assert!(rate_limited(Some(" 0 "), ""));
+        assert!(rate_limited(None, "API rate limit exceeded for 203.0.113.9."));
+        assert!(rate_limited(None, "You have exceeded a secondary Rate Limit"));
+        assert!(!rate_limited(Some("4999"), "Resource not accessible by personal access token"));
+        assert!(!rate_limited(None, "Forbidden"));
     }
 
     #[test]

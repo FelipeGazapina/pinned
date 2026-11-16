@@ -123,6 +123,20 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
             return Err(refusal);
         }
     };
+    // The confirmation holds the public text, scrubbed with what this session's tab and the account know.
+    let held_args = if admitted.action.name == "report_issue" {
+        let cwd = account.tab(origin, &caller.tab).map(|tab| tab.cwd).unwrap_or_default();
+        match crate::reports::prepare(hub, account, &cwd, &act.args).await {
+            Ok(args) => args,
+            Err(refusal) => {
+                let refusal = surface::mask_secrets(&refusal);
+                trail.write(AuditOutcome::Refused, &refusal).await?;
+                return Err(refusal);
+            }
+        }
+    } else {
+        act.args.clone()
+    };
     if surface::held_for_owner(admitted.action) || why.is_some() {
         let asked = Confirmation {
             id: String::new(),
@@ -134,7 +148,7 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
             role: caller.role,
             action: admitted.action.name.to_owned(),
             about: why.as_deref().map(surface::mask_secrets).unwrap_or_default(),
-            args: match surface::without_asked(admitted.action, &act.args) {
+            args: match surface::without_asked(admitted.action, &held_args) {
                 Value::Null => Value::Object(Default::default()),
                 // The held copy is listed to every app of the account, and an approval runs it, so a
                 // schedule act holds what the user sees: the stored task is masked the same way.
@@ -254,6 +268,9 @@ async fn run(hub: &Arc<Hub>, account: &Arc<Account>, caller_tab: &str, actor: Ac
         Parsed::Hub(HubCall::UnarchiveSession { session }) => json(hub.unarchive_session(account, &session, false).await?),
         // An idea made by an agent says which one.
         Parsed::Hub(HubCall::SaveIdea { id, title, text, project, status }) => json(hub.save_idea(account, actor, id.as_deref(), &title, &text, project.as_deref(), status).await?),
+        // What an agent reads of a report is where it is, and a report it sends says so.
+        Parsed::Hub(HubCall::Reports { ask }) => hub.reports_ask(account, ask, true).await,
+        Parsed::Hub(HubCall::ReportIssue { draft, shown, draft_id, request_id }) => hub.report_issue(account, draft, shown, draft_id, request_id, true).await,
         Parsed::Hub(call) => Box::pin(hub.hub_call(account, call)).await,
         Parsed::Node(call) => {
             let call = stamped(call, caller_tab, on_origin)?;

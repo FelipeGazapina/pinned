@@ -596,8 +596,13 @@ impl Db {
         Ok(Db { sealer, connection: Connection::open(url, SCHEMA).await?, transactions: Arc::default() })
     }
 
-    async fn client(&self) -> Result<Arc<Client>, String> {
+    pub(crate) async fn client(&self) -> Result<Arc<Client>, String> {
         self.connection.client().await
+    }
+
+    /// Runs `sql` (statements that are safe to run again), for a module that keeps its own tables.
+    pub async fn run_schema(&self, sql: &str) -> Result<(), String> {
+        self.client().await?.batch_execute(sql).await.map_err(|e| format!("could not create the tables: {e}"))
     }
 
     /// The new account, or None when the email is taken.

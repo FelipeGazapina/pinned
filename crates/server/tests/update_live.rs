@@ -64,6 +64,7 @@ impl Hub {
             convex_http: Arc::new(pinned_core::convex::client::Reqwest),
             learning_db: None,
             access: Default::default(),
+            reports: None,
         };
         let runtime = tokio::runtime::Runtime::new().unwrap();
         let running = runtime.block_on(pinned_server::start(config)).unwrap();

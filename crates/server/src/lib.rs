@@ -39,6 +39,8 @@ pub struct Config {
     pub learning_db: Option<String>,
     /// Which proxy's client address the hub believes, and how many accounts it takes.
     pub access: http::Access,
+    /// Where the hub files the issues users report from the app; without it reporting is not available.
+    pub reports: Option<reports::Config>,
 }
 
 /// How long the hub gives sockets to close once it is told to stop, before it drops them.
@@ -65,7 +67,7 @@ pub async fn start(config: Config) -> Result<Running, String> {
     let listener = tokio::net::TcpListener::bind(&config.listen).await.map_err(|e| format!("could not listen on {}: {e}", config.listen))?;
     let addr = listener.local_addr().map_err(|e| e.to_string())?;
     let public_url = config.public_url.unwrap_or_else(|| format!("http://{addr}"));
-    let hub = hub::Hub::new(db, public_url, config.signup, config.box_api, config.box_policy, config.convex_http);
+    let hub = hub::Hub::new(db, public_url, config.signup, config.box_api, config.box_policy, config.convex_http, config.reports).await?;
     surface::finish_interrupted(&hub).await?;
     // Again once a decision the hub before this one ran can no longer be running.
     let later = hub.clone();

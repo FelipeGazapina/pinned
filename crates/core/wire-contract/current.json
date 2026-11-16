@@ -7293,6 +7293,64 @@
                 ]
               },
               {
+                "description": "What the app asks about reporting an issue (`reports::Ask`): `status` answers `{available, left_today}`,\n`preview` a `reports::Preview`, `similar` a list of `reports::Similar`, `list` the account's `reports::Report`s\nand `save_draft` the draft's `reports::Report`; `delete_draft` answers null.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "reports"
+                  },
+                  "ask": {
+                    "$ref": "#/$defs/Ask2"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "ask"
+                ]
+              },
+              {
+                "description": "`reports::Report`: files `draft` as an issue in pinned's public GitHub repository, with the hub's own token.\n`shown` is the hash of the issue the person reviewed (`reports::shown`); a report that renders differently is\nrefused. `draft_id` sends that saved draft and removes it. A repeated `request_id` answers the first report.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "report_issue"
+                  },
+                  "draft": {
+                    "$ref": "#/$defs/Draft"
+                  },
+                  "shown": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "draft_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "request_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "draft",
+                  "shown",
+                  "draft_id",
+                  "request_id"
+                ]
+              },
+              {
                 "description": "`mcp::Entry`: adds a server, enabled, or with `id` changes that one, keeping its enabled\nstate. `secrets` holds what the user typed in the app; a name left out or blank keeps the\nvalue the server has, and a new name needs one.",
                 "type": "object",
                 "properties": {
@@ -10641,6 +10699,235 @@
               "open",
               "done",
               "dropped"
+            ]
+          },
+          "Ask2": {
+            "description": "What the app asks for, by `op`.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "status"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "preview"
+                  },
+                  "draft": {
+                    "$ref": "#/$defs/Draft"
+                  },
+                  "context": {
+                    "$ref": "#/$defs/Context",
+                    "default": {
+                      "projects": [],
+                      "folders": [],
+                      "files": [],
+                      "names": []
+                    }
+                  }
+                },
+                "required": [
+                  "op",
+                  "draft",
+                  "context"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "similar"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "title"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "list"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "save_draft"
+                  },
+                  "id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "draft": {
+                    "$ref": "#/$defs/Draft"
+                  }
+                },
+                "required": [
+                  "op",
+                  "id",
+                  "draft"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "delete_draft"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "id"
+                ]
+              }
+            ]
+          },
+          "Draft": {
+            "description": "What the reporter wrote. A problem uses `happened`, `expected` and `repeat`; an idea uses `happened` as \"The idea\"\nand `expected` as \"Why it helps\".",
+            "type": "object",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/Kind"
+              },
+              "title": {
+                "type": "string"
+              },
+              "happened": {
+                "type": "string",
+                "default": ""
+              },
+              "expected": {
+                "type": "string",
+                "default": ""
+              },
+              "repeat": {
+                "type": "string",
+                "default": ""
+              },
+              "attach": {
+                "$ref": "#/$defs/Attach",
+                "default": {
+                  "environment": false,
+                  "errors": []
+                }
+              },
+              "to_issue": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              }
+            },
+            "required": [
+              "kind",
+              "title",
+              "happened",
+              "expected",
+              "repeat",
+              "attach",
+              "to_issue"
+            ]
+          },
+          "Kind": {
+            "description": "What the reporter sends: something that does not work, or a suggestion.",
+            "type": "string",
+            "enum": [
+              "problem",
+              "idea"
+            ]
+          },
+          "Attach": {
+            "description": "What the reporter chose to send along with the text.",
+            "type": "object",
+            "properties": {
+              "environment": {
+                "type": "boolean",
+                "default": false
+              },
+              "errors": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              }
+            },
+            "required": [
+              "environment",
+              "errors"
+            ]
+          },
+          "Context": {
+            "description": "What the caller knows must never appear in a public report: the words to replace, by kind.",
+            "type": "object",
+            "properties": {
+              "projects": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "folders": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "files": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "names": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              }
+            },
+            "required": [
+              "projects",
+              "folders",
+              "files",
+              "names"
             ]
           },
           "Spec": {
@@ -18114,6 +18401,61 @@
                 ]
               },
               {
+                "description": "What the app asks about reporting an issue (`reports::Ask`): `status` answers `{available, left_today}`,\n`preview` a `reports::Preview`, `similar` a list of `reports::Similar`, `list` the account's `reports::Report`s\nand `save_draft` the draft's `reports::Report`; `delete_draft` answers null.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "reports"
+                  },
+                  "ask": {
+                    "$ref": "#/$defs/Ask2"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "ask"
+                ]
+              },
+              {
+                "description": "`reports::Report`: files `draft` as an issue in pinned's public GitHub repository, with the hub's own token.\n`shown` is the hash of the issue the person reviewed (`reports::shown`); a report that renders differently is\nrefused. `draft_id` sends that saved draft and removes it. A repeated `request_id` answers the first report.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "report_issue"
+                  },
+                  "draft": {
+                    "$ref": "#/$defs/Draft"
+                  },
+                  "shown": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "draft_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "request_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "draft"
+                ]
+              },
+              {
                 "description": "`mcp::Entry`: adds a server, enabled, or with `id` changes that one, keeping its enabled\nstate. `secrets` holds what the user typed in the app; a name left out or blank keeps the\nvalue the server has, and a new name needs one.",
                 "type": "object",
                 "properties": {
@@ -21352,6 +21694,218 @@
               "done",
               "dropped"
             ]
+          },
+          "Ask2": {
+            "description": "What the app asks for, by `op`.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "status"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "preview"
+                  },
+                  "draft": {
+                    "$ref": "#/$defs/Draft"
+                  },
+                  "context": {
+                    "$ref": "#/$defs/Context",
+                    "default": {
+                      "projects": [],
+                      "folders": [],
+                      "files": [],
+                      "names": []
+                    }
+                  }
+                },
+                "required": [
+                  "op",
+                  "draft"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "similar"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "title"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "list"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "save_draft"
+                  },
+                  "id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "draft": {
+                    "$ref": "#/$defs/Draft"
+                  }
+                },
+                "required": [
+                  "op",
+                  "draft"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "delete_draft"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "id"
+                ]
+              }
+            ]
+          },
+          "Draft": {
+            "description": "What the reporter wrote. A problem uses `happened`, `expected` and `repeat`; an idea uses `happened` as \"The idea\"\nand `expected` as \"Why it helps\".",
+            "type": "object",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/Kind"
+              },
+              "title": {
+                "type": "string"
+              },
+              "happened": {
+                "type": "string",
+                "default": ""
+              },
+              "expected": {
+                "type": "string",
+                "default": ""
+              },
+              "repeat": {
+                "type": "string",
+                "default": ""
+              },
+              "attach": {
+                "$ref": "#/$defs/Attach",
+                "default": {
+                  "environment": false,
+                  "errors": []
+                }
+              },
+              "to_issue": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              }
+            },
+            "required": [
+              "kind",
+              "title"
+            ]
+          },
+          "Kind": {
+            "description": "What the reporter sends: something that does not work, or a suggestion.",
+            "type": "string",
+            "enum": [
+              "problem",
+              "idea"
+            ]
+          },
+          "Attach": {
+            "description": "What the reporter chose to send along with the text.",
+            "type": "object",
+            "properties": {
+              "environment": {
+                "type": "boolean",
+                "default": false
+              },
+              "errors": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              }
+            }
+          },
+          "Context": {
+            "description": "What the caller knows must never appear in a public report: the words to replace, by kind.",
+            "type": "object",
+            "properties": {
+              "projects": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "folders": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "files": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "names": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              }
+            }
           },
           "Spec": {
             "description": "A server of the account's list, as the app and agents write it.",
@@ -25172,6 +25726,64 @@
                 "required": [
                   "cmd",
                   "id"
+                ]
+              },
+              {
+                "description": "What the app asks about reporting an issue (`reports::Ask`): `status` answers `{available, left_today}`,\n`preview` a `reports::Preview`, `similar` a list of `reports::Similar`, `list` the account's `reports::Report`s\nand `save_draft` the draft's `reports::Report`; `delete_draft` answers null.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "reports"
+                  },
+                  "ask": {
+                    "$ref": "#/$defs/Ask2"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "ask"
+                ]
+              },
+              {
+                "description": "`reports::Report`: files `draft` as an issue in pinned's public GitHub repository, with the hub's own token.\n`shown` is the hash of the issue the person reviewed (`reports::shown`); a report that renders differently is\nrefused. `draft_id` sends that saved draft and removes it. A repeated `request_id` answers the first report.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "report_issue"
+                  },
+                  "draft": {
+                    "$ref": "#/$defs/Draft"
+                  },
+                  "shown": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "draft_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "request_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "draft",
+                  "shown",
+                  "draft_id",
+                  "request_id"
                 ]
               },
               {
@@ -29228,6 +29840,235 @@
               "dropped"
             ]
           },
+          "Ask2": {
+            "description": "What the app asks for, by `op`.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "status"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "preview"
+                  },
+                  "draft": {
+                    "$ref": "#/$defs/Draft"
+                  },
+                  "context": {
+                    "$ref": "#/$defs/Context",
+                    "default": {
+                      "projects": [],
+                      "folders": [],
+                      "files": [],
+                      "names": []
+                    }
+                  }
+                },
+                "required": [
+                  "op",
+                  "draft",
+                  "context"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "similar"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "title"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "list"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "save_draft"
+                  },
+                  "id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "draft": {
+                    "$ref": "#/$defs/Draft"
+                  }
+                },
+                "required": [
+                  "op",
+                  "id",
+                  "draft"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "delete_draft"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "id"
+                ]
+              }
+            ]
+          },
+          "Draft": {
+            "description": "What the reporter wrote. A problem uses `happened`, `expected` and `repeat`; an idea uses `happened` as \"The idea\"\nand `expected` as \"Why it helps\".",
+            "type": "object",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/Kind"
+              },
+              "title": {
+                "type": "string"
+              },
+              "happened": {
+                "type": "string",
+                "default": ""
+              },
+              "expected": {
+                "type": "string",
+                "default": ""
+              },
+              "repeat": {
+                "type": "string",
+                "default": ""
+              },
+              "attach": {
+                "$ref": "#/$defs/Attach",
+                "default": {
+                  "environment": false,
+                  "errors": []
+                }
+              },
+              "to_issue": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              }
+            },
+            "required": [
+              "kind",
+              "title",
+              "happened",
+              "expected",
+              "repeat",
+              "attach",
+              "to_issue"
+            ]
+          },
+          "Kind": {
+            "description": "What the reporter sends: something that does not work, or a suggestion.",
+            "type": "string",
+            "enum": [
+              "problem",
+              "idea"
+            ]
+          },
+          "Attach": {
+            "description": "What the reporter chose to send along with the text.",
+            "type": "object",
+            "properties": {
+              "environment": {
+                "type": "boolean",
+                "default": false
+              },
+              "errors": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              }
+            },
+            "required": [
+              "environment",
+              "errors"
+            ]
+          },
+          "Context": {
+            "description": "What the caller knows must never appear in a public report: the words to replace, by kind.",
+            "type": "object",
+            "properties": {
+              "projects": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "folders": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "files": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "names": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              }
+            },
+            "required": [
+              "projects",
+              "folders",
+              "files",
+              "names"
+            ]
+          },
           "Spec": {
             "description": "A server of the account's list, as the app and agents write it.",
             "type": "object",
@@ -32857,6 +33698,61 @@
                 "required": [
                   "cmd",
                   "id"
+                ]
+              },
+              {
+                "description": "What the app asks about reporting an issue (`reports::Ask`): `status` answers `{available, left_today}`,\n`preview` a `reports::Preview`, `similar` a list of `reports::Similar`, `list` the account's `reports::Report`s\nand `save_draft` the draft's `reports::Report`; `delete_draft` answers null.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "reports"
+                  },
+                  "ask": {
+                    "$ref": "#/$defs/Ask2"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "ask"
+                ]
+              },
+              {
+                "description": "`reports::Report`: files `draft` as an issue in pinned's public GitHub repository, with the hub's own token.\n`shown` is the hash of the issue the person reviewed (`reports::shown`); a report that renders differently is\nrefused. `draft_id` sends that saved draft and removes it. A repeated `request_id` answers the first report.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "report_issue"
+                  },
+                  "draft": {
+                    "$ref": "#/$defs/Draft"
+                  },
+                  "shown": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "draft_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "request_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "draft"
                 ]
               },
               {
@@ -36789,6 +37685,218 @@
               "done",
               "dropped"
             ]
+          },
+          "Ask2": {
+            "description": "What the app asks for, by `op`.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "status"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "preview"
+                  },
+                  "draft": {
+                    "$ref": "#/$defs/Draft"
+                  },
+                  "context": {
+                    "$ref": "#/$defs/Context",
+                    "default": {
+                      "projects": [],
+                      "folders": [],
+                      "files": [],
+                      "names": []
+                    }
+                  }
+                },
+                "required": [
+                  "op",
+                  "draft"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "similar"
+                  },
+                  "title": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "title"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "list"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "save_draft"
+                  },
+                  "id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "draft": {
+                    "$ref": "#/$defs/Draft"
+                  }
+                },
+                "required": [
+                  "op",
+                  "draft"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "delete_draft"
+                  },
+                  "id": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "id"
+                ]
+              }
+            ]
+          },
+          "Draft": {
+            "description": "What the reporter wrote. A problem uses `happened`, `expected` and `repeat`; an idea uses `happened` as \"The idea\"\nand `expected` as \"Why it helps\".",
+            "type": "object",
+            "properties": {
+              "kind": {
+                "$ref": "#/$defs/Kind"
+              },
+              "title": {
+                "type": "string"
+              },
+              "happened": {
+                "type": "string",
+                "default": ""
+              },
+              "expected": {
+                "type": "string",
+                "default": ""
+              },
+              "repeat": {
+                "type": "string",
+                "default": ""
+              },
+              "attach": {
+                "$ref": "#/$defs/Attach",
+                "default": {
+                  "environment": false,
+                  "errors": []
+                }
+              },
+              "to_issue": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "uint64",
+                "minimum": 0,
+                "default": null
+              }
+            },
+            "required": [
+              "kind",
+              "title"
+            ]
+          },
+          "Kind": {
+            "description": "What the reporter sends: something that does not work, or a suggestion.",
+            "type": "string",
+            "enum": [
+              "problem",
+              "idea"
+            ]
+          },
+          "Attach": {
+            "description": "What the reporter chose to send along with the text.",
+            "type": "object",
+            "properties": {
+              "environment": {
+                "type": "boolean",
+                "default": false
+              },
+              "errors": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              }
+            }
+          },
+          "Context": {
+            "description": "What the caller knows must never appear in a public report: the words to replace, by kind.",
+            "type": "object",
+            "properties": {
+              "projects": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "folders": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "files": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "names": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              }
+            }
           },
           "Spec": {
             "description": "A server of the account's list, as the app and agents write it.",

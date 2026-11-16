@@ -48,6 +48,8 @@ struct TestHub {
     learning: Option<String>,
     signup: Signup,
     access: pinned_server::http::Access,
+    /// Where the hub files reports; a test points it at a fake GitHub.
+    reports: Option<pinned_server::reports::Config>,
 }
 
 impl TestHub {
@@ -96,7 +98,7 @@ impl TestHub {
         std::fs::create_dir_all(dir.join("downloads")).unwrap();
         std::fs::write(dir.join("downloads/pinned-server-x86_64-unknown-linux-musl"), "ELF").unwrap();
         let boxes = FakeBoxes::new(dir.join("boxes"));
-        let mut hub = TestHub { runtime: tokio::runtime::Runtime::new().unwrap(), running: None, url: String::new(), database, dir, boxes, policy, learning, signup, access };
+        let mut hub = TestHub { runtime: tokio::runtime::Runtime::new().unwrap(), running: None, url: String::new(), database, dir, boxes, policy, learning, signup, access, reports: None };
         hub.serve(listen);
         hub
     }
@@ -115,6 +117,7 @@ impl TestHub {
             convex_http: Arc::new(Replay::new(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../core/tests/fixtures/convex"), CONVEX_KEY).unwrap()),
             learning_db: self.learning.as_ref().map(|learning| format!("{}/{learning}", postgres())),
             access: self.access.clone(),
+            reports: self.reports.clone(),
         };
         let start = Instant::now();
         // A restarted hub takes its old address, which the dying runtime may not have let go of yet.

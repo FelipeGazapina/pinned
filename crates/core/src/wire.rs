@@ -1453,6 +1453,22 @@ pub enum HubCall {
     },
     /// Removes the account's idea `id`.
     DeleteIdea { id: String },
+    /// What the app asks about reporting an issue (`reports::Ask`): `status` answers `{available, left_today}`,
+    /// `preview` a `reports::Preview`, `similar` a list of `reports::Similar`, `list` the account's `reports::Report`s
+    /// and `save_draft` the draft's `reports::Report`; `delete_draft` answers null.
+    Reports { ask: crate::reports::Ask },
+    /// `reports::Report`: files `draft` as an issue in pinned's public GitHub repository, with the hub's own token.
+    /// `shown` is the hash of the issue the person reviewed (`reports::shown`); a report that renders differently is
+    /// refused. `draft_id` sends that saved draft and removes it. A repeated `request_id` answers the first report.
+    ReportIssue {
+        draft: crate::reports::Draft,
+        #[serde(default)]
+        shown: Option<String>,
+        #[serde(default)]
+        draft_id: Option<String>,
+        #[serde(default)]
+        request_id: Option<String>,
+    },
     /// `mcp::Entry`: adds a server, enabled, or with `id` changes that one, keeping its enabled
     /// state. `secrets` holds what the user typed in the app; a name left out or blank keeps the
     /// value the server has, and a new name needs one.
@@ -2393,6 +2409,21 @@ mod tests {
             json!({ "cmd": "save_idea", "id": "i1", "title": "An iPad app", "text": "Maybe.", "project": "github.com/a/b", "status": "dropped" }),
         );
         round_trip(HubCall::DeleteIdea { id: "i1".into() }, json!({ "cmd": "delete_idea", "id": "i1" }));
+    }
+
+    #[test]
+    fn the_report_calls_round_trip_and_an_older_shape_of_report_issue_reads() {
+        use crate::reports::{Ask, Attach, Draft, Kind};
+        let draft = Draft { kind: Kind::Problem, title: "Crash".into(), happened: "It closes.".into(), expected: String::new(), repeat: String::new(), attach: Attach::default(), to_issue: None };
+        let wire_draft = json!({ "kind": "problem", "title": "Crash", "happened": "It closes.", "expected": "", "repeat": "", "attach": { "environment": false, "errors": [] }, "to_issue": null });
+        round_trip(HubCall::Reports { ask: Ask::Status }, json!({ "cmd": "reports", "ask": { "op": "status" } }));
+        round_trip(HubCall::Reports { ask: Ask::Similar { title: "Crash".into() } }, json!({ "cmd": "reports", "ask": { "op": "similar", "title": "Crash" } }));
+        round_trip(
+            HubCall::ReportIssue { draft: draft.clone(), shown: Some("abc".into()), draft_id: Some("d1".into()), request_id: Some("q1".into()) },
+            json!({ "cmd": "report_issue", "draft": wire_draft, "shown": "abc", "draft_id": "d1", "request_id": "q1" }),
+        );
+        let bare: HubCall = serde_json::from_value(json!({ "cmd": "report_issue", "draft": { "kind": "problem", "title": "Crash", "happened": "It closes." } })).unwrap();
+        assert!(matches!(bare, HubCall::ReportIssue { shown: None, draft_id: None, request_id: None, .. }));
     }
 
     #[test]

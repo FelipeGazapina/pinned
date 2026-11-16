@@ -13,7 +13,7 @@ const SEARCH_LIMIT: usize = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
-    /// GitHub answered 401 or 403 to the hub's token.
+    /// GitHub answered 401, or 403 for a reason other than a rate limit, to the hub's token. A rate limit is `Failed`.
     Unauthorized,
     /// Anything else; never carries the token.
     Failed(String),
@@ -77,6 +77,8 @@ pub struct Comment {
     pub id: u64,
     pub created_at: String,
     pub user_login: String,
+    /// GitHub's `author_association`: `OWNER`, `MEMBER`, `COLLABORATOR`, `CONTRIBUTOR`, `NONE`, ...
+    pub author_association: String,
 }
 
 /// A pull request that mentioned the issue.
@@ -152,6 +154,11 @@ impl Github {
         Github { api: api.trim_end_matches('/').to_owned(), repo: repo.to_owned(), token: token.to_owned() }
     }
 
+    /// `name` of the repository `owner/name`.
+    pub fn repo_name(&self) -> &str {
+        self.repo.rsplit('/').next().unwrap_or(&self.repo)
+    }
+
     fn client(&self) -> Client {
         Client { api: self.api.clone(), token: self.token.clone() }
     }
@@ -198,6 +205,7 @@ impl Github {
                     id: c["id"].as_u64().ok_or_else(|| Error::Failed("GitHub sent a comment without an id".into()))?,
                     created_at: text(&c["created_at"]).unwrap_or_default(),
                     user_login: text(&c["user"]["login"]).unwrap_or_default(),
+                    author_association: text(&c["author_association"]).unwrap_or_default(),
                 })
             })
             .collect()
@@ -304,16 +312,45 @@ mod tests {
     async fn comments_since_lists_the_later_ones_with_their_author() {
         let (fake, github) = setup().await;
         github.create_issue("Crash on launch", "", &[]).await.unwrap();
-        assert_eq!(fake.add_comment_as(1, "bob", "first"), 1);
+        assert_eq!(fake.add_comment_as(1, "bob", "NONE", "first"), 1);
         fake.add_comment_at(1, "alice", "second", "2026-03-01T10:00:00Z");
         fake.add_comment_at(1, "maintainer-bot", "third", "2026-03-02T10:00:00Z");
         let later = github.comments_since(1, "2026-03-01T12:00:00Z").await.unwrap();
-        assert_eq!(later, [Comment { id: 3, created_at: "2026-03-02T10:00:00Z".into(), user_login: "maintainer-bot".into() }]);
+        assert_eq!(later, [Comment { id: 3, created_at: "2026-03-02T10:00:00Z".into(), user_login: "maintainer-bot".into(), author_association: "NONE".into() }]);
         let both = github.comments_since(1, "2026-03-01T00:00:00Z").await.unwrap();
         assert_eq!(both.iter().map(|c| (c.id, c.user_login.as_str())).collect::<Vec<_>>(), [(2, "alice"), (3, "maintainer-bot")]);
         let all = github.comments_since(1, "2025-01-01T00:00:00Z").await.unwrap();
         assert_eq!((all.len(), all[0].user_login.as_str(), all[0].created_at.as_str()), (3, "bob", "2026-01-01T00:00:01Z"));
         assert!(github.comments_since(1, "2999-01-01T00:00:00Z").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_comment_carries_the_author_association_github_gave_it() {
+        let (fake, github) = setup().await;
+        github.create_issue("Crash on launch", "", &[]).await.unwrap();
+        fake.add_comment_as(1, "ana", "OWNER", "We will look.");
+        fake.add_comment_as(1, "bob", "NONE", "Same here.");
+        github.add_comment(1, "From the hub").await.unwrap();
+        let all = github.comments_since(1, "2025-01-01T00:00:00Z").await.unwrap();
+        assert_eq!(all.iter().map(|c| (c.user_login.as_str(), c.author_association.as_str())).collect::<Vec<_>>(), [("ana", "OWNER"), ("bob", "NONE"), ("pinned-hub", "NONE")]);
+    }
+
+    #[tokio::test]
+    async fn a_403_for_a_rate_limit_is_a_temporary_failure_and_any_other_403_is_unauthorized() {
+        let (fake, github) = setup().await;
+        // The header says the limit is used up.
+        fake.fail_next(403, "Forbidden", Some("0"));
+        assert!(matches!(github.issue(1).await, Err(Error::Failed(text)) if text.contains("rate limit")));
+        // The message says so.
+        fake.fail_next(403, "API rate limit exceeded", None);
+        assert!(matches!(github.create_issue("x", "y", &[]).await, Err(Error::Failed(text)) if text.contains("rate limit")));
+        // Neither: the token may not do this.
+        fake.fail_next(403, "Resource not accessible by personal access token", Some("4990"));
+        assert_eq!(github.issue(1).await.unwrap_err(), Error::Unauthorized);
+        // 401 stays unauthorized, and the failure was for one request only.
+        assert!(github.create_issue("Real", "y", &[]).await.is_ok());
+        let stranger = Github::with_api(&fake.url, REPO, "ghp_real_looking_token");
+        assert_eq!(stranger.issue(1).await.unwrap_err(), Error::Unauthorized);
     }
 
     #[tokio::test]

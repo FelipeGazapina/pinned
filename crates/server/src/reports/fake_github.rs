@@ -32,6 +32,7 @@ struct StoredComment {
     login: String,
     body: String,
     created_at: String,
+    association: String,
 }
 
 #[derive(Debug, Clone)]
@@ -54,6 +55,8 @@ struct Repo {
     /// Seconds the clock has moved on from `CLOCK_START`; every new thing happens a second later.
     ticks: i64,
     requests: Vec<Request>,
+    /// Answers the next request with this instead of serving it: status, message and `x-ratelimit-remaining`.
+    fail: Option<(u16, String, Option<String>)>,
     last_headers: Vec<(String, String)>,
 }
 
@@ -63,7 +66,7 @@ impl Repo {
         iso(CLOCK_START + self.ticks)
     }
 
-    fn comment(&mut self, number: u64, login: &str, body: &str, created_at: Option<&str>) -> Option<u64> {
+    fn comment(&mut self, number: u64, login: &str, association: &str, body: &str, created_at: Option<&str>) -> Option<u64> {
         let created_at = match created_at {
             Some(at) => at.to_owned(),
             None => self.now(),
@@ -71,7 +74,7 @@ impl Repo {
         self.comment_ids += 1;
         let id = self.comment_ids;
         let issue = self.issues.get_mut(usize::try_from(number).ok()?.checked_sub(1)?)?;
-        issue.comments.push(StoredComment { id, login: login.into(), body: body.into(), created_at });
+        issue.comments.push(StoredComment { id, login: login.into(), body: body.into(), created_at, association: association.into() });
         Some(id)
     }
 }
@@ -189,18 +192,36 @@ impl FakeGithub {
         }));
     }
 
+    /// Puts an issue at exactly `number`, as GitHub numbers them: the numbers before it that are free become closed
+    /// placeholders, so the next created issue is `number + 1`. Panics when `number` is taken.
+    pub fn add_issue_numbered(&self, number: u64, title: &str, body: &str) {
+        let mut repo = self.repo();
+        let blank = |open| StoredIssue { title: String::new(), body: String::new(), labels: vec![], open, state_reason: None, closed_at: None, comments: vec![], timeline: vec![] };
+        assert!(repo.issues.len() < number as usize, "issue {number} is taken in the fake");
+        while repo.issues.len() + 1 < number as usize {
+            repo.issues.push(blank(false));
+        }
+        repo.issues.push(StoredIssue { title: title.into(), body: body.into(), ..blank(true) });
+    }
+
+    /// The next request is answered `status` with `message`, and `remaining` as `x-ratelimit-remaining`; the ones
+    /// after it are served as usual.
+    pub fn fail_next(&self, status: u16, message: &str, remaining: Option<&str>) {
+        self.repo().fail = Some((status, message.into(), remaining.map(str::to_owned)));
+    }
+
     pub fn add_release(&self, tag: &str, published_at: &str) {
         self.repo().releases.push(json!({ "tag_name": tag, "published_at": published_at, "draft": false, "prerelease": false }));
     }
 
-    /// A comment by `login`, written now; returns its id.
-    pub fn add_comment_as(&self, number: u64, login: &str, body: &str) -> u64 {
-        self.repo().comment(number, login, body, None).expect("no such issue in the fake")
+    /// A comment by `login` with GitHub's `author_association` (`OWNER`, `NONE`, ...), written now; returns its id.
+    pub fn add_comment_as(&self, number: u64, login: &str, association: &str, body: &str) -> u64 {
+        self.repo().comment(number, login, association, body, None).expect("no such issue in the fake")
     }
 
     /// A comment by `login` that says it was written at `created_at`.
     pub fn add_comment_at(&self, number: u64, login: &str, body: &str, created_at: &str) -> u64 {
-        self.repo().comment(number, login, body, Some(created_at)).expect("no such issue in the fake")
+        self.repo().comment(number, login, "NONE", body, Some(created_at)).expect("no such issue in the fake")
     }
 }
 
@@ -236,6 +257,13 @@ async fn handle(State(shared): State<Shared>, method: Method, uri: Uri, headers:
     let mut repo = lock(&shared);
     repo.requests.push(Request { method: method.to_string(), path: uri.path_and_query().map(|p| p.as_str().to_owned()).unwrap_or_default(), body: body_text.clone() });
     repo.last_headers = KEPT_HEADERS.iter().filter_map(|name| Some((name.to_string(), headers.get(*name)?.to_str().ok()?.to_owned()))).collect();
+    if let Some((status, message, remaining)) = repo.fail.take() {
+        let mut response = reply(StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR), json!({ "message": message }));
+        if let Some(value) = remaining.and_then(|v| axum::http::HeaderValue::from_str(&v).ok()) {
+            response.headers_mut().insert("x-ratelimit-remaining", value);
+        }
+        return response;
+    }
     if !authorized {
         return reply(StatusCode::UNAUTHORIZED, json!({ "message": "Bad credentials" }));
     }
@@ -262,14 +290,14 @@ async fn handle(State(shared): State<Shared>, method: Method, uri: Uri, headers:
             let Some(text) = sent["body"].as_str().filter(|t| !t.is_empty()) else {
                 return reply(StatusCode::UNPROCESSABLE_ENTITY, json!({ "message": "Validation Failed" }));
             };
-            let id = repo.comment(n as u64, "pinned-hub", text, None).expect("the issue exists");
+            let id = repo.comment(n as u64, "pinned-hub", "NONE", text, None).expect("the issue exists");
             let made = repo.issues[n - 1].comments.last().cloned().expect("just added");
-            reply(StatusCode::CREATED, json!({ "id": id, "body": made.body, "created_at": made.created_at, "user": { "login": made.login } }))
+            reply(StatusCode::CREATED, json!({ "id": id, "body": made.body, "created_at": made.created_at, "author_association": made.association, "user": { "login": made.login } }))
         }
         ("GET", ["repos", _, _, "issues", _, "comments"]) => {
             let Some(n) = number_at(4, &repo) else { return not_found() };
             let since = query.iter().find(|(k, _)| k == "since").map(|(_, v)| v.as_str()).unwrap_or_default();
-            let found: Vec<Value> = repo.issues[n - 1].comments.iter().filter(|c| c.created_at.as_str() >= since).map(|c| json!({ "id": c.id, "body": c.body, "created_at": c.created_at, "user": { "login": c.login } })).collect();
+            let found: Vec<Value> = repo.issues[n - 1].comments.iter().filter(|c| c.created_at.as_str() >= since).map(|c| json!({ "id": c.id, "body": c.body, "created_at": c.created_at, "author_association": c.association, "user": { "login": c.login } })).collect();
             reply(StatusCode::OK, Value::Array(found))
         }
         ("GET", ["repos", _, _, "issues", _, "timeline"]) => match number_at(4, &repo) {

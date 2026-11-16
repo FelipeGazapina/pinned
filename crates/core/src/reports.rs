@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 /// What the reporter sends: something that does not work, or a suggestion.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
     Problem,
@@ -18,7 +18,7 @@ pub enum Kind {
 
 /// What the reporter wrote. A problem uses `happened`, `expected` and `repeat`; an idea uses `happened` as "The idea"
 /// and `expected` as "Why it helps".
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Draft {
     pub kind: Kind,
     pub title: String,
@@ -35,7 +35,7 @@ pub struct Draft {
 }
 
 /// What the reporter chose to send along with the text.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Attach {
     #[serde(default)]
     pub environment: bool,
@@ -44,7 +44,7 @@ pub struct Attach {
 }
 
 /// What the caller knows must never appear in a public report: the words to replace, by kind.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Context {
     #[serde(default)]
     pub projects: Vec<String>,
@@ -106,7 +106,7 @@ pub struct Report {
 }
 
 /// What the app asks for, by `op`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Ask {
     Status,
@@ -127,6 +127,27 @@ pub enum Ask {
     DeleteDraft {
         id: String,
     },
+}
+
+/// What an agent may not do with the `reports` action: the app's own preview.
+pub fn agent_check_reports(parsed: &crate::surface::Parsed) -> Result<(), String> {
+    match parsed {
+        crate::surface::Parsed::Hub(crate::wire::HubCall::Reports { ask: Ask::Preview { .. } }) => Err("reports: preview is the app's: the user reads the exact public text there when they approve report_issue".into()),
+        _ => Ok(()),
+    }
+}
+
+/// What an agent may not send with `report_issue`: error lines (only the person's own app attaches them), and the
+/// fields only the app's dialog uses.
+pub fn agent_check_report_issue(parsed: &crate::surface::Parsed) -> Result<(), String> {
+    let crate::surface::Parsed::Hub(crate::wire::HubCall::ReportIssue { draft, shown, draft_id, request_id }) = parsed else { return Ok(()) };
+    if !draft.attach.errors.is_empty() {
+        return Err("report_issue: an agent attaches no error lines; set attach.environment if the version and system help".into());
+    }
+    if shown.is_some() || draft_id.is_some() || request_id.is_some() {
+        return Err("report_issue: shown, draft_id and request_id are the app's; send only draft".into());
+    }
+    Ok(())
 }
 
 /// Longest title sent, in characters.
@@ -159,24 +180,24 @@ pub fn scrub(text: &str, ctx: &Context) -> String {
     scrubber::scrub(text, ctx)
 }
 
-/// The title, body and labels of the issue for `draft`. Every part is scrubbed, with the generic rules only: `render`
-/// takes no `Context`, so scrub the draft's words with `scrub` first when the names are known.
-pub fn render(draft: &Draft, env: Option<&str>, report_ref: &str) -> (String, String, Vec<String>) {
-    let title = cap(&clean(&draft.title.replace('\n', " ")), TITLE_CHARS);
+/// The title, body and labels of the issue for `draft`. Every part is scrubbed with `scrub(text, ctx)`, here, so a
+/// caller cannot forget it.
+pub fn render(draft: &Draft, ctx: &Context, env: Option<&str>, report_ref: &str) -> (String, String, Vec<String>) {
+    let title = cap(&clean(&draft.title.replace('\n', " "), ctx), TITLE_CHARS);
     let mut blocks: Vec<String> = vec![];
     let labels = match draft.kind {
         Kind::Problem => {
-            blocks.extend(section("What happened", &draft.happened));
-            blocks.extend(section("Expected", &draft.expected));
-            blocks.extend(section("How to repeat", &draft.repeat));
-            blocks.extend(environment(draft, env));
-            blocks.extend(error_block(&draft.attach.errors));
+            blocks.extend(section("What happened", &draft.happened, ctx));
+            blocks.extend(section("Expected", &draft.expected, ctx));
+            blocks.extend(section("How to repeat", &draft.repeat, ctx));
+            blocks.extend(environment(draft, ctx, env));
+            blocks.extend(error_block(&draft.attach.errors, ctx));
             ["bug", "from-app", "needs-triage"]
         }
         Kind::Idea => {
-            blocks.extend(section("The idea", &draft.happened));
-            blocks.extend(section("Why it helps", &draft.expected));
-            blocks.extend(environment(draft, env));
+            blocks.extend(section("The idea", &draft.happened, ctx));
+            blocks.extend(section("Why it helps", &draft.expected, ctx));
+            blocks.extend(environment(draft, ctx, env));
             ["idea", "from-app", "needs-triage"]
         }
     };
@@ -213,9 +234,9 @@ pub fn search_query(title: &str) -> String {
     terms.join(" ")
 }
 
-/// The scrubbed text with the generic rules, trimmed.
-fn clean(text: &str) -> String {
-    scrubber::scrub(text, &Context::default()).trim().to_owned()
+/// The scrubbed text, trimmed.
+fn clean(text: &str, ctx: &Context) -> String {
+    scrubber::scrub(text, ctx).trim().to_owned()
 }
 
 /// The first `max` characters of `text`, without a trailing space. Cut on a character boundary.
@@ -224,29 +245,29 @@ fn cap(text: &str, max: usize) -> String {
 }
 
 /// A heading and its text, or nothing when the text is empty.
-fn section(heading: &str, text: &str) -> Option<String> {
-    let body = cap(&clean(text), SECTION_CHARS);
+fn section(heading: &str, text: &str, ctx: &Context) -> Option<String> {
+    let body = cap(&clean(text, ctx), SECTION_CHARS);
     (!body.is_empty()).then(|| format!("### {heading}\n\n{body}"))
 }
 
 /// The environment section, when the reporter chose to send it and there is one.
-fn environment(draft: &Draft, env: Option<&str>) -> Option<String> {
+fn environment(draft: &Draft, ctx: &Context, env: Option<&str>) -> Option<String> {
     if !draft.attach.environment {
         return None;
     }
-    section("Environment", env?)
+    section("Environment", env?, ctx)
 }
 
 /// The last error lines, folded away, when there are any.
-fn error_block(errors: &[String]) -> Option<String> {
-    let lines = error_lines(errors);
+fn error_block(errors: &[String], ctx: &Context) -> Option<String> {
+    let lines = error_lines(errors, ctx);
     (!lines.is_empty()).then(|| format!("<details><summary>Last app error lines (scrubbed)</summary>\n\n```\n{}\n```\n\n</details>", lines.join("\n")))
 }
 
 /// The scrubbed error lines: blank ones dropped, at most `ERROR_LINES` of `ERROR_LINE_CHARS` each. A fence in a line
 /// becomes quotes, so the line cannot close the block.
-fn error_lines(errors: &[String]) -> Vec<String> {
-    scrubber::scrub(&errors.join("\n"), &Context::default())
+fn error_lines(errors: &[String], ctx: &Context) -> Vec<String> {
+    scrubber::scrub(&errors.join("\n"), ctx)
         .lines()
         .filter(|line| !line.trim().is_empty())
         .take(ERROR_LINES)
@@ -471,7 +492,7 @@ mod tests {
             attach: Attach { environment: true, errors: vec!["panic at src/app/main.rs:42".into(), format!("token={TOKEN}")] },
             to_issue: None,
         };
-        let (title, body, labels) = render(&draft, Some("pinned 0.18.6 · macOS 15.6 · arm64"), "r-7f3a1c2d");
+        let (title, body, labels) = render(&draft, &none(), Some("pinned 0.18.6 · macOS 15.6 · arm64"), "r-7f3a1c2d");
         assert_eq!(title, "Upload stops at 90%");
         assert_eq!(labels, ["bug", "from-app", "needs-triage"]);
         let expected = concat!(
@@ -496,6 +517,22 @@ mod tests {
     }
 
     #[test]
+    fn render_scrubs_every_field_with_the_context() {
+        let ctx = Context { projects: vec!["loja-web".into()], names: vec!["mac-mini".into()], ..Context::default() };
+        let draft = Draft {
+            happened: "loja-web broke".into(),
+            expected: "mac-mini works".into(),
+            repeat: "open loja-web".into(),
+            attach: Attach { environment: true, errors: vec!["loja-web failed".into()] },
+            ..problem("loja-web crash")
+        };
+        let (title, body, _) = render(&draft, &ctx, Some("on mac-mini"), "r-1");
+        assert_eq!(title, "[project] crash");
+        assert!(!body.contains("loja-web") && !body.contains("mac-mini"), "{body}");
+        assert_eq!(body.matches("[project]").count(), 3, "{body}");
+    }
+
+    #[test]
     fn render_idea_gives_its_two_headings_and_the_environment() {
         let draft = Draft {
             kind: Kind::Idea,
@@ -506,7 +543,7 @@ mod tests {
             attach: Attach { environment: true, errors: vec!["not used by an idea".into()] },
             to_issue: None,
         };
-        let (_, body, labels) = render(&draft, Some("pinned 0.18.6"), "r-7f3a1c2d");
+        let (_, body, labels) = render(&draft, &none(), Some("pinned 0.18.6"), "r-7f3a1c2d");
         assert_eq!(labels, ["idea", "from-app", "needs-triage"]);
         assert_eq!(
             body,
@@ -525,23 +562,23 @@ mod tests {
             attach: Attach { environment: false, errors: vec![] },
             to_issue: None,
         };
-        let (_, body, _) = render(&draft, Some("pinned 0.18.6"), "r-7f3a1c2d");
+        let (_, body, _) = render(&draft, &none(), Some("pinned 0.18.6"), "r-7f3a1c2d");
         assert_eq!(body, "### What happened\n\nIt closes.\n\n---\n\nSent from the pinned app · report r-7f3a1c2d");
     }
 
     #[test]
     fn render_labels_follow_the_kind() {
-        let (_, _, problem_labels) = render(&problem("Crash"), None, "r-1");
+        let (_, _, problem_labels) = render(&problem("Crash"), &none(), None, "r-1");
         assert_eq!(problem_labels, ["bug", "from-app", "needs-triage"]);
         let idea = Draft { kind: Kind::Idea, ..problem("Idea") };
-        let (_, _, idea_labels) = render(&idea, None, "r-1");
+        let (_, _, idea_labels) = render(&idea, &none(), None, "r-1");
         assert_eq!(idea_labels, ["idea", "from-app", "needs-triage"]);
     }
 
     #[test]
     fn render_footer_has_the_ref_and_no_at_sign() {
         let draft = Draft { happened: "Something broke.".into(), ..problem("Crash") };
-        let (_, body, _) = render(&draft, None, "r-7f3a1c2d");
+        let (_, body, _) = render(&draft, &none(), None, "r-7f3a1c2d");
         assert!(body.ends_with("\n\n---\n\nSent from the pinned app · report r-7f3a1c2d"));
         assert!(!body.contains('@'));
     }
@@ -554,7 +591,7 @@ mod tests {
             attach: Attach { environment: false, errors },
             ..problem(&"t".repeat(130))
         };
-        let (title, body, _) = render(&draft, None, "r-1");
+        let (title, body, _) = render(&draft, &none(), None, "r-1");
         assert_eq!(title.chars().count(), 120);
         let happened = format!("### What happened\n\n{}", "x".repeat(4000));
         assert!(body.starts_with(&happened) && body[happened.len()..].starts_with("\n\n<details>"), "{body:.80}");
@@ -566,7 +603,7 @@ mod tests {
     #[test]
     fn render_error_lines_cannot_close_the_block() {
         let draft = Draft { attach: Attach { environment: false, errors: vec!["oops ``` </details> @octocat".into()] }, ..problem("Crash") };
-        let (_, body, _) = render(&draft, None, "r-1");
+        let (_, body, _) = render(&draft, &none(), None, "r-1");
         // The tag and the fence are gone from the line, and the mention is defused.
         assert!(body.contains("oops '''  @\u{200B}octocat\n```"), "{body}");
         assert_eq!(body.matches("```").count(), 2);
@@ -621,6 +658,24 @@ mod tests {
         assert_eq!(serde_json::to_value(&answered).unwrap(), json!({"state": "answered", "at": 1}));
         assert_eq!(serde_json::from_value::<ReportState>(json!({"state": "answered", "at": 1})).unwrap(), answered);
         assert_eq!(serde_json::to_value(ReportState::Draft).unwrap(), json!({"state": "draft"}));
+    }
+
+    #[test]
+    fn an_agent_may_not_preview_attach_errors_or_send_the_apps_fields() {
+        use crate::surface::Parsed;
+        use crate::wire::HubCall;
+        let preview = Parsed::Hub(HubCall::Reports { ask: Ask::Preview { draft: problem("x"), context: Context::default() } });
+        assert!(agent_check_reports(&preview).unwrap_err().contains("preview is the app's"));
+        assert!(agent_check_reports(&Parsed::Hub(HubCall::Reports { ask: Ask::List })).is_ok());
+        let send = |draft: Draft, shown: Option<&str>, draft_id: Option<&str>, request_id: Option<&str>| {
+            Parsed::Hub(HubCall::ReportIssue { draft, shown: shown.map(Into::into), draft_id: draft_id.map(Into::into), request_id: request_id.map(Into::into) })
+        };
+        assert!(agent_check_report_issue(&send(problem("x"), None, None, None)).is_ok());
+        let with_errors = Draft { attach: Attach { environment: false, errors: vec!["boom".into()] }, ..problem("x") };
+        assert!(agent_check_report_issue(&send(with_errors, None, None, None)).unwrap_err().contains("no error lines"));
+        for (shown, draft_id, request_id) in [(Some("h"), None, None), (None, Some("d"), None), (None, None, Some("r"))] {
+            assert!(agent_check_report_issue(&send(problem("x"), shown, draft_id, request_id)).is_err());
+        }
     }
 
     #[test]
