@@ -661,23 +661,26 @@ impl Db {
         Ok(row.map(|r| (AccountView { id: r.get::<_, Uuid>(0).to_string(), email: email.to_owned() }, r.get(1))))
     }
 
+    /// Whether any person has signed up. A team is no one's sign up: `--signup first` looks at people.
     pub async fn has_accounts(&self) -> Result<bool, String> {
-        let row = self.client().await?.query_one("select exists (select 1 from accounts)", &[]).await.map_err(err)?;
+        let row = self.client().await?.query_one("select exists (select 1 from accounts where kind = 'person')", &[]).await.map_err(err)?;
         Ok(row.get(0))
     }
 
+    /// The people on the hub, which `--max-accounts` caps. A team is made by a person and is no account of its own.
     pub async fn account_count(&self) -> Result<i64, String> {
-        let row = self.client().await?.query_one("select count(*) from accounts", &[]).await.map_err(err)?;
+        let row = self.client().await?.query_one("select count(*) from accounts where kind = 'person'", &[]).await.map_err(err)?;
         Ok(row.get(0))
     }
 
+    /// A person's email and password hash; None for a team, which has no password to check.
     pub async fn account(&self, account: Uuid) -> Result<Option<(AccountView, String)>, String> {
-        let row = self.client().await?.query_opt("select email, password_hash from accounts where id = $1", &[&account]).await.map_err(err)?;
+        let row = self.client().await?.query_opt("select email, password_hash from accounts where id = $1 and kind = 'person'", &[&account]).await.map_err(err)?;
         Ok(row.map(|r| (AccountView { id: account.to_string(), email: r.get(0) }, r.get(1))))
     }
 
     pub async fn set_password(&self, account: Uuid, password_hash: &str) -> Result<(), String> {
-        self.client().await?.execute("update accounts set password_hash = $2 where id = $1", &[&account, &password_hash]).await.map_err(err).map(drop)
+        self.client().await?.execute("update accounts set password_hash = $2 where id = $1 and kind = 'person'", &[&account, &password_hash]).await.map_err(err).map(drop)
     }
 
     pub async fn sync_list(&self, account: Uuid, project: &str) -> Result<Vec<sync::Entry>, String> {
