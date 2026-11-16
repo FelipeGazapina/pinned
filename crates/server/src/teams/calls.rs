@@ -492,11 +492,15 @@ pub const MAX_LIFE_REACHED: &str = "it reached the most time a run may take, wai
 ///   lets it go on, called no more for its limits (one limit call per run), up to its max life.
 async fn max_life(hub: &Arc<Hub>, policy: &TeamPolicy) -> Result<(), String> {
     for (team, run) in db::runs_past_max_life(&hub.db, policy.max_life_secs).await? {
-        let ended = async { end_run(hub, &hub.account(team).await?, run, RunState::Failed, MAX_LIFE_REACHED, Some(End::Expired)).await };
-        match ended.await {
-            Err(e) if e != RUN_ENDED => eprintln!("pinned-server: run {run} of team {team} reached its max life but did not end yet: {e}"),
-            _ => {}
-        }
+        let hub = hub.clone();
+        // Each on its own, as a give-up's: one box slow to end holds up no other.
+        tokio::spawn(async move {
+            let ended = async { end_run(&hub, &hub.account(team).await?, run, RunState::Failed, MAX_LIFE_REACHED, Some(End::Expired)).await };
+            match ended.await {
+                Err(e) if e != RUN_ENDED => eprintln!("pinned-server: run {run} of team {team} reached its max life but did not end yet: {e}"),
+                _ => {}
+            }
+        });
     }
     Ok(())
 }
