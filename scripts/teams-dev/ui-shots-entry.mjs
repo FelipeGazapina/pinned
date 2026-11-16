@@ -36,7 +36,6 @@ const OWN_PROJECTS = [
 const THEIR_PROJECTS = [
   { key: "github.com/northstudio/storefront", name: "storefront", repo: "https://github.com/northstudio/storefront", member: "a2" },
   { key: "github.com/northstudio/orders-api", name: "orders-api", repo: "https://github.com/northstudio/orders-api", member: "a2" },
-  { key: "github.com/northstudio/delivery-app", name: "delivery-app", repo: "https://github.com/northstudio/delivery-app", member: "a3" },
 ];
 const team = (id, name, role, credential = {}) => ({ id, name, owner: role === "owner" ? "a1" : "a2", role, credential: { upstash: false, claude: false, github: false, slack: false, ...credential } });
 
@@ -192,8 +191,8 @@ for (const scheme of ["dark", "light"]) {
     await page.click("#account-pages");
     await page.locator(".tm-create").click();
     await page.waitForSelector(".tm-wiz");
-    await shot(page, `app-criar-1-name-${scheme}`);
     await type(page, "#tm-team-name", "North Studio");
+    await shot(page, `app-criar-1-name-${scheme}`);
     await click(page, "Continue");
     await page.waitForSelector("text=Step 2 of 4");
     await page.locator(".tm-check").nth(0).click();

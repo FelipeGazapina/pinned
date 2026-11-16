@@ -78,8 +78,8 @@ const TEAMS_TEXT = {
   keptNote: "You paste the key in a form here in pinned. It is kept with the team and is never shown again.",
   noRush: "No rush: you can connect later. Until then you can set up bots and groups, but no bot runs.",
   form: {
-    upstash: { title: "Connect the Upstash key", fields: [{ id: "key", label: "Upstash Box key", placeholder: "box_…" }, { id: "claude_token", label: "Claude token", placeholder: "sk-ant-oat01-…" }], about: "Create the Box API key in the Box tab of the Upstash console. The Claude token comes from `claude setup-token`." },
-    claude: { title: "Connect the Claude token for boxes", fields: [{ id: "name", label: "Name", placeholder: "team", plain: true, value: "team" }, { id: "token", label: "Claude token", placeholder: "sk-ant-oat01-…" }], about: "Run `claude setup-token` in a terminal and paste what it prints. Connect the Upstash key first." },
+    upstash: { title: "Connect the Upstash key", fields: [{ id: "key", label: "Upstash Box key", placeholder: "box_…" }, { id: "claude_token", label: "Claude token", placeholder: "sk-ant-oat01-…" }], about: "Create the Box API key in the Box tab of the Upstash console. The Claude token comes from claude setup-token." },
+    claude: { title: "Connect the Claude token for boxes", fields: [{ id: "name", label: "Name", placeholder: "team", plain: true, value: "team" }, { id: "token", label: "Claude token", placeholder: "sk-ant-oat01-…" }], about: "Run claude setup-token in a terminal and paste what it prints. Connect the Upstash key first." },
     github: { title: "Connect the GitHub token", fields: [{ id: "token", label: "GitHub token", placeholder: "ghp_…" }], about: "A token that can read the repositories the bots clone." },
   },
   save: "Connect",
@@ -134,7 +134,7 @@ const teamsInitials = (name) => {
   const words = String(name ?? "").split(/[\s@._-]+/).filter(Boolean);
   return ((words.length > 1 ? words[0][0] + words[1][0] : (words[0] ?? "").slice(0, 2)) || "?").toUpperCase();
 };
-const teamsAvatar = (name, size = "") => `<span class="tm-avatar ${size}" aria-hidden="true" style="background:${teamsHue(name)}">${teamsEsc(teamsInitials(name))}</span>`;
+const teamsAvatar = (name, size = "", hue = teamsHue(name)) => `<span class="tm-avatar ${size}" aria-hidden="true" style="background:${hue}">${teamsEsc(teamsInitials(name))}</span>`;
 const teamsErrorText = (e) => String(e?.message ?? e ?? TEAMS_TEXT.noHub);
 /** A project's repository as the hub keys it, github.com/owner/repo, from whatever spelling a machine reported. */
 function teamsRepoKey(repo) {
@@ -231,7 +231,7 @@ function teamsWhereHtml() {
   const rows = teamsKnown.map((team) => row(team.id, team.name, teamsAvatar(team.name), teamsNow?.id === team.id ? t.here : t.roles[team.role] ?? ""));
   return `<div class="tm-where" role="group" aria-label="${t.where}">
     <p class="tm-where-head">${t.where}</p>
-    ${row("", t.justMe, teamsAvatar(teamsPerson()), teamsNow ? "" : t.here)}
+    ${row("", t.justMe, teamsAvatar(teamsPerson(), "", TEAM_HUES[0]), teamsNow ? "" : t.here)}
     ${rows.join("")}
     <button type="button" role="menuitem" class="tm-create" data-team-page="team-create"><span class="tm-plus" aria-hidden="true">+</span><span class="label">${t.create}</span></button>
     <button type="button" role="menuitem" class="tm-join" data-team-page="team-join"><span class="tm-plus" aria-hidden="true">→</span><span class="label">${t.join}</span></button>
@@ -415,7 +415,7 @@ function teamWizardBodyHtml() {
   const people = teamWizard.invites.slice(0, 2).map(() => `<span class="tm-avatar big ghost" aria-hidden="true">+</span>`).join("");
   const summary = t.readyProjects(teamWizard.attached.size) + t.readyAi(connectedCount(), t.creds.length) + t.readyInvites(teamWizard.invites.length);
   const bots = "team-bots" in SHELL_PAGES;
-  return `<div class="tm-faces">${teamsAvatar(teamsPerson(), "big")}${people}</div>
+  return `<div class="tm-faces">${teamsAvatar(teamsPerson(), "big", TEAM_HUES[0])}${people}</div>
     <h2>${t.readyTitle(team)}</h2><p class="tm-lede big">${teamsEsc(summary)}</p><p class="tm-note">${t.readyNoBot}</p>
     <div class="tm-actions">${bots ? tmButton('data-tm="first-bot"', t.firstBot, "primary") : ""}${tmButton('data-tm="open-team"', t.openTeam, bots ? "secondary" : "primary")}</div>`;
 }
@@ -431,7 +431,7 @@ function teamWizardNavHtml() {
 function teamWizardTopHtml() {
   const t = TEAMS_TEXT;
   const step = teamWizard.step;
-  const left = step === 1 ? tmButton('data-tm="leave"', `‹ ${t.backToAccount}`) : step <= 4 ? tmButton('data-tm="prev"', `‹ ${t.back}`, "secondary", teamWizard.busy) : "";
+  const left = step === 1 ? tmButton('data-tm="leave"', `‹ ${t.backToAccount}`) : tmButton('data-tm="prev"', `‹ ${t.back}`, "secondary", teamWizard.busy);
   const right = step <= 4 ? tmButton('data-tm="leave"', t.cancel, "quiet") : "";
   return `<div class="tm-top">${left}<span class="tm-grow"></span>${right}</div>`;
 }
@@ -444,7 +444,7 @@ function renderCreate() {
   setPage(
     `${headHtml(t.createTitle)}<div class="page-body"><div class="tm-wiz">
       <aside class="tm-aside" aria-label="${t.stepsLabel}">
-        <div class="tm-who">${teamsAvatar(person, "big")}<span class="tm-texts"><span class="tm-name">${teamsEsc(person)}</span><span class="tm-about">personal account</span></span></div>
+        <div class="tm-who">${teamsAvatar(person, "big", TEAM_HUES[0])}<span class="tm-texts"><span class="tm-name">${teamsEsc(person)}</span><span class="tm-about">personal account</span></span></div>
         <div class="tm-intro"><h1>${t.createTitle}</h1><p>${t.createAbout}</p></div>
         <ol class="tm-steps">${teamWizardStepsHtml()}</ol>
         <p class="tm-side-note">${t.sideNote}</p>
@@ -602,7 +602,7 @@ function teamJoiningPickHtml() {
       return tmCheckRow(`data-tm="toggle" data-key="${teamsEsc(p.key || p.name)}"${p.key ? "" : " disabled"}`, on, p.name, p.match ? t.teamHas : p.key ? p.repo || p.key : t.projectNoRepo, on ? t.teamSees : t.onlyYou);
     })
     .join("");
-  return `<header class="tm-hero"><div class="tm-faces">${teamsAvatar(teamJoining.team.name, "big")}</div><h1>${t.joinedTitle(teamsEsc(teamJoining.team.name))}</h1><p class="tm-lede big">${t.joinedAbout}</p></header>
+  return `<div class="tm-hero"><div class="tm-faces">${teamsAvatar(teamJoining.team.name, "big")}</div><h1>${t.joinedTitle(teamsEsc(teamJoining.team.name))}</h1><p class="tm-lede big">${t.joinedAbout}</p></div>
     <section class="tm-section"><h2>${t.joinWhich}</h2><p class="tm-note">${teamsEsc(intro)}</p><div class="tm-list">${list}</div></section>
     <section class="tm-card"><h2>${t.seeTitle}</h2>${t.seeLines.map((l) => `<p>${l}</p>`).join("")}</section>
     ${tmError(teamJoining.error)}
@@ -611,7 +611,7 @@ function teamJoiningPickHtml() {
 
 function teamJoiningCodeHtml() {
   const t = TEAMS_TEXT;
-  return `<header class="tm-hero"><h1>${t.joinTitle}</h1><p class="tm-lede big">${t.joinAbout}</p></header>
+  return `<div class="tm-hero"><h1>${t.joinTitle}</h1><p class="tm-lede big">${t.joinAbout}</p></div>
     <form class="tm-form flat" data-tm="join-form" autocomplete="off">
       <label class="tm-field big"><span>${t.codeLabel}</span><input id="tm-join-code" type="text" value="${teamsEsc(teamJoining.code)}" placeholder="${t.codePlaceholder}" autocomplete="off" spellcheck="false"></label>
       ${tmError(teamJoining.error)}

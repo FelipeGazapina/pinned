@@ -402,6 +402,7 @@ test("Finish leads to the Done screen with a truthful summary, and the team is c
   await flush();
   const t = text(a.page());
   assert.match(t, /North Studio is ready/);
+  assert.match(t, /‹ Back/, "the prototype's Back stays on the last screen");
   assert.match(t, /1 project added\./);
   assert.match(t, /The team's AI account is not connected yet, so no bot runs until it is\./);
   assert.match(t, /1 invite code made\. Nothing is sent: you pass it on yourself\./);
