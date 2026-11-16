@@ -280,6 +280,13 @@ async fn keep_in_turn(hub: &Arc<Hub>, team: &Arc<Account>, delivery: &Delivery, 
         if let Some(run) = live {
             return for_live(hub, team, run).await;
         }
+        // Replies held for a run (`for_live`) whose place then ended before its session opened
+        // have no run to reach: they are dropped once, logged and counted on the bot.
+        if db::last_run_never_opened(&hub.db, team.id, &delivery.connector, &subject).await? {
+            eprintln!("pinned-server: team {} workflow {}: {} new thread messages dropped: the thread's run ended before its session opened", team.id, delivery.connector, delivery.messages.len());
+            db::count_skipped(&hub.db, team.id, &delivery.connector, SkipReason::RepliesDropped, delivery.messages.len() as u64).await?;
+            return Ok(Replies::Dropped);
+        }
         eprintln!("pinned-server: team {} workflow {}: new thread messages dropped: the thread has no run and no waiting event", team.id, delivery.connector);
         return Ok(Replies::Dropped);
     };

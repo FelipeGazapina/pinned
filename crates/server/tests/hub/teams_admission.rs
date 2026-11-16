@@ -1368,3 +1368,47 @@ fn a_reply_after_the_claim_waits_for_the_session_and_starts_nothing() {
     assert_eq!(crew.skipped(&footer), Value::Null, "nothing counted");
     twin.shutdown_background();
 }
+
+#[test]
+fn a_reply_held_for_a_claimed_run_whose_place_ends_is_dropped_once_and_counted() {
+    let crew = Crew::new("ta_rc3_ended");
+    let (holder, footer) = (crew.on_bot("Docs"), crew.slack_bot("Footer"));
+    let thread = "1792400190.000100";
+    let (twin, running) = quiet_twin(&crew.hub);
+    admin_on(&crew.hub.database, &format!("update teams set max_live_runs = 1 where id = '{}'", crew.team));
+    assert_eq!(crew.found(crew.labeled(&holder, 9)), Ok(()));
+    assert_eq!(crew.found(crew.mentioned(&footer, thread)), Ok(()));
+    assert_eq!(crew.waiting(&footer), 1, "the thread's event waits");
+    let gate = Arc::new(tokio::sync::Notify::new());
+    crew.hub.boxes.state.lock().unwrap().gate = Some(gate.clone());
+    let (boxes_before, boots_before) = (crew.boxes_created(), crew.boots());
+    let held = crew.live_of(&holder);
+    crew.stop(&held[0]);
+    wait_for("the thread's claim and its box's boot", || crew.waiting(&footer) == 0 && crew.boots() > boots_before);
+    assert_eq!(crew.reserved_at(&footer), vec!["set".to_owned()], "claimed: its place is held while its box boots");
+
+    let delivery = Delivery {
+        connector: footer.clone(),
+        channel: "C0ACME001".into(),
+        thread: thread.into(),
+        messages: vec!["[Slack reply from Dina] still broken".into()],
+        cursor: "1792400195.000100".into(),
+        mentioned: vec![],
+    };
+    assert_eq!(crew.handed_on(&twin, &running.hub, Work::Delivery(delivery.clone())), Ok(()), "the reply is held for the claimed run");
+    assert_eq!(crew.skipped(&footer), Value::Null, "held, not counted");
+
+    // The backstop ends the claimed run's place before its box boots; the box then boots late.
+    crew.past_limit(&footer);
+    crew.reaper_pass();
+    assert_eq!(crew.states_of(&footer), never_started(), "the claimed run never started");
+    gate.notify_one();
+    wait_for("the late box's start to give up", || crew.boxes_created() - boxes_before == 1 && crew.live_of(&footer).is_empty());
+
+    // The next check passes the held reply on again: there is no run to reach, so it is dropped once and counted.
+    assert_eq!(crew.handed(Work::Delivery(delivery)), Ok(()));
+    assert_eq!(crew.skipped(&footer), json!([{ "reason": "never_started", "count": 1 }, { "reason": "replies_dropped", "count": 1 }]));
+    assert_eq!(crew.boxes_created() - boxes_before, 1, "no second box: the event ran nowhere else");
+    assert_eq!(crew.states_of(&footer), never_started(), "one run, ended, and no new one");
+    twin.shutdown_background();
+}

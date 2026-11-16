@@ -493,6 +493,21 @@ pub async fn reserved_run_for(db: &Db, team: Uuid, workflow: &str, subject: &Sub
     Ok(row.map(|r| r.get(0)))
 }
 
+/// Whether the newest run of bot `workflow` on `subject` ended while it still only held its place:
+/// its session never opened (the backstop, a stop or a failed start ended it).
+pub async fn last_run_never_opened(db: &Db, team: Uuid, workflow: &str, subject: &Subject) -> Result<bool, String> {
+    let row = db
+        .client()
+        .await?
+        .query_opt(
+            &format!("select reserved and state not in {LIVE} from team_runs where team = $1 and workflow = $2 and subject = $3 order by started_at desc limit 1"),
+            &[&team, &workflow, &json(subject)?],
+        )
+        .await
+        .map_err(err)?;
+    Ok(row.is_some_and(|r| r.get(0)))
+}
+
 /// Whether live run `run` still only holds its place.
 pub async fn is_reserved(db: &Db, team: Uuid, run: Uuid) -> Result<bool, String> {
     let row = db.client().await?.query_opt("select reserved from team_runs where team = $1 and id = $2", &[&team, &run]).await.map_err(err)?;

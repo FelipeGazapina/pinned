@@ -11741,7 +11741,7 @@
             ]
           },
           "SkipReason": {
-            "description": "Why an event of a bot started no run: `\"off\"`, `\"draft\"`, `\"manual\"` (a trigger of a workflow\nthat runs only by Run now), `\"queue_full\"` (the oldest of 20 waiting events, dropped for a\nnewer one), `\"bot_removed\"` (its workflow was deleted before its turn), `\"start_failed\"` (its\nturn came and its run did not start) or `\"never_started\"` (its place was held and its session\nnever opened within `TeamPolicy::reservation_limit_secs`).",
+            "description": "Why an event of a bot started no run: `\"off\"`, `\"draft\"`, `\"manual\"` (a trigger of a workflow\nthat runs only by Run now), `\"queue_full\"` (the oldest of 20 waiting events, dropped for a\nnewer one), `\"bot_removed\"` (its workflow was deleted before its turn), `\"start_failed\"` (its\nturn came and its run did not start), `\"never_started\"` (its place was held and its session\nnever opened within `TeamPolicy::reservation_limit_secs`) or `\"replies_dropped\"` (thread replies\nheld for a run whose place then ended before its session opened, counted per reply).",
             "type": "string",
             "enum": [
               "off",
@@ -11750,7 +11750,8 @@
               "queue_full",
               "bot_removed",
               "start_failed",
-              "never_started"
+              "never_started",
+              "replies_dropped"
             ]
           },
           "Answer2": {
@@ -23364,7 +23365,7 @@
             ]
           },
           "SkipReason": {
-            "description": "Why an event of a bot started no run: `\"off\"`, `\"draft\"`, `\"manual\"` (a trigger of a workflow\nthat runs only by Run now), `\"queue_full\"` (the oldest of 20 waiting events, dropped for a\nnewer one), `\"bot_removed\"` (its workflow was deleted before its turn), `\"start_failed\"` (its\nturn came and its run did not start) or `\"never_started\"` (its place was held and its session\nnever opened within `TeamPolicy::reservation_limit_secs`).",
+            "description": "Why an event of a bot started no run: `\"off\"`, `\"draft\"`, `\"manual\"` (a trigger of a workflow\nthat runs only by Run now), `\"queue_full\"` (the oldest of 20 waiting events, dropped for a\nnewer one), `\"bot_removed\"` (its workflow was deleted before its turn), `\"start_failed\"` (its\nturn came and its run did not start), `\"never_started\"` (its place was held and its session\nnever opened within `TeamPolicy::reservation_limit_secs`) or `\"replies_dropped\"` (thread replies\nheld for a run whose place then ended before its session opened, counted per reply).",
             "type": "string",
             "enum": [
               "off",
@@ -23373,7 +23374,8 @@
               "queue_full",
               "bot_removed",
               "start_failed",
-              "never_started"
+              "never_started",
+              "replies_dropped"
             ]
           },
           "Answer2": {
@@ -32183,7 +32185,7 @@
             ]
           },
           "SkipReason": {
-            "description": "Why an event of a bot started no run: `\"off\"`, `\"draft\"`, `\"manual\"` (a trigger of a workflow\nthat runs only by Run now), `\"queue_full\"` (the oldest of 20 waiting events, dropped for a\nnewer one), `\"bot_removed\"` (its workflow was deleted before its turn), `\"start_failed\"` (its\nturn came and its run did not start) or `\"never_started\"` (its place was held and its session\nnever opened within `TeamPolicy::reservation_limit_secs`).",
+            "description": "Why an event of a bot started no run: `\"off\"`, `\"draft\"`, `\"manual\"` (a trigger of a workflow\nthat runs only by Run now), `\"queue_full\"` (the oldest of 20 waiting events, dropped for a\nnewer one), `\"bot_removed\"` (its workflow was deleted before its turn), `\"start_failed\"` (its\nturn came and its run did not start), `\"never_started\"` (its place was held and its session\nnever opened within `TeamPolicy::reservation_limit_secs`) or `\"replies_dropped\"` (thread replies\nheld for a run whose place then ended before its session opened, counted per reply).",
             "type": "string",
             "enum": [
               "off",
@@ -32192,7 +32194,8 @@
               "queue_full",
               "bot_removed",
               "start_failed",
-              "never_started"
+              "never_started",
+              "replies_dropped"
             ]
           },
           "Answer": {
@@ -40658,7 +40661,7 @@
             ]
           },
           "SkipReason": {
-            "description": "Why an event of a bot started no run: `\"off\"`, `\"draft\"`, `\"manual\"` (a trigger of a workflow\nthat runs only by Run now), `\"queue_full\"` (the oldest of 20 waiting events, dropped for a\nnewer one), `\"bot_removed\"` (its workflow was deleted before its turn), `\"start_failed\"` (its\nturn came and its run did not start) or `\"never_started\"` (its place was held and its session\nnever opened within `TeamPolicy::reservation_limit_secs`).",
+            "description": "Why an event of a bot started no run: `\"off\"`, `\"draft\"`, `\"manual\"` (a trigger of a workflow\nthat runs only by Run now), `\"queue_full\"` (the oldest of 20 waiting events, dropped for a\nnewer one), `\"bot_removed\"` (its workflow was deleted before its turn), `\"start_failed\"` (its\nturn came and its run did not start), `\"never_started\"` (its place was held and its session\nnever opened within `TeamPolicy::reservation_limit_secs`) or `\"replies_dropped\"` (thread replies\nheld for a run whose place then ended before its session opened, counted per reply).",
             "type": "string",
             "enum": [
               "off",
@@ -40667,7 +40670,8 @@
               "queue_full",
               "bot_removed",
               "start_failed",
-              "never_started"
+              "never_started",
+              "replies_dropped"
             ]
           },
           "Answer": {
@@ -58704,7 +58708,7 @@
             ]
           },
           "SkipReason": {
-            "description": "Why an event of a bot started no run: `\"off\"`, `\"draft\"`, `\"manual\"` (a trigger of a workflow\nthat runs only by Run now), `\"queue_full\"` (the oldest of 20 waiting events, dropped for a\nnewer one), `\"bot_removed\"` (its workflow was deleted before its turn), `\"start_failed\"` (its\nturn came and its run did not start) or `\"never_started\"` (its place was held and its session\nnever opened within `TeamPolicy::reservation_limit_secs`).",
+            "description": "Why an event of a bot started no run: `\"off\"`, `\"draft\"`, `\"manual\"` (a trigger of a workflow\nthat runs only by Run now), `\"queue_full\"` (the oldest of 20 waiting events, dropped for a\nnewer one), `\"bot_removed\"` (its workflow was deleted before its turn), `\"start_failed\"` (its\nturn came and its run did not start), `\"never_started\"` (its place was held and its session\nnever opened within `TeamPolicy::reservation_limit_secs`) or `\"replies_dropped\"` (thread replies\nheld for a run whose place then ended before its session opened, counted per reply).",
             "type": "string",
             "enum": [
               "off",
@@ -58713,7 +58717,8 @@
               "queue_full",
               "bot_removed",
               "start_failed",
-              "never_started"
+              "never_started",
+              "replies_dropped"
             ]
           }
         }
@@ -58917,7 +58922,7 @@
             ]
           },
           "SkipReason": {
-            "description": "Why an event of a bot started no run: `\"off\"`, `\"draft\"`, `\"manual\"` (a trigger of a workflow\nthat runs only by Run now), `\"queue_full\"` (the oldest of 20 waiting events, dropped for a\nnewer one), `\"bot_removed\"` (its workflow was deleted before its turn), `\"start_failed\"` (its\nturn came and its run did not start) or `\"never_started\"` (its place was held and its session\nnever opened within `TeamPolicy::reservation_limit_secs`).",
+            "description": "Why an event of a bot started no run: `\"off\"`, `\"draft\"`, `\"manual\"` (a trigger of a workflow\nthat runs only by Run now), `\"queue_full\"` (the oldest of 20 waiting events, dropped for a\nnewer one), `\"bot_removed\"` (its workflow was deleted before its turn), `\"start_failed\"` (its\nturn came and its run did not start), `\"never_started\"` (its place was held and its session\nnever opened within `TeamPolicy::reservation_limit_secs`) or `\"replies_dropped\"` (thread replies\nheld for a run whose place then ended before its session opened, counted per reply).",
             "type": "string",
             "enum": [
               "off",
@@ -58926,7 +58931,8 @@
               "queue_full",
               "bot_removed",
               "start_failed",
-              "never_started"
+              "never_started",
+              "replies_dropped"
             ]
           }
         }
