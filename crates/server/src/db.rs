@@ -22,7 +22,7 @@ use pinned_core::surface::{ActorRole, AuditEntry, AuditOutcome, Confirmation, De
 use pinned_core::wire::{AccountView, AgentProject, AgentView, InviteView, MachineView, NewInvite, NEVER_EXPIRES};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
@@ -672,7 +672,9 @@ impl Db {
             (Some(agreed), Some((sha, _))) => agreed == sha,
             _ => true,
         };
-        let replaced: i64 = stored.iter().filter(|(path, _)| files.iter().any(|(e, _, agreed)| &e.path == *path && kept(path, agreed))).map(|(_, (_, size))| size).sum();
+        // The paths this push replaces: a deletion skipped for its stale `agreed` replaces nothing.
+        let replacing: BTreeSet<&str> = files.iter().filter(|(e, _, agreed)| kept(&e.path, agreed)).map(|(e, _, _)| e.path.as_str()).collect();
+        let replaced: i64 = stored.iter().filter(|(path, _)| replacing.contains(path.as_str())).map(|(_, (_, size))| size).sum();
         let incoming: i64 = files.iter().map(|(_, data, _)| data.len() as i64).sum();
         if incoming > replaced && used - replaced + incoming > SYNC_QUOTA {
             return Err(format!("{}{} MB; delete old sessions to sync more", sync::LIMIT_REFUSAL, SYNC_QUOTA >> 20));
