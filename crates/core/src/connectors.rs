@@ -2164,7 +2164,7 @@ impl Connectors {
                     let (run, newest) = self.fallback(&d).await?;
                     let folder = run.cwd.clone();
                     if let Err(why) = open(Work::Run(run)).await.taken() {
-                        return Err(format!("could not open a session in {} for a Slack thread: {why}; the next check tries again", folder.display()));
+                        return Err(thread_open_failed(&folder, &why));
                     }
                     newest
                 };
@@ -3135,6 +3135,16 @@ fn trigger_mention(input: &TriggerInput) -> String {
     let TriggerInput::Slack { posts, thread, request, .. } = input else { return String::new() };
     let ts = request.as_deref().unwrap_or(thread);
     posts.iter().find(|post| post.ts == ts).or_else(|| posts.first()).map(|post| post.text.clone()).unwrap_or_default()
+}
+
+/// What a check says when it could not open a session for a Slack thread's reply. A refusal that
+/// already says the next check tries again (a team's "still starting") is not given that twice.
+fn thread_open_failed(folder: &Path, why: &str) -> String {
+    let again = "the next check tries again";
+    match why.ends_with(again) {
+        true => format!("could not open a session in {} for a Slack thread: {why}", folder.display()),
+        false => format!("could not open a session in {} for a Slack thread: {why}; {again}", folder.display()),
+    }
 }
 
 /// A file-issue title for when the step's own renders empty: the mention's first non-empty
@@ -10293,6 +10303,19 @@ mod tests {
         let filed = file_on_a_mention_in_an_old_thread("  ", "", "<@UBOT> checkout drops the coupon  \nsteps: add one, pay\nexpected: 10% off");
         assert_eq!(filed.len(), 1, "{filed:?}");
         assert_eq!(filed[0]["title"], "checkout drops the coupon");
+    }
+
+    #[test]
+    fn a_thread_open_refusal_says_the_next_check_tries_again_once() {
+        let folder = Path::new("/repo");
+        assert_eq!(
+            thread_open_failed(folder, "no tab took it"),
+            "could not open a session in /repo for a Slack thread: no tab took it; the next check tries again"
+        );
+        assert_eq!(
+            thread_open_failed(folder, "the bot of workflow w1 has a run on this thread that is still starting; the next check tries again"),
+            "could not open a session in /repo for a Slack thread: the bot of workflow w1 has a run on this thread that is still starting; the next check tries again"
+        );
     }
 
     #[test]
