@@ -54,6 +54,8 @@ const DRAFTS_KEPT: i64 = 50;
 const AGENT_DRAFTS_KEPT: i64 = 10;
 /// The error a send left when the hub stopped before GitHub answered.
 pub const RESTARTED: &str = "the hub restarted while sending; check My reports before trying again";
+/// Why a send the restart failed is not tried again while the hub that stopped may still be sending it.
+const RESTART_WAIT: &str = "This report was being sent when the hub restarted. Try again in a minute.";
 /// Most reports `list` answers.
 const LIST_LIMIT: i64 = 200;
 
@@ -69,11 +71,12 @@ create unique index if not exists reports_request on reports (account, request_i
 alter table reports add column if not exists counts boolean not null default true;
 alter table reports add column if not exists hidden boolean not null default false;
 alter table reports add column if not exists first_sent_at bigint;
+alter table reports add column if not exists failed_at bigint;
 ";
 
 const COLUMNS: &str = "id, kind, title, draft, state, issue, url, followed, by_agent, created_at, updated_at";
-/// `COLUMNS`, then whether the row counts toward the daily limit, when it was sent and when it was first sent.
-const SEND_COLUMNS: &str = "id, kind, title, draft, state, issue, url, followed, by_agent, created_at, updated_at, counts, sent_at, first_sent_at";
+/// `COLUMNS`, then whether the row counts toward the daily limit, when it was sent, first sent and failed.
+const SEND_COLUMNS: &str = "id, kind, title, draft, state, issue, url, followed, by_agent, created_at, updated_at, counts, sent_at, first_sent_at, failed_at";
 
 /// Where the hub files reports: the GitHub API, the repository (`owner/name`) and the hub's own token.
 #[derive(Clone, PartialEq, Eq)]
@@ -329,7 +332,7 @@ async fn ready(db: &Db) -> Result<(), String> {
     db.run_schema(SCHEMA).await?;
     db.run_schema(super::poller::SCHEMA).await?;
     let failed = json(ReportState::Failed { error: RESTARTED.into() })?;
-    let swept = db.client().await?.execute("update reports set state = $1, updated_at = $2 where state->>'state' = 'sending'", &[&failed, &now_secs()]).await.map_err(err)?;
+    let swept = db.client().await?.execute("update reports set state = $1, updated_at = $2, failed_at = $2 where state->>'state' = 'sending'", &[&failed, &now_secs()]).await.map_err(err)?;
     if swept > 0 {
         eprintln!("pinned-server: {swept} report(s) were sending when a hub stopped; they read as failed");
     }
@@ -412,11 +415,12 @@ struct SendRow {
     sent_at: Option<i64>,
     /// When its first try was sent; a try again never moves it.
     first_sent_at: Option<i64>,
+    failed_at: Option<i64>,
 }
 
 /// A row of `SEND_COLUMNS`.
 fn send_row(row: &tokio_postgres::Row) -> Result<SendRow, String> {
-    Ok(SendRow { key: row.get(0), report: stored(row)?, counts: row.get(11), sent_at: row.get(12), first_sent_at: row.get(13) })
+    Ok(SendRow { key: row.get(0), report: stored(row)?, counts: row.get(11), sent_at: row.get(12), first_sent_at: row.get(13), failed_at: row.get(14) })
 }
 
 fn could_not_send(error: &str) -> String {
@@ -793,6 +797,15 @@ impl Hub {
             }
             None => again.as_ref().map(|again| again.key),
         };
+        // A send the restart failed may still be on its way from a hub that stopped but runs on, as in a deploy: it is
+        // tried again once that hub's call to GitHub has surely ended.
+        if let Some(row) = &again {
+            let wait = i64::try_from((github.timeout() * 2).as_secs()).unwrap_or(i64::MAX).max(1);
+            let restarted = matches!(&row.report.state, ReportState::Failed { error } if error == RESTARTED);
+            if restarted && row.failed_at.is_some_and(|at| at > now_secs() - wait) {
+                return Err(RESTART_WAIT.into());
+            }
+        }
         // A row that already counts in the window is not counted, nor held to the limit, again.
         let already = again.as_ref().is_some_and(|row| row.counts && row.sent_at.is_some_and(|at| at > now_secs() - WINDOW_SECS));
         if !already {
@@ -968,7 +981,7 @@ impl Hub {
     async fn failed(&self, account: &Account, id: Uuid, error: &GithubError, counts: bool) -> Result<Value, String> {
         eprintln!("pinned-server: could not file account {}'s report {id}: {error}", account.id);
         let failed = json(ReportState::Failed { error: error.public_send().into() })?;
-        if let Err(e) = self.record("update reports set state = $3, counts = $4, updated_at = $5 where id = $1 and account = $2 returning id", &[&id, &account.id, &failed, &counts, &now_secs()]).await {
+        if let Err(e) = self.record("update reports set state = $3, counts = $4, updated_at = $5, failed_at = $5 where id = $1 and account = $2 returning id", &[&id, &account.id, &failed, &counts, &now_secs()]).await {
             eprintln!("pinned-server: account {}'s report {id} failed and could not be recorded; the hub's next start fails it: {e}", account.id);
         }
         Err(could_not_send(error.public_send()))

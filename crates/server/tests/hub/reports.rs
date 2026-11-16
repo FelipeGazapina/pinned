@@ -885,6 +885,41 @@ fn try_again_finds_nothing_in_a_copy_of_the_footer_by_someone_else_and_files_the
 }
 
 #[test]
+fn try_again_right_after_a_restart_waits_out_the_stopped_hubs_send_then_looks_for_it() {
+    let fake = Fake::start();
+    // Calls give up after three seconds, so a send the restart failed waits six.
+    let config = Config { timeout: Duration::from_secs(3), ..fake.config() };
+    let mut hub = TestHub::start_reports("reports_restart_wait", Signup::Open, Policy::default(), false, Default::default(), "127.0.0.1:0", Some(config));
+    let token = signed_up(&hub, "ana@example.test");
+    let mut ana = Client::connect(&hub.url, &token);
+    let draft = problem("Crash on launch", "It closes.");
+    let id = ask(&mut ana, json!({ "op": "save_draft", "draft": draft })).unwrap()["id"].as_str().unwrap().to_owned();
+    // The hub was sending it when it stopped; in a deploy, the old hub may still be posting it.
+    admin_on(
+        &hub.database,
+        &format!("update reports set state = '{{\"state\": \"sending\"}}', sent_at = extract(epoch from now())::bigint, first_sent_at = extract(epoch from now())::bigint, request_id = 'try-r' where id = '{id}'"),
+    );
+    hub.restart();
+    let mut ana = Client::connect(&hub.url, &token);
+    let restarted = json!({ "state": "failed", "error": "the hub restarted while sending; check My reports before trying again" });
+    assert_eq!(listed_row(&mut ana, &id)["state"], restarted);
+
+    let extra = reviewed(&mut ana, &draft, json!({ "request_id": "try-r" })).unwrap();
+    let asked = fake.github.requests().len();
+    assert_eq!(report_issue(&mut ana, draft.clone(), extra.clone()), Err("This report was being sent when the hub restarted. Try again in a minute.".into()));
+    assert_eq!((fake.posts(), fake.github.requests().len()), ((0, 0), asked), "nothing is posted, nor looked for");
+    assert_eq!(listed_row(&mut ana, &id)["state"], restarted, "it stays failed");
+    assert_eq!(left_today(&mut ana), 4, "it still counts");
+
+    // Six seconds later: the old hub's call is over, and Try again looks for what it filed before it posts.
+    admin_on(&hub.database, &format!("update reports set failed_at = failed_at - 6 where id = '{id}'"));
+    let again = report_issue(&mut ana, draft, extra).unwrap();
+    assert_eq!((again["id"].clone(), again["issue"].clone(), again["state"].clone()), (json!(id), json!(1), json!({ "state": "open" })), "{again}");
+    let looked = fake.github.requests().into_iter().filter(|r| r.method == "GET" && r.path.starts_with("/search/issues?") && r.path.contains(&reports::ref_of(&id))).count();
+    assert_eq!((looked, fake.posts(), left_today(&mut ana)), (1, (1, 0), json!(4)));
+}
+
+#[test]
 fn a_send_that_may_have_reached_github_says_to_check_my_reports_and_one_that_never_left_keeps_its_text() {
     let fake = Fake::start();
     let hub = TestHub::start_reports("reports_may_have_filed", Signup::Open, Policy::default(), false, Default::default(), "127.0.0.1:0", Some(fake.impatient()));
