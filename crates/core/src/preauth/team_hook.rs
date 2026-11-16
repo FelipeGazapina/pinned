@@ -337,6 +337,11 @@ mod tests {
         let (_, message) = decision(&payload("Bash", json!({ "command": "SECRET_KEY=abc.def/1+2:x@y%z-_ vercel deploy --prod" })), true, Ok(r#"{"id":"k1"}"#));
         let Some(Message::AskPeople { question, .. }) = message else { panic!("no ask") };
         assert_eq!(question, "deploy: SECRET_KEY=[hidden] vercel deploy --prod");
+        // A one-word name is hidden from the members asked, and from the notice built from it.
+        let (_, message) = decision(&payload("Bash", json!({ "command": "DBPASSWORD=hunter2 vercel deploy --prod" })), true, Ok(r#"{"id":"k1"}"#));
+        let Some(Message::AskPeople { question, .. }) = message else { panic!("no ask") };
+        assert_eq!(question, "deploy: DBPASSWORD=[hidden] vercel deploy --prod");
+        assert_eq!(scrub("STRIPEKEY=abc MYTOKEN=xyz"), "STRIPEKEY=[hidden] MYTOKEN=[hidden]");
         // A name that contains a secret word anywhere is a secret: hiding more is safer.
         let (out, message) = decision(&payload("Bash", json!({ "command": "AUTHOR=$(whoami) MONKEY=x vercel deploy --prod" })), true, Ok(r#"{"id":"k1"}"#));
         assert_eq!(denied(&out.unwrap()), "this step hides a command in a secret");
@@ -344,11 +349,6 @@ mod tests {
         assert_eq!(scrub("AUTHOR=x MONKEY=y KEY=z"), "AUTHOR=[hidden] MONKEY=[hidden] KEY=[hidden]");
         assert!(hides_command("AUTHOR=$(x) MONKEY=`y` NOTE=a;b"));
         assert!(!hides_command("NOTE=$(x) USER=`y`"));
-        // A one-word name is hidden from the members asked, and from the notice built from it.
-        let (_, message) = decision(&payload("Bash", json!({ "command": "DBPASSWORD=hunter2 vercel deploy --prod" })), true, Ok(r#"{"id":"k1"}"#));
-        let Some(Message::AskPeople { question, .. }) = message else { panic!("no ask") };
-        assert_eq!(question, "deploy: DBPASSWORD=[hidden] vercel deploy --prod");
-        assert_eq!(scrub("STRIPEKEY=abc MYTOKEN=xyz"), "STRIPEKEY=[hidden] MYTOKEN=[hidden]");
         assert!(hides_command("--password='$(x)'"));
     }
 
