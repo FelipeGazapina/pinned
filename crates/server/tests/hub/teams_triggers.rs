@@ -61,6 +61,41 @@ impl Crew {
         id
     }
 
+    /// A workflow bob saves with a graph of `steps` after its trigger, one after another, each
+    /// `(id, step)` without its name and position. Its trigger watches `watch`.
+    fn graph_workflow(&self, name: &str, watch: Value, steps: &[(&str, Value)]) -> String {
+        let mut nodes = vec![json!({ "id": "t", "name": "Trigger", "position": [0, 0], "type": "trigger", "watch": watch })];
+        let mut edges = vec![];
+        let mut from = "t".to_owned();
+        for (i, (id, step)) in steps.iter().enumerate() {
+            let mut node = step.clone();
+            node["id"] = json!(id);
+            node["name"] = json!(format!("Step {i}"));
+            node["position"] = json!([i + 1, 0]);
+            nodes.push(node);
+            edges.push(json!({ "from": from, "port": "out", "to": id }));
+            from = (*id).to_owned();
+        }
+        let saved = self
+            .hub_op(&self.bob, json!({ "cmd": "save_connector", "connector": {
+                "name": name, "enabled": false, "trigger": watch,
+                "folder": self.folder, "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false,
+                "instructions": "", "machine": { "kind": "upstash-box", "size": "small" },
+                "graph": { "nodes": nodes, "edges": edges },
+            } }))
+            .unwrap();
+        saved["id"].as_str().unwrap().to_owned()
+    }
+
+    fn try_save_bot(&self, id: &str) -> Result<Value, String> {
+        let bot = Bot { workflow: id.to_owned(), name: String::new(), owner: None, calls: CallRules::default(), limits: BotLimits { usd: 5.0, minutes: 30 }, on: false, on_by: None, once: false, off_note: None };
+        self.call(&self.bob, TeamOp::SaveBot { bot })
+    }
+
+    fn try_turn_on(&self, id: &str) -> Result<Value, String> {
+        self.call(&self.ana, TeamOp::TurnBotOn { workflow: id.to_owned(), on: true })
+    }
+
     /// bob saves the bot of workflow `id` again, which puts it back to a draft.
     fn save_bot(&self, id: &str) {
         let bot = Bot { workflow: id.to_owned(), name: String::new(), owner: None, calls: CallRules::default(), limits: BotLimits { usd: 5.0, minutes: 30 }, on: false, on_by: None, once: false, off_note: None };
@@ -236,4 +271,29 @@ fn a_manual_bot_gets_no_run_from_its_poller_and_runs_only_by_run_now() {
     crew.call(&crew.bob, TeamOp::RunNow { workflow: id.clone() }).unwrap();
     assert_eq!(crew.runs(), vec![("working".to_owned(), crew.bob.id.to_string())]);
     assert_eq!(crew.hub.boxes.live().len(), 1);
+}
+
+#[test]
+fn a_bot_whose_workflow_reaches_its_session_twice_is_refused_and_a_one_session_bot_turns_on() {
+    let crew = Crew::new("tt_sessions");
+    let linear = json!({ "kind": "linear-label", "label": "agent" });
+    let talk = |prompt: &str| json!({ "type": "talk", "prompt": prompt });
+    let two = crew.graph_workflow("Two talks", linear.clone(), &[("a", talk("Look.")), ("b", json!({ "type": "session", "prompt": "Fix." }))]);
+    let helper = crew.graph_workflow("Helper", json!({ "kind": "called" }), &[("h", talk("Help."))]);
+    let calls = crew.graph_workflow("Talk and call", linear.clone(), &[("a", talk("Look.")), ("c", json!({ "type": "call", "workflow": helper }))]);
+    let one = crew.graph_workflow("One session", linear, &[("s", json!({ "type": "session", "prompt": "Fix." }))]);
+    let refused = Err("a bot's workflow may have only one session or talk step, counting the workflows it calls: a workflow with more is not available as a bot yet".to_owned());
+
+    for id in [&two, &calls] {
+        assert_eq!(crew.try_save_bot(id).map(drop), refused, "saving the bot");
+        assert_eq!(crew.try_turn_on(id).map(drop), refused, "turning it on");
+    }
+    assert_eq!(crew.call(&crew.bob, TeamOp::Bots).unwrap().as_array().unwrap().iter().filter(|b| b["on"] == json!(true)).count(), 0, "no bot is on");
+
+    assert_eq!(crew.try_save_bot(&one).map(drop), Ok(()));
+    assert_eq!(crew.try_turn_on(&one).map(drop), Ok(()), "a one-session workflow still turns on");
+    let migrated = crew.on_bot("Footer");
+    let on: Vec<String> = crew.call(&crew.bob, TeamOp::Bots).unwrap().as_array().unwrap().iter().filter(|b| b["on"] == json!(true)).map(|b| b["workflow"].as_str().unwrap().to_owned()).collect();
+    assert_eq!(on.len(), 2);
+    assert!(on.contains(&one) && on.contains(&migrated), "{on:?}");
 }

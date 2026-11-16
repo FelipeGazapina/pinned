@@ -7,6 +7,8 @@
 use super::{db, Scope};
 use crate::hub::{Account, Hub};
 use pinned_core::connectors::{BoxStep, Connector, Placement, Trigger};
+use pinned_core::graph::migrate::migrate;
+use pinned_core::graph::runner::{session_steps, Library};
 use pinned_core::graph::{NodeKind, Watch};
 use pinned_core::teams::{Bot, BotLimits, CallRules, Run, RunState, TeamEvent, TeamProject, Who};
 use pinned_core::wire::HubCall;
@@ -28,14 +30,24 @@ async fn workflows(hub: &Arc<Hub>, team: &Account) -> Result<Vec<Connector>, Str
 }
 
 async fn workflow(hub: &Arc<Hub>, team: &Account, id: &str) -> Result<Connector, String> {
-    workflows(hub, team).await?.into_iter().find(|c| c.id == id).ok_or_else(|| format!("this team has no workflow {id}"))
+    find(&workflows(hub, team).await?, id).cloned()
 }
+
+fn find<'a>(workflows: &'a [Connector], id: &str) -> Result<&'a Connector, String> {
+    workflows.iter().find(|c| c.id == id).ok_or_else(|| format!("this team has no workflow {id}"))
+}
+
+/// What a bot whose workflow would reach its session more than once is refused with. On a team,
+/// each later reach would type into no session or open a new run in a new box.
+pub const MORE_THAN_ONE_SESSION: &str =
+    "a bot's workflow may have only one session or talk step, counting the workflows it calls: a workflow with more is not available as a bot yet";
 
 /// Refuses a workflow whose trigger is not one a bot can have yet ("scheduled and GitHub-event bots
 /// are not available yet"). Linear, Slack and manual triggers are fine, and today they are the only kinds.
 /// The matches name every kind on purpose: a schedule or GitHub-event trigger added later does not
-/// compile until it is refused here.
-fn available(workflow: &Connector) -> Result<(), String> {
+/// compile until it is refused here. Refuses a graph that holds more than one session or talk step,
+/// with those of the team's `workflows` it calls (`MORE_THAN_ONE_SESSION`).
+fn available(workflow: &Connector, workflows: &[Connector]) -> Result<(), String> {
     match &workflow.trigger {
         Trigger::LinearLabel { .. } | Trigger::SlackMention { .. } | Trigger::SlackMessage { .. } | Trigger::Called | Trigger::Manual => {}
     }
@@ -47,6 +59,10 @@ fn available(workflow: &Connector) -> Result<(), String> {
         match watch {
             Watch::LinearLabel { .. } | Watch::SlackMention { .. } | Watch::SlackMessage { .. } | Watch::Called | Watch::Manual => {}
         }
+    }
+    let library: Library = workflows.iter().map(|c| (c.id.clone(), c.graph.clone().unwrap_or_else(|| migrate(c)))).collect();
+    if session_steps(&library, &workflow.id) > 1 {
+        return Err(MORE_THAN_ONE_SESSION.into());
     }
     Ok(())
 }
@@ -138,8 +154,9 @@ async fn check_who(hub: &Arc<Hub>, team: Uuid, calls: &CallRules) -> Result<(), 
 /// on again is `turn_bot_on`. A limit above the hub's team policy is the owner's to give.
 pub async fn save_bot(hub: &Arc<Hub>, scope: &Scope, bot: Bot) -> Result<(), String> {
     let team = scope.team.id;
-    let workflow = workflow(hub, &scope.team, &bot.workflow).await?;
-    available(&workflow)?;
+    let workflows = workflows(hub, &scope.team).await?;
+    let workflow = find(&workflows, &bot.workflow)?;
+    available(workflow, &workflows)?;
     check_who(hub, team, &bot.calls).await?;
     let BotLimits { usd, minutes } = bot.limits;
     if !usd.is_finite() || usd <= 0.0 || minutes == 0 {
@@ -167,13 +184,14 @@ pub async fn save_bot(hub: &Arc<Hub>, scope: &Scope, bot: Bot) -> Result<(), Str
 /// Upstash key and Claude token its boxes sign in with.
 pub async fn turn_bot_on(hub: &Arc<Hub>, scope: &Scope, workflow_id: &str, on: bool) -> Result<(), String> {
     let team = scope.team.id;
-    let workflow = workflow(hub, &scope.team, workflow_id).await?;
+    let workflows = workflows(hub, &scope.team).await?;
+    let workflow = find(&workflows, workflow_id)?;
     let row = db::bot(&hub.db, team, workflow_id).await?;
     if !on {
         draft(hub, scope, workflow_id).await?;
         return Ok(());
     }
-    available(&workflow)?;
+    available(workflow, &workflows)?;
     let calls = row.as_ref().map(|b| b.calls.clone()).unwrap_or_default();
     if !asked_by(hub, scope, &calls).await? {
         return Err("only the team's owner, or someone this bot asks, turns it on".into());
@@ -244,12 +262,13 @@ pub async fn run_now(hub: &Arc<Hub>, scope: &Scope, workflow_id: &str) -> Result
 /// `TeamEvent::RunChanged`. Answers the run and where it opened. The bot's `BotLimits` are held by
 /// `calls::tick`.
 pub async fn start_run(hub: &Arc<Hub>, team: &Arc<Account>, workflow_id: &str, start: Start) -> Result<(Run, Placement), String> {
-    let workflow = workflow(hub, team, workflow_id).await?;
+    let workflows = workflows(hub, team).await?;
+    let workflow = find(&workflows, workflow_id)?;
     let on = db::bot(&hub.db, team.id, workflow_id).await?.is_some_and(|b| b.on);
     if !on || !workflow.enabled {
         return Err(IS_A_DRAFT.into());
     }
-    available(&workflow)?;
+    available(workflow, &workflows)?;
     let credential = super::membership::credential(hub, team).await?;
     if !(credential.upstash && credential.claude) {
         return Err(NEEDS_KEYS.into());
