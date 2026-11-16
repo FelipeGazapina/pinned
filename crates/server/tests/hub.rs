@@ -83,6 +83,10 @@ impl TestHub {
     }
 
     fn start_all(name: &str, signup: Signup, policy: Policy, with_learning: bool, access: pinned_server::http::Access, listen: &str) -> TestHub {
+        TestHub::start_reports(name, signup, policy, with_learning, access, listen, None)
+    }
+
+    fn start_reports(name: &str, signup: Signup, policy: Policy, with_learning: bool, access: pinned_server::http::Access, listen: &str, reports: Option<pinned_server::reports::Config>) -> TestHub {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let database = format!("pinned_test_{name}_{}", std::process::id());
         admin(&format!("drop database if exists {database} with (force)"));
@@ -98,7 +102,7 @@ impl TestHub {
         std::fs::create_dir_all(dir.join("downloads")).unwrap();
         std::fs::write(dir.join("downloads/pinned-server-x86_64-unknown-linux-musl"), "ELF").unwrap();
         let boxes = FakeBoxes::new(dir.join("boxes"));
-        let mut hub = TestHub { runtime: tokio::runtime::Runtime::new().unwrap(), running: None, url: String::new(), database, dir, boxes, policy, learning, signup, access, reports: None };
+        let mut hub = TestHub { runtime: tokio::runtime::Runtime::new().unwrap(), running: None, url: String::new(), database, dir, boxes, policy, learning, signup, access, reports };
         hub.serve(listen);
         hub
     }
@@ -9001,6 +9005,7 @@ fn a_locked_app_still_needs_the_password_for_every_confirm_action_and_never_for_
         ("set_convex_repos", json!({ "id": "quick-lemur-789", "repos": [] })),
         ("disconnect_convex", json!({ "id": "quick-lemur-789" })),
         ("extend_box", json!({ "machine": machine, "extra_usd": 1.0 })),
+        ("report_issue", json!({ "draft": { "kind": "problem", "title": "Crash" } })),
     ]
     .into_iter()
     .collect();
@@ -11529,3 +11534,6 @@ fn an_agent_saves_and_lists_ideas_through_act_and_its_role_is_kept() {
     assert_eq!(deleted["outcome"], "done");
     assert_eq!(act(&ana.dir, &ana.tab, "list_ideas", json!({})).unwrap()["result"], json!([]));
 }
+
+#[path = "hub/reports.rs"]
+mod reports;

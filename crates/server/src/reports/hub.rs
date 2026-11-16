@@ -17,8 +17,6 @@ pub const NOT_AVAILABLE: &str = "Reporting is not available on this hub";
 /// Reports one account sends in any rolling 24 hours.
 pub const DAILY_LIMIT: usize = 5;
 const WINDOW_SECS: i64 = 24 * 60 * 60;
-/// Where the hub's own repository defaults to.
-const DEFAULT_REPO: &str = "FelipeGazapina/pinned";
 const DEFAULT_API: &str = "https://api.github.com";
 /// The variable the token is read from. Logs name it, never its value.
 pub const TOKEN_VARIABLE: &str = "PINNED_REPORTS_GITHUB_TOKEN";
@@ -81,7 +79,7 @@ impl Config {
     pub fn from_env(dev: bool, env: &dyn Fn(&str) -> Option<String>) -> Option<Config> {
         let given = |name: &str| env(name).map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());
         let token = given(TOKEN_VARIABLE)?;
-        let (mut repo, mut api) = (DEFAULT_REPO.to_owned(), DEFAULT_API.to_owned());
+        let (mut repo, mut api) = (default_repo(), DEFAULT_API.to_owned());
         for (name, value) in [(REPO_VARIABLE, given(REPO_VARIABLE)), (API_VARIABLE, given(API_VARIABLE))] {
             let Some(value) = value else { continue };
             if !dev {
@@ -99,10 +97,15 @@ impl Config {
     }
 }
 
+/// pinned's own repository, `owner/name`, as the updater already names it.
+fn default_repo() -> String {
+    crate::self_update::RELEASE_BASE.trim_start_matches("https://github.com/").splitn(3, '/').take(2).collect::<Vec<_>>().join("/")
+}
+
 /// `owner/name`.
 fn is_repo(text: &str) -> bool {
     let mut parts = text.split('/');
-    let part = |p: Option<&str>| p.is_some_and(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)));
+    let part = |p: Option<&str>| p.is_some_and(|p| !matches!(p, "" | "." | "..") && p.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)));
     part(parts.next()) && part(parts.next()) && parts.next().is_none()
 }
 
@@ -592,6 +595,7 @@ mod tests {
         let vars = [(TOKEN_VARIABLE, "tok"), (REPO_VARIABLE, "other/repo"), (API_VARIABLE, "http://127.0.0.1:9")];
         let config = Config::from_env(false, &env(&vars)).unwrap();
         assert_eq!((config.api.as_str(), config.repo.as_str(), config.token.as_str()), ("https://api.github.com", "FelipeGazapina/pinned", "tok"));
+        assert_eq!(default_repo(), "FelipeGazapina/pinned", "the default is the updater's repository");
         assert!(!format!("{config:?}").contains("tok\""), "the token stays out of Debug");
     }
 
