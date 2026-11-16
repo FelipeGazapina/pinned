@@ -616,3 +616,48 @@ fn a_waiting_run_whose_bot_never_reads_is_dropped_and_the_next_one_starts() {
     admin_on(&crew.hub.database, &format!("update team_bots set limits = '{{\"usd\":1,\"minutes\":5}}' where team = '{}' and workflow = '{x}'", crew.team));
     assert_eq!(crew.skipped(&x), json!([{ "reason": "start_failed", "count": 1 }]), "X's dropped run is counted once");
 }
+
+#[test]
+fn a_waiting_event_whose_bot_never_reads_is_dropped_and_the_next_one_starts() {
+    let crew = Crew::new("tl_event_unreadable");
+    let (holder, x, z) = (crew.on_bot("Docs"), crew.on_bot("Pages"), crew.on_bot("Notes"));
+    admin_on(&crew.hub.database, &format!("update teams set max_live_runs = 1 where id = '{}'", crew.team));
+    assert_eq!(crew.found(crew.labeled(&holder, 9)), Ok(()));
+    assert_eq!(crew.found(crew.labeled(&x, 1)), Ok(()));
+    assert_eq!(crew.waiting(&x), 1, "X's trigger event waits behind the holder");
+    let reply = crew.call(&crew.bob, TeamOp::RunNow { workflow: z.clone() }).unwrap();
+    assert_eq!(reply["waiting"], json!(true), "Notes's Run now waits behind X's event");
+    // A row only SQL could write: X's limits no longer read, on every pass.
+    admin_on(&crew.hub.database, &format!("update team_bots set limits = '{{\"usd\":1,\"minutes\":\"x\"}}' where team = '{}' and workflow = '{x}'", crew.team));
+    crew.stop(&crew.live_of(&holder)[0]);
+    crew.reaper_pass();
+
+    wait_for("Notes's waiting run to open its session", || opened(&crew, &z) == 1);
+    assert_eq!(crew.waiting(&x), 0, "X's event left the line");
+    assert_eq!(opened(&crew, &x), 0, "X's event never started");
+    admin_on(&crew.hub.database, &format!("update team_bots set limits = '{{\"usd\":1,\"minutes\":5}}' where team = '{}' and workflow = '{x}'", crew.team));
+    assert_eq!(crew.skipped(&x), json!([{ "reason": "start_failed", "count": 1 }]), "X's dropped event is counted once");
+}
+
+#[test]
+fn a_waiting_event_whose_bot_read_is_busy_still_waits_and_starts_later() {
+    let crew = Crew::new("tl_event_busy_read");
+    let (holder, pages) = (crew.on_bot("Docs"), crew.on_bot("Pages"));
+    admin_on(&crew.hub.database, &format!("update teams set max_live_runs = 1 where id = '{}'", crew.team));
+    assert_eq!(crew.found(crew.labeled(&holder, 9)), Ok(()));
+    assert_eq!(crew.found(crew.labeled(&pages, 1)), Ok(()));
+    assert_eq!(crew.waiting(&pages), 1, "Pages's trigger event waits behind the holder");
+    let skipped = crew.skipped(&pages);
+    // The start after the end reads the bot's row, which another connection holds.
+    let held = Held::new(&crew.hub, "lock table team_bots in access exclusive mode");
+    crew.stop(&crew.live_of(&holder)[0]);
+    waiting_on(&held);
+    wait_for("the start after the end to give up on the held table", || held.waiters() == 0);
+    held.release();
+
+    assert!(crew.waiting(&pages) == 1 || opened(&crew, &pages) == 1, "the event still waits, or it started");
+    assert_eq!(crew.skipped(&pages), skipped, "nothing was counted as skipped");
+    crew.reaper_pass();
+    wait_for("the event to open its session", || opened(&crew, &pages) == 1 && crew.waiting(&pages) == 0);
+    assert_eq!(crew.skipped(&pages), skipped, "nothing was counted as skipped");
+}
