@@ -2165,7 +2165,11 @@ impl Connectors {
             self.release(&connector, &subject).await;
             return self.keep_stopped(&connector, &subject);
         }
-        match self.consult(&connector, &run.input).await {
+        // On a hub's team, the issue's or thread's text reaches the Ask step's model and the
+        // session framed as data from outside pinned.
+        let team = self.admission.get().is_some();
+        let consulted = if team { untrusted_trigger(&run) } else { run.input.clone() };
+        match self.consult(&connector, &consulted).await {
             Ok(None) => {}
             Ok(Some((ask, answers))) => {
                 if stops(&ask, &answers).is_some() {
@@ -2179,6 +2183,9 @@ impl Connectors {
                 self.release(&connector, &subject).await;
                 return Err(self.unclaim(&connector, &subject, &folder, &why));
             }
+        }
+        if team {
+            frame_trigger_text(&mut run);
         }
         let answer = open(Work::Run(run)).await;
         // Consumed: nothing opened, so Linear and Slack are left as they are, and the
@@ -2962,6 +2969,31 @@ fn subject_taken(runs: &[runner::Run], key: &str) -> bool {
 /// A reply belongs to a graph run until that run has failed.
 fn run_owns(runs: &[runner::Run], subject: &Subject) -> bool {
     runs.iter().any(|run| &run.subject == subject && !matches!(run.status, Status::Failed { .. }))
+}
+
+/// `run`'s trigger text (`Run::input`: the Linear issue or the Slack thread) framed as data from
+/// outside pinned. A Run now's input is pinned's own and stays as it is.
+fn untrusted_trigger(run: &Run) -> String {
+    let source = match &run.subject {
+        _ if is_run_now(&run.subject) || run.input.trim().is_empty() => return run.input.clone(),
+        Subject::LinearIssue { .. } => "a Linear issue",
+        Subject::SlackThread { .. } => "a Slack thread",
+    };
+    crate::untrusted::frame(source, &run.input)
+}
+
+/// Frames the trigger text in `run`'s opening prompt (`untrusted_trigger`), where its builder put
+/// it; pinned's own instructions around it stay as they are.
+fn frame_trigger_text(run: &mut Run) {
+    let framed = untrusted_trigger(run);
+    if framed == run.input {
+        return;
+    }
+    if let Some(prompt) = run.args.last_mut() {
+        if let Some(at) = prompt.rfind(&run.input) {
+            prompt.replace_range(at..at + run.input.len(), &framed);
+        }
+    }
 }
 
 fn trigger_of(run: &runner::Run) -> Result<TriggerInput, String> {
@@ -4355,6 +4387,9 @@ impl Connectors {
         let inbox = self.take_inbox(&run.subject);
         let spec = match run_opening(run, &owner_c, prompt, seeded, library, &self.names(), &self.exe) {
             Ok(mut spec) => {
+                if self.admission.get().is_some() {
+                    frame_trigger_text(&mut spec);
+                }
                 let waiting = inbox_text(&inbox);
                 let note = self.convex_note(owner).unwrap_or_default();
                 if let Some(last) = spec.args.last_mut() {
