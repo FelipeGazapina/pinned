@@ -288,15 +288,15 @@ fn waiting_total(crew: &Crew) -> i64 {
 fn two_hubs_reaper_passes_start_at_most_the_teams_free_places() {
     let crew = Crew::new("tlc_reapers");
     let holder = crew.on_bot("Docs");
-    let bots = [crew.on_bot("Pages"), crew.on_bot("Blog"), crew.on_bot("Shop")];
+    let bots = ["Pages", "Blog", "Shop", "Help", "News"].map(|name| crew.on_bot(name));
     admin_on(&crew.hub.database, &format!("update teams set max_live_runs = 1 where id = '{}'", crew.team));
     assert_eq!(crew.found(crew.labeled(&holder, 9)), Ok(()));
-    // Five events wait for three bots behind the one live run.
-    let events = [(&bots[0], 1), (&bots[0], 2), (&bots[1], 3), (&bots[1], 4), (&bots[2], 5)];
+    // Six events wait for five bots behind the one live run: more bots wait than places free up.
+    let events = [(&bots[0], 1), (&bots[0], 2), (&bots[1], 3), (&bots[2], 4), (&bots[3], 5), (&bots[4], 6)];
     for (bot, n) in events {
         assert_eq!(crew.found(crew.labeled(bot, n)), Ok(()));
     }
-    assert_eq!((live_runs(&crew).len(), waiting_total(&crew)), (1, 5));
+    assert_eq!((live_runs(&crew).len(), waiting_total(&crew)), (1, 6));
 
     // Two places free up, and two hubs on the database run their reaper pass at the same time.
     let (twin, running) = crew.hub.twin();
@@ -334,7 +334,7 @@ fn two_hubs_reaper_passes_start_at_most_the_teams_free_places() {
         std::thread::sleep(Duration::from_millis(100));
     }
     // A run another hub's box check ends frees its place for the next: the line may move on.
-    assert!(waiting_total(&crew) <= 3, "the two free places took two events");
+    assert!(waiting_total(&crew) <= 4, "the free places took events");
     // Each event started at most once: no step outside pinned twice. A run another hub's box
     // check ended may stop before its last step.
     for (_, n) in events {
