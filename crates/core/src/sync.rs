@@ -380,7 +380,8 @@ fn exchange(
     // `local` is what this machine has to send: a merged history is written here only once the hub
     // took it, so turns that came only from the hub never change `sending`.
     let sending = fingerprint(push.iter().chain(&merge), local);
-    let held = hold == Some(sending) && !(push.is_empty() && merge.is_empty());
+    // A `hold` is the `sending` of a refused batch, so it never names an empty set of files.
+    let held = hold == Some(sending);
     // A history's own turns and both sides' turns merged, by path.
     let mut merged: BTreeMap<String, (Vec<u8>, Vec<u8>)> = BTreeMap::new();
     if held {
