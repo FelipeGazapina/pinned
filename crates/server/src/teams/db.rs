@@ -1262,14 +1262,17 @@ pub async fn drop_grant(db: &Db, team: Uuid, run: Uuid) -> Result<(), String> {
 }
 
 /// Runs left waiting with no open call for more than `secs`, none of whose calls closed within
-/// `secs` either, as (team, run, whether its box runs). An ask opens its call, and an answer moves
-/// its run on, within moments, so such a run was left by a give-up or a restart. For `calls::tick`.
-pub async fn stale_waiting(db: &Db, secs: u64) -> Result<Vec<(Uuid, Uuid, bool)>, String> {
+/// `secs` either, as (team, run, whether its box runs, its last call when that one gave up). An
+/// ask opens its call, and an answer moves its run on, within moments, so such a run was left by
+/// a give-up or a restart. For `calls::tick`.
+pub async fn stale_waiting(db: &Db, secs: u64) -> Result<Vec<(Uuid, Uuid, bool, Option<Uuid>)>, String> {
     let rows = db
         .client()
         .await?
         .query(
-            "select r.team, r.id, exists (select 1 from boxes b where b.account = r.team and b.machine::text = r.box and b.phase <> 'ending')
+            "select r.team, r.id, exists (select 1 from boxes b where b.account = r.team and b.machine::text = r.box and b.phase <> 'ending'),
+               (select case when c.outcome = 'gave-up' then c.id end from team_calls c where c.run = r.id
+                 order by c.answered_at desc nulls first, c.created_at desc limit 1)
              from team_runs r
              where r.state = 'waiting' and coalesce(r.waiting_since, r.started_at) <= now() - make_interval(secs => $1)
                and not exists (select 1 from team_calls c where c.run = r.id
@@ -1278,7 +1281,7 @@ pub async fn stale_waiting(db: &Db, secs: u64) -> Result<Vec<(Uuid, Uuid, bool)>
         )
         .await
         .map_err(err)?;
-    Ok(rows.iter().map(|r| (r.get(0), r.get(1), r.get(2))).collect())
+    Ok(rows.iter().map(|r| (r.get(0), r.get(1), r.get(2), r.get(3))).collect())
 }
 
 // ---- triggers.rs ----

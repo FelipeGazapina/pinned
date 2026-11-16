@@ -554,7 +554,8 @@ const STALE_WAIT: Duration = Duration::from_secs(300);
 /// - a reserved run whose session did not open within `policy.reservation_limit_secs` fails
 ///   (`NEVER_OPENED`), counted as `SkipReason::NeverStarted`, and a granted event no poller
 ///   claimed for it leaves its line, so it never runs without its place;
-/// - a run left waiting with no open call goes back to work while its box runs, else ends (`BOX_GONE`);
+/// - a run left waiting with no open call ends as `RunState::GaveUp` when its last call gave up
+///   (a give-up a restart cut short), else goes back to work while its box runs, else ends (`BOX_GONE`);
 /// - what waits for a team with a free place starts (`queue::next`), so an event is never left
 ///   waiting when the start after a run's end found the team's turn busy.
 ///
@@ -586,7 +587,20 @@ async fn reap(hub: &Arc<Hub>, policy: &TeamPolicy) -> Result<(), String> {
         }
         end_reservation(hub, team, run, &workflow, policy.reservation_limit_secs).await;
     }
-    for (team, run, box_runs) in db::stale_waiting(&hub.db, STALE_WAIT.as_secs()).await? {
+    for (team, run, box_runs, gave_up_call) in db::stale_waiting(&hub.db, STALE_WAIT.as_secs()).await? {
+        if let Some(call) = gave_up_call {
+            // Its call gave up but the run never ended (a restart): it ends now, never back to work.
+            let hub = hub.clone();
+            tokio::spawn(async move {
+                let box_end = box_runs.then_some(End::Expired);
+                let ended = async { end_run(&hub, &hub.account(team).await?, run, RunState::GaveUp, &format!("nobody answered call {call}"), box_end).await };
+                match ended.await {
+                    Err(e) if e != RUN_ENDED => eprintln!("pinned-server: run {run} of team {team} gave up but did not end yet: {e}"),
+                    _ => {}
+                }
+            });
+            continue;
+        }
         if !box_runs {
             reap_run(hub, team, run, BOX_GONE).await;
             continue;
