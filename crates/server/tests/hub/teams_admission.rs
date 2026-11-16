@@ -709,15 +709,6 @@ impl ClaimGate {
         rows.unwrap().iter().map(|r| r.get(0)).collect()
     }
 
-    /// Ends the server process of a stopped hub's claim before it took the row, as Postgres does
-    /// when it finds that hub gone.
-    fn end(&self, claims: &[i32]) {
-        for pid in claims {
-            self.runtime.block_on(self.db.query("select pg_terminate_backend($1)", &[pid])).unwrap();
-        }
-        wait_for("the stopped hub's claim to end", || self.claims().is_empty());
-    }
-
     fn release(self) {
         self.runtime.block_on(self.db.batch_execute("commit")).unwrap();
     }
@@ -741,7 +732,7 @@ impl Crew {
 }
 
 /// A team that may run one at a time: bot `holder`'s run takes the place, the graph bot's ENG-1
-/// waits behind it, and the test holds every claim (`ClaimGate`). Stopping the holder grants ENG-1.
+/// waits behind it, and the test holds its row so every claim skips it (`ClaimGate`). Stopping the holder grants ENG-1.
 fn one_granted(crew: &Crew, holder: &str, bot: &str) -> ClaimGate {
     admin_on(&crew.hub.database, &format!("update teams set max_live_runs = 1 where id = '{}'", crew.team));
     assert_eq!(crew.found(crew.labeled(holder, 9)), Ok(()));
@@ -750,7 +741,10 @@ fn one_granted(crew: &Crew, holder: &str, bot: &str) -> ClaimGate {
     let gate = ClaimGate::hold(crew);
     let held = crew.live_of(holder);
     crew.stop(&held[0]);
-    wait_for("ENG-1's grant and this hub's claim of it", || gate.granted() == 1 && gate.claims().len() == 1);
+    wait_for("ENG-1's grant", || gate.granted() == 1);
+    // A few checks pass: each claim skips the row the test holds, and none waits on it.
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(gate.claims(), Vec::<i32>::new(), "a claim never waits on a granted row another holds");
     assert_eq!(crew.outside(1), none(), "nothing of ENG-1 ran before its claim");
     assert_eq!(crew.reserved_at(bot), vec!["set".to_owned()], "its place is held in Postgres");
     gate
@@ -774,10 +768,7 @@ fn a_granted_event_survives_a_hub_restart_and_runs_once() {
     let (holder, triage) = (crew.on_bot("Docs"), crew.graph_bot("Triage"));
     let gate = one_granted(&crew, &holder, &triage);
     let boxes_before = crew.boxes_created();
-    let stopped = gate.claims();
-
     let addr = crew.hub.stop();
-    gate.end(&stopped);
     assert_eq!(gate.granted(), 1, "the stopped hub never claimed it");
     gate.release();
     crew.hub.serve(&addr);
@@ -790,9 +781,7 @@ fn two_hubs_claim_a_granted_event_once() {
     let (holder, triage) = (crew.on_bot("Docs"), crew.graph_bot("Triage"));
     let gate = one_granted(&crew, &holder, &triage);
     let boxes_before = crew.boxes_created();
-    let stopped = gate.claims();
     let addr = crew.hub.stop();
-    gate.end(&stopped);
     gate.release();
 
     // Two hubs start on the same database at once, and each one's first check finds the grant.

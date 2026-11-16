@@ -97,22 +97,28 @@ pub const TURN_KEY: &str = "hashtextextended('pinned-team-runs:' || $1::uuid::te
 /// A team's turn to decide what runs: this hub's line, and a transaction on a connection of its
 /// own holding the team's `pg_advisory_xact_lock`, so another hub on the database waits too.
 /// `end` commits it; a turn dropped on an error closes its connection, which frees the lock.
+/// Both waits are bounded: a turn not had within `TURN_WAIT` (this hub's line), or within the
+/// connection's lock timeout (the advisory lock), is refused as `crate::db::BUSY`, never retried.
+/// A turn only decides and reserves: nothing outside pinned is called while one is held.
 struct Turn {
     _line: tokio::sync::OwnedMutexGuard<()>,
     held: tokio_postgres::Client,
 }
 
+/// How long a task waits for this hub's line of a team, as long as Postgres's lock timeout.
+const TURN_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+
 impl Turn {
     async fn take(hub: &Hub, team: Uuid) -> Result<Turn, String> {
-        let line = line(team).lock_owned().await;
+        let line = tokio::time::timeout(TURN_WAIT, line(team).lock_owned()).await.map_err(|_| crate::db::BUSY.to_string())?;
         let held = hub.db.own_client().await?;
-        held.batch_execute("begin").await.map_err(|e| e.to_string())?;
-        held.execute(&format!("select pg_advisory_xact_lock({TURN_KEY})"), &[&team]).await.map_err(|e| e.to_string())?;
+        held.batch_execute("begin").await.map_err(crate::db::err)?;
+        held.execute(&format!("select pg_advisory_xact_lock({TURN_KEY})"), &[&team]).await.map_err(crate::db::err)?;
         Ok(Turn { _line: line, held })
     }
 
     async fn end(self) -> Result<(), String> {
-        self.held.batch_execute("commit").await.map_err(|e| e.to_string())
+        self.held.batch_execute("commit").await.map_err(crate::db::err)
     }
 }
 

@@ -293,11 +293,20 @@ const STATEMENT_LIMIT: Duration = Duration::from_secs(120);
 /// connection up. Longer than `STATEMENT_LIMIT`, so Postgres has cancelled a statement it was
 /// running by then.
 const WRITE_WAIT: Duration = Duration::from_secs(150);
+/// Postgres refuses a statement of the hub's that waits longer on a lock (`lock_timeout`): the
+/// shared connections pipeline every account's statements, so one waiting stalls them all.
+const LOCK_LIMIT: Duration = Duration::from_secs(2);
+/// What a statement refused by `LOCK_LIMIT` answers, as an ordinary error. Nothing retries it.
+pub const BUSY: &str = "the hub is busy with this right now; try again in a moment";
 
 impl Connection {
     async fn open(url: &str, schema: &str) -> Result<Connection, String> {
         let client = open(url).await?;
+        // The schema waits on locks as long as it must: a hub starting while another still runs
+        // must not fail its migration on that hub's short lock waits. Bounded again after it.
+        client.batch_execute("set lock_timeout = 0").await.map_err(|e| format!("could not create the tables: {e}"))?;
         client.batch_execute(schema).await.map_err(|e| format!("could not create the tables: {e}"))?;
+        bound_lock_waits(&client).await?;
         Ok(Connection { url: url.into(), client: Arc::new(tokio::sync::Mutex::new(Some(Arc::new(client)))), write_wait_ms: Arc::default() })
     }
 
@@ -487,7 +496,7 @@ impl WriteFailure {
     fn of(e: tokio_postgres::Error) -> WriteFailure {
         match e.code().map(|code| code.code()) {
             Some(sqlstate) if ["22", "23"].iter().any(|class| sqlstate.starts_with(class)) => WriteFailure::Refused { sqlstate: sqlstate.to_owned() },
-            _ => WriteFailure::Failed(e.to_string()),
+            _ => WriteFailure::Failed(err(e)),
         }
     }
 }
@@ -563,10 +572,28 @@ async fn open(url: &str) -> Result<Client, String> {
         Ok(Err(e)) => eprintln!("pinned-server: Postgres keeps its own statement timeout: {e}"),
         Err(_) => return Err("could not connect to Postgres: it did not answer the statement timeout".into()),
     }
+    bound_lock_waits(&client).await?;
     Ok(client)
 }
 
+/// Sets `LOCK_LIMIT` on `client` for its session, bounded like the statement timeout.
+async fn bound_lock_waits(client: &Client) -> Result<(), String> {
+    match tokio::time::timeout(CONNECT_WAIT, client.batch_execute(&format!("set lock_timeout = {}", LOCK_LIMIT.as_millis()))).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(format!("could not connect to Postgres: it refused the lock timeout: {e}")),
+        Err(_) => Err("could not connect to Postgres: it did not answer the lock timeout".into()),
+    }
+}
+
+/// Whether Postgres refused `e` for waiting on a lock past `LOCK_LIMIT`.
+fn lock_refused(e: &tokio_postgres::Error) -> bool {
+    e.code() == Some(&tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE)
+}
+
 pub(crate) fn err(e: tokio_postgres::Error) -> String {
+    if lock_refused(&e) {
+        return BUSY.into();
+    }
     e.to_string()
 }
 
