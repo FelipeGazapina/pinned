@@ -65,6 +65,7 @@ pub mod subagents;
 pub mod surface;
 pub mod sync;
 pub mod taste;
+pub mod team_call;
 pub mod teams;
 pub mod thread;
 pub mod titles;

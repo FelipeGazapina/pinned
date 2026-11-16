@@ -1,7 +1,8 @@
 //! The subcommands Claude Code and connector sessions run on the binary that started them.
 //! Every pinned binary answers them the same way, so a session can't tell which one hosts it.
 
-use crate::{evidence, hooks, mcp, reminders};
+use crate::preauth::team_hook;
+use crate::{evidence, hooks, mcp, reminders, team_call};
 
 /// Runs the subcommand `args` names (the arguments after the program) and returns the exit
 /// code, or None when `args` is not one, so the caller goes on to start normally.
@@ -21,6 +22,11 @@ pub fn dispatch(args: &[String]) -> Option<i32> {
             hooks::statusline();
             return Some(0);
         }
+        team_hook::SUBCOMMAND => {
+            team_hook::run();
+            return Some(0);
+        }
+        team_call::SUBCOMMAND => return Some(team_call::main(rest)),
         reminders::SUBCOMMAND => {
             reminders::serve(first != Some(reminders::NO_REMINDERS));
             return Some(0);

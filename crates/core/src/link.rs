@@ -193,6 +193,7 @@ impl Link {
             }
             Message::LinearTake { connector, channel, thread, issue } => HubCall::LinearTake { connector, channel, thread, issue },
             Message::RunSet { connector, subject, name, value } => HubCall::RunSet { connector, subject, name, value },
+            Message::AskPeople { situation, question, choices } => HubCall::Team { team: None, op: crate::teams::TeamOp::AskPeople { situation, question, choices } },
             _ => return Err("only a workflow session's callbacks go to the hub".into()),
         };
         match self.call_hub(call)? {

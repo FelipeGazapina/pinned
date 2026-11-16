@@ -11539,3 +11539,5 @@ fn an_agent_saves_and_lists_ideas_through_act_and_its_role_is_kept() {
     assert_eq!(act(&ana.dir, &ana.tab, "list_ideas", json!({})).unwrap()["result"], json!([]));
 }
 #[path = "hub/teams_calls.rs"] mod teams_calls;
+#[path = "hub/teams_box_call.rs"]
+mod teams_box_call;
