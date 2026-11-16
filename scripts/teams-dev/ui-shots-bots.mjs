@@ -117,12 +117,15 @@ function teamOp(op) {
       if (world.bots.find((b) => b.workflow === op.workflow)?.on) throw "turn the bot off first";
       world.bots = world.bots.filter((b) => b.workflow !== op.workflow);
       return null;
-    // save_bot answers nothing: the new workflow's id is the one `bots` lists afterwards.
+    // save_bot answers {workflow}: the id it saved the bot under. A new bot arrives with a lowercase uuid the app made, which the hub keeps.
     case "save_bot": {
-      const id = "c1700";
-      world.workflows.push({ ...op.connector, id });
-      world.bots.push({ ...op.bot, workflow: id, name: op.connector.name, on: false });
-      return null;
+      const id = op.bot.workflow || "c1700";
+      if (op.bot.workflow && !/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(id) && !world.bots.some((b) => b.workflow === id)) throw `this team has no workflow ${id}`;
+      if (op.connector.id !== id) throw `this bot is for workflow ${id}, not the workflow it saves`;
+      if (!(op.bot.limits.usd > 0)) throw "a run needs a limit above 0 dollars and 0 minutes";
+      world.workflows = world.workflows.filter((w) => w.id !== id).concat({ ...op.connector, id });
+      world.bots = world.bots.filter((b) => b.workflow !== id).concat({ ...op.bot, workflow: id, name: op.connector.name, on: false });
+      return { workflow: id };
     }
     case "hub":
       if (op.call.cmd === "get_settings") return { connectors: world.workflows };
@@ -279,7 +282,7 @@ for (const theme of ["dark", "light"]) {
 
   // Skipped events per reason, an unknown reason among them, and the off note.
   reset();
-  world.bots[0].skipped = [{ reason: "off", count: 3 }, { reason: "queue_full", count: 2 }, { reason: "start_failed", count: 1 }, { reason: "never_started", count: 4 }, { reason: "burnt_toast", count: 7 }];
+  world.bots[0].skipped = [{ reason: "off", count: 3 }, { reason: "queue_full", count: 2 }, { reason: "start_failed", count: 1 }, { reason: "never_started", count: 4 }, { reason: "replies_dropped", count: 6 }, { reason: "burnt_toast", count: 7 }];
   await bot("bot-skipped");
   reset();
   world.bots[0].on = false;

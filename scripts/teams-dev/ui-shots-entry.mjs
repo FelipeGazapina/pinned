@@ -57,9 +57,16 @@ function fakeHub(world) {
     if (op === "invite") {
       if (world.full) throw "this team has 20 open invite codes; revoke some first";
       const code = world.codes.shift() ?? "QRST-UVWX";
+      world.open.unshift({ hint: code.slice(0, 4), created: Math.floor(Date.now() / 1000), made_by: "ana" });
       return { code, hint: code.slice(0, 4) };
     }
-    if (op === "revoke_invite") return null;
+    // The owner's list of invites not used and not revoked, newest first: never a code.
+    if (op === "invites") return world.open;
+    if (op === "revoke_invite") {
+      if (!world.open.some((x) => x.hint === call.op.hint)) throw "there is no unused invite with that hint";
+      world.open = world.open.filter((x) => x.hint !== call.op.hint);
+      return null;
+    }
     if (op === "projects") return THEIR_PROJECTS;
     if (op === "attach_project" || op === "rename" || op === "detach_project") return null;
     if (op === "hub") {
@@ -127,7 +134,7 @@ async function newApp(scheme, world) {
   }, OWN_PROJECTS);
   return { context, page };
 }
-const freshWorld = () => ({ teams: [team("t1", "Studio Two", "owner", { upstash: true }), team("t3", "Side Gig", "member")], frames: [], code: "ABCD-EFGH", codes: ["WXYZ-2481", "QRST-6093"] });
+const freshWorld = () => ({ teams: [team("t1", "Studio Two", "owner", { upstash: true }), team("t3", "Side Gig", "member")], frames: [], open: [], code: "ABCD-EFGH", codes: ["WXYZ-2481", "QRST-6093"] });
 const shot = async (page, name) => {
   const file = join(OUT, `${name}.png`);
   await page.screenshot({ path: file });
@@ -151,20 +158,22 @@ for (const scheme of ["dark", "light"]) {
   // Invites (owner only): the empty page, two codes made with one revoked, and the hub's refusal at 20.
   {
     const world = freshWorld();
-    world.codes.push("MNPK-7714");
     const { context, page } = await newApp(scheme, world);
     await page.click("#account-pages");
     await page.locator(".tm-row", { hasText: "Studio Two" }).click();
     await page.evaluate(() => openPage("team-invites"));
-    await page.waitForSelector("text=No open invites made on this device.");
+    await page.waitForSelector("text=No open invites.");
     await shot(page, `app-invites-empty-${scheme}`);
+    // Two invites made earlier, by the owner and by another person (listed by account id when it has no name).
+    const now = Math.floor(Date.now() / 1000);
+    world.open = [{ hint: "K7QM", created: now - 2 * 86400, made_by: "ana" }, { hint: "H2VD", created: now - 9 * 86400, made_by: "0b7e5d1c" }];
+    await page.evaluate(() => openPage("team-invites"));
+    await page.waitForFunction(() => document.querySelectorAll(".tm-invite").length === 2);
     await page.locator('[data-tm="invite-make"]').click();
     await page.waitForSelector("[data-invite-made]");
-    await page.locator('[data-tm="invite-make"]').click();
-    await page.waitForFunction(() => document.querySelectorAll(".tm-invite").length === 2);
-    await page.locator('.tm-invite[data-hint="WXYZ"] [data-tm="invite-revoke"]').click();
-    await page.waitForSelector("text=Revoked WXYZ…");
-    await page.locator('[data-tm="invite-make"]').click();
+    await page.waitForFunction(() => document.querySelectorAll(".tm-invite").length === 3);
+    await page.locator('.tm-invite[data-hint="K7QM"] [data-tm="invite-revoke"]').click();
+    await page.waitForSelector("text=Revoked K7QM…");
     await page.waitForFunction(() => document.querySelectorAll(".tm-invite").length === 2);
     await shot(page, `app-invites-list-${scheme}`);
     world.full = true;

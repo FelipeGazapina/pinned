@@ -73,7 +73,7 @@ function world() {
       { id: "r1", workflow: "w1", state: "waiting", controller: null, cost_usd: 0.62, active_secs: 300, started_at: at(15, 0), ended_at: null, outcome: null, started_by: "schedule:daily" },
       { id: "r2", workflow: "w2", state: "waiting", controller: null, cost_usd: 0.3, active_secs: 120, started_at: at(14, 50), ended_at: null, outcome: null, started_by: "schedule:hourly" },
       { id: "r3", workflow: "w2", state: "working", controller: null, cost_usd: 0.1, active_secs: 60, started_at: at(15, 9), ended_at: null, outcome: null, started_by: "schedule:hourly" },
-      { id: "r4", workflow: "w4", state: "working", controller: null, cost_usd: 0.2, active_secs: 400, started_at: at(15, 2), ended_at: null, outcome: null, started_by: ME },
+      { id: "r4", workflow: "w4", state: "working", controller: null, cost_usd: 0.42, active_secs: 1440, waiting_secs: 720, started_at: at(14, 35), ended_at: null, outcome: null, started_by: ME },
       { id: "r5", workflow: "w2", state: "done", controller: null, cost_usd: 0.4, active_secs: 500, started_at: at(11, 5), ended_at: at(11, 25), outcome: "Asked for a fix on PR 50", started_by: "schedule:hourly" },
       ...[9, 10, 12, 13].map((h, i) => ({ id: `d${i}`, workflow: "w2", state: "done", controller: null, cost_usd: 0.2, active_secs: 300, started_at: at(h, 2), ended_at: at(h, 9), outcome: "Reviewed", started_by: "schedule:hourly" })),
     ],
@@ -89,7 +89,10 @@ function world() {
       ],
       r2: [{ at: at(14, 50), who: "bot", text: "Reading PR 9 of app-deliveries." }],
       r3: [{ at: at(15, 9), who: "bot", text: "Reading PR 51 of shop-web." }],
-      r4: [{ at: at(15, 2), who: "bot", text: "Changing the date format on the orders page." }],
+      r4: [
+        { at: at(14, 35), who: "bot", text: "I started. Looking for dates written in two formats." },
+        { at: at(15, 2), who: "bot", text: "Changing the date format on the orders page." },
+      ],
     },
   };
 }
@@ -201,6 +204,7 @@ for (const scheme of ["dark", "light"]) {
     await page.waitForSelector(".tc-card");
     check((await text(page, ".tc-title h1")) === "2 calls waiting for you", `calls headline says 2 (${scheme})`);
     check((await text(page, '#team-nav [data-tc-nav="team-calls"] .count')) === "2", "nav badge counts 2");
+    check((await page.locator(".tc-card .tc-primary").count()) === 0 && (await page.locator('.tc-card [data-tc="choice"].tc-secondary').count()) === 4, "every choice on a call card is a plain button, none primary");
     check((await page.locator("#team-nav").innerText()).includes("Create a bot") === false || true, "nav drawn");
     check(!(await page.locator("#team-nav").innerText()).match(/chat/i), "the nav has no chat item");
     check((await page.locator("#team-nav .tc-dot").evaluateAll((d) => d.map((x) => x.dataset.tone).join())) === "call,call,off,on", "bot dots: amber for the two bots with a call open, grey off, green on");
@@ -310,6 +314,38 @@ for (const scheme of ["dark", "light"]) {
     await page.waitForFunction(() => document.querySelector(".tc-runhead h1")?.textContent === "Stopped by you");
     check(sent.some((o) => JSON.stringify(o) === JSON.stringify({ op: "stop_run", run: "r1" })), "stop sends {op:stop_run,run}");
     await shot(page, "run-stopped", scheme);
+    await context.close();
+  }
+  {
+    // A run working: active time, waiting time (not counted toward the limit) and the box's cost.
+    const { page, context } = await open(browser, scheme);
+    await page.click('#team-nav [data-tc-nav="team-calls"]');
+    await page.waitForSelector(".tc-card");
+    await page.evaluate(() => openTeamRun("r4"));
+    await page.waitForSelector(".tc-facts");
+    const facts = await text(page, ".tc-facts");
+    check(facts.includes("Active time: 24 min") && facts.includes("Waiting for people: 12 min (not counted toward the time limit)") && facts.includes("Box cost: US$ 0.42 (model usage not included)"), `the run page shows the times and the box cost (${facts.replace(/\n/g, " | ")})`);
+    await shot(page, "run-working", scheme);
+    await context.close();
+  }
+  {
+    // Limit reached: the run's open on_limit call, answered with a plain button.
+    const { page, context, sent } = await open(browser, scheme, (w) => {
+      Object.assign(w.runs.find((r) => r.id === "r4"), { state: "waiting", active_secs: 1800, waiting_secs: 300, cost_usd: 0.51, started_at: at(14, 30) });
+      w.calls.push({ id: "c6", run: "r4", workflow: "w4", situation: "on_limit", asked: [{ kind: "person", account: ME }], question: "Date fixer used its 30 minutes. It has changed the orders page and still has the invoices page to do. Let it go on?", choices: ["Let it go on", "Stop it"], created_at: at(15, 8), escalated: false, answer: null });
+    });
+    await page.click('#team-nav [data-tc-nav="team-calls"]');
+    await page.waitForSelector(".tc-card");
+    await page.evaluate(() => openTeamRun("r4"));
+    await page.waitForSelector(".tc-limit");
+    check((await text(page, ".tc-runhead h1")) === "Limit reached", "the run's state is Limit reached");
+    check((await page.locator(".tc-limit .tc-primary").count()) === 0 && (await page.locator('.tc-limit [data-tc="choice"].tc-secondary').count()) === 2, "its two choices are plain buttons");
+    check((await page.locator('.tc-limit [data-tc="choice"]').allInnerTexts()).join() === "Let it go on,Stop it", "the hub's own two choices");
+    await shot(page, "run-limit-reached", scheme);
+    await page.click('.tc-limit [data-choice="0"]');
+    await page.waitForFunction(() => document.querySelector(".tc-runhead h1")?.textContent.endsWith("is working"));
+    check(sent.some((o) => o.op === "answer_call" && o.id === "c6" && JSON.stringify(o.answer) === JSON.stringify({ kind: { kind: "choice" }, choice: "Let it go on" })), "Let it go on is the existing answer_call");
+    check((await page.locator(".tc-limit").count()) === 0, "the limit state leaves once it is answered");
     await context.close();
   }
   {
