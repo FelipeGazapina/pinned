@@ -52,10 +52,13 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
 pub struct Asked {
     pub id: String,
     pub who: Vec<String>,
+    /// The hub used a "Go ahead" on call `id` for this very step: it runs now, nobody was asked.
+    pub granted: bool,
 }
 
 /// Reads the hub's answer to `AskPeople`: an object with the call's `id` and the `asked` people,
-/// each a handle or `Who` as the hub shows it (`@design`, `the owner`, or `{"kind":"group",...}`).
+/// each a handle or `Who` as the hub shows it (`@design`, `the owner`, or `{"kind":"group",...}`),
+/// or `{"granted":true,"call":"…"}` when the step's "Go ahead" let it run.
 pub fn parse_asked(reply: &str) -> Result<Asked, String> {
     let value: Value = serde_json::from_str(reply).map_err(|_| format!("the hub answered {reply:?}, which names no call"))?;
     let id = ["id", "call", "call_id"].iter().find_map(|k| value[*k].as_str()).filter(|id| !id.is_empty());
@@ -72,7 +75,7 @@ pub fn parse_asked(reply: &str) -> Result<Asked, String> {
                 .collect()
         })
         .unwrap_or_default();
-    Ok(Asked { id, who })
+    Ok(Asked { id, who, granted: value["granted"] == Value::Bool(true) })
 }
 
 /// `@design`, `@design and the owner`, `@a, @b and the owner`; `the team` when the hub named no one.
@@ -109,7 +112,7 @@ pub fn run(args: &[String], team_box: bool, ask: impl FnOnce(Message) -> Result<
         Ok(args) => args,
         Err(usage) => return fail(2, usage),
     };
-    let reply = match ask(Message::AskPeople { situation: args.situation, question: args.question, choices: args.choices }) {
+    let reply = match ask(Message::AskPeople { situation: args.situation, question: args.question, choices: args.choices, step: None }) {
         Ok(reply) => reply,
         Err(e) => return fail(1, e),
     };
@@ -187,7 +190,7 @@ mod tests {
             outcome,
             Outcome { code: 0, out: "Asked @design (call k1). The answer will come as your next message. End your turn now and wait; do not do the step.".into(), err: String::new() }
         );
-        let Some(Message::AskPeople { situation, question, choices }) = message else { panic!("no ask") };
+        let Some(Message::AskPeople { situation, question, choices, step: None }) = message else { panic!("no ask") };
         assert_eq!((situation, question.as_str(), choices), (Situation::InDoubt, "Which color?", vec!["red".to_owned(), "blue".to_owned()]));
         let (_, message) = sent(&["--before", "tag a release"], true, Ok(reply));
         assert!(matches!(message, Some(Message::AskPeople { situation: Situation::BeforeIrreversible, .. })));
@@ -201,6 +204,10 @@ mod tests {
         assert!(asked(r#"{"id":"k4","asked":["@a","@b",{"kind":"owner"}]}"#).unwrap().starts_with("Asked @a, @b and the owner (call k4)."));
         assert!(asked(r#"{"id":"k5"}"#).unwrap().starts_with("Asked the team (call k5)."));
         assert!(asked(r#"{"asked":["@design"]}"#).is_err() && asked("not json").is_err());
+        assert_eq!(parse_asked(r#"{"granted":true,"call":"k6"}"#), Ok(Asked { id: "k6".into(), who: vec![], granted: true }));
+        for not_granted in [r#"{"call":"k7","asked":["the owner"]}"#, r#"{"granted":false,"call":"k7"}"#, r#"{"granted":"true","call":"k7"}"#] {
+            assert!(!parse_asked(not_granted).unwrap().granted, "{not_granted}");
+        }
     }
 
     #[test]

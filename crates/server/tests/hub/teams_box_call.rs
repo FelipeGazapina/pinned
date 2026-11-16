@@ -16,7 +16,7 @@ fn a_machines_ask_people_frame_reaches_the_teams_machine_call() {
     wait_for("the box node online", || node.online());
     let link = node.link.as_ref().unwrap();
 
-    let ask = |situation| agent::Message::AskPeople { situation, question: "Which color?".into(), choices: vec!["red".into(), "blue".into()] };
+    let ask = |situation| agent::Message::AskPeople { situation, question: "Which color?".into(), choices: vec!["red".into(), "blue".into()], step: None };
     let refused = link.forward(ask(Situation::InDoubt)).expect_err("no team's box runs this node, so nobody can be asked");
     // Whatever the calls unit answers (not built yet, or a refusal of a machine that is no team's),
     // the frame got to `ask_people`: the hub neither failed to read it nor refused the op itself.

@@ -4,6 +4,7 @@
 
 use crate::db::{err, Db};
 use pinned_core::agent::Subject;
+use pinned_core::preauth::team_hook::GO_AHEAD;
 use pinned_core::teams::{Answer, Bot, Call, Group, Role, Run, RunState, TeamProject};
 use tokio_postgres::error::SqlState;
 use uuid::Uuid;
@@ -436,7 +437,7 @@ const RUN_COLUMNS: &str = "id, workflow, state, controller, cost_usd, active_sec
 
 /// A `team_calls` row `c` with its run `r`, as `call_of` reads it.
 const CALL_COLUMNS: &str = "c.id, c.run, r.workflow, c.situation, c.asked, c.question, c.choices, extract(epoch from c.created_at)::bigint, \
-     c.escalated_at is not null, c.answer, c.outcome, c.team";
+     c.escalated_at is not null, c.answer, c.outcome, c.team, c.step_hash";
 
 /// The run states a run that has not ended is in.
 const LIVE: &str = "('working', 'waiting', 'taken_over')";
@@ -463,6 +464,8 @@ pub struct CallRow {
     pub team: Uuid,
     pub call: Call,
     pub outcome: Option<String>,
+    /// The hash of the exact step the team-box hook asked about, if it was the hook.
+    pub step: Option<String>,
 }
 
 impl CallRow {
@@ -485,7 +488,7 @@ fn call_of(r: &Row) -> Result<CallRow, String> {
         escalated: r.get(8),
         answer: r.get::<_, Option<serde_json::Value>>(9).map(serde_json::from_value).transpose().map_err(|e| format!("a call's answer does not read: {e}"))?,
     };
-    Ok(CallRow { team: r.get(11), call, outcome: r.get(10) })
+    Ok(CallRow { team: r.get(11), call, outcome: r.get(10), step: r.get(12) })
 }
 
 fn calls_of(rows: &[Row]) -> Result<Vec<CallRow>, String> {
@@ -673,22 +676,45 @@ pub async fn email(db: &Db, account: Uuid) -> Result<Option<String>, String> {
     Ok(row.map(|r| r.get(0)))
 }
 
-/// Opens a call on its run, created now by Postgres's clock; answers it as kept.
-pub async fn insert_call(db: &Db, team: Uuid, call: &Call) -> Result<Call, String> {
+/// Opens a call on its run, created now by Postgres's clock; answers it as kept. `step` is the
+/// hash of the exact step the team-box hook asks about.
+pub async fn insert_call(db: &Db, team: Uuid, call: &Call, step: Option<&str>) -> Result<Call, String> {
     let (id, run) = (Uuid::parse_str(&call.id).map_err(|_| "a call's id is a uuid")?, Uuid::parse_str(&call.run).map_err(|_| "a run's id is a uuid")?);
     let row = db
         .client()
         .await?
         .query_one(
             &format!(
-                "with c as (insert into team_calls (id, team, run, situation, asked, question, choices) values ($1, $2, $3, $4, $5, $6, $7) returning *)
+                "with c as (insert into team_calls (id, team, run, situation, asked, question, choices, step_hash) values ($1, $2, $3, $4, $5, $6, $7, $8) returning *)
                  select {CALL_COLUMNS} from c join team_runs r on r.id = c.run"
             ),
-            &[&id, &team, &run, &call.situation.as_str(), &json(&call.asked)?, &call.question, &json(&call.choices)?],
+            &[&id, &team, &run, &call.situation.as_str(), &json(&call.asked)?, &call.question, &json(&call.choices)?, &step],
         )
         .await
         .map_err(err)?;
     Ok(call_of(&row)?.call)
+}
+
+/// Uses the "Go ahead" a person gave on a `before_irreversible` call of run `run` about the step
+/// hashed `step` and shown as `question`: the call's id, once, and only within 10 minutes of the
+/// answer's `at` (`now` is unix seconds). One statement, so of two asks at once only one uses it.
+pub async fn use_go_ahead(db: &Db, team: Uuid, run: Uuid, step: &str, question: &str, now: i64) -> Result<Option<Uuid>, String> {
+    let row = db
+        .client()
+        .await?
+        .query_opt(
+            "update team_calls set released_at = $5::bigint where id = (
+               select id from team_calls
+               where team = $1 and run = $2 and step_hash = $3 and question = $4 and situation = 'before_irreversible'
+                 and answer -> 'kind' ->> 'kind' = 'choice' and answer ->> 'choice' = $6
+                 and released_at is null and (answer ->> 'at')::bigint >= $5::bigint - 600
+               order by answered_at desc limit 1 for update)
+             returning id",
+            &[&team, &run, &step, &question, &now, &GO_AHEAD],
+        )
+        .await
+        .map_err(err)?;
+    Ok(row.map(|r| r.get(0)))
 }
 
 pub async fn call(db: &Db, team: Uuid, call: Uuid) -> Result<Option<CallRow>, String> {

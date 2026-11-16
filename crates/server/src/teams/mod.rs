@@ -101,7 +101,7 @@ pub async fn call(hub: &Arc<Hub>, person: &Arc<Account>, team: Option<Uuid>, op:
 /// Runs a machine's `HubCall::Team`: only `AskPeople`, from a machine of a team's own account.
 pub async fn machine_call(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, op: TeamOp) -> Result<Value, String> {
     match op {
-        TeamOp::AskPeople { situation, question, choices } => json(calls::ask_people(hub, account, machine, situation, &question, choices).await?),
+        TeamOp::AskPeople { situation, question, choices, step } => json(calls::ask_people(hub, account, machine, situation, &question, choices, step.as_deref()).await?),
         op => Err(format!("a machine may not send the team op {}", op.name())),
     }
 }

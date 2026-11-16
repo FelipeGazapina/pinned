@@ -32,14 +32,18 @@ const RUNS_LISTED: i64 = 50;
 
 const RUN_ENDED: &str = "this run has ended";
 
-/// What `ask_people` answers at once: the call's id and who it asks, by handle or "the owner",
-/// never an email.
-///
-/// `{"call":"6f1c…","asked":["@design"]}`
+/// What `ask_people` answers at once.
 #[derive(Serialize, Debug, PartialEq)]
-pub struct Asked {
-    pub call: String,
-    pub asked: Vec<String>,
+#[serde(untagged)]
+pub enum Asked {
+    /// The call's id and who it asks, by handle or "the owner", never an email.
+    ///
+    /// `{"call":"6f1c…","asked":["@design"]}`
+    Call { call: String, asked: Vec<String> },
+    /// The step's "Go ahead" on call `call` is used: the step runs now, and nobody is asked.
+    ///
+    /// `{"granted":true,"call":"6f1c…"}`
+    Granted { granted: bool, call: String },
 }
 
 /// The team's runs, newest first (at most 50). Any member reads them.
@@ -66,7 +70,8 @@ pub async fn answer_call(hub: &Arc<Hub>, scope: &Scope, id: &str, mut answer: An
     if row.closed() {
         return Err(already_answered(hub, &row).await);
     }
-    let call = row.call;
+    // A call passed on keeps the step its "Go ahead" lets run.
+    let (call, step) = (row.call, row.step);
     if !asks(hub, scope, &call.asked).await? {
         return Err("this call is not for you".into());
     }
@@ -114,7 +119,7 @@ pub async fn answer_call(hub: &Arc<Hub>, scope: &Scope, id: &str, mut answer: An
         }
         AnswerKind::PassTo { handle } => {
             let next = Call { id: Uuid::new_v4().to_string(), asked: vec![Who::Group { handle: handle.clone() }], escalated: false, answer: None, ..answered.clone() };
-            match db::insert_call(&hub.db, team, &next).await {
+            match db::insert_call(&hub.db, team, &next, step.as_deref()).await {
                 Ok(next) => push_logged(hub, team, TeamEvent::CallOpened { call: next }).await,
                 Err(e) => {
                     // The run cannot wait on a call that was never opened.
@@ -196,7 +201,20 @@ pub async fn stop_run(hub: &Arc<Hub>, scope: &Scope, run: &str) -> Result<Run, S
 /// waits on a call. Opens the call, sets the run `Waiting`, pushes `TeamEvent::CallOpened` and
 /// `RunChanged`, and answers at once with the call's id and who it asks; the answer reaches the
 /// session later, typed into its tab.
-pub async fn ask_people(hub: &Arc<Hub>, team: &Arc<Account>, machine: &str, situation: Situation, question: &str, choices: Vec<String>) -> Result<Asked, String> {
+///
+/// `step`, the team-box hook's hash of the exact step it asks about before an irreversible one:
+/// when someone answered "Go ahead" on a call of this run about the same step and question in the
+/// last 10 minutes, and it was not used yet, it is used now (`db::use_go_ahead`) and the answer is
+/// `Asked::Granted`, with nothing opened. Else the call opens as above and keeps the hash.
+pub async fn ask_people(
+    hub: &Arc<Hub>,
+    team: &Arc<Account>,
+    machine: &str,
+    situation: Situation,
+    question: &str,
+    choices: Vec<String>,
+    step: Option<&str>,
+) -> Result<Asked, String> {
     const NOT_A_TEAM_BOX: &str = "only a session in one of a team's boxes asks people";
     if !db::is_team(&hub.db, team.id).await? {
         return Err(NOT_A_TEAM_BOX.into());
@@ -206,15 +224,21 @@ pub async fn ask_people(hub: &Arc<Hub>, team: &Arc<Account>, machine: &str, situ
         return Err(NOT_A_TEAM_BOX.into());
     }
     let run = db::run_on_machine(&hub.db, team.id, machine).await?.ok_or("no run of the team works in this box")?;
+    let run_id = parse_id(&run.id, "run")?;
+    let question = question.trim();
+    let step = step.filter(|s| !s.is_empty() && situation == Situation::BeforeIrreversible);
+    if let Some(step) = step {
+        if let Some(call) = db::use_go_ahead(&hub.db, team.id, run_id, step, question, now()).await? {
+            return Ok(Asked::Granted { granted: true, call: call.to_string() });
+        }
+    }
     if run.state == RunState::Waiting {
         return Err("this run already waits on a call".into());
     }
-    let question = question.trim();
     if question.is_empty() {
         return Err("say what you ask".into());
     }
     let choices: Vec<String> = choices.iter().map(|c| c.trim().to_owned()).filter(|c| !c.is_empty()).collect();
-    let run_id = parse_id(&run.id, "run")?;
     let asked = match &run.controller {
         Some(controller) => vec![Who::Person { account: controller.clone() }],
         None => {
@@ -241,7 +265,7 @@ pub async fn ask_people(hub: &Arc<Hub>, team: &Arc<Account>, machine: &str, situ
         escalated: false,
         answer: None,
     };
-    let call = match db::insert_call(&hub.db, team.id, &call).await {
+    let call = match db::insert_call(&hub.db, team.id, &call, step).await {
         Ok(call) => call,
         Err(e) => {
             db::stop_waiting(&hub.db, team.id, run_id).await?;
@@ -254,7 +278,7 @@ pub async fn ask_people(hub: &Arc<Hub>, team: &Arc<Account>, machine: &str, situ
     for who in &call.asked {
         shown.push(shown_who(hub, who).await);
     }
-    Ok(Asked { call: call.id, asked: shown })
+    Ok(Asked::Call { call: call.id, asked: shown })
 }
 
 /// Runs every few seconds (`super::spawn_tick`), across every team. A call open longer than

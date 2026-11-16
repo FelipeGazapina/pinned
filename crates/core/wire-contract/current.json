@@ -11383,7 +11383,7 @@
                 ]
               },
               {
-                "description": "From a box's session only, on the team account's machine: asks the people its bot's\n`CallRules` name for `situation`. The session never names people. The hub replies at once\nwith the call's id and who it asks (`{\"call\":\"…\",\"asked\":[\"@design\"]}`); the answer, or\nthat nobody answered in time, is typed into the session later.",
+                "description": "From a box's session only, on the team account's machine: asks the people its bot's\n`CallRules` name for `situation`. The session never names people. The hub replies at once\nwith the call's id and who it asks (`{\"call\":\"…\",\"asked\":[\"@design\"]}`); the answer, or\nthat nobody answered in time, is typed into the session later.\n\n`step`, from the team-box hook only: the hash of the exact tool call it asks about. A\n\"Go ahead\" on a `BeforeIrreversible` call with the same step, in the same run, in the last\n10 minutes and not used yet, lets that step run once: the hub answers\n`{\"granted\":true,\"call\":\"…\"}` and opens no call.",
                 "type": "object",
                 "properties": {
                   "op": {
@@ -11402,6 +11402,12 @@
                       "type": "string"
                     },
                     "default": []
+                  },
+                  "step": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -22909,7 +22915,7 @@
                 ]
               },
               {
-                "description": "From a box's session only, on the team account's machine: asks the people its bot's\n`CallRules` name for `situation`. The session never names people. The hub replies at once\nwith the call's id and who it asks (`{\"call\":\"…\",\"asked\":[\"@design\"]}`); the answer, or\nthat nobody answered in time, is typed into the session later.",
+                "description": "From a box's session only, on the team account's machine: asks the people its bot's\n`CallRules` name for `situation`. The session never names people. The hub replies at once\nwith the call's id and who it asks (`{\"call\":\"…\",\"asked\":[\"@design\"]}`); the answer, or\nthat nobody answered in time, is typed into the session later.\n\n`step`, from the team-box hook only: the hash of the exact tool call it asks about. A\n\"Go ahead\" on a `BeforeIrreversible` call with the same step, in the same run, in the last\n10 minutes and not used yet, lets that step run once: the hub answers\n`{\"granted\":true,\"call\":\"…\"}` and opens no call.",
                 "type": "object",
                 "properties": {
                   "op": {
@@ -22928,6 +22934,12 @@
                       "type": "string"
                     },
                     "default": []
+                  },
+                  "step": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -31595,7 +31607,7 @@
                 ]
               },
               {
-                "description": "From a box's session only, on the team account's machine: asks the people its bot's\n`CallRules` name for `situation`. The session never names people. The hub replies at once\nwith the call's id and who it asks (`{\"call\":\"…\",\"asked\":[\"@design\"]}`); the answer, or\nthat nobody answered in time, is typed into the session later.",
+                "description": "From a box's session only, on the team account's machine: asks the people its bot's\n`CallRules` name for `situation`. The session never names people. The hub replies at once\nwith the call's id and who it asks (`{\"call\":\"…\",\"asked\":[\"@design\"]}`); the answer, or\nthat nobody answered in time, is typed into the session later.\n\n`step`, from the team-box hook only: the hash of the exact tool call it asks about. A\n\"Go ahead\" on a `BeforeIrreversible` call with the same step, in the same run, in the last\n10 minutes and not used yet, lets that step run once: the hub answers\n`{\"granted\":true,\"call\":\"…\"}` and opens no call.",
                 "type": "object",
                 "properties": {
                   "op": {
@@ -31614,6 +31626,12 @@
                       "type": "string"
                     },
                     "default": []
+                  },
+                  "step": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -39973,7 +39991,7 @@
                 ]
               },
               {
-                "description": "From a box's session only, on the team account's machine: asks the people its bot's\n`CallRules` name for `situation`. The session never names people. The hub replies at once\nwith the call's id and who it asks (`{\"call\":\"…\",\"asked\":[\"@design\"]}`); the answer, or\nthat nobody answered in time, is typed into the session later.",
+                "description": "From a box's session only, on the team account's machine: asks the people its bot's\n`CallRules` name for `situation`. The session never names people. The hub replies at once\nwith the call's id and who it asks (`{\"call\":\"…\",\"asked\":[\"@design\"]}`); the answer, or\nthat nobody answered in time, is typed into the session later.\n\n`step`, from the team-box hook only: the hash of the exact tool call it asks about. A\n\"Go ahead\" on a `BeforeIrreversible` call with the same step, in the same run, in the last\n10 minutes and not used yet, lets that step run once: the hub answers\n`{\"granted\":true,\"call\":\"…\"}` and opens no call.",
                 "type": "object",
                 "properties": {
                   "op": {
@@ -39992,6 +40010,12 @@
                       "type": "string"
                     },
                     "default": []
+                  },
+                  "step": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [

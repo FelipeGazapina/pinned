@@ -194,6 +194,9 @@ create index if not exists team_calls_open on team_calls (created_at) where answ
 alter table team_bots add column if not exists once boolean not null default false;
 alter table team_runs add column if not exists subject jsonb;
 alter table team_bots add column if not exists off_note text;
+-- The hash of the exact step a team-box hook asked about, and when its Go ahead let that step run
+-- (unix seconds): each Go ahead lets its step run once (`teams::db::use_go_ahead`).
+alter table team_calls add column if not exists step_hash text, add column if not exists released_at bigint;
 ";
 /// How long the hub keeps an end that its machine never came back for.
 const HELD_FOR: &str = "interval '30 days'";
