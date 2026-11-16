@@ -1,7 +1,7 @@
 //! Teams: the guards on a team bot's calls. A step that hides a command in a secret is denied
 //! without asking anyone. A Call step calls only an on bot of the same team.
 
-use super::teams_calls::{calls_of, on_node, patient, TeamBox};
+use super::teams_calls::{calls_of, choice, design, on_node, op, patient, rows, TeamBox};
 use super::*;
 use pinned_core::preauth::team_hook::{self, HookEnv};
 use pinned_core::teams::{Bot, BotLimits, CallRules, TeamOp};
@@ -217,4 +217,29 @@ fn a_team_with_one_box_reused_stored_runs_on_a_fresh_box() {
     crew.call(&crew.bob, TeamOp::RunNow { workflow: solo }).unwrap();
     assert_eq!(crew.hub.boxes.live().len(), 1, "the run opened a box");
     assert_eq!(team_settings(&crew.hub, crew.team)["boxes"]["workflow"], json!({ "mode": "fixed" }), "no shared box was claimed");
+}
+
+#[test]
+fn an_unused_go_ahead_does_not_survive_a_take_over() {
+    const DEPLOY: &str = "vercel deploy --prod site-a";
+    let hub = TestHub::start_with_team_policy("teams_guards_go_ahead_take_over", fast(), patient());
+    let mut tb = TeamBox::new(&hub);
+    let mut bea = tb.member(&hub, "bea@example.test", &[]);
+    tb.bot(&hub, design(), Some(bea.id));
+    let run = tb.run(&hub);
+    assert!(try_step(&hub, &tb, DEPLOY).unwrap().starts_with("Asked the team before this step"));
+    let first = calls_of(tb.team, &mut tb.owner.client);
+    assert_eq!(first.len(), 1);
+    let call = first[0]["id"].as_str().unwrap().to_owned();
+    op(tb.team, &mut tb.owner.client, json!({ "op": "answer_call", "id": call, "answer": choice("Go ahead", "") })).unwrap();
+
+    // bea, the bot's owner, takes over before the bot used the owner's Go ahead.
+    op(tb.team, &mut bea.client, json!({ "op": "take_over", "run": run.to_string() })).unwrap();
+    let reason = try_step(&hub, &tb, DEPLOY).expect("the step is asked about again, not run");
+    let listed = calls_of(tb.team, &mut tb.owner.client);
+    assert_eq!(listed.len(), 2, "a new call is listed");
+    let again = listed.iter().map(|c| c["id"].as_str().unwrap().to_owned()).find(|id| *id != call).unwrap();
+    assert_eq!(reason, format!("Asked the team before this step (call {again}). End your turn and wait for the answer; only if it says go ahead, make this exact tool call again, unchanged."));
+    let open = rows(&hub, &format!("select (answer is null and released_at is null)::text from team_calls where id = '{again}'"));
+    assert_eq!(open[0][0].as_deref(), Some("true"));
 }

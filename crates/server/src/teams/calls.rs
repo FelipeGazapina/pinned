@@ -142,6 +142,7 @@ pub async fn answer_call(hub: &Arc<Hub>, scope: &Scope, id: &str, mut answer: An
             if db::take_over(&hub.db, team, run_id, scope.member).await?.is_none() && run.controller.is_none() {
                 eprintln!("pinned-server: run {run_id} of team {team} changed while {} took it over", scope.member);
             }
+            db::release_go_aheads(&hub.db, team, run_id, now()).await?;
             back_to_work(hub, &scope.team, run_id).await?;
             let said = if answer.text.is_empty() { String::new() } else { format!(": {}", answer.text) };
             tell_session(hub, &scope.team, run_id, &format!("call-{id}"), format!("[{who} took over the run on call {id}{said}]")).await;
@@ -162,6 +163,8 @@ pub async fn take_over(hub: &Arc<Hub>, scope: &Scope, run: &str) -> Result<Run, 
     may_steer(hub, scope, run_id, &run).await?;
     match db::take_over(&hub.db, scope.team.id, run_id, scope.member).await? {
         Some(run) => {
+            // A "Go ahead" was given for the run as it was; the one who took over decides anew.
+            db::release_go_aheads(&hub.db, scope.team.id, run_id, now()).await?;
             push_logged(hub, scope.team.id, TeamEvent::RunChanged { run: run.clone() }).await;
             Ok(run)
         }
