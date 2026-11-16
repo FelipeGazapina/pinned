@@ -2918,11 +2918,13 @@ mod tests {
         inner: MemHub,
         limit: Cell<u64>,
         pushes: RefCell<Vec<Vec<(String, bool)>>>,
+        /// When set, every push is refused with this error, deletions too.
+        refuse: RefCell<Option<String>>,
     }
 
     impl QuotaHub {
         fn new(limit: u64) -> QuotaHub {
-            QuotaHub { inner: MemHub::default(), limit: Cell::new(limit), pushes: RefCell::default() }
+            QuotaHub { inner: MemHub::default(), limit: Cell::new(limit), pushes: RefCell::default(), refuse: RefCell::default() }
         }
         fn used(&self) -> u64 {
             self.inner.0.borrow().values().map(|f| f.entry.size).sum()
@@ -2935,6 +2937,9 @@ mod tests {
         }
         fn push(&self, project: &str, files: Vec<File>) -> Result<(), String> {
             self.pushes.borrow_mut().push(files.iter().map(|f| (f.entry.path.clone(), f.data.is_none())).collect());
+            if let Some(error) = self.refuse.borrow().clone() {
+                return Err(error);
+            }
             let replaced: u64 = files.iter().filter_map(|f| self.inner.0.borrow().get(&f.entry.path).map(|old| old.entry.size)).sum();
             let incoming: u64 = files.iter().map(|f| f.entry.size).sum();
             if incoming > replaced && self.used() - replaced + incoming > self.limit.get() {
@@ -3035,6 +3040,146 @@ mod tests {
         assert_eq!((done.pushed, done.pulled), (vec![], vec![memory("f")]));
         assert_eq!(hub.0.borrow()[&memory("f")].entry.sha, sha(b"second, from mini"));
         assert_eq!(std::fs::read_to_string(mac.claude("memory/f.md")).unwrap(), "second, from mini");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    fn age(path: &Path, seconds: u64) {
+        let file = std::fs::File::options().write(true).open(path).unwrap();
+        file.set_modified(SystemTime::now() - std::time::Duration::from_secs(seconds)).unwrap();
+    }
+
+    fn big(side: &Side) {
+        let notes: Vec<String> = (0..400).map(|i| format!("{i}:{}", i * 7919 % 1000)).collect();
+        put(&side.claude("memory/big.md"), &notes.join(","));
+    }
+
+    #[test]
+    fn a_stuck_push_keeps_this_machines_unsent_change_from_a_newer_copy_and_still_pulls_the_rest() {
+        let root = root("stuck-keeps-change");
+        let hub = QuotaHub::new(u64::MAX);
+        let (mut mac, mut mini) = (Side::new(&root, "mac", "app"), Side::new(&root, "mini", "app"));
+        put(&mac.claude("memory/MEMORY.md"), "both machines' notes");
+        put(&mac.claude("memory/other.md"), "other notes");
+        sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap();
+        sync(&hub, &mut mini.state, &mini.checkout, SystemTime::now()).unwrap();
+        let agreed_key = format!("github.com/acme/app {}", mac.checkout.path.display());
+        let baseline = mac.state.agreed[&agreed_key][&memory("MEMORY")].clone();
+        hub.limit.set(hub.used());
+        put(&mac.claude("memory/MEMORY.md"), "mac's notes the hub never took");
+        age(&mac.claude("memory/MEMORY.md"), 60);
+        big(&mac);
+        assert!(matches!(sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap().push, Push::Refused { .. }));
+        hub.limit.set(u64::MAX);
+        put(&mini.claude("memory/MEMORY.md"), "mini's later notes");
+        put(&mini.claude("memory/other.md"), "other notes, from mini");
+        assert_eq!(sync(&hub, &mut mini.state, &mini.checkout, SystemTime::now()).unwrap().pushed.len(), 2);
+        hub.limit.set(hub.used());
+
+        let done = sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap();
+        assert!(matches!(done.push, Push::Refused { .. }));
+        assert_eq!(std::fs::read_to_string(mac.claude("memory/MEMORY.md")).unwrap(), "mac's notes the hub never took");
+        assert_eq!(mac.state.agreed[&agreed_key].get(&memory("MEMORY")), Some(&baseline), "the baseline stays until the hub takes mac's change");
+        assert_eq!(done.pulled, vec![memory("other")], "a file mac did not change is pulled in the same cycle");
+        assert_eq!(std::fs::read_to_string(mac.claude("memory/other.md")).unwrap(), "other notes, from mini");
+
+        hub.limit.set(u64::MAX);
+        let taken = sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap();
+        assert_eq!((taken.push, taken.pushed), (Push::Done, vec![memory("big")]));
+        assert_eq!(std::fs::read_to_string(mac.claude("memory/MEMORY.md")).unwrap(), "mini's later notes", "once the push is taken the newer side wins, as on main");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_stuck_push_keeps_a_session_this_machine_appended_to_that_another_machine_deleted() {
+        let root = root("stuck-keeps-session");
+        let hub = QuotaHub::new(u64::MAX);
+        let (mut mac, mut mini) = (Side::new(&root, "mac", "app"), Side::new(&root, "mini", "app"));
+        put(&mac.claude("s1.jsonl"), "{\"turn\":1}\n");
+        sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap();
+        sync(&hub, &mut mini.state, &mini.checkout, SystemTime::now()).unwrap();
+        hub.limit.set(hub.used());
+        put(&mac.claude("s1.jsonl"), "{\"turn\":1}\n{\"turn\":2}\n");
+        age(&mac.claude("s1.jsonl"), 60);
+        big(&mac);
+        assert!(matches!(sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap().push, Push::Refused { .. }));
+        std::fs::remove_file(mini.claude("s1.jsonl")).unwrap();
+        assert_eq!(sync(&hub, &mut mini.state, &mini.checkout, SystemTime::now()).unwrap().pushed, vec!["claude/s1.jsonl"]);
+        assert!(hub.inner.0.borrow()["claude/s1.jsonl"].data.is_none());
+
+        let done = sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap();
+        assert!(matches!(done.push, Push::Refused { .. }));
+        assert_eq!(std::fs::read_to_string(mac.claude("s1.jsonl")).unwrap(), "{\"turn\":1}\n{\"turn\":2}\n");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_refused_batch_of_deletions_sends_no_additions_after_it() {
+        let root = root("refused-deletions");
+        let hub = QuotaHub::new(u64::MAX);
+        let mut mac = Side::new(&root, "mac", "app");
+        put(&mac.claude("memory/a.md"), "a");
+        sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap();
+        hub.pushes.borrow_mut().clear();
+        std::fs::remove_file(mac.claude("memory/a.md")).unwrap();
+        put(&mac.claude("memory/c.md"), "c is new");
+        *hub.refuse.borrow_mut() = Some(QUOTA_REFUSAL.into());
+
+        let done = sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap();
+        assert!(matches!(done.push, Push::Refused { .. }));
+        assert_eq!(*hub.pushes.borrow(), vec![vec![(memory("a"), true)]], "the hub saw the deletions batch only");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn only_the_hubs_limit_refusal_holds_a_push_and_any_other_error_ends_the_sync() {
+        let root = root("push-errors");
+        let hub = QuotaHub::new(u64::MAX);
+        let mut mac = Side::new(&root, "mac", "app");
+        put(&mac.claude("memory/a.md"), "a");
+        for error in ["the hub did not answer within 60 seconds", "not connected to the hub", "the connection to the hub dropped"] {
+            *hub.refuse.borrow_mut() = Some(error.into());
+            assert_eq!(sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).map(|d| d.push), Err(error.to_owned()));
+        }
+        *hub.refuse.borrow_mut() = Some(QUOTA_REFUSAL.into());
+        let refused = sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap().push;
+        assert!(matches!(&refused, Push::Refused { error, .. } if error == QUOTA_REFUSAL));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Removes a local file when the sync lists, after it was hashed and before it is sent.
+    struct VanishingHub<'a> {
+        inner: QuotaHub,
+        vanish: &'a Path,
+    }
+
+    impl Hub for VanishingHub<'_> {
+        fn list(&self, project: &str) -> Result<Vec<Entry>, String> {
+            let _ = std::fs::remove_file(self.vanish);
+            self.inner.list(project)
+        }
+        fn push(&self, project: &str, files: Vec<File>) -> Result<(), String> {
+            self.inner.push(project, files)
+        }
+        fn pull(&self, project: &str, paths: Vec<String>) -> Result<Vec<File>, String> {
+            self.inner.pull(project, paths)
+        }
+        fn mark_executable(&self, project: &str, repairs: Vec<ModeRepair>) -> Result<(), String> {
+            self.inner.mark_executable(project, repairs)
+        }
+    }
+
+    #[test]
+    fn a_file_that_vanishes_before_it_is_sent_and_was_never_agreed_sends_no_deletion() {
+        let root = root("vanished");
+        let mut mac = Side::new(&root, "mac", "app");
+        let fresh = mac.claude("memory/fresh.md");
+        put(&fresh, "written and removed within one sync");
+        let hub = VanishingHub { inner: QuotaHub::new(u64::MAX), vanish: &fresh };
+
+        let done = sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap();
+        assert_eq!(done.pushed, Vec::<String>::new());
+        assert_eq!(*hub.inner.pushes.borrow(), Vec::<Vec<(String, bool)>>::new(), "nothing is pushed for it");
+        assert!(!hub.inner.inner.0.borrow().contains_key(&memory("fresh")));
         let _ = std::fs::remove_dir_all(root);
     }
 }

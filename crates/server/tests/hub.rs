@@ -11669,3 +11669,42 @@ fn a_deletion_naming_a_sha_the_hub_no_longer_holds_is_skipped_and_one_naming_non
     assert_eq!(sha_of(&mut ana, gone), Some(String::new()));
     assert_eq!(sha_of(&mut ana, old), Some(String::new()), "a deletion without `agreed` applies whatever the hub holds");
 }
+
+#[test]
+fn over_the_sync_limit_a_stale_deletion_frees_nothing_and_agreed_on_a_file_is_ignored() {
+    let hub = TestHub::start("sync_quota_stale");
+    let url = hub.url.clone();
+    let (_, _, mut ana) = signed_in(&url, "ana@example.test");
+    let project = "github.com/acme/site";
+    let file = |path: &str, text: &str| {
+        json!({ "path": path, "sha": sha256_hex(text.as_bytes()), "modified": 1, "data": base64::engine::general_purpose::STANDARD.encode(gzip_bytes(text.as_bytes())) })
+    };
+    let push = |client: &mut Client, files: Vec<Value>| client.hub(json!({ "cmd": "sync_push", "project": project, "files": files }));
+    let sha_of = |client: &mut Client, path: &str| {
+        let listed = client.hub(json!({ "cmd": "sync_list", "project": project })).unwrap();
+        listed.as_array().unwrap().iter().find(|e| e["path"] == path).map(|e| e["sha"].as_str().unwrap().to_owned())
+    };
+    let plan = "claude/memory/plan.md";
+    push(&mut ana, vec![file(plan, "plan: ship 0.18.6")]).unwrap();
+    let mut changed = file(plan, "plan: ship 0.18.7");
+    changed["agreed"] = json!(sha256_hex(b"an older plan"));
+    assert_eq!(push(&mut ana, vec![changed]), Ok(Value::Null));
+    assert_eq!(sha_of(&mut ana, plan), Some(sha256_hex(b"plan: ship 0.18.7")), "`agreed` is only compared on a deletion");
+
+    // Eleven sessions of 100 MiB: 1153433600 bytes, past the 1073741824 the account may keep.
+    admin_on(
+        &hub.database,
+        &format!(
+            "insert into project_files (account, project, path, sha, modified, data) \
+             select a.id, '{project}', 'claude/big-' || n || '.jsonl', 'big' || n, 1, convert_to(repeat('x', 104857600), 'UTF8') \
+             from accounts a, generate_series(1, 11) n where a.email = 'ana@example.test'"
+        ),
+    );
+    let stale = json!({ "path": "claude/big-1.jsonl", "sha": "", "modified": 2, "agreed": "big0" });
+    let refused = push(&mut ana, vec![stale, file("claude/memory/more.md", "one more note")]);
+    assert_eq!(refused, Err("the account's synced projects would pass 1024 MB; delete old sessions to sync more".to_owned()), "the skipped deletion frees nothing");
+    assert_eq!(sha_of(&mut ana, "claude/big-1.jsonl"), Some("big1".to_owned()));
+    assert_eq!(sha_of(&mut ana, "claude/memory/more.md"), None);
+    let current = json!({ "path": "claude/big-1.jsonl", "sha": "", "modified": 2, "agreed": "big1" });
+    assert_eq!(push(&mut ana, vec![current, file("claude/memory/more.md", "one more note")]), Ok(Value::Null));
+}

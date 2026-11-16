@@ -1690,4 +1690,72 @@ mod tests {
         assert_eq!(hub.files.borrow()["claude/memory/notes.md"].entry.sha, sync::sha(b"notes edited again at second 120"));
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    fn append(path: &std::path::Path, line: &str) {
+        use std::io::Write;
+        std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap().write_all(line.as_bytes()).unwrap();
+    }
+
+    #[test]
+    fn a_held_push_stays_held_while_only_the_hubs_history_grows_and_goes_once_this_machine_adds_a_turn() {
+        let (dir, mut mac, _) = full_checkout("held-history-mac");
+        let (mini_dir, mut mini, _) = full_checkout("held-history-mini");
+        mac.history = Some(dir.join("history.jsonl"));
+        mini.history = Some(mini_dir.join("history.jsonl"));
+        let turn = |session: &str, ended: u64| format!("{{\"session\":\"{session}\",\"ended\":{ended}}}\n");
+        let (mac_history, mini_history) = (mac.history.clone().unwrap(), mini.history.clone().unwrap());
+        append(&mac_history, &turn("both", 1));
+        let hub = FullHub::default();
+        hub.room.set(true);
+        let (mut mac_state, mut mini_state) = (sync::State::default(), sync::State::default());
+        sync::sync(&hub, &mut mac_state, &mac, SystemTime::now()).unwrap();
+        sync::sync(&hub, &mut mini_state, &mini, SystemTime::now()).unwrap();
+        hub.room.set(false);
+        append(&mac_history, &turn("mac", 2));
+
+        let (mut backoff, start, mut at) = (PushBackoff::default(), Instant::now(), vec![]);
+        for cycle in 0..16 {
+            let seconds = (SYNC_EVERY * cycle).as_secs();
+            append(&mini_history, &turn("mini", 1000 + seconds));
+            hub.room.set(true);
+            assert_eq!(sync::sync(&hub, &mut mini_state, &mini, SystemTime::now()).unwrap().push, sync::Push::Done);
+            hub.room.set(false);
+            if seconds == 200 {
+                append(&mac_history, &turn("mac", 3));
+            }
+            let pushes = hub.pushes.get();
+            backoff.sync(&hub, &mut mac_state, &mac, start + SYNC_EVERY * cycle).unwrap();
+            if hub.pushes.get() > pushes {
+                at.push(seconds);
+            }
+        }
+        assert_eq!(at, [0, 20, 60, 140, 200, 220, 260], "the hub's turns never end the hold; mac's own turn does");
+        assert_eq!(std::fs::read_to_string(&mac_history).unwrap(), [turn("both", 1), turn("mac", 2), turn("mac", 3)].concat(), "the history is not merged while the hub refuses it");
+
+        hub.room.set(true);
+        assert_eq!(sync::sync(&hub, &mut mac_state, &mac, SystemTime::now()).unwrap().pushed, vec![sync::HISTORY]);
+        let merged = std::fs::read_to_string(&mac_history).unwrap();
+        assert!(merged.contains(&turn("mac", 3)) && merged.contains(&turn("mini", 1300)), "taken, the merge lands here too: {merged}");
+        assert_eq!(hub.files.borrow()[sync::HISTORY].entry.sha, sync::sha(merged.as_bytes()));
+        let _ = (std::fs::remove_dir_all(dir), std::fs::remove_dir_all(mini_dir));
+    }
+
+    #[test]
+    fn a_taken_push_ends_the_hold_so_a_later_refusal_waits_twenty_seconds_again() {
+        let (dir, checkout, notes) = full_checkout("taken-ends-hold");
+        let hub = FullHub::default();
+        let at = pushed_at(&hub, &checkout, 6, |seconds| match seconds {
+            40 => {
+                hub.room.set(true);
+                std::fs::write(&notes, "b").unwrap();
+            }
+            60 => {
+                hub.room.set(false);
+                std::fs::write(&notes, "notes written at the limit").unwrap();
+            }
+            _ => {}
+        });
+        assert_eq!(at, [0, 20, 40, 60, 80]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
