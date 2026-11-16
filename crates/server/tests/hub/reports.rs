@@ -54,6 +54,14 @@ fn report_issue(client: &mut Client, draft: Value, extra: Value) -> Result<Value
     client.hub(call)
 }
 
+/// The app's way to send: preview `draft`, then send it with the hash the preview showed.
+fn reviewed_send(client: &mut Client, draft: Value, extra: Value) -> Result<Value, String> {
+    let preview = ask(client, json!({ "op": "preview", "draft": draft.clone() }))?;
+    let mut extra = extra;
+    extra["shown"] = preview["shown"].clone();
+    report_issue(client, draft, extra)
+}
+
 fn listed(client: &mut Client) -> Vec<Value> {
     ask(client, json!({ "op": "list" })).unwrap().as_array().unwrap().clone()
 }
@@ -135,7 +143,7 @@ fn an_agents_report_waits_scrubbed_and_the_issue_is_its_held_text_once_the_owner
     let rows = listed(&mut ana.client);
     assert_eq!((rows.len(), rows[0]["by_agent"].clone()), (1, json!(true)));
     let held_draft: Draft = serde_json::from_value(item["args"]["draft"].clone()).unwrap();
-    let (title, body, labels) = reports::render(&held_draft, &Context::default(), None, &reports::ref_of(rows[0]["id"].as_str().unwrap()));
+    let (title, body, labels) = reports::render(&held_draft, &Context::default(), None, &reports::ref_of(rows[0]["id"].as_str().unwrap())).unwrap();
     assert_eq!((fake.github.body(1), fake.github.labels(1)), (body, labels));
     assert_eq!(title, "Crash in [project]");
     wait_for("the notice in the agent's queue", || ana.node.machine.view(&ana.tab).unwrap().queued >= 1);
@@ -176,13 +184,13 @@ fn a_report_can_join_a_similar_open_issue_as_a_comment_and_a_closed_one_is_refus
 
     let mut closed = problem("Old diff crash again", "It closes.");
     closed["to_issue"] = json!(320);
-    let refused = report_issue(&mut app, closed, json!({})).unwrap_err();
+    let refused = reviewed_send(&mut app, closed, json!({})).unwrap_err();
     assert!(refused.contains("Issue #320 is closed"), "{refused}");
     assert_eq!(ask(&mut app, json!({ "op": "status" })).unwrap()["left_today"], 5, "a refused report does not count");
 
     let mut added = problem("The diff is slow for files over 5000 lines", "Same here, with 8000 lines.");
     added["to_issue"] = json!(318);
-    let sent = report_issue(&mut app, added, json!({})).unwrap();
+    let sent = reviewed_send(&mut app, added, json!({})).unwrap();
     assert_eq!((sent["issue"].clone(), sent["followed"].clone(), sent["state"].clone()), (json!(318), json!(true), json!({ "state": "open" })), "{sent}");
     assert_eq!(fake.posts(), (0, 1), "one comment and no new issue");
     let comment = &fake.github.comment_bodies(318)[0];
@@ -217,11 +225,11 @@ fn drafts_are_saved_listed_sent_by_id_and_deleted_and_only_their_account_sees_th
     assert_eq!(listed(&mut bob), Vec::<Value>::new(), "bob lists none of ana's");
     assert_eq!(ask(&mut bob, json!({ "op": "delete_draft", "id": id })), no_draft(&id));
     assert_eq!(ask(&mut bob, json!({ "op": "save_draft", "id": id, "draft": problem("Bob's now", "x") })), no_draft(&id));
-    assert_eq!(report_issue(&mut bob, problem("Half written", "It closes."), json!({ "draft_id": id })), no_draft(&id));
+    assert_eq!(reviewed_send(&mut bob, problem("Half written", "It closes."), json!({ "draft_id": id })), no_draft(&id));
     assert_eq!(listed(&mut ana)[0]["title"], "Half written", "ana's draft is untouched");
     assert_eq!(fake.posts(), (0, 0));
 
-    let sent = report_issue(&mut ana, problem("Half written", "It closes."), json!({ "draft_id": id })).unwrap();
+    let sent = reviewed_send(&mut ana, problem("Half written", "It closes."), json!({ "draft_id": id })).unwrap();
     assert_eq!((sent["id"].clone(), sent["state"].clone(), sent["draft"].clone()), (json!(id), json!({ "state": "open" }), Value::Null), "{sent}");
     let list = listed(&mut ana);
     assert_eq!(list.len(), 1, "the draft became the report: {list:?}");
@@ -243,11 +251,11 @@ fn the_sixth_report_of_a_day_is_refused_before_any_request_and_an_added_case_and
     let before = fake.github.requests().len();
 
     for n in 0..3 {
-        report_issue(&mut ana, problem(&format!("Crash number {n}"), "It closes."), json!({})).unwrap();
+        reviewed_send(&mut ana, problem(&format!("Crash number {n}"), "It closes."), json!({})).unwrap();
     }
     let mut added = problem("Diff slow again", "Same.");
     added["to_issue"] = json!(7);
-    report_issue(&mut ana, added, json!({})).unwrap();
+    reviewed_send(&mut ana, added, json!({})).unwrap();
     assert_eq!(fake.posts(), (3, 1));
     assert_eq!(ask(&mut ana, json!({ "op": "status" })).unwrap()["left_today"], 1);
 
@@ -258,7 +266,7 @@ fn the_sixth_report_of_a_day_is_refused_before_any_request_and_an_added_case_and
             let (url, token, answers) = (&url, &token, &answers);
             scope.spawn(move || {
                 let mut client = Client::connect(url, token);
-                let answer = report_issue(&mut client, problem(&format!("Race {n}"), "It closes."), json!({}));
+                let answer = reviewed_send(&mut client, problem(&format!("Race {n}"), "It closes."), json!({}));
                 answers.lock().unwrap().push(answer);
             });
         }
@@ -269,14 +277,16 @@ fn the_sixth_report_of_a_day_is_refused_before_any_request_and_an_added_case_and
     assert!(refused.starts_with("You sent 5 reports in the last day. You can send again at ") && refused.ends_with(" UTC."), "{refused}");
     assert_eq!(fake.posts().0 + fake.posts().1, 5, "still 5");
 
+    let sixth = problem("Sixth", "It closes.");
+    let shown = ask(&mut ana, json!({ "op": "preview", "draft": sixth.clone() })).unwrap()["shown"].clone();
     let requests = fake.github.requests().len();
-    let refused = report_issue(&mut ana, problem("Sixth", "It closes."), json!({})).unwrap_err();
+    let refused = report_issue(&mut ana, sixth, json!({ "shown": shown })).unwrap_err();
     assert!(refused.starts_with("You sent 5 reports in the last day."), "{refused}");
     assert_eq!(fake.github.requests().len(), requests, "no request left the hub for the sixth");
     assert!(before < requests);
     assert_eq!(ask(&mut ana, json!({ "op": "status" })).unwrap()["left_today"], 0);
     let mut bob = Client::connect(&hub.url, &signed_up(&hub, "bob@example.test"));
-    assert!(report_issue(&mut bob, problem("Bob's own", "It closes."), json!({})).is_ok(), "the limit is per account");
+    assert!(reviewed_send(&mut bob, problem("Bob's own", "It closes."), json!({})).is_ok(), "the limit is per account");
 }
 
 #[test]
@@ -305,10 +315,11 @@ fn an_agent_reads_only_where_a_report_is_never_its_text_or_what_github_said() {
     let fake = Fake::start();
     fake.github.add_issue_numbered(318, "Diff slow on files over 5000 lines in /Users/ana/shop", "Body text from GitHub.");
     fake.github.add_comment_as(318, "maintainer", "OWNER", "A comment nobody asked an agent to read.");
+    fake.github.add_issue_numbered(319, &format!("Zigzag {}", "w".repeat(150)), "Long.");
     let hub = reporting("reports_agent_view", Some(&fake));
     let token = signed_up(&hub, "ana@example.test");
     let mut ana = agent_of(&hub.url, &token, "ana@example.test", "ana-view-mac");
-    report_issue(&mut ana.client, problem("Crash on launch", "It closes."), json!({})).unwrap();
+    reviewed_send(&mut ana.client, problem("Crash on launch", "It closes."), json!({})).unwrap();
     ask(&mut ana.client, json!({ "op": "save_draft", "draft": problem("A draft", "Private words.") })).unwrap();
 
     let keys = |value: &Value| {
@@ -328,6 +339,9 @@ fn an_agent_reads_only_where_a_report_is_never_its_text_or_what_github_said() {
     assert_eq!((similar[0]["number"].clone(), similar[0]["state"].clone()), (json!(318), json!("open")));
     assert!(similar[0]["public_title"].as_str().unwrap().contains("[folder]") && !similar.to_string().contains("/Users/ana"), "{similar}");
     assert!(!similar.to_string().contains("Body text") && !similar.to_string().contains("comment nobody"), "{similar}");
+    let long = act(&ana.dir, &ana.tab, "reports", json!({ "ask": { "op": "similar", "title": "Zigzag" } })).unwrap()["result"].clone();
+    let long = long.as_array().unwrap().iter().find(|s| s["number"] == 319).unwrap()["public_title"].as_str().unwrap().to_owned();
+    assert_eq!(long.chars().count(), 120, "an agent reads at most 120 characters of a title: {long}");
 }
 
 #[test]
@@ -365,4 +379,174 @@ fn a_search_is_reused_for_a_minute_and_the_hub_makes_at_most_twenty_a_minute() {
     let preview = ask(&mut ana, json!({ "op": "preview", "draft": problem("Yet another topic", "It closes.") })).unwrap();
     assert_eq!(preview["similar"], json!([]), "a preview goes on without suggestions while searching is held back");
     assert_eq!(searches(), 20);
+}
+
+/// An account's app and its machine `name`, with an agent session in each of `folders`, made under the node's own
+/// folder. The tabs come back in the order of `folders`.
+fn agents_in(url: &str, token: &str, email: &str, name: &str, folders: &[&str]) -> (Agent, Vec<String>) {
+    let mut client = Client::connect(url, token);
+    client.wait("hello", |f| f["type"] == "hello");
+    let dir = node_dir(&format!("reports-{name}"));
+    let (machine, machine_token) = account::register_machine(url, token, name, "macos").unwrap();
+    let creds = Credentials { hub: url.to_owned(), email: email.to_owned(), user_token: token.to_owned(), machine_id: machine.id.clone(), machine_token };
+    creds.save(&dir).unwrap();
+    let node = Node::start(&dir, creds);
+    node.machine.listen(|_| Err("unexpected".into())).unwrap();
+    client.wait_machines(&[(name, true)]);
+    let mut tabs = vec![];
+    for folder in folders {
+        let path = dir.join(folder);
+        std::fs::create_dir_all(&path).unwrap();
+        let tab = node.machine.open_tab(Some(path.display().to_string()), false).unwrap();
+        client.wait("the agent's tab at the hub", |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == tab));
+        tabs.push(tab);
+    }
+    let tab = tabs[0].clone();
+    (Agent { client, node, dir, machine: machine.id, tab }, tabs)
+}
+
+/// What an agent's `report_issue` from `tab` holds for the owner: the confirmation's id and its draft.
+fn held_report(agent: &mut Agent, tab: &str, draft: Value) -> (String, Value) {
+    let held = act(&agent.dir, tab, "report_issue", json!({ "draft": draft })).unwrap();
+    assert_eq!(held["outcome"], "pending", "{held}");
+    let id = held["id"].as_str().unwrap().to_owned();
+    let waiting = agent.client.hub(json!({ "cmd": "confirmations" })).unwrap();
+    let item = waiting.as_array().unwrap().iter().find(|c| c["id"] == id.as_str()).unwrap().clone();
+    (id, item["args"]["draft"].clone())
+}
+
+/// The title of the `n`th issue the hub posted, as GitHub got it.
+fn posted_title(fake: &Fake, n: usize) -> String {
+    let posts: Vec<_> = fake.github.requests().into_iter().filter(|r| r.method == "POST" && r.path.ends_with("/issues")).collect();
+    serde_json::from_str::<Value>(&posts[n - 1].body).unwrap()["title"].as_str().unwrap().to_owned()
+}
+
+/// `<` n times, then `b>` n times: removing the innermost tag leaves the next one whole.
+fn nested_tags(n: usize) -> String {
+    format!("{}{}", "<".repeat(n), "b>".repeat(n))
+}
+
+#[test]
+fn an_agent_in_a_worktree_or_a_windows_folder_reports_without_its_projects_name_and_with_its_machines_environment() {
+    let fake = Fake::start();
+    let hub = reporting("reports_cwd", Some(&fake));
+    let token = signed_up(&hub, "ana@example.test");
+    let (mut ana, tabs) = agents_in(&hub.url, &token, "ana@example.test", "ana-cwd-mac", &["x/projetos/loja-web/.worktrees/fix-1", "C:\\Users\\x\\proj\\caixa-pdv"]);
+    let (worktree, windows) = (tabs[0].clone(), tabs[1].clone());
+    ana.client.hub(json!({ "cmd": "unlock", "password": PASSWORD })).unwrap();
+
+    // The worktree's project, though its tab's folder is the worktree's, and an agent's own environment words.
+    let mut draft = problem("loja-web crashes on save", "It closes.");
+    draft["attach"] = json!({ "environment": "pinned 9.9.9 on ana-cwd-mac in loja-web" });
+    let (id, held) = held_report(&mut ana, &worktree, draft);
+    assert_eq!(held["title"], "[project] crashes on save", "{held}");
+    assert_eq!(held["attach"]["environment"], "pinned 0.0.0-test · linux", "the machine's, never the agent's words: {held}");
+    let decided = ana.client.hub(json!({ "cmd": "decide_confirmation", "id": id, "approve": true })).unwrap();
+    assert_eq!(decided["outcome"], "done", "{decided}");
+    assert_eq!(posted_title(&fake, 1), "[project] crashes on save");
+    let hub_line = format!("hub {}", env!("CARGO_PKG_VERSION"));
+    assert!(fake.github.body(1).contains(&format!("### Environment\n\npinned 0.0.0-test · linux · {hub_line}\n\n---")), "{}", fake.github.body(1));
+
+    // A Windows folder's name, after its last backslash.
+    let (id, held) = held_report(&mut ana, &windows, problem("caixa-pdv crashes on save", "It closes."));
+    assert_eq!(held["title"], "[project] crashes on save", "{held}");
+    ana.client.hub(json!({ "cmd": "decide_confirmation", "id": id, "approve": true })).unwrap();
+    assert_eq!(posted_title(&fake, 2), "[project] crashes on save");
+    assert!(!fake.github.body(2).contains("### Environment"), "no environment unless asked: {}", fake.github.body(2));
+
+    // A word split by markup, however deep, is found once the markup is gone.
+    let (_, held) = held_report(&mut ana, &worktree, problem(&format!("lo{}ja-web crashes", nested_tags(32)), "It closes."));
+    assert_eq!(held["title"], "[project] crashes", "{held}");
+}
+
+#[test]
+fn a_project_known_only_through_a_machines_list_is_scrubbed() {
+    let fake = Fake::start();
+    let hub = reporting("reports_listed", Some(&fake));
+    let token = signed_up(&hub, "ana@example.test");
+    let mut ana = agent_of(&hub.url, &token, "ana@example.test", "ana-listed-mac");
+    // A project the machine lists, with no tab in it, and no overview, lookup or box open ever asked for the list.
+    let books = ana.dir.join("kestrel-books");
+    std::fs::create_dir_all(&books).unwrap();
+    ana.node.machine.open_project(books);
+    let tab = ana.tab.clone();
+    let (_, held) = held_report(&mut ana, &tab, problem("kestrel-books export fails", "It closes."));
+    assert_eq!(held["title"], "[project] export fails", "{held}");
+}
+
+#[test]
+fn a_machines_name_is_scrubbed_on_its_own() {
+    let fake = Fake::start();
+    let hub = reporting("reports_machine_name", Some(&fake));
+    let token = signed_up(&hub, "ana@example.test");
+    account::register_machine(&hub.url, &token, "kestrel-7", "macos").unwrap();
+    let mut app = Client::connect(&hub.url, &token);
+    let preview = ask(&mut app, json!({ "op": "preview", "draft": problem("Fails on kestrel-7", "It closes.") })).unwrap();
+    assert_eq!(preview["title"], "Fails on [name]", "{preview}");
+}
+
+#[test]
+fn the_e_mail_local_part_is_scrubbed_on_its_own() {
+    let fake = Fake::start();
+    let hub = reporting("reports_local_part", Some(&fake));
+    let token = signed_up(&hub, "corvo.lima@example.test");
+    let mut app = Client::connect(&hub.url, &token);
+    let preview = ask(&mut app, json!({ "op": "preview", "draft": problem("Signed in as corvo.lima it fails", "It closes.") })).unwrap();
+    assert_eq!(preview["title"], "Signed in as [name] it fails", "{preview}");
+}
+
+#[test]
+fn the_apps_words_scrub_the_preview_and_the_send_and_a_send_needs_a_review() {
+    let fake = Fake::start();
+    let hub = reporting("reports_app_context", Some(&fake));
+    let token = signed_up(&hub, "ana@example.test");
+    let mut app = Client::connect(&hub.url, &token);
+    let mut draft = problem("zebra-corp fails on export", "It closes.");
+    draft["attach"] = json!({ "environment": "pinned 0.18.6 · macOS 15.6 · arm64" });
+
+    assert_eq!(report_issue(&mut app, draft.clone(), json!({})), Err("Review the report before sending it.".into()));
+    assert_eq!(fake.posts(), (0, 0));
+
+    let context = json!({ "names": ["zebra-corp"] });
+    let preview = ask(&mut app, json!({ "op": "preview", "draft": draft.clone(), "context": context })).unwrap();
+    assert_eq!(preview["title"], "[name] fails on export", "the word the app alone knows: {preview}");
+    let sent = report_issue(&mut app, draft, json!({ "shown": preview["shown"] })).unwrap();
+    assert_eq!(sent["issue"], 1, "the send scrubs with the preview's words, so its hash matches: {sent}");
+    assert_eq!(posted_title(&fake, 1), "[name] fails on export");
+    let hub_line = format!("hub {}", env!("CARGO_PKG_VERSION"));
+    assert!(fake.github.body(1).contains(&format!("### Environment\n\npinned 0.18.6 · macOS 15.6 · arm64 · {hub_line}\n\n---")), "{}", fake.github.body(1));
+
+    let large = json!({ "names": (0..501).map(|n| format!("w{n}")).collect::<Vec<_>>() });
+    assert_eq!(ask(&mut app, json!({ "op": "preview", "draft": problem("x", "y"), "context": large })), Err("The report's context is too large.".into()));
+    assert_eq!(ask(&mut app, json!({ "op": "similar", "title": "x", "context": { "files": ["f".repeat(201)] } })), Err("The report's context is too large.".into()));
+
+    // Markup that splits a word is gone before the word is looked for, and markup that never settles is refused.
+    let split = ask(&mut app, json!({ "op": "preview", "draft": problem(&format!("zebra{}-corp fails", nested_tags(32)), "x"), "context": context })).unwrap();
+    assert_eq!(split["title"], "[name] fails", "{split}");
+    let mut deep = "<b>".to_owned();
+    for _ in 0..20 {
+        deep = format!("<!{deep}[a](x)b>");
+    }
+    let refused = ask(&mut app, json!({ "op": "preview", "draft": problem("Crash", &format!("zebra{deep}-corp")), "context": context }));
+    assert_eq!(refused, Err("The report has markup the hub cannot clean. Remove the HTML and try again.".into()));
+}
+
+#[test]
+fn a_search_for_similar_issues_holds_only_scrubbed_words() {
+    let fake = Fake::start();
+    let config = Config { api: fake.github.url.clone(), repo: "octo-labs/tracker".into(), token: "fake-hub-token".into() };
+    let hub = TestHub::start_reports("reports_similar_scrub", Signup::Open, Policy::default(), false, Default::default(), "127.0.0.1:0", Some(config));
+    let token = signed_up(&hub, "ana@example.test");
+    let (ana, tabs) = agents_in(&hub.url, &token, "ana@example.test", "ana-similar-mac", &["acme-billing"]);
+    let mut app = Client::connect(&hub.url, &token);
+    let searched = || fake.github.requests().into_iter().filter(|r| r.path.starts_with("/search/issues")).map(|r| format!("{} {}", r.path, r.body)).collect::<Vec<_>>();
+
+    ask(&mut app, json!({ "op": "similar", "title": "zebra-ledger export fails", "context": { "projects": ["zebra-ledger"] } })).unwrap();
+    act(&ana.dir, &tabs[0], "reports", json!({ "ask": { "op": "similar", "title": "acme-billing export fails" } })).unwrap();
+    let log = searched();
+    assert_eq!(log.len(), 1, "both searches are the same scrubbed words: {log:?}");
+    for private in ["zebra", "ledger", "acme", "billing"] {
+        assert!(!log.iter().any(|r| r.to_lowercase().contains(private)), "the search holds {private}: {log:?}");
+    }
+    assert!(log[0].contains("q=export+fails+repo"), "{log:?}");
 }
