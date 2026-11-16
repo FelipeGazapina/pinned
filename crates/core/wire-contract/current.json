@@ -11509,6 +11509,11 @@
                   "null"
                 ],
                 "default": null
+              },
+              "once": {
+                "description": "Run once, then discard: when its run ends the bot and its workflow are deleted.",
+                "type": "boolean",
+                "default": false
               }
             },
             "required": [
@@ -11518,7 +11523,8 @@
               "calls",
               "limits",
               "on",
-              "on_by"
+              "on_by",
+              "once"
             ]
           },
           "CallRules": {
@@ -23017,6 +23023,11 @@
                   "null"
                 ],
                 "default": null
+              },
+              "once": {
+                "description": "Run once, then discard: when its run ends the bot and its workflow are deleted.",
+                "type": "boolean",
+                "default": false
               }
             },
             "required": [
@@ -31696,6 +31707,11 @@
                   "null"
                 ],
                 "default": null
+              },
+              "once": {
+                "description": "Run once, then discard: when its run ends the bot and its workflow are deleted.",
+                "type": "boolean",
+                "default": false
               }
             },
             "required": [
@@ -31705,7 +31721,8 @@
               "calls",
               "limits",
               "on",
-              "on_by"
+              "on_by",
+              "once"
             ]
           },
           "CallRules": {
@@ -40056,6 +40073,11 @@
                   "null"
                 ],
                 "default": null
+              },
+              "once": {
+                "description": "Run once, then discard: when its run ends the bot and its workflow are deleted.",
+                "type": "boolean",
+                "default": false
               }
             },
             "required": [
@@ -57935,6 +57957,11 @@
               "null"
             ],
             "default": null
+          },
+          "once": {
+            "description": "Run once, then discard: when its run ends the bot and its workflow are deleted.",
+            "type": "boolean",
+            "default": false
           }
         },
         "required": [
@@ -57944,7 +57971,8 @@
           "calls",
           "limits",
           "on",
-          "on_by"
+          "on_by",
+          "once"
         ],
         "$defs": {
           "CallRules": {
@@ -58110,6 +58138,11 @@
               "null"
             ],
             "default": null
+          },
+          "once": {
+            "description": "Run once, then discard: when its run ends the bot and its workflow are deleted.",
+            "type": "boolean",
+            "default": false
           }
         },
         "required": [

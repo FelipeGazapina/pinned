@@ -92,8 +92,8 @@ pub async fn call(hub: &Arc<Hub>, person: &Arc<Account>, team: Option<Uuid>, op:
         TeamOp::Hub { call } => {
             let call = TeamOp::hub_call(call)?;
             hub_call_allowed(&call, s.role)?;
-            // Boxed: `hub_call` is what called this.
-            Box::pin(hub.hub_call(&s.team, call)).await
+            // A bot's rules hold on the team's workflows: `bots::hub_call` boxes the recursion, as `hub_call` called this.
+            bots::hub_call(hub, s, call).await
         }
     }
 }

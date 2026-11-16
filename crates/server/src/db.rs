@@ -191,6 +191,7 @@ create table if not exists team_calls (id uuid primary key, team uuid not null r
   question text not null, choices jsonb not null, created_at timestamptz not null default now(),
   escalated_at timestamptz, answered_by uuid references accounts, answered_at timestamptz, answer jsonb, outcome text);
 create index if not exists team_calls_open on team_calls (created_at) where answered_at is null;
+alter table team_bots add column if not exists once boolean not null default false;
 ";
 /// How long the hub keeps an end that its machine never came back for.
 const HELD_FOR: &str = "interval '30 days'";
