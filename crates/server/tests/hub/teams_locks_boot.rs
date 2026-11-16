@@ -46,6 +46,30 @@ fn column_exists(hub: &TestHub, table: &str, column: &str) -> bool {
     })
 }
 
+/// Every table the hub's `SCHEMA` creates, alters, indexes or updates, read from the schema itself.
+fn schema_tables() -> Vec<String> {
+    let source = include_str!("../../src/db.rs");
+    let start = source.find("const SCHEMA: &str = \"").expect("db.rs has SCHEMA") + "const SCHEMA: &str = \"".len();
+    let schema = &source[start..start + source[start..].find("\";").expect("SCHEMA ends")];
+    let text = schema.lines().filter(|line| !line.trim_start().starts_with("--")).collect::<Vec<_>>().join("\n");
+    let mut tables: Vec<String> = Vec::new();
+    for statement in text.split(';') {
+        let words: Vec<&str> = statement.split_whitespace().collect();
+        let table = match words[..] {
+            ["create", "table", "if", "not", "exists", table, ..] | ["alter", "table", table, ..] | ["update", table, ..] => Some(table),
+            ["create", "index", ..] | ["create", "unique", "index", ..] => words.iter().position(|w| *w == "on").map(|on| words[on + 1]),
+            _ => None,
+        };
+        if let Some(table) = table.map(|t| t.trim_end_matches('(').to_owned()) {
+            if !tables.contains(&table) {
+                tables.push(table);
+            }
+        }
+    }
+    assert!(tables.len() > 20, "SCHEMA read: {tables:?}");
+    tables
+}
+
 #[test]
 fn a_hub_starts_while_another_hub_holds_row_locks_on_every_table() {
     let hub = TestHub::start("locks_boot_rows");
@@ -60,8 +84,11 @@ fn a_hub_starts_while_another_hub_holds_row_locks_on_every_table() {
              select 1 from teams for update;
              select 1 from team_runs for update;
              select 1 from team_run_queue for update;
-             update team_runs set state = state;",
-            ann.id, ann.id
+             update team_runs set state = state;
+             {}",
+            ann.id,
+            ann.id,
+            schema_tables().iter().map(|table| format!("lock table {table} in row exclusive mode;")).collect::<String>()
         ),
     );
     let since = Instant::now();

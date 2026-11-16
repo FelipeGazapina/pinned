@@ -83,6 +83,15 @@ fn turn_of(team: Uuid) -> String {
     format!("select pg_advisory_lock(hashtextextended('pinned-team-runs:' || '{team}'::uuid::text, 0))")
 }
 
+/// Waits until bot `bot`'s one run opened its session and nothing of the bot is left to start:
+/// no run only holding its place, nothing waiting or granted in its line, and its outside steps
+/// taken. Whatever ran twice has shown by then.
+fn settled(crew: &Crew, bot: &str) {
+    wait_for("the bot's run to open and nothing of it to be left pending", || {
+        opened(crew, bot) == 1 && crew.reserved_at(bot).is_empty() && crew.waiting(bot) == 0 && crew.outside(1).len() >= 2
+    });
+}
+
 // ---- the team's turn ----
 
 #[test]
@@ -166,7 +175,7 @@ fn a_trigger_event_refused_by_a_busy_turn_runs_later_exactly_once() {
 
     // The next check finds it again.
     assert_eq!(crew.found(crew.labeled(&bot, 1)), Ok(()));
-    std::thread::sleep(Duration::from_secs(3));
+    settled(&crew, &bot);
     assert_eq!(crew.outside(1), vec!["model".to_owned(), "linear move".to_owned()], "each outside step exactly once");
     assert_eq!(crew.live_of(&bot).len(), 1, "one run");
 }
@@ -189,8 +198,7 @@ fn an_event_left_waiting_by_a_busy_turn_after_a_run_ends_starts_on_the_next_reap
     assert_eq!((crew.waiting(&pages), crew.outside(1)), (1, none()), "ENG-1 still waits");
 
     crew.reaper_pass();
-    wait_for("ENG-1 to run", || crew.outside(1).len() == 2 && crew.live_of(&pages).len() == 1);
-    std::thread::sleep(Duration::from_secs(3));
+    settled(&crew, &pages);
     assert_eq!(crew.outside(1), vec!["model".to_owned(), "linear move".to_owned()], "each outside step exactly once");
     assert_eq!(crew.waiting(&pages), 0);
 }
@@ -296,8 +304,7 @@ fn a_claim_skips_a_granted_row_another_holds_and_the_hub_answers_others() {
     // on its next check (a minute): wake it, as a grant does, so the event does not wait for that.
     crew.hub.runtime.block_on(async { hub.connectors(&hub.account(team).await.unwrap()).await.unwrap().wake() });
 
-    wait_for("ENG-1 to run", || crew.outside(1).len() == 2 && crew.live_of(&pages).len() == 1);
-    std::thread::sleep(Duration::from_secs(3));
+    settled(&crew, &pages);
     assert_eq!(crew.outside(1), vec!["model".to_owned(), "linear move".to_owned()], "each outside step exactly once");
 }
 
