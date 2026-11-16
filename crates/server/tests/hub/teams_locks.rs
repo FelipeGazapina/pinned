@@ -561,6 +561,15 @@ fn a_session_whose_open_write_is_busy_twice_never_keeps_working_on_a_reserved_ru
 /// The open write of a reserved run is written by another connection, which commits, while the
 /// hub's own first try fails as a connection that dropped after its commit would. Needs `dblink`.
 fn open_written_elsewhere(crew: &Crew) {
+    open_written_elsewhere_on(crew, "box", false);
+}
+
+/// `open_written_elsewhere`, with the run opened on box `on` (an SQL value, quoted twice as it
+/// sits in a quoted statement: `box` keeps the hub's own), and the hub's second try refused as a
+/// lock wait that timed out when `refuse_retry`. When the other connection's write did not land
+/// on exactly one run, the sequence jumps to 100, so a test's `open_tries` check fails rather
+/// than pass with nothing opened elsewhere.
+fn open_written_elsewhere_on(crew: &Crew, on: &str, refuse_retry: bool) {
     let url = format!("{}/{}", postgres(), crew.hub.database);
     admin_on(
         &crew.hub.database,
@@ -568,10 +577,25 @@ fn open_written_elsewhere(crew: &Crew) {
             "create extension if not exists dblink;
              create sequence open_tries;
              create function open_elsewhere() returns trigger language plpgsql as $$
+               declare
+                 n bigint;
+                 written text;
                begin
-                 if current_query() like 'update team_runs set box = $3, reserved = false%' and nextval('open_tries') = 1 then
-                   perform dblink_exec('{url}', 'update team_runs set reserved = false, reserved_at = null, opened_at = now() where reserved and box is not null');
-                   raise exception 'the connection to the server was lost' using errcode = '08006';
+                 if current_query() like 'update team_runs set box = $3, reserved = false%' then
+                   n := nextval('open_tries');
+                   if n = 1 then
+                     begin
+                       written := dblink_exec('{url}', 'update team_runs set box = {on}, reserved = false, reserved_at = null, opened_at = now() where reserved and box is not null');
+                     exception when others then
+                       written := null;
+                     end;
+                     if written is distinct from 'UPDATE 1' then
+                       perform setval('open_tries', 100);
+                     end if;
+                     raise exception 'the connection to the server was lost' using errcode = '08006';
+                   elsif n = 2 and {refuse_retry} then
+                     raise exception 'lock held elsewhere' using errcode = '55P03';
+                   end if;
                  end if;
                  return null;
                end $$;
@@ -591,6 +615,40 @@ fn a_run_whose_open_write_committed_though_its_try_failed_keeps_its_box() {
     std::thread::sleep(Duration::from_millis(500));
     assert_eq!(crew.hub.boxes.live().len(), 1, "the box of the run that opened stays live");
     assert_eq!(crew.live_of(&pages).len(), 1, "the run stays working");
+    assert_eq!(opened(&crew, &pages), 1);
+}
+
+#[test]
+fn a_run_whose_open_write_committed_though_both_tries_failed_keeps_its_box() {
+    let crew = Crew::new("tl_open_committed_busy");
+    let pages = crew.on_bot("Pages");
+    open_written_elsewhere_on(&crew, "box", true);
+    let reply = crew.call(&crew.bob, TeamOp::RunNow { workflow: pages.clone() });
+    assert_eq!(reply.map(|r| (r["workflow"].clone(), r.get("waiting").cloned())), Ok((json!(pages), None)), "the Run now started its run, not queued it");
+    assert_eq!(open_tries(&crew), 2, "the failed try, then the refused one");
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(crew.hub.boxes.live().len(), 1, "the box of the run that opened stays live");
+    assert_eq!(crew.live_of(&pages).len(), 1, "the run stays working");
+    assert_eq!(opened(&crew, &pages), 1);
+}
+
+/// The machine another hub opened the run on, in `a_run_opened_on_another_box_..._ends_its_own_box`.
+const OTHER_BOX: &str = "0b0b0b0b-0000-4000-8000-00000000e1e1";
+
+#[test]
+fn a_run_opened_on_another_box_while_its_tries_failed_ends_its_own_box() {
+    let crew = Crew::new("tl_open_elsewhere_box");
+    let pages = crew.on_bot("Pages");
+    open_written_elsewhere_on(&crew, &format!("''{OTHER_BOX}''"), true);
+    let boxes = crew.boxes_created();
+    let reply = crew.call(&crew.bob, TeamOp::RunNow { workflow: pages.clone() });
+    assert_eq!(reply, Err(BUSY.to_owned()), "the Run now hears that the hub was busy");
+    assert_eq!(open_tries(&crew), 2, "the failed try, then the refused one");
+    wait_for("the box this hub started to end", || crew.hub.boxes.live().is_empty());
+    assert_eq!(crew.boxes_created(), boxes + 1, "one box was created");
+    std::thread::sleep(Duration::from_millis(500));
+    let rows = super::teams_calls::rows(&crew.hub, &format!("select state::text, box::text from team_runs where team = '{}' and workflow = '{pages}'", crew.team));
+    assert_eq!(rows, vec![vec![Some("working".to_owned()), Some(OTHER_BOX.to_owned())]], "the run opened on the other box is untouched");
     assert_eq!(opened(&crew, &pages), 1);
 }
 
