@@ -325,6 +325,9 @@ fn json<T: Serialize>(value: T) -> Result<Value, String> {
     serde_json::to_value(value).map_err(|e| e.to_string())
 }
 
+/// The answer of `Hub::hub_call` to a team call: team ops come only from the app's own path.
+pub const TEAM_CALL_ELSEWHERE: &str = "a team's ops run only from the pinned app";
+
 impl Hub {
     pub fn new(db: Db, public_url: String, signup: Signup, box_api: Arc<dyn BoxApi>, box_policy: boxes::Policy, team_policy: pinned_core::teams::TeamPolicy, convex_http: Arc<dyn ConvexHttp>) -> Arc<Hub> {
         let public_url = public_url.trim_end_matches('/').to_owned();
@@ -1021,13 +1024,10 @@ impl Hub {
             HubCall::DisconnectConvex { id } => (json(c().await?.disconnect_convex(&id)?), true),
             HubCall::ConvexTables { id } => (json(c().await?.convex_tables(&*self.convex_http, &id).await?), false),
             HubCall::Convex { .. } => return Err("only a session on a machine reads Convex".into()),
-            // `account` is the person: `teams::call` checks the membership and runs the op on the team.
-            // An app's own call comes through `http::client_frame`, which reads the op and checks
-            // the unlock on it first.
-            HubCall::Team { team, op } => {
-                let op = crate::teams::Op::read(op)?;
-                return crate::teams::call(self, account, crate::teams::team_id(team)?, op).await;
-            }
+            // A team op runs only on the app's own path, `http::client_frame`, which reads the op
+            // and checks the unlock on it first; a team box's ask goes through `teams::machine_call`.
+            // An agent's act, a team's own call or any other path that lands here runs none.
+            HubCall::Team { .. } => return Err(TEAM_CALL_ELSEWHERE.into()),
         };
         if changed {
             self.watch(account).await?;

@@ -91,3 +91,36 @@ fn a_team_event_reaches_only_the_app_connections_that_sent_a_team_call_and_never
     let machine_saw = machine_frames_until_a_reply(&mut machine, 8);
     assert_eq!(team_frames(&machine_saw), Vec::<Value>::new());
 }
+
+const AGENTS_NO_TEAM: &str = "team is not open to agents: a member's own calls about a team, which only the app sends";
+
+#[test]
+fn a_team_op_from_an_agent_a_team_call_or_a_machine_runs_nothing() {
+    let hub = TestHub::start("teams_b_hub_call");
+    let (token, _) = account::signup(&hub.url, "ana@example.test", "correct horse").unwrap();
+    let mut ana = agent_of(&hub.url, &token, "ana@example.test", "teams-b-mac");
+    let team = ana.client.hub(json!({ "cmd": "team", "op": { "op": "create", "name": "Acme" } })).unwrap()["id"].as_str().unwrap().to_owned();
+    let counts = |hub: &TestHub| {
+        let found = super::teams_calls::rows(hub, "select (select count(*) from team_invites)::text, (select count(*) from accounts where kind = 'team')::text, (select string_agg(name, ',') from teams)::text");
+        found[0].iter().map(|c| c.clone().unwrap_or_default()).collect::<Vec<_>>()
+    };
+    let before = counts(&hub);
+    assert_eq!(before, ["0", "1", "Acme"]);
+
+    let invite = json!({ "team": team, "op": { "op": "invite" } });
+    let create = json!({ "op": { "op": "create", "name": "Agents" } });
+    let rename = json!({ "team": team, "op": { "op": "rename", "name": "Taken" } });
+    for args in [&invite, &create, &rename] {
+        assert_eq!(act(&ana.dir, &ana.tab, "team", args.clone()), Err(AGENTS_NO_TEAM.into()), "an agent's act {args}");
+    }
+    // A team op inside a team's own hub call.
+    let nested = json!({ "cmd": "team", "team": team, "op": { "op": "hub", "call": { "cmd": "team", "team": team, "op": { "op": "invite" } } } });
+    assert_eq!(ana.client.hub(nested), Err("team does not run on a team".into()));
+    // A person's machine sending a team op itself.
+    let (_, machine_token) = account::register_machine(&hub.url, &token, "raw", "linux").unwrap();
+    assert_eq!(
+        machine_result(&hub.url, &machine_token, json!({ "cmd": "team", "team": team, "op": { "op": "invite" } })),
+        Err("a machine may not send the team op invite".into())
+    );
+    assert_eq!(counts(&hub), before, "nothing changed");
+}
