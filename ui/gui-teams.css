@@ -1,0 +1,117 @@
+/* pinned Teams, the way in (gui-teams.js): the "Where you work" block of the account menu, the Create a
+   team wizard and the Join a team page. Colors are the app's theme tokens, so both themes follow. */
+
+/* The pages take the thread's place, as gui-shell.css does for each page it lists. */
+body[data-page="team-create"] #sidebar footer > :not(.back), body[data-page="team-join"] #sidebar footer > :not(.back) { display: none; }
+body[data-page="team-create"] #sidebar footer .back, body[data-page="team-join"] #sidebar footer .back { display: flex; }
+body[data-mode="gui"]:is([data-page="team-create"], [data-page="team-join"]) #expanded > header, body[data-mode="gui"]:is([data-page="team-create"], [data-page="team-join"]) #chat { display: none; }
+body[data-mode="gui"]:is([data-page="team-create"], [data-page="team-join"]) #page-view { display: flex; flex-direction: column; grid-column: 2; grid-row: 1; min-width: 0; min-height: 0; z-index: 1; background: var(--g-bg); color: var(--g-fg); }
+body[data-mode="gui"]:is([data-page="team-create"], [data-page="team-join"]) #workspace { grid-template-columns: var(--sidebar-width) minmax(0, 1fr) 0; }
+body[data-mode="gui"]:is([data-page="team-create"], [data-page="team-join"])[data-sidebar="closed"] #workspace { grid-template-columns: 0 minmax(0, 1fr) 0; }
+body[data-mode="gui"]:is([data-page="team-create"], [data-page="team-join"]) #panel { visibility: hidden; }
+
+/* The account menu: Where you work */
+#account-menu .tm-where { display: flex; flex-direction: column; gap: 1px; }
+#account-menu .tm-where-head { margin: 0; padding: 2px 9px 4px; font-size: 11px; color: var(--g-side-muted); }
+#account-menu .tm-row { height: 34px; }
+#account-menu .tm-create { height: 34px; background: var(--g-primary); color: var(--g-on-primary); font-weight: 600; }
+#account-menu .tm-create:is(:hover, :focus-visible) { background: var(--g-primary-hover); }
+#account-menu .tm-plus { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 6px; border: 1px dashed currentColor; font-size: 13px; line-height: 1; opacity: 0.85; }
+#account-menu .tm-join { height: 32px; color: var(--g-side-muted); }
+#account-menu .tm-join .tm-plus { border-style: solid; border-color: transparent; }
+#account-menu .tm-sep { height: 1px; margin: 5px 4px; background: var(--g-side-border); }
+.tm-avatar { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 50%; color: #0a0a0a; font-size: 9px; font-weight: 600; letter-spacing: 0; }
+.tm-avatar.big { width: 36px; height: 36px; font-size: 13px; border: 2px solid var(--g-bg); }
+.tm-avatar.big + .tm-avatar.big { margin-left: -8px; }
+.tm-avatar.ghost { background: var(--g-control); color: var(--g-muted); }
+#account-pages .avatar[data-team] { color: #0a0a0a; }
+#account-pages .avatar .tm-mono { font-size: 10px; font-weight: 600; }
+#account-pages .avatar[data-team]::after { display: none; }
+
+/* Shared */
+#page-view :is(.tm-wiz, .tm-join-page) :is(h1, h2, h3) { margin: 0; font-weight: 600; }
+.tm-wiz, .tm-join-page { line-height: 1.5; font-size: 14px; text-align: left; }
+.tm-texts { display: flex; flex-direction: column; min-width: 0; line-height: 1.35; }
+.tm-name { font-weight: 600; overflow-wrap: anywhere; }
+.tm-about { font-size: 12px; color: var(--g-muted); overflow-wrap: anywhere; }
+.tm-note { margin: 0; font-size: 13px; color: var(--g-muted); }
+.tm-lede { margin: 0; font-size: 14px; color: var(--g-muted); }
+.tm-lede.big { font-size: 15px; color: var(--g-fg); opacity: 0.85; }
+.tm-kicker { margin: 0; font-size: 12px; color: var(--g-muted); }
+.tm-error { margin: 0; font-size: 13px; color: var(--g-error); overflow-wrap: anywhere; }
+.tm-ok { font-size: 13px; font-weight: 600; color: var(--g-success); }
+.tm-hint { font-size: 12px; color: var(--g-muted); }
+.tm-grow { flex: 1; }
+.tm-faces { display: flex; align-items: center; }
+.tm-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+
+.tm-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; padding: 0 14px; border-radius: 10px; border: 1px solid rgb(var(--g-ink-rgb) / 0.14); background: var(--g-raised); color: var(--g-fg); font: inherit; font-weight: 500; cursor: pointer; }
+.tm-btn.primary { min-height: 40px; padding: 0 20px; border: 0; background: var(--g-primary); color: var(--g-on-primary); font-weight: 600; }
+.tm-btn.quiet { border-color: transparent; background: transparent; color: var(--g-muted); }
+.tm-btn:disabled { opacity: 0.55; cursor: default; }
+@media (hover: hover) {
+  .tm-btn:hover:not(:disabled) { background: var(--g-hover); }
+  .tm-btn.primary:hover:not(:disabled) { background: var(--g-primary-hover); }
+  .tm-btn.quiet:hover:not(:disabled) { color: var(--g-fg); }
+}
+.tm-btn:focus-visible, .tm-step:focus-visible, .tm-check:focus-visible { outline: 2px solid var(--g-primary); outline-offset: 2px; }
+
+.tm-field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--g-muted); }
+.tm-field input { min-height: 38px; padding: 0 12px; border-radius: 10px; border: 1px solid rgb(var(--g-ink-rgb) / 0.14); background: var(--g-input); color: var(--g-fg); font: inherit; font-size: 14px; }
+.tm-field.big input { min-height: 44px; font-size: 16px; }
+.tm-field input:focus { outline: 2px solid var(--g-primary); outline-offset: -1px; }
+.tm-card { display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; border-radius: 14px; background: var(--g-raised); font-size: 13px; }
+.tm-card p, .tm-card span { margin: 0; color: var(--g-muted); }
+.tm-card b, #page-view .tm-card h2 { color: var(--g-fg); font-size: 14px; }
+
+.tm-list { display: flex; flex-direction: column; gap: 8px; }
+.tm-check { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 52px; padding: 8px 14px; border-radius: 12px; border: 1px solid rgb(var(--g-ink-rgb) / 0.12); background: transparent; color: var(--g-fg); font: inherit; text-align: left; cursor: pointer; }
+.tm-check[aria-checked="true"] { border-color: var(--g-primary); background: rgb(var(--g-primary-rgb) / 0.1); }
+.tm-check:disabled { opacity: 0.6; cursor: default; }
+.tm-check .tm-box { flex: none; width: 18px; height: 18px; border-radius: 5px; border: 2px solid rgb(var(--g-ink-rgb) / 0.4); }
+.tm-check[aria-checked="true"] .tm-box { border-color: var(--g-primary); background: var(--g-primary) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m5 12 5 5 9-10'/%3E%3C/svg%3E") center / 12px no-repeat; }
+.tm-check .tm-state { margin-left: auto; flex: none; font-size: 12px; color: var(--g-muted); }
+@media (hover: hover) { .tm-check:hover:not(:disabled) { background: var(--g-hover); } }
+
+/* Create a team */
+.tm-wiz { display: grid; grid-template-columns: minmax(240px, 300px) minmax(0, 1fr); min-height: 100%; }
+.tm-aside { display: flex; flex-direction: column; gap: 22px; padding: 22px 16px; border-right: 1px solid var(--g-border); background: var(--g-side); }
+.tm-who { display: flex; align-items: center; gap: 10px; padding: 0 6px; font-size: 13px; }
+.tm-intro { display: flex; flex-direction: column; gap: 4px; padding: 0 6px; }
+#page-view .tm-intro h1 { font-size: 18px; line-height: 1.25; }
+.tm-intro p { margin: 0; font-size: 13px; color: var(--g-muted); }
+.tm-steps { display: flex; flex-direction: column; gap: 2px; margin: 0; padding: 0; list-style: none; }
+.tm-step { display: flex; align-items: flex-start; gap: 12px; width: 100%; min-height: 52px; padding: 9px 10px; border: 0; border-radius: 10px; background: transparent; color: var(--g-fg); font: inherit; font-size: 13px; text-align: left; cursor: pointer; }
+.tm-step.current { background: var(--g-row-active); }
+.tm-step.todo .tm-name { color: var(--g-muted); font-weight: 500; }
+.tm-step:disabled { cursor: default; }
+.tm-num { flex: none; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; border-radius: 50%; border: 1px solid rgb(var(--g-ink-rgb) / 0.24); color: var(--g-muted); font-size: 12px; font-weight: 600; }
+.tm-step.current .tm-num { border-color: var(--g-primary); background: var(--g-primary); color: var(--g-on-primary); }
+.tm-step.done .tm-num { border-color: rgb(var(--g-ink-rgb) / 0.1); background: rgb(var(--g-ink-rgb) / 0.06); color: var(--g-success); }
+.tm-side-note { margin: auto 6px 0; font-size: 12px; color: var(--g-muted); }
+.tm-main { display: flex; flex-direction: column; gap: 40px; min-width: 0; padding: 18px 32px 48px; }
+.tm-top { display: flex; align-items: center; gap: 10px; }
+.tm-col { display: flex; flex-direction: column; gap: 20px; width: 100%; max-width: 560px; align-self: center; }
+#page-view .tm-col h2 { font-size: 26px; line-height: 1.2; letter-spacing: -0.01em; }
+
+.tm-creds { display: flex; flex-direction: column; gap: 8px; }
+.tm-cred { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 56px; padding: 10px 14px; border-radius: 12px; background: var(--g-raised); }
+.tm-form { display: flex; flex-direction: column; gap: 10px; margin: -2px 0 4px; padding: 14px 16px; border-radius: 12px; border: 1px solid rgb(var(--g-ink-rgb) / 0.14); }
+#page-view .tm-form h3 { font-size: 14px; }
+.tm-form.flat { padding: 0; border: 0; gap: 14px; }
+.tm-code { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; border-radius: 12px; background: var(--g-raised); }
+.tm-code code { font: 15px/1.3 var(--g-mono); letter-spacing: 0.04em; overflow-wrap: anywhere; user-select: all; }
+
+/* Join a team */
+.tm-join-page { display: flex; flex-direction: column; gap: 24px; width: 100%; max-width: 600px; margin: 0 auto; padding: 32px 20px 56px; box-sizing: border-box; }
+.tm-hero { display: flex; flex-direction: column; align-items: flex-start; gap: 12px; text-align: left; }
+#page-view .tm-hero h1 { font-size: 26px; line-height: 1.2; letter-spacing: -0.01em; }
+.tm-section { display: flex; flex-direction: column; gap: 10px; }
+#page-view .tm-section h2 { font-size: 16px; }
+
+@media (max-width: 860px) {
+  .tm-wiz { grid-template-columns: minmax(0, 1fr); }
+  .tm-aside { border-right: 0; border-bottom: 1px solid var(--g-border); gap: 14px; padding: 14px 12px; }
+  .tm-side-note { display: none; }
+  .tm-main { padding: 14px 16px 40px; gap: 24px; }
+}
