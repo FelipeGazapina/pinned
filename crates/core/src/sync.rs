@@ -418,10 +418,15 @@ fn exchange(
                 break;
             }
             let file = match resolve(&path).filter(|f| f.is_file() || merged.contains_key(&path)) {
-                None => File {
-                    entry: Entry { path: path.clone(), sha: String::new(), modified: millis(now), size: 0, executable: None },
-                    data: None,
-                    agreed: agreed.get(&path).cloned(),
+                // A file with no baseline that is gone was never on the hub from here: it vanished
+                // between hashing and sending, and there is nothing of this machine's to delete.
+                None => match agreed.get(&path) {
+                    None => continue,
+                    Some(sha) => File {
+                        entry: Entry { path: path.clone(), sha: String::new(), modified: millis(now), size: 0, executable: None },
+                        data: None,
+                        agreed: Some(sha.clone()),
+                    },
                 },
                 Some(target) => {
                     let (sha, modified, bytes) = match merged.get(&path) {
