@@ -11568,3 +11568,75 @@ fn an_account_over_the_sync_limit_takes_a_push_that_does_not_grow_it_and_refuses
     assert_eq!(push(&mut ana, vec![tombstone("claude/big-3.jsonl"), tombstone("claude/big-4.jsonl")]), Ok(Value::Null));
     assert_eq!(push(&mut ana, vec![file("claude/memory/later.md", "under the limit again")]), Ok(Value::Null), "9 sessions of 100 MiB leave room");
 }
+
+/// Runs `then` right after the hub answers a list, so another machine's push lands between this
+/// machine's list and its push.
+struct ListThen<'a> {
+    link: &'a Link,
+    then: std::cell::RefCell<Option<Box<dyn FnOnce() + 'a>>>,
+}
+
+impl sync::Hub for ListThen<'_> {
+    fn list(&self, project: &str) -> Result<Vec<sync::Entry>, String> {
+        let listed = sync::Hub::list(self.link, project);
+        if let Some(then) = self.then.borrow_mut().take() {
+            then();
+        }
+        listed
+    }
+    fn push(&self, project: &str, files: Vec<sync::File>) -> Result<(), String> {
+        sync::Hub::push(self.link, project, files)
+    }
+    fn pull(&self, project: &str, paths: Vec<String>) -> Result<Vec<sync::File>, String> {
+        sync::Hub::pull(self.link, project, paths)
+    }
+    fn mark_executable(&self, project: &str, repairs: Vec<sync::ModeRepair>) -> Result<(), String> {
+        sync::Hub::mark_executable(self.link, project, repairs)
+    }
+}
+
+#[test]
+fn a_deletion_sent_after_another_machine_changed_the_file_keeps_the_change() {
+    let hub = TestHub::start("sync_delete_race");
+    let url = hub.url.clone();
+    let (token, account) = account::signup(&url, "ana@example.test", "correct horse").unwrap();
+    let start = |name: &str| {
+        let dir = temp(&format!("race-{name}"));
+        let (machine, machine_token) = account::register_machine(&url, &token, name, "macos").unwrap();
+        let creds = Credentials { hub: url.clone(), email: account.email.clone(), user_token: token.clone(), machine_id: machine.id, machine_token };
+        creds.save(&dir).unwrap();
+        let node = Node::start(&dir, creds);
+        wait_for("the machine online", || node.online());
+        (node, dir)
+    };
+    let ((mac, mac_home), (mini, mini_home)) = (start("mac"), start("mini"));
+    let project = sync::Project { key: "github.com/acme/app".into(), name: "app".into(), repo: "git@github.com:acme/app.git".into() };
+    let checkout = |home: &Path| sync::Checkout { project: project.clone(), path: home.join("app"), history: None, claude_home: Some(home.join(".claude")) };
+    let (on_mac, on_mini) = (checkout(&mac_home), checkout(&mini_home));
+    let notes = |c: &sync::Checkout| sync::claude_dir(c.claude_home.as_ref().unwrap(), &c.path).join("memory/notes.md");
+    std::fs::create_dir_all(notes(&on_mac).parent().unwrap()).unwrap();
+    std::fs::write(notes(&on_mac), "first").unwrap();
+    let (mac_link, mini_link) = (mac.link.as_ref().unwrap(), mini.link.as_ref().unwrap());
+    let now = std::time::SystemTime::now();
+    let (mut mac_state, mut mini_state) = (sync::State::default(), sync::State::default());
+    assert_eq!(sync::sync(&Through(mac_link), &mut mac_state, &on_mac, now).unwrap().pushed, vec!["claude/memory/notes.md"]);
+    assert_eq!(sync::sync(&Through(mini_link), &mut mini_state, &on_mini, now).unwrap().pulled, vec!["claude/memory/notes.md"]);
+    std::fs::remove_file(notes(&on_mac)).unwrap();
+
+    let mini_changes = || {
+        std::fs::write(notes(&on_mini), "second, from mini").unwrap();
+        let pushed = sync::sync(&Through(mini_link), &mut mini_state, &on_mini, now).unwrap().pushed;
+        assert_eq!(pushed, vec!["claude/memory/notes.md"]);
+    };
+    let racing = ListThen { link: mac_link, then: std::cell::RefCell::new(Some(Box::new(mini_changes))) };
+    sync::sync(&racing, &mut mac_state, &on_mac, now).unwrap();
+    drop(racing);
+    let listed = mac_link.call_hub(HubCall::SyncList { project: project.key.clone() }).unwrap();
+    assert_eq!(listed[0]["sha"], json!(sha256_hex(b"second, from mini")), "the deletion was sent for the first version only");
+
+    assert_eq!(sync::sync(&Through(mac_link), &mut mac_state, &on_mac, now).unwrap().pulled, vec!["claude/memory/notes.md"]);
+    assert_eq!(std::fs::read_to_string(notes(&on_mac)).unwrap(), "second, from mini");
+    let (mut mac, mut mini) = (mac, mini);
+    mac.kill();
+    mini.kill();
+}
