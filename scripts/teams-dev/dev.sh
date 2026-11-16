@@ -14,6 +14,10 @@ set -eu
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 . "$REPO/scripts/web-sweep/lib.sh"
 HERE=$REPO/scripts/teams-dev
+# Debian and Homebrew keep initdb, pg_ctl and psql off the default PATH.
+command -v pg_ctl >/dev/null 2>&1 || for d in /usr/lib/postgresql/*/bin /opt/homebrew/opt/postgresql*/bin /usr/local/opt/postgresql*/bin; do
+  [ -x "$d/pg_ctl" ] && { PATH=$d:$PATH; break; }
+done
 HUB_PORT=${TEAMS_DEV_HUB_PORT:-8811}
 BOX_PORT=${TEAMS_DEV_BOX_PORT:-8812}
 SLACK_PORT=${TEAMS_DEV_SLACK_PORT:-8813}
@@ -39,7 +43,7 @@ alive() {
   [ -f "$1" ] || return 1
   pid=$(cat "$1")
   [ -d "/proc/$pid" ] || return 1
-  tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | grep -qx "TEAMS_DEV_DIR=$DIR" && return 0
+  tr '\0' '\n' 2>/dev/null <"/proc/$pid/environ" | grep -qx "TEAMS_DEV_DIR=$DIR" && return 0
   case $1 in "$DIR"/boxes/*) grep -qs pinned-server "/proc/$pid/cmdline" ;; *) return 1 ;; esac
 }
 
@@ -60,6 +64,7 @@ stop_all() {
   done
   for f in $files; do alive "$f" && kill -9 "$(cat "$f")" 2>/dev/null || true; rm -f "$f"; done
   pg_stop "$DIR/pg"
+  if pg_isready -q -h 127.0.0.1 -p "$PG_PORT" && [ -f "$DIR/pg/postmaster.pid" ]; then echo "postgres in $DIR/pg is still running: stop it with pg_ctl -D $DIR/pg -m fast stop" >&2; fi
 }
 
 # The environment of every child: its own HOME, TMPDIR and Claude config, and none of the developer's tokens.
