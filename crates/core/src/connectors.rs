@@ -339,14 +339,14 @@ fn on() -> bool {
     true
 }
 
-/// What an app reads. A connector that has no stored graph still sends the graph `migrate` builds,
-/// so a new app always sees one. The store keeps `None` until someone edits the graph.
 /// Whether `id` is a uuid in its lowercase hyphenated form (`0b7e…-…`): a new connector's id an
 /// app made itself. The store's own ids start with `c`.
 pub fn is_uuid(id: &str) -> bool {
     id.len() == 36 && id.char_indices().all(|(i, c)| if matches!(i, 8 | 13 | 18 | 23) { c == '-' } else { matches!(c, '0'..='9' | 'a'..='f') })
 }
 
+/// What an app reads. A connector that has no stored graph still sends the graph `migrate` builds,
+/// so a new app always sees one. The store keeps `None` until someone edits the graph.
 fn presented(mut connector: Connector) -> Connector {
     if connector.graph.is_none() {
         connector.graph = Some(migrate(&connector));
