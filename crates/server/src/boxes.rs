@@ -1540,6 +1540,8 @@ impl Boxes {
                 return Ok(Placement { machine: id, tab });
             }
         }
+        // A team's run knows its box before its session starts, so a session that asks people at once finds it.
+        crate::teams::db::claim_run_box(&hub.db, account.id, connector, subject, machine).await?;
         let mut spec = spec.clone();
         spec.token = hub.connectors(account).await?.github_token().filter(|_| spec.repo.as_deref().is_some_and(github::hosts));
         // A box's node keeps no agent accounts: it runs as the one whose token its box.env holds.
@@ -1654,9 +1656,12 @@ impl Boxes {
     /// its next trigger once (`BoxEndRelease`). Nothing opens another box or session for them. For the fixed row, which many runs share, only the runs whose
     /// session is on its machine. For another row, a run of its subject that started after the row was written is not its run, so a retried end (the row stays `Ending`) never fails a newer
     /// run of the subject that works elsewhere. A run that already finished holds nothing, so this does nothing.
+    /// A team's run in the box ends too (`teams::calls::box_ended`).
     /// An error leaves the runs as they were: the caller keeps the row `Ending`, so the reaper's
     /// next pass tries again before it deletes the row.
     async fn fail_held_runs(&self, hub: &Hub, account: &Account, row: &BoxRow, why: &End) -> Result<(), String> {
+        crate::teams::calls::box_ended(hub, account, row.machine, why)
+            .await.map_err(|e| format!("could not end the team run of box {}, so it stays until the next check: {e}", row.id))?;
         if row.work != BoxWork::Run || row.connector == INTERACTIVE_CONNECTOR {
             return Ok(());
         }

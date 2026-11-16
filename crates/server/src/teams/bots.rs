@@ -198,7 +198,8 @@ async fn asked_by(hub: &Arc<Hub>, scope: &Scope, calls: &CallRules) -> Result<bo
 
 /// Any member. Runs the bot now, as its workflow's Run now would on the team's account: a box on
 /// the team's Upstash key and Claude token. The bot must be on. Records the run (`db::insert_run`,
-/// started by the member, with the box's machine once it is open) and pushes
+/// started by the member, with the subject its box opens for, so the box sets its machine on the
+/// run before the session starts: `db::claim_run_box`) and pushes
 /// `TeamEvent::RunChanged`. The bot's `BotLimits` are held by `calls::tick`.
 pub async fn run_now(hub: &Arc<Hub>, scope: &Scope, workflow_id: &str) -> Result<Run, String> {
     let team = scope.team.id;
@@ -227,6 +228,11 @@ pub async fn run_now(hub: &Arc<Hub>, scope: &Scope, workflow_id: &str) -> Result
     };
     let id = Uuid::parse_str(&run.id).map_err(|e| e.to_string())?;
     db::insert_run(&hub.db, team, &run, None).await?;
+    // The box sets its machine on the run (`db::claim_run_box`) before it starts the session.
+    if let Err(e) = db::set_run_subject(&hub.db, team, id, &work.subject).await {
+        db::delete_run(&hub.db, team, id).await?;
+        return Err(e);
+    }
     let placed = match hub.open_placed(team, Work::Run(work)).await {
         Ok(Some(placed)) => placed,
         Ok(None) => {
@@ -244,9 +250,8 @@ pub async fn run_now(hub: &Arc<Hub>, scope: &Scope, workflow_id: &str) -> Result
 }
 
 /// A run of the team ended (`run.state.ended()`): a bot made to run once is discarded, its row and
-/// its workflow. `calls` calls it wherever it moves a run to an end state: `stop_run`, `tick`'s
-/// give-up, and a box session's own end.
-pub async fn run_ended(hub: &Arc<Hub>, team: Uuid, run: &Run) -> Result<(), String> {
+/// its workflow. `calls::end_run`, which every end of a run goes through, calls it.
+pub async fn run_ended(hub: &Hub, team: Uuid, run: &Run) -> Result<(), String> {
     if !run.state.ended() {
         return Ok(());
     }

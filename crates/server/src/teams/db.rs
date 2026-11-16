@@ -3,6 +3,7 @@
 //! The tables are in `db::SCHEMA`.
 
 use crate::db::{err, Db};
+use pinned_core::agent::Subject;
 use pinned_core::teams::{Answer, Bot, Call, Group, Role, Run, RunState, TeamProject};
 use tokio_postgres::error::SqlState;
 use uuid::Uuid;
@@ -396,6 +397,13 @@ pub async fn in_group(db: &Db, team: Uuid, handle: &str, member: Uuid) -> Result
 /// Records the box a run opened (the id of its machine), once it is known.
 pub async fn set_run_box(db: &Db, team: Uuid, run: Uuid, machine: &str) -> Result<(), String> {
     db.client().await?.execute("update team_runs set box = $3 where team = $1 and id = $2", &[&team, &run, &machine]).await.map_err(err)?;
+    Ok(())
+}
+
+/// Records the subject a run's box is opened for, so the box's machine is set on the run before
+/// its session starts (`claim_run_box`).
+pub async fn set_run_subject(db: &Db, team: Uuid, run: Uuid, subject: &Subject) -> Result<(), String> {
+    db.client().await?.execute("update team_runs set subject = $3 where team = $1 and id = $2", &[&team, &run, &json(subject)?]).await.map_err(err)?;
     Ok(())
 }
 
@@ -793,6 +801,21 @@ pub async fn stop_open_call(db: &Db, team: Uuid, run: Uuid, answer: &Answer) -> 
         .await
         .map_err(err)?;
     Ok(row.as_ref().map(call_of).transpose()?.map(|row| row.call))
+}
+
+/// Sets `machine` on the live run of the team's workflow `workflow` opened for `subject` that has
+/// no box yet, just before the box's session starts (`boxes::Boxes`), so a session that asks
+/// people at once finds its run. Nothing for a person's account.
+pub async fn claim_run_box(db: &Db, account: Uuid, workflow: &str, subject: &Subject, machine: &str) -> Result<(), String> {
+    db.client()
+        .await?
+        .execute(
+            &format!("update team_runs set box = $4 where team = $1 and workflow = $2 and subject = $3 and box is null and state in {LIVE}"),
+            &[&account, &workflow, &json(subject)?, &machine],
+        )
+        .await
+        .map_err(err)?;
+    Ok(())
 }
 
 /// The machines of the account's boxes whose run waits on an open call, which the box reaper

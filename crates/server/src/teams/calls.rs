@@ -13,6 +13,7 @@
 use super::{db, push, Scope};
 use crate::boxes::End;
 use crate::hub::{Account, Hub};
+use futures_util::future::BoxFuture;
 use pinned_core::teams::{Answer, AnswerKind, Call, Role, Run, RunState, Situation, TeamEvent, TeamPolicy, Who};
 use pinned_core::wire::Call as MachineCall;
 use serde::Serialize;
@@ -28,6 +29,8 @@ const NOTICE_TRIES: [Duration; 4] = [Duration::ZERO, Duration::from_secs(3), Dur
 
 /// The most runs `runs` lists.
 const RUNS_LISTED: i64 = 50;
+
+const RUN_ENDED: &str = "this run has ended";
 
 /// What `ask_people` answers at once: the call's id and who it asks, by handle or "the owner",
 /// never an email.
@@ -129,7 +132,7 @@ pub async fn answer_call(hub: &Arc<Hub>, scope: &Scope, id: &str, mut answer: An
             tell_session(hub, &scope.team, run_id, &format!("call-{id}"), format!("[{who} took over the run on call {id}{said}]")).await;
         }
         AnswerKind::Stop => {
-            end_run(hub, &scope.team, run_id, RunState::Stopped, &format!("stopped by {who}"), End::Removed).await?;
+            end_run(hub, &scope.team, run_id, RunState::Stopped, &format!("stopped by {who}"), Some(End::Removed)).await?;
         }
     }
     let row = db::call(&hub.db, team, id).await?.ok_or("the team has no such call")?;
@@ -183,7 +186,7 @@ pub async fn stop_run(hub: &Arc<Hub>, scope: &Scope, run: &str) -> Result<Run, S
         push_logged(hub, scope.team.id, TeamEvent::CallResolved { call }).await;
     }
     let who = name_of(hub, &stop.by).await;
-    end_run(hub, &scope.team, run_id, RunState::Stopped, &format!("stopped by {who}"), End::Removed).await
+    end_run(hub, &scope.team, run_id, RunState::Stopped, &format!("stopped by {who}"), Some(End::Removed)).await
 }
 
 /// From machine `machine` of a team's own account: the session of the team's live run in that box
@@ -283,25 +286,68 @@ async fn gave_up(hub: &Arc<Hub>, team: Uuid, call: &Call) -> Result<(), String> 
     let run_id = parse_id(&call.run, "run")?;
     let text = format!("[Nobody answered call {} in time: end without doing the step]", call.id);
     tell_session_now(hub, &account, run_id, &format!("call-{}", call.id), text).await;
-    end_run(hub, &account, run_id, RunState::GaveUp, &format!("nobody answered call {}", call.id), End::Expired).await.map(drop)
+    end_run(hub, &account, run_id, RunState::GaveUp, &format!("nobody answered call {}", call.id), Some(End::Expired)).await.map(drop)
 }
 
-/// Moves the run to the ended `state`, pushes it, and ends its box for `why`. A box that does not
-/// end now is logged: the reaper still ends it at its max life.
-async fn end_run(hub: &Arc<Hub>, team: &Arc<Account>, run_id: Uuid, state: RunState, outcome: &str, why: End) -> Result<Run, String> {
+/// Every way a run ends goes through here: `stop_run`, an answer that stops it, the give-up, and
+/// its box ending for any reason (`box_ended`). Moves the run to the ended `state` (refused when it
+/// had ended), closes its open call as stopped, pushes both, ends its box for `box_end` (None when
+/// the box is what ended), and discards a bot made to run once (`bots::run_ended`). A box that
+/// does not end now is logged: the reaper still ends it at its max life.
+pub async fn end_run(hub: &Hub, team: &Arc<Account>, run_id: Uuid, state: RunState, outcome: &str, box_end: Option<End>) -> Result<Run, String> {
     let current = db::run(&hub.db, team.id, run_id).await?.ok_or("the team has no such run")?;
     let controller = current.controller.as_deref().and_then(|c| Uuid::parse_str(c).ok());
     if !db::set_run_state(&hub.db, team.id, run_id, state, controller, Some(outcome)).await? {
-        return Err("this run has ended".into());
+        return Err(RUN_ENDED.into());
+    }
+    let closed = Answer { by: team.id.to_string(), choice: None, text: outcome.to_owned(), kind: AnswerKind::Stop, at: now() };
+    if let Some(call) = db::stop_open_call(&hub.db, team.id, run_id, &closed).await? {
+        push_logged(hub, team.id, TeamEvent::CallResolved { call }).await;
     }
     let run = db::run(&hub.db, team.id, run_id).await?.ok_or("the team has no such run")?;
     push_logged(hub, team.id, TeamEvent::RunChanged { run: run.clone() }).await;
-    if let Some(machine) = db::run_box(&hub.db, team.id, run_id).await?.and_then(|m| Uuid::parse_str(&m).ok()) {
-        if let Err(e) = hub.boxes.end_machine(hub, team, machine, why).await {
-            eprintln!("pinned-server: the box of run {run_id} of team {} did not end yet: {e}", team.id);
+    if let Some(why) = box_end {
+        if let Some(machine) = db::run_box(&hub.db, team.id, run_id).await?.and_then(|m| Uuid::parse_str(&m).ok()) {
+            if let Err(e) = hub.boxes.end_machine(hub, team, machine, why).await {
+                eprintln!("pinned-server: the box of run {run_id} of team {} did not end yet: {e}", team.id);
+            }
         }
     }
+    if let Err(e) = super::bots::run_ended(hub, team.id, &run).await {
+        eprintln!("pinned-server: run {run_id} of team {} ended but its run-once bot stays: {e}", team.id);
+    }
     Ok(run)
+}
+
+/// The box `machine` of `account` ends for `why` (`boxes::Boxes` calls it on every end, before
+/// the box goes). When it is a team's box whose run has not ended, the run ends with it, so no
+/// run stays `waiting` or `working` once its box is gone; the state follows `ended_by_box`.
+/// Boxed: ending a run can end its box, which comes back here.
+pub fn box_ended<'a>(hub: &'a Hub, account: &'a Account, machine: Uuid, why: &'a End) -> BoxFuture<'a, Result<(), String>> {
+    Box::pin(async move {
+        let Some(run) = db::run_on_machine(&hub.db, account.id, &machine.to_string()).await? else { return Ok(()) };
+        let team = hub.account(account.id).await?;
+        let (state, outcome) = ended_by_box(why);
+        match end_run(hub, &team, parse_id(&run.id, "run")?, state, &outcome, None).await {
+            Err(e) if e != RUN_ENDED => Err(e),
+            _ => Ok(()),
+        }
+    })
+}
+
+/// How a run ends when its box ends first: its session finishing is `Done`; a box someone removed,
+/// or the team's Upstash Box disconnected, is `Stopped`; max life, budget, going offline, a box
+/// deleted outside pinned or one that failed is `Failed`.
+fn ended_by_box(why: &End) -> (RunState, String) {
+    match why {
+        End::Done | End::Exited | End::Idle | End::TabClosed => (RunState::Done, "its session finished".into()),
+        End::Removed => (RunState::Stopped, "its box was removed".into()),
+        End::Disconnected => (RunState::Stopped, "the team's Upstash Box was disconnected".into()),
+        End::Expired => (RunState::Failed, "its box ran out of time or budget".into()),
+        End::Offline => (RunState::Failed, "its box went offline".into()),
+        End::Vanished => (RunState::Failed, "its box was deleted outside pinned".into()),
+        End::Failed(e) => (RunState::Failed, format!("its box failed: {e}")),
+    }
 }
 
 /// Moves a waiting run back to work and pushes it; a run that no longer waits stays as it is.
@@ -432,7 +478,7 @@ async fn tell_session_now(hub: &Arc<Hub>, team: &Arc<Account>, run_id: Uuid, id:
     eprintln!("pinned-server: run {run_id} of team {} was not told of {id}: {last}", team.id);
 }
 
-async fn push_logged(hub: &Arc<Hub>, team: Uuid, event: TeamEvent) {
+async fn push_logged(hub: &Hub, team: Uuid, event: TeamEvent) {
     if let Err(e) = push(hub, team, event).await {
         eprintln!("pinned-server: team {team}'s members did not hear of a change: {e}");
     }
