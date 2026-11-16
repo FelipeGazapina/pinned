@@ -286,12 +286,24 @@ struct Screen {
     size: (u16, u16),
     /// Reads the screen while the session waits on a menu, to tell when the user answered it.
     watch: Option<crate::menu_watch::MenuWatch>,
+    /// Counts what changed the screen: bytes, a resize, a restart.
+    fed: u64,
+    /// What `blocker` read at `fed`, so a look with nothing new parses nothing.
+    read: Option<(u64, Option<Blocker>)>,
+}
+
+/// What the session's screen shows in place of its prompt box, so typed text would land there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Blocker {
+    Menu,
+    Dialog,
 }
 
 impl Screen {
     fn restart(&mut self) -> u64 {
         self.kept.clear();
         self.watch = None;
+        self.fed += 1;
         self.session += 1;
         self.session
     }
@@ -305,6 +317,7 @@ impl Screen {
 
     fn resize(&mut self, rows: u16, cols: u16) {
         self.size = (rows, cols);
+        self.fed += 1;
         if let Some(watch) = self.watch.as_mut() {
             watch.resize(rows, cols);
         }
@@ -318,9 +331,34 @@ impl Screen {
             watch.feed(bytes, Instant::now());
         }
         keep_last(&mut self.kept, bytes, OUTPUT_KEEP);
+        self.fed += 1;
         for (_, sink) in &self.viewers {
             sink(bytes);
         }
+    }
+
+    /// The menu or dialog the screen shows, read from the kept bytes replayed into a terminal of the
+    /// session's size as `MenuWatch` reads them. Parsed again only once the screen changed.
+    fn blocker(&mut self) -> Option<Blocker> {
+        if let Some((fed, blocker)) = self.read {
+            if fed == self.fed {
+                return blocker;
+            }
+        }
+        let (rows, cols) = self.size;
+        let mut parser = vt100::Parser::new(rows.max(1), cols.max(1), 0);
+        parser.process(self.kept.make_contiguous());
+        let (_, width) = parser.screen().size();
+        let lines: Vec<String> = parser.screen().rows(0, width).collect();
+        let blocker = if crate::menu_watch::menu_top(&lines).is_some() {
+            Some(Blocker::Menu)
+        } else if crate::menu_watch::dialog_on(&lines) {
+            Some(Blocker::Dialog)
+        } else {
+            None
+        };
+        self.read = Some((self.fed, blocker));
+        blocker
     }
 
     /// Replays the screen to `sink`, then keeps it for live output. Holding the lock across both
@@ -4225,6 +4263,14 @@ impl Machine {
                 }
             }
         }
+    }
+
+    /// The menu or dialog the tab's screen shows, if any. The screen lock is taken alone, after the
+    /// tabs lock is let go, as the reader thread takes it.
+    fn blocker(&self, tab: &str) -> Option<Blocker> {
+        let screen = self.tab(tab, |t| t.screen.clone()).ok()?;
+        let blocker = screen.lock().unwrap().blocker();
+        blocker
     }
 
     /// Types `text` into the tab's session as one prompt and submits it. A session that has not
@@ -14057,6 +14103,46 @@ Have another model review a risky change before it goes ahead.";
         let run = m.delegates.get(&task).unwrap().run;
         assert_eq!((run.user_wait, run.paused), (None, answered - asked), "the clock runs again from the answer");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A permission menu as Claude Code draws it, and what erases it and draws the prompt box.
+    const MENU: &str = "\x1b[2J\x1b[H Bash command\r\n\r\n   cargo build\r\n\r\n Do you want to proceed?\r\n \u{276f} 1. Yes\r\n   2. Yes, and don't ask again for cargo build commands\r\n   3. No, and tell Claude what to do differently (esc)\r\n";
+    const ERASE: &str = "\x1b[2J\x1b[H\u{23fa} Done.\r\n\r\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\r\n\u{276f} \r\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\r\n  ? for shortcuts\r\n";
+
+    fn show(m: &Machine, tab: &str, bytes: &str) {
+        let screen = m.tab(tab, |t| t.screen.clone()).unwrap();
+        let mut screen = screen.lock().unwrap();
+        let session = screen.session;
+        screen.push(session, bytes.as_bytes());
+    }
+
+    #[test]
+    fn a_screen_is_read_again_only_once_it_changed() {
+        let mut screen = Screen::default();
+        screen.resize(24, 80);
+        let session = screen.session;
+        screen.push(session, MENU.as_bytes());
+        assert_eq!(screen.blocker(), Some(Blocker::Menu));
+        screen.kept.clear();
+        assert_eq!(screen.blocker(), Some(Blocker::Menu), "nothing new came in, so the answer stands unparsed");
+        screen.push(session, ERASE.as_bytes());
+        assert_eq!(screen.blocker(), None, "new bytes are read again");
+    }
+
+    #[test]
+    fn a_long_session_still_reads_its_menu() {
+        let mut screen = Screen::default();
+        screen.resize(24, 80);
+        let session = screen.session;
+        let filler: String = (0..12_000).map(|n| format!("\x1b[32mline {n} of the build output\x1b[0m\r\n")).collect();
+        assert!(filler.len() > OUTPUT_KEEP);
+        screen.push(session, filler.as_bytes());
+        assert_eq!(screen.blocker(), None);
+        screen.push(session, MENU.as_bytes());
+        assert_eq!(screen.blocker(), Some(Blocker::Menu), "the menu is read from the last 256 KiB");
+        screen.push(session, filler.as_bytes());
+        screen.push(session, ERASE.as_bytes());
+        assert_eq!(screen.blocker(), None, "the prompt box is back");
     }
 
     #[test]
