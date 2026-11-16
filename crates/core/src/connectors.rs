@@ -1350,6 +1350,10 @@ impl Taken for Result<Option<Placement>, String> {
 /// busy): nothing opened, so nothing is typed, acknowledged or placed.
 pub const CONSUMED: &str = "no session opened: the bot did not take the run";
 
+/// A resume step whose session was resumed, then refused as busy when typed into: it fails as any
+/// other error does, because trying the step again would resume the session a second time.
+pub const RESUMED_BUSY: &str = "the session was resumed, then the hub was busy and nothing was typed into it";
+
 /// A trigger's event as its poller found it, before its Ask step or any graph step: what a hub's
 /// team admits, keeps waiting or drops (`Admission`), and hands back whole when its turn comes
 /// (`Admission::claim`).
@@ -3770,18 +3774,7 @@ impl Connectors {
         Fut: Future<Output = R>,
         R: Taken,
     {
-        {
-            let mut known = self.known_tabs.lock().unwrap();
-            if known.get(machine).is_none_or(|(at, _)| *at <= observed) {
-                let replaced = known.insert(machine.to_owned(), (observed, after.to_vec()));
-                let mut facts = self.tab_facts.lock().unwrap();
-                let facts = facts.entry(machine.to_owned()).or_default();
-                if let Some((_, replaced)) = replaced.filter(|_| facts.unread) {
-                    facts.keep(&replaced);
-                }
-                facts.unread = true;
-            }
-        }
+        self.note_tabs(machine, observed, after);
         if self.tab_drive_queued.swap(true, Ordering::AcqRel) {
             self.tab_drives_coalesced.fetch_add(1, Ordering::Relaxed);
             return Ok(());
@@ -3792,6 +3785,21 @@ impl Connectors {
         let _guard = self.lock_driving().await;
         drop(queued);
         self.drive_locked(&open).await
+    }
+
+    /// Keeps `machine`'s tab list, observed at `observed`, for the next drive to read. The hub also
+    /// hands in the lists its machines reported before the account's workflows were loaded.
+    pub fn note_tabs(&self, machine: &str, observed: u64, after: &[TabView]) {
+        let mut known = self.known_tabs.lock().unwrap();
+        if known.get(machine).is_none_or(|(at, _)| *at <= observed) {
+            let replaced = known.insert(machine.to_owned(), (observed, after.to_vec()));
+            let mut facts = self.tab_facts.lock().unwrap();
+            let facts = facts.entry(machine.to_owned()).or_default();
+            if let Some((_, replaced)) = replaced.filter(|_| facts.unread) {
+                facts.keep(&replaced);
+            }
+            facts.unread = true;
+        }
     }
 
     /// Takes `driving`, counted in `drive_waiters` while it waits.
@@ -4077,8 +4085,11 @@ impl Connectors {
         let library = self.library();
         let mut failed = self.triage_inbox(&library).await;
         failed.append(&mut self.box_failures.lock().unwrap());
+        // Runs whose step the hub refused as busy: each stays Running at that step, and the next
+        // pass (a check or a tab wake) performs it again. Skipped for the rest of this pass.
+        let mut busy: Vec<runner::RunId> = vec![];
         for _ in 0..256 {
-            let index = self.runs.lock().unwrap().iter().position(|run| matches!(run.status, Status::Running));
+            let index = self.runs.lock().unwrap().iter().position(|run| matches!(run.status, Status::Running) && !busy.contains(&run.id));
             let Some(index) = index else { break };
             let mut run = self.runs.lock().unwrap()[index].clone();
             run.callable = self.callable();
@@ -4086,6 +4097,12 @@ impl Connectors {
                 Drive::Act(effect) => {
                     let supplied = match self.perform(&mut run, effect, &library, open).await {
                         Ok(supplied) => supplied,
+                        // Kept with its step still pending: the next pass performs that same step.
+                        Err(why) if why == crate::wire::HUB_BUSY => {
+                            busy.push(run.id.clone());
+                            self.replace_run(run)?;
+                            continue;
+                        }
                         Err(why) => Supplied::Failed(why),
                     };
                     runner::supply(&mut run, supplied, &Utc::now().to_rfc3339());
@@ -4104,7 +4121,10 @@ impl Connectors {
             }
         }
         self.flush_locked(open).await?;
-        let stuck = self.runs.lock().unwrap().iter().any(|run| matches!(run.status, Status::Running));
+        let stuck = self.runs.lock().unwrap().iter().any(|run| matches!(run.status, Status::Running) && !busy.contains(&run.id));
+        if !busy.is_empty() {
+            failed.push(crate::wire::HUB_BUSY.into());
+        }
         if stuck {
             failed.push("a workflow run did not settle".into());
         }
@@ -4527,6 +4547,11 @@ impl Connectors {
                 let place = place.unwrap_or(Placement { machine: "local".into(), tab: "local".into() });
                 Ok(Supplied::Opened { machine: place.machine, tab: place.tab })
             }
+            // Busy: the hub opened nothing, and the run keeps its subject to try the step again.
+            Err(why) if why == crate::wire::HUB_BUSY => {
+                self.restore_inbox(inbox);
+                Err(why)
+            }
             Err(why) => {
                 self.restore_inbox(inbox);
                 Err(self.unclaim(owner, &run.subject, &folder, &why))
@@ -4565,7 +4590,11 @@ impl Connectors {
         };
         if let Err(why) = self.type_into(run, owner, &text, &inbox_text(&inbox), open).await {
             self.restore_inbox(inbox);
-            return Err(why);
+            // The session is resumed already, so a busy refusal here is not tried again.
+            return Err(match why == crate::wire::HUB_BUSY {
+                true => RESUMED_BUSY.into(),
+                false => why,
+            });
         }
         let _ = self.ack_inbox(owner, &inbox).await;
         Ok(Supplied::Opened { machine: place.machine, tab: place.tab })
@@ -8788,6 +8817,82 @@ mod tests {
         assert!(lines[3].starts_with("run\n") && lines[3].contains("This session continues a run that already happened."), "{}", lines[3]);
         assert!(lines[3].contains("ENG-7: Broken button"), "{}", lines[3]);
         assert!(lines[3].contains("\n\ntwo"), "{}", lines[3]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The second talk's Type step, woken by the first session's Done tab, answers `refusal` on its
+    /// first try and is typed on the next. Returns the stored run after the refused wake and after
+    /// the next pass, and every prompt `open` was handed.
+    fn type_step_refused_once(name: &str, refusal: &str) -> (runner::Run, runner::Run, Vec<String>) {
+        let mut connector = linear_connector();
+        connector.graph = Some(talks(&["one", "two"]));
+        let (connectors, dir) = stored(name, vec![connector]);
+        connectors.begin("c1".into(), Subject::LinearIssue { issue: "uuid".into() }, issue_trigger(), "2026-10-29T12:00:00Z").unwrap();
+        let prompts = std::sync::Mutex::new(Vec::<String>::new());
+        let open = |work: Work| {
+            let refused = match &work {
+                Work::Prompt { text, .. } => {
+                    let mut prompts = prompts.lock().unwrap();
+                    prompts.push(text.clone());
+                    prompts.len() == 1
+                }
+                _ => false,
+            };
+            let refusal = refusal.to_owned();
+            async move {
+                match refused {
+                    true => Err::<Option<Placement>, String>(refusal),
+                    false => Ok(Some(Placement { machine: "m1".into(), tab: "tab-1".into() })),
+                }
+            }
+        };
+        block_on(connectors.drive(&open)).unwrap();
+        let done = session_tab(Some(AgentStatus::Done), Some("claude-1"));
+        let _ = block_on(connectors.on_tabs("m1", unix_millis(), std::slice::from_ref(&done), &open));
+        let woken = connectors.runs.lock().unwrap()[0].clone();
+        let _ = block_on(connectors.drive(&open));
+        let after = connectors.runs.lock().unwrap()[0].clone();
+        let _ = std::fs::remove_dir_all(dir);
+        (woken, after, prompts.into_inner().unwrap())
+    }
+
+    #[test]
+    fn a_step_refused_as_busy_stays_running_and_the_next_pass_performs_it_once() {
+        let (woken, after, prompts) = type_step_refused_once("graph-busy-step", crate::wire::HUB_BUSY);
+        assert_eq!(woken.status, Status::Running, "a busy step leaves its run running");
+        assert_eq!(runner::drive(&mut woken.clone(), &Default::default()), Drive::Act(Effect::Type { text: "two".into() }), "still at the same step");
+        assert_eq!(after.status, Status::Waiting, "the next pass typed the step and the run goes on");
+        assert_eq!(prompts, ["two", "two"], "refused once, typed once");
+    }
+
+    #[test]
+    fn a_step_refused_for_another_reason_still_fails_its_run() {
+        let (woken, after, prompts) = type_step_refused_once("graph-failed-step", "no session answers that thread");
+        assert_eq!(woken.status, Status::Failed { why: "no session answers that thread".into() });
+        assert_eq!(after.status, woken.status);
+        assert_eq!(prompts, ["two"], "a failed run is not tried again");
+    }
+
+    #[test]
+    fn a_tab_list_kept_without_a_drive_wakes_its_run_at_the_next_pass() {
+        let mut connector = linear_connector();
+        connector.graph = Some(talks(&["one", "two"]));
+        let (connectors, dir) = stored("graph-noted-tabs", vec![connector]);
+        connectors.begin("c1".into(), Subject::LinearIssue { issue: "uuid".into() }, issue_trigger(), "2026-10-29T12:00:00Z").unwrap();
+        let prompts = std::sync::Mutex::new(Vec::<String>::new());
+        let open = |work: Work| {
+            if let Work::Prompt { text, .. } = &work {
+                prompts.lock().unwrap().push(text.clone());
+            }
+            placed(work)
+        };
+        block_on(connectors.drive(&open)).unwrap();
+        assert_eq!(connectors.runs.lock().unwrap()[0].status, Status::Waiting);
+        let done = session_tab(Some(AgentStatus::Done), Some("claude-1"));
+        connectors.note_tabs("m1", unix_millis(), std::slice::from_ref(&done));
+        assert!(prompts.lock().unwrap().is_empty(), "keeping the list drives nothing");
+        block_on(connectors.drive(&open)).unwrap();
+        assert_eq!(*prompts.lock().unwrap(), ["two"], "the next pass read the kept list and typed the next step once");
         let _ = std::fs::remove_dir_all(dir);
     }
 

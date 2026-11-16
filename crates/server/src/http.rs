@@ -226,6 +226,10 @@ pub(crate) fn internal_response(e: String) -> Response {
 
 fn internal(e: String) -> Error {
     eprintln!("pinned-server: {e}");
+    // Refused for a busy lock: nothing was done, and the client may send the same request again.
+    if e == db::BUSY {
+        return Error(StatusCode::SERVICE_UNAVAILABLE, e);
+    }
     Error(StatusCode::INTERNAL_SERVER_ERROR, "the hub failed; try again".into())
 }
 
@@ -1167,7 +1171,19 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
                 let observed = pinned_core::connectors::unix_millis();
                 let (hub, account, machine) = (hub.clone(), account.clone(), machine.to_owned());
                 tokio::spawn(async move {
-                    let Ok(connectors) = hub.connectors(&account).await else { return };
+                    // Nothing is lost: no run waits before the workflows load, and the load that
+                    // succeeds next keeps every online machine's last list (`Hub::connectors`).
+                    let connectors = match hub.connectors(&account).await {
+                        Ok(connectors) => connectors,
+                        Err(e) => {
+                            let class = match e == crate::db::BUSY {
+                                true => "the hub was busy",
+                                false => "its workflows could not be read",
+                            };
+                            eprintln!("pinned-server: account {}: a machine's tab list wakes no workflow until the next pass: {class}", account.id);
+                            return;
+                        }
+                    };
                     let id = account.id;
                     let open = move |work| {
                         let hub = hub.clone();

@@ -146,6 +146,17 @@ pub(crate) fn run_call(spec: RunSpec, subject: &Subject) -> Call {
 }
 
 /// A machine whose pinned predates Run now can't read it: say so, instead of its parse error.
+/// What a workflow's step reads when the hub was busy partway through opening it: unlike the busy
+/// refusal, the step is not tried again, since part of it may have happened.
+pub const BUSY_PARTWAY: &str = "the hub was busy partway through opening this, so it was not tried again";
+
+fn busy_partway(e: String) -> String {
+    match e == db::BUSY {
+        true => BUSY_PARTWAY.into(),
+        false => e,
+    }
+}
+
 pub(crate) fn too_old_for_run_now(account: &Account, machine: &str, subject: &Subject, refused: String) -> String {
     if !pinned_core::connectors::is_run_now(subject) || !refused.contains("can't answer that") {
         return refused;
@@ -552,6 +563,14 @@ impl Hub {
                 let storage = PgStorage::new(self.db.clone(), account.id, stored, self.refuse_run_saves.clone());
                 self.persisted.lock().unwrap().insert(account.id, storage.0.clone());
                 let connectors = Arc::new(Connectors::new(storage, EXE_PLACEHOLDER.into()));
+                // A tab list a machine sent before this load found no workflows to wake: the next
+                // pass reads the lists the account's machines last reported.
+                let observed = pinned_core::connectors::unix_millis();
+                for (machine, _) in account.online() {
+                    if let Some(tabs) = account.tabs_of(&machine) {
+                        connectors.note_tabs(&machine, observed, &tabs);
+                    }
+                }
                 // A team's events ask its bots' lines first, before anything outside pinned.
                 if account.team {
                     connectors.set_admission(Arc::new(crate::teams::triggers::TeamAdmission { hub: self.me.clone(), team: account.id }));
@@ -615,9 +634,15 @@ impl Hub {
 
     /// What an account's own pollers and tab wakes found: a person's goes to `open_placed`, a
     /// team's to its bots (`teams::triggers::fired`).
+    /// A busy refusal is answered as is only where the hub refuses before it does anything (the
+    /// account lookup, and a run sent to a machine pool, whose refusals come before any machine
+    /// starts it): the workflow then tries the same step again. A team's start and a box's open can
+    /// be refused busy partway, so theirs answer `BUSY_PARTWAY` and the step is not repeated.
     pub async fn open_found(self: &Arc<Self>, account: Uuid, work: Work) -> Result<Option<Placement>, String> {
+        let boxed = matches!(&work, Work::Run(run) if matches!(run.runs_on, RunsOn::FreshBox(_)));
         match self.account(account).await?.team {
-            true => crate::teams::triggers::fired(self, account, work).await,
+            true => crate::teams::triggers::fired(self, account, work).await.map_err(busy_partway),
+            false if boxed => self.open_placed(account, work).await.map_err(busy_partway),
             false => self.open_placed(account, work).await,
         }
     }
