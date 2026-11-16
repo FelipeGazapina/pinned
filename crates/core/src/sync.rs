@@ -379,7 +379,9 @@ fn exchange(
     let mut synced = Synced::default();
     // `local` is what this machine has to send: a merged history is written here only once the hub
     // took it, so turns that came only from the hub never change `sending`.
-    let sending = fingerprint(push.iter().chain(&merge), local);
+    // The set of files to send, whichever list each is in: a history that moves between `push` and
+    // `merge` as the hub's copy changes is still the same file to send.
+    let sending = fingerprint(push.iter().chain(&merge).collect::<BTreeSet<_>>().into_iter(), local);
     // A `hold` is the `sending` of a refused batch, so it never names an empty set of files.
     let held = hold == Some(sending);
     // A history's own turns and both sides' turns merged, by path.
