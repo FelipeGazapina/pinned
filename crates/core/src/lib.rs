@@ -50,6 +50,7 @@ pub mod questions;
 pub mod reading;
 pub mod reminders;
 pub mod repo_look;
+pub mod report_scrub;
 pub mod scaffold;
 pub mod schedule;
 pub mod scripts;
