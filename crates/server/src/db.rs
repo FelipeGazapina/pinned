@@ -302,7 +302,10 @@ const WRITE_WAIT: Duration = Duration::from_secs(150);
 /// Postgres refuses a statement of the hub's that waits longer on a lock (`lock_timeout`): the
 /// shared connections pipeline every account's statements, so one waiting stalls them all.
 const LOCK_LIMIT: Duration = Duration::from_secs(2);
-/// What a statement refused by `LOCK_LIMIT` answers, as an ordinary error. Nothing retries it.
+/// What a statement refused by `LOCK_LIMIT` answers, as an ordinary error. The hub does not
+/// repeat the statement itself: the caller hears it and decides. A person's or a bot's call is
+/// refused with it and tried again by them, a trigger's check finds its event again on its next
+/// pass, and the store writer (`store_writes`) keeps the document and resends it.
 pub const BUSY: &str = pinned_core::wire::HUB_BUSY;
 
 impl Connection {
