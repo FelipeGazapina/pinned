@@ -601,7 +601,8 @@ const STALE_WAIT: Duration = Duration::from_secs(300);
 ///   (`NEVER_OPENED`), counted as `SkipReason::NeverStarted`, and a granted event no poller
 ///   claimed for it leaves its line, so it never runs without its place;
 /// - a run left waiting with no open call ends as `RunState::GaveUp` when its last call gave up
-///   (a give-up a restart cut short), else goes back to work while its box runs, else ends (`BOX_GONE`);
+///   (a give-up a restart cut short), as `RunState::Stopped` when its last call stopped it (a stop
+///   or "Stop it" whose end failed), else goes back to work while its box runs, else ends (`BOX_GONE`);
 /// - what waits for a team with a free place starts (`queue::next`), so an event is never left
 ///   waiting when the start after a run's end found the team's turn busy.
 ///
@@ -633,8 +634,23 @@ async fn reap(hub: &Arc<Hub>, policy: &TeamPolicy) -> Result<(), String> {
         }
         end_reservation(hub, team, run, &workflow, policy.reservation_limit_secs).await;
     }
-    for (team, run, box_runs, gave_up_call) in db::stale_waiting(&hub.db, STALE_WAIT.as_secs()).await? {
-        if let Some(call) = gave_up_call {
+    for (team, run, box_runs, last) in db::stale_waiting(&hub.db, STALE_WAIT.as_secs()).await? {
+        if let Some(db::LastCall::StoppedBy(by)) = last {
+            // A person stopped it but its end failed (a busy write): it ends now, never back to work.
+            let hub = hub.clone();
+            tokio::spawn(async move {
+                let ended = async {
+                    let who = name_of(&hub, &by).await;
+                    end_run(&hub, &hub.account(team).await?, run, RunState::Stopped, &format!("stopped by {who}"), box_runs.then_some(End::Removed)).await
+                };
+                match ended.await {
+                    Err(e) if e != RUN_ENDED => eprintln!("pinned-server: run {run} of team {team} was stopped but did not end yet: {e}"),
+                    _ => {}
+                }
+            });
+            continue;
+        }
+        if let Some(db::LastCall::GaveUp(call)) = last {
             // Its call gave up but the run never ended (a restart): it ends now, never back to work.
             let hub = hub.clone();
             tokio::spawn(async move {

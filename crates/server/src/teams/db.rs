@@ -1308,19 +1308,29 @@ pub async fn drop_grant(db: &Db, team: Uuid, run: Uuid) -> Result<(), String> {
     db.client().await?.execute("delete from team_run_queue where team = $1 and run = $2 and granted_at is not null", &[&team, &run]).await.map_err(err).map(drop)
 }
 
+/// How the last call of a run left waiting ended, when that call means the run must end.
+#[derive(Debug, PartialEq)]
+pub enum LastCall {
+    /// It gave up: call `0`.
+    GaveUp(Uuid),
+    /// Account `0` stopped the run on it: a stop, or a limit call's "Stop it".
+    StoppedBy(String),
+}
+
 /// Runs left waiting with no open call for more than `secs`, none of whose calls closed within
-/// `secs` either, as (team, run, whether its box runs, its last call when that one gave up). An
-/// ask opens its call, and an answer moves its run on, within moments, so such a run was left by
-/// a give-up or a restart. For `calls::tick`.
-pub async fn stale_waiting(db: &Db, secs: u64) -> Result<Vec<(Uuid, Uuid, bool, Option<Uuid>)>, String> {
+/// `secs` either, as (team, run, whether its box runs, its last call when that one gave up or
+/// stopped the run). An ask opens its call, and an answer moves its run on, within moments, so
+/// such a run was left by a give-up, a stop whose end failed, or a restart. For `calls::tick`.
+pub async fn stale_waiting(db: &Db, secs: u64) -> Result<Vec<(Uuid, Uuid, bool, Option<LastCall>)>, String> {
     let rows = db
         .client()
         .await?
         .query(
             "select r.team, r.id, exists (select 1 from boxes b where b.account = r.team and b.machine::text = r.box and b.phase <> 'ending'),
-               (select case when c.outcome = 'gave-up' then c.id end from team_calls c where c.run = r.id
-                 order by c.answered_at desc nulls first, c.created_at desc limit 1)
+               l.id, l.outcome = 'gave-up', l.outcome = 'stopped' or (l.situation = 'on_limit' and l.answer->>'choice' = 'Stop it'), l.by
              from team_runs r
+             left join lateral (select c.id, c.outcome, c.situation, c.answer, coalesce(c.answered_by::text, c.answer->>'by', '') as by
+               from team_calls c where c.run = r.id order by c.answered_at desc nulls first, c.created_at desc limit 1) l on true
              where r.state = 'waiting' and coalesce(r.waiting_since, r.started_at) <= now() - make_interval(secs => $1)
                and not exists (select 1 from team_calls c where c.run = r.id
                  and (c.answered_at is null or c.answered_at > now() - make_interval(secs => $1)))",
@@ -1328,7 +1338,17 @@ pub async fn stale_waiting(db: &Db, secs: u64) -> Result<Vec<(Uuid, Uuid, bool, 
         )
         .await
         .map_err(err)?;
-    Ok(rows.iter().map(|r| (r.get(0), r.get(1), r.get(2), r.get(3))).collect())
+    Ok(rows
+        .iter()
+        .map(|r| {
+            let last = match (r.get::<_, Option<Uuid>>(3), r.get::<_, Option<bool>>(4), r.get::<_, Option<bool>>(5)) {
+                (Some(call), Some(true), _) => Some(LastCall::GaveUp(call)),
+                (Some(_), _, Some(true)) => Some(LastCall::StoppedBy(r.get(6))),
+                _ => None,
+            };
+            (r.get(0), r.get(1), r.get(2), last)
+        })
+        .collect())
 }
 
 // ---- triggers.rs ----
