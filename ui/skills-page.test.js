@@ -142,6 +142,40 @@ test("skills changing on two machines at once lists both again", () => {
   assert.deepEqual(plain(api.fetched), [["mac", "mini"]]);
 });
 
+const BOX_NAME = "Box · MERGE-7: limits-fix + locks-fix + invite-used, stop gap S1, whole hub suite";
+const BOX_PLACE = `${BOX_NAME} · Claude (claude)`;
+const BOX_DIR = "/home/box/.claude/skills/ship-checklist";
+
+function markup() {
+  const skills = source("./gui-skills.js");
+  const settings = source("./settings.js");
+  const escLine = settings.slice(settings.indexOf("const esc ="), settings.indexOf("\n", settings.indexOf("const esc =")));
+  const copy = { key: "ship-checklist", scope: { kind: "personal" }, description: "", machine: "box-7", dir: BOX_DIR, tree: "t1", edit: "yes", place: { kind: "claude-personal" }, also: [], readers: [{ provider: "claude", account: "claude" }], linked: null };
+  const sandbox = {
+    skillsUi: { byMachine: new Map([["box-7", { copies: [copy] }]]), open: null, filter: "", loading: false },
+    LOCAL: "local",
+    machineName: (m) => (m === "box-7" ? BOX_NAME : m),
+    icon: () => "",
+  };
+  vm.createContext(sandbox);
+  vm.runInContext(`${escLine}
+    ${between(skills, "const copyId", "async function fetchSkills")}
+    ${between(skills, "/** One row per scope", "function machineNotesHtml")}
+    ${between(skills, "function skillRowHtml", "function listHtml")}
+    ${between(skills, "function editorParts", "function editorPaneHtml")}
+    this.api = { skillRows, skillRowHtml, editorParts };`, sandbox);
+  return { api: sandbox.api, copy };
+}
+
+test("a chip's tooltip holds the full label and the folder, and the header holds the full label", () => {
+  const { api, copy } = markup();
+  const [row] = api.skillRows();
+  const chip = api.skillRowHtml(row).match(/<span class="place" title="([^"]*)">([^<]*)<\/span>/);
+  assert.deepEqual([chip[1], chip[2]], [`${BOX_PLACE}\n${BOX_DIR}`, BOX_PLACE]);
+  const head = api.editorParts(row, { copy, file: "SKILL.md", got: null, view: "edit" }).top.match(/<span class="muted" title="([^"]*)">([^<]*)<\/span>/);
+  assert.deepEqual([head[1], head[2]], [BOX_PLACE, BOX_PLACE]);
+});
+
 test("opening another skill over unsaved edits waits for the user's answer", () => {
   const api = checklist();
   const went = [];
