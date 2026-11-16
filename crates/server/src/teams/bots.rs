@@ -10,7 +10,7 @@ use pinned_core::connectors::{BoxStep, Connector, Placement, Trigger};
 use pinned_core::graph::migrate::migrate;
 use pinned_core::graph::runner::{session_steps, Library, NOT_AN_ON_BOT};
 use pinned_core::graph::{NodeKind, Watch};
-use pinned_core::teams::{Bot, BotLimits, CallRules, Run, RunState, SkipReason, TeamEvent, TeamProject, Who};
+use pinned_core::teams::{Bot, BotLimits, CallRules, Run, SkipReason, TeamEvent, TeamProject, Who};
 use pinned_core::wire::HubCall;
 use serde_json::Value;
 use std::sync::Arc;
@@ -390,8 +390,9 @@ async fn end_box_of_ended_run(hub: &Arc<Hub>, team: &Arc<Account>, id: Uuid, mac
 /// reserved before anything outside pinned heard of it (`queue::ask`, `queue::admit`, a waiting
 /// run's turn), in a fresh box of the team's own, outside that turn. The bot must still be on and
 /// the team must keep its Upstash key and Claude token. A session that does not open frees the
-/// place, and what waits in the bot's line goes next; the run stays listed when it had ended
-/// meanwhile. The bot's `BotLimits` are held by `calls::tick`.
+/// place, is counted `SkipReason::StartFailed` unless the backstop or a stop ended its run first,
+/// and what waits in the bot's line goes next; the run stays listed when it had ended meanwhile.
+/// The bot's `BotLimits` are held by `calls::tick`.
 pub async fn start_reserved(hub: &Arc<Hub>, team: &Arc<Account>, id: Uuid, mut work: pinned_core::connectors::Run) -> Result<Placement, String> {
     let opened = async {
         ready(hub, team, &work.connector).await?;
@@ -403,20 +404,18 @@ pub async fn start_reserved(hub: &Arc<Hub>, team: &Arc<Account>, id: Uuid, mut w
     let placed = match opened.await {
         Ok(placed) => placed,
         Err(e) => {
-            // A run that ended meanwhile, as one stopped while its box booted, stays as it ended.
-            let ended = db::run(&hub.db, team.id, id).await?.map(|r| r.state).filter(|s| s.ended());
-            if ended.is_none() {
-                db::delete_run(&hub.db, team.id, id).await?;
-            }
-            // A granted event that waited for its place and then did not start is counted; a stop is not.
-            if super::queue::take_claimed(id) && ended != Some(RunState::Stopped) {
+            // Counted and deleted only through one conditional write on the run's row
+            // (`db::fail_reserved_start`): a run still live and reserved is deleted, one its box's
+            // failure ended stays listed, and either counts `StartFailed` once. A run the backstop
+            // ended (counted `NeverStarted` there) or that was stopped stays as it ended, counted
+            // by nobody here. No memory of this hub decides the count.
+            if db::fail_reserved_start(&hub.db, team.id, id, super::calls::NEVER_OPENED).await? {
                 db::count_skipped(&hub.db, team.id, &work.connector, SkipReason::StartFailed, 1).await?;
             }
             super::queue::next(hub, team, &work.connector);
             return Err(e);
         }
     };
-    super::queue::take_claimed(id);
     // Stopped, or ended by the backstop, since its session started: it gets no box, and its box ends
     // at once. In a task of its own: the poller's check that opens this holds its subject while it
     // runs, and ending the box needs that subject to fail the runs the box held.

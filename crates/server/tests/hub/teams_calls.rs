@@ -79,6 +79,7 @@ impl TeamBox {
         .unwrap();
         let workflow = team_workflows(hub, team)[0]["id"].as_str().unwrap().to_owned();
         let run = Run {
+            reservation: None,
             cwd: repo,
             repo: None,
             args: vec!["--name".into(), "Fix the footer".into()],

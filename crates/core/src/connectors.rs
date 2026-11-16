@@ -1285,6 +1285,11 @@ pub struct Run {
     pub runs_on: RunsOn,
     /// The subject text an Ask step reads: the issue, or the Slack thread so far.
     pub input: String,
+    /// On a hub's team, the reserved run whose place this event's admission or claim holds
+    /// (`Admitted::Reserved`, `Admission::claim`): the hub starts this event only in that place,
+    /// and consumes it when that place ended before its session opened. In process only.
+    #[serde(skip)]
+    pub reservation: Option<String>,
 }
 
 
@@ -1383,10 +1388,13 @@ impl Event {
 }
 
 /// What an `Admission` answered an event.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Admitted {
-    /// It may run now: its place is held until its session opens or its run ends without one.
+    /// It may run now, with no place of its own: a person's event, or one a live run takes.
     Go,
+    /// It may run now in the place reserved run `0` holds until its session opens or its run
+    /// ends without one. Only this event starts in that place (`Run::reservation`).
+    Reserved(String),
     /// It was dropped or skipped: nothing outside pinned hears of it, and a Slack thread's later
     /// replies are not followed.
     Held,
@@ -1402,6 +1410,10 @@ pub enum Replies {
     Pass,
     /// The thread's event waits, and they wait with it: nothing outside pinned hears of them.
     Kept,
+    /// The thread's run was claimed and its session has not opened: they are held for that run.
+    /// Nothing takes them now and the thread's cursor stays, so the next check passes them on
+    /// again, to the session once it opened. They never start a run of their own.
+    Later,
     /// The thread has neither a run nor a waiting event: they are dropped, and the thread is no
     /// longer followed.
     Dropped,
@@ -1430,8 +1442,9 @@ pub trait Admission: Send + Sync {
     }
 
     /// Claims granted event `id` right before it runs: answered to exactly one claim, so of two
-    /// pollers only one runs it, and none after it was claimed.
-    fn claim(&self, id: i64) -> Pending<Result<Option<Event>, String>> {
+    /// pollers only one runs it, and none after it was claimed. Answers the event and the reserved
+    /// run whose place it was granted.
+    fn claim(&self, id: i64) -> Pending<Result<Option<(Event, Option<String>)>, String>> {
         let _ = id;
         Box::pin(async { Ok(None) })
     }
@@ -1991,8 +2004,8 @@ impl Connectors {
         let mut error = None;
         for id in admission.granted().await? {
             let ran = match admission.claim(id).await {
-                Ok(Some(Event::Run(run))) => self.hand_over_run(run, open, true).await,
-                Ok(Some(graph @ Event::Graph { .. })) => self.begin_admitted(graph).await,
+                Ok(Some((Event::Run(run), reservation))) => self.hand_over_run(Run { reservation, ..run }, open, true).await,
+                Ok(Some((graph @ Event::Graph { .. }, reservation))) => self.begin_admitted(graph, reservation).await,
                 Ok(None) => Ok(()),
                 Err(e) => Err(e),
             };
@@ -2122,6 +2135,7 @@ impl Connectors {
                     match admission.replies(d.clone()).await? {
                         Replies::Pass => {}
                         Replies::Kept => return self.follow(&d.connector, &d.channel, &d.thread, d.cursor.clone()),
+                        Replies::Later => return Ok(()),
                         Replies::Dropped => return self.keep_stopped(&d.connector, &Subject::SlackThread { channel: d.channel.clone(), thread: d.thread.clone() }),
                     }
                 }
@@ -2157,6 +2171,7 @@ impl Connectors {
         if !granted {
             match self.admit(&Event::Run(run.clone())).await {
                 Ok(Admitted::Go) => {}
+                Ok(Admitted::Reserved(id)) => run.reservation = Some(id),
                 Ok(Admitted::Held) => return self.keep_stopped(&connector, &subject),
                 // The subject stays handled, and a thread stays followed for its replies.
                 Ok(Admitted::Waiting) => return Ok(()),
@@ -2777,7 +2792,7 @@ fn issue_run(c: &Connector, issue: &linear::Issue, exe: &str, team: bool) -> Run
     let subject = Subject::LinearIssue { issue: issue.id.clone() };
     prompt += &format!("\n\nLinear issue {}", trigger_shown(&subject, &input, team));
     args.push(prompt);
-    Run { cwd: c.folder.clone(), repo: c.repo(), args, connector: c.id.clone(), subject, mentioned: vec![], account: c.account(), runs_on: c.runs_on.clone(), input }
+    Run { cwd: c.folder.clone(), repo: c.repo(), args, connector: c.id.clone(), subject, mentioned: vec![], account: c.account(), runs_on: c.runs_on.clone(), input, reservation: None }
 }
 
 /// The first question whose answer is one of its `stop_on` values, ignoring case.
@@ -2937,7 +2952,7 @@ fn thread_session(
     prompt += &format!("\n\nSlack thread in #{}, oldest first:\n{}", pinned_lines::flat(channel_name, pinned_lines::HEADER_CHARS), trigger_shown(&subject, &input, team));
     prompt += note.unwrap_or_default();
     args.push(prompt);
-    Run { cwd: c.folder.clone(), repo: c.repo(), args, connector: c.id.clone(), subject, mentioned: vec![], account: c.account(), runs_on: c.runs_on.clone(), input }
+    Run { cwd: c.folder.clone(), repo: c.repo(), args, connector: c.id.clone(), subject, mentioned: vec![], account: c.account(), runs_on: c.runs_on.clone(), input, reservation: None }
 }
 
 /// The thread a session on it opens with, one `author: text` post per line start. Slack text is
@@ -3876,7 +3891,8 @@ impl Connectors {
     /// classify with a model or post to Slack.
     async fn start_graph(&self, event: Event) -> Result<(), String> {
         match self.admit(&event).await? {
-            Admitted::Go => self.begin_admitted(event).await,
+            Admitted::Go => self.begin_admitted(event, None).await,
+            Admitted::Reserved(id) => self.begin_admitted(event, Some(id)).await,
             Admitted::Held | Admitted::Waiting => Ok(()),
         }
     }
@@ -3913,14 +3929,22 @@ impl Connectors {
     }
 
     /// `begin` of an admitted graph event. Its place is held until its session opens; a run that
-    /// does not start, or ends before a session (`drive_locked`), releases it.
-    async fn begin_admitted(&self, event: Event) -> Result<(), String> {
+    /// does not start, or ends before a session (`drive_locked`), releases it. The run keeps the
+    /// reserved run whose place it holds (`runner::Run::reservation`), stored with the runs, so
+    /// each of its sessions opens only in that place, after a restart too.
+    async fn begin_admitted(&self, event: Event, reservation: Option<String>) -> Result<(), String> {
         let Event::Graph { connector, subject, input, at } = event else { return Err("not a graph event".into()) };
         let fresh = !run_open(&self.runs.lock().unwrap(), &connector, &subject);
         let begun = self.begin(connector.clone(), subject.clone(), input, &at);
         let started = begun.is_ok() && fresh && run_open(&self.runs.lock().unwrap(), &connector, &subject);
         match started && self.admission.get().is_some() {
             true => {
+                if reservation.is_some() {
+                    if let Some(run) = self.runs.lock().unwrap().iter_mut().rev().find(|r| r.connector == connector && r.subject == subject) {
+                        run.reservation = reservation;
+                    }
+                    self.save_runs()?;
+                }
                 self.holding.lock().unwrap().insert((connector, subject_key(&subject)));
             }
             false => self.release(&connector, &subject).await,
@@ -4211,7 +4235,7 @@ impl Connectors {
             let mut spec = graph_opening(&owner_c, &trigger, &[], "", None, &self.exe, false)?;
             spec.args.pop();
             spec.args.extend(["--resume".into(), claude.clone()]);
-            let answer = open(Work::Run(spec)).await;
+            let answer = open(Work::Run(Run { reservation: run.reservation.clone(), ..spec })).await;
             if answer.consumed() {
                 return self.keep_stopped(owner, &run.subject);
             }
@@ -4231,7 +4255,7 @@ impl Connectors {
         let team = self.admission.get().is_some();
         // On a team `graph_opening` makes sure of the trigger's frame.
         let spec = graph_opening(&owner_c, &trigger, &direct_answers(run, &self.library()), text, Some(&runner::history(run)), &self.exe, team)?;
-        let answer = open(Work::Run(spec)).await;
+        let answer = open(Work::Run(Run { reservation: run.reservation.clone(), ..spec })).await;
         if answer.consumed() {
             return self.keep_stopped(owner, &run.subject);
         }
@@ -4532,7 +4556,7 @@ impl Connectors {
         };
         let folder = spec.cwd.clone();
         let mentioned = spec.mentioned.clone();
-        let answer = open(Work::Run(spec)).await;
+        let answer = open(Work::Run(Run { reservation: run.reservation.clone(), ..spec })).await;
         // Consumed: nothing opened, so the run ends without a session and Slack hears nothing.
         if answer.consumed() {
             self.restore_inbox(inbox);
@@ -4572,7 +4596,7 @@ impl Connectors {
         spec.args.extend(["--resume".into(), claude.to_owned()]);
         let inbox = self.take_inbox(&run.subject);
         let text = render_for(text, run, self.admission.get().is_some());
-        let answer = open(Work::Run(spec)).await;
+        let answer = open(Work::Run(Run { reservation: run.reservation.clone(), ..spec })).await;
         if answer.consumed() {
             self.restore_inbox(inbox);
             return Ok(Supplied::Failed(CONSUMED.into()));
@@ -5550,7 +5574,7 @@ fn manual_run(owner: &Connector, workflow: &str, title: &str, talk: &str, by: &s
     }
     args.push(prompt);
     let subject = Subject::LinearIssue { issue: format!("{RUN_NOW}{workflow}:{stamp}") };
-    Run { cwd: owner.folder.clone(), repo: owner.repo(), args, connector: owner.id.clone(), subject, mentioned: vec![], account: owner.account(), runs_on: owner.runs_on.clone(), input }
+    Run { cwd: owner.folder.clone(), repo: owner.repo(), args, connector: owner.id.clone(), subject, mentioned: vec![], account: owner.account(), runs_on: owner.runs_on.clone(), input, reservation: None }
 }
 
 impl Connectors {

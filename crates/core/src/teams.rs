@@ -255,8 +255,9 @@ pub struct Skipped {
 /// Why an event of a bot started no run: `"off"`, `"draft"`, `"manual"` (a trigger of a workflow
 /// that runs only by Run now), `"queue_full"` (the oldest of 20 waiting events, dropped for a
 /// newer one), `"bot_removed"` (its workflow was deleted before its turn), `"start_failed"` (its
-/// turn came and its run did not start) or `"never_started"` (its place was held and its session
-/// never opened within `TeamPolicy::reservation_limit_secs`).
+/// turn came and its run did not start), `"never_started"` (its place was held and its session
+/// never opened within `TeamPolicy::reservation_limit_secs`) or `"replies_dropped"` (thread replies
+/// held for a run whose place then ended before its session opened, counted per reply).
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SkipReason {
@@ -267,6 +268,7 @@ pub enum SkipReason {
     BotRemoved,
     StartFailed,
     NeverStarted,
+    RepliesDropped,
 }
 
 impl SkipReason {
@@ -279,11 +281,12 @@ impl SkipReason {
             SkipReason::BotRemoved => "bot_removed",
             SkipReason::StartFailed => "start_failed",
             SkipReason::NeverStarted => "never_started",
+            SkipReason::RepliesDropped => "replies_dropped",
         }
     }
 
     pub fn parse(text: &str) -> Option<SkipReason> {
-        [SkipReason::Off, SkipReason::Draft, SkipReason::Manual, SkipReason::QueueFull, SkipReason::BotRemoved, SkipReason::StartFailed, SkipReason::NeverStarted]
+        [SkipReason::Off, SkipReason::Draft, SkipReason::Manual, SkipReason::QueueFull, SkipReason::BotRemoved, SkipReason::StartFailed, SkipReason::NeverStarted, SkipReason::RepliesDropped]
             .into_iter().find(|r| r.as_str() == text)
     }
 }

@@ -526,8 +526,8 @@ async fn end_reservation(hub: &Arc<Hub>, team: Uuid, run: Uuid, workflow: &str, 
             Err(e) if e == RUN_ENDED => return Ok(()),
             Err(e) => return Err(e),
         }
-        // Counted here only: a claim still booting this run counts no failed start on top.
-        super::queue::take_claimed(run);
+        // Counted here only: this write ended the run, so a box still booting for it and failing
+        // after finds it ended and counts no failed start on top (`db::fail_reserved_start`).
         db::count_skipped(&hub.db, team, workflow, SkipReason::NeverStarted, 1).await
     };
     if let Err(e) = ended.await {

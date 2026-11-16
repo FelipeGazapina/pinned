@@ -30,6 +30,10 @@ pub(crate) static THINKING: Mutex<Vec<String>> = Mutex::new(Vec::new());
 /// team's triggers claims no granted event meanwhile.
 pub(crate) static POLLS_HELD: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
+/// The tests whose model calls about the second event on ENG-1 (`ENG-1 again:`) wait while they
+/// are listed here.
+pub(crate) static AGAIN_THINKING: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
 /// Starts the Linear and model stand-ins once, and the Slack one. Each test names its own keys,
 /// so they share the servers.
 fn standins() {
@@ -68,6 +72,9 @@ fn answer(mut stream: TcpStream) {
         std::thread::sleep(Duration::from_millis(50));
     }
     while service == "model" && body.contains("ENG-1:") && THINKING.lock().unwrap().iter().any(|t| key.ends_with(t.as_str())) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    while service == "model" && body.contains("ENG-1 again:") && AGAIN_THINKING.lock().unwrap().iter().any(|t| key.ends_with(t.as_str())) {
         std::thread::sleep(Duration::from_millis(50));
     }
     // A model call about ENG-1 that stops its run (`ta_rel_stop`) or fails (`ta_rel_model`).
@@ -275,6 +282,7 @@ impl Crew {
     /// The event the team's Slack poller finds for a mention that starts thread `thread`.
     fn mentioned(&self, id: &str, thread: &str) -> Event {
         Event::Run(Run {
+            reservation: None,
             cwd: self.folder.clone(),
             repo: None,
             args: vec!["--name".into(), format!("Thread {thread}"), "Answer the thread.\n\nSlack thread in #acme, oldest first:\nENG-0: a thread".into()],
@@ -328,6 +336,7 @@ impl Crew {
     /// The event the team's Linear poller finds for label `agent` on issue `ENG-n`.
     pub(crate) fn labeled(&self, id: &str, n: u32) -> Event {
         Event::Run(Run {
+            reservation: None,
             cwd: self.folder.clone(),
             repo: None,
             args: vec!["--name".into(), format!("ENG-{n} Fix page {n}"), format!("Fix it.\n\nLinear issue ENG-{n}: Fix page {n}\nhttps://linear.example.test/acme/issue/ENG-{n}\n\n(no description)")],
@@ -1002,4 +1011,404 @@ fn a_stopped_reservation_leaves_no_granted_event_behind() {
     assert_eq!(crew.outside(1), none(), "nothing of ENG-1 reached outside pinned");
     assert_eq!(crew.unopened(), vec!["stopped"]);
     assert_eq!(crew.skipped(&pages), Value::Null, "a stop is not counted");
+}
+
+// ---- an admitted event runs once or is counted once, never both ----
+
+impl Crew {
+    /// Moves bot `id`'s reserved places back past the 15 minute limit, as if held 16 minutes ago.
+    fn past_limit(&self, id: &str) {
+        admin_on(&self.hub.database, &format!("update team_runs set reserved_at = now() - interval '16 minutes' where team = '{}' and workflow = '{id}' and reserved", self.team));
+    }
+}
+
+fn never_started() -> Vec<(String, Option<String>)> {
+    vec![("failed".to_owned(), Some("it never started".to_owned()))]
+}
+
+fn box_failed() -> Exec {
+    Exec { exit_code: 22, output: "Downloading pinned-server\n".into(), error: "curl: (22) The requested URL returned error: 404\n".into() }
+}
+
+#[test]
+fn an_admitted_event_whose_reservation_the_backstop_ended_is_consumed_not_started() {
+    let crew = Crew::new("ta_rc_consumed");
+    let pages = crew.on_bot("Pages");
+    let boxes_before = crew.boxes_created();
+    THINKING.lock().unwrap().push("ta_rc_consumed".into());
+    std::thread::scope(|scope| {
+        // Admitted: its place is held, and its Ask step's model call is still thinking.
+        let found = scope.spawn(|| crew.found(crew.labeled(&pages, 1)));
+        wait_for("ENG-1's admitted model call", || crew.outside(1) == vec!["model".to_owned()]);
+        assert_eq!(crew.reserved_at(&pages), vec!["set".to_owned()], "its place is held");
+        crew.past_limit(&pages);
+        crew.reaper_pass();
+        assert_eq!(crew.states_of(&pages), never_started(), "the backstop ended its reservation");
+        // The model answers: the event's run is fired after its reservation ended.
+        THINKING.lock().unwrap().retain(|t| t != "ta_rc_consumed");
+        assert_eq!(found.join().unwrap(), Ok(()), "consumed");
+    });
+    crew.reaper_pass();
+    assert_eq!(crew.boxes_created() - boxes_before, 0, "no session opened");
+    assert_eq!(crew.outside(1), vec!["model".to_owned()], "only the admitted Ask step's call; no Linear move, no second model call");
+    assert_eq!(crew.skipped(&pages), json!([{ "reason": "never_started", "count": 1 }]), "counted once, by the backstop");
+    assert_eq!(crew.live_of(&pages), none(), "no live run");
+    assert_eq!(crew.states_of(&pages), never_started(), "no fresh run was started");
+}
+
+#[test]
+fn an_admitted_event_that_runs_before_the_backstop_is_not_ended() {
+    let crew = Crew::new("ta_rc_runs_first");
+    let pages = crew.on_bot("Pages");
+    assert_eq!(crew.found(crew.labeled(&pages, 1)), Ok(()));
+    assert_eq!(crew.reserved_at(&pages), none(), "its session opened in its place");
+    admin_on(&crew.hub.database, &format!("update team_runs set reserved_at = now() - interval '16 minutes', started_at = now() - interval '16 minutes' where team = '{}' and workflow = '{pages}'", crew.team));
+    crew.reaper_pass();
+    assert_eq!(crew.states_of(&pages), vec![("working".to_owned(), None)], "the run lives");
+    assert_eq!(crew.skipped(&pages), Value::Null, "nothing counted");
+    assert_eq!(crew.outside(1), vec!["model".to_owned(), "linear move".to_owned()]);
+    assert_eq!(crew.boxes_created(), 1);
+}
+
+#[test]
+fn a_session_that_fails_to_open_after_the_backstop_counts_only_never_started() {
+    let crew = Crew::new("ta_rc_fail_after");
+    let pages = crew.on_bot("Pages");
+    let gate = Arc::new(tokio::sync::Notify::new());
+    crew.hub.boxes.state.lock().unwrap().gate = Some(gate.clone());
+    std::thread::scope(|scope| {
+        let found = scope.spawn(|| crew.found(crew.labeled(&pages, 1)));
+        wait_for("ENG-1's box to start booting", || crew.boots() == 1);
+        assert_eq!(crew.reserved_at(&pages), vec!["set".to_owned()], "its place is held while its box boots");
+        crew.past_limit(&pages);
+        crew.reaper_pass();
+        assert_eq!(crew.states_of(&pages), never_started(), "the backstop ended it while its box booted");
+        assert_eq!(crew.skipped(&pages), json!([{ "reason": "never_started", "count": 1 }]));
+        crew.hub.boxes.state.lock().unwrap().failing = Some(box_failed());
+        gate.notify_one();
+        assert!(found.join().unwrap().is_err(), "its session did not open");
+    });
+    crew.reaper_pass();
+    assert_eq!(crew.skipped(&pages), json!([{ "reason": "never_started", "count": 1 }]), "counted once: no start_failed on top");
+    assert_eq!(crew.states_of(&pages), never_started(), "the ended run stays listed with its outcome, not deleted");
+    assert_eq!(crew.unopened(), vec!["failed"]);
+}
+
+#[test]
+fn a_session_that_fails_to_open_before_the_backstop_counts_only_start_failed() {
+    let crew = Crew::new("ta_rc_fail_before");
+    let pages = crew.on_bot("Pages");
+    crew.hub.boxes.state.lock().unwrap().failing = Some(box_failed());
+    assert!(crew.found(crew.labeled(&pages, 1)).is_err(), "its box did not boot");
+    crew.past_limit(&pages);
+    crew.reaper_pass();
+    assert_eq!(crew.skipped(&pages), json!([{ "reason": "start_failed", "count": 1 }]), "counted once, as a failed start");
+    let why = "its box failed: the bootstrap failed: Downloading pinned-server\ncurl: (22) The requested URL returned error: 404";
+    assert_eq!(crew.states_of(&pages), vec![("failed".to_owned(), Some(why.to_owned()))], "not ended again by the backstop");
+}
+
+#[test]
+fn a_reply_to_a_granted_event_waits_with_it_and_the_event_runs_once() {
+    let crew = Crew::new("ta_rc_reply");
+    let (holder, footer) = (crew.on_bot("Docs"), crew.slack_bot("Footer"));
+    let thread = "1792400070.000100";
+    admin_on(&crew.hub.database, &format!("update teams set max_live_runs = 1 where id = '{}'", crew.team));
+    assert_eq!(crew.found(crew.labeled(&holder, 9)), Ok(()));
+    assert_eq!(crew.found(crew.mentioned(&footer, thread)), Ok(()));
+    assert_eq!(crew.waiting(&footer), 1, "the thread's event waits");
+    // The test holds the thread's row, so every claim skips it: granted, and not claimed.
+    let gate = ClaimGate::hold(&crew);
+    let held = crew.live_of(&holder);
+    crew.stop(&held[0]);
+    wait_for("the thread's grant", || gate.granted() == 1);
+    assert_eq!(crew.reserved_at(&footer), vec!["set".to_owned()], "its place is held");
+    assert_eq!(crew.waiting(&footer), 1, "granted, its row waits for a claim");
+    let boxes_before = crew.boxes_created();
+
+    let delivery = Delivery {
+        connector: footer.clone(),
+        channel: "C0ACME001".into(),
+        thread: thread.into(),
+        messages: vec!["[Slack reply from Dina] still broken".into()],
+        cursor: "1792400080.000100".into(),
+        mentioned: vec!["1792400080.000100".into()],
+    };
+    assert_eq!(crew.handed(Work::Delivery(delivery)), Ok(()));
+    assert_eq!(crew.boxes_created() - boxes_before, 0, "no session opened for the reply");
+    assert_eq!(crew.kept(&footer), (vec!["[Slack reply from Dina] still broken".to_owned()], 0), "the reply waits with the event");
+
+    gate.release();
+    // The team's poller looks now, as a grant wakes it.
+    let hub = crew.hub.hub().clone();
+    crew.hub.runtime.block_on(async { hub.connectors(&hub.account(crew.team).await.unwrap()).await.unwrap().wake() });
+    wait_for("the thread's box", || crew.box_prompt(thread).is_some());
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(
+        crew.box_prompt(thread).unwrap(),
+        format!(
+            "Answer the thread.\n\nSlack thread in #acme, oldest first:\n{}\n\nReplies the thread got while this run waited to start:\n\n{}",
+            pinned_core::untrusted::frame("a Slack thread", "ENG-0: a thread"),
+            pinned_core::untrusted::frame("a Slack reply in this thread", "[Slack reply from Dina] still broken")
+        )
+    );
+    assert_eq!(crew.boxes_created() - boxes_before, 1, "one session, in one box");
+    assert_eq!(crew.live_of(&footer).len(), 1, "one run");
+    assert_eq!(crew.waiting(&footer), 0, "the granted row is gone");
+    assert_eq!(crew.reserved_at(&footer), none(), "its session opened in the granted place");
+}
+
+#[test]
+fn a_turn_that_fails_after_taking_a_waiting_event_leaves_it_waiting() {
+    let crew = Crew::new("ta_rc_take");
+    let (holder, pages) = (crew.on_bot("Docs"), crew.on_bot("Pages"));
+    admin_on(&crew.hub.database, &format!("update teams set max_live_runs = 1 where id = '{}'", crew.team));
+    assert_eq!(crew.found(crew.labeled(&holder, 9)), Ok(()));
+    let reply = crew.call(&crew.bob, serde_json::from_value(json!({ "op": "run_now", "workflow": pages })).unwrap()).unwrap();
+    assert_eq!(reply["waiting"], json!(true), "bob's run waits behind the holder");
+    // The database refuses Pages' reservation; each refused try counts on a sequence, which a
+    // rollback does not undo.
+    admin_on(
+        &crew.hub.database,
+        &format!(
+            "create sequence ta_rc_tries;
+             create function refuse_pages() returns trigger language plpgsql as $$ begin
+               if new.workflow = '{pages}' then perform nextval('ta_rc_tries'); raise exception 'refused'; end if; return new; end $$;
+             create trigger refuse_pages before insert on team_runs for each row execute function refuse_pages()"
+        ),
+    );
+    let tries = || -> i64 {
+        crew.hub.runtime.block_on(async {
+            let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), crew.hub.database), tokio_postgres::NoTls).await.unwrap();
+            tokio::spawn(connection);
+            db.query_one("select case when is_called then last_value else 0 end from ta_rc_tries", &[]).await.unwrap().get(0)
+        })
+    };
+    let held = crew.live_of(&holder);
+    crew.stop(&held[0]);
+    wait_for("the turn's refused reservation", || tries() >= 1);
+    assert_eq!(crew.waiting(&pages), 1, "the event still waits");
+    assert_eq!(crew.skipped(&pages), Value::Null, "nothing counted");
+    assert_eq!(crew.live_of(&pages), none());
+
+    admin_on(&crew.hub.database, "drop trigger refuse_pages on team_runs");
+    crew.reaper_pass();
+    wait_for("the waiting run to start", || crew.live_of(&pages).len() == 1 && crew.waiting(&pages) == 0);
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(crew.live_of(&pages).len(), 1, "it started once");
+    assert_eq!(crew.waiting(&pages), 0);
+    assert_eq!(crew.skipped(&pages), Value::Null);
+}
+
+/// Another hub on `hub`'s database, as `TestHub::twin`, whose box tick and sweep do not run
+/// during a test: it never boots again a box the first hub is booting.
+fn quiet_twin(hub: &TestHub) -> (tokio::runtime::Runtime, pinned_server::Running) {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut config = hub.config("127.0.0.1:0");
+    config.box_policy = Policy { tick: Duration::from_secs(3600), sweep: Duration::from_secs(3600), ..config.box_policy.clone() };
+    let running = runtime.block_on(pinned_server::start(config)).unwrap();
+    (runtime, running)
+}
+
+impl Crew {
+    /// A second event on ENG-1, after the first: its prompt and its Ask step's text say `ENG-1 again:`.
+    fn again(&self, id: &str) -> Event {
+        let Event::Run(run) = self.labeled(id, 1) else { unreachable!() };
+        Event::Run(Run {
+            args: vec!["--name".into(), "ENG-1 Fix page 1".into(), "Fix it again.\n\nENG-1 again: Fix page 1".into()],
+            input: "ENG-1 again: Fix page 1".into(),
+            ..run
+        })
+    }
+
+    /// `found` on another hub of the same database (`TestHub::twin`).
+    fn found_on(&self, twin: &tokio::runtime::Runtime, hub: &Arc<pinned_server::hub::Hub>, event: Event) -> Result<(), String> {
+        let (hub, team) = (hub.clone(), self.team);
+        twin.block_on(async move {
+            let account = hub.account(team).await?;
+            let connectors = hub.connectors(&account).await?;
+            let open = |work| {
+                let hub = hub.clone();
+                async move { hub.open_found(team, work).await }
+            };
+            connectors.found(event, &open).await
+        })
+    }
+
+    /// `handed` on another hub of the same database.
+    fn handed_on(&self, twin: &tokio::runtime::Runtime, hub: &Arc<pinned_server::hub::Hub>, work: Work) -> Result<(), String> {
+        let (hub, team) = (hub.clone(), self.team);
+        twin.block_on(async move {
+            let account = hub.account(team).await?;
+            let connectors = hub.connectors(&account).await?;
+            let open = |work| {
+                let hub = hub.clone();
+                async move { hub.open_found(team, work).await }
+            };
+            connectors.handed(work, &open).await
+        })
+    }
+
+    /// The prompt of each box the team's runs were opened in.
+    fn box_prompts(&self) -> Vec<String> {
+        self.hub.runtime.block_on(async {
+            let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), self.hub.database), tokio_postgres::NoTls).await.unwrap();
+            tokio::spawn(connection);
+            let rows = db.query("select spec from boxes where account = $1", &[&self.team]).await.unwrap();
+            rows.iter().filter_map(|r| r.get::<_, Value>(0)["args"].as_array()?.last()?.as_str().map(str::to_owned)).collect()
+        })
+    }
+}
+
+#[test]
+fn a_new_event_on_a_subject_whose_last_reservation_was_ended_runs() {
+    let crew = Crew::new("ta_rc2_ended");
+    let pages = crew.on_bot("Pages");
+    let (twin, running) = quiet_twin(&crew.hub);
+    let boxes_before = crew.boxes_created();
+    THINKING.lock().unwrap().push("ta_rc2_ended".into());
+    AGAIN_THINKING.lock().unwrap().push("ta_rc2_ended".into());
+    std::thread::scope(|scope| {
+        // The first event (another hub of the team found it) is admitted; its Ask step thinks past
+        // the limit, and the backstop ends its place.
+        let first = scope.spawn(|| crew.found_on(&twin, &running.hub, crew.labeled(&pages, 1)));
+        wait_for("the first event's model call", || crew.outside(1) == vec!["model".to_owned()]);
+        crew.past_limit(&pages);
+        crew.reaper_pass();
+        assert_eq!(crew.states_of(&pages), never_started(), "the backstop ended the first event's place");
+        // A new event on ENG-1 is admitted to a place of its own.
+        let second = scope.spawn(|| crew.found(crew.again(&pages)));
+        wait_for("the new event's place", || crew.reserved_at(&pages) == vec!["set".to_owned()]);
+        // The first event is fired now: its own place ended, so it is consumed and takes no other.
+        THINKING.lock().unwrap().retain(|t| t != "ta_rc2_ended");
+        assert_eq!(first.join().unwrap(), Ok(()), "consumed");
+        assert_eq!(crew.boxes_created() - boxes_before, 0, "the first event opened no session in the new event's place");
+        AGAIN_THINKING.lock().unwrap().retain(|t| t != "ta_rc2_ended");
+        assert_eq!(second.join().unwrap(), Ok(()), "the new event runs");
+    });
+    crew.reaper_pass();
+    assert_eq!(crew.boxes_created() - boxes_before, 1, "one session, in one box");
+    assert_eq!(crew.box_prompts(), vec![format!("Fix it again.\n\n{}", pinned_core::untrusted::frame("a Linear issue", "ENG-1 again: Fix page 1") + "\n\nBefore this session, acme/sorter on Vercel's AI Gateway read the issue and answered:\n- kind: bug")], "the box runs the new event");
+    assert_eq!(crew.states_of(&pages), vec![("working".to_owned(), None), ("failed".to_owned(), Some("it never started".to_owned()))]);
+    assert_eq!(crew.unopened(), vec!["failed"], "only the first event's ended place is left unopened: the new event's session opened in its own place");
+    assert_eq!(crew.skipped(&pages), json!([{ "reason": "never_started", "count": 1 }]), "counts unchanged");
+    twin.shutdown_background();
+}
+
+#[test]
+fn a_new_event_on_a_subject_whose_last_start_failed_runs() {
+    let crew = Crew::new("ta_rc2_failed");
+    let pages = crew.on_bot("Pages");
+    crew.hub.boxes.state.lock().unwrap().failing = Some(box_failed());
+    assert!(crew.found(crew.labeled(&pages, 1)).is_err(), "its box did not boot");
+    assert_eq!(crew.skipped(&pages), json!([{ "reason": "start_failed", "count": 1 }]));
+    let why = "its box failed: the bootstrap failed: Downloading pinned-server\ncurl: (22) The requested URL returned error: 404";
+    assert_eq!(crew.states_of(&pages), vec![("failed".to_owned(), Some(why.to_owned()))], "the failed run keeps its place's flag");
+    crew.hub.boxes.state.lock().unwrap().failing = None;
+    let boxes_before = crew.boxes_created();
+    // ENG-1 found again, as the poller's one retry after a failed boot or a new event: admitted anew.
+    assert_eq!(crew.found(crew.labeled(&pages, 1)), Ok(()));
+    crew.reaper_pass();
+    assert_eq!(crew.boxes_created() - boxes_before, 1, "it runs once, in one box");
+    assert_eq!(crew.states_of(&pages), vec![("working".to_owned(), None), ("failed".to_owned(), Some(why.to_owned()))]);
+    assert_eq!(crew.reserved_at(&pages), vec!["null".to_owned()], "only the failed run keeps its flag: the new run's session opened in its own place");
+    assert_eq!(crew.skipped(&pages), json!([{ "reason": "start_failed", "count": 1 }]), "one count in total");
+}
+
+#[test]
+fn a_reply_after_the_claim_waits_for_the_session_and_starts_nothing() {
+    let crew = Crew::new("ta_rc2_reply");
+    let (holder, footer) = (crew.on_bot("Docs"), crew.slack_bot("Footer"));
+    let thread = "1792400090.000100";
+    // Another hub of the team, up from the start: its own checks wait their interval, so the grant
+    // below wakes only this hub's poller, which claims the thread's event.
+    let (twin, running) = quiet_twin(&crew.hub);
+    admin_on(&crew.hub.database, &format!("update teams set max_live_runs = 1 where id = '{}'", crew.team));
+    assert_eq!(crew.found(crew.labeled(&holder, 9)), Ok(()));
+    assert_eq!(crew.found(crew.mentioned(&footer, thread)), Ok(()));
+    assert_eq!(crew.waiting(&footer), 1, "the thread's event waits");
+    // The thread's box will wait at the gate while it boots.
+    let gate = Arc::new(tokio::sync::Notify::new());
+    crew.hub.boxes.state.lock().unwrap().gate = Some(gate.clone());
+    let (boxes_before, boots_before) = (crew.boxes_created(), crew.boots());
+    let held = crew.live_of(&holder);
+    crew.stop(&held[0]);
+    wait_for("the thread's claim and its box's boot", || crew.waiting(&footer) == 0 && crew.boots() > boots_before);
+    assert_eq!(crew.reserved_at(&footer), vec!["set".to_owned()], "claimed: its place is held while its box boots");
+
+    // A reply in the thread, found by another hub of the team while the claimed run's box boots.
+    let delivery = Delivery {
+        connector: footer.clone(),
+        channel: "C0ACME001".into(),
+        thread: thread.into(),
+        messages: vec!["[Slack reply from Dina] still broken".into()],
+        cursor: "1792400095.000100".into(),
+        mentioned: vec![],
+    };
+    assert_eq!(crew.handed_on(&twin, &running.hub, Work::Delivery(delivery.clone())), Ok(()), "the reply is held for the claimed run");
+    assert_eq!(crew.boxes_created() - boxes_before, 1, "the reply opened no box: the claimed run's is the only one");
+    assert_eq!(crew.reserved_at(&footer), vec!["set".to_owned()], "the claimed run still holds its place");
+
+    // The box boots: the claimed run's session opens in its place.
+    gate.notify_one();
+    wait_for("the thread's session", || crew.reserved_at(&footer).is_empty());
+    assert_eq!(crew.live_of(&footer).len(), 1, "one run");
+    let subject = serde_json::to_value(Subject::SlackThread { channel: "C0ACME001".into(), thread: thread.into() }).unwrap();
+    let mut ws = super::teams_hardening_b::team_machine(&crew.hub, crew.team, "0f0e0d0c-0b0a-4908-8706-050403020109", "box-rc2-reply-token", &[(footer.as_str(), subject)]);
+    // The next check passes the held reply on again: it reaches the session, once.
+    let typed = std::thread::scope(|scope| {
+        let handed = scope.spawn(|| crew.handed(Work::Delivery(delivery)));
+        let call = read_machine(&mut ws, |frame| frame["type"] == "call" && frame["call"]["cmd"] == "deliver");
+        ws.send(Message::text(json!({ "type": "reply", "id": call["id"], "ok": true }).to_string())).unwrap();
+        assert_eq!(handed.join().unwrap(), Ok(()));
+        call["call"]["text"].clone()
+    });
+    assert_eq!(typed, json!(pinned_core::untrusted::frame("a Slack reply in this thread", "[Slack reply from Dina] still broken")), "the reply reaches the session framed, once");
+    assert_eq!(crew.boxes_created() - boxes_before, 1, "one box");
+    assert_eq!(crew.live_of(&footer).len(), 1, "one session");
+    assert_eq!(crew.skipped(&footer), Value::Null, "nothing counted");
+    twin.shutdown_background();
+}
+
+#[test]
+fn a_reply_held_for_a_claimed_run_whose_place_ends_is_dropped_once_and_counted() {
+    let crew = Crew::new("ta_rc3_ended");
+    let (holder, footer) = (crew.on_bot("Docs"), crew.slack_bot("Footer"));
+    let thread = "1792400190.000100";
+    let (twin, running) = quiet_twin(&crew.hub);
+    admin_on(&crew.hub.database, &format!("update teams set max_live_runs = 1 where id = '{}'", crew.team));
+    assert_eq!(crew.found(crew.labeled(&holder, 9)), Ok(()));
+    assert_eq!(crew.found(crew.mentioned(&footer, thread)), Ok(()));
+    assert_eq!(crew.waiting(&footer), 1, "the thread's event waits");
+    let gate = Arc::new(tokio::sync::Notify::new());
+    crew.hub.boxes.state.lock().unwrap().gate = Some(gate.clone());
+    let (boxes_before, boots_before) = (crew.boxes_created(), crew.boots());
+    let held = crew.live_of(&holder);
+    crew.stop(&held[0]);
+    wait_for("the thread's claim and its box's boot", || crew.waiting(&footer) == 0 && crew.boots() > boots_before);
+    assert_eq!(crew.reserved_at(&footer), vec!["set".to_owned()], "claimed: its place is held while its box boots");
+
+    let delivery = Delivery {
+        connector: footer.clone(),
+        channel: "C0ACME001".into(),
+        thread: thread.into(),
+        messages: vec!["[Slack reply from Dina] still broken".into()],
+        cursor: "1792400195.000100".into(),
+        mentioned: vec![],
+    };
+    assert_eq!(crew.handed_on(&twin, &running.hub, Work::Delivery(delivery.clone())), Ok(()), "the reply is held for the claimed run");
+    assert_eq!(crew.skipped(&footer), Value::Null, "held, not counted");
+
+    // The backstop ends the claimed run's place before its box boots; the box then boots late.
+    crew.past_limit(&footer);
+    crew.reaper_pass();
+    assert_eq!(crew.states_of(&footer), never_started(), "the claimed run never started");
+    gate.notify_one();
+    wait_for("the late box's start to give up", || crew.boxes_created() - boxes_before == 1 && crew.live_of(&footer).is_empty());
+
+    // The next check passes the held reply on again: there is no run to reach, so it is dropped once and counted.
+    assert_eq!(crew.handed(Work::Delivery(delivery)), Ok(()));
+    assert_eq!(crew.skipped(&footer), json!([{ "reason": "never_started", "count": 1 }, { "reason": "replies_dropped", "count": 1 }]));
+    assert_eq!(crew.boxes_created() - boxes_before, 1, "no second box: the event ran nowhere else");
+    assert_eq!(crew.states_of(&footer), never_started(), "one run, ended, and no new one");
+    twin.shutdown_background();
 }

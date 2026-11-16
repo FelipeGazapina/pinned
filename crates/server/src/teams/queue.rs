@@ -77,7 +77,7 @@ impl Stored {
             Stored::Member { member } => Some(Start::Member(Uuid::parse_str(&member).unwrap_or_default())),
             Stored::Trigger { kind, cwd, repo, args, subject, mentioned, account, runs_on, input } => Some(Start::Trigger {
                 kind,
-                work: pinned_core::connectors::Run { cwd, repo, args, connector: workflow.to_owned(), subject, mentioned, account, runs_on, input },
+                work: pinned_core::connectors::Run { cwd, repo, args, connector: workflow.to_owned(), subject, mentioned, account, runs_on, input, reservation: None },
             }),
             Stored::Event { .. } => None,
         }
@@ -215,8 +215,8 @@ async fn decide(hub: &Arc<Hub>, turn: &Turn, team: &Arc<Account>, kind: &str, ev
         }
         return Ok(Admitted::Waiting);
     }
-    reserve(turn, team, &workflow, format!("trigger:{kind}"), event.subject()).await?;
-    Ok(Admitted::Go)
+    let run = reserve(turn, team, &workflow, format!("trigger:{kind}"), event.subject()).await?;
+    Ok(Admitted::Reserved(run.id))
 }
 
 /// Holds a place for a run of bot `workflow` on `subject` in the team's turn: a live run with no
@@ -239,21 +239,54 @@ async fn reserve(turn: &Turn, team: &Arc<Account>, workflow: &str, started_by: S
 }
 
 /// New replies of a Slack thread: kept with the thread's waiting event, the newest
-/// `MOST_REPLIES`; passed on when the bot runs the thread; dropped when nothing does.
+/// `MOST_REPLIES`; passed on when the bot runs the thread; dropped when nothing does. A thread
+/// whose event was granted its place and is not claimed yet has a live (reserved) run, but its
+/// replies are kept with the event, as `Replies::Kept`: no session opens for them by the
+/// delivery's fallback, which would take the event's place, and the event runs once, with them,
+/// when its poller claims it (`claim`). A reply to a claimed run whose session has not opened is
+/// held for that run (`for_live`), and never starts a run of its own.
 pub async fn keep_replies(hub: &Arc<Hub>, team: &Arc<Account>, delivery: &Delivery) -> Result<Replies, String> {
     let subject = Subject::SlackThread { channel: delivery.channel.clone(), thread: delivery.thread.clone() };
-    if db::live_run_for(&hub.db, team.id, &delivery.connector, &subject).await?.is_some() {
-        return Ok(Replies::Pass);
+    let live = db::live_run_for(&hub.db, team.id, &delivery.connector, &subject).await?;
+    let live = live.map(|run| Uuid::parse_str(&run.id).map_err(|e| e.to_string())).transpose()?;
+    if let Some(run) = live {
+        if db::waiting_event_for(&hub.db, team.id, &delivery.connector, &subject).await?.is_none() {
+            return for_live(hub, team, run).await;
+        }
     }
     let turn = Turn::take(hub, team.id).await?;
-    let kept = keep_in_turn(hub, team, delivery, &subject).await;
+    let kept = keep_in_turn(hub, team, delivery, &subject, live).await;
     turn.end().await?;
     kept
 }
 
-async fn keep_in_turn(hub: &Arc<Hub>, team: &Arc<Account>, delivery: &Delivery, subject: &Subject) -> Result<Replies, String> {
+/// Replies for the thread's live run `run`: passed on to its session once it opened. A run still
+/// reserved was claimed (or admitted) and its box is still opening its session, so they are held
+/// for it (`Replies::Later`): nothing takes them now, the thread's cursor stays, and the next check
+/// gives them to that session, once. Passed on now, the delivery's fallback would start the run's
+/// place a second time.
+async fn for_live(hub: &Arc<Hub>, team: &Arc<Account>, run: Uuid) -> Result<Replies, String> {
+    Ok(match db::is_reserved(&hub.db, team.id, run).await? {
+        true => Replies::Later,
+        false => Replies::Pass,
+    })
+}
+
+/// `keep_replies` in the team's turn; `live` is the thread's live run. A granted event a poller
+/// claims meanwhile is gone from its line, and its run takes the replies (`for_live`).
+async fn keep_in_turn(hub: &Arc<Hub>, team: &Arc<Account>, delivery: &Delivery, subject: &Subject, live: Option<Uuid>) -> Result<Replies, String> {
     let subject = subject.clone();
     let Some(waiting) = db::waiting_event_for(&hub.db, team.id, &delivery.connector, &subject).await? else {
+        if let Some(run) = live {
+            return for_live(hub, team, run).await;
+        }
+        // Replies held for a run (`for_live`) whose place then ended before its session opened
+        // have no run to reach: they are dropped once, logged and counted on the bot.
+        if db::last_run_never_opened(&hub.db, team.id, &delivery.connector, &subject).await? {
+            eprintln!("pinned-server: team {} workflow {}: {} new thread messages dropped: the thread's run ended before its session opened", team.id, delivery.connector, delivery.messages.len());
+            db::count_skipped(&hub.db, team.id, &delivery.connector, SkipReason::RepliesDropped, delivery.messages.len() as u64).await?;
+            return Ok(Replies::Dropped);
+        }
         eprintln!("pinned-server: team {} workflow {}: new thread messages dropped: the thread has no run and no waiting event", team.id, delivery.connector);
         return Ok(Replies::Dropped);
     };
@@ -265,7 +298,12 @@ async fn keep_in_turn(hub: &Arc<Hub>, team: &Arc<Account>, delivery: &Delivery, 
     replies.drain(..over);
     earlier += over as u64;
     let stored = serde_json::to_value(Stored::Event { kind, event, replies, earlier }).map_err(|e| e.to_string())?;
-    db::set_waiting(&hub.db, waiting.id, &stored).await?;
+    if !db::set_waiting(&hub.db, waiting.id, &stored).await? {
+        return match live {
+            Some(run) => for_live(hub, team, run).await,
+            None => Ok(Replies::Dropped),
+        };
+    }
     Ok(Replies::Kept)
 }
 
@@ -304,7 +342,6 @@ pub const ENDED_UNOPENED: &str = "the workflow ended before it opened a session"
 /// run ends (`calls::end_run`), so what waits starts (`next`). A run whose session opened is left.
 pub async fn release(hub: &Arc<Hub>, team: &Arc<Account>, workflow: &str, subject: &Subject) -> Result<(), String> {
     let Some(id) = db::reserved_run_for(&hub.db, team.id, workflow, subject).await? else { return Ok(()) };
-    take_claimed(id);
     match calls::end_run(hub, team, id, RunState::Done, ENDED_UNOPENED, None).await {
         Err(e) if e != calls::RUN_ENDED => Err(e),
         _ => Ok(()),
@@ -317,30 +354,16 @@ pub async fn release(hub: &Arc<Hub>, team: &Arc<Account>, workflow: &str, subjec
 /// next hub's poller runs it once. A hub that stops after the claim and before the event's session
 /// opens does not run it again: its reserved run (`reserved_at`) is left, and ended by the hub's
 /// backstop for reservations that never opened.
-pub async fn claim(hub: &Arc<Hub>, team: &Arc<Account>, id: i64) -> Result<Option<Event>, String> {
+/// Answers the event with the reserved run whose place it now holds, the only place it starts in.
+pub async fn claim(hub: &Arc<Hub>, team: &Arc<Account>, id: i64) -> Result<Option<(Event, Option<String>)>, String> {
     let Some((start, run)) = db::claim(&hub.db, team.id, id).await? else { return Ok(None) };
-    if let Some(run) = run {
-        CLAIMED.lock().unwrap().insert(run);
-    }
     match serde_json::from_value(start) {
-        Ok(Stored::Event { event, replies, earlier, .. }) => Ok(Some(with_replies(event, &replies, earlier))),
+        Ok(Stored::Event { event, replies, earlier, .. }) => Ok(Some((with_replies(event, &replies, earlier), run.map(|r| r.to_string())))),
         _ => {
             eprintln!("pinned-server: team {}: a granted event was not readable and is dropped", team.id);
             Ok(None)
         }
     }
-}
-
-/// The reserved runs of claimed events (`claim`), and of waiting runs whose turn came
-/// (`take_and_start`), whose session has not opened yet: one whose session fails to open counts on
-/// its bot as `SkipReason::StartFailed`. A restart forgets them with the claimed events, which it
-/// does not run again.
-static CLAIMED: LazyLock<Mutex<std::collections::HashSet<Uuid>>> = LazyLock::new(Mutex::default);
-
-/// Reserved run `run` opened its session, or ended without one: answers whether it held the place
-/// of a claimed granted event, and forgets it.
-pub fn take_claimed(run: Uuid) -> bool {
-    CLAIMED.lock().unwrap().remove(&run)
 }
 
 /// A run of bot `ended` ended: starts what waits while the team has a free place, in a task of its
@@ -367,7 +390,6 @@ async fn start_waiting(hub: &Arc<Hub>, team: &Arc<Account>, ended: &str) -> Resu
     }
     // Each reserved run's box starts outside the turn, on its own, so one slow boot holds up no other.
     for (id, work, told) in taken.starts {
-        CLAIMED.lock().unwrap().insert(id);
         let (hub, team) = (hub.clone(), team.clone());
         tokio::spawn(async move {
             let workflow = work.connector.clone();
@@ -409,15 +431,15 @@ async fn take_and_start(hub: &Arc<Hub>, turn: &Turn, team: &Arc<Account>, ended:
             Ok(stored) => stored,
             Err(e) => {
                 eprintln!("pinned-server: team {} bot {}: a waiting event was not readable and is dropped: {e}", team.id, waiting.workflow);
-                db::take_waiting(&hub.db, waiting.id).await?;
+                db::take_waiting(&turn.held, waiting.id).await?;
                 continue;
             }
         };
         if let Stored::Event { kind, event, .. } = stored {
             if let Some(reason) = skip_reason(hub, team, &waiting.workflow, true).await? {
                 eprintln!("pinned-server: team {} bot {}: a waiting event is dropped: the bot is {}", team.id, waiting.workflow, reason.as_str());
-                db::take_waiting(&hub.db, waiting.id).await?;
-                db::count_skipped(&hub.db, team.id, &waiting.workflow, reason, 1).await?;
+                db::take_waiting(&turn.held, waiting.id).await?;
+                db::count_skipped_on(&turn.held, team.id, &waiting.workflow, reason, 1).await?;
                 continue;
             }
             // Its place is held now and its row granted, in one transaction (the turn's): the
@@ -427,12 +449,15 @@ async fn take_and_start(hub: &Arc<Hub>, turn: &Turn, team: &Arc<Account>, ended:
             taken.granted = true;
             continue;
         }
-        db::take_waiting(&hub.db, waiting.id).await?;
+        // Taken in the turn's transaction (`turn.held`), with its counts and its reservation: a
+        // turn that fails after the take (a refused reservation, a refused commit, a lock wait
+        // that times out) rolls the take back, and the event still waits, counted by nobody.
+        db::take_waiting(&turn.held, waiting.id).await?;
         let Some(start) = stored.start(&waiting.workflow) else { continue };
         let by_trigger = matches!(start, Start::Trigger { .. });
         if let Some(reason) = skip_reason(hub, team, &waiting.workflow, by_trigger).await? {
             eprintln!("pinned-server: team {} bot {}: a waiting event is dropped: the bot is {}", team.id, waiting.workflow, reason.as_str());
-            db::count_skipped(&hub.db, team.id, &waiting.workflow, reason, 1).await?;
+            db::count_skipped_on(&turn.held, team.id, &waiting.workflow, reason, 1).await?;
             continue;
         }
         let told = match &start {
@@ -447,7 +472,7 @@ async fn take_and_start(hub: &Arc<Hub>, turn: &Turn, team: &Arc<Account>, ended:
             Ok(reserved) => reserved,
             Err(e) => {
                 eprintln!("pinned-server: team {} bot {}: a waiting run did not start and is dropped: {e}", team.id, waiting.workflow);
-                db::count_skipped(&hub.db, team.id, &waiting.workflow, SkipReason::StartFailed, 1).await?;
+                db::count_skipped_on(&turn.held, team.id, &waiting.workflow, SkipReason::StartFailed, 1).await?;
                 continue;
             }
         };
@@ -462,6 +487,7 @@ mod tests {
 
     fn slack_run(prompt: &str) -> Event {
         Event::Run(pinned_core::connectors::Run {
+            reservation: None,
             cwd: PathBuf::from("/work/acme"),
             repo: None,
             args: vec!["--name".into(), "Footer".into(), prompt.into()],

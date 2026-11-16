@@ -493,6 +493,21 @@ pub async fn reserved_run_for(db: &Db, team: Uuid, workflow: &str, subject: &Sub
     Ok(row.map(|r| r.get(0)))
 }
 
+/// Whether the newest run of bot `workflow` on `subject` ended while it still only held its place:
+/// its session never opened (the backstop, a stop or a failed start ended it).
+pub async fn last_run_never_opened(db: &Db, team: Uuid, workflow: &str, subject: &Subject) -> Result<bool, String> {
+    let row = db
+        .client()
+        .await?
+        .query_opt(
+            &format!("select reserved and state not in {LIVE} from team_runs where team = $1 and workflow = $2 and subject = $3 order by started_at desc limit 1"),
+            &[&team, &workflow, &json(subject)?],
+        )
+        .await
+        .map_err(err)?;
+    Ok(row.is_some_and(|r| r.get(0)))
+}
+
 /// Whether live run `run` still only holds its place.
 pub async fn is_reserved(db: &Db, team: Uuid, run: Uuid) -> Result<bool, String> {
     let row = db.client().await?.query_opt("select reserved from team_runs where team = $1 and id = $2", &[&team, &run]).await.map_err(err)?;
@@ -515,10 +530,53 @@ pub async fn open_reserved(db: &Db, team: Uuid, run: Uuid, machine: &str) -> Res
     Ok(set == 1)
 }
 
-/// Forgets a run that never started.
-pub async fn delete_run(db: &Db, team: Uuid, run: Uuid) -> Result<(), String> {
-    db.client().await?.execute("delete from team_runs where team = $1 and id = $2", &[&team, &run]).await.map_err(err)?;
-    Ok(())
+/// What became of the place reserved run `run` held: still held (live and reserved), its session
+/// opened, or ended before its session opened (ended while reserved, or deleted by a failed start).
+pub enum Reservation {
+    Held,
+    Opened,
+    Ended,
+}
+
+/// `Reservation` of run `run`, read from its own row only.
+pub async fn reservation_of(db: &Db, team: Uuid, run: Uuid) -> Result<Reservation, String> {
+    let row = db
+        .client()
+        .await?
+        .query_opt(&format!("select reserved, state in {LIVE} from team_runs where team = $1 and id = $2"), &[&team, &run])
+        .await
+        .map_err(err)?;
+    Ok(match row.map(|r| (r.get::<_, bool>(0), r.get::<_, bool>(1))) {
+        Some((true, true)) => Reservation::Held,
+        Some((false, _)) => Reservation::Opened,
+        Some((true, false)) | None => Reservation::Ended,
+    })
+}
+
+/// Reserved run `run`'s session did not open. One statement on the run's row decides whether this
+/// start is counted as failed: a run still live and still reserved is deleted, and one its box's
+/// failure ended (`state = 'failed'`, any outcome but `never_opened`, the backstop's) is marked
+/// counted (`reserved_at = null`). Answers true when either write returned the row. A run the
+/// backstop ended, which counted `NeverStarted`, or one that was stopped, matches neither, so
+/// `StartFailed` and `NeverStarted` are never both counted for one run, and the backstop's ended
+/// row is never deleted.
+pub async fn fail_reserved_start(db: &Db, team: Uuid, run: Uuid, never_opened: &str) -> Result<bool, String> {
+    let row = db
+        .client()
+        .await?
+        .query_one(
+            &format!(
+                "with gone as (delete from team_runs where team = $1 and id = $2 and reserved and state in {LIVE} returning id),
+                      failed as (update team_runs set reserved_at = null
+                                 where team = $1 and id = $2 and reserved and reserved_at is not null and state = 'failed' and outcome is distinct from $3
+                                 returning id)
+                 select (select count(*) from gone) + (select count(*) from failed)"
+            ),
+            &[&team, &run, &never_opened],
+        )
+        .await
+        .map_err(err)?;
+    Ok(row.get::<_, i64>(0) > 0)
 }
 
 // ---- calls.rs ----
@@ -1282,13 +1340,14 @@ pub async fn next_waiting(held: &Client, team: Uuid, first: &str) -> Result<Opti
     Ok(row.map(|r| Waiting { id: r.get(0), workflow: r.get(1), start: r.get(2) }))
 }
 
-/// The waiting event of bot `workflow` on `subject` (`queue::Stored::Event`), if one waits.
+/// The waiting event of bot `workflow` on `subject` (`queue::Stored::Event`), if one waits: one
+/// granted its place and not claimed yet waits too.
 pub async fn waiting_event_for(db: &Db, team: Uuid, workflow: &str, subject: &Subject) -> Result<Option<Waiting>, String> {
     let row = db
         .client()
         .await?
         .query_opt(
-            "select id, workflow, start from team_run_queue where team = $1 and workflow = $2 and granted_at is null and start->>'by' = 'event' and start->'event'->'subject' = $3 order by id limit 1",
+            "select id, workflow, start from team_run_queue where team = $1 and workflow = $2 and start->>'by' = 'event' and start->'event'->'subject' = $3 order by id limit 1",
             &[&team, &workflow, &json(subject)?],
         )
         .await
@@ -1296,9 +1355,10 @@ pub async fn waiting_event_for(db: &Db, team: Uuid, workflow: &str, subject: &Su
     Ok(row.map(|r| Waiting { id: r.get(0), workflow: r.get(1), start: r.get(2) }))
 }
 
-/// Stores what waiting event `id` starts with.
-pub async fn set_waiting(db: &Db, id: i64, start: &serde_json::Value) -> Result<(), String> {
-    db.client().await?.execute("update team_run_queue set start = $2 where id = $1", &[&id, start]).await.map_err(err).map(drop)
+/// Stores what waiting event `id` starts with: false when its row is gone, as when a poller
+/// claimed it meanwhile.
+pub async fn set_waiting(db: &Db, id: i64, start: &serde_json::Value) -> Result<bool, String> {
+    db.client().await?.execute("update team_run_queue set start = $2 where id = $1", &[&id, start]).await.map_err(err).map(|n| n == 1)
 }
 
 /// Waiting event `id`'s turn came: it stays in its line, granted the place reserved run `run`
@@ -1371,16 +1431,22 @@ pub async fn claim(db: &Db, team: Uuid, id: i64) -> Result<Option<(serde_json::V
     Ok(row.map(|r| (r.get(0), r.get(1))))
 }
 
-/// Takes waiting event `id` out of its line.
-pub async fn take_waiting(db: &Db, id: i64) -> Result<(), String> {
-    db.client().await?.execute("delete from team_run_queue where id = $1", &[&id]).await.map_err(err).map(drop)
+/// Takes waiting event `id` out of its line. Written on `held`, the connection of the team's
+/// turn, so it commits with the turn: a turn that fails after it leaves the event waiting.
+pub async fn take_waiting(held: &Client, id: i64) -> Result<(), String> {
+    held.execute("delete from team_run_queue where id = $1", &[&id]).await.map_err(err).map(drop)
 }
 
 /// Counts `count` more events of bot `workflow` that started no run for `reason`.
 pub async fn count_skipped(db: &Db, team: Uuid, workflow: &str, reason: SkipReason, count: u64) -> Result<(), String> {
+    count_skipped_on(&*db.client().await?, team, workflow, reason, count).await
+}
+
+/// `count_skipped` on `client`: a team's turn counts on its own connection, so a count commits
+/// with the take it goes with.
+pub async fn count_skipped_on(client: &Client, team: Uuid, workflow: &str, reason: SkipReason, count: u64) -> Result<(), String> {
     let count = i64::try_from(count).unwrap_or(i64::MAX);
-    db.client()
-        .await?
+    client
         .execute(
             "insert into team_bot_skips (team, workflow, reason, count) values ($1, $2, $3, $4)
              on conflict (team, workflow, reason) do update set count = team_bot_skips.count + excluded.count",
