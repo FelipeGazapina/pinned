@@ -14624,6 +14624,7 @@ Have another model review a risky change before it goes ahead.";
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(kept(&claude, "typed", &tab), "", "nothing reached the session");
         assert_eq!(m.pr_watches.of(&tab), [url], "the pull request is still watched");
+        assert!(m.pr_watches.tabs.lock().unwrap().get(&tab).is_some_and(|list| list.iter().any(|w| !w.pending.is_empty())), "the wake is kept for the next pass");
         show(&m, &tab, ERASE);
         m.wake_tab(&tab);
         wait_for("the wake", || kept(&claude, "typed", &tab).ends_with('\r'));
