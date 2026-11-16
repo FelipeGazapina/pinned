@@ -38,13 +38,28 @@ fn open_calls(tb: &mut TeamBox) -> Vec<(String, String)> {
 
 /// The bot tries `command`, which goes to the team as one new call; its id.
 fn ask(hub: &TestHub, tb: &mut TeamBox, command: &str) -> String {
+    ask_shown(hub, tb, command, command)
+}
+
+/// The bot tries `command`, which goes to the team as one new call showing `shown`; its id.
+fn ask_shown(hub: &TestHub, tb: &mut TeamBox, command: &str, shown: &str) -> String {
     let reason = try_step(hub, tb, command).expect("the step is asked about, not run");
     let open = open_calls(tb);
     assert_eq!(open.len(), 1, "{open:?} {reason}");
     let (id, question) = open[0].clone();
-    assert_eq!(question, format!("deploy: {command}"));
+    assert_eq!(question, format!("deploy: {shown}"));
     assert_eq!(reason, asked(&id));
     id
+}
+
+/// `AskPeople` for `command` as the hook sends it, showing `question`.
+fn ask_op(command: &str, question: &str) -> TeamOp {
+    TeamOp::AskPeople {
+        situation: Situation::BeforeIrreversible,
+        question: question.to_owned(),
+        choices: vec!["Go ahead".into(), "Don't".into()],
+        step: Some(team_hook::step_hash("Bash", &json!({ "command": command }))),
+    }
 }
 
 /// The team's owner answers call `call`.
@@ -99,12 +114,34 @@ fn a_go_ahead_does_not_let_a_step_one_character_apart_run() {
     let hub = TestHub::start_with_team_policy("teams_go_ahead_other_step", fast(), patient());
     let mut tb = TeamBox::new(&hub);
     tb.run(&hub);
-    let call = ask(&hub, &mut tb, DEPLOY);
+    // One hidden character apart: the people saw the same text, the hash tells the steps apart.
+    let hidden = "vercel deploy --prod --token=[hidden] site-a";
+    let call = ask_shown(&hub, &mut tb, "vercel deploy --prod --token=abc1 site-a", hidden);
     answer(&mut tb, &call, choice("Go ahead", ""));
-
-    let other = ask(&hub, &mut tb, "vercel deploy --prod site-b");
+    let other = ask_shown(&hub, &mut tb, "vercel deploy --prod --token=abc2 site-a", hidden);
     assert_ne!(other, call);
-    assert!(!released(&hub, &call), "the asked step's go-ahead is still unused");
+
+    answer(&mut tb, &other, choice("Go ahead", ""));
+    let visible = ask_shown(&hub, &mut tb, "vercel deploy --prod --token=abc2 site-b", "vercel deploy --prod --token=[hidden] site-b");
+    assert_ne!(visible, other);
+    assert!(!released(&hub, &call) && !released(&hub, &other), "the asked steps' go-aheads are still unused");
+}
+
+#[test]
+fn a_go_ahead_on_a_question_that_does_not_show_the_step_lets_nothing_run() {
+    let hub = TestHub::start_with_team_policy("teams_go_ahead_forged", fast(), patient());
+    let mut tb = TeamBox::new(&hub);
+    tb.run(&hub);
+    let account = hub.runtime.block_on(hub.hub().account(tb.team)).unwrap();
+    // An ask from the box with the deploy's hash under a harmless-looking question.
+    let forged = hub.runtime.block_on(teams::machine_call(hub.hub(), &account, &tb.machine, ask_op(DEPLOY, "deploy: echo hello"))).unwrap();
+    let forged = forged["call"].as_str().unwrap().to_owned();
+    assert_eq!(open_calls(&mut tb), [(forged.clone(), "deploy: echo hello".to_owned())]);
+    answer(&mut tb, &forged, choice("Go ahead", ""));
+
+    let real = ask(&hub, &mut tb, DEPLOY);
+    assert_ne!(real, forged);
+    assert!(!released(&hub, &forged));
 }
 
 #[test]
@@ -199,12 +236,7 @@ fn of_two_identical_tries_at_once_after_go_ahead_exactly_one_runs() {
     let mut tb = TeamBox::new(&hub);
     tb.run(&hub);
     let account = hub.runtime.block_on(hub.hub().account(tb.team)).unwrap();
-    let step = || TeamOp::AskPeople {
-        situation: Situation::BeforeIrreversible,
-        question: format!("deploy: {DEPLOY}"),
-        choices: vec!["Go ahead".into(), "Don't".into()],
-        step: Some(team_hook::step_hash("Bash", &json!({ "command": DEPLOY }))),
-    };
+    let step = || ask_op(DEPLOY, &format!("deploy: {DEPLOY}"));
     let mut call = ask(&hub, &mut tb, DEPLOY);
     for _ in 0..5 {
         answer(&mut tb, &call, choice("Go ahead", ""));
