@@ -452,9 +452,26 @@ async fn take_and_start(hub: &Arc<Hub>, turn: &Turn, team: &Arc<Account>, ended:
                 continue;
             }
         };
+        // Every read on the shared connection comes before the take: a busy read returns before
+        // the row is taken, so the event or run still waits, counted by nobody. Any other failed
+        // read is taken and counted `StartFailed`, so a row that never reads holds up no row
+        // behind it. Only what the take is written with (`turn.held`: its counts and its
+        // reservation) rolls back with a turn that fails after it, and the turn commits whatever
+        // this returns.
         if let Stored::Event { kind, event, .. } = stored {
-            if let Some(reason) = skip_reason(hub, team, &waiting.workflow, true).await? {
-                eprintln!("pinned-server: team {} bot {}: a waiting event is dropped: the bot is {}", team.id, waiting.workflow, reason.as_str());
+            let dropped = match skip_reason(hub, team, &waiting.workflow, true).await {
+                Ok(None) => None,
+                Ok(Some(reason)) => {
+                    eprintln!("pinned-server: team {} bot {}: a waiting event is dropped: the bot is {}", team.id, waiting.workflow, reason.as_str());
+                    Some(reason)
+                }
+                Err(e) if e == crate::db::BUSY => return Err(e),
+                Err(e) => {
+                    eprintln!("pinned-server: team {} bot {}: a waiting event did not start and is dropped: {e}", team.id, waiting.workflow);
+                    Some(SkipReason::StartFailed)
+                }
+            };
+            if let Some(reason) = dropped {
                 db::take_waiting(&turn.held, waiting.id).await?;
                 db::count_skipped_on(&turn.held, team.id, &waiting.workflow, reason, 1).await?;
                 continue;
@@ -466,11 +483,6 @@ async fn take_and_start(hub: &Arc<Hub>, turn: &Turn, team: &Arc<Account>, ended:
             taken.granted = true;
             continue;
         }
-        // Every read on the shared connection comes before the take: a busy read returns before
-        // the row is taken, so the run still waits, counted by nobody. Any other failed read is
-        // taken and counted `StartFailed`, so a row that never reads holds up no run behind it.
-        // Only what the take is written with (`turn.held`: its counts and its reservation) rolls
-        // back with a turn that fails after it, and the turn commits whatever this returns.
         let Some(start) = stored.start(&waiting.workflow) else {
             db::take_waiting(&turn.held, waiting.id).await?;
             continue;
