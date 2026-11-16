@@ -2417,7 +2417,7 @@ mod tests {
         let draft = Draft { kind: Kind::Problem, title: "Crash".into(), happened: "It closes.".into(), expected: String::new(), repeat: String::new(), attach: Attach::default(), to_issue: None };
         let wire_draft = json!({ "kind": "problem", "title": "Crash", "happened": "It closes.", "expected": "", "repeat": "", "attach": { "environment": false, "errors": [] }, "to_issue": null });
         round_trip(HubCall::Reports { ask: Ask::Status }, json!({ "cmd": "reports", "ask": { "op": "status" } }));
-        round_trip(HubCall::Reports { ask: Ask::Similar { title: "Crash".into() } }, json!({ "cmd": "reports", "ask": { "op": "similar", "title": "Crash" } }));
+        round_trip(HubCall::Reports { ask: Ask::Similar { title: "Crash".into(), context: Default::default() } }, json!({ "cmd": "reports", "ask": { "op": "similar", "title": "Crash", "context": { "projects": [], "folders": [], "files": [], "names": [] } } }));
         round_trip(
             HubCall::ReportIssue { draft: draft.clone(), shown: Some("abc".into()), draft_id: Some("d1".into()), request_id: Some("q1".into()) },
             json!({ "cmd": "report_issue", "draft": wire_draft, "shown": "abc", "draft_id": "d1", "request_id": "q1" }),

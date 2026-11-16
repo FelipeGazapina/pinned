@@ -38,9 +38,40 @@ pub struct Draft {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Attach {
     #[serde(default)]
-    pub environment: bool,
+    pub environment: Environment,
     #[serde(default)]
     pub errors: Vec<String>,
+}
+
+/// The environment section a report carries, after the reporter's choice: none (`false`), the hub's version alone
+/// (`true`), or the reporter's app version, system and architecture as the app's dialog shows them, the hub's
+/// version after it. Scrubbed like every other part.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(untagged)]
+pub enum Environment {
+    Chosen(bool),
+    Shown(String),
+}
+
+impl Default for Environment {
+    fn default() -> Environment {
+        Environment::Chosen(false)
+    }
+}
+
+impl Environment {
+    /// Whether the reporter chose to send an environment section.
+    pub fn chosen(&self) -> bool {
+        !matches!(self, Environment::Chosen(false))
+    }
+
+    /// What the reporter's app said of itself, empty when it said nothing.
+    pub fn text(&self) -> &str {
+        match self {
+            Environment::Shown(text) => text,
+            Environment::Chosen(_) => "",
+        }
+    }
 }
 
 /// What the caller knows must never appear in a public report: the words to replace, by kind.
@@ -117,6 +148,9 @@ pub enum Ask {
     },
     Similar {
         title: String,
+        /// Words the app knows must not reach the search, merged with the hub's own as a preview's are.
+        #[serde(default)]
+        context: Context,
     },
     List,
     SaveDraft {
@@ -174,35 +208,44 @@ const SEARCH_STOP: &[&str] = &[
     "folder", "project", "file", "name", "email", "secret",
 ];
 
+/// Why a text is refused: its markup still changed when scrubbing stopped, so no clean copy of it exists.
+pub const UNCLEAN: &str = scrubber::UNCLEAN;
+
 /// Makes `text` safe for a public issue: secrets, e-mail addresses, absolute paths, file names and the words in `ctx`
-/// become placeholders, and markup and mentions are defused. Scrubbing scrubbed text changes nothing.
-pub fn scrub(text: &str, ctx: &Context) -> String {
+/// become placeholders, and markup, mentions and issue references are defused. Scrubbing scrubbed text changes
+/// nothing. Text that does not settle is refused with `UNCLEAN`, never sent half clean.
+pub fn scrub(text: &str, ctx: &Context) -> Result<String, String> {
     scrubber::scrub(text, ctx)
 }
 
 /// The title, body and labels of the issue for `draft`. Every part is scrubbed with `scrub(text, ctx)`, here, so a
-/// caller cannot forget it.
-pub fn render(draft: &Draft, ctx: &Context, env: Option<&str>, report_ref: &str) -> (String, String, Vec<String>) {
-    let title = cap(&clean(&draft.title.replace('\n', " "), ctx), TITLE_CHARS);
+/// caller cannot forget it. `hub` is the hub's own line of the environment section, after the reporter's.
+pub fn render(draft: &Draft, ctx: &Context, hub: Option<&str>, report_ref: &str) -> Result<(String, String, Vec<String>), String> {
+    let title = cap(&clean(&draft.title.replace('\n', " "), ctx)?, TITLE_CHARS);
     let mut blocks: Vec<String> = vec![];
     let labels = match draft.kind {
         Kind::Problem => {
-            blocks.extend(section("What happened", &draft.happened, ctx));
-            blocks.extend(section("Expected", &draft.expected, ctx));
-            blocks.extend(section("How to repeat", &draft.repeat, ctx));
-            blocks.extend(environment(draft, ctx, env));
-            blocks.extend(error_block(&draft.attach.errors, ctx));
+            blocks.extend(section("What happened", &draft.happened, ctx)?);
+            blocks.extend(section("Expected", &draft.expected, ctx)?);
+            blocks.extend(section("How to repeat", &draft.repeat, ctx)?);
+            blocks.extend(environment(draft, ctx, hub)?);
+            blocks.extend(error_block(&draft.attach.errors, ctx)?);
             ["bug", "from-app", "needs-triage"]
         }
         Kind::Idea => {
-            blocks.extend(section("The idea", &draft.happened, ctx));
-            blocks.extend(section("Why it helps", &draft.expected, ctx));
-            blocks.extend(environment(draft, ctx, env));
+            blocks.extend(section("The idea", &draft.happened, ctx)?);
+            blocks.extend(section("Why it helps", &draft.expected, ctx)?);
+            blocks.extend(environment(draft, ctx, hub)?);
             ["idea", "from-app", "needs-triage"]
         }
     };
     blocks.push(format!("---\n\nSent from the pinned app · report {report_ref}"));
-    (title, blocks.join("\n\n"), labels.iter().map(|l| l.to_string()).collect())
+    Ok((title, blocks.join("\n\n"), labels.iter().map(|l| l.to_string()).collect()))
+}
+
+/// `text` scrubbed and cut to a title's length, as an agent reads an issue's title.
+pub fn public_title(text: &str, ctx: &Context) -> Result<String, String> {
+    Ok(cap(&clean(&text.replace('\n', " "), ctx)?, TITLE_CHARS))
 }
 
 /// The URL-safe, short name of a report: `r-` and the first 8 hex digits of its UUID, without dashes.
@@ -220,7 +263,8 @@ pub fn shown(title: &str, body: &str) -> String {
 /// The words to search existing issues with: the scrubbed title, lower case, without stopwords and placeholder words,
 /// the first unique terms of 3 or more characters.
 pub fn search_query(title: &str) -> String {
-    let scrubbed = scrubber::scrub(title, &Context::default()).to_lowercase();
+    // Text that does not scrub clean searches for nothing.
+    let scrubbed = scrubber::scrub(title, &Context::default()).unwrap_or_default().to_lowercase();
     let mut terms: Vec<&str> = vec![];
     for word in scrubbed.split(|x: char| !x.is_alphanumeric()) {
         if word.chars().count() < 3 || SEARCH_STOP.contains(&word) || terms.contains(&word) {
@@ -235,8 +279,8 @@ pub fn search_query(title: &str) -> String {
 }
 
 /// The scrubbed text, trimmed.
-fn clean(text: &str, ctx: &Context) -> String {
-    scrubber::scrub(text, ctx).trim().to_owned()
+fn clean(text: &str, ctx: &Context) -> Result<String, String> {
+    Ok(scrubber::scrub(text, ctx)?.trim().to_owned())
 }
 
 /// The first `max` characters of `text`, without a trailing space. Cut on a character boundary.
@@ -245,34 +289,36 @@ fn cap(text: &str, max: usize) -> String {
 }
 
 /// A heading and its text, or nothing when the text is empty.
-fn section(heading: &str, text: &str, ctx: &Context) -> Option<String> {
-    let body = cap(&clean(text, ctx), SECTION_CHARS);
-    (!body.is_empty()).then(|| format!("### {heading}\n\n{body}"))
+fn section(heading: &str, text: &str, ctx: &Context) -> Result<Option<String>, String> {
+    let body = cap(&clean(text, ctx)?, SECTION_CHARS);
+    Ok((!body.is_empty()).then(|| format!("### {heading}\n\n{body}")))
 }
 
-/// The environment section, when the reporter chose to send it and there is one.
-fn environment(draft: &Draft, ctx: &Context, env: Option<&str>) -> Option<String> {
-    if !draft.attach.environment {
-        return None;
+/// The environment section, when the reporter chose to send it: the reporter's own line, then the hub's.
+fn environment(draft: &Draft, ctx: &Context, hub: Option<&str>) -> Result<Option<String>, String> {
+    if !draft.attach.environment.chosen() {
+        return Ok(None);
     }
-    section("Environment", env?, ctx)
+    let reporter = clean(&draft.attach.environment.text().replace('\n', " "), ctx)?;
+    let line: Vec<&str> = [reporter.as_str(), hub.unwrap_or_default()].into_iter().filter(|part| !part.trim().is_empty()).collect();
+    section("Environment", &line.join(" · "), ctx)
 }
 
 /// The last error lines, folded away, when there are any.
-fn error_block(errors: &[String], ctx: &Context) -> Option<String> {
-    let lines = error_lines(errors, ctx);
-    (!lines.is_empty()).then(|| format!("<details><summary>Last app error lines (scrubbed)</summary>\n\n```\n{}\n```\n\n</details>", lines.join("\n")))
+fn error_block(errors: &[String], ctx: &Context) -> Result<Option<String>, String> {
+    let lines = error_lines(errors, ctx)?;
+    Ok((!lines.is_empty()).then(|| format!("<details><summary>Last app error lines (scrubbed)</summary>\n\n```\n{}\n```\n\n</details>", lines.join("\n"))))
 }
 
 /// The scrubbed error lines: blank ones dropped, at most `ERROR_LINES` of `ERROR_LINE_CHARS` each. A fence in a line
 /// becomes quotes, so the line cannot close the block.
-fn error_lines(errors: &[String], ctx: &Context) -> Vec<String> {
-    scrubber::scrub(&errors.join("\n"), ctx)
+fn error_lines(errors: &[String], ctx: &Context) -> Result<Vec<String>, String> {
+    Ok(scrubber::scrub(&errors.join("\n"), ctx)?
         .lines()
         .filter(|line| !line.trim().is_empty())
         .take(ERROR_LINES)
         .map(|line| cap(&line.replace("```", "'''"), ERROR_LINE_CHARS))
-        .collect()
+        .collect())
 }
 
 #[cfg(test)]
@@ -304,8 +350,8 @@ mod tests {
 
     /// Scrubs `text` twice and checks that the second round changes nothing.
     fn scrub_twice(text: &str, ctx: &Context) -> String {
-        let once = scrub(text, ctx);
-        assert_eq!(scrub(&once, ctx), once, "second round changed {text:?}");
+        let once = scrub(text, ctx).unwrap();
+        assert_eq!(scrub(&once, ctx).unwrap(), once, "second round changed {text:?}");
         once
     }
 
@@ -477,8 +523,118 @@ mod tests {
         for _ in 0..3000 {
             let len = next() % 40;
             let text: String = (0..len).map(|_| PIECES[next() as usize % PIECES.len()]).collect();
-            scrub_twice(&text, &ctx);
+            // Text that does not settle is refused, which is no clean copy to scrub again.
+            if scrub(&text, &ctx).is_ok() {
+                scrub_twice(&text, &ctx);
+            }
         }
+    }
+
+    /// `<` n times, then `b>` n times: removing the innermost `<b>` leaves the next one whole.
+    fn nested_tags(n: usize) -> String {
+        format!("{}{}", "<".repeat(n), "b>".repeat(n))
+    }
+
+    #[test]
+    fn scrub_removes_nested_tags_in_one_go_so_the_word_they_split_is_still_found() {
+        let ctx = projects(&["loja-web"]);
+        for n in [16, 32] {
+            let text = format!("lo{}ja-web crashes", nested_tags(n));
+            assert_eq!(scrub_twice(&text, &ctx), "[project] crashes", "{n} nested tags");
+        }
+    }
+
+    #[test]
+    fn scrub_refuses_markup_that_still_changes_after_the_last_round() {
+        // Each level is a tag that an image hides until the round after: one round per level.
+        let mut deep = "<b>".to_owned();
+        for _ in 0..20 {
+            deep = format!("<!{deep}[a](x)b>");
+        }
+        let text = format!("lo{deep}ja-web");
+        assert_eq!(scrub(&text, &projects(&["loja-web"])), Err(UNCLEAN.to_owned()));
+        assert_eq!(UNCLEAN, "The report has markup the hub cannot clean. Remove the HTML and try again.");
+        let draft = Draft { happened: text, ..problem("Crash") };
+        assert_eq!(render(&draft, &projects(&["loja-web"]), None, "r-1"), Err(UNCLEAN.to_owned()));
+    }
+
+    #[test]
+    fn scrub_finds_a_word_written_with_look_alike_characters() {
+        assert_eq!(scrub_twice("ｌｏｊａ-ｗｅｂ broke", &projects(&["loja-web"])), "[project] broke");
+    }
+
+    #[test]
+    fn scrub_finds_a_word_split_by_zero_width_characters() {
+        for invisible in ['\u{200B}', '\u{200C}', '\u{200D}', '\u{2060}', '\u{FEFF}'] {
+            assert_eq!(scrub_twice(&format!("lo{invisible}ja-web broke"), &projects(&["loja-web"])), "[project] broke", "{invisible:?}");
+        }
+    }
+
+    #[test]
+    fn scrub_finds_a_word_split_by_bidi_controls() {
+        for control in ['\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}'] {
+            assert_eq!(scrub_twice(&format!("lo{control}ja-web broke"), &projects(&["loja-web"])), "[project] broke", "{control:?}");
+        }
+    }
+
+    #[test]
+    fn scrub_takes_a_windows_home_in_any_letter_case() {
+        assert_eq!(scrub_twice("at c:\\users\\ana\\proj\\x", &none()), "at [folder]");
+        assert_eq!(scrub_twice("at C:\\USERS\\ana\\proj", &none()), "at [folder]");
+    }
+
+    #[test]
+    fn scrub_takes_paths_under_volumes_mnt_and_srv() {
+        assert_eq!(scrub_twice("/Volumes/Backup/clients/x and /mnt/data/y and /srv/site/z", &none()), "[folder] and [folder] and [folder]");
+    }
+
+    #[test]
+    fn scrub_takes_a_path_written_as_a_file_url() {
+        assert_eq!(scrub_twice("open file:///Users/ana/shop/notes and FILE:///home/ana/x", &none()), "open [folder] and [folder]");
+        assert_eq!(scrub_twice("file:///Volumes/x/y", &none()), "[folder]");
+    }
+
+    #[test]
+    fn scrub_takes_a_path_after_an_include_or_library_flag() {
+        assert_eq!(scrub_twice("cc -I/home/ana/include -L/Users/ana/lib", &none()), "cc -I[folder] -L[folder]");
+    }
+
+    #[test]
+    fn scrub_wraps_issue_references_so_github_does_not_link_them() {
+        assert_eq!(scrub_twice("see #123 and GH-7.", &none()), "see `#123` and `GH-7`.");
+        assert_eq!(scrub_twice("like octo/shop#12 did", &none()), "like `octo/shop#12` did");
+        assert_eq!(scrub_twice("#1", &none()), "`#1`");
+        assert_eq!(scrub_twice("C#12 and x.com/a#12 and #12a and ### Heading", &none()), "C#12 and x.com/a#12 and #12a and ### Heading");
+    }
+
+    #[test]
+    fn scrub_keeps_a_placeholder_from_becoming_a_link() {
+        let ctx = projects(&["loja-web"]);
+        assert_eq!(scrub_twice("[loja-web](https://x.com/a) and loja-web[1]", &ctx), "[[project]](https://x.com/a) and [project] [1]");
+        assert_eq!(scrub_twice("loja-web(beta)", &ctx), "[project] (beta)");
+        assert_eq!(scrub_twice("x\nloja-web: https://x.com/a", &ctx), "x\n[project] : https://x.com/a");
+        assert_eq!(scrub_twice("in loja-web: ok", &ctx), "in [project]: ok", "a colon inside a line is no link definition");
+    }
+
+    #[test]
+    fn public_title_is_scrubbed_and_cut_to_120_characters() {
+        let long = format!("loja-web {}", "x".repeat(200));
+        let title = public_title(&long, &projects(&["loja-web"])).unwrap();
+        assert_eq!(title.chars().count(), 120);
+        assert!(title.starts_with("[project] xxx"), "{title}");
+    }
+
+    #[test]
+    fn render_puts_the_reporters_environment_first_then_the_hubs() {
+        let ctx = names(&["mac-mini"]);
+        let shown = Draft { attach: Attach { environment: Environment::Shown("pinned 0.18.6 · macOS 15.6 · arm64 on mac-mini".into()), errors: vec![] }, ..problem("Crash") };
+        let (_, body, _) = render(&shown, &ctx, Some("hub 0.18.5"), "r-1").unwrap();
+        assert_eq!(body, "### Environment\n\npinned 0.18.6 · macOS 15.6 · arm64 on [name] · hub 0.18.5\n\n---\n\nSent from the pinned app · report r-1");
+        let hub_only = Draft { attach: Attach { environment: Environment::Chosen(true), errors: vec![] }, ..problem("Crash") };
+        assert_eq!(render(&hub_only, &ctx, Some("hub 0.18.5"), "r-1").unwrap().1, "### Environment\n\nhub 0.18.5\n\n---\n\nSent from the pinned app · report r-1");
+        let parsed: Attach = serde_json::from_value(json!({"environment": "pinned 1 · linux"})).unwrap();
+        assert_eq!(parsed.environment, Environment::Shown("pinned 1 · linux".into()));
+        assert_eq!(serde_json::from_value::<Attach>(json!({"environment": true})).unwrap().environment, Environment::Chosen(true));
     }
 
     #[test]
@@ -489,10 +645,10 @@ mod tests {
             happened: "The upload stops at 90% for /Users/felipe/projetos/loja-web/pedidos.sql, sent by ana@example.com.".into(),
             expected: "The file uploads.".into(),
             repeat: "1. Open a big order\n2. Press upload".into(),
-            attach: Attach { environment: true, errors: vec!["panic at src/app/main.rs:42".into(), format!("token={TOKEN}")] },
+            attach: Attach { environment: Environment::Shown("pinned 0.18.6 · macOS 15.6 · arm64".into()), errors: vec!["panic at src/app/main.rs:42".into(), format!("token={TOKEN}")] },
             to_issue: None,
         };
-        let (title, body, labels) = render(&draft, &none(), Some("pinned 0.18.6 · macOS 15.6 · arm64"), "r-7f3a1c2d");
+        let (title, body, labels) = render(&draft, &none(), Some("hub 0.18.5"), "r-7f3a1c2d").unwrap();
         assert_eq!(title, "Upload stops at 90%");
         assert_eq!(labels, ["bug", "from-app", "needs-triage"]);
         let expected = concat!(
@@ -503,7 +659,7 @@ mod tests {
             "### How to repeat\n\n",
             "1. Open a big order\n2. Press upload\n\n",
             "### Environment\n\n",
-            "pinned 0.18.6 · macOS 15.6 · arm64\n\n",
+            "pinned 0.18.6 · macOS 15.6 · arm64 · hub 0.18.5\n\n",
             "<details><summary>Last app error lines (scrubbed)</summary>\n\n",
             "```\n",
             "panic at [file]:42\n",
@@ -523,10 +679,10 @@ mod tests {
             happened: "loja-web broke".into(),
             expected: "mac-mini works".into(),
             repeat: "open loja-web".into(),
-            attach: Attach { environment: true, errors: vec!["loja-web failed".into()] },
+            attach: Attach { environment: Environment::Shown("on mac-mini".into()), errors: vec!["loja-web failed".into()] },
             ..problem("loja-web crash")
         };
-        let (title, body, _) = render(&draft, &ctx, Some("on mac-mini"), "r-1");
+        let (title, body, _) = render(&draft, &ctx, Some("hub 1"), "r-1").unwrap();
         assert_eq!(title, "[project] crash");
         assert!(!body.contains("loja-web") && !body.contains("mac-mini"), "{body}");
         assert_eq!(body.matches("[project]").count(), 3, "{body}");
@@ -540,10 +696,10 @@ mod tests {
             happened: "A toggle in settings.".into(),
             expected: "Readers at night.".into(),
             repeat: "not used by an idea".into(),
-            attach: Attach { environment: true, errors: vec!["not used by an idea".into()] },
+            attach: Attach { environment: Environment::Chosen(true), errors: vec!["not used by an idea".into()] },
             to_issue: None,
         };
-        let (_, body, labels) = render(&draft, &none(), Some("pinned 0.18.6"), "r-7f3a1c2d");
+        let (_, body, labels) = render(&draft, &none(), Some("pinned 0.18.6"), "r-7f3a1c2d").unwrap();
         assert_eq!(labels, ["idea", "from-app", "needs-triage"]);
         assert_eq!(
             body,
@@ -559,26 +715,26 @@ mod tests {
             happened: "It closes.".into(),
             expected: String::new(),
             repeat: "  \n ".into(),
-            attach: Attach { environment: false, errors: vec![] },
+            attach: Attach { environment: Environment::Chosen(false), errors: vec![] },
             to_issue: None,
         };
-        let (_, body, _) = render(&draft, &none(), Some("pinned 0.18.6"), "r-7f3a1c2d");
+        let (_, body, _) = render(&draft, &none(), Some("pinned 0.18.6"), "r-7f3a1c2d").unwrap();
         assert_eq!(body, "### What happened\n\nIt closes.\n\n---\n\nSent from the pinned app · report r-7f3a1c2d");
     }
 
     #[test]
     fn render_labels_follow_the_kind() {
-        let (_, _, problem_labels) = render(&problem("Crash"), &none(), None, "r-1");
+        let (_, _, problem_labels) = render(&problem("Crash"), &none(), None, "r-1").unwrap();
         assert_eq!(problem_labels, ["bug", "from-app", "needs-triage"]);
         let idea = Draft { kind: Kind::Idea, ..problem("Idea") };
-        let (_, _, idea_labels) = render(&idea, &none(), None, "r-1");
+        let (_, _, idea_labels) = render(&idea, &none(), None, "r-1").unwrap();
         assert_eq!(idea_labels, ["idea", "from-app", "needs-triage"]);
     }
 
     #[test]
     fn render_footer_has_the_ref_and_no_at_sign() {
         let draft = Draft { happened: "Something broke.".into(), ..problem("Crash") };
-        let (_, body, _) = render(&draft, &none(), None, "r-7f3a1c2d");
+        let (_, body, _) = render(&draft, &none(), None, "r-7f3a1c2d").unwrap();
         assert!(body.ends_with("\n\n---\n\nSent from the pinned app · report r-7f3a1c2d"));
         assert!(!body.contains('@'));
     }
@@ -588,10 +744,10 @@ mod tests {
         let errors: Vec<String> = (0..25).map(|_| "e".repeat(400)).collect();
         let draft = Draft {
             happened: "x".repeat(5000),
-            attach: Attach { environment: false, errors },
+            attach: Attach { environment: Environment::Chosen(false), errors },
             ..problem(&"t".repeat(130))
         };
-        let (title, body, _) = render(&draft, &none(), None, "r-1");
+        let (title, body, _) = render(&draft, &none(), None, "r-1").unwrap();
         assert_eq!(title.chars().count(), 120);
         let happened = format!("### What happened\n\n{}", "x".repeat(4000));
         assert!(body.starts_with(&happened) && body[happened.len()..].starts_with("\n\n<details>"), "{body:.80}");
@@ -602,8 +758,8 @@ mod tests {
 
     #[test]
     fn render_error_lines_cannot_close_the_block() {
-        let draft = Draft { attach: Attach { environment: false, errors: vec!["oops ``` </details> @octocat".into()] }, ..problem("Crash") };
-        let (_, body, _) = render(&draft, &none(), None, "r-1");
+        let draft = Draft { attach: Attach { environment: Environment::Chosen(false), errors: vec!["oops ``` </details> @octocat".into()] }, ..problem("Crash") };
+        let (_, body, _) = render(&draft, &none(), None, "r-1").unwrap();
         // The tag and the fence are gone from the line, and the mention is defused.
         assert!(body.contains("oops '''  @\u{200B}octocat\n```"), "{body}");
         assert_eq!(body.matches("```").count(), 2);
@@ -638,7 +794,8 @@ mod tests {
         let cases = [
             (json!({"op": "status"}), Ask::Status),
             (json!({"op": "list"}), Ask::List),
-            (json!({"op": "similar", "title": "x"}), Ask::Similar { title: "x".into() }),
+            (json!({"op": "similar", "title": "x"}), Ask::Similar { title: "x".into(), context: Context::default() }),
+            (json!({"op": "similar", "title": "x", "context": {"names": ["n1"]}}), Ask::Similar { title: "x".into(), context: Context { names: vec!["n1".into()], ..Context::default() } }),
             (json!({"op": "preview", "draft": draft}), Ask::Preview { draft: problem("x"), context: Context::default() }),
             (json!({"op": "save_draft", "draft": draft}), Ask::SaveDraft { id: None, draft: problem("x") }),
             (json!({"op": "save_draft", "id": "d1", "draft": draft}), Ask::SaveDraft { id: Some("d1".into()), draft: problem("x") }),
@@ -671,7 +828,7 @@ mod tests {
             Parsed::Hub(HubCall::ReportIssue { draft, shown: shown.map(Into::into), draft_id: draft_id.map(Into::into), request_id: request_id.map(Into::into) })
         };
         assert!(agent_check_report_issue(&send(problem("x"), None, None, None)).is_ok());
-        let with_errors = Draft { attach: Attach { environment: false, errors: vec!["boom".into()] }, ..problem("x") };
+        let with_errors = Draft { attach: Attach { environment: Environment::Chosen(false), errors: vec!["boom".into()] }, ..problem("x") };
         assert!(agent_check_report_issue(&send(with_errors, None, None, None)).unwrap_err().contains("no error lines"));
         for (shown, draft_id, request_id) in [(Some("h"), None, None), (None, Some("d"), None), (None, None, Some("r"))] {
             assert!(agent_check_report_issue(&send(problem("x"), shown, draft_id, request_id)).is_err());

@@ -1,12 +1,17 @@
 //! The rules behind `reports::scrub`. Private to `reports`: text in, text out, no IO.
 //!
-//! A round runs the rules in order, each on the output of the one before. Rounds repeat until the text stops
-//! changing, so scrubbing scrubbed text changes nothing.
+//! The text is NFKC-normalised and loses its invisible characters first. A round then runs the rules in order, each
+//! on the output of the one before. Rounds repeat until the text stops changing, so scrubbing scrubbed text changes
+//! nothing; text still changing after the last round is refused, never sent half clean.
 
 use super::Context;
+use unicode_normalization::UnicodeNormalization;
 
-/// Rounds after which the text is returned as it is. A rule can expose a match for one that ran before it.
+/// Rounds after which text that still changes is refused. A rule can expose a match for one that ran before it.
 const MAX_ROUNDS: usize = 16;
+
+/// Why a text is refused: its markup still changed after the last round.
+pub(super) const UNCLEAN: &str = "The report has markup the hub cannot clean. Remove the HTML and try again.";
 
 /// Characters to replace: start, end (exclusive) and what stands for them.
 type Span = (usize, usize, String);
@@ -24,7 +29,10 @@ const SECRET_KEYS: &[&str] = &["token", "secret", "password", "apikey", "api_key
 const SECRET_WORDS: &[&str] = &["bearer", "token"];
 
 /// Roots of the absolute paths that belong to one machine.
-const PATH_PREFIXES: &[&str] = &["/Users/", "/home/", "/private/", "/var/folders/", "/tmp/", "/opt/", "/root/", "~/", "C:\\Users\\"];
+const PATH_PREFIXES: &[&str] = &["/Users/", "/home/", "/private/", "/var/folders/", "/tmp/", "/opt/", "/root/", "/Volumes/", "/mnt/", "/srv/", "~/", "C:\\Users\\"];
+
+/// Flags a path follows with no space: `-I/home/ana/include`, `-L/Users/ana/lib`.
+const PATH_FLAGS: &[&str] = &["-I", "-L"];
 
 /// What may stand just before a path: the start of a word, a quote, an opening bracket, `=` or `:`.
 const PATH_LEADS: &[char] = &['"', '\'', '`', '(', '[', '=', ':'];
@@ -36,17 +44,28 @@ const FILE_EXTENSIONS: &[&str] = &[
 ];
 
 /// Scrubs `text` for a public report. The rules run in order, each replacing what it matches with a placeholder.
-pub(super) fn scrub(text: &str, ctx: &Context) -> String {
+pub(super) fn scrub(text: &str, ctx: &Context) -> Result<String, String> {
     let known = known_words(ctx);
-    let mut current = text.to_owned();
+    let mut current = normalised(text);
     for _ in 0..MAX_ROUNDS {
         let next = round(&current, &known);
         if next == current {
-            break;
+            return Ok(current);
         }
         current = next;
     }
-    current
+    Err(UNCLEAN.to_owned())
+}
+
+/// `text` in NFKC, without zero-width characters and bidi controls, so neither a look-alike nor an invisible
+/// character keeps a private word from matching.
+fn normalised(text: &str) -> String {
+    text.nfkc().filter(|&x| !is_invisible(x)).collect()
+}
+
+/// Zero-width characters (U+200B..U+200D, U+2060, U+FEFF) and bidi controls (U+202A..U+202E, U+2066..U+2069).
+fn is_invisible(x: char) -> bool {
+    matches!(x, '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }
 
 /// One pass of every rule, in order. Each rule scans the output of the one before it.
@@ -57,8 +76,8 @@ fn round(text: &str, known: &[(String, &'static str)]) -> String {
     // 1. The words the caller knows.
     let c = replace(&c, &known_spans(&c, known));
     // 2. Generic rules: markup, links, ids, secrets, paths and file names.
-    let c = replace(&c, &html_spans(&c));
-    let c = replace(&c, &image_spans(&c));
+    let c = until_stable(c, html_spans);
+    let c = until_stable(c, image_spans);
     let c = replace(&c, &url_spans(&c));
     let c = replace(&c, &uuid_spans(&c));
     let c = replace(&c, &tab_id_spans(&c));
@@ -68,8 +87,10 @@ fn round(text: &str, known: &[(String, &'static str)]) -> String {
     let c = replace(&c, &long_secret_spans(&c));
     let c = replace(&c, &path_spans(&c));
     let c = replace(&c, &file_spans(&c));
-    // 3. Markdown safety: no pings, no stray newlines.
+    // 3. Markdown safety: no pings, no cross-links, no links made of a placeholder, no stray newlines.
     let c = replace(&c, &mention_spans(&c));
+    let c = replace(&c, &issue_ref_spans(&c));
+    let c = replace(&c, &placeholder_link_spans(&c));
     let c = replace(&c, &newline_spans(&c));
     c.into_iter().collect()
 }
@@ -77,10 +98,10 @@ fn round(text: &str, known: &[(String, &'static str)]) -> String {
 /// The words the caller knows, with the placeholder each becomes. Longest first, so the longest match wins.
 /// A project also counts as `owner/name`, and a clone URL as `owner/name` too.
 fn known_words(ctx: &Context) -> Vec<(String, &'static str)> {
-    let folders = ctx.folders.iter().map(|f| (f.trim().to_owned(), "[folder]"));
-    let projects = ctx.projects.iter().flat_map(|p| project_forms(p).into_iter().map(|f| (f, "[project]")));
-    let files = ctx.files.iter().map(|f| (f.trim().to_owned(), "[file]"));
-    let names = ctx.names.iter().map(|n| (n.trim().to_owned(), "[name]"));
+    let folders = ctx.folders.iter().map(|f| (normalised(f.trim()), "[folder]"));
+    let projects = ctx.projects.iter().flat_map(|p| project_forms(&normalised(p)).into_iter().map(|f| (f, "[project]")));
+    let files = ctx.files.iter().map(|f| (normalised(f.trim()), "[file]"));
+    let names = ctx.names.iter().map(|n| (normalised(n.trim()), "[name]"));
     let mut words: Vec<(String, &'static str)> = folders.chain(projects).chain(files).chain(names).filter(|(w, _)| w.chars().count() >= 2).collect();
     words.sort_by_key(|(w, _)| std::cmp::Reverse(w.chars().count()));
     words
@@ -98,6 +119,17 @@ fn project_forms(project: &str) -> Vec<String> {
         }
     }
     forms
+}
+
+/// `c` with `rule`'s spans replaced, again and again until it finds none: removing one tag can join another.
+fn until_stable(mut c: Vec<char>, rule: fn(&[char]) -> Vec<Span>) -> Vec<char> {
+    loop {
+        let spans = rule(&c);
+        if spans.is_empty() {
+            return c;
+        }
+        c = replace(&c, &spans);
+    }
 }
 
 /// The text with each span replaced by its replacement. Spans come in order. An overlap is replaced, never skipped.
@@ -471,12 +503,14 @@ fn email_spans(c: &[char]) -> Vec<Span> {
     spans
 }
 
-/// Rule 4: an absolute path. It runs to the next whitespace or stop character; a placeholder inside it counts whole.
+/// Rule 4: an absolute path, also as a `file://` URL. It runs to the next whitespace or stop character; a
+/// placeholder inside it counts whole.
 fn path_spans(c: &[char]) -> Vec<Span> {
     let mut spans = vec![];
     let mut i = 0;
     while i < c.len() {
-        if path_starts_at(c, i) {
+        let url = occurs_at(c, i, "file://", true) && is_led(c, i) && has_root(c, i + 7);
+        if url || path_starts_at(c, i) {
             let end = path_end(c, i);
             spans.push((i, end, "[folder]".to_owned()));
             i = end;
@@ -487,10 +521,21 @@ fn path_spans(c: &[char]) -> Vec<Span> {
     spans
 }
 
-/// Whether a path of this machine starts at `i`: a known root, after the start of the text or a lead character.
+/// Whether a path of this machine starts at `i`: a known root, after the start of the text, a lead character or a
+/// flag such as `-I`.
 fn path_starts_at(c: &[char], i: usize) -> bool {
-    let led = i == 0 || c[i - 1].is_whitespace() || PATH_LEADS.contains(&c[i - 1]);
-    led && PATH_PREFIXES.iter().any(|p| occurs_at(c, i, p, false))
+    let flagged = i >= 2 && PATH_FLAGS.iter().any(|f| occurs_at(c, i - 2, f, false)) && is_led(c, i - 2);
+    (is_led(c, i) || flagged) && has_root(c, i)
+}
+
+/// Whether `i` is the start of the text, or follows whitespace or a lead character.
+fn is_led(c: &[char], i: usize) -> bool {
+    i == 0 || c[i - 1].is_whitespace() || PATH_LEADS.contains(&c[i - 1])
+}
+
+/// Whether a known root starts at `i`, in any letter case.
+fn has_root(c: &[char], i: usize) -> bool {
+    PATH_PREFIXES.iter().any(|p| occurs_at(c, i, p, true))
 }
 
 /// The end of the path that starts at `from`: the next stop character, with a placeholder passed over whole.
@@ -553,6 +598,77 @@ fn mention_spans(c: &[char]) -> Vec<Span> {
         if x == '@' && (i == 0 || !c[i - 1].is_alphanumeric()) && c.get(i + 1).is_some_and(|y| y.is_alphanumeric()) {
             spans.push((i + 1, i + 1, "\u{200B}".to_owned()));
         }
+    }
+    spans
+}
+
+/// Rule 5: an issue reference GitHub would link, `#123`, `GH-123` or `owner/repo#123`, is wrapped in backticks, so
+/// it shows as written and links nowhere. One already in backticks is left alone.
+fn issue_ref_spans(c: &[char]) -> Vec<Span> {
+    let mut spans = vec![];
+    let mut i = 0;
+    while i < c.len() {
+        let digits = if c[i] == '#' {
+            i + 1
+        } else if occurs_at(c, i, "GH-", true) && (i == 0 || !is_word_char(c[i - 1])) {
+            i + 3
+        } else {
+            i += 1;
+            continue;
+        };
+        let end = run_end(c, digits, |x| x.is_ascii_digit());
+        if end == digits || c.get(end).is_some_and(|&x| is_word_char(x)) {
+            i += 1;
+            continue;
+        }
+        let start = if c[i] == '#' { repo_start(c, i) } else { i };
+        let glued = start > 0 && (is_word_char(c[start - 1]) || matches!(c[start - 1], '`' | '/' | '#' | '.'));
+        if !glued {
+            let text: String = c[start..end].iter().collect();
+            spans.push((start, end, format!("`{text}`")));
+        }
+        i = end;
+    }
+    spans
+}
+
+/// Where `owner/repo` starts right before the `#` at `hash`, or `hash` when there is none.
+fn repo_start(c: &[char], hash: usize) -> usize {
+    let is_repo_char = |x: char| x.is_ascii_alphanumeric() || matches!(x, '-' | '_' | '.');
+    let mut name = hash;
+    while name > 0 && is_repo_char(c[name - 1]) {
+        name -= 1;
+    }
+    if name == hash || name == 0 || c[name - 1] != '/' {
+        return hash;
+    }
+    let mut owner = name - 1;
+    while owner > 0 && (c[owner - 1].is_ascii_alphanumeric() || c[owner - 1] == '-') {
+        owner -= 1;
+    }
+    if owner == name - 1 {
+        return hash;
+    }
+    owner
+}
+
+/// Rule 5: a placeholder right before `(` or `[`, or one that starts a line before `:`, would make a Markdown link or
+/// link definition: a space goes after it.
+fn placeholder_link_spans(c: &[char]) -> Vec<Span> {
+    let mut spans = vec![];
+    let mut i = 0;
+    while i < c.len() {
+        let Some(len) = placeholder_len(c, i) else {
+            i += 1;
+            continue;
+        };
+        let end = i + len;
+        let line_start = c[..i].iter().rposition(|&x| x == '\n').map_or(0, |p| p + 1);
+        let starts_line = c[line_start..i].iter().all(|&x| x == ' ');
+        if matches!(c.get(end), Some('(' | '[')) || (starts_line && c.get(end) == Some(&':')) {
+            spans.push((end, end, " ".to_owned()));
+        }
+        i = end;
     }
     spans
 }
