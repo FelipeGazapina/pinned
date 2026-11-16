@@ -32,11 +32,10 @@ fn ran(tool: &str, input: Value, secs: i64) -> String {
     entry("assistant", json!([{ "type": "tool_use", "id": format!("tool-{secs}"), "name": tool, "input": input }]), secs)
 }
 
-/// Gives the box's session `lines` as its transcript, in the claude home its built-in account
-/// reads (`$CLAUDE_CONFIG_DIR`, else `~/.claude`), under a session id of this test's own.
+/// Gives the box's session `lines` as its transcript, in the claude home of the box's own node
+/// (`.claude` in the box's folder), under a session id of this test's own.
 fn transcript(hub: &TestHub, tb: &TeamBox, lines: &[String]) {
-    let home = std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap()).join(".claude"));
-    let folder = home.join("projects/box");
+    let folder = tb.dir.join(".claude/projects/box");
     std::fs::create_dir_all(&folder).unwrap();
     let session = format!("s-{}", hub.database.replace('_', "-"));
     std::fs::write(folder.join(format!("{session}.jsonl")), lines.join("\n") + "\n").unwrap();
