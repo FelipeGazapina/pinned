@@ -7,7 +7,8 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 const API: &str = "https://us-east-1.box.upstash.com";
-/// Overrides `API`, as the Box SDK and CLI read it.
+/// Overrides `API`, as the Box SDK and CLI read it. Honoured only in a debug build and only for an
+/// http(s) loopback address with no userinfo (`resolve_base`).
 pub const BASE_URL_ENV: &str = "UPSTASH_BOX_BASE_URL";
 pub const KEY_PREFIX: &str = "box_";
 /// What `claude setup-token` prints.
@@ -325,7 +326,36 @@ enum Status {
 }
 
 fn base_url() -> String {
-    std::env::var(BASE_URL_ENV).ok().filter(|u| !u.trim().is_empty()).unwrap_or_else(|| API.into()).trim_end_matches('/').to_owned()
+    let set = std::env::var(BASE_URL_ENV).ok();
+    let (url, ignored) = resolve_base(set.as_deref(), cfg!(debug_assertions));
+    if ignored {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| eprintln!("pinned: {BASE_URL_ENV} is set but ignored, Box calls go to the Upstash Box API"));
+    }
+    url
+}
+
+/// The address Box calls go to, and whether `set` was ignored. Every call carries the Box key, so
+/// only a debug build takes an override, and only an http(s) address on this machine with no
+/// userinfo; anything else keeps the real API.
+fn resolve_base(set: Option<&str>, debug: bool) -> (String, bool) {
+    let Some(set) = set.map(|u| u.trim().trim_end_matches('/')).filter(|u| !u.is_empty()) else {
+        return (API.to_owned(), false);
+    };
+    if debug && loopback_http(set) {
+        (set.to_owned(), false)
+    } else {
+        (API.to_owned(), true)
+    }
+}
+
+fn loopback_http(address: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(address) else {
+        return false;
+    };
+    let host = url.host_str().unwrap_or_default().trim_start_matches('[').trim_end_matches(']');
+    let loopback = host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    matches!(url.scheme(), "http" | "https") && loopback && url.username().is_empty() && url.password().is_none()
 }
 
 /// A failure the API answered, with its status, or one that never reached it.
@@ -494,6 +524,55 @@ fn urlencode(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_release_build_ignores_a_loopback_box_address() {
+        for set in ["http://127.0.0.1:9", "http://localhost:8080/", "https://[::1]:9"] {
+            assert_eq!(resolve_base(Some(set), false), (API.to_owned(), true), "{set}");
+        }
+    }
+
+    #[test]
+    fn a_debug_build_ignores_a_box_address_off_this_machine_or_with_userinfo() {
+        for set in [
+            "https://box.example.test",
+            "http://10.0.0.5:9",
+            "http://127.0.0.1.example.test",
+            "http://169.254.169.254",
+            "ftp://127.0.0.1:9",
+            "not a url",
+            "http://user:secret@127.0.0.1:9",
+            "http://user@localhost:9",
+            "http://localhost@box.example.test",
+        ] {
+            assert_eq!(resolve_base(Some(set), true), (API.to_owned(), true), "{set}");
+        }
+    }
+
+    #[test]
+    fn a_debug_build_takes_a_loopback_box_address() {
+        assert_eq!(resolve_base(Some("http://127.0.0.1:9/"), true), ("http://127.0.0.1:9".to_owned(), false));
+        assert_eq!(resolve_base(Some("http://localhost:8080"), true), ("http://localhost:8080".to_owned(), false));
+        assert_eq!(resolve_base(Some("https://[::1]:9"), true), ("https://[::1]:9".to_owned(), false));
+        assert_eq!(resolve_base(None, true), (API.to_owned(), false));
+        assert_eq!(resolve_base(Some("  "), false), (API.to_owned(), false), "blank is unset, not ignored");
+    }
+
+    /// The variable as `base_url` reads it, in this (debug) test build.
+    #[test]
+    fn base_url_reads_the_variable_through_the_guard() {
+        let was = std::env::var(BASE_URL_ENV).ok();
+        std::env::set_var(BASE_URL_ENV, "https://box.example.test");
+        let off_machine = base_url();
+        std::env::set_var(BASE_URL_ENV, "http://127.0.0.1:9/");
+        let loopback = base_url();
+        match was {
+            Some(value) => std::env::set_var(BASE_URL_ENV, value),
+            None => std::env::remove_var(BASE_URL_ENV),
+        }
+        assert_eq!(off_machine, API);
+        assert_eq!(loopback, "http://127.0.0.1:9");
+    }
 
     #[test]
     fn a_refusal_that_echoes_the_key_does_not_carry_it() {
