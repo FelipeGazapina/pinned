@@ -78,34 +78,99 @@ pub async fn teams_of(db: &Db, member: Uuid) -> Result<Vec<TeamRow>, String> {
 }
 
 /// Renames the team; false when it has no `teams` row.
-pub async fn rename_team(_db: &Db, _team: Uuid, _name: &str) -> Result<bool, String> {
-    Err("not built yet".into())
+pub async fn rename_team(db: &Db, team: Uuid, name: &str) -> Result<bool, String> {
+    let renamed = db.client().await?.execute("update teams set name = $2 where id = $1", &[&team, &name]).await.map_err(err)?;
+    Ok(renamed == 1)
 }
 
-/// The members with their emails, the owner first.
-pub async fn members(_db: &Db, _team: Uuid) -> Result<Vec<MemberRow>, String> {
-    Err("not built yet".into())
+/// The members with their emails, the owner first, then by join time.
+pub async fn members(db: &Db, team: Uuid) -> Result<Vec<MemberRow>, String> {
+    let rows = db
+        .client()
+        .await?
+        .query(
+            "select m.member, a.email, m.role from team_members m join accounts a on a.id = m.member
+             where m.team = $1 order by m.role <> 'owner', m.joined_at, m.member",
+            &[&team],
+        )
+        .await
+        .map_err(err)?;
+    Ok(rows.iter().map(|r| MemberRow { account: r.get(0), email: r.get(1), role: Role::parse(r.get(2)) }).collect())
 }
 
-/// Keeps an invite by the sha256 of its code (`crate::db::hash`), never the code.
-pub async fn create_invite(_db: &Db, _team: Uuid, _made_by: Uuid, _code_hash: &[u8], _hint: &str) -> Result<(), String> {
-    Err("not built yet".into())
+/// Each member's group handles, as `(member, handle)` rows, by handle.
+pub async fn member_groups(db: &Db, team: Uuid) -> Result<Vec<(Uuid, String)>, String> {
+    let rows = db.client().await?.query("select member, handle from team_group_members where team = $1 order by handle", &[&team]).await.map_err(err)?;
+    Ok(rows.iter().map(|r| (r.get(0), r.get(1))).collect())
+}
+
+/// Keeps an invite by the sha256 of its code (`crate::db::invite_hash`), never the code.
+pub async fn create_invite(db: &Db, team: Uuid, made_by: Uuid, code_hash: &[u8], hint: &str) -> Result<(), String> {
+    db.client()
+        .await?
+        .execute("insert into team_invites (code_hash, team, made_by, hint) values ($1, $2, $3, $4)", &[&code_hash, &team, &made_by, &hint])
+        .await
+        .map_err(err)
+        .map(drop)
 }
 
 /// Marks the unused, unrevoked invite `code_hash` used by `member` and adds `member` as a
 /// member, in one statement; answers the team, or None when the code is unknown, used or revoked.
-pub async fn take_invite(_db: &Db, _code_hash: &[u8], _member: Uuid) -> Result<Option<Uuid>, String> {
-    Err("not built yet".into())
+/// A member of the invite's team who joins again keeps its role and the invite stays unused, so
+/// that case answers the team without spending it.
+pub async fn take_invite(db: &Db, code_hash: &[u8], member: Uuid) -> Result<Option<Uuid>, String> {
+    let client = db.client().await?;
+    // A racing second spend finds `used_by` set when its row lock comes free, so only one join lands.
+    let joined = client
+        .query_opt(
+            "with spent as (update team_invites set used_by = $2, used_at = now()
+                 where code_hash = $1 and used_by is null and not revoked
+                 and exists (select 1 from accounts where id = $2 and kind = 'person')
+                 and not exists (select 1 from team_members where team = team_invites.team and member = $2)
+                 returning team),
+              added as (insert into team_members (team, member, role) select team, $2, 'member' from spent
+                 on conflict (team, member) do nothing returning team)
+             select team from added",
+            &[&code_hash, &member],
+        )
+        .await
+        .map_err(err)?;
+    if let Some(row) = joined {
+        return Ok(Some(row.get(0)));
+    }
+    let again = client
+        .query_opt(
+            "select i.team from team_invites i join team_members m on m.team = i.team and m.member = $2
+             where i.code_hash = $1 and i.used_by is null and not i.revoked",
+            &[&code_hash, &member],
+        )
+        .await
+        .map_err(err)?;
+    Ok(again.map(|r| r.get(0)))
 }
 
 /// Revokes the team's unused invites whose hint is `hint`; answers how many.
-pub async fn revoke_invite(_db: &Db, _team: Uuid, _hint: &str) -> Result<u64, String> {
-    Err("not built yet".into())
+pub async fn revoke_invite(db: &Db, team: Uuid, hint: &str) -> Result<u64, String> {
+    db.client().await?.execute("update team_invites set revoked = true where team = $1 and hint = $2 and used_by is null and not revoked", &[&team, &hint]).await.map_err(err)
 }
 
-/// Removes a member who is not the owner; false when there was none such.
-pub async fn remove_member(_db: &Db, _team: Uuid, _member: Uuid) -> Result<bool, String> {
-    Err("not built yet".into())
+/// Removes a member who is not the owner; false when there was none such. In one statement the
+/// member's groups go by cascade, its attached projects are deleted here (`team_projects` cascades
+/// from accounts, not from membership), and any group that named it as fallback forgets it.
+pub async fn remove_member(db: &Db, team: Uuid, member: Uuid) -> Result<bool, String> {
+    let row = db
+        .client()
+        .await?
+        .query_one(
+            "with gone as (delete from team_members where team = $1 and member = $2 and role <> 'owner' returning member),
+                  projects as (delete from team_projects where team = $1 and member in (select member from gone)),
+                  fallbacks as (update team_groups set fallback = null where team = $1 and fallback in (select member from gone))
+             select exists (select 1 from gone)",
+            &[&team, &member],
+        )
+        .await
+        .map_err(err)?;
+    Ok(row.get(0))
 }
 
 // ---- projects.rs ----
