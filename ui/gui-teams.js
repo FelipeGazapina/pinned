@@ -1,7 +1,7 @@
 /** pinned Teams, the way in: the "Where you work" block of the Account and pages menu, the Create a
  * team teamWizard and the Join a team page. A team call is the hub's `team` call (crates/core/src/teams.rs);
  * this file also owns the contract the other Teams pages read: `teamsCurrent()`, `teamsList()`,
- * `teamCall(op)` and the `teams:changed` event.
+ * `teamCall(op)` (function declarations, so real `globalThis` properties) and the `teams:changed` event.
  *
  * What people typed (team names, project names) reaches the DOM through `esc()` or `textContent`.
  * A key typed in a form is read from its field, sent, and the field emptied: it is never kept in
@@ -163,11 +163,15 @@ let teamsLoaded = false;
 let teamsNow = null;
 try {
   const kept = JSON.parse(load(TEAMS_KEY) ?? "null");
-  if (kept && typeof kept.id === "string" && kept.id) teamsNow = { id: kept.id, name: String(kept.name ?? ""), role: kept.role === "owner" ? "owner" : "member", credential: kept.credential ?? {} };
+  if (kept && typeof kept.id === "string" && kept.id) teamsNow = { id: kept.id, name: String(kept.name ?? ""), role: kept.role === "owner" ? "owner" : "member", credential: kept.credential ?? {}, me: typeof kept.me === "string" && kept.me ? kept.me : null };
 } catch {}
 
-/** The team this viewer works in, `{id, name, role, credential}`, or null for the personal account. */
-const teamsCurrent = () => teamsNow;
+/** The team this viewer works in, `{id, name, role, credential, me}`, or null for the personal account.
+ * `me` is the viewer's own account id. The wire's `Team` names only the owner's (`owner`), so `me` is set
+ * for the owner and is null for a member, whose id the Members list gives by e-mail. */
+function teamsCurrent() {
+  return teamsNow;
+}
 
 /** A call about a team, run by the hub on the team's account. `List`, `Create` and `Join` take no team. */
 function teamCall(op, team = teamsNow?.id) {
@@ -176,7 +180,10 @@ function teamCall(op, team = teamsNow?.id) {
   return hub.hub({ cmd: "team", ...(free ? {} : { team }), op });
 }
 
-const teamView = (t) => ({ id: t.id, name: t.name, role: t.role === "owner" ? "owner" : "member", credential: t.credential ?? {} });
+const teamView = (t) => {
+  const role = t.role === "owner" ? "owner" : "member";
+  return { id: t.id, name: t.name, role, credential: t.credential ?? {}, me: typeof t.me === "string" && t.me ? t.me : role === "owner" && typeof t.owner === "string" && t.owner ? t.owner : null };
+};
 
 function teamsRemember() {
   save(TEAMS_KEY, teamsNow ? JSON.stringify(teamsNow) : null);
@@ -759,8 +766,5 @@ pageView.addEventListener("keydown", (e) => {
 SHELL_PAGES["team-create"] = { show: showTeamCreate };
 SHELL_PAGES["team-join"] = { show: showTeamJoin };
 
-globalThis.teamsCurrent = teamsCurrent;
-globalThis.teamsList = teamsList;
-globalThis.teamCall = teamCall;
 drawTeamsButton();
 drawTeamsWhere();

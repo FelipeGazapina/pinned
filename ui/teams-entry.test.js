@@ -105,7 +105,7 @@ test("the current team is kept per viewer, read back, and fires teams:changed on
   assert.equal(a.context.teamsCurrent(), null);
   await a.context.teamsList();
   a.run("teamsSelect(teamsKnown[1])");
-  assert.deepEqual(here(a.context.teamsCurrent()), { id: "t2", name: "Side Gig", role: "member", credential: SOLO.credential });
+  assert.deepEqual(here(a.context.teamsCurrent()), { id: "t2", name: "Side Gig", role: "member", credential: SOLO.credential, me: null });
   assert.equal(JSON.parse(a.store.get("teams-current")).id, "t2");
   a.run("teamsSelect(teamsKnown[1])");
   a.run("teamsSelect(null)");
@@ -120,12 +120,32 @@ test("a saved team is current at start, and refreshed from the list; one the per
   const a = app({ answers: { list: [created({ name: "New name" })] }, stored: saved });
   assert.equal(a.context.teamsCurrent().name, "Old name");
   await a.context.teamsList();
-  assert.deepEqual(here(a.context.teamsCurrent()), { id: "t1", name: "New name", role: "owner", credential: ACME.credential });
+  assert.deepEqual(here(a.context.teamsCurrent()), { id: "t1", name: "New name", role: "owner", credential: ACME.credential, me: "a1" });
   assert.equal(a.events.length, 0, "a refresh is not a change of team");
   const b = app({ answers: { list: [SOLO] }, stored: saved });
   await b.context.teamsList();
   assert.equal(b.context.teamsCurrent(), null);
   assert.equal(b.events.length, 1);
+});
+
+test("teamsCurrent carries me: the owner's own account id from the wire's owner, null for a member", async () => {
+  const a = await (async () => {
+    const x = app({ answers: { list: [ACME, SOLO] } });
+    await x.context.teamsList();
+    return x;
+  })();
+  a.run("teamsSelect(teamsKnown[0])");
+  assert.equal(a.context.teamsCurrent().me, "a1");
+  assert.equal(JSON.parse(a.store.get("teams-current")).me, "a1", "kept with the team");
+  a.run("teamsSelect(teamsKnown[1])");
+  assert.equal(a.context.teamsCurrent().me, null, "the wire gives a member no id of their own");
+  const b = app({ stored: { id: "t1", name: "North Studio", role: "owner", credential: {}, me: "a1" } });
+  assert.equal(b.context.teamsCurrent().me, "a1", "read back at start");
+});
+
+test("teamsCurrent, teamsList and teamCall are real properties of globalThis", () => {
+  const a = app();
+  for (const name of ["teamsCurrent", "teamsList", "teamCall"]) assert.equal(a.run(`Object.prototype.hasOwnProperty.call(globalThis, "${name}") && typeof globalThis.${name}`), "function", name);
 });
 
 test("a saved value that is not a team leaves no team chosen and breaks nothing", () => {

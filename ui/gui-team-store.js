@@ -32,10 +32,10 @@ const tcNotify = () => tcListeners.forEach((fn) => fn());
 const tcOnChange = (fn) => (tcListeners.add(fn), () => tcListeners.delete(fn));
 
 const tcCurrent = () => {
-  const team = globalThis.teamsCurrent?.();
+  const team = globalThis.teamsCurrent();
   return team && team.id ? team : null;
 };
-const tcCall = (op) => (globalThis.teamCall ? Promise.resolve().then(() => globalThis.teamCall(op)) : Promise.reject("teams are not available"));
+const tcCall = (op) => Promise.resolve().then(() => globalThis.teamCall(op));
 const tcNow = () => Date.now() / 1000;
 const tcLocale = () => (typeof APP_LOCALE === "undefined" ? undefined : APP_LOCALE);
 const tcClock = (unix) => new Date(unix * 1000).toLocaleTimeString(tcLocale(), { hour: "numeric", minute: "2-digit" });
@@ -73,12 +73,13 @@ function tcNameOf(email) {
 }
 const tcHue = (text) => [...String(text)].reduce((h, c) => (h * 31 + c.codePointAt(0)) % 360, 7);
 
-/** Who the signed-in person is among the team's members, by email. */
+/** Who the signed-in person is among the team's members: by `teamsCurrent().me`, their own account id.
+ * The wire gives that id only for the owner, so a member is found by the e-mail they signed in with. */
 function tcMe() {
   const team = tcCurrent();
   const email = (typeof account !== "undefined" && account?.email ? account.email : "").toLowerCase();
-  const member = email ? tcStore.members.find((m) => String(m.email).toLowerCase() === email) : null;
-  return { account: member?.account ?? null, name: member ? tcNameOf(member.email) : email ? tcNameOf(email) : "You", owner: (member?.role ?? team?.role) === "owner" };
+  const member = (team?.me ? tcStore.members.find((m) => m.account === team.me) : null) ?? (email ? tcStore.members.find((m) => String(m.email).toLowerCase() === email) : null);
+  return { account: member?.account ?? team?.me ?? null, name: member ? tcNameOf(member.email) : email ? tcNameOf(email) : "You", owner: (member?.role ?? team?.role) === "owner" };
 }
 function tcOwner() {
   const member = tcStore.members.find((m) => m.role === "owner");

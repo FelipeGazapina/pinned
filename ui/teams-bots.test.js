@@ -125,6 +125,13 @@ test("a time reads as today, yesterday, a weekday, then a date", () => {
   assert.deepEqual(a.read(`[0, 1, 3, 9].map((d) => tbWhen(${at(0)} - d * 86400 + (d ? 0 : 0), ${noon}))`), ["today", "yesterday", "Sunday", "Nov 9"]);
 });
 
+test("the viewer is the member teamsCurrent().me names, and the e-mail finds one when it names none", () => {
+  const named = app({ team: { ...MEMBER_TEAM, me: "c3" }, email: "bruno@acme.dev" });
+  assert.equal(named.read(`tbMe(${JSON.stringify(MEMBERS)}).account`), "c3");
+  assert.equal(app({ team: MEMBER_TEAM, email: "bruno@acme.dev" }).read(`tbMe(${JSON.stringify(MEMBERS)}).account`), "b2");
+  assert.equal(app({ team: MEMBER_TEAM, email: "x@y.z" }).read(`tbMe(${JSON.stringify(MEMBERS)})`), null);
+});
+
 test("a person is shown by the name in their e-mail", () => {
   const a = app();
   assert.equal(a.read(`tbPerson("ana.prado@acme.dev")`), "Ana Prado");

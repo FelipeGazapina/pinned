@@ -1,7 +1,7 @@
 /** pinned Teams, bots: the page of one bot (`team-bot`), the Create a bot wizard (`team-bot-new`) and the
  * page of one group (`team-group`). A team call is the hub's `team` call (crates/core/src/teams.rs); the
- * contract with the other Teams files is `teamCall(op)` and `teamsCurrent()`, both read at the time of
- * the call so this file loads in any order and runs without them (the pages then ask for a team).
+ * contract with the other Teams files is `teamCall(op)` and `teamsCurrent()` (globalThis, from gui-teams.js),
+ * both read at the time of the call so this file loads in any order.
  *
  * Opening a page: `openTeamBot(workflow)`, `openTeamGroup(handle)` and `openTeamBotNew()`.
  *
@@ -16,7 +16,6 @@ const TB_TEXT = {
   loadFailed: (e) => `Could not load: ${e}`,
   retry: "Try again",
   noHub: "The hub did not answer.",
-  unavailable: "Teams is not available in this build.",
   you: "you",
   youCap: "You",
   owner: "Owner",
@@ -201,8 +200,8 @@ const TB_IDEA_STEPS = {
 
 const tbEsc = (v) => (typeof esc === "function" ? esc(v) : String(v ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`));
 const tbErrorText = (e) => String(e?.message ?? e ?? TB_TEXT.noHub);
-const tbCall = (op) => (typeof teamCall === "function" ? teamCall(op) : Promise.reject(TB_TEXT.unavailable));
-const tbTeam = () => (typeof teamsCurrent === "function" ? teamsCurrent() : null);
+const tbCall = (op) => teamCall(op);
+const tbTeam = () => teamsCurrent();
 const tbDocument = () => (typeof document !== "undefined" ? document : null);
 const tbShown = () => (typeof shellPage === "function" ? shellPage() : null);
 
@@ -225,10 +224,11 @@ function tbRepoKey(repo) {
   return (rest.includes("@") ? rest.slice(rest.lastIndexOf("@") + 1) : rest).toLowerCase();
 }
 
-/** Who the viewer is among the team's members, by the e-mail they signed in with. */
+/** Who the viewer is among the team's members: by `teamsCurrent().me` (their account id), else by the e-mail they signed in with. */
 function tbMe(members) {
+  const id = tbTeam()?.me;
   const email = typeof account !== "undefined" && account?.email ? String(account.email).toLowerCase() : "";
-  return (members ?? []).find((m) => email && String(m.email ?? "").toLowerCase() === email) ?? null;
+  return (members ?? []).find((m) => id && m.account === id) ?? (members ?? []).find((m) => email && String(m.email ?? "").toLowerCase() === email) ?? null;
 }
 const tbMemberName = (members, id) => {
   const m = (members ?? []).find((x) => x.account === id);

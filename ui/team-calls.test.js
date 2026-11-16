@@ -403,6 +403,20 @@ test("a bot, a group, a run and Create a bot open through the one openTeamX styl
   for (const name of ["gui-team-store.js", "gui-team-nav.js", "gui-team-calls.js", "gui-team-run.js", "gui-teams.js", "gui-teams-bots.js"]) assert.ok(!/teamRunOpen|teamBotOpen|teamGroupOpen/.test(read(name)), `${name} keeps no old name`);
 });
 
+test("me is the account id teamsCurrent gives; the e-mail is the way only when it gives none", () => {
+  // The signed-in e-mail names Bruno, but the team says the viewer is Carla: the id wins.
+  const p = page({ email: "bruno.lima@north.example" });
+  p.context.teamsCurrent = () => ({ id: "team-1", name: "North Studio", role: "member", credential: {}, me: "acc-carla" });
+  assert.equal(p.eval("tcMe().account"), "acc-carla");
+  assert.equal(p.eval("tcMe().name"), "Carla Santos");
+  assert.equal(p.eval("tcPerson('acc-carla')"), "You");
+  const owner = page({ email: "nobody@else.example" });
+  owner.context.teamsCurrent = () => ({ id: "team-1", name: "North Studio", role: "owner", credential: {}, me: "acc-ana" });
+  assert.deepEqual(here(owner.eval("({ account: tcMe().account, owner: tcMe().owner })")), { account: "acc-ana", owner: true });
+  // A member: no id on the wire, so the members list and the e-mail give it.
+  assert.equal(page({ email: "bruno.lima@north.example" }).eval("tcMe().account"), ME);
+});
+
 test("refresh reads the five lists, and one that fails keeps what it had", async () => {
   const p = page({ reply: (op) => (op.op === "calls" ? new Error("down") : op.op === "runs" ? [run({ id: "fresh" })] : []) });
   await p.eval("tcRefresh()");
