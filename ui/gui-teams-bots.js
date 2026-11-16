@@ -52,6 +52,22 @@ const TB_TEXT = {
     limits: (usd, minutes) => `up to US$ ${usd} or ${minutes} minutes per run`,
     callsNote: "Outside those moments it works alone, and anyone on the team can follow or take over.",
     asks: "What it asks first",
+    skipped: "Events that started no run",
+    skippedAbout: "The hub counts them. An event that arrives while the bot is off is not picked up later.",
+    skippedLabels: {
+      off: "Arrived while the bot was off",
+      draft: "Arrived while the bot was a draft",
+      manual: "From a trigger that runs only with Run now",
+      queue_full: "Events dropped because the line was full",
+      bot_removed: "Dropped after the bot was removed",
+      start_failed: "Did not start",
+      never_started: "Never started",
+    },
+    delete: "Delete the bot",
+    deleting: "Deleting…",
+    deleteAsk: (name) => `Delete ${name}? Its past runs stay listed.`,
+    deleteYes: "Delete it",
+    deleteKeep: "Keep it",
     runs: "Latest runs",
     noRuns: "No runs yet.",
   },
@@ -428,6 +444,16 @@ function tbRunLine(run, { members, open } = {}) {
       return { text: String(run.outcome ?? "").trim() || String(run.state ?? ""), tone: "" };
   }
 }
+/** The skipped counts of a bot as rows: a plain label per reason the hub names, and for a reason this app does not know its raw name and the count, never hidden. */
+function tbSkippedRows(skipped) {
+  return (Array.isArray(skipped) ? skipped : [])
+    .filter((x) => x && typeof x === "object")
+    .map((x) => {
+      const reason = String(x.reason ?? "");
+      const n = Number(x.count);
+      return { reason, label: Object.hasOwn(TB_TEXT.bot.skippedLabels, reason) ? TB_TEXT.bot.skippedLabels[reason] : reason || "?", count: Number.isFinite(n) ? String(n) : String(x.count ?? "") };
+    });
+}
 const tbRunning = (run) => run?.state === "working" || run?.state === "taken_over" || run?.state === "waiting";
 
 /** What a call came to for the group page: when it was asked, the line, and its tone. */
@@ -439,8 +465,10 @@ function tbCallLine(call, { members, bots, me }) {
     if (call.escalated) return { text: t.escalated(bot, tbWhoText({ kind: "owner" }, members)), tone: "wait" };
     return { text: t.waiting(bot), tone: "wait" };
   }
-  const who = me && a.by === me.account ? TB_TEXT.youCap : tbMemberName(members, a.by);
   const kind = a.kind?.kind;
+  // The hub closes the open call of a run that ended as a stop from the team's own account.
+  if (kind === "stop" && tbTeam()?.id && a.by === tbTeam().id) return { text: `${bot}'s call was closed: the run ended${String(a.text ?? "").trim() ? ` · ${String(a.text).trim()}` : ""}.`, tone: "" };
+  const who = me && a.by === me.account ? TB_TEXT.youCap : tbMemberName(members, a.by);
   const what = kind === "pass_to" ? t.passed(a.kind.handle) : kind === "take_over" ? t.tookOver : kind === "stop" ? t.stoppedRun : t.chose(a.choice);
   const mins = a.at && call.created_at ? Math.max(0, Math.round((a.at - call.created_at) / 60)) : null;
   return { text: t.answered(who, mins, what), tone: "" };
@@ -465,7 +493,7 @@ function tbOpenHome() {
   openPage("team-calls");
 }
 
-const tbBotUi = { id: "", state: "idle", error: "", data: null, busy: "", note: "", started: null };
+const tbBotUi = { id: "", state: "idle", error: "", data: null, busy: "", note: "", started: null, confirm: false };
 const tbGroupUi = { handle: "", state: "idle", error: "", data: null, busy: "", note: "", adding: false };
 
 function openTeamBot(workflow) {
@@ -578,17 +606,30 @@ function tbBotHtml(ui, team) {
     return `<button type="button" class="tb-listrow" data-tb="open-run" data-run="${tbEsc(r.id)}">${row}</button>`;
   });
 
+  const skippedRows = tbSkippedRows(bot.skipped);
+  const skippedHtml = skippedRows.length
+    ? `<section class="tb-section" data-skipped><h2>${tbEsc(t.skipped)}</h2><div class="tb-card">${skippedRows.map((r) => `<div class="tb-row" data-skip="${tbEsc(r.reason)}"><span>${tbEsc(r.label)}</span><span class="tb-value">${tbEsc(r.count)}</span></div>`).join("")}</div><p class="tb-foot">${tbEsc(t.skippedAbout)}</p></section>`
+    : "";
+  const offNote = !bot.on && bot.off_note ? `<p class="tb-note" data-off-note>${tbEsc(bot.off_note)}</p>` : "";
+  const mine = team.role === "owner" || (!!bot.owner && tbMe(members)?.account === bot.owner);
+  const del = bot.on || !mine
+    ? ""
+    : ui.confirm
+      ? `<div class="tb-confirm" role="group" data-delete><span>${tbEsc(t.deleteAsk(name))}</span>${tbButton('data-tb="delete"', ui.busy === "delete" ? t.deleting : t.deleteYes, "danger", ui.busy === "delete")}${tbButton('data-tb="delete-keep"', t.deleteKeep, "quiet", ui.busy === "delete")}</div>`
+      : `<div class="tb-actions">${tbButton('data-tb="delete-ask"', t.delete, "quiet")}</div>`;
   const notice = bot.on ? "" : may ? "" : `<p class="tb-note">${tbEsc(t.askToTurnOn(tbAskText(rules, members)))}</p>`;
   return `<div class="tb-head">
       <div class="tb-who">${tbMono(name, "big")}<div class="tb-titles"><h1>${tbEsc(name)}${bot.on ? "" : ` <span class="tb-tag draft">${tbEsc(t.draft)}</span>`}</h1>
         <div class="tb-sub">${tbEsc(t.of(project, owner))}${bot.once ? ` <span class="tb-tag">${tbEsc(t.once)}</span>` : ""}</div></div></div>
       <div class="tb-actions">${runBtn}${toggle}</div>
     </div>
-    ${tbError(ui.error && ui.state === "ready" ? ui.error : "")}${notice}${needKeys && !bot.on ? `<p class="tb-note">${tbEsc(t.needKeys)}</p>` : ""}
+    ${tbError(ui.error && ui.state === "ready" ? ui.error : "")}${offNote}${notice}${needKeys && !bot.on ? `<p class="tb-note">${tbEsc(t.needKeys)}</p>` : ""}
     <section class="tb-section"><h2>${tbEsc(manual ? t.doesManual : firesOn ? t.doesOn(firesOn) : t.does)}</h2>${stepRows.length ? `<ol class="tb-steps">${stepRows.join("")}</ol>` : `<p class="tb-hint">${tbEsc(t.noSteps)}</p>`}</section>
     <section class="tb-section"><h2>${tbEsc(t.calls)}</h2><div class="tb-card">${moments.map(moment).join("")}</div><p class="tb-foot">${tbEsc(t.callsNote)}</p></section>
     <section class="tb-section tb-guard"><h2>${tbEsc(t.asks)}</h2>${tbAsksHtml()}</section>
-    <section class="tb-section"><h2>${tbEsc(t.runs)}</h2>${runRows.length ? `<div class="tb-list">${runRows.join("")}</div>` : `<p class="tb-hint">${tbEsc(t.noRuns)}</p>`}</section>`;
+    ${skippedHtml}
+    <section class="tb-section"><h2>${tbEsc(t.runs)}</h2>${runRows.length ? `<div class="tb-list">${runRows.join("")}</div>` : `<p class="tb-hint">${tbEsc(t.noRuns)}</p>`}</section>
+    ${del}`;
 }
 
 function drawBotPage() {
@@ -615,6 +656,34 @@ const TB_BOT_ACTS = {
     ui.busy = "";
     await tbLoadBot(true);
   },
+  "delete-ask"() {
+    tbBotUi.confirm = true;
+    tbBotUi.error = "";
+    drawBotPage();
+  },
+  "delete-keep"() {
+    tbBotUi.confirm = false;
+    drawBotPage();
+  },
+  async delete() {
+    const ui = tbBotUi;
+    ui.busy = "delete";
+    ui.error = "";
+    drawBotPage();
+    try {
+      await tbCall({ op: "delete_bot", workflow: ui.id });
+    } catch (e) {
+      // The hub's words as sent: a bot that is on, or has a live run, is refused.
+      ui.error = tbErrorText(e);
+      ui.busy = "";
+      ui.confirm = false;
+      return tbLoadBot(true);
+    }
+    ui.busy = "";
+    ui.confirm = false;
+    if (typeof tcRefresh === "function") tcRefresh();
+    tbOpenHome();
+  },
   async toggle() {
     const ui = tbBotUi;
     const on = !ui.data?.bot?.on;
@@ -633,7 +702,7 @@ const TB_BOT_ACTS = {
 };
 
 function showBot() {
-  Object.assign(tbBotUi, { state: "idle", error: "", data: null, busy: "", started: null });
+  Object.assign(tbBotUi, { state: "idle", error: "", data: null, busy: "", started: null, confirm: false });
   if (!tbTeam()) return drawBotPage();
   tbLoadBot();
 }

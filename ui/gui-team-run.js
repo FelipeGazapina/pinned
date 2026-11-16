@@ -47,6 +47,13 @@ function tcStartedText(run) {
   return run.started_at >= tcMidnight() ? `run started at ${tcClock(run.started_at)}` : `run started on ${day} at ${tcClock(run.started_at)}`;
 }
 
+/** Why the bot's own log is not drawn. The hub keeps a run's log in the run's own box, so an ended run whose log it cannot find lost it with the box. Any other failure is the hub's words as sent. */
+function tcLogNote(run, failed) {
+  if (!failed) return "The bot's own log could not be read, so this shows its calls and the answers.";
+  if (/the team has no such run/i.test(failed) && ["done", "stopped", "gave_up", "failed"].includes(run.state)) return "The log went away with the run's box.";
+  return `The bot's own log could not be read: ${failed}`;
+}
+
 /** The author of a log line: the bot, or a member when `who` is an account the team knows. */
 function tcLogAuthor(who, bot) {
   if (!who || /^(bot|agent|assistant|claude)$/i.test(who)) return { name: bot, mark: tcBotMark(bot) };
@@ -66,6 +73,9 @@ function tcEventHtml(entry, bot, run) {
     const head = entry.first ? `${esc(author.name)}${entry.at ? ", " : ""}` : "";
     return `<div class="tc-event">${author.mark}<div class="tc-event-body"><div class="tc-event-meta">${head}${entry.at ? esc(tcClock(entry.at)) : ""}</div><div class="tc-event-text">${esc(entry.text)}</div></div></div>`;
   }
+  if (entry.kind === "answer" && tcClosedByRun(entry.call)) {
+    return `<div class="tc-event">${tcBotMark(bot)}<div class="tc-event-body"><div class="tc-event-meta">Closed, ${esc(tcClock(entry.call.answer.at))}</div><div class="tc-event-text">${esc(tcClosedText(entry.call))}</div></div></div>`;
+  }
   if (entry.kind === "answer") {
     const a = entry.call.answer;
     const said = tcAnswerText(entry.call);
@@ -80,7 +90,7 @@ function tcEventHtml(entry, bot, run) {
   const typed = run?.state === "taken_over" && tcMe().account && run.controller === tcMe().account;
   const note = open ? `<div class="tc-note">Asked: ${esc(tcPeopleAsked(call))}. ${call.escalated ? `Nobody answered in ${TC_ESCALATE_MIN} minutes, so ${esc(owner)} was called too. If nobody answers in ${TC_GIVE_UP_HOURS} hours, the run gives up.` : `If nobody answers in ${TC_ESCALATE_MIN} minutes, I call ${esc(owner)} directly.`}</div>` : "";
   return `<div class="tc-event tc-call" data-call="${esc(call.id)}" data-state="${waiting ? "waiting" : "quiet"}">${tcBotMark(bot)}<div class="tc-event-body tc-stack"><div class="tc-event-meta">${esc(tcClock(call.created_at))}</div>
-    <div class="tc-event-text">${esc(call.question)}</div>${tcAskedChipsRow(call)}
+    ${tcQuestionHtml(call, "div", "tc-event-text")}${tcAskedChipsRow(call)}
     ${tcCanAnswer(call) ? tcActionsHtml(call, { typed, disabled: mine?.state === "sending" }) : ""}${note}${tcResultHtml(call)}${tcOpen(call) && !open ? `<div class="tc-result" data-state="other">Nobody answered.</div>` : ""}</div></div>`;
 }
 const tcAskedChipsRow = (call) => (call.asked.length ? `<div class="tc-chips">${tcAskedChips(call)}</div>` : "");
@@ -119,7 +129,7 @@ function tcRunPageHtml() {
     ? `<div class="tc-banner" role="status"><span>${mineRun ? "You are in charge. The bot stopped where it was and waits. You can answer its call in your own words, pass it on or stop the bot." : `${esc(controller)} is in charge. The bot stopped where it was and waits.`}</span>${mineRun || me.owner ? `<button type="button" class="tc-primary" data-tc-run="give_back">Give back to the bot</button>` : ""}</div>`
     : "";
   const error = tcStore.runError?.run === run.id ? `<p class="tc-result" data-state="error" role="alert">${esc(tcStore.runError.line)}</p>` : "";
-  const noLog = log === null && tcStore.logs.has(run.id) ? `<p class="tc-note">The bot's own log is not available from this hub yet, so this shows its calls and the answers.</p>` : "";
+  const noLog = log === null && tcStore.logs.has(run.id) ? `<p class="tc-note" data-log-note>${esc(tcLogNote(run, tcStore.logErrors.get(run.id) ?? ""))}</p>` : "";
   return `<div class="tc-runhead"><div class="tc-runhead-text"><div class="tc-crumb">${tcLinkHtml("bot", run.workflow, bot, "tc-botname")}, ${esc(tcStartedText(run))}</div><h1>${esc(status.title)}</h1>${status.sub ? `<p class="tc-sub">${esc(status.sub)}</p>` : ""}</div>
       <div class="tc-head-actions">${canTake ? `<button type="button" class="tc-secondary" data-tc-run="take_over">Take over</button>` : ""}${ended ? "" : `<button type="button" class="tc-danger" data-tc-run="stop_run">Stop the bot</button>`}</div></div>
     ${error}${banner}

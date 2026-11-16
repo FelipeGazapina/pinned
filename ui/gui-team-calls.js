@@ -28,7 +28,7 @@ function tcCardHtml(call) {
     ${tcBotMark(bot, "tc-mark-lg")}
     <div class="tc-card-body">
       <div class="tc-meta">${tcLinkHtml("bot", call.workflow, bot, "tc-botname")}<span class="tc-dim">called</span>${tcAskedChips(call)}<span class="tc-dim">${esc(tcAgo(call.created_at))}</span></div>
-      <p class="tc-question">${esc(call.question)}</p>
+      ${tcQuestionHtml(call, "p", "tc-question")}
       ${controls}${tcResultHtml(call)}
     </div>
   </article>`;
@@ -60,7 +60,8 @@ function tcResolvedHtml() {
     const to = group ? ` to @${group.handle}` : "";
     const said = a.kind?.kind;
     const text =
-      said === "pass_to" ? `${who} passed ${bot}'s call${to} to @${a.kind.handle}.`
+      tcClosedByRun(call) ? `${bot}'s call was closed: ${tcClosedText(call).replace(/^Closed: /, "")}.`
+        : said === "pass_to" ? `${who} passed ${bot}'s call${to} to @${a.kind.handle}.`
         : said === "take_over" ? `${who} took over ${bot}'s run.`
         : said === "stop" ? `${who} stopped ${bot}'s run.`
         : `${who} answered ${bot}'s call${to}: “${[a.choice, a.text].filter(Boolean).join(": ")}”.`;

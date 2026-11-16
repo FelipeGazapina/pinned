@@ -48,6 +48,8 @@ body[data-mode="gui"]:is([data-page="team-bot"], [data-page="team-bot-new"], [da
 .tb-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 34px; padding: 0 14px; border-radius: 10px; border: 1px solid rgb(var(--g-ink-rgb) / 0.14); background: transparent; color: var(--g-fg); font-weight: 500; cursor: pointer; }
 .tb-btn.primary { border-color: transparent; background: var(--g-primary); color: var(--g-on-primary); font-weight: 600; }
 .tb-btn.quiet { border-color: transparent; color: var(--g-side-muted); }
+.tb-btn.danger { border-color: rgb(var(--g-ink-rgb) / 0.2); color: var(--g-error); font-weight: 600; }
+.tb-confirm { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; padding: 10px 14px; border-radius: 12px; border: 1px solid rgb(var(--g-warning-rgb) / 0.5); font-size: 13.5px; overflow-wrap: anywhere; }
 .tb-btn.follow { border-color: transparent; background: var(--g-control); color: var(--g-success); font-weight: 600; }
 .tb-btn.static { cursor: default; }
 .tb-btn:disabled { opacity: 0.5; cursor: default; }

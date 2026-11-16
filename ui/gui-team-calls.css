@@ -57,6 +57,10 @@ body[data-team="on"] :is(#sidebar .side-head, #side-nav, #phone-chips, #sidebar 
 .tc-chip { padding: 0 7px; border-radius: 6px; background: rgb(var(--g-primary-rgb) / 0.2); color: var(--tc-link); font-weight: 500; font-size: 13px; overflow-wrap: anywhere; }
 /* The whole question, never clamped: a step to approve can be long. Line breaks the bot wrote stay. */
 .tc-question { margin: 0; font-size: 15px; overflow-wrap: anywhere; white-space: pre-line; }
+/* A step to approve: the tool, then the whole step as the hub sent it, spaces and line breaks kept, never clamped. */
+.tc-step { display: flex; flex-direction: column; gap: 4px; margin: 2px 0; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--g-border); background: var(--g-raised); }
+.tc-step-tool { font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--g-side-muted); }
+.tc-step-text { font: 12.5px/1.5 var(--g-mono); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
 .tc-link { padding: 0; border: 0; background: none; font: inherit; cursor: pointer; text-align: left; }
 button.tc-botname:hover, button.tc-chip:hover { text-decoration: underline; }
 

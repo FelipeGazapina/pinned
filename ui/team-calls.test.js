@@ -397,8 +397,114 @@ test("without a run log only the calls and answers are drawn", () => {
   p.eval(`tcRunShown = "r1"; tcStore.logs.set("r1", null)`);
   const t = text(p.eval("tcRunPageHtml()"));
   assert.match(t, /Can I publish\? .*You, 3:08 PM OK to publish/);
-  assert.match(t, /not available from this hub yet/);
+  assert.match(t, /The bot's own log could not be read, so this shows its calls and the answers\./);
   assert.ok(!/I started/.test(t));
+});
+
+test("the run page asks run_log, and an ended run the hub no longer finds says the log went away with its box", async () => {
+  const gone = "the team has no such run";
+  const p = page({ runs: [run({ state: "done", ended_at: at(15, 9), outcome: "Finished." })], reply: (op) => (op.op === "run_log" ? new Error(gone) : undefined) });
+  p.eval(`tcRunShown = "r1"`);
+  await p.eval(`tcLoadLog("r1")`);
+  assert.deepEqual(here(p.sent()), [{ op: "run_log", run: "r1" }]);
+  const html = p.eval("tcRunPageHtml()");
+  assert.match(html, /<p class="tc-note" data-log-note>The log went away with the run&#39;s box\.<\/p>/);
+  assert.ok(!text(html).includes(gone), "the raw refusal is not shown");
+});
+
+test("a run still going whose log the hub cannot read, or any other refusal, shows the hub's words as sent", async () => {
+  for (const [state, failure] of [["working", "the team has no such run"], ["done", "the hub is busy with this right now; try again in a moment"]]) {
+    const p = page({ runs: [run({ state })], reply: (op) => (op.op === "run_log" ? new Error(failure) : undefined) });
+    p.eval(`tcRunShown = "r1"`);
+    await p.eval(`tcLoadLog("r1")`);
+    assert.ok(text(p.eval("tcRunPageHtml()")).includes(`The bot's own log could not be read: ${failure}`), state);
+  }
+});
+
+test("a log that reads again after a failure drops the note", async () => {
+  let fail = true;
+  const p = page({ runs: [run({ state: "working" })], reply: (op) => (op.op === "run_log" ? (fail ? new Error("the hub is busy with this right now; try again in a moment") : [{ at: at(15, 1), who: "bot", text: "Started." }]) : undefined) });
+  p.eval(`tcRunShown = "r1"`);
+  await p.eval(`tcLoadLog("r1")`);
+  fail = false;
+  await p.eval(`tcLoadLog("r1")`);
+  const html = p.eval("tcRunPageHtml()");
+  assert.ok(!html.includes("data-log-note") && text(html).includes("Started."));
+});
+
+// ---- The call card: the whole step, and a call closed by its run ending ---------------------------
+
+const BASH = 'GH_TOKEN=[hidden] gh release create v1.0.0 --notes "line one\n  indented: line two" && echo <done> & "quoted"';
+const stepCall = (step, label = "release") => call({ question: `${label}: ${step}`, choices: ["Go ahead", "Don't"] });
+
+test("a Bash step is drawn whole and exactly as sent, as escaped text in a block that wraps and never clamps", () => {
+  const p = page({ calls: [stepCall(BASH)] });
+  const html = p.eval("tcCardHtml(tcStore.calls[0])");
+  assert.ok(html.includes('<p class="tc-question">Release</p>'), "the label first");
+  assert.ok(html.includes('<span class="tc-step-tool">Bash</span><div class="tc-step-text">' + BASH.replace(/&/g, "&#38;").replace(/</g, "&#60;").replace(/>/g, "&#62;").replace(/"/g, "&#34;") + "</div>"), html);
+  assert.ok(!html.includes("<done>"), "the step is escaped, never raw markup");
+  assert.deepEqual(buttons(html).slice(2, 4), ["Go ahead", "Don't"]);
+  const css = read("gui-team-calls.css");
+  const rule = css.match(/\.tc-step-text \{[^}]*\}/)[0];
+  assert.match(rule, /white-space: pre-wrap/);
+  assert.ok(!/line-clamp|max-height|text-overflow|overflow: hidden|overflow-y|height:/.test(rule), "nothing clamps the step");
+});
+
+test("a step of 4000 characters is in the card whole", () => {
+  const long = `echo ${"x".repeat(3994)}`;
+  const p = page({ calls: [stepCall(long, "deploy")] });
+  const html = p.eval("tcCardHtml(tcStore.calls[0])");
+  assert.ok(html.includes(`<div class="tc-step-text">${long}</div>`));
+  assert.equal(long.length, 3999);
+});
+
+test("a non-Bash step is its tool's name, then its whole input as sent", () => {
+  const input = '{"file_path":"/work/site/.env.production","new_string":"A=<b>1</b>","old_string":"A=0"}';
+  const p = page({ calls: [stepCall(`Edit ${input}`, "secrets")] });
+  const html = p.eval("tcCardHtml(tcStore.calls[0])");
+  assert.ok(html.includes('<p class="tc-question">Secrets</p>'));
+  assert.ok(html.includes(`<span class="tc-step-tool">Edit</span><div class="tc-step-text">${input.replace(/"/g, "&#34;").replace(/</g, "&#60;").replace(/>/g, "&#62;")}</div>`), html);
+  const mcp = page({ calls: [stepCall('mcp__vercel__deploy {"project":"site"}', "production")] }).eval("tcCardHtml(tcStore.calls[0])");
+  assert.ok(mcp.includes('<span class="tc-step-tool">mcp__vercel__deploy</span>'));
+});
+
+test("a question that is not a before-irreversible step stays one plain question", () => {
+  const same = 'release: gh release create v1';
+  for (const c of [call({ situation: "in_doubt", question: same }), call({ question: "Heads up: I will release now" })]) {
+    const html = page({ calls: [c] }).eval("tcCardHtml(tcStore.calls[0])");
+    assert.ok(html.includes(`<p class="tc-question">${c.question}</p>`) && !html.includes("tc-step"), c.question);
+  }
+});
+
+test("the run page draws the same step block in its timeline", () => {
+  const p = page({ calls: [stepCall(BASH)], runs: [run()] });
+  p.eval(`tcRunShown = "r1"`);
+  const html = p.eval("tcRunPageHtml()");
+  assert.ok(html.includes('<div class="tc-event-text">Release</div><div class="tc-step" data-step><span class="tc-step-tool">Bash</span>'), html);
+});
+
+const closedCall = (cause = "its session's tab went away before it finished") => call({ answer: { by: "team-1", choice: null, text: cause, kind: { kind: "stop" }, at: at(15, 20) } });
+
+test("a call closed because its run ended says Closed: the run ended and the cause, never the team as the answerer", () => {
+  const p = page({ calls: [closedCall()], runs: [run({ state: "failed", ended_at: at(15, 20) })] });
+  p.eval(`tcStore.seen.add("c1")`);
+  const card = p.eval("tcCardHtml(tcStore.calls[0])");
+  assert.ok(card.includes('<div class="tc-result" data-state="other" role="status">Closed: the run ended · its session&#39;s tab went away before it finished</div>'), card);
+  assert.ok(!/A former member|already stopped|stopped the run/.test(text(card)), text(card));
+  p.eval(`tcRunShown = "r1"`);
+  const runHtml = text(p.eval("tcRunPageHtml()"));
+  assert.match(runHtml, /Closed, 3:20 PM Closed: the run ended · its session's tab went away before it finished/);
+  assert.ok(!/A former member/.test(runHtml));
+  const resolved = text(p.eval("tcResolvedHtml()"));
+  assert.ok(resolved.includes("Test publisher's call was closed: the run ended · its session's tab went away before it finished."), resolved);
+  assert.ok(!/A former member|stopped Test publisher/.test(resolved), resolved);
+});
+
+test("a stop by a person who is not the team is still that person's stop", () => {
+  const stopped = call({ answer: { by: "acc-ana", choice: null, text: "", kind: { kind: "stop" }, at: at(15, 20) } });
+  const p = page({ calls: [stopped], runs: [run({ state: "stopped" })] });
+  p.eval(`tcStore.seen.add("c1")`);
+  assert.ok(text(p.eval("tcCardHtml(tcStore.calls[0])")).includes("Ana Souza already stopped the run."));
 });
 
 test("the timeline keeps time order and does not repeat the question the log already holds", () => {

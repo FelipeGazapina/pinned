@@ -784,3 +784,105 @@ test("a hub that fails shows the error and Try again", async () => {
   assert.ok(text(a.page()).includes("Could not load: The hub did not answer."));
   assert.ok(a.control("reload"));
 });
+
+// ---- Skipped events, Delete, Run now busy, a call closed by its run ----------------------------------
+
+const skipRows = (html) => [...html.matchAll(/<div class="tb-row" data-skip="([^"]*)"><span>([^<]*)<\/span><span class="tb-value">([^<]*)<\/span>/g)].map((m) => [m[1], m[2], m[3]]);
+
+test("the bot page counts the skipped events per reason, in plain words", async () => {
+  const skipped = [{ reason: "off", count: 3 }, { reason: "queue_full", count: 2 }, { reason: "start_failed", count: 1 }, { reason: "never_started", count: 4 }];
+  const a = app({ answers: botAnswers({ bots: [bot({ skipped })] }) });
+  await openBot(a);
+  assert.deepEqual(skipRows(a.page()), [
+    ["off", "Arrived while the bot was off", "3"],
+    ["queue_full", "Events dropped because the line was full", "2"],
+    ["start_failed", "Did not start", "1"],
+    ["never_started", "Never started", "4"],
+  ]);
+  assert.ok(text(a.page()).includes("Events that started no run"));
+  assert.ok(text(a.page()).includes("An event that arrives while the bot is off is not picked up later."));
+});
+
+test("a skipped reason the app does not know shows as its raw name and a plain count, and nothing crashes", async () => {
+  const skipped = [{ reason: "burnt_toast", count: 7 }, { reason: "<b>x</b>", count: 1 }, { reason: "off", count: "many" }, { count: 2 }, null];
+  const a = app({ answers: botAnswers({ bots: [bot({ skipped })] }) });
+  await openBot(a);
+  assert.deepEqual(skipRows(a.page()), [
+    ["burnt_toast", "burnt_toast", "7"],
+    ["&#60;b&#62;x&#60;/b&#62;", "&#60;b&#62;x&#60;/b&#62;", "1"],
+    ["off", "Arrived while the bot was off", "many"],
+    ["", "?", "2"],
+  ]);
+  assert.ok(!a.page().includes("<b>x</b>"), "a reason is text, never markup");
+});
+
+test("a bot with nothing skipped has no such section, and an off note from the hub is shown as sent", async () => {
+  let a = app({ answers: botAnswers({ bots: [bot({ skipped: [] })] }) });
+  await openBot(a);
+  assert.ok(!a.page().includes("data-skipped"));
+  a = app({ answers: botAnswers({ bots: [bot({ on: false, off_note: "the team's Claude token stopped working, so the bot was turned off" })] }) });
+  await openBot(a);
+  assert.ok(text(a.page()).includes("the team's Claude token stopped working, so the bot was turned off"));
+});
+
+test("a draft bot can be deleted: Delete asks in place, then sends delete_bot and goes to the team's calls", async () => {
+  const a = app({ answers: botAnswers({ bots: [bot({ on: false })], delete_bot: null }) });
+  await openBot(a);
+  assert.ok(a.control("delete-ask"));
+  await a.click("delete-ask");
+  assert.ok(text(a.page()).includes("Delete Test publisher? Its past runs stay listed."));
+  await a.click("delete-keep");
+  assert.equal(a.control("delete"), null);
+  await a.click("delete-ask");
+  a.frames.length = 0;
+  await a.click("delete");
+  assert.deepEqual(a.frames, [{ op: "delete_bot", workflow: "c1" }]);
+  assert.equal(a.context.opened.at(-1), "team-calls");
+});
+
+test("an on bot has no Delete; a draft with a live run is refused and the hub's words are shown", async () => {
+  let a = app({ answers: botAnswers() });
+  await openBot(a);
+  assert.equal(a.control("delete-ask"), null, "an on bot is turned off first");
+  const refusal = "turn the bot off first";
+  a = app({ answers: botAnswers({ bots: [bot({ on: false })], delete_bot: new Error(refusal) }) });
+  await openBot(a);
+  await a.click("delete-ask");
+  await a.click("delete");
+  assert.match(a.page(), /<p class="tb-error" role="alert">turn the bot off first<\/p>/);
+  assert.ok(a.control("delete-ask"), "the person can ask again");
+  assert.notEqual(a.context.opened.at(-1), "team-calls", "the bot page stays");
+});
+
+test("only the team's owner or the bot's owner is offered Delete", async () => {
+  const draft = bot({ on: false, owner: "c3" });
+  let a = app({ team: MEMBER_TEAM, email: "bruno@acme.dev", answers: botAnswers({ bots: [draft] }) });
+  await openBot(a);
+  assert.equal(a.control("delete-ask"), null, "bruno neither owns the team nor the bot");
+  a = app({ team: MEMBER_TEAM, email: "carla@acme.dev", answers: botAnswers({ bots: [draft] }) });
+  await openBot(a);
+  assert.ok(a.control("delete-ask"), "carla owns the bot");
+});
+
+test("Run now refused as busy is a plain refusal on the page, and the button works again", async () => {
+  const busy = "the hub is busy with this right now; try again in a moment";
+  let n = 0;
+  const a = app({ answers: botAnswers({ runs: [run()], calls: [], run_now: () => (n++ === 0 ? new Error(busy) : run({ id: "r7", state: "working", ended_at: null })) }) });
+  await openBot(a);
+  a.frames.length = 0;
+  await a.click("run-now");
+  assert.deepEqual(a.frames[0], { op: "run_now", workflow: "c1" });
+  assert.match(a.page(), /<p class="tb-error" role="alert">the hub is busy with this right now; try again in a moment<\/p>/);
+  assert.deepEqual(a.control("run-now"), { disabled: false });
+  await a.click("run-now");
+  assert.equal(n, 2, "a second press goes to the hub");
+});
+
+test("the group page does not name the team as the one who stopped a run the hub closed", async () => {
+  const closed = { id: "k9", run: "r2", workflow: "c1", situation: "in_doubt", asked: [{ kind: "group", handle: "publish" }], question: "?", choices: [], created_at: NOW - 3600, escalated: false, answer: { by: "t1", choice: null, text: "its session's tab went away before it finished", kind: { kind: "stop" }, at: NOW - 600 } };
+  const a = app({ answers: groupAnswers({ calls: [closed] }) });
+  await openGroup(a);
+  const rows = [...a.page().matchAll(/<span class="tb-line" data-tone="(\w*)">([^<]*)<\/span>/g)].map((m) => m[2]);
+  assert.deepEqual(rows, ["Test publisher&#39;s call was closed: the run ended · its session&#39;s tab went away before it finished."]);
+  assert.ok(!/A former member/.test(text(a.page())));
+});
