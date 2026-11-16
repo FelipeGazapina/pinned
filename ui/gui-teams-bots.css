@@ -115,7 +115,7 @@ button.tb-listrow { cursor: pointer; }
 .tb-choice { display: flex; flex-direction: column; gap: 2px; width: 100%; min-height: 56px; padding: 10px 16px; border-radius: 12px; border: 1px solid rgb(var(--g-ink-rgb) / 0.12); background: transparent; text-align: left; cursor: pointer; }
 .tb-choice-title { font-weight: 600; }
 .tb-choice-text { color: var(--g-muted); font-size: 13px; }
-.tb-choice[aria-pressed="true"], .tb-opt[aria-pressed="true"], .tb-pill[aria-pressed="true"] { border-color: rgb(var(--g-primary-rgb) / 0.9); background: rgb(var(--g-primary-rgb) / 0.14); }
+.tb-choice[aria-pressed="true"], .tb-opt[aria-pressed="true"], .tb-pill[aria-checked="true"] { border-color: rgb(var(--g-primary-rgb) / 0.9); background: rgb(var(--g-primary-rgb) / 0.14); }
 .tb-opt[aria-pressed="true"] { color: var(--g-link); }
 @media (hover: hover) { .tb-choice:hover, .tb-opt:hover { background: var(--g-hover); } }
 .tb-field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--g-side-muted); }
@@ -124,8 +124,9 @@ button.tb-listrow { cursor: pointer; }
 .tb-field input:focus { border-color: rgb(var(--g-primary-rgb) / 0.8); box-shadow: 0 0 0 3px rgb(var(--g-primary-rgb) / 0.2); outline: 0; }
 .tb-pills { display: flex; flex-wrap: wrap; gap: 8px; }
 .tb-pill { min-height: 34px; padding: 0 14px; border-radius: 999px; border: 1px solid rgb(var(--g-ink-rgb) / 0.14); background: transparent; cursor: pointer; }
-.tb-pill:disabled { opacity: 0.55; cursor: default; }
-.tb-soon { margin-left: 6px; color: var(--g-muted); font-size: 12px; }
+.tb-sub-field { display: flex; flex-direction: column; gap: 4px; max-width: 360px; margin-top: 10px; font-size: 13px; color: var(--g-side-muted); }
+.tb-sub-field input { min-height: 36px; padding: 0 12px; border-radius: 10px; border: 1px solid rgb(var(--g-ink-rgb) / 0.14); background: var(--g-input); color: var(--g-fg); font: inherit; font-size: 14px; }
+.tb-fires { margin: 10px 0 0; font-size: 13px; color: var(--g-muted); overflow-wrap: anywhere; }
 .tb-opt { min-height: 34px; padding: 0 12px; border-radius: 8px; border: 1px solid rgb(var(--g-ink-rgb) / 0.12); background: transparent; font-weight: 500; cursor: pointer; }
 .tb-moments { display: flex; flex-direction: column; gap: 12px; }
 .tb-moment { display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; border-radius: 12px; border: 1px solid var(--g-border); background: var(--g-raised); }

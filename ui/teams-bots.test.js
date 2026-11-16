@@ -117,6 +117,11 @@ function assertAsksList(html, where) {
 
 /** The ops a page asks to draw itself. */
 const wizardAnswers = (over = {}) => ({ members: MEMBERS, groups: [PUBLISH, REVIEWERS], projects: PROJECTS, ...over });
+/** The hub's `save_bot` and `bots`: save_bot answers null, and `bots` lists the new bot (with the workflow id the hub made) only after it. */
+function saving(id = "c1700", over = {}) {
+  let made = null;
+  return { save_bot: (op) => ((made = { ...op.bot, workflow: id, name: op.connector.name }), null), bots: () => (made ? [made] : []), ...over };
+}
 
 // ---- Helpers ------------------------------------------------------------------------------------
 
@@ -178,7 +183,7 @@ test("the wizard reads the team's people, groups and projects when it opens", as
   assert.deepEqual(a.control("next"), { disabled: true }, "nothing chosen yet");
 });
 
-test("an idea fills its fixed steps, the plan says nothing was understood, and Not available yet marks what the hub cannot do", async () => {
+test("an idea fills its fixed steps, the plan says nothing was understood, and the trigger chooser offers Manual, Linear and Slack only", async () => {
   const a = app({ answers: wizardAnswers() });
   await a.open("team-bot-new");
   await a.click("idea", { idea: "publish" });
@@ -189,10 +194,73 @@ test("an idea fills its fixed steps, the plan says nothing was understood, and N
   assert.ok(t.includes("Nothing was worked out from your words"));
   const steps = [...a.page().matchAll(/data-tb-input="step" data-i="(\d)" value="([^"]*)"/g)].map((m) => m[2]);
   assert.deepEqual(steps, ["Take what entered the project since the last publish.", "Run all the tests.", "Stop and call a person before publishing.", "Publish to the test environment and tell whoever made the changes the result."]);
-  assert.match(t, /When it runs Only when someone runs it Every weekday at 3pm Not available yet When a PR is merged Not available yet/);
-  assert.equal([...a.page().matchAll(/class="tb-pill" disabled/g)].length, 2, "the schedule and event choices are disabled");
-  assert.match(a.page(), /<button type="button" class="tb-pill" aria-pressed="true">Only when someone runs it<\/button>/);
+  assert.match(t, /What starts it Only when someone runs it A Linear issue gets a label Someone mentions it in a Slack channel Nothing starts it but Run now, on its page\./);
+  const pills = [...a.page().matchAll(/class="tb-pill" role="radio" data-tb="trigger" data-kind="([a-z-]+)" aria-checked="(true|false)"/g)].map((m) => [m[1], m[2]]);
+  assert.deepEqual(pills, [["manual", "true"], ["linear-label", "false"], ["slack-mention", "false"]]);
+  assert.ok(!/schedule|every weekday|GitHub|routing|decide|Not available yet/i.test(t), "no scheduled, GitHub-event or routing trigger is offered");
   assert.ok(t.includes("Run once, then discard"));
+});
+
+test("a Linear or Slack trigger asks for its label or channel, says what fires the bot and that events while it is off are lost, and is saved as that trigger", async () => {
+  const a = app({ answers: wizardAnswers(saving()) });
+  await a.open("team-bot-new");
+  await a.click("idea", { idea: "review" });
+  await a.click("next");
+  await a.click("trigger", { kind: "linear-label" });
+  assert.deepEqual(a.control("next"), { disabled: true }, "a Linear trigger needs its label");
+  assert.ok(a.page().includes('data-tb-input="label"'));
+  await a.input("label", "bot-review");
+  await a.click("trigger", { kind: "linear-label" });
+  assert.deepEqual(a.control("next"), { disabled: false });
+  await a.click("trigger", { kind: "slack-mention" });
+  assert.ok(a.page().includes('data-tb-input="channel"') && !a.page().includes('data-tb-input="label"'));
+  assert.deepEqual(a.control("next"), { disabled: true }, "a Slack trigger needs its channel");
+  await a.input("channel", "#releases");
+  await a.click("trigger", { kind: "linear-label" });
+  const t = text(a.page());
+  assert.ok(t.includes("A run starts for each new Linear issue that gets the label “bot-review”. Events that arrive while the bot is off are not picked up later."), t);
+  await a.click("trigger", { kind: "slack-mention" });
+  assert.ok(text(a.page()).includes("A run starts each time someone mentions the bot in #releases. Events that arrive while the bot is off are not picked up later."));
+  assert.ok(text(a.page()).includes("The team's Slack is not connected yet, so this starts nothing until the owner connects it."), "OWNER_TEAM has no Slack");
+  await a.click("next");
+  await a.click("next");
+  await a.click("project", { key: "github.com/acme/site" });
+  a.frames.length = 0;
+  await a.click("next");
+  const saved = a.frames.find((f) => f.op === "save_bot");
+  assert.deepEqual(saved.connector.trigger, { kind: "slack-mention", channel: "#releases" });
+  assert.deepEqual(saved.connector.graph.nodes[0], { id: "trigger-1", name: "Trigger", position: [0, 0], type: "trigger", watch: { kind: "slack-mention", channel: "#releases" } });
+});
+
+test("a team whose Slack is connected is not warned, and a Linear trigger is saved with its label", async () => {
+  const a = app({ team: { ...OWNER_TEAM, credential: { ...OWNER_TEAM.credential, slack: true } }, answers: wizardAnswers(saving()) });
+  await a.open("team-bot-new");
+  await a.click("idea", { idea: "weekly" });
+  await a.click("next");
+  await a.click("trigger", { kind: "slack-mention" });
+  assert.ok(!text(a.page()).includes("Slack is not connected"));
+  await a.click("trigger", { kind: "linear-label" });
+  await a.input("label", "  weekly  ");
+  await a.click("next");
+  await a.click("next");
+  await a.click("project", { key: "github.com/acme/site" });
+  a.frames.length = 0;
+  await a.click("next");
+  const saved = a.frames.find((f) => f.op === "save_bot");
+  assert.deepEqual(saved.connector.trigger, { kind: "linear-label", label: "weekly" });
+});
+
+test("a routing trigger is never offered; if the hub refuses one anyway, its words are shown as sent", async () => {
+  const refusal = "a team bot can't use a routing trigger yet";
+  const a = app({ answers: wizardAnswers({ bots: [], save_bot: new Error(refusal) }) });
+  await a.open("team-bot-new");
+  await a.click("idea", { idea: "weekly" });
+  for (let i = 0; i < 3; i++) await a.click("next");
+  await a.click("project", { key: "github.com/acme/site" });
+  await a.click("next");
+  assert.ok(text(a.page()).includes(`Could not create the bot: ${refusal}`), text(a.page()));
+  assert.deepEqual(a.control("next"), { disabled: false }, "the person can try again");
+  assert.equal(a.read("TB_TEXT.wiz.triggers.map((x) => x.kind).join()"), "manual,linear-label,slack-mention");
 });
 
 test("a description of the person's own becomes one editable step, not a plan", async () => {
@@ -206,15 +274,15 @@ test("a description of the person's own becomes one editable step, not a plan", 
   assert.ok(!t.includes("Nothing was worked out"), "no claim of having understood anything");
   assert.deepEqual([...a.page().matchAll(/data-tb-input="step" data-i="(\d)" value="([^"]*)"/g)].map((m) => m[2]), ["whenever a PR is open, check that it has tests"]);
   assert.ok(a.page().includes('data-tb-input="name" value="whenever a PR is open, check"'));
-  assert.match(text(a.page()), /On a schedule Not available yet When something happens on GitHub Not available yet/);
+  assert.match(text(a.page()), /What starts it Only when someone runs it A Linear issue gets a label Someone mentions it in a Slack channel/);
   await a.click("add-step");
   await a.input("step", "Say so in the PR.", { i: "1" });
   await a.click("remove-step", { i: "0" });
   assert.deepEqual([...a.page().matchAll(/data-tb-input="step" data-i="(\d)" value="([^"]*)"/g)].map((m) => m[2]), ["Say so in the PR."]);
 });
 
-test("creating a bot saves the workflow in the team's store through hub, then the bot, as a draft", async () => {
-  const a = app({ answers: wizardAnswers({ "hub:save_connector": { id: "c1700", name: "Test publisher" }, save_bot: null }) });
+test("creating a bot sends one save_bot with the workflow as its connector, as a draft", async () => {
+  const a = app({ answers: wizardAnswers(saving()) });
   await a.open("team-bot-new");
   await a.click("idea", { idea: "publish" });
   await a.click("next");
@@ -238,51 +306,11 @@ test("creating a bot saves the workflow in the team's store through hub, then th
   a.frames.length = 0;
   await a.click("next");
   assert.deepEqual(a.frames, [
-    {
-      op: "hub",
-      call: {
-        cmd: "save_connector",
-        connector: {
-          id: "",
-          name: "Test publisher",
-          enabled: false,
-          trigger: { kind: "linear-label", label: "pinned-run-now-only" },
-          folder: "",
-          repo: "github.com/acme/orders-api",
-          model: "opus",
-          effort: "high",
-          permissionMode: "auto",
-          worktree: false,
-          proof: false,
-          instructions: "",
-          graph: {
-            nodes: [
-              { id: "trigger-1", name: "Trigger", position: [0, 0], type: "trigger", watch: { kind: "linear-label", label: "pinned-run-now-only" } },
-              {
-                id: "session-1",
-                name: "Run session",
-                position: [230, 0],
-                type: "session",
-                prompt: "1. Take what entered the project since the last publish.\n2. Run all the tests.\n3. Stop and call a person before publishing.\n4. Publish to the test environment and tell whoever made the changes the result.",
-                folder: "",
-                repo: "github.com/acme/orders-api",
-                model: "",
-                effort: "",
-                permission: "",
-                account: "",
-                worktree: false,
-                instructions: "",
-              },
-            ],
-            edges: [{ from: "trigger-1", port: "out", to: "session-1" }],
-          },
-        },
-      },
-    },
+    { op: "bots" },
     {
       op: "save_bot",
       bot: {
-        workflow: "c1700",
+        workflow: "",
         name: "Test publisher",
         owner: null,
         calls: { before_irreversible: { kind: "group", handle: "publish" }, in_doubt: { kind: "group", handle: "reviewers" }, on_limit: { kind: "person", account: "b2" }, on_failure: { kind: "person", account: "b2" } },
@@ -291,15 +319,52 @@ test("creating a bot saves the workflow in the team's store through hub, then th
         on_by: null,
         once: true,
       },
+      connector: {
+        id: "",
+        name: "Test publisher",
+        enabled: false,
+        trigger: { kind: "manual" },
+        folder: "",
+        repo: "github.com/acme/orders-api",
+        model: "opus",
+        effort: "high",
+        permissionMode: "auto",
+        worktree: false,
+        proof: false,
+        instructions: "",
+        graph: {
+          nodes: [
+            { id: "trigger-1", name: "Trigger", position: [0, 0], type: "trigger", watch: { kind: "manual" } },
+            {
+              id: "session-1",
+              name: "Run session",
+              position: [230, 0],
+              type: "session",
+              prompt: "1. Take what entered the project since the last publish.\n2. Run all the tests.\n3. Stop and call a person before publishing.\n4. Publish to the test environment and tell whoever made the changes the result.",
+              folder: "",
+              repo: "github.com/acme/orders-api",
+              model: "",
+              effort: "",
+              permission: "",
+              account: "",
+              worktree: false,
+              instructions: "",
+            },
+          ],
+          edges: [{ from: "trigger-1", port: "out", to: "session-1" }],
+        },
+      },
     },
+    { op: "bots" },
   ]);
   t = text(a.page());
   assert.ok(t.includes("Test publisher is ready, as a draft"), t);
+  assert.equal(a.read("tbWiz.workflow"), "c1700", "the id is the one the hub listed after the save");
 });
 
-test("a failed save of the bot keeps the workflow, so trying again updates it instead of making another", async () => {
+test("a refused save_bot saves nothing, says why, and trying again sends the same save with no workflow id", async () => {
   let fail = true;
-  const a = app({ answers: wizardAnswers({ "hub:save_connector": (op) => ({ id: op.call.connector.id || "c9", name: "x" }), save_bot: () => (fail ? new Error("this team has no group @publish") : null) }) });
+  const a = app({ answers: wizardAnswers(saving("c9", { save_bot: (op) => (fail ? new Error("this team has no group @publish") : saving("c9").save_bot(op)) })) });
   await a.open("team-bot-new");
   await a.click("idea", { idea: "weekly" });
   for (let i = 0; i < 3; i++) await a.click("next");
@@ -309,14 +374,15 @@ test("a failed save of the bot keeps the workflow, so trying again updates it in
   fail = false;
   a.frames.length = 0;
   await a.click("next");
-  assert.equal(a.frames[0].call.connector.id, "c9");
-  assert.equal(a.frames[1].op, "save_bot");
-  assert.ok(text(a.page()).includes("Weekly summary is ready, as a draft"));
+  const sent = a.frames.filter((f) => f.op === "save_bot");
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].connector.id, "");
+  assert.equal(sent[0].bot.workflow, "");
 });
 
 test("the done screen turns the bot on only when the person may", async () => {
   const done = async (team, who, email) => {
-    const a = app({ team, email, answers: wizardAnswers({ "hub:save_connector": { id: "c1" }, save_bot: null, turn_bot_on: null }) });
+    const a = app({ team, email, answers: wizardAnswers(saving("c1", { turn_bot_on: null })) });
     await a.open("team-bot-new");
     await a.click("idea", { idea: "review" });
     await a.click("next");
@@ -354,7 +420,7 @@ test("the done screen turns the bot on only when the person may", async () => {
 });
 
 test("seeing the bot's page opens it by the workflow's id", async () => {
-  const a = app({ answers: { ...wizardAnswers({ "hub:save_connector": { id: "c1" }, save_bot: null }), bots: [bot()], runs: [], calls: [], "hub:get_settings": { connectors: [workflow()] } } });
+  const a = app({ answers: { ...wizardAnswers(saving("c1", { bots: ((n) => () => (n++ < 1 ? [] : [bot()]))(0) })), runs: [], calls: [], "hub:get_settings": { connectors: [workflow()] } } });
   await a.open("team-bot-new");
   await a.click("idea", { idea: "review" });
   await a.click("next");

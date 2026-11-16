@@ -51,6 +51,7 @@ function tcNavHtml(team, page) {
     ${calls}
     <div class="tc-section"><div class="tc-head">Bots</div>${bots}${row("team-bot-new", `<span class="label">Create a bot</span>`, { attrs: ' data-create="true"' })}</div>
     <div class="tc-section"><div class="tc-head">Groups</div>${groups}</div>
+    ${me.owner && tcNavOpens("team-invites") ? `<div class="tc-section"><div class="tc-head">People</div>${row("team-invites", `<span class="label">Invite people</span>`)}</div>` : ""}
     <div class="tc-section tc-projects"><div class="tc-head">Projects</div>${tcStore.projects.map(tcProjectHtml).join("") || `<div class="tc-none">${tcStore.loaded ? "No projects in the team yet." : "Loading…"}</div>`}</div>
     <div class="tc-me"><span class="tc-mark tc-person" style="--tc-hue:${tcHue(me.account || me.name)}" aria-hidden="true">${esc(tcInitials(me.name))}</span><span class="tc-me-name">${esc(me.name)}</span></div>`;
 }

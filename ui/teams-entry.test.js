@@ -625,3 +625,115 @@ test("the script loads before the project catalog is ready, and the pages read t
   a.run("renderCreate()");
   assert.match(a.page(), /data-key="github.com\/acme\/storefront"/);
 });
+
+// ---- Invites (owner only) -----------------------------------------------------------------------
+
+const OWNER_STORED = { id: "t1", name: "North Studio", role: "owner", credential: {} };
+const MEMBER_STORED = { id: "t2", name: "Side Gig", role: "member", credential: {} };
+const submit = (a, tm) => a.listeners.submit({ target: { closest: () => ({ dataset: { tm } }) }, preventDefault() {} });
+
+test("the invites page says a code works once and never that it expires", () => {
+  const a = app({ stored: OWNER_STORED, pages: ["team-invites"] });
+  a.show("team-invites");
+  const t = text(a.page());
+  assert.ok(t.includes("A code works once. It stays open until the person uses it or you revoke it."), t);
+  assert.ok(!/expir|valid for|days|hours/i.test(t), "there is no expiry");
+  assert.ok(t.includes("the hub sends no e-mail"), t);
+});
+
+test("an invite is one invite op; its code is shown once and the open list keeps only its first characters", async () => {
+  let n = 0;
+  const a = app({ stored: OWNER_STORED, pages: ["team-invites"], answers: { invite: () => ({ code: ["ABCD-EFGH-JKMN-PQRS", "WXYZ-2345-6789-KMNP"][n++], hint: ["ABCD", "WXYZ"][n - 1] }) } });
+  a.show("team-invites");
+  assert.ok(text(a.page()).includes("No open invites made on this device."));
+  a.click("invite-make", {}, "team-invites");
+  await flush();
+  assert.deepEqual(a.frames, [{ cmd: "team", team: "t1", op: { op: "invite" } }]);
+  let t = text(a.page());
+  assert.ok(t.includes("ABCD-EFGH-JKMN-PQRS"), "the code is shown now");
+  assert.ok(t.includes("Shown only now"), t);
+  assert.ok(t.includes("ABCD…"), "and the open list names it by its first characters");
+  a.click("invite-make", {}, "team-invites");
+  await flush();
+  t = text(a.page());
+  assert.ok(!t.includes("ABCD-EFGH-JKMN-PQRS"), "the first code is gone once a second is made");
+  assert.ok(t.includes("WXYZ-2345-6789-KMNP") && t.includes("ABCD…") && t.includes("WXYZ…"), t);
+  assert.deepEqual(JSON.parse(a.store.get("team-invites:t1")).map((x) => x.hint), ["ABCD", "WXYZ"]);
+  assert.ok(!a.store.get("team-invites:t1").includes("EFGH"), "a code is never kept");
+});
+
+test("Revoke sends revoke_invite with the hint and takes the invite off the list", async () => {
+  const a = app({ stored: OWNER_STORED, pages: ["team-invites"], answers: { invite: { code: "ABCD-EFGH-JKMN-PQRS", hint: "ABCD" }, revoke_invite: null } });
+  a.show("team-invites");
+  a.click("invite-make", {}, "team-invites");
+  await flush();
+  a.frames.length = 0;
+  a.click("invite-revoke", { hint: "ABCD" }, "team-invites");
+  await flush();
+  assert.deepEqual(a.frames, [{ cmd: "team", team: "t1", op: { op: "revoke_invite", hint: "ABCD" } }]);
+  const t = text(a.page());
+  assert.ok(t.includes("Revoked ABCD…") && t.includes("No open invites made on this device."), t);
+  assert.ok(!t.includes("ABCD-EFGH-JKMN-PQRS"), "the code it showed is gone too");
+  assert.equal(a.store.has("team-invites:t1"), false);
+});
+
+test("an invite made elsewhere is revoked by typing its first characters", async () => {
+  const a = app({ stored: OWNER_STORED, pages: ["team-invites"], answers: { revoke_invite: (c) => (c.op.hint.toUpperCase() === "K7QM" ? null : new Error("there is no unused invite with that hint")) } });
+  a.show("team-invites");
+  a.listeners.input({ target: { id: "tm-invite-hint", value: "k7qm" } });
+  submit(a, "invite-form");
+  await flush();
+  assert.deepEqual(a.frames, [{ cmd: "team", team: "t1", op: { op: "revoke_invite", hint: "k7qm" } }]);
+  assert.ok(text(a.page()).includes("Revoked K7QM…"));
+  a.frames.length = 0;
+  a.listeners.input({ target: { id: "tm-invite-hint", value: "ZZZZ" } });
+  submit(a, "invite-form");
+  await flush();
+  assert.ok(text(a.page()).includes("there is no unused invite with that hint"), "the hub's words, as sent");
+  a.listeners.input({ target: { id: "tm-invite-hint", value: "" } });
+  a.frames.length = 0;
+  submit(a, "invite-form");
+  await flush();
+  assert.deepEqual(a.frames, [], "an empty hint sends nothing");
+  assert.ok(text(a.page()).includes("Type the first characters of the code."));
+});
+
+test("at 20 open invites the hub's refusal is shown as it was sent", async () => {
+  const refusal = "this team has 20 open invite codes; revoke some first";
+  const a = app({ stored: OWNER_STORED, pages: ["team-invites"], answers: { invite: new Error(refusal) } });
+  a.show("team-invites");
+  a.click("invite-make", {}, "team-invites");
+  await flush();
+  assert.ok(text(a.page()).includes(refusal), text(a.page()));
+  assert.match(a.page(), /<p class="tm-error" role="alert">this team has 20 open invite codes; revoke some first<\/p>/);
+  assert.equal(a.store.has("team-invites:t1"), false, "nothing was made, nothing is kept");
+});
+
+test("a member is told that only the owner makes invites, and sees no controls", async () => {
+  const a = app({ stored: MEMBER_STORED, pages: ["team-invites"] });
+  a.show("team-invites");
+  assert.ok(text(a.page()).includes("Only the team's owner makes invite codes."));
+  assert.ok(!a.page().includes('data-tm="invite-make"'));
+  a.click("invite-make", {}, "team-invites");
+  await flush();
+  assert.deepEqual(a.frames, [], "no invite op leaves a member's page");
+});
+
+test("an invite made in the create wizard lands on the owner's open list", async () => {
+  const a = app({ answers: { create: ACME, invite: { code: "ABCD-EFGH-JKMN-PQRS", hint: "ABCD" } } });
+  a.show("team-create");
+  a.run('teamWizard.team = { id: "t1", name: "North Studio" }; teamWizard.step = 4; renderCreate()');
+  a.click("invite");
+  await flush();
+  assert.deepEqual(JSON.parse(a.store.get("team-invites:t1")).map((x) => x.hint), ["ABCD"]);
+});
+
+test("the create wizard no longer promises a team chat", () => {
+  const a = app();
+  a.show("team-create");
+  const t = text(a.page());
+  assert.ok(t.includes("Bots that do the repeated work on their own"), t);
+  assert.ok(t.includes("Groups of people the bots call when they need a yes or an answer."), t);
+  assert.ok(!/chat/i.test(t), "chat is not in 0.18.6");
+  assert.ok(!/chat/i.test(a.run("JSON.stringify(TEAMS_TEXT.nameHas)")));
+});

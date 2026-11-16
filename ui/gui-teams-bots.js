@@ -39,6 +39,7 @@ const TB_TEXT = {
     needKeys: "The team needs its Upstash key and Claude token before a bot can run. The owner connects them in the team's settings.",
     does: "What it does",
     doesManual: "What it does, only when someone runs it",
+    doesOn: (when) => `What it does, ${when}`,
     noSteps: "This bot has no steps written in its workflow.",
     calls: "Who it calls",
     moments: {
@@ -124,15 +125,22 @@ const TB_TEXT = {
     removeStep: (n) => `Remove step ${n}`,
     addStep: "Add a step",
     noSteps: "Add at least one step.",
-    when: "When it runs",
-    manual: "Only when someone runs it",
-    notYet: "Not available yet",
-    whens: {
-      review: ["When a PR opens", "Every day at 9am"],
-      publish: ["Every weekday at 3pm", "When a PR is merged"],
-      weekly: ["Every Friday at 4pm", "Every day at 6pm"],
-      own: ["On a schedule", "When something happens on GitHub"],
+    when: "What starts it",
+    triggers: [
+      { kind: "manual", label: "Only when someone runs it" },
+      { kind: "linear-label", label: "A Linear issue gets a label" },
+      { kind: "slack-mention", label: "Someone mentions it in a Slack channel" },
+    ],
+    labelField: "Linear label",
+    labelPlaceholder: "E.g. bot-review",
+    channelField: "Slack channel",
+    channelPlaceholder: "E.g. #releases",
+    fires: {
+      manual: "Nothing starts it but Run now, on its page.",
+      "linear-label": (label) => `A run starts for each new Linear issue that gets the label “${label || "…"}”. Events that arrive while the bot is off are not picked up later.`,
+      "slack-mention": (channel) => `A run starts each time someone mentions the bot in ${channel || "the channel"}. Events that arrive while the bot is off are not picked up later.`,
     },
+    slackOff: "The team's Slack is not connected yet, so this starts nothing until the owner connects it.",
     once: "Run once, then discard",
     onceAbout: "When its first run ends, the bot and its workflow are deleted.",
     s3Title: "Who stays nearby?",
@@ -153,7 +161,7 @@ const TB_TEXT = {
     doneDraft: (name) => `${name} is ready, as a draft`,
     doneOn: (name) => `${name} is on`,
     doneDraftText: (why) => `It is not running yet. ${why}`,
-    doneOnText: (who) => `It runs when someone runs it, from its page. When it needs a person, it calls ${who}.`,
+    doneOnText: (who, when) => `It runs ${when || "when someone runs it, from its page"}. When it needs a person, it calls ${who}.`,
     mayTurnOn: (why) => `${why}, so you can turn it on now.`,
     youOwner: "You are the team's owner",
     youIn: (handle) => `You are in @${handle}`,
@@ -193,8 +201,7 @@ const tbAsksHtml = () =>
 
 /** The hub's `TeamPolicy::default()`, which is not on the wire: the numbers a call and a new bot start from. */
 const TB_POLICY = { escalateSecs: 1800, giveUpSecs: 7200, usd: 5, minutes: 30 };
-/** The trigger of a bot made here. It never fires on its own: a team with no Linear key scans nothing and nobody
- * puts this label on an issue, so the bot runs only through Run now. */
+/** The label bots made before the hub had a manual trigger carry: nobody puts it on an issue, so they run only through Run now. */
 const TB_MANUAL_LABEL = "pinned-run-now-only";
 const TB_DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 const TB_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -322,16 +329,38 @@ function tbCallStep(text) {
   return "before_irreversible";
 }
 
+/** "when a Linear issue gets “x”" or "when someone mentions it in #c" for a workflow's trigger; "" for a trigger the page does not name. */
+function tbTriggerHeading(trigger) {
+  if (trigger?.kind === "linear-label" && trigger.label && trigger.label !== TB_MANUAL_LABEL) return `when a Linear issue gets “${trigger.label}”`;
+  if (trigger?.kind === "slack-mention" && trigger.channel) return `when someone mentions it in ${trigger.channel}`;
+  return "";
+}
+
 /** The numbered steps a bot's workflow is saved with. */
 const tbPromptOf = (steps) => steps.map((s, i) => `${i + 1}. ${s.trim()}`).join("\n");
 
-/** The connector the hub stores for a bot made here: one Session step, and a trigger that fires only through Run now. */
-function tbConnector({ id = "", name, steps, repo }) {
+/** The trigger a bot made here has, as the hub's `Trigger` reads it: Run now only, a Linear label, or a mention in a Slack channel.
+ * A routing trigger (`slack-message`, which sorts every message) is never offered: the hub refuses it on a team. */
+function tbTrigger({ trigger = "manual", label = "", channel = "" } = {}) {
+  if (trigger === "linear-label") return { kind: "linear-label", label: String(label).trim() };
+  if (trigger === "slack-mention") return { kind: "slack-mention", channel: String(channel).trim() };
+  return { kind: "manual" };
+}
+/** The line that says what starts the bot, from the chosen trigger. */
+const tbFires = (s) => {
+  const f = TB_TEXT.wiz.fires;
+  return s.trigger === "linear-label" ? f["linear-label"](s.label.trim()) : s.trigger === "slack-mention" ? f["slack-mention"](s.channel.trim()) : f.manual;
+};
+const tbTriggerOk = (s) => (s.trigger === "linear-label" ? !!s.label.trim() : s.trigger === "slack-mention" ? !!s.channel.trim() : true);
+
+/** The workflow the hub stores for a bot made here, as `save_bot`'s `connector`: one Session step and the chosen trigger. A new one has an empty id. */
+function tbConnector({ id = "", name, steps, repo, trigger }) {
+  const watch = tbTrigger(trigger);
   return {
     id,
     name,
     enabled: false,
-    trigger: { kind: "linear-label", label: TB_MANUAL_LABEL },
+    trigger: watch,
     folder: "",
     repo,
     model: "opus",
@@ -342,14 +371,13 @@ function tbConnector({ id = "", name, steps, repo }) {
     instructions: "",
     graph: {
       nodes: [
-        { id: "trigger-1", name: "Trigger", position: [0, 0], type: "trigger", watch: { kind: "linear-label", label: TB_MANUAL_LABEL } },
+        { id: "trigger-1", name: "Trigger", position: [0, 0], type: "trigger", watch },
         { id: "session-1", name: "Run session", position: [230, 0], type: "session", prompt: tbPromptOf(steps), folder: "", repo, model: "", effort: "", permission: "", account: "", worktree: false, instructions: "" },
       ],
       edges: [{ from: "trigger-1", port: "out", to: "session-1" }],
     },
   };
 }
-const tbSaveConnectorOp = (connector) => ({ op: "hub", call: { cmd: "save_connector", connector } });
 
 /** The `Bot` a wizard saves: draft, owner left to the hub. */
 const tbBotOf = ({ workflow, name, who, once }) => ({
@@ -523,7 +551,8 @@ function tbBotHtml(ui, team) {
     : tbButton(`data-tb="toggle" aria-pressed="false"`, ui.busy === "toggle" ? t.switching : t.turnOn, "secondary", ui.busy === "toggle" || !may);
 
   const steps = tbStepsOf(tbWorkflowPrompt(workflow));
-  const manual = workflow?.trigger?.kind === "linear-label" && workflow.trigger.label === TB_MANUAL_LABEL;
+  const manual = workflow?.trigger?.kind === "manual" || (workflow?.trigger?.kind === "linear-label" && workflow.trigger.label === TB_MANUAL_LABEL);
+  const firesOn = tbTriggerHeading(workflow?.trigger);
   const stepRows = steps.map((s, i) => {
     const moment = tbCallStep(s);
     const num = `<span class="tb-n">${i + 1}</span>`;
@@ -556,7 +585,7 @@ function tbBotHtml(ui, team) {
       <div class="tb-actions">${runBtn}${toggle}</div>
     </div>
     ${tbError(ui.error && ui.state === "ready" ? ui.error : "")}${notice}${needKeys && !bot.on ? `<p class="tb-note">${tbEsc(t.needKeys)}</p>` : ""}
-    <section class="tb-section"><h2>${tbEsc(manual ? t.doesManual : t.does)}</h2>${stepRows.length ? `<ol class="tb-steps">${stepRows.join("")}</ol>` : `<p class="tb-hint">${tbEsc(t.noSteps)}</p>`}</section>
+    <section class="tb-section"><h2>${tbEsc(manual ? t.doesManual : firesOn ? t.doesOn(firesOn) : t.does)}</h2>${stepRows.length ? `<ol class="tb-steps">${stepRows.join("")}</ol>` : `<p class="tb-hint">${tbEsc(t.noSteps)}</p>`}</section>
     <section class="tb-section"><h2>${tbEsc(t.calls)}</h2><div class="tb-card">${moments.map(moment).join("")}</div><p class="tb-foot">${tbEsc(t.callsNote)}</p></section>
     <section class="tb-section tb-guard"><h2>${tbEsc(t.asks)}</h2>${tbAsksHtml()}</section>
     <section class="tb-section"><h2>${tbEsc(t.runs)}</h2>${runRows.length ? `<div class="tb-list">${runRows.join("")}</div>` : `<p class="tb-hint">${tbEsc(t.noRuns)}</p>`}</section>`;
@@ -773,6 +802,9 @@ function tbWizReset() {
     name: "",
     steps: [],
     once: false,
+    trigger: "manual",
+    label: "",
+    channel: "",
     who: { before: { kind: "owner" }, doubt: { kind: "owner" }, limit: { kind: "owner" } },
     project: "",
     data: null,
@@ -801,7 +833,7 @@ function tbNameFrom(text) {
 const tbWizReady = () => {
   const s = tbWiz;
   if (s.step === 1) return !!s.idea || !!s.desc.trim();
-  if (s.step === 2) return s.steps.some((x) => x.trim()) && !!s.name.trim();
+  if (s.step === 2) return s.steps.some((x) => x.trim()) && !!s.name.trim() && tbTriggerOk(s);
   if (s.step === 4) return !s.data?.projects.length || !!s.project;
   return true;
 };
@@ -841,15 +873,17 @@ function tbWizHtml(team) {
       <div class="tb-field"><label for="tb-desc">${tbEsc(w.own)}</label><input id="tb-desc" type="text" data-tb-input="desc" value="${tbEsc(s.desc)}" placeholder="${tbEsc(w.ownPlaceholder)}" autocomplete="off"></div>`;
   } else if (s.step === 2) {
     const own = !s.idea;
-    const whens = w.whens[s.idea ?? "own"];
     body = `${kicker(2)}<h1>${tbEsc(w.s2Title)}</h1><p class="tb-lede">${tbEsc(own ? w.s2AboutOwn : w.s2About)}</p>
       <div class="tb-field"><label for="tb-name">${tbEsc(w.nameLabel)}</label><input id="tb-name" type="text" data-tb-input="name" value="${tbEsc(s.name)}" autocomplete="off"></div>
       <ol class="tb-steps editable">${s.steps.map((text, i) => `<li class="tb-step edit"><span class="tb-n">${i + 1}</span><input type="text" class="tb-step-input" data-tb-input="step" data-i="${i}" value="${tbEsc(text)}" aria-label="${tbEsc(w.stepLabel(i + 1))}" placeholder="${tbEsc(w.stepPlaceholder)}" autocomplete="off"><button type="button" class="tb-x" data-tb="remove-step" data-i="${i}" aria-label="${tbEsc(w.removeStep(i + 1))}" title="${tbEsc(w.removeStep(i + 1))}">×</button></li>`).join("")}</ol>
       ${s.steps.some((x) => x.trim()) ? "" : `<p class="tb-hint">${tbEsc(w.noSteps)}</p>`}
       <div class="tb-actions">${tbButton('data-tb="add-step"', w.addStep, "quiet")}</div>
-      <div class="tb-field"><div class="tb-label">${tbEsc(w.when)}</div><div class="tb-pills">
-        <button type="button" class="tb-pill" aria-pressed="true">${tbEsc(w.manual)}</button>
-        ${whens.map((x) => `<button type="button" class="tb-pill" disabled aria-pressed="false">${tbEsc(x)} <span class="tb-soon">${tbEsc(w.notYet)}</span></button>`).join("")}</div></div>
+      <div class="tb-field"><div class="tb-label" id="tb-when">${tbEsc(w.when)}</div><div class="tb-pills" role="radiogroup" aria-labelledby="tb-when">
+        ${w.triggers.map((x) => `<button type="button" class="tb-pill" role="radio" data-tb="trigger" data-kind="${x.kind}" aria-checked="${s.trigger === x.kind}">${tbEsc(x.label)}</button>`).join("")}</div>
+        ${s.trigger === "linear-label" ? `<label class="tb-sub-field" for="tb-label-in"><span>${tbEsc(w.labelField)}</span><input id="tb-label-in" type="text" data-tb-input="label" value="${tbEsc(s.label)}" placeholder="${tbEsc(w.labelPlaceholder)}" autocomplete="off"></label>` : ""}
+        ${s.trigger === "slack-mention" ? `<label class="tb-sub-field" for="tb-channel-in"><span>${tbEsc(w.channelField)}</span><input id="tb-channel-in" type="text" data-tb-input="channel" value="${tbEsc(s.channel)}" placeholder="${tbEsc(w.channelPlaceholder)}" autocomplete="off"></label>` : ""}
+        <p class="tb-fires" data-fires>${tbEsc(tbFires(s))}</p>
+        ${s.trigger === "slack-mention" && team.credential && !team.credential.slack ? `<p class="tb-note">${tbEsc(w.slackOff)}</p>` : ""}</div>
       <button type="button" class="tb-check" role="checkbox" aria-checked="${s.once}" data-tb="once"><span class="tb-box" aria-hidden="true"></span><span class="tb-texts"><span class="tb-name">${tbEsc(w.once)}</span><span class="tb-about">${tbEsc(w.onceAbout)}</span></span></button>`;
   } else if (s.step === 3) {
     const options = tbOptions(s.data);
@@ -870,7 +904,7 @@ function tbWizHtml(team) {
     const name = s.saved?.name ?? s.name;
     const turn = tbWizTurnOn(s.saved?.calls ?? calls, s.data, team.role);
     const title = s.on ? w.doneOn(name) : w.doneDraft(name);
-    const text = s.on ? w.doneOnText(tbWhoText(s.who.before, s.data.members)) : w.doneDraftText(turn.may ? w.mayTurnOn(turn.why) : w.ask(turn.ask));
+    const text = s.on ? w.doneOnText(tbWhoText(s.who.before, s.data.members), tbTriggerHeading(tbTrigger(s))) : w.doneDraftText(turn.may ? w.mayTurnOn(turn.why) : w.ask(turn.ask));
     body = `${tbMono(name, "huge")}<h1>${tbEsc(title)}</h1><p class="tb-lede big">${tbEsc(text)}</p>${tbError(s.error)}
       <div class="tb-actions">${!s.on && turn.may ? tbButton('data-tb="turn-on"', s.busy ? TB_TEXT.bot.switching : w.turnOn, "primary", s.busy) : ""}<button type="button" class="tb-link" data-tb="see-bot">${tbEsc(w.seePage)}</button></div>`;
   }
@@ -905,26 +939,26 @@ async function tbWizLoad() {
   tbWizDraw();
 }
 
-/** Saves the workflow in the team's store, then the bot that goes with it. The workflow's id is kept, so a retry updates it. */
+/** Saves the bot and its workflow in one `save_bot`: the workflow goes in `connector`, new when its id is empty, and the bot is a draft.
+ * `save_bot` answers nothing, so the new bot's workflow id is the one `bots` lists after the save and not before. */
 async function tbWizCreate() {
   const s = tbWiz;
   const steps = s.steps.map((x) => x.trim()).filter(Boolean);
   const project = s.data.projects.find((p) => p.key === s.project);
+  const name = s.name.trim();
   s.busy = true;
   s.error = "";
   tbWizDraw();
   try {
-    // adapts to SaveBot.connector
-    if (!s.workflow) {
-      const saved = await tbCall(tbSaveConnectorOp(tbConnector({ name: s.name.trim(), steps, repo: project?.repo ?? "" })));
-      s.workflow = String(saved?.id ?? "");
-      if (!s.workflow) throw "the hub did not name the workflow";
-    } else {
-      await tbCall(tbSaveConnectorOp(tbConnector({ id: s.workflow, name: s.name.trim(), steps, repo: project?.repo ?? "" })));
-    }
-    const bot = tbBotOf({ workflow: s.workflow, name: s.name.trim(), who: s.who, once: s.once });
-    await tbCall({ op: "save_bot", bot });
-    s.saved = bot;
+    const list = (v) => (Array.isArray(v) ? v : []);
+    const before = new Set(list(await tbCall({ op: "bots" })).map((b) => b.workflow));
+    const connector = tbConnector({ name, steps, repo: project?.repo ?? "", trigger: s });
+    const bot = tbBotOf({ workflow: "", name, who: s.who, once: s.once });
+    const reply = await tbCall({ op: "save_bot", bot, connector });
+    const fresh = list(await tbCall({ op: "bots" })).filter((b) => !before.has(b.workflow));
+    s.workflow = String(reply?.workflow ?? reply?.id ?? (fresh.find((b) => b.name === name) ?? fresh[0])?.workflow ?? "");
+    if (!s.workflow) throw "the bot was saved, but the hub did not list it";
+    s.saved = { ...bot, workflow: s.workflow };
     s.step = 5;
     s.on = false;
   } catch (e) {
@@ -971,6 +1005,12 @@ const TB_WIZ_ACTS = {
   },
   once() {
     tbWiz.once = !tbWiz.once;
+    tbWizDraw();
+  },
+  trigger(b) {
+    if (!TB_TEXT.wiz.triggers.some((x) => x.kind === b.dataset.kind)) return;
+    tbWiz.trigger = b.dataset.kind;
+    tbWiz.focus = b.dataset.kind === "linear-label" ? "#tb-label-in" : b.dataset.kind === "slack-mention" ? "#tb-channel-in" : null;
     tbWizDraw();
   },
   who(b) {
@@ -1028,6 +1068,11 @@ if (typeof pageView !== "undefined" && pageView?.addEventListener) {
         tbWiz.idea = null;
         for (const el of pageView.querySelectorAll?.('[data-tb="idea"]') ?? []) el.setAttribute("aria-pressed", "false");
       }
+      tbWizSyncNext();
+    } else if (field === "label" || field === "channel") {
+      tbWiz[field] = value;
+      const line = pageView.querySelector?.("[data-fires]");
+      if (line) line.textContent = tbFires(tbWiz);
       tbWizSyncNext();
     } else if (field === "name") {
       tbWiz.name = value;

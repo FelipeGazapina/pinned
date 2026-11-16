@@ -267,6 +267,16 @@ const sitePs = [
   { key: "github.com/north/api", name: "api", repo: "github.com/north/api", member: "acc-ana" },
   { key: "github.com/north/<b>x</b>", name: "<b>x</b>", repo: "", member: "acc-carla" },
 ];
+test("only the owner's nav has People with Invite people, which opens the invites page", () => {
+  const owner = page({ role: "owner", email: "ana.souza@north.example", pages: ["team-calls", "team-invites"] });
+  const html = owner.eval("tcNavHtml(tcCurrent(), 'team-calls')");
+  assert.match(html, /<div class="tc-head">People<\/div><button type="button" class="nav-row tc-row" data-tc-nav="team-invites"><span class="label">Invite people<\/span><\/button>/);
+  assert.ok(!/Invite people/.test(page({ pages: ["team-calls", "team-invites"] }).eval("tcNavHtml(tcCurrent(), 'team-calls')")), "a member has no such row");
+  assert.ok(!/Invite people/.test(page({ role: "owner", email: "ana.souza@north.example" }).eval("tcNavHtml(tcCurrent(), 'team-calls')")), "and none while the page is not registered");
+  owner.eval(`tcNavOpen({ dataset: { tcNav: "team-invites" } })`);
+  assert.deepEqual(owner.ops.at(-1), { opened: "team-invites" });
+});
+
 const projectRows = (html) => [...html.matchAll(/<div class="nav-row tc-row tc-plain tc-project[^"]*"[^>]*data-project="([^"]*)"[\s\S]*?<\/div>/g)].map((m) => ({ key: m[1], html: m[0] }));
 
 test("the nav lists the team's projects, each with Take out of the team for who attached it and for the owner", () => {
