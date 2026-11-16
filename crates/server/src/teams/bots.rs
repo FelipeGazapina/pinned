@@ -503,16 +503,20 @@ pub async fn start_reserved(hub: &Arc<Hub>, team: &Arc<Account>, id: Uuid, mut w
     // Its session works already: a write that fails (a busy row) is tried once more, and when that
     // fails too its box ends as well, so no session keeps working on a run that only holds a place.
     // A first write that failed may have committed all the same (its connection dropped after
-    // it): a retry that finds the run opened on this box keeps the box.
+    // it): whatever the retry answers short of opening it, the run's row is read, and a run found
+    // opened on this box keeps the box. A row that does not read ends the box.
     let open = match db::open_reserved(&hub.db, team.id, id, &placed.machine).await {
         Ok(open) => Ok(open),
         Err(_) => match db::open_reserved(&hub.db, team.id, id, &placed.machine).await {
-            Ok(false) => match db::reservation_of(&hub.db, team.id, id).await {
-                Ok(db::Reservation::Opened(on)) => Ok(on.as_deref() == Some(placed.machine.as_str())),
-                Ok(_) => Ok(false),
-                Err(e) => Err(e),
+            Ok(true) => Ok(true),
+            retried => match db::reservation_of(&hub.db, team.id, id).await {
+                Ok(db::Reservation::Opened(Some(on))) if on == placed.machine => Ok(true),
+                Ok(_) => retried,
+                Err(e) => {
+                    eprintln!("pinned-server: run {id} of team {}: its row was not read after its open was retried: {e}", team.id);
+                    retried.and(Err(e))
+                }
             },
-            retried => retried,
         },
     };
     if !matches!(open, Ok(true)) {
