@@ -4,9 +4,6 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap};
 
 const API: &str = "https://slack.com/api/";
-/// Overrides `API` (a root ending in `/api/`), so a hub test points Slack at a stand-in. Honoured
-/// only in a debug build and only for an http(s) loopback host, since every call carries a bot token.
-pub const API_ROOT_ENV: &str = "PINNED_SLACK_API_ROOT";
 /// How far back a channel's history is read to find threads that got a new reply. A thread
 /// older than this, or past the newest `HISTORY_PAGES` pages, that gets a new mention or reply
 /// is missed. Slack's history lists only top-level messages, each with its thread's latest reply,
@@ -124,25 +121,7 @@ fn api_root() -> String {
     if let Some(root) = DEV_ROOT.get() {
         return root.clone();
     }
-    let set = std::env::var(API_ROOT_ENV).ok();
-    let (root, ignored) = resolve_root(set.as_deref(), cfg!(debug_assertions));
-    if ignored {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| eprintln!("pinned: {API_ROOT_ENV} is set but ignored, Slack calls go to {API}"));
-    }
-    root
-}
-
-/// The root Slack calls go to, and whether `set` was ignored. A release build, or a root that is
-/// not http(s) on a loopback host, keeps the real API so a token never goes to a stranger.
-fn resolve_root(set: Option<&str>, debug: bool) -> (String, bool) {
-    let Some(set) = set.map(|r| r.trim().trim_end_matches('/')).filter(|r| !r.is_empty()) else {
-        return (API.to_owned(), false);
-    };
-    match debug.then(|| loopback_http(set)).flatten() {
-        Some(()) => (format!("{set}/"), false),
-        None => (API.to_owned(), true),
-    }
+    API.to_owned()
 }
 
 /// Where calls go instead of `api` when a debug build's `env` names an http(s) root on a
@@ -174,7 +153,7 @@ pub fn dev_root(value: &str) -> Option<String> {
 }
 
 /// Sends every Slack call to `value` for the rest of the process. Refuses any host but this machine.
-/// Only `pinned-server hub --dev` calls this, with PINNED_SLACK_API_BASE.
+/// Only `pinned-server hub --dev` calls this, with PINNED_SLACK_API_BASE, and the hub tests for their stand-in.
 pub fn use_dev_root(value: &str) -> Result<(), String> {
     let root = dev_root(value).ok_or_else(|| "Slack dev root must be an http or https URL on this machine".to_owned())?;
     DEV_ROOT.set(root).map_err(|_| "Slack dev root is already set".to_owned())
@@ -624,44 +603,6 @@ mod tests {
     }
 
     #[test]
-    fn the_api_root_override_only_reaches_a_loopback_host_in_a_debug_build() {
-        assert_eq!(resolve_root(None, true), (API.to_owned(), false));
-        assert_eq!(resolve_root(Some("  "), true), (API.to_owned(), false));
-        for root in ["http://127.0.0.1:5000/api/", "http://localhost:5000/api", "https://[::1]:5000/api/", "http://127.0.0.2/api/"] {
-            let (used, ignored) = resolve_root(Some(root), true);
-            assert_eq!((used, ignored), (format!("{}/", root.trim_end_matches('/')), false), "{root}");
-            assert_eq!(resolve_root(Some(root), false), (API.to_owned(), true), "{root} in a release build");
-        }
-        for root in [
-            "https://evil.example.test/api/",
-            "http://127.0.0.1.example.test/api/",
-            "http://169.254.169.254/api/",
-            "http://localhost@evil.example.test/api/",
-            "ftp://127.0.0.1/api/",
-            "not a url",
-        ] {
-            assert_eq!(resolve_root(Some(root), true), (API.to_owned(), true), "{root}");
-        }
-    }
-
-    #[test]
-    fn the_api_root_comes_from_the_environment_only_for_loopback() {
-        let _api = lock_api();
-        set_api_root(None);
-        let was = std::env::var(API_ROOT_ENV).ok();
-        std::env::remove_var(API_ROOT_ENV);
-        assert_eq!(api_root(), API);
-        std::env::set_var(API_ROOT_ENV, "http://127.0.0.1:9/api/");
-        assert_eq!(api_root(), "http://127.0.0.1:9/api/");
-        std::env::set_var(API_ROOT_ENV, "https://evil.example.test/api/");
-        assert_eq!(api_root(), API);
-        match was {
-            Some(value) => std::env::set_var(API_ROOT_ENV, value),
-            None => std::env::remove_var(API_ROOT_ENV),
-        }
-    }
-
-    #[test]
     fn mentions_are_new_messages_to_the_bot_keyed_by_thread() {
         let (history, replies) = fixture();
         let since = DateTime::from_timestamp(1792395000, 0).unwrap();
@@ -833,6 +774,19 @@ mod tests {
         std::env::set_var("PINNED_SLACK_API_BASE", "http://127.0.0.1:9/api/");
         let root = api_root();
         std::env::remove_var("PINNED_SLACK_API_BASE");
+        assert_eq!(root, "https://slack.com/api/");
+    }
+
+    /// The only way to point Slack elsewhere is `hub --dev`'s root: the variable older hub tests
+    /// set reaches nothing, a loopback address in a debug build included.
+    #[test]
+    fn the_retired_root_variable_is_ignored_in_a_debug_build() {
+        const RETIRED: &str = concat!("PINNED_SLACK", "_API_ROOT");
+        let _guard = lock_api();
+        set_api_root(None);
+        std::env::set_var(RETIRED, "http://127.0.0.1:9/api/");
+        let root = api_root();
+        std::env::remove_var(RETIRED);
         assert_eq!(root, "https://slack.com/api/");
     }
 }

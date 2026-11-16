@@ -16,14 +16,15 @@ pub(crate) struct Seen {
 
 static SEEN: Mutex<Vec<Seen>> = Mutex::new(Vec::new());
 
-/// The stand-in Slack's address as a root for `PINNED_SLACK_API_ROOT`, starting it on first use.
+/// Starts the stand-in Slack on first use and points the hub's Slack calls at it through the
+/// root `hub --dev` sets (`slack::use_dev_root`), for the rest of the test binary.
 /// Each test names its own tokens, so they share the one server. A token holding `500` gets a
 /// failing `chat.postMessage`.
 pub(crate) fn slack_standin() {
     static SERVER: OnceLock<()> = OnceLock::new();
     SERVER.get_or_init(|| {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        std::env::set_var(pinned_core::slack::API_ROOT_ENV, format!("http://{}/api", listener.local_addr().unwrap()));
+        pinned_core::slack::use_dev_root(&format!("http://{}/api", listener.local_addr().unwrap())).unwrap();
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 std::thread::spawn(move || slack_answer(stream));
