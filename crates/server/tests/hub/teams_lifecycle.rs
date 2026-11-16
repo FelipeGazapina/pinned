@@ -339,12 +339,22 @@ fn the_tick_moves_a_run_left_waiting_with_no_open_call_back_to_work() {
     crew.tick();
     assert_eq!(crew.runs(), vec![("waiting".to_owned(), None)], "a run that just began to wait may be opening its call");
 
+    // A call answered whose run stayed waiting (a restart between the answer and the move): back to work.
+    crew.sql(&format!("update team_calls set outcome = 'answered' where run = '{}'", run.id));
     wait(old_wait);
     crew.tick();
     assert_eq!(crew.runs(), vec![("working".to_owned(), None)]);
     assert_eq!(crew.hub.boxes.live().len(), 1, "its box goes on");
     let asked = crew.ask("Red or blue header?").unwrap();
     assert_eq!(asked["asked"], json!(["@design"]), "it can ask again");
+
+    // Its last call gave up but the run never ended (a restart): it ends as gave up, never back to work.
+    let call = asked["call"].as_str().unwrap().to_owned();
+    crew.sql(&format!("update team_calls set answered_at = now() - interval '1 hour', outcome = 'gave-up' where id = '{call}'"));
+    wait(old_wait);
+    crew.tick();
+    wait_for("the run to end as gave up", || crew.runs() == vec![("gave_up".to_owned(), Some(format!("nobody answered call {call}")))]);
+    wait_for("its box to end", || crew.hub.boxes.live().is_empty());
 }
 
 #[test]

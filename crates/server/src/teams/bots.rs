@@ -105,6 +105,18 @@ fn default_limits(hub: &Hub) -> BotLimits {
     BotLimits { usd: hub.team_policy.run_usd, minutes: hub.team_policy.run_minutes }
 }
 
+/// The most a bot's limits may be: `CEILING_TIMES` the policy's `run_usd` and `run_minutes`.
+pub fn most(policy: &pinned_core::teams::TeamPolicy) -> BotLimits {
+    BotLimits { usd: policy.run_usd * f64::from(CEILING_TIMES), minutes: policy.run_minutes.saturating_mul(CEILING_TIMES) }
+}
+
+/// `limits` held at the ceiling (`most`): a row stored above it, by an older hub or by hand, is
+/// shown, saved again and enforced as the ceiling.
+pub fn held(policy: &pinned_core::teams::TeamPolicy, limits: BotLimits) -> BotLimits {
+    let most = most(policy);
+    BotLimits { usd: limits.usd.min(most.usd), minutes: limits.minutes.min(most.minutes) }
+}
+
 /// Every workflow of the team's account as a bot: its `team_bots` row, or `CallRules::default()`
 /// and the hub's `TeamPolicy` limits when it has none, with `name` from the workflow.
 pub async fn bots(hub: &Arc<Hub>, scope: &Scope) -> Result<Vec<Bot>, String> {
@@ -112,7 +124,7 @@ pub async fn bots(hub: &Arc<Hub>, scope: &Scope) -> Result<Vec<Bot>, String> {
     let mut bots = Vec::new();
     for workflow in workflows(hub, &scope.team).await? {
         let bot = match rows.iter().find(|b| b.workflow == workflow.id) {
-            Some(row) => Bot { name: workflow.name.clone(), ..row.clone() },
+            Some(row) => Bot { name: workflow.name.clone(), limits: held(&hub.team_policy, row.limits.clone()), ..row.clone() },
             None => Bot { workflow: workflow.id.clone(), name: workflow.name.clone(), owner: None, calls: CallRules::default(), limits: default_limits(hub), on: false, on_by: None, once: false, off_note: None, skipped: vec![] },
         };
         let skipped = db::skipped(&hub.db, scope.team.id, &workflow.id).await?;
@@ -234,7 +246,8 @@ pub async fn save_bot(hub: &Arc<Hub>, scope: &Scope, mut bot: Bot, connector: Op
         bot.workflow = saved["id"].as_str().ok_or("the saved workflow has no id")?.to_owned();
     }
     let owner = existing.and_then(|b| b.owner).or_else(|| Some(scope.member.to_string()));
-    let saved = Bot { name: String::new(), owner, on: false, on_by: None, off_note: None, ..bot };
+    let limits = held(&hub.team_policy, bot.limits.clone());
+    let saved = Bot { name: String::new(), owner, on: false, on_by: None, off_note: None, limits, ..bot };
     db::save_bot(&hub.db, team, &saved).await?;
     draft(hub, scope, &saved.workflow).await
 }
@@ -259,8 +272,11 @@ fn ceiling(hub: &Hub, usd: f64, minutes: f64) -> Result<BotLimits, String> {
 pub async fn set_bot_ceiling(hub: &Arc<Hub>, scope: &Scope, workflow_id: &str, usd: f64, minutes: f64) -> Result<(), String> {
     scope.owner_only()?;
     let limits = ceiling(hub, usd, minutes)?;
-    let bot = db::bot(&hub.db, scope.team.id, workflow_id).await?.ok_or_else(|| format!("the team has no bot for workflow {workflow_id}"))?;
-    db::save_bot(&hub.db, scope.team.id, &Bot { limits, ..bot }).await
+    // Only the row's limits, in one write: a save of the bot's rules at the same time stays.
+    if !db::set_bot_limits(&hub.db, scope.team.id, workflow_id, &limits).await? {
+        return Err("the team has no such bot".into());
+    }
+    Ok(())
 }
 
 /// What a bot whose stored limits are not above 0 hears when it would start.

@@ -415,6 +415,13 @@ pub async fn turn_bot_on(db: &Db, team: Uuid, workflow: &str, on: bool, by: Uuid
     Ok(changed.map_err(err)? == 1)
 }
 
+/// Sets only the `limits` of the bot of `workflow`; false when the team has no such bot.
+pub async fn set_bot_limits(db: &Db, team: Uuid, workflow: &str, limits: &BotLimits) -> Result<bool, String> {
+    let limits = serde_json::to_value(limits).map_err(|e| e.to_string())?;
+    let changed = db.client().await?.execute("update team_bots set limits = $3 where team = $1 and workflow = $2", &[&team, &workflow, &limits]).await.map_err(err)?;
+    Ok(changed == 1)
+}
+
 /// Turns the bot off with `note`, which members see on it; false when it was not on.
 pub async fn turn_bot_off_noted(db: &Db, team: Uuid, workflow: &str, note: &str) -> Result<bool, String> {
     let changed = db
@@ -916,18 +923,19 @@ pub async fn email(db: &Db, account: Uuid) -> Result<Option<String>, String> {
 }
 
 /// Opens a call on its run, created now by Postgres's clock; answers it as kept. `step` is the
-/// hash of the exact step the team-box hook asks about.
-pub async fn insert_call(db: &Db, team: Uuid, call: &Call, step: Option<&str>) -> Result<Call, String> {
+/// hash of the exact step the team-box hook asks about; `by_hub` marks the limits tick's own call
+/// (`opened_by_hub`), the only one `runs_at_limit` counts.
+pub async fn insert_call(db: &Db, team: Uuid, call: &Call, step: Option<&str>, by_hub: bool) -> Result<Call, String> {
     let (id, run) = (Uuid::parse_str(&call.id).map_err(|_| "a call's id is a uuid")?, Uuid::parse_str(&call.run).map_err(|_| "a run's id is a uuid")?);
     let row = db
         .client()
         .await?
         .query_one(
             &format!(
-                "with c as (insert into team_calls (id, team, run, situation, asked, question, choices, step_hash) values ($1, $2, $3, $4, $5, $6, $7, $8) returning *)
+                "with c as (insert into team_calls (id, team, run, situation, asked, question, choices, step_hash, opened_by_hub) values ($1, $2, $3, $4, $5, $6, $7, $8, $9) returning *)
                  select {CALL_COLUMNS} from c join team_runs r on r.id = c.run"
             ),
-            &[&id, &team, &run, &call.situation.as_str(), &json(&call.asked)?, &call.question, &json(&call.choices)?, &step],
+            &[&id, &team, &run, &call.situation.as_str(), &json(&call.asked)?, &call.question, &json(&call.choices)?, &step, &by_hub],
         )
         .await
         .map_err(err)?;
@@ -944,8 +952,8 @@ pub async fn pass_call(db: &Db, team: Uuid, call: &Call, step: Option<&str>, fir
         .await?
         .query_opt(
             &format!(
-                "with c as (insert into team_calls (id, team, run, situation, asked, question, choices, step_hash, created_at)
-                   select $1, $2, $3, $4, $5, $6, $7, $8, f.created_at from team_runs w, team_calls f
+                "with c as (insert into team_calls (id, team, run, situation, asked, question, choices, step_hash, created_at, opened_by_hub)
+                   select $1, $2, $3, $4, $5, $6, $7, $8, f.created_at, f.opened_by_hub from team_runs w, team_calls f
                    where w.team = $2 and w.id = $3 and w.state = 'waiting' and f.team = $2 and f.id = $9
                    returning *)
                  select {CALL_COLUMNS} from c join team_runs r on r.id = c.run"
@@ -1262,14 +1270,17 @@ pub async fn drop_grant(db: &Db, team: Uuid, run: Uuid) -> Result<(), String> {
 }
 
 /// Runs left waiting with no open call for more than `secs`, none of whose calls closed within
-/// `secs` either, as (team, run, whether its box runs). An ask opens its call, and an answer moves
-/// its run on, within moments, so such a run was left by a give-up or a restart. For `calls::tick`.
-pub async fn stale_waiting(db: &Db, secs: u64) -> Result<Vec<(Uuid, Uuid, bool)>, String> {
+/// `secs` either, as (team, run, whether its box runs, its last call when that one gave up). An
+/// ask opens its call, and an answer moves its run on, within moments, so such a run was left by
+/// a give-up or a restart. For `calls::tick`.
+pub async fn stale_waiting(db: &Db, secs: u64) -> Result<Vec<(Uuid, Uuid, bool, Option<Uuid>)>, String> {
     let rows = db
         .client()
         .await?
         .query(
-            "select r.team, r.id, exists (select 1 from boxes b where b.account = r.team and b.machine::text = r.box and b.phase <> 'ending')
+            "select r.team, r.id, exists (select 1 from boxes b where b.account = r.team and b.machine::text = r.box and b.phase <> 'ending'),
+               (select case when c.outcome = 'gave-up' then c.id end from team_calls c where c.run = r.id
+                 order by c.answered_at desc nulls first, c.created_at desc limit 1)
              from team_runs r
              where r.state = 'waiting' and coalesce(r.waiting_since, r.started_at) <= now() - make_interval(secs => $1)
                and not exists (select 1 from team_calls c where c.run = r.id
@@ -1278,7 +1289,7 @@ pub async fn stale_waiting(db: &Db, secs: u64) -> Result<Vec<(Uuid, Uuid, bool)>
         )
         .await
         .map_err(err)?;
-    Ok(rows.iter().map(|r| (r.get(0), r.get(1), r.get(2))).collect())
+    Ok(rows.iter().map(|r| (r.get(0), r.get(1), r.get(2), r.get(3))).collect())
 }
 
 // ---- triggers.rs ----
@@ -1488,7 +1499,8 @@ pub async fn skipped(db: &Db, team: Uuid, workflow: &str) -> Result<Vec<Skipped>
 // ---- limits (calls::tick) ----
 
 /// Charges each run at work (`working` or `taken_over`) in a box for its active time at its box's
-/// hourly rate (`small`, `medium`, `large` in `rates`): its `cost_usd` never goes down, and a
+/// hourly rate (`small`, `medium`, `large` in `rates`; a size it does not know at the largest):
+/// its `cost_usd` never goes down, and a
 /// waiting run is not charged, so a wait costs nothing toward its `BotLimits::usd`.
 pub async fn charge_working_runs(db: &Db, rates: [f64; 3]) -> Result<(), String> {
     db.client()
@@ -1496,7 +1508,7 @@ pub async fn charge_working_runs(db: &Db, rates: [f64; 3]) -> Result<(), String>
         .execute(
             "update team_runs r set cost_usd = greatest(r.cost_usd,
                    greatest(0, extract(epoch from now() - coalesce(r.opened_at, r.started_at))::bigint - r.waiting_secs)::float8
-                   * case lower(b.size) when 'medium' then $2::float8 when 'large' then $3::float8 else $1::float8 end / 3600.0)
+                   * case lower(b.size) when 'small' then $1::float8 when 'medium' then $2::float8 else $3::float8 end / 3600.0)
                  from boxes b where b.account = r.team and b.machine::text = r.box and r.state in ('working', 'taken_over') and not r.reserved",
             &[&rates[0], &rates[1], &rates[2]],
         )
@@ -1515,25 +1527,33 @@ pub struct AtLimit {
 }
 
 /// The runs at work (not reserved) whose active time reached their bot's `minutes`, or whose
-/// `cost_usd` its `usd`, and that have no `on_limit` call yet: one limit call per run.
-pub async fn runs_at_limit(db: &Db) -> Result<Vec<AtLimit>, String> {
+/// `cost_usd` its `usd`, and that have no `on_limit` call the hub opened yet (`opened_by_hub`):
+/// one limit call per run, and none a session opened counts. A limit above `most` (the ceiling)
+/// is held at it.
+pub async fn runs_at_limit(db: &Db, most: &BotLimits) -> Result<Vec<AtLimit>, String> {
     let rows = db
         .client()
         .await?
         .query(
-            "select r.team, r.id, b.limits, r.cost_usd >= (b.limits->>'usd')::float8
+            "select r.team, r.id, b.limits, coalesce(r.cost_usd >= least((b.limits->>'usd')::float8, $1), false), b.workflow
                  from team_runs r join team_bots b on b.team = r.team and b.workflow = r.workflow
                  where r.state in ('working', 'taken_over') and not r.reserved
-                   and (r.cost_usd >= (b.limits->>'usd')::float8
-                        or extract(epoch from now() - coalesce(r.opened_at, r.started_at))::bigint - r.waiting_secs >= (b.limits->>'minutes')::bigint * 60)
-                   and not exists (select 1 from team_calls c where c.run = r.id and c.situation = 'on_limit')",
-            &[],
+                   and (r.cost_usd >= least((b.limits->>'usd')::float8, $1)
+                        or extract(epoch from now() - coalesce(r.opened_at, r.started_at))::bigint - r.waiting_secs >= least((b.limits->>'minutes')::bigint, $2) * 60)
+                   and not exists (select 1 from team_calls c where c.run = r.id and c.situation = 'on_limit' and c.opened_by_hub)",
+            &[&most.usd, &i64::from(most.minutes)],
         )
         .await
         .map_err(err)?;
     let mut found = Vec::with_capacity(rows.len());
     for r in &rows {
-        let limits = serde_json::from_value(r.get(2)).map_err(|e| e.to_string())?;
+        // One bot's unreadable row holds up no other run's limit: it is skipped, and logged.
+        let Ok(limits) = serde_json::from_value::<BotLimits>(r.get(2)) else {
+            let (team, workflow): (Uuid, String) = (r.get(0), r.get(4));
+            eprintln!("pinned-server: the limits of bot {workflow} of team {team} are not readable: its runs are not held to them");
+            continue;
+        };
+        let limits = BotLimits { usd: limits.usd.min(most.usd), minutes: limits.minutes.min(most.minutes) };
         found.push(AtLimit { team: r.get(0), run: r.get(1), limits, spent: r.get(3) });
     }
     Ok(found)
