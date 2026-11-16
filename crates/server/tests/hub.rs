@@ -11658,3 +11658,4 @@ mod teams_hardening;
 #[path = "hub/teams_locks_boot.rs"] mod teams_locks_boot;
 #[path = "hub/teams_locks_callers.rs"] mod teams_locks_callers;
 #[path = "hub/teams_limits.rs"] mod teams_limits;
+#[path = "hub/teams_wire.rs"] mod teams_wire;
