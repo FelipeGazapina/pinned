@@ -9,6 +9,7 @@ use super::teams_calls::{calls_of, choice, on_node, op, patient, rows, sql, Team
 use super::*;
 use pinned_core::preauth::team_hook::{self, HookEnv};
 use pinned_core::teams::{Answer, AnswerKind, Situation, TeamOp};
+use pinned_server::db::{Db, Sealer};
 use pinned_server::teams;
 use uuid::Uuid;
 
@@ -234,7 +235,7 @@ fn a_dont_lets_nothing_run_and_the_same_step_asks_again() {
 fn of_two_identical_tries_at_once_after_go_ahead_exactly_one_runs() {
     let hub = TestHub::start_with_team_policy("teams_go_ahead_race", fast(), patient());
     let mut tb = TeamBox::new(&hub);
-    tb.run(&hub);
+    let run = tb.run(&hub);
     let account = hub.runtime.block_on(hub.hub().account(tb.team)).unwrap();
     let step = || ask_op(DEPLOY, &format!("deploy: {DEPLOY}"));
     let mut call = ask(&hub, &mut tb, DEPLOY);
@@ -249,6 +250,21 @@ fn of_two_identical_tries_at_once_after_go_ahead_exactly_one_runs() {
         assert_eq!(opened, [&json!({ "call": next, "asked": ["the owner"] })]);
         assert_eq!(open_calls(&mut tb), [(next.clone(), format!("deploy: {DEPLOY}"))]);
         call = next;
+    }
+
+    // The hub runs its statements on one connection; two hubs on one database still use it once.
+    let url = format!("{}/{}", postgres(), hub.database);
+    let other = hub.runtime.block_on(Db::connect(&url, Sealer::load(&temp(&format!("go-ahead-{}", hub.database)).join("hub.key")).unwrap())).unwrap();
+    let db = &hub.hub().db;
+    let (hash, question) = (team_hook::step_hash("Bash", &json!({ "command": DEPLOY })), format!("deploy: {DEPLOY}"));
+    for _ in 0..10 {
+        answer(&mut tb, &call, choice("Go ahead", ""));
+        let (first, second) = hub.runtime.block_on(async {
+            tokio::join!(teams::db::use_go_ahead(db, tb.team, run, &hash, &question, now()), teams::db::use_go_ahead(&other, tb.team, run, &hash, &question, now()))
+        });
+        let used: Vec<Uuid> = [first.unwrap(), second.unwrap()].into_iter().flatten().collect();
+        assert_eq!(used, [Uuid::parse_str(&call).unwrap()]);
+        call = ask(&hub, &mut tb, DEPLOY);
     }
 }
 
