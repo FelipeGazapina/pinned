@@ -212,3 +212,44 @@ fn a_team_box_asks_its_people_and_a_persons_machine_forwards_as_before() {
     let share = json!({ "cmd": "share_project", "project": { "key": "github.com/b/site", "name": "site", "repo": "git@github.com:b/site.git" } });
     assert!(machine_result(&hub.url, &machine_token, share).is_ok(), "a person's machine still shares its projects");
 }
+
+// ---- Only a person lets an agent in or owns a team ----
+
+#[test]
+fn a_grant_and_token_made_for_a_team_find_no_agent_and_issue_no_token() {
+    let hub = TestHub::start("sepfix_agent");
+    let (mut ana, _, _) = locked_app(&hub.url, "ana@example.test");
+    let team = make_team(&mut ana, "Acme");
+    let grant = "6f1c0b1e-0000-4000-8000-00000000a9a9";
+    admin_on(&hub.database, "insert into agent_clients (id, name, redirect_uris) values ('agent-x', 'Agent X', '[]')");
+    admin_on(&hub.database, &format!("insert into agent_grants (id, account, client, scopes, projects) values ('{grant}', '{team}', 'agent-x', '[\"sessions\"]', '[]')"));
+    admin_on(&hub.database, &format!("insert into agent_tokens (token_hash, grant_id, kind, expires_at) values (sha256('team-agent-token'::bytea), '{grant}', 'access', now() + interval '1 hour')"));
+    let db = &hub.hub().db;
+    assert_eq!(hub.runtime.block_on(db.agent_by_token("team-agent-token")).unwrap().map(|g| g.id), None, "the team's token finds no grant");
+    assert_eq!(hub.runtime.block_on(db.issue_agent_tokens(grant.parse().unwrap())), Ok(None), "the team's grant issues no token");
+    let request = pinned_server::db::AgentRequestRow {
+        client: "agent-x".into(),
+        client_name: "Agent X".into(),
+        redirect_uri: "http://localhost/cb".into(),
+        state: None,
+        scopes: vec!["sessions".into()],
+        code_challenge: "c".into(),
+        resource: format!("{}/mcp", hub.url),
+        expires_at: 0,
+    };
+    let team_id: uuid::Uuid = team.parse().unwrap();
+    assert_eq!(hub.runtime.block_on(db.create_agent_grant(team_id, &request, &["sessions".into()], &[])), Err(format!("account {team} cannot let an agent in")));
+    assert_eq!(sql_text(&hub, &format!("select count(*)::text from agent_grants where account = '{team}'")), "1", "only the grant made by SQL");
+    assert_eq!(sql_text(&hub, "select count(*)::text from agent_tokens"), "1", "no token was issued");
+}
+
+#[test]
+fn a_team_cannot_own_a_team() {
+    let hub = TestHub::start("sepfix_owner");
+    let (mut ana, _, _) = locked_app(&hub.url, "ana@example.test");
+    let team = make_team(&mut ana, "Acme");
+    let made = hub.runtime.block_on(pinned_server::teams::db::create_team(&hub.hub().db, team.parse().unwrap(), "Inner"));
+    assert_eq!(made, Err("the team was not made".into()));
+    assert_eq!(sql_text(&hub, "select count(*)::text from teams"), "1");
+    assert_eq!(sql_text(&hub, "select count(*)::text from accounts where kind = 'team'"), "1");
+}

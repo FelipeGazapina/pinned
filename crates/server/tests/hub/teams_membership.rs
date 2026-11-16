@@ -284,14 +284,16 @@ fn a_team_account_cannot_sign_in_with_its_email_and_any_password() {
     let team = make_team(&mut ana, "Acme");
     let team_email = format!("team-{team}@teams.invalid");
     assert_eq!(db_text(&hub.database, &format!("select email from accounts where id::text = '{team}'")), vec![team_email.clone()]);
+    // The team's row gets a real hash, the hub's own of ana's password, so only its kind refuses it.
+    admin_on(&hub.database, &format!("update accounts set password_hash = (select password_hash from accounts where email = 'ana@example.test') where id::text = '{team}'"));
 
-    for password in ["any password", "!"] {
+    for password in ["correct horse", "any password", "!"] {
         let as_team = post_with(&url, "/api/login", &[], json!({ "email": team_email, "password": password }));
         let as_stranger = post_with(&url, "/api/login", &[], json!({ "email": "nobody@example.test", "password": password }));
         assert_eq!(as_team, (401, json!({ "error": WRONG_LOGIN })));
         assert_eq!(as_team, as_stranger, "a team's email answers exactly as an unknown email does");
     }
-    assert_eq!(account::login(&url, &team_email, "any password").map(|_| ()), Err(WRONG_LOGIN.into()));
+    assert_eq!(account::login(&url, &team_email, "correct horse").map(|_| ()), Err(WRONG_LOGIN.into()));
     assert_eq!(team_logins(&hub.database, &team), vec!["0"]);
 }
 
@@ -352,8 +354,14 @@ fn a_team_cannot_register_a_machine_on_the_machines_route() {
     let team = make_team(&mut ana, "Acme");
 
     assert_eq!(post_with(&url, "/api/machines", &[], json!({ "name": "vps", "os": "linux" })), (401, json!({ "error": SIGN_IN_FIRST })));
+    // A login row for the team, made by SQL as no route makes one: its bearer still signs nothing in.
+    admin_on(&hub.database, &format!("insert into logins (token_hash, account) values (sha256('team-login-token'::bytea), '{team}')"));
+    assert_eq!(
+        post_with(&url, "/api/machines", &[("authorization", "Bearer team-login-token")], json!({ "name": "vps", "os": "linux" })),
+        (401, json!({ "error": SIGN_IN_FIRST }))
+    );
     assert_eq!(db_text(&hub.database, "select count(*)::text from machines"), vec!["0"]);
-    assert_eq!(team_logins(&hub.database, &team), vec!["0"]);
+    assert_eq!(team_logins(&hub.database, &team), vec!["1"]);
 }
 
 #[test]
@@ -373,6 +381,20 @@ fn a_team_cannot_get_an_agent_token_from_the_token_route_or_an_approval() {
         (400, json!({ "error": "invalid_grant", "error_description": "unknown code" }))
     );
     assert_eq!(db_text(&hub.database, &format!("select count(*)::text from agent_grants where account::text = '{team}'")), vec!["0"]);
+
+    // A grant and a live code for the team, made by SQL as no approval makes one: the exchange
+    // passes every check of the code and still gets no token.
+    let (verifier, challenge) = pkce();
+    admin_on(&hub.database, "insert into agent_clients (id, name, redirect_uris) values ('agent-x', 'Agent X', '[\"http://localhost/cb\"]')");
+    admin_on(&hub.database, &format!("insert into agent_grants (id, account, client, scopes, projects) values ('6f1c0b1e-0000-4000-8000-00000000a9a9', '{team}', 'agent-x', '[\"sessions\"]', '[]')"));
+    admin_on(&hub.database, &format!(
+        "insert into agent_codes (code_hash, grant_id, redirect_uri, code_challenge, resource, expires_at) values \
+         (sha256('TEAMCODE'::bytea), '6f1c0b1e-0000-4000-8000-00000000a9a9', 'http://localhost/cb', '{challenge}', '{url}/mcp', now() + interval '10 minutes')"
+    ));
+    let http = reqwest::blocking::Client::new();
+    let form = [("grant_type", "authorization_code"), ("client_id", "agent-x"), ("code", "TEAMCODE"), ("code_verifier", verifier.as_str()), ("redirect_uri", "http://localhost/cb")];
+    assert_eq!(super::exchange(&url, &http, &form), (400, json!({ "error": "invalid_grant", "error_description": "the access was revoked" })));
+    assert_eq!(db_text(&hub.database, "select count(*)::text from agent_tokens"), vec!["0"]);
 }
 
 #[test]
