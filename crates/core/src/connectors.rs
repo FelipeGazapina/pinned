@@ -689,6 +689,14 @@ enum Filing {
 }
 
 impl Connector {
+    /// A message router that sorts with its own categories: a `slack-message` workflow whose
+    /// graph is none or still the one `migrate` builds. Its poller asks the decision model, looks
+    /// groups up and pages at the check, before a hub's team could admit the message, so a team's
+    /// poller skips it and a team refuses it as a bot.
+    pub fn sorts_messages_at_the_check(&self) -> bool {
+        matches!(self.trigger, Trigger::SlackMessage { .. }) && self.graph.as_ref().is_none_or(|graph| *graph == migrate(self))
+    }
+
     fn filing(&self, channel: &str, thread: &str) -> Result<Filing, String> {
         let key = thread_key(channel, thread);
         match self.fix {
@@ -2026,8 +2034,18 @@ impl Connectors {
         self.fill_bots().await;
         let now = Utc::now();
         // A manual workflow has no poller: it runs only when someone runs it now.
-        let watching: Vec<Connector> =
-            self.store.lock().unwrap().connectors.iter().filter(|c| c.enabled && !matches!(c.trigger, Trigger::Manual)).cloned().collect();
+        // On a hub's team, a message router is skipped: nothing of a message reaches Slack or a
+        // model before the team admits it, and the router would sort and page at the check.
+        let team = self.admission.get().is_some();
+        let watching: Vec<Connector> = self
+            .store
+            .lock()
+            .unwrap()
+            .connectors
+            .iter()
+            .filter(|c| c.enabled && !matches!(c.trigger, Trigger::Manual) && !(team && c.sorts_messages_at_the_check()))
+            .cloned()
+            .collect();
         let (mut found, mut checked, mut limited, mut errors) = (vec![], vec![], vec![], vec![]);
         for connector in watching {
             // Each Slack bot is its own app with its own rate limit.
@@ -2057,7 +2075,7 @@ impl Connectors {
             let runs = self.runs.lock().unwrap().clone();
             let _filing = self.filing.lock().await;
             let mut store = self.store.lock().unwrap();
-            let settled = store.settle(&checked, found, now, &self.exe, &runs, self.admission.get().is_some());
+            let settled = store.settle(&checked, found, now, &self.exe, &runs, team);
             if settled.needs_save {
                 if let Err(e) = self.save(&store) {
                     errors.push(e);
@@ -9774,6 +9792,10 @@ mod tests {
                     r#"{"data":{"issueCreate":{"success":true,"issue":{"id":"lin-1","identifier":"BLO-1","title":"t","description":"d","url":"https://linear.example/BLO-1"}}}}"#.to_owned()
                 } else if path.starts_with("/graphql") {
                     r#"{"data":{"viewer":{"id":"u1"},"users":{"nodes":[]},"teams":{"nodes":[{"id":"team-1","key":"BLO","name":"Bloom"}]},"issueLabels":{"nodes":[]}}}"#.to_owned()
+                } else if path.starts_with("/evaluate") {
+                    r#"{"answers":{"category":{"choice":"escalation","probabilities":{"escalation":1.0}}}}"#.to_owned()
+                } else if path.starts_with("/usergroups.list") {
+                    r#"{"ok":true,"usergroups":[{"id":"S0PRODENG1","handle":"prod-engg"}]}"#.to_owned()
                 } else if path.starts_with("/chat.getPermalink") {
                     r#"{"ok":true,"permalink":"https://slack.example/archives/C0123ABCD/p1792400050000200"}"#.to_owned()
                 } else if path.starts_with("/conversations.history") {
@@ -9798,6 +9820,72 @@ mod tests {
             }
         });
         format!("http://{address}/")
+    }
+
+    struct RestoreVercelRoot;
+
+    impl Drop for RestoreVercelRoot {
+        fn drop(&mut self) {
+            std::env::remove_var(crate::vercel::API_ROOT_ENV);
+        }
+    }
+
+    /// A person's message router, at the check that finds a message its model sorts as an
+    /// escalation, looks the group up, pages it in the message's thread and reacts there: a team's
+    /// admission does not change a person's connectors.
+    #[test]
+    fn a_persons_message_router_pages_and_reacts_at_the_check_that_finds_the_message() {
+        let _api = slack::lock_api();
+        let _restore = (RestoreSlack, RestoreVercelRoot);
+        install_rustls();
+        let now = Utc::now();
+        let ts = slack_ts(now - chrono::Duration::seconds(60));
+        let message = [slack_message(&ts, &ts, "U1", "prod is down")];
+        let channel = json!({ "history": [message[0].clone()], "threads": { ts.clone(): message } });
+        let seen = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let root = serve_channel_and_linear(seen.clone(), stop.clone(), std::sync::Arc::new(Mutex::new(channel)));
+        slack::set_api_root(Some(root.clone()));
+        std::env::set_var(crate::vercel::API_ROOT_ENV, root.trim_end_matches('/'));
+        let mut router = router();
+        router.since = (now - chrono::Duration::minutes(10)).to_rfc3339();
+        let (connectors, dir) = stored("persons-router-pages", vec![router, slack_connector(), called()]);
+        for (name, key) in [("slack-key", "xoxb-test"), ("vercel-key", "vck-test")] {
+            std::fs::write(dir.join(name), key).unwrap();
+        }
+        connectors.store.lock().unwrap().slack = Some(slack::Account { team: "T".into(), user_id: "UBOT".into(), name: "pinned".into() });
+        connectors.channels.lock().unwrap().insert(("UBOT".into(), "#support".into()), "C0123ABCD".into());
+        for c in connectors.store.lock().unwrap().connectors.iter_mut().filter(|c| c.id != "c5") {
+            c.enabled = false;
+        }
+        let (work, error) = block_on(connectors.poll());
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!((work.len(), error), (0, None));
+        let effects: Vec<String> = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|line| {
+                let (path, body) = line.split_once(' ').unwrap_or((line, ""));
+                let path = path.split('?').next().unwrap_or_default();
+                let body: Value = serde_json::from_str(body).unwrap_or(Value::Null);
+                match path {
+                    "/usergroups.list" | "/evaluate" => Some(path.to_owned()),
+                    "/chat.postMessage" => Some(format!("{path} {} {}", body["thread_ts"].as_str()?, body["text"].as_str()?)),
+                    "/reactions.add" => Some(format!("{path} {} {}", body["timestamp"].as_str()?, body["name"].as_str()?)),
+                    _ => None,
+                }
+            })
+            .collect();
+        assert_eq!(
+            effects,
+            vec![
+                "/usergroups.list".to_owned(),
+                "/evaluate".to_owned(),
+                format!("/chat.postMessage {ts} <!subteam^S0PRODENG1> escalation: Someone needs an engineer on support now"),
+                format!("/reactions.add {ts} robot_face"),
+            ]
+        );
     }
 
     /// The "Route Slack messages" shape: a classify on the message, whose bug branch opens a

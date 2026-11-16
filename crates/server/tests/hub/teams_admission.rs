@@ -84,6 +84,8 @@ fn answer(mut stream: TcpStream) {
         ("linear", _) if body.contains("issue(id") => json!({ "data": { "issue": { "identifier": "ENG", "team": { "name": "Eng", "states": { "nodes": [{ "id": "state-1", "name": "In Progress" }] } } } } }),
         ("linear", _) => json!({ "errors": [{ "message": "the stand-in knows no such query" }] }),
         (_, p) if p.starts_with("/v1/models/") => json!({ "id": "acme/sorter", "type": "language" }),
+        // A message router's decision model (`ta_rtr_*` keys) sorts every message as an outage.
+        (_, "/v1/evaluate") if key.contains("_rtr") => json!({ "answers": { "category": { "choice": "outage", "probabilities": { "outage": 1.0 } } } }),
         (_, "/v1/chat/completions") => json!({ "choices": [{ "message": { "content": "{\"kind\":\"bug\"}" } }] }),
         _ => json!({}),
     });
@@ -1013,4 +1015,90 @@ fn a_stopped_reservation_leaves_no_granted_event_behind() {
     assert_eq!(crew.outside(1), none(), "nothing of ENG-1 reached outside pinned");
     assert_eq!(crew.unopened(), vec!["stopped"]);
     assert_eq!(crew.skipped(&pages), Value::Null, "a stop is not counted");
+}
+
+/// A message router of channel `C0ACME001` as an older hub stored it on the team (no edited
+/// graph, so the poller would sort with its categories): "outage" pages @ops-team and hands the
+/// thread to a called workflow, "other" stops. `enabled` as given.
+fn stored_router(crew: &Crew, enabled: bool) -> String {
+    let called = store_on_team(&crew.hub, crew.team, json!({
+        "name": "Oncall", "enabled": false, "trigger": { "kind": "called" },
+        "folder": crew.folder, "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false,
+        "instructions": "", "machine": { "kind": "upstash-box", "size": "small" },
+    }));
+    store_on_team(&crew.hub, crew.team, router_json(crew, enabled, &called))
+}
+
+fn router_json(crew: &Crew, enabled: bool, called: &str) -> Value {
+    json!({
+        "name": "Triage", "enabled": enabled,
+        "trigger": { "kind": "slack-message", "channel": "C0ACME001", "decide": {
+            "model": "acme/sorter", "instructions": "Sort the message.",
+            "categories": [
+                { "name": "outage", "description": "Something is down.", "workflow": called, "mention": "ops-team" },
+                { "name": "other", "description": "Anything else.", "workflow": null },
+            ],
+        } },
+        "folder": crew.folder, "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false,
+        "instructions": "", "machine": { "kind": "upstash-box", "size": "small" },
+    })
+}
+
+/// What reached outside pinned with keys of test `name` beyond reading Slack and checking the
+/// model key at connect: each model call,
+/// each Slack post, reaction, permalink and user group lookup.
+fn reached(name: &str) -> Vec<String> {
+    let mut reached: Vec<String> = CALLS.lock().unwrap().iter().filter(|c| c.key.ends_with(name) && c.service == "model" && c.path != "/v1/credits").map(|c| format!("model {}", c.path)).collect();
+    let effects = ["chat.postMessage", "reactions.add", "chat.getPermalink", "usergroups.list"];
+    reached.extend(seen(&format!("xoxb-dev-{name}")).into_iter().filter(|s| effects.contains(&s.method.as_str())).map(|s| format!("slack {}", s.method)));
+    reached
+}
+
+/// The text a message router is refused with as a team's bot.
+const ROUTER_REFUSED: &str = "a workflow that sorts a channel's new messages into categories is not available as a bot yet: edit its steps in the workflow editor first";
+
+#[test]
+fn a_teams_message_router_that_is_not_a_bot_reaches_nothing_outside_pinned() {
+    let crew = Crew::new("ta_rtr_draft");
+    let router = stored_router(&crew, true);
+    let hub = crew.hub.hub().clone();
+    let team = crew.team;
+    let check = crew.hub.runtime.block_on(async move {
+        let connectors = hub.connectors(&hub.account(team).await.unwrap()).await.unwrap();
+        let open = |work| {
+            let hub = hub.clone();
+            async move { hub.open_found(team, work).await }
+        };
+        connectors.check_once(&open).await
+    });
+    assert_eq!(check.error, None);
+    assert_eq!(reached("ta_rtr_draft"), Vec::<String>::new(), "no model call, Slack post, reaction or group lookup");
+    assert_eq!(crew.runs(), vec![]);
+    assert_eq!(crew.waiting(&router), 0);
+}
+
+#[test]
+fn a_message_router_is_refused_as_a_teams_bot_at_save_and_turn_on() {
+    let crew = Crew::new("ta_rtr_refused");
+    let refused = Err(ROUTER_REFUSED.to_owned());
+    let called = store_on_team(&crew.hub, crew.team, json!({
+        "name": "Oncall", "enabled": false, "trigger": { "kind": "called" },
+        "folder": crew.folder, "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false,
+        "instructions": "", "machine": { "kind": "upstash-box", "size": "small" },
+    }));
+    assert_eq!(save_team_workflow(&crew.hub, &crew.bob, crew.team, router_json(&crew, false, &called)).map(drop), refused, "saving the workflow with its bot");
+    // A bot saved for a mention workflow whose workflow an older hub then stored as a router.
+    let mention = json!({
+        "name": "Triage", "enabled": false, "trigger": { "kind": "slack-mention", "channel": "C0ACME001" },
+        "folder": crew.folder, "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false,
+        "instructions": "", "machine": { "kind": "upstash-box", "size": "small" },
+    });
+    let router = save_team_workflow(&crew.hub, &crew.bob, crew.team, mention).unwrap();
+    let mut stored = router_json(&crew, false, &called);
+    stored["id"] = json!(router);
+    assert_eq!(store_on_team(&crew.hub, crew.team, stored), router);
+    let bot = Bot { workflow: router.clone(), name: String::new(), owner: None, calls: CallRules::default(), limits: BotLimits { usd: 5.0, minutes: 30 }, on: false, on_by: None, once: false, off_note: None, skipped: vec![] };
+    assert_eq!(crew.call(&crew.bob, TeamOp::SaveBot { bot, connector: None }).map(drop), refused, "saving the bot");
+    assert_eq!(crew.call(&crew.ana, TeamOp::TurnBotOn { workflow: router, on: true }).map(drop), refused, "turning it on");
+    assert_eq!(reached("ta_rtr_refused"), Vec::<String>::new());
 }

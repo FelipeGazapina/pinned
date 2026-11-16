@@ -55,6 +55,10 @@ fn slack_answer(mut stream: TcpStream) {
         }
         "bots.info" => (200, json!({ "ok": true, "bot": { "app_id": "A0APP0001" } })),
         "usergroups.list" => (200, json!({ "ok": true, "usergroups": [{ "id": "S0DESIGN01", "handle": "design-team" }, { "id": "S0OPS00001", "handle": "ops-team" }] })),
+        // A `_rtr` token's channel holds one new message a person wrote, which starts its thread.
+        "conversations.history" | "conversations.replies" if token.contains("_rtr") => {
+            (200, json!({ "ok": true, "messages": [{ "user": "U0PERSON01", "ts": "4102444800.000100", "text": "ENG-9: the build is red" }] }))
+        }
         "chat.postMessage" if token.contains("500") => (500, json!({ "ok": false, "error": "internal_error" })),
         _ => (200, json!({ "ok": true })),
     };

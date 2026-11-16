@@ -42,6 +42,11 @@ fn find<'a>(workflows: &'a [Connector], id: &str) -> Result<&'a Connector, Strin
 pub const MORE_THAN_ONE_SESSION: &str =
     "a bot's workflow may have only one session or talk step, counting the workflows it calls: a workflow with more is not available as a bot yet";
 
+/// What a message router (`Connector::sorts_messages_at_the_check`) is refused with as a bot: it
+/// would ask its model and page in Slack before the team admits the message.
+pub const SORTS_AT_THE_CHECK: &str =
+    "a workflow that sorts a channel's new messages into categories is not available as a bot yet: edit its steps in the workflow editor first";
+
 /// Refuses a workflow whose trigger is not one a bot can have yet ("scheduled and GitHub-event bots
 /// are not available yet"). Linear, Slack and manual triggers are fine, and today they are the only kinds.
 /// The matches name every kind on purpose: a schedule or GitHub-event trigger added later does not
@@ -50,6 +55,9 @@ pub const MORE_THAN_ONE_SESSION: &str =
 fn available(workflow: &Connector, workflows: &[Connector]) -> Result<(), String> {
     match &workflow.trigger {
         Trigger::LinearLabel { .. } | Trigger::SlackMention { .. } | Trigger::SlackMessage { .. } | Trigger::Called | Trigger::Manual => {}
+    }
+    if workflow.sorts_messages_at_the_check() {
+        return Err(SORTS_AT_THE_CHECK.into());
     }
     let triggers = workflow.graph.iter().flat_map(|g| g.nodes.iter()).filter_map(|n| match &n.kind {
         NodeKind::Trigger { watch } => Some(watch),
