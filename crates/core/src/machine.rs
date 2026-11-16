@@ -2673,8 +2673,8 @@ impl Machine {
             if !held {
                 return;
             }
-            // The screen lock is taken alone, with the tabs lock let go.
-            let blocked = screen.lock().unwrap().blocker().is_some();
+            // The screen lock is taken alone, with the tabs lock let go. Only Claude Code's screens are read.
+            let blocked = machine.blocker(&tab).is_some();
             let since = *clear_since.get_or_insert_with(Instant::now);
             if blocked {
                 clear_since = None;
@@ -14652,6 +14652,34 @@ Have another model review a risky change before it goes ahead.";
             assert!(m.type_prompt(&tab, "Run the tests.").is_ok(), "{provider:?}");
             wait_for("the prompt", || read_pty(&file).contains("Run the tests."));
         }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_held_prompt_of_a_codex_or_cursor_tab_is_typed_though_its_screen_looks_like_a_dialog() {
+        let (m, root, _) = reload_machine("guard-held-providers");
+        let screen = format!("\x1b[2J\x1b[H{}\r\nsome text\r\n", "\u{2594}".repeat(20));
+        let hold = |tab: &str| {
+            let session = m.tab(tab, |t| {
+                t.held.push("Run the tests.".into());
+                t.screen.clone()
+            });
+            show(&m, tab, &screen);
+            let session = session.unwrap().lock().unwrap().session;
+            m.type_held_once_raw(tab, session);
+        };
+        let claude = typing_tab(&m, Account::builtin(Provider::Claude), &root.join("claude.bin"));
+        hold(&claude);
+        for provider in [Provider::Codex, Provider::Cursor] {
+            let file = root.join(format!("{provider:?}.bin"));
+            let tab = typing_tab(&m, Account::builtin(provider), &file);
+            hold(&tab);
+            wait_for("the held prompt", || read_pty(&file).contains("Run the tests."));
+            assert!(m.tab(&tab, |t| t.held.is_empty()).unwrap(), "{provider:?}");
+        }
+        assert_eq!(read_pty(&root.join("claude.bin")), "", "the same screen still holds Claude Code's prompt back");
+        assert_eq!(m.tab(&claude, |t| t.held.clone()).unwrap(), ["Run the tests."]);
         let _ = std::fs::remove_dir_all(root);
     }
 
