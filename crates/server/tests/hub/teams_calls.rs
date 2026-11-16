@@ -14,12 +14,12 @@ fn patient() -> TeamPolicy {
     TeamPolicy { escalate_after_secs: 3600, give_up_after_secs: 7200, ..TeamPolicy::default() }
 }
 
-struct Person {
-    id: Uuid,
-    client: Client,
+pub(super) struct Person {
+    pub(super) id: Uuid,
+    pub(super) client: Client,
 }
 
-fn person(hub: &TestHub, email: &str) -> Person {
+pub(super) fn person(hub: &TestHub, email: &str) -> Person {
     let (token, account) = account::signup(&hub.url, email, "correct horse").unwrap();
     let mut client = Client::connect(&hub.url, &token);
     client.wait("hello", |f| f["type"] == "hello");
@@ -27,7 +27,7 @@ fn person(hub: &TestHub, email: &str) -> Person {
 }
 
 /// Runs SQL on the hub's database, as the teams' other ops would write it.
-fn sql(hub: &TestHub, statement: &str) {
+pub(super) fn sql(hub: &TestHub, statement: &str) {
     hub.runtime.block_on(async {
         let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), hub.database), tokio_postgres::NoTls).await.unwrap();
         tokio::spawn(connection);
@@ -36,7 +36,7 @@ fn sql(hub: &TestHub, statement: &str) {
 }
 
 /// Each row of `query`, its columns as text.
-fn rows(hub: &TestHub, query: &str) -> Vec<Vec<Option<String>>> {
+pub(super) fn rows(hub: &TestHub, query: &str) -> Vec<Vec<Option<String>>> {
     hub.runtime.block_on(async {
         let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), hub.database), tokio_postgres::NoTls).await.unwrap();
         tokio::spawn(connection);
@@ -46,19 +46,19 @@ fn rows(hub: &TestHub, query: &str) -> Vec<Vec<Option<String>>> {
 }
 
 /// A team whose owner connected Upstash and keeps a box workflow, with one box booted for it.
-struct TeamBox {
-    owner: Person,
-    team: Uuid,
-    workflow: String,
-    machine: String,
-    box_id: String,
+pub(super) struct TeamBox {
+    pub(super) owner: Person,
+    pub(super) team: Uuid,
+    pub(super) workflow: String,
+    pub(super) machine: String,
+    pub(super) box_id: String,
     /// The box node's folder, where its socket is.
-    dir: PathBuf,
-    tab: String,
+    pub(super) dir: PathBuf,
+    pub(super) tab: String,
 }
 
 impl TeamBox {
-    fn new(hub: &TestHub) -> TeamBox {
+    pub(super) fn new(hub: &TestHub) -> TeamBox {
         let mut owner = person(hub, "olga@example.test");
         let made = owner.client.hub(json!({ "cmd": "team", "op": { "op": "create", "name": "Acme" } })).unwrap();
         let team = Uuid::parse_str(made["id"].as_str().unwrap()).unwrap();
@@ -98,7 +98,7 @@ impl TeamBox {
     }
 
     /// A member of the team, in the groups `groups`.
-    fn member(&self, hub: &TestHub, email: &str, groups: &[&str]) -> Person {
+    pub(super) fn member(&self, hub: &TestHub, email: &str, groups: &[&str]) -> Person {
         let member = person(hub, email);
         sql(hub, &format!("insert into team_members (team, member, role) values ('{}', '{}', 'member')", self.team, member.id));
         for group in groups {
@@ -112,7 +112,7 @@ impl TeamBox {
     }
 
     /// The bot of the box's workflow, asking `in_doubt` and answered for by `owner`.
-    fn bot(&self, hub: &TestHub, in_doubt: Value, owner: Option<Uuid>) {
+    pub(super) fn bot(&self, hub: &TestHub, in_doubt: Value, owner: Option<Uuid>) {
         let owner = owner.map_or("null".to_owned(), |o| format!("'{o}'"));
         let calls = json!({ "in_doubt": in_doubt });
         sql(hub, &format!(
@@ -122,7 +122,7 @@ impl TeamBox {
     }
 
     /// A run of the bot working in this box.
-    fn run(&self, hub: &TestHub) -> Uuid {
+    pub(super) fn run(&self, hub: &TestHub) -> Uuid {
         let id = Uuid::new_v4();
         let run = TeamRun {
             id: id.to_string(),
@@ -170,7 +170,7 @@ impl TeamBox {
 }
 
 /// Runs `f` on the node of box `box_id`.
-fn on_node<T>(hub: &TestHub, box_id: &str, f: impl FnOnce(&Node) -> T) -> T {
+pub(super) fn on_node<T>(hub: &TestHub, box_id: &str, f: impl FnOnce(&Node) -> T) -> T {
     let node = hub.boxes.state.lock().unwrap().boxes.get(box_id).and_then(|b| b.node.clone()).expect("the box runs a node");
     f(&node)
 }
@@ -189,7 +189,7 @@ fn design() -> Value {
 }
 
 /// A member's op on team `team`, from their app.
-fn op(team: Uuid, client: &mut Client, op: Value) -> Result<Value, String> {
+pub(super) fn op(team: Uuid, client: &mut Client, op: Value) -> Result<Value, String> {
     client.hub(json!({ "cmd": "team", "team": team.to_string(), "op": op }))
 }
 

@@ -271,6 +271,18 @@ impl RunState {
     }
 }
 
+/// One line of a run's log: plain text on one line, secrets hidden, at most 500 characters.
+/// `who` is `bot` for what the bot wrote, the tool's name for a tool it ran, `person` for what a
+/// person typed into the session. `at` is unix seconds, 0 when the session did not date it.
+///
+/// `{"at":1763300000,"who":"bot","text":"The footer is fixed."}`
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+pub struct RunLogLine {
+    pub at: i64,
+    pub who: String,
+    pub text: String,
+}
+
 /// `{"id":"…","workflow":"c1","state":"working","controller":null,"cost_usd":0.4,"active_secs":120,"started_at":1763300000,"ended_at":null,"outcome":null,"started_by":"0b7e…"}`
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
 pub struct Run {
@@ -428,6 +440,9 @@ pub enum TeamOp {
     TakeOver { run: String },
     GiveBack { run: String },
     StopRun { run: String },
+    /// `Vec<RunLogLine>`: the last 200 lines of what the run's bot did, oldest first, read from the
+    /// session in the run's own box. `[]` while the run has no box or session yet.
+    RunLog { run: String },
     /// Text to the team's chat; answers its reply.
     Chat { text: String },
     /// A personal `HubCall` run on the team's account, if the hub's `hub_call_allowed` lets the
@@ -513,6 +528,8 @@ mod tests {
             json!({ "op": "take_over", "run": "r1" }),
             json!({ "op": "give_back", "run": "r1" }),
             json!({ "op": "stop_run", "run": "r1" }),
+            json!({ "op": "run_log", "run": "r1" }),
+            json!({ "op": "run_log", "run": "r1" }),
             json!({ "op": "chat", "text": "hi" }),
             json!({ "op": "hub", "call": { "cmd": "get_settings" } }),
             json!({ "op": "ask_people", "situation": "in_doubt", "question": "Which?", "choices": ["red", "blue"] }),

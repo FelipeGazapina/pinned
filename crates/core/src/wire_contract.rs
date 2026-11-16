@@ -125,6 +125,7 @@ pub fn current(version: &str, routes: &[&str]) -> Contract {
     outbound.insert("TeamBot".into(), schemas::<crate::teams::Bot>());
     outbound.insert("TeamRun".into(), schemas::<crate::teams::Run>());
     outbound.insert("TeamCall".into(), schemas::<crate::teams::Call>());
+    outbound.insert("TeamRunLogLine".into(), schemas::<crate::teams::RunLogLine>());
     Contract {
         version: version.into(),
         routes: routes.iter().map(|route| (*route).to_string()).collect(),
