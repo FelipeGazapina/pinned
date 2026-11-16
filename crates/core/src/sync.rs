@@ -508,8 +508,9 @@ fn exchange(
 }
 
 /// Pushes one batch; once the hub has it, lands its merged histories here and takes its files as
-/// agreed. A refusal is kept in `synced` for the caller instead of ending the sync, so the pull
-/// still happens; only an older hub's refusal of the whole kind of file ends it.
+/// agreed. The hub's refusal at the account's limit is kept in `synced` for the caller instead of
+/// ending the sync, so the pull still happens; any other error (offline, a timeout, an older hub's
+/// refusal of the whole kind of file) ends it as before, with no hold.
 #[allow(clippy::too_many_arguments)]
 fn send(
     hub: &impl Hub,
@@ -532,11 +533,11 @@ fn send(
             synced.pushed.extend(pending.into_iter().map(|(path, _)| path));
             Ok(())
         }
-        Err(e) if old_hub(&e) => Err(e),
-        Err(error) => {
+        Err(error) if error.starts_with(LIMIT_REFUSAL) => {
             synced.push = Push::Refused { error, sending };
             Ok(())
         }
+        Err(e) => Err(e),
     }
 }
 
@@ -622,6 +623,9 @@ pub struct PluginShare {
     pub claude_home: PathBuf,
     pub dir: PathBuf,
 }
+
+/// How the hub's refusal of a push past the account's limit begins, from 0.18.5 on.
+pub const LIMIT_REFUSAL: &str = "the account's synced projects would pass ";
 
 pub fn old_hub(err: &str) -> bool {
     err.contains("is not a file a project shares")

@@ -675,7 +675,7 @@ impl Db {
         let replaced: i64 = stored.iter().filter(|(path, _)| files.iter().any(|(e, _, agreed)| &e.path == *path && kept(path, agreed))).map(|(_, (_, size))| size).sum();
         let incoming: i64 = files.iter().map(|(_, data, _)| data.len() as i64).sum();
         if incoming > replaced && used - replaced + incoming > SYNC_QUOTA {
-            return Err(format!("the account's synced projects would pass {} MB; delete old sessions to sync more", SYNC_QUOTA >> 20));
+            return Err(format!("{}{} MB; delete old sessions to sync more", sync::LIMIT_REFUSAL, SYNC_QUOTA >> 20));
         }
         for (entry, data, agreed) in &files {
             // `known` is false when the sender omitted the mode, so a stored true survives. A null column would be omitted on the way out, and a unix machine would never send the bit.
