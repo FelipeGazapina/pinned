@@ -175,7 +175,7 @@ fn nothing_of_a_members_own_account_shows_in_what_the_team_answers() {
     }
     // B's real workflow, run on the team by B itself, is one the team's account does not have.
     let b_flow = before["settings"]["connectors"][0]["id"].as_str().unwrap().to_owned();
-    assert_eq!(via(&mut s.b, &team, json!({ "cmd": "run_workflow", "id": b_flow })), Err(format!("this account has no workflow {b_flow}")));
+    assert_eq!(via(&mut s.b, &team, json!({ "cmd": "run_workflow", "id": b_flow })), Err(format!("this team has no workflow {b_flow}")));
 
     assert_eq!(personal(&mut s.b), before, "B's own account is as it was");
 }

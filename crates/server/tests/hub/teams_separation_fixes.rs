@@ -5,7 +5,6 @@
 use super::*;
 
 const NOT_AN_OBJECT: &str = "not a hub call: a hub call is a JSON object";
-const NOT_BUILT: &str = "not built yet";
 const PASSWORD: &str = "correct horse";
 
 fn team_op(client: &mut Client, team: &str, op: Value) -> Result<Value, String> {
@@ -120,15 +119,14 @@ fn a_locked_login_unlocks_before_every_team_change_and_reads_without_it() {
         json!({ "op": "members" }),
         json!({ "op": "projects" }),
         json!({ "op": "groups" }),
+        json!({ "op": "bots" }),
+        json!({ "op": "runs" }),
+        json!({ "op": "calls" }),
         json!({ "op": "hub", "call": { "cmd": "get_settings" } }),
         json!({ "op": "hub", "call": { "cmd": "list_schedules" } }),
     ];
     for op in &reads {
         assert!(team_op(&mut bruno, &team, op.clone()).is_ok(), "{op}");
-    }
-    // Still stubs on this base: they answer that, never the unlock.
-    for op in [json!({ "op": "bots" }), json!({ "op": "runs" }), json!({ "op": "calls" })] {
-        assert_eq!(team_op(&mut bruno, &team, op.clone()), Err(NOT_BUILT.into()), "{op}");
     }
 
     // Unlocked, every change gets past the unlock: each answers what its op answers, never LOCKED.
@@ -247,7 +245,8 @@ fn a_team_box_may_not_read_a_session() {
 fn a_team_box_asks_its_people_and_a_persons_machine_forwards_as_before() {
     let (hub, _) = team_box("sepfix_box_allowed");
     let ask = json!({ "cmd": "team", "op": { "op": "ask_people", "situation": "in_doubt", "question": "Which?", "choices": ["red", "blue"] } });
-    assert_eq!(machine_result(&hub.url, TEAM_BOX_TOKEN, ask), Err(NOT_BUILT.into()), "it reaches the op, which is a stub on this base");
+    let no_session = "only a session in one of a team's boxes asks people";
+    assert_eq!(machine_result(&hub.url, TEAM_BOX_TOKEN, ask), Err(no_session.into()), "it reaches the op, which finds no session in the box");
     let (token, _) = account::signup(&hub.url, "bruno@example.test", PASSWORD).unwrap();
     let (_, machine_token) = account::register_machine(&hub.url, &token, "bruno-laptop", "linux").unwrap();
     let share = json!({ "cmd": "share_project", "project": { "key": "github.com/b/site", "name": "site", "repo": "git@github.com:b/site.git" } });
