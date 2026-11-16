@@ -422,3 +422,67 @@ fn an_agent_task_whose_account_another_holds_is_refused() {
     assert_eq!(within(&hub, "erin's agent task", pending).unwrap(), Err(BUSY.to_owned()));
     held.release();
 }
+
+// ---- a busy read never loses what waits ----
+
+#[test]
+fn a_waiting_run_now_whose_bot_read_is_busy_still_waits_and_starts_later() {
+    let crew = Crew::new("tl_wait_busy_read");
+    let pages = crew.on_bot("Pages");
+    assert_eq!(crew.found(crew.labeled(&pages, 1)), Ok(()));
+    let reply = crew.call(&crew.bob, TeamOp::RunNow { workflow: pages.clone() }).unwrap();
+    assert_eq!((reply["waiting"].clone(), reply["place"].clone()), (json!(true), json!(1)), "bob's Run now waits behind the live run");
+    let skipped = crew.skipped(&pages);
+    let boxes = crew.boxes_created();
+    // The start after the end reads the bot's row, which another connection holds.
+    let held = Held::new(&crew.hub, "lock table team_bots in access exclusive mode");
+    crew.stop(&crew.live_of(&pages)[0]);
+    waiting_on(&held);
+    wait_for("the start after the end to give up on the held table", || held.waiters() == 0);
+    held.release();
+
+    assert!(crew.waiting(&pages) == 1 || crew.boxes_created() > boxes, "bob's Run now still waits, or its box start was tried");
+    assert_eq!(crew.skipped(&pages), skipped, "nothing was counted as skipped");
+    crew.reaper_pass();
+    wait_for("bob's Run now to open its session", || opened(&crew, &pages) == 1 && crew.waiting(&pages) == 0);
+}
+
+/// The write that a reserved run opened its session (`reserved` set false) is refused as a lock
+/// wait that timed out, its first `times` tries. A sequence counts them: it is not rolled back.
+fn open_write_busy(crew: &Crew, times: u32) {
+    admin_on(
+        &crew.hub.database,
+        &format!(
+            "create sequence open_tries;
+             create function open_busy() returns trigger language plpgsql as $$
+               begin
+                 if old.reserved and not new.reserved and nextval('open_tries') <= {times} then
+                   raise exception 'lock held elsewhere' using errcode = '55P03';
+                 end if;
+                 return new;
+               end $$;
+             create trigger open_busy before update on team_runs for each row execute function open_busy()"
+        ),
+    );
+}
+
+/// A Run now whose session started but whose open write was refused `times` times: the run opens
+/// on a later try, or its box ends. A session never keeps working on a run that only holds its place.
+fn an_open_write_refused(name: &str, times: u32) {
+    let crew = Crew::new(name);
+    let pages = crew.on_bot("Pages");
+    open_write_busy(&crew, times);
+    let _ = crew.call(&crew.bob, TeamOp::RunNow { workflow: pages.clone() });
+    wait_for("the run to open, or its box to end", || opened(&crew, &pages) == 1 || crew.hub.boxes.live().is_empty());
+    assert!(opened(&crew, &pages) == 1 || crew.hub.boxes.live().is_empty(), "no session keeps working on a run that only holds its place");
+}
+
+#[test]
+fn a_session_whose_open_write_is_busy_once_never_keeps_working_on_a_reserved_run() {
+    an_open_write_refused("tl_open_busy_once", 1);
+}
+
+#[test]
+fn a_session_whose_open_write_is_busy_twice_never_keeps_working_on_a_reserved_run() {
+    an_open_write_refused("tl_open_busy_twice", 2);
+}

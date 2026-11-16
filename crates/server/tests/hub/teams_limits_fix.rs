@@ -319,3 +319,42 @@ fn a_box_of_unknown_size_is_charged_at_the_largest_rate() {
     let cost = listed(&mut tb, run)["cost_usd"].as_f64().unwrap();
     assert!((cost - 0.40).abs() <= 0.40 * 3.0 / 3600.0, "a large box's hour: {cost}");
 }
+
+#[test]
+fn a_limit_of_the_wrong_json_type_stops_no_other_teams_limit_call() {
+    let hub = start("teams_limfix_wrong_type");
+    let broken = TeamBox::new(&hub);
+    let broken_run = broken.run(&hub);
+    let mut limited = TeamBox::new_as(&hub, "lena@example.test");
+    let limited_run = limited.run(&hub);
+    limited_bot(&hub, &limited, json!({ "usd": 5.0, "minutes": 1 }), json!({ "kind": "owner" }));
+    limited_bot(&hub, &broken, json!({ "usd": 1.0, "minutes": 1 }), json!({ "kind": "owner" }));
+    // A row only SQL could write: its minutes are text.
+    sql(&hub, &format!("update team_bots set limits = '{{\"usd\":1,\"minutes\":\"x\"}}' where team = '{}'", broken.team));
+    backdate(&hub, broken_run, 120);
+    backdate(&hub, limited_run, 70);
+    tick(&hub);
+    let limit = on_limit_calls(&calls_of(limited.team, &mut limited.owner.client));
+    assert_eq!(limit.len(), 1, "the other team's run at its limit is called in the same tick: {limit:?}");
+    assert_eq!(limit[0]["question"], json!(minutes_question("1 minute")));
+}
+
+#[test]
+fn a_stop_answered_but_not_ended_spends_the_runs_go_ahead() {
+    use super::teams_go_ahead::{answer, ask, try_step, DEPLOY};
+    let hub = start("teams_limfix_stop_go_ahead");
+    let mut tb = TeamBox::new(&hub);
+    limited_bot(&hub, &tb, json!({ "usd": 5.0, "minutes": 30 }), json!({ "kind": "owner" }));
+    let run = tb.run(&hub);
+    // A "Go ahead" on the deploy, not used yet.
+    let deploy = ask(&hub, &mut tb, DEPLOY);
+    answer(&mut tb, &deploy, choice("Go ahead", ""));
+    let doubt = tb.ask(&hub, "Red or blue footer?", &[]).unwrap()["call"].as_str().unwrap().to_owned();
+    // The stop is stored on its call, then the run's end waits on another connection's lock.
+    let held = super::teams_locks::Held::new(&hub, &format!("select 1 from team_runs where id = '{run}' for update"));
+    let stopped = op(tb.team, &mut tb.owner.client, json!({ "op": "answer_call", "id": doubt, "answer": { "choice": null, "text": "", "kind": { "kind": "stop" } } }));
+    held.release();
+    assert!(stopped.is_err(), "the stop's end failed: {stopped:?}");
+    assert_eq!(listed(&mut tb, run)["state"], json!("waiting"), "the run is left waiting");
+    assert!(try_step(&hub, &tb, DEPLOY).is_some(), "the deploy does not run on the Go ahead of a run a person stopped");
+}
