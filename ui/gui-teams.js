@@ -305,8 +305,7 @@ function teamsOpenHome() {
 // ---- Create a team ------------------------------------------------------------------------------
 
 const teamWizard = {};
-function resetWizard() {
-  const own = teamsOwnProjects();
+function resetWizard(own = teamsOwnProjects()) {
   Object.assign(teamWizard, {
     step: 1,
     name: "",
@@ -325,7 +324,8 @@ function resetWizard() {
     copied: "",
   });
 }
-resetWizard();
+// The projects are read when the page opens: the catalog is not ready while this script loads.
+resetWizard([]);
 
 const teamWizardTeamName = () => (teamWizard.team?.name ?? teamWizard.name).trim() || "the team";
 const teamWizardCreds = () => teamWizard.team?.credential ?? {};

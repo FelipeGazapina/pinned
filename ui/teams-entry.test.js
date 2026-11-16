@@ -13,7 +13,7 @@ const SOLO = { id: "t2", name: "Side Gig", owner: "a9", role: "member", credenti
 
 /** gui-teams.js in a page whose hub answers each team op from `answers` (a value, or a function of the call),
  * with `projects` as the person's own projects (name, repo) and `pages` as the registered shell pages. */
-function app({ answers = {}, projects = [], pages = [], stored = null, raw = null, body = {} } = {}) {
+function app({ answers = {}, projects = [], pages = [], stored = null, raw = null, body = {}, catalogNotReady = false } = {}) {
   const frames = [];
   const listeners = {};
   const events = [];
@@ -21,6 +21,7 @@ function app({ answers = {}, projects = [], pages = [], stored = null, raw = nul
   const shown = [];
   const context = {
     console,
+    catalogNotReady,
     CustomEvent: class {
       constructor(type, init) {
         this.type = type;
@@ -40,7 +41,10 @@ function app({ answers = {}, projects = [], pages = [], stored = null, raw = nul
     esc: (v) => String(v ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`),
     load: (key) => store.get(key),
     save: (key, value) => (value === null ? store.delete(key) : store.set(key, value)),
-    globalProjectsCatalog: () => ({ projects: projects.map(([name, repo]) => ({ slug: name, name, repo, machines: [] })), machines: [] }),
+    globalProjectsCatalog: () => {
+      if (context.catalogNotReady) throw new ReferenceError("PinnedProjects is not defined");
+      return { projects: projects.map(([name, repo]) => ({ slug: name, name, repo, machines: [] })), machines: [] };
+    },
     account: { email: "ana.prado@acme.dev" },
     navigator: { clipboard: { writeText: (t) => ((context.copied = t), Promise.resolve()) } },
     opened: [],
@@ -569,4 +573,16 @@ test("repository keys are the hub's spelling whichever way a machine wrote the r
   assert.equal(key("https://user:tok@github.com/acme/site.git"), "github.com/acme/site");
   assert.equal(key(""), "");
   assert.equal(key(null), "");
+});
+
+test("the script loads before the project catalog is ready, and the pages read the projects when they open", () => {
+  const a = app({ catalogNotReady: true, projects: [["storefront", "https://github.com/acme/storefront"]], pages: [] });
+  assert.ok("team-create" in a.context.SHELL_PAGES && "team-join" in a.context.SHELL_PAGES);
+  a.context.catalogNotReady = false;
+  a.show("team-create");
+  a.listeners.input({ target: { id: "tm-team-name", value: "North Studio" } });
+  assert.match(a.page(), /What is the team called\?/);
+  a.run("teamWizard.step = 2");
+  a.run("renderCreate()");
+  assert.match(a.page(), /data-key="github.com\/acme\/storefront"/);
 });
