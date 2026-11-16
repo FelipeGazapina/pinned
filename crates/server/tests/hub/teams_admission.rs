@@ -828,3 +828,182 @@ fn a_granted_event_its_ask_step_stops_is_not_counted() {
     assert_eq!(crew.outside(1), vec!["model".to_owned()], "ENG-1's Ask step stopped it");
     assert_eq!(crew.skipped(&pages), Value::Null, "a stop by its Ask step is not a failed start");
 }
+
+// ---- a granted event's claim and the reservation backstop at the limit ----
+
+impl Crew {
+    /// The team's runs of bot `id` as a member lists them: (state, outcome) of each, newest first.
+    fn states_of(&self, id: &str) -> Vec<(String, Option<String>)> {
+        let runs = self.call(&self.bob, TeamOp::Runs).unwrap();
+        runs.as_array().unwrap().iter().filter(|r| r["workflow"] == id).map(|r| (r["state"].as_str().unwrap().to_owned(), r["outcome"].as_str().map(str::to_owned))).collect()
+    }
+
+    /// One pass of the hub's calls tick, the reaper's backstop with it, as `teams::spawn_tick` runs it.
+    fn reaper_pass(&self) {
+        self.hub.runtime.block_on(teams::calls::tick(self.hub.hub(), &self.hub.team_policy)).unwrap();
+    }
+
+    /// How many box bootstraps started so far.
+    fn boots(&self) -> usize {
+        self.hub.boxes.state.lock().unwrap().scripts.iter().filter(|s| s.contains("start.sh")).count()
+    }
+}
+
+/// `granted_unclaimed`, then `past_the_limit`.
+fn granted_past_the_limit(crew: &Crew, holder: &str, pages: &str) -> Arc<tokio::sync::Notify> {
+    granted_unclaimed(crew, holder, pages);
+    past_the_limit(crew, pages)
+}
+
+/// Bot `pages`' ENG-1 and ENG-2 wait behind `holder`'s run, which stops: ENG-1 is granted its
+/// place, which no poller claims while the test's polls are held.
+fn granted_unclaimed(crew: &Crew, holder: &str, pages: &str) {
+    POLLS_HELD.lock().unwrap().push(crew.name.clone());
+    two_wait_behind(crew, holder, pages, false);
+    wait_for("ENG-1's grant", || crew.reserved_at(pages) == vec!["set".to_owned()]);
+    assert_eq!(crew.waiting(pages), 2, "ENG-1 is granted and its row waits for a claim, ENG-2 waits");
+}
+
+/// ENG-1's place was held 16 minutes ago, past the 15 minute limit. The next box's boot waits
+/// for the answered gate.
+fn past_the_limit(crew: &Crew, pages: &str) -> Arc<tokio::sync::Notify> {
+    admin_on(&crew.hub.database, &format!("update team_runs set reserved_at = now() - interval '16 minutes' where team = '{}' and workflow = '{pages}' and reserved", crew.team));
+    let gate = Arc::new(tokio::sync::Notify::new());
+    crew.hub.boxes.state.lock().unwrap().gate = Some(gate.clone());
+    gate
+}
+
+/// The test's polls go on: the poller claims ENG-1, whose Ask step asks the model, and its box
+/// starts to boot and waits at the gate, so its run is still reserved.
+fn claimed_and_booting(crew: &Crew, pages: &str) {
+    let booted = crew.boots();
+    POLLS_HELD.lock().unwrap().retain(|t| t != &crew.name);
+    wait_for("ENG-1's claim, its model call and its box's boot", || crew.waiting(pages) == 1 && crew.outside(1) == vec!["model".to_owned()] && crew.boots() > booted);
+    assert_eq!(crew.reserved_at(pages), vec!["set".to_owned()], "its place is held while its box boots");
+}
+
+/// ENG-1's box boots: its run opens its session in the place it was granted, each outside step
+/// once, and nothing ended or counted it.
+fn started_once(crew: &Crew, pages: &str, gate: &tokio::sync::Notify) {
+    gate.notify_one();
+    wait_for("ENG-1's session to move its issue", || crew.outside(1).len() == 2 && crew.reserved_at(pages).is_empty());
+    // A few checks pass meanwhile, and another reaper pass: nothing runs a second time.
+    std::thread::sleep(Duration::from_secs(3));
+    crew.reaper_pass();
+    assert_eq!(crew.outside(1), vec!["model".to_owned(), "linear move".to_owned()], "each outside step exactly once");
+    assert_eq!(crew.states_of(pages), vec![("working".to_owned(), None)], "ENG-1's run lives, not ended");
+    assert_eq!(crew.reserved_at(pages), none(), "its session opened in the place it was granted");
+    assert_eq!(crew.unopened(), none(), "no reserved row is left unopened");
+    assert_eq!(crew.skipped(pages), Value::Null, "nothing counted, no never_started");
+    assert_eq!(crew.waiting(pages), 1, "ENG-2 waits for the place ENG-1 runs in");
+    assert_eq!(crew.outside(2), none());
+}
+
+#[test]
+fn a_claim_at_the_limit_beats_the_backstop_and_the_run_starts_once() {
+    let crew = Crew::new("ta_race_claim");
+    let (holder, pages) = (crew.on_bot("Docs"), crew.on_bot("Pages"));
+    let gate = granted_past_the_limit(&crew, &holder, &pages);
+    claimed_and_booting(&crew, &pages);
+
+    crew.reaper_pass();
+    assert_eq!(crew.states_of(&pages), vec![("working".to_owned(), None)], "the claim refreshed its place: the backstop leaves it");
+    assert_eq!(crew.skipped(&pages), Value::Null);
+    started_once(&crew, &pages, &gate);
+}
+
+#[test]
+fn a_backstop_at_the_limit_beats_the_claim_and_the_run_is_counted_once() {
+    let crew = Crew::new("ta_race_backstop");
+    let (holder, pages) = (crew.on_bot("Docs"), crew.on_bot("Pages"));
+    let gate = granted_past_the_limit(&crew, &holder, &pages);
+    let boxes_before = crew.boxes_created();
+
+    crew.reaper_pass();
+    let failed = ("failed".to_owned(), Some("it never started".to_owned()));
+    assert_eq!(crew.states_of(&pages), vec![failed.clone()], "ENG-1's run is ended: it never started");
+    assert_eq!(crew.skipped(&pages), json!([{ "reason": "never_started", "count": 1 }]));
+    assert_eq!(crew.waiting(&pages), 1, "ENG-1's granted row is gone, ENG-2 holds the freed place");
+
+    // The poller's claim comes after: ENG-1 is not there to claim, and ENG-2 gets the place.
+    POLLS_HELD.lock().unwrap().retain(|t| t != &crew.name);
+    gate.notify_one();
+    wait_for("ENG-2 to take the freed place", || crew.live_of(&pages).len() == 1 && crew.waiting(&pages) == 0 && crew.outside(2).len() == 2);
+    std::thread::sleep(Duration::from_secs(3));
+    crew.reaper_pass();
+    assert_eq!(crew.outside(1), none(), "nothing of ENG-1 reached outside pinned");
+    assert_eq!(crew.outside(2), vec!["model".to_owned(), "linear move".to_owned()]);
+    assert_eq!(crew.boxes_created() - boxes_before, 1, "only ENG-2 got a box and a session");
+    assert_eq!(crew.states_of(&pages), vec![("working".to_owned(), None), failed], "ENG-2 runs, ENG-1 stays listed as it ended");
+    assert_eq!(crew.unopened(), vec!["failed"]);
+    assert_eq!(crew.skipped(&pages), json!([{ "reason": "never_started", "count": 1 }]), "counted once, and no start_failed");
+}
+
+#[test]
+fn a_claim_between_the_backstops_read_and_its_end_wins_alone() {
+    let crew = Crew::new("ta_race_between");
+    let (holder, pages) = (crew.on_bot("Docs"), crew.on_bot("Pages"));
+    // A second hub on the same database runs the backstop: its first write after its read of the
+    // stale runs (the unclaimed grant's drop) waits for an advisory lock the test holds, so this
+    // hub's claim runs between that read and the backstop's end. Each hub has one connection, so
+    // only the second hub's statements wait. It starts before the place is past the limit, so
+    // its first tick finds nothing stale.
+    granted_unclaimed(&crew, &holder, &pages);
+    let (twin, running) = crew.hub.twin();
+    let gate = past_the_limit(&crew, &pages);
+    admin_on(
+        &crew.hub.database,
+        "create function hold_backstop() returns trigger language plpgsql as $$ begin
+           if current_query() like '%delete from team_run_queue where team = $1 and run = $2%' then
+             perform pg_advisory_lock_shared(4242); perform pg_advisory_unlock_shared(4242);
+           end if; return null; end $$;
+         create trigger hold_backstop before delete on team_run_queue for each statement execute function hold_backstop()",
+    );
+    let held = tokio::runtime::Runtime::new().unwrap();
+    let lock = held.block_on(async {
+        let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), crew.hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        db.query("select pg_advisory_lock(4242)", &[]).await.unwrap();
+        db
+    });
+    let backstop_waits = || -> bool {
+        held.block_on(lock.query_one("select count(*) from pg_stat_activity where datname = current_database() and wait_event = 'advisory' and query like '%and run = $2%'", &[])).unwrap().get::<_, i64>(0) == 1
+    };
+    std::thread::scope(|scope| {
+        let pass = scope.spawn(|| twin.block_on(teams::calls::tick(&running.hub, &crew.hub.team_policy)).unwrap());
+        wait_for("the backstop to read ENG-1's run as stale and wait", backstop_waits);
+        claimed_and_booting(&crew, &pages);
+        held.block_on(lock.query("select pg_advisory_unlock(4242)", &[])).unwrap();
+        pass.join().unwrap();
+    });
+    admin_on(&crew.hub.database, "drop trigger hold_backstop on team_run_queue");
+    twin.shutdown_background();
+
+    assert_eq!(crew.states_of(&pages), vec![("working".to_owned(), None)], "the claim won: the backstop's end found its place refreshed");
+    assert_eq!(crew.skipped(&pages), Value::Null, "nothing counted");
+    started_once(&crew, &pages, &gate);
+}
+
+#[test]
+fn a_stopped_reservation_leaves_no_granted_event_behind() {
+    let crew = Crew::new("ta_race_stopped");
+    let (holder, pages) = (crew.on_bot("Docs"), crew.on_bot("Pages"));
+    POLLS_HELD.lock().unwrap().push(crew.name.clone());
+    two_wait_behind(&crew, &holder, &pages, false);
+    wait_for("ENG-1's grant", || crew.reserved_at(&pages) == vec!["set".to_owned()]);
+    assert_eq!(crew.waiting(&pages), 2, "ENG-1 is granted and its row waits for a claim, ENG-2 waits");
+
+    let reserved = crew.live_of(&pages);
+    crew.stop(&reserved[0]);
+    let oldest = crew.states_of(&pages).pop();
+    assert_eq!(oldest, Some(("stopped".to_owned(), Some("stopped by ana".to_owned()))), "ENG-1's run is listed stopped");
+    assert_eq!(crew.waiting(&pages), 1, "ENG-1's granted row went with its run: only ENG-2's row is left");
+
+    POLLS_HELD.lock().unwrap().retain(|t| t != &crew.name);
+    wait_for("ENG-2 to take the freed place", || crew.live_of(&pages).len() == 1 && crew.outside(2).len() == 2);
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(crew.waiting(&pages), 0, "no granted event is left behind");
+    assert_eq!(crew.outside(1), none(), "nothing of ENG-1 reached outside pinned");
+    assert_eq!(crew.unopened(), vec!["stopped"]);
+    assert_eq!(crew.skipped(&pages), Value::Null, "a stop is not counted");
+}
