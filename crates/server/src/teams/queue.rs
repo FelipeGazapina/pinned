@@ -466,10 +466,11 @@ async fn take_and_start(hub: &Arc<Hub>, turn: &Turn, team: &Arc<Account>, ended:
             taken.granted = true;
             continue;
         }
-        // Every read on the shared connection comes before the take: one that fails (a busy read)
-        // returns before the row is taken, so the run still waits, counted by nobody. Only what
-        // the take is written with (`turn.held`: its counts and its reservation) rolls back with a
-        // turn that fails after it, and the turn commits whatever this returns.
+        // Every read on the shared connection comes before the take: a busy read returns before
+        // the row is taken, so the run still waits, counted by nobody. Any other failed read is
+        // taken and counted `StartFailed`, so a row that never reads holds up no run behind it.
+        // Only what the take is written with (`turn.held`: its counts and its reservation) rolls
+        // back with a turn that fails after it, and the turn commits whatever this returns.
         let Some(start) = stored.start(&waiting.workflow) else {
             db::take_waiting(&turn.held, waiting.id).await?;
             continue;
@@ -479,14 +480,20 @@ async fn take_and_start(hub: &Arc<Hub>, turn: &Turn, team: &Arc<Account>, ended:
             Start::Trigger { work, .. } => Some(work.clone()),
             Start::Member(_) => None,
         };
-        let read = match skip_reason(hub, team, &waiting.workflow, by_trigger).await? {
-            Some(reason) => Err(reason),
-            None => Ok(match bots::ready(hub, team, &waiting.workflow).await {
-                Ok(()) => bots::work_of(&*hub.connectors(team).await?, &waiting.workflow, start),
-                // A busy read says nothing of the bot: the run still waits.
+        // A busy read says nothing of the bot: the run still waits.
+        let read = match skip_reason(hub, team, &waiting.workflow, by_trigger).await {
+            Ok(Some(reason)) => Err(reason),
+            Ok(None) => Ok(match bots::ready(hub, team, &waiting.workflow).await {
+                Ok(()) => match hub.connectors(team).await {
+                    Ok(connectors) => bots::work_of(&connectors, &waiting.workflow, start),
+                    Err(e) if e == crate::db::BUSY => return Err(e),
+                    Err(e) => Err(e),
+                },
                 Err(e) if e == crate::db::BUSY => return Err(e),
                 Err(e) => Err(e),
             }),
+            Err(e) if e == crate::db::BUSY => return Err(e),
+            Err(e) => Ok(Err(e)),
         };
         db::take_waiting(&turn.held, waiting.id).await?;
         let reserved = match read {
