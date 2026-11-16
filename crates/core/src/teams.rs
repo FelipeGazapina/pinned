@@ -350,8 +350,14 @@ pub struct Run {
     pub controller: Option<String>,
     #[serde(default)]
     pub cost_usd: f64,
+    /// Seconds of work: from `started_at` to its end (or now), less `waiting_secs`. A run's
+    /// `BotLimits::minutes` count these only.
     #[serde(default)]
     pub active_secs: u64,
+    /// Seconds it waited on people (its calls), the open one included. Waiting counts toward
+    /// neither of its `BotLimits`, only toward `TeamPolicy::max_life_secs`.
+    #[serde(default)]
+    pub waiting_secs: u64,
     pub started_at: i64,
     #[serde(default)]
     pub ended_at: Option<i64>,
@@ -428,7 +434,19 @@ pub struct TeamPolicy {
     /// (`RunState::Failed`), counted as `SkipReason::NeverStarted`.
     #[serde(default = "default_reservation_limit_secs")]
     pub reservation_limit_secs: u64,
+    /// The most a run lives from its start, its waits included: never suspended, so a run that
+    /// keeps opening calls still ends then (`RunState::Failed`).
+    #[serde(default = "default_max_life_secs")]
+    pub max_life_secs: u64,
 }
+
+fn default_max_life_secs() -> u64 {
+    4 * 3600
+}
+
+/// How many times the policy's `run_usd` and `run_minutes` a team's owner may give a bot
+/// (`TeamOp::SetBotCeiling`).
+pub const CEILING_TIMES: u32 = 4;
 
 fn default_reservation_limit_secs() -> u64 {
     900
@@ -442,6 +460,7 @@ impl Default for TeamPolicy {
             run_usd: 5.0,
             run_minutes: 30,
             reservation_limit_secs: default_reservation_limit_secs(),
+            max_life_secs: default_max_life_secs(),
         }
     }
 }
@@ -457,6 +476,7 @@ impl TeamPolicy {
             run_usd: self.run_usd,
             run_minutes: (self.run_minutes / divide_by).max(1),
             reservation_limit_secs: (self.reservation_limit_secs / u64::from(divide_by)).max(1),
+            max_life_secs: (self.max_life_secs / u64::from(divide_by)).max(1),
         }
     }
 }
@@ -520,6 +540,10 @@ pub enum TeamOp {
     TakeOver { run: String },
     GiveBack { run: String },
     StopRun { run: String },
+    /// Owner only: the bot's `BotLimits` for each run, at most `CEILING_TIMES` the policy's
+    /// `run_usd` and `run_minutes`. Both finite and above 0, `minutes` whole; a value JSON cannot
+    /// carry (NaN, infinity) arrives as no number and is refused too.
+    SetBotCeiling { workflow: String, usd: f64, minutes: f64 },
     /// `Vec<RunLogLine>`: the last 200 lines of what the run's bot did, oldest first, read from the
     /// session in the run's own box. `[]` while the run has no box or session yet.
     RunLog { run: String },
@@ -679,7 +703,7 @@ mod tests {
     #[test]
     fn a_scaled_policy_divides_times_only() {
         let fast = TeamPolicy::default().scaled(60);
-        assert_eq!(fast, TeamPolicy { escalate_after_secs: 30, give_up_after_secs: 120, run_usd: 5.0, run_minutes: 1, reservation_limit_secs: 15 });
+        assert_eq!(fast, TeamPolicy { escalate_after_secs: 30, give_up_after_secs: 120, run_usd: 5.0, run_minutes: 1, reservation_limit_secs: 15, max_life_secs: 240 });
         let tiny = TeamPolicy::default().scaled(100_000);
         assert_eq!((tiny.escalate_after_secs, tiny.give_up_after_secs, tiny.run_minutes, tiny.reservation_limit_secs), (1, 1, 1, 1));
         assert_eq!(TeamPolicy::default().scaled(0), TeamPolicy::default());

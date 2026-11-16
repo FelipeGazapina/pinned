@@ -200,6 +200,9 @@ alter table team_calls add column if not exists step_hash text, add column if no
 -- When a run last moved to waiting, so the calls tick tells a run left waiting with no open call
 -- from one whose call is being opened (`teams::db::stale_waiting`).
 alter table team_runs add column if not exists waiting_since timestamptz;
+-- Seconds a run waited on its closed calls; with `waiting_since` it gives the run's waiting
+-- and active time (`teams::db::RUN_COLUMNS`), which survive a restart.
+alter table team_runs add column if not exists waiting_secs bigint not null default 0;
 -- One live run per bot and at most `max_live_runs` per team: the events past that wait in their
 -- bot's line (`teams::queue`), and the events that started no run are counted by why.
 alter table teams add column if not exists max_live_runs integer not null default 3;

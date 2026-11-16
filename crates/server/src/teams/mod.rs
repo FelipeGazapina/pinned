@@ -121,6 +121,7 @@ pub fn owner_only(op: &Op, locked: bool) -> bool {
             | TeamOp::SaveBot { .. }
             | TeamOp::TurnBotOn { .. }
             | TeamOp::DeleteBot { .. }
+            | TeamOp::SetBotCeiling { .. }
             | TeamOp::RunNow { .. }
             | TeamOp::AnswerCall { .. }
             | TeamOp::TakeOver { .. }
@@ -194,6 +195,7 @@ pub async fn call(hub: &Arc<Hub>, person: &Arc<Account>, team: Option<Uuid>, op:
         TeamOp::TakeOver { run } => json(calls::take_over(hub, s, &run).await?),
         TeamOp::GiveBack { run } => json(calls::give_back(hub, s, &run).await?),
         TeamOp::StopRun { run } => json(calls::stop_run(hub, s, &run).await?),
+        TeamOp::SetBotCeiling { workflow, usd, minutes } => json(bots::set_bot_ceiling(hub, s, &workflow, usd, minutes).await?),
         TeamOp::RunLog { run } => json(run_log::run_log(hub, s, &run).await?),
         TeamOp::Chat { text } => json(chat::chat(hub, s, &text).await?),
     }

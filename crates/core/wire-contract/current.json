@@ -11405,6 +11405,33 @@
                 ]
               },
               {
+                "description": "Owner only: the bot's `BotLimits` for each run, at most `CEILING_TIMES` the policy's\n`run_usd` and `run_minutes`. Both finite and above 0, `minutes` whole; a value JSON cannot\ncarry (NaN, infinity) arrives as no number and is refused too.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "set_bot_ceiling"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  },
+                  "usd": {
+                    "type": "number",
+                    "format": "double"
+                  },
+                  "minutes": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow",
+                  "usd",
+                  "minutes"
+                ]
+              },
+              {
                 "description": "`Vec<RunLogLine>`: the last 200 lines of what the run's bot did, oldest first, read from the\nsession in the run's own box. `[]` while the run has no box or session yet.",
                 "type": "object",
                 "properties": {
@@ -23046,6 +23073,33 @@
                 ]
               },
               {
+                "description": "Owner only: the bot's `BotLimits` for each run, at most `CEILING_TIMES` the policy's\n`run_usd` and `run_minutes`. Both finite and above 0, `minutes` whole; a value JSON cannot\ncarry (NaN, infinity) arrives as no number and is refused too.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "set_bot_ceiling"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  },
+                  "usd": {
+                    "type": "number",
+                    "format": "double"
+                  },
+                  "minutes": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow",
+                  "usd",
+                  "minutes"
+                ]
+              },
+              {
                 "description": "`Vec<RunLogLine>`: the last 200 lines of what the run's bot did, oldest first, read from the\nsession in the run's own box. `[]` while the run has no box or session yet.",
                 "type": "object",
                 "properties": {
@@ -31847,6 +31901,33 @@
                 ]
               },
               {
+                "description": "Owner only: the bot's `BotLimits` for each run, at most `CEILING_TIMES` the policy's\n`run_usd` and `run_minutes`. Both finite and above 0, `minutes` whole; a value JSON cannot\ncarry (NaN, infinity) arrives as no number and is refused too.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "set_bot_ceiling"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  },
+                  "usd": {
+                    "type": "number",
+                    "format": "double"
+                  },
+                  "minutes": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow",
+                  "usd",
+                  "minutes"
+                ]
+              },
+              {
                 "description": "`Vec<RunLogLine>`: the last 200 lines of what the run's bot did, oldest first, read from the\nsession in the run's own box. `[]` while the run has no box or session yet.",
                 "type": "object",
                 "properties": {
@@ -40337,6 +40418,33 @@
                 "required": [
                   "op",
                   "run"
+                ]
+              },
+              {
+                "description": "Owner only: the bot's `BotLimits` for each run, at most `CEILING_TIMES` the policy's\n`run_usd` and `run_minutes`. Both finite and above 0, `minutes` whole; a value JSON cannot\ncarry (NaN, infinity) arrives as no number and is refused too.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "set_bot_ceiling"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  },
+                  "usd": {
+                    "type": "number",
+                    "format": "double"
+                  },
+                  "minutes": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow",
+                  "usd",
+                  "minutes"
                 ]
               },
               {
@@ -59667,6 +59775,14 @@
             "default": 0.0
           },
           "active_secs": {
+            "description": "Seconds of work: from `started_at` to its end (or now), less `waiting_secs`. A run's\n`BotLimits::minutes` count these only.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "default": 0
+          },
+          "waiting_secs": {
+            "description": "Seconds it waited on people (its calls), the open one included. Waiting counts toward\nneither of its `BotLimits`, only toward `TeamPolicy::max_life_secs`.",
             "type": "integer",
             "format": "uint64",
             "minimum": 0,
@@ -59704,6 +59820,7 @@
           "controller",
           "cost_usd",
           "active_secs",
+          "waiting_secs",
           "started_at",
           "ended_at",
           "outcome",
@@ -59770,6 +59887,14 @@
             "default": 0.0
           },
           "active_secs": {
+            "description": "Seconds of work: from `started_at` to its end (or now), less `waiting_secs`. A run's\n`BotLimits::minutes` count these only.",
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "default": 0
+          },
+          "waiting_secs": {
+            "description": "Seconds it waited on people (its calls), the open one included. Waiting counts toward\nneither of its `BotLimits`, only toward `TeamPolicy::max_life_secs`.",
             "type": "integer",
             "format": "uint64",
             "minimum": 0,
@@ -64238,6 +64363,14 @@
                 "default": 0.0
               },
               "active_secs": {
+                "description": "Seconds of work: from `started_at` to its end (or now), less `waiting_secs`. A run's\n`BotLimits::minutes` count these only.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0,
+                "default": 0
+              },
+              "waiting_secs": {
+                "description": "Seconds it waited on people (its calls), the open one included. Waiting counts toward\nneither of its `BotLimits`, only toward `TeamPolicy::max_life_secs`.",
                 "type": "integer",
                 "format": "uint64",
                 "minimum": 0,
@@ -64275,6 +64408,7 @@
               "controller",
               "cost_usd",
               "active_secs",
+              "waiting_secs",
               "started_at",
               "ended_at",
               "outcome",
@@ -68532,6 +68666,14 @@
                 "default": 0.0
               },
               "active_secs": {
+                "description": "Seconds of work: from `started_at` to its end (or now), less `waiting_secs`. A run's\n`BotLimits::minutes` count these only.",
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0,
+                "default": 0
+              },
+              "waiting_secs": {
+                "description": "Seconds it waited on people (its calls), the open one included. Waiting counts toward\nneither of its `BotLimits`, only toward `TeamPolicy::max_life_secs`.",
                 "type": "integer",
                 "format": "uint64",
                 "minimum": 0,

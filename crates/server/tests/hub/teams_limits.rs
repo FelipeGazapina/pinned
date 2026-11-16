@@ -214,3 +214,20 @@ fn the_box_idle_timer_waits_while_its_run_waits_and_runs_again_after() {
     op(tb.team, &mut tb.owner.client, json!({ "op": "answer_call", "id": call, "answer": choice("", "blue") })).unwrap();
     wait_for("the idle box to end once answered", || hub.boxes.live().is_empty());
 }
+
+/// JSON carries no NaN or infinity, so the typed op, as the hub reads it, brings them to the check.
+#[test]
+fn set_bot_ceiling_refuses_nan_and_infinity_as_the_hub_reads_them() {
+    let hub = TestHub::start("teams_limits_ceiling_nan");
+    let (mut ana, _, ana_id) = locked_app(&hub.url, "ana@example.test");
+    let team = make_team(&mut ana, "Acme");
+    let (team, ana_id) = (Uuid::parse_str(&team).unwrap(), Uuid::parse_str(&ana_id).unwrap());
+    for (usd, minutes) in [(f64::NAN, 60.0), (f64::INFINITY, 60.0), (f64::NEG_INFINITY, 60.0), (10.0, f64::NAN), (10.0, f64::INFINITY)] {
+        let op = pinned_core::teams::TeamOp::SetBotCeiling { workflow: "c1".into(), usd, minutes };
+        let refused = hub.runtime.block_on(async {
+            let owner = hub.hub().account(ana_id).await.unwrap();
+            pinned_server::teams::call(hub.hub(), &owner, Some(team), pinned_server::teams::Op::Team(op)).await
+        });
+        assert_eq!(refused, Err("a bot's ceiling needs dollars and whole minutes above 0".into()), "{usd} {minutes}");
+    }
+}
