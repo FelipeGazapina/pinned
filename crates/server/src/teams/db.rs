@@ -1492,7 +1492,8 @@ pub async fn skipped(db: &Db, team: Uuid, workflow: &str) -> Result<Vec<Skipped>
 // ---- limits (calls::tick) ----
 
 /// Charges each run at work (`working` or `taken_over`) in a box for its active time at its box's
-/// hourly rate (`small`, `medium`, `large` in `rates`): its `cost_usd` never goes down, and a
+/// hourly rate (`small`, `medium`, `large` in `rates`; a size it does not know at the largest):
+/// its `cost_usd` never goes down, and a
 /// waiting run is not charged, so a wait costs nothing toward its `BotLimits::usd`.
 pub async fn charge_working_runs(db: &Db, rates: [f64; 3]) -> Result<(), String> {
     db.client()
@@ -1500,7 +1501,7 @@ pub async fn charge_working_runs(db: &Db, rates: [f64; 3]) -> Result<(), String>
         .execute(
             "update team_runs r set cost_usd = greatest(r.cost_usd,
                    greatest(0, extract(epoch from now() - coalesce(r.opened_at, r.started_at))::bigint - r.waiting_secs)::float8
-                   * case lower(b.size) when 'medium' then $2::float8 when 'large' then $3::float8 else $1::float8 end / 3600.0)
+                   * case lower(b.size) when 'small' then $1::float8 when 'medium' then $2::float8 else $3::float8 end / 3600.0)
                  from boxes b where b.account = r.team and b.machine::text = r.box and r.state in ('working', 'taken_over') and not r.reserved",
             &[&rates[0], &rates[1], &rates[2]],
         )
