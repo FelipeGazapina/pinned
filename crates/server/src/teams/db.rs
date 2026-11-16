@@ -442,10 +442,16 @@ pub async fn in_group(db: &Db, team: Uuid, handle: &str, member: Uuid) -> Result
     Ok(row.is_some())
 }
 
-/// Records the box a run opened (the id of its machine), once it is known.
-pub async fn set_run_box(db: &Db, team: Uuid, run: Uuid, machine: &str) -> Result<(), String> {
-    db.client().await?.execute("update team_runs set box = $3 where team = $1 and id = $2", &[&team, &run, &machine]).await.map_err(err)?;
-    Ok(())
+/// Records the box a live run opened (the id of its machine), once it is known. False when the
+/// run ended meanwhile, as when someone stopped it while its box booted: it gets no box.
+pub async fn set_run_box(db: &Db, team: Uuid, run: Uuid, machine: &str) -> Result<bool, String> {
+    let set = db
+        .client()
+        .await?
+        .execute(&format!("update team_runs set box = $3 where team = $1 and id = $2 and state in {LIVE}"), &[&team, &run, &machine])
+        .await
+        .map_err(err)?;
+    Ok(set == 1)
 }
 
 /// Records the subject a run's box is opened for, so the box's machine is set on the run before
@@ -638,7 +644,7 @@ pub async fn start_waiting(db: &Db, team: Uuid, run: Uuid) -> Result<Option<Run>
         .client()
         .await?
         .query_opt(
-            &format!("update team_runs set state = 'waiting' where team = $1 and id = $2 and state in ('working', 'taken_over') returning {RUN_COLUMNS}"),
+            &format!("update team_runs set state = 'waiting', waiting_since = now() where team = $1 and id = $2 and state in ('working', 'taken_over') returning {RUN_COLUMNS}"),
             &[&team, &run],
         )
         .await
@@ -795,6 +801,29 @@ pub async fn insert_call(db: &Db, team: Uuid, call: &Call, step: Option<&str>) -
         .await
         .map_err(err)?;
     Ok(call_of(&row)?.call)
+}
+
+/// Opens `call`, passed on from call `first`, keeping `first`'s `created_at`, so passing restarts
+/// neither the escalation nor the give-up clock. Only while the run still waits, in one statement:
+/// None when it ended meanwhile, as when someone stopped it between the pass and this.
+pub async fn pass_call(db: &Db, team: Uuid, call: &Call, step: Option<&str>, first: Uuid) -> Result<Option<Call>, String> {
+    let (id, run) = (Uuid::parse_str(&call.id).map_err(|_| "a call's id is a uuid")?, Uuid::parse_str(&call.run).map_err(|_| "a run's id is a uuid")?);
+    let row = db
+        .client()
+        .await?
+        .query_opt(
+            &format!(
+                "with c as (insert into team_calls (id, team, run, situation, asked, question, choices, step_hash, created_at)
+                   select $1, $2, $3, $4, $5, $6, $7, $8, f.created_at from team_runs w, team_calls f
+                   where w.team = $2 and w.id = $3 and w.state = 'waiting' and f.team = $2 and f.id = $9
+                   returning *)
+                 select {CALL_COLUMNS} from c join team_runs r on r.id = c.run"
+            ),
+            &[&id, &team, &run, &call.situation.as_str(), &json(&call.asked)?, &call.question, &json(&call.choices)?, &step, &first],
+        )
+        .await
+        .map_err(err)?;
+    row.as_ref().map(call_of).transpose().map(|row| row.map(|row| row.call))
 }
 
 /// Uses the "Go ahead" a person gave on a `before_irreversible` call of run `run` about the step
@@ -966,17 +995,19 @@ pub async fn stop_open_call(db: &Db, team: Uuid, run: Uuid, answer: &Answer) -> 
 
 /// Sets `machine` on the live run of the team's workflow `workflow` opened for `subject` that has
 /// no box yet, just before the box's session starts (`boxes::Boxes`), so a session that asks
-/// people at once finds its run. Nothing for a person's account.
-pub async fn claim_run_box(db: &Db, account: Uuid, workflow: &str, subject: &Subject, machine: &str) -> Result<(), String> {
-    db.client()
+/// people at once finds its run. Answers whether a live run has the box now: false for a person's
+/// account, and for a team's run that ended while its box booted.
+pub async fn claim_run_box(db: &Db, account: Uuid, workflow: &str, subject: &Subject, machine: &str) -> Result<bool, String> {
+    let claimed = db
+        .client()
         .await?
         .execute(
-            &format!("update team_runs set box = $4 where team = $1 and workflow = $2 and subject = $3 and box is null and state in {LIVE}"),
+            &format!("update team_runs set box = $4 where team = $1 and workflow = $2 and subject = $3 and (box is null or box = $4) and state in {LIVE}"),
             &[&account, &workflow, &json(subject)?, &machine],
         )
         .await
         .map_err(err)?;
-    Ok(())
+    Ok(claimed > 0)
 }
 
 /// The machines of the account's boxes whose run waits on an open call, which the box reaper
@@ -993,6 +1024,66 @@ pub async fn waiting_boxes(db: &Db, account: Uuid) -> Result<std::collections::H
         .await
         .map_err(err)?;
     Ok(rows.iter().map(|r| r.get(0)).collect())
+}
+
+/// The running boxes of team accounts that no live run holds, as (team, machine): no live run has
+/// the box's machine, and none still without a box was opened for the box's workflow and subject
+/// (a run's box is set only once its session starts). For `calls::tick`.
+pub async fn unheld_team_boxes(db: &Db) -> Result<Vec<(Uuid, Uuid)>, String> {
+    let rows = db
+        .client()
+        .await?
+        .query(
+            &format!(
+                "select b.account, b.machine from boxes b join accounts a on a.id = b.account and a.kind = 'team'
+                 where b.phase = 'running' and not exists (
+                   select 1 from team_runs r where r.team = b.account and r.state in {LIVE}
+                     and (r.box = b.machine::text or (r.box is null and r.workflow = b.connector and r.subject = b.subject)))"
+            ),
+            &[],
+        )
+        .await
+        .map_err(err)?;
+    Ok(rows.iter().map(|r| (r.get(0), r.get(1))).collect())
+}
+
+/// Live runs whose box is not there, as (team, run, never started): one with no box that started
+/// more than `secs` ago (true), and one whose box has no `boxes` row (false). For `calls::tick`.
+pub async fn boxless_runs(db: &Db, secs: u64) -> Result<Vec<(Uuid, Uuid, bool)>, String> {
+    let rows = db
+        .client()
+        .await?
+        .query(
+            &format!(
+                "select r.team, r.id, r.box is null from team_runs r
+                 where r.state in {LIVE} and case when r.box is null then r.started_at <= now() - make_interval(secs => $1)
+                   else not exists (select 1 from boxes b where b.account = r.team and b.machine::text = r.box) end"
+            ),
+            &[&(secs as f64)],
+        )
+        .await
+        .map_err(err)?;
+    Ok(rows.iter().map(|r| (r.get(0), r.get(1), r.get(2))).collect())
+}
+
+/// Runs left waiting with no open call for more than `secs`, none of whose calls closed within
+/// `secs` either, as (team, run, whether its box runs). An ask opens its call, and an answer moves
+/// its run on, within moments, so such a run was left by a give-up or a restart. For `calls::tick`.
+pub async fn stale_waiting(db: &Db, secs: u64) -> Result<Vec<(Uuid, Uuid, bool)>, String> {
+    let rows = db
+        .client()
+        .await?
+        .query(
+            "select r.team, r.id, exists (select 1 from boxes b where b.account = r.team and b.machine::text = r.box and b.phase <> 'ending')
+             from team_runs r
+             where r.state = 'waiting' and coalesce(r.waiting_since, r.started_at) <= now() - make_interval(secs => $1)
+               and not exists (select 1 from team_calls c where c.run = r.id
+                 and (c.answered_at is null or c.answered_at > now() - make_interval(secs => $1)))",
+            &[&(secs as f64)],
+        )
+        .await
+        .map_err(err)?;
+    Ok(rows.iter().map(|r| (r.get(0), r.get(1), r.get(2))).collect())
 }
 
 // ---- triggers.rs ----

@@ -271,6 +271,8 @@ struct Online {
     /// The tabs a person asked the machine to close (`Call::CloseTab`), until they go.
     closing: HashSet<String>,
     /// How each connector session whose tab went ended: its connector, subject, and `LastTurn`.
+    /// Kept for a team's machines only, whose runs end by it (`teams::calls::box_ended`): a
+    /// person's machine runs sessions for ever more subjects, and nothing reads theirs.
     gone: Vec<(String, Subject, LastTurn)>,
 }
 
@@ -1601,7 +1603,8 @@ impl Account {
         let Some(m) = live.machines.get_mut(machine).filter(|m| m.socket == socket) else { return };
         match &event {
             MachineEvent::Tabs { tabs } => {
-                for was in m.tabs.iter().flatten().filter(|was| !tabs.iter().any(|t| t.id == was.id)) {
+                let gone_tabs = m.tabs.iter().flatten().filter(|was| !tabs.iter().any(|t| t.id == was.id));
+                for was in gone_tabs.filter(|_| self.team) {
                     let by_person = m.closing.remove(&was.id);
                     let (Some(connector), Some(subject)) = (&was.connector, &was.subject) else { continue };
                     let turn = match last_turn(was) {
@@ -2172,6 +2175,31 @@ mod tests {
         assert!(heard.try_recv().is_err(), "clients get it with the machines list, not as an event");
         assert!(account.went_offline("m", Some(1)));
         assert_eq!(shown(&account), None, "an offline machine can't be switched");
+    }
+
+    /// Only a team's machine keeps how its gone sessions' last turns stood: a person's machine,
+    /// whose sessions come and go for ever more subjects, keeps none.
+    #[test]
+    fn only_a_teams_machine_keeps_its_gone_sessions() {
+        let gone_after = |team: bool, sessions: usize| {
+            let account = Account { id: Uuid::nil(), email: String::new(), team, live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() };
+            let (out, _sent, _) = Outbox::new();
+            account.came_online("m", 1, "studio".into(), false, "0.18.5".into(), out);
+            for n in 0..sessions {
+                let tab: TabView = serde_json::from_value(serde_json::json!({
+                    "id": format!("tab-{n}"), "cwd": "/work/repo", "bypass": true, "running": false, "opened": 1_794_240_000u64,
+                    "status": "done", "connector": "c1", "subject": { "issue": format!("FAKE-{n}") },
+                }))
+                .unwrap();
+                account.machine_event("m", 1, MachineEvent::Tabs { tabs: vec![tab] });
+                account.machine_event("m", 1, MachineEvent::Tabs { tabs: vec![] });
+            }
+            let turn = account.last_turn("m", "c1", &serde_json::from_value(serde_json::json!({ "issue": "FAKE-0" })).unwrap());
+            let kept = account.live.lock().unwrap().machines["m"].gone.len();
+            (kept, turn)
+        };
+        assert_eq!(gone_after(false, 100), (0, LastTurn::Unknown), "a person's machine keeps none");
+        assert_eq!(gone_after(true, 3), (3, LastTurn::Ended), "a team's box keeps each session's last turn");
     }
 
     #[test]

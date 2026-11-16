@@ -2687,6 +2687,8 @@ struct FakeState {
     failing: Option<Exec>,
     /// The next bootstrap never answers, as when the hub dies during it. Other scripts answer at once.
     hanging: bool,
+    /// The next bootstrap waits until this is notified, then boots as usual.
+    gate: Option<Arc<tokio::sync::Notify>>,
     /// A checkout each booted node already knows, as `(folder name, git origin)`, so the node finds
     /// the repo a worker or a Captain needs without cloning from the network.
     checkout: Option<(String, String)>,
@@ -2797,11 +2799,15 @@ impl BoxApi for FakeBoxes {
     fn exec<'a>(&'a self, key: &'a str, id: &'a BoxId, script: String) -> BoxFuture<'a, Result<Exec, String>> {
         Box::pin(async move {
             Self::refuse(key)?;
-            let hanging = {
+            let (hanging, gate) = {
                 let mut state = self.state.lock().unwrap();
                 state.scripts.push(script.clone());
-                script.contains("start.sh") && std::mem::take(&mut state.hanging)
+                let boots = script.contains("start.sh");
+                (boots && std::mem::take(&mut state.hanging), if boots { state.gate.take() } else { None })
             };
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
             if !script.contains("start.sh") {
                 return Ok(Exec { exit_code: 0, output: String::new(), error: String::new() });
             }
@@ -11604,3 +11610,4 @@ mod teams_hardening;
 #[path = "hub/teams_slack_notice.rs"] mod teams_slack_notice;
 #[path = "hub/teams_hardening_a.rs"] mod teams_hardening_a;
 #[path = "hub/teams_hardening_b.rs"] mod teams_hardening_b;
+#[path = "hub/teams_lifecycle.rs"] mod teams_lifecycle;

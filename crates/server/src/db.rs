@@ -197,6 +197,9 @@ alter table team_bots add column if not exists off_note text;
 -- The hash of the exact step a team-box hook asked about, and when its Go ahead let that step run
 -- (unix seconds): each Go ahead lets its step run once (`teams::db::use_go_ahead`).
 alter table team_calls add column if not exists step_hash text, add column if not exists released_at bigint;
+-- When a run last moved to waiting, so the calls tick tells a run left waiting with no open call
+-- from one whose call is being opened (`teams::db::stale_waiting`).
+alter table team_runs add column if not exists waiting_since timestamptz;
 ";
 /// How long the hub keeps an end that its machine never came back for.
 const HELD_FOR: &str = "interval '30 days'";

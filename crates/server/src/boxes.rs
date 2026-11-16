@@ -1408,14 +1408,21 @@ impl Boxes {
         }
         if let Err(e) = &booted {
             eprintln!("pinned-server: box {} of account {} failed: {e}", row.id, account.id);
-            self.cooling.lock().unwrap().insert((account.id, row.connector.clone()), Instant::now());
+            // A team's run stopped while its box booted is no failed boot: its next run boots at once.
+            let run_ended = e == crate::teams::calls::ENDED_WHILE_BOOTING;
+            if !run_ended {
+                self.cooling.lock().unwrap().insert((account.id, row.connector.clone()), Instant::now());
+            }
             let failed = Phase::Ending(End::Failed(e.clone()));
             for from in [Phase::Creating, Phase::Booting] {
                 if hub.db.set_box_phase(account.id, &row.id, &from, &failed).await? {
                     let mut row = row.clone();
                     row.phase = failed.clone();
                     self.tell_origin(hub, account, &row, &End::Failed(e.clone())).await;
-                    if row.work == BoxWork::Run && row.connector != INTERACTIVE_CONNECTOR {
+                    if let Err(failed) = crate::teams::calls::box_failed(hub, account, row.machine, &row.connector, &row.subject, e).await {
+                        eprintln!("pinned-server: box {} of account {} failed, but its team run did not end yet: {failed}", row.id, account.id);
+                    }
+                    if row.work == BoxWork::Run && row.connector != INTERACTIVE_CONNECTOR && !run_ended {
                         if let Ok(connectors) = hub.connectors(account).await {
                             connectors.box_boot_failed(&row.subject);
                         }
@@ -1540,8 +1547,11 @@ impl Boxes {
                 return Ok(Placement { machine: id, tab });
             }
         }
-        // A team's run knows its box before its session starts, so a session that asks people at once finds it.
-        crate::teams::db::claim_run_box(&hub.db, account.id, connector, subject, machine).await?;
+        // A team's run knows its box before its session starts, so a session that asks people at once
+        // finds it. A team's run that ended while its box booted gets no session.
+        if !crate::teams::db::claim_run_box(&hub.db, account.id, connector, subject, machine).await? && account.team {
+            return Err(crate::teams::calls::ENDED_WHILE_BOOTING.into());
+        }
         let mut spec = spec.clone();
         spec.token = hub.connectors(account).await?.github_token().filter(|_| spec.repo.as_deref().is_some_and(github::hosts));
         // A box's node keeps no agent accounts: it runs as the one whose token its box.env holds.
