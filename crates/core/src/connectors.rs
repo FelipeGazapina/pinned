@@ -3504,7 +3504,17 @@ pub fn graph_opening(owner: &Connector, trigger: &TriggerInput, answers: &[Class
             prompt.push_str(talk);
         }
     }
+    // On a hub's team the check reads the prompt the builder made. The history goes in front of
+    // it after the check, framed: its JSON holds the trigger's text and what the run's steps
+    // answered about it.
+    if team {
+        frame_trigger_text(&mut opened)?;
+    }
     if let Some(history) = history.filter(|history| !history.is_empty()) {
+        let history = match team {
+            true => crate::untrusted::frame("this run's record of its earlier steps", history),
+            false => history.to_owned(),
+        };
         if let Some(prompt) = opened.args.last_mut() {
             *prompt = format!("{history}\n\n{prompt}");
         }
@@ -4199,10 +4209,8 @@ impl Connectors {
             }
         }
         let team = self.admission.get().is_some();
-        let mut spec = graph_opening(&owner_c, &trigger, &direct_answers(run, &self.library()), text, Some(&runner::history(run)), &self.exe, team)?;
-        if team {
-            frame_trigger_text(&mut spec)?;
-        }
+        // On a team `graph_opening` makes sure of the trigger's frame.
+        let spec = graph_opening(&owner_c, &trigger, &direct_answers(run, &self.library()), text, Some(&runner::history(run)), &self.exe, team)?;
         let answer = open(Work::Run(spec)).await;
         if answer.consumed() {
             return self.keep_stopped(owner, &run.subject);
@@ -4486,10 +4494,8 @@ impl Connectors {
         }
         let inbox = self.take_inbox(&run.subject);
         let team = self.admission.get().is_some();
-        let opened = run_opening(run, &owner_c, prompt, seeded, library, &self.names(), &self.exe, team).and_then(|mut spec| match team {
-            true => frame_trigger_text(&mut spec).map(|()| spec),
-            false => Ok(spec),
-        });
+        // On a team `graph_opening` makes sure of the trigger's frame, before a seeded session's history.
+        let opened = run_opening(run, &owner_c, prompt, seeded, library, &self.names(), &self.exe, team);
         let spec = match opened {
             Ok(mut spec) => {
                 let waiting = inbox_text(&inbox);
@@ -9637,6 +9643,74 @@ mod tests {
         let (typed, delivered) = live_reply_reaches("person-live-reply", false);
         assert_eq!(typed, [LIVE_REPLY], "the graph inbox types the reply as it is");
         assert_eq!(delivered, [LIVE_REPLY], "a delivery hands the reply as it is");
+    }
+
+    /// `prompt` without its framed parts: the frames' header lines and the text inside fences.
+    fn outside_frames(prompt: &str) -> String {
+        let mut inside = false;
+        let mut kept = vec![];
+        for line in prompt.lines() {
+            if line == crate::untrusted::FENCE {
+                inside = !inside;
+            } else if !inside && !line.starts_with("The text below came from ") {
+                kept.push(line);
+            }
+        }
+        kept.join("\n")
+    }
+
+    #[test]
+    fn a_resumed_team_run_opens_with_its_history_framed() {
+        let mut connector = slack_connector();
+        connector.graph = Some(talks(&["one"]));
+        let (connectors, dir) = stored("team-resume-history", vec![connector]);
+        connectors.set_admission(std::sync::Arc::new(TeamAdmission));
+        let subject = Subject::SlackThread { channel: "C0123ABCD".into(), thread: "1792400050.000200".into() };
+        let trigger = TriggerInput::Slack {
+            channel: "C0123ABCD".into(),
+            channel_name: "support".into(),
+            thread: "1792400050.000200".into(),
+            posts: vec![TriggerPost { ts: "1792400050.000200".into(), author: "ana".into(), text: "please fix the footer".into() }],
+            note: None,
+            mentioned: vec!["1792400050.000200".into()],
+            request: None,
+        };
+        connectors.begin("c2".into(), subject, trigger, "2026-11-16T10:00:00Z").unwrap();
+        let opened = Mutex::new(Vec::<Run>::new());
+        let open = |work: Work| {
+            if let Work::Run(run) = &work {
+                opened.lock().unwrap().push(run.clone());
+            }
+            placed(work)
+        };
+        block_on(connectors.drive(&open)).unwrap();
+        let input = opened.lock().unwrap()[0].input.clone();
+        assert_eq!(input, "ana: please fix the footer");
+        // The run ended without a conversation to resume, and a step's answer quotes the thread.
+        let ended = {
+            let mut runs = connectors.runs.lock().unwrap();
+            runs[0].status = Status::Done;
+            runs[0].session = Session::Detached { claude: None };
+            runs[0].context["Sort"] = json!({ "quote": input });
+            runs[0].clone()
+        };
+        opened.lock().unwrap().clear();
+
+        let mut reply = mention_in_thread("1792400100.000100", "@pinned is it fixed?");
+        reply.mentioned = vec![];
+        connectors.enqueue(reply);
+        assert_eq!(block_on(connectors.drive(&open)), Ok(()), "the restarted run opens");
+        let opened = opened.lock().unwrap().clone();
+        assert_eq!(opened.len(), 1, "one session for the restarted run");
+        let prompt = opened[0].args.last().unwrap();
+        let history = crate::untrusted::frame("this run's record of its earlier steps", &runner::history(&ended));
+        assert!(prompt.starts_with(&format!("{history}\n\n")), "{prompt}");
+        assert!(prompt.contains(&crate::untrusted::frame("a Slack thread", "ana: please fix the footer")), "{prompt}");
+        let outside = outside_frames(prompt);
+        for text in ["please fix the footer", "is it fixed?"] {
+            assert!(!outside.contains(text), "{text:?} outside a frame: {outside}");
+        }
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     struct RestoreLinear;
