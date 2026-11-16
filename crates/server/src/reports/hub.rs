@@ -734,7 +734,7 @@ impl Hub {
         let (now, kept, sending) = (now_secs(), json(draft)?, json(ReportState::Sending)?);
         let mut held = self.db.transaction_client().await?;
         let tx = held.transaction().await.map_err(err)?;
-        tx.execute("select pg_advisory_xact_lock(hashtextextended('pinned-reports:' || $1::text, 0))", &[&account.id]).await.map_err(err)?;
+        tx.execute("select pg_advisory_xact_lock(hashtextextended('pinned-reports:' || $1::uuid::text, 0))", &[&account.id]).await.map_err(err)?;
         if let Some(request_id) = request_id {
             let row = tx.query_opt(&format!("select {SEND_COLUMNS} from reports where account = $1 and request_id = $2"), &[&account.id, &request_id]).await.map_err(err)?;
             if let Some(row) = row.as_ref().map(send_row).transpose()? {

@@ -60,7 +60,7 @@ struct Repo {
     requests: Vec<Request>,
     /// Answers the next request with this instead of serving it: status, message and `x-ratelimit-remaining`.
     fail: Option<(u16, String, Option<String>)>,
-    /// Serves the next request, then holds its answer this long.
+    /// Serves the next POST, then holds its answer this long.
     hang: Option<std::time::Duration>,
     /// Waits this long before it creates each issue.
     slow_create: Option<std::time::Duration>,
@@ -217,8 +217,8 @@ impl FakeGithub {
         self.repo().fail = Some((status, message.into(), remaining.map(str::to_owned)));
     }
 
-    /// Serves the next request as usual (an issue it creates exists), then holds the answer for `wait`.
-    pub fn hang_next(&self, wait: std::time::Duration) {
+    /// Serves the next POST as usual (the issue or comment it creates exists), then holds the answer for `wait`.
+    pub fn hang_next_post(&self, wait: std::time::Duration) {
         self.repo().hang = Some(wait);
     }
 
@@ -289,7 +289,8 @@ async fn handle(State(shared): State<Shared>, method: Method, uri: Uri, headers:
     let (hang, slow) = {
         let mut repo = lock(&shared);
         let creates = method == Method::POST && uri.path().ends_with("/issues");
-        (repo.hang.take(), repo.slow_create.filter(|_| creates))
+        let hang = if method == Method::POST { repo.hang.take() } else { None };
+        (hang, repo.slow_create.filter(|_| creates))
     };
     if let Some(wait) = slow {
         tokio::time::sleep(wait).await;

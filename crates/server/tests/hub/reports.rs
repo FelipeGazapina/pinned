@@ -22,7 +22,12 @@ impl Fake {
     }
 
     fn config(&self) -> Config {
-        Config { api: self.github.url.clone(), repo: "acme/app".into(), token: "fake-hub-token".into() }
+        Config { api: self.github.url.clone(), repo: "acme/app".into(), token: "fake-hub-token".into(), timeout: pinned_core::github::CALL_TIMEOUT }
+    }
+
+    /// `config` with calls to GitHub that give up after one second.
+    fn impatient(&self) -> Config {
+        Config { timeout: Duration::from_secs(1), ..self.config() }
     }
 
     /// The issues the hub made, and the comments it added.
@@ -251,7 +256,9 @@ fn the_sixth_report_of_a_day_is_refused_before_any_request_and_an_added_case_and
     assert_eq!(fake.posts(), (3, 1));
     assert_eq!(ask(&mut ana, json!({ "op": "status" })).unwrap()["left_today"], 1);
 
-    // Two sends at once, with one left: one files, the other is refused.
+    // Two sends at once, with one left: one files, the other is refused. A slow create keeps the first one sending
+    // while the second asks.
+    fake.github.slow_creates(Duration::from_millis(400));
     let (url, answers) = (hub.url.clone(), Mutex::new(vec![]));
     std::thread::scope(|scope| {
         for n in 0..2 {
@@ -354,15 +361,382 @@ fn a_search_is_reused_for_a_minute_and_the_hub_makes_at_most_twenty_a_minute() {
     ask(&mut ana, json!({ "op": "similar", "title": "Diff is slow" })).unwrap();
     ask(&mut ana, json!({ "op": "similar", "title": "Diff is slow" })).unwrap();
     assert_eq!(searches(), 1, "the second ask is answered from the first");
-    for n in 1..20 {
+    // Each account makes at most five a minute, so four more make up the twenty.
+    for n in 1..5 {
         ask(&mut ana, json!({ "op": "similar", "title": format!("Different words number{n}x") })).unwrap();
     }
+    for (k, who) in ["bob", "cy", "dee"].into_iter().enumerate() {
+        let mut other = Client::connect(&hub.url, &signed_up(&hub, &format!("{who}@example.test")));
+        for n in 0..5 {
+            ask(&mut other, json!({ "op": "similar", "title": format!("Other words team{k} number{n}x") })).unwrap();
+        }
+    }
     assert_eq!(searches(), 20);
-    let busy = ask(&mut ana, json!({ "op": "similar", "title": "One more topic entirely" })).unwrap_err();
+    let mut eve = Client::connect(&hub.url, &signed_up(&hub, "eve@example.test"));
+    let busy = ask(&mut eve, json!({ "op": "similar", "title": "One more topic entirely" })).unwrap_err();
     assert!(busy.contains("busy"), "{busy}");
     assert_eq!(searches(), 20, "the twenty-first search never left the hub");
     ask(&mut ana, json!({ "op": "similar", "title": "Diff is slow" })).unwrap();
     let preview = ask(&mut ana, json!({ "op": "preview", "draft": problem("Yet another topic", "It closes.") })).unwrap();
     assert_eq!(preview["similar"], json!([]), "a preview goes on without suggestions while searching is held back");
     assert_eq!(searches(), 20);
+}
+
+/// One value, as text, of `sql` on the hub's database.
+fn sql_text(hub: &TestHub, sql: &str) -> Option<String> {
+    hub.runtime.block_on(async {
+        let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        db.query_one(sql, &[]).await.unwrap().get::<_, Option<String>>(0)
+    })
+}
+
+fn left_today(client: &mut Client) -> Value {
+    ask(client, json!({ "op": "status" })).unwrap()["left_today"].clone()
+}
+
+fn could_not_send(why: &str) -> Result<Value, String> {
+    Err(format!("Could not send the report: {why}"))
+}
+
+/// The report of `client`'s account whose id is `id`, as `list` gives it.
+fn listed_row(client: &mut Client, id: &str) -> Value {
+    listed(client).into_iter().find(|r| r["id"] == id).unwrap_or(Value::Null)
+}
+
+#[test]
+fn a_send_a_stopped_hub_left_reads_failed_after_the_restart_and_still_counts() {
+    let fake = Fake::start();
+    let mut hub = reporting("reports_restart", Some(&fake));
+    let token = signed_up(&hub, "ana@example.test");
+    let mut ana = Client::connect(&hub.url, &token);
+    report_issue(&mut ana, problem("Crash on launch", "It closes."), json!({})).unwrap();
+    // A send the hub was making when it stopped.
+    admin_on(
+        &hub.database,
+        "insert into reports (id, account, kind, title, state, sent_at, created_at, updated_at)
+         select 'aaaaaaaa-0000-4000-8000-000000000001', id, 'problem', 'Halfway', '{\"state\": \"sending\"}', extract(epoch from now())::bigint, 1, 1 from accounts where email = 'ana@example.test'",
+    );
+    assert_eq!(left_today(&mut ana), 3);
+
+    hub.restart();
+    let mut ana = Client::connect(&hub.url, &token);
+    let row = listed_row(&mut ana, "aaaaaaaa-0000-4000-8000-000000000001");
+    assert_eq!(row["state"], json!({ "state": "failed", "error": "the hub restarted while sending; check My reports before trying again" }), "{row}");
+    assert_eq!(left_today(&mut ana), 3, "it may have reached GitHub, so it still counts");
+    assert_eq!(sql_text(&hub, "select count(*)::text from reports where state->>'state' = 'sending'"), Some("0".into()));
+}
+
+#[test]
+fn try_again_reuses_the_failed_row_finds_what_a_timed_out_send_filed_and_counts_once() {
+    let fake = Fake::start();
+    fake.github.add_issue_numbered(7, "Diff slow", "The diff takes a minute.");
+    let hub = TestHub::start_reports("reports_again", Signup::Open, Policy::default(), false, Default::default(), "127.0.0.1:0", Some(fake.impatient()));
+    let mut ana = Client::connect(&hub.url, &signed_up(&hub, "ana@example.test"));
+    let issues = || fake.github.requests().iter().filter(|r| r.method == "POST" && r.path.ends_with("/issues")).count();
+
+    // GitHub files it but answers too late.
+    fake.github.hang_next_post(Duration::from_secs(3));
+    let draft = problem("Crash on launch", "It closes.");
+    assert_eq!(report_issue(&mut ana, draft.clone(), json!({ "request_id": "try-1" })), could_not_send("GitHub took too long to answer."));
+    assert_eq!(fake.github.issue_count(), 8, "GitHub made it");
+    let failed = listed(&mut ana).into_iter().find(|r| r["title"] == "Crash on launch").unwrap();
+    let id = failed["id"].as_str().unwrap().to_owned();
+    assert_eq!(failed["state"], json!({ "state": "failed", "error": "GitHub took too long to answer." }));
+    assert_eq!(left_today(&mut ana), 4, "it may have reached GitHub");
+
+    let again = report_issue(&mut ana, draft.clone(), json!({ "request_id": "try-1" })).unwrap();
+    assert_eq!((again["id"].clone(), again["state"].clone(), again["issue"].clone()), (json!(id), json!({ "state": "open" }), json!(8)), "{again}");
+    assert_eq!(issues(), 1, "the issue the timed-out try filed is the report, and nothing is posted again");
+    assert!(fake.github.body(8).ends_with(&format!("report {}", reports::ref_of(&id))));
+    assert_eq!(left_today(&mut ana), 4, "the row counts once");
+    // The same request once more is the same report.
+    assert_eq!(report_issue(&mut ana, draft, json!({ "request_id": "try-1" })).unwrap()["id"], json!(id));
+    assert_eq!((issues(), listed(&mut ana).len()), (1, 1));
+
+    // A 500 did nothing: trying again posts it, in the same row, under the same reference.
+    fake.github.fail_next(500, "Server Error", None);
+    let draft = problem("Slow sync", "It takes minutes.");
+    assert_eq!(report_issue(&mut ana, draft.clone(), json!({ "request_id": "try-2" })), could_not_send("GitHub is busy. Try again later."));
+    assert_eq!(left_today(&mut ana), 4, "a 500 does not count");
+    let again = report_issue(&mut ana, draft, json!({ "request_id": "try-2" })).unwrap();
+    let id = again["id"].as_str().unwrap().to_owned();
+    assert_eq!((again["state"].clone(), again["issue"].clone()), (json!({ "state": "open" }), json!(9)), "{again}");
+    assert!(fake.github.body(9).ends_with(&format!("report {}", reports::ref_of(&id))));
+    assert_eq!((fake.github.issue_count(), issues(), listed(&mut ana).len(), left_today(&mut ana)), (9, 3, 2, json!(3)), "the refused post, then the one that filed");
+
+    // A case added to issue #7 that timed out is found among #7's comments.
+    fake.github.hang_next_post(Duration::from_secs(3));
+    let mut case = problem("Diff slow again", "Same.");
+    case["to_issue"] = json!(7);
+    assert_eq!(report_issue(&mut ana, case.clone(), json!({ "request_id": "try-3" })), could_not_send("GitHub took too long to answer."));
+    let again = report_issue(&mut ana, case, json!({ "request_id": "try-3" })).unwrap();
+    assert_eq!((again["issue"].clone(), again["followed"].clone(), again["state"].clone()), (json!(7), json!(true), json!({ "state": "open" })), "{again}");
+    assert_eq!(fake.github.comment_bodies(7).len(), 1, "one comment");
+    assert_eq!(left_today(&mut ana), 2);
+}
+
+#[test]
+fn a_second_send_of_a_request_still_sending_waits_and_answers_its_outcome() {
+    let fake = Fake::start();
+    let hub = reporting("reports_inflight", Some(&fake));
+    let token = signed_up(&hub, "ana@example.test");
+    fake.github.slow_creates(Duration::from_millis(800));
+    let answers = Mutex::new(vec![]);
+    std::thread::scope(|scope| {
+        let (url, token, answers) = (&hub.url, &token, &answers);
+        scope.spawn(move || {
+            let mut client = Client::connect(url, token);
+            answers.lock().unwrap().push(report_issue(&mut client, problem("Crash on launch", "It closes."), json!({ "request_id": "same" })).unwrap());
+        });
+        wait_for("the first send to be sending", || sql_text(&hub, "select string_agg(state->>'state', ',') from reports").as_deref() == Some("sending"));
+        let mut client = Client::connect(url, token);
+        answers.lock().unwrap().push(report_issue(&mut client, problem("Crash on launch", "It closes."), json!({ "request_id": "same" })).unwrap());
+    });
+    let answers = answers.into_inner().unwrap();
+    assert_eq!((answers[0]["id"] == answers[1]["id"], answers[1]["issue"].clone(), answers[1]["state"].clone()), (true, json!(1), json!({ "state": "open" })), "{answers:?}");
+    assert_eq!(fake.posts(), (1, 0));
+}
+
+#[test]
+fn a_failed_send_counts_only_when_it_may_have_reached_github_and_never_says_what_github_said() {
+    let fake = Fake::start();
+    let hub = TestHub::start_reports("reports_counts", Signup::Open, Policy::default(), false, Default::default(), "127.0.0.1:0", Some(fake.impatient()));
+    let mut ana = Client::connect(&hub.url, &signed_up(&hub, "ana@example.test"));
+    let cases: [(u16, &str, Option<&str>, &str); 4] = [
+        (401, "Bad credentials from GitHub", None, "GitHub refused the report."),
+        (403, "Resource not accessible by integration", Some("4999"), "GitHub refused the report."),
+        (403, "API rate limit exceeded for installation", Some("0"), "GitHub is busy. Try again later."),
+        (500, "Internal trouble at GitHub", None, "GitHub is busy. Try again later."),
+    ];
+    for (n, (status, message, remaining, said)) in cases.into_iter().enumerate() {
+        fake.github.fail_next(status, message, remaining);
+        assert_eq!(report_issue(&mut ana, problem(&format!("Crash {n}"), "It closes."), json!({})), could_not_send(said), "{status} {message}");
+        assert_eq!(left_today(&mut ana), 5, "a {status} answer did nothing, so it does not count");
+    }
+    fake.github.hang_next_post(Duration::from_secs(3));
+    assert_eq!(report_issue(&mut ana, problem("Crash slow", "It closes."), json!({})), could_not_send("GitHub took too long to answer."));
+    assert_eq!(left_today(&mut ana), 4, "a timeout may have filed it");
+    let list = serde_json::to_string(&listed(&mut ana)).unwrap();
+    for raw in ["Bad credentials from GitHub", "Resource not accessible", "API rate limit exceeded", "Internal trouble", "fake-hub-token"] {
+        assert!(!list.contains(raw), "{raw} reached the app: {list}");
+    }
+
+    // A GitHub whose port nobody listens on: the request never left.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let api = format!("http://{}", closed.local_addr().unwrap());
+    drop(closed);
+    let config = Config { api, ..fake.config() };
+    let hub = TestHub::start_reports("reports_unreachable", Signup::Open, Policy::default(), false, Default::default(), "127.0.0.1:0", Some(config));
+    let mut bob = Client::connect(&hub.url, &signed_up(&hub, "bob@example.test"));
+    assert_eq!(report_issue(&mut bob, problem("Crash", "It closes."), json!({})), could_not_send("Could not reach GitHub."));
+    assert_eq!(left_today(&mut bob), 5, "a send that never left does not count");
+    assert_eq!(listed(&mut bob)[0]["state"], json!({ "state": "failed", "error": "Could not reach GitHub." }));
+}
+
+#[test]
+fn a_failed_draft_is_tried_again_by_id_and_a_failed_report_is_deleted_by_its_account_only() {
+    let fake = Fake::start();
+    let hub = TestHub::start_reports("reports_failed_drafts", Signup::Open, Policy::default(), false, Default::default(), "127.0.0.1:0", Some(fake.impatient()));
+    let mut ana = Client::connect(&hub.url, &signed_up(&hub, "ana@example.test"));
+    let mut bob = Client::connect(&hub.url, &signed_up(&hub, "bob@example.test"));
+    let draft = problem("Half written", "It closes.");
+    let id = ask(&mut ana, json!({ "op": "save_draft", "draft": draft })).unwrap()["id"].as_str().unwrap().to_owned();
+
+    fake.github.fail_next(502, "Bad gateway", None);
+    assert_eq!(report_issue(&mut ana, draft.clone(), json!({ "draft_id": id })), could_not_send("GitHub is busy. Try again later."));
+    let row = listed_row(&mut ana, &id);
+    assert_eq!((row["state"].clone(), row["draft"]["happened"].clone()), (json!({ "state": "failed", "error": "GitHub is busy. Try again later." }), json!("It closes.")));
+    let sent = report_issue(&mut ana, draft, json!({ "draft_id": id })).unwrap();
+    assert_eq!((sent["id"].clone(), sent["state"].clone(), sent["issue"].clone()), (json!(id), json!({ "state": "open" }), json!(1)), "{sent}");
+    assert_eq!((fake.posts(), listed(&mut ana).len(), left_today(&mut ana)), ((2, 0), 1, json!(4)));
+
+    // A failed report that did not count is deleted; only by its own account.
+    fake.github.fail_next(500, "Server Error", None);
+    report_issue(&mut ana, problem("Gone soon", "It closes."), json!({})).unwrap_err();
+    let failed = listed(&mut ana).into_iter().find(|r| r["title"] == "Gone soon").unwrap()["id"].as_str().unwrap().to_owned();
+    assert_eq!(ask(&mut bob, json!({ "op": "delete_draft", "id": failed })), Err(format!("this account has no draft {failed}")));
+    assert_eq!(ask(&mut ana, json!({ "op": "delete_draft", "id": failed })), Ok(Value::Null));
+    assert_eq!(listed(&mut ana).len(), 1);
+    assert_eq!(ask(&mut ana, json!({ "op": "delete_draft", "id": id })), Err(format!("this account has no draft {id}")), "an open report is no draft");
+
+    // One that counts leaves the list, and deleting it frees no send.
+    fake.github.hang_next_post(Duration::from_secs(3));
+    report_issue(&mut ana, problem("Timed out", "It closes."), json!({})).unwrap_err();
+    assert_eq!(left_today(&mut ana), 3);
+    let counted = listed(&mut ana).into_iter().find(|r| r["title"] == "Timed out").unwrap()["id"].as_str().unwrap().to_owned();
+    assert_eq!(ask(&mut ana, json!({ "op": "delete_draft", "id": counted })), Ok(Value::Null));
+    assert_eq!((listed(&mut ana).len(), left_today(&mut ana)), (1, json!(3)));
+}
+
+#[test]
+fn a_denied_agent_report_is_kept_as_the_agents_draft_and_the_agent_hears_so() {
+    let fake = Fake::start();
+    let hub = reporting("reports_denied", Some(&fake));
+    let token = signed_up(&hub, "ana@example.test");
+    let mut ana = agent_of(&hub.url, &token, "ana@example.test", "ana-deny-mac");
+    let draft = json!({ "kind": "problem", "title": "Crash in site", "happened": "It closes for ana@example.test.", "expected": "No crash.", "repeat": "Open site" });
+    let held = act(&ana.dir, &ana.tab, "report_issue", json!({ "draft": draft })).unwrap();
+    let id = held["id"].as_str().unwrap().to_owned();
+    ana.client.hub(json!({ "cmd": "unlock", "password": PASSWORD })).unwrap();
+    let decided = ana.client.hub(json!({ "cmd": "decide_confirmation", "id": id, "approve": false })).unwrap();
+    assert_eq!((decided["decision"].clone(), decided["result"].clone()), (json!("denied"), json!("Not sent. Saved as a draft in My reports.")), "{decided}");
+
+    let rows = listed(&mut ana.client);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!((rows[0]["state"].clone(), rows[0]["title"].clone(), rows[0]["by_agent"].clone()), (json!({ "state": "draft" }), json!("Crash in [project]"), json!(true)));
+    assert_eq!(rows[0]["draft"]["happened"], "It closes for [email].", "the held, scrubbed text is the draft");
+    assert_eq!((fake.github.issue_count(), fake.posts()), (0, (0, 0)));
+    wait_for("the notice in the agent's queue", || ana.node.machine.view(&ana.tab).unwrap().queued >= 1);
+    let told = turn_end_context(&ana.dir, &ana.tab);
+    assert!(told.contains(&format!("The user denied your report_issue request ({id}). Not sent. Saved as a draft in My reports.")), "{told}");
+}
+
+#[test]
+fn two_hubs_on_one_database_count_the_sixth_send_under_the_accounts_lock() {
+    let fake = Fake::start();
+    let first = reporting("reports_two_hubs", Some(&fake));
+    let token = signed_up(&first, "ana@example.test");
+    let mut second = TestHub { runtime: tokio::runtime::Runtime::new().unwrap(), running: None, url: String::new(), database: first.database.clone(), dir: first.dir.clone(), boxes: first.boxes.clone(), policy: Policy::default(), learning: None, signup: Signup::Open, access: Default::default(), reports: Some(fake.config()) };
+    second.serve("127.0.0.1:0");
+    let mut ana = Client::connect(&first.url, &token);
+    for n in 0..4 {
+        report_issue(&mut ana, problem(&format!("Crash number {n}"), "It closes."), json!({})).unwrap();
+    }
+    fake.github.slow_creates(Duration::from_millis(300));
+
+    // The account's lock, held from outside: neither hub marks a send while it is held.
+    let outside = first.runtime.block_on(async {
+        let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), first.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        db.batch_execute("begin; select pg_advisory_xact_lock(hashtextextended('pinned-reports:' || id::text, 0)) from accounts where email = 'ana@example.test'").await.unwrap();
+        db
+    });
+    let answers = Mutex::new(vec![]);
+    std::thread::scope(|scope| {
+        for (n, url) in [first.url.clone(), second.url.clone()].into_iter().enumerate() {
+            let (token, answers) = (&token, &answers);
+            scope.spawn(move || {
+                let mut client = Client::connect(&url, token);
+                answers.lock().unwrap().push(report_issue(&mut client, problem(&format!("Race {n}"), "It closes."), json!({})));
+            });
+        }
+        std::thread::sleep(Duration::from_millis(800));
+        assert_eq!(sql_text(&first, "select count(*)::text from reports"), Some("4".into()), "no send is marked while the lock is held");
+        first.runtime.block_on(outside.batch_execute("rollback")).unwrap();
+    });
+    let answers = answers.into_inner().unwrap();
+    assert_eq!(answers.iter().filter(|a| a.is_ok()).count(), 1, "{answers:?}");
+    assert!(answers.iter().find_map(|a| a.as_ref().err()).unwrap().starts_with("You sent 5 reports in the last day."), "{answers:?}");
+    assert_eq!((fake.posts(), left_today(&mut ana)), ((5, 0), json!(0)));
+}
+
+#[test]
+fn a_case_for_a_pull_request_or_a_locked_issue_is_refused_before_it_counts() {
+    let fake = Fake::start();
+    fake.github.add_issue_numbered(5, "Add a button", "A pull request.");
+    fake.github.make_pull(5);
+    fake.github.add_issue_numbered(6, "Heated thread", "Locked.");
+    fake.github.lock(6);
+    let hub = reporting("reports_pull_locked", Some(&fake));
+    let mut ana = Client::connect(&hub.url, &signed_up(&hub, "ana@example.test"));
+    let mut case = problem("Same here", "It closes.");
+    case["to_issue"] = json!(5);
+    assert_eq!(report_issue(&mut ana, case.clone(), json!({})), Err("#5 is a pull request, not an issue.".into()));
+    case["to_issue"] = json!(6);
+    assert_eq!(report_issue(&mut ana, case.clone(), json!({})), Err("Issue #6 is locked. Send this as a new report instead.".into()));
+    case["to_issue"] = json!(40);
+    assert_eq!(report_issue(&mut ana, case, json!({})), Err("There is no issue #40.".into()));
+    assert_eq!((fake.posts(), left_today(&mut ana), listed(&mut ana).len()), ((0, 0), json!(5), 0));
+}
+
+#[test]
+fn agents_keep_at_most_ten_drafts_and_the_account_fifty() {
+    let fake = Fake::start();
+    let hub = reporting("reports_draft_caps", Some(&fake));
+    let token = signed_up(&hub, "ana@example.test");
+    let mut ana = agent_of(&hub.url, &token, "ana@example.test", "ana-caps-mac");
+    let save = |n: usize| json!({ "ask": { "op": "save_draft", "draft": problem(&format!("Agent draft {n}"), "x") } });
+    for n in 0..10 {
+        act(&ana.dir, &ana.tab, "reports", save(n)).unwrap();
+    }
+    assert_eq!(act(&ana.dir, &ana.tab, "reports", save(10)), Err("There are 10 drafts from agents. Delete one first.".into()));
+    let rows = listed(&mut ana.client);
+    assert_eq!((rows.len(), rows.iter().all(|r| r["by_agent"] == true)), (10, true));
+    for n in 0..40 {
+        ask(&mut ana.client, json!({ "op": "save_draft", "draft": problem(&format!("My draft {n}"), "x") })).unwrap();
+    }
+    assert_eq!(ask(&mut ana.client, json!({ "op": "save_draft", "draft": problem("One more", "x") })), Err("You have 50 drafts. Delete one to save another.".into()));
+    assert_eq!(listed(&mut ana.client).iter().filter(|r| r["by_agent"] == false).count(), 40);
+}
+
+#[test]
+fn one_account_makes_at_most_five_searches_a_minute() {
+    let fake = Fake::start();
+    let hub = reporting("reports_search_account", Some(&fake));
+    let mut ana = Client::connect(&hub.url, &signed_up(&hub, "ana@example.test"));
+    let mut bob = Client::connect(&hub.url, &signed_up(&hub, "bob@example.test"));
+    for n in 0..5 {
+        ask(&mut ana, json!({ "op": "similar", "title": format!("Topic number{n}x") })).unwrap();
+    }
+    assert_eq!(ask(&mut ana, json!({ "op": "similar", "title": "Sixth topic" })), Err("Searching the issues is busy. Try again in a minute.".into()));
+    ask(&mut ana, json!({ "op": "similar", "title": "Topic number0x" })).unwrap();
+    ask(&mut bob, json!({ "op": "similar", "title": "Sixth topic" })).unwrap();
+    assert_eq!(fake.github.requests().iter().filter(|r| r.path.starts_with("/search/issues")).count(), 6);
+}
+
+#[test]
+fn a_hub_without_reports_makes_no_table_and_one_whose_table_fails_still_serves() {
+    let fake = Fake::start();
+    let mut hub = reporting("reports_no_table", None);
+    assert_eq!(sql_text(&hub, "select to_regclass('reports')::text"), None);
+    // A table in the way: readying reporting fails, the hub serves without it.
+    admin_on(&hub.database, "create table reports (id int)");
+    hub.reports = Some(fake.config());
+    hub.restart();
+    let mut ana = Client::connect(&hub.url, &signed_up(&hub, "ana@example.test"));
+    assert_eq!(ask(&mut ana, json!({ "op": "status" })), Ok(json!({ "available": false })));
+    assert_eq!(report_issue(&mut ana, problem("Crash", "It closes."), json!({})), Err(NOT_AVAILABLE.into()));
+}
+
+#[test]
+fn a_locked_login_unlocks_before_it_sends_a_report_or_approves_an_agents() {
+    let fake = Fake::start();
+    let hub = reporting("reports_locked", Some(&fake));
+    let token = signed_up(&hub, "ana@example.test");
+    let ana = agent_of(&hub.url, &token, "ana@example.test", "ana-locked-mac");
+    let mut app = Client::app(&hub.url, &token);
+    let locked: Result<Value, String> = Err(pinned_core::surface::LOCKED.into());
+
+    assert_eq!(report_issue(&mut app, problem("From the dialog", "It closes."), json!({})), locked);
+    let held = act(&ana.dir, &ana.tab, "report_issue", json!({ "draft": problem("From the agent", "It closes.") })).unwrap();
+    assert_eq!(app.hub(json!({ "cmd": "decide_confirmation", "id": held["id"], "approve": true })), locked);
+    assert_eq!(fake.posts(), (0, 0));
+
+    app.hub(json!({ "cmd": "unlock", "password": PASSWORD })).unwrap();
+    assert_eq!(report_issue(&mut app, problem("From the dialog", "It closes."), json!({})).unwrap()["issue"], 1);
+    let decided = app.hub(json!({ "cmd": "decide_confirmation", "id": held["id"], "approve": true })).unwrap();
+    assert_eq!((decided["outcome"].clone(), decided["result"].clone()), (json!("done"), json!({ "number": 2, "url": "https://github.com/acme/app/issues/2" })), "{decided}");
+    assert_eq!(fake.posts(), (2, 0));
+}
+
+#[test]
+fn a_send_with_no_title_or_too_long_is_refused_and_a_sent_report_is_no_draft() {
+    let fake = Fake::start();
+    let hub = reporting("reports_refusals", Some(&fake));
+    let mut ana = Client::connect(&hub.url, &signed_up(&hub, "ana@example.test"));
+    assert_eq!(report_issue(&mut ana, problem("   ", "It closes."), json!({})), Err("Give the report a title.".into()));
+    let long = problem("Long", &"x".repeat(64_001));
+    let too_long: Result<Value, String> = Err("The report is too long: keep it under 64000 characters.".into());
+    assert_eq!(report_issue(&mut ana, long.clone(), json!({})), too_long);
+    assert_eq!(ask(&mut ana, json!({ "op": "save_draft", "draft": long })), too_long);
+    assert_eq!((fake.github.requests().len(), listed(&mut ana).len(), left_today(&mut ana)), (0, 0, json!(5)));
+
+    let sent = report_issue(&mut ana, problem("Sent", "It closes."), json!({})).unwrap();
+    let id = sent["id"].as_str().unwrap().to_owned();
+    let no_draft: Result<Value, String> = Err(format!("this account has no draft {id}"));
+    assert_eq!(ask(&mut ana, json!({ "op": "save_draft", "id": id, "draft": problem("Rewritten", "x") })), no_draft, "a sent report is not saved over");
+    assert_eq!(report_issue(&mut ana, problem("Again", "x"), json!({ "draft_id": id })), no_draft, "a sent report is not sent again by id");
+    assert_eq!(listed_row(&mut ana, &id)["title"], "Sent");
+    assert_eq!(fake.posts(), (1, 0));
 }
