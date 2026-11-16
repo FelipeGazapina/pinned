@@ -248,9 +248,12 @@ pub enum Push {
     /// The hub took them all, or there were none.
     #[default]
     Done,
+    /// Not sent: they are the same files as the `hold` the caller passed.
+    Held,
     /// The hub refused a batch, so it and the ones after it wait for a later sync. Their agreed
-    /// baseline stays as it was, and the sync still pulled.
-    Refused { error: String },
+    /// baseline stays as it was, and the sync still pulled. `sending` names the files the sync had
+    /// to send; passed back as `hold`, it keeps the next sync from sending them again unchanged.
+    Refused { error: String, sending: u64 },
 }
 
 /// Claude Code's folder for a project's sessions and memory in `claude_home`: the path with every
@@ -262,6 +265,12 @@ pub fn claude_dir(claude_home: &Path, checkout: &Path) -> PathBuf {
 
 /// Brings one checkout and the hub to the same files.
 pub fn sync(hub: &impl Hub, state: &mut State, checkout: &Checkout, now: SystemTime) -> Result<Synced, String> {
+    sync_with(hub, state, checkout, now, None)
+}
+
+/// Like `sync`, but sends nothing while the files to send are still those of `hold`, the
+/// `sending` of a refused push. It lists and pulls all the same.
+pub fn sync_with(hub: &impl Hub, state: &mut State, checkout: &Checkout, now: SystemTime, hold: Option<u64>) -> Result<Synced, String> {
     let roots = Roots::new(checkout);
     let key = &checkout.project.key;
     let mut local: BTreeMap<String, (String, u64)> = BTreeMap::new();
@@ -283,7 +292,7 @@ pub fn sync(hub: &impl Hub, state: &mut State, checkout: &Checkout, now: SystemT
             state.flush()?;
         }
     }
-    let synced = exchange(hub, state, key, &agreed_key, &mut agreed, &local, &|path| roots.local(path), now, true)?;
+    let synced = exchange(hub, state, key, &agreed_key, &mut agreed, &local, &|path| roots.local(path), now, true, hold)?;
     state.keep_agreed(agreed_key, agreed);
     Ok(synced)
 }
@@ -298,6 +307,7 @@ fn exchange(
     resolve: &dyn Fn(&str) -> Option<PathBuf>,
     now: SystemTime,
     sessions: bool,
+    hold: Option<u64>,
 ) -> Result<Synced, String> {
     let remote: BTreeMap<String, Entry> = hub.list(key)?.into_iter().map(|e| (e.path.clone(), e)).collect();
     let paths: BTreeSet<String> = local.keys().chain(remote.keys()).chain(agreed.keys()).filter(|p| resolve(p).is_some()).cloned().collect();
@@ -358,6 +368,8 @@ fn exchange(
         hub.mark_executable(key, repairs)?;
     }
     let mut synced = Synced::default();
+    let sending = fingerprint(push.iter().chain(&merge), local);
+    let held = hold == Some(sending) && !(push.is_empty() && merge.is_empty());
     for path in merge {
         let theirs = hub.pull(key, vec![path.clone()])?.into_iter().next().and_then(|f| f.data).map(|d| unpack(&d)).transpose()?.unwrap_or_default();
         let target = resolve(&path).ok_or("no history here")?;
@@ -366,6 +378,10 @@ fn exchange(
         push.push(path);
     }
 
+    if held {
+        push.clear();
+        synced.push = Push::Held;
+    }
     // Deletions go first, in batches of their own: they never grow the account, so a hub at its
     // limit still takes them, and a refused addition never holds one back.
     let (deletions, additions): (Vec<String>, Vec<String>) = push.into_iter().partition(|path| resolve(path).filter(|f| f.is_file()).is_none());
@@ -401,12 +417,12 @@ fn exchange(
             pending.push((file.entry.path.clone(), file.data.as_ref().map(|_| file.entry.sha.clone())));
             batch.push(file);
             if size >= BATCH {
-                send(hub, state, key, agreed_key, agreed, &mut synced, std::mem::take(&mut batch), std::mem::take(&mut pending))?;
+                send(hub, state, key, agreed_key, agreed, &mut synced, sending, std::mem::take(&mut batch), std::mem::take(&mut pending))?;
                 size = 0;
             }
         }
         if !batch.is_empty() && synced.push == Push::Done {
-            send(hub, state, key, agreed_key, agreed, &mut synced, batch, pending)?;
+            send(hub, state, key, agreed_key, agreed, &mut synced, sending, batch, pending)?;
         }
     }
 
@@ -464,6 +480,7 @@ fn send(
     agreed_key: &str,
     agreed: &mut BTreeMap<String, String>,
     synced: &mut Synced,
+    sending: u64,
     batch: Vec<File>,
     pending: Vec<(String, Option<String>)>,
 ) -> Result<(), String> {
@@ -475,10 +492,21 @@ fn send(
         }
         Err(e) if old_hub(&e) => Err(e),
         Err(error) => {
-            synced.push = Push::Refused { error };
+            synced.push = Push::Refused { error, sending };
             Ok(())
         }
     }
+}
+
+/// Names the files a sync has to send by their paths and their contents here.
+fn fingerprint<'a>(paths: impl Iterator<Item = &'a String>, local: &BTreeMap<String, (String, u64)>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for path in paths {
+        path.hash(&mut hasher);
+        local.get(path).map(|(sha, _)| sha).hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 fn skill_file(key: &str, path: &str) -> bool {
@@ -580,6 +608,11 @@ pub fn plugin_dirs(claude_home: &Path, dir: &Path) -> Vec<PathBuf> {
 /// Claude Code has no flag for a second skills directory.
 /// A user skill this home already has, and has not synced before, stays when the hub holds a different copy.
 pub fn sync_plugins(hub: &impl Hub, state: &mut State, share: &PluginShare, now: SystemTime) -> Result<Synced, String> {
+    sync_plugins_with(hub, state, share, now, None)
+}
+
+/// Like `sync_plugins`, holding the push back the way `sync_with` does.
+pub fn sync_plugins_with(hub: &impl Hub, state: &mut State, share: &PluginShare, now: SystemTime, hold: Option<u64>) -> Result<Synced, String> {
     publish(share)?;
     let mut local = BTreeMap::new();
     for (path, file) in plugin_files(share) {
@@ -590,7 +623,7 @@ pub fn sync_plugins(hub: &impl Hub, state: &mut State, share: &PluginShare, now:
     let agreed_key = format!("{PLUGINS_KEY} {}", share.claude_home.display());
     let mut agreed = state.agreed.get(&agreed_key).cloned().unwrap_or_default();
     let keep = conflicting_user_skills(&local, &agreed, &hub.list(PLUGINS_KEY)?);
-    let synced = exchange(hub, state, PLUGINS_KEY, &agreed_key, &mut agreed, &local, &|path| if keep.contains(path) { None } else { plugin_local(share, path) }, now, false)?;
+    let synced = exchange(hub, state, PLUGINS_KEY, &agreed_key, &mut agreed, &local, &|path| if keep.contains(path) { None } else { plugin_local(share, path) }, now, false, hold)?;
     state.keep_agreed(agreed_key, agreed);
     Ok(synced)
 }

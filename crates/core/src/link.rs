@@ -35,6 +35,10 @@ const BACKOFF_STABLE: Duration = Duration::from_secs(30);
 const BACKOFF_JITTER: f64 = 0.25;
 const SYNC_FIRST: Duration = Duration::from_secs(5);
 const SYNC_EVERY: Duration = Duration::from_secs(20);
+/// After the hub refuses a project's push, the same files wait this long before they go again,
+/// twice as long after each refusal of them, up to `PUSH_HOLD_MAX`.
+const PUSH_HOLD_MIN: Duration = SYNC_EVERY;
+const PUSH_HOLD_MAX: Duration = Duration::from_secs(30 * 60);
 /// The close code the hub sends when it doesn't know the token a socket signed in with.
 pub const UNAUTHORIZED: u16 = 4001;
 /// How long a box's node is refused with `UNAUTHORIZED`, with no hello accepted in between, before
@@ -278,13 +282,51 @@ struct Syncer {
     backoff: PushBackoff,
 }
 
-/// Syncs one project at a time.
+/// Holds back a project's push after the hub refused it, by sync key, while its files to send
+/// stay the same. A push the hub takes ends the hold; changed files go at the next cycle. The
+/// project lists and pulls every cycle all the same.
 #[derive(Default)]
-struct PushBackoff {}
+struct PushBackoff(HashMap<String, Held>);
+
+struct Held {
+    sending: u64,
+    wait: Duration,
+    until: Instant,
+}
 
 impl PushBackoff {
-    fn sync(&mut self, hub: &impl sync::Hub, state: &mut sync::State, checkout: &sync::Checkout, _now: Instant) -> Result<sync::Synced, String> {
-        sync::sync(hub, state, checkout, SystemTime::now())
+    fn sync(&mut self, hub: &impl sync::Hub, state: &mut sync::State, checkout: &sync::Checkout, now: Instant) -> Result<sync::Synced, String> {
+        let key = &checkout.project.key;
+        let done = sync::sync_with(hub, state, checkout, SystemTime::now(), self.hold(key, now))?;
+        self.record(key, &done.push, now);
+        Ok(done)
+    }
+
+    fn sync_plugins(&mut self, hub: &impl sync::Hub, state: &mut sync::State, share: &sync::PluginShare, now: Instant) -> Result<sync::Synced, String> {
+        let key = format!("{} {}", sync::PLUGINS_KEY, share.claude_home.display());
+        let done = sync::sync_plugins_with(hub, state, share, SystemTime::now(), self.hold(&key, now))?;
+        self.record(&key, &done.push, now);
+        Ok(done)
+    }
+
+    fn hold(&self, key: &str, now: Instant) -> Option<u64> {
+        self.0.get(key).filter(|held| now < held.until).map(|held| held.sending)
+    }
+
+    fn record(&mut self, key: &str, push: &sync::Push, now: Instant) {
+        match push {
+            sync::Push::Done => {
+                self.0.remove(key);
+            }
+            sync::Push::Held => {}
+            sync::Push::Refused { sending, .. } => {
+                let wait = match self.0.get(key) {
+                    Some(held) if held.sending == *sending => (held.wait * 2).min(PUSH_HOLD_MAX),
+                    _ => PUSH_HOLD_MIN,
+                };
+                self.0.insert(key.to_owned(), Held { sending: *sending, wait, until: now + wait });
+            }
+        }
     }
 }
 
@@ -349,7 +391,7 @@ impl Syncer {
                     if !done.pushed.is_empty() || !done.pulled.is_empty() {
                         eprintln!("pinned: synced {key}: {} up, {} down", done.pushed.len(), done.pulled.len())
                     }
-                    if let sync::Push::Refused { error } = &done.push {
+                    if let sync::Push::Refused { error, .. } = &done.push {
                         eprintln!("pinned: could not send {key}'s changes: {error}");
                     }
                 }
@@ -357,14 +399,14 @@ impl Syncer {
             }
         }
         for share in machine.plugin_shares() {
-            match sync::sync_plugins(shared, state, &share, SystemTime::now()) {
+            match self.backoff.sync_plugins(shared, state, &share, Instant::now()) {
                 Ok(done) => {
                     self.reported_old_hub = false;
                     machine.skills_changed(&skills::pulled_by_plugin_sync(&share, &done.pulled));
                     if !done.pushed.is_empty() || !done.pulled.is_empty() {
                         eprintln!("pinned: synced plugins: {} up, {} down", done.pushed.len(), done.pulled.len());
                     }
-                    if let sync::Push::Refused { error } = &done.push {
+                    if let sync::Push::Refused { error, .. } = &done.push {
                         eprintln!("pinned: could not send the plugins' changes: {error}");
                     }
                 }
