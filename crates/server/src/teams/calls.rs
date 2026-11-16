@@ -547,7 +547,7 @@ async fn at_limit(hub: &Arc<Hub>, policy: &TeamPolicy) -> Result<(), String> {
 
 /// The choices of a limit call: "Let it go on" until the run's max life, or "Stop it" as `stop_run`.
 const GO_ON: &str = "Let it go on";
-const STOP_IT: &str = "Stop it";
+pub(super) const STOP_IT: &str = "Stop it";
 
 /// `secs` of `TeamPolicy::max_life_secs` as a limit reads it: "4 hour", "90 minute", "8 second".
 fn life_limit(secs: u64) -> String {

@@ -1085,20 +1085,37 @@ pub async fn calls(db: &Db, team: Uuid) -> Result<Vec<Call>, String> {
     Ok(calls_of(&rows)?.into_iter().map(|row| row.call).collect())
 }
 
+/// The start of a stop's `with spent as (...)`: spends the unused "Go ahead" answers of team `$1`,
+/// the choice in parameter `$choice`, narrowed by what the caller adds after it.
+fn spend_go_aheads(choice: u8) -> String {
+    format!(
+        "update team_calls g set released_at = extract(epoch from now())::bigint
+         where g.team = $1 and g.situation = 'before_irreversible' and g.released_at is null
+           and g.answer -> 'kind' ->> 'kind' = 'choice' and g.answer ->> 'choice' = ${choice}"
+    )
+}
+
 /// Answers a call nobody answered yet, in one statement guarded by `answered_at is null`, so of
 /// two answers (or an answer and the give-up) only one wins. None when someone already did.
+/// An answer that stops its run (a stop, or a limit call's "Stop it") spends every unused
+/// "Go ahead" of the run in the same statement: a run a person stopped never uses one, even
+/// while its end has not happened yet.
 pub async fn answer_call(db: &Db, team: Uuid, call: Uuid, answer: &Answer, outcome: &str) -> Result<Option<Call>, String> {
     let by = Uuid::parse_str(&answer.by).map_err(|_| "an answer's author is an account id")?;
+    let (stop, stop_it) = (matches!(answer.kind, pinned_core::teams::AnswerKind::Stop), answer.choice.as_deref() == Some(super::calls::STOP_IT));
     let row = db
         .client()
         .await?
         .query_opt(
             &format!(
-                "update team_calls c set answered_by = $3, answered_at = now(), answer = $4, outcome = $5
+                "with spent as ({} and g.run = (select o.run from team_calls o where o.team = $1 and o.id = $2 and o.answered_at is null
+                                                       and ($6 or ($8 and o.situation = 'on_limit'))))
+                 update team_calls c set answered_by = $3, answered_at = now(), answer = $4, outcome = $5
                  from team_runs r where r.id = c.run and c.team = $1 and c.id = $2 and c.answered_at is null
-                 returning {CALL_COLUMNS}"
+                 returning {CALL_COLUMNS}",
+                spend_go_aheads(7)
             ),
-            &[&team, &call, &by, &json(answer)?, &outcome],
+            &[&team, &call, &by, &json(answer)?, &outcome, &stop, &GO_AHEAD, &stop_it],
         )
         .await
         .map_err(err)?;
@@ -1167,7 +1184,8 @@ pub async fn give_up_due(db: &Db, secs: u64) -> Result<Vec<CallRow>, String> {
     calls_of(&rows)
 }
 
-/// Closes the run's open call as `stopped` with `answer`, when it has one.
+/// Closes the run's open call as `stopped` with `answer`, when it has one, and spends the run's
+/// unused "Go ahead" answers in the same statement: a stopped run never uses one.
 pub async fn stop_open_call(db: &Db, team: Uuid, run: Uuid, answer: &Answer) -> Result<Option<Call>, String> {
     let by = Uuid::parse_str(&answer.by).map_err(|_| "an answer's author is an account id")?;
     let row = db
@@ -1175,11 +1193,13 @@ pub async fn stop_open_call(db: &Db, team: Uuid, run: Uuid, answer: &Answer) -> 
         .await?
         .query_opt(
             &format!(
-                "update team_calls c set answered_by = $3, answered_at = now(), answer = $4, outcome = 'stopped'
+                "with spent as ({} and g.run = $2)
+                 update team_calls c set answered_by = $3, answered_at = now(), answer = $4, outcome = 'stopped'
                  from team_runs r where r.id = c.run and c.team = $1 and c.run = $2 and c.answered_at is null
-                 returning {CALL_COLUMNS}"
+                 returning {CALL_COLUMNS}",
+                spend_go_aheads(5)
             ),
-            &[&team, &run, &by, &json(answer)?],
+            &[&team, &run, &by, &json(answer)?, &GO_AHEAD],
         )
         .await
         .map_err(err)?;
