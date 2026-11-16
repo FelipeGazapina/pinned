@@ -303,7 +303,9 @@ fn a_team_box_may_not_act_to_save_an_on_bots_workflow() {
 }
 
 #[test]
-fn a_members_save_connector_on_an_on_bots_workflow_puts_the_bot_back_to_draft() {
+// Temporary: proves both sides survived the merge. The hardening unit replaces it: a member's
+// save_connector through the team hub call is refused, and SaveBot on an on bot puts it to draft.
+fn temporary_merge_check_member_save_connector_puts_bot_back_to_draft() {
     let (hub, team, id, mut bruno) = team_box_with_on_bot("sepfix_member_save_draft");
     let mut changed = team_workflow(&mut bruno, &team, &id);
     changed["instructions"] = json!("Fix the bug and open a pull request.");
