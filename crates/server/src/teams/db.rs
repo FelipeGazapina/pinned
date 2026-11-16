@@ -46,13 +46,15 @@ pub async fn is_team(db: &Db, account: Uuid) -> Result<bool, String> {
 
 /// Makes the team's account (kind 'team', email `team-<id>@teams.invalid`, password '!', which no
 /// hash matches), its `teams` row and `owner` as its owner, in one statement, and answers its id.
+/// The owner is a person: a team never owns a team.
 pub async fn create_team(db: &Db, owner: Uuid, name: &str) -> Result<Uuid, String> {
     let id = Uuid::new_v4();
     let email = format!("team-{id}@teams.invalid");
     let made = db
         .client().await?
         .execute(
-            "with account as (insert into accounts (id, email, password_hash, kind) values ($1, $2, '!', 'team') returning id),
+            "with account as (insert into accounts (id, email, password_hash, kind)
+                     select $1, $2, '!', 'team' where exists (select 1 from accounts where id = $4 and kind = 'person') returning id),
                   team as (insert into teams (id, name, owner) select id, $3, $4 from account returning id)
              insert into team_members (team, member, role) select id, $4, 'owner' from team",
             &[&id, &email, &name, &owner],

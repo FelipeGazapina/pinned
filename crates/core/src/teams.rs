@@ -446,7 +446,12 @@ pub enum TeamOp {
 
 impl TeamOp {
     /// The personal call inside `Hub`, as the hub reads it.
+    /// Only a JSON object: serde reads a tagged enum from an array as well (`["disconnect_upstash"]`),
+    /// which no app sends.
     pub fn hub_call(call: Value) -> Result<HubCall, String> {
+        if !call.is_object() {
+            return Err("not a hub call: a hub call is a JSON object".into());
+        }
         serde_json::from_value(call).map_err(|e| format!("not a hub call: {e}"))
     }
 
@@ -522,6 +527,11 @@ mod tests {
         let TeamOp::Hub { call } = op(json!({ "op": "hub", "call": { "cmd": "run_workflow", "id": "c1" } })) else { panic!("hub") };
         assert!(matches!(TeamOp::hub_call(call), Ok(HubCall::RunWorkflow { ref id }) if id == "c1"));
         assert!(TeamOp::hub_call(json!({ "cmd": "no_such_call" })).is_err());
+        assert!(serde_json::from_value::<HubCall>(json!(["disconnect_upstash"])).is_ok(), "serde alone takes the array");
+        for not_an_object in [json!(["disconnect_upstash"]), json!(["run_workflow", "c1"]), json!("disconnect_upstash"), json!(null)] {
+            assert_eq!(TeamOp::hub_call(not_an_object.clone()).err().as_deref(), Some("not a hub call: a hub call is a JSON object"), "{not_an_object}");
+        }
+        assert!(TeamOp::hub_call(json!({ "cmd": "Disconnect_Upstash" })).is_err(), "a cmd's case is its name");
     }
 
     #[test]

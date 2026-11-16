@@ -973,9 +973,11 @@ impl Hub {
             HubCall::ConvexTables { id } => (json(c().await?.convex_tables(&*self.convex_http, &id).await?), false),
             HubCall::Convex { .. } => return Err("only a session on a machine reads Convex".into()),
             // `account` is the person: `teams::call` checks the membership and runs the op on the team.
+            // An app's own call comes through `http::client_frame`, which reads the op and checks
+            // the unlock on it first.
             HubCall::Team { team, op } => {
-                let team = team.map(|id| Uuid::parse_str(&id).map_err(|_| format!("{id} is not a team id"))).transpose()?;
-                return crate::teams::call(self, account, team, op).await;
+                let op = crate::teams::Op::read(op)?;
+                return crate::teams::call(self, account, crate::teams::team_id(team)?, op).await;
             }
         };
         if changed {
@@ -1608,6 +1610,16 @@ impl Account {
             None => return true,
         };
         !unlocked && surface::owner_only(side, &surface::cmd_of(call), locked)
+    }
+
+    /// Whether client `id` must unlock before a call `owner_only` names, which it answers from
+    /// whether the login is locked. A team's op asks this with `teams::owner_only`.
+    pub fn needs_unlock_for(&self, id: u64, owner_only: impl FnOnce(bool) -> bool) -> bool {
+        let (locked, unlocked) = match self.live.lock().unwrap().clients.get(&id) {
+            Some(client) => (client.locked, client.unlocked.is_some_and(|until| until > Instant::now())),
+            None => return true,
+        };
+        !unlocked && owner_only(locked)
     }
 
     /// The sha256 of the login client `id` signed in with.

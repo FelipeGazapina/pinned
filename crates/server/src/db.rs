@@ -2031,10 +2031,18 @@ impl Db {
         let client = self.client().await?;
         let grant = Uuid::new_v4();
         let (scopes, projects) = (serde_json::to_value(scopes).map_err(|e| e.to_string())?, serde_json::to_value(projects).map_err(|e| e.to_string())?);
-        client
-            .execute("insert into agent_grants (id, account, client, scopes, projects) values ($1, $2, $3, $4, $5)", &[&grant, &account, &request.client, &scopes, &projects])
+        // Only a person lets an agent in: a team's account has no owner of its own to act for.
+        let made = client
+            .execute(
+                "insert into agent_grants (id, account, client, scopes, projects) select $1, $2, $3, $4, $5 \
+                 where exists (select 1 from accounts where id = $2 and kind = 'person')",
+                &[&grant, &account, &request.client, &scopes, &projects],
+            )
             .await
             .map_err(err)?;
+        if made != 1 {
+            return Err(format!("account {account} cannot let an agent in"));
+        }
         let code = Token::new();
         client
             .execute(
@@ -2071,7 +2079,14 @@ impl Db {
     /// A fresh access token and refresh token for the grant, unless it was revoked.
     pub async fn issue_agent_tokens(&self, grant: Uuid) -> Result<Option<(String, String)>, String> {
         let client = self.client().await?;
-        let live = client.query_opt("select 1 from agent_grants where id = $1 and not revoked", &[&grant]).await.map_err(err)?;
+        let live = client
+            .query_opt(
+                "select 1 from agent_grants g where g.id = $1 and not g.revoked \
+                 and exists (select 1 from accounts a where a.id = g.account and a.kind = 'person')",
+                &[&grant],
+            )
+            .await
+            .map_err(err)?;
         if live.is_none() {
             return Ok(None);
         }
@@ -2160,6 +2175,7 @@ impl Db {
             .query_opt(
                 "update agent_grants g set last_used = now() from agent_tokens t, agent_clients c \
                  where t.token_hash = $1 and t.kind = 'access' and t.expires_at > now() and t.grant_id = g.id and c.id = g.client and not g.revoked \
+                 and exists (select 1 from accounts a where a.id = g.account and a.kind = 'person') \
                  returning g.id, g.account, c.name, g.scopes, g.projects",
                 &[&hash(token)],
             )
