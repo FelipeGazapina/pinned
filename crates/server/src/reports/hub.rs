@@ -56,6 +56,12 @@ const AGENT_DRAFTS_KEPT: i64 = 10;
 pub const RESTARTED: &str = "the hub restarted while sending; check My reports before trying again";
 /// Why a send the restart failed is not tried again while the hub that stopped may still be sending it.
 const RESTART_WAIT: &str = "This report was being sent when the hub restarted. Try again in a minute.";
+/// What a send answers while another send of the account, on this hub or another, holds the account's reports lock.
+const SEND_BUSY: &str = "Another report of yours is being sent. Try again in a moment.";
+/// What a send answers when a row it writes stays locked past `LOCK_TIMEOUT`.
+const REPORTS_BUSY: &str = "Your reports are busy right now. Try again in a moment.";
+/// The first statement of every reports transaction: no lock wait in it holds the shared transaction connection long.
+const LOCK_TIMEOUT: &str = "set local lock_timeout = '2s'";
 /// Most reports `list` answers.
 const LIST_LIMIT: i64 = 200;
 
@@ -371,6 +377,14 @@ fn now_secs() -> i64 {
 
 fn err(e: tokio_postgres::Error) -> String {
     e.to_string()
+}
+
+/// `e`, or `REPORTS_BUSY` when it is a lock wait that ran past `LOCK_TIMEOUT`.
+fn busy_or_err(e: tokio_postgres::Error) -> String {
+    if e.code() == Some(&tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE) {
+        return REPORTS_BUSY.into();
+    }
+    err(e)
 }
 
 fn json<T: serde::Serialize>(value: T) -> Result<Value, String> {
@@ -927,15 +941,20 @@ impl Hub {
 
     /// Marks report `id` as sending, counted toward the daily limit, in one transaction that holds the account's
     /// advisory lock, so two hubs on one database never both pass the limit. Some(report) when another send of
-    /// `request_id` got there first: that report is the answer.
+    /// `request_id` got there first: that report is the answer. It never waits for the lock: while another send
+    /// holds it, the answer is `SEND_BUSY`, with nothing written or counted.
     #[allow(clippy::too_many_arguments)]
     async fn mark_sending(&self, account: &Account, id: Uuid, draft: &Draft, title: &str, saved: bool, already: bool, again: Option<&SendRow>, request_id: Option<&str>, by_agent: bool) -> Result<Option<Report>, String> {
         let (now, kept, sending) = (now_secs(), json(draft)?, json(ReportState::Sending)?);
         let mut held = self.db.transaction_client().await?;
         let tx = held.transaction().await.map_err(err)?;
-        tx.execute("select pg_advisory_xact_lock(hashtextextended('pinned-reports:' || $1::uuid::text, 0))", &[&account.id]).await.map_err(err)?;
+        tx.batch_execute(LOCK_TIMEOUT).await.map_err(err)?;
+        let ours: bool = tx.query_one("select pg_try_advisory_xact_lock(hashtextextended('pinned-reports:' || $1::uuid::text, 0))", &[&account.id]).await.map_err(busy_or_err)?.get(0);
+        if !ours {
+            return Err(SEND_BUSY.into());
+        }
         if let Some(request_id) = request_id {
-            let row = tx.query_opt(&format!("select {SEND_COLUMNS} from reports where account = $1 and request_id = $2"), &[&account.id, &request_id]).await.map_err(err)?;
+            let row = tx.query_opt(&format!("select {SEND_COLUMNS} from reports where account = $1 and request_id = $2"), &[&account.id, &request_id]).await.map_err(busy_or_err)?;
             if let Some(row) = row.as_ref().map(send_row).transpose()? {
                 let ours = again.is_some_and(|again| again.key == row.key) && matches!(row.report.state, ReportState::Failed { .. });
                 if !ours {
@@ -944,7 +963,7 @@ impl Hub {
             }
         }
         if !already {
-            let sent: Vec<i64> = tx.query(COUNTED_SENDS, &[&account.id, &(now - WINDOW_SECS)]).await.map_err(err)?.iter().map(|r| r.get(0)).collect();
+            let sent: Vec<i64> = tx.query(COUNTED_SENDS, &[&account.id, &(now - WINDOW_SECS)]).await.map_err(busy_or_err)?.iter().map(|r| r.get(0)).collect();
             if let Some(refusal) = over_limit(&sent) {
                 return Err(refusal);
             }
@@ -957,7 +976,7 @@ impl Hub {
                     &[&id, &account.id, &kind_name(&draft.kind), &title, &kept, &sending, &by_agent, &now, &request_id, &already],
                 )
                 .await
-                .map_err(err)?;
+                .map_err(busy_or_err)?;
             if updated == 0 {
                 return Err(no_draft(&id.to_string()));
             }
@@ -967,9 +986,9 @@ impl Hub {
                 &[&id, &account.id, &kind_name(&draft.kind), &title, &kept, &sending, &by_agent, &now, &request_id],
             )
             .await
-            .map_err(err)?;
+            .map_err(busy_or_err)?;
         }
-        tx.commit().await.map_err(err)?;
+        tx.commit().await.map_err(busy_or_err)?;
         Ok(None)
     }
 
