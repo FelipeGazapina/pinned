@@ -507,7 +507,7 @@ pub async fn open_reserved(db: &Db, team: Uuid, run: Uuid, machine: &str) -> Res
         .client()
         .await?
         .execute(
-            &format!("update team_runs set box = $3, reserved = false, reserved_at = null where team = $1 and id = $2 and reserved and state in {LIVE}"),
+            &format!("update team_runs set box = $3, reserved = false, reserved_at = null, opened_at = now() where team = $1 and id = $2 and reserved and state in {LIVE}"),
             &[&team, &run, &machine],
         )
         .await
@@ -572,11 +572,12 @@ macro_rules! waited {
 
 /// A `team_runs` row as `run_of` reads it. Its waiting time is its closed waits (`waiting_secs`)
 /// and the open one (since `waiting_since`); its active time is the rest of the time from its
-/// start to its end, or now while it is live.
+/// session's open (`opened_at`, or its start for a run that opened with its row) to its end, or
+/// now while it is live: 0 while its place is only reserved.
 const RUN_COLUMNS: &str = concat!(
-    "id, workflow, state, controller, cost_usd, greatest(0, extract(epoch from coalesce(ended_at, now()) - started_at)::bigint - ",
+    "id, workflow, state, controller, cost_usd, case when reserved then 0 else greatest(0, extract(epoch from coalesce(ended_at, now()) - coalesce(opened_at, started_at))::bigint - ",
     waited!(),
-    "), extract(epoch from started_at)::bigint, extract(epoch from ended_at)::bigint, outcome, started_by #>> '{}', ",
+    ") end, extract(epoch from started_at)::bigint, extract(epoch from ended_at)::bigint, outcome, started_by #>> '{}', ",
     waited!()
 );
 
@@ -1472,9 +1473,9 @@ pub async fn charge_working_runs(db: &Db, rates: [f64; 3]) -> Result<(), String>
         .await?
         .execute(
             "update team_runs r set cost_usd = greatest(r.cost_usd,
-                   greatest(0, extract(epoch from now() - r.started_at)::bigint - r.waiting_secs)::float8
+                   greatest(0, extract(epoch from now() - coalesce(r.opened_at, r.started_at))::bigint - r.waiting_secs)::float8
                    * case lower(b.size) when 'medium' then $2::float8 when 'large' then $3::float8 else $1::float8 end / 3600.0)
-                 from boxes b where b.account = r.team and b.machine::text = r.box and r.state in ('working', 'taken_over')",
+                 from boxes b where b.account = r.team and b.machine::text = r.box and r.state in ('working', 'taken_over') and not r.reserved",
             &[&rates[0], &rates[1], &rates[2]],
         )
         .await
@@ -1502,7 +1503,7 @@ pub async fn runs_at_limit(db: &Db) -> Result<Vec<AtLimit>, String> {
                  from team_runs r join team_bots b on b.team = r.team and b.workflow = r.workflow
                  where r.state in ('working', 'taken_over') and not r.reserved
                    and (r.cost_usd >= (b.limits->>'usd')::float8
-                        or extract(epoch from now() - r.started_at)::bigint - r.waiting_secs >= (b.limits->>'minutes')::bigint * 60)
+                        or extract(epoch from now() - coalesce(r.opened_at, r.started_at))::bigint - r.waiting_secs >= (b.limits->>'minutes')::bigint * 60)
                    and not exists (select 1 from team_calls c where c.run = r.id and c.situation = 'on_limit')",
             &[],
         )
