@@ -125,6 +125,17 @@ test("the calls page: open cards, then a green result line once answered", async
   assert.match(html, /<div class="tc-result" data-state="done" role="status">You answered “OK to publish”\. The bot goes on with it\.<\/div>/);
 });
 
+test("a call card shows the whole question, with no line clamp", () => {
+  const long = `Approve this step? ${"Run the migration on the orders table, then the backfill. ".repeat(30)}\nThen restart the workers.`;
+  const p = page({ calls: [call({ question: long })] });
+  const html = p.eval("tcCardHtml(tcStore.calls[0])");
+  assert.ok(html.includes(`<p class="tc-question">${long.replace(/&/g, "&#38;")}</p>`), "every character of the question is in the card");
+  const css = read("gui-team-calls.css");
+  assert.ok(!/line-clamp|max-height|text-overflow/.test(css.match(/\.tc-question[^{]*\{[^}]*\}/)?.[0] ?? "x"), "the question rule clamps nothing");
+  assert.ok(!/-webkit-line-clamp/.test(css), "no line clamp anywhere in the calls styles");
+  assert.match(css, /\.tc-question \{[^}]*white-space: pre-line/);
+});
+
 test("the first choice is the primary button and each other group of the bot is a pass", () => {
   const p = page({ calls: [call({ id: "c2", run: "r2", workflow: "w2", asked: [{ kind: "person", account: ME }], choices: ["Yes", "No"] })] });
   const html = p.eval("tcCardHtml(tcStore.calls[0])");

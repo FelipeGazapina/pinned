@@ -55,7 +55,8 @@ body[data-team="on"] :is(#sidebar .side-head, #side-nav, #phone-chips, #sidebar 
 .tc-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; min-width: 0; }
 .tc-botname { font-weight: 600; color: var(--g-fg); overflow-wrap: anywhere; }
 .tc-chip { padding: 0 7px; border-radius: 6px; background: rgb(var(--g-primary-rgb) / 0.2); color: var(--tc-link); font-weight: 500; font-size: 13px; overflow-wrap: anywhere; }
-.tc-question { margin: 0; font-size: 15px; overflow-wrap: anywhere; }
+/* The whole question, never clamped: a step to approve can be long. Line breaks the bot wrote stay. */
+.tc-question { margin: 0; font-size: 15px; overflow-wrap: anywhere; white-space: pre-line; }
 .tc-link { padding: 0; border: 0; background: none; font: inherit; cursor: pointer; text-align: left; }
 button.tc-botname:hover, button.tc-chip:hover { text-decoration: underline; }
 
