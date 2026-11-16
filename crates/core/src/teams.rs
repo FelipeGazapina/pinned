@@ -230,6 +230,9 @@ pub struct Bot {
     /// Who turned it on last.
     #[serde(default)]
     pub on_by: Option<String>,
+    /// Run once, then discard: when its run ends the bot and its workflow are deleted.
+    #[serde(default)]
+    pub once: bool,
 }
 
 /// `"working"`, `"waiting"`, `"taken_over"`, `"done"`, `"stopped"`, `"gave_up"`, `"failed"`
@@ -483,7 +486,7 @@ mod tests {
         let answer = json!({ "by": "", "choice": "red", "text": "", "kind": { "kind": "choice" }, "at": 0 });
         let group = json!({ "handle": "design", "about": "", "members": ["a1"], "fallback": null, "slack_group": "" });
         let calls = json!({ "before_irreversible": { "kind": "owner" }, "in_doubt": { "kind": "group", "handle": "design" }, "on_limit": { "kind": "person", "account": "a1" }, "on_failure": { "kind": "owner" } });
-        let bot = json!({ "workflow": "c1", "name": "Fix", "owner": null, "calls": calls, "limits": { "usd": 5.0, "minutes": 30 }, "on": false, "on_by": null });
+        let bot = json!({ "workflow": "c1", "name": "Fix", "owner": null, "calls": calls, "limits": { "usd": 5.0, "minutes": 30 }, "on": false, "on_by": null, "once": false });
         let cases = [
             json!({ "op": "list" }),
             json!({ "op": "create", "name": "Acme" }),

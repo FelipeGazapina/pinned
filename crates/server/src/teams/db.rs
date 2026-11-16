@@ -147,31 +147,143 @@ pub async fn leave_group(_db: &Db, _team: Uuid, _handle: &str, _member: Uuid) ->
 
 // ---- bots.rs ----
 
+fn bot_row(r: &tokio_postgres::Row) -> Result<Bot, String> {
+    let calls: serde_json::Value = r.get("calls");
+    let limits: serde_json::Value = r.get("limits");
+    let owner: Option<Uuid> = r.get("owner");
+    let on_by: Option<Uuid> = r.get("on_by");
+    let on: bool = r.get("on");
+    Ok(Bot {
+        workflow: r.get("workflow"),
+        name: String::new(),
+        owner: owner.map(|o| o.to_string()),
+        calls: serde_json::from_value(calls).map_err(|e| format!("a bot's call rules are not readable: {e}"))?,
+        limits: serde_json::from_value(limits).map_err(|e| format!("a bot's limits are not readable: {e}"))?,
+        on,
+        on_by: on_by.map(|o| o.to_string()),
+        once: r.get("once"),
+    })
+}
+
+const BOT_COLUMNS: &str = "workflow, owner, calls, limits, on_by, on_at is not null as on, once";
+
 /// The `team_bots` rows: `Bot` with an empty `name` (the workflow's name is in the team's store).
-pub async fn bots(_db: &Db, _team: Uuid) -> Result<Vec<Bot>, String> {
-    Err("not built yet".into())
+pub async fn bots(db: &Db, team: Uuid) -> Result<Vec<Bot>, String> {
+    let rows = db.client().await?.query(&format!("select {BOT_COLUMNS} from team_bots where team = $1 order by workflow"), &[&team]).await.map_err(err)?;
+    rows.iter().map(bot_row).collect()
+}
+
+/// The row of one workflow, if it is a bot.
+pub async fn bot(db: &Db, team: Uuid, workflow: &str) -> Result<Option<Bot>, String> {
+    let row = db.client().await?.query_opt(&format!("select {BOT_COLUMNS} from team_bots where team = $1 and workflow = $2"), &[&team, &workflow]).await.map_err(err)?;
+    row.as_ref().map(bot_row).transpose()
 }
 
 /// Inserts or replaces the row of `bot.workflow`, leaving `on_by` and `on_at` as they are.
-pub async fn save_bot(_db: &Db, _team: Uuid, _bot: &Bot) -> Result<(), String> {
-    Err("not built yet".into())
+pub async fn save_bot(db: &Db, team: Uuid, bot: &Bot) -> Result<(), String> {
+    let owner = bot.owner.as_deref().map(Uuid::parse_str).transpose().map_err(|_| "the bot's owner is not an account id".to_owned())?;
+    let calls = serde_json::to_value(&bot.calls).map_err(|e| e.to_string())?;
+    let limits = serde_json::to_value(&bot.limits).map_err(|e| e.to_string())?;
+    db.client()
+        .await?
+        .execute(
+            "insert into team_bots (team, workflow, owner, calls, limits, once) values ($1, $2, $3, $4, $5, $6)
+             on conflict (team, workflow) do update set owner = excluded.owner, calls = excluded.calls, limits = excluded.limits, once = excluded.once",
+            &[&team, &bot.workflow, &owner, &calls, &limits, &bot.once],
+        )
+        .await
+        .map_err(err)?;
+    Ok(())
 }
 
 /// Sets `on_by`/`on_at` (on) or clears them (off); false when the bot has no row.
-pub async fn turn_bot_on(_db: &Db, _team: Uuid, _workflow: &str, _on: bool, _by: Uuid) -> Result<bool, String> {
-    Err("not built yet".into())
+pub async fn turn_bot_on(db: &Db, team: Uuid, workflow: &str, on: bool, by: Uuid) -> Result<bool, String> {
+    let client = db.client().await?;
+    let changed = match on {
+        true => client.execute("update team_bots set on_by = $3, on_at = now() where team = $1 and workflow = $2", &[&team, &workflow, &by]).await,
+        false => client.execute("update team_bots set on_by = null, on_at = null where team = $1 and workflow = $2", &[&team, &workflow]).await,
+    };
+    Ok(changed.map_err(err)? == 1)
+}
+
+/// Deletes the row of a workflow; false when it was no bot.
+pub async fn delete_bot(db: &Db, team: Uuid, workflow: &str) -> Result<bool, String> {
+    let gone = db.client().await?.execute("delete from team_bots where team = $1 and workflow = $2", &[&team, &workflow]).await.map_err(err)?;
+    Ok(gone == 1)
+}
+
+/// The handles of the team's groups.
+pub async fn group_handles(db: &Db, team: Uuid) -> Result<Vec<String>, String> {
+    let rows = db.client().await?.query("select handle from team_groups where team = $1", &[&team]).await.map_err(err)?;
+    Ok(rows.iter().map(|r| r.get(0)).collect())
+}
+
+/// Whether `member` is in the team's group `handle`.
+pub async fn in_group(db: &Db, team: Uuid, handle: &str, member: Uuid) -> Result<bool, String> {
+    let row = db.client().await?.query_opt("select 1 from team_group_members where team = $1 and handle = $2 and member = $3", &[&team, &handle, &member]).await.map_err(err)?;
+    Ok(row.is_some())
+}
+
+/// Records the box a run opened (the id of its machine), once it is known.
+pub async fn set_run_box(db: &Db, team: Uuid, run: Uuid, machine: &str) -> Result<(), String> {
+    db.client().await?.execute("update team_runs set box = $3 where team = $1 and id = $2", &[&team, &run, &machine]).await.map_err(err)?;
+    Ok(())
+}
+
+/// Forgets a run that never started.
+pub async fn delete_run(db: &Db, team: Uuid, run: Uuid) -> Result<(), String> {
+    db.client().await?.execute("delete from team_runs where team = $1 and id = $2", &[&team, &run]).await.map_err(err)?;
+    Ok(())
 }
 
 // ---- calls.rs ----
 
 /// Inserts a run in `RunState::Working`; `machine` is the box it runs in, if known yet.
-pub async fn insert_run(_db: &Db, _team: Uuid, _run: &Run, _machine: Option<&str>) -> Result<(), String> {
-    Err("not built yet".into())
+pub async fn insert_run(db: &Db, team: Uuid, run: &Run, machine: Option<&str>) -> Result<(), String> {
+    let id = Uuid::parse_str(&run.id).map_err(|_| "the run's id is not a uuid".to_owned())?;
+    let started_by = serde_json::Value::String(run.started_by.clone());
+    db.client()
+        .await?
+        .execute(
+            "insert into team_runs (id, team, workflow, box, started_by, state, started_at) values ($1, $2, $3, $4, $5, $6, to_timestamp($7::bigint))",
+            &[&id, &team, &run.workflow, &machine, &started_by, &run.state.as_str(), &run.started_at],
+        )
+        .await
+        .map_err(err)?;
+    Ok(())
 }
 
 /// The team's runs, newest first, at most `limit`.
-pub async fn runs(_db: &Db, _team: Uuid, _limit: i64) -> Result<Vec<Run>, String> {
-    Err("not built yet".into())
+pub async fn runs(db: &Db, team: Uuid, limit: i64) -> Result<Vec<Run>, String> {
+    let rows = db
+        .client()
+        .await?
+        .query(
+            "select id, workflow, state, controller, cost_usd, active_secs, extract(epoch from started_at)::bigint, extract(epoch from ended_at)::bigint, outcome, started_by
+             from team_runs where team = $1 order by started_at desc, id limit $2",
+            &[&team, &limit],
+        )
+        .await
+        .map_err(err)?;
+    Ok(rows
+        .iter()
+        .map(|r| {
+            let (id, controller, started_by): (Uuid, Option<Uuid>, serde_json::Value) = (r.get(0), r.get(3), r.get(9));
+            let active: i64 = r.get(5);
+            Run {
+                id: id.to_string(),
+                workflow: r.get(1),
+                state: RunState::parse(r.get(2)).unwrap_or(RunState::Failed),
+                controller: controller.map(|c| c.to_string()),
+                cost_usd: r.get(4),
+                active_secs: active.max(0) as u64,
+                started_at: r.get(6),
+                ended_at: r.get(7),
+                outcome: r.get(8),
+                started_by: started_by.as_str().unwrap_or_default().to_owned(),
+            }
+        })
+        .collect())
 }
 
 pub async fn run(_db: &Db, _team: Uuid, _run: Uuid) -> Result<Option<Run>, String> {
