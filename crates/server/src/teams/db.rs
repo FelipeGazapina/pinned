@@ -1136,6 +1136,33 @@ pub async fn stale_reservations(db: &Db, secs: u64) -> Result<Vec<(Uuid, Uuid, S
     Ok(rows.iter().map(|r| (r.get(0), r.get(1), r.get(2))).collect())
 }
 
+/// Ends reserved run `run` as `state` with `outcome`, like `set_run_state`, only while it is live,
+/// still reserved and its place was held at least `secs` ago, in one statement: the backstop's
+/// end of a reservation that never opened. False when any of that no longer holds.
+///
+/// The claim (`claim`) writes the same row while the run is live and reserved, so exactly one of
+/// them wins: Postgres's row lock and its re-check of the row under READ COMMITTED decide.
+/// - This write locks the row first: the run ends; the claim's update waits, re-checks, finds it
+///   ended, and takes nothing.
+/// - The claim locks the row first: it holds the place anew (`reserved_at = now()`); this write
+///   waits, re-checks, finds the place no longer past the limit, and answers false.
+pub async fn end_stale_reservation(db: &Db, team: Uuid, run: Uuid, state: RunState, controller: Option<Uuid>, outcome: &str, secs: u64) -> Result<bool, String> {
+    let ended = db
+        .client()
+        .await?
+        .query_opt(
+            &format!(
+                "update team_runs set state = $3, controller = $4, ended_at = now(), outcome = $5
+                 where team = $1 and id = $2 and state in {LIVE} and reserved and reserved_at <= now() - make_interval(secs => $6)
+                 returning id"
+            ),
+            &[&team, &run, &state.as_str(), &controller, &outcome, &(secs as f64)],
+        )
+        .await
+        .map_err(err)?;
+    Ok(ended.is_some())
+}
+
 /// Takes out of its line the granted event that reserved run `run` holds the place of, if no
 /// poller claimed it yet, so it never runs without its place.
 pub async fn drop_grant(db: &Db, team: Uuid, run: Uuid) -> Result<(), String> {
@@ -1274,17 +1301,30 @@ pub async fn granted(db: &Db, team: Uuid) -> Result<Vec<i64>, String> {
 
 /// Claims granted event `id` for the poller that runs it: only the claim that deletes the row
 /// gets its stored event and the reserved run that holds its place, so of two hubs exactly one runs it.
-/// Only while that run is still live and reserved: a claim that races the backstop, or a stop, at
-/// the limit gets nothing, so the event never runs without its place.
+/// Only while that run is still live and reserved, and in the same statement the claim holds that
+/// place anew (`reserved_at = now()`), so the claimed run gets a whole limit to open its session.
+///
+/// The claim and the backstop (`end_stale_reservation`) both write the run's row, each only while
+/// it is live and reserved, so exactly one of them wins, and the claim has no limit of its own:
+/// Postgres's row lock and its re-check of the row under READ COMMITTED decide.
+/// - The claim locks the row first: it holds the place anew and takes the granted row; the
+///   backstop's write waits, re-checks the row, finds the place no longer past the limit, and
+///   ends nothing. The run starts once.
+/// - The backstop locks the row first: it ends the run; the claim's update waits, re-checks the
+///   row, finds the run ended, and takes nothing. The run is ended and counted once.
+/// The granted row is locked first (`for update`), so a claim that holds the place anew always
+/// takes its row: a granted row someone else took meanwhile leaves the run as it was.
 pub async fn claim(db: &Db, team: Uuid, id: i64) -> Result<Option<(serde_json::Value, Option<Uuid>)>, String> {
     let row = db
         .client()
         .await?
         .query_opt(
             &format!(
-                "delete from team_run_queue where team = $1 and id = $2 and granted_at is not null
-                   and exists (select 1 from team_runs r where r.id = team_run_queue.run and r.reserved and r.state in {LIVE})
-                 returning start, run"
+                "with granted as (select run from team_run_queue where team = $1 and id = $2 and granted_at is not null for update),
+                      held as (update team_runs r set reserved_at = now() from granted
+                               where r.team = $1 and r.id = granted.run and r.reserved and r.state in {LIVE} returning r.id)
+                 delete from team_run_queue q using held where q.team = $1 and q.id = $2 and q.run = held.id
+                 returning q.start, q.run"
             ),
             &[&team, &id],
         )

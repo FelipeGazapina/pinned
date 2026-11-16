@@ -471,7 +471,7 @@ async fn reap(hub: &Arc<Hub>, policy: &TeamPolicy) -> Result<(), String> {
             read.notify_one();
             go.notified().await;
         }
-        end_reservation(hub, team, run, &workflow).await;
+        end_reservation(hub, team, run, &workflow, policy.reservation_limit_secs).await;
     }
     for (team, run, box_runs) in db::stale_waiting(&hub.db, STALE_WAIT.as_secs()).await? {
         if !box_runs {
@@ -495,16 +495,15 @@ async fn reap_run(hub: &Arc<Hub>, team: Uuid, run: Uuid, outcome: &str) {
     }
 }
 
-/// Ends reserved run `run` of bot `workflow`, whose session never opened, as `RunState::Failed`
-/// (`NEVER_OPENED`) and counts it, after taking out an unclaimed granted event that holds its
-/// place. A run that opened or ended meanwhile is left as it is.
-async fn end_reservation(hub: &Arc<Hub>, team: Uuid, run: Uuid, workflow: &str) {
+/// Ends reserved run `run` of bot `workflow`, whose session never opened within `secs`, as
+/// `RunState::Failed` (`NEVER_OPENED`) and counts it, after taking out an unclaimed granted event
+/// that holds its place. Only through one write on the run's row (`db::end_stale_reservation`):
+/// a run that opened, ended, or whose granted event a poller claimed meanwhile (which holds its
+/// place anew) is left as it is, and counted by nobody here.
+async fn end_reservation(hub: &Arc<Hub>, team: Uuid, run: Uuid, workflow: &str, secs: u64) {
     let ended = async {
         db::drop_grant(&hub.db, team, run).await?;
-        if !db::is_reserved(&hub.db, team, run).await? {
-            return Ok(());
-        }
-        match end_run(hub, &hub.account(team).await?, run, RunState::Failed, NEVER_OPENED, None).await {
+        match end_run_if(hub, &hub.account(team).await?, run, RunState::Failed, NEVER_OPENED, None, Some(secs)).await {
             Ok(_) => {}
             Err(e) if e == RUN_ENDED => return Ok(()),
             Err(e) => return Err(e),
@@ -529,14 +528,30 @@ async fn gave_up(hub: &Arc<Hub>, team: Uuid, call: &Call) -> Result<(), String> 
 
 /// Every way a run ends goes through here: `stop_run`, an answer that stops it, the give-up, and
 /// its box ending for any reason (`box_ended`). Moves the run to the ended `state` (refused when it
-/// had ended), closes its open call as stopped, pushes both, ends its box for `box_end` (None when
+/// had ended), takes out of its line a granted event no poller claimed for it (`db::drop_grant`),
+/// closes its open call as stopped, pushes both, ends its box for `box_end` (None when
 /// the box is what ended), and discards a bot made to run once (`bots::run_ended`). A box that
 /// does not end now is logged: the reaper still ends it at its max life.
 pub async fn end_run(hub: &Hub, team: &Arc<Account>, run_id: Uuid, state: RunState, outcome: &str, box_end: Option<End>) -> Result<Run, String> {
+    end_run_if(hub, team, run_id, state, outcome, box_end, None).await
+}
+
+/// `end_run`, whose state write, when `stale_after` is set, ends only a run still reserved whose
+/// place was held at least that many seconds ago (`db::end_stale_reservation`): the backstop's.
+/// The rest follows only when that write ended the run; otherwise `RUN_ENDED`.
+async fn end_run_if(hub: &Hub, team: &Arc<Account>, run_id: Uuid, state: RunState, outcome: &str, box_end: Option<End>, stale_after: Option<u64>) -> Result<Run, String> {
     let current = db::run(&hub.db, team.id, run_id).await?.ok_or("the team has no such run")?;
     let controller = current.controller.as_deref().and_then(|c| Uuid::parse_str(c).ok());
-    if !db::set_run_state(&hub.db, team.id, run_id, state, controller, Some(outcome)).await? {
+    let ended = match stale_after {
+        None => db::set_run_state(&hub.db, team.id, run_id, state, controller, Some(outcome)).await?,
+        Some(secs) => db::end_stale_reservation(&hub.db, team.id, run_id, state, controller, outcome, secs).await?,
+    };
+    if !ended {
         return Err(RUN_ENDED.into());
+    }
+    // A granted event no poller claimed for it never runs now: a claim takes only a live run's.
+    if let Err(e) = db::drop_grant(&hub.db, team.id, run_id).await {
+        eprintln!("pinned-server: run {run_id} of team {} ended but its granted event stays in line: {e}", team.id);
     }
     let closed = Answer { by: team.id.to_string(), choice: None, text: outcome.to_owned(), kind: AnswerKind::Stop, at: now() };
     if let Some(call) = db::stop_open_call(&hub.db, team.id, run_id, &closed).await? {
