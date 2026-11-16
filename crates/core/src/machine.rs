@@ -292,6 +292,35 @@ struct Screen {
     read: Option<(u64, Option<Blocker>)>,
 }
 
+/// Why a prompt was not typed: the screen shows a menu or dialog, or the write failed.
+enum NotTyped {
+    Blocked(Blocker),
+    Failed(String),
+}
+
+const MENU_UP: &str = "Claude is waiting for an answer to its menu, so nothing was typed. Answer the menu, then send again.";
+const DIALOG_UP: &str = "Claude has a dialog open, so nothing was typed. Close it with Esc, then send again.";
+
+impl NotTyped {
+    /// The reason as the person who sent the prompt reads it.
+    fn for_person(self) -> String {
+        match self {
+            NotTyped::Blocked(Blocker::Menu) => MENU_UP.into(),
+            NotTyped::Blocked(Blocker::Dialog) => DIALOG_UP.into(),
+            NotTyped::Failed(error) => error,
+        }
+    }
+
+    /// The reason as an agent that prompted `tab` reads it.
+    fn for_agent(self, tab: &str) -> String {
+        match self {
+            NotTyped::Blocked(Blocker::Menu) => format!("{tab} is waiting for its user to answer a menu, so nothing was typed. Try again after the user answers it."),
+            NotTyped::Blocked(Blocker::Dialog) => format!("{tab} has a dialog open in its terminal, so nothing was typed. Try again later."),
+            NotTyped::Failed(error) => error,
+        }
+    }
+}
+
 /// What the session's screen shows in place of its prompt box, so typed text would land there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Blocker {
@@ -1317,7 +1346,7 @@ impl Machine {
             Call::CancelSetupToken { account } => json(self.setup_tokens.cancel(&account)),
             Call::SwitchAccount { tab, account, cols, rows } => json(self.switch_account(&tab, &account, cols, rows)?),
             Call::Thread { tab, from, limit, before } => json(self.thread_page(&tab, from, limit, before)?),
-            Call::Prompt { tab, text } => json(self.type_prompt(&tab, &text)?),
+            Call::Prompt { tab, text } => json(self.type_prompt(&tab, &text).map_err(NotTyped::for_person)?),
             Call::Workspace { tab } => {
                 let cwd = self.tab(&tab, |t| t.cwd.clone())?;
                 json(workspace::Workspace { scratch: cwd == self.scratch, ..workspace::of(&cwd) })
@@ -3574,7 +3603,7 @@ impl Machine {
         if let Call::Prompt { tab, text } = &call {
             self.may_prompt(caller, tab)?;
             // Typed text from another agent says who sent it, as enqueue's does.
-            return json(self.type_prompt(tab, &format!("[{}] {}", self.sender_of(caller), pinned_lines::guard(text)))?);
+            return json(self.type_prompt(tab, &format!("[{}] {}", self.sender_of(caller), pinned_lines::guard(text))).map_err(|e| e.for_agent(tab))?);
         }
         if matches!(call, Call::OpenGlobalOrchestrator) && !self.tab(caller, |t| global::is_global(&t.env)).unwrap_or(false) {
             return Err("open_global_orchestrator is for the global orchestrator's own session".into());
@@ -4191,8 +4220,21 @@ impl Machine {
 
     /// Types `text` as one prompt into the newest live tab whose environment holds every pair of
     /// `env`, such as the session answering a Slack thread. Answers whether one took it.
+    /// A delivery the screen's menu or dialog holds back waits in the tab's queue and is still
+    /// delivered: an answer of false sends the thread to another session.
     pub fn deliver(&self, env: &[(String, String)], text: &str) -> bool {
-        self.live_tab(env).is_some_and(|tab| self.type_prompt(&tab, text).is_ok())
+        let Some(tab) = self.live_tab(env) else { return false };
+        match self.type_prompt(&tab, text) {
+            Ok(()) => true,
+            Err(NotTyped::Blocked(_)) => {
+                let session = self.tab(&tab, |t| t.claude_session.clone()).ok().flatten();
+                self.delegates.queue_report(&tab, session, text.to_owned());
+                self.arm_delegate_pass();
+                self.emit_tabs();
+                true
+            }
+            Err(NotTyped::Failed(_)) => false,
+        }
     }
 
     fn live_tab(&self, env: &[(String, String)]) -> Option<TabId> {
@@ -4277,18 +4319,26 @@ impl Machine {
     /// taken the terminal yet, as claude starting up, gets it once it does: typed earlier, the
     /// pty's cooked mode would echo it and turn the submitting \r into \n, and claude would never
     /// see a prompt.
-    fn type_prompt(&self, tab: &str, text: &str) -> Result<(), String> {
-        self.awake(tab)?;
+    /// Nothing is typed while the screen shows a menu or dialog, held prompts included.
+    fn type_prompt(&self, tab: &str, text: &str) -> Result<(), NotTyped> {
+        self.awake(tab).map_err(NotTyped::Failed)?;
+        // Read under the screen lock alone: held across the write, a paste larger than the pty's
+        // free input would block it, and the reader thread would wait on the lock for good.
+        let blocker = self.blocker(tab);
         let wrote = self.tab(tab, |t| match t.session.as_mut() {
             Some(s) if s.raw() => {
+                if let Some(blocker) = blocker {
+                    return Err(NotTyped::Blocked(blocker));
+                }
+                let failed = |e: std::io::Error| NotTyped::Failed(e.to_string());
                 if !t.keys.is_empty() {
-                    s.write(&std::mem::take(&mut t.keys)).map_err(|e| e.to_string())?;
+                    s.write(&std::mem::take(&mut t.keys)).map_err(failed)?;
                 }
                 for held in std::mem::take(&mut t.held) {
-                    s.write(&paste(&held)).map_err(|e| e.to_string())?;
+                    s.write(&paste(&held)).map_err(failed)?;
                     t.turn_pending = Some(Instant::now());
                 }
-                s.write(&paste(text)).map_err(|e| e.to_string())?;
+                s.write(&paste(text)).map_err(failed)?;
                 t.turn_pending = Some(Instant::now());
                 Ok(true)
             }
@@ -4301,8 +4351,8 @@ impl Machine {
                 t.held.push(text.to_owned());
                 Ok(false)
             }
-            None => Err(format!("tab {tab} has no running session")),
-        })??;
+            None => Err(NotTyped::Failed(format!("tab {tab} has no running session"))),
+        }).map_err(NotTyped::Failed)??;
         if wrote {
             self.arm_delegate_pass();
         }
@@ -5806,7 +5856,7 @@ impl Machine {
         let text = self.delegates.claim_task_notice(&caller, task)?;
         if let Err(error) = self.type_prompt(tab, &text) {
             self.delegates.release_notice(&[task.to_owned()]);
-            return Err(error);
+            return Err(error.for_person());
         }
         Ok(())
     }
@@ -14143,6 +14193,137 @@ Have another model review a risky change before it goes ahead.";
         screen.push(session, filler.as_bytes());
         screen.push(session, ERASE.as_bytes());
         assert_eq!(screen.blocker(), None, "the prompt box is back");
+    }
+
+    /// Claude Code's prompt box as it stands between turns.
+    fn prompt_box(above: &str, inside: &str) -> String {
+        let rule = "\u{2500}".repeat(60);
+        format!("\x1b[2J\x1b[H{above}\r\n\r\n{rule}\r\n{inside}\r\n{rule}\r\n  ? for shortcuts\r\n")
+    }
+
+    /// A dialog drawn under a ▔ rule in place of the prompt box, as /usage draws it.
+    fn dialog() -> String {
+        format!("\x1b[2J\x1b[H\u{23fa} Done.\r\n\r\n{}\r\n  Status   Config   Usage\r\n\r\n  Current session   9% used\r\n\r\n  Esc to cancel\r\n", "\u{2594}".repeat(60))
+    }
+
+    /// A restored session woken and holding the terminal, its screen still blank.
+    #[cfg(unix)]
+    fn woken(name: &str, sessions: &[&str]) -> (Arc<Machine>, PathBuf, PathBuf, Vec<TabId>) {
+        let (m, dir, claude, tabs) = restored_idle(name, sessions);
+        for tab in &tabs {
+            m.call(Call::Wake { tab: tab.clone(), cols: 80, rows: 24 }).unwrap();
+        }
+        for tab in &tabs {
+            wait_for("the terminal", || m.tab(tab, |t| t.session.as_ref().is_some_and(|s| s.raw())).unwrap());
+        }
+        (m, dir, claude, tabs)
+    }
+
+    fn pasted(text: &str) -> String {
+        format!("\x1b[200~{text}\x1b[201~\r")
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_prompt_is_not_typed_into_a_menu_and_goes_once_the_menu_is_gone() {
+        let (m, dir, claude, tabs) = woken("guard-menu", &["s1"]);
+        let tab = tabs[0].clone();
+        show(&m, &tab, MENU);
+        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "Run the tests.".into() }), Err(MENU_UP.into()));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(kept(&claude, "typed", &tab), "", "nothing reached the session");
+        show(&m, &tab, ERASE);
+        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "Run the tests.".into() }), Ok(json!(null)));
+        wait_for("the prompt", || kept(&claude, "typed", &tab).ends_with('\r'));
+        assert_eq!(kept(&claude, "typed", &tab), pasted("Run the tests."));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_decline_then_prompt_goes_through() {
+        let (m, dir, claude, tabs) = woken("guard-decline", &["s1"]);
+        let tab = tabs[0].clone();
+        show(&m, &tab, MENU);
+        show(&m, &tab, &prompt_box("\u{23fa} Bash(cargo build)\r\n  \u{23bf}  Interrupted \u{b7} What should Claude do instead?", "\u{276f} "));
+        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "Build it in release.".into() }), Ok(json!(null)));
+        wait_for("the prompt", || kept(&claude, "typed", &tab).ends_with('\r'));
+        assert_eq!(kept(&claude, "typed", &tab), pasted("Build it in release."));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_draft_and_the_idle_prompt_box_are_not_menus() {
+        let (m, dir, claude, tabs) = woken("guard-not-menus", &["s1"]);
+        let tab = tabs[0].clone();
+        let screens = [
+            prompt_box("\u{23fa} Done.", "\u{276f} 1. fix the bug"),
+            prompt_box("  Both are in Settings \u{203a} Archive and can be brought back.", "\u{276f}"),
+            prompt_box("\u{23fa} Bash(cargo build)\r\n  \u{23bf}  Running\u{2026}", "\u{276f} "),
+        ];
+        let mut want = String::new();
+        for (n, screen) in screens.iter().enumerate() {
+            show(&m, &tab, screen);
+            let text = format!("prompt {n}");
+            assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: text.clone() }), Ok(json!(null)), "screen {n}");
+            want += &pasted(&text);
+            wait_for("the prompt", || kept(&claude, "typed", &tab).len() >= want.len());
+        }
+        assert_eq!(kept(&claude, "typed", &tab), want);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_dialog_blocks_a_prompt() {
+        let (m, dir, claude, tabs) = woken("guard-dialog", &["s1"]);
+        let tab = tabs[0].clone();
+        show(&m, &tab, &dialog());
+        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "Run the tests.".into() }), Err(DIALOG_UP.into()));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(kept(&claude, "typed", &tab), "", "nothing reached the session");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_delivery_waits_in_the_queue_while_a_menu_is_up() {
+        let file = std::env::temp_dir().join(format!("pinned-guard-delivery-{}.bin", std::process::id()));
+        let m = machine();
+        let tab = running(&m, slack_env("c2", "1792400050.000200"), &format!("stty raw -echo; exec cat > '{}'", file.display()));
+        wait_for("the terminal", || m.tab(&tab, |t| t.session.as_ref().is_some_and(|s| s.raw())).unwrap());
+        show(&m, &tab, MENU);
+        let d = delivery("c2", "1792400050.000200", &["[Slack reply from ana in the thread]\nship it"]);
+        assert!(m.deliver(&d.env(), &d.text()), "a held delivery is still delivered, so the thread opens no other session");
+        assert_eq!(m.delegates.queued().get(&tab), Some(&1));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(std::fs::read(&file).unwrap_or_default(), b"", "nothing reached the session");
+        show(&m, &tab, ERASE);
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
+        m.maybe_deliver(&tab);
+        wait_for("the delivery", || std::fs::read(&file).is_ok_and(|b| b.ends_with(b"\r")));
+        std::thread::sleep(Duration::from_millis(1200));
+        let typed = String::from_utf8(std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(typed.matches("ship it").count(), 1, "typed once: {typed:?}");
+        assert!(typed.starts_with("\x1b[200~") && typed.ends_with("\x1b[201~\r"), "{typed:?}");
+        assert_eq!(m.delegates.queued().get(&tab), None);
+        let _ = std::fs::remove_file(file);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agents_prompt_is_refused_with_its_own_reason() {
+        let (m, dir, claude, tabs) = woken("guard-agent", &["s1", "s2"]);
+        let (me, other) = (tabs[0].clone(), tabs[1].clone());
+        let prompt = || act_as(&m, &me, "prompt", json!({ "tab": other, "text": "Rebase on main." }));
+        show(&m, &other, MENU);
+        assert_eq!(prompt(), Err(format!("{other} is waiting for its user to answer a menu, so nothing was typed. Try again after the user answers it.")));
+        show(&m, &other, &dialog());
+        assert_eq!(prompt(), Err(format!("{other} has a dialog open in its terminal, so nothing was typed. Try again later.")));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(kept(&claude, "typed", &other), "", "nothing reached the session");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
