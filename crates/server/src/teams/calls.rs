@@ -453,7 +453,9 @@ const STALE_WAIT: Duration = Duration::from_secs(300);
 /// - a reserved run whose session did not open within `policy.reservation_limit_secs` fails
 ///   (`NEVER_OPENED`), counted as `SkipReason::NeverStarted`, and a granted event no poller
 ///   claimed for it leaves its line, so it never runs without its place;
-/// - a run left waiting with no open call goes back to work while its box runs, else ends (`BOX_GONE`).
+/// - a run left waiting with no open call goes back to work while its box runs, else ends (`BOX_GONE`);
+/// - what waits for a team with a free place starts (`queue::next`), so an event is never left
+///   waiting when the start after a run's end found the team's turn busy.
 ///
 /// A failure is logged and leaves the rest of the pass to run; the next tick tries again.
 async fn reap(hub: &Arc<Hub>, policy: &TeamPolicy) -> Result<(), String> {
@@ -491,6 +493,12 @@ async fn reap(hub: &Arc<Hub>, policy: &TeamPolicy) -> Result<(), String> {
         let moved = async { back_to_work(hub, &hub.account(team).await?, run).await };
         if let Err(e) = moved.await {
             eprintln!("pinned-server: run {run} of team {team} waits on no call but did not go back to work: {e}");
+        }
+    }
+    for (team, workflow) in db::startable_waiting(&hub.db).await? {
+        match hub.account(team).await {
+            Ok(account) => super::queue::next(hub, &account, &workflow),
+            Err(e) => eprintln!("pinned-server: team {team} has a free place but what waits did not start: {e}"),
         }
     }
     Ok(())

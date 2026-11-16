@@ -1308,6 +1308,27 @@ pub async fn grant(held: &Client, id: i64, run: Uuid) -> Result<(), String> {
     held.execute("update team_run_queue set granted_at = now(), run = $2 where id = $1", &[&id, &run]).await.map_err(err).map(drop)
 }
 
+/// Each team that has a free place and an event, not granted yet, waiting for a bot with no live
+/// run: the team and that oldest event's bot. The reaper starts them (`calls::reap`).
+pub async fn startable_waiting(db: &Db) -> Result<Vec<(Uuid, String)>, String> {
+    let rows = db
+        .client()
+        .await?
+        .query(
+            &format!(
+                "select distinct on (q.team) q.team, q.workflow from team_run_queue q join teams t on t.id = q.team
+                 where q.granted_at is null
+                   and not exists (select 1 from team_runs r where r.team = q.team and r.workflow = q.workflow and r.state in {LIVE})
+                   and (select count(*) from team_runs r where r.team = q.team and r.state in {LIVE}) < t.max_live_runs
+                 order by q.team, q.id"
+            ),
+            &[],
+        )
+        .await
+        .map_err(err)?;
+    Ok(rows.iter().map(|r| (r.get(0), r.get(1))).collect())
+}
+
 /// The team's granted events (`grant`) that no poller claimed yet, oldest first.
 pub async fn granted(db: &Db, team: Uuid) -> Result<Vec<i64>, String> {
     let rows = db.client().await?.query("select id from team_run_queue where team = $1 and granted_at is not null order by id", &[&team]).await.map_err(err)?;
@@ -1328,14 +1349,16 @@ pub async fn granted(db: &Db, team: Uuid) -> Result<Vec<i64>, String> {
 /// - The backstop locks the row first: it ends the run; the claim's update waits, re-checks the
 ///   row, finds the run ended, and takes nothing. The run is ended and counted once.
 /// The granted row is locked first (`for update`), so a claim that holds the place anew always
-/// takes its row: a granted row someone else took meanwhile leaves the run as it was.
+/// takes its row: a granted row someone else took meanwhile leaves the run as it was. A granted
+/// row another claim has locked is skipped (`skip locked`): that claim runs it, and this one gets
+/// nothing, without waiting on the shared connection.
 pub async fn claim(db: &Db, team: Uuid, id: i64) -> Result<Option<(serde_json::Value, Option<Uuid>)>, String> {
     let row = db
         .client()
         .await?
         .query_opt(
             &format!(
-                "with granted as (select run from team_run_queue where team = $1 and id = $2 and granted_at is not null for update),
+                "with granted as (select run from team_run_queue where team = $1 and id = $2 and granted_at is not null for update skip locked),
                       held as (update team_runs r set reserved_at = now() from granted
                                where r.team = $1 and r.id = granted.run and r.reserved and r.state in {LIVE} returning r.id)
                  delete from team_run_queue q using held where q.team = $1 and q.id = $2 and q.run = held.id

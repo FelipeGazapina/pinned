@@ -226,7 +226,7 @@ pub struct Account {
     pub id: Uuid,
     pub email: String,
     /// A team's account (kind `team`), read once when the hub loads it: a kind never changes. Its
-    /// runs start only through its bots (`teams::bots::start_run`), never through `open_placed`.
+    /// runs start only through its bots (`teams::bots::start_reserved`), never through `open_placed`.
     pub team: bool,
     live: Mutex<Live>,
     connectors: OnceCell<Arc<Connectors>>,
@@ -627,7 +627,7 @@ impl Hub {
         self.me.upgrade()
     }
 
-    /// Opens a team's run, which only `teams::bots::start_run` asks for: the pass is its proof.
+    /// Opens a team's run, which only `teams::bots::start_reserved` asks for: the pass is its proof.
     pub async fn open_team_run(&self, _pass: crate::teams::bots::TeamRunPass, team: &Arc<Account>, run: Run) -> Result<Placement, String> {
         self.place_run(team, run).await
     }

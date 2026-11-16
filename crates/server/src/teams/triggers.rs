@@ -1,5 +1,5 @@
 //! Triggers: what the team account's own pollers and tab wakes find (`Hub::open_found`). A trigger
-//! of a team's workflow starts a run only through its bot (`bots::start_run`), and only while the
+//! of a team's workflow starts a run only through its bot (`bots::start_reserved`), and only while the
 //! bot is on, through its waiting line (`queue::ask`). An event for a bot that is off, a draft, or
 //! gone is consumed: one log line and a count on the bot, never queued, never replayed. A manual
 //! workflow is never started here: it runs only by Run now.

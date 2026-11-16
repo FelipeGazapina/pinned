@@ -14,16 +14,11 @@ use pinned_core::teams::{Bot, BotLimits, CallRules, Run, RunState, SkipReason, T
 use pinned_core::wire::HubCall;
 use serde_json::Value;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 /// What a refused run of a bot that is not on says, whichever way it was asked for.
 pub const IS_A_DRAFT: &str = "this bot is a draft: it has to be turned on before it can run";
 const NEEDS_KEYS: &str = "the team needs its Upstash key and Claude token before a bot can run";
-
-fn unix_secs() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
-}
 
 async fn workflows(hub: &Arc<Hub>, team: &Account) -> Result<Vec<Connector>, String> {
     Ok(hub.connectors(team).await?.get_settings().connectors)
@@ -320,7 +315,7 @@ async fn asked_by(hub: &Arc<Hub>, scope: &Scope, calls: &CallRules) -> Result<bo
     Ok(false)
 }
 
-/// What `Hub::open_team_run` asks for. Only `start_run` makes one, so a team's run opens through
+/// What `Hub::open_team_run` asks for. Only `start_reserved` makes one, so a team's run opens through
 /// no other path.
 pub struct TeamRunPass(());
 
@@ -334,7 +329,7 @@ pub enum Start {
 }
 
 /// Any member. Runs the bot now, as its workflow's Run now would on the team's account
-/// (`start_run`, started by the member), or puts it in the bot's line (`queue::ask`): then the
+/// (`start_reserved`, started by the member), or puts it in the bot's line (`queue::ask`): then the
 /// reply says it waits, `{"waiting":true,"workflow":"c1","place":2,"message":"…"}`.
 pub async fn run_now(hub: &Arc<Hub>, scope: &Scope, workflow_id: &str) -> Result<Value, String> {
     match super::queue::ask(hub, &scope.team, workflow_id, Start::Member(scope.member)).await? {
@@ -366,59 +361,20 @@ pub async fn ready(hub: &Arc<Hub>, team: &Account, workflow_id: &str) -> Result<
     Ok(())
 }
 
-/// The one way a team's run starts, from a member's Run now or a trigger that fired. The bot must
-/// be on and the team must keep its Upstash key and Claude token. Whatever the stored workflow
-/// says, the run opens in a fresh box of the team's own. Records the run (`db::insert_run`, started
-/// by the member or `trigger:<kind>`, with the subject its box opens for, so the box sets its
-/// machine on the run before the session starts: `db::claim_run_box`) and pushes
-/// `TeamEvent::RunChanged`. Answers the run and where it opened. The bot's `BotLimits` are held by
-/// `calls::tick`.
-pub async fn start_run(hub: &Arc<Hub>, team: &Arc<Account>, workflow_id: &str, start: Start) -> Result<(Run, Placement), String> {
-    ready(hub, team, workflow_id).await?;
+/// What a run of bot `workflow_id` opens, and who starts it (the member, or `trigger:<kind>`),
+/// for a member's Run now or a trigger that fired. Whatever the stored workflow says, the run
+/// opens in a fresh box of the team's own. Only `queue` asks, in the team's turn, before it
+/// reserves the run's place: the run then starts as every team run does, by `start_reserved`.
+pub fn work_of(connectors: &pinned_core::connectors::Connectors, workflow_id: &str, start: Start) -> Result<(pinned_core::connectors::Run, String), String> {
     let (mut work, started_by) = match start {
-        Start::Member(member) => (hub.connectors(team).await?.run_now(workflow_id, "a member of the team, from its bots")?, member.to_string()),
+        Start::Member(member) => (connectors.run_now(workflow_id, "a member of the team, from its bots")?, member.to_string()),
         Start::Trigger { kind, work } => (work, format!("trigger:{kind}")),
     };
     // Whatever the stored workflow says, a bot never runs on a member's machine.
     if !matches!(work.runs_on, pinned_core::connectors::RunsOn::FreshBox(_)) {
         work.runs_on = pinned_core::connectors::RunsOn::FreshBox(BoxStep::default());
     }
-    let run = Run {
-        id: Uuid::new_v4().to_string(),
-        workflow: workflow_id.to_owned(),
-        state: RunState::Working,
-        controller: None,
-        cost_usd: 0.0,
-        active_secs: 0,
-        started_at: unix_secs(),
-        ended_at: None,
-        outcome: None,
-        started_by,
-    };
-    let id = Uuid::parse_str(&run.id).map_err(|e| e.to_string())?;
-    db::insert_run(&hub.db, team.id, &run, None).await?;
-    // The box sets its machine on the run (`db::claim_run_box`) before it starts the session.
-    if let Err(e) = db::set_run_subject(&hub.db, team.id, id, &work.subject).await {
-        db::delete_run(&hub.db, team.id, id).await?;
-        return Err(e);
-    }
-    let placed = match hub.open_team_run(TeamRunPass(()), team, work).await {
-        Ok(placed) => placed,
-        Err(e) => {
-            // A run that ended meanwhile, as one stopped while its box booted, stays as it ended.
-            if !db::run(&hub.db, team.id, id).await?.is_some_and(|r| r.state.ended()) {
-                db::delete_run(&hub.db, team.id, id).await?;
-            }
-            return Err(e);
-        }
-    };
-    // Read again now that the box runs: a run stopped while it booted gets no box, and its box ends at once.
-    if !db::set_run_box(&hub.db, team.id, id, &placed.machine).await? {
-        end_box_of_ended_run(hub, team, id, &placed.machine).await;
-        return Err(super::calls::ENDED_WHILE_BOOTING.into());
-    }
-    super::push(hub, team.id, TeamEvent::RunChanged { run: run.clone() }).await?;
-    Ok((run, placed))
+    Ok((work, started_by))
 }
 
 /// Ends the box `machine` of run `id`, which ended while its box booted: its session is not the run's.
@@ -430,9 +386,12 @@ async fn end_box_of_ended_run(hub: &Arc<Hub>, team: &Arc<Account>, id: Uuid, mac
     }
 }
 
-/// Opens the session of run `id`, whose place its trigger's event was given before anything
-/// outside pinned heard of it (`queue::admit`). A session that does not open frees the place, and
-/// what waits in the bot's line goes next; the run stays listed when it had ended meanwhile.
+/// The one way a team's run starts: opens the session of run `id`, whose place the team's turn
+/// reserved before anything outside pinned heard of it (`queue::ask`, `queue::admit`, a waiting
+/// run's turn), in a fresh box of the team's own, outside that turn. The bot must still be on and
+/// the team must keep its Upstash key and Claude token. A session that does not open frees the
+/// place, and what waits in the bot's line goes next; the run stays listed when it had ended
+/// meanwhile. The bot's `BotLimits` are held by `calls::tick`.
 pub async fn start_reserved(hub: &Arc<Hub>, team: &Arc<Account>, id: Uuid, mut work: pinned_core::connectors::Run) -> Result<Placement, String> {
     let opened = async {
         ready(hub, team, &work.connector).await?;
