@@ -673,11 +673,11 @@ fn try_again_reuses_the_failed_row_finds_what_a_timed_out_send_filed_and_counts_
     // GitHub files it but answers too late.
     fake.github.hang_next_post(Duration::from_secs(3));
     let draft = problem("Crash on launch", "It closes.");
-    assert_eq!(reviewed_send(&mut ana, draft.clone(), json!({ "request_id": "try-1" })), could_not_send("GitHub took too long to answer."));
+    assert_eq!(reviewed_send(&mut ana, draft.clone(), json!({ "request_id": "try-1" })), could_not_send("GitHub may have filed this report. Check My reports before trying again."));
     assert_eq!(fake.github.issue_count(), 8, "GitHub made it");
     let failed = listed(&mut ana).into_iter().find(|r| r["title"] == "Crash on launch").unwrap();
     let id = failed["id"].as_str().unwrap().to_owned();
-    assert_eq!(failed["state"], json!({ "state": "failed", "error": "GitHub took too long to answer." }));
+    assert_eq!(failed["state"], json!({ "state": "failed", "error": "GitHub may have filed this report. Check My reports before trying again." }));
     assert_eq!(left_today(&mut ana), 4, "it may have reached GitHub");
 
     let again = reviewed_send(&mut ana, draft.clone(), json!({ "request_id": "try-1" })).unwrap();
@@ -705,11 +705,64 @@ fn try_again_reuses_the_failed_row_finds_what_a_timed_out_send_filed_and_counts_
     fake.github.hang_next_post(Duration::from_secs(3));
     let mut case = problem("Diff slow again", "Same.");
     case["to_issue"] = json!(7);
-    assert_eq!(reviewed_send(&mut ana, case.clone(), json!({ "request_id": "try-3" })), could_not_send("GitHub took too long to answer."));
+    assert_eq!(reviewed_send(&mut ana, case.clone(), json!({ "request_id": "try-3" })), could_not_send("GitHub may have filed this report. Check My reports before trying again."));
     let again = reviewed_send(&mut ana, case, json!({ "request_id": "try-3" })).unwrap();
     assert_eq!((again["issue"].clone(), again["followed"].clone(), again["state"].clone()), (json!(7), json!(true), json!({ "state": "open" })), "{again}");
     assert_eq!(fake.github.comment_bodies(7).len(), 1, "one comment");
     assert_eq!(left_today(&mut ana), 2);
+}
+
+#[test]
+fn try_again_soon_after_a_timeout_finds_the_filed_issue_in_the_list_while_search_lags() {
+    let fake = Fake::start();
+    // The fake dates its issues by the hub's clock, so the list's `since` sees them.
+    fake.github.set_clock(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64);
+    let hub = TestHub::start_reports("reports_again_list", Signup::Open, Policy::default(), false, Default::default(), "127.0.0.1:0", Some(fake.impatient()));
+    let mut ana = Client::connect(&hub.url, &signed_up(&hub, "ana@example.test"));
+
+    fake.github.hang_next_post(Duration::from_secs(3));
+    let draft = problem("Crash on launch", "It closes.");
+    assert_eq!(reviewed_send(&mut ana, draft.clone(), json!({ "request_id": "try-1" })), could_not_send("GitHub may have filed this report. Check My reports before trying again."));
+    assert_eq!(fake.github.issue_count(), 1, "GitHub made it");
+
+    // Search has not caught up yet; the list of issues has it.
+    let extra = reviewed(&mut ana, &draft, json!({ "request_id": "try-1" })).unwrap();
+    fake.github.blind_next_search();
+    let again = report_issue(&mut ana, draft, extra).unwrap();
+    assert_eq!((again["issue"].clone(), again["state"].clone()), (json!(1), json!({ "state": "open" })), "{again}");
+    assert_eq!(fake.github.issue_count(), 1, "no second issue");
+    assert_eq!(fake.posts(), (1, 0), "nothing is posted again");
+    let listed_issues: Vec<String> = fake.github.requests().into_iter().filter(|r| r.method == "GET" && r.path.starts_with("/repos/acme/app/issues?")).map(|r| r.path).collect();
+    assert_eq!(listed_issues.len(), 1, "{listed_issues:?}");
+    assert!(["state=all", "since=", "sort=created", "direction=desc"].iter().all(|part| listed_issues[0].contains(part)), "{listed_issues:?}");
+}
+
+#[test]
+fn a_send_that_may_have_reached_github_says_to_check_my_reports_and_one_that_never_left_keeps_its_text() {
+    let fake = Fake::start();
+    let hub = TestHub::start_reports("reports_may_have_filed", Signup::Open, Policy::default(), false, Default::default(), "127.0.0.1:0", Some(fake.impatient()));
+    let mut ana = Client::connect(&hub.url, &signed_up(&hub, "ana@example.test"));
+    let may_have_filed = "GitHub may have filed this report. Check My reports before trying again.";
+
+    // No answer in time.
+    fake.github.hang_next_post(Duration::from_secs(3));
+    assert_eq!(reviewed_send(&mut ana, problem("Crash slow", "It closes."), json!({})), Err("Could not send the report: GitHub may have filed this report. Check My reports before trying again.".into()));
+    // A success whose answer does not read.
+    fake.github.garble_next_post();
+    assert_eq!(reviewed_send(&mut ana, problem("Crash garbled", "It closes."), json!({})), Err("Could not send the report: GitHub may have filed this report. Check My reports before trying again.".into()));
+    assert_eq!(fake.github.issue_count(), 2, "both reached GitHub");
+    for row in listed(&mut ana) {
+        assert_eq!(row["state"], json!({ "state": "failed", "error": may_have_filed }), "{row}");
+    }
+
+    // A GitHub whose port nobody listens on: the request never left, and the text says so.
+    let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let api = format!("http://{}", closed.local_addr().unwrap());
+    drop(closed);
+    let hub = TestHub::start_reports("reports_never_left", Signup::Open, Policy::default(), false, Default::default(), "127.0.0.1:0", Some(Config { api, ..fake.config() }));
+    let mut bob = Client::connect(&hub.url, &signed_up(&hub, "bob@example.test"));
+    assert_eq!(reviewed_send(&mut bob, problem("Crash", "It closes."), json!({})), Err("Could not send the report: Could not reach GitHub.".into()));
+    assert_eq!(listed(&mut bob)[0]["state"], json!({ "state": "failed", "error": "Could not reach GitHub." }));
 }
 
 #[test]
@@ -753,7 +806,7 @@ fn a_failed_send_counts_only_when_it_may_have_reached_github_and_never_says_what
         assert_eq!(left_today(&mut ana), 5, "a {status} answer did nothing, so it does not count");
     }
     fake.github.hang_next_post(Duration::from_secs(3));
-    assert_eq!(reviewed_send(&mut ana, problem("Crash slow", "It closes."), json!({})), could_not_send("GitHub took too long to answer."));
+    assert_eq!(reviewed_send(&mut ana, problem("Crash slow", "It closes."), json!({})), could_not_send("GitHub may have filed this report. Check My reports before trying again."));
     assert_eq!(left_today(&mut ana), 4, "a timeout may have filed it");
     let list = serde_json::to_string(&listed(&mut ana)).unwrap();
     for raw in ["Bad credentials from GitHub", "Resource not accessible", "API rate limit exceeded", "Internal trouble", "fake-hub-token"] {

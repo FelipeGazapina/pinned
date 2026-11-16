@@ -11,6 +11,9 @@ const AGENT: &str = "pinned-hub";
 /// Most hits `search_open` asks for.
 const SEARCH_LIMIT: usize = 5;
 
+/// What a send that may have reached GitHub says, whatever went wrong.
+pub const MAY_HAVE_FILED: &str = "GitHub may have filed this report. Check My reports before trying again.";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
     /// GitHub answered 401, or 403 for a reason other than a rate limit, to the hub's token. A rate limit is `Busy`.
@@ -40,6 +43,15 @@ impl Error {
             Error::Busy(_) => "GitHub is busy. Try again later.",
             Error::Failed(_) | Error::Unreachable(_) => "Could not reach GitHub.",
             Error::TimedOut(_) => "GitHub took too long to answer.",
+        }
+    }
+
+    /// What a person or an agent reads of a send that ended so: `public`, unless GitHub may have filed it, when they
+    /// look before they try again.
+    pub fn public_send(&self) -> &'static str {
+        match self.may_have_reached() {
+            true => MAY_HAVE_FILED,
+            false => self.public(),
         }
     }
 }
@@ -186,6 +198,11 @@ impl std::fmt::Debug for Github {
     }
 }
 
+/// Whether the body of issue or comment `item` carries the footer reference `report_ref`.
+fn carries_ref(item: &Value, report_ref: &str) -> bool {
+    item["body"].as_str().is_some_and(|body| body.contains(&format!("report {report_ref}")))
+}
+
 fn decode<T: DeserializeOwned>(value: Value) -> Result<T> {
     serde_json::from_value(value).map_err(|e| Error::Failed(format!("GitHub sent an unexpected answer: {e}")))
 }
@@ -256,14 +273,28 @@ impl Github {
         decode_list(found["items"].take())
     }
 
-    /// The issue, open or closed, whose body carries `report_ref`, the footer reference of a report.
-    pub async fn issue_with_ref(&self, report_ref: &str) -> Result<Option<Issue>> {
+    /// The issue, open or closed, whose body carries `report_ref`, the footer reference of a report sent at
+    /// `sent_at`. It looks first in the issues changed since a minute before then, newest first, which GitHub answers
+    /// at once; only when they hold none does it ask search, whose index lags.
+    pub async fn issue_with_ref(&self, report_ref: &str, sent_at: Option<i64>) -> Result<Option<Issue>> {
+        if let Some(sent_at) = sent_at {
+            let since: String = url::form_urlencoded::byte_serialize(super::poller::iso(sent_at - 60).as_bytes()).collect();
+            for page in 1..=10 {
+                let found = self.get(&format!("/repos/{}/issues?state=all&since={since}&sort=created&direction=desc&per_page=100&page={page}", self.repo)).await?;
+                let Value::Array(items) = found else { return Err(Error::Failed("GitHub sent an unexpected answer: not a list".into())) };
+                if let Some(item) = items.iter().find(|item| carries_ref(item, report_ref)) {
+                    return decode(item.clone()).map(Some);
+                }
+                if items.len() < 100 {
+                    break;
+                }
+            }
+        }
         let q = format!("\"{report_ref}\" repo:{} is:issue in:body", self.repo);
         let q: String = url::form_urlencoded::byte_serialize(q.as_bytes()).collect();
         let mut found = self.get(&format!("/search/issues?q={q}&per_page={SEARCH_LIMIT}")).await?;
         let Value::Array(items) = found["items"].take() else { return Err(Error::Failed("GitHub sent an unexpected answer: not a list".into())) };
-        let carries = |item: &Value| item["body"].as_str().is_some_and(|body| body.contains(&format!("report {report_ref}")));
-        items.into_iter().find(carries).map(decode).transpose()
+        items.into_iter().find(|item| carries_ref(item, report_ref)).map(decode).transpose()
     }
 
     /// The id of the comment on issue `number` whose body carries `report_ref`.
@@ -271,7 +302,7 @@ impl Github {
         for page in 1..=10 {
             let found = self.get(&format!("/repos/{}/issues/{number}/comments?per_page=100&page={page}", self.repo)).await?;
             let Value::Array(items) = found else { return Err(Error::Failed("GitHub sent an unexpected answer: not a list".into())) };
-            if let Some(comment) = items.iter().find(|c| c["body"].as_str().is_some_and(|body| body.contains(&format!("report {report_ref}")))) {
+            if let Some(comment) = items.iter().find(|c| carries_ref(c, report_ref)) {
                 return comment["id"].as_u64().map(Some).ok_or_else(|| Error::Failed("GitHub sent a comment without an id".into()));
             }
             if items.len() < 100 {
@@ -354,6 +385,17 @@ mod tests {
 
     fn labels(names: &[&str]) -> Vec<String> {
         names.iter().map(|n| n.to_string()).collect()
+    }
+
+    #[test]
+    fn a_send_that_may_have_reached_github_says_to_check_my_reports_and_any_other_keeps_its_text() {
+        let may = "GitHub may have filed this report. Check My reports before trying again.";
+        assert_eq!(Error::TimedOut("no answer in time".into()).public_send(), may);
+        assert_eq!(Error::Failed("GitHub sent a bad response".into()).public_send(), may);
+        assert_eq!(Error::Unreachable("connection refused".into()).public_send(), "Could not reach GitHub.");
+        assert_eq!(Error::Busy("rate limit".into()).public_send(), "GitHub is busy. Try again later.");
+        assert_eq!(Error::Refused { status: 422, text: "Validation Failed".into() }.public_send(), "GitHub refused the report.");
+        assert_eq!(Error::Unauthorized.public_send(), "GitHub refused the report.");
     }
 
     #[tokio::test]

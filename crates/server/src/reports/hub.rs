@@ -923,7 +923,7 @@ impl Hub {
                 };
                 Ok(Some((number, url, Some(comment))))
             }
-            None => Ok(github.issue_with_ref(report_ref).await?.map(|issue| (issue.number, issue.html_url, None))),
+            None => Ok(github.issue_with_ref(report_ref, row.sent_at).await?.map(|issue| (issue.number, issue.html_url, None))),
         }
     }
 
@@ -931,11 +931,11 @@ impl Hub {
     /// `counts`.
     async fn failed(&self, account: &Account, id: Uuid, error: &GithubError, counts: bool) -> Result<Value, String> {
         eprintln!("pinned-server: could not file account {}'s report {id}: {error}", account.id);
-        let failed = json(ReportState::Failed { error: error.public().into() })?;
+        let failed = json(ReportState::Failed { error: error.public_send().into() })?;
         if let Err(e) = self.record("update reports set state = $3, counts = $4, updated_at = $5 where id = $1 and account = $2 returning id", &[&id, &account.id, &failed, &counts, &now_secs()]).await {
             eprintln!("pinned-server: account {}'s report {id} failed and could not be recorded; the hub's next start fails it: {e}", account.id);
         }
-        Err(could_not_send(error.public()))
+        Err(could_not_send(error.public_send()))
     }
 }
 

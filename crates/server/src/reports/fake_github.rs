@@ -48,6 +48,9 @@ struct StoredIssue {
     locked: bool,
     /// The number is a pull request's.
     pull: bool,
+    /// When it was made and last changed, by the fake's clock.
+    created_at: String,
+    updated_at: String,
 }
 
 #[derive(Default)]
@@ -72,11 +75,20 @@ struct Repo {
     hub_association: Option<String>,
     /// Search finds nothing, as when GitHub's index lags or no issue changed since the time asked.
     search_blind: bool,
+    /// The next searches that find nothing, as when GitHub's index has not caught up yet.
+    blind_searches: u32,
+    /// Serves the next POST, then answers it with a success whose body does not read.
+    garble: bool,
 }
 
 impl Repo {
     fn now(&mut self) -> String {
         self.ticks += 1;
+        self.clock()
+    }
+
+    /// The clock's time, without moving it on.
+    fn clock(&self) -> String {
         iso(self.clock_start.unwrap_or(CLOCK_START) + self.ticks)
     }
 
@@ -88,6 +100,7 @@ impl Repo {
         self.comment_ids += 1;
         let id = self.comment_ids;
         let issue = self.issues.get_mut(usize::try_from(number).ok()?.checked_sub(1)?)?;
+        issue.updated_at = issue.updated_at.clone().max(created_at.clone());
         issue.comments.push(StoredComment { id, login: login.into(), body: body.into(), created_at, association: association.into() });
         Some(id)
     }
@@ -177,6 +190,7 @@ impl FakeGithub {
         issue.open = false;
         issue.state_reason = Some(reason.into());
         issue.closed_at = Some(at.clone());
+        issue.updated_at = at.clone();
         issue.timeline.push(json!({ "event": "closed", "created_at": at, "commit_id": commit, "state_reason": reason }));
     }
 
@@ -188,6 +202,7 @@ impl FakeGithub {
         issue.open = true;
         issue.state_reason = Some("reopened".into());
         issue.closed_at = None;
+        issue.updated_at = at.clone();
         issue.timeline.push(json!({ "event": "reopened", "created_at": at }));
     }
 
@@ -225,7 +240,8 @@ impl FakeGithub {
     /// placeholders, so the next created issue is `number + 1`. Panics when `number` is taken.
     pub fn add_issue_numbered(&self, number: u64, title: &str, body: &str) {
         let mut repo = self.repo();
-        let blank = |open| StoredIssue { title: String::new(), body: String::new(), labels: vec![], open, state_reason: None, closed_at: None, comments: vec![], timeline: vec![], locked: false, pull: false };
+        let at = repo.clock();
+        let blank = |open| StoredIssue { title: String::new(), body: String::new(), labels: vec![], open, state_reason: None, closed_at: None, comments: vec![], timeline: vec![], locked: false, pull: false, created_at: at.clone(), updated_at: at.clone() };
         assert!(repo.issues.len() < number as usize, "issue {number} is taken in the fake");
         while repo.issues.len() + 1 < number as usize {
             repo.issues.push(blank(false));
@@ -288,6 +304,18 @@ impl FakeGithub {
         self.repo().search_blind = blind;
     }
 
+    /// The next search answers with no issues at all, as GitHub's index does before it catches up; the list of
+    /// issues still has them.
+    pub fn blind_next_search(&self) {
+        self.repo().blind_searches += 1;
+    }
+
+    /// Serves the next POST as usual (the issue or comment it creates exists), then answers it 201 with a body that
+    /// is not JSON.
+    pub fn garble_next_post(&self) {
+        self.repo().garble = true;
+    }
+
     /// A comment by `login` that says it was written at `created_at`.
     pub fn add_comment_at(&self, number: u64, login: &str, body: &str, created_at: &str) -> u64 {
         self.repo().comment(number, login, "NONE", body, Some(created_at)).expect("no such issue in the fake")
@@ -314,6 +342,8 @@ fn issue_json(number: usize, issue: &StoredIssue) -> Value {
         "closed_at": issue.closed_at,
         "locked": issue.locked,
         "pull_request": issue.pull.then(|| json!({ "url": format!("{HTML_BASE}/pull/{number}") })),
+        "created_at": issue.created_at,
+        "updated_at": issue.updated_at,
         "labels": issue.labels.iter().map(|name| json!({ "name": name })).collect::<Vec<_>>(),
     })
 }
@@ -332,7 +362,12 @@ async fn handle(State(shared): State<Shared>, method: Method, uri: Uri, headers:
     if let Some(wait) = slow {
         tokio::time::sleep(wait).await;
     }
+    let garble = method == Method::POST && std::mem::take(&mut lock(&shared).garble);
     let response = serve_now(&shared, method, uri, headers, body);
+    let response = match garble {
+        true => (StatusCode::CREATED, [("content-type", "application/json")], "{\"number\": ").into_response(),
+        false => response,
+    };
     if let Some(wait) = hang {
         tokio::time::sleep(wait).await;
     }
@@ -365,9 +400,30 @@ fn serve_now(shared: &Shared, method: Method, uri: Uri, headers: HeaderMap, body
                 return reply(StatusCode::UNPROCESSABLE_ENTITY, json!({ "message": "Validation Failed" }));
             };
             let labels = sent["labels"].as_array().map(|l| l.iter().filter_map(|l| l.as_str().map(str::to_owned)).collect()).unwrap_or_default();
-            let issue = StoredIssue { title: title.into(), body: sent["body"].as_str().unwrap_or_default().into(), labels, open: true, state_reason: None, closed_at: None, comments: vec![], timeline: vec![], locked: false, pull: false };
+            let at = repo.clock();
+            let issue = StoredIssue { title: title.into(), body: sent["body"].as_str().unwrap_or_default().into(), labels, open: true, state_reason: None, closed_at: None, comments: vec![], timeline: vec![], locked: false, pull: false, created_at: at.clone(), updated_at: at };
             repo.issues.push(issue.clone());
             reply(StatusCode::CREATED, issue_json(repo.issues.len(), &issue))
+        }
+        ("GET", ["repos", _, _, "issues"]) => {
+            // GitHub's list: `state` (open unless all or closed), changed at or after `since`, newest made first.
+            let get = |key: &str| query.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str());
+            let state = get("state").unwrap_or("open");
+            let since = get("since").unwrap_or_default();
+            let per_page = get("per_page").and_then(|v| v.parse().ok()).unwrap_or(30usize);
+            let page = get("page").and_then(|v| v.parse().ok()).unwrap_or(1usize).max(1);
+            let mut items: Vec<Value> = repo
+                .issues
+                .iter()
+                .enumerate()
+                .filter(|(_, issue)| state == "all" || (state == "closed") != issue.open)
+                .filter(|(_, issue)| issue.updated_at.as_str() >= since)
+                .map(|(i, issue)| issue_json(i + 1, issue))
+                .collect();
+            if get("direction") != Some("asc") {
+                items.reverse();
+            }
+            reply(StatusCode::OK, Value::Array(items.into_iter().skip((page - 1) * per_page).take(per_page).collect()))
         }
         ("GET", ["repos", _, _, "issues", _]) => match number_at(4, &repo) {
             Some(n) => reply(StatusCode::OK, issue_json(n, &repo.issues[n - 1])),
@@ -397,7 +453,8 @@ fn serve_now(shared: &Shared, method: Method, uri: Uri, headers: HeaderMap, body
         ("GET", ["search", "issues"]) => {
             let q = query.iter().find(|(k, _)| k == "q").map(|(_, v)| v.to_lowercase()).unwrap_or_default();
             let per_page = query.iter().find(|(k, _)| k == "per_page").and_then(|(_, v)| v.parse().ok()).unwrap_or(30usize);
-            let blind = repo.search_blind;
+            let blind = repo.search_blind || repo.blind_searches > 0;
+            repo.blind_searches = repo.blind_searches.saturating_sub(1);
             let mut words = vec![];
             let (mut want_open, mut want_closed) = (false, false);
             for word in q.split_whitespace() {
