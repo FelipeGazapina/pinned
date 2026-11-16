@@ -4,7 +4,8 @@ use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-const API: &str = "https://api.github.com";
+/// The real GitHub, the default base of a `Client`.
+pub const API: &str = "https://api.github.com";
 /// Where a signed-in user creates the token pinned asks for, with the `repo` scope picked.
 pub const TOKEN_PAGE: &str = "https://github.com/settings/tokens/new?scopes=repo&description=pinned";
 /// Most repositories `repos` lists, newest push first.
@@ -26,23 +27,95 @@ pub struct Repo {
     pub description: String,
 }
 
-async fn get(token: &str, path: &str) -> Result<Value, String> {
-    let response = reqwest::Client::new()
-        .get(format!("{API}{path}"))
-        .timeout(crate::connectors::CALL_TIMEOUT)
-        .bearer_auth(token)
-        .header("User-Agent", "pinned")
-        .header("Accept", "application/vnd.github+json")
-        .send()
-        .await
-        .map_err(|e| format!("GitHub unreachable: {e}"))?;
-    let status = response.status();
-    let body: Value = response.json().await.map_err(|e| format!("GitHub sent a bad response: {e}"))?;
-    match status.as_u16() {
-        200..=299 => Ok(body),
-        401 => Err("GitHub refused the token".into()),
-        _ => Err(format!("GitHub answered {status}: {}", body["message"].as_str().unwrap_or_default())),
+/// Why a GitHub call failed; `Display` is the text `account` and `repos` have always returned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Error {
+    /// GitHub answered 401 or 403: the token is refused or may not do this.
+    Unauthorized(String),
+    Failed(String),
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (Error::Unauthorized(text) | Error::Failed(text)) = self;
+        f.write_str(text)
     }
+}
+
+impl std::error::Error for Error {}
+
+impl From<Error> for String {
+    fn from(error: Error) -> String {
+        error.to_string()
+    }
+}
+
+/// How long one GitHub call may take.
+pub const CALL_TIMEOUT: std::time::Duration = crate::connectors::CALL_TIMEOUT;
+
+/// A GitHub API at `api` that `token` signs in to.
+#[derive(Clone)]
+pub struct Client {
+    pub api: String,
+    pub token: String,
+}
+
+impl std::fmt::Debug for Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Client").field("api", &self.api).finish_non_exhaustive()
+    }
+}
+
+impl Client {
+    /// The real GitHub.
+    pub fn new(token: &str) -> Client {
+        Client { api: API.into(), token: token.into() }
+    }
+
+    pub async fn get(&self, path: &str) -> Result<Value, Error> {
+        self.call("pinned", reqwest::Method::GET, path, None).await
+    }
+
+    pub async fn post(&self, path: &str, body: &Value) -> Result<Value, Error> {
+        self.call("pinned", reqwest::Method::POST, path, Some(body)).await
+    }
+
+    /// `get` that names itself `agent` in the `User-Agent` header.
+    pub async fn get_as(&self, agent: &str, path: &str) -> Result<Value, Error> {
+        self.call(agent, reqwest::Method::GET, path, None).await
+    }
+
+    /// `post` that names itself `agent` in the `User-Agent` header.
+    pub async fn post_as(&self, agent: &str, path: &str, body: &Value) -> Result<Value, Error> {
+        self.call(agent, reqwest::Method::POST, path, Some(body)).await
+    }
+
+    async fn call(&self, agent: &str, method: reqwest::Method, path: &str, body: Option<&Value>) -> Result<Value, Error> {
+        let mut request = reqwest::Client::new()
+            .request(method, format!("{}{path}", self.api))
+            .timeout(CALL_TIMEOUT)
+            .bearer_auth(&self.token)
+            .header("User-Agent", agent)
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28");
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        // reqwest's error names the URL, never a header, so the token stays out of it.
+        let response = request.send().await.map_err(|e| Error::Failed(format!("GitHub unreachable: {e}")))?;
+        let status = response.status();
+        let body: Value = response.json().await.map_err(|e| Error::Failed(format!("GitHub sent a bad response: {e}")))?;
+        match status.as_u16() {
+            200..=299 => Ok(body),
+            401 => Err(Error::Unauthorized("GitHub refused the token".into())),
+            403 => Err(Error::Unauthorized(format!("GitHub answered {status}: {}", body["message"].as_str().unwrap_or_default()))),
+            _ => Err(Error::Failed(format!("GitHub answered {status}: {}", body["message"].as_str().unwrap_or_default()))),
+        }
+    }
+}
+
+async fn get(token: &str, path: &str) -> Result<Value, String> {
+    Ok(Client::new(token).get(path).await?)
 }
 
 pub async fn account(token: &str) -> Result<Account, String> {
