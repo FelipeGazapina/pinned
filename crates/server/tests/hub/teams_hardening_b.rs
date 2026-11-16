@@ -188,3 +188,53 @@ fn a_team_has_at_most_20_open_invites_and_only_unused_unrevoked_ones_count_howev
     assert_eq!(team_op(&mut ana, &team, json!({ "op": "invite" })), Err(FULL.into()), "a used one made room for exactly one");
     assert_eq!(open(), vec!["20"]);
 }
+
+#[test]
+fn a_member_who_leaves_while_controlling_a_live_run_gives_it_back_to_its_bot_at_once() {
+    let hub = TestHub::start_with_team_policy("teams_b_leave_run", fast(), patient());
+    let mut tb = TeamBox::new(&hub);
+    let mut dina = tb.member(&hub, "dina@example.test", &[]);
+    tb.bot(&hub, design(), Some(dina.id));
+    let run = tb.run(&hub);
+    op(tb.team, &mut tb.owner.client, json!({ "op": "runs" })).unwrap();
+    let taken = op(tb.team, &mut dina.client, json!({ "op": "take_over", "run": run.to_string() })).unwrap();
+    assert_eq!((&taken["state"], &taken["controller"]), (&json!("taken_over"), &json!(dina.id.to_string())));
+
+    assert_eq!(op(tb.team, &mut dina.client, json!({ "op": "leave" })), Ok(Value::Null));
+    assert_eq!(tb.run_state(&hub, run), ("working".to_owned(), None), "the run is back with its bot");
+    let id = json!(run.to_string());
+    let pushed = tb.owner.client.wait("the run given back", |f| f["type"] == "team" && f["event"]["kind"] == "run_changed" && f["event"]["run"]["id"] == id && f["event"]["run"]["state"] == "working");
+    assert_eq!(pushed["event"]["run"]["controller"], Value::Null);
+    let runs = op(tb.team, &mut tb.owner.client, json!({ "op": "runs" })).unwrap();
+    let listed = runs.as_array().unwrap().iter().find(|r| r["id"] == json!(run.to_string())).unwrap();
+    assert_eq!((&listed["state"], &listed["controller"]), (&json!("working"), &Value::Null), "the runs page shows it working, with nobody in control");
+    assert!(tb.told(&hub, "[dina gave the run back: continue]").contains("[dina gave the run back: continue]"));
+}
+
+#[test]
+fn a_call_whose_only_asked_member_is_removed_goes_to_the_owner_at_once() {
+    let hub = TestHub::start_with_team_policy("teams_b_remove_call", fast(), patient());
+    let mut tb = TeamBox::new(&hub);
+    let dina = tb.member(&hub, "dina@example.test", &["design"]);
+    let omar = tb.member(&hub, "omar@example.test", &["ops"]);
+    tb.bot(&hub, design(), None);
+    let run = tb.run(&hub);
+    op(tb.team, &mut tb.owner.client, json!({ "op": "runs" })).unwrap();
+    let call = tb.ask(&hub, "Red or blue footer?", &["red", "blue"]).unwrap()["call"].as_str().unwrap().to_owned();
+    let asked = |tb: &mut TeamBox| {
+        let listed = super::teams_calls::calls_of(tb.team, &mut tb.owner.client);
+        (listed[0]["id"].clone(), listed[0]["asked"].clone(), listed[0]["escalated"].clone())
+    };
+
+    // Removing someone the call does not ask changes nothing.
+    assert_eq!(op(tb.team, &mut tb.owner.client, json!({ "op": "remove_member", "account": omar.id.to_string() })), Ok(Value::Null));
+    assert_eq!(asked(&mut tb), (json!(call), json!([design()]), json!(false)));
+
+    assert_eq!(op(tb.team, &mut tb.owner.client, json!({ "op": "remove_member", "account": dina.id.to_string() })), Ok(Value::Null));
+    assert_eq!(asked(&mut tb), (json!(call), json!([design(), { "kind": "owner" }]), json!(true)), "the owner is asked at once");
+    let pushed = tb.owner.client.wait("the escalation pushed", |f| f["type"] == "team" && f["event"]["kind"] == "call_opened" && f["event"]["call"]["escalated"] == json!(true));
+    assert_eq!(pushed["event"]["call"]["id"], json!(call));
+    assert_eq!(tb.run_state(&hub, run), ("waiting".to_owned(), None));
+    let answered = op(tb.team, &mut tb.owner.client, json!({ "op": "answer_call", "id": call, "answer": { "kind": { "kind": "choice" }, "choice": "blue", "text": "" } })).unwrap();
+    assert_eq!(answered["answer"]["choice"], json!("blue"));
+}

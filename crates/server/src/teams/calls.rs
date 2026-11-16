@@ -177,11 +177,81 @@ pub async fn give_back(hub: &Arc<Hub>, scope: &Scope, run: &str) -> Result<Run, 
     if controller != scope.member.to_string() && scope.role != Role::Owner {
         return Err(format!("only {}, who took it over, or the team's owner gives it back", name_of(hub, controller).await));
     }
-    let run = db::give_back(&hub.db, scope.team.id, run_id).await?.ok_or("nobody has taken this run over")?;
-    push_logged(hub, scope.team.id, TeamEvent::RunChanged { run: run.clone() }).await;
-    let who = name_of(hub, &scope.member.to_string()).await;
-    tell_session(hub, &scope.team, run_id, &format!("give-back-{run_id}-{}", Uuid::new_v4()), format!("[{who} gave the run back: continue]")).await;
-    Ok(run)
+    handed_back(hub, &scope.team, run_id, scope.member).await?.ok_or_else(|| "nobody has taken this run over".into())
+}
+
+/// Gives the live run back to its bot as `give_back` does, for `member`: pushes
+/// `TeamEvent::RunChanged` and types `[<who> gave the run back: continue]` into the session.
+/// None when nobody controlled it or it ended.
+async fn handed_back(hub: &Arc<Hub>, team: &Arc<Account>, run_id: Uuid, member: Uuid) -> Result<Option<Run>, String> {
+    let Some(run) = db::give_back(&hub.db, team.id, run_id).await? else { return Ok(None) };
+    push_logged(hub, team.id, TeamEvent::RunChanged { run: run.clone() }).await;
+    let who = name_of(hub, &member.to_string()).await;
+    tell_session(hub, team, run_id, &format!("give-back-{run_id}-{}", Uuid::new_v4()), format!("[{who} gave the run back: continue]")).await;
+    Ok(Some(run))
+}
+
+/// The open calls, not escalated yet, that ask `member` now: by name, or through a group it is in
+/// or is the fallback of (`asks_member`). Read before `member` goes, for `member_gone`.
+pub async fn calls_asking(hub: &Arc<Hub>, team: Uuid, member: Uuid) -> Result<Vec<Call>, String> {
+    let mut asking = Vec::new();
+    for call in db::calls(&hub.db, team).await? {
+        if call.answer.is_some() || call.escalated {
+            continue;
+        }
+        let mut hit = false;
+        for who in &call.asked {
+            hit = match who {
+                Who::Person { account } => *account == member.to_string(),
+                Who::Group { handle } => db::asks_member(&hub.db, team, handle, member).await?,
+                Who::Owner => false,
+            };
+            if hit {
+                break;
+            }
+        }
+        if hit {
+            asking.push(call);
+        }
+    }
+    Ok(asking)
+}
+
+/// After `member` left the team or was removed: each live run it controlled goes back to its bot
+/// at once (`handed_back`), and each call of `asking` (`calls_asking`, read before it went) that
+/// now asks nobody goes to the team's owner at once, as `tick`'s escalation does. Agents are never
+/// asked, so none is added. Logs what it could not do: the member is gone either way.
+pub async fn member_gone(hub: &Arc<Hub>, team: &Arc<Account>, member: Uuid, asking: Vec<Call>) {
+    let runs = match db::runs_controlled_by(&hub.db, team.id, member).await {
+        Ok(runs) => runs,
+        Err(e) => return eprintln!("pinned-server: the runs {member} controlled on team {} were not given back: {e}", team.id),
+    };
+    for run_id in runs {
+        if let Err(e) = handed_back(hub, team, run_id, member).await {
+            eprintln!("pinned-server: run {run_id} of team {} was not given back: {e}", team.id);
+        }
+    }
+    for call in asking {
+        let mut reached = false;
+        for who in &call.asked {
+            match db::reaches_anyone(&hub.db, team.id, who).await {
+                Ok(false) => {}
+                Ok(true) | Err(_) => {
+                    reached = true;
+                    break;
+                }
+            }
+        }
+        if reached {
+            continue;
+        }
+        let Ok(id) = parse_id(&call.id, "call") else { continue };
+        match db::escalate_now(&hub.db, team.id, id).await {
+            Ok(Some(call)) => push_logged(hub, team.id, TeamEvent::CallOpened { call }).await,
+            Ok(None) => {}
+            Err(e) => eprintln!("pinned-server: call {id} of team {} did not go to its owner: {e}", team.id),
+        }
+    }
 }
 
 /// Someone who may steer the run (`may_steer`) stops a run that has not ended: `RunState::Stopped`,

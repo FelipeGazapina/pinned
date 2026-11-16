@@ -26,7 +26,9 @@ const TOO_MANY_JOINS: &str = "too many invite codes tried; try again in 15 minut
 
 /// When `join`s came that are not known to have landed, per account and for the whole hub, for
 /// their limit. A try counts when it starts and is taken back (`forgive`) once it lands, so tries
-/// racing each other can't all pass a full limit. Kept in memory on the `Hub`: a restart forgets it.
+/// racing each other can't all pass a full limit.
+/// This limiter lives in memory only, on the `Hub`: it resets when the hub restarts, so a restart
+/// gives every account and the hub a fresh window of tries.
 #[derive(Default)]
 pub struct JoinFails {
     hub: VecDeque<Instant>,
@@ -199,29 +201,35 @@ pub async fn revoke_invite(hub: &Arc<Hub>, scope: &Scope, hint: &str) -> Result<
 /// Owner only. Removes member `account` (never the owner). Its groups lose it by cascade; the
 /// projects it attached go with it and the bots it owned lose their owner (`db::remove_member`);
 /// its runs keep going. An `account` that is not a member of this team, however it is wrong, gets
-/// `members_only`'s one message.
+/// `members_only`'s one message. A live run it controlled goes back to its bot, and a call it was
+/// the only one asked goes to the owner (`calls::member_gone`).
 pub async fn remove_member(hub: &Arc<Hub>, scope: &Scope, account: &str) -> Result<(), String> {
     scope.owner_only()?;
     let account = super::members_only(hub, scope.team.id, &[account]).await?[0];
     if db::role(&hub.db, scope.team.id, account).await? == Some(Role::Owner) {
         return Err("the owner cannot be removed from the team".into());
     }
+    let asking = super::calls::calls_asking(hub, scope.team.id, account).await?;
     if !db::remove_member(&hub.db, scope.team.id, account).await? {
         return Err(format!("no member {account} on this team"));
     }
+    super::calls::member_gone(hub, &scope.team, account, asking).await;
     eprintln!("pinned-server: account {} removed {account} from team {}", scope.member, scope.team.id);
     Ok(())
 }
 
 /// The member leaves the team, as `remove_member` removes one: its projects go, it stops being a
-/// group's fallback and its bots lose their owner. The owner cannot leave: it removes the others first, or the team.
+/// group's fallback, its bots lose their owner, a live run it controlled goes back to its bot and a
+/// call it was the only one asked goes to the owner. The owner cannot leave: it removes the others first, or the team.
 pub async fn leave(hub: &Arc<Hub>, scope: &Scope) -> Result<(), String> {
     if scope.role == Role::Owner {
         return Err("the owner cannot leave the team; remove the others first".into());
     }
+    let asking = super::calls::calls_asking(hub, scope.team.id, scope.member).await?;
     if !db::remove_member(&hub.db, scope.team.id, scope.member).await? {
         return Err("you are not a member of that team".into());
     }
+    super::calls::member_gone(hub, &scope.team, scope.member, asking).await;
     eprintln!("pinned-server: account {} left team {}", scope.member, scope.team.id);
     Ok(())
 }

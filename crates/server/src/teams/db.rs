@@ -5,7 +5,7 @@
 use crate::db::{err, Db};
 use pinned_core::agent::Subject;
 use pinned_core::preauth::team_hook::GO_AHEAD;
-use pinned_core::teams::{Answer, Bot, Call, Group, Role, Run, RunState, TeamProject};
+use pinned_core::teams::{Answer, Bot, Call, Group, Role, Run, RunState, TeamProject, Who};
 use tokio_postgres::error::SqlState;
 use uuid::Uuid;
 
@@ -685,6 +685,41 @@ pub async fn give_back(db: &Db, team: Uuid, run: Uuid) -> Result<Option<Run>, St
     Ok(row.as_ref().map(run_of))
 }
 
+/// The live runs `member` controls.
+pub async fn runs_controlled_by(db: &Db, team: Uuid, member: Uuid) -> Result<Vec<Uuid>, String> {
+    let rows = db
+        .client()
+        .await?
+        .query(&format!("select id from team_runs where team = $1 and controller = $2 and state in {LIVE}"), &[&team, &member])
+        .await
+        .map_err(err)?;
+    Ok(rows.iter().map(|r| r.get(0)).collect())
+}
+
+/// Whether `who` takes in any member of the team now: a member named, a group with a member, or a
+/// group with none whose fallback is a member; the owner always.
+pub async fn reaches_anyone(db: &Db, team: Uuid, who: &Who) -> Result<bool, String> {
+    let client = db.client().await?;
+    let row = match who {
+        Who::Owner => return Ok(true),
+        Who::Person { account } => {
+            let Ok(account) = Uuid::parse_str(account) else { return Ok(false) };
+            client.query_one("select exists (select 1 from team_members where team = $1 and member = $2)", &[&team, &account]).await
+        }
+        Who::Group { handle } => {
+            client
+                .query_one(
+                    "select exists (select 1 from team_group_members where team = $1 and handle = $2)
+                         or exists (select 1 from team_groups g join team_members m on m.team = g.team and m.member = g.fallback
+                                      where g.team = $1 and g.handle = $2)",
+                    &[&team, &handle],
+                )
+                .await
+        }
+    };
+    Ok(row.map_err(err)?.get(0))
+}
+
 /// Who the bot of `workflow` asks, and the member who answers for it; None when it has no row.
 pub async fn bot_calls(db: &Db, team: Uuid, workflow: &str) -> Result<Option<(CallRules, Option<Uuid>)>, String> {
     let row = db.client().await?.query_opt("select calls, owner from team_bots where team = $1 and workflow = $2", &[&team, &workflow]).await.map_err(err)?;
@@ -827,6 +862,27 @@ pub async fn answer_call(db: &Db, team: Uuid, call: Uuid, answer: &Answer, outco
                  returning {CALL_COLUMNS}"
             ),
             &[&team, &call, &by, &json(answer)?, &outcome],
+        )
+        .await
+        .map_err(err)?;
+    Ok(row.as_ref().map(call_of).transpose()?.map(|row| row.call))
+}
+
+/// The open call `call`, not escalated yet, now escalated as `escalate_due` does it: `escalated_at`
+/// set and the owner added to `asked`. None when it was answered or escalated already.
+pub async fn escalate_now(db: &Db, team: Uuid, call: Uuid) -> Result<Option<Call>, String> {
+    let row = db
+        .client()
+        .await?
+        .query_opt(
+            &format!(
+                "update team_calls c set escalated_at = now(),
+                   asked = case when c.asked @> '[{{\"kind\":\"owner\"}}]'::jsonb then c.asked else c.asked || '[{{\"kind\":\"owner\"}}]'::jsonb end
+                 from team_runs r
+                 where r.id = c.run and c.team = $1 and c.id = $2 and c.answered_at is null and c.escalated_at is null
+                 returning {CALL_COLUMNS}"
+            ),
+            &[&team, &call],
         )
         .await
         .map_err(err)?;
