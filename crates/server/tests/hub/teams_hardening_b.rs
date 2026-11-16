@@ -124,3 +124,67 @@ fn a_team_op_from_an_agent_a_team_call_or_a_machine_runs_nothing() {
     );
     assert_eq!(counts(&hub), before, "nothing changed");
 }
+
+const NO_INVITE: &str = "that invite code is unknown, used or revoked";
+const FULL: &str = "this team has 20 open invite codes; revoke some first";
+
+/// Moves invite `code`'s row `age` into the past.
+fn backdate(hub: &TestHub, code: &str, age: &str) {
+    admin_on(&hub.database, &format!("update team_invites set created_at = now() - interval '{age}' where code_hash = sha256(convert_to('{}', 'UTF8'))", code.replace('-', "")));
+}
+
+#[test]
+fn an_old_unused_invite_still_works_and_a_used_or_revoked_one_answers_like_an_unknown_one() {
+    use super::teams_membership::{join_team, make_team, new_invite, person, team_op};
+    let hub = TestHub::start("teams_b_invite_age");
+    let (mut ana, _) = person(&hub.url, "ana@example.test");
+    let (mut bruno, _) = person(&hub.url, "bruno@example.test");
+    let (mut carla, _) = person(&hub.url, "carla@example.test");
+    let team = make_team(&mut ana, "Acme");
+
+    let old = new_invite(&mut ana, &team);
+    backdate(&hub, &old, "3650 days");
+    assert_eq!(join_team(&mut bruno, &old).unwrap()["id"], json!(team), "a ten year old unused code still joins");
+
+    let revoked = new_invite(&mut ana, &team);
+    backdate(&hub, &revoked, "400 days");
+    assert_eq!(team_op(&mut ana, &team, json!({ "op": "revoke_invite", "hint": &revoked[..4] })), Ok(Value::Null), "an old code can still be revoked");
+    let unknown = join_team(&mut carla, "ZZZZ-ZZZZ-ZZZZ-0000");
+    let used = join_team(&mut carla, &old);
+    let gone = join_team(&mut carla, &revoked);
+    assert_eq!((unknown.clone(), used, gone), (Err(NO_INVITE.into()), Err(NO_INVITE.into()), Err(NO_INVITE.into())), "used and revoked answer exactly as unknown");
+    assert_eq!(super::teams_membership::roster(&mut carla, &team), Err("you are not a member of that team".into()));
+}
+
+#[test]
+fn a_team_has_at_most_20_open_invites_and_only_unused_unrevoked_ones_count_however_old() {
+    use super::teams_membership::{db_text, join_team, make_team, new_invite, person, team_op};
+    let hub = TestHub::start("teams_b_invite_cap");
+    let (mut ana, _) = person(&hub.url, "ana@example.test");
+    let (mut bruno, _) = person(&hub.url, "bruno@example.test");
+    let (mut carla, _) = person(&hub.url, "carla@example.test");
+    let team = make_team(&mut ana, "Acme");
+    let open = || db_text(&hub.database, "select count(*)::text from team_invites where used_by is null and not revoked");
+
+    // One used and one revoked code: neither counts.
+    join_team(&mut bruno, &new_invite(&mut ana, &team)).unwrap();
+    let revoked = new_invite(&mut ana, &team);
+    team_op(&mut ana, &team, json!({ "op": "revoke_invite", "hint": &revoked[..4] })).unwrap();
+    let mut codes: Vec<String> = (0..20).map(|_| new_invite(&mut ana, &team)).collect();
+    assert_eq!(team_op(&mut ana, &team, json!({ "op": "invite" })), Err(FULL.into()), "the 21st open one");
+    assert_eq!(open(), vec!["20"]);
+    assert_eq!(db_text(&hub.database, "select count(*)::text from team_invites"), vec!["22"]);
+
+    // Old open codes still count: none of them lapses.
+    admin_on(&hub.database, "update team_invites set created_at = now() - interval '3650 days' where used_by is null");
+    assert_eq!(team_op(&mut ana, &team, json!({ "op": "invite" })), Err(FULL.into()), "old open codes still fill the cap");
+
+    let last = codes.pop().unwrap();
+    team_op(&mut ana, &team, json!({ "op": "revoke_invite", "hint": &last[..4] })).unwrap();
+    codes.push(new_invite(&mut ana, &team));
+    assert_eq!(team_op(&mut ana, &team, json!({ "op": "invite" })), Err(FULL.into()), "a revoked one made room for exactly one");
+    assert_eq!(join_team(&mut carla, &codes[0]).unwrap()["id"], json!(team), "an old code joins");
+    new_invite(&mut ana, &team);
+    assert_eq!(team_op(&mut ana, &team, json!({ "op": "invite" })), Err(FULL.into()), "a used one made room for exactly one");
+    assert_eq!(open(), vec!["20"]);
+}

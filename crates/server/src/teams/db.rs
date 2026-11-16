@@ -116,17 +116,17 @@ pub async fn member_groups(db: &Db, team: Uuid) -> Result<Vec<(Uuid, String)>, S
 }
 
 /// Keeps an invite by the sha256 of its code (`crate::db::invite_hash`), never the code, unless the
-/// team already has `max_open` open invites (unused, unrevoked, made in the last `days` days):
-/// false then. The count and the insert run under one lock per team, so two racing invites never
+/// team already has `max_open` open invites (unused and unrevoked: a code never expires): false
+/// then. The count and the insert run under one lock per team, so two racing invites never
 /// pass the cap together.
-pub async fn create_invite(db: &Db, team: Uuid, made_by: Uuid, code_hash: &[u8], hint: &str, days: i32, max_open: i64) -> Result<bool, String> {
+pub async fn create_invite(db: &Db, team: Uuid, made_by: Uuid, code_hash: &[u8], hint: &str, max_open: i64) -> Result<bool, String> {
     let mut held = db.transaction_client().await?;
     let tx = held.as_mut().expect("opened above").transaction().await.map_err(err)?;
     tx.execute("select pg_advisory_xact_lock(hashtext($1::text))", &[&format!("team_invites:{team}")]).await.map_err(err)?;
     let open: i64 = tx
         .query_one(
-            "select count(*) from team_invites where team = $1 and used_by is null and not revoked and created_at > now() - make_interval(days => $2)",
-            &[&team, &days],
+            "select count(*) from team_invites where team = $1 and used_by is null and not revoked",
+            &[&team],
         )
         .await
         .map_err(err)?
@@ -139,26 +139,26 @@ pub async fn create_invite(db: &Db, team: Uuid, made_by: Uuid, code_hash: &[u8],
     Ok(true)
 }
 
-/// Marks the unused, unrevoked invite `code_hash`, made in the last `days` days, used by `member`
-/// and adds `member` as a member, in one statement; answers the team, or None when the code is
-/// unknown, used, revoked or expired. It reads `team_invites` only: an account signup code
+/// Marks the unused, unrevoked invite `code_hash`, however old, used by `member` and adds
+/// `member` as a member, in one statement; answers the team, or None when the code is unknown,
+/// used or revoked. It reads `team_invites` only: an account signup code
 /// (`invites`) is never a team code.
 /// A member of the invite's team who joins again keeps its role and the invite stays unused, so
 /// that case answers the team without spending it.
-pub async fn take_invite(db: &Db, code_hash: &[u8], member: Uuid, days: i32) -> Result<Option<Uuid>, String> {
+pub async fn take_invite(db: &Db, code_hash: &[u8], member: Uuid) -> Result<Option<Uuid>, String> {
     let client = db.client().await?;
     // A racing second spend finds `used_by` set when its row lock comes free, so only one join lands.
     let joined = client
         .query_opt(
             "with spent as (update team_invites set used_by = $2, used_at = now()
-                 where code_hash = $1 and used_by is null and not revoked and created_at > now() - make_interval(days => $3)
+                 where code_hash = $1 and used_by is null and not revoked
                  and exists (select 1 from accounts where id = $2 and kind = 'person')
                  and not exists (select 1 from team_members where team = team_invites.team and member = $2)
                  returning team),
               added as (insert into team_members (team, member, role) select team, $2, 'member' from spent
                  on conflict (team, member) do nothing returning team)
              select team from added",
-            &[&code_hash, &member, &days],
+            &[&code_hash, &member],
         )
         .await
         .map_err(err)?;
@@ -168,23 +168,23 @@ pub async fn take_invite(db: &Db, code_hash: &[u8], member: Uuid, days: i32) -> 
     let again = client
         .query_opt(
             "select i.team from team_invites i join team_members m on m.team = i.team and m.member = $2
-             where i.code_hash = $1 and i.used_by is null and not i.revoked and i.created_at > now() - make_interval(days => $3)",
-            &[&code_hash, &member, &days],
+             where i.code_hash = $1 and i.used_by is null and not i.revoked",
+            &[&code_hash, &member],
         )
         .await
         .map_err(err)?;
     Ok(again.map(|r| r.get(0)))
 }
 
-/// Revokes the team's open invites (unused, unrevoked, made in the last `days` days) whose hint is
-/// `hint`; answers how many.
-pub async fn revoke_invite(db: &Db, team: Uuid, hint: &str, days: i32) -> Result<u64, String> {
+/// Revokes the team's open invites (unused and unrevoked, however old) whose hint is `hint`;
+/// answers how many.
+pub async fn revoke_invite(db: &Db, team: Uuid, hint: &str) -> Result<u64, String> {
     db.client()
         .await?
         .execute(
             "update team_invites set revoked = true
-             where team = $1 and hint = $2 and used_by is null and not revoked and created_at > now() - make_interval(days => $3)",
-            &[&team, &hint, &days],
+             where team = $1 and hint = $2 and used_by is null and not revoked",
+            &[&team, &hint],
         )
         .await
         .map_err(err)

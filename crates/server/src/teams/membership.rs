@@ -15,9 +15,8 @@ pub const NAME_CHARS: usize = 80;
 /// The one answer to an invite code that is unknown, used or revoked, so a stranger learns nothing.
 const NO_INVITE: &str = "that invite code is unknown, used or revoked";
 
-/// How long an unused invite code stays good.
-pub const INVITE_DAYS: i32 = 7;
-/// The most open invites (unused, unrevoked, unexpired) a team has at once.
+/// The most open invites (unused and unrevoked) a team has at once. A code never expires: it is
+/// good until it is used or revoked.
 pub const MAX_OPEN_INVITES: i64 = 20;
 /// Failed joins an account may make, and the hub in all, in `JOIN_WINDOW`.
 pub const JOIN_FAILS_PER_ACCOUNT: usize = 10;
@@ -127,13 +126,13 @@ pub async fn create(hub: &Arc<Hub>, person: Uuid, name: &str) -> Result<Team, St
 
 /// Joins the team of invite `code` as a member, once: `db::take_invite` with the code's sha256
 /// (`crate::db::invite_hash`, which ignores case, spaces and dashes). Unknown, used and revoked codes all
-/// answer the same error; so does a code older than `INVITE_DAYS`. A member of the team already keeps
+/// answer the same error; a code never expires, however old. A member of the team already keeps
 /// its role. Failed tries are limited per account and per hub (`JoinFails`): past the limit the code
 /// is not looked up. A join that lands does not count. Answers the team as `list` shows it.
 pub async fn join(hub: &Arc<Hub>, person: Uuid, code: &str) -> Result<Team, String> {
     let tried = Instant::now();
     hub.team_join_fails.lock().unwrap().attempt(person, tried)?;
-    let team = match db::take_invite(&hub.db, &invite_hash(code), person, INVITE_DAYS).await {
+    let team = match db::take_invite(&hub.db, &invite_hash(code), person).await {
         Ok(Some(team)) => team,
         Ok(None) => return Err(NO_INVITE.into()),
         Err(e) => {
@@ -173,14 +172,14 @@ pub async fn members(hub: &Arc<Hub>, scope: &Scope) -> Result<Vec<Member>, Strin
         .collect())
 }
 
-/// Owner only. A new single-use invite code (`crate::db::invite_code`), good for `INVITE_DAYS`
-/// days; the hub keeps only its sha256 and the hint (its first group), and shows the code this once.
+/// Owner only. A new single-use invite code (`crate::db::invite_code`), good until it is used or
+/// revoked, with no expiry; the hub keeps only its sha256 and the hint (its first group), and shows the code this once.
 /// A team has at most `MAX_OPEN_INVITES` open invites.
 pub async fn invite(hub: &Arc<Hub>, scope: &Scope) -> Result<TeamInvite, String> {
     scope.owner_only()?;
     let code = invite_code();
     let hint = code[..4].to_owned();
-    if !db::create_invite(&hub.db, scope.team.id, scope.member, &invite_hash(&code), &hint, INVITE_DAYS, MAX_OPEN_INVITES).await? {
+    if !db::create_invite(&hub.db, scope.team.id, scope.member, &invite_hash(&code), &hint, MAX_OPEN_INVITES).await? {
         return Err(format!("this team has {MAX_OPEN_INVITES} open invite codes; revoke some first"));
     }
     eprintln!("pinned-server: account {} made an invite to team {}", scope.member, scope.team.id);
@@ -191,7 +190,7 @@ pub async fn invite(hub: &Arc<Hub>, scope: &Scope) -> Result<TeamInvite, String>
 pub async fn revoke_invite(hub: &Arc<Hub>, scope: &Scope, hint: &str) -> Result<(), String> {
     scope.owner_only()?;
     let hint = hint.trim().to_ascii_uppercase();
-    match db::revoke_invite(&hub.db, scope.team.id, &hint, INVITE_DAYS).await? {
+    match db::revoke_invite(&hub.db, scope.team.id, &hint).await? {
         0 => Err("there is no unused invite with that hint".into()),
         _ => Ok(()),
     }
