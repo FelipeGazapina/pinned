@@ -60,8 +60,21 @@ The stack never touches anything outside its own directory:
   Deleting a box signals only the pids the fake spawned for it and what those started, each checked
   in `/proc/<pid>/environ`; no pid is read from a file.
 
-Tests: `node --test scripts/teams-dev/fake-box.test.mjs scripts/teams-dev/fake-slack.test.mjs`,
-`sh scripts/teams-dev/dev-guard.test.sh`, and `TEAMS_DEV_BIN=<pinned-server> sh scripts/teams-dev/e2e-empty.sh`
+Two more refusals keep the stack away from anything real:
+
+- `hub-client.mjs` (seed, smoke and the end-to-end steps) takes the hub from `TEAMS_DEV_HUB`, and
+  exits 1 for any address whose host is not `127.0.0.1`, `::1` or `localhost`, whose scheme is not
+  `ws` or `http` (a `wss://` remote included), or that carries a user name or password. The message
+  names the variable, never its value.
+- `dev.sh up` runs `check-bin.sh` on the pinned-server (`TEAMS_DEV_BIN` or the cargo build) before it
+  empties, creates or starts anything, and exits 2 unless it is a debug build. The binary is asked
+  with an empty environment (`hub --dev` is refused before it listens); the dev check in
+  `crates/server/src/dev.rs` refuses a release build first, so a release build never gets to send Box
+  calls to the real Upstash.
+
+Tests: `node --test scripts/teams-dev/fake-box.test.mjs scripts/teams-dev/fake-slack.test.mjs scripts/teams-dev/hub-client.test.mjs`,
+`sh scripts/teams-dev/dev-guard.test.sh`, `sh scripts/teams-dev/check-bin.test.sh`,
+`cargo test -p pinned-server --lib dev::tests`, and `TEAMS_DEV_BIN=<pinned-server> sh scripts/teams-dev/e2e-empty.sh`
 (up, status, sign-in, a box opened and ended, Slack through the hub, down, reset, in a fresh dir).
 
 Safety rules: only `box_dev-…` keys work, and `UPSTASH_BOX_BASE_URL` always points at the fake, so no
