@@ -11514,6 +11514,14 @@
                 "description": "Run once, then discard: when its run ends the bot and its workflow are deleted.",
                 "type": "boolean",
                 "default": false
+              },
+              "off_note": {
+                "description": "Why the hub turned it off, as members see it; cleared when it is turned on again. The hub\nsets it: one a member sends is not read.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
               }
             },
             "required": [
@@ -11524,7 +11532,8 @@
               "limits",
               "on",
               "on_by",
-              "once"
+              "once",
+              "off_note"
             ]
           },
           "CallRules": {
@@ -23028,6 +23037,14 @@
                 "description": "Run once, then discard: when its run ends the bot and its workflow are deleted.",
                 "type": "boolean",
                 "default": false
+              },
+              "off_note": {
+                "description": "Why the hub turned it off, as members see it; cleared when it is turned on again. The hub\nsets it: one a member sends is not read.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
               }
             },
             "required": [
@@ -31712,6 +31729,14 @@
                 "description": "Run once, then discard: when its run ends the bot and its workflow are deleted.",
                 "type": "boolean",
                 "default": false
+              },
+              "off_note": {
+                "description": "Why the hub turned it off, as members see it; cleared when it is turned on again. The hub\nsets it: one a member sends is not read.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
               }
             },
             "required": [
@@ -31722,7 +31747,8 @@
               "limits",
               "on",
               "on_by",
-              "once"
+              "once",
+              "off_note"
             ]
           },
           "CallRules": {
@@ -40078,6 +40104,14 @@
                 "description": "Run once, then discard: when its run ends the bot and its workflow are deleted.",
                 "type": "boolean",
                 "default": false
+              },
+              "off_note": {
+                "description": "Why the hub turned it off, as members see it; cleared when it is turned on again. The hub\nsets it: one a member sends is not read.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
               }
             },
             "required": [
@@ -57962,6 +57996,14 @@
             "description": "Run once, then discard: when its run ends the bot and its workflow are deleted.",
             "type": "boolean",
             "default": false
+          },
+          "off_note": {
+            "description": "Why the hub turned it off, as members see it; cleared when it is turned on again. The hub\nsets it: one a member sends is not read.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
           }
         },
         "required": [
@@ -57972,7 +58014,8 @@
           "limits",
           "on",
           "on_by",
-          "once"
+          "once",
+          "off_note"
         ],
         "$defs": {
           "CallRules": {
@@ -58143,6 +58186,14 @@
             "description": "Run once, then discard: when its run ends the bot and its workflow are deleted.",
             "type": "boolean",
             "default": false
+          },
+          "off_note": {
+            "description": "Why the hub turned it off, as members see it; cleared when it is turned on again. The hub\nsets it: one a member sends is not read.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
           }
         },
         "required": [

@@ -8,7 +8,7 @@ use super::{db, Scope};
 use crate::hub::{Account, Hub};
 use pinned_core::connectors::{BoxStep, Connector, Trigger, Work};
 use pinned_core::graph::{NodeKind, Watch};
-use pinned_core::teams::{Bot, BotLimits, CallRules, Run, RunState, TeamEvent, Who};
+use pinned_core::teams::{Bot, BotLimits, CallRules, Run, RunState, TeamEvent, TeamProject, Who};
 use pinned_core::wire::HubCall;
 use serde_json::Value;
 use std::sync::Arc;
@@ -79,11 +79,32 @@ pub async fn bots(hub: &Arc<Hub>, scope: &Scope) -> Result<Vec<Bot>, String> {
     for workflow in workflows(hub, &scope.team).await? {
         let bot = match rows.iter().find(|b| b.workflow == workflow.id) {
             Some(row) => Bot { name: workflow.name.clone(), ..row.clone() },
-            None => Bot { workflow: workflow.id.clone(), name: workflow.name.clone(), owner: None, calls: CallRules::default(), limits: default_limits(hub), on: false, on_by: None, once: false },
+            None => Bot { workflow: workflow.id.clone(), name: workflow.name.clone(), owner: None, calls: CallRules::default(), limits: default_limits(hub), on: false, on_by: None, once: false, off_note: None },
         };
         bots.push(bot);
     }
     Ok(bots)
+}
+
+/// Project `project` was taken out of the team: every bot that is on and works in it (its
+/// workflow's `repo` is the project's, by `boxes::project_key`) goes back to a draft, with a note
+/// that says why. Answers the workflows it turned off.
+pub async fn project_detached(hub: &Hub, team: &Account, project: &TeamProject) -> Result<Vec<String>, String> {
+    let note = format!("Turned off: project {} was taken out of the team.", project.name);
+    let mut off = Vec::new();
+    let connectors = hub.connectors(team).await?;
+    for workflow in connectors.get_settings().connectors {
+        if crate::boxes::project_key(&workflow.repo).as_deref() != Some(project.key.as_str()) {
+            continue;
+        }
+        if db::turn_bot_off_noted(&hub.db, team.id, &workflow.id, &note).await? {
+            let mut stored = workflow;
+            stored.enabled = false;
+            off.push(stored.id.clone());
+            connectors.save_connector(stored)?;
+        }
+    }
+    Ok(off)
 }
 
 /// Every `Who` must name a member or a group of the team.
@@ -135,7 +156,7 @@ pub async fn save_bot(hub: &Arc<Hub>, scope: &Scope, bot: Bot) -> Result<(), Str
         }
     }
     let owner = existing.and_then(|b| b.owner).or_else(|| Some(scope.member.to_string()));
-    let saved = Bot { name: String::new(), owner, on: false, on_by: None, ..bot };
+    let saved = Bot { name: String::new(), owner, on: false, on_by: None, off_note: None, ..bot };
     db::save_bot(&hub.db, team, &saved).await?;
     draft(hub, scope, &saved.workflow).await
 }
@@ -162,7 +183,7 @@ pub async fn turn_bot_on(hub: &Arc<Hub>, scope: &Scope, workflow_id: &str, on: b
         return Err(NEEDS_KEYS.into());
     }
     if row.is_none() {
-        let fresh = Bot { workflow: workflow_id.to_owned(), name: String::new(), owner: Some(scope.member.to_string()), calls, limits: default_limits(hub), on: false, on_by: None, once: false };
+        let fresh = Bot { workflow: workflow_id.to_owned(), name: String::new(), owner: Some(scope.member.to_string()), calls, limits: default_limits(hub), on: false, on_by: None, once: false, off_note: None };
         db::save_bot(&hub.db, team, &fresh).await?;
     }
     set_enabled(hub, &scope.team, workflow_id, true).await?;

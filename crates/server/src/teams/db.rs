@@ -332,10 +332,11 @@ fn bot_row(r: &tokio_postgres::Row) -> Result<Bot, String> {
         on,
         on_by: on_by.map(|o| o.to_string()),
         once: r.get("once"),
+        off_note: r.get("off_note"),
     })
 }
 
-const BOT_COLUMNS: &str = "workflow, owner, calls, limits, on_by, on_at is not null as on, once";
+const BOT_COLUMNS: &str = "workflow, owner, calls, limits, on_by, on_at is not null as on, once, off_note";
 
 /// The `team_bots` rows: `Bot` with an empty `name` (the workflow's name is in the team's store).
 pub async fn bots(db: &Db, team: Uuid) -> Result<Vec<Bot>, String> {
@@ -366,14 +367,25 @@ pub async fn save_bot(db: &Db, team: Uuid, bot: &Bot) -> Result<(), String> {
     Ok(())
 }
 
-/// Sets `on_by`/`on_at` (on) or clears them (off); false when the bot has no row.
+/// Sets `on_by`/`on_at` and clears `off_note` (on), or clears them (off); false when the bot has no row.
 pub async fn turn_bot_on(db: &Db, team: Uuid, workflow: &str, on: bool, by: Uuid) -> Result<bool, String> {
     let client = db.client().await?;
     let changed = match on {
-        true => client.execute("update team_bots set on_by = $3, on_at = now() where team = $1 and workflow = $2", &[&team, &workflow, &by]).await,
+        true => client.execute("update team_bots set on_by = $3, on_at = now(), off_note = null where team = $1 and workflow = $2", &[&team, &workflow, &by]).await,
         false => client.execute("update team_bots set on_by = null, on_at = null where team = $1 and workflow = $2", &[&team, &workflow]).await,
     };
     Ok(changed.map_err(err)? == 1)
+}
+
+/// Turns the bot off with `note`, which members see on it; false when it was not on.
+pub async fn turn_bot_off_noted(db: &Db, team: Uuid, workflow: &str, note: &str) -> Result<bool, String> {
+    let changed = db
+        .client()
+        .await?
+        .execute("update team_bots set on_by = null, on_at = null, off_note = $3 where team = $1 and workflow = $2 and on_at is not null", &[&team, &workflow, &note])
+        .await
+        .map_err(err)?;
+    Ok(changed == 1)
 }
 
 /// Deletes the row of a workflow; false when it was no bot.

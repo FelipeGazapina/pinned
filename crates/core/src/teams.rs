@@ -233,6 +233,10 @@ pub struct Bot {
     /// Run once, then discard: when its run ends the bot and its workflow are deleted.
     #[serde(default)]
     pub once: bool,
+    /// Why the hub turned it off, as members see it; cleared when it is turned on again. The hub
+    /// sets it: one a member sends is not read.
+    #[serde(default)]
+    pub off_note: Option<String>,
 }
 
 /// `"working"`, `"waiting"`, `"taken_over"`, `"done"`, `"stopped"`, `"gave_up"`, `"failed"`

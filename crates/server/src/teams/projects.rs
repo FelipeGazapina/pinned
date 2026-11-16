@@ -16,17 +16,21 @@ pub async fn attach_project(hub: &Arc<Hub>, scope: &Scope, key: &str) -> Result<
     db::attach_project(&hub.db, scope.team.id, &attached).await
 }
 
-/// Detaches project `key`: the member who attached it or the owner.
+/// Detaches project `key`: the member who attached it or the owner. A bot that is on and works in
+/// it goes back to a draft, saying why (`bots::project_detached`).
 pub async fn detach_project(hub: &Arc<Hub>, scope: &Scope, key: &str) -> Result<(), String> {
+    let project = db::projects(&hub.db, scope.team.id).await?.into_iter().find(|p| p.key == key);
     let gone = match scope.role {
         Role::Owner => db::detach_project(&hub.db, scope.team.id, key).await?,
         Role::Member => db::detach_project_attached_by(&hub.db, scope.team.id, key, scope.member).await?,
     };
     if gone {
+        if let Some(project) = project {
+            super::bots::project_detached(hub, &scope.team, &project).await?;
+        }
         return Ok(());
     }
-    let exists = db::projects(&hub.db, scope.team.id).await?.iter().any(|p| p.key == key);
-    Err(if exists { "only the team's owner or the member who attached a project detaches it".into() } else { format!("the team has no project {key}") })
+    Err(if project.is_some() { "only the team's owner or the member who attached a project detaches it".into() } else { format!("the team has no project {key}") })
 }
 
 /// The team's projects. Any member reads them.
