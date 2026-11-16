@@ -13,6 +13,7 @@ use pinned_core::account::{DictationFeedback, Failure, NewMachine, NewPassword, 
 use pinned_core::link::UNAUTHORIZED;
 use pinned_core::surface::{self, Side};
 use pinned_core::sync;
+use pinned_core::teams::TeamOp;
 use pinned_core::wire::{AccountView, Call, ClientFrame, HubCall, MachineEvent, MachineFrame, MachineView, Reply, ToClient, ToMachine, UpdateStatus};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -972,6 +973,8 @@ fn client_frame(server: &Arc<Server>, account: &Arc<Account>, client: u64, text:
     match parsed {
         Ok(ClientFrame::Call { id, call, .. }) if account.needs_unlock(client, Side::Node, &call) => locked(id),
         Ok(ClientFrame::Hub { id, call }) if account.needs_unlock(client, Side::Hub, &call) => locked(id),
+        // A personal call run on a team's account needs what it needs on the person's own.
+        Ok(ClientFrame::Hub { id, call: HubCall::Team { op: TeamOp::Hub { call }, .. } }) if account.needs_unlock(client, Side::Hub, &call) => locked(id),
         Ok(ClientFrame::Hub { id, call: HubCall::Unlock { password } }) => {
             let (server, account) = (server.clone(), account.clone());
             tokio::spawn(async move {
@@ -1215,6 +1218,14 @@ async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: 
     // A machine archives only its own tabs, found finished by its own check.
     if let HubCall::AutoArchive { tab } = call {
         let result = hub.auto_archive(&account, &machine, &tab).await.and_then(|marks| serde_json::to_value(marks).map_err(|e| e.to_string()));
+        return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
+    }
+    // A team's box asks its people; no other team op comes from a machine.
+    if let HubCall::Team { op, .. } = call {
+        let result = crate::teams::machine_call(&hub, &account, &machine, op).await;
+        if let Err(e) = &result {
+            eprintln!("pinned-server: machine {machine}'s team call failed: {e}");
+        }
         return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
     }
     if let HubCall::RecordTasks { records } = call {

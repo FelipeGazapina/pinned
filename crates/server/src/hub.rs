@@ -181,6 +181,8 @@ pub struct Hub {
     pub public_url: String,
     pub signup: Signup,
     pub boxes: Boxes,
+    /// Every team's call timings and default bot limits (`teams::calls::tick`).
+    pub team_policy: pinned_core::teams::TeamPolicy,
     /// Every Convex read and key check goes through it.
     pub convex_http: Arc<dyn ConvexHttp>,
     accounts: Mutex<HashMap<Uuid, Arc<Account>>>,
@@ -295,10 +297,10 @@ fn json<T: Serialize>(value: T) -> Result<Value, String> {
 }
 
 impl Hub {
-    pub fn new(db: Db, public_url: String, signup: Signup, box_api: Arc<dyn BoxApi>, box_policy: boxes::Policy, convex_http: Arc<dyn ConvexHttp>) -> Arc<Hub> {
+    pub fn new(db: Db, public_url: String, signup: Signup, box_api: Arc<dyn BoxApi>, box_policy: boxes::Policy, team_policy: pinned_core::teams::TeamPolicy, convex_http: Arc<dyn ConvexHttp>) -> Arc<Hub> {
         let public_url = public_url.trim_end_matches('/').to_owned();
         let boxes = Boxes::new(box_api, box_policy, &public_url);
-        Arc::new(Hub { db, public_url, signup, boxes, convex_http, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default(), unlocks: Mutex::default(), going_away: tokio::sync::watch::channel(false).0, held_expired: Mutex::default(), refuse_run_saves: Arc::default(), persisted: Mutex::default() })
+        Arc::new(Hub { db, public_url, signup, boxes, team_policy, convex_http, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default(), unlocks: Mutex::default(), going_away: tokio::sync::watch::channel(false).0, held_expired: Mutex::default(), refuse_run_saves: Arc::default(), persisted: Mutex::default() })
     }
 
     /// Tells every socket to close with a going away frame. The hub stops serving afterwards.
@@ -483,6 +485,11 @@ impl Hub {
                 0
             }
         }
+    }
+
+    /// The account if the hub holds it already, as it does while any of its apps is connected.
+    pub fn loaded(&self, id: Uuid) -> Option<Arc<Account>> {
+        self.accounts.lock().unwrap().get(&id).cloned()
     }
 
     pub async fn account(&self, id: Uuid) -> Result<Arc<Account>, String> {
@@ -965,6 +972,11 @@ impl Hub {
             HubCall::DisconnectConvex { id } => (json(c().await?.disconnect_convex(&id)?), true),
             HubCall::ConvexTables { id } => (json(c().await?.convex_tables(&*self.convex_http, &id).await?), false),
             HubCall::Convex { .. } => return Err("only a session on a machine reads Convex".into()),
+            // `account` is the person: `teams::call` checks the membership and runs the op on the team.
+            HubCall::Team { team, op } => {
+                let team = team.map(|id| Uuid::parse_str(&id).map_err(|_| format!("{id} is not a team id"))).transpose()?;
+                return crate::teams::call(self, account, team, op).await;
+            }
         };
         if changed {
             self.watch(account).await?;

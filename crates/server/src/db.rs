@@ -157,6 +157,40 @@ create table if not exists ideas (id uuid primary key, account uuid not null ref
   title text not null, text text not null default '', project text, status text not null default 'open',
   task text, created_by jsonb not null, created_at bigint not null, updated_at bigint not null);
 create index if not exists ideas_by_account on ideas (account, updated_at desc);
+-- pinned Teams. A team is an accounts row of kind 'team' with no login and no password ('!'): its
+-- members act on it through the hub (`teams::team_scope`), never by signing in or pairing.
+alter table accounts add column if not exists kind text not null default 'person';
+create table if not exists teams (id uuid primary key references accounts on delete cascade, name text not null,
+  owner uuid not null references accounts, created_at timestamptz not null default now());
+create table if not exists team_members (team uuid not null references teams on delete cascade,
+  member uuid not null references accounts on delete cascade, role text not null,
+  joined_at timestamptz not null default now(), primary key (team, member));
+create index if not exists team_members_by_member on team_members (member);
+create table if not exists team_invites (code_hash bytea primary key, team uuid not null references teams on delete cascade,
+  made_by uuid not null references accounts, hint text not null, created_at timestamptz not null default now(),
+  used_by uuid references accounts on delete set null, used_at timestamptz, revoked boolean not null default false);
+create table if not exists team_projects (team uuid not null references teams on delete cascade, key text not null,
+  name text not null, repo text not null, member uuid not null references accounts on delete cascade,
+  attached_at timestamptz not null default now(), primary key (team, key));
+create table if not exists team_groups (team uuid not null references teams on delete cascade, handle text not null,
+  about text not null default '', fallback uuid references accounts on delete set null,
+  slack_group text not null default '', primary key (team, handle));
+create table if not exists team_group_members (team uuid not null, handle text not null, member uuid not null,
+  primary key (team, handle, member), foreign key (team, handle) references team_groups on delete cascade,
+  foreign key (team, member) references team_members on delete cascade);
+create table if not exists team_bots (team uuid not null references teams on delete cascade, workflow text not null,
+  owner uuid references accounts on delete set null, calls jsonb not null, limits jsonb not null,
+  on_by uuid references accounts on delete set null, on_at timestamptz, primary key (team, workflow));
+create table if not exists team_runs (id uuid primary key, team uuid not null references teams on delete cascade,
+  workflow text not null, box text, started_by jsonb not null, state text not null, controller uuid references accounts,
+  cost_usd double precision not null default 0, active_secs bigint not null default 0,
+  started_at timestamptz not null default now(), ended_at timestamptz, outcome text);
+create index if not exists team_runs_live on team_runs (team, started_at desc);
+create table if not exists team_calls (id uuid primary key, team uuid not null references teams on delete cascade,
+  run uuid not null references team_runs on delete cascade, situation text not null, asked jsonb not null,
+  question text not null, choices jsonb not null, created_at timestamptz not null default now(),
+  escalated_at timestamptz, answered_by uuid references accounts, answered_at timestamptz, answer jsonb, outcome text);
+create index if not exists team_calls_open on team_calls (created_at) where answered_at is null;
 ";
 /// How long the hub keeps an end that its machine never came back for.
 const HELD_FOR: &str = "interval '30 days'";
@@ -507,7 +541,7 @@ async fn open(url: &str) -> Result<Client, String> {
     Ok(client)
 }
 
-fn err(e: tokio_postgres::Error) -> String {
+pub(crate) fn err(e: tokio_postgres::Error) -> String {
     e.to_string()
 }
 
@@ -596,8 +630,18 @@ impl Db {
         Ok(Db { sealer, connection: Connection::open(url, SCHEMA).await?, transactions: Arc::default() })
     }
 
-    async fn client(&self) -> Result<Arc<Client>, String> {
+    pub(crate) async fn client(&self) -> Result<Arc<Client>, String> {
         self.connection.client().await
+    }
+
+    /// The connection kept for transactions, opened if closed. Hold the guard for the whole
+    /// transaction: `held.as_mut().unwrap().transaction()`.
+    pub async fn transaction_client(&self) -> Result<tokio::sync::MutexGuard<'_, Option<Client>>, String> {
+        let mut held = self.transactions.lock().await;
+        if held.as_ref().map_or(true, Client::is_closed) {
+            *held = Some(open(&self.connection.url).await?);
+        }
+        Ok(held)
     }
 
     /// The new account, or None when the email is taken.
@@ -612,7 +656,8 @@ impl Db {
     }
 
     pub async fn account_by_email(&self, email: &str) -> Result<Option<(AccountView, String)>, String> {
-        let row = self.client().await?.query_opt("select id, password_hash from accounts where email = $1", &[&email]).await.map_err(err)?;
+        // A team has no password and never signs in: its email reads as unknown.
+        let row = self.client().await?.query_opt("select id, password_hash from accounts where email = $1 and kind = 'person'", &[&email]).await.map_err(err)?;
         Ok(row.map(|r| (AccountView { id: r.get::<_, Uuid>(0).to_string(), email: email.to_owned() }, r.get(1))))
     }
 
@@ -738,7 +783,15 @@ impl Db {
 
     pub async fn create_login(&self, account: Uuid) -> Result<String, String> {
         let token = Token::new();
-        self.client().await?.execute("insert into logins (token_hash, account) values ($1, $2)", &[&token.hash, &account]).await.map_err(err)?;
+        // A team never gets a login.
+        let made = self
+            .client().await?
+            .execute("insert into logins (token_hash, account) select $1, id from accounts where id = $2 and kind = 'person'", &[&token.hash, &account])
+            .await
+            .map_err(err)?;
+        if made != 1 {
+            return Err(format!("account {account} cannot sign in"));
+        }
         Ok(token.text)
     }
 
@@ -748,7 +801,8 @@ impl Db {
             .client().await?
             .query_opt(
                 "update logins set last_used = now(), locked = locked or $3 where token_hash = $1 \
-                 and coalesce(last_used, created_at) > now() - make_interval(days => $2) returning account, locked",
+                 and coalesce(last_used, created_at) > now() - make_interval(days => $2) \
+                 and account in (select id from accounts where kind = 'person') returning account, locked",
                 &[&hash(token), &LOGIN_IDLE_DAYS, &lock],
             )
             .await
@@ -1586,7 +1640,7 @@ impl Db {
             .client().await?
             .query_opt(
                 "with taken as (delete from pair_codes where code = $1 returning account, expires_at)
-                 select a.id, a.email from taken join accounts a on a.id = taken.account where taken.expires_at > now()",
+                 select a.id, a.email from taken join accounts a on a.id = taken.account where taken.expires_at > now() and a.kind = 'person'",
                 &[&code],
             )
             .await

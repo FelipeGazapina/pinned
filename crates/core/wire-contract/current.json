@@ -7520,6 +7520,31 @@
                   "repo",
                   "ask"
                 ]
+              },
+              {
+                "description": "A member's call about a team, which the hub runs on the team's account after it checks\nthe membership. `team` is the team's id; `List`, `Create` and `Join` leave it out. From a\nmachine, only a box of the team sends it, with `AskPeople` and no `team`.\n\n`{\"cmd\":\"team\",\"team\":\"6f1c…\",\"op\":{\"op\":\"members\"}}`, `{\"cmd\":\"team\",\"op\":{\"op\":\"create\",\"name\":\"Acme\"}}`",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "team"
+                  },
+                  "team": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "op": {
+                    "$ref": "#/$defs/TeamOp"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "team",
+                  "op"
+                ]
               }
             ]
           },
@@ -10916,6 +10941,793 @@
                   "limit"
                 ]
               }
+            ]
+          },
+          "TeamOp": {
+            "description": "What a member asks about a team, inside `HubCall::Team`. Every op but `List`, `Create` and\n`Join` names the team in `HubCall::Team::team`.\n\n`{\"op\":\"create\",\"name\":\"Acme\"}`, `{\"op\":\"answer_call\",\"id\":\"…\",\"answer\":{\"kind\":{\"kind\":\"choice\"},\"choice\":\"red\"}}`,\n`{\"op\":\"hub\",\"call\":{\"cmd\":\"get_settings\"}}`, `{\"op\":\"ask_people\",\"situation\":\"in_doubt\",\"question\":\"Which color?\",\"choices\":[\"red\",\"blue\"]}`",
+            "oneOf": [
+              {
+                "description": "`Vec<Team>`: the teams the person is a member of.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "list"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "description": "`Team`: a new team the person owns.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "create"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "name"
+                ]
+              },
+              {
+                "description": "`Team`: joins by an invite code.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "join"
+                  },
+                  "code": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "code"
+                ]
+              },
+              {
+                "description": "Owner only.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "rename"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "name"
+                ]
+              },
+              {
+                "description": "`Vec<Member>`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "members"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "description": "Owner only. `{\"code\":\"ABCD-…\",\"hint\":\"ABCD\"}`: the code is shown once.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "invite"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "description": "Owner only: the invite whose code starts with `hint`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "revoke_invite"
+                  },
+                  "hint": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "hint"
+                ]
+              },
+              {
+                "description": "Owner only.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "remove_member"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "account"
+                ]
+              },
+              {
+                "description": "A member leaves; the owner cannot.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "leave"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "description": "Attaches the person's own shared project `key` to the team.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "attach_project"
+                  },
+                  "key": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "key"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "detach_project"
+                  },
+                  "key": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "key"
+                ]
+              },
+              {
+                "description": "`Vec<TeamProject>`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "projects"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "description": "`Vec<Group>`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "groups"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "save_group"
+                  },
+                  "group": {
+                    "$ref": "#/$defs/Group"
+                  }
+                },
+                "required": [
+                  "op",
+                  "group"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "join_group"
+                  },
+                  "handle": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "handle"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "leave_group"
+                  },
+                  "handle": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "handle"
+                ]
+              },
+              {
+                "description": "`Vec<Bot>`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "bots"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "save_bot"
+                  },
+                  "bot": {
+                    "$ref": "#/$defs/Bot"
+                  }
+                },
+                "required": [
+                  "op",
+                  "bot"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "turn_bot_on"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  },
+                  "on": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow",
+                  "on"
+                ]
+              },
+              {
+                "description": "`Run`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "run_now"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow"
+                ]
+              },
+              {
+                "description": "`Vec<Run>`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "runs"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "description": "`Vec<Call>`: the open calls, and the last answered.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "calls"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "answer_call"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "answer": {
+                    "$ref": "#/$defs/Answer2"
+                  }
+                },
+                "required": [
+                  "op",
+                  "id",
+                  "answer"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "take_over"
+                  },
+                  "run": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "run"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "give_back"
+                  },
+                  "run": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "run"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "stop_run"
+                  },
+                  "run": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "run"
+                ]
+              },
+              {
+                "description": "Text to the team's chat; answers its reply.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "chat"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "text"
+                ]
+              },
+              {
+                "description": "A personal `HubCall` run on the team's account, if the hub's `hub_call_allowed` lets the\nrole. A `HubCall` as JSON, which the hub parses: a recursive schema overflows the wire\nchecker's stack.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "hub"
+                  },
+                  "call": true
+                },
+                "required": [
+                  "op",
+                  "call"
+                ]
+              },
+              {
+                "description": "From a box's session only, on the team account's machine: asks the people its bot's\n`CallRules` name for `situation`. The session never names people.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "ask_people"
+                  },
+                  "situation": {
+                    "$ref": "#/$defs/Situation"
+                  },
+                  "question": {
+                    "type": "string"
+                  },
+                  "choices": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "default": []
+                  }
+                },
+                "required": [
+                  "op",
+                  "situation",
+                  "question",
+                  "choices"
+                ]
+              }
+            ]
+          },
+          "Group": {
+            "description": "People a bot asks by one name: `@design`.\n\n`{\"handle\":\"design\",\"about\":\"UI calls\",\"members\":[\"0b7e…\"],\"fallback\":null,\"slack_group\":\"\"}`",
+            "type": "object",
+            "properties": {
+              "handle": {
+                "type": "string"
+              },
+              "about": {
+                "type": "string",
+                "default": ""
+              },
+              "members": {
+                "description": "Account ids.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "fallback": {
+                "description": "Who is asked when no member of the group is a member of the team any more.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "slack_group": {
+                "description": "A Slack user group to mention, empty for none.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "handle",
+              "about",
+              "members",
+              "fallback",
+              "slack_group"
+            ]
+          },
+          "Bot": {
+            "description": "A team workflow with who it asks and what a run may spend.\n\n`{\"workflow\":\"c1\",\"name\":\"Fix bugs\",\"owner\":\"0b7e…\",\"calls\":{…},\"limits\":{\"usd\":5.0,\"minutes\":30},\"on\":true,\"on_by\":\"0b7e…\"}`",
+            "type": "object",
+            "properties": {
+              "workflow": {
+                "description": "The id of the team account's workflow (a `Connector`).",
+                "type": "string"
+              },
+              "name": {
+                "type": "string",
+                "default": ""
+              },
+              "owner": {
+                "description": "The member who answers for the bot.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "calls": {
+                "$ref": "#/$defs/CallRules",
+                "default": {
+                  "before_irreversible": {
+                    "kind": "owner"
+                  },
+                  "in_doubt": {
+                    "kind": "owner"
+                  },
+                  "on_limit": {
+                    "kind": "owner"
+                  },
+                  "on_failure": {
+                    "kind": "owner"
+                  }
+                }
+              },
+              "limits": {
+                "$ref": "#/$defs/BotLimits",
+                "default": {
+                  "usd": 5.0,
+                  "minutes": 30
+                }
+              },
+              "on": {
+                "type": "boolean",
+                "default": false
+              },
+              "on_by": {
+                "description": "Who turned it on last.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "workflow",
+              "name",
+              "owner",
+              "calls",
+              "limits",
+              "on",
+              "on_by"
+            ]
+          },
+          "CallRules": {
+            "description": "Who a bot asks in each situation. Every situation goes to the owner by default.\n\n`{\"before_irreversible\":{\"kind\":\"owner\"},\"in_doubt\":{\"kind\":\"group\",\"handle\":\"design\"},\"on_limit\":{\"kind\":\"owner\"},\"on_failure\":{\"kind\":\"owner\"}}`",
+            "type": "object",
+            "properties": {
+              "before_irreversible": {
+                "$ref": "#/$defs/Who",
+                "default": {
+                  "kind": "owner"
+                }
+              },
+              "in_doubt": {
+                "$ref": "#/$defs/Who",
+                "default": {
+                  "kind": "owner"
+                }
+              },
+              "on_limit": {
+                "$ref": "#/$defs/Who",
+                "default": {
+                  "kind": "owner"
+                }
+              },
+              "on_failure": {
+                "$ref": "#/$defs/Who",
+                "default": {
+                  "kind": "owner"
+                }
+              }
+            },
+            "required": [
+              "before_irreversible",
+              "in_doubt",
+              "on_limit",
+              "on_failure"
+            ]
+          },
+          "Who": {
+            "description": "Who a bot's call goes to.\n\n`{\"kind\":\"person\",\"account\":\"0b7e…\"}`, `{\"kind\":\"group\",\"handle\":\"design\"}`, `{\"kind\":\"owner\"}`",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "person"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "account"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "group"
+                  },
+                  "handle": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "handle"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "owner"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "BotLimits": {
+            "description": "What one run of a bot may spend.\n\n`{\"usd\":5.0,\"minutes\":30}`",
+            "type": "object",
+            "properties": {
+              "usd": {
+                "type": "number",
+                "format": "double"
+              },
+              "minutes": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "usd",
+              "minutes"
+            ]
+          },
+          "Answer2": {
+            "description": "A client sends `by` and `at` empty; the hub sets them.\n\n`{\"by\":\"0b7e…\",\"choice\":\"Ship it\",\"text\":\"\",\"kind\":{\"kind\":\"choice\"},\"at\":1763300000}`",
+            "type": "object",
+            "properties": {
+              "by": {
+                "type": "string",
+                "default": ""
+              },
+              "choice": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "text": {
+                "type": "string",
+                "default": ""
+              },
+              "kind": {
+                "$ref": "#/$defs/AnswerKind"
+              },
+              "at": {
+                "type": "integer",
+                "format": "int64",
+                "default": 0
+              }
+            },
+            "required": [
+              "by",
+              "choice",
+              "text",
+              "kind",
+              "at"
+            ]
+          },
+          "AnswerKind": {
+            "description": "How a person answered a call.\n\n`{\"kind\":\"choice\"}`, `{\"kind\":\"pass_to\",\"handle\":\"design\"}`, `{\"kind\":\"take_over\"}`, `{\"kind\":\"stop\"}`",
+            "oneOf": [
+              {
+                "description": "`Answer::choice` and `Answer::text` go back to the session.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "choice"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "The call goes to the group `handle` instead.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "pass_to"
+                  },
+                  "handle": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "handle"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "take_over"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "stop"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Situation": {
+            "description": "Why a bot's session stops to ask people.\n\n`\"before_irreversible\"`, `\"in_doubt\"`, `\"on_limit\"`, `\"on_failure\"`",
+            "type": "string",
+            "enum": [
+              "before_irreversible",
+              "in_doubt",
+              "on_limit",
+              "on_failure"
             ]
           },
           "Target4": {
@@ -18339,6 +19151,30 @@
                   "tab",
                   "ask"
                 ]
+              },
+              {
+                "description": "A member's call about a team, which the hub runs on the team's account after it checks\nthe membership. `team` is the team's id; `List`, `Create` and `Join` leave it out. From a\nmachine, only a box of the team sends it, with `AskPeople` and no `team`.\n\n`{\"cmd\":\"team\",\"team\":\"6f1c…\",\"op\":{\"op\":\"members\"}}`, `{\"cmd\":\"team\",\"op\":{\"op\":\"create\",\"name\":\"Acme\"}}`",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "team"
+                  },
+                  "team": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "op": {
+                    "$ref": "#/$defs/TeamOp"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "op"
+                ]
               }
             ]
           },
@@ -21618,6 +22454,772 @@
                   "op"
                 ]
               }
+            ]
+          },
+          "TeamOp": {
+            "description": "What a member asks about a team, inside `HubCall::Team`. Every op but `List`, `Create` and\n`Join` names the team in `HubCall::Team::team`.\n\n`{\"op\":\"create\",\"name\":\"Acme\"}`, `{\"op\":\"answer_call\",\"id\":\"…\",\"answer\":{\"kind\":{\"kind\":\"choice\"},\"choice\":\"red\"}}`,\n`{\"op\":\"hub\",\"call\":{\"cmd\":\"get_settings\"}}`, `{\"op\":\"ask_people\",\"situation\":\"in_doubt\",\"question\":\"Which color?\",\"choices\":[\"red\",\"blue\"]}`",
+            "oneOf": [
+              {
+                "description": "`Vec<Team>`: the teams the person is a member of.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "list"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "description": "`Team`: a new team the person owns.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "create"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "name"
+                ]
+              },
+              {
+                "description": "`Team`: joins by an invite code.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "join"
+                  },
+                  "code": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "code"
+                ]
+              },
+              {
+                "description": "Owner only.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "rename"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "name"
+                ]
+              },
+              {
+                "description": "`Vec<Member>`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "members"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "description": "Owner only. `{\"code\":\"ABCD-…\",\"hint\":\"ABCD\"}`: the code is shown once.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "invite"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "description": "Owner only: the invite whose code starts with `hint`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "revoke_invite"
+                  },
+                  "hint": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "hint"
+                ]
+              },
+              {
+                "description": "Owner only.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "remove_member"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "account"
+                ]
+              },
+              {
+                "description": "A member leaves; the owner cannot.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "leave"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "description": "Attaches the person's own shared project `key` to the team.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "attach_project"
+                  },
+                  "key": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "key"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "detach_project"
+                  },
+                  "key": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "key"
+                ]
+              },
+              {
+                "description": "`Vec<TeamProject>`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "projects"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "description": "`Vec<Group>`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "groups"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "save_group"
+                  },
+                  "group": {
+                    "$ref": "#/$defs/Group"
+                  }
+                },
+                "required": [
+                  "op",
+                  "group"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "join_group"
+                  },
+                  "handle": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "handle"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "leave_group"
+                  },
+                  "handle": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "handle"
+                ]
+              },
+              {
+                "description": "`Vec<Bot>`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "bots"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "save_bot"
+                  },
+                  "bot": {
+                    "$ref": "#/$defs/Bot"
+                  }
+                },
+                "required": [
+                  "op",
+                  "bot"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "turn_bot_on"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  },
+                  "on": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow",
+                  "on"
+                ]
+              },
+              {
+                "description": "`Run`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "run_now"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow"
+                ]
+              },
+              {
+                "description": "`Vec<Run>`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "runs"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "description": "`Vec<Call>`: the open calls, and the last answered.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "calls"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "answer_call"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "answer": {
+                    "$ref": "#/$defs/Answer2"
+                  }
+                },
+                "required": [
+                  "op",
+                  "id",
+                  "answer"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "take_over"
+                  },
+                  "run": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "run"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "give_back"
+                  },
+                  "run": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "run"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "stop_run"
+                  },
+                  "run": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "run"
+                ]
+              },
+              {
+                "description": "Text to the team's chat; answers its reply.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "chat"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "text"
+                ]
+              },
+              {
+                "description": "A personal `HubCall` run on the team's account, if the hub's `hub_call_allowed` lets the\nrole. A `HubCall` as JSON, which the hub parses: a recursive schema overflows the wire\nchecker's stack.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "hub"
+                  },
+                  "call": true
+                },
+                "required": [
+                  "op",
+                  "call"
+                ]
+              },
+              {
+                "description": "From a box's session only, on the team account's machine: asks the people its bot's\n`CallRules` name for `situation`. The session never names people.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "ask_people"
+                  },
+                  "situation": {
+                    "$ref": "#/$defs/Situation"
+                  },
+                  "question": {
+                    "type": "string"
+                  },
+                  "choices": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "default": []
+                  }
+                },
+                "required": [
+                  "op",
+                  "situation",
+                  "question"
+                ]
+              }
+            ]
+          },
+          "Group": {
+            "description": "People a bot asks by one name: `@design`.\n\n`{\"handle\":\"design\",\"about\":\"UI calls\",\"members\":[\"0b7e…\"],\"fallback\":null,\"slack_group\":\"\"}`",
+            "type": "object",
+            "properties": {
+              "handle": {
+                "type": "string"
+              },
+              "about": {
+                "type": "string",
+                "default": ""
+              },
+              "members": {
+                "description": "Account ids.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "fallback": {
+                "description": "Who is asked when no member of the group is a member of the team any more.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "slack_group": {
+                "description": "A Slack user group to mention, empty for none.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "handle"
+            ]
+          },
+          "Bot": {
+            "description": "A team workflow with who it asks and what a run may spend.\n\n`{\"workflow\":\"c1\",\"name\":\"Fix bugs\",\"owner\":\"0b7e…\",\"calls\":{…},\"limits\":{\"usd\":5.0,\"minutes\":30},\"on\":true,\"on_by\":\"0b7e…\"}`",
+            "type": "object",
+            "properties": {
+              "workflow": {
+                "description": "The id of the team account's workflow (a `Connector`).",
+                "type": "string"
+              },
+              "name": {
+                "type": "string",
+                "default": ""
+              },
+              "owner": {
+                "description": "The member who answers for the bot.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "calls": {
+                "$ref": "#/$defs/CallRules",
+                "default": {
+                  "before_irreversible": {
+                    "kind": "owner"
+                  },
+                  "in_doubt": {
+                    "kind": "owner"
+                  },
+                  "on_limit": {
+                    "kind": "owner"
+                  },
+                  "on_failure": {
+                    "kind": "owner"
+                  }
+                }
+              },
+              "limits": {
+                "$ref": "#/$defs/BotLimits",
+                "default": {
+                  "usd": 5.0,
+                  "minutes": 30
+                }
+              },
+              "on": {
+                "type": "boolean",
+                "default": false
+              },
+              "on_by": {
+                "description": "Who turned it on last.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "workflow"
+            ]
+          },
+          "CallRules": {
+            "description": "Who a bot asks in each situation. Every situation goes to the owner by default.\n\n`{\"before_irreversible\":{\"kind\":\"owner\"},\"in_doubt\":{\"kind\":\"group\",\"handle\":\"design\"},\"on_limit\":{\"kind\":\"owner\"},\"on_failure\":{\"kind\":\"owner\"}}`",
+            "type": "object",
+            "properties": {
+              "before_irreversible": {
+                "$ref": "#/$defs/Who",
+                "default": {
+                  "kind": "owner"
+                }
+              },
+              "in_doubt": {
+                "$ref": "#/$defs/Who",
+                "default": {
+                  "kind": "owner"
+                }
+              },
+              "on_limit": {
+                "$ref": "#/$defs/Who",
+                "default": {
+                  "kind": "owner"
+                }
+              },
+              "on_failure": {
+                "$ref": "#/$defs/Who",
+                "default": {
+                  "kind": "owner"
+                }
+              }
+            }
+          },
+          "Who": {
+            "description": "Who a bot's call goes to.\n\n`{\"kind\":\"person\",\"account\":\"0b7e…\"}`, `{\"kind\":\"group\",\"handle\":\"design\"}`, `{\"kind\":\"owner\"}`",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "person"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "account"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "group"
+                  },
+                  "handle": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "handle"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "owner"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "BotLimits": {
+            "description": "What one run of a bot may spend.\n\n`{\"usd\":5.0,\"minutes\":30}`",
+            "type": "object",
+            "properties": {
+              "usd": {
+                "type": "number",
+                "format": "double"
+              },
+              "minutes": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "usd",
+              "minutes"
+            ]
+          },
+          "Answer2": {
+            "description": "A client sends `by` and `at` empty; the hub sets them.\n\n`{\"by\":\"0b7e…\",\"choice\":\"Ship it\",\"text\":\"\",\"kind\":{\"kind\":\"choice\"},\"at\":1763300000}`",
+            "type": "object",
+            "properties": {
+              "by": {
+                "type": "string",
+                "default": ""
+              },
+              "choice": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "text": {
+                "type": "string",
+                "default": ""
+              },
+              "kind": {
+                "$ref": "#/$defs/AnswerKind"
+              },
+              "at": {
+                "type": "integer",
+                "format": "int64",
+                "default": 0
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "AnswerKind": {
+            "description": "How a person answered a call.\n\n`{\"kind\":\"choice\"}`, `{\"kind\":\"pass_to\",\"handle\":\"design\"}`, `{\"kind\":\"take_over\"}`, `{\"kind\":\"stop\"}`",
+            "oneOf": [
+              {
+                "description": "`Answer::choice` and `Answer::text` go back to the session.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "choice"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "The call goes to the group `handle` instead.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "pass_to"
+                  },
+                  "handle": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "handle"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "take_over"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "stop"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Situation": {
+            "description": "Why a bot's session stops to ask people.\n\n`\"before_irreversible\"`, `\"in_doubt\"`, `\"on_limit\"`, `\"on_failure\"`",
+            "type": "string",
+            "enum": [
+              "before_irreversible",
+              "in_doubt",
+              "on_limit",
+              "on_failure"
             ]
           },
           "Target4": {
@@ -25401,6 +27003,31 @@
                   "tab",
                   "repo",
                   "ask"
+                ]
+              },
+              {
+                "description": "A member's call about a team, which the hub runs on the team's account after it checks\nthe membership. `team` is the team's id; `List`, `Create` and `Join` leave it out. From a\nmachine, only a box of the team sends it, with `AskPeople` and no `team`.\n\n`{\"cmd\":\"team\",\"team\":\"6f1c…\",\"op\":{\"op\":\"members\"}}`, `{\"cmd\":\"team\",\"op\":{\"op\":\"create\",\"name\":\"Acme\"}}`",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "team"
+                  },
+                  "team": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "op": {
+                    "$ref": "#/$defs/TeamOp"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "team",
+                  "op"
                 ]
               }
             ]
@@ -29502,6 +31129,793 @@
                 ]
               }
             ]
+          },
+          "TeamOp": {
+            "description": "What a member asks about a team, inside `HubCall::Team`. Every op but `List`, `Create` and\n`Join` names the team in `HubCall::Team::team`.\n\n`{\"op\":\"create\",\"name\":\"Acme\"}`, `{\"op\":\"answer_call\",\"id\":\"…\",\"answer\":{\"kind\":{\"kind\":\"choice\"},\"choice\":\"red\"}}`,\n`{\"op\":\"hub\",\"call\":{\"cmd\":\"get_settings\"}}`, `{\"op\":\"ask_people\",\"situation\":\"in_doubt\",\"question\":\"Which color?\",\"choices\":[\"red\",\"blue\"]}`",
+            "oneOf": [
+              {
+                "description": "`Vec<Team>`: the teams the person is a member of.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "list"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "description": "`Team`: a new team the person owns.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "create"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "name"
+                ]
+              },
+              {
+                "description": "`Team`: joins by an invite code.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "join"
+                  },
+                  "code": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "code"
+                ]
+              },
+              {
+                "description": "Owner only.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "rename"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "name"
+                ]
+              },
+              {
+                "description": "`Vec<Member>`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "members"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "description": "Owner only. `{\"code\":\"ABCD-…\",\"hint\":\"ABCD\"}`: the code is shown once.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "invite"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "description": "Owner only: the invite whose code starts with `hint`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "revoke_invite"
+                  },
+                  "hint": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "hint"
+                ]
+              },
+              {
+                "description": "Owner only.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "remove_member"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "account"
+                ]
+              },
+              {
+                "description": "A member leaves; the owner cannot.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "leave"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "description": "Attaches the person's own shared project `key` to the team.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "attach_project"
+                  },
+                  "key": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "key"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "detach_project"
+                  },
+                  "key": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "key"
+                ]
+              },
+              {
+                "description": "`Vec<TeamProject>`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "projects"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "description": "`Vec<Group>`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "groups"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "save_group"
+                  },
+                  "group": {
+                    "$ref": "#/$defs/Group"
+                  }
+                },
+                "required": [
+                  "op",
+                  "group"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "join_group"
+                  },
+                  "handle": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "handle"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "leave_group"
+                  },
+                  "handle": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "handle"
+                ]
+              },
+              {
+                "description": "`Vec<Bot>`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "bots"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "save_bot"
+                  },
+                  "bot": {
+                    "$ref": "#/$defs/Bot"
+                  }
+                },
+                "required": [
+                  "op",
+                  "bot"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "turn_bot_on"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  },
+                  "on": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow",
+                  "on"
+                ]
+              },
+              {
+                "description": "`Run`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "run_now"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow"
+                ]
+              },
+              {
+                "description": "`Vec<Run>`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "runs"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "description": "`Vec<Call>`: the open calls, and the last answered.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "calls"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "answer_call"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "answer": {
+                    "$ref": "#/$defs/Answer"
+                  }
+                },
+                "required": [
+                  "op",
+                  "id",
+                  "answer"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "take_over"
+                  },
+                  "run": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "run"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "give_back"
+                  },
+                  "run": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "run"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "stop_run"
+                  },
+                  "run": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "run"
+                ]
+              },
+              {
+                "description": "Text to the team's chat; answers its reply.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "chat"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "text"
+                ]
+              },
+              {
+                "description": "A personal `HubCall` run on the team's account, if the hub's `hub_call_allowed` lets the\nrole. A `HubCall` as JSON, which the hub parses: a recursive schema overflows the wire\nchecker's stack.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "hub"
+                  },
+                  "call": true
+                },
+                "required": [
+                  "op",
+                  "call"
+                ]
+              },
+              {
+                "description": "From a box's session only, on the team account's machine: asks the people its bot's\n`CallRules` name for `situation`. The session never names people.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "ask_people"
+                  },
+                  "situation": {
+                    "$ref": "#/$defs/Situation"
+                  },
+                  "question": {
+                    "type": "string"
+                  },
+                  "choices": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "default": []
+                  }
+                },
+                "required": [
+                  "op",
+                  "situation",
+                  "question",
+                  "choices"
+                ]
+              }
+            ]
+          },
+          "Group": {
+            "description": "People a bot asks by one name: `@design`.\n\n`{\"handle\":\"design\",\"about\":\"UI calls\",\"members\":[\"0b7e…\"],\"fallback\":null,\"slack_group\":\"\"}`",
+            "type": "object",
+            "properties": {
+              "handle": {
+                "type": "string"
+              },
+              "about": {
+                "type": "string",
+                "default": ""
+              },
+              "members": {
+                "description": "Account ids.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "fallback": {
+                "description": "Who is asked when no member of the group is a member of the team any more.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "slack_group": {
+                "description": "A Slack user group to mention, empty for none.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "handle",
+              "about",
+              "members",
+              "fallback",
+              "slack_group"
+            ]
+          },
+          "Bot": {
+            "description": "A team workflow with who it asks and what a run may spend.\n\n`{\"workflow\":\"c1\",\"name\":\"Fix bugs\",\"owner\":\"0b7e…\",\"calls\":{…},\"limits\":{\"usd\":5.0,\"minutes\":30},\"on\":true,\"on_by\":\"0b7e…\"}`",
+            "type": "object",
+            "properties": {
+              "workflow": {
+                "description": "The id of the team account's workflow (a `Connector`).",
+                "type": "string"
+              },
+              "name": {
+                "type": "string",
+                "default": ""
+              },
+              "owner": {
+                "description": "The member who answers for the bot.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "calls": {
+                "$ref": "#/$defs/CallRules",
+                "default": {
+                  "before_irreversible": {
+                    "kind": "owner"
+                  },
+                  "in_doubt": {
+                    "kind": "owner"
+                  },
+                  "on_limit": {
+                    "kind": "owner"
+                  },
+                  "on_failure": {
+                    "kind": "owner"
+                  }
+                }
+              },
+              "limits": {
+                "$ref": "#/$defs/BotLimits",
+                "default": {
+                  "usd": 5.0,
+                  "minutes": 30
+                }
+              },
+              "on": {
+                "type": "boolean",
+                "default": false
+              },
+              "on_by": {
+                "description": "Who turned it on last.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "workflow",
+              "name",
+              "owner",
+              "calls",
+              "limits",
+              "on",
+              "on_by"
+            ]
+          },
+          "CallRules": {
+            "description": "Who a bot asks in each situation. Every situation goes to the owner by default.\n\n`{\"before_irreversible\":{\"kind\":\"owner\"},\"in_doubt\":{\"kind\":\"group\",\"handle\":\"design\"},\"on_limit\":{\"kind\":\"owner\"},\"on_failure\":{\"kind\":\"owner\"}}`",
+            "type": "object",
+            "properties": {
+              "before_irreversible": {
+                "$ref": "#/$defs/Who",
+                "default": {
+                  "kind": "owner"
+                }
+              },
+              "in_doubt": {
+                "$ref": "#/$defs/Who",
+                "default": {
+                  "kind": "owner"
+                }
+              },
+              "on_limit": {
+                "$ref": "#/$defs/Who",
+                "default": {
+                  "kind": "owner"
+                }
+              },
+              "on_failure": {
+                "$ref": "#/$defs/Who",
+                "default": {
+                  "kind": "owner"
+                }
+              }
+            },
+            "required": [
+              "before_irreversible",
+              "in_doubt",
+              "on_limit",
+              "on_failure"
+            ]
+          },
+          "Who": {
+            "description": "Who a bot's call goes to.\n\n`{\"kind\":\"person\",\"account\":\"0b7e…\"}`, `{\"kind\":\"group\",\"handle\":\"design\"}`, `{\"kind\":\"owner\"}`",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "person"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "account"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "group"
+                  },
+                  "handle": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "handle"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "owner"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "BotLimits": {
+            "description": "What one run of a bot may spend.\n\n`{\"usd\":5.0,\"minutes\":30}`",
+            "type": "object",
+            "properties": {
+              "usd": {
+                "type": "number",
+                "format": "double"
+              },
+              "minutes": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "usd",
+              "minutes"
+            ]
+          },
+          "Answer": {
+            "description": "A client sends `by` and `at` empty; the hub sets them.\n\n`{\"by\":\"0b7e…\",\"choice\":\"Ship it\",\"text\":\"\",\"kind\":{\"kind\":\"choice\"},\"at\":1763300000}`",
+            "type": "object",
+            "properties": {
+              "by": {
+                "type": "string",
+                "default": ""
+              },
+              "choice": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "text": {
+                "type": "string",
+                "default": ""
+              },
+              "kind": {
+                "$ref": "#/$defs/AnswerKind"
+              },
+              "at": {
+                "type": "integer",
+                "format": "int64",
+                "default": 0
+              }
+            },
+            "required": [
+              "by",
+              "choice",
+              "text",
+              "kind",
+              "at"
+            ]
+          },
+          "AnswerKind": {
+            "description": "How a person answered a call.\n\n`{\"kind\":\"choice\"}`, `{\"kind\":\"pass_to\",\"handle\":\"design\"}`, `{\"kind\":\"take_over\"}`, `{\"kind\":\"stop\"}`",
+            "oneOf": [
+              {
+                "description": "`Answer::choice` and `Answer::text` go back to the session.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "choice"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "The call goes to the group `handle` instead.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "pass_to"
+                  },
+                  "handle": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "handle"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "take_over"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "stop"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Situation": {
+            "description": "Why a bot's session stops to ask people.\n\n`\"before_irreversible\"`, `\"in_doubt\"`, `\"on_limit\"`, `\"on_failure\"`",
+            "type": "string",
+            "enum": [
+              "before_irreversible",
+              "in_doubt",
+              "on_limit",
+              "on_failure"
+            ]
           }
         }
       },
@@ -33084,6 +35498,30 @@
                   "cmd",
                   "tab",
                   "ask"
+                ]
+              },
+              {
+                "description": "A member's call about a team, which the hub runs on the team's account after it checks\nthe membership. `team` is the team's id; `List`, `Create` and `Join` leave it out. From a\nmachine, only a box of the team sends it, with `AskPeople` and no `team`.\n\n`{\"cmd\":\"team\",\"team\":\"6f1c…\",\"op\":{\"op\":\"members\"}}`, `{\"cmd\":\"team\",\"op\":{\"op\":\"create\",\"name\":\"Acme\"}}`",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "team"
+                  },
+                  "team": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "default": null
+                  },
+                  "op": {
+                    "$ref": "#/$defs/TeamOp"
+                  }
+                },
+                "required": [
+                  "cmd",
+                  "op"
                 ]
               }
             ]
@@ -37055,6 +39493,772 @@
                   "op"
                 ]
               }
+            ]
+          },
+          "TeamOp": {
+            "description": "What a member asks about a team, inside `HubCall::Team`. Every op but `List`, `Create` and\n`Join` names the team in `HubCall::Team::team`.\n\n`{\"op\":\"create\",\"name\":\"Acme\"}`, `{\"op\":\"answer_call\",\"id\":\"…\",\"answer\":{\"kind\":{\"kind\":\"choice\"},\"choice\":\"red\"}}`,\n`{\"op\":\"hub\",\"call\":{\"cmd\":\"get_settings\"}}`, `{\"op\":\"ask_people\",\"situation\":\"in_doubt\",\"question\":\"Which color?\",\"choices\":[\"red\",\"blue\"]}`",
+            "oneOf": [
+              {
+                "description": "`Vec<Team>`: the teams the person is a member of.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "list"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "description": "`Team`: a new team the person owns.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "create"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "name"
+                ]
+              },
+              {
+                "description": "`Team`: joins by an invite code.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "join"
+                  },
+                  "code": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "code"
+                ]
+              },
+              {
+                "description": "Owner only.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "rename"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "name"
+                ]
+              },
+              {
+                "description": "`Vec<Member>`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "members"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "description": "Owner only. `{\"code\":\"ABCD-…\",\"hint\":\"ABCD\"}`: the code is shown once.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "invite"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "description": "Owner only: the invite whose code starts with `hint`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "revoke_invite"
+                  },
+                  "hint": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "hint"
+                ]
+              },
+              {
+                "description": "Owner only.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "remove_member"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "account"
+                ]
+              },
+              {
+                "description": "A member leaves; the owner cannot.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "leave"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "description": "Attaches the person's own shared project `key` to the team.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "attach_project"
+                  },
+                  "key": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "key"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "detach_project"
+                  },
+                  "key": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "key"
+                ]
+              },
+              {
+                "description": "`Vec<TeamProject>`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "projects"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "description": "`Vec<Group>`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "groups"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "save_group"
+                  },
+                  "group": {
+                    "$ref": "#/$defs/Group"
+                  }
+                },
+                "required": [
+                  "op",
+                  "group"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "join_group"
+                  },
+                  "handle": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "handle"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "leave_group"
+                  },
+                  "handle": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "handle"
+                ]
+              },
+              {
+                "description": "`Vec<Bot>`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "bots"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "save_bot"
+                  },
+                  "bot": {
+                    "$ref": "#/$defs/Bot"
+                  }
+                },
+                "required": [
+                  "op",
+                  "bot"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "turn_bot_on"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  },
+                  "on": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow",
+                  "on"
+                ]
+              },
+              {
+                "description": "`Run`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "run_now"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow"
+                ]
+              },
+              {
+                "description": "`Vec<Run>`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "runs"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "description": "`Vec<Call>`: the open calls, and the last answered.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "calls"
+                  }
+                },
+                "required": [
+                  "op"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "answer_call"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "answer": {
+                    "$ref": "#/$defs/Answer"
+                  }
+                },
+                "required": [
+                  "op",
+                  "id",
+                  "answer"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "take_over"
+                  },
+                  "run": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "run"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "give_back"
+                  },
+                  "run": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "run"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "stop_run"
+                  },
+                  "run": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "run"
+                ]
+              },
+              {
+                "description": "Text to the team's chat; answers its reply.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "chat"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "op",
+                  "text"
+                ]
+              },
+              {
+                "description": "A personal `HubCall` run on the team's account, if the hub's `hub_call_allowed` lets the\nrole. A `HubCall` as JSON, which the hub parses: a recursive schema overflows the wire\nchecker's stack.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "hub"
+                  },
+                  "call": true
+                },
+                "required": [
+                  "op",
+                  "call"
+                ]
+              },
+              {
+                "description": "From a box's session only, on the team account's machine: asks the people its bot's\n`CallRules` name for `situation`. The session never names people.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "ask_people"
+                  },
+                  "situation": {
+                    "$ref": "#/$defs/Situation"
+                  },
+                  "question": {
+                    "type": "string"
+                  },
+                  "choices": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "default": []
+                  }
+                },
+                "required": [
+                  "op",
+                  "situation",
+                  "question"
+                ]
+              }
+            ]
+          },
+          "Group": {
+            "description": "People a bot asks by one name: `@design`.\n\n`{\"handle\":\"design\",\"about\":\"UI calls\",\"members\":[\"0b7e…\"],\"fallback\":null,\"slack_group\":\"\"}`",
+            "type": "object",
+            "properties": {
+              "handle": {
+                "type": "string"
+              },
+              "about": {
+                "type": "string",
+                "default": ""
+              },
+              "members": {
+                "description": "Account ids.",
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "fallback": {
+                "description": "Who is asked when no member of the group is a member of the team any more.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "slack_group": {
+                "description": "A Slack user group to mention, empty for none.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "handle"
+            ]
+          },
+          "Bot": {
+            "description": "A team workflow with who it asks and what a run may spend.\n\n`{\"workflow\":\"c1\",\"name\":\"Fix bugs\",\"owner\":\"0b7e…\",\"calls\":{…},\"limits\":{\"usd\":5.0,\"minutes\":30},\"on\":true,\"on_by\":\"0b7e…\"}`",
+            "type": "object",
+            "properties": {
+              "workflow": {
+                "description": "The id of the team account's workflow (a `Connector`).",
+                "type": "string"
+              },
+              "name": {
+                "type": "string",
+                "default": ""
+              },
+              "owner": {
+                "description": "The member who answers for the bot.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "calls": {
+                "$ref": "#/$defs/CallRules",
+                "default": {
+                  "before_irreversible": {
+                    "kind": "owner"
+                  },
+                  "in_doubt": {
+                    "kind": "owner"
+                  },
+                  "on_limit": {
+                    "kind": "owner"
+                  },
+                  "on_failure": {
+                    "kind": "owner"
+                  }
+                }
+              },
+              "limits": {
+                "$ref": "#/$defs/BotLimits",
+                "default": {
+                  "usd": 5.0,
+                  "minutes": 30
+                }
+              },
+              "on": {
+                "type": "boolean",
+                "default": false
+              },
+              "on_by": {
+                "description": "Who turned it on last.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "workflow"
+            ]
+          },
+          "CallRules": {
+            "description": "Who a bot asks in each situation. Every situation goes to the owner by default.\n\n`{\"before_irreversible\":{\"kind\":\"owner\"},\"in_doubt\":{\"kind\":\"group\",\"handle\":\"design\"},\"on_limit\":{\"kind\":\"owner\"},\"on_failure\":{\"kind\":\"owner\"}}`",
+            "type": "object",
+            "properties": {
+              "before_irreversible": {
+                "$ref": "#/$defs/Who",
+                "default": {
+                  "kind": "owner"
+                }
+              },
+              "in_doubt": {
+                "$ref": "#/$defs/Who",
+                "default": {
+                  "kind": "owner"
+                }
+              },
+              "on_limit": {
+                "$ref": "#/$defs/Who",
+                "default": {
+                  "kind": "owner"
+                }
+              },
+              "on_failure": {
+                "$ref": "#/$defs/Who",
+                "default": {
+                  "kind": "owner"
+                }
+              }
+            }
+          },
+          "Who": {
+            "description": "Who a bot's call goes to.\n\n`{\"kind\":\"person\",\"account\":\"0b7e…\"}`, `{\"kind\":\"group\",\"handle\":\"design\"}`, `{\"kind\":\"owner\"}`",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "person"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "account"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "group"
+                  },
+                  "handle": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "handle"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "owner"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "BotLimits": {
+            "description": "What one run of a bot may spend.\n\n`{\"usd\":5.0,\"minutes\":30}`",
+            "type": "object",
+            "properties": {
+              "usd": {
+                "type": "number",
+                "format": "double"
+              },
+              "minutes": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "usd",
+              "minutes"
+            ]
+          },
+          "Answer": {
+            "description": "A client sends `by` and `at` empty; the hub sets them.\n\n`{\"by\":\"0b7e…\",\"choice\":\"Ship it\",\"text\":\"\",\"kind\":{\"kind\":\"choice\"},\"at\":1763300000}`",
+            "type": "object",
+            "properties": {
+              "by": {
+                "type": "string",
+                "default": ""
+              },
+              "choice": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "text": {
+                "type": "string",
+                "default": ""
+              },
+              "kind": {
+                "$ref": "#/$defs/AnswerKind"
+              },
+              "at": {
+                "type": "integer",
+                "format": "int64",
+                "default": 0
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "AnswerKind": {
+            "description": "How a person answered a call.\n\n`{\"kind\":\"choice\"}`, `{\"kind\":\"pass_to\",\"handle\":\"design\"}`, `{\"kind\":\"take_over\"}`, `{\"kind\":\"stop\"}`",
+            "oneOf": [
+              {
+                "description": "`Answer::choice` and `Answer::text` go back to the session.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "choice"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "The call goes to the group `handle` instead.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "pass_to"
+                  },
+                  "handle": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "handle"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "take_over"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "stop"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Situation": {
+            "description": "Why a bot's session stops to ask people.\n\n`\"before_irreversible\"`, `\"in_doubt\"`, `\"on_limit\"`, `\"on_failure\"`",
+            "type": "string",
+            "enum": [
+              "before_irreversible",
+              "in_doubt",
+              "on_limit",
+              "on_failure"
             ]
           }
         }
@@ -54528,6 +57732,1398 @@
         }
       }
     },
+    "Team": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Team",
+        "description": "A team as one of its members sees it, with that member's role.\n\n`{\"id\":\"6f1c…\",\"name\":\"Acme\",\"owner\":\"0b7e…\",\"role\":\"owner\",\"credential\":{\"upstash\":false,\"claude\":false,\"github\":false,\"slack\":false}}`",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "owner": {
+            "description": "The owner's account id.",
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/$defs/Role"
+          },
+          "credential": {
+            "$ref": "#/$defs/CredentialState",
+            "default": {
+              "upstash": false,
+              "claude": false,
+              "github": false,
+              "slack": false
+            }
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "owner",
+          "role",
+          "credential"
+        ],
+        "$defs": {
+          "Role": {
+            "description": "What a member may do on a team. The owner made it and holds its keys.\n\n`\"owner\"`, `\"member\"`",
+            "type": "string",
+            "enum": [
+              "owner",
+              "member"
+            ]
+          },
+          "CredentialState": {
+            "description": "Which of the team's keys are set, never a value.\n\n`{\"upstash\":true,\"claude\":true,\"github\":false,\"slack\":false}`",
+            "type": "object",
+            "properties": {
+              "upstash": {
+                "type": "boolean",
+                "default": false
+              },
+              "claude": {
+                "type": "boolean",
+                "default": false
+              },
+              "github": {
+                "type": "boolean",
+                "default": false
+              },
+              "slack": {
+                "type": "boolean",
+                "default": false
+              }
+            },
+            "required": [
+              "upstash",
+              "claude",
+              "github",
+              "slack"
+            ]
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Team",
+        "description": "A team as one of its members sees it, with that member's role.\n\n`{\"id\":\"6f1c…\",\"name\":\"Acme\",\"owner\":\"0b7e…\",\"role\":\"owner\",\"credential\":{\"upstash\":false,\"claude\":false,\"github\":false,\"slack\":false}}`",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "owner": {
+            "description": "The owner's account id.",
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/$defs/Role"
+          },
+          "credential": {
+            "$ref": "#/$defs/CredentialState",
+            "default": {
+              "upstash": false,
+              "claude": false,
+              "github": false,
+              "slack": false
+            }
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "owner",
+          "role"
+        ],
+        "$defs": {
+          "Role": {
+            "description": "What a member may do on a team. The owner made it and holds its keys.\n\n`\"owner\"`, `\"member\"`",
+            "type": "string",
+            "enum": [
+              "owner",
+              "member"
+            ]
+          },
+          "CredentialState": {
+            "description": "Which of the team's keys are set, never a value.\n\n`{\"upstash\":true,\"claude\":true,\"github\":false,\"slack\":false}`",
+            "type": "object",
+            "properties": {
+              "upstash": {
+                "type": "boolean",
+                "default": false
+              },
+              "claude": {
+                "type": "boolean",
+                "default": false
+              },
+              "github": {
+                "type": "boolean",
+                "default": false
+              },
+              "slack": {
+                "type": "boolean",
+                "default": false
+              }
+            }
+          }
+        }
+      }
+    },
+    "TeamBot": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Bot",
+        "description": "A team workflow with who it asks and what a run may spend.\n\n`{\"workflow\":\"c1\",\"name\":\"Fix bugs\",\"owner\":\"0b7e…\",\"calls\":{…},\"limits\":{\"usd\":5.0,\"minutes\":30},\"on\":true,\"on_by\":\"0b7e…\"}`",
+        "type": "object",
+        "properties": {
+          "workflow": {
+            "description": "The id of the team account's workflow (a `Connector`).",
+            "type": "string"
+          },
+          "name": {
+            "type": "string",
+            "default": ""
+          },
+          "owner": {
+            "description": "The member who answers for the bot.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "calls": {
+            "$ref": "#/$defs/CallRules",
+            "default": {
+              "before_irreversible": {
+                "kind": "owner"
+              },
+              "in_doubt": {
+                "kind": "owner"
+              },
+              "on_limit": {
+                "kind": "owner"
+              },
+              "on_failure": {
+                "kind": "owner"
+              }
+            }
+          },
+          "limits": {
+            "$ref": "#/$defs/BotLimits",
+            "default": {
+              "usd": 5.0,
+              "minutes": 30
+            }
+          },
+          "on": {
+            "type": "boolean",
+            "default": false
+          },
+          "on_by": {
+            "description": "Who turned it on last.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "workflow",
+          "name",
+          "owner",
+          "calls",
+          "limits",
+          "on",
+          "on_by"
+        ],
+        "$defs": {
+          "CallRules": {
+            "description": "Who a bot asks in each situation. Every situation goes to the owner by default.\n\n`{\"before_irreversible\":{\"kind\":\"owner\"},\"in_doubt\":{\"kind\":\"group\",\"handle\":\"design\"},\"on_limit\":{\"kind\":\"owner\"},\"on_failure\":{\"kind\":\"owner\"}}`",
+            "type": "object",
+            "properties": {
+              "before_irreversible": {
+                "$ref": "#/$defs/Who",
+                "default": {
+                  "kind": "owner"
+                }
+              },
+              "in_doubt": {
+                "$ref": "#/$defs/Who",
+                "default": {
+                  "kind": "owner"
+                }
+              },
+              "on_limit": {
+                "$ref": "#/$defs/Who",
+                "default": {
+                  "kind": "owner"
+                }
+              },
+              "on_failure": {
+                "$ref": "#/$defs/Who",
+                "default": {
+                  "kind": "owner"
+                }
+              }
+            },
+            "required": [
+              "before_irreversible",
+              "in_doubt",
+              "on_limit",
+              "on_failure"
+            ]
+          },
+          "Who": {
+            "description": "Who a bot's call goes to.\n\n`{\"kind\":\"person\",\"account\":\"0b7e…\"}`, `{\"kind\":\"group\",\"handle\":\"design\"}`, `{\"kind\":\"owner\"}`",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "person"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "account"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "group"
+                  },
+                  "handle": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "handle"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "owner"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "BotLimits": {
+            "description": "What one run of a bot may spend.\n\n`{\"usd\":5.0,\"minutes\":30}`",
+            "type": "object",
+            "properties": {
+              "usd": {
+                "type": "number",
+                "format": "double"
+              },
+              "minutes": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "usd",
+              "minutes"
+            ]
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Bot",
+        "description": "A team workflow with who it asks and what a run may spend.\n\n`{\"workflow\":\"c1\",\"name\":\"Fix bugs\",\"owner\":\"0b7e…\",\"calls\":{…},\"limits\":{\"usd\":5.0,\"minutes\":30},\"on\":true,\"on_by\":\"0b7e…\"}`",
+        "type": "object",
+        "properties": {
+          "workflow": {
+            "description": "The id of the team account's workflow (a `Connector`).",
+            "type": "string"
+          },
+          "name": {
+            "type": "string",
+            "default": ""
+          },
+          "owner": {
+            "description": "The member who answers for the bot.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "calls": {
+            "$ref": "#/$defs/CallRules",
+            "default": {
+              "before_irreversible": {
+                "kind": "owner"
+              },
+              "in_doubt": {
+                "kind": "owner"
+              },
+              "on_limit": {
+                "kind": "owner"
+              },
+              "on_failure": {
+                "kind": "owner"
+              }
+            }
+          },
+          "limits": {
+            "$ref": "#/$defs/BotLimits",
+            "default": {
+              "usd": 5.0,
+              "minutes": 30
+            }
+          },
+          "on": {
+            "type": "boolean",
+            "default": false
+          },
+          "on_by": {
+            "description": "Who turned it on last.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "workflow"
+        ],
+        "$defs": {
+          "CallRules": {
+            "description": "Who a bot asks in each situation. Every situation goes to the owner by default.\n\n`{\"before_irreversible\":{\"kind\":\"owner\"},\"in_doubt\":{\"kind\":\"group\",\"handle\":\"design\"},\"on_limit\":{\"kind\":\"owner\"},\"on_failure\":{\"kind\":\"owner\"}}`",
+            "type": "object",
+            "properties": {
+              "before_irreversible": {
+                "$ref": "#/$defs/Who",
+                "default": {
+                  "kind": "owner"
+                }
+              },
+              "in_doubt": {
+                "$ref": "#/$defs/Who",
+                "default": {
+                  "kind": "owner"
+                }
+              },
+              "on_limit": {
+                "$ref": "#/$defs/Who",
+                "default": {
+                  "kind": "owner"
+                }
+              },
+              "on_failure": {
+                "$ref": "#/$defs/Who",
+                "default": {
+                  "kind": "owner"
+                }
+              }
+            }
+          },
+          "Who": {
+            "description": "Who a bot's call goes to.\n\n`{\"kind\":\"person\",\"account\":\"0b7e…\"}`, `{\"kind\":\"group\",\"handle\":\"design\"}`, `{\"kind\":\"owner\"}`",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "person"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "account"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "group"
+                  },
+                  "handle": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "handle"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "owner"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "BotLimits": {
+            "description": "What one run of a bot may spend.\n\n`{\"usd\":5.0,\"minutes\":30}`",
+            "type": "object",
+            "properties": {
+              "usd": {
+                "type": "number",
+                "format": "double"
+              },
+              "minutes": {
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "usd",
+              "minutes"
+            ]
+          }
+        }
+      }
+    },
+    "TeamCall": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Call",
+        "description": "A run's question to people.\n\n`{\"id\":\"…\",\"run\":\"…\",\"workflow\":\"c1\",\"situation\":\"in_doubt\",\"asked\":[{\"kind\":\"owner\"}],\"question\":\"Which color?\",\"choices\":[\"red\",\"blue\"],\"created_at\":1763300000,\"escalated\":false,\"answer\":null}`",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "run": {
+            "type": "string"
+          },
+          "workflow": {
+            "type": "string"
+          },
+          "situation": {
+            "$ref": "#/$defs/Situation"
+          },
+          "asked": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Who"
+            },
+            "default": []
+          },
+          "question": {
+            "type": "string"
+          },
+          "choices": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "escalated": {
+            "description": "Whether it went on to the owner after `TeamPolicy::escalate_after_secs`.",
+            "type": "boolean",
+            "default": false
+          },
+          "answer": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Answer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "id",
+          "run",
+          "workflow",
+          "situation",
+          "asked",
+          "question",
+          "choices",
+          "created_at",
+          "escalated",
+          "answer"
+        ],
+        "$defs": {
+          "Situation": {
+            "description": "Why a bot's session stops to ask people.\n\n`\"before_irreversible\"`, `\"in_doubt\"`, `\"on_limit\"`, `\"on_failure\"`",
+            "type": "string",
+            "enum": [
+              "before_irreversible",
+              "in_doubt",
+              "on_limit",
+              "on_failure"
+            ]
+          },
+          "Who": {
+            "description": "Who a bot's call goes to.\n\n`{\"kind\":\"person\",\"account\":\"0b7e…\"}`, `{\"kind\":\"group\",\"handle\":\"design\"}`, `{\"kind\":\"owner\"}`",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "person"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "account"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "group"
+                  },
+                  "handle": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "handle"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "owner"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Answer": {
+            "description": "A client sends `by` and `at` empty; the hub sets them.\n\n`{\"by\":\"0b7e…\",\"choice\":\"Ship it\",\"text\":\"\",\"kind\":{\"kind\":\"choice\"},\"at\":1763300000}`",
+            "type": "object",
+            "properties": {
+              "by": {
+                "type": "string",
+                "default": ""
+              },
+              "choice": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "text": {
+                "type": "string",
+                "default": ""
+              },
+              "kind": {
+                "$ref": "#/$defs/AnswerKind"
+              },
+              "at": {
+                "type": "integer",
+                "format": "int64",
+                "default": 0
+              }
+            },
+            "required": [
+              "by",
+              "choice",
+              "text",
+              "kind",
+              "at"
+            ]
+          },
+          "AnswerKind": {
+            "description": "How a person answered a call.\n\n`{\"kind\":\"choice\"}`, `{\"kind\":\"pass_to\",\"handle\":\"design\"}`, `{\"kind\":\"take_over\"}`, `{\"kind\":\"stop\"}`",
+            "oneOf": [
+              {
+                "description": "`Answer::choice` and `Answer::text` go back to the session.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "choice"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "The call goes to the group `handle` instead.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "pass_to"
+                  },
+                  "handle": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "handle"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "take_over"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "stop"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Call",
+        "description": "A run's question to people.\n\n`{\"id\":\"…\",\"run\":\"…\",\"workflow\":\"c1\",\"situation\":\"in_doubt\",\"asked\":[{\"kind\":\"owner\"}],\"question\":\"Which color?\",\"choices\":[\"red\",\"blue\"],\"created_at\":1763300000,\"escalated\":false,\"answer\":null}`",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "run": {
+            "type": "string"
+          },
+          "workflow": {
+            "type": "string"
+          },
+          "situation": {
+            "$ref": "#/$defs/Situation"
+          },
+          "asked": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/Who"
+            },
+            "default": []
+          },
+          "question": {
+            "type": "string"
+          },
+          "choices": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "escalated": {
+            "description": "Whether it went on to the owner after `TeamPolicy::escalate_after_secs`.",
+            "type": "boolean",
+            "default": false
+          },
+          "answer": {
+            "anyOf": [
+              {
+                "$ref": "#/$defs/Answer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "id",
+          "run",
+          "workflow",
+          "situation",
+          "question",
+          "created_at"
+        ],
+        "$defs": {
+          "Situation": {
+            "description": "Why a bot's session stops to ask people.\n\n`\"before_irreversible\"`, `\"in_doubt\"`, `\"on_limit\"`, `\"on_failure\"`",
+            "type": "string",
+            "enum": [
+              "before_irreversible",
+              "in_doubt",
+              "on_limit",
+              "on_failure"
+            ]
+          },
+          "Who": {
+            "description": "Who a bot's call goes to.\n\n`{\"kind\":\"person\",\"account\":\"0b7e…\"}`, `{\"kind\":\"group\",\"handle\":\"design\"}`, `{\"kind\":\"owner\"}`",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "person"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "account"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "group"
+                  },
+                  "handle": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "handle"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "owner"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Answer": {
+            "description": "A client sends `by` and `at` empty; the hub sets them.\n\n`{\"by\":\"0b7e…\",\"choice\":\"Ship it\",\"text\":\"\",\"kind\":{\"kind\":\"choice\"},\"at\":1763300000}`",
+            "type": "object",
+            "properties": {
+              "by": {
+                "type": "string",
+                "default": ""
+              },
+              "choice": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "text": {
+                "type": "string",
+                "default": ""
+              },
+              "kind": {
+                "$ref": "#/$defs/AnswerKind"
+              },
+              "at": {
+                "type": "integer",
+                "format": "int64",
+                "default": 0
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "AnswerKind": {
+            "description": "How a person answered a call.\n\n`{\"kind\":\"choice\"}`, `{\"kind\":\"pass_to\",\"handle\":\"design\"}`, `{\"kind\":\"take_over\"}`, `{\"kind\":\"stop\"}`",
+            "oneOf": [
+              {
+                "description": "`Answer::choice` and `Answer::text` go back to the session.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "choice"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "The call goes to the group `handle` instead.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "pass_to"
+                  },
+                  "handle": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "handle"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "take_over"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "stop"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          }
+        }
+      }
+    },
+    "TeamGroup": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Group",
+        "description": "People a bot asks by one name: `@design`.\n\n`{\"handle\":\"design\",\"about\":\"UI calls\",\"members\":[\"0b7e…\"],\"fallback\":null,\"slack_group\":\"\"}`",
+        "type": "object",
+        "properties": {
+          "handle": {
+            "type": "string"
+          },
+          "about": {
+            "type": "string",
+            "default": ""
+          },
+          "members": {
+            "description": "Account ids.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "fallback": {
+            "description": "Who is asked when no member of the group is a member of the team any more.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "slack_group": {
+            "description": "A Slack user group to mention, empty for none.",
+            "type": "string",
+            "default": ""
+          }
+        },
+        "required": [
+          "handle",
+          "about",
+          "members",
+          "fallback",
+          "slack_group"
+        ]
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Group",
+        "description": "People a bot asks by one name: `@design`.\n\n`{\"handle\":\"design\",\"about\":\"UI calls\",\"members\":[\"0b7e…\"],\"fallback\":null,\"slack_group\":\"\"}`",
+        "type": "object",
+        "properties": {
+          "handle": {
+            "type": "string"
+          },
+          "about": {
+            "type": "string",
+            "default": ""
+          },
+          "members": {
+            "description": "Account ids.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "fallback": {
+            "description": "Who is asked when no member of the group is a member of the team any more.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "slack_group": {
+            "description": "A Slack user group to mention, empty for none.",
+            "type": "string",
+            "default": ""
+          }
+        },
+        "required": [
+          "handle"
+        ]
+      }
+    },
+    "TeamInvite": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "TeamInvite",
+        "description": "A new invite, the only time its code is shown. `hint` names it after: its first group.\n\n`{\"code\":\"ABCD-EFGH-JKMN-PQRS\",\"hint\":\"ABCD\"}`",
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "hint": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "hint"
+        ]
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "TeamInvite",
+        "description": "A new invite, the only time its code is shown. `hint` names it after: its first group.\n\n`{\"code\":\"ABCD-EFGH-JKMN-PQRS\",\"hint\":\"ABCD\"}`",
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "hint": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "hint"
+        ]
+      }
+    },
+    "TeamMember": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Member",
+        "description": "`{\"account\":\"0b7e…\",\"email\":\"ana@acme.com\",\"role\":\"member\",\"groups\":[\"design\"]}`",
+        "type": "object",
+        "properties": {
+          "account": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/$defs/Role"
+          },
+          "groups": {
+            "description": "The handles of the groups the member is in.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          }
+        },
+        "required": [
+          "account",
+          "email",
+          "role",
+          "groups"
+        ],
+        "$defs": {
+          "Role": {
+            "description": "What a member may do on a team. The owner made it and holds its keys.\n\n`\"owner\"`, `\"member\"`",
+            "type": "string",
+            "enum": [
+              "owner",
+              "member"
+            ]
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Member",
+        "description": "`{\"account\":\"0b7e…\",\"email\":\"ana@acme.com\",\"role\":\"member\",\"groups\":[\"design\"]}`",
+        "type": "object",
+        "properties": {
+          "account": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/$defs/Role"
+          },
+          "groups": {
+            "description": "The handles of the groups the member is in.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          }
+        },
+        "required": [
+          "account",
+          "email",
+          "role"
+        ],
+        "$defs": {
+          "Role": {
+            "description": "What a member may do on a team. The owner made it and holds its keys.\n\n`\"owner\"`, `\"member\"`",
+            "type": "string",
+            "enum": [
+              "owner",
+              "member"
+            ]
+          }
+        }
+      }
+    },
+    "TeamProject": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "TeamProject",
+        "description": "A member's shared project attached to the team: its bots work in it.\n\n`{\"key\":\"github.com/acme/site\",\"name\":\"site\",\"repo\":\"github.com/acme/site\",\"member\":\"0b7e…\"}`",
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "member": {
+            "description": "The member who attached it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "name",
+          "repo",
+          "member"
+        ]
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "TeamProject",
+        "description": "A member's shared project attached to the team: its bots work in it.\n\n`{\"key\":\"github.com/acme/site\",\"name\":\"site\",\"repo\":\"github.com/acme/site\",\"member\":\"0b7e…\"}`",
+        "type": "object",
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "member": {
+            "description": "The member who attached it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "name",
+          "repo",
+          "member"
+        ]
+      }
+    },
+    "TeamRun": {
+      "send": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Run",
+        "description": "`{\"id\":\"…\",\"workflow\":\"c1\",\"state\":\"working\",\"controller\":null,\"cost_usd\":0.4,\"active_secs\":120,\"started_at\":1763300000,\"ended_at\":null,\"outcome\":null,\"started_by\":\"0b7e…\"}`",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "workflow": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/$defs/RunState"
+          },
+          "controller": {
+            "description": "The member who took it over.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "cost_usd": {
+            "type": "number",
+            "format": "double",
+            "default": 0.0
+          },
+          "active_secs": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "default": 0
+          },
+          "started_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "ended_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "default": null
+          },
+          "outcome": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "started_by": {
+            "description": "Who or what started it: a member's account id, or `schedule:<id>`.",
+            "type": "string",
+            "default": ""
+          }
+        },
+        "required": [
+          "id",
+          "workflow",
+          "state",
+          "controller",
+          "cost_usd",
+          "active_secs",
+          "started_at",
+          "ended_at",
+          "outcome",
+          "started_by"
+        ],
+        "$defs": {
+          "RunState": {
+            "description": "`\"working\"`, `\"waiting\"`, `\"taken_over\"`, `\"done\"`, `\"stopped\"`, `\"gave_up\"`, `\"failed\"`",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "working",
+                  "done",
+                  "stopped",
+                  "failed"
+                ]
+              },
+              {
+                "description": "A call of the run waits on people.",
+                "type": "string",
+                "const": "waiting"
+              },
+              {
+                "description": "A member drives the session (`Run::controller`).",
+                "type": "string",
+                "const": "taken_over"
+              },
+              {
+                "description": "Nobody answered its call within `TeamPolicy::give_up_after_secs`.",
+                "type": "string",
+                "const": "gave_up"
+              }
+            ]
+          }
+        }
+      },
+      "accept": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "title": "Run",
+        "description": "`{\"id\":\"…\",\"workflow\":\"c1\",\"state\":\"working\",\"controller\":null,\"cost_usd\":0.4,\"active_secs\":120,\"started_at\":1763300000,\"ended_at\":null,\"outcome\":null,\"started_by\":\"0b7e…\"}`",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "workflow": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/$defs/RunState"
+          },
+          "controller": {
+            "description": "The member who took it over.",
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "cost_usd": {
+            "type": "number",
+            "format": "double",
+            "default": 0.0
+          },
+          "active_secs": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0,
+            "default": 0
+          },
+          "started_at": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "ended_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "default": null
+          },
+          "outcome": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "default": null
+          },
+          "started_by": {
+            "description": "Who or what started it: a member's account id, or `schedule:<id>`.",
+            "type": "string",
+            "default": ""
+          }
+        },
+        "required": [
+          "id",
+          "workflow",
+          "state",
+          "started_at"
+        ],
+        "$defs": {
+          "RunState": {
+            "description": "`\"working\"`, `\"waiting\"`, `\"taken_over\"`, `\"done\"`, `\"stopped\"`, `\"gave_up\"`, `\"failed\"`",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "working",
+                  "done",
+                  "stopped",
+                  "failed"
+                ]
+              },
+              {
+                "description": "A call of the run waits on people.",
+                "type": "string",
+                "const": "waiting"
+              },
+              {
+                "description": "A member drives the session (`Run::controller`).",
+                "type": "string",
+                "const": "taken_over"
+              },
+              {
+                "description": "Nobody answered its call within `TeamPolicy::give_up_after_secs`.",
+                "type": "string",
+                "const": "gave_up"
+              }
+            ]
+          }
+        }
+      }
+    },
     "ToClient": {
       "send": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -54688,6 +59284,27 @@
             "required": [
               "type",
               "items"
+            ]
+          },
+          {
+            "description": "A change on team `team`, to the clients of its members that listed their teams.\n\n`{\"type\":\"team\",\"team\":\"6f1c…\",\"event\":{\"kind\":\"call_opened\",\"call\":{…}}}`",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "team"
+              },
+              "team": {
+                "type": "string"
+              },
+              "event": {
+                "$ref": "#/$defs/TeamEvent"
+              }
+            },
+            "required": [
+              "type",
+              "team",
+              "event"
             ]
           }
         ],
@@ -58530,6 +63147,379 @@
               "approved",
               "denied"
             ]
+          },
+          "TeamEvent": {
+            "description": "A team change pushed to its members' clients, in `ToClient::Team`.\n\n`{\"kind\":\"call_opened\",\"call\":{…}}`, `{\"kind\":\"run_changed\",\"run\":{…}}`",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "call_opened"
+                  },
+                  "call": {
+                    "$ref": "#/$defs/Call"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "call"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "call_resolved"
+                  },
+                  "call": {
+                    "$ref": "#/$defs/Call"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "call"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "run_changed"
+                  },
+                  "run": {
+                    "$ref": "#/$defs/Run"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "run"
+                ]
+              }
+            ]
+          },
+          "Call": {
+            "description": "A run's question to people.\n\n`{\"id\":\"…\",\"run\":\"…\",\"workflow\":\"c1\",\"situation\":\"in_doubt\",\"asked\":[{\"kind\":\"owner\"}],\"question\":\"Which color?\",\"choices\":[\"red\",\"blue\"],\"created_at\":1763300000,\"escalated\":false,\"answer\":null}`",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "run": {
+                "type": "string"
+              },
+              "workflow": {
+                "type": "string"
+              },
+              "situation": {
+                "$ref": "#/$defs/Situation"
+              },
+              "asked": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Who"
+                },
+                "default": []
+              },
+              "question": {
+                "type": "string"
+              },
+              "choices": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "created_at": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "escalated": {
+                "description": "Whether it went on to the owner after `TeamPolicy::escalate_after_secs`.",
+                "type": "boolean",
+                "default": false
+              },
+              "answer": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Answer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "id",
+              "run",
+              "workflow",
+              "situation",
+              "asked",
+              "question",
+              "choices",
+              "created_at",
+              "escalated",
+              "answer"
+            ]
+          },
+          "Situation": {
+            "description": "Why a bot's session stops to ask people.\n\n`\"before_irreversible\"`, `\"in_doubt\"`, `\"on_limit\"`, `\"on_failure\"`",
+            "type": "string",
+            "enum": [
+              "before_irreversible",
+              "in_doubt",
+              "on_limit",
+              "on_failure"
+            ]
+          },
+          "Who": {
+            "description": "Who a bot's call goes to.\n\n`{\"kind\":\"person\",\"account\":\"0b7e…\"}`, `{\"kind\":\"group\",\"handle\":\"design\"}`, `{\"kind\":\"owner\"}`",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "person"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "account"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "group"
+                  },
+                  "handle": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "handle"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "owner"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Answer": {
+            "description": "A client sends `by` and `at` empty; the hub sets them.\n\n`{\"by\":\"0b7e…\",\"choice\":\"Ship it\",\"text\":\"\",\"kind\":{\"kind\":\"choice\"},\"at\":1763300000}`",
+            "type": "object",
+            "properties": {
+              "by": {
+                "type": "string",
+                "default": ""
+              },
+              "choice": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "text": {
+                "type": "string",
+                "default": ""
+              },
+              "kind": {
+                "$ref": "#/$defs/AnswerKind"
+              },
+              "at": {
+                "type": "integer",
+                "format": "int64",
+                "default": 0
+              }
+            },
+            "required": [
+              "by",
+              "choice",
+              "text",
+              "kind",
+              "at"
+            ]
+          },
+          "AnswerKind": {
+            "description": "How a person answered a call.\n\n`{\"kind\":\"choice\"}`, `{\"kind\":\"pass_to\",\"handle\":\"design\"}`, `{\"kind\":\"take_over\"}`, `{\"kind\":\"stop\"}`",
+            "oneOf": [
+              {
+                "description": "`Answer::choice` and `Answer::text` go back to the session.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "choice"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "The call goes to the group `handle` instead.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "pass_to"
+                  },
+                  "handle": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "handle"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "take_over"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "stop"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Run": {
+            "description": "`{\"id\":\"…\",\"workflow\":\"c1\",\"state\":\"working\",\"controller\":null,\"cost_usd\":0.4,\"active_secs\":120,\"started_at\":1763300000,\"ended_at\":null,\"outcome\":null,\"started_by\":\"0b7e…\"}`",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "workflow": {
+                "type": "string"
+              },
+              "state": {
+                "$ref": "#/$defs/RunState2"
+              },
+              "controller": {
+                "description": "The member who took it over.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "cost_usd": {
+                "type": "number",
+                "format": "double",
+                "default": 0.0
+              },
+              "active_secs": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0,
+                "default": 0
+              },
+              "started_at": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "ended_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "default": null
+              },
+              "outcome": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "started_by": {
+                "description": "Who or what started it: a member's account id, or `schedule:<id>`.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "id",
+              "workflow",
+              "state",
+              "controller",
+              "cost_usd",
+              "active_secs",
+              "started_at",
+              "ended_at",
+              "outcome",
+              "started_by"
+            ]
+          },
+          "RunState2": {
+            "description": "`\"working\"`, `\"waiting\"`, `\"taken_over\"`, `\"done\"`, `\"stopped\"`, `\"gave_up\"`, `\"failed\"`",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "working",
+                  "done",
+                  "stopped",
+                  "failed"
+                ]
+              },
+              {
+                "description": "A call of the run waits on people.",
+                "type": "string",
+                "const": "waiting"
+              },
+              {
+                "description": "A member drives the session (`Run::controller`).",
+                "type": "string",
+                "const": "taken_over"
+              },
+              {
+                "description": "Nobody answered its call within `TeamPolicy::give_up_after_secs`.",
+                "type": "string",
+                "const": "gave_up"
+              }
+            ]
           }
         }
       },
@@ -58692,6 +63682,27 @@
             "required": [
               "type",
               "items"
+            ]
+          },
+          {
+            "description": "A change on team `team`, to the clients of its members that listed their teams.\n\n`{\"type\":\"team\",\"team\":\"6f1c…\",\"event\":{\"kind\":\"call_opened\",\"call\":{…}}}`",
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "const": "team"
+              },
+              "team": {
+                "type": "string"
+              },
+              "event": {
+                "$ref": "#/$defs/TeamEvent"
+              }
+            },
+            "required": [
+              "type",
+              "team",
+              "event"
             ]
           }
         ],
@@ -62411,6 +67422,365 @@
             "enum": [
               "approved",
               "denied"
+            ]
+          },
+          "TeamEvent": {
+            "description": "A team change pushed to its members' clients, in `ToClient::Team`.\n\n`{\"kind\":\"call_opened\",\"call\":{…}}`, `{\"kind\":\"run_changed\",\"run\":{…}}`",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "call_opened"
+                  },
+                  "call": {
+                    "$ref": "#/$defs/Call"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "call"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "call_resolved"
+                  },
+                  "call": {
+                    "$ref": "#/$defs/Call"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "call"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "run_changed"
+                  },
+                  "run": {
+                    "$ref": "#/$defs/Run"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "run"
+                ]
+              }
+            ]
+          },
+          "Call": {
+            "description": "A run's question to people.\n\n`{\"id\":\"…\",\"run\":\"…\",\"workflow\":\"c1\",\"situation\":\"in_doubt\",\"asked\":[{\"kind\":\"owner\"}],\"question\":\"Which color?\",\"choices\":[\"red\",\"blue\"],\"created_at\":1763300000,\"escalated\":false,\"answer\":null}`",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "run": {
+                "type": "string"
+              },
+              "workflow": {
+                "type": "string"
+              },
+              "situation": {
+                "$ref": "#/$defs/Situation"
+              },
+              "asked": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/$defs/Who"
+                },
+                "default": []
+              },
+              "question": {
+                "type": "string"
+              },
+              "choices": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": []
+              },
+              "created_at": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "escalated": {
+                "description": "Whether it went on to the owner after `TeamPolicy::escalate_after_secs`.",
+                "type": "boolean",
+                "default": false
+              },
+              "answer": {
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Answer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              }
+            },
+            "required": [
+              "id",
+              "run",
+              "workflow",
+              "situation",
+              "question",
+              "created_at"
+            ]
+          },
+          "Situation": {
+            "description": "Why a bot's session stops to ask people.\n\n`\"before_irreversible\"`, `\"in_doubt\"`, `\"on_limit\"`, `\"on_failure\"`",
+            "type": "string",
+            "enum": [
+              "before_irreversible",
+              "in_doubt",
+              "on_limit",
+              "on_failure"
+            ]
+          },
+          "Who": {
+            "description": "Who a bot's call goes to.\n\n`{\"kind\":\"person\",\"account\":\"0b7e…\"}`, `{\"kind\":\"group\",\"handle\":\"design\"}`, `{\"kind\":\"owner\"}`",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "person"
+                  },
+                  "account": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "account"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "group"
+                  },
+                  "handle": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "handle"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "owner"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Answer": {
+            "description": "A client sends `by` and `at` empty; the hub sets them.\n\n`{\"by\":\"0b7e…\",\"choice\":\"Ship it\",\"text\":\"\",\"kind\":{\"kind\":\"choice\"},\"at\":1763300000}`",
+            "type": "object",
+            "properties": {
+              "by": {
+                "type": "string",
+                "default": ""
+              },
+              "choice": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "text": {
+                "type": "string",
+                "default": ""
+              },
+              "kind": {
+                "$ref": "#/$defs/AnswerKind"
+              },
+              "at": {
+                "type": "integer",
+                "format": "int64",
+                "default": 0
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          },
+          "AnswerKind": {
+            "description": "How a person answered a call.\n\n`{\"kind\":\"choice\"}`, `{\"kind\":\"pass_to\",\"handle\":\"design\"}`, `{\"kind\":\"take_over\"}`, `{\"kind\":\"stop\"}`",
+            "oneOf": [
+              {
+                "description": "`Answer::choice` and `Answer::text` go back to the session.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "choice"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "The call goes to the group `handle` instead.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "pass_to"
+                  },
+                  "handle": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "handle"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "take_over"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "stop"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Run": {
+            "description": "`{\"id\":\"…\",\"workflow\":\"c1\",\"state\":\"working\",\"controller\":null,\"cost_usd\":0.4,\"active_secs\":120,\"started_at\":1763300000,\"ended_at\":null,\"outcome\":null,\"started_by\":\"0b7e…\"}`",
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "workflow": {
+                "type": "string"
+              },
+              "state": {
+                "$ref": "#/$defs/RunState2"
+              },
+              "controller": {
+                "description": "The member who took it over.",
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "cost_usd": {
+                "type": "number",
+                "format": "double",
+                "default": 0.0
+              },
+              "active_secs": {
+                "type": "integer",
+                "format": "uint64",
+                "minimum": 0,
+                "default": 0
+              },
+              "started_at": {
+                "type": "integer",
+                "format": "int64"
+              },
+              "ended_at": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "default": null
+              },
+              "outcome": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "default": null
+              },
+              "started_by": {
+                "description": "Who or what started it: a member's account id, or `schedule:<id>`.",
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "id",
+              "workflow",
+              "state",
+              "started_at"
+            ]
+          },
+          "RunState2": {
+            "description": "`\"working\"`, `\"waiting\"`, `\"taken_over\"`, `\"done\"`, `\"stopped\"`, `\"gave_up\"`, `\"failed\"`",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "working",
+                  "done",
+                  "stopped",
+                  "failed"
+                ]
+              },
+              {
+                "description": "A call of the run waits on people.",
+                "type": "string",
+                "const": "waiting"
+              },
+              {
+                "description": "A member drives the session (`Run::controller`).",
+                "type": "string",
+                "const": "taken_over"
+              },
+              {
+                "description": "Nobody answered its call within `TeamPolicy::give_up_after_secs`.",
+                "type": "string",
+                "const": "gave_up"
+              }
             ]
           }
         }

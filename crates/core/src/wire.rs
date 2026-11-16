@@ -1507,6 +1507,16 @@ pub enum HubCall {
         repo: Option<String>,
         ask: crate::convex::Ask,
     },
+    /// A member's call about a team, which the hub runs on the team's account after it checks
+    /// the membership. `team` is the team's id; `List`, `Create` and `Join` leave it out. From a
+    /// machine, only a box of the team sends it, with `AskPeople` and no `team`.
+    ///
+    /// `{"cmd":"team","team":"6f1c…","op":{"op":"members"}}`, `{"cmd":"team","op":{"op":"create","name":"Acme"}}`
+    Team {
+        #[serde(default)]
+        team: Option<String>,
+        op: crate::teams::TeamOp,
+    },
 }
 
 /// A project an external agent may work in: one folder on one machine.
@@ -1718,6 +1728,10 @@ pub enum ToClient {
     SessionMarks { marks: Vec<crate::marks::SessionMarks> },
     /// The agents' actions waiting on the user's approval, after `Hello` and after any change.
     Confirmations { items: Vec<crate::surface::Confirmation> },
+    /// A change on team `team`, to the clients of its members that listed their teams.
+    ///
+    /// `{"type":"team","team":"6f1c…","event":{"kind":"call_opened","call":{…}}}`
+    Team { team: String, event: crate::teams::TeamEvent },
 }
 
 /// Machine to hub. The first frame must be `Auth` with the machine's token.
