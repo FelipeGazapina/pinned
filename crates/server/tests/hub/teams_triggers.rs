@@ -133,3 +133,59 @@ fn an_on_bots_linear_label_fires_one_run_in_a_fresh_box() {
     assert_eq!(crew.runs(), vec![("working".to_owned(), "trigger:linear_label".to_owned())]);
     assert_eq!(crew.hub.boxes.live().len(), 1);
 }
+
+#[test]
+fn an_event_for_a_bot_turned_off_is_consumed_and_never_runs_after_it_is_turned_on() {
+    let crew = Crew::new("tt_off");
+    let id = crew.on_bot("Footer");
+    crew.turn_on(&id, false);
+
+    assert_eq!(crew.fired(crew.labeled(&id, "eng-7")), Ok(None), "consumed: the poller does not try it again");
+    assert_eq!(crew.runs(), vec![]);
+    assert_eq!(crew.hub.boxes.live(), Vec::<String>::new());
+
+    crew.turn_on(&id, true);
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(crew.runs(), vec![], "the consumed event is not picked up once the bot is on");
+    assert_eq!(crew.hub.boxes.live(), Vec::<String>::new());
+}
+
+#[test]
+fn an_event_for_a_draft_bot_starts_nothing() {
+    let crew = Crew::new("tt_draft");
+    let id = crew.draft_bot("Footer", json!({ "kind": "linear-label", "label": "agent" }));
+
+    assert_eq!(crew.fired(crew.labeled(&id, "eng-7")), Ok(None));
+    assert_eq!(crew.runs(), vec![]);
+    assert_eq!(crew.hub.boxes.live(), Vec::<String>::new());
+}
+
+#[test]
+fn a_bot_saved_again_is_a_draft_and_its_next_event_starts_nothing() {
+    let crew = Crew::new("tt_saved");
+    let id = crew.on_bot("Footer");
+    crew.save_bot(&id);
+
+    assert_eq!(crew.fired(crew.labeled(&id, "eng-7")), Ok(None));
+    assert_eq!(crew.runs(), vec![]);
+    assert_eq!(crew.hub.boxes.live(), Vec::<String>::new());
+}
+
+#[test]
+fn new_thread_messages_for_a_bot_with_no_live_run_are_dropped_and_start_nothing() {
+    let crew = Crew::new("tt_delivery");
+    let id = crew.draft_bot("Answer", json!({ "kind": "slack-mention", "channel": "C0123ABCD" }));
+    crew.turn_on(&id, true);
+    let delivery = Delivery {
+        connector: id.clone(),
+        channel: "C0123ABCD".into(),
+        thread: "1792400050.000200".into(),
+        messages: vec!["[Slack reply from Dana] Any news on the footer?".into()],
+        cursor: "1792400060.000300".into(),
+        mentioned: vec![],
+    };
+
+    assert_eq!(crew.fired(Work::Delivery(delivery)), Ok(None), "dropped, so the poller does not open a session for it");
+    assert_eq!(crew.runs(), vec![]);
+    assert_eq!(crew.hub.boxes.live(), Vec::<String>::new());
+}
