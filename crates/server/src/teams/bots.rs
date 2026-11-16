@@ -40,7 +40,7 @@ pub const MORE_THAN_ONE_SESSION: &str =
 /// What a message router (`Connector::sorts_messages_at_the_check`) is refused with as a bot: it
 /// would ask its model and page in Slack before the team admits the message.
 pub const SORTS_AT_THE_CHECK: &str =
-    "a workflow that sorts a channel's new messages into categories is not available as a bot yet: edit its steps in the workflow editor first";
+    "a team bot can't use a routing trigger yet: edit its steps in the workflow editor first";
 
 /// Refuses a workflow whose trigger is not one a bot can have yet ("scheduled and GitHub-event bots
 /// are not available yet"). Linear, Slack and manual triggers are fine, and today they are the only kinds.

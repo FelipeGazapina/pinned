@@ -1453,7 +1453,7 @@ fn reached(name: &str) -> Vec<String> {
 }
 
 /// The text a message router is refused with as a team's bot.
-const ROUTER_REFUSED: &str = "a workflow that sorts a channel's new messages into categories is not available as a bot yet: edit its steps in the workflow editor first";
+const ROUTER_REFUSED: &str = "a team bot can't use a routing trigger yet: edit its steps in the workflow editor first";
 
 #[test]
 fn a_teams_message_router_that_is_not_a_bot_reaches_nothing_outside_pinned() {
