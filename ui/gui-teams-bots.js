@@ -65,6 +65,7 @@ const TB_TEXT = {
       bot_removed: "Dropped after the bot was removed",
       start_failed: "Did not start",
       never_started: "Never started",
+      replies_dropped: "Replies dropped (the run never started)",
     },
     delete: "Delete the bot",
     deleting: "Deleting…",

@@ -955,3 +955,16 @@ test("step 4 draws no USD input or row while the save still sends limits.usd 5",
   const sent = a.frames.find((f) => f.op === "save_bot");
   assert.deepEqual(sent.bot.limits, { usd: 5, minutes: 30 }, "sent silently with the policy default");
 });
+
+test("every reason the hub counts a skipped event under has its own label", async () => {
+  // teams.rs SkipReason (the hub's enum, as_str): the eight reasons of the final wire.
+  const reasons = ["off", "draft", "manual", "queue_full", "bot_removed", "start_failed", "never_started", "replies_dropped"];
+  const a = app({ answers: botAnswers({ bots: [bot({ skipped: reasons.map((reason, i) => ({ reason, count: i + 1 })) })] }) });
+  await openBot(a);
+  const rows = skipRows(a.page());
+  assert.deepEqual(rows.map((r) => r[0]), reasons);
+  for (const [reason, label] of rows) assert.ok(label && label !== reason && !/_/.test(label), `${reason} has words, not its raw name`);
+  assert.equal(new Set(rows.map((r) => r[1])).size, reasons.length, "no two reasons share a label");
+  assert.deepEqual(rows.find((r) => r[0] === "replies_dropped"), ["replies_dropped", "Replies dropped (the run never started)", "8"]);
+  assert.deepEqual(Object.keys(a.read("TB_TEXT.bot.skippedLabels")).sort(), [...reasons].sort(), "and the app labels no reason the hub lacks");
+});
