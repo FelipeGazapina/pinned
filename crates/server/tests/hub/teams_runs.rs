@@ -308,6 +308,8 @@ fn a_stop_that_ended_the_run_is_answered_as_done_though_a_later_step_was_busy() 
     crew.op(&crew.bob, json!({ "op": "attach_project", "key": SITE })).unwrap();
     let (_, cara_id, mut cara) = signed_in(&crew.hub.url, "cara@example.test");
     admin_on(&crew.hub.database, &format!("insert into team_members (team, member, role) values ('{}', '{cara_id}', 'member')", crew.team));
+    // Cara's app asks about the team, so its socket hears the team's events.
+    assert!(cara.hub(json!({ "cmd": "team", "team": crew.team.to_string(), "op": { "op": "runs" } })).is_ok());
     let site = crew.on_bot("Site bot", &format!("https://{SITE}"), false);
     let run = crew.run_now(&site);
     wait_for("the run's node", || crew.node().is_some());
