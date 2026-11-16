@@ -105,6 +105,42 @@ fn a_run_left_waiting_after_its_call_gave_up_ends_as_gave_up() {
     wait_for("its box to end", || hub.boxes.live().is_empty());
 }
 
+/// A run whose stop was answered on its call, with `answer` stored as `outcome` on a call of
+/// `situation`, but whose end failed (a busy write): a tick ends it as stopped, never back to work.
+fn a_stop_answered_but_not_ended_ends_as_stopped(name: &str, situation: &str, outcome: &str, answer: Value) {
+    let hub = start(name);
+    let mut tb = TeamBox::new(&hub);
+    limited_bot(&hub, &tb, json!({ "usd": 5.0, "minutes": 30 }), json!({ "kind": "owner" }));
+    let run = tb.run(&hub);
+    let call = tb.ask(&hub, "Red or blue footer?", &[]).unwrap()["call"].as_str().unwrap().to_owned();
+    let by = tb.owner.id;
+    let mut answer = answer;
+    answer["by"] = json!(by.to_string());
+    // The answer was stored, then the run's end met a busy write: the run stays waiting.
+    sql(&hub, &format!(
+        "update team_calls set situation = '{situation}', created_at = now() - interval '7 minutes', answered_by = '{by}',
+           answered_at = now() - interval '6 minutes', answer = '{answer}', outcome = '{outcome}' where id = '{call}';
+         update team_runs set started_at = started_at - interval '7 minutes', waiting_since = now() - interval '6 minutes' where id = '{run}'"
+    ));
+    tick(&hub);
+    assert_ne!(listed(&mut tb, run)["state"], json!("working"), "a run a person stopped never goes back to work");
+    wait_for("the run to end as stopped", || listed(&mut tb, run)["state"] == "stopped");
+    assert_eq!(listed(&mut tb, run)["outcome"], json!("stopped by olga"));
+    wait_for("its box to end", || hub.boxes.live().is_empty());
+}
+
+#[test]
+fn a_run_left_waiting_after_a_stop_answer_ends_as_stopped() {
+    let answer = json!({ "choice": null, "text": "", "kind": { "kind": "stop" }, "at": 1 });
+    a_stop_answered_but_not_ended_ends_as_stopped("teams_limfix_stop_wait", "in_doubt", "stopped", answer);
+}
+
+#[test]
+fn a_run_left_waiting_after_a_stop_it_limit_answer_ends_as_stopped() {
+    let answer = json!({ "choice": "Stop it", "text": "", "kind": { "kind": "choice" }, "at": 1 });
+    a_stop_answered_but_not_ended_ends_as_stopped("teams_limfix_stop_it_wait", "on_limit", "answered", answer);
+}
+
 #[test]
 fn a_session_may_not_ask_about_its_own_limit() {
     let hub = start("teams_limfix_own_limit");
