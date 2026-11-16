@@ -11537,3 +11537,5 @@ fn an_agent_saves_and_lists_ideas_through_act_and_its_role_is_kept() {
 
 #[path = "hub/reports.rs"]
 mod reports;
+#[path = "hub/reports_poller.rs"]
+mod reports_poller;

@@ -63,6 +63,8 @@ struct Repo {
     /// The `author_association` of the comments the hub posts: `NONE` unless a test says the token is the owner's,
     /// as it is on GitHub.
     hub_association: Option<String>,
+    /// Search finds nothing, as when GitHub's index lags or no issue changed since the time asked.
+    search_blind: bool,
 }
 
 impl Repo {
@@ -244,6 +246,16 @@ impl FakeGithub {
         self.repo().comment(number, login, association, body, None).expect("no such issue in the fake")
     }
 
+    /// A comment by `login` with `association` that says it was written at `created_at`; returns its id.
+    pub fn add_comment_full(&self, number: u64, login: &str, association: &str, body: &str, created_at: &str) -> u64 {
+        self.repo().comment(number, login, association, body, Some(created_at)).expect("no such issue in the fake")
+    }
+
+    /// While `blind`, a search answers with no issues at all.
+    pub fn set_search_blind(&self, blind: bool) {
+        self.repo().search_blind = blind;
+    }
+
     /// A comment by `login` that says it was written at `created_at`.
     pub fn add_comment_at(&self, number: u64, login: &str, body: &str, created_at: &str) -> u64 {
         self.repo().comment(number, login, "NONE", body, Some(created_at)).expect("no such issue in the fake")
@@ -334,6 +346,7 @@ async fn handle(State(shared): State<Shared>, method: Method, uri: Uri, headers:
         ("GET", ["search", "issues"]) => {
             let q = query.iter().find(|(k, _)| k == "q").map(|(_, v)| v.to_lowercase()).unwrap_or_default();
             let per_page = query.iter().find(|(k, _)| k == "per_page").and_then(|(_, v)| v.parse().ok()).unwrap_or(30usize);
+            let blind = repo.search_blind;
             let mut words = vec![];
             let (mut want_open, mut want_closed) = (false, false);
             for word in q.split_whitespace() {
@@ -348,6 +361,7 @@ async fn handle(State(shared): State<Shared>, method: Method, uri: Uri, headers:
                 .issues
                 .iter()
                 .enumerate()
+                .filter(|_| !blind)
                 .filter(|(_, issue)| (!want_open || issue.open) && (!want_closed || !issue.open))
                 .filter(|(_, issue)| {
                     let text = format!("{} {}", issue.title, issue.body).to_lowercase();
