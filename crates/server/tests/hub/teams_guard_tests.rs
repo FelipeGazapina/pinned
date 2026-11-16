@@ -308,9 +308,11 @@ fn a_restart_after_a_box_failed_does_not_leave_its_run_working_forever() {
 
     crew.hub.restart();
     admin_on(&crew.hub.database, "drop trigger block_end on team_runs");
-    admin_on(&crew.hub.database, &format!("update team_runs set started_at = now() - interval '1 hour' where team = '{}'", crew.team));
+    // Run now's run holds a reserved place until its session opens: the backstop for a
+    // reservation that never opened ends it, past its limit.
+    admin_on(&crew.hub.database, &format!("update team_runs set started_at = now() - interval '1 hour', reserved_at = now() - interval '16 minutes' where team = '{}'", crew.team));
     crew.hub.runtime.block_on(teams::calls::tick(crew.hub.hub(), &crew.hub.team_policy)).unwrap();
-    assert_eq!(listed(&crew, &holder), [("failed".to_owned(), Some("its box never started".to_owned()))]);
+    assert_eq!(listed(&crew, &holder), [("failed".to_owned(), Some("it never started".to_owned()))]);
     wait_for("ENG-1 to take the freed place", || crew.live_of(&pages).len() == 1 && crew.waiting(&pages) == 0);
 }
 
