@@ -11534,3 +11534,5 @@ mod teams_membership;
 mod teams_groups;
 #[path = "hub/teams_separation.rs"] mod teams_separation;
 #[path = "hub/teams_separation_fixes.rs"] mod teams_separation_fixes;
+#[path = "hub/teams_hardening.rs"]
+mod teams_hardening;

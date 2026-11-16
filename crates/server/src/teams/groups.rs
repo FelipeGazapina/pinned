@@ -4,7 +4,6 @@ use super::{db, Scope};
 use crate::hub::Hub;
 use pinned_core::teams::{Group, Role};
 use std::sync::Arc;
-use uuid::Uuid;
 
 /// The longest handle, in characters, without its `@`.
 pub const HANDLE_CHARS: usize = 32;
@@ -43,20 +42,13 @@ pub async fn save_group(hub: &Arc<Hub>, scope: &Scope, mut group: Group) -> Resu
     if group.slack_group.chars().count() > SLACK_CHARS || group.slack_group.contains('\0') {
         return Err(format!("a group's Slack group is at most {SLACK_CHARS} characters"));
     }
-    let not_on_team = format!("@{} has someone who is not a member of this team", group.handle);
     let fallback = group.fallback.take().filter(|f| !f.is_empty());
     if let Some(fallback) = &fallback {
-        let id = Uuid::parse_str(fallback).map_err(|_| "the fallback must be a member of this team")?;
-        db::role(&hub.db, scope.team.id, id).await?.ok_or("the fallback must be a member of this team")?;
+        super::members_only(hub, scope.team.id, &[fallback.as_str()]).await?;
     }
     group.fallback = fallback;
-    let mut ids: Vec<Uuid> = Vec::new();
-    for raw in &group.members {
-        let id = Uuid::parse_str(raw).map_err(|_| not_on_team.clone())?;
-        if !ids.contains(&id) {
-            ids.push(id);
-        }
-    }
+    // Checked for a member's save too, though only the owner's decides the members: no role probes.
+    let ids = super::members_only(hub, scope.team.id, &group.members.iter().map(String::as_str).collect::<Vec<_>>()).await?;
     let caller = [scope.member];
     let members = match scope.role {
         Role::Owner => db::Members::Replace(&ids),

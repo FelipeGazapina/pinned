@@ -49,6 +49,29 @@ pub async fn team_scope(hub: &Arc<Hub>, person: &Arc<Account>, team: Uuid) -> Re
     Ok((hub.account(team).await?, role))
 }
 
+/// Parses each client-sent account id and checks that every one is a current member of `team`,
+/// answering them in order without repeats. An id that is malformed, unknown or a member of
+/// another team only gets the one message, so the answer never says which accounts exist or who is
+/// on another team. Every account id a client sends to a team op goes through it at save time.
+pub async fn members_only(hub: &Arc<Hub>, team: Uuid, ids: &[&str]) -> Result<Vec<Uuid>, String> {
+    let refused = |raw: &str| format!("no member {} on this team", raw.chars().take(64).collect::<String>());
+    let mut parsed = Vec::with_capacity(ids.len());
+    for raw in ids {
+        parsed.push(Uuid::parse_str(raw).map_err(|_| refused(raw))?);
+    }
+    let members = db::members_among(&hub.db, team, &parsed).await?;
+    let mut kept: Vec<Uuid> = Vec::with_capacity(parsed.len());
+    for (raw, id) in ids.iter().zip(parsed) {
+        if !members.contains(&id) {
+            return Err(refused(raw));
+        }
+        if !kept.contains(&id) {
+            kept.push(id);
+        }
+    }
+    Ok(kept)
+}
+
 /// A member's team op with the personal call inside `TeamOp::Hub` read into its type, once, by
 /// `Op::read`: the unlock check (`owner_only`), the allowlist (`hub_rule`) and the run all see
 /// that one typed call, and nothing in Teams reads a field of the JSON it came as.

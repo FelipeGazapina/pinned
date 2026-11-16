@@ -101,7 +101,7 @@ fn the_owner_sets_the_members_and_a_members_edit_keeps_them() {
     let stranger = a.stranger_id.clone();
     let owner = a.owner_id.clone();
     let refused = op(&mut a.owner, &a.team, save("@design", "", &[owner.as_str(), stranger.as_str()]));
-    assert_eq!(refused, Err("@design has someone who is not a member of this team".into()), "the foreign key on team_group_members refuses a stranger");
+    assert_eq!(refused, Err(format!("no member {stranger} on this team")), "a stranger is refused before anything is stored");
     assert_eq!(op(&mut a.owner, &a.team, json!({ "op": "groups" })), Ok(listed("UI calls")), "the refused save changes nothing");
 }
 
@@ -113,10 +113,11 @@ fn a_member_cannot_put_other_people_into_a_group() {
     let stranger = a.stranger_id.clone();
     assert_eq!(op(&mut a.owner, &a.team, save("@design", "", &[owner.as_str()])), Ok(Value::Null));
 
-    assert_eq!(op(&mut a.member, &a.team, save("@design", "", &[member.as_str(), stranger.as_str()])), Ok(Value::Null), "the save is kept, and its members are not");
+    assert_eq!(op(&mut a.member, &a.team, save("@design", "", &[member.as_str(), stranger.as_str()])), Err(format!("no member {stranger} on this team")), "an outsider's id is refused whoever sends it");
+    assert_eq!(op(&mut a.member, &a.team, save("@design", "", &[member.as_str()])), Ok(Value::Null), "the save is kept, and its members are not");
     assert_eq!(op(&mut a.member, &a.team, json!({ "op": "groups" })), Ok(json!([shown("design", "", &[owner.as_str()], None)])), "the stored list stays [owner]");
 
-    assert_eq!(op(&mut a.member, &a.team, save("@ops", "", &[owner.as_str(), stranger.as_str()])), Ok(Value::Null));
+    assert_eq!(op(&mut a.member, &a.team, save("@ops", "", &[owner.as_str()])), Ok(Value::Null));
     assert_eq!(
         op(&mut a.member, &a.team, json!({ "op": "groups" })),
         Ok(json!([shown("design", "", &[owner.as_str()], None), shown("ops", "", &[member.as_str()], None)])),
@@ -151,7 +152,7 @@ fn a_fallback_that_is_not_a_member_is_refused() {
     let both = sorted(vec![owner.clone(), member.clone()]);
     let mut asked = save("@design", "", &[owner.as_str(), member.as_str()]);
     asked["group"]["fallback"] = json!(stranger);
-    assert_eq!(op(&mut a.owner, &a.team, asked.clone()), Err("the fallback must be a member of this team".into()));
+    assert_eq!(op(&mut a.owner, &a.team, asked.clone()), Err(format!("no member {stranger} on this team")));
     assert_eq!(op(&mut a.owner, &a.team, json!({ "op": "groups" })), Ok(json!([])), "nothing is stored");
 
     asked["group"]["fallback"] = json!(member.clone());
