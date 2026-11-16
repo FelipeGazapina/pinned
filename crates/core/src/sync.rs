@@ -3223,4 +3223,146 @@ mod tests {
         assert!(!hub.inner.inner.0.borrow().contains_key(&memory("fresh")));
         let _ = std::fs::remove_dir_all(root);
     }
+
+    fn turn(session: &str, ended: u64) -> String {
+        format!("{{\"session\":\"{session}\",\"ended\":{ended}}}\n")
+    }
+
+    #[test]
+    fn a_held_cycle_leaves_this_machines_unsent_change_alone() {
+        let root = root("held-keeps-change");
+        let hub = QuotaHub::new(u64::MAX);
+        let (mut mac, mut mini) = (Side::new(&root, "mac", "app"), Side::new(&root, "mini", "app"));
+        put(&mac.claude("memory/MEMORY.md"), "both machines' notes");
+        sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap();
+        sync(&hub, &mut mini.state, &mini.checkout, SystemTime::now()).unwrap();
+        let agreed_key = format!("github.com/acme/app {}", mac.checkout.path.display());
+        let baseline = mac.state.agreed[&agreed_key][&memory("MEMORY")].clone();
+        put(&mac.claude("memory/MEMORY.md"), "mac's notes the hub never took");
+        age(&mac.claude("memory/MEMORY.md"), 60);
+        big(&mac);
+        put(&mini.claude("memory/MEMORY.md"), "mini's later notes");
+        assert_eq!(sync(&hub, &mut mini.state, &mini.checkout, SystemTime::now()).unwrap().pushed, vec![memory("MEMORY")]);
+        hub.limit.set(hub.used());
+        let refused = sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap().push;
+        let Push::Refused { sending, .. } = refused else { panic!("the first cycle is refused, got {refused:?}") };
+        assert_eq!(std::fs::read_to_string(mac.claude("memory/MEMORY.md")).unwrap(), "mac's notes the hub never took");
+        hub.pushes.borrow_mut().clear();
+
+        let held = sync_with(&hub, &mut mac.state, &mac.checkout, SystemTime::now(), Some(sending)).unwrap();
+        assert_eq!((held.push, held.pushed, held.pulled), (Push::Held, vec![], vec![]));
+        assert_eq!(*hub.pushes.borrow(), Vec::<Vec<(String, bool)>>::new(), "a held cycle sends nothing");
+        assert_eq!(std::fs::read_to_string(mac.claude("memory/MEMORY.md")).unwrap(), "mac's notes the hub never took");
+        assert_eq!(mac.state.agreed[&agreed_key].get(&memory("MEMORY")), Some(&baseline), "the baseline stays under the hold");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Appends a line to a local file inside a push, before the hub answers that it took it.
+    struct AppendDuringPush<'a> {
+        inner: MemHub,
+        file: &'a Path,
+        line: String,
+        armed: Cell<bool>,
+    }
+
+    impl Hub for AppendDuringPush<'_> {
+        fn list(&self, project: &str) -> Result<Vec<Entry>, String> {
+            self.inner.list(project)
+        }
+        fn push(&self, project: &str, files: Vec<File>) -> Result<(), String> {
+            if self.armed.replace(false) {
+                let mut text = std::fs::read_to_string(self.file).unwrap();
+                text.push_str(&self.line);
+                std::fs::write(self.file, text).unwrap();
+            }
+            self.inner.push(project, files)
+        }
+        fn pull(&self, project: &str, paths: Vec<String>) -> Result<Vec<File>, String> {
+            self.inner.pull(project, paths)
+        }
+        fn mark_executable(&self, project: &str, repairs: Vec<ModeRepair>) -> Result<(), String> {
+            self.inner.mark_executable(project, repairs)
+        }
+    }
+
+    #[test]
+    fn landing_a_merged_history_keeps_a_turn_added_while_its_batch_was_on_the_way() {
+        let root = root("land-keeps-turn");
+        let (mut mac, mut mini) = (Side::new(&root, "mac", "app"), Side::new(&root, "mini", "app"));
+        let history = mac.checkout.history.clone().unwrap();
+        let hub = AppendDuringPush { inner: MemHub::default(), file: &history, line: turn("d", 4), armed: Cell::new(false) };
+        put(&history, &turn("a", 1));
+        sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap();
+        sync(&hub, &mut mini.state, &mini.checkout, SystemTime::now()).unwrap();
+        put(mini.checkout.history.as_ref().unwrap(), &format!("{}{}", turn("a", 1), turn("b", 2)));
+        assert_eq!(sync(&hub, &mut mini.state, &mini.checkout, SystemTime::now()).unwrap().pushed, vec![HISTORY]);
+        put(&history, &format!("{}{}", turn("a", 1), turn("c", 3)));
+        hub.armed.set(true);
+
+        let done = sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap();
+        assert_eq!(done.pushed, vec![HISTORY]);
+        let four = "{\"session\":\"a\",\"ended\":1}\n{\"session\":\"b\",\"ended\":2}\n{\"session\":\"c\",\"ended\":3}\n{\"session\":\"d\",\"ended\":4}\n";
+        assert_eq!(std::fs::read_to_string(&history).unwrap(), four, "the turn added during the push is kept");
+        let hub_text = |hub: &AppendDuringPush| String::from_utf8(unpack(hub.inner.0.borrow()[HISTORY].data.as_ref().unwrap()).unwrap()).unwrap();
+        let three = "{\"session\":\"a\",\"ended\":1}\n{\"session\":\"b\",\"ended\":2}\n{\"session\":\"c\",\"ended\":3}\n";
+        assert_eq!(hub_text(&hub), three, "the hub took the batch as it was read");
+
+        let next = sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap();
+        assert_eq!(next.pushed, vec![HISTORY], "the next sync sends the added turn");
+        assert_eq!(hub_text(&hub), four);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_file_deleted_here_stays_gone_while_the_push_is_refused_and_comes_back_once_it_is_taken() {
+        let root = root("deleted-here");
+        let hub = QuotaHub::new(u64::MAX);
+        let (mut mac, mut mini) = (Side::new(&root, "mac", "app"), Side::new(&root, "mini", "app"));
+        put(&mac.claude("memory/f.md"), "first");
+        sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap();
+        sync(&hub, &mut mini.state, &mini.checkout, SystemTime::now()).unwrap();
+        let agreed_key = format!("github.com/acme/app {}", mac.checkout.path.display());
+        let baseline = mac.state.agreed[&agreed_key][&memory("f")].clone();
+        put(&mini.claude("memory/f.md"), "second, from mini");
+        assert_eq!(sync(&hub, &mut mini.state, &mini.checkout, SystemTime::now()).unwrap().pushed, vec![memory("f")]);
+        hub.limit.set(hub.used());
+        std::fs::remove_file(mac.claude("memory/f.md")).unwrap();
+        big(&mac);
+
+        let refused = sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap();
+        assert!(matches!(refused.push, Push::Refused { .. }));
+        assert_eq!(refused.pulled, Vec::<String>::new());
+        assert!(!mac.claude("memory/f.md").exists(), "mini's copy does not undo the deletion while mac's push is refused");
+        assert_eq!(mac.state.agreed[&agreed_key].get(&memory("f")), Some(&baseline), "the baseline stays");
+
+        hub.limit.set(u64::MAX);
+        let taken = sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap();
+        assert_eq!((taken.push, taken.pushed, taken.pulled), (Push::Done, vec![memory("big")], vec![memory("f")]));
+        // A file deleted here has no modified time, so the copy another machine changed since the
+        // baseline is the newer side of the conflict and is pulled.
+        assert_eq!(std::fs::read_to_string(mac.claude("memory/f.md")).unwrap(), "second, from mini");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_hold_survives_the_hub_first_history_turn_moving_the_history_between_send_lists() {
+        let root = root("hold-history-moves");
+        let hub = QuotaHub::new(0);
+        let (mut mac, mut mini) = (Side::new(&root, "mac", "app"), Side::new(&root, "mini", "app"));
+        put(mac.checkout.history.as_ref().unwrap(), &turn("mac", 1));
+        put(&mac.checkout.path.join(".claude/skills/greet/SKILL.md"), "say hello");
+        let refused = sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap().push;
+        let Push::Refused { sending, .. } = refused else { panic!("the first cycle is refused, got {refused:?}") };
+        hub.limit.set(u64::MAX);
+        put(mini.checkout.history.as_ref().unwrap(), &turn("mini", 2));
+        assert_eq!(sync(&hub, &mut mini.state, &mini.checkout, SystemTime::now()).unwrap().pushed, vec![HISTORY]);
+        hub.limit.set(hub.used());
+        hub.pushes.borrow_mut().clear();
+
+        let held = sync_with(&hub, &mut mac.state, &mac.checkout, SystemTime::now(), Some(sending)).unwrap();
+        assert_eq!(held.push, Push::Held, "the same files to send are the same hold in whichever list each is");
+        assert_eq!(*hub.pushes.borrow(), Vec::<Vec<(String, bool)>>::new(), "a held cycle sends nothing");
+        assert_eq!(std::fs::read_to_string(mac.checkout.history.as_ref().unwrap()).unwrap(), turn("mac", 1));
+        let _ = std::fs::remove_dir_all(root);
+    }
 }
