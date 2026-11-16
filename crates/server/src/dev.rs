@@ -5,19 +5,21 @@ use crate::boxes::Policy;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
-/// Slack's API base for a dev hub. Nothing reads it yet; `check` requires it to be loopback.
+/// Slack's API base for a dev hub. `check` requires it to be a loopback root; `hub` then points Slack at it.
 const SLACK_BASE_ENV: &str = "PINNED_SLACK_API_BASE";
 const TIME_SCALE_ENV: &str = "PINNED_DEV_TIME_SCALE";
 const MAX_TIME_SCALE: u32 = 3600;
 
 /// How the hub's timers are shortened. `time_scale` 1 is real time.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Dev {
     pub time_scale: u32,
+    /// The normalised Slack API root (`slack::dev_root`) a dev hub sends Slack calls to. `None` when off.
+    pub slack_root: Option<String>,
 }
 
 impl Dev {
-    pub const OFF: Dev = Dev { time_scale: 1 };
+    pub const OFF: Dev = Dev { time_scale: 1, slack_root: None };
 
     /// Real duration divided by time_scale, never below 1 second.
     pub fn scale(&self, d: Duration) -> Duration {
@@ -50,10 +52,11 @@ pub fn check(db_url: &str, listen: &str, public_url: &str, env: &dyn Fn(&str) ->
         return Err("--listen must bind a loopback address, not a wildcard or remote one".into());
     }
     loopback_url("--public-url", public_url)?;
-    for name in [pinned_core::upstash::BASE_URL_ENV, SLACK_BASE_ENV] {
-        let value = env(name).filter(|v| !v.is_empty()).ok_or_else(|| format!("{name} is not set"))?;
-        loopback_url(name, &value)?;
-    }
+    let box_name = pinned_core::upstash::BASE_URL_ENV;
+    let box_base = env(box_name).filter(|v| !v.is_empty()).ok_or_else(|| format!("{box_name} is not set"))?;
+    loopback_url(box_name, &box_base)?;
+    let slack_base = env(SLACK_BASE_ENV).filter(|v| !v.is_empty()).ok_or_else(|| format!("{SLACK_BASE_ENV} is not set"))?;
+    let slack_root = pinned_core::slack::dev_root(&slack_base).ok_or_else(|| format!("{SLACK_BASE_ENV} must be an http or https URL on this machine"))?;
     let time_scale = match env(TIME_SCALE_ENV) {
         None => 1,
         Some(raw) => match raw.parse::<u32>() {
@@ -62,7 +65,7 @@ pub fn check(db_url: &str, listen: &str, public_url: &str, env: &dyn Fn(&str) ->
             Err(_) => return Err(format!("{TIME_SCALE_ENV} is not a whole number")),
         },
     };
-    Ok(Dev { time_scale })
+    Ok(Dev { time_scale, slack_root: Some(slack_root) })
 }
 
 fn check_db(db_url: &str) -> Result<(), String> {
@@ -129,8 +132,8 @@ mod tests {
 
     #[test]
     fn accepts_loopback_and_reads_the_time_scale() {
-        assert_eq!(run(DB, LISTEN, PUBLIC, &[BOX, SLACK, ("PINNED_DEV_TIME_SCALE", "60")]), Ok(Dev { time_scale: 60 }));
-        assert_eq!(run(DB, LISTEN, PUBLIC, &[BOX, SLACK]), Ok(Dev { time_scale: 1 }), "real time when unset");
+        assert_eq!(run(DB, LISTEN, PUBLIC, &[BOX, SLACK, ("PINNED_DEV_TIME_SCALE", "60")]), Ok(Dev { time_scale: 60, slack_root: Some("http://localhost:9/".into()) }));
+        assert_eq!(run(DB, LISTEN, PUBLIC, &[BOX, SLACK]), Ok(Dev { time_scale: 1, slack_root: Some("http://localhost:9/".into()) }), "real time when unset");
     }
 
     #[test]
@@ -162,7 +165,33 @@ mod tests {
 
     #[test]
     fn refuses_a_slack_base_on_slack_com() {
-        assert_eq!(run(DB, LISTEN, PUBLIC, &[BOX, ("PINNED_SLACK_API_BASE", "https://slack.com/api")]), Err("PINNED_SLACK_API_BASE host is not loopback".into()));
+        assert_eq!(run(DB, LISTEN, PUBLIC, &[BOX, ("PINNED_SLACK_API_BASE", "https://slack.com/api")]), Err("PINNED_SLACK_API_BASE must be an http or https URL on this machine".into()));
+    }
+
+    #[test]
+    fn refuses_a_database_that_is_not_a_url() {
+        assert_eq!(run("not a url", LISTEN, PUBLIC, &[BOX, SLACK]), Err("--db is not a postgres:// URL".into()));
+    }
+
+    #[test]
+    fn refuses_a_database_with_another_scheme() {
+        assert_eq!(run("mysql://x@127.0.0.1/p", LISTEN, PUBLIC, &[BOX, SLACK]), Err("--db must use the postgres:// scheme".into()));
+    }
+
+    #[test]
+    fn refuses_a_missing_slack_base() {
+        assert_eq!(run(DB, LISTEN, PUBLIC, &[BOX]), Err("PINNED_SLACK_API_BASE is not set".into()));
+    }
+
+    #[test]
+    fn refuses_a_box_base_on_a_remote_host() {
+        assert_eq!(run(DB, LISTEN, PUBLIC, &[("UPSTASH_BOX_BASE_URL", "https://box.example.com"), SLACK]), Err("UPSTASH_BOX_BASE_URL host is not loopback".into()));
+    }
+
+    #[test]
+    fn returns_the_normalised_slack_root() {
+        let dev = run(DB, LISTEN, PUBLIC, &[BOX, ("PINNED_SLACK_API_BASE", "http://localhost:9/api")]).unwrap();
+        assert_eq!(dev.slack_root.as_deref(), Some("http://localhost:9/api/"));
     }
 
     #[test]
@@ -182,14 +211,14 @@ mod tests {
 
     #[test]
     fn scale_divides_real_time_and_never_goes_below_one_second() {
-        assert_eq!(Dev { time_scale: 60 }.scale(Duration::from_secs(30 * 60)), Duration::from_secs(30));
-        assert_eq!(Dev { time_scale: 60 }.scale(Duration::from_secs(2 * 60 * 60)), Duration::from_secs(120));
-        assert_eq!(Dev { time_scale: 3600 }.scale(Duration::from_secs(10)), Duration::from_secs(1));
+        assert_eq!(Dev { time_scale: 60, slack_root: None }.scale(Duration::from_secs(30 * 60)), Duration::from_secs(30));
+        assert_eq!(Dev { time_scale: 60, slack_root: None }.scale(Duration::from_secs(2 * 60 * 60)), Duration::from_secs(120));
+        assert_eq!(Dev { time_scale: 3600, slack_root: None }.scale(Duration::from_secs(10)), Duration::from_secs(1));
     }
 
     #[test]
     fn policy_scales_every_duration_and_keeps_the_cap() {
-        let policy = Dev { time_scale: 60 }.policy(&Policy::default());
+        let policy = Dev { time_scale: 60, slack_root: None }.policy(&Policy::default());
         assert_eq!(policy.boot_wait, Duration::from_secs(5));
         assert_eq!(policy.idle, Duration::from_secs(10));
         assert_eq!(policy.max_life, Duration::from_secs(240));

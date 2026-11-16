@@ -114,6 +114,12 @@ fn hub(args: &[String]) -> Result<(), String> {
         let public_url = args.flags.get("public-url").cloned().unwrap_or_else(|| format!("http://{listen}"));
         match pinned_server::dev::check(&db, &listen, &public_url, &|key| std::env::var(key).ok()) {
             Ok(dev) => {
+                if let Some(root) = &dev.slack_root {
+                    if let Err(refusal) = pinned_core::slack::use_dev_root(root) {
+                        eprintln!("pinned-server: {refusal}");
+                        std::process::exit(2);
+                    }
+                }
                 eprintln!("DEV HUB: not production (time scale {})", dev.time_scale);
                 dev
             }

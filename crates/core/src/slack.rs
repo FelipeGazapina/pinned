@@ -138,7 +138,7 @@ pub fn dev_root(value: &str) -> Option<String> {
 /// Sends every Slack call to `value` for the rest of the process. Refuses any host but this machine.
 /// Only `pinned-server hub --dev` calls this, with PINNED_SLACK_API_BASE.
 pub fn use_dev_root(value: &str) -> Result<(), String> {
-    let root = dev_root(value).ok_or_else(|| format!("Slack dev root must be an http or https URL on this machine, not {value}"))?;
+    let root = dev_root(value).ok_or_else(|| "Slack dev root must be an http or https URL on this machine".to_owned())?;
     DEV_ROOT.set(root).map_err(|_| "Slack dev root is already set".to_owned())
 }
 
