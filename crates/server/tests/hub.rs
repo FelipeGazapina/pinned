@@ -48,6 +48,8 @@ struct TestHub {
     learning: Option<String>,
     signup: Signup,
     access: pinned_server::http::Access,
+    /// The teams' call timings: the hub's default unless `start_with_team_policy` names others.
+    team_policy: pinned_core::teams::TeamPolicy,
 }
 
 impl TestHub {
@@ -80,7 +82,16 @@ impl TestHub {
         hub
     }
 
+    /// A hub whose boxes follow `policy` and whose teams' calls escalate and give up as `teams` says.
+    fn start_with_team_policy(name: &str, policy: Policy, teams: pinned_core::teams::TeamPolicy) -> TestHub {
+        TestHub::start_every(name, Signup::Open, policy, false, Default::default(), "127.0.0.1:0", teams)
+    }
+
     fn start_all(name: &str, signup: Signup, policy: Policy, with_learning: bool, access: pinned_server::http::Access, listen: &str) -> TestHub {
+        TestHub::start_every(name, signup, policy, with_learning, access, listen, Default::default())
+    }
+
+    fn start_every(name: &str, signup: Signup, policy: Policy, with_learning: bool, access: pinned_server::http::Access, listen: &str, team_policy: pinned_core::teams::TeamPolicy) -> TestHub {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let database = format!("pinned_test_{name}_{}", std::process::id());
         admin(&format!("drop database if exists {database} with (force)"));
@@ -96,7 +107,7 @@ impl TestHub {
         std::fs::create_dir_all(dir.join("downloads")).unwrap();
         std::fs::write(dir.join("downloads/pinned-server-x86_64-unknown-linux-musl"), "ELF").unwrap();
         let boxes = FakeBoxes::new(dir.join("boxes"));
-        let mut hub = TestHub { runtime: tokio::runtime::Runtime::new().unwrap(), running: None, url: String::new(), database, dir, boxes, policy, learning, signup, access };
+        let mut hub = TestHub { runtime: tokio::runtime::Runtime::new().unwrap(), running: None, url: String::new(), database, dir, boxes, policy, learning, signup, access, team_policy };
         hub.serve(listen);
         hub
     }
@@ -112,7 +123,7 @@ impl TestHub {
             signup: self.signup,
             box_api: self.boxes.clone(),
             box_policy: self.policy.clone(),
-            team_policy: Default::default(),
+            team_policy: self.team_policy.clone(),
             convex_http: Arc::new(Replay::new(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../core/tests/fixtures/convex"), CONVEX_KEY).unwrap()),
             learning_db: self.learning.as_ref().map(|learning| format!("{}/{learning}", postgres())),
             access: self.access.clone(),
@@ -11536,3 +11547,4 @@ mod teams_groups;
 #[path = "hub/teams_bots.rs"] mod teams_bots;
 #[path = "hub/teams_box_call.rs"]
 mod teams_box_call;
+#[path = "hub/teams_calls.rs"] mod teams_calls;
