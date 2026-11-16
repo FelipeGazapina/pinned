@@ -545,6 +545,15 @@ mod tests {
     }
 
     #[test]
+    fn scrub_removes_nested_images_in_one_go_so_the_word_they_split_is_still_found() {
+        let mut images = "![a](x)".to_owned();
+        for _ in 0..31 {
+            images = format!("![{images}](x)");
+        }
+        assert_eq!(scrub_twice(&format!("lo{images}ja-web crashes"), &projects(&["loja-web"])), "[project] crashes");
+    }
+
+    #[test]
     fn scrub_refuses_markup_that_still_changes_after_the_last_round() {
         // Each level is a tag that an image hides until the round after: one round per level.
         let mut deep = "<b>".to_owned();
