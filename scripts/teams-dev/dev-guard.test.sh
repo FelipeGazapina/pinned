@@ -58,4 +58,17 @@ mkdir -p "$FAKEHOME/notes" && echo keep >"$FAKEHOME/notes/a.txt"
 out=$(HOME="$FAKEHOME" TEAMS_DEV_DIR="$FAKEHOME/notes" TEAMS_DEV_BIN=/bin/false sh "$HERE/dev.sh" up 2>&1); code=$?
 [ "$code" -eq 2 ] && [ -f "$FAKEHOME/notes/a.txt" ] || fail "a folder with other files was emptied or not refused: exit $code: $out"
 
+# A binary that is not a debug build is refused before the stack touches anything: no marker, no
+# record, no database, no port. (A stub that answers like a release build.)
+printf '#!/bin/sh\necho "pinned-server: this is a release build: --dev needs a debug build (cargo build -p pinned-server, without --release)" >&2\nexit 2\n' >"$FAKEHOME/release-bin"
+chmod +x "$FAKEHOME/release-bin"
+mkdir -p "$FAKEHOME/stack-release"
+before=$(record_state)
+out=$(HOME="$FAKEHOME" TEAMS_DEV_DIR="$FAKEHOME/stack-release" TEAMS_DEV_BIN="$FAKEHOME/release-bin" sh "$HERE/dev.sh" up 2>&1); code=$?
+[ "$code" -eq 2 ] || fail "a release binary: exit $code, wanted 2: $out"
+case $out in *"not a debug build"*) ;; *) fail "a release binary: the message does not say it is not a debug build: $out" ;; esac
+[ -z "$(ls -A "$FAKEHOME/stack-release")" ] || fail "a release binary: the stack dir was written to: $(ls -A "$FAKEHOME/stack-release")"
+[ "$(record_state)" = "$before" ] || fail "a release binary: .dev/teams-dev.dir was written"
+[ $failed -eq 0 ] && echo "ok a release binary is refused before anything is created: $out"
+
 if [ $failed -eq 0 ]; then echo "dev-guard: all refused, nothing created"; else exit 1; fi

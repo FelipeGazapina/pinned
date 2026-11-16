@@ -115,7 +115,7 @@ fn is_loopback_host(host: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{check, Dev};
+    use super::{check, check_build, Dev};
     use crate::boxes::Policy;
     use std::time::Duration;
 
@@ -128,6 +128,18 @@ mod tests {
     fn run(db: &str, listen: &str, public: &str, vars: &[(&str, &str)]) -> Result<Dev, String> {
         let env = |key: &str| vars.iter().find(|(k, _)| *k == key).map(|(_, v)| v.to_string());
         check(db, listen, public, &env)
+    }
+
+    #[test]
+    fn refuses_a_build_without_debug_assertions() {
+        assert_eq!(check_build(false), Err("this is a release build: --dev needs a debug build (cargo build -p pinned-server, without --release)".into()));
+        assert_eq!(check_build(true), Ok(()));
+    }
+
+    #[test]
+    fn this_test_build_is_a_debug_build_so_check_runs_on_to_the_rest() {
+        assert!(cfg!(debug_assertions));
+        assert_eq!(run(DB, LISTEN, PUBLIC, &[SLACK]), Err("UPSTASH_BOX_BASE_URL is not set".into()));
     }
 
     #[test]
