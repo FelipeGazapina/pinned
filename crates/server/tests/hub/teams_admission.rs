@@ -123,7 +123,7 @@ pub(crate) struct Crew {
     pub(crate) team: Uuid,
     pub(crate) ana: Arc<Account>,
     pub(crate) bob: Arc<Account>,
-    folder: PathBuf,
+    pub(crate) folder: PathBuf,
     name: String,
 }
 
@@ -362,7 +362,7 @@ impl Crew {
         runs.as_array().unwrap().iter().map(|r| (r["state"].as_str().unwrap().to_owned(), r["started_by"].as_str().unwrap().to_owned())).collect()
     }
 
-    fn live(&self) -> usize {
+    pub(crate) fn live(&self) -> usize {
         self.runs().iter().filter(|(state, _)| state == "working").count()
     }
 
@@ -856,12 +856,12 @@ impl Crew {
     }
 
     /// One pass of the hub's calls tick, the reaper's backstop with it, as `teams::spawn_tick` runs it.
-    fn reaper_pass(&self) {
+    pub(crate) fn reaper_pass(&self) {
         self.hub.runtime.block_on(teams::calls::tick(self.hub.hub(), &self.hub.team_policy)).unwrap();
     }
 
     /// How many box bootstraps started so far.
-    fn boots(&self) -> usize {
+    pub(crate) fn boots(&self) -> usize {
         self.hub.boxes.state.lock().unwrap().scripts.iter().filter(|s| s.contains("start.sh")).count()
     }
 }

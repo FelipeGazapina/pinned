@@ -11653,3 +11653,4 @@ mod teams_hardening;
 #[path = "hub/teams_backstop.rs"] mod teams_backstop;
 #[path = "hub/teams_guard_tests.rs"] mod teams_guard_tests;
 #[path = "hub/teams_calls_guards.rs"] mod teams_calls_guards;
+#[path = "hub/teams_locks.rs"] mod teams_locks;
