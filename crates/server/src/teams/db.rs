@@ -1520,30 +1520,32 @@ pub struct AtLimit {
 
 /// The runs at work (not reserved) whose active time reached their bot's `minutes`, or whose
 /// `cost_usd` its `usd`, and that have no `on_limit` call the hub opened yet (`opened_by_hub`):
-/// one limit call per run, and none a session opened counts.
-pub async fn runs_at_limit(db: &Db) -> Result<Vec<AtLimit>, String> {
+/// one limit call per run, and none a session opened counts. A limit above `most` (the ceiling)
+/// is held at it.
+pub async fn runs_at_limit(db: &Db, most: &BotLimits) -> Result<Vec<AtLimit>, String> {
     let rows = db
         .client()
         .await?
         .query(
-            "select r.team, r.id, b.limits, coalesce(r.cost_usd >= (b.limits->>'usd')::float8, false), b.workflow
+            "select r.team, r.id, b.limits, coalesce(r.cost_usd >= least((b.limits->>'usd')::float8, $1), false), b.workflow
                  from team_runs r join team_bots b on b.team = r.team and b.workflow = r.workflow
                  where r.state in ('working', 'taken_over') and not r.reserved
-                   and (r.cost_usd >= (b.limits->>'usd')::float8
-                        or extract(epoch from now() - coalesce(r.opened_at, r.started_at))::bigint - r.waiting_secs >= (b.limits->>'minutes')::bigint * 60)
+                   and (r.cost_usd >= least((b.limits->>'usd')::float8, $1)
+                        or extract(epoch from now() - coalesce(r.opened_at, r.started_at))::bigint - r.waiting_secs >= least((b.limits->>'minutes')::bigint, $2) * 60)
                    and not exists (select 1 from team_calls c where c.run = r.id and c.situation = 'on_limit' and c.opened_by_hub)",
-            &[],
+            &[&most.usd, &i64::from(most.minutes)],
         )
         .await
         .map_err(err)?;
     let mut found = Vec::with_capacity(rows.len());
     for r in &rows {
         // One bot's unreadable row holds up no other run's limit: it is skipped, and logged.
-        let Ok(limits) = serde_json::from_value(r.get(2)) else {
+        let Ok(limits) = serde_json::from_value::<BotLimits>(r.get(2)) else {
             let (team, workflow): (Uuid, String) = (r.get(0), r.get(4));
             eprintln!("pinned-server: the limits of bot {workflow} of team {team} are not readable: its runs are not held to them");
             continue;
         };
+        let limits = BotLimits { usd: limits.usd.min(most.usd), minutes: limits.minutes.min(most.minutes) };
         found.push(AtLimit { team: r.get(0), run: r.get(1), limits, spent: r.get(3) });
     }
     Ok(found)

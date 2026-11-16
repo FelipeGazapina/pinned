@@ -537,7 +537,7 @@ async fn charge(hub: &Arc<Hub>) -> Result<(), String> {
 }
 
 async fn at_limit(hub: &Arc<Hub>, policy: &TeamPolicy) -> Result<(), String> {
-    for at in db::runs_at_limit(&hub.db).await? {
+    for at in db::runs_at_limit(&hub.db, &super::bots::most(policy)).await? {
         if let Err(e) = limit_reached(hub, policy, &at).await {
             eprintln!("pinned-server: run {} of team {} reached a limit but was not called for it: {e}", at.run, at.team);
         }
