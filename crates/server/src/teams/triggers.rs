@@ -118,6 +118,19 @@ impl Admission for TeamAdmission {
         })
     }
 
+    fn granted(&self) -> Pending<Result<Vec<i64>, String>> {
+        let (hub, team) = (self.hub.upgrade(), self.team);
+        Box::pin(async move { db::granted(&hub.ok_or("the hub is stopping")?.db, team).await })
+    }
+
+    fn claim(&self, id: i64) -> Pending<Result<Option<Event>, String>> {
+        let (hub, team) = (self.hub.upgrade(), self.team);
+        Box::pin(async move {
+            let hub = hub.ok_or("the hub is stopping")?;
+            queue::claim(&hub, &hub.account(team).await?, id).await
+        })
+    }
+
     fn release(&self, connector: String, subject: Subject) -> Pending<()> {
         let (hub, team) = (self.hub.upgrade(), self.team);
         Box::pin(async move {

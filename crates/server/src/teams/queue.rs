@@ -38,7 +38,8 @@ enum Stored {
     Member { member: String },
     Trigger { kind: String, cwd: PathBuf, repo: Option<String>, args: Vec<String>, subject: Subject, mentioned: Vec<String>, account: Option<String>, runs_on: RunsOn, input: String },
     /// A trigger's raw event, as its poller found it before its Ask step or any graph step
-    /// (`admit`): its turn runs it whole, from the start (`Connectors::granted`).
+    /// (`admit`): when its turn comes it is granted in its row (`db::grant`), and its team's
+    /// poller claims it (`claim`) and runs it whole, from the start.
     /// The replies its Slack thread got while it waited, the newest `MOST_REPLIES`, and how many
     /// older ones were dropped.
     Event {
@@ -178,13 +179,13 @@ pub async fn admit(hub: &Arc<Hub>, team: &Arc<Account>, kind: &str, event: Event
         });
     }
     let turn = Turn::take(hub, team.id).await?;
-    let admitted = decide(hub, team, kind, event, &workflow).await;
+    let admitted = decide(hub, &turn, team, kind, event, &workflow).await;
     turn.end().await?;
     admitted
 }
 
 /// `admit`'s decision, inside the team's turn.
-async fn decide(hub: &Arc<Hub>, team: &Arc<Account>, kind: &str, event: Event, workflow: &str) -> Result<Admitted, String> {
+async fn decide(hub: &Arc<Hub>, turn: &Turn, team: &Arc<Account>, kind: &str, event: Event, workflow: &str) -> Result<Admitted, String> {
     let workflow = workflow.to_owned();
     bots::ready(hub, team, &workflow).await?;
     let waiting = db::waiting_count(&hub.db, team.id, &workflow).await?;
@@ -199,14 +200,16 @@ async fn decide(hub: &Arc<Hub>, team: &Arc<Account>, kind: &str, event: Event, w
         }
         return Ok(Admitted::Waiting);
     }
-    reserve(hub, team, kind, &event).await?;
+    reserve(turn, team, kind, &event).await?;
     Ok(Admitted::Go)
 }
 
-/// Holds a place for `event`: a live run with no session yet, which the team's cap counts.
-async fn reserve(hub: &Arc<Hub>, team: &Arc<Account>, kind: &str, event: &Event) -> Result<(), String> {
+/// Holds a place for `event` in the team's turn: a live run with no session yet, which the team's
+/// cap counts. Answers the run's id.
+async fn reserve(turn: &Turn, team: &Arc<Account>, kind: &str, event: &Event) -> Result<Uuid, String> {
+    let id = Uuid::new_v4();
     let run = Run {
-        id: Uuid::new_v4().to_string(),
+        id: id.to_string(),
         workflow: event.connector().to_owned(),
         state: RunState::Working,
         controller: None,
@@ -217,7 +220,8 @@ async fn reserve(hub: &Arc<Hub>, team: &Arc<Account>, kind: &str, event: &Event)
         outcome: None,
         started_by: format!("trigger:{kind}"),
     };
-    db::insert_reserved(&hub.db, team.id, &run, event.subject()).await
+    db::insert_reserved(&turn.held, team.id, &run, event.subject()).await?;
+    Ok(id)
 }
 
 /// New replies of a Slack thread: kept with the thread's waiting event, the newest
@@ -292,6 +296,23 @@ pub async fn release(hub: &Arc<Hub>, team: &Arc<Account>, workflow: &str, subjec
     }
 }
 
+/// The team's poller claims granted event `id` (`db::grant`) right before it runs it from the
+/// start with its place already held: only the claim that deleted the row gets the event, so of
+/// two hubs exactly one runs it. A hub that stops before the claim leaves the row granted, and the
+/// next hub's poller runs it once. A hub that stops after the claim and before the event's session
+/// opens does not run it again: its reserved run (`reserved_at`) is left, and ended by the hub's
+/// backstop for reservations that never opened.
+pub async fn claim(hub: &Arc<Hub>, team: &Arc<Account>, id: i64) -> Result<Option<Event>, String> {
+    let Some(start) = db::claim(&hub.db, team.id, id).await? else { return Ok(None) };
+    match serde_json::from_value(start) {
+        Ok(Stored::Event { event, replies, earlier, .. }) => Ok(Some(with_replies(event, &replies, earlier))),
+        _ => {
+            eprintln!("pinned-server: team {}: a granted event was not readable and is dropped", team.id);
+            Ok(None)
+        }
+    }
+}
+
 /// A run of bot `ended` ended: starts what waits while the team has a free place, in a task of its
 /// own, so the end never waits on a box opening. Only `calls::end_run` calls it.
 pub fn next(hub: &Hub, team: &Arc<Account>, ended: &str) {
@@ -306,37 +327,47 @@ pub fn next(hub: &Hub, team: &Arc<Account>, ended: &str) {
 
 async fn start_waiting(hub: &Arc<Hub>, team: &Arc<Account>, ended: &str) -> Result<(), String> {
     let turn = Turn::take(hub, team.id).await?;
-    let started = take_and_start(hub, team, ended).await;
+    let started = take_and_start(hub, &turn, team, ended).await;
     turn.end().await?;
-    started
+    // A grant is in Postgres once the turn committed: the team's poller looks now.
+    if matches!(started, Ok(true)) {
+        hub.connectors(team).await?.wake();
+    }
+    started.map(drop)
 }
 
-/// `start_waiting`'s takes and starts, inside the team's turn.
-async fn take_and_start(hub: &Arc<Hub>, team: &Arc<Account>, ended: &str) -> Result<(), String> {
+/// `start_waiting`'s takes and starts, inside the team's turn. Answers whether it granted an
+/// event a place.
+async fn take_and_start(hub: &Arc<Hub>, turn: &Turn, team: &Arc<Account>, ended: &str) -> Result<bool, String> {
+    let mut granted = false;
     loop {
-        if db::live_count(&hub.db, team.id).await? >= db::max_live_runs(&hub.db, team.id).await? {
-            return Ok(());
+        if db::live_count_on(&turn.held, team.id).await? >= db::max_live_runs(&hub.db, team.id).await? {
+            return Ok(granted);
         }
-        let Some(waiting) = db::next_waiting(&hub.db, team.id, ended).await? else { return Ok(()) };
-        db::take_waiting(&hub.db, waiting.id).await?;
+        let Some(waiting) = db::next_waiting(&turn.held, team.id, ended).await? else { return Ok(granted) };
         let stored: Stored = match serde_json::from_value(waiting.start) {
             Ok(stored) => stored,
             Err(e) => {
                 eprintln!("pinned-server: team {} bot {}: a waiting event was not readable and is dropped: {e}", team.id, waiting.workflow);
+                db::take_waiting(&hub.db, waiting.id).await?;
                 continue;
             }
         };
-        if let Stored::Event { kind, event, replies, earlier } = stored {
+        if let Stored::Event { kind, event, .. } = stored {
             if let Some(reason) = skip_reason(hub, team, &waiting.workflow, true).await? {
                 eprintln!("pinned-server: team {} bot {}: a waiting event is dropped: the bot is {}", team.id, waiting.workflow, reason.as_str());
+                db::take_waiting(&hub.db, waiting.id).await?;
                 db::count_skipped(&hub.db, team.id, &waiting.workflow, reason, 1).await?;
                 continue;
             }
-            // Its place is held now, and the team's poller runs it whole, from the start.
-            reserve(hub, team, &kind, &event).await?;
-            hub.connectors(team).await?.granted(with_replies(event, &replies, earlier));
+            // Its place is held now and its row granted, in one transaction (the turn's): the
+            // team's poller claims it and runs it whole, from the start.
+            let run = reserve(turn, team, &kind, &event).await?;
+            db::grant(&turn.held, waiting.id, run).await?;
+            granted = true;
             continue;
         }
+        db::take_waiting(&hub.db, waiting.id).await?;
         let Some(start) = stored.start(&waiting.workflow) else { continue };
         let by_trigger = matches!(start, Start::Trigger { .. });
         if let Some(reason) = skip_reason(hub, team, &waiting.workflow, by_trigger).await? {

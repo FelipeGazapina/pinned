@@ -1352,7 +1352,7 @@ pub const CONSUMED: &str = "no session opened: the bot did not take the run";
 
 /// A trigger's event as its poller found it, before its Ask step or any graph step: what a hub's
 /// team admits, keeps waiting or drops (`Admission`), and hands back whole when its turn comes
-/// (`Connectors::granted`).
+/// (`Admission::claim`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Event {
@@ -1417,6 +1417,19 @@ pub trait Admission: Send + Sync {
     fn replies(&self, delivery: Delivery) -> Pending<Result<Replies, String>> {
         let _ = delivery;
         Box::pin(async { Ok(Replies::Pass) })
+    }
+
+    /// The events whose place was granted while they waited, oldest first: kept by the hub, not
+    /// in memory, so a hub that restarts before its poller claims one still runs it.
+    fn granted(&self) -> Pending<Result<Vec<i64>, String>> {
+        Box::pin(async { Ok(vec![]) })
+    }
+
+    /// Claims granted event `id` right before it runs: answered to exactly one claim, so of two
+    /// pollers only one runs it, and none after it was claimed.
+    fn claim(&self, id: i64) -> Pending<Result<Option<Event>, String>> {
+        let _ = id;
+        Box::pin(async { Ok(None) })
     }
 }
 
@@ -1806,8 +1819,6 @@ pub struct Connectors {
     boot_failed: Mutex<std::collections::HashSet<String>>,
     /// A hub's team's admission (`Admission`); none on a person's account.
     admission: std::sync::OnceLock<std::sync::Arc<dyn Admission>>,
-    /// Events the admission let run after they waited: the next check runs each from the start.
-    granted: Mutex<Vec<Event>>,
     /// Admitted graph runs whose session has not opened, by connector and `subject_key`: a run
     /// that ends before one releases its place.
     holding: Mutex<std::collections::HashSet<(String, String)>>,
@@ -1948,7 +1959,6 @@ impl Connectors {
             box_failures: Mutex::new(vec![]),
             boot_failed: Mutex::new(std::collections::HashSet::new()),
             admission: std::sync::OnceLock::new(),
-            granted: Mutex::new(vec![]),
             holding: Mutex::new(std::collections::HashSet::new()),
         }
     }
@@ -1958,11 +1968,35 @@ impl Connectors {
         let _ = self.admission.set(admission);
     }
 
-    /// `event` waited and its place is now granted: the next check runs it from the start, its
-    /// Ask step and every graph step included, without asking the admission again.
-    pub fn granted(&self, event: Event) {
-        self.granted.lock().unwrap().push(event);
+    /// An event waited and its place is now granted (`Admission::granted`): checks now, so it
+    /// runs from the start, its Ask step and every graph step included, without asking again.
+    pub fn wake(&self) {
         self.wake.notify_one();
+    }
+
+    /// Runs every granted event this check claims (`Admission::claim`), each claimed right before
+    /// it runs. A granted event a restart left unclaimed runs on the new hub's first check; one
+    /// claimed before a restart is not run again, and its reserved run is left to the hub.
+    async fn run_granted<F, Fut, R>(&self, open: &F) -> Result<(), String>
+    where
+        F: Fn(Work) -> Fut,
+        Fut: Future<Output = R>,
+        R: Taken,
+    {
+        let Some(admission) = self.admission.get().cloned() else { return Ok(()) };
+        let mut error = None;
+        for id in admission.granted().await? {
+            let ran = match admission.claim(id).await {
+                Ok(Some(Event::Run(run))) => self.hand_over_run(run, open, true).await,
+                Ok(Some(graph @ Event::Graph { .. })) => self.begin_admitted(graph).await,
+                Ok(None) => Ok(()),
+                Err(e) => Err(e),
+            };
+            if let Err(e) = ran {
+                error.get_or_insert(e);
+            }
+        }
+        error.map_or(Ok(()), Err)
     }
 
     /// Asks the admission about `event`; a person's connectors have none and always go.
@@ -3500,15 +3534,8 @@ impl Connectors {
     {
         let _guard = self.lock_driving().await;
         let (work, mut error) = self.poll().await;
-        let granted = std::mem::take(&mut *self.granted.lock().unwrap());
-        for event in granted {
-            let ran = match event {
-                Event::Run(run) => self.hand_over_run(run, open, true).await,
-                graph @ Event::Graph { .. } => self.begin_admitted(graph).await,
-            };
-            if let Err(e) = ran {
-                error.get_or_insert(e);
-            }
+        if let Err(e) = self.run_granted(open).await {
+            error.get_or_insert(e);
         }
         for work in work {
             if let Err(e) = self.hand_over(work, open).await {

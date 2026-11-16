@@ -208,6 +208,11 @@ create table if not exists team_bot_skips (team uuid not null references teams o
 -- A run whose place a trigger's event holds before its session opens (`teams::queue::admit`):
 -- the team's cap counts it from then, and its session's `open` starts it without deciding again.
 alter table team_runs add column if not exists reserved boolean not null default false;
+-- A waiting event whose turn came (`teams::queue::take_and_start`) stays in its line, granted, with the
+-- reserved run that holds its place, until its team's poller claims it (`teams::db::claim`).
+alter table team_run_queue add column if not exists granted_at timestamptz;
+alter table team_run_queue add column if not exists run uuid;
+alter table team_runs add column if not exists reserved_at timestamptz;
 ";
 /// How long the hub keeps an end that its machine never came back for.
 const HELD_FOR: &str = "interval '30 days'";
