@@ -22,6 +22,9 @@ struct Call {
 }
 
 static CALLS: Mutex<Vec<Call>> = Mutex::new(Vec::new());
+/// The tests whose model call about ENG-1 gets no answer while they are listed here, as a model
+/// that is still thinking when its hub stops.
+static THINKING: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 /// Starts the Linear and model stand-ins once, and the Slack one. Each test names its own keys,
 /// so they share the servers.
@@ -57,6 +60,9 @@ fn answer(mut stream: TcpStream) {
     let key = header("authorization").trim_start_matches("Bearer ").to_owned();
     let service = if path.starts_with("/graphql") { "linear" } else { "model" };
     CALLS.lock().unwrap().push(Call { service, key: key.clone(), path: path.clone(), body: body.clone() });
+    while service == "model" && body.contains("ENG-1:") && THINKING.lock().unwrap().iter().any(|t| key.ends_with(t.as_str())) {
+        std::thread::sleep(Duration::from_millis(50));
+    }
     // A model call about ENG-1 that stops its run (`ta_rel_stop`) or fails (`ta_rel_model`).
     let (status, special) = match (service, path.as_str()) {
         ("model", "/v1/chat/completions") if body.contains("ENG-1:") && key.ends_with("ta_rel_stop") => ("200 OK", Some(json!({ "choices": [{ "message": { "content": "{\"kind\":\"stop\"}" } }] }))),
@@ -626,4 +632,168 @@ fn a_graph_that_ends_before_any_session_frees_its_reserved_place() {
     assert_eq!(crew.unopened(), vec!["done", "done"], "both reserved rows ended, none is left holding a place");
     assert_eq!((crew.live(), crew.waiting(&pages)), (0, 0), "both graphs ended, neither holds a place");
     assert_eq!((crew.outside(1), crew.outside(2)), (vec!["linear move".to_owned()], vec!["linear move".to_owned()]), "each graph moved its issue once");
+}
+
+/// A lock the test holds on the team's waiting rows: a grant (an update) goes through, a claim (a
+/// delete) waits, as a poller that has not claimed yet. It lives on a runtime of its own, so a
+/// stopped hub does not drop it. A hub's start changes the tables, so it waits for the release.
+struct ClaimGate {
+    runtime: tokio::runtime::Runtime,
+    db: tokio_postgres::Client,
+    team: Uuid,
+}
+
+impl ClaimGate {
+    fn hold(crew: &Crew) -> ClaimGate {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let url = format!("{}/{}", postgres(), crew.hub.database);
+        let db = runtime.block_on(async {
+            let (db, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls).await.unwrap();
+            tokio::spawn(connection);
+            db.batch_execute("begin").await.unwrap();
+            db.query("select id from team_run_queue where team = $1 for key share", &[&crew.team]).await.unwrap();
+            db
+        });
+        ClaimGate { runtime, db, team: crew.team }
+    }
+
+    /// How many of the team's waiting rows are granted.
+    fn granted(&self) -> i64 {
+        self.runtime.block_on(self.db.query_one("select count(*) from team_run_queue where team = $1 and granted_at is not null", &[&self.team])).unwrap().get(0)
+    }
+
+    /// The server processes of the claims that wait on this lock.
+    fn claims(&self) -> Vec<i32> {
+        // Inside a transaction, Postgres keeps the first read of its activity view unless told not to.
+        self.runtime.block_on(self.db.query("select pg_stat_clear_snapshot()", &[])).unwrap();
+        let rows = self.runtime.block_on(self.db.query(
+            "select pid from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock' and query like 'delete from team_run_queue where team = $1 and id = $2%'",
+            &[],
+        ));
+        rows.unwrap().iter().map(|r| r.get(0)).collect()
+    }
+
+    /// Ends the server process of a stopped hub's claim before it took the row, as Postgres does
+    /// when it finds that hub gone.
+    fn end(&self, claims: &[i32]) {
+        for pid in claims {
+            self.runtime.block_on(self.db.query("select pg_terminate_backend($1)", &[pid])).unwrap();
+        }
+        wait_for("the stopped hub's claim to end", || self.claims().is_empty());
+    }
+
+    fn release(self) {
+        self.runtime.block_on(self.db.batch_execute("commit")).unwrap();
+    }
+}
+
+impl Crew {
+    /// How many boxes were created for sessions so far.
+    fn boxes_created(&self) -> usize {
+        self.hub.boxes.state.lock().unwrap().created.len()
+    }
+
+    /// When each reserved run of bot `id` got its place (`reserved_at`), as `set` or `null`.
+    fn reserved_at(&self, id: &str) -> Vec<String> {
+        self.hub.runtime.block_on(async {
+            let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), self.hub.database), tokio_postgres::NoTls).await.unwrap();
+            tokio::spawn(connection);
+            let rows = db.query("select case when reserved_at is null then 'null' else 'set' end from team_runs where team = $1 and workflow = $2 and reserved", &[&self.team, &id]).await.unwrap();
+            rows.iter().map(|r| r.get::<_, String>(0)).collect()
+        })
+    }
+}
+
+/// A team that may run one at a time: bot `holder`'s run takes the place, the graph bot's ENG-1
+/// waits behind it, and the test holds every claim (`ClaimGate`). Stopping the holder grants ENG-1.
+fn one_granted(crew: &Crew, holder: &str, bot: &str) -> ClaimGate {
+    admin_on(&crew.hub.database, &format!("update teams set max_live_runs = 1 where id = '{}'", crew.team));
+    assert_eq!(crew.found(crew.labeled(holder, 9)), Ok(()));
+    assert_eq!(crew.found(crew.graph_labeled(bot, 1)), Ok(()));
+    assert_eq!((crew.live(), crew.waiting(bot)), (1, 1), "the holder's run is the only one, ENG-1 waits");
+    let gate = ClaimGate::hold(crew);
+    let held = crew.live_of(holder);
+    crew.stop(&held[0]);
+    wait_for("ENG-1's grant and this hub's claim of it", || gate.granted() == 1 && gate.claims().len() == 1);
+    assert_eq!(crew.outside(1), none(), "nothing of ENG-1 ran before its claim");
+    assert_eq!(crew.reserved_at(bot), vec!["set".to_owned()], "its place is held in Postgres");
+    gate
+}
+
+/// ENG-1 of graph bot `bot` ran once, each outside step once, in one new box, and nothing waits.
+fn ran_once(crew: &Crew, bot: &str, boxes_before: usize) {
+    wait_for("ENG-1's graph to run", || crew.outside(1).len() >= 2 && crew.reserved_at(bot).is_empty());
+    // A few checks pass meanwhile: nothing runs a second time.
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(crew.outside(1), vec!["linear move".to_owned(), "model".to_owned()], "each outside step exactly once");
+    assert_eq!(crew.boxes_created() - boxes_before, 1, "one session opened, in one box");
+    assert_eq!(crew.live_of(bot).len(), 1, "one run of ENG-1 lives");
+    assert_eq!(crew.reserved_at(bot), none(), "its session opened in the place it was granted");
+    assert_eq!(crew.waiting(bot), 0);
+}
+
+#[test]
+fn a_granted_event_survives_a_hub_restart_and_runs_once() {
+    let mut crew = Crew::new("ta_dur_restart");
+    let (holder, triage) = (crew.on_bot("Docs"), crew.graph_bot("Triage"));
+    let gate = one_granted(&crew, &holder, &triage);
+    let boxes_before = crew.boxes_created();
+    let stopped = gate.claims();
+
+    let addr = crew.hub.stop();
+    gate.end(&stopped);
+    assert_eq!(gate.granted(), 1, "the stopped hub never claimed it");
+    gate.release();
+    crew.hub.serve(&addr);
+    ran_once(&crew, &triage, boxes_before);
+}
+
+#[test]
+fn two_hubs_claim_a_granted_event_once() {
+    let mut crew = Crew::new("ta_dur_twin");
+    let (holder, triage) = (crew.on_bot("Docs"), crew.graph_bot("Triage"));
+    let gate = one_granted(&crew, &holder, &triage);
+    let boxes_before = crew.boxes_created();
+    let stopped = gate.claims();
+    let addr = crew.hub.stop();
+    gate.end(&stopped);
+    gate.release();
+
+    // Two hubs start on the same database at once, and each one's first check finds the grant.
+    let (twin, _running) = crew.hub.twin();
+    crew.hub.serve(&addr);
+    // Only one claim gets the event. Whether its box then reaches the hub that opened it is not
+    // what this test checks: the claim is, by every step outside pinned and by the boxes asked for.
+    wait_for("ENG-1's graph to run", || crew.outside(1).len() >= 2 && crew.boxes_created() > boxes_before);
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(crew.outside(1), vec!["linear move".to_owned(), "model".to_owned()], "each outside step exactly once");
+    assert_eq!(crew.boxes_created() - boxes_before, 1, "one session asked for, in one box");
+    assert_eq!(crew.waiting(&triage), 0, "the claim took the row");
+    twin.shutdown_background();
+}
+
+#[test]
+fn a_claimed_event_is_not_run_again_after_a_restart() {
+    let mut crew = Crew::new("ta_dur_claimed");
+    THINKING.lock().unwrap().push("ta_dur_claimed".into());
+    let (holder, pages) = (crew.on_bot("Docs"), crew.on_bot("Pages"));
+    admin_on(&crew.hub.database, &format!("update teams set max_live_runs = 1 where id = '{}'", crew.team));
+    assert_eq!(crew.found(crew.labeled(&holder, 9)), Ok(()));
+    assert_eq!(crew.found(crew.labeled(&pages, 1)), Ok(()));
+    assert_eq!(crew.waiting(&pages), 1, "ENG-1 waits");
+    let boxes_before = crew.boxes_created();
+    let held = crew.live_of(&holder);
+    crew.stop(&held[0]);
+    // Claimed: its Ask step asked the model, which is still thinking when the hub stops.
+    wait_for("ENG-1's claim and its model call", || crew.outside(1) == vec!["model".to_owned()]);
+    assert_eq!(crew.waiting(&pages), 0, "the claim took its row");
+
+    crew.hub.restart();
+    THINKING.lock().unwrap().retain(|t| t != "ta_dur_claimed");
+    // A few checks of the new hub pass.
+    std::thread::sleep(Duration::from_secs(4));
+    assert_eq!(crew.outside(1), vec!["model".to_owned()], "no second model call and no Linear move");
+    assert_eq!(crew.boxes_created() - boxes_before, 0, "no session opened");
+    assert_eq!(crew.reserved_at(&pages), vec!["set".to_owned()], "its reserved run is left for the backstop");
+    assert_eq!(crew.live_of(&pages).len(), 1);
 }
