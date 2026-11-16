@@ -239,10 +239,10 @@ fn a_run_now_opens_a_box_on_the_teams_claude_token_not_a_members() {
     assert_eq!(crew.hub.runtime.block_on(crew.hub.hub().db.boxes(crew.team)).unwrap().len(), 1, "the box is the team's");
     assert_eq!(crew.hub.runtime.block_on(crew.hub.hub().db.boxes(crew.bob.id)).unwrap().len(), 0, "and none is bob's");
 
-    // The same run through the personal door lists a second run.
+    // The same run through the personal door joins the bot's line behind its live run.
     let again = crew.hub_op(&crew.bob, json!({ "cmd": "run_workflow", "id": id })).unwrap();
-    assert_eq!((again["workflow"].as_str(), again["state"].as_str(), again["started_by"].as_str()), (Some(id.as_str()), Some("working"), Some(crew.bob.id.to_string().as_str())));
-    assert_eq!(crew.runs().len(), 2);
+    assert_eq!((again["workflow"].as_str(), again["waiting"].as_bool(), again["place"].as_i64()), (Some(id.as_str()), Some(true), Some(1)));
+    assert_eq!(crew.runs().len(), 1);
 }
 
 #[test]

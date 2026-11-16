@@ -11576,8 +11576,7 @@
                 "type": "array",
                 "items": {
                   "$ref": "#/$defs/Skipped"
-                },
-                "default": []
+                }
               }
             },
             "required": [
@@ -11588,8 +11587,7 @@
               "limits",
               "on",
               "on_by",
-              "once",
-              "skipped"
+              "once"
             ]
           },
           "CallRules": {
@@ -23184,8 +23182,7 @@
                 "type": "array",
                 "items": {
                   "$ref": "#/$defs/Skipped"
-                },
-                "default": []
+                }
               }
             },
             "required": [
@@ -31961,8 +31958,7 @@
                 "type": "array",
                 "items": {
                   "$ref": "#/$defs/Skipped"
-                },
-                "default": []
+                }
               }
             },
             "required": [
@@ -31973,8 +31969,7 @@
               "limits",
               "on",
               "on_by",
-              "once",
-              "skipped"
+              "once"
             ]
           },
           "CallRules": {
@@ -40421,8 +40416,7 @@
                 "type": "array",
                 "items": {
                   "$ref": "#/$defs/Skipped"
-                },
-                "default": []
+                }
               }
             },
             "required": [
@@ -58453,8 +58447,7 @@
             "type": "array",
             "items": {
               "$ref": "#/$defs/Skipped"
-            },
-            "default": []
+            }
           }
         },
         "required": [
@@ -58465,8 +58458,7 @@
           "limits",
           "on",
           "on_by",
-          "once",
-          "skipped"
+          "once"
         ],
         "$defs": {
           "CallRules": {
@@ -58679,8 +58671,7 @@
             "type": "array",
             "items": {
               "$ref": "#/$defs/Skipped"
-            },
-            "default": []
+            }
           }
         },
         "required": [

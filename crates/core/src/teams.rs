@@ -239,7 +239,7 @@ pub struct Bot {
     pub off_note: Option<String>,
     /// The events that started no run of the bot, counted by why. The hub sets it: one a member
     /// sends is not read.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skipped: Vec<Skipped>,
 }
 

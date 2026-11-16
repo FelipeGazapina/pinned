@@ -1346,6 +1346,10 @@ impl Taken for Result<Option<Placement>, String> {
     }
 }
 
+/// Why a graph run ended when its session's `open` was consumed (a hub's team bot that is off or
+/// busy): nothing opened, so nothing is typed, acknowledged or placed.
+pub const CONSUMED: &str = "no session opened: the bot did not take the run";
+
 /// Runs `work` off the async worker. Resume detection sleeps, and a desktop watcher must not block on it.
 pub async fn off_worker<T: Send + 'static>(work: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
     match tokio::task::spawn_blocking(work).await {
@@ -1968,6 +1972,13 @@ impl Connectors {
         match work {
             Work::Run(mut run) => {
                 let (connector, subject, folder, mentioned) = (run.connector.clone(), run.subject.clone(), run.cwd.clone(), run.mentioned.clone());
+                // A connector that is off (a hub's team bot that is not on) takes no run, so its
+                // Ask step asks no model: the event is consumed before anything outside pinned
+                // hears of it.
+                let (asks, enabled) = self.store.lock().unwrap().connectors.iter().find(|c| c.id == connector).map_or((false, false), |c| (c.ask.is_some(), c.enabled));
+                if asks && !enabled {
+                    return self.keep_stopped(&connector, &subject);
+                }
                 match self.consult(&connector, &run.input).await {
                     Ok(None) => {}
                     Ok(Some((ask, answers))) => {
@@ -3789,7 +3800,11 @@ impl Connectors {
             let mut spec = graph_opening(&owner_c, &trigger, &[], "", None, &self.exe)?;
             spec.args.pop();
             spec.args.extend(["--resume".into(), claude.clone()]);
-            match open(Work::Run(spec)).await.taken() {
+            let answer = open(Work::Run(spec)).await;
+            if answer.consumed() {
+                return self.keep_stopped(owner, &run.subject);
+            }
+            match answer.taken() {
                 Ok(place) => {
                     let place = place.unwrap_or(Placement { machine: "local".into(), tab: "local".into() });
                     if !text.is_empty() {
@@ -3803,7 +3818,11 @@ impl Connectors {
             }
         }
         let spec = graph_opening(&owner_c, &trigger, &direct_answers(run, &self.library()), text, Some(&runner::history(run)), &self.exe)?;
-        let place = open(Work::Run(spec)).await.taken()?.unwrap_or(Placement { machine: "local".into(), tab: "local".into() });
+        let answer = open(Work::Run(spec)).await;
+        if answer.consumed() {
+            return self.keep_stopped(owner, &run.subject);
+        }
+        let place = answer.taken()?.unwrap_or(Placement { machine: "local".into(), tab: "local".into() });
         self.mark_live(&run.id.0, place, None)
     }
 
@@ -4095,7 +4114,13 @@ impl Connectors {
         };
         let folder = spec.cwd.clone();
         let mentioned = spec.mentioned.clone();
-        match open(Work::Run(spec)).await.taken() {
+        let answer = open(Work::Run(spec)).await;
+        // Consumed: nothing opened, so the run ends without a session and Slack hears nothing.
+        if answer.consumed() {
+            self.restore_inbox(inbox);
+            return Ok(Supplied::Failed(CONSUMED.into()));
+        }
+        match answer.taken() {
             Ok(place) => {
                 if let Subject::SlackThread { channel, thread } = &run.subject {
                     let _ = self.acknowledge(owner, channel, thread, &mentioned).await;
@@ -4124,7 +4149,12 @@ impl Connectors {
         spec.args.extend(["--resume".into(), claude.to_owned()]);
         let inbox = self.take_inbox(&run.subject);
         let text = render_template(text, run);
-        let place = match open(Work::Run(spec)).await.taken() {
+        let answer = open(Work::Run(spec)).await;
+        if answer.consumed() {
+            self.restore_inbox(inbox);
+            return Ok(Supplied::Failed(CONSUMED.into()));
+        }
+        let place = match answer.taken() {
             Err(why) if why.contains("No conversation found") => {
                 self.restore_inbox(inbox);
                 return Ok(Supplied::NoConversation);
@@ -9901,6 +9931,47 @@ mod tests {
         block_on(connectors.perform_resume(&mut run, "c2", "claude-1", FORGED_TEMPLATE, &open)).unwrap();
         assert_eq!(*typed.lock().unwrap(), [FORGED_TYPED]);
         assert!(runner::already_sent(&run, FORGED_RAW));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_off_connectors_ask_step_asks_no_model_and_its_run_is_consumed() {
+        let _model = TestReply::set(r#"{"kind":"bug","agent":"yes"}"#.into());
+        crate::vercel::take_test_inputs();
+        let off = Connector { enabled: false, ask: Some(classifying()), handled: vec!["uuid".into()], ..linear_connector() };
+        let (connectors, dir) = stored("off-ask", vec![off]);
+        std::fs::write(dir.join("vercel-key"), "vck-test").unwrap();
+        let opened = Mutex::new(0);
+        let open = |work: Work| {
+            *opened.lock().unwrap() += 1;
+            placed(work)
+        };
+        assert_eq!(block_on(connectors.hand_over(Work::Run(run(&linear_connector(), &issue(), "/bin/pinned")), &open)), Ok(()));
+        assert_eq!(crate::vercel::take_test_inputs(), Vec::<String>::new(), "no model was asked");
+        assert_eq!(*opened.lock().unwrap(), 0, "no session was asked for");
+        assert_eq!(connectors.get_settings().connectors[0].handled, ["uuid"], "the issue stays handled");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_consumed_open_or_resume_of_a_graph_step_places_nothing_and_types_nothing() {
+        let (connector, mut run) = forged_template_run();
+        let (connectors, dir) = stored("consumed-graph", vec![connector.clone()]);
+        let sent = Mutex::new(Vec::<&'static str>::new());
+        let consumed = |work: Work| {
+            sent.lock().unwrap().push(match work {
+                Work::Run(_) => "run",
+                Work::Prompt { .. } => "prompt",
+                Work::Delivery(_) => "delivery",
+            });
+            async { Ok::<Option<Placement>, String>(None) }
+        };
+        let resumed = block_on(connectors.perform_resume(&mut run, "c2", "claude-1", FORGED_TEMPLATE, &consumed));
+        assert_eq!(resumed, Ok(Supplied::Failed(CONSUMED.into())), "no local placement");
+        let library: runner::Library = [("c2".to_owned(), connector.graph.clone().unwrap())].into_iter().collect();
+        let opened = block_on(connectors.perform_open(&run, "c2", FORGED_TEMPLATE, false, &SessionSetup::default(), &library, &consumed));
+        assert_eq!(opened, Ok(Supplied::Failed(CONSUMED.into())), "no local placement");
+        assert_eq!(*sent.lock().unwrap(), ["run", "run"], "nothing typed into a session that never opened");
         let _ = std::fs::remove_dir_all(dir);
     }
 
