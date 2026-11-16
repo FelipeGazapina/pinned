@@ -75,6 +75,7 @@ const TEAMS_TEXT = {
   connected: "Connected",
   connectNow: "Connect now",
   ownerOnly: "Only the owner connects these.",
+  keyAccess: "The bot can do whatever the team's keys allow, so connect keys with the least access the bot needs.",
   keptNote: "You paste the key in a form here in pinned. It is kept with the team and is never shown again.",
   noRush: "No rush: you can connect later. Until then you can set up bots and groups, but no bot runs.",
   form: {
@@ -370,7 +371,7 @@ function teamWizardCredHtml() {
 function teamWizardFormHtml(cred) {
   const f = TEAMS_TEXT.form[cred];
   const fields = f.fields
-    .map((x) => `<label class="tm-field"><span>${teamsEsc(x.label)}</span><input data-field="${x.id}" type="${x.plain ? "text" : "password"}" autocomplete="off" spellcheck="false" placeholder="${teamsEsc(x.placeholder)}"${x.value ? ` value="${teamsEsc(x.value)}"` : ""}></label>`)
+    .map((x) => `<label class="tm-field"><span>${teamsEsc(x.label)}</span><input data-field="${x.id}" type="${x.plain ? "text" : "password"}" autocomplete="off" spellcheck="false" placeholder="${teamsEsc(x.placeholder)}"${x.value ? ` value="${teamsEsc(x.value)}"` : ""}>${x.plain ? "" : `<span class="tm-field-note">${teamsEsc(TEAMS_TEXT.keyAccess)}</span>`}</label>`)
     .join("");
   return `<form class="tm-form" data-tm="form" data-cred="${cred}" autocomplete="off">
     <h3>${f.title}</h3>${fields}<p class="tm-note">${teamsEsc(f.about)}</p>${tmError(teamWizard.formError)}

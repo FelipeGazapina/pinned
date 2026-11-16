@@ -343,6 +343,21 @@ test("Connect now opens a password form per credential and sends the personal ca
   assert.match(a.page(), />Continue</, "all three connected: no more Connect later");
 });
 
+const KEY_ADVICE = "The bot can do whatever the team's keys allow, so connect keys with the least access the bot needs.";
+
+test("next to each key field the form says the bot can do whatever the team's keys allow", async () => {
+  const a = await atStep3(ACME, { answers: { hub: null } });
+  for (const [cred, keys] of [["upstash", 2], ["claude", 1], ["github", 1]]) {
+    a.click("connect", { cred });
+    const page = a.page();
+    const fields = page.match(/<label class="tm-field">.*?<\/label>/g) ?? [];
+    const withKey = fields.filter((f) => f.includes('type="password"'));
+    assert.equal(withKey.length, keys, cred);
+    for (const f of withKey) assert.equal(text(f).split(KEY_ADVICE).length - 1, 1, `${cred}: the sentence sits in the key field's own label`);
+    assert.equal((text(page).match(/whatever the team's keys allow/g) ?? []).length, keys, `${cred}: one sentence per key field, none on the name field`);
+  }
+});
+
 test("a key the hub refuses shows its words inline and keeps the form open without the key", async () => {
   const a = await atStep3(ACME, { answers: { hub: new Error("only the team's owner runs connect_github on the team") } });
   a.click("connect", { cred: "github" });

@@ -58,6 +58,7 @@ body[data-mode="gui"]:is([data-page="team-create"], [data-page="team-join"]) #pa
 
 .tm-field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--g-muted); }
 .tm-field input { min-height: 38px; padding: 0 12px; border-radius: 10px; border: 1px solid rgb(var(--g-ink-rgb) / 0.14); background: var(--g-input); color: var(--g-fg); font: inherit; font-size: 14px; }
+.tm-field-note { font-size: 12.5px; line-height: 1.45; color: var(--g-muted); }
 .tm-field.big input { min-height: 44px; font-size: 16px; }
 .tm-field input:focus { outline: 2px solid var(--g-primary); outline-offset: -1px; }
 .tm-card { display: flex; flex-direction: column; gap: 8px; padding: 14px 16px; border-radius: 14px; background: var(--g-raised); font-size: 13px; }
