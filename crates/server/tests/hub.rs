@@ -12,7 +12,7 @@ use pinned_core::sync;
 use pinned_core::taste::{TastePatch, TasteScope, Tastes};
 use pinned_core::upstash::{BoxId, Exec, Listed, NewBox};
 use pinned_core::sessions::Saved;
-use pinned_core::wire::{Call, HubCall, MachineView, NEVER_EXPIRES};
+use pinned_core::wire::{Call, HubCall, MachineEvent, MachineView, NEVER_EXPIRES};
 use pinned_server::boxes::{BoxApi, Policy};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
@@ -398,6 +398,11 @@ struct Node {
 }
 
 fn launched(dir: &Path) -> Arc<Machine> {
+    launched_with(dir, |_| {})
+}
+
+/// A machine that tells `events` what it reports.
+fn launched_with(dir: &Path, events: impl Fn(MachineEvent) + Send + Sync + 'static) -> Arc<Machine> {
     let claude = dir.join("claude");
     std::fs::write(&claude, "#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && { echo '{\"loggedIn\":true}'; exit 0; }\nexec cat\n").unwrap();
     std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
@@ -424,12 +429,16 @@ fn launched(dir: &Path) -> Arc<Machine> {
         // Each node reads and writes its transcripts under its own folder, never the process's HOME.
         claude_home: Some(dir.join(".claude")),
     };
-    Machine::new(launch, Some(dir.to_owned()), Some(dir.to_owned()), |_| {})
+    Machine::new(launch, Some(dir.to_owned()), Some(dir.to_owned()), events)
 }
 
 impl Node {
     fn start(dir: &Path, creds: Credentials) -> Node {
-        let machine = launched(dir);
+        Node::start_with(dir, creds, |_| {})
+    }
+
+    fn start_with(dir: &Path, creds: Credentials, events: impl Fn(MachineEvent) + Send + Sync + 'static) -> Node {
+        let machine = launched_with(dir, events);
         let link = link::spawn(creds, machine.clone(), "0.0.0-test");
         Node { machine, link: Some(link) }
     }
@@ -2709,6 +2718,9 @@ struct FakeState {
     /// A checkout each booted node already knows, as `(folder name, git origin)`, so the node finds
     /// the repo a worker or a Captain needs without cloning from the network.
     checkout: Option<(String, String)>,
+    /// Runs on the next booted node's machine thread, inside the call that opens its first tab and
+    /// before that call answers the hub: what a session does as its first act.
+    first_tab: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 /// Upstash's Box API in memory. Running the bootstrap starts a node from the account.json the hub
@@ -2748,19 +2760,27 @@ impl FakeBoxes {
     }
 
     async fn boot(&self, id: &BoxId) -> Result<Exec, String> {
-        let (dir, creds, checkout) = {
+        let (dir, creds, checkout, first_tab) = {
             let mut state = self.state.lock().unwrap();
             if let Some(failing) = state.failing.take() {
                 return Ok(failing);
             }
+            let first_tab = state.first_tab.take();
             let fake = state.boxes.get(&id.0).ok_or("no such box")?;
             let creds: Credentials = serde_json::from_str(&fake.files[&format!("{BOX_DIR}/account.json")]).unwrap();
             assert!(fake.files[&format!("{BOX_DIR}/start.sh")].contains("pinned-server\" node --config-dir"));
-            (self.root.join(&id.0), creds, state.checkout.clone())
+            (self.root.join(&id.0), creds, state.checkout.clone(), first_tab)
         };
         std::fs::create_dir_all(&dir).unwrap();
         let node = tokio::task::spawn_blocking(move || {
-            let node = Node::start(&dir, creds);
+            let opened = std::sync::atomic::AtomicBool::new(false);
+            let node = Node::start_with(&dir, creds, move |event| {
+                if let (Some(first), MachineEvent::Tabs { tabs }) = (&first_tab, &event) {
+                    if !tabs.is_empty() && !opened.swap(true, Ordering::SeqCst) {
+                        first();
+                    }
+                }
+            });
             // A delivery is a prompt, which the node holds until claude takes the terminal, as this stand-in does.
             std::fs::write(dir.join("claude"), "#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && { echo '{\"loggedIn\":true}'; exit 0; }\nstty raw -echo; exec cat\n").unwrap();
             if let Some((name, remote)) = checkout {

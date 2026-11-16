@@ -203,30 +203,31 @@ fn a_tab_a_person_closes_mid_turn_stops_its_run() {
 fn a_session_that_asks_as_its_first_act_gets_a_call() {
     let crew = Crew::new("tr_first_ask", fast());
     let id = crew.on_bot("Footer", "", false);
-    // Run now records the run's box only after its box moves to running, which comes after the
-    // session started. That move waits here, on a lock this test holds until the session has asked,
-    // so the ask always comes before Run now has answered, whatever the timing.
-    const HOLD: i64 = 7_031;
-    let url = format!("{}/{}", postgres(), crew.hub.database);
-    let (held, connection) = crew.hub.runtime.block_on(tokio_postgres::connect(&url, tokio_postgres::NoTls)).unwrap();
-    crew.hub.runtime.spawn(connection);
-    crew.hub.runtime.block_on(held.batch_execute(&format!(
-        "select pg_advisory_lock({HOLD});
-         create function hold_running() returns trigger language plpgsql as $$ begin
-           if new.phase = 'running' then perform pg_advisory_lock({HOLD}); perform pg_advisory_unlock({HOLD}); end if;
-           return new;
-         end $$;
-         create trigger hold_running before update on boxes for each row execute function hold_running();"
-    )))
-    .unwrap();
+    // The box's node asks inside the call that opens the session's tab, before that call answers the hub,
+    // and holds that answer until the test lets it go. So the hub cannot have answered Run now when the
+    // ask comes, whatever the timing, and nothing here waits on a clock.
+    let (asked_tx, asked_rx) = std::sync::mpsc::channel();
+    let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+    let (boxes, go_rx) = (crew.hub.boxes.clone(), Mutex::new(go_rx));
+    let first_act = move || {
+        let op = TeamOp::AskPeople { situation: Situation::InDoubt, question: "Red or blue footer?".into(), choices: vec![], step: None };
+        let asked = boxes.with_node(|node| node.link.as_ref().unwrap().call_hub(HubCall::Team { team: None, op }));
+        let _ = asked_tx.send(asked);
+        let _ = go_rx.lock().unwrap().recv();
+    };
+    crew.hub.boxes.state.lock().unwrap().first_tab = Some(Arc::new(first_act));
     let (hub, bob, team) = (crew.hub.hub().clone(), crew.bob.clone(), crew.team);
     let started = crew.hub.runtime.spawn(async move { teams::call(&hub, &bob, Some(team), teams::Op::Team(TeamOp::RunNow { workflow: id })).await });
-    wait_for("the box's session", || crew.node().is_some_and(|n| !n.machine.tabs().is_empty()));
-    let asked = crew.ask("Red or blue footer?").unwrap();
+    let mut reply = None;
+    wait_for("the session's first question to be answered", || {
+        reply = asked_rx.try_recv().ok();
+        reply.is_some()
+    });
+    let asked = reply.unwrap().unwrap();
     assert!(!started.is_finished(), "the session asked before Run now answered");
     assert_eq!(asked["asked"], json!(["@design"]));
     assert!(asked["call"].as_str().is_some_and(|c| Uuid::parse_str(c).is_ok()), "a call: {asked}");
-    crew.hub.runtime.block_on(held.batch_execute(&format!("select pg_advisory_unlock({HOLD})"))).unwrap();
+    go_tx.send(()).unwrap();
     let run: TeamRun = serde_json::from_value(crew.hub.runtime.block_on(started).unwrap().unwrap()).unwrap();
     let calls = crew.op(&crew.bob, json!({ "op": "calls" })).unwrap();
     assert_eq!((&calls[0]["run"], &calls[0]["question"]), (&json!(run.id), &json!("Red or blue footer?")));
