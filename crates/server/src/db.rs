@@ -600,6 +600,15 @@ impl Db {
         self.connection.client().await
     }
 
+    /// The connection transactions run on, opened on first use and held by the caller until the guard drops.
+    pub(crate) async fn transaction_client(&self) -> Result<tokio::sync::MappedMutexGuard<'_, Client>, String> {
+        let mut held = self.transactions.lock().await;
+        if held.as_ref().map_or(true, Client::is_closed) {
+            *held = Some(open(&self.connection.url).await?);
+        }
+        Ok(tokio::sync::MutexGuard::map(held, |held| held.as_mut().expect("opened above")))
+    }
+
     /// Runs `sql` (statements that are safe to run again), for a module that keeps its own tables.
     pub async fn run_schema(&self, sql: &str) -> Result<(), String> {
         self.client().await?.batch_execute(sql).await.map_err(|e| format!("could not create the tables: {e}"))

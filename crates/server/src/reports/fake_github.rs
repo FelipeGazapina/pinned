@@ -45,6 +45,9 @@ struct StoredIssue {
     closed_at: Option<String>,
     comments: Vec<StoredComment>,
     timeline: Vec<Value>,
+    locked: bool,
+    /// The number is a pull request's.
+    pull: bool,
 }
 
 #[derive(Default)]
@@ -57,6 +60,10 @@ struct Repo {
     requests: Vec<Request>,
     /// Answers the next request with this instead of serving it: status, message and `x-ratelimit-remaining`.
     fail: Option<(u16, String, Option<String>)>,
+    /// Serves the next request, then holds its answer this long.
+    hang: Option<std::time::Duration>,
+    /// Waits this long before it creates each issue.
+    slow_create: Option<std::time::Duration>,
     last_headers: Vec<(String, String)>,
 }
 
@@ -196,7 +203,7 @@ impl FakeGithub {
     /// placeholders, so the next created issue is `number + 1`. Panics when `number` is taken.
     pub fn add_issue_numbered(&self, number: u64, title: &str, body: &str) {
         let mut repo = self.repo();
-        let blank = |open| StoredIssue { title: String::new(), body: String::new(), labels: vec![], open, state_reason: None, closed_at: None, comments: vec![], timeline: vec![] };
+        let blank = |open| StoredIssue { title: String::new(), body: String::new(), labels: vec![], open, state_reason: None, closed_at: None, comments: vec![], timeline: vec![], locked: false, pull: false };
         assert!(repo.issues.len() < number as usize, "issue {number} is taken in the fake");
         while repo.issues.len() + 1 < number as usize {
             repo.issues.push(blank(false));
@@ -208,6 +215,31 @@ impl FakeGithub {
     /// after it are served as usual.
     pub fn fail_next(&self, status: u16, message: &str, remaining: Option<&str>) {
         self.repo().fail = Some((status, message.into(), remaining.map(str::to_owned)));
+    }
+
+    /// Serves the next request as usual (an issue it creates exists), then holds the answer for `wait`.
+    pub fn hang_next(&self, wait: std::time::Duration) {
+        self.repo().hang = Some(wait);
+    }
+
+    /// Every create of an issue waits `wait` before it is done.
+    pub fn slow_creates(&self, wait: std::time::Duration) {
+        self.repo().slow_create = Some(wait);
+    }
+
+    /// Locks issue `number`: only collaborators may comment.
+    pub fn lock(&self, number: u64) {
+        self.repo().issues.get_mut(number as usize - 1).expect("no such issue in the fake").locked = true;
+    }
+
+    /// Makes `number` a pull request's.
+    pub fn make_pull(&self, number: u64) {
+        self.repo().issues.get_mut(number as usize - 1).expect("no such issue in the fake").pull = true;
+    }
+
+    /// How many issues the repository holds.
+    pub fn issue_count(&self) -> usize {
+        self.repo().issues.len()
     }
 
     pub fn add_release(&self, tag: &str, published_at: &str) {
@@ -243,6 +275,8 @@ fn issue_json(number: usize, issue: &StoredIssue) -> Value {
         "html_url": format!("{HTML_BASE}/issues/{number}"),
         "comments": issue.comments.len(),
         "closed_at": issue.closed_at,
+        "locked": issue.locked,
+        "pull_request": issue.pull.then(|| json!({ "url": format!("{HTML_BASE}/pull/{number}") })),
         "labels": issue.labels.iter().map(|name| json!({ "name": name })).collect::<Vec<_>>(),
     })
 }
@@ -252,9 +286,25 @@ fn query_of(uri: &Uri) -> Vec<(String, String)> {
 }
 
 async fn handle(State(shared): State<Shared>, method: Method, uri: Uri, headers: HeaderMap, body: Bytes) -> Response {
+    let (hang, slow) = {
+        let mut repo = lock(&shared);
+        let creates = method == Method::POST && uri.path().ends_with("/issues");
+        (repo.hang.take(), repo.slow_create.filter(|_| creates))
+    };
+    if let Some(wait) = slow {
+        tokio::time::sleep(wait).await;
+    }
+    let response = serve_now(&shared, method, uri, headers, body);
+    if let Some(wait) = hang {
+        tokio::time::sleep(wait).await;
+    }
+    response
+}
+
+fn serve_now(shared: &Shared, method: Method, uri: Uri, headers: HeaderMap, body: Bytes) -> Response {
     let body_text = String::from_utf8_lossy(&body).into_owned();
     let authorized = headers.get("authorization").and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")).is_some_and(|token| token.starts_with("fake-"));
-    let mut repo = lock(&shared);
+    let mut repo = lock(shared);
     repo.requests.push(Request { method: method.to_string(), path: uri.path_and_query().map(|p| p.as_str().to_owned()).unwrap_or_default(), body: body_text.clone() });
     repo.last_headers = KEPT_HEADERS.iter().filter_map(|name| Some((name.to_string(), headers.get(*name)?.to_str().ok()?.to_owned()))).collect();
     if let Some((status, message, remaining)) = repo.fail.take() {
@@ -277,7 +327,7 @@ async fn handle(State(shared): State<Shared>, method: Method, uri: Uri, headers:
                 return reply(StatusCode::UNPROCESSABLE_ENTITY, json!({ "message": "Validation Failed" }));
             };
             let labels = sent["labels"].as_array().map(|l| l.iter().filter_map(|l| l.as_str().map(str::to_owned)).collect()).unwrap_or_default();
-            let issue = StoredIssue { title: title.into(), body: sent["body"].as_str().unwrap_or_default().into(), labels, open: true, state_reason: None, closed_at: None, comments: vec![], timeline: vec![] };
+            let issue = StoredIssue { title: title.into(), body: sent["body"].as_str().unwrap_or_default().into(), labels, open: true, state_reason: None, closed_at: None, comments: vec![], timeline: vec![], locked: false, pull: false };
             repo.issues.push(issue.clone());
             reply(StatusCode::CREATED, issue_json(repo.issues.len(), &issue))
         }
@@ -315,7 +365,7 @@ async fn handle(State(shared): State<Shared>, method: Method, uri: Uri, headers:
                     "is:open" => want_open = true,
                     "is:closed" => want_closed = true,
                     _ if word.contains(':') => {}
-                    _ => words.push(word),
+                    _ => words.push(word.trim_matches('"')),
                 }
             }
             let items: Vec<Value> = repo

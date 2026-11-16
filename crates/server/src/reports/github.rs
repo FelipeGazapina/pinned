@@ -13,17 +13,42 @@ const SEARCH_LIMIT: usize = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Error {
-    /// GitHub answered 401, or 403 for a reason other than a rate limit, to the hub's token. A rate limit is `Failed`.
+    /// GitHub answered 401, or 403 for a reason other than a rate limit, to the hub's token. A rate limit is `Busy`.
     Unauthorized,
-    /// Anything else; never carries the token.
+    /// The outcome is unknown: the connection broke once the request was out, or the answer did not read.
     Failed(String),
+    /// GitHub answered a rate limit or a 5xx: it did nothing.
+    Busy(String),
+    /// GitHub answered `status`, another refusal (a 404, a 422): it did nothing.
+    Refused { status: u16, text: String },
+    /// The request never left the hub.
+    Unreachable(String),
+    /// No answer in time: GitHub may have done it.
+    TimedOut(String),
+}
+
+impl Error {
+    /// Whether GitHub may have done what was asked, so a send that ended so counts toward the daily limit.
+    pub fn may_have_reached(&self) -> bool {
+        matches!(self, Error::Failed(_) | Error::TimedOut(_))
+    }
+
+    /// What a person or an agent reads of the failure: never GitHub's own words, which stay in the hub's log.
+    pub fn public(&self) -> &'static str {
+        match self {
+            Error::Unauthorized | Error::Refused { .. } => "GitHub refused the report.",
+            Error::Busy(_) => "GitHub is busy. Try again later.",
+            Error::Failed(_) | Error::Unreachable(_) => "Could not reach GitHub.",
+            Error::TimedOut(_) => "GitHub took too long to answer.",
+        }
+    }
 }
 
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::Unauthorized => f.write_str("GitHub refused the hub's token"),
-            Error::Failed(text) => f.write_str(text),
+            Error::Failed(text) | Error::Busy(text) | Error::Refused { text, .. } | Error::Unreachable(text) | Error::TimedOut(text) => f.write_str(text),
         }
     }
 }
@@ -32,9 +57,14 @@ impl std::error::Error for Error {}
 
 impl From<pinned_core::github::Error> for Error {
     fn from(error: pinned_core::github::Error) -> Error {
+        use pinned_core::github::Error as Core;
         match error {
-            pinned_core::github::Error::Unauthorized(_) => Error::Unauthorized,
-            pinned_core::github::Error::Failed(text) => Error::Failed(text),
+            Core::Unauthorized(_) => Error::Unauthorized,
+            Core::Failed(text) => Error::Failed(text),
+            Core::Answered { busy: true, text, .. } => Error::Busy(text),
+            Core::Answered { status, text, .. } => Error::Refused { status, text },
+            Core::Unreachable(text) => Error::Unreachable(text),
+            Core::TimedOut(text) => Error::TimedOut(text),
         }
     }
 }
@@ -61,6 +91,12 @@ pub struct IssueInfo {
     pub comments: u64,
     #[serde(default)]
     pub closed_at: Option<String>,
+    /// Set when only collaborators may comment.
+    #[serde(default)]
+    pub locked: bool,
+    /// Present when the number is a pull request's.
+    #[serde(default)]
+    pub pull_request: Option<Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -119,6 +155,7 @@ pub struct Github {
     api: String,
     repo: String,
     token: String,
+    timeout: std::time::Duration,
 }
 
 // Not derived, so the token never reaches a log.
@@ -151,7 +188,12 @@ impl Github {
 
     /// `repo` on another API root, such as `fake_github`'s.
     pub fn with_api(api: &str, repo: &str, token: &str) -> Github {
-        Github { api: api.trim_end_matches('/').to_owned(), repo: repo.to_owned(), token: token.to_owned() }
+        Github { api: api.trim_end_matches('/').to_owned(), repo: repo.to_owned(), token: token.to_owned(), timeout: pinned_core::github::CALL_TIMEOUT }
+    }
+
+    /// This client with calls that give up after `timeout`.
+    pub fn with_timeout(self, timeout: std::time::Duration) -> Github {
+        Github { timeout, ..self }
     }
 
     /// `name` of the repository `owner/name`.
@@ -160,7 +202,7 @@ impl Github {
     }
 
     fn client(&self) -> Client {
-        Client { api: self.api.clone(), token: self.token.clone() }
+        Client { api: self.api.clone(), token: self.token.clone(), timeout: self.timeout }
     }
 
     async fn get(&self, path: &str) -> Result<Value> {
@@ -191,6 +233,31 @@ impl Github {
         let q: String = url::form_urlencoded::byte_serialize(q.as_bytes()).collect();
         let mut found = self.get(&format!("/search/issues?q={q}&per_page={SEARCH_LIMIT}")).await?;
         decode_list(found["items"].take())
+    }
+
+    /// The issue, open or closed, whose body carries `report_ref`, the footer reference of a report.
+    pub async fn issue_with_ref(&self, report_ref: &str) -> Result<Option<Issue>> {
+        let q = format!("\"{report_ref}\" repo:{} is:issue in:body", self.repo);
+        let q: String = url::form_urlencoded::byte_serialize(q.as_bytes()).collect();
+        let mut found = self.get(&format!("/search/issues?q={q}&per_page={SEARCH_LIMIT}")).await?;
+        let Value::Array(items) = found["items"].take() else { return Err(Error::Failed("GitHub sent an unexpected answer: not a list".into())) };
+        let carries = |item: &Value| item["body"].as_str().is_some_and(|body| body.contains(&format!("report {report_ref}")));
+        items.into_iter().find(carries).map(decode).transpose()
+    }
+
+    /// The id of the comment on issue `number` whose body carries `report_ref`.
+    pub async fn comment_with_ref(&self, number: u64, report_ref: &str) -> Result<Option<u64>> {
+        for page in 1..=10 {
+            let found = self.get(&format!("/repos/{}/issues/{number}/comments?per_page=100&page={page}", self.repo)).await?;
+            let Value::Array(items) = found else { return Err(Error::Failed("GitHub sent an unexpected answer: not a list".into())) };
+            if let Some(comment) = items.iter().find(|c| c["body"].as_str().is_some_and(|body| body.contains(&format!("report {report_ref}")))) {
+                return comment["id"].as_u64().map(Some).ok_or_else(|| Error::Failed("GitHub sent a comment without an id".into()));
+            }
+            if items.len() < 100 {
+                break;
+            }
+        }
+        Ok(None)
     }
 
     /// The comments written at or after `since_iso`, oldest first.
@@ -257,12 +324,12 @@ mod tests {
         let info = github.issue(1).await.unwrap();
         assert_eq!(
             info,
-            IssueInfo { number: 1, state: "open".into(), state_reason: None, title: "Crash on launch".into(), html_url: "https://github.com/acme/app/issues/1".into(), comments: 0, closed_at: None }
+            IssueInfo { number: 1, state: "open".into(), state_reason: None, title: "Crash on launch".into(), html_url: "https://github.com/acme/app/issues/1".into(), comments: 0, closed_at: None, locked: false, pull_request: None }
         );
         assert_eq!(fake.labels(1), ["bug", "from-app"]);
         assert_eq!(fake.body(1), "It dies at startup.");
         assert_eq!(github.create_issue("Second", "", &[]).await.unwrap().number, 2);
-        assert!(matches!(github.issue(9).await, Err(Error::Failed(text)) if text.contains("404")));
+        assert!(matches!(github.issue(9).await, Err(Error::Refused { status: 404, text }) if text.contains("404")));
     }
 
     #[tokio::test]
@@ -340,10 +407,10 @@ mod tests {
         let (fake, github) = setup().await;
         // The header says the limit is used up.
         fake.fail_next(403, "Forbidden", Some("0"));
-        assert!(matches!(github.issue(1).await, Err(Error::Failed(text)) if text.contains("rate limit")));
+        assert!(matches!(github.issue(1).await, Err(Error::Busy(text)) if text.contains("rate limit")));
         // The message says so.
         fake.fail_next(403, "API rate limit exceeded", None);
-        assert!(matches!(github.create_issue("x", "y", &[]).await, Err(Error::Failed(text)) if text.contains("rate limit")));
+        assert!(matches!(github.create_issue("x", "y", &[]).await, Err(Error::Busy(text)) if text.contains("rate limit")));
         // Neither: the token may not do this.
         fake.fail_next(403, "Resource not accessible by personal access token", Some("4990"));
         assert_eq!(github.issue(1).await.unwrap_err(), Error::Unauthorized);

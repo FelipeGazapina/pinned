@@ -300,7 +300,7 @@ impl Hub {
     pub async fn new(db: Db, public_url: String, signup: Signup, box_api: Arc<dyn BoxApi>, box_policy: boxes::Policy, convex_http: Arc<dyn ConvexHttp>, reports: Option<crate::reports::Config>) -> Result<Arc<Hub>, String> {
         let public_url = public_url.trim_end_matches('/').to_owned();
         let boxes = Boxes::new(box_api, box_policy, &public_url);
-        let reports = crate::reports::Reports::start(&db, reports).await?;
+        let reports = crate::reports::Reports::start(&db, reports).await;
         Ok(Arc::new(Hub { db, public_url, signup, boxes, convex_http, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default(), unlocks: Mutex::default(), going_away: tokio::sync::watch::channel(false).0, held_expired: Mutex::default(), refuse_run_saves: Arc::default(), persisted: Mutex::default(), reports }))
     }
 

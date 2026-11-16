@@ -344,7 +344,7 @@ pub async fn decide(hub: &Arc<Hub>, account: &Arc<Account>, id: &str, approve: b
     trail.write(if approve { AuditOutcome::Approved } else { AuditOutcome::Denied }, "").await?;
     let action = surface::find(&asked.action);
     let (decision, outcome, result) = match (approve, action) {
-        (false, _) => (Decision::Denied, "denied".to_owned(), Value::Null),
+        (false, _) => (Decision::Denied, "denied".to_owned(), denied_kept(hub, account, asked).await),
         (true, None) => (Decision::Approved, format!("failed: no action {} any more", asked.action), Value::Null),
         (true, Some(action)) => match rerun(hub, account, action, asked, typed.as_ref().unwrap_or(&asked.args)).await {
             Ok(result) => (Decision::Approved, "done".to_owned(), result),
@@ -399,6 +399,24 @@ pub async fn finish_interrupted(hub: &Arc<Hub>) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// What a denial keeps of the request: an agent's report, already scrubbed, becomes a draft of the account its agents
+/// saved, and the agent hears so. Null when nothing is kept.
+async fn denied_kept(hub: &Hub, account: &Account, asked: &Confirmation) -> Value {
+    if asked.action != "report_issue" {
+        return Value::Null;
+    }
+    match hub.keep_denied_report(account, &asked.args).await {
+        Ok(()) => Value::String(DENIED_REPORT_KEPT.into()),
+        Err(e) => {
+            eprintln!("pinned-server: the report of confirmation {} was denied and could not be kept as a draft: {e}", asked.id);
+            Value::Null
+        }
+    }
+}
+
+/// What the agent hears when the person denies its report and the hub keeps it as a draft.
+const DENIED_REPORT_KEPT: &str = "Not sent. Saved as a draft in My reports.";
 
 /// The arguments an approval runs with when the user typed some in the app: the stored ones with
 /// `entered`, checked before the confirmation is taken, so one that lacks a field still waits.

@@ -833,7 +833,11 @@ pub fn notice_text(confirmation: &Confirmation, result: &Value) -> String {
     let action = &confirmation.action;
     let id = &confirmation.id;
     match confirmation.decision {
-        Some(Decision::Denied) => format!("[pinned] The user denied your {action} request ({id}). It did not run."),
+        // What the hub kept of a denied request, in its own words, says what became of it.
+        Some(Decision::Denied) => match result {
+            Value::String(kept) => format!("[pinned] The user denied your {action} request ({id}). {kept}"),
+            _ => format!("[pinned] The user denied your {action} request ({id}). It did not run."),
+        },
         _ => {
             // An error the action ended with, and its result, can echo a third party's text, so each is one line.
             let outcome = crate::pinned_lines::flat(confirmation.outcome.as_deref().unwrap_or("done"), crate::pinned_lines::FIELD_CHARS);
