@@ -372,6 +372,10 @@ fn exchange(
     if !repairs.is_empty() {
         hub.mark_executable(key, repairs)?;
     }
+    // Files to pull that this machine changed since it last agreed with the hub: changed here, or
+    // deleted here. While the hub has not taken this machine's push, they are this machine's only
+    // copy of a change, so the pull leaves them alone until a push is taken.
+    let changed_here: BTreeSet<String> = pull.iter().filter(|path| local.get(*path).map(|(sha, _)| sha) != agreed.get(*path)).cloned().collect();
     let mut synced = Synced::default();
     let sending = fingerprint(push.iter().chain(&merge), local);
     let held = hold == Some(sending) && !(push.is_empty() && merge.is_empty());
@@ -462,6 +466,9 @@ fn exchange(
         result.and(committed)
     };
     for path in pull {
+        if synced.push != Push::Done && changed_here.contains(&path) {
+            continue;
+        }
         if !remote.contains_key(&path) {
             agreed.remove(&path);
             continue;
