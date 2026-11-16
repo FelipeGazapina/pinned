@@ -15,6 +15,7 @@
 set -eu
 
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
+. "$REPO/scripts/web-sweep/lib.sh"
 DIR=${SWEEP_DIR:-${TMPDIR:-/tmp}/pinned-web-sweep}
 PG_PORT=${SWEEP_PG_PORT:-5497}
 HUB_PORT=${SWEEP_HUB_PORT:-8797}
@@ -26,20 +27,8 @@ SERVER=${CARGO_TARGET_DIR:-$REPO/target}/debug/pinned-server
 
 stop() {
   # Every pid file: the stack's own, and the extra nodes sweeps start beside it (node2, node-<name>).
-  for pid in "$DIR"/*.pid; do
-    [ -f "$pid" ] && kill "$(cat "$pid")" 2>/dev/null || true
-    rm -f "$pid"
-  done
-  [ -d "$DIR/pg" ] && pg_ctl -D "$DIR/pg" -m fast stop >/dev/null 2>&1 || true
-}
-
-wait_for() {
-  i=0
-  until eval "$1" >/dev/null 2>&1; do
-    i=$((i + 1))
-    [ $i -gt 100 ] && { echo "timed out waiting for $2" >&2; exit 1; }
-    sleep 0.2
-  done
+  kill_pid_files "$DIR"
+  pg_stop "$DIR/pg"
 }
 
 start() {
@@ -48,11 +37,7 @@ start() {
   mkdir -p "$DIR/bin" "$DIR/home/work" "$DIR/downloads"
   ${CARGO:-cargo} build -p pinned-server --manifest-path "$REPO/Cargo.toml" >&2
 
-  export LC_ALL=C
-  initdb -U pinned --auth=trust -D "$DIR/pg" >/dev/null
-  pg_ctl -D "$DIR/pg" -l "$DIR/pg.log" -o "-p $PG_PORT -c listen_addresses=127.0.0.1 -c unix_socket_directories=" start >/dev/null
-  wait_for "psql -h 127.0.0.1 -p $PG_PORT -U pinned -d postgres -c 'select 1'" postgres
-  psql -h 127.0.0.1 -p "$PG_PORT" -U pinned -d postgres -qc "create database pinned"
+  pg_start "$DIR/pg" "$PG_PORT" pinned
 
   "$SERVER" hub --db "postgres://pinned@127.0.0.1:$PG_PORT/pinned" --listen "127.0.0.1:$HUB_PORT" --ui "$REPO/ui" \
     --downloads "$DIR/downloads" --key-file "$DIR/hub.key" --public-url "$HUB" --signup "${SWEEP_SIGNUP:-open}" >"$DIR/hub.log" 2>&1 &

@@ -1,5 +1,6 @@
 use crate::boxes::{self, BoxApi, Boxes, Seen};
 use crate::db::{self, Db};
+use crate::dev::Dev;
 use pinned_core::account::Signup;
 use pinned_core::accounts::AccountId;
 use pinned_core::agent::{AgentStatus, Stage, Subject, Usage, CONNECTOR_ENV};
@@ -34,6 +35,8 @@ const MINT_WAIT: Duration = Duration::from_secs(pinned_core::setup_token::WAIT.a
 /// How long importing an MCP server waits for the machine to read its account's config.
 const MCP_IMPORT_WAIT: Duration = Duration::from_secs(20);
 const MAX_RECORDS_PER_CALL: usize = 500;
+/// Why `open_placed` refuses a run on a team's account.
+pub const TEAM_RUNS: &str = "a team's runs start only through its bots";
 /// How long the password the app took counts as the owner being there.
 const UNLOCK_FOR: Duration = Duration::from_secs(12 * 60 * 60);
 /// A run may clone a large repository before its session starts.
@@ -143,6 +146,18 @@ pub(crate) fn run_call(spec: RunSpec, subject: &Subject) -> Call {
     }
 }
 
+/// What a workflow's step reads when the hub was busy partway through opening it: unlike the busy
+/// refusal, the step is not tried again, since part of it may have happened.
+pub const BUSY_PARTWAY: &str = "the hub was busy partway through opening this, so it was not tried again";
+
+/// `e`, the refusal of a step's call, read as `BUSY_PARTWAY` when it is the busy refusal (`db::BUSY`).
+fn busy_partway(e: String) -> String {
+    match e == db::BUSY {
+        true => BUSY_PARTWAY.into(),
+        false => e,
+    }
+}
+
 /// A machine whose pinned predates Run now can't read it: say so, instead of its parse error.
 pub(crate) fn too_old_for_run_now(account: &Account, machine: &str, subject: &Subject, refused: String) -> String {
     if !pinned_core::connectors::is_run_now(subject) || !refused.contains("can't answer that") {
@@ -177,10 +192,16 @@ fn cgroup_bytes(stat: &str, key: &str) -> Option<u64> {
 pub const HELD_EXPIRY_EVERY: Duration = Duration::from_secs(3600);
 
 pub struct Hub {
+    /// The hub itself, for work a borrowed `&Hub` hands to a task of its own (`teams::queue::next`).
+    me: std::sync::Weak<Hub>,
     pub db: Db,
     pub public_url: String,
     pub signup: Signup,
     pub boxes: Boxes,
+    /// Every team's call timings and default bot limits (`teams::calls::tick`).
+    pub team_policy: pinned_core::teams::TeamPolicy,
+    /// When failed team invite joins came, for their limit (`teams::membership::join`).
+    pub(crate) team_join_fails: Mutex<crate::teams::membership::JoinFails>,
     /// Every Convex read and key check goes through it.
     pub convex_http: Arc<dyn ConvexHttp>,
     accounts: Mutex<HashMap<Uuid, Arc<Account>>>,
@@ -199,8 +220,17 @@ pub struct Hub {
     /// it: a queued Postgres write cannot fail on its own at the moment a box ends.
     #[doc(hidden)]
     pub refuse_run_saves: Arc<AtomicBool>,
+    /// When set, the next backstop for reservations (`teams::calls::reap`) that read a reservation
+    /// as past its limit tells the first, then waits for the second before it ends it. Only a test
+    /// sets it, to run a claim between the backstop's read and its end; it is taken on use.
+    #[doc(hidden)]
+    pub hold_backstop: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
     /// Every account's `PgStorage` state, for the census and the flush on stop.
     persisted: Mutex<HashMap<Uuid, Arc<Persisted>>>,
+    /// Reporting an issue from the app: pinned's GitHub repository and what the hub keeps about it.
+    pub(crate) reports: crate::reports::Reports,
+    /// `hub --dev`'s time scale. Timers it shortens call `dev.scale`; `Dev::OFF` otherwise.
+    pub dev: Dev,
 }
 
 struct Unlock {
@@ -212,6 +242,9 @@ struct Unlock {
 pub struct Account {
     pub id: Uuid,
     pub email: String,
+    /// A team's account (kind `team`), read once when the hub loads it: a kind never changes. Its
+    /// runs start only through its bots (`teams::bots::start_reserved`), never through `open_placed`.
+    pub team: bool,
     live: Mutex<Live>,
     connectors: OnceCell<Arc<Connectors>>,
     watching: AtomicBool,
@@ -259,6 +292,28 @@ struct Online {
     state: Option<pinned_core::load::MachineState>,
     /// Whether its desktop app runs in the background, as it last reported. A node reports none.
     background: Option<bool>,
+    /// The tabs a person asked the machine to close (`Call::CloseTab`), until they go.
+    closing: HashSet<String>,
+    /// How each connector session whose tab went ended: its connector, subject, and `LastTurn`.
+    /// Kept for a team's machines only, whose runs end by it (`teams::calls::box_ended`): a
+    /// person's machine runs sessions for ever more subjects, and nothing reads theirs.
+    gone: Vec<(String, Subject, LastTurn)>,
+}
+
+/// How a connector session's last turn stood when its tab went or its box ended.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LastTurn {
+    /// Its last hook status was Done: the session ended its own turn (Claude's Stop hook).
+    Ended,
+    /// A person closed its tab before the session ended its turn.
+    ClosedByPerson,
+    /// Neither is known: it was mid-turn, or the hub never saw it.
+    Unknown,
+}
+
+/// What a tab that is still open says about its turn.
+fn last_turn(tab: &TabView) -> LastTurn {
+    if tab.status == Some(AgentStatus::Done) && tab.questions.is_none() { LastTurn::Ended } else { LastTurn::Unknown }
 }
 
 impl Online {
@@ -276,6 +331,8 @@ struct Client {
     unlocked: Option<Instant>,
     attached: HashSet<Target>,
     threads: HashMap<MachineId, HashSet<TabId>>,
+    /// It sent a team call on this connection, so it hears its teams' events (`broadcast_team`).
+    hears_teams: bool,
 }
 
 fn viewer(client: u64) -> String {
@@ -294,11 +351,16 @@ fn json<T: Serialize>(value: T) -> Result<Value, String> {
     serde_json::to_value(value).map_err(|e| e.to_string())
 }
 
+/// The answer of `Hub::hub_call` to a team call: team ops come only from the app's own path.
+pub const TEAM_CALL_ELSEWHERE: &str = "a team's ops run only from the pinned app";
+
 impl Hub {
-    pub fn new(db: Db, public_url: String, signup: Signup, box_api: Arc<dyn BoxApi>, box_policy: boxes::Policy, convex_http: Arc<dyn ConvexHttp>) -> Arc<Hub> {
+    #[allow(clippy::too_many_arguments)]
+    pub async fn new(db: Db, public_url: String, signup: Signup, box_api: Arc<dyn BoxApi>, box_policy: boxes::Policy, team_policy: pinned_core::teams::TeamPolicy, convex_http: Arc<dyn ConvexHttp>, reports: Option<crate::reports::Config>, dev: Dev) -> Result<Arc<Hub>, String> {
         let public_url = public_url.trim_end_matches('/').to_owned();
         let boxes = Boxes::new(box_api, box_policy, &public_url);
-        Arc::new(Hub { db, public_url, signup, boxes, convex_http, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default(), unlocks: Mutex::default(), going_away: tokio::sync::watch::channel(false).0, held_expired: Mutex::default(), refuse_run_saves: Arc::default(), persisted: Mutex::default() })
+        let reports = crate::reports::Reports::start(&db, reports).await;
+        Ok(Arc::new_cyclic(|me| Hub { me: me.clone(), db, public_url, signup, boxes, team_policy, team_join_fails: Mutex::default(), convex_http, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default(), unlocks: Mutex::default(), going_away: tokio::sync::watch::channel(false).0, held_expired: Mutex::default(), refuse_run_saves: Arc::default(), hold_backstop: Mutex::default(), persisted: Mutex::default(), reports, dev }))
     }
 
     /// Tells every socket to close with a going away frame. The hub stops serving afterwards.
@@ -485,23 +547,43 @@ impl Hub {
         }
     }
 
+    /// The account if the hub holds it already, as it does while any of its apps is connected.
+    pub fn loaded(&self, id: Uuid) -> Option<Arc<Account>> {
+        self.accounts.lock().unwrap().get(&id).cloned()
+    }
+
     pub async fn account(&self, id: Uuid) -> Result<Arc<Account>, String> {
         if let Some(account) = self.accounts.lock().unwrap().get(&id) {
             return Ok(account.clone());
         }
         let email = self.db.email(id).await?.ok_or("the account was deleted")?;
-        let fresh = Arc::new(Account { id, email, live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() });
+        let team = crate::teams::db::is_team(&self.db, id).await?;
+        let fresh = Arc::new(Account { id, email, team, live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() });
         Ok(self.accounts.lock().unwrap().entry(id).or_insert(fresh).clone())
     }
 
-    pub(crate) async fn connectors(&self, account: &Account) -> Result<Arc<Connectors>, String> {
+    #[doc(hidden)]
+    pub async fn connectors(&self, account: &Account) -> Result<Arc<Connectors>, String> {
         let connectors = account
             .connectors
             .get_or_try_init(|| async {
                 let stored = self.db.connectors(account.id).await?;
                 let storage = PgStorage::new(self.db.clone(), account.id, stored, self.refuse_run_saves.clone());
                 self.persisted.lock().unwrap().insert(account.id, storage.0.clone());
-                Ok::<_, String>(Arc::new(Connectors::new(storage, EXE_PLACEHOLDER.into())))
+                let connectors = Arc::new(Connectors::new(storage, EXE_PLACEHOLDER.into()));
+                // A tab list a machine sent before this load found no workflows to wake: the next
+                // pass reads the lists the account's machines last reported.
+                let observed = pinned_core::connectors::unix_millis();
+                for (machine, _) in account.online() {
+                    if let Some(tabs) = account.tabs_of(&machine) {
+                        connectors.note_tabs(&machine, observed, &tabs);
+                    }
+                }
+                // A team's events ask its bots' lines first, before anything outside pinned.
+                if account.team {
+                    connectors.set_admission(Arc::new(crate::teams::triggers::TeamAdmission { hub: self.me.clone(), team: account.id }));
+                }
+                Ok::<_, String>(connectors)
             })
             .await?;
         Ok(connectors.clone())
@@ -517,7 +599,7 @@ impl Hub {
         tokio::spawn(async move {
             let open = |work| {
                 let hub = hub.clone();
-                async move { hub.open_placed(id, work).await }
+                async move { hub.open_found(id, work).await }
             };
             let on_check = |_: &pinned_core::connectors::Check| {
                 let (hub, account) = checked.clone();
@@ -546,22 +628,52 @@ impl Hub {
         self.open_placed(account, work).await.map(drop)
     }
 
-    /// Hands `work` to a machine and returns the tab that took a run, or none for a delivery.
+    /// Hands `work` to a machine and returns the tab that took a run, or none for a delivery. A
+    /// team's account takes no run here: its runs start only through its bots (`open_team_run`).
     pub async fn open_placed(&self, account: Uuid, work: Work) -> Result<Option<Placement>, String> {
         let account = self.account(account).await?;
         match work {
-            Work::Run(run) => {
-                if let Some((machine, tab)) = account.placed(&run.connector, &run.subject) {
-                    return Ok(Some(Placement { machine, tab }));
-                }
-                match run.runs_on.clone() {
-                    RunsOn::FreshBox(step) => self.boxes.open(self, &account, run, step).await.map(Some),
-                    RunsOn::Any => self.open_on_pool(&account, run, "").await.map(Some),
-                    RunsOn::Machine(id) => self.open_on_pool(&account, run, &id).await.map(Some),
-                }
-            }
+            Work::Run(_) if account.team => Err(TEAM_RUNS.into()),
+            Work::Run(run) => self.place_run(&account, run).await.map(Some),
             Work::Delivery(d) => self.deliver(&account, d).await.map(|()| None),
             Work::Prompt { env, text } => self.type_prompt(&account, &env, &text).await.map(|()| None),
+        }
+    }
+
+    /// What an account's own pollers and tab wakes found: a person's goes to `open_placed`, a
+    /// team's to its bots (`teams::triggers::fired`).
+    /// A busy refusal is answered as is only where the hub refuses before it does anything (the
+    /// account lookup, and a run sent to a machine pool, whose refusals come before any machine
+    /// starts it): the workflow then tries the same step again. A team's start and a box's open can
+    /// be refused busy partway, so theirs answer `BUSY_PARTWAY` and the step is not repeated.
+    pub async fn open_found(self: &Arc<Self>, account: Uuid, work: Work) -> Result<Option<Placement>, String> {
+        let boxed = matches!(&work, Work::Run(run) if matches!(run.runs_on, RunsOn::FreshBox(_)));
+        match self.account(account).await?.team {
+            true => crate::teams::triggers::fired(self, account, work).await.map_err(busy_partway),
+            false if boxed => self.open_placed(account, work).await.map_err(busy_partway),
+            false => self.open_placed(account, work).await,
+        }
+    }
+
+    /// The hub as an `Arc`, while it is still up.
+    pub fn arc(&self) -> Option<Arc<Hub>> {
+        self.me.upgrade()
+    }
+
+    /// Opens a team's run, which only `teams::bots::start_reserved` asks for: the pass is its proof.
+    pub async fn open_team_run(&self, _pass: crate::teams::bots::TeamRunPass, team: &Arc<Account>, run: Run) -> Result<Placement, String> {
+        self.place_run(team, run).await
+    }
+
+    /// A run goes to the tab that already has it, else where its workflow says.
+    async fn place_run(&self, account: &Arc<Account>, run: Run) -> Result<Placement, String> {
+        if let Some((machine, tab)) = account.placed(&run.connector, &run.subject) {
+            return Ok(Placement { machine, tab });
+        }
+        match run.runs_on.clone() {
+            RunsOn::FreshBox(step) => self.boxes.open(self, account, run, step).await,
+            RunsOn::Any => self.open_on_pool(account, run, "").await,
+            RunsOn::Machine(id) => self.open_on_pool(account, run, &id).await,
         }
     }
 
@@ -778,7 +890,9 @@ impl Hub {
                     if data.len() as u64 > sync::FILE_LIMIT {
                         return Err(format!("{} is bigger than a synced file may be", file.entry.path));
                     }
-                    kept.push((file.entry, data));
+                    // Only a deletion is compared with what the hub holds.
+                    let agreed = file.agreed.filter(|_| file.entry.sha.is_empty());
+                    kept.push((file.entry, data, agreed));
                 }
                 return json(self.db.sync_push(account.id, &project, kept).await?);
             }
@@ -800,7 +914,7 @@ impl Hub {
                     .into_iter()
                     .map(|(entry, data)| {
                         let data = (!entry.sha.is_empty()).then(|| base64::engine::general_purpose::STANDARD.encode(data));
-                        sync::File { entry, data }
+                        sync::File { entry, data, agreed: None }
                     })
                     .collect();
                 return json(files);
@@ -836,6 +950,9 @@ impl Hub {
             }
             HubCall::Delegate { .. } | HubCall::RemoteTask { .. } | HubCall::RemoteEnded { .. } | HubCall::RemoteAsked { .. } | HubCall::Place { .. } => {
                 return Err("only a thread's machine delegates a task, asks after it or reports its end".into());
+            }
+            HubCall::SetBoxAccess { access } if account.team && [&access.workflow, &access.session, &access.worker, &access.orchestrator].iter().any(|p| matches!(p, pinned_core::connectors::BoxPermission::Fixed { .. })) => {
+                return Err(crate::teams::bots::OWN_BOX_EACH.into());
             }
             HubCall::SetBoxAccess { access } => (json(c().await?.set_box_access(access)?), true),
             HubCall::SetRepoInsight { settings } => (json(c().await?.set_repo_insight(settings)?), true),
@@ -943,6 +1060,8 @@ impl Hub {
                 self.push_settings(account).await;
                 return Ok(Value::Null);
             }
+            HubCall::Reports { ask } => return self.reports_ask(account, ask, false).await,
+            HubCall::ReportIssue { draft, shown, draft_id, request_id } => return self.report_issue(account, draft, shown, draft_id, request_id, false).await,
             HubCall::ListMcpServers => return json(c().await?.mcp_servers()),
             HubCall::SaveMcpServer { id, server, secrets } => return json(c().await?.save_mcp_server(id.as_deref(), server, &secrets)?),
             HubCall::EnableMcpServer { id, enabled } => return json(c().await?.enable_mcp_server(&id, enabled)?),
@@ -965,6 +1084,10 @@ impl Hub {
             HubCall::DisconnectConvex { id } => (json(c().await?.disconnect_convex(&id)?), true),
             HubCall::ConvexTables { id } => (json(c().await?.convex_tables(&*self.convex_http, &id).await?), false),
             HubCall::Convex { .. } => return Err("only a session on a machine reads Convex".into()),
+            // A team op runs only on the app's own path, `http::client_frame`, which reads the op
+            // and checks the unlock on it first; a team box's ask goes through `teams::machine_call`.
+            // An agent's act, a team's own call or any other path that lands here runs none.
+            HubCall::Team { .. } => return Err(TEAM_CALL_ELSEWHERE.into()),
         };
         if changed {
             self.watch(account).await?;
@@ -1313,7 +1436,7 @@ impl Account {
                 let _ = out.send(frame(&ToMachine::WatchThreads { viewer: viewer(*id), tabs: tabs.iter().cloned().collect() }));
             }
         }
-        let online = Online { socket, name, out, pending: HashMap::new(), next_call: 1, tabs: None, usage: BTreeMap::new(), dedicated, version, state: None, background: None };
+        let online = Online { socket, name, out, pending: HashMap::new(), next_call: 1, tabs: None, usage: BTreeMap::new(), dedicated, version, state: None, background: None, closing: HashSet::new(), gone: Vec::new() };
         live.machines.insert(machine.to_owned(), online);
     }
 
@@ -1462,6 +1585,11 @@ impl Account {
         self.projects.lock().unwrap().insert(machine.to_owned(), projects);
     }
 
+    /// Every project any machine of the account listed since the hub started.
+    pub(crate) fn listed_projects(&self) -> Vec<ProjectView> {
+        self.projects.lock().unwrap().values().flatten().cloned().collect()
+    }
+
     /// The projects `machine` listed last, or none if it never did since the hub started.
     pub fn last_listed(&self, machine: &str) -> Vec<ProjectView> {
         self.projects.lock().unwrap().get(machine).cloned().unwrap_or_default()
@@ -1475,6 +1603,17 @@ impl Account {
             None => Seen::NoTab,
             Some(t) => Seen::Tab { running: t.running, quiet: !holds_box(t) },
         }
+    }
+
+    /// How the session for `connector` and `subject` on `machine` last stood: its open tab's, else
+    /// the one its tab had when it went. `Unknown` while the machine is offline.
+    pub fn last_turn(&self, machine: &str, connector: &str, subject: &Subject) -> LastTurn {
+        let live = self.live.lock().unwrap();
+        let Some(m) = live.machines.get(machine) else { return LastTurn::Unknown };
+        if let Some(t) = m.tabs().iter().find(|t| t.connector.as_deref() == Some(connector) && t.subject.as_ref() == Some(subject)) {
+            return last_turn(t);
+        }
+        m.gone.iter().find(|(c, s, _)| c == connector && s == subject).map_or(LastTurn::Unknown, |(_, _, turn)| *turn)
     }
 
     /// What a worker's or a Captain's box shows: any of its tabs, working or not.
@@ -1494,6 +1633,9 @@ impl Account {
         let m = live.machines.get_mut(machine)?;
         let id = m.next_call;
         m.next_call += 1;
+        if let Call::CloseTab { tab } = &call {
+            m.closing.insert(tab.clone());
+        }
         // Calls whose callers stopped waiting, as after a timeout, would otherwise stay until the machine disconnects.
         m.pending.retain(|_, waiting| !waiting.answer.is_closed());
         let (answer, answered) = oneshot::channel();
@@ -1523,7 +1665,20 @@ impl Account {
         let mut live = self.live.lock().unwrap();
         let Some(m) = live.machines.get_mut(machine).filter(|m| m.socket == socket) else { return };
         match &event {
-            MachineEvent::Tabs { tabs } => m.tabs = Some(tabs.clone()),
+            MachineEvent::Tabs { tabs } => {
+                let gone_tabs = m.tabs.iter().flatten().filter(|was| !tabs.iter().any(|t| t.id == was.id));
+                for was in gone_tabs.filter(|_| self.team) {
+                    let by_person = m.closing.remove(&was.id);
+                    let (Some(connector), Some(subject)) = (&was.connector, &was.subject) else { continue };
+                    let turn = match last_turn(was) {
+                        LastTurn::Unknown if by_person => LastTurn::ClosedByPerson,
+                        turn => turn,
+                    };
+                    m.gone.retain(|(c, s, _)| !(c == connector && s == subject));
+                    m.gone.push((connector.clone(), subject.clone(), turn));
+                }
+                m.tabs = Some(tabs.clone());
+            }
             MachineEvent::Usage { usage, account } => {
                 m.usage.insert(account.clone(), *usage);
             }
@@ -1585,7 +1740,7 @@ impl Account {
                 let _ = out.send(frame(&ToClient::Event { machine: id.clone(), event }));
             }
         }
-        live.clients.insert(id, Client { out, login, locked, unlocked, attached: HashSet::new(), threads: HashMap::new() });
+        live.clients.insert(id, Client { out, login, locked, unlocked, attached: HashSet::new(), threads: HashMap::new(), hears_teams: false });
     }
 
     /// Whether client `id` must unlock before `call` on `side`: only the account's owner makes it,
@@ -1596,6 +1751,16 @@ impl Account {
             None => return true,
         };
         !unlocked && surface::owner_only(side, &surface::cmd_of(call), locked)
+    }
+
+    /// Whether client `id` must unlock before a call `owner_only` names, which it answers from
+    /// whether the login is locked. A team's op asks this with `teams::owner_only`.
+    pub fn needs_unlock_for(&self, id: u64, owner_only: impl FnOnce(bool) -> bool) -> bool {
+        let (locked, unlocked) = match self.live.lock().unwrap().clients.get(&id) {
+            Some(client) => (client.locked, client.unlocked.is_some_and(|until| until > Instant::now())),
+            None => return true,
+        };
+        !unlocked && owner_only(locked)
     }
 
     /// The sha256 of the login client `id` signed in with.
@@ -1650,6 +1815,22 @@ impl Account {
     pub fn broadcast(&self, message: &ToClient) {
         let text = frame(message);
         for client in self.live.lock().unwrap().clients.values() {
+            let _ = client.out.send(text.clone());
+        }
+    }
+
+    /// Client `id` sent a team call: from now on this connection hears its teams' events.
+    pub fn hears_teams(&self, id: u64) {
+        if let Some(client) = self.live.lock().unwrap().clients.get_mut(&id) {
+            client.hears_teams = true;
+        }
+    }
+
+    /// Sends a team's event to the app connections that sent a team call (`hears_teams`) and to
+    /// no other connection; a machine never gets one.
+    pub fn broadcast_team(&self, message: &ToClient) {
+        let text = frame(message);
+        for client in self.live.lock().unwrap().clients.values().filter(|client| client.hears_teams) {
             let _ = client.out.send(text.clone());
         }
     }
@@ -2016,7 +2197,7 @@ mod tests {
 
     #[test]
     fn a_machine_back_before_a_client_saw_it_leave_gets_that_clients_watch() {
-        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() };
+        let account = Account { id: Uuid::nil(), email: String::new(), team: false, live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() };
         for client in [1, 2] {
             account.client_connected(client, vec![], false, None, Outbox::new().0, vec![]);
         }
@@ -2037,7 +2218,7 @@ mod tests {
 
     #[test]
     fn a_machine_reports_run_in_the_background_on_its_view_while_it_is_online() {
-        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() };
+        let account = Account { id: Uuid::nil(), email: String::new(), team: false, live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() };
         let (client, mut heard, _) = Outbox::new();
         account.client_connected(1, vec![], false, None, client, vec![]);
         let (out, _sent, _) = Outbox::new();
@@ -2059,9 +2240,34 @@ mod tests {
         assert_eq!(shown(&account), None, "an offline machine can't be switched");
     }
 
+    /// Only a team's machine keeps how its gone sessions' last turns stood: a person's machine,
+    /// whose sessions come and go for ever more subjects, keeps none.
+    #[test]
+    fn only_a_teams_machine_keeps_its_gone_sessions() {
+        let gone_after = |team: bool, sessions: usize| {
+            let account = Account { id: Uuid::nil(), email: String::new(), team, live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() };
+            let (out, _sent, _) = Outbox::new();
+            account.came_online("m", 1, "studio".into(), false, "0.18.5".into(), out);
+            for n in 0..sessions {
+                let tab: TabView = serde_json::from_value(serde_json::json!({
+                    "id": format!("tab-{n}"), "cwd": "/work/repo", "bypass": true, "running": false, "opened": 1_794_240_000u64,
+                    "status": "done", "connector": "c1", "subject": { "issue": format!("FAKE-{n}") },
+                }))
+                .unwrap();
+                account.machine_event("m", 1, MachineEvent::Tabs { tabs: vec![tab] });
+                account.machine_event("m", 1, MachineEvent::Tabs { tabs: vec![] });
+            }
+            let turn = account.last_turn("m", "c1", &serde_json::from_value(serde_json::json!({ "issue": "FAKE-0" })).unwrap());
+            let kept = account.live.lock().unwrap().machines["m"].gone.len();
+            (kept, turn)
+        };
+        assert_eq!(gone_after(false, 100), (0, LastTurn::Unknown), "a person's machine keeps none");
+        assert_eq!(gone_after(true, 3), (3, LastTurn::Ended), "a team's box keeps each session's last turn");
+    }
+
     #[test]
     fn a_call_cut_off_by_its_machine_going_offline_is_lost_not_refused() {
-        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() };
+        let account = Account { id: Uuid::nil(), email: String::new(), team: false, live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() };
         let (out, _sent, _) = Outbox::new();
         account.came_online("m", 1, "box".into(), false, "0.17.14".into(), out);
         let (_, mut answered) = account.send_call("m", Call::Tabs).unwrap();
@@ -2088,7 +2294,7 @@ mod tests {
     /// questionnaire when `asked`, as the node shows a tab whose worker called `question_user`.
     fn box_showing(status: AgentStatus, asked: bool, running: bool) -> Account {
         use pinned_core::questions::{self, QOption, Question, Questionnaire};
-        let account = Account { id: Uuid::nil(), email: String::new(), live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() };
+        let account = Account { id: Uuid::nil(), email: String::new(), team: false, live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() };
         let (out, _sent, _) = Outbox::new();
         account.came_online("box", 1, "box".into(), true, "0.18.2".into(), out);
         let mut tab: TabView = serde_json::from_value(serde_json::json!({

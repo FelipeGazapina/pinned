@@ -91,6 +91,7 @@ fn watch_of(trigger: &Trigger) -> Watch {
         Trigger::SlackMention { channel } => Watch::SlackMention { channel: channel.clone() },
         Trigger::SlackMessage { channel, .. } => Watch::SlackMessage { channel: channel.clone() },
         Trigger::Called => Watch::Called,
+        Trigger::Manual => Watch::Manual,
     }
 }
 

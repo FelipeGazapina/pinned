@@ -110,12 +110,57 @@ pub struct Post {
     pub text: String,
 }
 
+/// Set once by `use_dev_root`. Unset in every process that does not run `--dev`.
+static DEV_ROOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 fn api_root() -> String {
     #[cfg(test)]
     if let Some(root) = API_ROOT.lock().unwrap().clone() {
         return root;
     }
+    if let Some(root) = DEV_ROOT.get() {
+        return root.clone();
+    }
     API.to_owned()
+}
+
+/// Where calls go instead of `api` when a debug build's `env` names an http(s) root on a
+/// loopback host, as the hub tests' stand-ins; otherwise `api`, so a key never goes to a stranger.
+pub(crate) fn loopback_root(env: &str, api: &str) -> String {
+    root_for(std::env::var(env).ok().as_deref(), cfg!(debug_assertions), api)
+}
+
+/// `loopback_root` with the variable's value and whether this is a debug build given.
+fn root_for(set: Option<&str>, debug: bool, api: &str) -> String {
+    match set.map(|r| r.trim().trim_end_matches('/')).filter(|r| !r.is_empty()) {
+        Some(set) if debug && loopback_http(set).is_some() => set.to_owned(),
+        _ => api.to_owned(),
+    }
+}
+
+fn loopback_http(root: &str) -> Option<()> {
+    let url = reqwest::Url::parse(root).ok()?;
+    let host = url.host_str()?.trim_start_matches('[').trim_end_matches(']');
+    let loopback = host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    (matches!(url.scheme(), "http" | "https") && loopback).then_some(())
+}
+
+/// A Slack root for a local fake: HTTP or HTTPS on this machine only, normalised to end in one `/`.
+pub fn dev_root(value: &str) -> Option<String> {
+    let url = reqwest::Url::parse(value.trim()).ok()?;
+    let host = url.host_str()?.trim_start_matches('[').trim_end_matches(']');
+    let loopback = host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    if !matches!(url.scheme(), "http" | "https") || !loopback || url.query().is_some() || url.fragment().is_some() {
+        return None;
+    }
+    Some(format!("{}/", url.as_str().trim_end_matches('/')))
+}
+
+/// Sends every Slack call to `value` for the rest of the process. Refuses any host but this machine.
+/// Only `pinned-server hub --dev` calls this, with PINNED_SLACK_API_BASE, and the hub tests for their stand-in.
+pub fn use_dev_root(value: &str) -> Result<(), String> {
+    let root = dev_root(value).ok_or_else(|| "Slack dev root must be an http or https URL on this machine".to_owned())?;
+    DEV_ROOT.set(root).map_err(|_| "Slack dev root is already set".to_owned())
 }
 
 /// Points Slack calls at `root` for a test. `None` restores the real API.
@@ -513,6 +558,16 @@ pub async fn post(token: &str, channel: &str, thread: &str, text: &str) -> Resul
     write(token, "chat.postMessage", json!({ "channel": channel, "thread_ts": thread, "text": text })).await.map(drop)
 }
 
+/// A new message in `channel`, not in a thread.
+pub async fn announce(token: &str, channel: &str, text: &str) -> Result<(), String> {
+    write(token, "chat.postMessage", json!({ "channel": channel, "text": text })).await.map(drop)
+}
+
+/// Whether `handle` is a Slack user-group handle: 1 to 80 of `a-z`, `0-9`, `.`, `_` and `-`.
+pub fn is_group_handle(handle: &str) -> bool {
+    (1..=80).contains(&handle.len()) && handle.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
+}
+
 /// Reacts to the message `ts` with the emoji `name`. A reaction the bot already left counts as
 /// done, so a retry after a crash converges.
 pub async fn react(token: &str, channel: &str, ts: &str, name: &str) -> Result<(), String> {
@@ -692,5 +747,64 @@ mod tests {
                 Post { ts: "1792400060.000000".into(), author: "deploybot".into(), text: "deploy failed".into() },
             ]
         );
+    }
+
+    #[test]
+    fn dev_root_keeps_loopback_urls_and_ends_them_in_one_slash() {
+        assert_eq!(dev_root("http://127.0.0.1:8813/api").as_deref(), Some("http://127.0.0.1:8813/api/"));
+        assert_eq!(dev_root("http://localhost:9/api/").as_deref(), Some("http://localhost:9/api/"));
+        assert_eq!(dev_root("http://[::1]:9/api/").as_deref(), Some("http://[::1]:9/api/"));
+    }
+
+    #[test]
+    fn dev_root_refuses_every_other_host_and_shape() {
+        assert_eq!(dev_root("https://slack.com/api/"), None);
+        assert_eq!(dev_root("http://10.0.0.5/api/"), None);
+        assert_eq!(dev_root("http://127.0.0.1.example.com/"), None);
+        assert_eq!(dev_root("http://127.0.0.1:8813/api?x=1"), None);
+        assert_eq!(dev_root("garbage"), None);
+    }
+
+    #[test]
+    fn use_dev_root_refuses_a_public_host_and_stays_unset() {
+        assert!(use_dev_root("https://slack.com/api/").is_err());
+        assert!(DEV_ROOT.get().is_none());
+    }
+
+    #[test]
+    fn slack_base_env_is_ignored_without_dev() {
+        let _guard = lock_api();
+        set_api_root(None);
+        std::env::set_var("PINNED_SLACK_API_BASE", "http://127.0.0.1:9/api/");
+        let root = api_root();
+        std::env::remove_var("PINNED_SLACK_API_BASE");
+        assert_eq!(root, "https://slack.com/api/");
+    }
+
+    /// Linear's and Vercel's stand-ins (`loopback_root`): a debug build's loopback address only.
+    #[test]
+    fn a_stand_in_root_reaches_only_a_loopback_host_in_a_debug_build() {
+        const REAL: &str = "https://api.example.test";
+        for set in ["http://127.0.0.1:5000/graphql", "http://localhost:5000/v1/", "https://[::1]:5000"] {
+            assert_eq!(root_for(Some(set), true, REAL), set.trim_end_matches('/'), "{set}");
+            assert_eq!(root_for(Some(set), false, REAL), REAL, "{set} in a release build");
+        }
+        for set in ["https://evil.example.test/v1", "http://127.0.0.1.example.test/", "http://169.254.169.254/", "ftp://127.0.0.1/", "not a url"] {
+            assert_eq!(root_for(Some(set), true, REAL), REAL, "{set}");
+        }
+        assert_eq!(root_for(None, true, REAL), REAL);
+    }
+
+    /// The only way to point Slack elsewhere is `hub --dev`'s root: the variable older hub tests
+    /// set reaches nothing, a loopback address in a debug build included.
+    #[test]
+    fn the_retired_root_variable_is_ignored_in_a_debug_build() {
+        const RETIRED: &str = concat!("PINNED_SLACK", "_API_ROOT");
+        let _guard = lock_api();
+        set_api_root(None);
+        std::env::set_var(RETIRED, "http://127.0.0.1:9/api/");
+        let root = api_root();
+        std::env::remove_var(RETIRED);
+        assert_eq!(root, "https://slack.com/api/");
     }
 }

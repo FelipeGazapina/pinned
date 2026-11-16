@@ -128,6 +128,10 @@ pub struct Launch {
     /// How long a fresh Claude Code session may sit in "starting" without reporting before its
     /// start fails.
     pub starting_limit: Duration,
+    /// The folder the built-in Claude account's sessions, transcripts and `.claude.json` live in,
+    /// instead of `$CLAUDE_CONFIG_DIR` or `~/.claude`. Only a test that runs a node in its own
+    /// process sets it.
+    pub claude_home: Option<PathBuf>,
 }
 
 impl Launch {
@@ -164,6 +168,7 @@ impl Launch {
             vector_search: true,
             first_run_wait: FIRST_RUN_WAIT,
             starting_limit: STARTING_LIMIT,
+            claude_home: None,
         })
     }
 
@@ -900,16 +905,18 @@ impl Machine {
         taste::migrate_worker_cap(dir.as_deref());
         let home = home();
         // A test must never write the user's own claude config.
-        let builtin_claude_config = match (test_binary(), std::env::var_os("CLAUDE_CONFIG_DIR")) {
-            (true, _) => dir.clone().unwrap_or_else(std::env::temp_dir).join("home"),
-            (false, Some(config)) => PathBuf::from(config),
-            (false, None) => home.clone(),
+        let builtin_claude_config = match (&launch.claude_home, test_binary(), std::env::var_os("CLAUDE_CONFIG_DIR")) {
+            (Some(claude_home), ..) => claude_home.clone(),
+            (None, true, _) => dir.clone().unwrap_or_else(std::env::temp_dir).join("home"),
+            (None, false, Some(config)) => PathBuf::from(config),
+            (None, false, None) => home.clone(),
         }
         .join(".claude.json");
         let global_dir = if test_binary() { dir.clone().unwrap_or_else(std::env::temp_dir).join("home") } else { home.clone() }.join(global::FOLDER[0]).join(global::FOLDER[1]);
         let default_cwd = open
             .or_else(|| projects::recent(&projects).first().map(|p| p.path.clone()))
             .unwrap_or_else(|| home.clone());
+        let accounts = Accounts::load(dir.as_deref(), home.clone()).with_claude_home(launch.claude_home.clone());
         let machine = Arc::new_cyclic(|me| Machine {
             launch,
             default_cwd,
@@ -923,7 +930,7 @@ impl Machine {
             sync_loop_holds_state: AtomicBool::new(false),
             projects: Mutex::new(projects),
             projects_file,
-            accounts: Accounts::load(dir.as_deref(), home.clone()),
+            accounts,
             statuses: Default::default(),
             history_dir: dir.as_ref().map(|d| d.join("history")),
             uploads,
@@ -7018,6 +7025,7 @@ pub(crate) mod tests {
             vector_search: false,
             first_run_wait: Duration::from_millis(300),
             starting_limit: Duration::from_secs(60),
+            claude_home: None,
         }
     }
 

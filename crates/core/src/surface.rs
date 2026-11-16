@@ -359,6 +359,9 @@ pub const ACTIONS: &[Action] = &[
     h("list_ideas", Read, "The account's ideas, most recently changed first, or with project (a repository like github.com/owner/repo) only that project's: id, title, text, project, status (open, done or dropped), task, who made it, and times. An idea is something that might be done; it is never recalled into a prompt, and facts go to memory (memory_save) instead.").wired(),
     h("save_idea", Write, "Saves an idea: title, text and an optional project (a repository like github.com/owner/repo), or with id changes that one (status: open, done or dropped). An idea is something that might be done; it is never recalled into a prompt, and facts go to memory (memory_save) instead.").wired(),
     h("delete_idea", Write, "Deletes an idea of the account. An idea is something that might be done; it is never recalled into a prompt, and facts go to memory (memory_save) instead.").wired(),
+    h("team", Excluded, "a member's own calls about a team, which only the app sends"),
+    h("reports", Write, "Report drafts and the account's reports: op status, similar {title}, list, save_draft, delete_draft. Preview is the app's.").wired().checks(crate::reports::agent_check_reports),
+    h("report_issue", Confirm, "Sends a report to pinned's public GitHub issues, only when the user asked you to report. Args: draft {kind (problem|idea), title, happened, expected, repeat, attach {environment}, to_issue (the number of an open issue to add this case to)}. Write no project, file, folder or person names. The user reads the exact public text and approves it in the app.").wired().checks(crate::reports::agent_check_report_issue),
     h("convex", Excluded, "a session's Convex read, which its machine sends: call the convex_ tools"),
 ];
 
@@ -831,7 +834,11 @@ pub fn notice_text(confirmation: &Confirmation, result: &Value) -> String {
     let action = &confirmation.action;
     let id = &confirmation.id;
     match confirmation.decision {
-        Some(Decision::Denied) => format!("[pinned] The user denied your {action} request ({id}). It did not run."),
+        // What the hub kept of a denied request, in its own words, says what became of it.
+        Some(Decision::Denied) => match result {
+            Value::String(kept) => format!("[pinned] The user denied your {action} request ({id}). {kept}"),
+            _ => format!("[pinned] The user denied your {action} request ({id}). It did not run."),
+        },
         _ => {
             // An error the action ended with, and its result, can echo a third party's text, so each is one line.
             let outcome = crate::pinned_lines::flat(confirmation.outcome.as_deref().unwrap_or("done"), crate::pinned_lines::FIELD_CHARS);
@@ -1116,7 +1123,7 @@ mod tests {
                 "delete_session",
                 "save_mcp_server", "enable_mcp_server", "remove_mcp_server", "import_mcp_server",
                 "connect_convex", "set_convex_repos", "disconnect_convex",
-                "save_idea", "delete_idea",
+                "save_idea", "delete_idea", "reports", "report_issue",
             ]
         );
         for name in ["set_taste", "reset_taste_field", "set_box_size", "delete_connector", "extend_box"] {
@@ -1312,6 +1319,19 @@ mod tests {
             for name in ["list_ideas", "save_idea", "delete_idea"] {
                 assert!(find(name).unwrap().about.contains("never recalled into a prompt"), "{name} says how an idea differs from memory");
             }
+        }
+
+        #[test]
+        fn the_report_actions() {
+            wired("reports", Write, "hub", false, json!({ "ask": { "op": "list" } }));
+            wired("reports", Write, "hub", false, json!({ "ask": { "op": "similar", "title": "Diff is slow" } }));
+            wired("report_issue", Confirm, "hub", false, json!({ "draft": { "kind": "problem", "title": "Diff is slow", "happened": "It takes a minute." } }));
+            assert!(find("report_issue").unwrap().about.contains("approves it in the app"));
+            let preview = json!({ "ask": { "op": "preview", "draft": { "kind": "idea", "title": "x" } } });
+            let refused = parse(find("reports").unwrap(), &preview).err().unwrap();
+            assert!(refused.contains("preview is the app's"), "{refused}");
+            let errors = json!({ "draft": { "kind": "problem", "title": "x", "attach": { "errors": ["boom"] } } });
+            assert!(parse(find("report_issue").unwrap(), &errors).err().unwrap().contains("no error lines"));
         }
 
         #[test]

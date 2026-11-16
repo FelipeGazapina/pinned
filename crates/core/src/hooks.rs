@@ -50,10 +50,19 @@ pub fn write_global_settings(path: &Path, exe: &Path) -> std::io::Result<()> {
     std::fs::write(path, serde_json::to_vec_pretty(&settings)?)
 }
 
+/// Every session's settings, plus, in a team's box, the hook that asks the team before a step the
+/// never list holds.
 fn settings(exe: &Path) -> serde_json::Value {
+    settings_for(exe, crate::team_call::in_team_box())
+}
+
+pub(crate) fn settings_for(exe: &Path, team_box: bool) -> serde_json::Value {
     let mut hooks = serde_json::Map::new();
     for (_, arg, hook_event) in AgentStatus::ALL {
         hooks.insert(hook_event.into(), serde_json::json!([{ "hooks": [hook_command(exe, arg)] }]));
+    }
+    if team_box {
+        hooks.insert("PreToolUse".into(), serde_json::json!([{ "hooks": [subcommand(exe, crate::preauth::team_hook::SUBCOMMAND)] }]));
     }
     serde_json::json!({
         "hooks": hooks,
@@ -167,7 +176,7 @@ fn launch_notify(cmd: &[String], payload: &str) {
 }
 
 /// Claude writes the payload on stdin. Codex appends it as the last argument.
-fn hook_payload() -> String {
+pub(crate) fn hook_payload() -> String {
     let mut input = String::new();
     let _ = std::io::stdin().read_to_string(&mut input);
     if !input.trim().is_empty() {
@@ -447,7 +456,7 @@ fn env(k: &str) -> Result<String, String> {
 }
 
 /// Sends one message to the running harness and waits for its answer.
-fn ask(message: Message) -> Reply {
+pub(crate) fn ask(message: Message) -> Reply {
     let mut stream = UnixStream::connect(env(SOCK_ENV)?).map_err(|e| format!("pinned is not running: {e}"))?;
     let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
     writeln!(stream, "{}", serde_json::to_string(&message).unwrap()).map_err(|e| e.to_string())?;

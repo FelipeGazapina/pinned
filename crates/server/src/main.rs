@@ -13,7 +13,7 @@ static HEAP: pinned_server::heap::Counting = pinned_server::heap::Counting;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const USAGE: &str = "usage:
-  pinned-server hub --db <postgres url> --listen <addr> --ui <dir> --downloads <dir> [--public-url <url>] [--key-file <file>] [--signup first|open|invite] [--learning-db <postgres url>] [--trusted-proxy off|railway] [--max-accounts <n>]
+  pinned-server hub --db <postgres url> --listen <addr> --ui <dir> --downloads <dir> [--public-url <url>] [--key-file <file>] [--signup first|open|invite] [--learning-db <postgres url>] [--trusted-proxy off|railway] [--max-accounts <n>] [--dev]
   pinned-server pair <hub url> <code> [--name <name>] [--config-dir <dir>]
   pinned-server login <hub url> <email> [--name <name>] [--config-dir <dir>]   (password on stdin or in PINNED_PASSWORD)
   pinned-server node [--config-dir <dir>]";
@@ -34,6 +34,8 @@ fn main() {
             "pair" => pair(rest),
             "login" => login(rest),
             "node" => node(rest),
+            #[cfg(debug_assertions)]
+            "fake-github" => fake_github(rest),
             "--version" | "version" => Ok(println!("pinned-server {VERSION}")),
             _ => Err(USAGE.into()),
         },
@@ -90,7 +92,10 @@ impl Args {
 }
 
 fn hub(args: &[String]) -> Result<(), String> {
-    let args = Args::parse(args, &["db", "listen", "ui", "downloads", "public-url", "key-file", "signup", "learning-db", "trusted-proxy", "max-accounts"], 0)?;
+    // `--dev` takes no value, so it is taken out before the flags are read.
+    let dev_mode = args.iter().any(|arg| arg == "--dev");
+    let flags: Vec<String> = args.iter().filter(|arg| arg.as_str() != "--dev").cloned().collect();
+    let args = Args::parse(&flags, &["db", "listen", "ui", "downloads", "public-url", "key-file", "signup", "learning-db", "trusted-proxy", "max-accounts"], 0)?;
     let (signup, unknown) = signup_mode(args.flags.get("signup").map(String::as_str));
     if let Some(warning) = unknown {
         eprintln!("pinned-server: {warning}");
@@ -104,19 +109,48 @@ fn hub(args: &[String]) -> Result<(), String> {
         .get("max-accounts")
         .map(|n| n.parse::<u32>().map_err(|_| format!("--max-accounts takes a number of accounts, not {n}\n{USAGE}")))
         .transpose()?;
+    let (db, listen) = (args.required("db")?, args.required("listen")?);
+    // Checked before the hub reads the database or binds the listener. Without a public URL the hub's
+    // is its listen address, so the check sees the same host the hub will answer on.
+    let dev = if dev_mode {
+        let public_url = args.flags.get("public-url").cloned().unwrap_or_else(|| format!("http://{listen}"));
+        match pinned_server::dev::check(&db, &listen, &public_url, &|key| std::env::var(key).ok()) {
+            Ok(dev) => {
+                if let Some(root) = &dev.slack_root {
+                    if let Err(refusal) = pinned_core::slack::use_dev_root(root) {
+                        eprintln!("pinned-server: {refusal}");
+                        std::process::exit(2);
+                    }
+                }
+                eprintln!("DEV HUB: not production (time scale {})", dev.time_scale);
+                dev
+            }
+            Err(refusal) => {
+                eprintln!("pinned-server: {refusal}");
+                std::process::exit(2);
+            }
+        }
+    } else {
+        pinned_server::dev::Dev::OFF
+    };
+    let box_policy = if dev_mode { dev.policy(&pinned_server::boxes::Policy::default()) } else { pinned_server::boxes::Policy::default() };
     let config = pinned_server::Config {
-        db: args.required("db")?,
-        listen: args.required("listen")?,
+        db,
+        listen,
         ui: args.required("ui")?.into(),
         downloads: args.required("downloads")?.into(),
         public_url: args.flags.get("public-url").cloned(),
         key_file: args.flags.get("key-file").map_or_else(|| args.config_dir().join("hub.key"), PathBuf::from),
         signup,
         box_api: std::sync::Arc::new(pinned_server::boxes::Upstash),
-        box_policy: pinned_server::boxes::Policy::default(),
+        box_policy,
+        team_policy: pinned_core::teams::TeamPolicy::default(),
+        dev,
         convex_http: std::sync::Arc::new(pinned_core::convex::client::Reqwest),
         learning_db: args.flags.get("learning-db").cloned(),
         access: pinned_server::http::Access { trusted_proxy, max_accounts, hashing: None },
+        // The repository and API overrides of reports stay off on every hub, `--dev` included.
+        reports: reports_config(false),
     };
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     runtime.block_on(async {
@@ -142,6 +176,36 @@ fn hub(args: &[String]) -> Result<(), String> {
             eprintln!("pinned-server: stopped with saves not written after {}s", pinned_server::FLUSH_WITHIN.as_secs());
         }
         ended.map_err(|e| e.to_string())
+    })
+}
+
+/// Where reports are filed, from the environment (`PINNED_REPORTS_GITHUB_TOKEN` and, under `--dev`, a local fake API and repository).
+fn reports_config(dev: bool) -> Option<pinned_server::reports::Config> {
+    let config = pinned_server::reports::Config::from_env(dev, &|name| std::env::var(name).ok());
+    if config.is_none() {
+        // With a token set, `from_env` has already said under `--dev` why reporting is off.
+        match std::env::var(pinned_server::reports::TOKEN_VARIABLE).map(|v| v.trim().is_empty()) {
+            Ok(false) => eprintln!("pinned-server: reporting an issue from the app is not available"),
+            _ => eprintln!("pinned-server: reporting an issue from the app is not available: {} is not set", pinned_server::reports::TOKEN_VARIABLE),
+        }
+    }
+    config
+}
+
+/// `pinned-server fake-github --listen <addr>`: the in-memory GitHub the dev stack and the tests file reports in.
+#[cfg(debug_assertions)]
+fn fake_github(args: &[String]) -> Result<(), String> {
+    let args = Args::parse(args, &["listen"], 0)?;
+    let listen = args.flags.get("listen").cloned().unwrap_or_else(|| "127.0.0.1:0".into());
+    if !listen.starts_with("127.0.0.1:") && !listen.starts_with("localhost:") && !listen.starts_with("[::1]:") {
+        return Err("fake-github listens on a loopback address only".into());
+    }
+    let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
+    runtime.block_on(async {
+        let fake = pinned_server::reports::fake_github::serve(&listen).await?;
+        eprintln!("pinned-server: fake GitHub listening on {}; use a token that starts fake-", fake.url);
+        let _ = tokio::signal::ctrl_c().await;
+        Ok(())
     })
 }
 

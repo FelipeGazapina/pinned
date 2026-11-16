@@ -819,14 +819,18 @@ pub fn start_script(login: &str, repo: Option<&str>) -> String {
 
 /// What the node and its sessions run with, as `start.sh` sources it: the secrets, and, when
 /// `leaves`, `PINNED_BOX=1`, which tells the node it runs in a box and may exit for good once the hub
-/// has refused it for 15 minutes.
-fn box_env(keys: &Keys, github: Option<&str>, leaves: bool) -> String {
+/// has refused it for 15 minutes. A team's box also gets `PINNED_TEAM_BOX=1`, which turns on
+/// `pinned call` and the hook that asks the team before a step only people may approve.
+fn box_env(keys: &Keys, github: Option<&str>, leaves: bool, team: bool) -> String {
     let mut env = format!("CLAUDE_CODE_OAUTH_TOKEN='{}'\n", quoted(&keys.claude_token));
     if let Some(token) = github {
         env += &format!("GH_TOKEN='{}'\n", quoted(token));
     }
     if leaves {
         env += &format!("{}=1\n", crate::box_exit::BOX_ENV);
+    }
+    if team {
+        env += &format!("{}=1\n", pinned_core::team_call::TEAM_BOX_ENV);
     }
     env
 }
@@ -978,7 +982,11 @@ impl Boxes {
     pub async fn open(&self, hub: &Hub, account: &Arc<Account>, mut run: Run, step: BoxStep) -> Result<Placement, String> {
         let connectors = hub.connectors(account).await?;
         let keys = connectors.box_keys().ok_or(NOT_CONNECTED)?;
-        let permission = connectors.box_access().workflow;
+        let permission = match connectors.box_access().workflow {
+            // A team's runs never share a machine, whatever an older hub stored.
+            BoxPermission::Fixed { .. } if account.team => BoxPermission::Fresh,
+            permission => permission,
+        };
         if permission == BoxPermission::Off {
             return Err("Upstash Box is off for workflows: choose a box permission in Connectors settings".into());
         }
@@ -1404,14 +1412,21 @@ impl Boxes {
         }
         if let Err(e) = &booted {
             eprintln!("pinned-server: box {} of account {} failed: {e}", row.id, account.id);
-            self.cooling.lock().unwrap().insert((account.id, row.connector.clone()), Instant::now());
+            // A team's run stopped while its box booted is no failed boot: its next run boots at once.
+            let run_ended = e == crate::teams::calls::ENDED_WHILE_BOOTING;
+            if !run_ended {
+                self.cooling.lock().unwrap().insert((account.id, row.connector.clone()), Instant::now());
+            }
             let failed = Phase::Ending(End::Failed(e.clone()));
             for from in [Phase::Creating, Phase::Booting] {
                 if hub.db.set_box_phase(account.id, &row.id, &from, &failed).await? {
                     let mut row = row.clone();
                     row.phase = failed.clone();
                     self.tell_origin(hub, account, &row, &End::Failed(e.clone())).await;
-                    if row.work == BoxWork::Run && row.connector != INTERACTIVE_CONNECTOR {
+                    if let Err(failed) = crate::teams::calls::box_failed(hub, account, row.machine, &row.connector, &row.subject, e).await {
+                        eprintln!("pinned-server: box {} of account {} failed, but its team run did not end yet: {failed}", row.id, account.id);
+                    }
+                    if row.work == BoxWork::Run && row.connector != INTERACTIVE_CONNECTOR && !run_ended {
                         if let Ok(connectors) = hub.connectors(account).await {
                             connectors.box_boot_failed(&row.subject);
                         }
@@ -1489,7 +1504,8 @@ impl Boxes {
         let claude_token = connectors.box_claude_token(&signs_in).ok_or_else(|| format!("No Claude token is kept for {signs_in}: {ADD_TOKEN}."))?;
         let keys = Keys { api_key: keys.api_key.clone(), claude_token };
         let leaves = leaves_when_refused(&connectors.box_access(), &row.id);
-        self.api.write(key, id, &format!("{DIR}/box.env"), box_env(&keys, connectors.github_token().as_deref(), leaves)).await?;
+        let team = crate::teams::db::is_team(&hub.db, account.id).await?;
+        self.api.write(key, id, &format!("{DIR}/box.env"), box_env(&keys, connectors.github_token().as_deref(), leaves, team)).await?;
         self.api.write(key, id, &format!("{DIR}/start.sh"), start_script(&login, row.spec.repo.as_deref())).await?;
         let exec = self.api.exec(key, id, bootstrap_script(&hub.public_url)).await?;
         if exec.exit_code != 0 {
@@ -1534,6 +1550,11 @@ impl Boxes {
             if id == machine {
                 return Ok(Placement { machine: id, tab });
             }
+        }
+        // A team's run knows its box before its session starts, so a session that asks people at once
+        // finds it. A team's run that ended while its box booted gets no session.
+        if !crate::teams::db::claim_run_box(&hub.db, account.id, connector, subject, machine).await? && account.team {
+            return Err(crate::teams::calls::ENDED_WHILE_BOOTING.into());
         }
         let mut spec = spec.clone();
         spec.token = hub.connectors(account).await?.github_token().filter(|_| spec.repo.as_deref().is_some_and(github::hosts));
@@ -1649,9 +1670,13 @@ impl Boxes {
     /// its next trigger once (`BoxEndRelease`). Nothing opens another box or session for them. For the fixed row, which many runs share, only the runs whose
     /// session is on its machine. For another row, a run of its subject that started after the row was written is not its run, so a retried end (the row stays `Ending`) never fails a newer
     /// run of the subject that works elsewhere. A run that already finished holds nothing, so this does nothing.
+    /// A team's run in the box ends too (`teams::calls::box_ended`).
     /// An error leaves the runs as they were: the caller keeps the row `Ending`, so the reaper's
     /// next pass tries again before it deletes the row.
     async fn fail_held_runs(&self, hub: &Hub, account: &Account, row: &BoxRow, why: &End) -> Result<(), String> {
+        let turn = account.last_turn(&row.machine.to_string(), &row.connector, &row.subject);
+        crate::teams::calls::box_ended(hub, account, row.machine, why, turn)
+            .await.map_err(|e| format!("could not end the team run of box {}, so it stays until the next check: {e}", row.id))?;
         if row.work != BoxWork::Run || row.connector == INTERACTIVE_CONNECTOR {
             return Ok(());
         }
@@ -1765,9 +1790,14 @@ impl Boxes {
 
     /// Removing a box's machine deletes the box too. Answers whether `machine` ran in one.
     pub async fn end_for_machine(&self, hub: &Hub, account: &Arc<Account>, machine: Uuid) -> Result<bool, String> {
+        self.end_machine(hub, account, machine, End::Removed).await
+    }
+
+    /// Ends the box `machine` runs in for `why`, as the reaper would. Answers whether it ran in one.
+    pub async fn end_machine(&self, hub: &Hub, account: &Arc<Account>, machine: Uuid, why: End) -> Result<bool, String> {
         let Some(row) = hub.db.box_of(account.id, machine).await? else { return Ok(false) };
         let key = hub.connectors(account).await?.box_api_key();
-        self.finish(hub, account, row, End::Removed, key.as_deref()).await?;
+        self.finish(hub, account, row, why, key.as_deref()).await?;
         Ok(true)
     }
 
@@ -1822,6 +1852,8 @@ impl Boxes {
                 _ => None,
             })
             .collect();
+        // A team box whose run waits on people (`teams::calls`): it sits quiet for as long as they take.
+        let asking = if rows.is_empty() { HashSet::new() } else { crate::teams::db::waiting_boxes(&hub.db, account.id).await? };
         let now = Instant::now();
         for row in rows {
             let row = match row {
@@ -1879,10 +1911,12 @@ impl Boxes {
                         } else if over_budget {
                             Some(End::Expired)
                         } else {
-                            // An interactive session is quiet while its human thinks; only its
-                            // budget, its closed or exited tab, or going missing ends it.
+                            // An interactive session is quiet while its human thinks, and a team
+                            // box's while its run waits on people; only its budget, its max life,
+                            // its closed or exited tab, or going missing ends it.
                             let seen = match (row.connector.as_str(), seen) {
                                 (INTERACTIVE_CONNECTOR, Seen::Tab { running, .. }) => Seen::Tab { running, quiet: false },
+                                (_, Seen::Tab { running, .. }) if asking.contains(&machine) => Seen::Tab { running, quiet: false },
                                 _ => seen,
                             };
                             let was_offline = slot.offline_since;
@@ -2637,7 +2671,7 @@ mod tests {
         assert!(scripts[1].contains(r#"const clones = ["app"].map"#), "{}", scripts[1]);
         assert!(start_script("felipe", None).contains("const clones = [].map"));
         assert_eq!(
-            box_env(&keys, Some("ghp_SECRETGITHUB"), true),
+            box_env(&keys, Some("ghp_SECRETGITHUB"), true, false),
             "CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-SECRETCLAUDE'\nGH_TOKEN='ghp_SECRETGITHUB'\nPINNED_BOX=1\n"
         );
         assert_eq!(start_script("o'brien", None).lines().find(|l| l.contains("user.name")), Some("git config --global user.name 'o'\\''brien'"));
@@ -2647,10 +2681,24 @@ mod tests {
     fn a_box_env_tells_its_node_it_runs_in_a_box() {
         let keys = Keys { api_key: "box_SECRETKEY".into(), claude_token: "sk-ant-oat01-SECRETCLAUDE".into() };
         for github in [None, Some("ghp_SECRETGITHUB")] {
-            let env = box_env(&keys, github, true);
+            let env = box_env(&keys, github, true, false);
             assert!(env.lines().any(|line| line == "PINNED_BOX=1"), "{env}");
             assert!(!env.contains("box_SECRETKEY"), "{env}");
         }
+    }
+
+    #[test]
+    fn a_teams_box_env_sets_pinned_team_box_and_a_persons_does_not() {
+        let keys = Keys { api_key: "box_SECRETKEY".into(), claude_token: "sk-ant-oat01-SECRETCLAUDE".into() };
+        for leaves in [true, false] {
+            let team = box_env(&keys, Some("ghp_SECRETGITHUB"), leaves, true);
+            assert!(team.lines().any(|line| line == "PINNED_TEAM_BOX=1"), "{team}");
+            assert!(team.lines().any(|line| line.starts_with("CLAUDE_CODE_OAUTH_TOKEN=")), "{team}");
+            let person = box_env(&keys, Some("ghp_SECRETGITHUB"), leaves, false);
+            assert!(!person.contains("PINNED_TEAM_BOX"), "{person}");
+        }
+        assert_eq!(box_env(&keys, None, true, true), "CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-SECRETCLAUDE'\nPINNED_BOX=1\nPINNED_TEAM_BOX=1\n");
+        assert_eq!(pinned_core::team_call::TEAM_BOX_ENV, "PINNED_TEAM_BOX");
     }
 
     fn fixed_access(row: &str) -> BoxAccess {
@@ -2661,11 +2709,11 @@ mod tests {
     fn a_fixed_box_env_does_not_mark_its_node_to_leave_and_a_fresh_box_env_does() {
         let keys = Keys { api_key: "fake-api-key".into(), claude_token: "fake-claude-token".into() };
         let access = fixed_access("fixed-row");
-        let fixed = box_env(&keys, None, leaves_when_refused(&access, "fixed-row"));
+        let fixed = box_env(&keys, None, leaves_when_refused(&access, "fixed-row"), false);
         assert!(!fixed.contains("PINNED_BOX"), "{fixed}");
         assert!(fixed.lines().any(|line| line.starts_with("CLAUDE_CODE_OAUTH_TOKEN=")), "{fixed}");
         for (access, row) in [(&access, "fresh-row"), (&BoxAccess::default(), "fresh-row")] {
-            let fresh = box_env(&keys, None, leaves_when_refused(access, row));
+            let fresh = box_env(&keys, None, leaves_when_refused(access, row), false);
             assert!(fresh.lines().any(|line| line == "PINNED_BOX=1"), "{fresh}");
         }
     }
@@ -2684,7 +2732,7 @@ mod tests {
     impl StartRun {
         fn new() -> StartRun {
             let keys = Keys { api_key: "fake-api-key".into(), claude_token: "fake-claude-token".into() };
-            StartRun::with_env(box_env(&keys, None, true))
+            StartRun::with_env(box_env(&keys, None, true, false))
         }
 
         /// As `new`, with `env` as the box's `box.env`.
@@ -2762,7 +2810,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     async fn refused_for_an_hour(access: &BoxAccess, row: &str) -> (bool, usize, bool) {
         let keys = Keys { api_key: "fake-api-key".into(), claude_token: "fake-claude-token".into() };
-        let run = StartRun::with_env(box_env(&keys, None, leaves_when_refused(access, row)));
+        let run = StartRun::with_env(box_env(&keys, None, leaves_when_refused(access, row), false));
         pair_fake(&run.dir);
         let seen = run.start().expect("the start script did not launch the node");
         let refused = tokio::time::sleep(pinned_core::link::BOX_REFUSED_FOR + Duration::from_secs(30));

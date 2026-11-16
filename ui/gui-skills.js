@@ -69,7 +69,7 @@ function machineNotesHtml() {
 
 function skillRowHtml(r) {
   const open = skillsUi.open?.row === r.id;
-  const places = r.copies.map((c) => `<span class="place${c.edit === "no" ? " fixed" : ""}" title="${esc(c.dir)}">${esc(whereLabel(c))}</span>`).join("");
+  const places = r.copies.map((c) => `<span class="place${c.edit === "no" ? " fixed" : ""}" title="${esc(`${whereLabel(c)}\n${c.dir}`)}">${esc(whereLabel(c))}</span>`).join("");
   const agree = r.copies.length < 2 ? "" : r.agree ? `<span class="agree">${icon("check")} Same everywhere</span>` : `<span class="agree differ">${new Set(r.copies.map((c) => c.tree)).size} versions</span>`;
   return `<button type="button" class="skill-row${open ? " selected" : ""}" data-skill-row="${esc(r.id)}">
     <span class="name">${icon("sparkles")}<b>${esc(r.key)}</b>${agree}</span>
@@ -262,7 +262,7 @@ function reportHtml(report) {
 /** The editor pane in three parts, so a refresh can redraw the parts around an open editor and leave
  * the textarea, with its undo history and caret, alone. */
 function editorParts(row, o) {
-  const head = `<div class="skill-head"><h2>${esc(row.key)}</h2><span class="muted">${esc(whereLabel(o.copy))}</span><span class="spacer"></span>
+  const head = `<div class="skill-head"><h2>${esc(row.key)}</h2><span class="muted" title="${esc(whereLabel(o.copy))}">${esc(whereLabel(o.copy))}</span><span class="spacer"></span>
     ${o.got?.files?.length > 1 ? `<select data-skill-file aria-label="File">${o.got.files.map((f) => `<option${f === o.file ? " selected" : ""}>${esc(f)}</option>`).join("")}</select>` : ""}</div>`;
   if (o.error) return { top: `${head}<p class="skills-note error">${esc(o.error)}</p>`, body: null, bottom: "" };
   if (!o.got) return { top: `${head}<div class="file-loading" role="status" aria-label="Loading skill"><span class="spinner"></span></div>`, body: null, bottom: "" };

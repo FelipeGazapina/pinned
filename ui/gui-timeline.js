@@ -1027,6 +1027,43 @@ function reportRowHtml(report, at, t, key, captain) {
 /** Whether a message is long enough to fold: past 600 characters or 8 lines. */
 const isLongText = (text) => text.length > 600 || text.split("\n").length > 8;
 
+/** claude's hint on its screen while it holds prompts typed during a turn or a compaction. */
+const QUEUED_HINT = /edit queued messages/i;
+
+/** How long a delivered prompt may stay out of the transcript on an idle tab before the row says so. */
+const PENDING_STALE_MS = 30_000;
+
+/** Prompts sent but not yet in the transcript, as `renderThread` draws them: dimmed, after the turns.
+ * claude is busy when the thread is mid-turn or its screen shows the queued-messages hint. `stale`
+ * names the delivered rows an idle tab still has not written. */
+function pendingState(tab, t) {
+  const rows = t.pending ?? [];
+  if (!rows.length) return { rows, busy: false, stale: [] };
+  let hint = false;
+  try {
+    hint = !!tab.term && screenLines(tab).some((l) => QUEUED_HINT.test(l));
+  } catch {}
+  const busy = turnLive(tab) || hint;
+  const stale = busy ? [] : rows.filter((p) => p.sent && p.state !== "unconfirmed" && Date.now() - p.sentAt >= PENDING_STALE_MS).map((p) => p.id);
+  return { rows, busy, stale };
+}
+
+const PENDING_UNCONFIRMED = "Could not confirm it was delivered. Check the session before sending again.";
+
+function pendingHtml({ rows, busy, stale }) {
+  return rows
+    .map((p) => {
+      const lost = p.state === "unconfirmed";
+      const late = stale.includes(p.id);
+      const state = lost ? "unconfirmed" : late ? "stale" : busy ? "queued" : "sending";
+      const label = lost ? PENDING_UNCONFIRMED : late ? "Sent · not in the session yet" : busy ? "Queued · claude is busy; it goes in when it's free" : "Sending…";
+      const again = lost || late;
+      return `<section class="pending-turn" data-pending="${esc(p.id)}" data-state="${state}"><div class="user"><div class="bubble"><div class="body md">${markdown(p.text, promptMarked)}</div></div>
+        <div class="pending-note" role="status"><span>${esc(label)}</span>${again ? `<button type="button" class="pending-again" data-send-again="${esc(p.id)}">Send again</button>` : ""}</div></div></section>`;
+    })
+    .join("");
+}
+
 /** The prompt bubble as every other thread draws it. */
 function userBubbleHtml(user, t, tab, first, by) {
   const cited = citationsIn(user.text);
@@ -1212,13 +1249,14 @@ function renderThread() {
   const resume = !sub && resumeOffered(tab);
   const box = !sub && boxSoon(tab);
   const convex = !sub && convexBannerFor(tab);
+  const waiting = sub ? { rows: [], busy: false, stale: [] } : pendingState(tab, t);
   const limit = finder.open ? Infinity : t.limit ?? TURNS_SHOWN;
   const turns = turnsFor(t);
   if (globalLane(tab) && !sub) speakGlobalTexts(tab, turns);
   const first = Math.max(0, turns.length - limit);
   const shown = turns.slice(first);
   const place = sub ? `${tab.key}:${sub.tool}` : tab.key;
-  const content = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, t.start, !!t.fetchingOlder, t.olderError, t.resets, !!t.history, [...t.open], limit, t.agentsKey, t.sendErrors ?? null, phaseOf(tab), resume, boxKey(box), convex && [convex.repo, convex.deployment], globalLane(tab) ? globalLaneKey() : null, workersKey(tab), workerViewKey(tab), panelTurn(tab)]);
+  const content = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, t.start, !!t.fetchingOlder, t.olderError, t.resets, !!t.history, [...t.open], limit, t.agentsKey, t.sendErrors ?? null, phaseOf(tab), resume, boxKey(box), convex && [convex.repo, convex.deployment], globalLane(tab) ? globalLaneKey() : null, workersKey(tab), workerViewKey(tab), panelTurn(tab), waiting.rows.map((p) => [p.id, p.state, p.sent, p.text]), waiting.busy, waiting.stale]);
   // A render that brings nothing new keeps the drawn turns while they cover the screen, so a menu
   // open in them survives; heights measured since the last draw would otherwise shift the window.
   if (threadView.dataset.key && threadView.dataset.content === content && !windowStale()) return renderComposer(tab);
@@ -1245,8 +1283,8 @@ function renderThread() {
     ? `${parent}${first ? `<button type="button" class="earlier" data-earlier><span>Load earlier turns</span></button>` : sub ? "" : olderHtml(t)}<div class="spacer" style="height:${win.above}px"></div>${shown
         .slice(win.lo, win.hi)
         .map((turn, i) => turnHtml(tab, turn, changes.get(turn), working && first + win.lo + i === turns.length - 1, turn === opening, t, first + win.lo + i === turns.length - 1, turn === home ? workers : ""))
-        .join("")}<div class="spacer" style="height:${win.below}px"></div>`
-    : workers || `<div class="blank"><p>${blank}</p><p class="hint">${esc(tilde(tab.view.cwd))}</p></div>`;
+        .join("")}<div class="spacer" style="height:${win.below}px"></div>${pendingHtml(waiting)}`
+    : (workers || (waiting.rows.length ? "" : `<div class="blank"><p>${blank}</p><p class="hint">${esc(tilde(tab.view.cwd))}</p></div>`)) + pendingHtml(waiting);
   const liveRows = threadView.querySelector(".work.live .group[open] > .rows");
   const follow = !liveRows || liveRows.scrollHeight - liveRows.scrollTop - liveRows.clientHeight < 24;
   // The window redraws on scroll, so claude's dialog card moves into the new lane, keeping its focus.
@@ -1980,6 +2018,8 @@ threadView.addEventListener("click", (e) => {
   }
   const rewind = e.target.closest("[data-rewind]");
   if (rewind) return editFromHere(rewind.dataset.rewind);
+  const again = e.target.closest("[data-send-again]");
+  if (again) return sendAgain(active, again.dataset.sendAgain);
   const fork = e.target.closest("[data-fork]");
   if (fork) return forkFrom(fork.dataset.fork);
   const source = e.target.closest("[data-fork-source]");

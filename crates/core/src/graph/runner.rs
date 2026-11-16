@@ -19,6 +19,9 @@ pub struct RunId(pub String);
 /// Every graph the hub holds, by connector id. `call` reads its target here.
 pub type Library = BTreeMap<String, Graph>;
 
+/// Why a hub's team refuses a Call step to a workflow that is not one of its on bots.
+pub const NOT_AN_ON_BOT: &str = "the called workflow is not an on bot of this team";
+
 /// One execution. Owned by the hub, stored beside `connectors.json`, never sent to apps.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Run {
@@ -43,6 +46,15 @@ pub struct Run {
     stack: Vec<Frame>,
     /// Returned by `drive` until `supply` answers it.
     pending: Option<Effect>,
+    /// On a hub's team, the workflows that are on bots: a Call step to any other fails
+    /// (`NOT_AN_ON_BOT`). `None` on a person's account. Set before each `drive`, never stored.
+    #[serde(skip)]
+    pub callable: Option<std::collections::BTreeSet<String>>,
+    /// On a hub's team, the reserved run whose place this run's admitted event holds: each of its
+    /// sessions opens only in that place (`connectors::Run::reservation`). Stored with the run, so
+    /// a hub that restarts keeps it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reservation: Option<String>,
     /// The classify `pending` is asking. `supply` has no library, so the gate travels with the run.
     ready: Option<ReadyClassify>,
     /// Set once a claim has been supplied, so a finished run does not claim twice.
@@ -262,6 +274,8 @@ impl Run {
 /// issue or the Slack message, which goes into `context.trigger` and the first log entry.
 pub fn start(library: &Library, connector: &str, subject: Subject, input: Value, at: &str) -> Run {
     let mut run = Run {
+        callable: None,
+        reservation: None,
         id: RunId(format!("{connector}:{}:{at}", subject_key(&subject))),
         connector: connector.to_owned(),
         subject,
@@ -407,6 +421,31 @@ pub fn routing_classify(library: &Library, connector: &str) -> Option<(NodeId, C
 /// The port `answers` take out of the classify `node`, paging the way a run would.
 pub fn classify_port(library: &Library, connector: &str, node: &NodeId, classify: &Classify, answers: &Answers) -> PortId {
     port_for(classify, answers, &|port| branch_pages(library, connector, node, port))
+}
+
+/// How many talk and session steps `connector`'s graph holds, counting a called graph's again at
+/// each call step. The first a run walks opens its session, and every later one reaches that
+/// session again: it types into it, or opens it anew when its tab or conversation is gone. A call
+/// back into a graph already being counted adds nothing; the save refuses that cycle anyway.
+pub fn session_steps(library: &Library, connector: &str) -> usize {
+    fn count(library: &Library, connector: &str, counting: &mut Vec<String>) -> usize {
+        let Some(graph) = library.get(connector).filter(|_| !counting.iter().any(|c| c == connector)) else {
+            return 0;
+        };
+        counting.push(connector.to_owned());
+        let steps = graph
+            .nodes
+            .iter()
+            .map(|node| match &node.kind {
+                NodeKind::Talk { .. } | NodeKind::Session(_) => 1,
+                NodeKind::Call { workflow } => count(library, workflow, counting),
+                _ => 0,
+            })
+            .sum();
+        counting.pop();
+        steps
+    }
+    count(library, connector, &mut Vec::new())
 }
 
 /// Whether the branch out of `port` acts on its own, hub-side: it reaches a reply, a file-issue or
@@ -608,6 +647,9 @@ fn enter_call(
             .collect::<Vec<_>>()
             .join(" -> ");
         return Next::Fail(format!("call to workflow {workflow:?} cycles: it is already on the stack ({chain} -> {workflow})"));
+    }
+    if run.callable.as_ref().is_some_and(|on| !on.contains(workflow)) {
+        return Next::Fail(NOT_AN_ON_BOT.into());
     }
     let Some(graph) = library.get(workflow) else {
         return Next::Fail(format!("call to workflow {workflow:?}, which has no graph"));
@@ -2475,6 +2517,21 @@ mod tests {
                 why: "call to workflow \"missing\", which has no graph".into()
             }
         );
+    }
+
+    #[test]
+    fn on_a_team_a_call_to_a_workflow_that_is_not_an_on_bot_fails_the_run() {
+        let callee = chain(vec![("t", "Trigger", trigger()), ("s", "Talk", NodeKind::Talk { prompt: "Fix.".into() })]);
+        let caller = chain(vec![("t", "Trigger", trigger()), ("c", "Call", NodeKind::Call { workflow: "c2".into() })]);
+        let lib = library(vec![("c1", caller), ("c2", callee)]);
+        let mut run = start(&lib, "c1", linear(), json!("ENG-7: Broken button"), AT);
+        run.callable = Some(["c1".to_owned()].into_iter().collect());
+        assert_eq!(drive(&mut run, &lib), Drive::Done);
+        assert_eq!(run.status, Status::Failed { why: "the called workflow is not an on bot of this team".into() });
+        // With the callee on, the call goes in.
+        let mut run = start(&lib, "c1", linear(), json!("ENG-7: Broken button"), AT);
+        run.callable = Some(["c1".to_owned(), "c2".to_owned()].into_iter().collect());
+        assert!(matches!(drive(&mut run, &lib), Drive::Act(_)), "{:?}", run.status);
     }
 
     #[test]

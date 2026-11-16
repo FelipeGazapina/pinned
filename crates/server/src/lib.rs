@@ -1,17 +1,20 @@
 pub mod box_exit;
 pub mod boxes;
 pub mod db;
+pub mod dev;
 pub mod heap;
 pub mod http;
 pub mod hub;
 pub mod mcp;
 pub mod oauth;
 pub mod relay;
+pub mod reports;
 pub mod remote;
 pub mod self_update;
 mod store_writes;
 pub mod traffic;
 pub mod surface;
+pub mod teams;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -32,12 +35,18 @@ pub struct Config {
     /// Upstash's Box API; tests pass a fake.
     pub box_api: Arc<dyn boxes::BoxApi>,
     pub box_policy: boxes::Policy,
+    /// Every team's call timings and default bot limits.
+    pub team_policy: pinned_core::teams::TeamPolicy,
+    /// `hub --dev`'s time scale, or `Dev::OFF`. Timers the dev mode shortens go through `Dev::scale`.
+    pub dev: dev::Dev,
     /// Convex, which the hub reads for sessions with the keys it keeps; tests replay fixtures.
     pub convex_http: Arc<dyn pinned_core::convex::client::Http>,
     /// A second Postgres for what users share to improve the app; without it the hub keeps none.
     pub learning_db: Option<String>,
     /// Which proxy's client address the hub believes, and how many accounts it takes.
     pub access: http::Access,
+    /// Where the hub files the issues users report from the app; without it reporting is not available.
+    pub reports: Option<reports::Config>,
 }
 
 /// How long the hub gives sockets to close once it is told to stop, before it drops them.
@@ -64,7 +73,12 @@ pub async fn start(config: Config) -> Result<Running, String> {
     let listener = tokio::net::TcpListener::bind(&config.listen).await.map_err(|e| format!("could not listen on {}: {e}", config.listen))?;
     let addr = listener.local_addr().map_err(|e| e.to_string())?;
     let public_url = config.public_url.unwrap_or_else(|| format!("http://{addr}"));
-    let hub = hub::Hub::new(db, public_url, config.signup, config.box_api, config.box_policy, config.convex_http);
+    let polling = config.reports.clone();
+    let hub = hub::Hub::new(db, public_url, config.signup, config.box_api, config.box_policy, config.team_policy, config.convex_http, config.reports, config.dev).await?;
+    // Only where reporting is available: no token, or a table that could not be readied, nothing to ask GitHub.
+    if let Some(reports) = polling.filter(|_| hub.reports.available()) {
+        reports::poller::spawn(&hub, reports);
+    }
     surface::finish_interrupted(&hub).await?;
     // Again once a decision the hub before this one ran can no longer be running.
     let later = hub.clone();
@@ -75,6 +89,7 @@ pub async fn start(config: Config) -> Result<Running, String> {
         }
     });
     hub.watch_all().await?;
+    teams::spawn_tick(&hub);
     // Counts of what the hub holds, so memory that grows can be told apart by cause.
     let census = Arc::downgrade(&hub);
     tokio::spawn(async move {

@@ -12,7 +12,7 @@ use pinned_core::sync;
 use pinned_core::taste::{TastePatch, TasteScope, Tastes};
 use pinned_core::upstash::{BoxId, Exec, Listed, NewBox};
 use pinned_core::sessions::Saved;
-use pinned_core::wire::{Call, HubCall, MachineView, NEVER_EXPIRES};
+use pinned_core::wire::{Call, HubCall, MachineEvent, MachineView, NEVER_EXPIRES};
 use pinned_server::boxes::{BoxApi, Policy};
 use serde_json::{json, Value};
 use std::io::{Read, Write};
@@ -48,6 +48,10 @@ struct TestHub {
     learning: Option<String>,
     signup: Signup,
     access: pinned_server::http::Access,
+    /// The teams' call timings: the hub's default unless `start_with_team_policy` names others.
+    team_policy: pinned_core::teams::TeamPolicy,
+    /// Where the hub files reports; a test points it at a fake GitHub.
+    reports: Option<pinned_server::reports::Config>,
 }
 
 impl TestHub {
@@ -80,7 +84,21 @@ impl TestHub {
         hub
     }
 
+    /// A hub whose boxes follow `policy` and whose teams' calls escalate and give up as `teams` says.
+    fn start_with_team_policy(name: &str, policy: Policy, teams: pinned_core::teams::TeamPolicy) -> TestHub {
+        TestHub::start_every(name, Signup::Open, policy, false, Default::default(), "127.0.0.1:0", teams, None)
+    }
+
     fn start_all(name: &str, signup: Signup, policy: Policy, with_learning: bool, access: pinned_server::http::Access, listen: &str) -> TestHub {
+        TestHub::start_every(name, signup, policy, with_learning, access, listen, Default::default(), None)
+    }
+
+    fn start_reports(name: &str, signup: Signup, policy: Policy, with_learning: bool, access: pinned_server::http::Access, listen: &str, reports: Option<pinned_server::reports::Config>) -> TestHub {
+        TestHub::start_every(name, signup, policy, with_learning, access, listen, Default::default(), reports)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_every(name: &str, signup: Signup, policy: Policy, with_learning: bool, access: pinned_server::http::Access, listen: &str, team_policy: pinned_core::teams::TeamPolicy, reports: Option<pinned_server::reports::Config>) -> TestHub {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let database = format!("pinned_test_{name}_{}", std::process::id());
         admin(&format!("drop database if exists {database} with (force)"));
@@ -96,30 +114,16 @@ impl TestHub {
         std::fs::create_dir_all(dir.join("downloads")).unwrap();
         std::fs::write(dir.join("downloads/pinned-server-x86_64-unknown-linux-musl"), "ELF").unwrap();
         let boxes = FakeBoxes::new(dir.join("boxes"));
-        let mut hub = TestHub { runtime: tokio::runtime::Runtime::new().unwrap(), running: None, url: String::new(), database, dir, boxes, policy, learning, signup, access };
+        let mut hub = TestHub { runtime: tokio::runtime::Runtime::new().unwrap(), running: None, url: String::new(), database, dir, boxes, policy, learning, signup, access, team_policy, reports };
         hub.serve(listen);
         hub
     }
 
     fn serve(&mut self, listen: &str) {
-        let config = || pinned_server::Config {
-            db: format!("{}/{}", postgres(), self.database),
-            listen: listen.into(),
-            ui: self.dir.join("ui"),
-            downloads: self.dir.join("downloads"),
-            public_url: None,
-            key_file: self.dir.join("hub.key"),
-            signup: self.signup,
-            box_api: self.boxes.clone(),
-            box_policy: self.policy.clone(),
-            convex_http: Arc::new(Replay::new(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../core/tests/fixtures/convex"), CONVEX_KEY).unwrap()),
-            learning_db: self.learning.as_ref().map(|learning| format!("{}/{learning}", postgres())),
-            access: self.access.clone(),
-        };
         let start = Instant::now();
         // A restarted hub takes its old address, which the dying runtime may not have let go of yet.
         let running = loop {
-            match self.runtime.block_on(pinned_server::start(config())) {
+            match self.runtime.block_on(pinned_server::start(self.config(listen))) {
                 Ok(running) => break running,
                 Err(e) if e.contains("could not listen") && start.elapsed() < WAIT => std::thread::sleep(Duration::from_millis(50)),
                 Err(e) => panic!("{e}"),
@@ -129,12 +133,46 @@ impl TestHub {
         self.running = Some(running);
     }
 
+    /// A second hub on this hub's database, key and boxes, as another replica: its runtime and
+    /// what it runs. Dropping the runtime stops it.
+    fn twin(&self) -> (tokio::runtime::Runtime, pinned_server::Running) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let running = runtime.block_on(pinned_server::start(self.config("127.0.0.1:0"))).unwrap();
+        (runtime, running)
+    }
+
+    fn config(&self, listen: &str) -> pinned_server::Config {
+        pinned_server::Config {
+            db: format!("{}/{}", postgres(), self.database),
+            listen: listen.into(),
+            ui: self.dir.join("ui"),
+            downloads: self.dir.join("downloads"),
+            public_url: None,
+            key_file: self.dir.join("hub.key"),
+            signup: self.signup,
+            box_api: self.boxes.clone(),
+            box_policy: self.policy.clone(),
+            team_policy: self.team_policy.clone(),
+            dev: pinned_server::dev::Dev::OFF,
+            convex_http: Arc::new(Replay::new(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../core/tests/fixtures/convex"), CONVEX_KEY).unwrap()),
+            learning_db: self.learning.as_ref().map(|learning| format!("{}/{learning}", postgres())),
+            access: self.access.clone(),
+            reports: self.reports.clone(),
+        }
+    }
+
     /// Kills the hub mid-whatever, as a deploy does, and starts another on its database and address.
     fn restart(&mut self) {
+        let addr = self.stop();
+        self.serve(&addr);
+    }
+
+    /// Kills the hub mid-whatever, as a deploy does; answers its address for the next (`serve`).
+    fn stop(&mut self) -> String {
         let addr = self.running.take().unwrap().addr;
         let old = std::mem::replace(&mut self.runtime, tokio::runtime::Runtime::new().unwrap());
         old.shutdown_background();
-        self.serve(&addr.to_string());
+        addr.to_string()
     }
 
     fn hub(&self) -> &Arc<pinned_server::hub::Hub> {
@@ -166,6 +204,43 @@ fn admin_on(database: &str, sql: &str) {
         tokio::spawn(connection);
         client.batch_execute(sql).await.unwrap();
     });
+}
+
+/// The team's workflows as its own account stores them: a read for tests, as no member reads a
+/// team's settings.
+fn team_workflows(hub: &TestHub, team: uuid::Uuid) -> Vec<Value> {
+    team_settings(hub, team)["connectors"].as_array().unwrap().clone()
+}
+
+/// The team's settings as its own account reads them, for tests only.
+fn team_settings(hub: &TestHub, team: uuid::Uuid) -> Value {
+    let account = hub.runtime.block_on(hub.hub().account(team)).unwrap();
+    hub.runtime.block_on(hub.hub().hub_call(&account, HubCall::GetSettings)).unwrap()
+}
+
+/// Stores `connector` on the team's account directly, past every check of a member's save, as a
+/// workflow an older hub let a member save. Answers its id.
+fn store_on_team(hub: &TestHub, team: uuid::Uuid, connector: Value) -> String {
+    let account = hub.runtime.block_on(hub.hub().account(team)).unwrap();
+    let connector = serde_json::from_value(connector).unwrap();
+    let saved = hub.runtime.block_on(hub.hub().hub_call(&account, HubCall::SaveConnector { connector })).unwrap();
+    saved["id"].as_str().unwrap().to_owned()
+}
+
+/// `who` saves the workflow `connector` (the JSON `save_connector` takes) on `team` with its bot,
+/// by `TeamOp::SaveBot`, the one way a member saves a team's workflow. Answers its id.
+fn save_team_workflow(hub: &TestHub, who: &Arc<pinned_server::hub::Account>, team: uuid::Uuid, connector: Value) -> Result<String, String> {
+    let ids = |hub: &TestHub| team_workflows(hub, team).iter().map(|c| c["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+    let before = ids(hub);
+    let given = connector["id"].as_str().unwrap_or_default().to_owned();
+    let bot = pinned_core::teams::Bot { workflow: given.clone(), name: String::new(), owner: None, calls: Default::default(), limits: pinned_core::teams::BotLimits { usd: 5.0, minutes: 30 }, on: false, on_by: None, once: false, off_note: None, skipped: vec![] };
+    let connector = Some(serde_json::from_value(connector).map_err(|e| e.to_string())?);
+    let op = pinned_server::teams::Op::read(pinned_core::teams::TeamOp::SaveBot { bot, connector })?;
+    hub.runtime.block_on(pinned_server::teams::call(hub.hub(), who, Some(team), op))?;
+    if !given.is_empty() {
+        return Ok(given);
+    }
+    Ok(ids(hub).into_iter().find(|id| !before.contains(id)).expect("a new workflow"))
 }
 
 /// A fresh folder for one node of one test. Parallel tests reuse machine names, so a counter
@@ -332,12 +407,24 @@ struct Node {
 }
 
 fn launched(dir: &Path) -> Arc<Machine> {
+    launched_with(dir, |_| {})
+}
+
+/// A machine that tells `events` what it reports.
+fn launched_with(dir: &Path, events: impl Fn(MachineEvent) + Send + Sync + 'static) -> Arc<Machine> {
     let claude = dir.join("claude");
     std::fs::write(&claude, "#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && { echo '{\"loggedIn\":true}'; exit 0; }\nexec cat\n").unwrap();
     std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    // The other providers' CLIs are signed out stand-ins, so a node never runs one found on the PATH, which keeps its login and scratch files in the process's HOME.
+    let signed_out = |name: &str| {
+        let bin = dir.join(name);
+        std::fs::write(&bin, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&bin, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        bin
+    };
     let launch = Launch {
         exe: "/opt/pinned/bin/pinned-server".into(),
-        bins: BTreeMap::from([(Provider::Claude, claude)]),
+        bins: BTreeMap::from([(Provider::Claude, claude), (Provider::Codex, signed_out("codex")), (Provider::Cursor, signed_out("cursor-agent"))]),
         path_env: None,
         settings: dir.join("settings.json"),
         mcp_config: None,
@@ -348,13 +435,19 @@ fn launched(dir: &Path) -> Arc<Machine> {
         vector_search: false,
         first_run_wait: std::time::Duration::from_secs(60),
         starting_limit: std::time::Duration::from_secs(600),
+        // Each node reads and writes its transcripts under its own folder, never the process's HOME.
+        claude_home: Some(dir.join(".claude")),
     };
-    Machine::new(launch, Some(dir.to_owned()), Some(dir.to_owned()), |_| {})
+    Machine::new(launch, Some(dir.to_owned()), Some(dir.to_owned()), events)
 }
 
 impl Node {
     fn start(dir: &Path, creds: Credentials) -> Node {
-        let machine = launched(dir);
+        Node::start_with(dir, creds, |_| {})
+    }
+
+    fn start_with(dir: &Path, creds: Credentials, events: impl Fn(MachineEvent) + Send + Sync + 'static) -> Node {
+        let machine = launched_with(dir, events);
         let link = link::spawn(creds, machine.clone(), "0.0.0-test");
         Node { machine, link: Some(link) }
     }
@@ -783,7 +876,7 @@ fn a_connector_run_goes_to_its_machine_else_another_online_one() {
     client.wait("the saved connector", |f| f["type"] == "settings" && f["settings"]["connectors"][0]["id"] == id);
     let account_id = uuid::Uuid::parse_str(&account.id).unwrap();
     let run = |subject: Subject| {
-        Work::Run(Run { cwd: repo.clone(), repo: None, args: vec![], connector: id.clone(), subject, mentioned: vec![], account: None, runs_on: RunsOn::Machine(mac_mini.clone()), input: String::new() })
+        Work::Run(Run { cwd: repo.clone(), repo: None, args: vec![], connector: id.clone(), subject, mentioned: vec![], account: None, runs_on: RunsOn::Machine(mac_mini.clone()), input: String::new(), reservation: None })
     };
     let open = |work| hub.runtime.block_on(hub.hub().open(account_id, work));
     let connector_tabs = |node: &Node| node.machine.tabs().into_iter().filter(|t| t.connector.as_deref() == Some(&id) && t.running).count();
@@ -833,6 +926,7 @@ fn a_connector_run_goes_to_its_machine_else_another_online_one() {
     assert_eq!(open(delivery("1792499999.000100")), Err("no session answers that thread".into()));
 
     let work = Run {
+        reservation: None,
         cwd: repo.clone(),
         repo: None,
         args: vec![],
@@ -907,6 +1001,7 @@ fn the_accounts_taste_lives_on_the_hub_and_a_machines_old_style_seeds_an_empty_a
         "strategy": "strongest_first", "ladder": [opus], "hard_model": opus, "parallel": 4, "autonomy": "report_at_end",
         "review_diffs": false, "second_opinion": true, "skills": [], "context": [],
         "tier": "high", "default_effort": null, "max_effort": "max", "budget_cents": 0, "time_limit_min": 480, "box_budget_cents": 0,
+        "box_size": null,
     });
     assert_eq!(client.hub(get()).unwrap()["captains"], aggressive, "the old style's preset, with workers at once lowered to the old cap of 4");
 
@@ -1040,7 +1135,7 @@ fn machines_share_a_projects_memory_through_the_hub_wherever_they_keep_it() {
     assert_eq!(pulled, vec!["claude/memory/MEMORY.md"]);
     assert_eq!(std::fs::read_to_string(memory(&on_mini)).unwrap(), "- deploys go through the VPS");
 
-    let outside = sync::File { entry: sync::Entry { path: "../.ssh/authorized_keys".into(), sha: "x".into(), modified: 1, size: 1, executable: None }, data: Some("eA==".into()) };
+    let outside = sync::File { entry: sync::Entry { path: "../.ssh/authorized_keys".into(), sha: "x".into(), modified: 1, size: 1, executable: None }, data: Some("eA==".into()), agreed: None };
     assert_eq!(
         mac_link.call_hub(HubCall::SyncPush { project: project.key.clone(), files: vec![outside] }),
         Err("../.ssh/authorized_keys is not a file a project shares".into())
@@ -1114,7 +1209,7 @@ fn a_plugin_tree_is_stored_without_settings_env_or_claude_json() {
     pulled.sort();
     assert_eq!(pulled, stored);
     assert_eq!(std::fs::read_to_string(mini_home.join("synced-plugins/plugins/toy@demo/skills/greet/SKILL.md")).unwrap(), skill);
-    let secret = |path: &str| sync::File { entry: sync::Entry { path: path.into(), sha: "x".into(), modified: 1, size: 1, executable: None }, data: Some("eA==".into()) };
+    let secret = |path: &str| sync::File { entry: sync::Entry { path: path.into(), sha: "x".into(), modified: 1, size: 1, executable: None }, data: Some("eA==".into()), agreed: None };
     for path in [
         "plugins/toy@demo/settings.json",
         "plugins/toy@demo/.claude.json",
@@ -1137,6 +1232,7 @@ fn a_plugin_tree_is_stored_without_settings_env_or_claude_json() {
     let oversized = sync::File {
         entry: sync::Entry { path: "plugins/toy@demo/skills/greet/blob.bin".into(), sha: "x".into(), modified: 1, size: raw.len() as u64, executable: None },
         data: Some(base64::engine::general_purpose::STANDARD.encode(&raw)),
+        agreed: None,
     };
     assert_eq!(
         mac_link.call_hub(HubCall::SyncPush { project: sync::PLUGINS_KEY.into(), files: vec![oversized] }),
@@ -1465,6 +1561,7 @@ fn plugin_hook(body: &[u8], modified: u64, executable: bool) -> sync::File {
     sync::File {
         entry: sync::Entry { path: HOOK_PATH.into(), sha: sha256_hex(body), modified, size: packed.len() as u64, executable: Some(executable) },
         data: Some(base64::engine::general_purpose::STANDARD.encode(packed)),
+        agreed: None,
     }
 }
 
@@ -2629,9 +2726,14 @@ struct FakeState {
     failing: Option<Exec>,
     /// The next bootstrap never answers, as when the hub dies during it. Other scripts answer at once.
     hanging: bool,
+    /// The next bootstrap waits until this is notified, then boots as usual.
+    gate: Option<Arc<tokio::sync::Notify>>,
     /// A checkout each booted node already knows, as `(folder name, git origin)`, so the node finds
     /// the repo a worker or a Captain needs without cloning from the network.
     checkout: Option<(String, String)>,
+    /// Runs on the next booted node's machine thread, inside the call that opens its first tab and
+    /// before that call answers the hub: what a session does as its first act.
+    first_tab: Option<Arc<dyn Fn() + Send + Sync>>,
 }
 
 /// Upstash's Box API in memory. Running the bootstrap starts a node from the account.json the hub
@@ -2671,19 +2773,27 @@ impl FakeBoxes {
     }
 
     async fn boot(&self, id: &BoxId) -> Result<Exec, String> {
-        let (dir, creds, checkout) = {
+        let (dir, creds, checkout, first_tab) = {
             let mut state = self.state.lock().unwrap();
             if let Some(failing) = state.failing.take() {
                 return Ok(failing);
             }
+            let first_tab = state.first_tab.take();
             let fake = state.boxes.get(&id.0).ok_or("no such box")?;
             let creds: Credentials = serde_json::from_str(&fake.files[&format!("{BOX_DIR}/account.json")]).unwrap();
             assert!(fake.files[&format!("{BOX_DIR}/start.sh")].contains("pinned-server\" node --config-dir"));
-            (self.root.join(&id.0), creds, state.checkout.clone())
+            (self.root.join(&id.0), creds, state.checkout.clone(), first_tab)
         };
         std::fs::create_dir_all(&dir).unwrap();
         let node = tokio::task::spawn_blocking(move || {
-            let node = Node::start(&dir, creds);
+            let opened = std::sync::atomic::AtomicBool::new(false);
+            let node = Node::start_with(&dir, creds, move |event| {
+                if let (Some(first), MachineEvent::Tabs { tabs }) = (&first_tab, &event) {
+                    if !tabs.is_empty() && !opened.swap(true, Ordering::SeqCst) {
+                        first();
+                    }
+                }
+            });
             // A delivery is a prompt, which the node holds until claude takes the terminal, as this stand-in does.
             std::fs::write(dir.join("claude"), "#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && { echo '{\"loggedIn\":true}'; exit 0; }\nstty raw -echo; exec cat\n").unwrap();
             if let Some((name, remote)) = checkout {
@@ -2739,11 +2849,15 @@ impl BoxApi for FakeBoxes {
     fn exec<'a>(&'a self, key: &'a str, id: &'a BoxId, script: String) -> BoxFuture<'a, Result<Exec, String>> {
         Box::pin(async move {
             Self::refuse(key)?;
-            let hanging = {
+            let (hanging, gate) = {
                 let mut state = self.state.lock().unwrap();
                 state.scripts.push(script.clone());
-                script.contains("start.sh") && std::mem::take(&mut state.hanging)
+                let boots = script.contains("start.sh");
+                (boots && std::mem::take(&mut state.hanging), if boots { state.gate.take() } else { None })
             };
+            if let Some(gate) = gate {
+                gate.notified().await;
+            }
             if !script.contains("start.sh") {
                 return Ok(Exec { exit_code: 0, output: String::new(), error: String::new() });
             }
@@ -2822,7 +2936,7 @@ impl BoxAccount {
 
     fn run(&self, subject: Subject, runs_on: RunsOn) -> Work {
         let args = vec!["--name".into(), "ENG-7 Fix login".into()];
-        Work::Run(Run { cwd: self.repo.clone(), repo: None, args, connector: self.connector.clone(), subject, mentioned: vec![], account: None, runs_on, input: String::new() })
+        Work::Run(Run { cwd: self.repo.clone(), repo: None, args, connector: self.connector.clone(), subject, mentioned: vec![], account: None, runs_on, input: String::new(), reservation: None })
     }
 
     fn box_run(&self, subject: Subject) -> Work {
@@ -8998,6 +9112,7 @@ fn a_locked_app_still_needs_the_password_for_every_confirm_action_and_never_for_
         ("set_convex_repos", json!({ "id": "quick-lemur-789", "repos": [] })),
         ("disconnect_convex", json!({ "id": "quick-lemur-789" })),
         ("extend_box", json!({ "machine": machine, "extra_usd": 1.0 })),
+        ("report_issue", json!({ "draft": { "kind": "problem", "title": "Crash" } })),
     ]
     .into_iter()
     .collect();
@@ -9101,7 +9216,7 @@ fn every_box_signs_in_with_the_claude_token_of_its_projects_account_and_refuses_
         "permissionMode": "acceptEdits", "worktree": false, "instructions": "", "machine": { "kind": "upstash-box", "size": "small" },
     } })).unwrap()["id"].as_str().unwrap().to_owned();
     let triggered = |issue_id: &str| {
-        let run = Run { cwd: site.clone().into(), repo: None, args: vec!["--name".into(), "ENG-9 Site".into()], connector: on_site.clone(), subject: issue(issue_id), mentioned: vec![], account: None, runs_on: RunsOn::FreshBox(BoxStep { size: Some(BoxSize::Small) }), input: String::new() };
+        let run = Run { cwd: site.clone().into(), repo: None, args: vec!["--name".into(), "ENG-9 Site".into()], connector: on_site.clone(), subject: issue(issue_id), mentioned: vec![], account: None, runs_on: RunsOn::FreshBox(BoxStep { size: Some(BoxSize::Small) }), input: String::new(), reservation: None };
         hub.runtime.block_on(hub.hub().open(ana.id, Work::Run(run)))
     };
     let open_box = |client: &mut Client| client.hub(json!({ "cmd": "open_box", "repo": "acme/site", "size": "small", "budget_usd": 2.0 }));
@@ -11525,4 +11640,220 @@ fn an_agent_saves_and_lists_ideas_through_act_and_its_role_is_kept() {
     let deleted = act(&ana.dir, &ana.tab, "delete_idea", json!({ "id": id })).unwrap();
     assert_eq!(deleted["outcome"], "done");
     assert_eq!(act(&ana.dir, &ana.tab, "list_ideas", json!({})).unwrap()["result"], json!([]));
+}
+
+#[path = "hub/teams_membership.rs"]
+mod teams_membership;
+#[path = "hub/teams_groups.rs"]
+mod teams_groups;
+#[path = "hub/teams_separation.rs"] mod teams_separation;
+#[path = "hub/teams_bots.rs"] mod teams_bots;
+#[path = "hub/teams_box_call.rs"]
+mod teams_box_call;
+#[path = "hub/teams_calls.rs"] mod teams_calls;
+#[path = "hub/teams_runs.rs"] mod teams_runs;
+#[path = "hub/teams_go_ahead.rs"] mod teams_go_ahead;
+#[path = "hub/teams_separation_fixes.rs"] mod teams_separation_fixes;
+#[path = "hub/teams_hardening.rs"]
+mod teams_hardening;
+#[path = "hub/teams_triggers.rs"] mod teams_triggers;
+#[path = "hub/teams_run_log.rs"] mod teams_run_log;
+#[path = "hub/teams_slack_notice.rs"] mod teams_slack_notice;
+#[path = "hub/teams_hardening_a.rs"] mod teams_hardening_a;
+#[path = "hub/teams_hardening_b.rs"] mod teams_hardening_b;
+#[path = "hub/teams_lifecycle.rs"] mod teams_lifecycle;
+#[path = "hub/teams_flood.rs"] mod teams_flood;
+#[path = "hub/teams_admission.rs"] mod teams_admission;
+#[path = "hub/teams_backstop.rs"] mod teams_backstop;
+#[path = "hub/teams_guard_tests.rs"] mod teams_guard_tests;
+#[path = "hub/teams_calls_guards.rs"] mod teams_calls_guards;
+#[path = "hub/teams_locks.rs"] mod teams_locks;
+#[path = "hub/teams_locks_boot.rs"] mod teams_locks_boot;
+#[path = "hub/teams_locks_callers.rs"] mod teams_locks_callers;
+#[path = "hub/teams_limits.rs"] mod teams_limits;
+#[path = "hub/teams_limits_fix.rs"] mod teams_limits_fix;
+#[path = "hub/teams_wire.rs"] mod teams_wire;
+#[path = "hub/reports.rs"]
+mod reports;
+#[path = "hub/reports_poller.rs"]
+mod reports_poller;
+
+#[test]
+fn an_account_over_the_sync_limit_takes_a_push_that_does_not_grow_it_and_refuses_one_that_does() {
+    let hub = TestHub::start("sync_quota");
+    let url = hub.url.clone();
+    let (_, _, mut ana) = signed_in(&url, "ana@example.test");
+    let project = "github.com/acme/site";
+    let file = |path: &str, text: &str| {
+        json!({ "path": path, "sha": sha256_hex(text.as_bytes()), "modified": 1, "data": base64::engine::general_purpose::STANDARD.encode(gzip_bytes(text.as_bytes())) })
+    };
+    let tombstone = |path: &str| json!({ "path": path, "sha": "", "modified": 2 });
+    let push = |client: &mut Client, files: Vec<Value>| client.hub(json!({ "cmd": "sync_push", "project": project, "files": files }));
+    let (notes, plan) = ("claude/memory/notes.md", "claude/memory/plan.md");
+    push(&mut ana, vec![file(notes, "ana's notes"), file(plan, "plan: ship 0.18.6")]).unwrap();
+    // Thirteen sessions of 100 MiB: 1363148800 bytes, past the 1073741824 the account may keep.
+    admin_on(
+        &hub.database,
+        &format!(
+            "insert into project_files (account, project, path, sha, modified, data) \
+             select a.id, '{project}', 'claude/big-' || n || '.jsonl', 'big' || n, 1, convert_to(repeat('x', 104857600), 'UTF8') \
+             from accounts a, generate_series(1, 13) n where a.email = 'ana@example.test'"
+        ),
+    );
+    let refused = Err("the account's synced projects would pass 1024 MB; delete old sessions to sync more".to_owned());
+    let sha_of = |client: &mut Client, path: &str| {
+        let listed = client.hub(json!({ "cmd": "sync_list", "project": project })).unwrap();
+        listed.as_array().unwrap().iter().find(|e| e["path"] == path).map(|e| e["sha"].as_str().unwrap().to_owned())
+    };
+
+    assert_eq!(push(&mut ana, vec![tombstone(notes)]), Ok(Value::Null), "a deletion frees bytes even past the limit");
+    assert_eq!(sha_of(&mut ana, notes), Some(String::new()));
+    assert_eq!(gzip_bytes(b"plan: ship 0.18.6").len(), gzip_bytes(b"plan: ship 0.18.7").len());
+    assert_eq!(push(&mut ana, vec![file(plan, "plan: ship 0.18.7")]), Ok(Value::Null), "a file replaced by one of the same size grows nothing");
+    assert_eq!(push(&mut ana, vec![file("claude/big-1.jsonl", "{}")]), Ok(Value::Null), "a session shrunk from 100 MiB to a few bytes");
+    assert_eq!(push(&mut ana, vec![file("claude/memory/more.md", "one more note")]), refused, "a push that grows the account stays refused");
+    assert_eq!(sha_of(&mut ana, "claude/memory/more.md"), None);
+    let mixed = vec![tombstone("claude/big-2.jsonl"), file("claude/memory/more.md", "one more note")];
+    assert_eq!(push(&mut ana, mixed), Ok(Value::Null), "freeing 104857600 bytes while adding a few is taken whole, 11 sessions still past the limit");
+    assert_eq!(sha_of(&mut ana, "claude/memory/more.md"), Some(sha256_hex(b"one more note")));
+    assert_eq!(push(&mut ana, vec![tombstone("claude/big-3.jsonl"), tombstone("claude/big-4.jsonl")]), Ok(Value::Null));
+    assert_eq!(push(&mut ana, vec![file("claude/memory/later.md", "under the limit again")]), Ok(Value::Null), "9 sessions of 100 MiB leave room");
+}
+
+/// Runs `then` right after the hub answers a list, so another machine's push lands between this
+/// machine's list and its push.
+struct ListThen<'a> {
+    link: &'a Link,
+    then: std::cell::RefCell<Option<Box<dyn FnOnce() + 'a>>>,
+}
+
+impl sync::Hub for ListThen<'_> {
+    fn list(&self, project: &str) -> Result<Vec<sync::Entry>, String> {
+        let listed = sync::Hub::list(self.link, project);
+        if let Some(then) = self.then.borrow_mut().take() {
+            then();
+        }
+        listed
+    }
+    fn push(&self, project: &str, files: Vec<sync::File>) -> Result<(), String> {
+        sync::Hub::push(self.link, project, files)
+    }
+    fn pull(&self, project: &str, paths: Vec<String>) -> Result<Vec<sync::File>, String> {
+        sync::Hub::pull(self.link, project, paths)
+    }
+    fn mark_executable(&self, project: &str, repairs: Vec<sync::ModeRepair>) -> Result<(), String> {
+        sync::Hub::mark_executable(self.link, project, repairs)
+    }
+}
+
+#[test]
+fn a_deletion_sent_after_another_machine_changed_the_file_keeps_the_change() {
+    let hub = TestHub::start("sync_delete_race");
+    let url = hub.url.clone();
+    let (token, account) = account::signup(&url, "ana@example.test", "correct horse").unwrap();
+    let start = |name: &str| {
+        let dir = temp(&format!("race-{name}"));
+        let (machine, machine_token) = account::register_machine(&url, &token, name, "macos").unwrap();
+        let creds = Credentials { hub: url.clone(), email: account.email.clone(), user_token: token.clone(), machine_id: machine.id, machine_token };
+        creds.save(&dir).unwrap();
+        let node = Node::start(&dir, creds);
+        wait_for("the machine online", || node.online());
+        (node, dir)
+    };
+    let ((mac, mac_home), (mini, mini_home)) = (start("mac"), start("mini"));
+    let project = sync::Project { key: "github.com/acme/app".into(), name: "app".into(), repo: "git@github.com:acme/app.git".into() };
+    let checkout = |home: &Path| sync::Checkout { project: project.clone(), path: home.join("app"), history: None, claude_home: Some(home.join(".claude")) };
+    let (on_mac, on_mini) = (checkout(&mac_home), checkout(&mini_home));
+    let notes = |c: &sync::Checkout| sync::claude_dir(c.claude_home.as_ref().unwrap(), &c.path).join("memory/notes.md");
+    std::fs::create_dir_all(notes(&on_mac).parent().unwrap()).unwrap();
+    std::fs::write(notes(&on_mac), "first").unwrap();
+    let (mac_link, mini_link) = (mac.link.as_ref().unwrap(), mini.link.as_ref().unwrap());
+    let now = std::time::SystemTime::now();
+    let (mut mac_state, mut mini_state) = (sync::State::default(), sync::State::default());
+    assert_eq!(sync::sync(&Through(mac_link), &mut mac_state, &on_mac, now).unwrap().pushed, vec!["claude/memory/notes.md"]);
+    assert_eq!(sync::sync(&Through(mini_link), &mut mini_state, &on_mini, now).unwrap().pulled, vec!["claude/memory/notes.md"]);
+    std::fs::remove_file(notes(&on_mac)).unwrap();
+
+    let mini_changes = || {
+        std::fs::write(notes(&on_mini), "second, from mini").unwrap();
+        let pushed = sync::sync(&Through(mini_link), &mut mini_state, &on_mini, now).unwrap().pushed;
+        assert_eq!(pushed, vec!["claude/memory/notes.md"]);
+    };
+    let racing = ListThen { link: mac_link, then: std::cell::RefCell::new(Some(Box::new(mini_changes))) };
+    sync::sync(&racing, &mut mac_state, &on_mac, now).unwrap();
+    drop(racing);
+    let listed = mac_link.call_hub(HubCall::SyncList { project: project.key.clone() }).unwrap();
+    assert_eq!(listed[0]["sha"], json!(sha256_hex(b"second, from mini")), "the deletion was sent for the first version only");
+
+    assert_eq!(sync::sync(&Through(mac_link), &mut mac_state, &on_mac, now).unwrap().pulled, vec!["claude/memory/notes.md"]);
+    assert_eq!(std::fs::read_to_string(notes(&on_mac)).unwrap(), "second, from mini");
+    let (mut mac, mut mini) = (mac, mini);
+    mac.kill();
+    mini.kill();
+}
+
+#[test]
+fn a_deletion_naming_a_sha_the_hub_no_longer_holds_is_skipped_and_one_naming_none_applies_as_before() {
+    let hub = TestHub::start("sync_delete_agreed");
+    let url = hub.url.clone();
+    let (_, _, mut ana) = signed_in(&url, "ana@example.test");
+    let project = "github.com/acme/site";
+    let file = |path: &str, text: &str| {
+        json!({ "path": path, "sha": sha256_hex(text.as_bytes()), "modified": 1, "data": base64::engine::general_purpose::STANDARD.encode(gzip_bytes(text.as_bytes())) })
+    };
+    let push = |client: &mut Client, files: Vec<Value>| client.hub(json!({ "cmd": "sync_push", "project": project, "files": files }));
+    let sha_of = |client: &mut Client, path: &str| {
+        let listed = client.hub(json!({ "cmd": "sync_list", "project": project })).unwrap();
+        listed.as_array().unwrap().iter().find(|e| e["path"] == path).map(|e| e["sha"].as_str().unwrap().to_owned())
+    };
+    let (kept, gone, old) = ("claude/memory/kept.md", "claude/memory/gone.md", "claude/memory/old.md");
+    push(&mut ana, vec![file(kept, "second"), file(gone, "first"), file(old, "second")]).unwrap();
+    let first = sha256_hex(b"first");
+
+    let stale = json!({ "path": kept, "sha": "", "modified": 2, "agreed": first });
+    let current = json!({ "path": gone, "sha": "", "modified": 2, "agreed": first });
+    let from_an_older_app = json!({ "path": old, "sha": "", "modified": 2 });
+    assert_eq!(push(&mut ana, vec![stale, current, from_an_older_app]), Ok(Value::Null));
+    assert_eq!(sha_of(&mut ana, kept), Some(sha256_hex(b"second")), "changed since the sender agreed on it");
+    assert_eq!(sha_of(&mut ana, gone), Some(String::new()));
+    assert_eq!(sha_of(&mut ana, old), Some(String::new()), "a deletion without `agreed` applies whatever the hub holds");
+}
+
+#[test]
+fn over_the_sync_limit_a_stale_deletion_frees_nothing_and_agreed_on_a_file_is_ignored() {
+    let hub = TestHub::start("sync_quota_stale");
+    let url = hub.url.clone();
+    let (_, _, mut ana) = signed_in(&url, "ana@example.test");
+    let project = "github.com/acme/site";
+    let file = |path: &str, text: &str| {
+        json!({ "path": path, "sha": sha256_hex(text.as_bytes()), "modified": 1, "data": base64::engine::general_purpose::STANDARD.encode(gzip_bytes(text.as_bytes())) })
+    };
+    let push = |client: &mut Client, files: Vec<Value>| client.hub(json!({ "cmd": "sync_push", "project": project, "files": files }));
+    let sha_of = |client: &mut Client, path: &str| {
+        let listed = client.hub(json!({ "cmd": "sync_list", "project": project })).unwrap();
+        listed.as_array().unwrap().iter().find(|e| e["path"] == path).map(|e| e["sha"].as_str().unwrap().to_owned())
+    };
+    let plan = "claude/memory/plan.md";
+    push(&mut ana, vec![file(plan, "plan: ship 0.18.6")]).unwrap();
+    let mut changed = file(plan, "plan: ship 0.18.7");
+    changed["agreed"] = json!(sha256_hex(b"an older plan"));
+    assert_eq!(push(&mut ana, vec![changed]), Ok(Value::Null));
+    assert_eq!(sha_of(&mut ana, plan), Some(sha256_hex(b"plan: ship 0.18.7")), "`agreed` is only compared on a deletion");
+
+    // Eleven sessions of 100 MiB: 1153433600 bytes, past the 1073741824 the account may keep.
+    admin_on(
+        &hub.database,
+        &format!(
+            "insert into project_files (account, project, path, sha, modified, data) \
+             select a.id, '{project}', 'claude/big-' || n || '.jsonl', 'big' || n, 1, convert_to(repeat('x', 104857600), 'UTF8') \
+             from accounts a, generate_series(1, 11) n where a.email = 'ana@example.test'"
+        ),
+    );
+    let stale = json!({ "path": "claude/big-1.jsonl", "sha": "", "modified": 2, "agreed": "big0" });
+    let refused = push(&mut ana, vec![stale, file("claude/memory/more.md", "one more note")]);
+    assert_eq!(refused, Err("the account's synced projects would pass 1024 MB; delete old sessions to sync more".to_owned()), "the skipped deletion frees nothing");
+    assert_eq!(sha_of(&mut ana, "claude/big-1.jsonl"), Some("big1".to_owned()));
+    assert_eq!(sha_of(&mut ana, "claude/memory/more.md"), None);
+    let current = json!({ "path": "claude/big-1.jsonl", "sha": "", "modified": 2, "agreed": "big1" });
+    assert_eq!(push(&mut ana, vec![current, file("claude/memory/more.md", "one more note")]), Ok(Value::Null));
 }

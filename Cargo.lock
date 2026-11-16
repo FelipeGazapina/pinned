@@ -3405,7 +3405,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pinned"
-version = "0.18.5"
+version = "0.18.6"
 dependencies = [
  "block2",
  "dunce",
@@ -3431,7 +3431,7 @@ dependencies = [
 
 [[package]]
 name = "pinned-core"
-version = "0.18.5"
+version = "0.18.6"
 dependencies = [
  "apple-native-keyring-store",
  "base64 0.22.1",
@@ -3456,6 +3456,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.28.0",
  "uds_windows",
+ "unicode-normalization",
  "vt100",
  "windows-native-keyring-store",
  "windows-sys 0.61.2",
@@ -3463,19 +3464,20 @@ dependencies = [
 
 [[package]]
 name = "pinned-dev"
-version = "0.18.5"
+version = "0.18.6"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "pinned-server"
-version = "0.18.5"
+version = "0.18.6"
 dependencies = [
  "argon2",
  "axum",
  "base64 0.22.1",
  "chacha20poly1305",
+ "chrono",
  "flate2",
  "futures-util",
  "libc",

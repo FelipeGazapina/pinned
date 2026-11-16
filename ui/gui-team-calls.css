@@ -1,0 +1,138 @@
+/* The team screens of gui-team-nav.js, gui-team-calls.js and gui-team-run.js: the nav that replaces
+   the personal list in the sidebar, the Calls page and one run. Colours are the app's own tokens. */
+
+/* The pages take the thread's place, as gui-shell.css does for each page it lists. */
+body[data-mode="gui"]:is([data-page="team-calls"], [data-page="team-run"]) #expanded > header,
+body[data-mode="gui"]:is([data-page="team-calls"], [data-page="team-run"]) #chat { display: none; }
+body[data-mode="gui"]:is([data-page="team-calls"], [data-page="team-run"]) #page-view { display: flex; flex-direction: column; grid-column: 2; grid-row: 1; min-width: 0; min-height: 0; z-index: 1;
+  background: var(--g-bg); color: var(--g-fg); }
+body[data-mode="gui"]:is([data-page="team-calls"], [data-page="team-run"]) #workspace { grid-template-columns: var(--sidebar-width) minmax(0, 1fr) 0; }
+body[data-mode="gui"]:is([data-page="team-calls"], [data-page="team-run"])[data-sidebar="closed"] #workspace { grid-template-columns: 0 minmax(0, 1fr) 0; }
+body[data-mode="gui"]:is([data-page="team-calls"], [data-page="team-run"]) #panel { visibility: hidden; }
+
+/* While a team is current, its nav is the sidebar's list. */
+body[data-team="on"] :is(#sidebar .side-head, #side-nav, #phone-chips, #sidebar .threads-head, #thread-list, #side-notice) { display: none; }
+#team-nav { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; gap: 14px; overflow-y: auto; padding: 4px 6px 8px; }
+#team-nav .tc-team { display: flex; align-items: center; gap: 8px; padding: 4px 8px; min-width: 0; }
+#team-nav .tc-team-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: var(--g-side-fg); }
+#team-nav .tc-section { display: flex; flex-direction: column; gap: 1px; }
+#team-nav .tc-head { padding: 0 8px 3px; font-size: 12px; color: var(--g-side-muted); }
+#team-nav .tc-row { cursor: pointer; }
+#team-nav .tc-plain { cursor: default; color: var(--g-side-muted); }
+#team-nav .tc-plain:hover { background: none; }
+#team-nav [data-create="true"] { color: var(--g-link); }
+#team-nav .nav-row[data-tc-nav="team-calls"] .count { background: rgb(var(--g-warning-rgb) / 0.16); color: var(--g-warning-fg); }
+.tc-dot { flex: none; width: 8px; height: 8px; margin: 0 5px; border-radius: 50%; background: var(--g-glyph-idle); }
+.tc-dot[data-tone="call"] { background: var(--g-warning); }
+.tc-dot[data-tone="on"] { background: var(--g-success); }
+#team-nav .tc-me { margin-top: auto; display: flex; align-items: center; gap: 8px; padding: 10px 8px 0; border-top: 1px solid var(--g-side-border); min-width: 0; }
+#team-nav .tc-me-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--g-side-muted); }
+
+/* Avatars: the bot is a rounded square of initials, a person a circle with a colour of their own. */
+.tc-mark { flex: none; width: 22px; height: 22px; display: inline-flex; align-items: center; justify-content: center; border-radius: 6px; box-sizing: border-box;
+  background: var(--g-control); border: 1px solid var(--g-input); color: var(--g-fg); font-size: 10px; font-weight: 600; letter-spacing: 0.02em; }
+.tc-mark.tc-person { border-radius: 50%; border: 0; background: hsl(var(--tc-hue) 55% 72%); color: #0a0a0a; }
+.tc-mark.tc-team-mark { width: 24px; background: var(--g-primary); border-color: transparent; color: var(--g-on-primary); }
+.tc-mark.tc-mark-lg { width: 34px; height: 34px; border-radius: 9px; font-size: 12px; }
+
+/* The pages */
+.tc-wrap { --tc-line: rgb(var(--g-ink-rgb) / 0.09); --tc-edge: rgb(var(--g-ink-rgb) / 0.16); --tc-link: color-mix(in srgb, var(--g-link) 77%, var(--g-ink));
+  max-width: 680px; margin: 0 auto; padding: 24px 20px 56px; display: flex; flex-direction: column; gap: 28px; color: var(--g-fg); font-size: 14px; line-height: 1.45; }
+.tc-wrap h1 { margin: 0; font-size: 26px; line-height: 1.25; font-weight: 600; letter-spacing: -0.01em; overflow-wrap: anywhere; }
+.tc-wrap h2 { margin: 0 0 6px; font-size: 15px; font-weight: 600; }
+.tc-title { display: flex; flex-direction: column; gap: 6px; }
+.tc-title p { margin: 0; color: var(--g-side-muted); font-size: 14px; }
+.tc-empty { margin: 0; color: var(--g-side-muted); }
+.tc-dim, .tc-time { color: var(--g-side-muted); font-size: 12px; }
+.tc-time { margin-left: auto; flex: none; font-variant-numeric: tabular-nums; }
+.tc-note { font-size: 12px; color: var(--g-side-muted); overflow-wrap: anywhere; }
+
+/* Calls */
+.tc-cards { display: flex; flex-direction: column; gap: 10px; }
+.tc-card { display: flex; gap: 12px; padding: 14px; border: 1px solid var(--tc-line); border-radius: 14px; background: var(--g-raised); min-width: 0; }
+.tc-card[data-state="waiting"], .tc-call[data-state="waiting"] { border-color: rgb(var(--g-warning-rgb) / 0.5); }
+.tc-card-body { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 8px; }
+.tc-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; min-width: 0; }
+.tc-botname { font-weight: 600; color: var(--g-fg); overflow-wrap: anywhere; }
+.tc-chip { padding: 0 7px; border-radius: 6px; background: rgb(var(--g-primary-rgb) / 0.2); color: var(--tc-link); font-weight: 500; font-size: 13px; overflow-wrap: anywhere; }
+/* The whole question, never clamped: a step to approve can be long. Line breaks the bot wrote stay. */
+.tc-question { margin: 0; font-size: 15px; overflow-wrap: anywhere; white-space: pre-line; }
+/* A step to approve: the tool, then the whole step as the hub sent it, spaces and line breaks kept, never clamped. */
+.tc-step { display: flex; flex-direction: column; gap: 4px; margin: 2px 0; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--g-border); background: var(--g-raised); }
+.tc-step-tool { font-size: 11px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--g-side-muted); }
+.tc-step-text { font: 12.5px/1.5 var(--g-mono); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
+.tc-link { padding: 0; border: 0; background: none; font: inherit; cursor: pointer; text-align: left; }
+button.tc-botname:hover, button.tc-chip:hover { text-decoration: underline; }
+
+.tc-fields { display: flex; flex-direction: column; gap: 8px; min-width: 0; margin: 0; padding: 0; border: 0; }
+.tc-fields:disabled { opacity: 0.6; }
+.tc-actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.tc-actions button, .tc-typed button, .tc-head-actions button, .tc-banner button { min-height: 32px; padding: 0 14px; border-radius: 9px; font: inherit; font-weight: 500; cursor: pointer; }
+.tc-primary { border: 0; background: var(--g-primary); color: var(--g-on-primary); }
+.tc-secondary { border: 1px solid var(--tc-edge); background: transparent; color: var(--g-fg); }
+.tc-danger { border: 1px solid var(--tc-edge); background: transparent; color: var(--g-error); }
+.tc-quiet { border: 0; background: transparent; color: var(--g-side-muted); font-weight: 400 !important; }
+.tc-actions .tc-seerun { padding: 0 6px; min-height: 32px; border: 0; background: none; color: var(--tc-link); font-weight: 400; }
+button.tc-seerun:hover { text-decoration: underline; }
+@media (hover: hover) {
+  .tc-primary:hover:not(:disabled) { background: var(--g-primary-hover); }
+  .tc-secondary:hover:not(:disabled), .tc-danger:hover:not(:disabled) { background: var(--g-hover); }
+  .tc-quiet:hover:not(:disabled) { color: var(--g-fg); }
+}
+.tc-typed { display: flex; gap: 8px; }
+.tc-typed input { flex: 1; min-width: 0; height: 32px; padding: 0 10px; border: 1px solid var(--g-input); border-radius: 9px; outline: 0; background: rgb(var(--g-ink-rgb) / 0.03); color: var(--g-fg); font: inherit; }
+.tc-typed input:focus { border-color: rgb(var(--g-primary-rgb) / 0.8); box-shadow: 0 0 0 3px rgb(var(--g-primary-rgb) / 0.2); }
+
+.tc-result { margin: 0; font-weight: 600; overflow-wrap: anywhere; color: color-mix(in srgb, var(--g-success) 72%, var(--g-fg)); }
+.tc-result[data-state="sending"], .tc-result[data-state="other"], .tc-result[data-state="taken"] { color: var(--g-side-muted); font-weight: 500; }
+.tc-result[data-state="taken"] { color: var(--g-warning-fg); }
+.tc-result[data-state="error"] { color: var(--g-error); font-weight: 500; }
+
+.tc-block { display: flex; flex-direction: column; gap: 2px; }
+.tc-item { display: flex; align-items: center; gap: 12px; min-height: 40px; padding: 4px 2px; width: 100%; color: var(--g-fg); min-width: 0; }
+button.tc-item { border-radius: 8px; font: inherit; text-align: left; }
+button.tc-item:hover { background: var(--g-hover); }
+.tc-plain { color: var(--g-text); }
+.tc-line { min-width: 0; display: flex; flex-direction: column; }
+.tc-line-main { overflow-wrap: anywhere; }
+.tc-line-sub { color: var(--g-side-muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* A run */
+.tc-runhead { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; }
+.tc-runhead-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.tc-crumb { font-size: 13px; color: var(--g-side-muted); }
+.tc-crumb .tc-botname { color: var(--tc-link); font-weight: 500; }
+.tc-sub { margin: 0; color: var(--g-side-muted); overflow-wrap: anywhere; }
+.tc-facts { display: flex; flex-direction: column; gap: 2px; padding: 12px 14px; border-radius: 12px; background: var(--g-raised); border: 1px solid var(--tc-line); font-size: 14px; }
+.tc-fact { margin: 0; overflow-wrap: anywhere; }
+.tc-fact-key { color: var(--g-side-muted); }
+.tc-fact-note { color: var(--g-side-muted); font-size: 13px; }
+.tc-limit { display: flex; gap: 14px; padding: 16px; border-radius: 14px; background: rgb(var(--g-primary-rgb) / 0.1); border: 1px solid rgb(var(--g-primary-rgb) / 0.6); min-width: 0; }
+.tc-limit[data-state="quiet"] { background: var(--g-raised); border-color: var(--tc-line); }
+.tc-limit-body { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 8px; }
+.tc-limit-head { font-size: 12px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--g-side-muted); }
+.tc-head-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.tc-banner { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; padding: 12px 14px; border-radius: 12px; background: rgb(var(--g-primary-rgb) / 0.14); border: 1px solid rgb(var(--g-primary-rgb) / 0.6); }
+.tc-banner span { flex: 1 1 280px; min-width: 0; }
+.tc-timeline { display: flex; flex-direction: column; gap: 16px; }
+.tc-event { display: flex; gap: 12px; min-width: 0; }
+.tc-event-body { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.tc-stack { gap: 8px; flex: 1; }
+.tc-event-meta { font-size: 12px; color: var(--g-side-muted); }
+.tc-event-text { overflow-wrap: anywhere; white-space: pre-wrap; }
+.tc-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.tc-call { padding: 12px; margin: 0 -12px; border: 1px solid var(--tc-line); border-radius: 12px; background: var(--g-raised); }
+.tc-footer { margin: 0; font-size: 12px; color: var(--g-muted); }
+
+/* The team's projects in the nav: a plain list, and the question asked in the row itself. */
+#team-nav .tc-project { flex-wrap: wrap; align-items: baseline; gap: 2px 8px; height: auto; min-height: 0; padding-top: 4px; padding-bottom: 4px; color: var(--g-side-fg); }
+#team-nav .tc-project .label { min-width: 0; flex: 1 1 auto; overflow-wrap: anywhere; }
+#team-nav .tc-none { padding: 0 8px; font-size: 12px; color: var(--g-side-muted); }
+#team-nav .tc-detach, #team-nav .tc-detach-keep, #team-nav .tc-detach-yes { padding: 0; border: 0; background: none; font: inherit; font-size: 12px; cursor: pointer; color: var(--g-link); text-align: left; }
+#team-nav .tc-detach { color: var(--g-side-muted); }
+#team-nav .tc-detach:hover, #team-nav .tc-detach-keep:hover, #team-nav .tc-detach-yes:hover { text-decoration: underline; }
+#team-nav .tc-detach-yes { color: color-mix(in srgb, var(--g-error) 70%, var(--g-fg)); font-weight: 600; }
+#team-nav .tc-detach:disabled, #team-nav .tc-detach-keep:disabled, #team-nav .tc-detach-yes:disabled { opacity: 0.6; cursor: default; text-decoration: none; }
+#team-nav .tc-confirm { flex-direction: column; align-items: stretch; gap: 6px; border: 1px solid rgb(var(--g-warning-rgb) / 0.5); border-radius: 8px; padding: 8px; font-size: 12.5px; line-height: 1.4; overflow-wrap: anywhere; }
+#team-nav .tc-ask-error { color: color-mix(in srgb, var(--g-error) 70%, var(--g-fg)); }
+#team-nav .tc-ask-actions { display: flex; gap: 14px; }

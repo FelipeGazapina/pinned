@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.18.6 (2026-11-16)
+
+### Added
+
+- Teams: create a team, invite people with a code, and attach projects to it. A team keeps its own keys (Upstash Box, a Claude token for boxes, GitHub, Slack) on the team, never on a member's account. A member can leave, and the owner can remove members or take a project out of the team.
+- Team bots: a bot is a team workflow that runs in a fresh Upstash Box under the team. A new or edited bot is a draft until a member of a group it calls, or the team owner, turns it on. A bot starts with Run now, a Linear label or a Slack message. It runs one at a time; later starts wait in line. Each bot has a time limit, at most 4 hours.
+- Calls: when a bot is unsure, or before an action that can't be undone, it asks a group of people instead of guessing. The first answer wins. A call nobody answers goes to the team owner and then gives up, which ends that run. Time spent waiting on a call does not count toward the bot's time limit, and the run shows waiting time apart from active time. A call can ping a Slack user group through the team's Slack bot.
+- Report an issue: from the app, or from an agent after you confirm, file an issue on pinned's GitHub. Paths, names, e-mail addresses and secrets are removed before it leaves, and you see exactly what will be sent. My reports lists your reports and their state; a report that matches an existing issue adds your case to it.
+
+### Fixed
+
+- Chat: a message sent while the session is busy now shows as queued and is not sent twice. If the connection drops before delivery is confirmed, the message stays with a note to check the session before sending again.
+- Sync: an account at its sync size limit no longer retries a refused push every second. A push that does not grow the account is accepted, and deletions are sent first.
+- Skills: long location chips and the editor header no longer overflow their panes at narrow widths.
+- An override of a provider address is now limited to development builds.
+
+### Known limits
+
+- Spend limits for bots arrive with model cost reporting. Until then a bot's limit is its time; the box budget still applies.
+- Bots don't run on a schedule yet, and GitHub events don't start bots.
+- Team bots: if one read of a bot's settings fails, for example while the database is briefly unreachable, that bot's waiting run or event can be dropped and counted as "start failed" instead of waiting for the next pass.
+- A team box can end if two database writes fail in a row while its run opens.
+- A bot whose classify step answers by quoting its whole input refuses the run instead of going on.
+- A box whose node is older than 0.18.6 skips a step that asks the team while the hub is briefly busy, instead of waiting and trying it again.
+- Issue reporting is for personal accounts in this version; a team cannot file reports.
+- The limit on joining a team with wrong invite codes is kept in the hub's memory and resets when the hub restarts.
+
 ## 0.18.5 (2026-11-15)
 
 ### Fixed

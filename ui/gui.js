@@ -130,7 +130,22 @@ function phaseOf(tab) {
 const turnLive = (tab) => ["working", "asking", "input"].includes(phaseOf(tab));
 const unseenDone = (tab) => phaseOf(tab) === "done" && tab !== active && lastActivity(tab) > (seenAt[threadKey(tab)] ?? 0);
 
-const drawnOf = (t) => JSON.stringify([t.session, t.loaded, t.unsupported, t.error, t.items.length, t.todos, t.context, t.branch, t.agentsKey]);
+const drawnOf = (t) => JSON.stringify([t.session, t.loaded, t.unsupported, t.error, t.items.length, t.todos, t.context, t.branch, t.agentsKey, t.pending?.map((p) => p.id)]);
+
+/** A prompt's text with its whitespace collapsed, so a message claude joined or re-wrapped still matches. */
+const squashed = (text) => String(text ?? "").replace(/\s+/g, " ").trim();
+
+/** Drops the prompts shown as sent but not yet in the transcript once a new user or steer item holds
+ * their text. claude may join queued prompts into one item, so "holds" is "contains". */
+function settlePending(t, items) {
+  if (!t.pending?.length) return;
+  const said = items.filter((i) => i.kind === "user" || i.kind === "steer").map((i) => squashed(i.text));
+  if (!said.length) return;
+  const gone = t.pending.filter((p) => said.some((text) => text.includes(squashed(p.text))));
+  if (!gone.length) return;
+  t.pending = t.pending.filter((p) => !gone.includes(p));
+  clearQueuedNote(gone.map((p) => p.id));
+}
 
 async function fetchThread(tab) {
   const t = threadOf(tab);
@@ -172,6 +187,7 @@ async function fetchThread(tab) {
       if (page.todos) t.todos = page.todos;
       if (page.branch) t.branch = page.branch;
       t.items.push(...page.items);
+      settlePending(t, page.items);
       t.next = page.next;
       t.loaded = true;
       takeAgents(t, page.agents);

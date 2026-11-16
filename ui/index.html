@@ -41,6 +41,12 @@
 <link rel="stylesheet" href="gui-needs-you.css">
 <link rel="stylesheet" href="gui-phone.css">
 <link rel="stylesheet" href="gui-phone-thread.css">
+<!-- teams-entry: start -->
+<link rel="stylesheet" href="gui-teams.css">
+<!-- teams-entry: end -->
+<!-- teams-bots: start -->
+<link rel="stylesheet" href="gui-teams-bots.css">
+<!-- teams-bots: end -->
 </head>
 <body data-view="expanded" data-tabs="top">
   <main id="expanded">
@@ -84,6 +90,9 @@
           <button class="back"><i data-icon="arrow-left"></i>Back</button>
           <button id="side-update" class="icon" hidden></button>
           <div id="account-menu" role="menu" aria-label="Account and pages" hidden>
+            <!-- teams-entry: start -->
+            <div id="teams-where"></div>
+            <!-- teams-entry: end -->
             <button type="button" role="menuitem" id="gui-settings"><span class="label">Settings</span><span class="hint" data-hint="settings"></span></button>
             <button type="button" role="menuitem" data-open-page="taste"><span class="label">Way of working</span><span class="hint">Captains and models</span></button>
             <button type="button" role="menuitem" data-open-page="skills"><span class="label">Skills</span><span class="hint"></span></button>
@@ -262,7 +271,20 @@
 <script src="gui-taste.js"></script>
 <script src="gui-delegation.js"></script>
 <script src="gui-needs-you.js"></script>
+<!-- teams-calls: start -->
+<link rel="stylesheet" href="gui-team-calls.css">
+<script src="gui-team-store.js"></script>
+<script src="gui-team-nav.js"></script>
+<script src="gui-team-calls.js"></script>
+<script src="gui-team-run.js"></script>
+<!-- teams-calls: end -->
 <script src="gui-phone.js"></script>
+<!-- teams-entry: start -->
+<script src="gui-teams.js"></script>
+<!-- teams-entry: end -->
+<!-- teams-bots: start -->
+<script src="gui-teams-bots.js"></script>
+<!-- teams-bots: end -->
 <script src="vendor/theme-palettes.js"></script>
 <script src="theme-colors.js"></script>
 <script src="gui-theme.js"></script>
