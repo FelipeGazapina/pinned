@@ -1,5 +1,14 @@
 /* Report a problem (gui-reports.js): the dialog, the agent's request card and My reports. */
 
+/* The page takes the thread's place, as gui-shell.css does for each page it lists. */
+body[data-page="reports"] #sidebar footer > :not(.back) { display: none; }
+body[data-page="reports"] #sidebar footer .back { display: flex; }
+body[data-mode="gui"][data-page="reports"] #expanded > header, body[data-mode="gui"][data-page="reports"] #chat { display: none; }
+body[data-mode="gui"][data-page="reports"] #page-view { display: flex; flex-direction: column; grid-column: 2; grid-row: 1; min-width: 0; min-height: 0; z-index: 1; background: var(--g-bg); color: var(--g-fg); }
+body[data-mode="gui"][data-page="reports"] #workspace { grid-template-columns: var(--sidebar-width) minmax(0, 1fr) 0; }
+body[data-mode="gui"][data-page="reports"][data-sidebar="closed"] #workspace { grid-template-columns: 0 minmax(0, 1fr) 0; }
+body[data-mode="gui"][data-page="reports"] #panel { visibility: hidden; }
+
 /* The dialog */
 #shell-dialog .popup.rp-popup { max-width: 540px; overflow-y: auto; }
 .rp-dialog { display: flex; flex-direction: column; font-size: 13px; }
@@ -22,7 +31,8 @@
 .rp-error:empty { display: none; }
 
 .rp-similar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; padding: 8px 10px; border-radius: 10px; background: rgb(var(--g-ink-rgb) / 0.04); }
-.rp-similar + .rp-similar { margin-top: -6px; }
+[data-slot="similar"] { display: flex; flex-direction: column; gap: 6px; }
+[data-slot="similar"]:empty { display: none; }
 .rp-similar-text { flex: 1 1 220px; min-width: 0; display: flex; flex-direction: column; }
 .rp-similar-title { overflow-wrap: anywhere; }
 .rp-similar .outline { height: 26px; font-size: 12px; }
@@ -70,15 +80,16 @@
 .rp-card-note { padding: 8px 10px; border-radius: 8px; background: rgb(var(--g-ink-rgb) / 0.04); color: var(--g-side-muted); font-size: 12px; }
 .rp-card-similar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; color: var(--g-side-muted); font-size: 12px; }
 .rp-card-similar .outline { height: 26px; font-size: 12px; }
+.ny-actions:has(> [data-agent="report-edit"]) button { white-space: nowrap; font-size: 15px; }
+.ny-actions:has(> [data-agent="report-edit"]) .ny-secondary { flex: none; }
 .ny-card .rp-card { padding: 10px 12px; border-radius: 10px; font-size: 14px; }
 .ny-card .rp-card-similar .outline { height: 36px; border-radius: 10px; }
 .agent-confirm .rp-card { margin: 4px 0; }
 
 /* My reports */
 .rp-page { display: flex; flex-direction: column; gap: 20px; max-width: 720px; margin: 0 auto; padding: 20px 20px 48px; color: var(--g-fg); font-size: 13px; }
-.rp-page-head { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 12px; }
-.rp-page-head h1 { margin: 0; font-size: 20px; font-weight: 600; }
-.rp-page-head p { margin: 4px 0 0; color: var(--g-side-muted); }
+.rp-page-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 0; border: 0; }
+.rp-page-head p { margin: 0; color: var(--g-side-muted); }
 .rp-page-head .primary { height: 30px; }
 .rp-group { display: flex; flex-direction: column; gap: 2px; }
 .rp-group h2 { margin: 0 0 4px; color: var(--g-side-muted); font-size: 12px; font-weight: 500; }

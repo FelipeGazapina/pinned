@@ -80,9 +80,10 @@ const REPORT_TEXT = {
     followed: "someone else's report, you follow it",
   },
   agent: {
-    ask: "Review the report before it is sent. It becomes a public issue on GitHub.",
+    ask: "Anyone can read it. Review it before it is sent.",
     publicTag: "Public on GitHub",
     send: "Send to pinned",
+    sendShort: "Send",
     editFirst: "Edit first",
     skip: "Don't send",
     similar: (n) => `#${n} looks like the same problem.`,
@@ -433,6 +434,13 @@ function drawReportError() {
   if (el && dlg) el.textContent = dlg.error;
 }
 
+/** Asks the hub whether it files reports. An older hub that does not know the call counts as not available. */
+const reportCheckStatus = (dlg) =>
+  reportCall(reportAsk({ op: "status" })).then(
+    (answer) => (dlg.status = answer?.available ? "ready" : "unavailable"),
+    () => (dlg.status = "unavailable"),
+  );
+
 function openReportDialog(opts = {}) {
   if (typeof showDialog !== "function") return;
   const dlg = (reportsUi.dialog = reportDialogState(opts));
@@ -441,10 +449,7 @@ function openReportDialog(opts = {}) {
   shellDialog.querySelector(".popup").classList.add("rp-popup");
   drawReportDialog();
   if (!reportHub()) return;
-  reportCall(reportAsk({ op: "status" })).then(
-    (answer) => (dlg.status = answer?.available ? "ready" : "unavailable"),
-    () => (dlg.status = "unavailable"),
-  ).then(() => {
+  reportCheckStatus(dlg).then(() => {
     if (reportsUi.dialog !== dlg) return;
     drawReportDialog();
     if (dlg.status === "ready") {
@@ -639,7 +644,7 @@ function reportsRowHtml(row, s, group) {
 function reportsPageHtml(s) {
   const t = REPORT_TEXT;
   const e = reportEsc;
-  const head = `<header class="rp-page-head"><div><h1>${e(t.pageTitle)}</h1><p>${e(t.pageAbout)}</p></div><button type="button" class="primary" data-rp="new">${e(t.menuReport)}</button></header>`;
+  const head = `<div class="rp-page-head"><p>${e(t.pageAbout)}</p><button type="button" class="primary" data-rp="new">${e(t.menuReport)}</button></div>`;
   if (reportsUi.listState === "error") return `${head}<p class="rp-error" role="alert">${s.slot(t.loadFailed(reportsUi.listError))}</p>`;
   if (!reportsUi.list) return `${head}<p class="rp-hint" role="status">${e(t.loading)}</p>`;
   const groups = reportGroups(reportsUi.list, reportAppVersion());
@@ -730,7 +735,7 @@ function reportCardActions(c, busy, ny) {
   const t = REPORT_TEXT.agent;
   const b = (act, label, cls, nyCls) => (ny ? `<button type="button" class="${nyCls}" data-ny="${act}" data-agent="${act}"${busy}>${reportEsc(label)}</button>` : `<button type="button" class="${cls}" data-agent="${act}"${busy}>${reportEsc(label)}</button>`);
   const out = ny
-    ? `<div class="ny-actions">${b("deny", t.skip, "", "ny-secondary")}${b("report-edit", t.editFirst, "", "ny-secondary")}${b("approve", t.send, "", "ny-primary")}</div>`
+    ? `<div class="ny-actions">${b("deny", t.skip, "", "ny-secondary")}${b("report-edit", t.editFirst, "", "ny-secondary")}${b("approve", t.sendShort, "", "ny-primary")}</div>`
     : `<div class="actions start">${b("approve", t.send, "primary")}${b("report-edit", t.editFirst, "outline")}${b("deny", t.skip, "outline")}</div>`;
   return out;
 }
