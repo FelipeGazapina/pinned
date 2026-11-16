@@ -153,6 +153,7 @@ impl TestHub {
             box_api: self.boxes.clone(),
             box_policy: self.policy.clone(),
             team_policy: self.team_policy.clone(),
+            dev: pinned_server::dev::Dev::OFF,
             convex_http: Arc::new(Replay::new(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../core/tests/fixtures/convex"), CONVEX_KEY).unwrap()),
             learning_db: self.learning.as_ref().map(|learning| format!("{}/{learning}", postgres())),
             access: self.access.clone(),

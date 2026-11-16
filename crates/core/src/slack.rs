@@ -113,10 +113,16 @@ pub struct Post {
     pub text: String,
 }
 
+/// Set once by `use_dev_root`. Unset in every process that does not run `--dev`.
+static DEV_ROOT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 fn api_root() -> String {
     #[cfg(test)]
     if let Some(root) = API_ROOT.lock().unwrap().clone() {
         return root;
+    }
+    if let Some(root) = DEV_ROOT.get() {
+        return root.clone();
     }
     let set = std::env::var(API_ROOT_ENV).ok();
     let (root, ignored) = resolve_root(set.as_deref(), cfg!(debug_assertions));
@@ -154,6 +160,24 @@ fn loopback_http(root: &str) -> Option<()> {
     let host = url.host_str()?.trim_start_matches('[').trim_end_matches(']');
     let loopback = host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
     (matches!(url.scheme(), "http" | "https") && loopback).then_some(())
+}
+
+/// A Slack root for a local fake: HTTP or HTTPS on this machine only, normalised to end in one `/`.
+pub fn dev_root(value: &str) -> Option<String> {
+    let url = reqwest::Url::parse(value.trim()).ok()?;
+    let host = url.host_str()?.trim_start_matches('[').trim_end_matches(']');
+    let loopback = host.eq_ignore_ascii_case("localhost") || host.parse::<std::net::IpAddr>().is_ok_and(|ip| ip.is_loopback());
+    if !matches!(url.scheme(), "http" | "https") || !loopback || url.query().is_some() || url.fragment().is_some() {
+        return None;
+    }
+    Some(format!("{}/", url.as_str().trim_end_matches('/')))
+}
+
+/// Sends every Slack call to `value` for the rest of the process. Refuses any host but this machine.
+/// Only `pinned-server hub --dev` calls this, with PINNED_SLACK_API_BASE.
+pub fn use_dev_root(value: &str) -> Result<(), String> {
+    let root = dev_root(value).ok_or_else(|| "Slack dev root must be an http or https URL on this machine".to_owned())?;
+    DEV_ROOT.set(root).map_err(|_| "Slack dev root is already set".to_owned())
 }
 
 /// Points Slack calls at `root` for a test. `None` restores the real API.
@@ -778,5 +802,37 @@ mod tests {
                 Post { ts: "1792400060.000000".into(), author: "deploybot".into(), text: "deploy failed".into() },
             ]
         );
+    }
+
+    #[test]
+    fn dev_root_keeps_loopback_urls_and_ends_them_in_one_slash() {
+        assert_eq!(dev_root("http://127.0.0.1:8813/api").as_deref(), Some("http://127.0.0.1:8813/api/"));
+        assert_eq!(dev_root("http://localhost:9/api/").as_deref(), Some("http://localhost:9/api/"));
+        assert_eq!(dev_root("http://[::1]:9/api/").as_deref(), Some("http://[::1]:9/api/"));
+    }
+
+    #[test]
+    fn dev_root_refuses_every_other_host_and_shape() {
+        assert_eq!(dev_root("https://slack.com/api/"), None);
+        assert_eq!(dev_root("http://10.0.0.5/api/"), None);
+        assert_eq!(dev_root("http://127.0.0.1.example.com/"), None);
+        assert_eq!(dev_root("http://127.0.0.1:8813/api?x=1"), None);
+        assert_eq!(dev_root("garbage"), None);
+    }
+
+    #[test]
+    fn use_dev_root_refuses_a_public_host_and_stays_unset() {
+        assert!(use_dev_root("https://slack.com/api/").is_err());
+        assert!(DEV_ROOT.get().is_none());
+    }
+
+    #[test]
+    fn slack_base_env_is_ignored_without_dev() {
+        let _guard = lock_api();
+        set_api_root(None);
+        std::env::set_var("PINNED_SLACK_API_BASE", "http://127.0.0.1:9/api/");
+        let root = api_root();
+        std::env::remove_var("PINNED_SLACK_API_BASE");
+        assert_eq!(root, "https://slack.com/api/");
     }
 }

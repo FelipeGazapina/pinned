@@ -62,6 +62,7 @@ impl Hub {
             box_api: Arc::new(Upstash),
             box_policy: Policy::default(),
             team_policy: Default::default(),
+            dev: pinned_server::dev::Dev::OFF,
             convex_http: Arc::new(pinned_core::convex::client::Reqwest),
             learning_db: None,
             access: Default::default(),

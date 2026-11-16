@@ -1,5 +1,6 @@
 use crate::boxes::{self, BoxApi, Boxes, Seen};
 use crate::db::{self, Db};
+use crate::dev::Dev;
 use pinned_core::account::Signup;
 use pinned_core::accounts::AccountId;
 use pinned_core::agent::{AgentStatus, Stage, Subject, Usage, CONNECTOR_ENV};
@@ -228,6 +229,8 @@ pub struct Hub {
     persisted: Mutex<HashMap<Uuid, Arc<Persisted>>>,
     /// Reporting an issue from the app: pinned's GitHub repository and what the hub keeps about it.
     pub(crate) reports: crate::reports::Reports,
+    /// `hub --dev`'s time scale. Timers it shortens call `dev.scale`; `Dev::OFF` otherwise.
+    pub dev: Dev,
 }
 
 struct Unlock {
@@ -352,11 +355,12 @@ fn json<T: Serialize>(value: T) -> Result<Value, String> {
 pub const TEAM_CALL_ELSEWHERE: &str = "a team's ops run only from the pinned app";
 
 impl Hub {
-    pub async fn new(db: Db, public_url: String, signup: Signup, box_api: Arc<dyn BoxApi>, box_policy: boxes::Policy, team_policy: pinned_core::teams::TeamPolicy, convex_http: Arc<dyn ConvexHttp>, reports: Option<crate::reports::Config>) -> Result<Arc<Hub>, String> {
+    #[allow(clippy::too_many_arguments)]
+    pub async fn new(db: Db, public_url: String, signup: Signup, box_api: Arc<dyn BoxApi>, box_policy: boxes::Policy, team_policy: pinned_core::teams::TeamPolicy, convex_http: Arc<dyn ConvexHttp>, reports: Option<crate::reports::Config>, dev: Dev) -> Result<Arc<Hub>, String> {
         let public_url = public_url.trim_end_matches('/').to_owned();
         let boxes = Boxes::new(box_api, box_policy, &public_url);
         let reports = crate::reports::Reports::start(&db, reports).await;
-        Ok(Arc::new_cyclic(|me| Hub { me: me.clone(), db, public_url, signup, boxes, team_policy, team_join_fails: Mutex::default(), convex_http, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default(), unlocks: Mutex::default(), going_away: tokio::sync::watch::channel(false).0, held_expired: Mutex::default(), refuse_run_saves: Arc::default(), hold_backstop: Mutex::default(), persisted: Mutex::default(), reports }))
+        Ok(Arc::new_cyclic(|me| Hub { me: me.clone(), db, public_url, signup, boxes, team_policy, team_join_fails: Mutex::default(), convex_http, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default(), unlocks: Mutex::default(), going_away: tokio::sync::watch::channel(false).0, held_expired: Mutex::default(), refuse_run_saves: Arc::default(), hold_backstop: Mutex::default(), persisted: Mutex::default(), reports, dev }))
     }
 
     /// Tells every socket to close with a going away frame. The hub stops serving afterwards.

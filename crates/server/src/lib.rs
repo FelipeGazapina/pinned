@@ -1,6 +1,7 @@
 pub mod box_exit;
 pub mod boxes;
 pub mod db;
+pub mod dev;
 pub mod heap;
 pub mod http;
 pub mod hub;
@@ -36,6 +37,8 @@ pub struct Config {
     pub box_policy: boxes::Policy,
     /// Every team's call timings and default bot limits.
     pub team_policy: pinned_core::teams::TeamPolicy,
+    /// `hub --dev`'s time scale, or `Dev::OFF`. Timers the dev mode shortens go through `Dev::scale`.
+    pub dev: dev::Dev,
     /// Convex, which the hub reads for sessions with the keys it keeps; tests replay fixtures.
     pub convex_http: Arc<dyn pinned_core::convex::client::Http>,
     /// A second Postgres for what users share to improve the app; without it the hub keeps none.
@@ -71,7 +74,7 @@ pub async fn start(config: Config) -> Result<Running, String> {
     let addr = listener.local_addr().map_err(|e| e.to_string())?;
     let public_url = config.public_url.unwrap_or_else(|| format!("http://{addr}"));
     let polling = config.reports.clone();
-    let hub = hub::Hub::new(db, public_url, config.signup, config.box_api, config.box_policy, config.team_policy, config.convex_http, config.reports).await?;
+    let hub = hub::Hub::new(db, public_url, config.signup, config.box_api, config.box_policy, config.team_policy, config.convex_http, config.reports, config.dev).await?;
     // Only where reporting is available: no token, or a table that could not be readied, nothing to ask GitHub.
     if let Some(reports) = polling.filter(|_| hub.reports.available()) {
         reports::poller::spawn(&hub, reports);
