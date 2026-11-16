@@ -374,7 +374,7 @@ test("a run reads its state in words", () => {
   assert.equal(status({ state: "taken_over", controller: ME }).title, "You took over this run");
   assert.equal(status({ state: "taken_over", controller: "acc-ana" }).title, "Ana Souza took over this run");
   assert.equal(status({ state: "working" }).title, "Test publisher is working");
-  assert.deepEqual(status({ state: "done", outcome: "Published to test", active_secs: 540, cost_usd: 0.84 }), { title: "Finished", sub: "Published to test · 9 minutes of work, US$ 0.84." });
+  assert.deepEqual(status({ state: "done", outcome: "Published to test", active_secs: 540, cost_usd: 0.84 }), { title: "Finished", sub: "Published to test" });
   assert.equal(status({ state: "stopped" }).title, "Stopped");
   assert.equal(status({ state: "stopped" }, [], true).title, "Stopped by you");
   assert.equal(status({ state: "gave_up" }).title, "Gave up: nobody answered in 2 hours");
@@ -386,7 +386,7 @@ test("the run page: breadcrumb, buttons, the open call and its note", () => {
   p.eval(`tcRunShown = "r1"; tcStore.logs.set("r1", [{ at: ${at(15, 0)}, who: "bot", text: "I started." }, { at: ${at(15, 4)}, who: "bot", text: "Ran the tests." }])`);
   const html = p.eval("tcRunPageHtml()");
   const t = text(html);
-  assert.match(t, /^Test publisher, run started at 3:00 PM Waiting for someone in @publishing Take over Stop the bot Test publisher, 3:00 PM I started\. 3:04 PM Ran the tests\. 3:05 PM Can I publish\?/);
+  assert.match(t, /^Test publisher, run started at 3:00 PM Waiting for someone in @publishing Take over Stop the bot Active time: Less than a minute Box cost: US\$ 0.00 \(model usage not included\) Test publisher, 3:00 PM I started\. 3:04 PM Ran the tests\. 3:05 PM Can I publish\?/);
   assert.match(t, /Asked: Ana Souza and you\. If nobody answers in 30 minutes, I call Ana Souza directly\. Everything the bot and the people do in a run is kept here\.$/);
   assert.deepEqual(buttons(html).filter((b) => /publish$|publish$/.test(b) && !/^[@T]/.test(b)), ["OK to publish", "Don't publish"]);
   assert.ok(!html.includes('data-tc-form'), "no typed field while the call has choices and nobody took over");
@@ -522,7 +522,7 @@ test("taken over by me: the banner with Give back, a typed answer, and no Take o
   const p = page({ calls: [call()], runs: [run({ state: "taken_over", controller: ME })] });
   p.eval(`tcRunShown = "r1"; tcStore.logs.set("r1", [])`);
   const html = p.eval("tcRunPageHtml()");
-  assert.match(text(html), /You took over this run Stop the bot You are in charge\. The bot stopped where it was and waits\./);
+  assert.match(text(html), /You took over this run Stop the bot Active time: Less than a minute Box cost: US\$ 0.00 \(model usage not included\) You are in charge\. The bot stopped where it was and waits\./);
   assert.ok(!/recorded/.test(text(html)), "nothing promises what is recorded");
   assert.deepEqual(buttons(html).filter((b) => /Take over|Give back|Stop/.test(b)), ["Stop the bot", "Give back to the bot"]);
   assert.match(html, /data-tc-run="give_back"/);
@@ -634,4 +634,83 @@ test("a pass names the people of the group, and a call only to me has no 'called
   assert.ok(!/first to answer/i.test(p.eval("tcCardHtml(tcStore.calls[0])")));
   await p.eval(`tcAnswer(tcStore.calls[0], tcPassAnswer("reviewers"))`);
   assert.match(p.eval("tcCardHtml(tcStore.calls[0])"), /Passed to @reviewers\. Carla Santos and Ana Souza are being called\./);
+});
+
+// ---- Run page: times, cost, limit reached ----------------------------------------------------------
+
+const LIMIT_CALL = (over = {}) => call({ id: "c9", situation: "on_limit", asked: [{ kind: "person", account: ME }], question: "The run reached its time limit. Let it go on?", choices: ["Let it go on", "Stop it"], ...over });
+const runPage = (runOver, calls = []) => {
+  const p = page({ calls, runs: [run(runOver)], reply: (op) => (op.op === "answer_call" ? { ...calls[0], answer: { by: ME, choice: op.answer.choice, kind: { kind: "choice" }, at: S } } : undefined) });
+  p.eval(`tcRunShown = "r1"; tcStore.logs.set("r1", [])`);
+  return p;
+};
+
+test("the run page shows active time and waiting time apart, and what the box cost", () => {
+  const p = runPage({ state: "working", active_secs: 25 * 60, waiting_secs: 12 * 60, cost_usd: 0.4 });
+  const t = text(p.eval("tcRunPageHtml()"));
+  assert.ok(t.includes("Active time: 25 min"), t);
+  assert.ok(t.includes("Waiting for people: 12 min (not counted toward the time limit)"), t);
+  assert.ok(t.includes("Box cost: US$ 0.40 (model usage not included)"), t);
+  assert.ok(!/minutes of work/.test(t), "one line each, no second spelling");
+});
+
+test("a run that never waited has no waiting line, a cost of nothing says US$ 0.00, and an hour reads as hours", () => {
+  let t = text(runPage({ state: "working", active_secs: 20, waiting_secs: 0, cost_usd: 0 }).eval("tcRunPageHtml()"));
+  assert.ok(t.includes("Active time: Less than a minute") && t.includes("Box cost: US$ 0.00"), t);
+  assert.ok(!t.includes("Waiting for people"), t);
+  t = text(runPage({ state: "done", ended_at: at(17, 0), active_secs: 3900, waiting_secs: 7200, cost_usd: 1.234, outcome: "Published" }).eval("tcRunPageHtml()"));
+  assert.ok(t.includes("Active time: 1 h 5 min") && t.includes("Waiting for people: 2 h (not counted") && t.includes("Box cost: US$ 1.23"), t);
+  assert.ok(t.includes("Finished Published"), "the outcome stays the run's subtitle");
+});
+
+test("a run with an open on_limit call is Limit reached, with the question and plain buttons for its choices", () => {
+  const p = runPage({ state: "waiting", active_secs: 1800 }, [LIMIT_CALL()]);
+  const html = p.eval("tcRunPageHtml()");
+  const t = text(html);
+  assert.match(t, /Limit reached Waiting for you/);
+  const panel = html.match(/<section class="tc-limit"[\s\S]*?<\/section>/)[0];
+  assert.ok(text(panel).includes("The run reached its time limit. Let it go on?"));
+  assert.deepEqual(buttons(panel).filter((b) => !/^Pass/.test(b)), ["Let it go on", "Stop it"]);
+  assert.ok(!panel.includes("tc-primary") && (panel.match(/class="tc-secondary" data-tc="choice"/g) ?? []).length === 2, "plain buttons, none primary");
+  assert.equal((html.match(/data-tc="choice"/g) ?? []).length, 2, "the call is drawn once, not again in the log");
+});
+
+test("answering from the limit-reached state is the existing answer_call op, with the choice", async () => {
+  const p = runPage({ state: "waiting" }, [LIMIT_CALL()]);
+  const click = (choice) => {
+    const button = { dataset: { tc: "choice", choice }, disabled: false, closest: (sel) => (sel === "[data-call]" ? { dataset: { call: "c9" } } : null) };
+    p.eval("tcHandleClick")({ target: { closest: (sel) => (sel === "[data-tc]" ? button : null) } }, p.eval("tcFindCall"));
+  };
+  click("0");
+  await flush();
+  assert.deepEqual(here(p.sent()), [{ op: "answer_call", id: "c9", answer: { kind: { kind: "choice" }, choice: "Let it go on" } }]);
+  p.ops.length = 0;
+  const q = runPage({ state: "waiting" }, [LIMIT_CALL()]);
+  const stop = { dataset: { tc: "choice", choice: "1" }, disabled: false, closest: () => ({ dataset: { call: "c9" } }) };
+  q.eval("tcHandleClick")({ target: { closest: (sel) => (sel === "[data-tc]" ? stop : null) } }, q.eval("tcFindCall"));
+  await flush();
+  assert.deepEqual(here(q.sent()), [{ op: "answer_call", id: "c9", answer: { kind: { kind: "choice" }, choice: "Stop it" } }]);
+});
+
+test("another situation, an answered limit call or an ended run is not the limit-reached state", () => {
+  assert.ok(!text(runPage({ state: "waiting" }, [call()]).eval("tcRunPageHtml()")).includes("Limit reached"));
+  const answered = LIMIT_CALL({ answer: { by: ME, choice: "Let it go on", text: "", kind: { kind: "choice" }, at: S } });
+  let html = runPage({ state: "working" }, [answered]).eval("tcRunPageHtml()");
+  assert.ok(!html.includes("tc-limit") && !text(html).includes("Limit reached"), "answered: the run is working again");
+  html = runPage({ state: "stopped", ended_at: at(15, 9) }, [LIMIT_CALL()]).eval("tcRunPageHtml()");
+  assert.ok(!html.includes("tc-limit"), "an ended run shows no open question");
+});
+
+test("a person the limit call does not ask sees the state and the question, and no buttons", () => {
+  const p = runPage({ state: "waiting" }, [LIMIT_CALL({ asked: [{ kind: "person", account: "acc-carla" }] })]);
+  const html = p.eval("tcRunPageHtml()");
+  assert.match(text(html), /Limit reached Waiting for Carla Santos/);
+  const panel = html.match(/<section class="tc-limit"[\s\S]*?<\/section>/)[0];
+  assert.ok(text(panel).includes("Let it go on?") && !/<button/.test(panel));
+});
+
+test("the limit question and its choices reach the page as text", () => {
+  const evil = `<img src=x onerror="window.pwned=1">`;
+  const html = runPage({ state: "waiting" }, [LIMIT_CALL({ question: evil, choices: [evil, "Stop it"] })]).eval("tcRunPageHtml()");
+  assert.ok(!html.includes("<img"), html);
 });

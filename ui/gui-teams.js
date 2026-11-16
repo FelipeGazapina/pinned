@@ -745,7 +745,7 @@ function renderInvites() {
 }
 
 /** Reads the open invites again; an answer for a team the person has since left is dropped. */
-async function loadInvites() {
+async function loadTeamInvites() {
   const team = teamsNow?.id;
   if (!team || teamsNow.role !== "owner") return;
   teamInvites.loading = true;
@@ -777,7 +777,7 @@ async function makeInvite() {
     teamInvites.error = teamsErrorText(e);
   }
   teamInvites.busy = "";
-  await loadInvites();
+  await loadTeamInvites();
 }
 
 async function revokeInvite(hint) {
@@ -795,7 +795,7 @@ async function revokeInvite(hint) {
     teamInvites.error = teamsErrorText(e);
   }
   teamInvites.busy = "";
-  await loadInvites();
+  await loadTeamInvites();
 }
 
 function copyInvite() {
@@ -812,7 +812,7 @@ function copyInvite() {
 function showTeamInvites() {
   resetInvites();
   renderInvites();
-  loadInvites();
+  loadTeamInvites();
 }
 
 // ---- The pages' events --------------------------------------------------------------------------

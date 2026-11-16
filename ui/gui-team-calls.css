@@ -103,6 +103,14 @@ button.tc-item:hover { background: var(--g-hover); }
 .tc-crumb { font-size: 13px; color: var(--g-side-muted); }
 .tc-crumb .tc-botname { color: var(--tc-link); font-weight: 500; }
 .tc-sub { margin: 0; color: var(--g-side-muted); overflow-wrap: anywhere; }
+.tc-facts { display: flex; flex-direction: column; gap: 2px; padding: 12px 14px; border-radius: 12px; background: var(--g-raised); border: 1px solid var(--tc-line); font-size: 14px; }
+.tc-fact { margin: 0; overflow-wrap: anywhere; }
+.tc-fact-key { color: var(--g-side-muted); }
+.tc-fact-note { color: var(--g-side-muted); font-size: 13px; }
+.tc-limit { display: flex; gap: 14px; padding: 16px; border-radius: 14px; background: rgb(var(--g-primary-rgb) / 0.1); border: 1px solid rgb(var(--g-primary-rgb) / 0.6); min-width: 0; }
+.tc-limit[data-state="quiet"] { background: var(--g-raised); border-color: var(--tc-line); }
+.tc-limit-body { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 8px; }
+.tc-limit-head { font-size: 12px; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--g-side-muted); }
 .tc-head-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .tc-banner { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; padding: 12px 14px; border-radius: 12px; background: rgb(var(--g-primary-rgb) / 0.14); border: 1px solid rgb(var(--g-primary-rgb) / 0.6); }
 .tc-banner span { flex: 1 1 280px; min-width: 0; }

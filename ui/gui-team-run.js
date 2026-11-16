@@ -6,13 +6,25 @@ function tcRunUnits() {
   return { run, bot: run ? tcBotName(run.workflow) : "" };
 }
 
-/** What the hub says of a run that ended: its outcome, and how long it worked and what it cost. */
-function tcEndedSub(run) {
-  const minutes = Math.round(run.active_secs / 60);
-  const took = run.active_secs ? `${minutes < 1 ? "Less than a minute" : tcPlural(minutes, "minute", "minutes")} of work` : "";
-  const cost = run.cost_usd ? `US$ ${run.cost_usd.toFixed(2)}` : "";
-  const spent = [took, cost].filter(Boolean).join(", ");
-  return [run.outcome, spent && `${spent}.`].filter(Boolean).join(" · ");
+/** What the hub says of a run that ended: its outcome. Its times and cost are in `tcRunFactsHtml`. */
+const tcEndedSub = (run) => run.outcome || "";
+
+/** "Less than a minute", "12 min", "1 h 5 min": a time the hub counts in seconds. */
+function tcDuration(secs) {
+  const minutes = Math.round(Math.max(0, Number(secs) || 0) / 60);
+  if (minutes < 1) return "Less than a minute";
+  if (minutes < 60) return `${minutes} min`;
+  return minutes % 60 ? `${Math.floor(minutes / 60)} h ${minutes % 60} min` : `${minutes / 60} h`;
+}
+
+/** The open call of a run that stopped at its limit (`situation: "on_limit"`), while the run goes on. */
+const tcLimitCall = (run) => (["working", "waiting", "taken_over"].includes(run.state) ? tcStore.calls.find((c) => c.run === run.id && tcOpen(c) && c.situation === "on_limit") ?? null : null);
+
+/** What the run has used, each on its own line: active time, waiting time (which no limit counts) and the box's cost. */
+function tcRunFactsHtml(run) {
+  const fact = (key, value, note = "") => `<p class="tc-fact"><span class="tc-fact-key">${key}:</span> <span class="tc-fact-value">${esc(value)}</span>${note ? ` <span class="tc-fact-note">(${esc(note)})</span>` : ""}</p>`;
+  const cost = `US$ ${Number(run.cost_usd || 0).toFixed(2)}`;
+  return `<div class="tc-facts" aria-label="Time and cost of this run">${fact("Active time", tcDuration(run.active_secs))}${run.waiting_secs ? fact("Waiting for people", tcDuration(run.waiting_secs), "not counted toward the time limit") : ""}${fact("Box cost", cost, "model usage not included")}</div>`;
 }
 
 /** "Waiting for someone in @design", "Ana took over this run", "Stopped by you". `sub` is a second line when the run has one. */
@@ -21,10 +33,11 @@ function tcRunStatus(run) {
   const open = tcStore.calls.find((c) => c.run === run.id && tcOpen(c));
   switch (run.state) {
     case "working":
-      return { title: `${bot} is working`, sub: "" };
+      return tcLimitCall(run) ? { title: "Limit reached", sub: "" } : { title: `${bot} is working`, sub: "" };
     case "waiting": {
       const parts = (open?.asked ?? []).map((w) => (w.kind === "group" ? `someone in @${w.handle}` : w.kind === "person" ? (tcPerson(w.account) === "You" ? "you" : tcPerson(w.account)) : (tcOwner()?.name ?? "the owner")));
-      return { title: parts.length ? `Waiting for ${[...new Set(parts)].join(" or ")}` : "Waiting for a person", sub: "" };
+      const waiting = parts.length ? `Waiting for ${[...new Set(parts)].join(" or ")}` : "Waiting for a person";
+      return tcLimitCall(run) ? { title: "Limit reached", sub: waiting } : { title: waiting, sub: "" };
     }
     case "taken_over": {
       const who = run.controller ? tcPerson(run.controller) : "";
@@ -112,6 +125,17 @@ function tcTimeline(run, log) {
   return entries;
 }
 
+/** The run's open limit call as a panel above its log: the question, the choices as plain buttons, who it waits for. */
+function tcLimitHtml(call, run, bot) {
+  const owner = tcOwner()?.name ?? "the owner";
+  const mine = tcStore.answers.get(call.id);
+  const typed = run.state === "taken_over" && tcMe().account && run.controller === tcMe().account;
+  const note = `<div class="tc-note">Asked: ${esc(tcPeopleAsked(call))}. ${call.escalated ? `Nobody answered in ${TC_ESCALATE_MIN} minutes, so ${esc(owner)} was called too. If nobody answers in ${TC_GIVE_UP_HOURS} hours, the run gives up.` : `If nobody answers in ${TC_ESCALATE_MIN} minutes, I call ${esc(owner)} directly.`}</div>`;
+  return `<section class="tc-limit" data-call="${esc(call.id)}" data-state="${tcCanAnswer(call) ? "waiting" : "quiet"}" aria-label="Limit reached">${tcBotMark(bot, "tc-mark-lg")}<div class="tc-limit-body">
+    <div class="tc-limit-head">Limit reached</div>${tcQuestionHtml(call, "p", "tc-question")}${tcAskedChipsRow(call)}
+    ${tcCanAnswer(call) ? tcActionsHtml(call, { typed, disabled: mine?.state === "sending" }) : ""}${note}${tcResultHtml(call)}</div></section>`;
+}
+
 function tcRunPageHtml() {
   if (!tcCurrent()) return `<p class="tc-empty">Create or join a team to see its runs.</p>`;
   const { run, bot } = tcRunUnits();
@@ -123,7 +147,8 @@ function tcRunPageHtml() {
   const mineRun = taken && !!me.account && run.controller === me.account;
   const canTake = run.state === "working" || run.state === "waiting";
   const log = tcStore.logs.get(run.id);
-  const entries = tcTimeline(run, log);
+  const limit = tcLimitCall(run);
+  const entries = tcTimeline(run, log).filter((e) => !(limit && e.kind === "call" && e.call.id === limit.id));
   const controller = run.controller ? tcPerson(run.controller) : "Someone";
   const banner = taken
     ? `<div class="tc-banner" role="status"><span>${mineRun ? "You are in charge. The bot stopped where it was and waits. You can answer its call in your own words, pass it on or stop the bot." : `${esc(controller)} is in charge. The bot stopped where it was and waits.`}</span>${mineRun || me.owner ? `<button type="button" class="tc-primary" data-tc-run="give_back">Give back to the bot</button>` : ""}</div>`
@@ -132,7 +157,7 @@ function tcRunPageHtml() {
   const noLog = log === null && tcStore.logs.has(run.id) ? `<p class="tc-note" data-log-note>${esc(tcLogNote(run, tcStore.logErrors.get(run.id) ?? ""))}</p>` : "";
   return `<div class="tc-runhead"><div class="tc-runhead-text"><div class="tc-crumb">${tcLinkHtml("bot", run.workflow, bot, "tc-botname")}, ${esc(tcStartedText(run))}</div><h1>${esc(status.title)}</h1>${status.sub ? `<p class="tc-sub">${esc(status.sub)}</p>` : ""}</div>
       <div class="tc-head-actions">${canTake ? `<button type="button" class="tc-secondary" data-tc-run="take_over">Take over</button>` : ""}${ended ? "" : `<button type="button" class="tc-danger" data-tc-run="stop_run">Stop the bot</button>`}</div></div>
-    ${error}${banner}
+    ${tcRunFactsHtml(run)}${error}${banner}${limit ? tcLimitHtml(limit, run, bot) : ""}
     <section class="tc-timeline" aria-label="What happened in this run">${entries.length ? entries.map((e) => tcEventHtml(e, bot, run)).join("") : `<p class="tc-empty">Nothing was logged yet.</p>`}${noLog}</section>
     <p class="tc-footer">Everything the bot and the people do in a run is kept here.</p>`;
 }
