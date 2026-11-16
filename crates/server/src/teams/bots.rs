@@ -406,7 +406,7 @@ pub async fn start_run(hub: &Arc<Hub>, team: &Arc<Account>, workflow_id: &str, s
 
 /// Opens the session of run `id`, whose place its trigger's event was given before anything
 /// outside pinned heard of it (`queue::admit`). A session that does not open frees the place, and
-/// what waits in the bot's line goes next.
+/// what waits in the bot's line goes next; the run stays listed when it had ended meanwhile.
 pub async fn start_reserved(hub: &Arc<Hub>, team: &Arc<Account>, id: Uuid, mut work: pinned_core::connectors::Run) -> Result<Placement, String> {
     let opened = async {
         ready(hub, team, &work.connector).await?;
@@ -418,7 +418,10 @@ pub async fn start_reserved(hub: &Arc<Hub>, team: &Arc<Account>, id: Uuid, mut w
     let placed = match opened.await {
         Ok(placed) => placed,
         Err(e) => {
-            db::delete_run(&hub.db, team.id, id).await?;
+            // A run that ended meanwhile, as one stopped while its box booted, stays as it ended.
+            if !db::run(&hub.db, team.id, id).await?.is_some_and(|r| r.state.ended()) {
+                db::delete_run(&hub.db, team.id, id).await?;
+            }
             // A granted event that waited for its place and then did not start is counted.
             if super::queue::take_claimed(id) {
                 db::count_skipped(&hub.db, team.id, &work.connector, SkipReason::StartFailed, 1).await?;

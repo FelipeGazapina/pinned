@@ -618,7 +618,7 @@ fn a_session_that_does_not_open_frees_its_reserved_place() {
     two_wait_behind(&crew, &holder, &pages, false);
     crew.hub.boxes.state.lock().unwrap().failing = Some(Exec { exit_code: 22, output: "Downloading pinned-server\n".into(), error: "curl: (22) The requested URL returned error: 404\n".into() });
 
-    assert_place_freed_for_eng_2(&crew, &pages, &[]);
+    assert_place_freed_for_eng_2(&crew, &pages, &["failed"]);
     assert_eq!(crew.outside(1), vec!["model".to_owned()], "ENG-1 asked the model, its box did not boot, and its issue stayed where it was");
 }
 
@@ -806,7 +806,7 @@ fn a_granted_event_whose_box_does_not_boot_is_counted_as_start_failed() {
     two_wait_behind(&crew, &holder, &pages, false);
     crew.hub.boxes.state.lock().unwrap().failing = Some(Exec { exit_code: 22, output: "Downloading pinned-server\n".into(), error: "curl: (22) The requested URL returned error: 404\n".into() });
 
-    assert_place_freed_for_eng_2(&crew, &pages, &[]);
+    assert_place_freed_for_eng_2(&crew, &pages, &["failed"]);
     assert_eq!(crew.skipped(&pages), json!([{ "reason": "start_failed", "count": 1 }]), "ENG-1's box did not boot: counted once");
     assert_eq!(crew.skipped(&holder), Value::Null);
 }
