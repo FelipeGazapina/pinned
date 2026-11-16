@@ -225,7 +225,7 @@ fn an_agent_code_exchange_refused_for_a_busy_code_is_a_plain_oauth_refusal_and_t
     held.release();
 
     let (status, tokens) = exchange(&url, &http, &form);
-    assert_eq!((status, tokens["token_type"].as_str()), (200, Some("Bearer")), "the retry with the same code gets tokens: {tokens}");
+    assert_eq!((status, tokens["token_type"].as_str()), (200, Some("Bearer")), "the retry with the same code gets tokens: {}", tokens["error"]);
 }
 
 #[test]
@@ -233,7 +233,7 @@ fn an_agent_refresh_refused_for_a_busy_token_is_a_plain_oauth_refusal_and_the_re
     let hub = TestHub::start("tlc_agent_refresh");
     let (url, http, client_id, code, verifier) = approved_code(&hub);
     let (status, tokens) = exchange(&url, &http, &[("grant_type", "authorization_code"), ("client_id", &client_id), ("code", &code), ("code_verifier", &verifier), ("redirect_uri", AGENT_REDIRECT)]);
-    assert_eq!(status, 200, "{tokens}");
+    assert_eq!(status, 200, "{}", tokens["error"]);
     let refresh = tokens["refresh_token"].as_str().unwrap().to_owned();
     let form = [("grant_type", "refresh_token"), ("client_id", client_id.as_str()), ("refresh_token", refresh.as_str())];
     let held = Held::new(&hub, "select 1 from agent_tokens for update");
@@ -241,7 +241,7 @@ fn an_agent_refresh_refused_for_a_busy_token_is_a_plain_oauth_refusal_and_the_re
     held.release();
 
     let (status, tokens) = exchange(&url, &http, &form);
-    assert_eq!((status, tokens["token_type"].as_str()), (200, Some("Bearer")), "the retry with the same refresh token gets tokens: {tokens}");
+    assert_eq!((status, tokens["token_type"].as_str()), (200, Some("Bearer")), "the retry with the same refresh token gets tokens: {}", tokens["error"]);
 }
 
 // ---- H. the hub's store writer ----
