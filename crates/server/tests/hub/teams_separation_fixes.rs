@@ -94,8 +94,18 @@ fn a_locked_login_unlocks_before_every_team_change_and_reads_without_it() {
         json!({ "op": "hub", "call": { "cmd": "save_connector", "connector": workflow } }),
         json!({ "op": "hub", "call": { "cmd": "delete_connector", "id": "c1" } }),
         json!({ "op": "hub", "call": { "cmd": "save_schedule", "task": task_body("team-schedule") } }),
+        json!({ "op": "hub", "call": { "cmd": "pause_schedule", "id": "t1", "paused": true } }),
+        json!({ "op": "hub", "call": { "cmd": "delete_schedule", "id": "t1" } }),
+        json!({ "op": "hub", "call": { "cmd": "remove_box_claude_token", "name": "n" } }),
+        json!({ "op": "hub", "call": { "cmd": "disconnect_slack" } }),
+        json!({ "op": "hub", "call": { "cmd": "disconnect_upstash" } }),
     ];
-    for op in &changes {
+    // They would reach GitHub and Slack once unlocked, so they are only refused while locked.
+    let network = [
+        json!({ "op": "hub", "call": { "cmd": "connect_github", "token": "ghp_team" } }),
+        json!({ "op": "hub", "call": { "cmd": "connect_slack", "token": "xoxb-team" } }),
+    ];
+    for op in changes.iter().chain(&network) {
         assert_eq!(team_op(&mut ana, &team, op.clone()), Err(LOCKED.into()), "{op}");
     }
     assert_eq!(team_op(&mut bruno, &team, json!({ "op": "leave" })), Err(LOCKED.into()));
@@ -121,11 +131,18 @@ fn a_locked_login_unlocks_before_every_team_change_and_reads_without_it() {
         assert_eq!(team_op(&mut bruno, &team, op.clone()), Err(NOT_BUILT.into()), "{op}");
     }
 
+    // Unlocked, every change gets past the unlock: each answers what its op answers, never LOCKED.
+    bruno.hub(json!({ "cmd": "unlock", "password": PASSWORD })).unwrap();
+    assert_ne!(team_op(&mut bruno, &team, json!({ "op": "join", "code": "ABCD-EFGH-JKMN-PQRS" })), Err(LOCKED.into()));
+    assert_eq!(team_op(&mut bruno, &team, json!({ "op": "leave" })), Ok(Value::Null), "bruno leaves");
     ana.hub(json!({ "cmd": "unlock", "password": PASSWORD })).unwrap();
-    assert_eq!(team_op(&mut ana, &team, json!({ "op": "rename", "name": "Acme 2" })), Ok(Value::Null));
-    assert!(team_op(&mut ana, &team, json!({ "op": "invite" })).unwrap()["code"].is_string());
+    assert_eq!(team_op(&mut ana, &team, changes[0].clone()), Ok(Value::Null));
+    assert!(team_op(&mut ana, &team, changes[1].clone()).unwrap()["code"].is_string());
     assert_eq!(team_op(&mut ana, &team, changes[7].clone()), Ok(credential(true, true)));
     assert_eq!(team_op(&mut ana, &team, changes[12].clone()).unwrap()["name"], "team-flow");
+    for op in &changes[2..] {
+        assert_ne!(team_op(&mut ana, &team, op.clone()), Err(LOCKED.into()), "{op}");
+    }
     assert_eq!(sql_text(&hub, &format!("select name from teams where id = '{team}'")), "Acme 2");
 }
 
@@ -193,13 +210,37 @@ fn a_team_box_may_not_sync_a_projects_files() {
 }
 
 #[test]
-fn a_team_box_may_not_load_mcp_secrets_read_tastes_or_act_as_an_agent() {
-    let (hub, _) = team_box("sepfix_box_rest");
+fn a_team_box_may_not_load_mcp_secrets() {
+    let (hub, _) = team_box("sepfix_box_mcp");
     assert_eq!(machine_result(&hub.url, TEAM_BOX_TOKEN, json!({ "cmd": "load_mcp_servers" })), refused("load_mcp_servers"));
+}
+
+#[test]
+fn a_team_box_may_not_read_tastes_or_machine_states() {
+    let (hub, _) = team_box("sepfix_box_tastes_read");
     assert_eq!(machine_result(&hub.url, TEAM_BOX_TOKEN, json!({ "cmd": "get_tastes" })), refused("get_tastes"));
     assert_eq!(machine_result(&hub.url, TEAM_BOX_TOKEN, json!({ "cmd": "machine_states" })), refused("machine_states"));
+}
+
+#[test]
+fn a_team_box_may_not_act_as_an_agent() {
+    let (hub, _) = team_box("sepfix_box_act");
     let act = json!({ "cmd": "act", "act": { "action": "get_settings", "args": null, "tab": "tab-1" } });
     assert_eq!(machine_result(&hub.url, TEAM_BOX_TOKEN, act), refused("act"));
+}
+
+#[test]
+fn a_team_box_may_not_relay_to_a_capitao() {
+    let (hub, _) = team_box("sepfix_box_relay");
+    let relay = json!({ "cmd": "relay", "request_id": "r1", "to": { "kind": "captain", "machine": "m1", "path": "/w", "text": "hi" } });
+    assert_eq!(machine_result(&hub.url, TEAM_BOX_TOKEN, relay), refused("relay"));
+}
+
+#[test]
+fn a_team_box_may_not_read_a_session() {
+    let (hub, _) = team_box("sepfix_box_read_session");
+    let read = json!({ "cmd": "read_session", "tab": "tab-1", "machine": "6f1c0b1e-0000-4000-8000-00000000b0b0" });
+    assert_eq!(machine_result(&hub.url, TEAM_BOX_TOKEN, read), refused("read_session"));
 }
 
 #[test]
