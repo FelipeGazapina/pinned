@@ -176,17 +176,40 @@ pub async fn remove_member(db: &Db, team: Uuid, member: Uuid) -> Result<bool, St
 
 // ---- projects.rs ----
 
-pub async fn attach_project(_db: &Db, _team: Uuid, _project: &TeamProject) -> Result<(), String> {
-    Err("not built yet".into())
+/// Keeps the project under the team, attached by `project.member`. A key the team already has
+/// stays as it is, with the name, repo and member of whoever attached it first.
+pub async fn attach_project(db: &Db, team: Uuid, project: &TeamProject) -> Result<(), String> {
+    let member = Uuid::parse_str(&project.member).map_err(|_| "that member is not an account id".to_string())?;
+    db.client().await?
+        .execute(
+            "insert into team_projects (team, key, name, repo, member) values ($1, $2, $3, $4, $5) on conflict (team, key) do nothing",
+            &[&team, &project.key, &project.name, &project.repo, &member],
+        )
+        .await
+        .map_err(err)?;
+    Ok(())
 }
 
 /// False when the team had no project `key`.
-pub async fn detach_project(_db: &Db, _team: Uuid, _key: &str) -> Result<bool, String> {
-    Err("not built yet".into())
+pub async fn detach_project(db: &Db, team: Uuid, key: &str) -> Result<bool, String> {
+    let gone = db.client().await?.execute("delete from team_projects where team = $1 and key = $2", &[&team, &key]).await.map_err(err)?;
+    Ok(gone == 1)
 }
 
-pub async fn projects(_db: &Db, _team: Uuid) -> Result<Vec<TeamProject>, String> {
-    Err("not built yet".into())
+/// Like `detach_project`, but only a project that `member` attached; false when there was none such.
+pub async fn detach_project_attached_by(db: &Db, team: Uuid, key: &str, member: Uuid) -> Result<bool, String> {
+    let gone = db.client().await?.execute("delete from team_projects where team = $1 and key = $2 and member = $3", &[&team, &key, &member]).await.map_err(err)?;
+    Ok(gone == 1)
+}
+
+/// The team's projects, in the order they were attached.
+pub async fn projects(db: &Db, team: Uuid) -> Result<Vec<TeamProject>, String> {
+    let rows = db
+        .client().await?
+        .query("select key, name, repo, member::text from team_projects where team = $1 order by attached_at, key", &[&team])
+        .await
+        .map_err(err)?;
+    Ok(rows.iter().map(|r| TeamProject { key: r.get(0), name: r.get(1), repo: r.get(2), member: r.get(3) }).collect())
 }
 
 // ---- groups.rs ----
