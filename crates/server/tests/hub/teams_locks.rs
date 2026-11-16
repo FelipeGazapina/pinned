@@ -191,6 +191,28 @@ fn a_waiting_run_reserved_by_a_turn_that_then_fails_still_starts_at_once() {
     assert_eq!(crew.reserved_at(&pages), Vec::<String>::new(), "no Pages run is left only holding its place");
 }
 
+#[test]
+fn a_run_now_refused_after_its_turn_queued_it_is_queued_and_counted_exactly_once_on_retry() {
+    let crew = Crew::new("tl_queue_once");
+    let pages = crew.on_bot("Pages");
+    assert_eq!(crew.found(crew.labeled(&pages, 1)), Ok(()));
+    // Pages's line is full of ana's waiting Run nows.
+    let ana = format!("{{\"by\": \"member\", \"member\": \"{}\"}}", crew.ana.id);
+    admin_on(&crew.hub.database, &format!("insert into team_run_queue (team, workflow, start) select '{}', '{pages}', '{ana}'::jsonb from generate_series(1, 20)", crew.team));
+    let line = || super::teams_calls::rows(&crew.hub, &format!("select start->>'member', count(*)::text from team_run_queue where team = '{}' group by 1 order by 2", crew.team));
+    // Counting the dropped oldest waits on another connection's lock and is refused: bob's Run now
+    // was queued in the same turn, so it goes back out with it.
+    let held = Held::new(&crew.hub, "lock table team_bot_skips in share mode");
+    assert_eq!(crew.call(&crew.bob, TeamOp::RunNow { workflow: pages.clone() }), Err(BUSY.to_owned()));
+    held.release();
+    assert_eq!(line(), vec![vec![Some(crew.ana.id.to_string()), Some("20".to_owned())]], "the refused turn left the line as it was");
+
+    let waiting = crew.call(&crew.bob, TeamOp::RunNow { workflow: pages.clone() }).unwrap();
+    assert_eq!(waiting["waiting"], json!(true));
+    assert_eq!(line(), vec![vec![Some(crew.bob.id.to_string()), Some("1".to_owned())], vec![Some(crew.ana.id.to_string()), Some("19".to_owned())]], "bob's Run now waits once");
+    assert_eq!(crew.skipped(&pages), json!([{ "reason": "queue_full", "count": 1 }]), "one oldest dropped, counted once");
+}
+
 // ---- the claim of a granted event ----
 
 #[test]

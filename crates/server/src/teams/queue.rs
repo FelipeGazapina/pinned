@@ -163,10 +163,10 @@ async fn ask_in_turn(hub: &Arc<Hub>, turn: &Turn, team: &Arc<Account>, workflow:
     let full = db::live_count(&hub.db, team.id).await? >= db::max_live_runs(&hub.db, team.id).await?;
     if waiting > 0 || busy || full {
         let stored = serde_json::to_value(Stored::of(&start)).map_err(|e| e.to_string())?;
-        let dropped = db::enqueue(&hub.db, team.id, workflow, &stored, MOST_WAITING).await?;
+        let dropped = db::enqueue(&turn.held, team.id, workflow, &stored, MOST_WAITING).await?;
         if dropped > 0 {
             eprintln!("pinned-server: team {} bot {workflow}: its line is full, so its oldest waiting event was dropped", team.id);
-            db::count_skipped(&hub.db, team.id, workflow, SkipReason::QueueFull, dropped).await?;
+            db::count_skipped_on(&turn.held, team.id, workflow, SkipReason::QueueFull, dropped).await?;
         }
         return Ok(Err((waiting + 1).min(MOST_WAITING)));
     }
@@ -208,10 +208,10 @@ async fn decide(hub: &Arc<Hub>, turn: &Turn, team: &Arc<Account>, kind: &str, ev
     let full = db::live_count(&hub.db, team.id).await? >= db::max_live_runs(&hub.db, team.id).await?;
     if waiting > 0 || busy || full {
         let stored = serde_json::to_value(Stored::Event { kind: kind.to_owned(), event, replies: vec![], earlier: 0 }).map_err(|e| e.to_string())?;
-        let dropped = db::enqueue(&hub.db, team.id, &workflow, &stored, MOST_WAITING).await?;
+        let dropped = db::enqueue(&turn.held, team.id, &workflow, &stored, MOST_WAITING).await?;
         if dropped > 0 {
             eprintln!("pinned-server: team {} bot {workflow}: its line is full, so its oldest waiting event was dropped", team.id);
-            db::count_skipped(&hub.db, team.id, &workflow, SkipReason::QueueFull, dropped).await?;
+            db::count_skipped_on(&turn.held, team.id, &workflow, SkipReason::QueueFull, dropped).await?;
         }
         return Ok(Admitted::Waiting);
     }
@@ -255,7 +255,7 @@ pub async fn keep_replies(hub: &Arc<Hub>, team: &Arc<Account>, delivery: &Delive
         }
     }
     let turn = Turn::take(hub, team.id).await?;
-    let kept = keep_in_turn(hub, team, delivery, &subject, live).await;
+    let kept = keep_in_turn(hub, &turn, team, delivery, &subject, live).await;
     turn.end().await?;
     kept
 }
@@ -274,7 +274,7 @@ async fn for_live(hub: &Arc<Hub>, team: &Arc<Account>, run: Uuid) -> Result<Repl
 
 /// `keep_replies` in the team's turn; `live` is the thread's live run. A granted event a poller
 /// claims meanwhile is gone from its line, and its run takes the replies (`for_live`).
-async fn keep_in_turn(hub: &Arc<Hub>, team: &Arc<Account>, delivery: &Delivery, subject: &Subject, live: Option<Uuid>) -> Result<Replies, String> {
+async fn keep_in_turn(hub: &Arc<Hub>, turn: &Turn, team: &Arc<Account>, delivery: &Delivery, subject: &Subject, live: Option<Uuid>) -> Result<Replies, String> {
     let subject = subject.clone();
     let Some(waiting) = db::waiting_event_for(&hub.db, team.id, &delivery.connector, &subject).await? else {
         if let Some(run) = live {
@@ -284,7 +284,7 @@ async fn keep_in_turn(hub: &Arc<Hub>, team: &Arc<Account>, delivery: &Delivery, 
         // have no run to reach: they are dropped once, logged and counted on the bot.
         if db::last_run_never_opened(&hub.db, team.id, &delivery.connector, &subject).await? {
             eprintln!("pinned-server: team {} workflow {}: {} new thread messages dropped: the thread's run ended before its session opened", team.id, delivery.connector, delivery.messages.len());
-            db::count_skipped(&hub.db, team.id, &delivery.connector, SkipReason::RepliesDropped, delivery.messages.len() as u64).await?;
+            db::count_skipped_on(&turn.held, team.id, &delivery.connector, SkipReason::RepliesDropped, delivery.messages.len() as u64).await?;
             return Ok(Replies::Dropped);
         }
         eprintln!("pinned-server: team {} workflow {}: new thread messages dropped: the thread has no run and no waiting event", team.id, delivery.connector);
@@ -298,7 +298,7 @@ async fn keep_in_turn(hub: &Arc<Hub>, team: &Arc<Account>, delivery: &Delivery, 
     replies.drain(..over);
     earlier += over as u64;
     let stored = serde_json::to_value(Stored::Event { kind, event, replies, earlier }).map_err(|e| e.to_string())?;
-    if !db::set_waiting(&hub.db, waiting.id, &stored).await? {
+    if !db::set_waiting(&turn.held, waiting.id, &stored).await? {
         return match live {
             Some(run) => for_live(hub, team, run).await,
             None => Ok(Replies::Dropped),
