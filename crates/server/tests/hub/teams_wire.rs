@@ -108,6 +108,10 @@ fn a_used_invite_stays_used_when_its_joiner_is_deleted() {
     // (b) The owner's list of open invites does not show it.
     assert_eq!(team_op(&mut ana, &team, json!({ "op": "invites" })), Ok(json!([])));
 
+    // The owner cannot revoke it either: it is not an unused invite.
+    assert_eq!(team_op(&mut ana, &team, json!({ "op": "revoke_invite", "hint": &used[..4] })), Err("there is no unused invite with that hint".into()));
+    assert_eq!(db_text(&hub.database, "select revoked::text from team_invites"), vec!["false"], "and it was not marked revoked");
+
     // (c) It does not count toward the limit of 20 open invites: 19 others and one more are fine.
     for _ in 0..19 {
         new_invite(&mut ana, &team);
