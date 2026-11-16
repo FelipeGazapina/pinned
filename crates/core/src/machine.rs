@@ -27,6 +27,9 @@ pub const OUTPUT_KEEP: usize = 256 * 1024;
 const RECORDS_PER_SEND: usize = 100;
 const RECORDS_RETRY: Duration = Duration::from_secs(60);
 const LIMIT_MARGIN_SECS: u64 = 5;
+/// How long a session that took the terminal must show no menu or dialog before its held prompts
+/// are typed, as `menu_watch::SETTLE` waits out a redraw.
+const HELD_SETTLE: Duration = Duration::from_millis(300);
 const UNWATCHED: (u16, u16) = (120, 32);
 /// How long input for a session waits for a start under way to give it a process.
 const START_WAIT: Duration = Duration::from_secs(5);
@@ -2634,20 +2637,50 @@ impl Machine {
 
     /// Watches the session until it takes the terminal, then types the prompts held for it. The
     /// program says nothing when it does, so the poll asks the pty.
+    /// Held prompts wait until the screen has shown no menu or dialog for `HELD_SETTLE` since the
+    /// session took the terminal: a dialog at start can be what took it. Keys go at once.
     fn type_held_once_raw(&self, tab: &str, session: u64) {
         let (me, tab) = (self.me.clone(), tab.to_owned());
+        let mut clear_since: Option<Instant> = None;
         std::thread::spawn(move || loop {
             let Some(machine) = me.upgrade() else { return };
             let Ok(screen) = machine.tab(&tab, |t| t.screen.clone()) else { return };
             if screen.lock().unwrap().session != session {
                 return;
             }
-            let done = machine.tab(&tab, |t| match t.session.as_mut() {
+            // Some(whether prompts are held) once raw, None while cooked, the thread ends on Err.
+            let raw = machine.tab(&tab, |t| match t.session.as_mut() {
                 Some(s) if s.raw() => {
                     t.waking = false;
                     if !t.keys.is_empty() {
                         let _ = s.write(&std::mem::take(&mut t.keys));
                     }
+                    Ok(Some(!t.held.is_empty()))
+                }
+                Some(_) => Ok(None),
+                None => Err(()),
+            });
+            let held = match raw {
+                Ok(Ok(Some(held))) => held,
+                Ok(Ok(None)) => {
+                    clear_since = None;
+                    drop(machine);
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                }
+                _ => return,
+            };
+            if !held {
+                return;
+            }
+            // The screen lock is taken alone, with the tabs lock let go.
+            let blocked = screen.lock().unwrap().blocker().is_some();
+            let since = *clear_since.get_or_insert_with(Instant::now);
+            if blocked {
+                clear_since = None;
+            } else if since.elapsed() >= HELD_SETTLE {
+                let wrote = machine.tab(&tab, |t| {
+                    let Some(s) = t.session.as_mut() else { return false };
                     let mut wrote = false;
                     for text in std::mem::take(&mut t.held) {
                         if s.write(&paste(&text)).is_ok() {
@@ -2655,16 +2688,11 @@ impl Machine {
                             wrote = true;
                         }
                     }
-                    (true, wrote)
+                    wrote
+                });
+                if wrote == Ok(true) {
+                    machine.arm_delegate_pass();
                 }
-                Some(_) => (false, false),
-                None => (true, false),
-            });
-            let (done, wrote) = done.unwrap_or((true, false));
-            if wrote {
-                machine.arm_delegate_pass();
-            }
-            if done {
                 return;
             }
             drop(machine);
@@ -4299,7 +4327,8 @@ impl Machine {
                 }
             }
             let free = self.tab(&tab, |t| t.live() && matches!(t.status, None | Some(AgentStatus::Done))).unwrap_or(false);
-            if free {
+            // Read before the wake is taken, so a menu or dialog leaves it for a later read.
+            if free && self.blocker(&tab).is_none() {
                 if let Some(text) = self.pr_watches.take_wake(&tab) {
                     let _ = self.type_prompt(&tab, &text);
                 }
@@ -5892,7 +5921,11 @@ impl Machine {
 
     /// Writes `text` into a raw session. `Ok(false)` when the session has not taken the terminal,
     /// which leaves the notice unclaimed so a later idle can type it. Queuing it is not delivery.
+    /// Also `Ok(false)` while the screen shows a menu or dialog: the notice waits for it to close.
     fn write_notice(&self, tab: &str, text: &str) -> Result<bool, String> {
+        if self.blocker(tab).is_some() {
+            return Ok(false);
+        }
         self.tab(tab, |t| {
             if !t.notice_idle() {
                 return Ok(false);
@@ -5957,7 +5990,9 @@ impl Machine {
                 machine.end_finished_holds(Instant::now());
                 let tabs: Vec<String> = machine.tabs.lock().unwrap().keys().cloned().collect();
                 for tab in tabs {
-                    if !machine.tab(&tab, Tab::reload_if_idle).unwrap_or(false) {
+                    // The screen is read before the tabs lock is taken, and only when a reload is owed.
+                    let owes = machine.tab(&tab, |t| t.owes_reload && t.notice_idle()).unwrap_or(false);
+                    if !(owes && machine.blocker(&tab).is_none() && machine.tab(&tab, Tab::reload_if_idle).unwrap_or(false)) {
                         machine.maybe_deliver(&tab);
                     }
                 }
@@ -6565,6 +6600,13 @@ impl Machine {
         std::thread::spawn(move || {
             while unix_now() < at + LIMIT_MARGIN_SECS {
                 std::thread::sleep(std::time::Duration::from_secs(15));
+                if machine.tab(&tab, |t| t.resume_at) != Ok(Some(at)) {
+                    return;
+                }
+            }
+            // A menu or dialog on the screen holds the continue back until it closes.
+            while machine.blocker(&tab).is_some() {
+                std::thread::sleep(std::time::Duration::from_millis(500));
                 if machine.tab(&tab, |t| t.resume_at) != Ok(Some(at)) {
                     return;
                 }
@@ -14323,6 +14365,136 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(prompt(), Err(format!("{other} has a dialog open in its terminal, so nothing was typed. Try again later.")));
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(kept(&claude, "typed", &other), "", "nothing reached the session");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A picker the person opened and left open between turns, as /model draws one.
+    const PICKER: &str = "\x1b[2J\x1b[H Select model\r\n Switch between Claude models.\r\n\r\n \u{276f} 1. Default (recommended)  Opus\r\n   2. Sonnet\r\n   3. Haiku\r\n\r\n Enter to confirm \u{b7} Esc to exit\r\n";
+
+    #[test]
+    #[cfg(unix)]
+    fn news_waits_while_a_menu_is_up() {
+        let (m, dir, claude, tabs) = woken("guard-news", &["s1"]);
+        let tab = tabs[0].clone();
+        m.tab(&tab, |t| (t.status, t.turn_pending) = (Some(AgentStatus::Done), None)).unwrap();
+        show(&m, &tab, PICKER);
+        let session = m.tab(&tab, |t| t.claude_session.clone()).unwrap();
+        m.delegates.queue_report(&tab, session, "[pinned] Worker tab-9 finished".into());
+        let handoff = m.hand_to(&tab, "[Ana] Ship it.", "r-1", BusyPolicy::Queue, &m.sent.lock().unwrap()).unwrap();
+        assert!(matches!(handoff, Handoff::Queued { .. }), "an idle Captain behind a menu queues the message: {handoff:?}");
+        m.maybe_deliver(&tab);
+        std::thread::sleep(Duration::from_millis(1200));
+        assert_eq!(kept(&claude, "typed", &tab), "", "nothing reached the session");
+        assert!(m.delegates.has_news(&tab), "the news stays queued");
+        show(&m, &tab, ERASE);
+        m.maybe_deliver(&tab);
+        wait_for("the news", || kept(&claude, "typed", &tab).ends_with('\r'));
+        std::thread::sleep(Duration::from_millis(1200));
+        let typed = kept(&claude, "typed", &tab);
+        assert_eq!((typed.matches("\x1b[200~").count(), typed.matches("tab-9 finished").count(), typed.matches("Ship it.").count()), (1, 1, 1), "typed once: {typed:?}");
+        assert!(!m.delegates.has_news(&tab));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn news_for_a_turn_waiting_on_background_work_waits_while_a_menu_is_up() {
+        let (m, dir, claude, tabs) = woken("guard-background", &["s1"]);
+        let tab = tabs[0].clone();
+        m.tab(&tab, |t| {
+            t.status = Some(AgentStatus::Working);
+            t.turn_pending = None;
+            t.background_wait = Some(BackgroundWait { since: Instant::now(), shells_only: false, in_session: true, clear_since: None });
+        })
+        .unwrap();
+        show(&m, &tab, MENU);
+        let session = m.tab(&tab, |t| t.claude_session.clone()).unwrap();
+        m.delegates.queue_report(&tab, session, "[pinned] Worker tab-9 finished".into());
+        m.maybe_deliver(&tab);
+        std::thread::sleep(Duration::from_millis(1200));
+        assert_eq!(kept(&claude, "typed", &tab), "", "nothing reached the session");
+        assert!(m.delegates.has_news(&tab), "the news stays queued");
+        show(&m, &tab, ERASE);
+        m.maybe_deliver(&tab);
+        wait_for("the news", || kept(&claude, "typed", &tab).contains("tab-9 finished"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn held_prompts_wait_out_a_startup_menu() {
+        let (m, dir, claude, tabs) = restored_idle("guard-held", &["s1"]);
+        let tab = tabs[0].clone();
+        m.call(Call::Wake { tab: tab.clone(), cols: 80, rows: 24 }).unwrap();
+        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "Where were we?".into() }), Ok(json!(null)));
+        assert_eq!(m.tab(&tab, |t| t.held.clone()).unwrap(), ["Where were we?"], "held until the session takes the terminal");
+        show(&m, &tab, MENU);
+        wait_for("the terminal", || m.tab(&tab, |t| t.session.as_ref().is_some_and(|s| s.raw())).unwrap());
+        std::thread::sleep(Duration::from_millis(600));
+        assert_eq!(kept(&claude, "typed", &tab), "", "nothing is typed while the menu is up");
+        let erased = Instant::now();
+        show(&m, &tab, ERASE);
+        wait_for("the held prompt", || kept(&claude, "typed", &tab).ends_with('\r'));
+        assert!(erased.elapsed() >= HELD_SETTLE, "typed only once the screen stayed clear: {:?}", erased.elapsed());
+        assert_eq!(kept(&claude, "typed", &tab), pasted("Where were we?"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_pull_request_update_waits_for_the_menu_and_is_not_lost() {
+        let (m, dir, claude, tabs) = {
+            let dir = temp("guard-pr");
+            let (app, config, bin) = (dir.join("app"), dir.join("config"), dir.join("bin"));
+            for d in [&app, &config, &bin] {
+                std::fs::create_dir_all(d).unwrap();
+            }
+            // gh here reads nothing, so the watch keeps the update it already has.
+            std::fs::write(bin.join("gh"), "#!/bin/sh\nexit 1\n").unwrap();
+            std::fs::set_permissions(bin.join("gh"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+            std::fs::write(config.join("sessions.json"), json!([{ "cwd": app, "session": "s1", "env": [] }]).to_string()).unwrap();
+            let claude = typed_claude(&dir);
+            let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+            let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), path_env: Some(path), ..launch() }, Some(config), None, |_| {});
+            let tabs = m.restore_tabs();
+            (m, dir, claude, tabs)
+        };
+        let tab = tabs[0].clone();
+        m.call(Call::Wake { tab: tab.clone(), cols: 80, rows: 24 }).unwrap();
+        wait_for("the terminal", || m.tab(&tab, |t| t.session.as_ref().is_some_and(|s| s.raw())).unwrap());
+        m.tab(&tab, |t| (t.status, t.turn_pending) = (Some(AgentStatus::Done), None)).unwrap();
+        let url = "https://github.com/o/r/pull/41";
+        let view = |status: &str, conclusion: &str| json!({ "number": 41, "url": url, "state": "OPEN", "headRefOid": "abc1234def", "baseRefName": "main", "mergeable": "MERGEABLE",
+            "statusCheckRollup": [{ "name": "build", "status": status, "conclusion": conclusion }], "comments": [], "reviews": [] });
+        m.pr_watches.set(&tab, url, true);
+        m.pr_watches.update(&tab, url, crate::prwatch::snapshot(&view("IN_PROGRESS", "")));
+        m.pr_watches.update(&tab, url, crate::prwatch::snapshot(&view("COMPLETED", "SUCCESS")));
+        show(&m, &tab, MENU);
+        m.read_watches();
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(kept(&claude, "typed", &tab), "", "nothing reached the session");
+        show(&m, &tab, ERASE);
+        m.read_watches();
+        wait_for("the update", || kept(&claude, "typed", &tab).ends_with('\r'));
+        assert!(kept(&claude, "typed", &tab).contains("pull request #41"), "the update was kept for the read after the menu");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_continue_after_a_usage_limit_waits_while_a_menu_is_up() {
+        let (m, dir, claude, tabs) = woken("guard-limit", &["s1"]);
+        let tab = tabs[0].clone();
+        let at = unix_now() - LIMIT_MARGIN_SECS - 1;
+        m.tab(&tab, |t| (t.resume_at, t.held_at_limit) = (Some(at), false)).unwrap();
+        show(&m, &tab, MENU);
+        m.continue_when_limit_lifts(&tab);
+        std::thread::sleep(Duration::from_millis(1200));
+        assert_eq!(kept(&claude, "typed", &tab), "", "nothing reached the session");
+        assert_eq!(m.tab(&tab, |t| t.resume_at).unwrap(), Some(at), "the limit still waits to continue");
+        show(&m, &tab, ERASE);
+        wait_for("the continue", || kept(&claude, "typed", &tab).ends_with('\r'));
+        assert_eq!(kept(&claude, "typed", &tab), format!("{}\r", sessions::CONTINUE_PROMPT));
         let _ = std::fs::remove_dir_all(dir);
     }
 
