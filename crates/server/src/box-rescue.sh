@@ -99,7 +99,9 @@ found() {
     { for (v in value) if (index($0, v)) { hit = 1; exit } }
     END { if (unread) exit 2; exit !hit }'
 }
-checked=$(printf '%s' "$github" | tr 'A-Z' 'a-z')
+# tr is the last of each lowering's pipeline, so its status is the pipeline's: a tr that failed
+# lowered nothing, and what it printed is not taken.
+checked=$(printf '%s' "$github" | tr 'A-Z' 'a-z') || checked=''
 # Whether origin, as git reads it in the tree it runs in, fetches from and pushes to the checked
 # repository alone: one URL, on github.com, over https or ssh, with no other user, and its push URL
 # that same one. git expands insteadOf and pushInsteadOf in what it reads, and reads a worktree's
@@ -110,7 +112,8 @@ bound() {
   case "$url" in *'
 '*) return 1 ;; esac
   [ "$(git remote get-url --push --all origin 2>/dev/null)" = "$url" ] || return 1
-  case "$(printf '%s' "$url" | tr 'A-Z' 'a-z')" in
+  url=$(printf '%s' "$url" | tr 'A-Z' 'a-z') || return 1
+  case "$url" in
     "https://github.com/$checked" | "https://github.com/$checked.git" | "git@github.com:$checked" | "git@github.com:$checked.git" | \
       "ssh://git@github.com/$checked" | "ssh://git@github.com/$checked.git") return 0 ;;
   esac
@@ -177,11 +180,12 @@ commit() {
   [ -n "$(git status --porcelain --ignore-submodules=dirty 2>/dev/null)" ] || return 0
   git reset -q >/dev/null 2>&1 || { answer 'failed add'; return 0; }
   safe add -A >/dev/null 2>&1 || { answer 'failed add'; return 0; }
-  if git diff --cached --raw --no-renames 2>/dev/null | grep -q '^:[0-7]* 160000 '; then
+  # A staged gitlink, or a check that could not tell there is none, undoes the add.
+  raw=$(git diff --cached --raw --no-renames 2>/dev/null) && { printf '%s\n' "$raw" | grep -q '^:[0-7]* 160000 '; [ $? -eq 1 ]; } || {
     git reset -q >/dev/null 2>&1
     answer 'failed add'
     return 0
-  fi
+  }
   git diff --cached --quiet 2>/dev/null && return 0
   # A hook may stage more than this added: a commit whose tree is not this one is undone, never sent.
   staged=$(git write-tree 2>/dev/null) || { answer 'failed add'; return 0; }
@@ -222,8 +226,9 @@ shaped() {
     -e '-----BEGIN[A-Z0-9 ]*PRIVATE KEY'
 }
 # Whether the NUL-ended paths it reads hold a name that may hold a secret, by the names `safe` leaves out.
+# Each tr reports its failure to the scan on descriptor 3, so a tr killed or missing is no clean scan.
 named() {
-  tr '\000\n' '\n\000' | tr 'A-Z' 'a-z' | grep -q -E \
+  { tr '\000\n' '\n\000' || echo "tr $?" >&3; } | { tr 'A-Z' 'a-z' || echo "tr $?" >&3; } | grep -q -E \
     -e '(^|/)(\.env[^/]*|[^/]*\.env|env\.local|[^/]*\.(pem|key|p12|pfx|jks|keystore|tfstate|tfvars)|id_[^/]*)(/|$)' \
     -e '(^|/)(\.npmrc|\.netrc|\.pgpass|\.htpasswd|\.dockercfg|[^/]*kubeconfig[^/]*|\.mcp\.json|\.claude|\.?tokens?)(/|$)' \
     -e '(^|/)([^/]*secrets?|[^/]*credentials?)([._-][^/]*)?(/|$)' -e '(^|/)[^/]*tokens?([._-][^/]*)?$'
