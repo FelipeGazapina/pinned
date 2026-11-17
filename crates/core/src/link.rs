@@ -174,6 +174,9 @@ pub fn spawn(creds: Credentials, machine: Arc<Machine>, version: &str) -> Link {
     Link { shared, stop, thread, syncing }
 }
 
+/// What the unchecked call answers a workflow session's callback.
+const UNVOUCHED: &str = "a workflow session's callback goes to the hub only with the session it came from";
+
 /// What a hub call answers while the link is down.
 pub const OFFLINE: &str = "not connected to the hub";
 /// What a hub call that waited out `CALL_WAIT` fails with: the hub may still be working on it.
@@ -810,6 +813,31 @@ mod tests {
 
     fn waits(backoff: &mut Backoff, count: usize) -> Vec<u64> {
         (0..count).map(|_| backoff.wait(0.5).as_secs()).collect()
+    }
+
+    /// A workflow session's callback goes only with what the machine found of its session
+    /// (`Link::forward_from`): the unchecked call sends none, and still sends every other call.
+    #[test]
+    fn an_unchecked_call_sends_no_workflow_sessions_callback() {
+        let shared = Shared::default();
+        let (out, mut sent) = channel::unbounded_channel();
+        *shared.out.lock().unwrap() = Some(out);
+        let issue = crate::agent::Subject::LinearIssue { issue: "uuid-1".into() };
+        let thread = || ("C1".to_owned(), "1.2".to_owned());
+        let calls = [
+            HubCall::Stage { connector: "c1".into(), subject: issue.clone(), stage: crate::agent::Stage::Coding },
+            HubCall::RunSet { connector: "c1".into(), subject: issue, name: "title".into(), value: "x".into() },
+            HubCall::SlackReply { connector: "c1".into(), channel: thread().0, thread: thread().1, text: "on it".into() },
+            HubCall::LinearCreate { connector: "c1".into(), channel: thread().0, thread: thread().1, title: "x".into(), description: "y".into(), assignee: String::new() },
+            HubCall::LinearTake { connector: "c1".into(), channel: thread().0, thread: thread().1, issue: "ENG-7".into() },
+        ];
+        for call in calls {
+            let what = crate::surface::cmd_of(&call);
+            assert_eq!(shared.call(call), Err(UNVOUCHED.to_owned()), "{what}");
+        }
+        assert!(sent.try_recv().is_err(), "nothing went to the hub");
+        drop(sent);
+        assert_eq!(shared.call(HubCall::Overview), Err(OFFLINE.to_owned()), "another call still goes");
     }
 
     #[test]
