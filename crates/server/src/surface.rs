@@ -164,6 +164,10 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
             decided_at: None,
             outcome: None,
         };
+        // An extend is held only while its turn's locks are: nothing was done, so no row.
+        if let Some(turn) = &turn {
+            turn.held().await?;
+        }
         let (id, held) = hub.db.hold_confirmation(account.id, caller.machine, caller.session.as_deref(), &asked).await?;
         end_turn(turn).await;
         if !held {

@@ -649,6 +649,12 @@ impl ExtendTurn {
         self.held.execute(sql, params).await.map_err(lost_turn).map(drop)
     }
 
+    /// Whether the turn still holds its locks: a connection that ended took them with it, and
+    /// another hub's ask may have been checked since, so the turn is refused as busy.
+    pub async fn held(&self) -> Result<(), String> {
+        self.held.batch_execute("select 1").await.map_err(busy_turn)
+    }
+
     /// Frees the lock. What the turn guarded is already written, so a commit that fails only closes the connection.
     pub async fn end(self) {
         if let Err(e) = self.held.batch_execute("commit").await {
