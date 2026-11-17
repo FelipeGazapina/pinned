@@ -878,6 +878,13 @@ impl Db {
     #[doc(hidden)]
     pub async fn age_sync_reads(&self, _by: Duration) {}
 
+    /// Holds every growing push after its check and before its files are written, until the
+    /// answer is dropped, for a test.
+    #[doc(hidden)]
+    pub async fn pause_sync_writes(&self) -> tokio::sync::OwnedRwLockWriteGuard<()> {
+        Arc::new(tokio::sync::RwLock::new(())).write_owned().await
+    }
+
     pub(crate) async fn client(&self) -> Result<Arc<Client>, String> {
         self.connection.client().await
     }

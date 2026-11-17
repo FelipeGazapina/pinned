@@ -13037,19 +13037,13 @@ fn of_two_pushes_at_once_that_together_pass_the_total_one_is_refused() {
     // 3000 bytes left under the 1 MB total; each push grows the hub by 2000.
     store_synced(&hub, "ana@example.test", "claude/memory/notes.md", (1 << 20) - 3000);
     let blob = |path: &str| json!({ "path": path, "sha": sha256_hex(path.as_bytes()), "modified": 1, "data": base64::engine::general_purpose::STANDARD.encode([7u8; 2000]) });
-    // The inserts wait behind this lock, so both pushes are past their check before the files of either land.
-    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-    let locker = runtime.block_on(async {
-        let (client, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), hub.database), tokio_postgres::NoTls).await.unwrap();
-        tokio::spawn(connection);
-        client.batch_execute("begin; lock table project_files in share mode").await.unwrap();
-        client
-    });
+    // Each push waits after its check while this is held, so both are past their check before the files of either land.
+    let paused = hub.runtime.block_on(hub.hub().db.pause_sync_writes());
     let mut answers = std::thread::scope(|scope| {
         let a = scope.spawn(|| sync_push(&mut ana, vec![blob("claude/memory/a.md")]));
         let b = scope.spawn(|| sync_push(&mut bea, vec![blob("claude/memory/b.md")]));
         std::thread::sleep(Duration::from_millis(1000));
-        runtime.block_on(locker.batch_execute("commit")).unwrap();
+        drop(paused);
         vec![a.join().unwrap(), b.join().unwrap()]
     });
     answers.sort_by_key(|answer| answer.is_err());
