@@ -145,7 +145,7 @@ function needsYouCardHtml(card, answer = null) {
   const body =
     card.kind === "approval" && card.ask?.command ? `<pre>${esc(card.ask.command)}</pre>`
       : card.kind === "agent" && Object.keys(card.confirmation.args ?? {}).length && !AGENT_TITLE_ONLY.has(card.confirmation.action) ? `<pre>${esc(JSON.stringify(card.confirmation.args, null, 2))}</pre>`
-      : card.line && card.line !== card.title ? `<p class="ny-line">${esc(card.line)}</p>`
+      : card.kind !== "agent" && card.line && card.line !== card.title ? `<p class="ny-line">${esc(card.line)}</p>`
       : "";
   const unsupervised = card.sleep?.delegated ? `<p class="ny-line">${esc(`${nyPlural(card.sleep.delegated, "delegated task")} still running with nobody to supervise ${card.sleep.delegated === 1 ? "it" : "them"}.`)}</p>` : "";
   const agentLine = unsupervised + (card.kind === "agent" ? `<p class="ny-line">${esc(card.line)}</p>` : "");
@@ -208,9 +208,18 @@ function drawNeedsYou() {
   tickNeedsYou();
 }
 
+/** The page's heading: it says Personal while a team is current, so the person's own asks say whose they are. */
+const needsYouTeamCurrent = () => typeof teamsNow !== "undefined" && teamsNow !== null;
+const needsYouTitle = () => (needsYouTeamCurrent() ? "Needs you · Personal" : "Needs you");
+/** Sets both headings of the open page to the title, after a team switch. */
+function paintNeedsYouTitle() {
+  for (const h of pageView.querySelectorAll(".page-head h1, .ny-title h1")) h.textContent = needsYouTitle();
+}
+document.addEventListener("teams:changed", () => needsYouLive && paintNeedsYouTitle());
+
 function showNeedsYou() {
-  setPage(`${headHtml("Needs you", `<span class="range ny-count"></span>`)}<div class="page-body"><div class="ny-wrap">
-    <div class="ny-title"><h1>Needs you</h1><span class="ny-count"></span></div>
+  setPage(`${headHtml(needsYouTitle(), `<span class="range ny-count"></span>`)}<div class="page-body"><div class="ny-wrap">
+    <div class="ny-title"><h1>${needsYouTitle()}</h1><span class="ny-count"></span></div>
     <section class="ny-list" aria-label="Threads that need you"></section>
     <p class="ny-empty" role="status" hidden>Nothing needs you right now.</p>
   </div></div>`);

@@ -202,7 +202,7 @@ test("a fully typed slash command sends on desktop and is picked on touch", () =
   assert.equal(phone.prompt.value, "/help ");
 });
 
-function loadPlaceholder(coarse, fine) {
+function loadPlaceholder(coarse, fine, team) {
   const src = readFileSync(new URL("./gui-composer.js", import.meta.url), "utf8");
   const touch = src.slice(src.indexOf("function touchComposer"), src.indexOf("function composerEnterIntent"));
   const body = src.slice(src.indexOf("function placeholderFor"), src.indexOf("function renderComposer"));
@@ -210,6 +210,7 @@ function loadPlaceholder(coarse, fine) {
     matchMedia: mq(coarse, fine),
     composer: { dataset: {} },
     machines: { get: () => ({ view: { online: true } }) },
+    teamsNow: team,
   };
   vm.createContext(context);
   vm.runInContext(`${touch}\n${body}\nglobalThis.placeholderFor = placeholderFor;`, context);
@@ -220,6 +221,42 @@ test("a stopped claude names the control that starts it", () => {
   const tab = { menu: null, machine: "local", view: { running: false } };
   assert.equal(loadPlaceholder(true, false)(tab), "claude isn't running. Use the send button to start it.");
   assert.equal(loadPlaceholder(false, true)(tab), "claude isn't running. Press Enter to start it.");
+});
+
+test("a personal thread's prompt says Personal while a team is current, and reads as before with none", () => {
+  const tab = { menu: null, machine: "local", view: { running: true } };
+  const team = { id: "t1", name: "North Studio" };
+  assert.equal(loadPlaceholder(true, false, team)(tab), "Personal · Ask anything, @tag files/folders, $use skills, or / for commands");
+  assert.equal(loadPlaceholder(true, false, null)(tab), "Ask anything, @tag files/folders, $use skills, or / for commands");
+  assert.equal(loadPlaceholder(true, false)(tab), "Ask anything, @tag files/folders, $use skills, or / for commands");
+  const stopped = { menu: null, machine: "local", view: { running: false } };
+  assert.equal(loadPlaceholder(true, false, team)(stopped), "Personal · claude isn't running. Use the send button to start it.");
+});
+
+test("teams:changed repaints the prompt label: to no team it reads as before", () => {
+  const src = readFileSync(new URL("./gui-composer.js", import.meta.url), "utf8");
+  const touch = src.slice(src.indexOf("function touchComposer"), src.indexOf("function composerEnterIntent"));
+  const body = src.slice(src.indexOf("function placeholderFor"), src.indexOf("function renderComposer"));
+  const at = src.indexOf('document.addEventListener("teams:changed"');
+  assert.ok(at >= 0, "the composer listens to teams:changed");
+  const listener = src.slice(at, src.indexOf("\n", at));
+  const tab = { menu: null, machine: "local", view: { running: true } };
+  const context = {
+    matchMedia: mq(true, false),
+    composer: { dataset: {} },
+    machines: { get: () => ({ view: { online: true } }) },
+    active: tab,
+    teamsNow: { id: "t1", name: "North Studio" },
+    shown: [],
+    renderComposer: (t) => context.shown.push(context.placeholderFor(t, {})),
+    document: { addEventListener: (type, fn) => (context.onTeams = fn) },
+  };
+  vm.createContext(context);
+  vm.runInContext(`${touch}\n${body}\n${listener}\nglobalThis.placeholderFor = placeholderFor;`, context);
+  context.onTeams();
+  context.teamsNow = null;
+  context.onTeams();
+  assert.deepEqual(context.shown, ["Personal · Ask anything, @tag files/folders, $use skills, or / for commands", "Ask anything, @tag files/folders, $use skills, or / for commands"]);
 });
 
 test("needsMod and Enter share enterNeedsMod", () => {

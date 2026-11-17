@@ -6,7 +6,7 @@ use crate::db::{err, Db};
 use tokio_postgres::Client;
 use pinned_core::agent::Subject;
 use pinned_core::preauth::team_hook::GO_AHEAD;
-use pinned_core::teams::{Answer, Bot, BotLimits, Call, Group, Role, Run, RunState, SkipReason, Skipped, TeamProject, Who};
+use pinned_core::teams::{Answer, Bot, BotLimits, Call, Group, HeldWhy, LineHeld, Role, Run, RunState, SkipReason, Skipped, TeamProject, Who};
 use tokio_postgres::error::SqlState;
 use uuid::Uuid;
 
@@ -16,6 +16,8 @@ pub struct TeamRow {
     pub name: String,
     pub owner: Uuid,
     pub role: Role,
+    /// Since when, and why, the team's waiting line is held (`hold_line`).
+    pub line_held: Option<LineHeld>,
 }
 
 /// A member of a team, with its email from `accounts`.
@@ -90,12 +92,26 @@ pub async fn teams_of(db: &Db, member: Uuid) -> Result<Vec<TeamRow>, String> {
     let rows = db
         .client().await?
         .query(
-            "select t.id, t.name, t.owner, m.role from team_members m join teams t on t.id = m.team where m.member = $1 order by t.created_at",
+            "select t.id, t.name, t.owner, m.role, extract(epoch from t.line_held_at)::bigint, t.line_held_why
+             from team_members m join teams t on t.id = m.team where m.member = $1 order by t.created_at",
             &[&member],
         )
         .await
         .map_err(err)?;
-    Ok(rows.iter().map(|r| TeamRow { id: r.get(0), name: r.get(1), owner: r.get(2), role: Role::parse(r.get(3)) }).collect())
+    let held = |r: &tokio_postgres::Row| Some(LineHeld { since: r.get::<_, Option<i64>>(4)?, why: HeldWhy::parse(r.get::<_, Option<&str>>(5)?)? });
+    Ok(rows.iter().map(|r| TeamRow { id: r.get(0), name: r.get(1), owner: r.get(2), role: Role::parse(r.get(3)), line_held: held(r) }).collect())
+}
+
+/// The team's waiting line is held for `why`, since now unless it already was. Written on `held`,
+/// in the team's turn.
+pub async fn hold_line(held: &Client, team: Uuid, why: HeldWhy) -> Result<(), String> {
+    held.execute("update teams set line_held_at = now(), line_held_why = $2 where id = $1 and line_held_at is null", &[&team, &why.as_str()]).await.map_err(err).map(drop)
+}
+
+/// The team's waiting line is no longer held. Written on `held`, in the team's turn; a team whose
+/// line was not held is not written.
+pub async fn line_read(held: &Client, team: Uuid) -> Result<(), String> {
+    held.execute("update teams set line_held_at = null, line_held_why = null where id = $1 and line_held_at is not null", &[&team]).await.map_err(err).map(drop)
 }
 
 /// Renames the team; false when it has no `teams` row.
