@@ -10870,6 +10870,87 @@ while True:
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// Sends `line` as a hook that stopped waiting does: it hangs up before the reply comes.
+    #[cfg(unix)]
+    fn hang_up(sock: &Path, line: &str) {
+        use std::io::Write;
+        let mut stream = crate::ipc::UnixStream::connect(sock).unwrap();
+        writeln!(stream, "{line}").unwrap();
+    }
+
+    /// What `file` holds once it has `len` bytes, or after five seconds.
+    #[cfg(unix)]
+    fn settled(file: &Path, len: usize) -> Vec<u8> {
+        let start = Instant::now();
+        while std::fs::read(file).map_or(0, |b| b.len()) < len && start.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        std::fs::read(file).unwrap_or_default()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn queued_messages_reach_a_busy_capitao_once_each_and_in_order_over_its_turn_ends() {
+        let dir = temp("enqueue-turns");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let (sock, file) = (dir.join("pinned.sock"), dir.join("typed.bin"));
+        let m = Machine::new(Launch { sock: sock.clone(), ..launch() }, Some(dir.join("config")), None, |_| {});
+        m.listen(|_| Err("not the machine's".into())).unwrap();
+        let path = project.display().to_string();
+        let tab = idle_captain(&m, &path, &file);
+        m.record_event(hook(&tab, AgentStatus::Working));
+        let in_flight = || m.sent.lock().unwrap().in_flight(&project).iter().map(|s| s.request_id.clone()).collect::<Vec<_>>();
+        let stop = serde_json::to_string(&Message::Agent(AgentEvent { hook_feedback: true, ..hook(&tab, AgentStatus::Done) })).unwrap();
+
+        for (n, text) in ["Ship the form.", "Then the footer.", "And the docs.", "Check the build."].into_iter().enumerate() {
+            assert_eq!(enqueue(&m, &path, text, &format!("r-{}", n + 1)), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": n + 1 })));
+        }
+        hang_up(&sock, &stop);
+        let first = b"\x1b[200~[Orchestrator] Ship the form.\n[Orchestrator] Then the footer.\n[Orchestrator] And the docs.\n[Orchestrator] Check the build.\x1b[201~\r";
+        assert_eq!(String::from_utf8_lossy(&settled(&file, first.len())), String::from_utf8_lossy(first), "a turn end whose hook stopped waiting lost the queued messages");
+        assert_eq!(in_flight(), ["r-1", "r-2", "r-3", "r-4"], "the typed messages started the next turn");
+
+        let prompt = AgentEvent { hook_feedback: true, prompt: Some("[Orchestrator] Ship the form.".into()), ..hook(&tab, AgentStatus::Working) };
+        assert_eq!(ask(&sock, &serde_json::to_string(&Message::Agent(prompt)).unwrap()), Ok(String::new()), "the turn's prompt got the typed messages again");
+        assert_eq!(enqueue(&m, &path, "Bump the version.", "r-5"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })));
+        assert_eq!(enqueue(&m, &path, "Tag the release.", "r-6"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 2 })));
+        assert_eq!(ask(&sock, &stop), Ok("[Orchestrator] Bump the version.\n[Orchestrator] Tag the release.".into()));
+        assert_eq!(in_flight(), ["r-5", "r-6"]);
+        assert_eq!(ask(&sock, &stop), Ok(String::new()), "a later turn end handed a message over twice");
+        assert_eq!(m.view(&tab).unwrap().queued, 0);
+        assert_eq!(std::fs::read(&file).unwrap(), first, "a message was typed twice");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_queued_message_claimed_but_not_handed_over_before_a_stop_is_handed_over_after_it() {
+        let dir = temp("enqueue-claimed");
+        let (project, config) = (dir.join("site"), dir.join("config"));
+        std::fs::create_dir_all(&project).unwrap();
+        let path = project.display().to_string();
+        let before = Machine::new(launch(), Some(config.clone()), None, |_| {});
+        let tab = idle_captain(&before, &path, &dir.join("typed.bin"));
+        before.record_event(hook(&tab, AgentStatus::Working));
+        assert_eq!(enqueue(&before, &path, "Ship it.", "r-1"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })));
+        let done = AgentEvent { hook_feedback: true, ..hook(&tab, AgentStatus::Done) };
+        assert_eq!(before.take_notices(&done).0, "[Orchestrator] Ship it.", "a turn end's hook takes it");
+        assert_eq!(enqueue(&before, &path, "Then the footer.", "r-2"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 2 })), "the message taken is still waiting");
+        assert_eq!(before.delegates.claim_notice(&tab).map(|(text, _)| text), Some("[Orchestrator] Then the footer.".into()), "the idle pass takes the next one");
+        before.quit();
+
+        let after = Machine::new(launch(), Some(config), None, |_| {});
+        let restored = after.restore_tabs().remove(0);
+        assert_eq!(
+            after.delegates.claim_notice(&restored).map(|(text, _)| text),
+            Some("[Orchestrator] Ship it.\n[Orchestrator] Then the footer.".into()),
+            "a message taken but never handed over was lost to the stop"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     #[cfg(unix)]
     fn a_busy_capitao_refuses_when_the_settings_say_so_and_a_refusal_is_not_remembered() {
