@@ -141,3 +141,32 @@ fn a_hub_on_two_live_runs_of_one_bot_starts_and_sets_the_rule_once_one_ends() {
     assert!(index_exists(&hub), "the next start sets the rule");
     assert!(!boot_log(&hub).contains("one live run per bot"), "and says nothing of it");
 }
+
+#[test]
+fn a_waiting_run_keeps_its_place_when_its_bot_has_a_live_run_the_turn_did_not_read() {
+    let crew = Crew::new("one_live_line");
+    let (id, docs) = (crew.on_bot("Pages"), crew.on_bot("Docs"));
+    let run_now = |workflow: &str| crew.call(&crew.bob, serde_json::from_value(json!({ "op": "run_now", "workflow": workflow })).unwrap()).unwrap();
+    run_now(&id);
+    assert_eq!(run_now(&id)["waiting"], json!(true), "bob's second run of the bot waits");
+    run_now(&docs);
+    // The bot's run ends without a word to its line, and another path writes a live run of the
+    // bot, its transaction still open: the turn that docs' end takes reads no live run of the bot.
+    admin_on(&crew.hub.database, &format!("update team_runs set state = 'stopped', ended_at = now() where team = '{}' and workflow = '{id}'", crew.team));
+    let other = crew.hub.runtime.block_on(async {
+        let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), crew.hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        db.batch_execute("begin").await.unwrap();
+        db.execute("insert into team_runs (id, team, workflow, started_by, state) values (gen_random_uuid(), $1, $2, '\"trigger:linear_label\"', 'working')", &[&crew.team, &id])
+            .await
+            .unwrap();
+        db
+    });
+    crew.stop(&crew.live_of(&docs)[0]);
+    std::thread::sleep(Duration::from_secs(1));
+    crew.hub.runtime.block_on(other.batch_execute("commit")).unwrap();
+    // The team's next turn comes after the one docs' end took.
+    assert_eq!(run_now(&docs)["state"], json!("working"), "docs runs again");
+    assert_eq!(crew.live_of(&id).len(), 1, "one live run of the bot: the other path's");
+    assert_eq!(crew.waiting(&id), 1, "bob's run still waits in the bot's line");
+}
