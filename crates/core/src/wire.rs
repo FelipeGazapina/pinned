@@ -1538,6 +1538,22 @@ pub enum HubCall {
     },
 }
 
+impl HubCall {
+    /// The workflow and subject a workflow session's callback acts for: a stage or a run variable
+    /// for its subject, a Slack reply or a Linear issue for its Slack thread. None for any other call.
+    pub fn work(&self) -> Option<(String, Subject)> {
+        match self {
+            HubCall::Stage { connector, subject, .. } | HubCall::RunSet { connector, subject, .. } => Some((connector.clone(), subject.clone())),
+            HubCall::SlackReply { connector, channel, thread, .. }
+            | HubCall::LinearCreate { connector, channel, thread, .. }
+            | HubCall::LinearTake { connector, channel, thread, .. } => {
+                Some((connector.clone(), Subject::SlackThread { channel: channel.clone(), thread: thread.clone() }))
+            }
+            _ => None,
+        }
+    }
+}
+
 /// A project an external agent may work in: one folder on one machine.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
 pub struct AgentProject {
@@ -1771,7 +1787,19 @@ pub enum MachineFrame {
     /// A tab's output for the viewer that subscribed to it, its screen first.
     Output { viewer: String, tab: TabId, data: Bytes },
     /// A connector session's callback; the hub answers with `ToMachine::Reply`.
-    Call { id: u64, call: HubCall },
+    Call {
+        id: u64,
+        call: HubCall,
+        /// The tab whose session the machine found a workflow session's callback to come from:
+        /// the nearest session up the calling process's parents.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_tab: Option<TabId>,
+        /// Whether the machine found the callback to come from inside a session (true, with
+        /// `from_tab`) or from outside every session on it (false). Absent from a machine that does
+        /// not check, and for every other call.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        vouched: Option<bool>,
+    },
 }
 
 /// Hub to machine.
@@ -1963,20 +1991,20 @@ mod tests {
             json!({ "cmd": "orchestrator_report", "request_id": "report-1", "report": { "machine": "m1", "machine_name": "MacBook", "project": "site", "path": "/w/site", "tab": "tab-1a-3", "text": "Done.", "answers": ["r-1"] } }),
         );
         round_trip(
-            MachineFrame::Call { id: 9, call: HubCall::Relay { request_id: "r-1".into(), to: RelayTo::Captain { machine: "m2".into(), path: "/w/site".into(), text: "Ship it.".into(), sender: "Orchestrator".into(), busy: None } } },
+            MachineFrame::Call { id: 9, call: HubCall::Relay { request_id: "r-1".into(), to: RelayTo::Captain { machine: "m2".into(), path: "/w/site".into(), text: "Ship it.".into(), sender: "Orchestrator".into(), busy: None } }, from_tab: None, vouched: None },
             json!({ "type": "call", "id": 9, "call": { "cmd": "relay", "request_id": "r-1", "to": { "kind": "captain", "machine": "m2", "path": "/w/site", "text": "Ship it.", "sender": "Orchestrator" } } }),
         );
         round_trip(
-            MachineFrame::Call { id: 10, call: HubCall::Relay { request_id: "report-1".into(), to: RelayTo::Orchestrator { report } } },
+            MachineFrame::Call { id: 10, call: HubCall::Relay { request_id: "report-1".into(), to: RelayTo::Orchestrator { report } }, from_tab: None, vouched: None },
             json!({ "type": "call", "id": 10, "call": { "cmd": "relay", "request_id": "report-1", "to": { "kind": "orchestrator", "report": { "machine": "m1", "machine_name": "MacBook", "project": "site", "path": "/w/site", "tab": "tab-1a-3", "text": "Done.", "answers": ["r-1"] } } } }),
         );
         round_trip(ClientFrame::Hub { id: 3, call: HubCall::Overview }, json!({ "type": "hub", "id": 3, "call": { "cmd": "overview" } }));
         round_trip(
-            MachineFrame::Call { id: 11, call: HubCall::ReadCaptain { machine: "m2".into(), path: "/w/site".into() } },
+            MachineFrame::Call { id: 11, call: HubCall::ReadCaptain { machine: "m2".into(), path: "/w/site".into() }, from_tab: None, vouched: None },
             json!({ "type": "call", "id": 11, "call": { "cmd": "read_captain", "machine": "m2", "path": "/w/site" } }),
         );
         round_trip(
-            MachineFrame::Call { id: 12, call: HubCall::ReadSession { tab: "tab-2b-7".into(), machine: None, items: Some(5) } },
+            MachineFrame::Call { id: 12, call: HubCall::ReadSession { tab: "tab-2b-7".into(), machine: None, items: Some(5) }, from_tab: None, vouched: None },
             json!({ "type": "call", "id": 12, "call": { "cmd": "read_session", "tab": "tab-2b-7", "items": 5 } }),
         );
         let bare: Call = serde_json::from_value(json!({ "cmd": "read_session", "tab": "tab-2b-7" })).unwrap();
@@ -2372,8 +2400,12 @@ mod tests {
             json!({ "type": "event", "event": { "kind": "exit", "tab": "tab-1" } }),
         );
         round_trip(
-            MachineFrame::Call { id: 7, call: HubCall::SlackReply { connector: "c2".into(), channel: "C1".into(), thread: "1.2".into(), text: "done".into() } },
+            MachineFrame::Call { id: 7, call: HubCall::SlackReply { connector: "c2".into(), channel: "C1".into(), thread: "1.2".into(), text: "done".into() }, from_tab: None, vouched: None },
             json!({ "type": "call", "id": 7, "call": { "cmd": "slack_reply", "connector": "c2", "channel": "C1", "thread": "1.2", "text": "done" } }),
+        );
+        round_trip(
+            MachineFrame::Call { id: 8, call: HubCall::SlackReply { connector: "c2".into(), channel: "C1".into(), thread: "1.2".into(), text: "done".into() }, from_tab: Some("tab-1".into()), vouched: Some(true) },
+            json!({ "type": "call", "id": 8, "call": { "cmd": "slack_reply", "connector": "c2", "channel": "C1", "thread": "1.2", "text": "done" }, "from_tab": "tab-1", "vouched": true }),
         );
         round_trip(MachineFrame::Reply(Reply::new(3, Ok(json!("tab-4")))), json!({ "type": "reply", "id": 3, "ok": "tab-4" }));
         round_trip(

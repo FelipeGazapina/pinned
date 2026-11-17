@@ -381,6 +381,28 @@ impl Usage {
     }
 }
 
+/// What a machine found of the session a workflow session's callback on its socket came from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Vouch {
+    /// The system does not tell who connected, so the machine did not look.
+    Unchecked,
+    /// From the session in this tab: its agent, or a process inside the agent's process tree.
+    Tab(String),
+    /// From outside every session's process tree on the machine.
+    Outside,
+}
+
+impl Vouch {
+    /// The tab and the verdict, as `MachineFrame::Call` carries them.
+    pub fn wire(&self) -> (Option<String>, Option<bool>) {
+        match self {
+            Vouch::Unchecked => (None, None),
+            Vouch::Tab(tab) => (Some(tab.clone()), Some(true)),
+            Vouch::Outside => (None, Some(false)),
+        }
+    }
+}
+
 /// One line on the harness socket.
 #[derive(Serialize, Deserialize, Debug, schemars::JsonSchema)]
 #[serde(tag = "kind", rename_all = "kebab-case")]

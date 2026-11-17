@@ -7183,7 +7183,9 @@ fn agent_of(url: &str, token: &str, email: &str, name: &str) -> Agent {
     let creds = Credentials { hub: url.to_owned(), email: email.to_owned(), user_token: token.to_owned(), machine_id: machine.id.clone(), machine_token };
     creds.save(&dir).unwrap();
     let node = Node::start(&dir, creds);
-    node.machine.listen(|_| Err("unexpected".into())).unwrap();
+    // A session's callbacks go to the hub, as a node's do.
+    let forward = node.link.as_ref().unwrap().forwarder();
+    node.machine.listen_vouched(move |message, vouch| forward(message, vouch)).unwrap();
     client.wait_machines(&[(name, true)]);
     for project in ["site", "docs"] {
         std::fs::create_dir_all(dir.join(project)).unwrap();
@@ -11912,15 +11914,101 @@ struct Workflows {
 /// `direct` starts the server as the agent's own child, the way Claude Code starts it; `nested`
 /// starts it one process lower, the way a `claude -p` the session runs starts its own from the
 /// same MCP config. A third word puts that tab id in the server's `PINNED_TAB`. The server reads
-/// its requests from the file `<request>` and its answers land in `<request>.out`.
+/// its requests from the file `<request>` and its answers land in `<request>.out`. `sh` runs the
+/// shell script `<request>` instead, its output and errors landing in `<request>.out`.
 fn agents_run_their_mcp(dir: &Path) {
-    let script = format!(
-        "#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && {{ echo '{{\"loggedIn\":true}}'; exit 0; }}\nwhile read -r how req tab; do\n  case \"$how\" in\n    direct) PINNED_TAB=\"${{tab:-$PINNED_TAB}}\" {BIN} mcp < \"$req\" > \"$req.tmp\" ;;\n    nested) PINNED_TAB=\"${{tab:-$PINNED_TAB}}\" sh -c '\"$0\" mcp < \"$1\" > \"$1.tmp\"; true' {BIN} \"$req\" ;;\n  esac\n  mv \"$req.tmp\" \"$req.out\"\ndone\n"
-    );
-    let next = dir.join("claude.next");
+    install(dir, "claude", &stand_in_agent());
+}
+
+/// `agents_run_their_mcp`, with each session's agent a launcher that starts the stand-in as its
+/// own child and waits for it, rather than becoming it.
+fn agents_run_their_mcp_through_a_launcher(dir: &Path) {
+    install(dir, "claude-real", &stand_in_agent());
+    install(dir, "claude", &format!("#!/bin/sh
+{} \"$@\"\nexit $?\n", dir.join("claude-real").display()));
+}
+
+fn stand_in_agent() -> String {
+    format!(
+        "#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && {{ echo '{{\"loggedIn\":true}}'; exit 0; }}\nwhile read -r how req tab; do\n  case \"$how\" in\n    direct) PINNED_TAB=\"${{tab:-$PINNED_TAB}}\" {BIN} mcp < \"$req\" > \"$req.tmp\" ;;\n    nested) PINNED_TAB=\"${{tab:-$PINNED_TAB}}\" sh -c '\"$0\" mcp < \"$1\" > \"$1.tmp\"; true' {BIN} \"$req\" ;;\n    sh) sh \"$req\" > \"$req.tmp\" 2>&1 ;;\n  esac\n  mv \"$req.tmp\" \"$req.out\"\ndone\n"
+    )
+}
+
+/// Writes the executable `name` in `dir` in one step, so a session starting now never runs half of it.
+fn install(dir: &Path, name: &str, script: &str) {
+    let next = dir.join(format!("{name}.next"));
     std::fs::write(&next, script).unwrap();
     std::fs::set_permissions(&next, std::fs::Permissions::from_mode(0o755)).unwrap();
-    std::fs::rename(next, dir.join("claude")).unwrap();
+    std::fs::rename(next, dir.join(name)).unwrap();
+}
+
+/// Runs shell script `script` in the session of tab `tab`, as a child of its agent, and answers
+/// what it printed. `$PINNED` in the script is pinned's binary.
+fn in_session(machine: &Machine, dir: &Path, tab: &str, script: &str) -> String {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let request = dir.join(format!("sh-{}", NEXT.fetch_add(1, Ordering::Relaxed)));
+    std::fs::write(&request, format!("PINNED={BIN}\n{script}\n")).unwrap();
+    machine.write_input(tab, format!("sh {}\n", request.display()).as_bytes()).unwrap();
+    let out = PathBuf::from(format!("{}.out", request.display()));
+    wait_for("the session's script to finish", || out.exists());
+    std::fs::read_to_string(out).unwrap()
+}
+
+/// What a `pinned` command's output says: its answer, or the refusal it printed.
+fn cli_answer(output: &str) -> Result<String, String> {
+    let output = output.trim();
+    match output.strip_prefix("pinned: ") {
+        Some(refused) => Err(refused.to_owned()),
+        None => Ok(output.to_owned()),
+    }
+}
+
+/// `pinned <args>` run in the session of tab `tab` with `env` set first (`NAME=value ...`), as
+/// that session's processes run it.
+fn cli_in_session(machine: &Machine, dir: &Path, tab: &str, env: &str, args: &str) -> Result<String, String> {
+    cli_answer(&in_session(machine, dir, tab, &format!("{env} \"$PINNED\" {args}")))
+}
+
+/// Runs `command` (with `$1` its file `<at>`) from inside the session of tab `tab`, with `env` set
+/// first, in a process the session started and left: `setsid`, where there is one, in a subshell
+/// that exits, so the first process adopts it. It starts `command` once the session's script has
+/// ended, and answers once `<at>.done` exists.
+fn detached(machine: &Machine, dir: &Path, tab: &str, env: &str, at: &Path, command: &str) {
+    let script = format!(
+        "S=$(command -v setsid)\n( {env} $S sh -c 'while [ ! -e \"$1.go\" ]; do sleep 0.05; done; {command}; touch \"$1.done\"' \"$PINNED\" {} & )",
+        at.display()
+    );
+    in_session(machine, dir, tab, &script);
+    std::fs::write(format!("{}.go", at.display()), "").unwrap();
+    wait_for("the detached process to finish", || Path::new(&format!("{}.done", at.display())).exists());
+}
+
+/// `pinned <args>` as `detached` runs it.
+fn cli_detached(machine: &Machine, dir: &Path, tab: &str, env: &str, args: &str) -> Result<String, String> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let out = dir.join(format!("detached-{}", NEXT.fetch_add(1, Ordering::Relaxed)));
+    detached(machine, dir, tab, env, &out, &format!("\"$0\" {args} > \"$1\" 2>&1"));
+    cli_answer(&std::fs::read_to_string(out).unwrap())
+}
+
+/// `act` as pinned's MCP server makes it when `detached` runs it.
+fn act_detached(machine: &Machine, dir: &Path, tab: &str, env: &str, action: &str, args: Value) -> Result<Value, String> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let request = dir.join(format!("act-detached-{}.json", NEXT.fetch_add(1, Ordering::Relaxed)));
+    let call = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "act", "arguments": { "action": action, "args": args } } });
+    std::fs::write(&request, format!("{call}\n")).unwrap();
+    detached(machine, dir, tab, env, &request, "\"$0\" mcp < \"$1\" > \"$1.out\"");
+    mcp_answer(&std::fs::read_to_string(format!("{}.out", request.display())).unwrap())
+}
+
+/// What pinned's MCP server answered to an `act` call.
+fn mcp_answer(out: &str) -> Result<Value, String> {
+    let answer: Value = serde_json::from_str(out.trim()).unwrap();
+    let text = answer["result"]["content"][0]["text"].as_str().unwrap().to_owned();
+    match answer["result"]["isError"].as_bool() {
+        Some(false) => Ok(serde_json::from_str(&text).unwrap_or(Value::String(text))),
+        _ => Err(text),
+    }
 }
 
 /// `act` as pinned's MCP server in the session of tab `tab` makes it, the server started `how`
@@ -11933,12 +12021,7 @@ fn act_in_session(machine: &Machine, dir: &Path, tab: &str, how: &str, named: Op
     machine.write_input(tab, format!("{how} {} {}\n", request.display(), named.unwrap_or("")).as_bytes()).unwrap();
     let out = PathBuf::from(format!("{}.out", request.display()));
     wait_for("the session's MCP server to answer", || out.exists());
-    let answer: Value = serde_json::from_str(std::fs::read_to_string(&out).unwrap().trim()).unwrap();
-    let text = answer["result"]["content"][0]["text"].as_str().unwrap().to_owned();
-    match answer["result"]["isError"].as_bool() {
-        Some(false) => Ok(serde_json::from_str(&text).unwrap_or(Value::String(text))),
-        _ => Err(text),
-    }
+    mcp_answer(&std::fs::read_to_string(&out).unwrap())
 }
 
 /// How a test's `act` reaches the node.
@@ -11952,6 +12035,8 @@ enum Via<'a> {
     Nested,
     /// From the session's own MCP server, with `PINNED_TAB` set to this other tab.
     Naming(&'a str),
+    /// From an MCP server a process inside the session started, with `PINNED_TAB` set to this other tab.
+    NestedNaming(&'a str),
 }
 
 fn workflows_of(name: &str) -> Workflows {
@@ -12012,7 +12097,20 @@ impl Workflows {
             Via::Own => act_in_session(machine, dir, tab, "direct", None, action, args),
             Via::Nested => act_in_session(machine, dir, tab, "nested", None, action, args),
             Via::Naming(other) => act_in_session(machine, dir, tab, "direct", Some(other), action, args),
+            Via::NestedNaming(other) => act_in_session(machine, dir, tab, "nested", Some(other), action, args),
         }
+    }
+
+    /// `pinned <args>` from the session of tab `tab`, with `env` set first.
+    fn cli(&self, tab: &str, env: &str, args: &str) -> Result<String, String> {
+        cli_in_session(&self.ana.node.machine, &self.ana.dir, tab, env, args)
+    }
+
+    /// The CLI's four workflow calls (`pinned stage`, `slack reply`, `linear create`, `linear
+    /// take`), each from the session of tab `tab` with `env` set first: stage as that session's
+    /// own subject has it, the others on the Slack thread its environment names.
+    fn cli_four(&self, tab: &str, env: &str) -> Vec<Result<String, String>> {
+        ["stage coding", "slack reply on it", "linear create x y", "linear take ENG-7"].iter().map(|args| self.cli(tab, env, args)).collect()
     }
 
     /// The four calls that act through a workflow's connections, each naming `connector` on
@@ -12117,17 +12215,136 @@ fn act_refuses_a_second_session_that_names_the_workflow_sessions_tab() {
     assert_eq!(w.act(Via::Own, &w.plain, "machines", json!({})).map(|answer| answer["outcome"].clone()), Ok(json!("done")), "the second session still acts as itself");
 }
 
+/// What a workflow call from outside every session on the machine gets.
+const OUTSIDE: &str = "this call comes from no session on this machine: run it from the workflow's session";
+const NO_COLUMN: &str = "this workflow has no column for that stage, so the issue stays where it is";
+
+/// The answers the thread's three calls get once they pass the check: this account has no Slack
+/// or Linear connected, and workflow A files no issues.
+fn past_the_check() -> Vec<Result<String, String>> {
+    vec![
+        Err("Slack is not connected: connect it in pinned's Connectors settings".into()),
+        Err("workflow \"A\" does not file Linear issues: it is set to only analyze and reply".into()),
+        Err("Linear is not connected: connect it in pinned's Connectors settings".into()),
+    ]
+}
+
+/// The environment that names workflow `connector` on Slack thread C1:1.2, for a CLI call.
+fn on_thread_env(connector: &str) -> String {
+    format!("PINNED_CONNECTOR={connector} PINNED_SLACK_CHANNEL=C1 PINNED_SLACK_THREAD=1.2")
+}
+
 #[test]
-fn act_refuses_a_process_started_inside_the_workflow_session() {
+fn act_takes_a_process_started_inside_the_workflow_session_as_that_session() {
     let mut w = workflows_of("act_nested");
     let on_issue = w.run(&w.a.clone(), issue("uuid-1"));
     let on_thread = w.run(&w.a.clone(), Subject::SlackThread { channel: "C1".into(), thread: "1.2".into() });
+    let staged = w.act(Via::Nested, &on_issue, "stage", json!({ "connector": w.a, "issue": "uuid-1", "stage": "coding" }));
+    assert_eq!(staged.map(|answer| answer["result"].clone()), Ok(json!(NO_COLUMN)), "stage, from a process the session on the issue started");
+    let thread = w.the_four(Via::Nested, &on_thread, &w.a, "uuid-1");
+    assert_eq!(thread[1..], past_the_check().into_iter().map(|e| e.map(Value::String)).collect::<Vec<_>>()[..], "the thread's calls, from a process the session on the thread started");
     let reached = (asked_of("slack.com:443"), asked_of("api.linear.app:443"));
-    assert_eq!(w.the_four(Via::Nested, &on_issue, &w.a, "uuid-1")[..1], refused_all()[..1], "stage, from a process the session on the issue started");
-    assert_eq!(w.the_four(Via::Nested, &on_thread, &w.a, "uuid-1")[1..], refused_all()[1..], "the thread's calls, from a process the session on the thread started");
+    assert_eq!(w.the_four(Via::NestedNaming(&on_issue), &on_thread, &w.a, "uuid-1")[..1], [Err(NOT_ITSELF.into())], "only as that session: naming the session on the issue");
+    assert_eq!(w.the_four(Via::NestedNaming(&on_thread), &on_issue, &w.a, "uuid-1")[1..], vec![Err(NOT_ITSELF.into()); 3], "only as that session: naming the session on the thread");
     assert_eq!((asked_of("slack.com:443"), asked_of("api.linear.app:443")), reached, "nothing left the hub");
-    let staged = w.act(Via::Own, &on_issue, "stage", json!({ "connector": w.a, "issue": "uuid-1", "stage": "coding" })).unwrap();
-    assert_eq!(staged["result"], "this workflow has no column for that stage, so the issue stays where it is", "the session itself still acts");
+}
+
+#[test]
+fn act_and_the_cli_refuse_a_process_outside_the_workflow_sessions_tree() {
+    let mut w = workflows_of("act_outside");
+    let on_issue = w.run(&w.a.clone(), issue("uuid-1"));
+    let on_thread = w.run(&w.a.clone(), Subject::SlackThread { channel: "C1".into(), thread: "1.2".into() });
+    let reached = (asked_of("slack.com:443"), asked_of("api.linear.app:443"));
+    let (machine, dir) = (&w.ana.node.machine, &w.ana.dir);
+    // Another tab's process, with the workflow session's environment.
+    assert_eq!(w.the_four(Via::NestedNaming(&on_issue), &w.plain, &w.a, "uuid-1")[..1], [Err(NOT_ITSELF.into())], "act: stage, from inside another session");
+    assert_eq!(w.the_four(Via::NestedNaming(&on_thread), &w.plain, &w.a, "uuid-1")[1..], vec![Err(NOT_ITSELF.into()); 3], "act: the thread's calls, from inside another session");
+    let issue_env = format!("PINNED_CONNECTOR={} PINNED_ISSUE=uuid-1 PINNED_TAB={on_issue}", w.a);
+    assert_eq!(w.cli(&w.plain, &issue_env, "stage coding"), Err(ONLY_ITS_SESSION.into()), "the CLI: stage, from inside another session");
+    let thread_env = format!("{} PINNED_TAB={on_thread}", on_thread_env(&w.a));
+    assert_eq!(w.cli_four(&w.plain, &thread_env)[1..], vec![Err(ONLY_ITS_SESSION.into()); 3], "the CLI: the thread's calls, from inside another session");
+    assert_eq!(w.cli(&on_thread, &issue_env, "stage coding"), Err(ONLY_ITS_SESSION.into()), "the CLI: another session of the same workflow, naming the issue");
+    // A process the workflow session started and left.
+    let staged = act_detached(machine, dir, &on_issue, "", "stage", json!({ "connector": w.a, "issue": "uuid-1", "stage": "coding" }));
+    assert_eq!(staged, Err(OUTSIDE.into()), "act: stage, from a detached process");
+    let replied = act_detached(machine, dir, &on_thread, "", "slack_reply", json!({ "connector": w.a, "channel": "C1", "thread": "1.2", "text": "on it" }));
+    assert_eq!(replied, Err(OUTSIDE.into()), "act: a reply, from a detached process");
+    assert_eq!(cli_detached(machine, dir, &on_issue, "", "stage coding"), Err(OUTSIDE.into()), "the CLI: stage, from a detached process");
+    for args in ["slack reply on it", "linear create x y", "linear take ENG-7"] {
+        assert_eq!(cli_detached(machine, dir, &on_thread, "", args), Err(OUTSIDE.into()), "the CLI: {args}, from a detached process");
+    }
+    // A process of no session at all: the test's own.
+    let stage = agent::Message::Stage { connector: w.a.clone(), subject: issue("uuid-1"), stage: Stage::Coding };
+    let mut stream = std::os::unix::net::UnixStream::connect(dir.join("sock")).unwrap();
+    writeln!(stream, "{}", serde_json::to_string(&stage).unwrap()).unwrap();
+    let mut reply = String::new();
+    std::io::BufRead::read_line(&mut std::io::BufReader::new(stream), &mut reply).unwrap();
+    assert_eq!(serde_json::from_str::<Result<String, String>>(&reply).unwrap(), Err(OUTSIDE.into()), "the CLI's message, from no session's process");
+    assert_eq!((asked_of("slack.com:443"), asked_of("api.linear.app:443")), reached, "nothing left the hub");
+    // The workflow's own sessions still act, through either path.
+    assert_eq!(w.cli(&on_issue, "", "stage coding"), Ok(NO_COLUMN.into()), "the CLI, from the session on the issue");
+    assert_eq!(w.cli_four(&on_thread, "")[1..], past_the_check()[..], "the CLI, from the session on the thread");
+    let staged = w.act(Via::Own, &on_issue, "stage", json!({ "connector": w.a, "issue": "uuid-1", "stage": "coding" }));
+    assert_eq!(staged.map(|answer| answer["result"].clone()), Ok(json!(NO_COLUMN)), "act, from the session on the issue");
+}
+
+#[test]
+fn a_session_whose_agent_runs_under_a_launcher_acts_as_itself() {
+    let mut w = workflows_of("act_launcher");
+    agents_run_their_mcp_through_a_launcher(&w.ana.dir);
+    let on_issue = w.run(&w.a.clone(), issue("uuid-1"));
+    let on_thread = w.run(&w.a.clone(), Subject::SlackThread { channel: "C1".into(), thread: "1.2".into() });
+    let staged = w.act(Via::Own, &on_issue, "stage", json!({ "connector": w.a, "issue": "uuid-1", "stage": "coding" }));
+    assert_eq!(staged.map(|answer| answer["result"].clone()), Ok(json!(NO_COLUMN)), "act: the MCP server of the agent the launcher started");
+    let thread = w.the_four(Via::Own, &on_thread, &w.a, "uuid-1");
+    assert_eq!(thread[1..], past_the_check().into_iter().map(|e| e.map(Value::String)).collect::<Vec<_>>()[..], "act: the thread's calls");
+    assert_eq!(w.cli(&on_issue, "", "stage coding"), Ok(NO_COLUMN.into()), "the CLI under the launcher's agent");
+    assert_eq!(w.cli_four(&on_thread, "")[1..], past_the_check()[..], "the CLI: the thread's calls");
+    assert_eq!(w.the_four(Via::Naming(&on_issue), &on_thread, &w.a, "uuid-1")[..1], [Err(NOT_ITSELF.into())], "and still only as itself");
+}
+
+/// Two accounts' nodes on one machine: a session of the second, pointed at the first node's
+/// socket with the first account's workflow session's variables, acts for none of its workflows.
+#[test]
+fn a_session_of_another_accounts_node_on_the_same_machine_cannot_act_for_a_workflow() {
+    let mut w = workflows_of("act_other_node");
+    let on_issue = w.run(&w.a.clone(), issue("uuid-1"));
+    let on_thread = w.run(&w.a.clone(), Subject::SlackThread { channel: "C1".into(), thread: "1.2".into() });
+    let (token, _) = account::signup(&w.hub.url, "bea@example.test", "battery staple").unwrap();
+    let bea = agent_of(&w.hub.url, &token, "bea@example.test", "act_other_node-bea");
+    agents_run_their_mcp(&bea.dir);
+    let beas = bea.node.machine.open_tab(Some(bea.dir.join("site").display().to_string()), false).unwrap();
+    bea.node.machine.start_claude(&beas, 80, 24).unwrap();
+    let anas_sock = w.ana.dir.join("sock");
+    let reached = (asked_of("slack.com:443"), asked_of("api.linear.app:443"));
+    let pointed = |tab: &str, workflow: &str| format!("PINNED_SOCK={} PINNED_TAB={tab} {workflow}", anas_sock.display());
+    let as_issue = pointed(&on_issue, &format!("PINNED_CONNECTOR={} PINNED_ISSUE=uuid-1", w.a));
+    let as_thread = pointed(&on_thread, &on_thread_env(&w.a));
+    let (machine, dir) = (&bea.node.machine, &bea.dir);
+    assert_eq!(cli_in_session(machine, dir, &beas, &as_issue, "stage coding"), Err(OUTSIDE.into()), "the CLI: stage");
+    for args in ["slack reply on it", "linear create x y", "linear take ENG-7"] {
+        assert_eq!(cli_in_session(machine, dir, &beas, &as_thread, args), Err(OUTSIDE.into()), "the CLI: {args}");
+    }
+    let act = |env: &str, action: &str, args: Value| {
+        let request = dir.join(format!("act-{action}.json"));
+        let call = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "act", "arguments": { "action": action, "args": args } } });
+        std::fs::write(&request, format!("{call}\n")).unwrap();
+        mcp_answer(&in_session(machine, dir, &beas, &format!("{env} \"$PINNED\" mcp < {}", request.display())))
+    };
+    let thread = json!({ "connector": w.a, "channel": "C1", "thread": "1.2" });
+    let with = |extra: Value| {
+        let mut args = thread.clone();
+        args.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        args
+    };
+    assert_eq!(act(&as_issue, "stage", json!({ "connector": w.a, "issue": "uuid-1", "stage": "coding" })), Err(OUTSIDE.into()), "act: stage");
+    assert_eq!(act(&as_thread, "slack_reply", with(json!({ "text": "on it" }))), Err(OUTSIDE.into()), "act: slack_reply");
+    assert_eq!(act(&as_thread, "linear_create", with(json!({ "title": "x", "description": "y" }))), Err(OUTSIDE.into()), "act: linear_create");
+    assert_eq!(act(&as_thread, "linear_take", with(json!({ "issue": "ENG-7" }))), Err(OUTSIDE.into()), "act: linear_take");
+    assert_eq!((asked_of("slack.com:443"), asked_of("api.linear.app:443")), reached, "nothing left the hub");
+    assert_eq!(w.cli(&on_issue, "", "stage coding"), Ok(NO_COLUMN.into()), "the account's own workflow session, the CLI");
+    let staged = w.act(Via::Own, &on_issue, "stage", json!({ "connector": w.a, "issue": "uuid-1", "stage": "coding" }));
+    assert_eq!(staged.map(|answer| answer["result"].clone()), Ok(json!(NO_COLUMN)), "the account's own workflow session, act");
 }
 
 #[test]

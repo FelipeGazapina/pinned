@@ -1196,7 +1196,7 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
             }
         }
         Ok(MachineFrame::Output { viewer, tab, data }) => account.output(machine, &viewer, tab, data),
-        Ok(MachineFrame::Call { id, call }) => {
+        Ok(MachineFrame::Call { id, call, from_tab, vouched }) => {
             let (hub, account, machine) = (hub.clone(), account.clone(), machine.to_owned());
             tokio::spawn(async move {
                 // A machine holds a lesser credential than a login: it may only pass on the callbacks
@@ -1207,11 +1207,11 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
                 // Its sessions act as the user only through `surface`, which checks, audits and holds
                 // each act, and never decide a confirmation.
                 let surfaced = match call {
-                    call if team => return forward_team_box(hub, account, machine, socket, id, call).await,
+                    call if team => return forward_team_box(hub, account, machine, socket, id, call, CallerFound { tab: from_tab, vouched }).await,
                     HubCall::Act { act } => crate::surface::act(&hub, &account, &machine, act).await,
                     HubCall::Confirmations => hub.hub_call(&account, HubCall::Confirmations).await,
                     HubCall::DecideConfirmation { .. } => Err("only the account's owner decides, in the app".to_owned()),
-                    call => return forward(hub, account, machine, socket, id, call).await,
+                    call => return forward(hub, account, machine, socket, id, call, CallerFound { tab: from_tab, vouched }).await,
                 };
                 if let Err(e) = &surfaced {
                     eprintln!("pinned-server: machine {machine}'s agent act failed: {e}");
@@ -1235,7 +1235,7 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
 /// the hub bound to this machine (`teams::db::bound_runs`): the tabs a box reports vouch for
 /// nothing. No agent act, import, tastes, sync, sharing, delegation, MCP secrets or global
 /// orchestrator.
-async fn forward_team_box(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: u64, id: u64, call: HubCall) {
+async fn forward_team_box(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: u64, id: u64, call: HubCall, from: CallerFound) {
     let allowed = matches!(
         call,
         HubCall::Stage { .. }
@@ -1255,12 +1255,12 @@ async fn forward_team_box(hub: Arc<Hub>, account: Arc<Account>, machine: String,
     // A run's callback is held to the run the hub bound to this machine (`team_runs.box`), never
     // to the tabs the box reports: a box vouches for nothing of its own.
     let Some((connector, subject)) = run_work(&call) else {
-        return forward(hub, account, machine, socket, id, call).await;
+        return forward(hub, account, machine, socket, id, call, from).await;
     };
     let refused = match crate::teams::db::bound_runs(&hub.db, account.id, &machine).await {
         Ok(runs) if runs.is_empty() => "this box has no live run of the team".to_owned(),
         Ok(runs) if runs.iter().any(|(workflow, bound)| *workflow == connector && bound.as_ref() == Some(&subject)) => {
-            return forward(hub, account, machine, socket, id, call).await;
+            return forward(hub, account, machine, socket, id, call, from).await;
         }
         Ok(_) => "this box's run is not of that workflow on that subject".to_owned(),
         Err(e) => e,
@@ -1269,22 +1269,20 @@ async fn forward_team_box(hub: Arc<Hub>, account: Arc<Account>, machine: String,
     account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, Err(refused))));
 }
 
-/// The workflow and subject a workflow session's callback acts for: a stage or a run variable for
-/// its subject, a Slack reply or a Linear issue for its Slack thread. None for any other call.
+/// The workflow and subject a workflow session's callback acts for (`HubCall::work`).
 pub(crate) fn run_work(call: &HubCall) -> Option<(String, Subject)> {
-    match call {
-        HubCall::Stage { connector, subject, .. } | HubCall::RunSet { connector, subject, .. } => Some((connector.clone(), subject.clone())),
-        HubCall::SlackReply { connector, channel, thread, .. }
-        | HubCall::LinearCreate { connector, channel, thread, .. }
-        | HubCall::LinearTake { connector, channel, thread, .. } => {
-            Some((connector.clone(), Subject::SlackThread { channel: channel.clone(), thread: thread.clone() }))
-        }
-        _ => None,
-    }
+    call.work()
+}
+
+/// What a machine found of the session a workflow session's callback came from
+/// (`MachineFrame::Call`'s `from_tab` and `vouched`).
+struct CallerFound {
+    tab: Option<String>,
+    vouched: Option<bool>,
 }
 
 /// A machine's hub call other than an agent's act: only the callbacks its sessions may pass on.
-async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: u64, id: u64, call: HubCall) {
+async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: u64, id: u64, call: HubCall, from: CallerFound) {
     if matches!(call, HubCall::Delegate { .. } | HubCall::RemoteTask { .. } | HubCall::RemoteEnded { .. } | HubCall::RemoteAsked { .. } | HubCall::Place { .. }) {
         let result = crate::remote::serve(&hub, &account, &machine, call).await;
         if let Err(e) = &result {

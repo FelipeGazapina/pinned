@@ -1,7 +1,7 @@
 //! The binary installs rustls's ring provider before spawning the link.
 
 use crate::account::Credentials;
-use crate::agent::Message;
+use crate::agent::{Message, Vouch};
 use crate::machine::{Machine, ViewerId};
 use crate::{skills, sync};
 use crate::wire::{Bytes, Call, HubCall, MachineEvent, MachineFrame, MachineView, Reply, TabId, ToMachine};
@@ -109,10 +109,16 @@ impl Shared {
 
     /// Asks the hub, blocking up to 60 seconds for the answer. Fails at once while offline.
     fn call(&self, call: HubCall) -> Result<Value, String> {
+        self.call_from(call, &Vouch::Unchecked)
+    }
+
+    /// `call`, with what the machine found of the session the call came from.
+    fn call_from(&self, call: HubCall, vouch: &Vouch) -> Result<Value, String> {
         let id = self.next_call.fetch_add(1, Ordering::Relaxed);
         let (answer, answered) = mpsc::channel();
         self.pending.lock().unwrap().insert(id, answer);
-        if !self.send(&MachineFrame::Call { id, call }) {
+        let (from_tab, vouched) = vouch.wire();
+        if !self.send(&MachineFrame::Call { id, call, from_tab, vouched }) {
             self.pending.lock().unwrap().remove(&id);
             return Err(OFFLINE.into());
         }
@@ -186,26 +192,23 @@ impl Link {
         self.shared.call(call)
     }
 
-    /// Passes a connector session's callback to the hub and answers what the session prints.
-    /// Every other socket message is the machine's own business.
+    /// Passes a connector session's callback to the hub and answers what the session prints, with
+    /// nothing found of the session it came from. Every other socket message is the machine's own
+    /// business.
     pub fn forward(&self, message: Message) -> Result<String, String> {
-        let call = match message {
-            Message::Stage { connector, subject, stage } => HubCall::Stage { connector, subject, stage },
-            Message::SlackReply { connector, channel, thread, text } => HubCall::SlackReply { connector, channel, thread, text },
-            Message::LinearCreate { connector, channel, thread, title, description, assignee } => {
-                HubCall::LinearCreate { connector, channel, thread, title, description, assignee }
-            }
-            Message::LinearTake { connector, channel, thread, issue } => HubCall::LinearTake { connector, channel, thread, issue },
-            Message::RunSet { connector, subject, name, value } => HubCall::RunSet { connector, subject, name, value },
-            Message::AskPeople { situation, question, choices, step } => {
-                HubCall::Team { team: None, op: crate::teams::TeamOp::AskPeople { situation, question, choices, step } }
-            }
-            _ => return Err("only a workflow session's callbacks go to the hub".into()),
-        };
-        match self.call_hub(call)? {
-            Value::String(text) => Ok(text),
-            other => Ok(other.to_string()),
-        }
+        self.forward_from(message, Vouch::Unchecked)
+    }
+
+    /// `forward`, with what the machine found of the session the callback came from
+    /// (`Machine::listen_vouched`).
+    pub fn forward_from(&self, message: Message, vouch: Vouch) -> Result<String, String> {
+        forward(&self.shared, message, &vouch)
+    }
+
+    /// `forward_from`, for a listener that outlives this borrow.
+    pub fn forwarder(&self) -> impl Fn(Message, Vouch) -> Result<String, String> + Send + Sync + 'static {
+        let shared = self.shared.clone();
+        move |message, vouch| forward(&shared, message, &vouch)
     }
 
     pub fn online(&self) -> bool {
@@ -225,6 +228,27 @@ impl Link {
         self.syncing.thread().unpark();
         let _ = self.thread.join();
         let _ = self.syncing.join();
+    }
+}
+
+/// A connector session's callback, passed to the hub with what the machine found of its session.
+fn forward(shared: &Shared, message: Message, vouch: &Vouch) -> Result<String, String> {
+    let call = match message {
+        Message::Stage { connector, subject, stage } => HubCall::Stage { connector, subject, stage },
+        Message::SlackReply { connector, channel, thread, text } => HubCall::SlackReply { connector, channel, thread, text },
+        Message::LinearCreate { connector, channel, thread, title, description, assignee } => {
+            HubCall::LinearCreate { connector, channel, thread, title, description, assignee }
+        }
+        Message::LinearTake { connector, channel, thread, issue } => HubCall::LinearTake { connector, channel, thread, issue },
+        Message::RunSet { connector, subject, name, value } => HubCall::RunSet { connector, subject, name, value },
+        Message::AskPeople { situation, question, choices, step } => {
+            HubCall::Team { team: None, op: crate::teams::TeamOp::AskPeople { situation, question, choices, step } }
+        }
+        _ => return Err("only a workflow session's callbacks go to the hub".into()),
+    };
+    match shared.call_from(call, vouch)? {
+        Value::String(text) => Ok(text),
+        other => Ok(other.to_string()),
     }
 }
 

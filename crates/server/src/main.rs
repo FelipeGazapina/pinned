@@ -301,7 +301,7 @@ fn node(args: &[String]) -> Result<(), String> {
     let machine_token = creds.machine_token.clone();
     let link = Arc::new(link::spawn(creds, machine.clone(), &version));
     let forward = link.clone();
-    machine.listen(move |message| forward.forward(message)).map_err(|e| format!("could not listen for claude's hooks: {e}"))?;
+    machine.listen_vouched(move |message, vouch| forward.forward_from(message, vouch)).map_err(|e| format!("could not listen for claude's hooks: {e}"))?;
     pinned_core::boot::ready();
     for tab in machine.restore_working() {
         if let Err(e) = machine.start_claude(&tab, UNWATCHED.0, UNWATCHED.1) {

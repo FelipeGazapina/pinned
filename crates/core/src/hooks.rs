@@ -505,8 +505,8 @@ pub fn listen(sock: PathBuf, on_message: impl Fn(Message) -> Reply + Send + Sync
 }
 
 /// `listen`, with an `Answer` that learns whether its reply was sent. `on_message` also gets the
-/// process that connected, when the system tells it.
-pub fn answer(sock: PathBuf, on_message: impl Fn(Message, Option<u32>) -> Answer + Send + Sync + 'static) -> std::io::Result<()> {
+/// process that connected, read as it connected, when the system tells it.
+pub fn answer(sock: PathBuf, on_message: impl Fn(Message, Option<crate::ipc::Peer>) -> Answer + Send + Sync + 'static) -> std::io::Result<()> {
     let _ = std::fs::remove_file(&sock);
     let listener = UnixListener::bind(&sock)?;
     let on_message = Arc::new(on_message);
@@ -515,7 +515,7 @@ pub fn answer(sock: PathBuf, on_message: impl Fn(Message, Option<u32>) -> Answer
             let on_message = on_message.clone();
             std::thread::spawn(move || {
                 let Ok(reader) = stream.try_clone() else { return };
-                let peer = crate::ipc::peer_pid(&stream);
+                let peer = crate::ipc::peer(&stream);
                 for line in BufReader::new(reader).lines().map_while(Result::ok) {
                     let answer = match serde_json::from_str(&line) {
                         Ok(message) => on_message(message, peer),

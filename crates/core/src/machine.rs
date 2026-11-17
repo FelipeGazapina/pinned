@@ -3624,17 +3624,21 @@ impl Machine {
     /// process the tab's pty runs. One another session's agent started is refused. One no
     /// session's agent started itself, such as a process inside a session that inherited its
     /// environment, is passed on not vouched for. None where the system does not tell the caller.
-    fn vouch(&self, tab: &str, peer: Option<u32>) -> Result<Option<bool>, String> {
+    fn vouch(&self, tab: &str, peer: Option<crate::ipc::Peer>) -> Result<Option<bool>, String> {
         if !crate::ipc::KNOWS_PEERS {
             return Ok(None);
         }
-        let Some(parent) = peer.and_then(crate::ipc::parent_of) else { return Ok(Some(false)) };
+        let Some(parent) = peer.and_then(|p| crate::ipc::parent_of(p.pid)) else { return Ok(Some(false)) };
         let tabs = self.tabs.lock().unwrap();
         match tabs.iter().find(|(_, t)| t.session.as_ref().and_then(|s| s.pid()) == Some(parent)) {
             Some((id, _)) if id == tab => Ok(Some(true)),
             Some(_) => Err(NOT_ITSELF.into()),
             None => Ok(Some(false)),
         }
+    }
+
+    fn vouch_callback(&self, _peer: Option<crate::ipc::Peer>) -> crate::agent::Vouch {
+        crate::agent::Vouch::Unchecked
     }
 
     /// A Convex tool's ask, which the hub answers for the project of the tab's checkout, by its
@@ -4648,6 +4652,12 @@ impl Machine {
     /// Answers the hook socket. Hook events and usage update the tabs and project tools act on
     /// them; every other message, a connector session's callbacks and the reminders tools, goes to `other`.
     pub fn listen(&self, other: impl Fn(Message) -> Result<String, String> + Send + Sync + 'static) -> std::io::Result<()> {
+        self.listen_vouched(move |message, _| other(message))
+    }
+
+    /// `listen`, telling `other` what the machine found of the session a workflow session's
+    /// callback came from (`Vouch::Unchecked` for every other message).
+    pub fn listen_vouched(&self, other: impl Fn(Message, crate::agent::Vouch) -> Result<String, String> + Send + Sync + 'static) -> std::io::Result<()> {
         let me = self.me.clone();
         hooks::answer(self.launch.sock.clone(), move |message, peer| {
             let Some(machine) = me.upgrade() else { return hooks::Answer::from(Err("pinned is shutting down".to_owned())) };
@@ -4688,7 +4698,11 @@ impl Machine {
                 }),
                 Message::Project { tab, tool } => machine.project_tool(&tab, tool),
                 Message::Guard { tab, tool, input } => machine.guard(&tab, &tool, &input),
-                message => other(message),
+                message @ (Message::Stage { .. } | Message::SlackReply { .. } | Message::LinearCreate { .. } | Message::LinearTake { .. } | Message::RunSet { .. }) => {
+                    let vouch = machine.vouch_callback(peer);
+                    other(message, vouch)
+                }
+                message => other(message, crate::agent::Vouch::Unchecked),
             };
             reply.into()
         })
