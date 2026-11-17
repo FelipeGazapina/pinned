@@ -1626,7 +1626,7 @@ mod tests {
             let replaced: u64 = files.iter().filter_map(|f| self.files.borrow().get(&f.entry.path).map(|old| old.entry.size)).sum();
             let incoming: u64 = files.iter().map(|f| f.entry.size).sum();
             if !self.room.get() && incoming > replaced {
-                return Err("the account's synced projects would pass 1024 MB; delete old sessions to sync more".into());
+                return Err("the account's synced projects would pass 1024 MB; nothing is deleted, the push is refused".into());
             }
             for file in files {
                 self.files.borrow_mut().insert(file.entry.path.clone(), file);

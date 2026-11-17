@@ -11757,7 +11757,7 @@ fn an_account_over_the_sync_limit_takes_a_push_that_does_not_grow_it_and_refuses
              from accounts a, generate_series(1, 13) n where a.email = 'ana@example.test'"
         ),
     );
-    let refused = Err("the account's synced projects would pass 1024 MB; delete old sessions to sync more".to_owned());
+    let refused = Err("the account's synced projects would pass 1024 MB; nothing is deleted, the push is refused".to_owned());
     let sha_of = |client: &mut Client, path: &str| {
         let listed = client.hub(json!({ "cmd": "sync_list", "project": project })).unwrap();
         listed.as_array().unwrap().iter().find(|e| e["path"] == path).map(|e| e["sha"].as_str().unwrap().to_owned())
@@ -11932,7 +11932,7 @@ fn over_the_sync_limit_a_stale_deletion_frees_nothing_and_agreed_on_a_file_is_ig
     );
     let stale = json!({ "path": "claude/big-1.jsonl", "sha": "", "modified": 2, "agreed": "big0" });
     let refused = push(&mut ana, vec![stale, file("claude/memory/more.md", "one more note")]);
-    assert_eq!(refused, Err("the account's synced projects would pass 1024 MB; delete old sessions to sync more".to_owned()), "the skipped deletion frees nothing");
+    assert_eq!(refused, Err("the account's synced projects would pass 1024 MB; nothing is deleted, the push is refused".to_owned()), "the skipped deletion frees nothing");
     assert_eq!(sha_of(&mut ana, "claude/big-1.jsonl"), Some("big1".to_owned()));
     assert_eq!(sha_of(&mut ana, "claude/memory/more.md"), None);
     let current = json!({ "path": "claude/big-1.jsonl", "sha": "", "modified": 2, "agreed": "big1" });

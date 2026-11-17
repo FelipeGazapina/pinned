@@ -971,7 +971,7 @@ impl Db {
         let replaced: i64 = stored.iter().filter(|(path, _)| replacing.contains(path.as_str())).map(|(_, (_, size))| size).sum();
         let incoming: i64 = files.iter().map(|(_, data, _, _)| data.len() as i64).sum();
         if incoming > replaced && used - replaced + incoming > SYNC_QUOTA {
-            return Err(format!("{}{} MB; delete old sessions to sync more", sync::LIMIT_REFUSAL, SYNC_QUOTA >> 20));
+            return Err(format!("{}{} MB; nothing is deleted, the push is refused", sync::LIMIT_REFUSAL, SYNC_QUOTA >> 20));
         }
         // A file with a base goes first, so another machine's push landing since the check above
         // refuses this push before any of its files is kept.
