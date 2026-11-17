@@ -1276,7 +1276,8 @@ impl Store {
                         settled.needs_save = true;
                         continue;
                     }
-                    let framed = framed || self.reads_apps(&workflow);
+                    // The run is the target's: framed where app posts reach it, the router's among them.
+                    let framed = team || self.reads_apps(&workflow);
                     let Some(target) = self.claim_thread(&workflow, &key) else { continue };
                     let cursor = posts.last().map_or_else(|| thread.clone(), |p| p.ts.clone());
                     target.followed.insert(key.clone(), Followed { cursor, seen: None, replied: false });
@@ -10640,6 +10641,26 @@ mod tests {
         assert_eq!(*opened.lock().unwrap(), ts[..slack::APPS_PER_CHECK].to_vec(), "the second check opens none of the fifteen");
         assert_eq!(slack::take_skipped_log(), Vec::<String>::new(), "and logs none of them again");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A router that reads app posts hands one to "Answer" (c6), which reads none itself: the
+    /// run "Answer" opens has the post's text and its app's name only inside the frame.
+    #[test]
+    fn the_workflow_a_router_hands_an_app_post_to_gets_its_text_and_author_framed() {
+        let _api = slack::lock_api();
+        let _restore = (RestoreSlack, RestoreVercelRoot);
+        let ts = slack_ts(Utc::now() - chrono::Duration::seconds(60));
+        let text = format!("Disk at 91% on db-1\n{PLANTED}");
+        let post = json!({ "ts": ts, "subtype": "bot_message", "bot_id": "B9", "username": "Grafana Alerts", "text": text });
+        let (work, _) = route_an_app_post("apps-router-hands-over", post);
+        let runs = opened_runs(&work);
+        assert_eq!(runs.iter().map(|run| run.connector.as_str()).collect::<Vec<_>>(), ["c6"]);
+        let (input, prompt) = (&runs[0].input, runs[0].args.last().unwrap());
+        assert!(input.contains(&text) && input.contains("Grafana Alerts"), "{input}");
+        let framed = crate::untrusted::frame(crate::untrusted::SLACK_THREAD, input);
+        assert!(prompt.contains(&framed), "{prompt}");
+        let bare = prompt.replace(&framed, "");
+        assert!(!bare.contains(PLANTED) && !bare.contains("Disk at 91%") && !bare.contains("Grafana Alerts"), "only inside the frame: {bare}");
     }
 
     /// The run a router hands an app post to reads the post as the router did, its attachments
