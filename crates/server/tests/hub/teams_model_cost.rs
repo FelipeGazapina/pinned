@@ -186,7 +186,7 @@ fn second_box(hub: &TestHub, tb: &mut TeamBox) -> (String, String) {
 }
 
 #[test]
-fn a_report_for_an_ended_run_from_a_person_from_a_non_team_or_from_another_box_of_the_team_is_refused() {
+fn a_report_for_an_ended_run_from_a_person_a_non_team_a_non_box_or_another_box_of_the_team_is_refused() {
     let hub = TestHub::start_with_team_policy("teams_model_cost_refused", fast(), policy());
     let mut tb = TeamBox::new(&hub);
     bot(&hub, &tb, 5.0);
@@ -212,9 +212,18 @@ fn a_report_for_an_ended_run_from_a_person_from_a_non_team_or_from_another_box_o
     assert_eq!(report(&hub, &tb.box_id, &tb.workflow, 3.0), refused, "a run that ended");
     assert_eq!(model_usd(&hub, run), "0.2", "an ended run's cost stays");
 
-    // The run is live again in its box, but the box's account is no team.
+    // The run is live again and still names the machine, but the machine is no longer one of
+    // the team's boxes.
     sql(&hub, &format!("update team_runs set state = 'working', ended_at = null where id = '{run}'"));
+    let moved = Uuid::new_v4();
+    sql(&hub, &format!("update boxes set machine = '{moved}' where account = '{}' and machine = '{}'", tb.team, tb.machine));
+    assert_eq!(report(&hub, &tb.box_id, &tb.workflow, 3.0), refused, "a machine that is no box of the team");
+    assert_eq!(model_usd(&hub, run), "0.2", "a machine that is no box changes nothing");
+    sql(&hub, &format!("update boxes set machine = '{}' where machine = '{moved}'", tb.machine));
+    assert_eq!(report(&hub, &tb.box_id, &tb.workflow, 0.3), Ok(Value::Null), "its box again");
+
+    // The box's account is no team.
     sql(&hub, &format!("update accounts set kind = 'person' where id = '{}'", tb.team));
     assert_eq!(report(&hub, &tb.box_id, &tb.workflow, 3.0), refused, "a machine of an account that is no team");
-    assert_eq!(model_usd(&hub, run), "0.2", "a non-team machine's report changes nothing");
+    assert_eq!(model_usd(&hub, run), "0.3", "a non-team machine's report changes nothing");
 }
