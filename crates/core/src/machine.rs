@@ -1090,7 +1090,7 @@ impl Machine {
             meters: Mutex::default(),
             worker_unpriced: Mutex::default(),
             meter_rates: Mutex::default(),
-            list_rates: Mutex::new(team_box_rates(usage::download)),
+            list_rates: Mutex::new(team_box_rates(LIST_DOWNLOAD)),
             tastes_shared: Arc::default(),
             mcp_loaded: Mutex::default(),
             mcp_waited: AtomicBool::new(false),
@@ -7491,6 +7491,13 @@ const RUN_COST_EVERY: Duration = Duration::from_secs(15);
 fn team_box_rates(download: fn() -> Option<Vec<u8>>) -> Arc<dyn Fn() -> usage::RateTable + Send + Sync> {
     Arc::new(move || usage::downloaded(download))
 }
+
+/// Where a team box downloads the price list from; a test build never reaches the network, so
+/// its first try fails.
+#[cfg(not(test))]
+const LIST_DOWNLOAD: fn() -> Option<Vec<u8>> = usage::download;
+#[cfg(test)]
+const LIST_DOWNLOAD: fn() -> Option<Vec<u8>> = || None;
 
 /// How long a team box waits after it tried to download the price list before it tries again.
 const LIST_RETRY: Duration = Duration::from_secs(60);
@@ -14568,6 +14575,20 @@ Have another model review a risky change before it goes ahead.";
         *m.list_rates.lock().unwrap() = team_box_rates(|| None);
         m.report_run_costs(Instant::now());
         assert_eq!(*sent.lock().unwrap(), vec![("wf-1".to_owned(), subject, 150.0)], "10 000 output tokens at the ceiling, not the file's 0");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_team_box_built_as_every_node_is_never_priced_from_a_file_in_its_config_dir() {
+        let dir = temp("team-box-list-wiring");
+        let config = dir.join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(config.join("usage-model-rates.json"), r#"{"claude-sonnet-5-5":{"input_cost_per_token":1e-12,"output_cost_per_token":1e-12}}"#).unwrap();
+        let m = Machine::new(launch(), Some(config), None, |_| {});
+        m.team_box.store(true, Ordering::SeqCst);
+        let rates = m.meter_rates().expect("a failed first try prices at the ceiling");
+        assert_eq!(rates.len(), 0, "the planted list is never read: the box downloads its list, and a test build's download fails");
         let _ = std::fs::remove_dir_all(dir);
     }
 
