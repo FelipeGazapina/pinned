@@ -644,8 +644,6 @@ fn project_tools() -> [(Audience, serde_json::Value); 24] {
                             "hard_model": model,
                             "parallel": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Workers at once in a project; delegate_task refuses one more." },
                             "autonomy": { "type": "string", "enum": ["ask_first", "decide_and_tell", "report_at_end"] },
-                            "review_diffs": { "type": "boolean", "description": "Review each worker's diff before accepting it." },
-                            "second_opinion": { "type": "boolean", "description": "Another model reviews a risky change." },
                             "skills": { "type": "array", "items": { "type": "object", "properties": { "name": { "type": "string" }, "enabled": { "type": "boolean" } }, "required": ["name", "enabled"] }, "description": "Skills the sessions follow; the whole list." },
                             "context": { "type": "array", "items": { "type": "string" }, "description": "Notes every turn carries; the whole list." },
                             "tier": { "type": "string", "enum": ["low", "mid", "high"], "description": "The costliest model tier a worker may run on, as orchestrator_capabilities lists it. It covers the worker's own model, not the models it picks for its subagents." },
@@ -668,7 +666,7 @@ fn project_tools() -> [(Audience, serde_json::Value); 24] {
                 "type": "object",
                 "properties": {
                     "scope": scope,
-                    "field": { "type": "string", "enum": ["strategy", "ladder", "hard_model", "parallel", "autonomy", "review_diffs", "second_opinion", "skills", "context", "tier", "default_effort", "max_effort", "budget_cents", "time_limit_min", "box_budget_cents", "box_size"] },
+                    "field": { "type": "string", "enum": ["strategy", "ladder", "hard_model", "parallel", "autonomy", "skills", "context", "tier", "default_effort", "max_effort", "budget_cents", "time_limit_min", "box_budget_cents", "box_size"] },
                 },
                 "required": ["scope", "field"],
             },

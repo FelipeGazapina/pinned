@@ -493,6 +493,17 @@ fn workers_full(working: usize) -> String {
     format!("{working} in this project, the most it allows at once. Wait for one to finish, or raise Workers at once in Settings › Way of working.")
 }
 
+/// A taste chat's change to review settings, which only the user makes on the Way of working page.
+/// Refused whole, so the other fields of the same change wait too.
+fn refuse_review_settings(named: impl IntoIterator<Item = &'static str>) -> Result<(), String> {
+    let named: Vec<&str> = named.into_iter().collect();
+    if named.is_empty() {
+        return Ok(());
+    }
+    let verb = if named.len() == 1 { "is" } else { "are" };
+    Err(format!("{} {verb} changed only by the user, on the Way of working page; nothing changed", named.join(" and ")))
+}
+
 struct ThreadChild<'a> {
     from: &'a str,
     /// The tab on another machine the thread is for. `from` then names no tab here.
@@ -3648,11 +3659,13 @@ impl Machine {
             }
             ProjectTool::TasteSet { scope, patch } => {
                 let scope = TasteScope::parse(&scope)?;
+                refuse_review_settings(patch.review_settings())?;
                 let call = HubCall::SetTaste { scope: scope.clone(), patch: patch.clone() };
                 text_json(self.change_tastes(call, |tastes| tastes.set(&scope, patch))?.view(&scope))
             }
             ProjectTool::TasteReset { scope, field } => {
                 let scope = TasteScope::parse(&scope)?;
+                refuse_review_settings(field.review_setting())?;
                 let call = HubCall::ResetTasteField { scope: scope.clone(), field };
                 let reset = |tastes: &mut Tastes| {
                     tastes.reset(&scope, field);

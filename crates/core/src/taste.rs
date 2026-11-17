@@ -246,6 +246,17 @@ pub enum TasteField {
     BoxSize,
 }
 
+impl TasteField {
+    /// The JSON name of a review setting, which only the user changes on the Way of working page. None for the rest.
+    pub fn review_setting(self) -> Option<&'static str> {
+        match self {
+            TasteField::ReviewDiffs => Some("review_diffs"),
+            TasteField::SecondOpinion => Some("second_opinion"),
+            _ => None,
+        }
+    }
+}
+
 /// An account's tastes.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(default)]
@@ -574,6 +585,11 @@ fn usd(cents: u32) -> String {
 }
 
 impl TastePatch {
+    /// The review settings this patch sets, by name. Only the user changes these, on the Way of working page.
+    pub fn review_settings(&self) -> Vec<&'static str> {
+        [("review_diffs", self.review_diffs.is_some()), ("second_opinion", self.second_opinion.is_some())].into_iter().filter(|(_, set)| *set).map(|(name, _)| name).collect()
+    }
+
     /// Overwrites each of `taste`'s knobs this patch sets.
     pub fn apply(&self, taste: &mut Taste) {
         fn put<T: Clone>(set: &Option<T>, knob: &mut T) {
@@ -935,7 +951,7 @@ pub fn chat_prompt(scope: &TasteScope) -> String {
     format!(
         "Help me adjust the way of working of {who} in pinned (scope {name}).
 
-You have three tools for it. taste_get(scope) reads a scope: the settings its sessions get (effective), what the scope sets itself (own), and the brief text they start with. taste_set(scope, patch) changes the fields the patch names and keeps the rest; a project's field set to the Captains' value goes back to inheriting it. taste_reset(scope, field) makes a project inherit the field again, or gives the orchestrator and the Captains its default back. A scope is orchestrator, captains, or project: followed by the project's repo, as in project:github.com/acme/site. The fields are strategy (cheap_with_guidance, escalate_on_failure or strongest_first), ladder (models, cheapest first), hard_model, parallel (workers at once, 1 to 100), autonomy (ask_first, decide_and_tell or report_at_end), review_diffs, second_opinion, skills ({{name, enabled}}) and context (notes every turn carries), and the delegation limits pinned enforces: tier (low, mid or high), default_effort and max_effort (low, medium, high, xhigh or max), budget_cents (per worker, 0 for no cap), time_limit_min (1 to 10080) and box_budget_cents (per box, 0 for none), and box_size (small, medium or large: the size of a box opened with none named; captains holds the account's, a project overrides it, small when neither does). The Way of working page shows each change as soon as it lands, and new sessions start with it.
+You have three tools for it. taste_get(scope) reads a scope: the settings its sessions get (effective), what the scope sets itself (own), and the brief text they start with. taste_set(scope, patch) changes the fields the patch names and keeps the rest; a project's field set to the Captains' value goes back to inheriting it. taste_reset(scope, field) makes a project inherit the field again, or gives the orchestrator and the Captains its default back. A scope is orchestrator, captains, or project: followed by the project's repo, as in project:github.com/acme/site. The fields are strategy (cheap_with_guidance, escalate_on_failure or strongest_first), ladder (models, cheapest first), hard_model, parallel (workers at once, 1 to 100), autonomy (ask_first, decide_and_tell or report_at_end), skills ({{name, enabled}}) and context (notes every turn carries), and the delegation limits pinned enforces: tier (low, mid or high), default_effort and max_effort (low, medium, high, xhigh or max), budget_cents (per worker, 0 for no cap), time_limit_min (1 to 10080) and box_budget_cents (per box, 0 for none), and box_size (small, medium or large: the size of a box opened with none named; captains holds the account's, a project overrides it, small when neither does). Leave review_diffs and second_opinion alone: taste_set and taste_reset refuse them, and only the user sets them, on the Way of working page. The Way of working page shows each change as soon as it lands, and new sessions start with it.
 
 Start with taste_get(\"{name}\"). Then interview me: one short question at a time, each with two or three answers to pick from, and change nothing yet. When you know what to change, list the changes in plain words, apply them with taste_set or taste_reset once I agree, and read the scope again to show me the new brief.",
         who = scope.label(),
