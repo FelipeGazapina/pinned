@@ -630,7 +630,9 @@ fn two_wait_behind(crew: &Crew, holder: &str, bot: &str, graph: bool) {
 /// reserved row is gone, and ENG-2 got the place.
 fn assert_place_freed_for_eng_2(crew: &Crew, bot: &str, unopened: &[&str]) {
     wait_for("ENG-2 to take the place", || crew.live_of(bot).len() == 1);
-    std::thread::sleep(Duration::from_secs(1));
+    wait_for("ENG-1's reserved row to end and ENG-2 to finish its steps", || {
+        crew.unopened() == unopened && crew.live() == 1 && crew.waiting(bot) == 0 && crew.outside(2) == vec!["model".to_owned(), "linear move".to_owned()]
+    });
     assert_eq!(crew.unopened(), unopened, "ENG-1's reserved row ended, none is left holding the place");
     assert_eq!(crew.live(), 1, "the place ENG-1 held is back: only ENG-2's run lives");
     assert_eq!(crew.waiting(bot), 0);
@@ -675,7 +677,9 @@ fn a_graph_that_ends_before_any_session_frees_its_reserved_place() {
     two_wait_behind(&crew, &holder, &pages, true);
 
     wait_for("both graphs to run", || crew.outside(1).len() == 1 && crew.outside(2).len() == 1);
-    std::thread::sleep(Duration::from_secs(2));
+    wait_for("both graphs to end", || {
+        crew.unopened() == vec!["done", "done"] && (crew.live(), crew.waiting(&pages)) == (0, 0) && (crew.outside(1), crew.outside(2)) == (vec!["linear move".to_owned()], vec!["linear move".to_owned()])
+    });
     assert_eq!(crew.unopened(), vec!["done", "done"], "both reserved rows ended, none is left holding a place");
     assert_eq!((crew.live(), crew.waiting(&pages)), (0, 0), "both graphs ended, neither holds a place");
     assert_eq!((crew.outside(1), crew.outside(2)), (vec!["linear move".to_owned()], vec!["linear move".to_owned()]), "each graph moved its issue once");
@@ -1143,8 +1147,13 @@ fn a_reply_to_a_granted_event_waits_with_it_and_the_event_runs_once() {
     // The team's poller looks now, as a grant wakes it.
     let hub = crew.hub.hub().clone();
     crew.hub.runtime.block_on(async { hub.connectors(&hub.account(crew.team).await.unwrap()).await.unwrap().wake() });
-    wait_for("the thread's box", || crew.box_prompt(thread).is_some());
-    std::thread::sleep(Duration::from_secs(3));
+    wait_for("the thread's box to hold Dina's reply and its run to open", || {
+        crew.box_prompt(thread).is_some_and(|p| p.contains("[Slack reply from Dina] still broken"))
+            && crew.boxes_created() - boxes_before == 1
+            && crew.live_of(&footer).len() == 1
+            && crew.waiting(&footer) == 0
+            && crew.reserved_at(&footer) == none()
+    });
     assert_eq!(
         crew.box_prompt(thread).unwrap(),
         format!(

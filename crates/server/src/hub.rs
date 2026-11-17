@@ -1536,6 +1536,14 @@ impl Account {
             .any(|t| t.running && t.connector.as_deref() == Some(connector) && t.subject.as_ref() == Some(subject))
     }
 
+    /// Whether the session in tab `tab` of the online `machine` itself runs the connector on `subject`.
+    pub fn runs_in_tab(&self, connector: &str, subject: &Subject, machine: &str, tab: &str) -> bool {
+        let live = self.live.lock().unwrap();
+        live.machines
+            .get(machine)
+            .is_some_and(|m| m.tabs().iter().any(|t| t.id == tab && t.running && t.connector.as_deref() == Some(connector) && t.subject.as_ref() == Some(subject)))
+    }
+
     /// Machines a workflow run may go to: online, never a box's, `preferred` first, then the most recently connected.
     fn run_pool(&self, preferred: &str) -> Vec<MachineId> {
         let live = self.live.lock().unwrap();

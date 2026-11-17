@@ -1,5 +1,5 @@
 use super::*;
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicU32, AtomicU64};
 
 #[derive(Clone)]
 struct Cache {
@@ -21,6 +21,8 @@ pub struct Delegates {
     /// When the tasks were last written, so a working task's counted time is saved at least each
     /// `COUNTED_SAVE_EVERY` and a crash loses at most that much of it.
     saved_at: Mutex<Instant>,
+    /// The last claim `claim_news` made, so one claim's end leaves another's reports alone.
+    claims: AtomicU64,
 }
 
 /// How often the counted time of working tasks reaches disk while nothing else changes.
@@ -51,6 +53,9 @@ struct Report {
     text: String,
     #[serde(default)]
     claimed: bool,
+    /// The claim that holds it while `claimed`. Not saved: a load puts every claim back.
+    #[serde(skip)]
+    claim: u64,
     #[serde(default)]
     task: Option<String>,
     /// The orchestrator's `request_id` this text delivers, so the machine knows when it was typed.
@@ -88,6 +93,7 @@ impl Default for Delegates {
             warming: Arc::new(AtomicBool::new(false)),
             limits: ProviderLimits::default(),
             saved_at: Mutex::new(Instant::now()),
+            claims: AtomicU64::new(0),
         }
     }
 }
@@ -527,7 +533,7 @@ impl Delegates {
                 } else if ran >= task.run.budget_ms && !task.run.told_late {
                     task.run.told_late = true;
                     if let (Parent::Tab(tab), true) = (&task.parent, announces(task)) {
-                        late.push(Report { tab: tab.clone(), session: task.parent_session.clone(), text: late_line(task, ran), claimed: false, task: Some(task.id.clone()), request: None });
+                        late.push(Report { tab: tab.clone(), session: task.parent_session.clone(), text: late_line(task, ran), claimed: false, claim: 0, task: Some(task.id.clone()), request: None });
                     }
                 }
             }
@@ -1076,6 +1082,12 @@ impl Delegates {
     /// A grandchild stays out: its headless parent reads it, and it is never typed into the root tab.
     /// The caller puts the ids back with `release_notice` when the bytes were not written.
     pub fn claim_notice(&self, tab: &str) -> Option<(String, Vec<String>)> {
+        self.claim_news(tab).map(|(text, ids, _)| (text, ids))
+    }
+
+    /// `claim_notice`, and the claim that holds the tab's reports until `confirm_claim` or
+    /// `release_claim` ends it.
+    pub fn claim_news(&self, tab: &str) -> Option<(String, Vec<String>, u64)> {
         let mut tasks = self.tasks.lock().unwrap();
         self.reports.lock().unwrap().retain(|report| report.claimed || !stale(report, &tasks));
         let ready: Vec<usize> = tasks
@@ -1096,14 +1108,16 @@ impl Delegates {
         for index in &ready {
             tasks[*index].claim();
         }
+        let claim = self.claims.fetch_add(1, Ordering::Relaxed) + 1;
         for index in pending {
             reports[index].claimed = true;
+            reports[index].claim = claim;
             lines.push(reports[index].text.clone());
         }
         drop(reports);
         drop(tasks);
         self.persist();
-        Some((lines.join("\n"), ids))
+        Some((lines.join("\n"), ids, claim))
     }
 
     /// Whether `claim_notice` has something for `tab`.
@@ -1163,12 +1177,12 @@ impl Delegates {
     }
 
     pub fn queue_report(&self, tab: &str, session: Option<String>, text: String) {
-        self.push_report(Report { tab: tab.to_owned(), session, text, claimed: false, task: None, request: None });
+        self.push_report(Report { tab: tab.to_owned(), session, text, claimed: false, claim: 0, task: None, request: None });
     }
 
     /// Queues a message from the global orchestrator, typed with the tab's other news once it is idle.
     pub fn queue_request(&self, tab: &str, session: Option<String>, text: String, request: String) {
-        self.push_report(Report { tab: tab.to_owned(), session, text, claimed: false, task: None, request: Some(request) });
+        self.push_report(Report { tab: tab.to_owned(), session, text, claimed: false, claim: 0, task: None, request: Some(request) });
     }
 
     /// Whether the notice `key` was already taken, queued or typed.
@@ -1208,7 +1222,7 @@ impl Delegates {
                 notices.drain(..extra);
             }
         }
-        self.push_report(Report { tab: tab.to_owned(), session, text, claimed: false, task: Some(id.to_owned()), request: None });
+        self.push_report(Report { tab: tab.to_owned(), session, text, claimed: false, claim: 0, task: Some(id.to_owned()), request: None });
         true
     }
 
@@ -1241,11 +1255,12 @@ impl Delegates {
         by_tab
     }
 
-    /// Drops the tab's reports that were typed, and returns the orchestrator requests among them.
-    pub fn drop_claimed_reports(&self, tab: &str) -> Vec<String> {
+    /// Drops the reports `claim` took, whose text reached the session, and returns the
+    /// orchestrator requests among them.
+    pub fn confirm_claim(&self, claim: u64) -> Vec<String> {
         let mut typed = vec![];
         self.reports.lock().unwrap().retain(|report| {
-            let drop = report.tab == tab && report.claimed;
+            let drop = report.claimed && report.claim == claim;
             if drop {
                 typed.extend(report.request.clone());
             }
@@ -1255,11 +1270,11 @@ impl Delegates {
         typed
     }
 
-    pub fn release_reports(&self, tab: &str) {
-        for report in self.reports.lock().unwrap().iter_mut() {
-            if report.tab == tab {
-                report.claimed = false;
-            }
+    /// Puts back the reports `claim` took, whose text did not reach the session.
+    pub fn release_claim(&self, claim: u64) {
+        for report in self.reports.lock().unwrap().iter_mut().filter(|report| report.claimed && report.claim == claim) {
+            report.claimed = false;
+            report.claim = 0;
         }
         self.persist();
     }
@@ -1830,7 +1845,7 @@ fn pending_report(task: &mut Task) -> Option<Report> {
         span(QUIET_AFTER_REPLY_MS),
         task.id
     );
-    Some(Report { tab: tab.clone(), session: task.parent_session.clone(), text, claimed: false, task: Some(task.id.clone()), request: None })
+    Some(Report { tab: tab.clone(), session: task.parent_session.clone(), text, claimed: false, claim: 0, task: Some(task.id.clone()), request: None })
 }
 
 const SHELL_TASK: &str = "local_bash";
@@ -2576,6 +2591,20 @@ mod tests {
     }
 
     #[test]
+    fn ending_one_claim_leaves_another_claims_reports_alone() {
+        let delegates = Delegates::default();
+        delegates.queue_request("tab-1", None, "[Orchestrator] Ship the form.".into(), "r-1".into());
+        let (_, _, hook) = delegates.claim_news("tab-1").unwrap();
+        delegates.queue_request("tab-1", None, "[Orchestrator] Then the footer.".into(), "r-2".into());
+        let (text, _, typed) = delegates.claim_news("tab-1").unwrap();
+        assert_eq!(text, "[Orchestrator] Then the footer.");
+        delegates.release_claim(hook);
+        assert_eq!(delegates.claim_notice("tab-1").map(|(text, _)| text), Some("[Orchestrator] Ship the form.".into()), "putting one claim back put back another's");
+        assert_eq!(delegates.confirm_claim(typed), ["r-2"], "confirming one claim dropped another's");
+        assert_eq!(delegates.queued(), HashMap::from([("tab-1".to_owned(), 1)]));
+    }
+
+    #[test]
     fn a_report_claimed_when_pinned_stopped_is_pending_again_at_the_next_load() {
         let dir = std::env::temp_dir().join(format!("pinned-claimed-report-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -2588,8 +2617,9 @@ mod tests {
         let loaded = Delegates::load(Some(file.clone()));
         assert!(loaded.has_news("tab-1"));
         assert_eq!(loaded.queued().get("tab-1"), Some(&1));
-        assert_eq!(loaded.claim_notice("tab-1").map(|(text, _)| text), Some("[Slack reply from ana in the thread]\nship it".into()));
-        loaded.drop_claimed_reports("tab-1");
+        let (text, _, claim) = loaded.claim_news("tab-1").expect("offered again");
+        assert_eq!(text, "[Slack reply from ana in the thread]\nship it");
+        loaded.confirm_claim(claim);
         assert!(!Delegates::load(Some(file)).has_news("tab-1"), "a typed report is gone for good");
         let _ = std::fs::remove_dir_all(dir);
     }

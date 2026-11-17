@@ -94,6 +94,8 @@ const REMOTE_CHECK: Duration = Duration::from_secs(60);
 const HOLD_CLEAR: Duration = Duration::from_secs(5);
 /// An idle notice this soon after a submit may have been on its way before it: the submit still counts.
 const IDLE_NOTICE_GRACE: Duration = Duration::from_secs(10);
+/// How long a compaction's mark holds when no end comes for it: the tab then reads as it did before.
+const COMPACT_WAIT: Duration = Duration::from_secs(600);
 const NO_PROJECT_WORK: &str = "the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain";
 
 pub type Event = MachineEvent;
@@ -103,6 +105,16 @@ pub type ViewerId = String;
 /// so it must not attach to or detach from that tab.
 pub type Sink = Box<dyn Fn(&[u8]) + Send + Sync>;
 pub type Listener = Box<dyn Fn(&Event) + Send + Sync>;
+
+/// What a hook took from a tab's queue, held until its reply reached the hook or did not.
+struct Taken {
+    tab: TabId,
+    /// The tasks whose notices it took.
+    ids: Vec<String>,
+    claim: u64,
+    /// When a Stop hook's hand-over marked the turn as continuing.
+    pending: Option<Instant>,
+}
 
 fn merge_context(recall: &str, notices: &str) -> String {
     match (recall.is_empty(), notices.is_empty()) {
@@ -585,6 +597,8 @@ struct Tab {
     seen: Option<SystemTime>,
     /// When the latest submit went in. Cleared by Done, Failed, and a new session.
     turn_pending: Option<Instant>,
+    /// When Claude Code's PreCompact hook last marked the session compacting.
+    compacting_since: Option<Instant>,
     /// Set while a worker's turn has ended with background work it started still pending: Claude
     /// Code resumes the session when that work hands back, so the turn end is not the worker's end.
     background_wait: Option<BackgroundWait>,
@@ -606,6 +620,12 @@ struct Tab {
 }
 
 impl Tab {
+    /// Whether claude is compacting: its PreCompact mark holds until PostCompact, the turn's end, or
+    /// the time COMPACT_WAIT lapses.
+    fn compacting(&self) -> bool {
+        self.compacting_since.is_some_and(|at| at.elapsed() < COMPACT_WAIT)
+    }
+
     /// What reopens the tab's conversation, once claude has reported one.
     /// A sign-in tab has no conversation to resume.
     fn saved(&self) -> Option<sessions::Saved> {
@@ -647,6 +667,7 @@ impl Tab {
     /// from the global orchestrator started.
     fn view(&self, id: &str, turns: &HashSet<PathBuf>, queued: &HashMap<String, u32>, work: &HashMap<String, crate::delegate::WorkCost>) -> TabView {
         let role = role_of(&self.env);
+        let compacting = self.compacting();
         TabView {
             id: id.to_owned(),
             cwd: self.cwd.display().to_string(),
@@ -654,11 +675,17 @@ impl Tab {
             program: self.program,
             bypass: self.bypass,
             running: self.live(),
-            status: self.status,
+            // A compaction is work: the tab reads busy, unless it waits on the user or failed.
+            status: match self.status {
+                Some(AgentStatus::NeedsInput | AgentStatus::Failed) => self.status,
+                _ if compacting => Some(AgentStatus::Working),
+                _ => self.status,
+            },
             title: self.title.clone(),
             message: self.message.clone(),
             resume_at: self.resume_at,
             held: self.held_at_limit,
+            compacting,
             connector: self.env.iter().find(|(k, _)| k == CONNECTOR_ENV).map(|(_, v)| v.clone()),
             subject: session_of(&self.env).map(|(_, subject)| subject),
             opened: tab_number(id).into(),
@@ -4611,21 +4638,25 @@ impl Machine {
     /// them; every other message, a connector session's callbacks and the reminders tools, goes to `other`.
     pub fn listen(&self, other: impl Fn(Message) -> Result<String, String> + Send + Sync + 'static) -> std::io::Result<()> {
         let me = self.me.clone();
-        hooks::listen(self.launch.sock.clone(), move |message| {
-            let Some(machine) = me.upgrade() else { return Err("pinned is shutting down".into()) };
-            match message {
+        hooks::answer(self.launch.sock.clone(), move |message| {
+            let Some(machine) = me.upgrade() else { return hooks::Answer::from(Err("pinned is shutting down".to_owned())) };
+            let reply = match message {
                 Message::Agent(event) => {
-                    let (notices, typed) = if event.hook_feedback { machine.take_notices(&event) } else { Default::default() };
+                    let (notices, mut taken) = if event.hook_feedback { machine.take_notices(&event) } else { Default::default() };
                     machine.record_event(event.clone());
-                    // After the event: a Stop hook that hands a request over continues the turn, and
-                    // the turn that just ended did not answer it.
-                    machine.mark_typed(&typed);
-                    if !notices.is_empty() && event.status == AgentStatus::Done {
-                        if let Some(tab) = &event.tab {
-                            let _ = machine.tab(tab, |t| t.turn_pending = Some(Instant::now()));
-                        }
+                    // A Stop hook that hands news over continues the turn: nothing is typed over it.
+                    if let Some(taken) = taken.as_mut().filter(|_| event.status == AgentStatus::Done) {
+                        let at = Instant::now();
+                        taken.pending = machine.tab(&taken.tab, |t| t.turn_pending = Some(at)).ok().map(|_| at);
                     }
-                    Ok(merge_context(&machine.recall(&event), &notices))
+                    let reply = Ok(merge_context(&machine.recall(&event), &notices));
+                    let Some(taken) = taken else { return reply.into() };
+                    // After the event: the turn that just ended did not answer what the hook hands over.
+                    return hooks::Answer { reply, sent: Some(Box::new(move |read| machine.handed(taken, read))) };
+                }
+                Message::Compacting { tab, compacting } => {
+                    machine.record_compacting(&tab, compacting);
+                    Ok(String::new())
                 }
                 Message::Usage { usage, account } => {
                     machine.record_usage(account.unwrap_or_else(accounts::default_account), usage);
@@ -4644,7 +4675,8 @@ impl Machine {
                 Message::Project { tab, tool } => machine.project_tool(&tab, tool),
                 Message::Guard { tab, tool, input } => machine.guard(&tab, &tool, &input),
                 message => other(message),
-            }
+            };
+            reply.into()
         })
     }
 
@@ -5959,13 +5991,13 @@ impl Machine {
         if self.blocker(tab).is_some() {
             return;
         }
-        let Some((text, ids)) = self.delegates.claim_notice(tab) else { return };
+        let Some((text, ids, claim)) = self.delegates.claim_news(tab) else { return };
         if self.write_notice(tab, &text) != Ok(true) {
             self.delegates.release_notice(&ids);
-            self.delegates.release_reports(tab);
+            self.delegates.release_claim(claim);
         } else {
             self.delegates.confirm_notice(&ids);
-            let typed = self.delegates.drop_claimed_reports(tab);
+            let typed = self.delegates.confirm_claim(claim);
             self.sent.lock().unwrap().typed(&typed);
             self.emit_tabs();
         }
@@ -6357,6 +6389,7 @@ impl Machine {
             keys: vec![],
             seen: None,
             turn_pending: None,
+            compacting_since: None,
             background_wait: None,
             draft: Draft::default(),
             owes_reload: false,
@@ -6452,17 +6485,39 @@ impl Machine {
         new
     }
 
-    /// The notices the hook adds to the session's context, and the orchestrator requests among them.
-    fn take_notices(&self, event: &AgentEvent) -> (String, Vec<String>) {
+    /// Claims the notices the hook adds to the session's context. They stay queued until
+    /// `handed` learns whether the hook read them.
+    fn take_notices(&self, event: &AgentEvent) -> (String, Option<Taken>) {
         let Some(tab) = event.tab.as_deref() else { return Default::default() };
         let wants = event.status == AgentStatus::Done || (event.status == AgentStatus::Working && event.prompt.is_some());
         if !wants {
             return Default::default();
         }
-        let Some((text, ids)) = self.delegates.claim_notice(tab) else { return Default::default() };
-        self.delegates.confirm_notice(&ids);
-        let typed = self.delegates.drop_claimed_reports(tab);
-        (text, typed)
+        let Some((text, ids, claim)) = self.delegates.claim_news(tab) else { return Default::default() };
+        (text, Some(Taken { tab: tab.to_owned(), ids, claim, pending: None }))
+    }
+
+    /// Ends the claim `take_notices` made once the hook's reply was sent. Notices the hook read
+    /// leave the queue, and the orchestrator requests among them start the Capitão's next turn.
+    /// Those a hook that stopped waiting never read are queued again, and the turn they would
+    /// have continued is over, so the next idle pass types them.
+    fn handed(&self, taken: Taken, read: bool) {
+        if read {
+            self.delegates.confirm_notice(&taken.ids);
+            let typed = self.delegates.confirm_claim(taken.claim);
+            self.mark_typed(&typed);
+            return;
+        }
+        self.delegates.release_notice(&taken.ids);
+        self.delegates.release_claim(taken.claim);
+        if let Some(at) = taken.pending {
+            let _ = self.tab(&taken.tab, |t| {
+                if t.turn_pending == Some(at) {
+                    t.turn_pending = None;
+                }
+            });
+        }
+        self.arm_delegate_pass();
     }
 
     fn stamp_parent_sessions(&self) {
@@ -6506,6 +6561,24 @@ impl Machine {
         Some(turns)
     }
 
+    /// Marks the tab compacting from PreCompact and clears the mark at PostCompact. The mark lapses
+    /// on its own after COMPACT_WAIT, and a timer tells the clients then, as no other event may come.
+    fn record_compacting(&self, tab: &str, compacting: bool) {
+        if self.tab(tab, |t| t.compacting_since = compacting.then(Instant::now)).is_err() {
+            return;
+        }
+        self.emit_tabs();
+        if compacting {
+            let me = self.me.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(COMPACT_WAIT);
+                if let Some(machine) = me.upgrade() {
+                    machine.emit_tabs();
+                }
+            });
+        }
+    }
+
     fn record_status(&self, tab: &str, event: &AgentEvent) {
         // Claude says it waits for input a while after every finished turn too, which asks nothing.
         let was_done = self.tab(tab, |t| t.status == Some(AgentStatus::Done)).unwrap_or(false);
@@ -6542,6 +6615,10 @@ impl Machine {
             }
             if matches!(event.status, AgentStatus::Done | AgentStatus::Failed) {
                 t.turn_pending = None;
+            }
+            // A turn's start or end settles any compaction the hooks marked; a question does not.
+            if event.status != AgentStatus::NeedsInput {
+                t.compacting_since = None;
             }
             if matches!(event.status, AgentStatus::Working | AgentStatus::Failed) {
                 t.background_wait = None;
@@ -11067,6 +11144,120 @@ while True:
 
     #[test]
     #[cfg(unix)]
+    fn a_compaction_marks_its_tab_busy_until_its_end_its_turn_end_or_ten_minutes_clear_it() {
+        let dir = temp("compacting");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let sock = dir.join("pinned.sock");
+        let m = Machine::new(Launch { sock: sock.clone(), ..launch() }, Some(dir.join("config")), None, |_| {});
+        m.listen(|_| Err("not the machine's".into())).unwrap();
+        let path = project.display().to_string();
+        let tab = idle_captain(&m, &path, &dir.join("typed.bin"));
+        let mark = |compacting| serde_json::to_string(&Message::Compacting { tab: tab.clone(), compacting }).unwrap();
+        let shown = |m: &Machine| m.view(&tab).map(|v| (v.compacting, v.status)).unwrap();
+
+        assert_eq!(shown(&m), (false, Some(AgentStatus::Done)), "an idle tab is not compacting");
+        assert_eq!(ask(&sock, &mark(true)), Ok(String::new()));
+        assert_eq!(shown(&m), (true, Some(AgentStatus::Working)), "PreCompact marks the tab, which reads busy");
+        assert_eq!(ask(&sock, &mark(false)), Ok(String::new()));
+        assert_eq!(shown(&m), (false, Some(AgentStatus::Done)), "PostCompact clears the mark, and the tab reads its own status again");
+
+        assert_eq!(ask(&sock, &mark(true)), Ok(String::new()));
+        m.record_event(hook(&tab, AgentStatus::Done));
+        assert_eq!(shown(&m), (false, Some(AgentStatus::Done)), "a turn's Stop clears a mark whose end never came");
+
+        assert_eq!(ask(&sock, &mark(true)), Ok(String::new()));
+        m.tab(&tab, |t| t.compacting_since = Some(Instant::now() - Duration::from_secs(60))).unwrap();
+        assert_eq!(shown(&m), (true, Some(AgentStatus::Working)), "a mark a minute old still holds");
+        m.tab(&tab, |t| t.compacting_since = Some(Instant::now() - Duration::from_secs(601))).unwrap();
+        assert_eq!(shown(&m), (false, Some(AgentStatus::Done)), "a mark older than ten minutes lapses on its own");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Sends `line` as a hook that stopped waiting does: it hangs up before the reply comes.
+    #[cfg(unix)]
+    fn hang_up(sock: &Path, line: &str) {
+        use std::io::Write;
+        let mut stream = crate::ipc::UnixStream::connect(sock).unwrap();
+        writeln!(stream, "{line}").unwrap();
+    }
+
+    /// What `file` holds once it has `len` bytes, or after five seconds.
+    #[cfg(unix)]
+    fn settled(file: &Path, len: usize) -> Vec<u8> {
+        let start = Instant::now();
+        while std::fs::read(file).map_or(0, |b| b.len()) < len && start.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        std::fs::read(file).unwrap_or_default()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn queued_messages_reach_a_busy_capitao_once_each_and_in_order_over_its_turn_ends() {
+        let dir = temp("enqueue-turns");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let (sock, file) = (dir.join("pinned.sock"), dir.join("typed.bin"));
+        let m = Machine::new(Launch { sock: sock.clone(), ..launch() }, Some(dir.join("config")), None, |_| {});
+        m.listen(|_| Err("not the machine's".into())).unwrap();
+        let path = project.display().to_string();
+        let tab = idle_captain(&m, &path, &file);
+        m.record_event(hook(&tab, AgentStatus::Working));
+        let in_flight = || m.sent.lock().unwrap().in_flight(&project).iter().map(|s| s.request_id.clone()).collect::<Vec<_>>();
+        let stop = serde_json::to_string(&Message::Agent(AgentEvent { hook_feedback: true, ..hook(&tab, AgentStatus::Done) })).unwrap();
+
+        for (n, text) in ["Ship the form.", "Then the footer.", "And the docs.", "Check the build."].into_iter().enumerate() {
+            assert_eq!(enqueue(&m, &path, text, &format!("r-{}", n + 1)), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": n + 1 })));
+        }
+        hang_up(&sock, &stop);
+        let first = b"\x1b[200~[Orchestrator] Ship the form.\n[Orchestrator] Then the footer.\n[Orchestrator] And the docs.\n[Orchestrator] Check the build.\x1b[201~\r";
+        assert_eq!(String::from_utf8_lossy(&settled(&file, first.len())), String::from_utf8_lossy(first), "a turn end whose hook stopped waiting lost the queued messages");
+        assert_eq!(in_flight(), ["r-1", "r-2", "r-3", "r-4"], "the typed messages started the next turn");
+
+        let prompt = AgentEvent { hook_feedback: true, prompt: Some("[Orchestrator] Ship the form.".into()), ..hook(&tab, AgentStatus::Working) };
+        assert_eq!(ask(&sock, &serde_json::to_string(&Message::Agent(prompt)).unwrap()), Ok(String::new()), "the turn's prompt got the typed messages again");
+        assert_eq!(enqueue(&m, &path, "Bump the version.", "r-5"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })));
+        assert_eq!(enqueue(&m, &path, "Tag the release.", "r-6"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 2 })));
+        let answered = serde_json::to_string(&Message::Agent(AgentEvent { hook_feedback: true, reply: Some("Shipped.".into()), ..hook(&tab, AgentStatus::Done) })).unwrap();
+        assert_eq!(ask(&sock, &answered), Ok("[Orchestrator] Bump the version.\n[Orchestrator] Tag the release.".into()));
+        assert_eq!(in_flight(), ["r-5", "r-6"], "the turn r-1 to r-4 started ended, and the handed messages started the next");
+        assert_eq!(ask(&sock, &stop), Ok(String::new()), "a later turn end handed a message over twice");
+        assert_eq!(m.view(&tab).unwrap().queued, 0);
+        assert_eq!(std::fs::read(&file).unwrap(), first, "a message was typed twice");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_queued_message_claimed_but_not_handed_over_before_a_stop_is_handed_over_after_it() {
+        let dir = temp("enqueue-claimed");
+        let (project, config) = (dir.join("site"), dir.join("config"));
+        std::fs::create_dir_all(&project).unwrap();
+        let path = project.display().to_string();
+        let before = Machine::new(launch(), Some(config.clone()), None, |_| {});
+        let tab = idle_captain(&before, &path, &dir.join("typed.bin"));
+        before.record_event(hook(&tab, AgentStatus::Working));
+        assert_eq!(enqueue(&before, &path, "Ship it.", "r-1"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })));
+        let done = AgentEvent { hook_feedback: true, ..hook(&tab, AgentStatus::Done) };
+        assert_eq!(before.take_notices(&done).0, "[Orchestrator] Ship it.", "a turn end's hook takes it");
+        assert_eq!(enqueue(&before, &path, "Then the footer.", "r-2"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 2 })), "the message taken is still waiting");
+        assert_eq!(before.delegates.claim_notice(&tab).map(|(text, _)| text), Some("[Orchestrator] Then the footer.".into()), "the idle pass takes the next one");
+        before.quit();
+
+        let after = Machine::new(launch(), Some(config), None, |_| {});
+        let restored = after.restore_tabs().remove(0);
+        assert_eq!(
+            after.delegates.claim_notice(&restored).map(|(text, _)| text),
+            Some("[Orchestrator] Ship it.\n[Orchestrator] Then the footer.".into()),
+            "a message taken but never handed over was lost to the stop"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn a_busy_capitao_refuses_when_the_settings_say_so_and_a_refusal_is_not_remembered() {
         let dir = temp("enqueue-refuse");
         let project = dir.join("site");
@@ -12810,8 +13001,9 @@ Have another model review a risky change before it goes ahead.";
         let tab = m.open_tab(None, false).unwrap();
         m.tab(&tab, |t| t.claude_session = Some("s-1".into())).unwrap();
         assert_eq!(notice_call(&m, &tab, None, "c-1"), Ok(json!(true)));
-        let (context, _) = m.take_notices(&turn_done(&tab, "s-1"));
+        let (context, taken) = m.take_notices(&turn_done(&tab, "s-1"));
         assert_eq!(context, "[pinned] The user approved your remove_machine request (c-1): done.");
+        m.handed(taken.unwrap(), true);
         assert_eq!(m.view(&tab).unwrap().queued, 0, "the notice was typed");
         assert_eq!(notice_call(&m, &tab, None, "c-1"), Ok(json!(true)), "the hub marks it notified on this answer");
         assert_eq!(m.view(&tab).unwrap().queued, 0, "a notice typed once queued again");
