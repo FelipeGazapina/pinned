@@ -210,7 +210,7 @@ pub struct TabView {
     pub read_only: bool,
     /// A Captain's plans as the Orchestrator panel glances at them. The full plans are read with
     /// `Call::Plan`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub plans: Vec<crate::plan::PlanGlance>,
 }
 

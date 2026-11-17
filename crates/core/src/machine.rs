@@ -669,8 +669,11 @@ impl Tab {
 
     /// The tab as clients see it. `turns` are the projects whose Capitão runs a turn that a message
     /// from the global orchestrator started.
-    fn view(&self, id: &str, turns: &HashSet<PathBuf>, queued: &HashMap<String, u32>, work: &HashMap<String, crate::delegate::WorkCost>) -> TabView {
+    /// `plans` is every Captain session's plans, of which a Captain's tab glances at its own.
+    fn view(&self, id: &str, turns: &HashSet<PathBuf>, queued: &HashMap<String, u32>, work: &HashMap<String, crate::delegate::WorkCost>, plans: &crate::plan_store::PlanStore) -> TabView {
         let role = role_of(&self.env);
+        let captain = matches!(role, Some((Role::Orchestrator, _))) && !global::is_global(&self.env);
+        let plans = self.claude_session.as_deref().filter(|_| captain).and_then(|s| plans.get(s)).map(|p| crate::plan::glance_list(p, &[])).unwrap_or_default();
         let compacting = self.compacting();
         TabView {
             id: id.to_owned(),
@@ -718,7 +721,7 @@ impl Tab {
             stopped: self.stopped.clone().filter(|_| !self.live()),
             questions: None,
             read_only: self.child_access() == crate::delegate::Access::ReadOnly,
-            plans: vec![],
+            plans,
         }
     }
 
@@ -1394,7 +1397,13 @@ impl Machine {
             Call::CancelSetupToken { account } => json(self.setup_tokens.cancel(&account)),
             Call::SwitchAccount { tab, account, cols, rows } => json(self.switch_account(&tab, &account, cols, rows)?),
             Call::Thread { tab, from, limit, before } => json(self.thread_page(&tab, from, limit, before)?),
-            Call::Plan { .. } => Err("plans are not built yet".into()),
+            Call::Plan { tab, plan } => {
+                let session = self.captain_session(&tab)?;
+                let plans = self.plans.lock().unwrap();
+                let kept = session.as_deref().and_then(|s| plans.get(s)).map_or(&[][..], |p| &p.plans[..]);
+                let views: Vec<crate::plan::PlanView> = kept.iter().filter(|p| plan.as_deref().is_none_or(|id| p.id == id)).map(|p| crate::plan::derive(p, &[])).collect();
+                Ok(json!(views))
+            }
             Call::Prompt { tab, text } => json(self.type_prompt(&tab, &text).map_err(NotTyped::for_person)?),
             Call::Workspace { tab } => {
                 let cwd = self.tab(&tab, |t| t.cwd.clone())?;
@@ -1776,7 +1785,9 @@ impl Machine {
         let turns = self.turns.lock().unwrap().clone();
         let queued = self.delegates.queued();
         let work = self.delegates.work_costs();
-        let views: Vec<TabView> = self.tabs.lock().unwrap().iter().map(|(id, t)| t.view(id, &turns, &queued, &work)).collect();
+        let plans = self.plans.lock().unwrap();
+        let views: Vec<TabView> = self.tabs.lock().unwrap().iter().map(|(id, t)| t.view(id, &turns, &queued, &work, &plans)).collect();
+        drop(plans);
         let mut views: Vec<TabView> = views.into_iter().map(|v| self.shown(v)).collect();
         views.sort_by_key(|v| v.opened);
         views
@@ -1786,7 +1797,8 @@ impl Machine {
         let turns = self.turns.lock().unwrap().clone();
         let queued = self.delegates.queued();
         let work = self.delegates.work_costs();
-        self.tab(tab, |t| t.view(tab, &turns, &queued, &work)).map(|v| self.shown(v))
+        let view = { let plans = self.plans.lock().unwrap(); self.tab(tab, |t| t.view(tab, &turns, &queued, &work, &plans)) };
+        view.map(|v| self.shown(v))
     }
 
     /// `view` with the questionnaire open on its tab, which makes it a question mid-turn.
@@ -2856,12 +2868,17 @@ impl Machine {
         if let Some(task) = self.thread_task(tab, false) {
             let _ = self.delegates.cancel_tree(&task, "its thread was closed", path.as_deref());
         }
-        let (closed, owned, last) = {
+        let (closed, owned, last, gone) = {
             let mut tabs = self.tabs.lock().unwrap();
             let closed = tabs.remove(tab);
             let owned: Vec<PathBuf> = tabs.values().filter_map(|t| t.made.clone()).collect();
-            (closed, owned, tabs.is_empty())
+            // A session no other tab holds is gone, and its plans with it.
+            let gone = closed.as_ref().and_then(|t| t.claude_session.clone()).filter(|s| !tabs.values().any(|t| t.claude_session.as_ref() == Some(s)));
+            (closed, owned, tabs.is_empty(), gone)
         };
+        if let Some(session) = gone {
+            self.plans.lock().unwrap().drop_session(&session);
+        }
         let made = closed.as_ref().and_then(|t| t.made.clone());
         drop(closed);
         self.delegates.drop_kept_worktrees(tab, &owned, path.as_deref());
@@ -3049,7 +3066,7 @@ impl Machine {
             let turns = self.turns.lock().unwrap().clone();
             let queued = self.delegates.queued();
             let tabs = self.tabs.lock().unwrap();
-            tabs.iter().map(|(id, t)| (t.view(id, &turns, &queued, &HashMap::new()), t.idle_for_archive())).collect()
+            tabs.iter().map(|(id, t)| (t.view(id, &turns, &queued, &HashMap::new(), &Default::default()), t.idle_for_archive())).collect()
         };
         let candidates: Vec<(TabView, bool)> = candidates.into_iter().map(|(view, idle)| (self.shown(view), idle)).collect();
         let looked = Instant::now();
@@ -3527,6 +3544,15 @@ impl Machine {
         });
     }
 
+    /// The Claude session of `tab` when it is a project's Captain, which keeps its plans by it.
+    /// None for any other seat, or a Captain whose session has not started.
+    fn captain_session(&self, tab: &str) -> Result<Option<String>, String> {
+        self.tab(tab, |t| match role_of(&t.env) {
+            Some((Role::Orchestrator, _)) if !global::is_global(&t.env) => t.claude_session.clone(),
+            _ => None,
+        })
+    }
+
     fn project_tool(&self, tab: &str, tool: ProjectTool) -> Result<String, String> {
         let global = self.tab(tab, |t| global::is_global(&t.env))?;
         let only_global = || if global { Ok(()) } else { Err("only the global orchestrator has this tool".to_owned()) };
@@ -3598,7 +3624,17 @@ impl Machine {
                 };
                 text_json(self.change_tastes(call, reset)?.view(&scope))
             }
-            ProjectTool::PlanSet(_) | ProjectTool::PlanStep(_) | ProjectTool::PlanFix(_) | ProjectTool::PlanClose(_) => Err("plan tools are not built yet".into()),
+            ProjectTool::PlanSet(_) | ProjectTool::PlanStep(_) | ProjectTool::PlanFix(_) | ProjectTool::PlanClose(_) => {
+                let session = self.captain_session(tab)?.ok_or("only a project's Captain keeps a plan")?;
+                let now = unix_millis();
+                self.plans.lock().unwrap().write(&session, |plans| match tool {
+                    ProjectTool::PlanSet(call) => crate::plan::set(plans, call, now, &[], now),
+                    ProjectTool::PlanStep(call) => crate::plan::step(plans, call, &[], now),
+                    ProjectTool::PlanFix(call) => crate::plan::fix(plans, call, &[], now),
+                    ProjectTool::PlanClose(call) => crate::plan::close(plans, call, &[], now),
+                    _ => unreachable!("only plan tools reach here"),
+                })
+            }
             ProjectTool::TellOrchestrator { text } => match self.tab(tab, |t| role_of(&t.env))? {
                 Some((Role::Orchestrator, project)) => text_json(self.report_up(tab, &project, text, vec![])?),
                 _ => Err("only a project's Capitão reports to the global orchestrator".into()),
@@ -3990,7 +4026,7 @@ impl Machine {
     /// The workers `from` sees, one per line, each indented under the worker that started it:
     /// the orchestrator sees every worker of its project, any other thread the ones it started.
     fn workers(&self, from: &str, project: &Path) -> String {
-        let workers: Vec<TabView> = self.tabs.lock().unwrap().iter().filter(|(_, t)| role_of(&t.env).is_some_and(|(r, p)| r == Role::Worker && p == project)).map(|(id, t)| t.view(id, &HashSet::new(), &HashMap::new(), &HashMap::new())).collect();
+        let workers: Vec<TabView> = self.tabs.lock().unwrap().iter().filter(|(_, t)| role_of(&t.env).is_some_and(|(r, p)| r == Role::Worker && p == project)).map(|(id, t)| t.view(id, &HashSet::new(), &HashMap::new(), &HashMap::new(), &Default::default())).collect();
         let mut workers: Vec<TabView> = workers.into_iter().map(|w| self.shown(w)).collect();
         workers.sort_by_key(|w| w.opened);
         let everyone = self.tab(from, |t| role_of(&t.env)).ok().flatten().is_some_and(|(role, _)| role == Role::Orchestrator);
@@ -4515,6 +4551,8 @@ impl Machine {
             .iter()
             .filter_map(|id| self.tab(id, |t| t.claude_session.clone()).ok().flatten().map(|session| (session, id.clone())))
             .collect();
+        // Plans of a session no restored tab holds have nothing left to show on.
+        self.plans.lock().unwrap().keep_only(&sessions.iter().map(|(session, _)| session.as_str()).collect());
         self.delegates.rebind(&sessions);
         self.resume_workers(&sessions);
         if self.delegates.has_pending() {
@@ -5132,7 +5170,7 @@ impl Machine {
 
     /// What the thread `tab` waits on the user for right now, or None while it waits on nothing.
     fn thread_ask(&self, tab: &str) -> Option<crate::delegate::RemoteAsk> {
-        let view = self.shown(self.tab(tab, |t| t.view(tab, &HashSet::new(), &HashMap::new(), &HashMap::new())).ok()?);
+        let view = self.shown(self.tab(tab, |t| t.view(tab, &HashSet::new(), &HashMap::new(), &HashMap::new(), &Default::default())).ok()?);
         if global::waiting_kind(&view) != Some(global::WaitingKind::NeedsInput) {
             return None;
         }
@@ -7247,6 +7285,10 @@ fn login_shell_path() -> Option<String> {
 #[cfg(windows)]
 fn login_shell_path() -> Option<String> {
     None
+}
+
+fn unix_millis() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
 fn unix_now() -> u64 {

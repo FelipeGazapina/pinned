@@ -434,7 +434,7 @@ fn reminder_tools() -> Vec<Value> {
 
 /// Each project tool, named as `ProjectTool` tags it, and who is offered it. Every session gets the
 /// memory tools; one outside a project is told it has no memory.
-fn project_tools() -> [(Audience, serde_json::Value); 20] {
+fn project_tools() -> [(Audience, serde_json::Value); 24] {
     let no_args = serde_json::json!({ "type": "object", "properties": {} });
     let project = serde_json::json!({ "type": "string", "description": "The project's key from projects, its folder on this machine, or <machine>:<folder> for a folder on another machine." });
     let machine = serde_json::json!({ "type": "string", "description": "The machine's id or name from projects, with or without @. Pass it whenever projects lists the project on more than one machine." });
@@ -680,6 +680,91 @@ fn project_tools() -> [(Audience, serde_json::Value); 20] {
                 "type": "object",
                 "properties": { "text": { "type": "string", "description": "The report, written so it stands alone." } },
                 "required": ["text"],
+            },
+        })),
+        (Audience::Captains, serde_json::json!({
+            "name": "plan_set",
+            "description": "Write or rewrite your plan for the user's ask as lists of steps the user follows in the Orchestrator panel. Without plan, rewrites your one unfinished plan, or starts one when you have none; pass new: true to start another beside it. Pass the ids of lists and steps you keep, so their states stay. Limits: 8 lists, 20 steps per list, 120 steps in all; a name is up to 60 characters, a step's what up to 300, the title up to 80. You keep at most 6 unfinished plans. Answers the plan as one line per list.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "plan": { "type": "string", "description": "The plan's id, as in p1, to rewrite that plan." },
+                    "new": { "type": "boolean", "description": "Start another plan instead of rewriting one." },
+                    "title": { "type": "string", "description": "What the plan delivers, up to 80 characters." },
+                    "lists": {
+                        "type": "array",
+                        "description": "Up to 8 lists, each a line of work run in order.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string", "description": "The id of a list you keep, as in l1." },
+                                "name": { "type": "string", "description": "Up to 60 characters." },
+                                "steps": {
+                                    "type": "array",
+                                    "description": "Up to 20 steps.",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "id": { "type": "string", "description": "The id of a step you keep, as in s1." },
+                                            "name": { "type": "string", "description": "Up to 60 characters." },
+                                            "what": { "type": "string", "description": "What the step does, up to 300 characters." },
+                                        },
+                                        "required": ["name"],
+                                    },
+                                },
+                            },
+                            "required": ["name"],
+                        },
+                    },
+                },
+            },
+        })),
+        (Audience::Captains, serde_json::json!({
+            "name": "plan_step",
+            "description": "Report on one step of your plan: pending, running, waiting, done or failed, with a note of up to 200 characters the user reads beside it. Answers the plan as one line per list.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "step": { "type": "string", "description": "The step's id, as in s2." },
+                    "state": { "type": "string", "enum": ["pending", "running", "waiting", "done", "failed"] },
+                    "note": { "type": "string", "description": "Why, up to 200 characters." },
+                },
+                "required": ["step", "state"],
+            },
+        })),
+        (Audience::Captains, serde_json::json!({
+            "name": "plan_fix",
+            "description": "Open a fix under a failed step: up to 6 steps that repair it, and at most 3 fixes per step. A name is up to 60 characters, a what up to 300. Answers the plan as one line per list.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "step": { "type": "string", "description": "The failed step's id." },
+                    "steps": {
+                        "type": "array",
+                        "description": "Up to 6 steps.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": { "type": "string", "description": "Up to 60 characters." },
+                                "what": { "type": "string", "description": "Up to 300 characters." },
+                            },
+                            "required": ["name"],
+                        },
+                    },
+                },
+                "required": ["step", "steps"],
+            },
+        })),
+        (Audience::Captains, serde_json::json!({
+            "name": "plan_close",
+            "description": "Give up a plan the user no longer wants, with a reason of up to 200 characters. Answers the closed plan.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "plan": { "type": "string", "description": "The plan's id, as in p1." },
+                    "reason": { "type": "string", "description": "Why, up to 200 characters." },
+                },
+                "required": ["plan", "reason"],
             },
         })),
     ]
