@@ -35,8 +35,8 @@ const BACKOFF_STABLE: Duration = Duration::from_secs(30);
 const BACKOFF_JITTER: f64 = 0.25;
 const SYNC_FIRST: Duration = Duration::from_secs(5);
 const SYNC_EVERY: Duration = Duration::from_secs(20);
-/// After the hub refuses a project's push, the same files wait this long before they go again,
-/// twice as long after each refusal of them, up to `PUSH_HOLD_MAX`.
+/// After the hub refuses a push at the account's limit, the account's pushes that grow what the hub
+/// holds wait this long, twice as long after each refused probe, up to `PUSH_HOLD_MAX`.
 const PUSH_HOLD_MIN: Duration = SYNC_EVERY;
 const PUSH_HOLD_MAX: Duration = Duration::from_secs(10 * 60);
 /// The close code the hub sends when it doesn't know the token a socket signed in with.
@@ -285,20 +285,21 @@ struct Syncer {
     backoff: PushBackoff,
 }
 
-/// Holds back a project's push after the hub refused it, by sync key, while its files to send
-/// stay the same. A push the hub takes ends the hold; changed files go at the next cycle. The
-/// project lists and pulls every cycle all the same.
-struct PushBackoff(HashMap<String, Held>, fn() -> f64);
-
-struct Held {
-    sending: u64,
-    wait: Duration,
-    until: Instant,
+/// Holds back the account's pushes once the hub refused one at its limit. The hub refuses a push
+/// that grows the account past its limit whichever project sends it, so one hold covers every
+/// project and plugin share. Until it ends, a sync sends only what does not grow the hub's copy
+/// (see `sync::sync_shrinking`); when it ends, the next sync is a probe that sends everything. The
+/// hold is not restarted when the files to send change: it grows only with each refused probe.
+/// The project lists and pulls every cycle all the same.
+struct PushBackoff {
+    limit: Option<Limit>,
+    draw: fn() -> f64,
 }
 
-/// The key a plugin share's push is held under: the Claude home it publishes.
-fn share_key(share: &sync::PluginShare) -> String {
-    format!("{} {}", sync::PLUGINS_KEY, share.claude_home.display())
+struct Limit {
+    /// The hold before jitter: `PUSH_HOLD_MIN` after the first refusal, doubled after each refused probe.
+    wait: Duration,
+    until: Instant,
 }
 
 impl Default for PushBackoff {
@@ -310,41 +311,51 @@ impl Default for PushBackoff {
 impl PushBackoff {
     /// `draw` is the jitter source: a draw in `0.0..1.0` for each hold.
     fn with_draw(draw: fn() -> f64) -> Self {
-        PushBackoff(HashMap::new(), draw)
+        PushBackoff { limit: None, draw }
     }
 
     fn sync(&mut self, hub: &impl sync::Hub, state: &mut sync::State, checkout: &sync::Checkout, now: Instant) -> Result<sync::Synced, String> {
-        let key = &checkout.project.key;
-        let done = sync::sync_with(hub, state, checkout, SystemTime::now(), self.hold(key, now))?;
-        self.record(key, &done.push, now);
+        let shrinking = self.shrinking(now);
+        let done = if shrinking { sync::sync_shrinking(hub, state, checkout, SystemTime::now()) } else { sync::sync(hub, state, checkout, SystemTime::now()) }?;
+        self.record(&done, shrinking, now);
         Ok(done)
     }
 
     fn sync_plugins(&mut self, hub: &impl sync::Hub, state: &mut sync::State, share: &sync::PluginShare, now: Instant) -> Result<sync::Synced, String> {
-        let key = share_key(share);
-        let done = sync::sync_plugins_with(hub, state, share, SystemTime::now(), self.hold(&key, now))?;
-        self.record(&key, &done.push, now);
+        let shrinking = self.shrinking(now);
+        let done = if shrinking { sync::sync_plugins_shrinking(hub, state, share, SystemTime::now()) } else { sync::sync_plugins(hub, state, share, SystemTime::now()) }?;
+        self.record(&done, shrinking, now);
         Ok(done)
     }
 
-    fn hold(&self, key: &str, now: Instant) -> Option<u64> {
-        self.0.get(key).filter(|held| now < held.until).map(|held| held.sending)
+    /// Whether the hold is on at `now`: pushes send only what does not grow the hub's copy.
+    fn shrinking(&self, now: Instant) -> bool {
+        self.limit.as_ref().is_some_and(|limit| now < limit.until)
     }
 
-    fn record(&mut self, key: &str, push: &sync::Push, now: Instant) {
-        match push {
-            sync::Push::Done => {
-                self.0.remove(key);
-            }
-            sync::Push::Held => {}
-            sync::Push::Refused { sending, .. } => {
-                let wait = match self.0.get(key) {
-                    Some(held) if held.sending == *sending => (held.wait * 2).min(PUSH_HOLD_MAX),
-                    _ => PUSH_HOLD_MIN,
+    fn record(&mut self, done: &sync::Synced, shrinking: bool, now: Instant) {
+        match &done.push {
+            sync::Push::Refused { .. } => {
+                let wait = match &self.limit {
+                    Some(limit) => (limit.wait * 2).min(PUSH_HOLD_MAX),
+                    None => PUSH_HOLD_MIN,
                 };
-                self.0.insert(key.to_owned(), Held { sending: *sending, wait, until: now + wait });
+                self.limit = Some(Limit { wait, until: now + jittered(wait, (self.draw)()) });
             }
+            // A probe the hub takes ends the hold. A shrinking push leaves the growth for the probe.
+            sync::Push::Done if !shrinking && !done.pushed.is_empty() => self.limit = None,
+            _ => {}
         }
+    }
+
+    /// Whether the hub's limit holds the account's pushes, probe due or not.
+    fn limited(&self) -> bool {
+        self.limit.is_some()
+    }
+
+    /// A user action ends the hold, so the next sync is a probe.
+    fn end(&mut self) {
+        self.limit = None;
     }
 }
 
@@ -383,7 +394,7 @@ impl Syncer {
     fn cycle(&mut self, shared: &Shared, hub: &impl sync::Hub, machine: &Machine, file: &Path) {
         // A user action ends every hold, so the refused pushes go out in this cycle.
         if shared.sync_now.swap(false, Ordering::SeqCst) {
-            self.backoff.0.clear();
+            self.backoff.end();
         }
         if self.state.is_none() {
             match sync::State::load(file, &crate::machine::home().join(".claude")) {
@@ -403,8 +414,10 @@ impl Syncer {
         let Some(state) = self.state.as_mut() else { return };
         let checkouts = machine.checkouts();
         let shares = machine.plugin_shares();
-        // A project that left the machine no longer holds the notice.
-        self.backoff.0.retain(|key, _| checkouts.iter().any(|c| &c.project.key == key) || shares.iter().any(|s| share_key(s) == *key));
+        // With nothing left on the machine to send, the account's hold has nothing to hold.
+        if checkouts.is_empty() && shares.is_empty() {
+            self.backoff.end();
+        }
         for checkout in checkouts {
             if !shared.online() {
                 break;
@@ -448,7 +461,7 @@ impl Syncer {
                 Err(e) => eprintln!("pinned: could not sync plugins: {e}"),
             }
         }
-        machine.hold_sync_limit(!self.backoff.0.is_empty());
+        machine.hold_sync_limit(self.backoff.limited());
         if let Err(e) = state.flush() {
             eprintln!("pinned: {e}");
         }
@@ -478,11 +491,16 @@ impl Backoff {
     /// The wait before the next dial, varied by `BACKOFF_JITTER` around the current step and never
     /// past `BACKOFF_MAX`. `unit` is a draw in `0.0..1.0`.
     fn wait(&mut self, unit: f64) -> Duration {
-        let spread = 1.0 + BACKOFF_JITTER * (2.0 * unit.clamp(0.0, 1.0) - 1.0);
-        let wait = self.next.mul_f64(spread).min(BACKOFF_MAX);
+        let wait = jittered(self.next, unit).min(BACKOFF_MAX);
         self.next = (self.next * 2).min(BACKOFF_MAX);
         wait
     }
+}
+
+/// `step` varied by `BACKOFF_JITTER` either way: `unit` is a draw in `0.0..1.0`, and 0.0 is the shortest.
+fn jittered(step: Duration, unit: f64) -> Duration {
+    let spread = 1.0 + BACKOFF_JITTER * (2.0 * unit.clamp(0.0, 1.0) - 1.0);
+    step.mul_f64(spread)
 }
 
 /// A draw in `0.0..1.0` from the standard library's randomly seeded hasher.
@@ -1712,7 +1730,9 @@ mod tests {
     }
 
     #[test]
-    fn a_held_push_goes_out_at_the_next_cycle_once_the_files_change_and_a_taken_push_ends_the_wait() {
+    fn a_changed_file_waits_out_the_account_hold_and_the_probe_the_hub_takes_ends_it() {
+        // Refusals at 0, 20 and 60 s hold 20, 40 and 80 s. The edits at 40 and 120 s grow nothing
+        // sent during the hold and change nothing about it; the probe at 140 s is taken.
         let (dir, checkout, notes) = full_checkout("full-hub-reset");
         let hub = FullHub::default();
         let at = pushed_at(&hub, &checkout, 8, |seconds| match seconds {
@@ -1721,7 +1741,7 @@ mod tests {
             120 => std::fs::write(&notes, "notes edited again at second 120").unwrap(),
             _ => {}
         });
-        assert_eq!(at, [0, 20, 40, 60, 100, 120]);
+        assert_eq!(at, [0, 20, 60, 140]);
         assert_eq!(hub.files.borrow()["claude/memory/notes.md"].entry.sha, sync::sha(b"notes edited again at second 120"));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -1732,7 +1752,7 @@ mod tests {
     }
 
     #[test]
-    fn a_held_push_stays_held_while_only_the_hubs_history_grows_and_goes_once_this_machine_adds_a_turn() {
+    fn a_held_history_waits_for_a_probe_the_hub_takes_and_then_merges_both_sides() {
         let (dir, mut mac, _) = full_checkout("held-history-mac");
         let (mini_dir, mut mini, _) = full_checkout("held-history-mini");
         mac.history = Some(dir.join("history.jsonl"));
@@ -1764,7 +1784,7 @@ mod tests {
                 at.push(seconds);
             }
         }
-        assert_eq!(at, [0, 20, 60, 140, 200, 220, 260], "the hub's turns never end the hold; mac's own turn does");
+        assert_eq!(at, [0, 20, 60, 140, 300], "the hold keeps the history back, the hub's turns and mac's own alike, until the probe the hub refuses at 300 s");
         assert_eq!(std::fs::read_to_string(&mac_history).unwrap(), [turn("both", 1), turn("mac", 2), turn("mac", 3)].concat(), "the history is not merged while the hub refuses it");
 
         hub.room.set(true);
@@ -1779,18 +1799,18 @@ mod tests {
     fn a_taken_push_ends_the_hold_so_a_later_refusal_waits_twenty_seconds_again() {
         let (dir, checkout, notes) = full_checkout("taken-ends-hold");
         let hub = FullHub::default();
+        // The hub has room from 60 s, the probe there is taken and ends the hold; the next refusal, at
+        // 80 s, holds 20 s, so the probe after it is at 100 s.
         let at = pushed_at(&hub, &checkout, 6, |seconds| match seconds {
-            40 => {
-                hub.room.set(true);
-                std::fs::write(&notes, "b").unwrap();
-            }
-            60 => {
+            40 => std::fs::write(&notes, "b").unwrap(),
+            60 => hub.room.set(true),
+            80 => {
                 hub.room.set(false);
                 std::fs::write(&notes, "notes written at the limit").unwrap();
             }
             _ => {}
         });
-        assert_eq!(at, [0, 20, 40, 60, 80]);
+        assert_eq!(at, [0, 20, 60, 80, 100]);
         let _ = std::fs::remove_dir_all(dir);
     }
 

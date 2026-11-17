@@ -282,6 +282,17 @@ pub fn sync(hub: &impl Hub, state: &mut State, checkout: &Checkout, now: SystemT
 /// Like `sync`, but sends nothing while the files to send are still those of `hold`, the
 /// `sending` of a refused push. It lists and pulls all the same.
 pub fn sync_with(hub: &impl Hub, state: &mut State, checkout: &Checkout, now: SystemTime, hold: Option<u64>) -> Result<Synced, String> {
+    sync_checkout(hub, state, checkout, now, hold, false)
+}
+
+/// Like `sync`, at the account's limit: sends only the files that do not grow the copy the hub
+/// holds (deletions, and files no bigger than theirs), keeps every other file for a later sync the
+/// hub takes, and sends no history, which grows with every turn. It lists and pulls all the same.
+pub fn sync_shrinking(hub: &impl Hub, state: &mut State, checkout: &Checkout, now: SystemTime) -> Result<Synced, String> {
+    sync_checkout(hub, state, checkout, now, None, true)
+}
+
+fn sync_checkout(hub: &impl Hub, state: &mut State, checkout: &Checkout, now: SystemTime, hold: Option<u64>, shrinking: bool) -> Result<Synced, String> {
     let roots = Roots::new(checkout);
     let key = &checkout.project.key;
     let mut local: BTreeMap<String, (String, u64)> = BTreeMap::new();
@@ -303,7 +314,7 @@ pub fn sync_with(hub: &impl Hub, state: &mut State, checkout: &Checkout, now: Sy
             state.flush()?;
         }
     }
-    let synced = exchange(hub, state, key, &agreed_key, &mut agreed, &local, &|path| roots.local(path), now, true, hold)?;
+    let synced = exchange(hub, state, key, &agreed_key, &mut agreed, &local, &|path| roots.local(path), now, true, hold, shrinking)?;
     state.keep_agreed(agreed_key, agreed);
     Ok(synced)
 }
@@ -319,6 +330,7 @@ fn exchange(
     now: SystemTime,
     sessions: bool,
     hold: Option<u64>,
+    shrinking: bool,
 ) -> Result<Synced, String> {
     let remote: BTreeMap<String, Entry> = hub.list(key)?.into_iter().map(|e| (e.path.clone(), e)).collect();
     let paths: BTreeSet<String> = local.keys().chain(remote.keys()).chain(agreed.keys()).filter(|p| resolve(p).is_some()).cloned().collect();
@@ -405,6 +417,10 @@ fn exchange(
             history = Some((path, None));
         }
     }
+    // At the account's limit no history goes: it grows with every turn, so it waits for a probe.
+    if shrinking {
+        history = None;
+    }
 
     // Deletions go first, in batches of their own: they never grow the account, so a hub at its
     // limit still takes them, and a refused addition never holds one back.
@@ -451,6 +467,11 @@ fn exchange(
                     }
                 }
             };
+            // At the limit a file that would grow the copy the hub holds waits for a probe; a deletion
+            // grows nothing, and is sent.
+            if shrinking && file.entry.size > remote.get(&path).map_or(0, |e| e.size) {
+                continue;
+            }
             size += file.entry.size;
             pending.push((file.entry.path.clone(), file.data.as_ref().map(|_| file.entry.sha.clone())));
             batch.push(file);
@@ -740,6 +761,15 @@ pub fn sync_plugins(hub: &impl Hub, state: &mut State, share: &PluginShare, now:
 
 /// Like `sync_plugins`, holding the push back the way `sync_with` does.
 pub fn sync_plugins_with(hub: &impl Hub, state: &mut State, share: &PluginShare, now: SystemTime, hold: Option<u64>) -> Result<Synced, String> {
+    sync_plugin_share(hub, state, share, now, hold, false)
+}
+
+/// Like `sync_shrinking`, for a plugin share.
+pub fn sync_plugins_shrinking(hub: &impl Hub, state: &mut State, share: &PluginShare, now: SystemTime) -> Result<Synced, String> {
+    sync_plugin_share(hub, state, share, now, None, true)
+}
+
+fn sync_plugin_share(hub: &impl Hub, state: &mut State, share: &PluginShare, now: SystemTime, hold: Option<u64>, shrinking: bool) -> Result<Synced, String> {
     publish(share)?;
     let mut local = BTreeMap::new();
     for (path, file) in plugin_files(share) {
@@ -750,7 +780,7 @@ pub fn sync_plugins_with(hub: &impl Hub, state: &mut State, share: &PluginShare,
     let agreed_key = format!("{PLUGINS_KEY} {}", share.claude_home.display());
     let mut agreed = state.agreed.get(&agreed_key).cloned().unwrap_or_default();
     let keep = conflicting_user_skills(&local, &agreed, &hub.list(PLUGINS_KEY)?);
-    let synced = exchange(hub, state, PLUGINS_KEY, &agreed_key, &mut agreed, &local, &|path| if keep.contains(path) { None } else { plugin_local(share, path) }, now, false, hold)?;
+    let synced = exchange(hub, state, PLUGINS_KEY, &agreed_key, &mut agreed, &local, &|path| if keep.contains(path) { None } else { plugin_local(share, path) }, now, false, hold, shrinking)?;
     state.keep_agreed(agreed_key, agreed);
     Ok(synced)
 }
