@@ -254,6 +254,36 @@ test("auto-open: not on another thread, not over a shown surface, not after the 
   assert.equal(closed.panel.open, false, "it stays closed after the user closed it");
 });
 
+test("auto-open after a resume: a reused plan id opens the surface once in the new session", () => {
+  const h = harness();
+  const tab = captain([glance()]);
+  h.tabs.push(tab);
+  h.context.active = tab;
+  h.push();
+  assert.equal(h.log.added.length, 1, "the session's first plan p1 opens the Plan surface");
+
+  // The user closes the panel; /resume starts a new session whose first plan is p1 again, with another title.
+  tab.panel.open = false;
+  tab.panel.active = null;
+  tab.panel.surfaces = [];
+  tab.view.session = "s2";
+  tab.view.plans = [glance({ id: "p1", title: "Tidy the README" })];
+  h.push();
+  assert.equal(h.log.added.length, 2, "the new session's p1 opens the surface too");
+  assert.equal(h.log.added[1].kind, "plan");
+  assert.equal(tab.panel.open, true);
+
+  h.push();
+  assert.equal(h.log.added.length, 2, "the same p1 in the same session does not open it again");
+  assert.deepEqual(plain(tab.panel.autoOpened), { session: "s2", ids: ["p1"] }, "the saved state holds only the new session's entries");
+
+  // A session change with nothing new to open still drops the old session's entries.
+  tab.view.session = "s3";
+  tab.view.plans = [];
+  h.push();
+  assert.deepEqual(plain(tab.panel.autoOpened), { session: "s3", ids: [] }, "an empty new session keeps no old entries");
+});
+
 test("a resume that drops unfinished plans shows one line until it is dismissed", async () => {
   const two = [plan(), plan({ id: "p2", title: "Fix the export job", lists: [] })];
   const h = harness({ reply: () => two });
