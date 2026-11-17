@@ -1271,7 +1271,7 @@ async fn forward_team_box(hub: Arc<Hub>, account: Arc<Account>, machine: String,
 
 /// The workflow and subject a workflow session's callback acts for: a stage or a run variable for
 /// its subject, a Slack reply or a Linear issue for its Slack thread. None for any other call.
-fn run_work(call: &HubCall) -> Option<(String, Subject)> {
+pub(crate) fn run_work(call: &HubCall) -> Option<(String, Subject)> {
     match call {
         HubCall::Stage { connector, subject, .. } | HubCall::RunSet { connector, subject, .. } => Some((connector.clone(), subject.clone())),
         HubCall::SlackReply { connector, channel, thread, .. }
