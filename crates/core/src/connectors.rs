@@ -1037,6 +1037,11 @@ struct Store {
     /// What each Linear change workflow's checks did not fire, by workflow id.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     change_counts: BTreeMap<String, ChangeCounts>,
+    /// Linear changes a later check fires again, by workflow id and then claim key, with the
+    /// change's time: one a check left for the next, since a check starts one run of a workflow on
+    /// an issue. Each is tried until it is older than `CATCH_UP`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    change_retries: BTreeMap<String, BTreeMap<String, String>>,
     connectors: Vec<Connector>,
 }
 
@@ -1388,6 +1393,7 @@ impl Store {
             since: self.connectors.iter().filter(|c| pass.read.contains(&c.id)).map(|c| (c.id.clone(), c.since.clone())).collect(),
             from: self.linear_changes_from.clone(),
             counts: self.change_counts.clone(),
+            retries: self.change_retries.clone(),
         };
         for c in self.connectors.iter_mut().filter(|c| pass.read.contains(&c.id)) {
             // What came before the floor was skipped: the next read starts there at the oldest.
@@ -1409,6 +1415,21 @@ impl Store {
         for (id, n) in &pass.claim_errors {
             self.change_counts.entry(id.clone()).or_default().claim_errors += n;
         }
+        for (workflow, key) in &pass.retried {
+            if let Some(keys) = self.change_retries.get_mut(workflow) {
+                keys.remove(key);
+            }
+        }
+        for (workflow, key, at) in &pass.deferred {
+            self.change_retries.entry(workflow.clone()).or_default().insert(key.clone(), at.clone());
+        }
+        // A retry past the floor is never fired, its workflow's or not (one turned off, deleted).
+        if let Some(floor) = pass.floor {
+            self.change_retries.retain(|_, keys| {
+                keys.retain(|_, at| DateTime::parse_from_rfc3339(at).is_ok_and(|at| at > floor));
+                !keys.is_empty()
+            });
+        }
         Some(undo)
     }
 
@@ -1420,6 +1441,7 @@ impl Store {
         }
         self.linear_changes_from = undo.from;
         self.change_counts = undo.counts;
+        self.change_retries = undo.retries;
     }
 
     /// The runs the won `fires` start: a graph run for a workflow drawn as a graph, else today's
@@ -1986,15 +2008,21 @@ impl Guards {
         })
     }
 
-    /// Whether a guard refuses the start of `workflow` on `change`, made at `at`.
-    fn refusal(&self, workflow: &str, change: &linear::Change, at: DateTime<Utc>) -> Option<Refusal> {
+    /// Whether a guard refuses the start of `workflow` on `change`, made at `at`. `pending` are
+    /// changes this check's read took, as (workflow, issue, change time), that have not started
+    /// yet: they count as starts.
+    fn refusal(&self, workflow: &str, change: &linear::Change, at: DateTime<Utc>, pending: &[(String, String, DateTime<Utc>)]) -> Option<Refusal> {
         if self.echo(change, at) {
             return Some(Refusal::Echo);
         }
-        if self.last_start.get(&(workflow.to_owned(), change.issue_id.clone())).is_some_and(|last| within(*last, at, COOLDOWN)) {
+        let issue = &change.issue_id;
+        let pending = || pending.iter().filter(|(_, on, _)| on == issue);
+        let last = self.last_start.get(&(workflow.to_owned(), issue.clone())).into_iter().chain(pending().filter(|(w, ..)| w == workflow).map(|(.., t)| t));
+        if last.into_iter().any(|t| within(*t, at, COOLDOWN)) {
             return Some(Refusal::Cooled);
         }
-        let started = self.starts.get(&change.issue_id).map_or(0, |starts| starts.iter().filter(|s| within(**s, at, CAP_WINDOW)).count());
+        let starts = self.starts.get(issue).into_iter().flatten().chain(pending().map(|(.., t)| t));
+        let started = starts.filter(|s| within(**s, at, CAP_WINDOW)).count();
         (started >= ISSUE_CAP).then_some(Refusal::Capped)
     }
 
@@ -2050,6 +2078,11 @@ struct ChangePass {
     from: Option<Option<String>>,
     skipped: BTreeMap<String, u64>,
     claim_errors: BTreeMap<String, u64>,
+    /// The retries (`Store::change_retries`) this read reached, as (workflow, key): each leaves the
+    /// retries, unless it waits again in `deferred`.
+    retried: Vec<(String, String)>,
+    /// The changes this read left for the next check, as (workflow, key, change time).
+    deferred: Vec<(String, String, String)>,
     errors: Vec<String>,
 }
 
@@ -2058,6 +2091,7 @@ struct ChangeUndo {
     since: Vec<(String, String)>,
     from: Option<String>,
     counts: BTreeMap<String, ChangeCounts>,
+    retries: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 fn stamp(at: DateTime<Utc>) -> String {
@@ -2374,9 +2408,6 @@ pub struct Connectors {
     claimer: String,
     /// Fires, as `<workflow>\n<key>`, whose claim answered an error: the next claim of one is a retry.
     unsure: Mutex<std::collections::HashSet<String>>,
-    /// The won fire of each Linear change run not yet handed over, by connector and `subject_key`:
-    /// its claim is given back when the run does not start.
-    fire_runs: Mutex<HashMap<(String, String), String>>,
     /// The loop guards of this account's Linear change triggers.
     guards: Mutex<Guards>,
 }
@@ -2519,7 +2550,6 @@ impl Connectors {
             holding: Mutex::new(std::collections::HashSet::new()),
             claimer: new_claimer(),
             unsure: Mutex::new(std::collections::HashSet::new()),
-            fire_runs: Mutex::new(HashMap::new()),
             guards: Mutex::new(Guards::default()),
         }
     }
@@ -2548,7 +2578,7 @@ impl Connectors {
         let mut error = None;
         for id in admission.granted().await? {
             let ran = match admission.claim(id).await {
-                Ok(Some((Event::Run(run), reservation))) => self.hand_over_run(Run { reservation, ..run }, open, true).await,
+                Ok(Some((Event::Run(run), reservation))) => self.hand_over_run(Run { reservation, ..run }, open, true, None).await,
                 Ok(Some((graph @ Event::Graph { .. }, reservation))) => self.begin_admitted(graph, reservation).await,
                 Ok(None) => Ok(()),
                 Err(e) => Err(e),
@@ -2627,7 +2657,16 @@ impl Connectors {
         let floor = now - chrono::Duration::from_std(CATCH_UP).expect("CATCH_UP fits");
         let mut pass = ChangePass { floor: Some(floor), ..ChangePass::default() };
         let Some(key) = self.key(LINEAR_KEY) else { return pass };
-        let Some(oldest) = workflows.iter().map(|c| since_or(&c.since, now)).min() else { return pass };
+        let retries = self.store.lock().unwrap().change_retries.clone();
+        let retrying = |workflow: &str, key: &str| retries.get(workflow).is_some_and(|keys| keys.contains_key(key));
+        // A retry's change is read again, however far its workflow's `since` moved.
+        let retry_from = workflows
+            .iter()
+            .filter_map(|c| retries.get(&c.id))
+            .flat_map(|keys| keys.values())
+            .filter_map(|at| DateTime::parse_from_rfc3339(at).ok())
+            .map(|at| at.with_timezone(&Utc) - chrono::Duration::milliseconds(1));
+        let Some(oldest) = workflows.iter().map(|c| since_or(&c.since, now)).chain(retry_from).min() else { return pass };
         // The history floor reaches back to the oldest `since` (FIRES_KEPT at most), so what
         // happened while pinned was away is counted; only the issues updated since the catch-up
         // floor are read.
@@ -2669,14 +2708,25 @@ impl Connectors {
         changes.sort_by_key(|(at, _)| *at);
         let mut seen = BTreeSet::new();
         let mut held = None;
+        // The changes this read left for the next check, as (workflow, issue, change time): the
+        // guards count them as starts.
+        let mut pending: Vec<(String, String, DateTime<Utc>)> = vec![];
         'changes: for (at, change) in changes {
             let key = fire_key(&change);
             if !seen.insert(key.clone()) {
                 continue;
             }
             for c in workflows {
-                if !matches(&c.trigger, &change, Some(&viewer)) || at <= since_or(&c.since, now) {
+                let retry = retrying(&c.id, &key);
+                if !matches(&c.trigger, &change, Some(&viewer)) || (at <= since_or(&c.since, now) && !retry) {
                     continue;
+                }
+                if retry {
+                    pass.retried.push((c.id.clone(), key.clone()));
+                    if at <= floor {
+                        eprintln!("pinned: workflow {} gave up on {key}: it did not start within {} minutes of the change", c.id, CATCH_UP.as_secs() / 60);
+                        continue;
+                    }
                 }
                 if at <= floor {
                     eprintln!("pinned: workflow {} skipped a Linear change on issue {}, {} minutes old: pinned was away", c.id, change.issue_id, (now - at).num_minutes());
@@ -2686,7 +2736,15 @@ impl Connectors {
                 // The guards decide before the claim, which a refused change wins all the same: a
                 // read of it again (the overlap, another hub of the account) neither starts nor
                 // counts it.
-                let refused = self.guards.lock().unwrap().refusal(&c.id, &change, at);
+                let refused = self.guards.lock().unwrap().refusal(&c.id, &change, at, &pending);
+                // One check starts at most one run of a workflow on an issue, as a graph workflow's
+                // check does: a later change waits, unclaimed, for the next check.
+                if refused.is_none() && c.graph.is_none() && pass.fires.iter().any(|fire| fire.workflow == c.id && fire.change.issue_id == change.issue_id) {
+                    eprintln!("pinned: workflow {} starts once on issue {} this check: {key} waits for the next check", c.id, change.issue_id);
+                    pending.push((c.id.clone(), change.issue_id.clone(), at));
+                    pass.deferred.push((c.id.clone(), key.clone(), stamp(at)));
+                    continue;
+                }
                 match self.claim_change(&c.id, &key) {
                     Ok(true) => match refused {
                         Some(refusal) => self.refuse(&c.id, &key, &change.issue_id, refusal, now),
@@ -2778,15 +2836,10 @@ impl Connectors {
         let _ = self.save(&store);
     }
 
-    /// The won fire of the change run of `connector` on `subject` not yet handed over, if it is one.
-    fn take_fire(&self, connector: &str, subject: &Subject) -> Option<String> {
-        self.fire_runs.lock().unwrap().remove(&(connector.to_owned(), subject_key(subject)))
-    }
-
     /// Starts a session for everything new the enabled connectors match, and passes new thread
     /// messages on. A failing connector doesn't hold up the others, but a rate limit skips the
     /// rest of that integration until the next check instead of hammering it.
-    async fn poll(&self) -> (Vec<Work>, Option<String>) {
+    async fn poll(&self) -> (Vec<(Work, Option<String>)>, Option<String>) {
         self.fill_bots().await;
         let now = Utc::now();
         // A manual workflow has no poller: it runs only when someone runs it now.
@@ -2865,10 +2918,9 @@ impl Connectors {
         }
         let (fire_starts, fire_work) = fired;
         settled.starts.extend(fire_starts);
-        for (run, key) in fire_work {
-            self.fire_runs.lock().unwrap().insert((run.connector.clone(), subject_key(&run.subject)), key);
-            settled.work.push(Work::Run(run));
-        }
+        let mut work: Vec<(Work, Option<String>)> = std::mem::take(&mut settled.work).into_iter().map(|work| (work, None)).collect();
+        // Each change's run carries its own won fire to its hand-over.
+        work.extend(fire_work.into_iter().map(|(run, key)| (Work::Run(run), Some(key))));
         for start in settled.starts {
             let fire = start.fire.map(|key| (start.connector.clone(), key));
             let event = Event::Graph { connector: start.connector, subject: start.subject, input: start.input, at: now.to_rfc3339() };
@@ -2888,7 +2940,7 @@ impl Connectors {
                 errors.push(e);
             }
         }
-        (settled.work, (!errors.is_empty()).then(|| errors.join("; ")))
+        (work, (!errors.is_empty()).then(|| errors.join("; ")))
     }
 
     /// Posts the page with the bot of the thread: the one that claimed it, which `settle` records,
@@ -2916,8 +2968,18 @@ impl Connectors {
         Fut: Future<Output = R>,
         R: Taken,
     {
+        self.hand_over_fired(work, None, open).await
+    }
+
+    /// `hand_over` of `work`, with the won fire of the Linear change whose run it is, if one is.
+    async fn hand_over_fired<F, Fut, R>(&self, work: Work, fire: Option<String>, open: &F) -> Result<(), String>
+    where
+        F: Fn(Work) -> Fut,
+        Fut: Future<Output = R>,
+        R: Taken,
+    {
         match work {
-            Work::Run(run) => self.hand_over_run(run, open, false).await,
+            Work::Run(run) => self.hand_over_run(run, open, false, fire).await,
             Work::Delivery(mut d) => {
                 // A hub's team keeps the replies of a thread whose event waits, before any
                 // session or Slack hears of them. It keeps them raw: they are framed where they
@@ -2948,8 +3010,10 @@ impl Connectors {
         }
     }
 
-    /// `hand_over` of a run: `granted` when a hub's team already gave the event its place.
-    async fn hand_over_run<F, Fut, R>(&self, mut run: Run, open: &F, granted: bool) -> Result<(), String>
+    /// `hand_over` of a run: `granted` when a hub's team already gave the event its place, and
+    /// `fire` the won fire of the Linear change that made it, which it gives back when it does not
+    /// start.
+    async fn hand_over_run<F, Fut, R>(&self, mut run: Run, open: &F, granted: bool, fire: Option<String>) -> Result<(), String>
     where
         F: Fn(Work) -> Fut,
         Fut: Future<Output = R>,
@@ -2957,7 +3021,6 @@ impl Connectors {
     {
         let (connector, subject, folder, mentioned) = (run.connector.clone(), run.subject.clone(), run.cwd.clone(), run.mentioned.clone());
         // A Linear change's run gives its won claim back when it does not start.
-        let fire = self.take_fire(&connector, &subject);
         let not_started = || {
             if let Some(key) = &fire {
                 self.fire_not_started(&connector, key);
@@ -2985,10 +3048,11 @@ impl Connectors {
             not_started();
             return self.keep_stopped(&connector, &subject);
         }
-        // On a hub's team, and for a Linear change on a person's account, the issue's or
-        // thread's text reaches the Ask step's model and the session framed as data from outside
-        // pinned; a run whose prompt cannot hold it framed opens no session.
-        let framed = self.admission.get().is_some() || fire.is_some();
+        // On a hub's team, and for a run whose prompt shows it framed (a Linear change's on a
+        // person's account), the issue's or thread's text reaches the Ask step's model and the
+        // session framed as data from outside pinned; a run whose prompt cannot hold it framed
+        // opens no session. The run itself says so, whatever fire it carries.
+        let framed = self.admission.get().is_some() || shows_framed(&run);
         if framed {
             if let Err(why) = frame_trigger_text(&mut run) {
                 self.release(&connector, &subject).await;
@@ -3875,6 +3939,13 @@ fn untrusted_trigger(run: &Run) -> String {
     trigger_shown(&run.subject, &run.input, true)
 }
 
+/// Whether `run`'s opening prompt shows its trigger text framed as data from outside pinned, as the
+/// builder of a Linear change's run puts it on a person's account too (`issue_run_for`).
+fn shows_framed(run: &Run) -> bool {
+    let framed = untrusted_trigger(run);
+    framed != run.input && run.args.last().is_some_and(|prompt| prompt.contains(&framed))
+}
+
 /// What a team's run that cannot show its trigger text framed answers: it opens no session.
 const UNFRAMED: &str = "the trigger's text could not be marked as outside data";
 
@@ -4594,8 +4665,8 @@ impl Connectors {
         if let Err(e) = self.run_granted(open).await {
             error.get_or_insert(e);
         }
-        for work in work {
-            if let Err(e) = self.hand_over(work, open).await {
+        for (work, fire) in work {
+            if let Err(e) = self.hand_over_fired(work, fire, open).await {
                 error.get_or_insert(e);
             }
         }
@@ -4822,7 +4893,7 @@ impl Connectors {
     {
         let _guard = self.lock_driving().await;
         match event {
-            Event::Run(run) => self.hand_over_run(run, open, false).await,
+            Event::Run(run) => self.hand_over_run(run, open, false, None).await,
             graph @ Event::Graph { .. } => {
                 self.start_graph(graph).await?;
                 self.drive_locked(open).await
@@ -12830,7 +12901,7 @@ mod tests {
             assert!(calls(&seen, "xoxb-test-B").iter().any(|c| c.starts_with("/conversations.history?channel=CB1")), "{seen:?}");
             assert!(!calls(&seen, "xoxb-test-A").iter().any(|c| c.contains("CB1")) && !calls(&seen, "xoxb-test-B").iter().any(|c| c.contains("CA1")), "{seen:?}");
             // Only bot B's user id is mentioned, so only B's workflow finds the message.
-            let runs: Vec<&str> = work.iter().filter_map(|w| match w { Work::Run(run) => Some(run.connector.as_str()), _ => None }).collect();
+            let runs: Vec<&str> = work.iter().filter_map(|(w, _)| match w { Work::Run(run) => Some(run.connector.as_str()), _ => None }).collect();
             assert_eq!(runs, ["cb"]);
             assert_eq!(connectors.store.lock().unwrap().slack_threads, BTreeMap::from([(format!("CB1:{ts}"), "UB".to_owned())]));
             let _ = std::fs::remove_dir_all(dir);

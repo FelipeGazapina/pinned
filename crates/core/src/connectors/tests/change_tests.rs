@@ -680,7 +680,8 @@ fn pinneds_own_move_starts_nothing_and_the_same_move_by_someone_else_starts_one_
 }
 
 /// E2 item 2: two moves into the same status on one issue 5 minutes apart start the workflow
-/// once, the second counted as cooled; 16 minutes apart, twice.
+/// once, the second counted as cooled; 16 minutes apart, twice, the second on the next check
+/// (#346 E3 item 1: a check starts one run of a workflow on an issue).
 #[test]
 fn a_second_move_within_the_cooldown_starts_nothing_and_after_it_starts_again() {
     let _api = slack::lock_api();
@@ -694,9 +695,13 @@ fn a_second_move_within_the_cooldown_starts_nothing_and_after_it_starts_again() 
 
     let (runs, error) = check(&connectors);
     assert_eq!(error, None);
-    let on_issue = |issue: &str| runs.iter().filter(|run| run.subject == Subject::LinearIssue { issue: issue.into() }).count();
-    assert_eq!(on_issue("i-1"), 1, "5 minutes apart: one start");
-    assert_eq!(on_issue("i-2"), 2, "16 minutes apart: two starts");
+    let on_issue = |runs: &[Run], issue: &str| runs.iter().filter(|run| run.subject == Subject::LinearIssue { issue: issue.into() }).count();
+    assert_eq!(on_issue(&runs, "i-1"), 1, "5 minutes apart: one start");
+    assert_eq!(on_issue(&runs, "i-2"), 1, "16 minutes apart: one start this check");
+    assert_eq!(connectors.change_counts()["w1"].cooled, 1);
+    let (later, error) = check(&connectors);
+    assert_eq!(error, None);
+    assert_eq!((on_issue(&later, "i-1"), on_issue(&later, "i-2")), (0, 1), "and the second start on the next check");
     assert_eq!(connectors.change_counts()["w1"].cooled, 1);
     no_unlisted(&fake);
 }
@@ -714,7 +719,8 @@ fn five_changes(n: u32, fifth: Value) -> Value {
 }
 
 /// E2 item 3: at most `ISSUE_CAP` change-trigger starts per issue per hour across the account's
-/// workflows: the fifth is skipped, counted, and logged once for the issue.
+/// workflows: the fifth is skipped, counted, and logged once for the issue. A check starts one run
+/// of a workflow on an issue (#346 E3 item 1), so the four starts take two checks.
 #[test]
 fn a_fifth_change_on_one_issue_within_the_hour_is_capped_and_logged_once() {
     let _api = slack::lock_api();
@@ -725,7 +731,9 @@ fn a_fifth_change_on_one_issue_within_the_hour_is_capped_and_logged_once() {
 
     let (runs, error) = check(&connectors);
     assert_eq!(error, None);
-    assert_eq!(runs.len(), 4, "exactly four starts");
+    let (later, error) = check(&connectors);
+    assert_eq!(error, None);
+    assert_eq!((runs.len(), later.len()), (2, 2), "exactly four starts");
     assert_eq!(connectors.change_counts()["w-cap-1"].capped, 1, "the fifth is capped");
     assert_eq!(connectors.change_counts().get("w-cap-2").map_or(0, |counts| counts.capped), 0);
     fake.lock().unwrap().issues = vec![five_changes(46, moved("h-5", ago(10), "In Progress", "Ready to Dev"))];
@@ -767,7 +775,9 @@ fn a_capped_change_asks_no_model() {
 
     let (runs, error) = check(&connectors);
     assert_eq!(error, None);
-    assert_eq!(runs.len(), 4);
+    let (later, error) = check(&connectors);
+    assert_eq!(error, None);
+    assert_eq!((runs.len(), later.len()), (2, 2));
     assert_eq!(connectors.change_counts()["w-ask-3"].capped, 1);
     assert_eq!(crate::vercel::take_test_inputs(), Vec::<String>::new(), "no model was asked");
     no_unlisted(&fake);
@@ -828,7 +838,7 @@ fn reads_then_hand_over(connectors: &Connectors, reads: usize, answer: Result<()
     let mut work = vec![];
     for _ in 0..reads {
         let (read, _) = block_on(connectors.poll());
-        found.push(read.iter().filter(|work| matches!(work, Work::Run(_))).count());
+        found.push(read.iter().filter(|(work, _)| matches!(work, Work::Run(_))).count());
         work.extend(read);
     }
     let opened = Mutex::new(vec![]);
@@ -839,8 +849,8 @@ fn reads_then_hand_over(connectors: &Connectors, reads: usize, answer: Result<()
         let answer = answer.clone();
         async move { answer }
     };
-    for work in work {
-        let _ = block_on(connectors.hand_over(work, &open));
+    for (work, fire) in work {
+        let _ = block_on(connectors.hand_over_fired(work, fire, &open));
     }
     (found, opened.into_inner().unwrap())
 }
