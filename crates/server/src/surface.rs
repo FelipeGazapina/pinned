@@ -179,7 +179,7 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
         let (id, held) = hub.db.hold_confirmation(account.id, caller.machine, caller.session.as_deref(), &asked).await?;
         end_turn(turn).await;
         if held {
-            if let Some(ended) = extend_ended(hub, account, &admitted.call, id).await? {
+            if let Some(ended) = extend_ended(hub, account, &admitted.call, id).await {
                 trail.write(AuditOutcome::Refused, &ended).await?;
                 return Err(ended);
             }
@@ -336,9 +336,22 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
 /// Why the extend just stored as `id` can never run: its box ended between the ask's check and its
 /// store, after the end closed what waited. It closes the asks still waiting for the box, this one
 /// among them, whose session hears the refusal and no notice. None for any other act, or a box that runs.
-async fn extend_ended(hub: &Hub, account: &Arc<Account>, call: &Parsed, id: Uuid) -> Result<Option<String>, String> {
-    let Parsed::Hub(HubCall::ExtendBox { machine, .. }) = call else { return Ok(None) };
-    let machine = Uuid::parse_str(machine).map_err(|_| format!("this account has no machine {machine}"))?;
+/// A database error here is logged, not answered: the ask is stored and waits as any ask does, so
+/// the act answers it pending as it would have. The error text is the database's generic one.
+async fn extend_ended(hub: &Hub, account: &Arc<Account>, call: &Parsed, id: Uuid) -> Option<String> {
+    let Parsed::Hub(HubCall::ExtendBox { machine, .. }) = call else { return None };
+    // `admit` parsed the machine already, so it parses here too.
+    let machine = Uuid::parse_str(machine).ok()?;
+    match ended_extend(hub, account, machine, id).await {
+        Ok(ended) => ended,
+        Err(e) => {
+            eprintln!("pinned-server: account {}'s extend {id} was stored, but its box could not be checked: {e}", account.id);
+            None
+        }
+    }
+}
+
+async fn ended_extend(hub: &Hub, account: &Arc<Account>, machine: Uuid, id: Uuid) -> Result<Option<String>, String> {
     let Err(ended) = crate::boxes::still_open(hub.db.box_of(account.id, machine).await?) else { return Ok(None) };
     let closed = hub.db.close_extends(account.id, machine).await?;
     hub.db.notified(account.id, id).await?;
