@@ -977,7 +977,7 @@ test("the bot page's needKeys note: the owner gets Connect AI account, which ope
   await openBot(a);
   const t = text(a.page());
   assert.ok(t.includes("The team needs its Upstash key and Claude token before a bot can run."));
-  assert.ok(!a.page().includes("team's settings"), "no settings page is named");
+  assert.ok(!t.includes("team's settings"), "no settings page is named");
   assert.deepEqual(a.control("connect-ai"), { disabled: false });
   await a.click("connect-ai");
   assert.deepEqual(a.context.connectOpened, ["team-bot"]);
@@ -988,6 +988,6 @@ test("a member is asked to have the owner connect the team's AI account, by name
   await openBot(a);
   assert.equal(a.control("connect-ai"), null);
   assert.ok(text(a.page()).includes("Ask Ana Prado to connect the team's AI account."));
-  assert.ok(!a.page().includes("team's settings"), "no settings page is named");
+  assert.ok(!text(a.page()).includes("team's settings"), "no settings page is named");
   assert.deepEqual(a.context.connectOpened, []);
 });
