@@ -107,8 +107,12 @@ impl Shared {
         written.recv_timeout(Duration::from_secs(5)).is_ok()
     }
 
-    /// Asks the hub, blocking up to 60 seconds for the answer. Fails at once while offline.
+    /// Asks the hub, blocking up to 60 seconds for the answer. Fails at once while offline, and
+    /// for a workflow session's callback, which goes only through `forward` with its vouch.
     fn call(&self, call: HubCall) -> Result<Value, String> {
+        if call.work().is_some() {
+            return Err(UNVOUCHED.into());
+        }
         self.call_from(call, &Vouch::Unchecked)
     }
 
@@ -190,7 +194,8 @@ pub fn is_unanswered(error: &str) -> bool {
 }
 
 impl Link {
-    /// Asks the hub, blocking up to 60 seconds for the answer. Fails at once while offline.
+    /// Asks the hub, blocking up to 60 seconds for the answer. Fails at once while offline, and
+    /// for a workflow session's callback, which goes only through `forward_from`.
     pub fn call_hub(&self, call: HubCall) -> Result<Value, String> {
         self.shared.call(call)
     }
