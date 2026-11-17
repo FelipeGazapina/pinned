@@ -1790,4 +1790,48 @@ mod tests {
         assert_eq!(hub.pushes.get(), 2, "a user action sends the refused push again at once");
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    /// A project at the account's limit, open on a machine whose sync loop has the state file.
+    fn refused_project(name: &str) -> (std::path::PathBuf, std::path::PathBuf, Arc<Machine>, Shared, std::path::PathBuf) {
+        let (dir, file, machine, shared, _frames) = stopped_sync_fixture(name);
+        let app = dir.join("app");
+        std::fs::create_dir_all(app.join(".claude/skills")).unwrap();
+        for args in [&["init", "-q"][..], &["remote", "add", "origin", "git@github.com:acme/app.git"]] {
+            assert!(std::process::Command::new("git").arg("-C").arg(&app).args(args).status().unwrap().success());
+        }
+        std::fs::write(app.join(".claude/skills/skill.md"), "a skill").unwrap();
+        machine.open_project(app.clone());
+        (dir, file, machine, shared, app)
+    }
+
+    #[test]
+    fn a_refused_push_shows_the_limit_notice_until_a_push_is_taken() {
+        let (dir, file, machine, shared, _app) = refused_project("limit-notice");
+        let hub = FullHub::default();
+        let mut syncer = Syncer { shared_projects: HashSet::from(["github.com/acme/app".to_owned()]), ..Syncer::default() };
+        assert_eq!(machine.call(Call::SyncLimit), Ok(Value::Null), "nothing refused yet");
+        syncer.cycle(&shared, &hub, &machine, &file);
+        let notice = "Sync stopped: your synced projects would pass 1024 MB. Delete old sessions to sync again.";
+        assert_eq!(machine.call(Call::SyncLimit), Ok(Value::String(notice.into())), "the refused push shows the notice");
+        syncer.cycle(&shared, &hub, &machine, &file);
+        assert_eq!(machine.call(Call::SyncLimit), Ok(Value::String(notice.into())), "a held push keeps the notice");
+        hub.room.set(true);
+        shared.sync_now.store(true, Ordering::SeqCst);
+        syncer.cycle(&shared, &hub, &machine, &file);
+        assert_eq!(machine.call(Call::SyncLimit), Ok(Value::Null), "a push the hub takes clears it");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_refused_project_that_leaves_the_machine_clears_the_limit_notice() {
+        let (dir, file, machine, shared, app) = refused_project("limit-gone");
+        let hub = FullHub::default();
+        let mut syncer = Syncer { shared_projects: HashSet::from(["github.com/acme/app".to_owned()]), ..Syncer::default() };
+        syncer.cycle(&shared, &hub, &machine, &file);
+        assert_eq!(machine.call(Call::SyncLimit), Ok(Value::String("Sync stopped: your synced projects would pass 1024 MB. Delete old sessions to sync again.".into())));
+        std::fs::remove_dir_all(app.join(".git")).unwrap();
+        syncer.cycle(&shared, &hub, &machine, &file);
+        assert_eq!(machine.call(Call::SyncLimit), Ok(Value::Null), "a project no longer on the machine holds no notice");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
