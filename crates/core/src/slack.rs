@@ -415,7 +415,7 @@ impl Own {
 pub struct Apps<'a> {
     pub workflow: &'a str,
     pub own: &'a Own,
-    pub busy: &'a dyn Fn(&str) -> bool,
+    pub busy: &'a (dyn Fn(&str) -> bool + Sync),
 }
 
 /// What one history page gives a workflow: the messages it takes, oldest first, and the
