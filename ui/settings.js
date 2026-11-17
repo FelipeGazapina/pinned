@@ -1704,12 +1704,13 @@ function paintChecked() {
  * one at once when the window shows again (`visibleInterval`). */
 async function refreshChecked() {
   if (!settingsOpen() || page !== "connectors") return;
+  let latest;
   try {
-    settings = await connectorCall("get_settings");
+    latest = await connectorCall("get_settings");
   } catch (e) {
     return console.warn("get_settings", e);
   }
-  if (settingsOpen() && page === "connectors") paintChecked();
+  onHubSettings(latest);
 }
 visibleInterval(refreshChecked, 60000);
 

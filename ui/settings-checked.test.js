@@ -143,8 +143,8 @@ test("the checked line shows its age when the last check is older than three min
 
 test("an open settings page refetches get_settings when the window becomes visible", async () => {
   const at12 = minutesAgo(12);
-  const fresh = { linear: null, slack: null, connectors: [], checked: { at: minutesAgo(0), error: null } };
-  const w = world({ checked: { at: at12, error: null }, replies: [fresh], hidden: true });
+  const fresh = { linear: {}, slack: null, connectors: [], checked: { at: minutesAgo(0), error: null } };
+  const w = world({ checked: { at: at12, error: null }, linear: {}, replies: [fresh], hidden: true });
   w.ctx.paintChecked();
   assert.match(w.line.textContent, /\(12 min ago\)/);
   assert.equal(w.line.classList.contains("stale"), true);
