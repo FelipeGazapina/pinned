@@ -272,6 +272,9 @@ fn node_command(program: &Path, config: &Path, extra: &[(&str, &str)]) -> Comman
         .env("SHELL", shell(config))
         .stdin(Stdio::null())
         .process_group(0);
+    for name in pinned_core::machine::session_variables() {
+        cmd.env_remove(name);
+    }
     for (key, value) in extra {
         cmd.env(key, value);
     }
