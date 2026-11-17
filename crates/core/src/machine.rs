@@ -9886,6 +9886,24 @@ pub(crate) mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn a_print_start_in_a_worktree_that_would_carry_gets_the_shared_settings() {
+        let root = temp("mcp-carry-print");
+        let (m, shared) = carrying_machine(&root);
+        let shared_json: Value = serde_json::from_slice(&std::fs::read(&shared).unwrap()).unwrap();
+        let repo = mcp_repo(&root, &["a", "b"], &["a", "b"], Some(json!({ "enabledMcpjsonServers": ["a"] })));
+        let tree = root.join("tree");
+        git(&repo, &["worktree", "add", "-q", "-b", "tree", tree.to_str().unwrap()]);
+        start_in(&m, &tree);
+        let (_, got) = started_settings(&root);
+        carries(&got, &shared_json, &["a"]);
+        let tab = m.add_tab(tree.clone(), Account::builtin(Provider::Claude), vec!["-p".into(), "look".into()], vec![], false, None);
+        m.start_claude(&tab, 200, 24).unwrap();
+        assert_eq!(started_settings(&root), (shared, shared_json), "a -p start carries nothing and gets the shared file exactly");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn the_bypass_warning_is_never_accepted_for_a_session_started_without_bypass() {
         let root = temp("first-run-bypass");
         let (claude, keys) = claude_on_screens(&root, &[BYPASS_SCREEN]);
