@@ -1088,6 +1088,36 @@ fn a_taste_chat_changes_its_own_accounts_taste_live_and_never_another_accounts()
     assert_eq!(ana.hub(get()).unwrap()["projects"], json!({ "github.com/acme/site": { "parallel": 2 } }));
 }
 
+#[test]
+fn a_taste_chat_cannot_change_the_review_settings_through_the_hub() {
+    let hub = TestHub::start("taste_review");
+    let url = hub.url.clone();
+    let (token, account) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = Client::connect(&url, &token);
+    ana.wait("hello", |f| f["type"] == "hello");
+    let dir = temp("taste-chat-review");
+    let (machine, machine_token) = account::register_machine(&url, &token, "ana-mac", "macos").unwrap();
+    let creds = Credentials { hub: url.clone(), email: account.email, user_token: token, machine_id: machine.id, machine_token };
+    creds.save(&dir).unwrap();
+    let node = Node::start(&dir, creds);
+    node.machine.listen(|_| Err("unexpected".into())).unwrap();
+    ana.wait_machines(&[("ana-mac", true)]);
+    let site = TasteScope::Project { repo: "github.com/acme/site".into() };
+    let tab = node.machine.call(Call::OpenTasteChat { scope: site, path: None }).unwrap().as_str().unwrap().to_owned();
+    ana.wait("the chat's tab at the hub", |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == tab && t["taste_chat"] == true));
+
+    let read = json!({ "name": "taste_get", "scope": "project:github.com/acme/site" });
+    let before = session_tool(&dir, &tab, read.clone()).unwrap();
+    let one = "review_diffs is changed only by the user, on the Way of working page; nothing changed";
+    let other = "second_opinion is changed only by the user, on the Way of working page; nothing changed";
+    let set = |patch: Value| json!({ "name": "taste_set", "scope": "project:github.com/acme/site", "patch": patch });
+    assert_eq!(session_tool(&dir, &tab, set(json!({ "parallel": 2, "review_diffs": false }))), Err(one.into()), "a mixed patch is refused whole");
+    assert_eq!(session_tool(&dir, &tab, set(json!({ "second_opinion": true }))), Err(other.into()));
+    assert_eq!(session_tool(&dir, &tab, json!({ "name": "taste_reset", "scope": "project:github.com/acme/site", "field": "review_diffs" })), Err(one.into()));
+    assert_eq!(session_tool(&dir, &tab, read), Ok(before), "a refused call changed the taste the session reads");
+    assert_eq!(ana.hub(json!({ "cmd": "get_tastes" })).unwrap()["projects"], json!({}), "the hub stored a refused change");
+}
+
 struct Through<'a>(&'a Link);
 
 impl sync::Hub for Through<'_> {
