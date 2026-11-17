@@ -267,8 +267,18 @@ impl ExportedHomes {
 /// session's account home to the built-in account. Never one under the `accounts` folder of a
 /// pinned data folder, `own_dir` or one that keeps `accounts.json`, which is an added account's.
 pub fn exported_homes(env: &[(String, String)], own_dir: Option<&Path>) -> ExportedHomes {
-    let _ = (env, own_dir);
-    ExportedHomes::default()
+    let homes: Vec<&str> = Provider::ALL.into_iter().map(|p| p.spec().home_env).filter(|name| !name.is_empty()).collect();
+    let session = crate::machine::INHERITED_SESSION_ENV.iter().filter(|name| !homes.contains(name));
+    if session.into_iter().any(|name| env.iter().any(|(key, _)| key == name)) {
+        return ExportedHomes::default();
+    }
+    let data_dir = |dir: &Path| own_dir == Some(dir) || dir.join(FILE).is_file();
+    let added = |home: &Path| home.ancestors().any(|a| a.file_name().is_some_and(|name| name == "accounts") && a.parent().is_some_and(data_dir));
+    let exported = Provider::ALL.into_iter().filter(|p| !p.spec().home_env.is_empty()).filter_map(|p| {
+        let home = env.iter().find(|(key, _)| key == p.spec().home_env).map(|(_, value)| PathBuf::from(value)).filter(|home| !home.as_os_str().is_empty())?;
+        (!added(&home)).then_some((p, home))
+    });
+    ExportedHomes(exported.collect())
 }
 
 impl Accounts {
@@ -287,8 +297,7 @@ impl Accounts {
 
     /// The home the user exported for `provider`'s built-in account, when the node keeps it.
     pub fn exported_home(&self, provider: Provider) -> Option<&Path> {
-        let _ = provider;
-        None
+        self.exported.of(provider)
     }
 
     /// The built-in Claude account's home moved to `home`, when there is one.
@@ -395,20 +404,23 @@ impl Accounts {
         Ok(())
     }
 
-    /// The CLI home the account's sessions run on. A built-in account's is the CLI's default one:
-    /// its sessions never inherit pinned's own `home_env`, which may name another account's home.
+    /// The CLI home the account's sessions run on. A built-in account's is the one the user
+    /// exported, else the CLI's default one: its sessions never inherit pinned's own `home_env`
+    /// otherwise, which may name another account's home.
     pub fn home(&self, account: &Account) -> PathBuf {
         let spec = account.provider.spec();
-        match (&self.dir, &self.claude_home) {
-            (Some(dir), _) if !account.is_builtin() => dir.join("accounts").join(&account.id),
-            (_, Some(claude_home)) if account.provider == Provider::Claude => claude_home.clone(),
+        let exported = self.exported_home(account.provider).filter(|_| account.is_builtin());
+        match (&self.dir, &self.claude_home, exported) {
+            (Some(dir), _, _) if !account.is_builtin() => dir.join("accounts").join(&account.id),
+            (_, Some(claude_home), _) if account.provider == Provider::Claude => claude_home.clone(),
+            (_, _, Some(exported)) => exported.to_path_buf(),
             _ if spec.home_env.is_empty() => self.home.clone(),
             _ => self.home.join(spec.default_home),
         }
     }
 
-    /// What every process of the account runs with. A built-in account sets no home, so its CLI
-    /// keeps the login it had before pinned knew about accounts.
+    /// What every process of the account runs with. A built-in account sets only the home the
+    /// user exported, so its CLI keeps the login it had before pinned knew about accounts.
     pub fn env(&self, account: &Account) -> Vec<(String, String)> {
         let mut env: Vec<(String, String)> = self.home_env(account).into_iter().collect();
         env.push((ACCOUNT_ENV.to_owned(), account.id.clone()));
@@ -420,10 +432,14 @@ impl Accounts {
         env
     }
 
-    /// The variable that points the account's CLI at its home: an added account's own one. A
-    /// built-in account sets none.
+    /// The variable that points the account's CLI at its home: an added account's own one, a
+    /// built-in account's only when the user exported it.
     pub fn home_env(&self, account: &Account) -> Option<(String, String)> {
-        (!account.is_builtin()).then(|| (account.provider.spec().home_env.to_owned(), self.home(account).display().to_string()))
+        let home_env = account.provider.spec().home_env.to_owned();
+        if account.is_builtin() {
+            return self.exported_home(account.provider).map(|_| (home_env, self.home(account).display().to_string()));
+        }
+        Some((home_env, self.home(account).display().to_string()))
     }
 
     /// What any process of the account's CLI starts with: its env and nothing a parent left.

@@ -1168,10 +1168,11 @@ impl Machine {
         let exported = accounts::exported_homes(&node_env(), dir.as_deref());
         let accounts = Accounts::load(dir.as_deref(), home.clone()).with_claude_home(launch.claude_home.clone()).with_exported_homes(exported);
         // A test must never write the user's own claude config.
-        let builtin_claude_config = match (&launch.claude_home, test_binary()) {
-            (Some(claude_home), _) => claude_home.clone(),
-            (None, true) => dir.clone().unwrap_or_else(std::env::temp_dir).join("home"),
-            (None, false) => home.clone(),
+        let builtin_claude_config = match (&launch.claude_home, accounts.exported_home(Provider::Claude), test_binary()) {
+            (Some(claude_home), _, _) => claude_home.clone(),
+            (None, Some(exported), _) => exported.to_path_buf(),
+            (None, None, true) => dir.clone().unwrap_or_else(std::env::temp_dir).join("home"),
+            (None, None, false) => home.clone(),
         }
         .join(".claude.json");
         let global_dir = if test_binary() { dir.clone().unwrap_or_else(std::env::temp_dir).join("home") } else { home.clone() }.join(global::FOLDER[0]).join(global::FOLDER[1]);
@@ -1630,7 +1631,10 @@ impl Machine {
                 book.save(&file)?;
                 json(book)
             }
-            Call::UsageLimits => json(usage::limits(&self.launch.bin(Provider::Claude), &home(), self.launch.path_env.as_deref())?),
+            Call::UsageLimits => {
+                let env: Vec<(String, String)> = self.accounts.home_env(&Account::builtin(Provider::Claude)).into_iter().collect();
+                json(usage::limits(&self.launch.bin(Provider::Claude), &home(), &env, self.launch.path_env.as_deref())?)
+            }
             Call::PullRequestFilterOptions { paths, kind, query } => json(pulls::filter_options(&home(), self.launch.path_env.as_deref(), &self.gh_repos(&paths), kind, &query)?),
             Call::PullRequestFiles { host, repo, number } => json(pulls::files(&home(), self.launch.path_env.as_deref(), &host, &repo, number)?),
             Call::PageMeta { url, frame_by } => json(panel::page_meta(&url, frame_by.as_deref())?),
