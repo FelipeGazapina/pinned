@@ -256,7 +256,7 @@ impl Meter {
     /// The tokens so far, priced with `rates` and the user's `book`. `wall_ms` and `box_usd` are the caller's.
     pub fn usage(&self, rates: &RateTable, book: &PriceBook) -> TaskUsage {
         let mut usage = TaskUsage { cost_usd: Some(0.0), ..TaskUsage::default() };
-        for row in self.priced_rows(rates, book) {
+        for (row, _) in self.priced_rows(rates, book) {
             usage.tokens_in += row.input + row.cached + row.cache_write;
             usage.tokens_out += row.output;
             usage.cost_usd = match (usage.cost_usd, row.cost) {
@@ -268,15 +268,17 @@ impl Meter {
     }
 
     /// What `usage` prices, as a team box prices it: a model with no price, at the ceiling rate
-    /// (`CEILING_INPUT_USD`, `CEILING_OUTPUT_USD`) instead of leaving the whole cost unknown. The
-    /// cost, and the models priced at the ceiling.
+    /// (`CEILING_INPUT_USD`, `CEILING_OUTPUT_USD`) instead of leaving the whole cost unknown, and a
+    /// fast row priced by `FAST_MULTIPLE`, at that or the ceiling, whichever is more. The cost, and
+    /// the models priced either way.
     pub fn priced(&self, rates: &RateTable, book: &PriceBook) -> (f64, Vec<String>) {
         let (mut usd, mut unpriced) = (0.0, vec![]);
-        for row in self.priced_rows(rates, book) {
+        for (row, by_multiple) in self.priced_rows(rates, book) {
+            let ceiling = (row.input + row.cached + row.cache_write) as f64 * CEILING_INPUT_USD + row.output as f64 * CEILING_OUTPUT_USD;
             match row.cost {
-                Some(c) => usd += c.input + c.cache_read + c.cache_write + c.output,
-                None => {
-                    usd += (row.input + row.cached + row.cache_write) as f64 * CEILING_INPUT_USD + row.output as f64 * CEILING_OUTPUT_USD;
+                Some(c) if !by_multiple => usd += c.input + c.cache_read + c.cache_write + c.output,
+                cost => {
+                    usd += cost.map_or(ceiling, |c| (c.input + c.cache_read + c.cache_write + c.output).max(ceiling));
                     unpriced.push(row.model);
                 }
             }
@@ -286,14 +288,15 @@ impl Meter {
         (usd, unpriced)
     }
 
-    /// One row per model and speed, a mapped model as the one `book` maps it to, priced.
-    fn priced_rows<'a>(&'a self, rates: &'a RateTable, book: &'a PriceBook) -> impl Iterator<Item = Row> + 'a {
+    /// One row per model and speed, a mapped model as the one `book` maps it to, priced, and
+    /// whether it was priced by `FAST_MULTIPLE`.
+    fn priced_rows<'a>(&'a self, rates: &'a RateTable, book: &'a PriceBook) -> impl Iterator<Item = (Row, bool)> + 'a {
         let targets = book.targets();
         self.sums.iter().map(move |((model, speed), [input, cached, cache_write, output])| {
             let model = targets.get(model.as_str()).map_or(model.clone(), |&target| target.to_owned());
             let mut row = Row { at: 0, model, session: 0, speed: *speed, input: *input, cached: *cached, cache_write: *cache_write, output: *output, cost: None, premium: 0.0, savings: 0.0 };
-            price(&mut row, rates, &book.prices);
-            row
+            let by_multiple = price(&mut row, rates, &book.prices);
+            (row, by_multiple)
         })
     }
 }
@@ -380,8 +383,11 @@ fn unix_of(iso: &str) -> Option<u64> {
 }
 
 /// A price the user set for the model wins over the list's, even for a name the list can't price.
-fn price(row: &mut Row, table: &RateTable, prices: &HashMap<String, Price>) {
-    let Some(rate) = prices.get(row.model.trim()).map(Price::rate).or_else(|| lookup(table, &row.model)) else { return };
+/// A fast row whose model has no fast tier costs its standard price times `FAST_MULTIPLE`, and
+/// answers true.
+fn price(row: &mut Row, table: &RateTable, prices: &HashMap<String, Price>) -> bool {
+    let Some(rate) = prices.get(row.model.trim()).map(Price::rate).or_else(|| lookup(table, &row.model)) else { return false };
+    let by_multiple = row.speed == Speed::Fast && rate.fast.is_none();
     let rates = match row.speed {
         Speed::Fast => rate.fast.unwrap_or(rate.standard),
         Speed::Standard => rate.standard,
@@ -393,10 +399,14 @@ fn price(row: &mut Row, table: &RateTable, prices: &HashMap<String, Price>) {
         output: row.output as f64 * r.output,
     };
     let total = |c: Cost| c.input + c.cache_read + c.cache_write + c.output;
-    let listed = cost(rates);
+    let mut listed = cost(rates);
+    if by_multiple {
+        listed = Cost { input: listed.input * FAST_MULTIPLE, cache_read: listed.cache_read * FAST_MULTIPLE, cache_write: listed.cache_write * FAST_MULTIPLE, output: listed.output * FAST_MULTIPLE };
+    }
     row.premium = if row.speed == Speed::Standard { 0.0 } else { total(listed) - total(cost(rate.standard)) };
     row.savings = row.cached as f64 * (rates.input - rates.cache_read);
     row.cost = Some(listed);
+    by_multiple
 }
 
 fn lookup(table: &RateTable, model: &str) -> Option<ModelRate> {
@@ -789,7 +799,8 @@ mod tests {
         assert!(close(sum("claude-opus-5-5", |r| r.savings), 3000.0 * 4.5e-6));
         let opus = rows.iter().find(|r| r.model == "claude-opus-5-5").unwrap();
         assert_ne!(haiku.session, opus.session);
-        assert_eq!(haiku.premium, 0.0, "haiku has no fast tier, so fast is priced as standard");
+        let standard = 10.0 * 1e-6 + 20.0 * 5e-6;
+        assert!(close(haiku.premium, standard * (FAST_MULTIPLE - 1.0)), "haiku has no fast tier, so fast is its standard price times FAST_MULTIPLE");
     }
 
     #[test]

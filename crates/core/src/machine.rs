@@ -3999,7 +3999,7 @@ impl Machine {
                     }
                     for model in unpriced {
                         if logged.entry(task.clone()).or_default().insert(model.clone()) {
-                            eprintln!("pinned: worker {task}'s cost prices {model}, which has no price, at the ceiling rate");
+                            eprintln!("pinned: worker {task}'s cost prices {model}, which has no listed price, at the ceiling rate or more");
                         }
                     }
                     usage.cost_usd = Some(usd);
@@ -4037,7 +4037,7 @@ impl Machine {
                 let (own, unpriced) = cost.meter.priced(rates, book);
                 for model in unpriced {
                     if cost.unpriced.insert(model.clone()) {
-                        eprintln!("pinned: a run's model cost prices {model}, which has no price, at the ceiling rate");
+                        eprintln!("pinned: a run's model cost prices {model}, which has no listed price, at the ceiling rate or more");
                     }
                 }
                 own + self.delegates.work_cost_of_tab(tab).agents_usd
