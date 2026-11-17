@@ -257,6 +257,17 @@ impl TasteField {
     }
 }
 
+/// The refusal of an agent's change to review settings, which only the user makes on the Way of working page.
+/// Refused whole, so the other fields of the same change wait too.
+pub fn refuse_review_settings(named: impl IntoIterator<Item = &'static str>) -> Result<(), String> {
+    let named: Vec<&str> = named.into_iter().collect();
+    if named.is_empty() {
+        return Ok(());
+    }
+    let verb = if named.len() == 1 { "is" } else { "are" };
+    Err(format!("{} {verb} changed only by the user, on the Way of working page; nothing changed", named.join(" and ")))
+}
+
 /// An account's tastes.
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(default)]

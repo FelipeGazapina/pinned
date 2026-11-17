@@ -8,6 +8,7 @@ use crate::hub::{Account, Hub};
 use pinned_core::surface::{self, ActAnswer, Action, ActorRole, AgentAct, AuditOutcome, Class, Confirmation, Decided, Decision, Parsed, Side};
 use pinned_core::connectors::{Connector, Placement, RunsOn};
 use pinned_core::schedule::{self, Actor};
+use pinned_core::taste;
 use pinned_core::wire::{Call, HubCall, RunStarted, ToClient};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -239,6 +240,13 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
         return Err(format!("{}: {field}. The user enters it in the app.", surface::SECRET_REFUSAL));
     }
     let call = surface::parse(action, &surface::with_blank_asks(action, &act.args))?;
+    // Only the user changes a review setting, approved or not: an agent's change to one is refused here, before
+    // any confirmation is held. The user's own app calls the hub's SetTaste directly and is not an agent's act.
+    match &call {
+        Parsed::Hub(HubCall::SetTaste { patch, .. }) => taste::refuse_review_settings(patch.review_settings())?,
+        Parsed::Hub(HubCall::ResetTasteField { field, .. }) => taste::refuse_review_settings(field.review_setting())?,
+        _ => {}
+    }
     // A call that acts through a workflow's Linear and Slack connections comes only from the
     // session that runs that workflow on that subject: the tab its machine names, which the node
     // does not yet vouch for.
