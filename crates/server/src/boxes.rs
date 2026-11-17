@@ -3435,7 +3435,7 @@ mod tests {
             "what the script runs that changes or asks the remote"
         );
         assert!(script.contains("    safe add >/dev/null 2>&1 || { answer 'failed add'; return 0; }\n"), "new files are added only through the secret names' exclusion");
-        for never in ["add -A", "add --all", "add .", "--force", " -f ", "+HEAD", "--no-verify", "commit -n", "--mirror", "--delete", ":refs/heads/main", "GH_TOKEN", "box.env"] {
+        for never in ["add -A", "add --all", "add .", "--force", " -f ", "+HEAD", "--no-verify", "commit -n", "hooksPath", "remote add", "set-url", "--mirror", "--delete", ":refs/heads/main", "GH_TOKEN", "box.env"] {
             assert!(!script.contains(never), "{never}");
         }
     }
