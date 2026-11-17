@@ -14256,6 +14256,27 @@ Have another model review a risky change before it goes ahead.";
 
     #[test]
     #[cfg(unix)]
+    fn a_team_boxs_run_cost_keeps_a_workers_priced_spend_when_it_uses_a_model_with_no_price() {
+        let RunCostBox { dir, m, sent, subject, tab, transcript, .. } = run_costs_box("run-costs-worker-unpriced");
+        let reply = delegate_task(&m, &tab, work(Some("claude-sonnet-5-5"), None));
+        let child = reply["tabId"].as_str().unwrap().to_owned();
+        let worker = transcript.with_file_name("s-worker.jsonl");
+        std::fs::write(&worker, format!("{}\n", run_spent("w1", "claude-sonnet-5-5", 200_000))).unwrap();
+        let payload = json!({ "session_id": "s-worker", "transcript_path": worker, "prompt": "Parser" });
+        m.record_event(AgentEvent { tab: Some(child), ..hooks::event_from(Some("working"), &payload.to_string()).unwrap() });
+        let t0 = Instant::now();
+        m.meter_workers();
+        m.report_run_costs(t0);
+        append(&worker, &[run_spent("w2", "claude-unlisted-1", 50_000)]);
+        m.meter_workers();
+        m.report_run_costs(t0 + RUN_COST_EVERY);
+        let cents = |usd: f64| ("wf-1".to_owned(), subject.clone(), usd);
+        assert_eq!(*sent.lock().unwrap(), vec![cents(315.0), cents(315.0)], "the worker's US$ 3.00 and its parent's 0.15, the unpriced model left out");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn a_team_boxs_run_cost_takes_the_list_price_not_the_boxs_price_file() {
         let RunCostBox { dir, config, m, sent, subject, .. } = run_costs_box("run-costs-price-file");
         std::fs::write(config.join("usage-prices.json"), r#"{"prices":{"claude-sonnet-5-5":{"input":0,"output":0}}}"#).unwrap();
