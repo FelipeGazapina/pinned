@@ -425,9 +425,11 @@ fn number(entry: &Value, key: &str) -> Option<f64> {
 
 /// A tier's rates; a cache price the tier leaves out follows the standard tier's ratio to input,
 /// or else is input's, since a model priced as if cached input were free would under-report.
+/// An input or output rate that is not above zero leaves the tier unpriced, so a team box prices
+/// its model at the ceiling rate.
 fn tier_rates(entry: &Value, suffix: &str, standard: Option<Rates>) -> Option<Rates> {
-    let input = number(entry, &format!("input_cost_per_token{suffix}"))?;
-    let output = number(entry, &format!("output_cost_per_token{suffix}"))?;
+    let input = number(entry, &format!("input_cost_per_token{suffix}")).filter(|n| *n > 0.0)?;
+    let output = number(entry, &format!("output_cost_per_token{suffix}")).filter(|n| *n > 0.0)?;
     let cache = |name: &str, pick: fn(&Rates) -> f64| {
         number(entry, &format!("{name}{suffix}")).unwrap_or_else(|| match standard {
             Some(s) if s.input > 0.0 => pick(&s) / s.input * input,
