@@ -103,7 +103,13 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
     let request_id = act.request_id.as_deref().filter(|id| !id.is_empty());
     let trail = Trail { hub, account: account.id, machine: caller.machine, tab: &caller.tab, role: caller.role, action: &act.action, args: surface::summary(&act.args), request_id, task: Default::default() };
     if let Some(id) = request_id {
-        match hub.db.audited(account.id, caller.machine, &caller.tab, &act.action, id).await? {
+        // An extend's repeat check counts in its 2 s too: one that has not answered by then is busy, and writes no row.
+        let earlier = if act.action == "extend_box" {
+            tokio::time::timeout_at(deadline, hub.db.audited(account.id, caller.machine, &caller.tab, &act.action, id)).await.map_err(|_| crate::db::BUSY.to_owned())??
+        } else {
+            hub.db.audited(account.id, caller.machine, &caller.tab, &act.action, id).await?
+        };
+        match earlier {
             Some((AuditOutcome::Pending, _)) | None => {}
             Some((earlier, at)) => return json(ActAnswer::Repeat { earlier, at }),
         }
