@@ -225,6 +225,20 @@ fn check_census(check: Option<&pinned_core::connectors::Check>, now: i64) -> (i6
     (age, check.is_some_and(|check| check.error.is_some()))
 }
 
+/// `census_accounts`' lines, one per persisted account in the order given: each one's census with
+/// its connectors' runs and last check, read from `accounts`.
+fn census_lines(censuses: Vec<(Uuid, (usize, usize, store_writes::Pending))>, accounts: &HashMap<Uuid, Arc<Account>>, now: i64) -> Vec<String> {
+    censuses
+        .into_iter()
+        .map(|(id, census)| {
+            let connectors = accounts.get(&id).and_then(|account| account.connectors.get());
+            let runs = connectors.map_or(0, |connectors| connectors.census().runs);
+            let check = check_census(connectors.and_then(|connectors| connectors.last_check()).as_ref(), now);
+            account_census(id, runs, census, check)
+        })
+        .collect()
+}
+
 /// The current time in whole seconds since the Unix epoch.
 fn unix_secs_now() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
@@ -536,16 +550,8 @@ impl Hub {
         persisted.sort_by_key(|(id, _)| *id);
         // The accounts' lock is let go before any account's own locks are taken.
         let accounts: HashMap<Uuid, Arc<Account>> = self.accounts.lock().unwrap().clone();
-        let now = unix_secs_now();
-        persisted
-            .iter()
-            .map(|(id, p)| {
-                let connectors = accounts.get(id).and_then(|account| account.connectors.get());
-                let runs = connectors.map_or(0, |connectors| connectors.census().runs);
-                let check = check_census(connectors.and_then(|connectors| connectors.last_check()).as_ref(), now);
-                account_census(*id, runs, p.census(), check)
-            })
-            .collect()
+        let censuses = persisted.iter().map(|(id, p)| (*id, p.census())).collect();
+        census_lines(censuses, &accounts, unix_secs_now())
     }
 
     /// Writes every account's store and keys that wait, all at once, and again what was saved
@@ -2353,13 +2359,14 @@ mod tests {
         let (state, lines) = log(&state, None, 1180);
         assert_eq!(lines, ["pinned-server: check-late account=12345678 gap_s=150"]);
         let (state, lines) = log(&state, Some("Linear answered 500"), 1240);
-        assert_eq!(lines, ["pinned-server: check-error account=12345678 error=Linear answered 500"]);
+        assert_eq!(lines, ["pinned-server: check-error account=12345678 class=linear parts=1 fp=1d8aa235"]);
         let (state, lines) = log(&state, Some("Linear answered 500"), 1300);
         assert!(lines.is_empty(), "{lines:?}");
         let (state, lines) = log(&state, Some("Slack answered 403"), 1360);
-        assert_eq!(lines, ["pinned-server: check-error account=12345678 error=Slack answered 403"]);
+        assert_eq!(lines, ["pinned-server: check-error account=12345678 class=slack parts=1 fp=7c9e905a"]);
+        // The failure began at 1240, and a changed error does not start the count again.
         let (_, lines) = log(&state, None, 1450);
-        assert_eq!(lines, ["pinned-server: check-ok account=12345678 after_s=90"]);
+        assert_eq!(lines, ["pinned-server: check-ok account=12345678 after_s=210"]);
 
         // A repeated error lasts from its first check, so the recovery says 120 s here.
         let (state, _) = log(&CheckLog::default(), Some("Linear answered 500"), 100);
@@ -2367,12 +2374,83 @@ mod tests {
         let (_, lines) = log(&state, None, 220);
         assert_eq!(lines, ["pinned-server: check-ok account=12345678 after_s=120"]);
 
-        // The error is one line, cut before any query string, and at most 200 characters.
+        // The line carries no error text, whatever the error holds: a query string or a newline.
         let (_, lines) = log(&CheckLog::default(), Some("Bad\nthing?token=x&more"), 0);
-        assert_eq!(lines, ["pinned-server: check-error account=12345678 error=Bad thing"]);
+        assert_eq!(lines, ["pinned-server: check-error account=12345678 class=other parts=1 fp=168b78fb"]);
         let long = "x".repeat(500);
         let (_, lines) = log(&CheckLog::default(), Some(&long), 0);
-        assert_eq!(lines, [format!("pinned-server: check-error account=12345678 error={}", "x".repeat(200))]);
+        assert_eq!(lines, ["pinned-server: check-error account=12345678 class=other parts=1 fp=c38c2bf3"]);
+    }
+
+    #[test]
+    fn a_check_error_line_names_its_class_and_never_its_text() {
+        let id = Uuid::from_u128(0x1234_5678_9abc_def0_1111_2222_3333_4444);
+        let error = "workflow \"Workflow Alpha\" names a step \"Step Beta\" it does not have; could not open a session in /home/u/acme-site: no tab took it";
+        let (_, lines) = log_check(&CheckLog::default(), id, &check_at("", Some(error)), 0);
+        assert_eq!(lines, ["pinned-server: check-error account=12345678 class=workflow parts=2 fp=58bf650f"]);
+        for text in ["Workflow Alpha", "Step Beta", "/home/u/acme-site", "names a step"] {
+            assert!(!lines[0].contains(text), "{lines:?} holds {text:?}");
+        }
+    }
+
+    #[test]
+    fn a_changed_error_text_logs_again_and_the_same_text_does_not() {
+        let id = Uuid::from_u128(0x1234_5678_9abc_def0_1111_2222_3333_4444);
+        let log = |prev: &CheckLog, error: Option<&str>, now: i64| log_check(prev, id, &check_at("", error), now);
+        let (state, lines) = log(&CheckLog::default(), Some("Linear answered 500"), 0);
+        assert_eq!(lines, ["pinned-server: check-error account=12345678 class=linear parts=1 fp=1d8aa235"]);
+        let (state, lines) = log(&state, Some("Linear answered 500"), 60);
+        assert!(lines.is_empty(), "{lines:?}");
+        let (state, lines) = log(&state, Some("Linear answered 503"), 120);
+        assert_eq!(lines, ["pinned-server: check-error account=12345678 class=linear parts=1 fp=b616c532"]);
+        let (_, lines) = log(&state, Some("Linear answered 503"), 180);
+        assert!(lines.is_empty(), "{lines:?}");
+    }
+
+    #[test]
+    fn check_ok_counts_from_the_first_failure() {
+        let id = Uuid::from_u128(0x1234_5678_9abc_def0_1111_2222_3333_4444);
+        let log = |prev: &CheckLog, error: Option<&str>, now: i64| log_check(prev, id, &check_at("", error), now);
+        let (state, _) = log(&CheckLog::default(), Some("Linear answered 500"), 0);
+        let (state, _) = log(&state, Some("Slack answered 403"), 60);
+        let (_, lines) = log(&state, None, 150);
+        assert_eq!(lines, ["pinned-server: check-ok account=12345678 after_s=150"]);
+    }
+
+    /// An account the hub knows, its connectors as given and watched or not.
+    fn account_with(id: Uuid, connectors: Option<Connectors>, watching: bool) -> Account {
+        Account { id, email: String::new(), team: false, live: Mutex::default(), connectors: OnceCell::new_with(connectors.map(Arc::new)), watching: AtomicBool::new(watching), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() }
+    }
+
+    /// Connectors whose `runs.json` does not parse, so they hold a failed check from the start.
+    fn connectors_with_broken_runs() -> (tempfile::TempDir, Connectors) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("runs.json"), b"{not json").unwrap();
+        let connectors = Connectors::new(pinned_core::connectors::FileStorage::new(dir.path().to_path_buf()), String::new());
+        (dir, connectors)
+    }
+
+    #[test]
+    fn the_census_says_whether_the_account_is_watched() {
+        let pending = || store_writes::Pending { store: 0, store_bytes: 0, secrets: 0, secrets_bytes: 0 };
+        let (id, other) = (Uuid::from_u128(7), Uuid::from_u128(8));
+        let empty = tempfile::tempdir().unwrap();
+        let connectors = || Connectors::new(pinned_core::connectors::FileStorage::new(empty.path().to_path_buf()), String::new());
+        let accounts: HashMap<Uuid, Arc<Account>> = HashMap::from([(id, Arc::new(account_with(id, Some(connectors()), false))), (other, Arc::new(account_with(other, Some(connectors()), true)))]);
+        let lines = census_lines(vec![(id, (0, 0, pending())), (other, (0, 0, pending()))], &accounts, 42);
+        assert!(lines[0].ends_with(" check_age_s=-1 check_failing=0 watching=0"), "{lines:?}");
+        assert!(lines[1].ends_with(" check_age_s=-1 check_failing=0 watching=1"), "{lines:?}");
+    }
+
+    #[test]
+    fn the_census_line_reads_the_last_check_its_connectors_kept() {
+        let pending = store_writes::Pending { store: 0, store_bytes: 0, secrets: 0, secrets_bytes: 0 };
+        let id = Uuid::from_u128(7);
+        let (_dir, connectors) = connectors_with_broken_runs();
+        let at = chrono::DateTime::parse_from_rfc3339(&connectors.last_check().unwrap().at).unwrap().timestamp();
+        let accounts: HashMap<Uuid, Arc<Account>> = HashMap::from([(id, Arc::new(account_with(id, Some(connectors), true)))]);
+        let lines = census_lines(vec![(id, (0, 0, pending))], &accounts, at + 42);
+        assert_eq!(lines, ["pinned-server: census-account id=00000000-0000-0000-0000-000000000007 runs=0 runs_bytes=0 store_bytes=0 store_pending=0 store_pending_bytes=0 secrets_pending=0 secrets_pending_bytes=0 check_age_s=42 check_failing=1 watching=1"]);
     }
 
     #[test]
