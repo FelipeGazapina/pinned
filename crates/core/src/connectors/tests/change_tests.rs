@@ -884,3 +884,29 @@ fn two_changes_on_one_issue_start_one_run_a_check_each_framed_and_each_gives_bac
     assert!(claims.rows.lock().unwrap().is_empty());
     no_unlisted(&fake);
 }
+
+/// #346 E3 item 3: a change whose run did not start is tried again by a later check, also once it
+/// is older than the check's overlap (three minutes here), and starts there once; the error of
+/// the check that could not start it says when it is tried again.
+#[test]
+fn a_change_whose_run_did_not_start_starts_once_on_a_later_check() {
+    let _api = slack::lock_api();
+    let _restore = RestoreLinear;
+    let at = ago(3);
+    let fake = fake_with(vec![issue(1, at, vec![moved("h-1", at, "Backlog", "Ready to Dev")])]);
+    let claims = Claims::default();
+    let connectors = on(&claims, vec![ready_to_dev("w1", ago(10))], "lin-e3-retry");
+
+    let (runs, error) = check_answering(&connectors, Err("the machine refused the run".into()));
+    assert_eq!(runs.len(), 1, "the start was tried");
+    let mut started = vec![];
+    for _ in 0..2 {
+        let (runs, error) = check(&connectors);
+        assert_eq!(error, None);
+        started.extend(runs.into_iter().map(|run| subject_key(&run.subject)));
+    }
+    assert_eq!(started, ["i-1"], "a later check starts it once");
+    let error = error.unwrap_or_default();
+    assert!(error.contains("a later check tries the change again until it is 60 minutes old"), "{error}");
+    no_unlisted(&fake);
+}
