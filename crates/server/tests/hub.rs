@@ -12573,8 +12573,7 @@ fn a_session_whose_agent_runs_under_a_launcher_acts_as_itself() {
     assert_eq!(w.the_four(Via::Naming(&on_issue), &on_thread, &w.a, "uuid-1")[..1], [Err(NOT_ITSELF.into())], "and still only as itself");
 }
 
-/// The environment of a process that takes itself for session `tab` of the node in `dir`, with
-/// `workflow` the workflow's own variables.
+/// Environment for a CLI call in this test.
 fn taken_for(dir: &Path, tab: &str, workflow: &str) -> String {
     format!("PINNED_SOCK={} PINNED_TAB={tab} {workflow}", dir.join("sock").display())
 }
@@ -12595,6 +12594,7 @@ fn a_session_of_another_accounts_node_on_the_same_machine_cannot_act_for_a_workf
     let as_thread = taken_for(&w.ana.dir, &on_thread, &on_thread_env(&w.a));
     let (machine, dir) = (&bea.node.machine, &bea.dir);
     assert_eq!(cli_in_session(machine, dir, &beas, &as_issue, "stage coding"), Err(OUTSIDE.into()), "the CLI: stage");
+    assert_eq!(cli_in_session(machine, dir, &beas, &as_issue, "run set title x"), Err(OUTSIDE.into()), "the CLI: run set");
     for args in ["slack reply on it", "linear create x y", "linear take ENG-7"] {
         assert_eq!(cli_in_session(machine, dir, &beas, &as_thread, args), Err(OUTSIDE.into()), "the CLI: {args}");
     }
