@@ -386,7 +386,7 @@ test("the run page: breadcrumb, buttons, the open call and its note", () => {
   p.eval(`tcRunShown = "r1"; tcStore.logs.set("r1", [{ at: ${at(15, 0)}, who: "bot", text: "I started." }, { at: ${at(15, 4)}, who: "bot", text: "Ran the tests." }])`);
   const html = p.eval("tcRunPageHtml()");
   const t = text(html);
-  assert.match(t, /^Test publisher, run started at 3:00 PM Waiting for someone in @publishing Take over Stop the bot Active time: Less than a minute Cost: Box US\$ 0.00 · Model US\$ 0.00 Test publisher, 3:00 PM I started\. 3:04 PM Ran the tests\. 3:05 PM Can I publish\?/);
+  assert.match(t, /^Test publisher, run started at 3:00 PM Waiting for someone in @publishing Take over Stop the bot Active time: Less than a minute Box cost: US\$ 0.00 \(model usage not included\) Test publisher, 3:00 PM I started\. 3:04 PM Ran the tests\. 3:05 PM Can I publish\?/);
   assert.match(t, /Asked: Ana Souza and you\. If nobody answers in 30 minutes, I call Ana Souza directly\. Everything the bot and the people do in a run is kept here\.$/);
   assert.deepEqual(buttons(html).filter((b) => /publish$|publish$/.test(b) && !/^[@T]/.test(b)), ["OK to publish", "Don't publish"]);
   assert.ok(!html.includes('data-tc-form'), "no typed field while the call has choices and nobody took over");
@@ -522,7 +522,7 @@ test("taken over by me: the banner with Give back, a typed answer, and no Take o
   const p = page({ calls: [call()], runs: [run({ state: "taken_over", controller: ME })] });
   p.eval(`tcRunShown = "r1"; tcStore.logs.set("r1", [])`);
   const html = p.eval("tcRunPageHtml()");
-  assert.match(text(html), /You took over this run Stop the bot Active time: Less than a minute Cost: Box US\$ 0.00 · Model US\$ 0.00 You are in charge\. The bot stopped where it was and waits\./);
+  assert.match(text(html), /You took over this run Stop the bot Active time: Less than a minute Box cost: US\$ 0.00 \(model usage not included\) You are in charge\. The bot stopped where it was and waits\./);
   assert.ok(!/recorded/.test(text(html)), "nothing promises what is recorded");
   assert.deepEqual(buttons(html).filter((b) => /Take over|Give back|Stop/.test(b)), ["Stop the bot", "Give back to the bot"]);
   assert.match(html, /data-tc-run="give_back"/);
@@ -646,7 +646,7 @@ const runPage = (runOver, calls = []) => {
 };
 
 test("the run page shows active time and waiting time apart, and what the box and the model cost", () => {
-  const p = runPage({ state: "working", active_secs: 25 * 60, waiting_secs: 12 * 60, cost_usd: 0.52, model_usd: 0.4 });
+  const p = runPage({ state: "working", active_secs: 25 * 60, waiting_secs: 12 * 60, cost_usd: 0.12, model_usd: 0.4 });
   const t = text(p.eval("tcRunPageHtml()"));
   assert.ok(t.includes("Active time: 25 min"), t);
   assert.ok(t.includes("Waiting for people: 12 min (not counted toward the time limit)"), t);
@@ -656,12 +656,18 @@ test("the run page shows active time and waiting time apart, and what the box an
 });
 
 test("a run that never waited has no waiting line, a cost of nothing says US$ 0.00, and an hour reads as hours", () => {
-  let t = text(runPage({ state: "working", active_secs: 20, waiting_secs: 0, cost_usd: 0 }).eval("tcRunPageHtml()"));
+  let t = text(runPage({ state: "working", active_secs: 20, waiting_secs: 0, cost_usd: 0, model_usd: 0 }).eval("tcRunPageHtml()"));
   assert.ok(t.includes("Active time: Less than a minute") && t.includes("Cost: Box US$ 0.00 · Model US$ 0.00"), t);
   assert.ok(!t.includes("Waiting for people"), t);
-  t = text(runPage({ state: "done", ended_at: at(17, 0), active_secs: 3900, waiting_secs: 7200, cost_usd: 1.234, outcome: "Published" }).eval("tcRunPageHtml()"));
+  t = text(runPage({ state: "done", ended_at: at(17, 0), active_secs: 3900, waiting_secs: 7200, cost_usd: 1.234, model_usd: 0, outcome: "Published" }).eval("tcRunPageHtml()"));
   assert.ok(t.includes("Active time: 1 h 5 min") && t.includes("Waiting for people: 2 h (not counted") && t.includes("Cost: Box US$ 1.23 · Model US$ 0.00"), t);
   assert.ok(t.includes("Finished Published"), "the outcome stays the run's subtitle");
+});
+
+test("a run from an older hub or box, with no model_usd, keeps the one box cost line", () => {
+  const t = text(runPage({ state: "working", active_secs: 25 * 60, cost_usd: 0.4 }).eval("tcRunPageHtml()"));
+  assert.ok(t.includes("Box cost: US$ 0.40 (model usage not included)"), t);
+  assert.ok(!/Model US\$|Cost: Box/.test(t), t);
 });
 
 test("a run with an open on_limit call is Limit reached, with the question and plain buttons for its choices", () => {
