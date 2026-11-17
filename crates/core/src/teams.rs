@@ -60,6 +60,39 @@ pub struct Team {
     pub role: Role,
     #[serde(default)]
     pub credential: CredentialState,
+    /// Set for the team's owner while its waiting line is held; absent otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_held: Option<LineHeld>,
+}
+
+/// The team's waiting line is held: no waiting run or event of its bots starts, since `since`
+/// (unix seconds), for `why`.
+///
+/// `{"since":1763300000,"why":"settings_unread"}`
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq, schemars::JsonSchema)]
+pub struct LineHeld {
+    pub since: i64,
+    pub why: HeldWhy,
+}
+
+/// Why a team's waiting line is held: `"settings_unread"` (the team's workflows, keys or settings
+/// could not be read).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HeldWhy {
+    SettingsUnread,
+}
+
+impl HeldWhy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HeldWhy::SettingsUnread => "settings_unread",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<HeldWhy> {
+        [HeldWhy::SettingsUnread].into_iter().find(|w| w.as_str() == text)
+    }
 }
 
 /// `{"account":"0b7e…","email":"ana@acme.com","role":"member","groups":["design"]}`

@@ -19,9 +19,14 @@ function app({ answers = {}, projects = [], pages = [], stored = null, raw = nul
   const events = [];
   const store = new Map(stored ? [["teams-current", JSON.stringify(stored)]] : raw ? [["teams-current", raw]] : []);
   const shown = [];
+  // Fake timers: each pending one by its id, with its wait in ms.
+  const timers = new Map();
+  let timerIds = 0;
   const context = {
     console,
     catalogNotReady,
+    setTimeout: (fn, ms) => (timers.set(++timerIds, { fn, ms }), timerIds),
+    clearTimeout: (id) => timers.delete(id),
     CustomEvent: class {
       constructor(type, init) {
         this.type = type;
@@ -33,6 +38,7 @@ function app({ answers = {}, projects = [], pages = [], stored = null, raw = nul
       getElementById: () => null,
       dispatchEvent: (e) => events.push(e),
       activeElement: null,
+      visibilityState: "visible",
     },
     SHELL_PAGES: Object.fromEntries(pages.map((p) => [p, {}])),
     pageView: { addEventListener: (type, fn) => (listeners[type] = fn), querySelector: () => null },
@@ -49,8 +55,14 @@ function app({ answers = {}, projects = [], pages = [], stored = null, raw = nul
     navigator: { clipboard: { writeText: (t) => ((context.copied = t), Promise.resolve()) } },
     opened: [],
     closed: 0,
-    openPage: (name) => context.opened.push(name),
-    closePage: () => context.closed++,
+    // The shell's openPage: records the page, makes it current and shows it. Closing one hands the screen back to the thread.
+    openPage: (name) => {
+      context.opened.push(name);
+      context.document.body.dataset.page = name;
+      context.SHELL_PAGES[name]?.show?.();
+    },
+    shellPage: () => (context.document.body.dataset.page in context.SHELL_PAGES ? context.document.body.dataset.page : null),
+    closePage: () => (context.closed++, delete context.document.body.dataset.page),
     // The bots UI's opener of the Create a bot page, a cross-file global.
     openTeamBotNew: () => context.opened.push("team-bot-new"),
     hub: {
@@ -75,7 +87,7 @@ function app({ answers = {}, projects = [], pages = [], stored = null, raw = nul
     const el = { dataset: { tm, ...data }, disabled: false };
     listeners.click({ target: { closest: (sel) => (sel === "[data-tm]" ? el : null) } });
   };
-  return { context, run, frames, events, store, shown, page, listeners, click, show: (name) => (context.document.body.dataset.page = name, context.SHELL_PAGES[name].show()) };
+  return { context, run, frames, events, store, shown, page, listeners, click, timers, show: (name) => (context.document.body.dataset.page = name, context.SHELL_PAGES[name].show()) };
 }
 
 const created = (over = {}) => ({ ...ACME, ...over });
@@ -126,6 +138,94 @@ test("a saved team is current at start, and refreshed from the list; one the per
   await b.context.teamsList();
   assert.equal(b.context.teamsCurrent(), null);
   assert.equal(b.events.length, 1);
+});
+
+// ---- A switch of team sets the main area: a team opens its home, the personal account closes a team page ----
+
+test("switching from the personal account to a team opens the team's Calls page, once", async () => {
+  const a = app({ answers: { list: [ACME, SOLO] }, pages: ["team-calls", "team-bot"] });
+  await a.context.teamsList();
+  assert.deepEqual(a.context.opened, [], "a list with nothing remembered opens nothing");
+  a.run("teamsSelect(teamsKnown[0])");
+  assert.equal(a.context.document.body.dataset.page, "team-calls");
+  assert.deepEqual(a.context.opened, ["team-calls"]);
+  assert.equal(a.context.closed, 0);
+});
+
+test("switching from one team to another opens the new team's Calls page once", async () => {
+  const a = app({ answers: { list: [ACME, SOLO] }, pages: ["team-calls", "team-bot"] });
+  await a.context.teamsList();
+  a.run("teamsSelect(teamsKnown[0])");
+  a.context.opened.length = 0;
+  a.run("teamsSelect(teamsKnown[1])");
+  assert.equal(a.context.teamsCurrent().id, "t2");
+  assert.deepEqual(a.context.opened, ["team-calls"]);
+  assert.equal(a.context.closed, 0);
+});
+
+test("switching from a team to the personal account closes an open team page and leaves a non-team page open", async () => {
+  const a = app({ answers: { list: [ACME] }, pages: ["team-calls", "team-bot", "settings"] });
+  await a.context.teamsList();
+  a.run("teamsSelect(teamsKnown[0])");
+  a.context.opened.length = 0;
+  a.context.document.body.dataset.page = "team-bot";
+  a.run("teamsSelect(null)");
+  assert.equal(a.context.teamsCurrent(), null);
+  assert.equal(a.context.closed, 1);
+  assert.deepEqual(a.context.opened, [], "the personal account opens no page of its own");
+  assert.equal(a.context.document.body.dataset.page, undefined, "no page is set, so the thread is what shows");
+
+  a.run("teamsSelect(teamsKnown[0])");
+  a.context.opened.length = 0;
+  a.context.document.body.dataset.page = "settings";
+  a.run("teamsSelect(null)");
+  assert.equal(a.context.closed, 1, "a non-team page is not closed");
+  assert.equal(a.context.document.body.dataset.page, "settings");
+});
+
+test("a teamsList refresh that keeps the same team opens and closes nothing", async () => {
+  const a = app({ answers: { list: [ACME] }, pages: ["team-calls", "team-bot"] });
+  await a.context.teamsList();
+  a.run("teamsSelect(teamsKnown[0])");
+  a.context.opened.length = 0;
+  a.context.document.body.dataset.page = "team-bot";
+  await a.context.teamsList();
+  assert.deepEqual(a.context.opened, []);
+  assert.equal(a.context.closed, 0);
+  assert.equal(a.context.document.body.dataset.page, "team-bot");
+});
+
+test("being dropped from the current team closes its open team page", async () => {
+  let teams = [ACME];
+  const a = app({ answers: { list: () => teams }, pages: ["team-calls", "team-bot"] });
+  await a.context.teamsList();
+  a.run("teamsSelect(teamsKnown[0])");
+  a.context.opened.length = 0;
+  a.context.document.body.dataset.page = "team-bot";
+  teams = [SOLO];
+  await a.context.teamsList();
+  assert.equal(a.context.teamsCurrent(), null);
+  assert.equal(a.context.closed, 1);
+  assert.deepEqual(a.context.opened, []);
+});
+
+test("start with a remembered team opens its Calls page once, at the first list from the hub, not at load", async () => {
+  const saved = { id: "t1", name: "North Studio", role: "owner", credential: ACME.credential };
+  const a = app({ answers: { list: [ACME] }, pages: ["team-calls"], stored: saved });
+  assert.deepEqual(a.context.opened, [], "nothing opens before the hub answers: the personal thread is shown first");
+  await a.context.teamsList();
+  assert.deepEqual(a.context.opened, ["team-calls"]);
+  assert.equal(a.context.document.body.dataset.page, "team-calls");
+  a.context.opened.length = 0;
+  await a.context.teamsList();
+  assert.deepEqual(a.context.opened, [], "a later refresh opens nothing");
+});
+
+test("start with a remembered team the person is no longer in opens nothing", async () => {
+  const a = app({ answers: { list: [SOLO] }, pages: ["team-calls"], stored: { id: "t1", name: "North Studio", role: "owner", credential: {} } });
+  await a.context.teamsList();
+  assert.equal(a.context.teamsCurrent(), null);
+  assert.deepEqual(a.context.opened, []);
 });
 
 test("teamsCurrent carries me: the owner's own account id from the wire's owner, null for a member", async () => {
@@ -792,4 +892,146 @@ test("the join code field's placeholder is the four-group invite code shape", as
   const a = joinApp();
   a.show("team-join");
   assert.ok(a.page().includes('placeholder="ABCD-EFGH-JKMN-PQRS"'), "the code field shows the four-group shape");
+});
+
+// ---- Connect AI account: step 3 for the team the owner is in, opened from the team nav or the bot page ----
+
+const KEYS_OFF = { upstash: false, claude: false, github: false, slack: false };
+const CONNECT_TOKEN_SENTENCE = "The token comes from the Claude account your terminal is signed in to. Sign in to the team's own Claude account first.";
+
+/** North Studio, as `role` and `credential` say, opened from `origin` (the page the owner is on) by Connect AI account. */
+async function atConnect(origin, { role = "owner", credential = KEYS_OFF } = {}) {
+  const team = { ...ACME, role, credential };
+  const a = app({ answers: { list: () => [team] }, stored: { id: "t1", name: "North Studio", role, credential }, pages: origin ? [origin, "team-calls"] : ["team-calls"] });
+  await a.context.teamsList();
+  // The first read opens the stored team's home; what Connect opens is counted from here.
+  a.context.opened.length = 0;
+  a.context.document.body.dataset.page = origin ?? "";
+  a.run("openTeamConnect()");
+  return a;
+}
+
+test("Connect AI account opens step 3 for the current team: its name and key state, and nothing sent but the list", async () => {
+  const a = await atConnect("team-calls", { credential: { ...KEYS_OFF, upstash: true } });
+  const t = text(a.page());
+  assert.match(t, /North Studio Team Connect AI account/);
+  assert.match(t, /The team has its own AI account/);
+  assert.match(t, /Upstash key Opens the boxes the bots work in Connected/);
+  assert.match(t, /Claude token for boxes Signs the bots in to Claude inside the box Connect now/);
+  assert.ok(!/Step \d of 4|Who works with you|Connect later/.test(t), "one step: no step list and no way on to the people step");
+  assert.deepEqual(a.frames.map((f) => f.op.op), ["list"]);
+});
+
+test("saving in Connect AI account sends the credential call with the team's id, and never a create, rename or invite", async () => {
+  const a = await atConnect("team-calls");
+  a.click("connect", { cred: "claude" });
+  const inputs = [{ dataset: { field: "name" }, value: "team" }, { dataset: { field: "token" }, value: "sk-ant-oat01-SECRET3" }];
+  a.listeners.submit({ preventDefault() {}, target: { closest: () => ({ dataset: { tm: "form", cred: "claude" }, querySelectorAll: () => inputs }) } });
+  await flush();
+  assert.deepEqual(a.frames.map((f) => f.op.op), ["list", "hub", "list"]);
+  assert.deepEqual(a.frames.find((f) => f.op.op === "hub"), { cmd: "team", team: "t1", op: { op: "hub", call: { cmd: "set_box_claude_token", name: "team", token: "sk-ant-oat01-SECRET3" } } });
+  assert.ok(!a.shown.some((h) => /SECRET3/.test(h)), "the token is never drawn");
+});
+
+test("Done and Back return to the page the owner came from, and create, rename or invite nothing", async () => {
+  const done = await atConnect("team-bot");
+  done.click("connect-done");
+  assert.equal(done.context.document.body.dataset.page, "team-bot");
+  assert.deepEqual(done.context.opened.at(-1), "team-bot");
+  const back = await atConnect("team-calls");
+  back.click("leave");
+  assert.deepEqual(back.context.opened.at(-1), "team-calls");
+  for (const a of [done, back]) assert.deepEqual(a.frames.map((f) => f.op.op).filter((op) => op !== "list"), [], "only the list is read");
+});
+
+test("asked from outside the shell's pages, Done closes the page as Back to my account does", async () => {
+  const a = await atConnect(null);
+  a.click("connect-done");
+  assert.equal(a.context.closed, 1);
+  assert.deepEqual(a.context.opened, ["team-create"], "nothing else is opened");
+});
+
+test("a member cannot open Connect AI account: nothing opens and no call is sent", async () => {
+  const a = await atConnect("team-calls", { role: "member" });
+  assert.deepEqual(a.context.opened, []);
+  assert.deepEqual(a.frames.map((f) => f.op.op), ["list"]);
+});
+
+test("the Claude token field says where the token comes from, on step 3 and in Connect AI account", async () => {
+  const a = await atConnect("team-calls");
+  a.click("connect", { cred: "claude" });
+  assert.ok(text(a.page()).includes(CONNECT_TOKEN_SENTENCE), "the Claude token form");
+  a.click("connect", { cred: "upstash" });
+  assert.ok(text(a.page()).includes(CONNECT_TOKEN_SENTENCE), "the Claude token field of the Upstash form");
+  const wizard = await atStep3();
+  wizard.click("connect", { cred: "claude" });
+  assert.ok(text(wizard.page()).includes(CONNECT_TOKEN_SENTENCE), "the create wizard's step 3");
+});
+
+test("the team list keeps the line the hub holds for the team's owner, and only the owner's", async () => {
+  const held = { since: 1795359900, why: "settings_unread" };
+  const a = app({ answers: { list: [{ ...ACME, line_held: held }, { ...SOLO, line_held: held }] } });
+  await a.context.teamsList();
+  a.run("teamsSelect(teamsKnown[0])");
+  assert.deepEqual(here(a.context.teamsCurrent()), { id: "t1", name: "North Studio", role: "owner", credential: ACME.credential, me: "a1", line_held: held });
+  a.run("teamsSelect(teamsKnown[1])");
+  assert.deepEqual(here(a.context.teamsCurrent()), { id: "t2", name: "Side Gig", role: "member", credential: SOLO.credential, me: null }, "a member's team keeps none");
+  const b = app({ answers: { list: [ACME] } });
+  await b.context.teamsList();
+  b.run("teamsSelect(teamsKnown[0])");
+  assert.equal("line_held" in b.context.teamsCurrent(), false, "a team the hub holds nothing for has no line");
+});
+
+/** The waits of the pending fake timers, in ms. */
+const waits = (a) => [...a.timers.values()].map((t) => t.ms);
+/** Runs the one pending fake timer and lets what it started settle. */
+async function fire(a) {
+  assert.equal(a.timers.size, 1, "one timer pending");
+  const [[id, timer]] = [...a.timers];
+  a.timers.delete(id);
+  timer.fn();
+  for (let i = 0; i < 5; i++) await flush();
+}
+
+test("an owner's team list is read again on one timer, and the held line goes once the hub lets it go", async () => {
+  const held = { since: 1795359900, why: "settings_unread" };
+  let list = [{ ...ACME, line_held: held }, SOLO];
+  const a = app({ answers: { list: () => list }, body: { hub: "online" } });
+  const drawn = [];
+  a.context.tcNavDraw = () => drawn.push(here(a.context.teamsCurrent()));
+  await a.context.teamsList();
+  a.run("teamsSelect(teamsKnown[0])");
+  assert.deepEqual(here(a.context.teamsCurrent().line_held), held);
+  assert.deepEqual(waits(a), [30000], "every 30 s while an owned team's line is held");
+
+  list = [ACME, SOLO];
+  drawn.length = 0;
+  await fire(a);
+  assert.equal(a.frames.filter((f) => f.op.op === "list").length, 2, "the timer read the list again");
+  assert.equal("line_held" in a.context.teamsCurrent(), false, "the held line is gone");
+  assert.ok(drawn.length > 0 && drawn.every((t) => !("line_held" in t)), "the nav is drawn again, with no held line");
+  assert.deepEqual(waits(a), [120000], "every 2 min once nothing is held");
+
+  await a.context.teamsList();
+  await a.context.teamsList();
+  assert.deepEqual(waits(a), [120000], "reads by other ways never stack a second timer");
+
+  a.context.document.visibilityState = "hidden";
+  a.run("teamsPollArm()");
+  assert.deepEqual(waits(a), [], "no timer while the page is hidden");
+  a.context.document.visibilityState = "visible";
+  a.run("teamsPollArm()");
+  assert.deepEqual(waits(a), [120000]);
+  a.context.document.body.dataset.hub = "offline";
+  a.run("teamsPollArm()");
+  assert.deepEqual(waits(a), [], "no timer while the hub is not online");
+});
+
+test("a person who owns no team, or is offline, gets no timer", async () => {
+  const member = app({ answers: { list: [{ ...SOLO, line_held: { since: 1795359900, why: "settings_unread" } }] }, body: { hub: "online" } });
+  await member.context.teamsList();
+  assert.deepEqual(waits(member), [], "a member's list is not read on a timer");
+  const offline = app({ answers: { list: [ACME] } });
+  await offline.context.teamsList();
+  assert.deepEqual(waits(offline), [], "nothing while the hub is not online");
 });

@@ -179,6 +179,7 @@ pub const ACTIONS: &[Action] = &[
     n("switch_account", Write, "Moves a session's conversation to another agent account signed in on the machine and resumes it there.").wired(),
     n("repo_look", Excluded, "the global orchestrator's repo_overview, repo_read and repo_search, which the hub sends after its permission and rate checks").named("node_repo_look"),
     n("thread", Read, "A session's conversation items from byte from of its transcript (0: the start) and the offset to read next. node_read_session reads its end.").wired(),
+    n("plan", Read, "A Captain session's plans with their lists and steps, or the one plan given by plan. A session that is not a Captain keeps none.").wired(),
     n("prompt", Write, "Types text into another running session as one prompt and submits it. A Captain takes enqueue instead, and the global orchestrator takes tell_orchestrator.").wired(),
     n("workspace", Excluded, GIT),
     n("pull_request", Excluded, GIT),
