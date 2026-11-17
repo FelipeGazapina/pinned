@@ -965,7 +965,7 @@ fn tail(exec: &Exec) -> String {
 
 /// The whole end notice of a box whose repository GitHub did not confirm private: no rescue script
 /// was sent to it.
-const NOT_PRIVATE: &str = "Unpushed work on this box was not saved: the repository is not confirmed private.";
+const NOT_PRIVATE: &str = "Any unpushed work on this box was not saved: the repository is not confirmed private.";
 /// The whole end notice of a box whose clone's origin is not only the task's repository: the rescue
 /// script committed and pushed nothing.
 const OTHER_REMOTE: &str = "Unpushed work on this box was not saved: its push remote is not the task's repository.";
