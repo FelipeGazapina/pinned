@@ -949,6 +949,33 @@ fn a_won_change_read_again_where_its_claim_would_fail_fires_once_and_is_not_cool
     no_unlisted(&fake);
 }
 
+/// #346 E3 round 4 item 2: an Ask step that stops a change's run has asked its model, so that
+/// start counts for the cooldown: a second move into Ready to Dev three minutes later is cooled
+/// and asks no model.
+#[test]
+fn an_ask_step_that_stops_a_run_counts_as_a_start_for_the_cooldown() {
+    let _api = slack::lock_api();
+    let _restore = RestoreLinear;
+    let first = ago(3);
+    let fake = fake_with(vec![issue(1, first, vec![moved("h-1", first, "Backlog", "Ready to Dev")])]);
+    let claims = Claims::default();
+    let connectors = on(&claims, vec![Connector { ask: Some(agent_ask()), ..ready_to_dev("w1", ago(10)) }], "lin-e2-ask-cooldown");
+    claims.inner.write_key(VERCEL_KEY, "vck_testcooldown").unwrap();
+    let _reply = TestReply::set(r#"{"agent":"no"}"#.into());
+    crate::vercel::take_test_inputs();
+
+    let (runs, error) = check(&connectors);
+    assert_eq!((runs.len(), error), (0, None), "the Ask step stops the run");
+    let second = Utc::now();
+    fake.lock().unwrap().issues = vec![issue(1, second, vec![moved("h-1", first, "Backlog", "Ready to Dev"), moved("h-2", second, "Todo", "Ready to Dev")])];
+    let (runs, error) = check(&connectors);
+    assert_eq!((runs.len(), error), (0, None), "the cooldown refuses the second move");
+    assert_eq!(crate::vercel::take_test_inputs().len(), 1, "the Ask model is asked once");
+    let counts = connectors.change_counts()["w1"].clone();
+    assert_eq!((counts.cooled, counts.not_started), (1, 1));
+    no_unlisted(&fake);
+}
+
 /// #346 E3 round 4 item 1: a retry whose claim answers an error stays in the retries, so a later
 /// check starts it.
 #[test]
