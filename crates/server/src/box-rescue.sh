@@ -11,13 +11,18 @@
 # nested repository, and commits them. The answer counts the files it left out and never names them.
 # Then, in both modes, it pushes each worktree's HEAD and every local branch that has commits on no
 # remote branch, each to the new branch wip/rescue/<task>, or <task>-2 and on while that name is
-# taken. Before the first push it fetches origin, pruning, and before each push it reads what that
-# push would add over origin's branches, commits and messages, and when that holds a value of a
-# secret-named variable of its own, of the box's `box.env` or of the node's environment, or a token's
-# shape, or adds or changes a file whose name may hold a secret, it pushes nothing of that branch,
-# undoes its own rescue commit there and answers only that it refused. It pushes with the
-# credentials the clone keeps, never forces, never skips a hook, and never pushes a submodule or a
-# tag the clone's settings would add.
+# taken. It pushes only while origin has one URL and pushes to that URL alone. Before the first push
+# it fetches origin, pruning, and before each push it reads what that push would add over origin's
+# branches, commits and messages, and when that holds a value of a secret-named variable of its own,
+# of the box's `box.env` or of the node's environment, or a token's shape, or adds or changes a file
+# whose name may hold a secret, it pushes nothing of that branch, undoes its own rescue commit there
+# and answers only that it refused. Those values stay in one awk process's memory, never on a command
+# line, in a file or on an output; when box.env or the node's environment cannot be read, it pushes
+# nothing at all and undoes its rescue commits. In `commits` mode it also refuses a branch that would
+# add a commit with no parent or one another ref holds (another remote's branch, a tag origin does
+# not have, a note, the stash), and answers only how many it refused. It pushes with the credentials
+# the clone keeps, never forces, never skips a hook, and never pushes a submodule or a tag the
+# clone's settings would add.
 # The hub reads only the `pinned-rescue:` lines: git's own output, which may name paths, stays here.
 export GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0 LC_ALL=C
 task='{{task}}'
@@ -31,36 +36,59 @@ answer() { echo "pinned-rescue: $1"; }
 cd "$HOME/pinned/{{repo}}" 2>/dev/null && git rev-parse --git-dir >/dev/null 2>&1 || { answer done; exit 0; }
 top=$(pwd)
 trees=$(git worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p')
-common=$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd) || { answer 'failed scan'; answer done; exit 0; }
-values=$(mktemp "$common/pinned-rescue.XXXXXX" 2>/dev/null) || { answer 'failed scan'; answer done; exit 0; }
-diff=$(mktemp "$common/pinned-rescue.XXXXXX" 2>/dev/null) || { rm -f "$values"; answer 'failed scan'; answer done; exit 0; }
-trap 'rm -f "$values" "$diff"' EXIT
-# Each line of 12 characters or more of a value of a variable named like a secret: of this process's
-# own, read inside awk, so no value is ever on a command line.
-awk 'BEGIN { for (k in ENVIRON) if (toupper(k) ~ /TOKEN|KEY|SECRET|PASSWORD|PASS|AUTH|CREDENTIAL|COOKIE/) { n = split(ENVIRON[k], part, "\n"); for (i = 1; i <= n; i++) if (length(part[i]) >= 12) print part[i] } }' >"$values" 2>/dev/null || { answer 'failed scan'; answer done; exit 0; }
-# The same of `NAME=value` lines on its input, with no quotes around and with them, as box.env and
-# the node's environment hold them: read as text, never run. A line with no name goes on the value
-# before it.
-assigned() {
-  awk 'function keep(v) { if (length(v) >= 12) print v }
-    { line = $0; sub(/\r$/, "", line) }
-    line ~ /^(export[ \t]+)?[A-Za-z_][A-Za-z0-9_]*=/ { sub(/^export[ \t]+/, "", line); i = index(line, "="); named = toupper(substr(line, 1, i - 1)) ~ /TOKEN|KEY|SECRET|PASSWORD|PASS|AUTH|CREDENTIAL|COOKIE/; line = substr(line, i + 1) }
-    named { keep(line); q = sprintf("%c", 39); v = line; gsub(q "\\\\" q q, q, v); gsub("^[" q "\"]|[" q "\"]$", "", v); keep(v) }' >>"$values" 2>/dev/null
+# Whether what it reads holds, on one line, a value of 12 characters or more of a variable named like
+# a secret: of this process's own, of the box's `box.env`, which start.sh loads into the node's
+# environment but no exec of the hub runs with, and of the node's environment, as `NAME=value` lines
+# with no quotes around the value and with them. A line with no name goes on the value before it. awk
+# reads them itself, as text it never runs, and keeps them in its memory alone: no value is ever on a
+# command line, in a file or on an output. It exits 0 when its input holds one, 1 when not, and 2 when
+# box.env is there but cannot be read or the pid file names no running pinned-server whose
+# environment this user may read.
+found() {
+  node=$(cat "$pinned/node.pid" 2>/dev/null)
+  case "$node" in '' | *[!0-9]*) node='' ;; esac
+  [ -n "$node" ] && grep -qs pinned-server "/proc/$node/cmdline" || node=''
+  env=''
+  { [ -e "$pinned/box.env" ] || [ -L "$pinned/box.env" ]; } && env="$pinned/box.env"
+  awk -v env="$env" -v node="$node" '
+    function keep(v) { if (length(v) >= 12) value[v] = 1 }
+    function secret(name) { return toupper(name) ~ /TOKEN|KEY|SECRET|PASSWORD|PASS|AUTH|CREDENTIAL|COOKIE/ }
+    function take(line,  i, v) {
+      sub(/\r$/, "", line)
+      if (line ~ /^(export[ \t]+)?[A-Za-z_][A-Za-z0-9_]*=/) { sub(/^export[ \t]+/, "", line); i = index(line, "="); named = secret(substr(line, 1, i - 1)); line = substr(line, i + 1) }
+      if (named) { keep(line); v = line; gsub(q "\\\\" q q, q, v); gsub("^[" q "\"]|[" q "\"]$", "", v); keep(v) }
+    }
+    # Each line of file f, cut at its NULs too, as the environment holds them; false when it cannot be read.
+    function load(f,  line, part, n, i, got) {
+      named = 0
+      while ((got = (getline line < f)) == 1) { n = split(line, part, nul); for (i = 1; i <= n; i++) take(part[i]) }
+      close(f)
+      return got == 0
+    }
+    BEGIN {
+      q = sprintf("%c", 39); nul = sprintf("%c", 0)
+      for (k in ENVIRON) if (secret(k)) { n = split(ENVIRON[k], part, "\n"); for (i = 1; i <= n; i++) keep(part[i]) }
+      if (env != "" && !load(env)) unread = 1
+      if (node == "" || !load("/proc/" node "/environ")) unread = 1
+      if (unread) exit
+    }
+    { for (v in value) if (index($0, v)) { hit = 1; exit } }
+    END { if (unread) exit 2; exit !hit }'
 }
-# box.env, which start.sh loads into the node's environment but no exec of the hub runs with.
-[ -f "$pinned/box.env" ] && { assigned <"$pinned/box.env" || { answer 'failed scan'; answer done; exit 0; }; }
-# The node's environment, when its pid file names a running pinned-server this user may read.
-node=$(cat "$pinned/node.pid" 2>/dev/null)
-case "$node" in '' | *[!0-9]*) node='' ;; esac
-[ -n "$node" ] && grep -qs pinned-server "/proc/$node/cmdline" && [ -r "/proc/$node/environ" ] && tr '\000' '\n' <"/proc/$node/environ" | assigned
+# Origin's one URL, when it pushes to that URL alone, so what the scan takes as origin's is where the
+# push goes; else empty, and nothing is pushed. git expands insteadOf and pushInsteadOf in what it reads.
+origin=$(git remote get-url --all origin 2>/dev/null)
+case "$origin" in *'
+'*) origin='' ;; esac
+[ "$(git remote get-url --push --all origin 2>/dev/null)" = "$origin" ] || origin=''
 # `full` only while origin pushes to the checked repository alone: one push URL, on github.com,
-# over https or ssh, with no other user. git expands insteadOf and pushInsteadOf in what it reads.
+# over https or ssh, with no other user.
 if [ "$mode" = full ]; then
   url=$(git remote get-url --push --all origin 2>/dev/null | tr 'A-Z' 'a-z')
   checked=$(printf '%s' "$github" | tr 'A-Z' 'a-z')
   case "$url" in
     "https://github.com/$checked" | "https://github.com/$checked.git" | "git@github.com:$checked" | "git@github.com:$checked.git" | \
-      "ssh://git@github.com/$checked" | "ssh://git@github.com/$checked.git") [ -n "$checked" ] || mode=commits ;;
+      "ssh://git@github.com/$checked" | "ssh://git@github.com/$checked.git") [ -n "$checked" ] && [ -n "$origin" ] || mode=commits ;;
     *) mode=commits ;;
   esac
 fi
@@ -70,9 +98,13 @@ uncommitted=0
 fetched=''
 # The rescue commits this run made, as `<commit> <files it left out>` lines.
 made=''
-# The commits handled already, and the branches whose push was refused.
+# The commits handled already, the branches whose push was refused, and how many of them were refused
+# for history that may not be origin's.
 sent=' '
 refused=' '
+strays=0
+# Origin's tags, as `<object> <ref>` lines between two newlines, once it was fetched.
+tags=''
 # How many NUL-ended names it reads.
 names() { tr -cd '\000' | wc -c | tr -d ' '; }
 # The nested repositories of this tree, one per line: new folders that hold a `.git`, and submodules.
@@ -132,25 +164,65 @@ commit() {
   made="$made$(git rev-parse HEAD) $(changed)
 "
 }
-# Whether what commit $1 adds over origin's branches, commits and messages, may hold a secret: a
-# value of a secret-named variable, a token's shape, or a file added or changed whose name may hold
-# a secret, by the names `safe` leaves out. A failure to read it is a yes.
-leaks() {
-  git log -p --cc --text --no-color --no-ext-diff --no-textconv "$1" --not --remotes=origin >"$diff" 2>/dev/null || return 0
-  grep -q -F -f "$values" "$diff"
-  [ $? -eq 1 ] || return 0
+# Runs `git log` with the arguments after the first into check $1, and answers that check's exit:
+# 0 when it found something, 1 when not, and 2 when it could not look. When git fails, so what may
+# hold a secret could not all be read, that is 0.
+scanned() {
+  check=$1
+  shift
+  said=$({ { git log "$@" 2>/dev/null; echo "log $?" >&3; } | "$check" >/dev/null 2>&1; echo "check $?" >&3; } 3>&1)
+  case "$said" in
+    *'check 1'*) case "$said" in *'log 0'*) return 1 ;; esac ;;
+    *'check 2'*) return 2 ;;
+  esac
+  return 0
+}
+# Whether what it reads holds a token's shape.
+shaped() {
   grep -q -E -e 'sk-[A-Za-z0-9_-]{20}' -e 'sk_live_[A-Za-z0-9]{10}' -e 'gh[pousr]_[A-Za-z0-9_]{30}' -e 'github_pat_' \
     -e 'xox[abposr]-' -e 'xapp-[A-Za-z0-9-]{10}' -e 'glpat-[A-Za-z0-9_-]{20}' -e 'AIza[A-Za-z0-9_-]{30}' -e 'box_[A-Za-z0-9_]{16}' \
     -e 'A(KI|SI)A[0-9A-Z]{16}' -e 'eyJ[A-Za-z0-9_-]*\.eyJ[A-Za-z0-9_-]*\.' -e '://[^/:@[:space:]]+:[^/@[:space:]]+@' \
-    -e '-----BEGIN[A-Z0-9 ]*PRIVATE KEY' "$diff"
-  [ $? -eq 1 ] || return 0
-  git log -z --format= --name-only --no-renames --diff-filter=d --cc "$1" --not --remotes=origin >"$diff" 2>/dev/null || return 0
-  tr '\000\n' '\n\000' <"$diff" | tr 'A-Z' 'a-z' | grep -q -E \
+    -e '-----BEGIN[A-Z0-9 ]*PRIVATE KEY'
+}
+# Whether the NUL-ended paths it reads hold a name that may hold a secret, by the names `safe` leaves out.
+named() {
+  tr '\000\n' '\n\000' | tr 'A-Z' 'a-z' | grep -q -E \
     -e '(^|/)(\.env[^/]*|[^/]*\.env|env\.local|[^/]*\.(pem|key|p12|pfx|jks|keystore|tfstate|tfvars)|id_[^/]*)(/|$)' \
     -e '(^|/)(\.npmrc|\.netrc|\.pgpass|\.htpasswd|\.dockercfg|[^/]*kubeconfig[^/]*|\.mcp\.json|\.claude|\.?tokens?)(/|$)' \
     -e '(^|/)([^/]*secrets?|[^/]*credentials?)([._-][^/]*)?(/|$)' -e '(^|/)[^/]*tokens?([._-][^/]*)?$'
+}
+# Whether what commit $1 adds over origin's branches, commits and messages, may hold a secret: a
+# value of a secret-named variable, a token's shape, or a file added or changed whose name may hold
+# a secret. A failure to read it is a yes. Answers 0 for a yes, 1 for a no, and 2 when box.env or
+# the node's environment, which hold values to look for, could not be read.
+leaks() {
+  scanned found -p --cc --text --no-color --no-ext-diff --no-textconv "$1" --not --remotes=origin
+  hit=$?
+  [ "$hit" -eq 1 ] || return "$hit"
+  scanned shaped -p --cc --text --no-color --no-ext-diff --no-textconv "$1" --not --remotes=origin
+  [ $? -eq 1 ] || return 0
+  scanned named -z --format= --name-only --no-renames --diff-filter=d --cc "$1" --not --remotes=origin
   [ $? -eq 1 ] || return 0
   return 1
+}
+# The refs but local branches and origin's, one per line, less the tags origin has as they are here.
+outside() {
+  git for-each-ref --format='%(objectname) %(refname)' 2>/dev/null | while read -r object ref; do
+    case "$ref" in refs/heads/* | refs/remotes/origin/*) continue ;; esac
+    case "$tags" in *"
+$object $ref
+"*) continue ;; esac
+    echo "$ref"
+  done
+}
+# Whether each commit that $1 adds over origin's branches has a parent and is on no ref but a local
+# branch or one of origin's: another remote's branch, a tag origin does not have, a note or the stash
+# holds history that may not be origin's.
+descends() {
+  roots=$(git rev-list -n 1 --max-parents=0 "$1" --not --remotes=origin 2>/dev/null) && [ -z "$roots" ] || return 1
+  all=$(git rev-list --count "$1" --not --remotes=origin 2>/dev/null) || return 1
+  own=$(git rev-list --count "$1" --not --remotes=origin $(outside) 2>/dev/null) || return 1
+  [ "$all" = "$own" ]
 }
 # Undoes rescue commit $1 in the tree whose HEAD it is, keeping its files.
 undo() {
@@ -168,17 +240,39 @@ send() {
   case "$refused" in *" $1 "*) return 0 ;; esac
   sent="$sent$2 "
   [ -n "$(git rev-list -n 1 "$2" --not --remotes=origin 2>/dev/null)" ] || return 0
-  # Once, before the first scan: origin's branches as they are now, so a stale one hides nothing.
-  [ -n "$fetched" ] || { git fetch -q --prune --no-recurse-submodules origin >/dev/null 2>&1; fetched=$?; }
+  # Once, before the first scan, when origin pushes where it fetches from: its branches as they are
+  # now, so a stale one hides nothing, and its tags.
+  if [ -z "$fetched" ]; then
+    fetched=1
+    [ -n "$origin" ] && git fetch -q --prune --no-recurse-submodules origin >/dev/null 2>&1 && fetched=0
+    [ "$fetched" -eq 0 ] && [ "$mode" = commits ] && tags="
+$(git ls-remote --tags origin 2>/dev/null | tr '\t' ' ')
+"
+  fi
   [ "$fetched" -eq 0 ] || { answer 'failed remote'; return 0; }
   [ -n "$(git rev-list -n 1 "$2" --not --remotes=origin 2>/dev/null)" ] || return 0
   leaks "$2"
   hit=$?
-  : >"$diff"
+  # Values to look for that cannot be read: nothing more is pushed and no rescue commit stays.
+  if [ "$hit" -eq 2 ]; then
+    while read -r commit left; do
+      [ -n "$commit" ] && undo "$commit"
+    done <<EOF
+$made
+EOF
+    answer 'refused secret'
+    answer done
+    exit 0
+  fi
   if [ "$hit" -eq 0 ]; then
     [ -n "$1" ] && refused="$refused$1 "
     undo "$2"
     answer 'refused secret'
+    return 0
+  fi
+  if [ "$mode" = commits ] && ! descends "$2"; then
+    [ -n "$1" ] && refused="$refused$1 "
+    strays=$((strays + 1))
     return 0
   fi
   while :; do
@@ -220,5 +314,6 @@ while read -r tip branch; do
 done <<EOF
 $(git for-each-ref --format='%(objectname) %(refname)' refs/heads/ 2>/dev/null)
 EOF
+[ "$strays" -gt 0 ] && answer "refused history $strays"
 [ "$uncommitted" -gt 0 ] && answer "uncommitted $uncommitted"
 answer done

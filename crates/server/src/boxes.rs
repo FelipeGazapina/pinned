@@ -1092,11 +1092,19 @@ fn is_rescue_branch(branch: &str, task: &str) -> bool {
 /// What the rescue script's answer says for task `task`. Only its own lines are read, a branch only
 /// when it is one of the task's, and an answer without its closing `done` did not finish. A saved
 /// branch's line may end in how many files it left out, ` (left out <n> files that may hold secrets)`,
-/// and `uncommitted <n>` counts the files a public repository's rescue did not save.
+/// `uncommitted <n>` counts the files a public repository's rescue did not save, and `refused history
+/// <n>` the branches it did not push because their history may not be the repository's.
 fn rescued(exec: &Exec, task: &str) -> Rescue {
     let mut rescue = Rescue::default();
     let mut done = false;
     for said in exec.output.lines().filter_map(|line| line.strip_prefix(RESCUE_MARK)) {
+        if let Some(n) = said.trim().strip_prefix("refused history ").and_then(count) {
+            rescue.failed.get_or_insert_with(|| match n {
+                1 => "1 branch holds history that does not come from its repository, so it was not pushed".to_owned(),
+                n => format!("{n} branches hold history that does not come from its repository, so they were not pushed"),
+            });
+            continue;
+        }
         let why = match said.trim() {
             "done" => {
                 done = true;
@@ -3644,7 +3652,8 @@ mod tests {
                 "git commit -q -m \"rescue: unpushed work of task $task\" >/dev/null 2>&1 || { answer 'failed commit'; return 0; }",
                 "git reset -q HEAD~1 >/dev/null 2>&1",
                 "[ -n \"$tree\" ] && [ \"$(git -C \"$tree\" rev-parse HEAD 2>/dev/null)\" = \"$1\" ] && git -C \"$tree\" reset -q --soft HEAD~1 >/dev/null 2>&1",
-                "[ -n \"$fetched\" ] || { git fetch -q --prune --no-recurse-submodules origin >/dev/null 2>&1; fetched=$?; }",
+                "[ -n \"$origin\" ] && git fetch -q --prune --no-recurse-submodules origin >/dev/null 2>&1 && fetched=0",
+                "$(git ls-remote --tags origin 2>/dev/null | tr '\\t' ' ')",
                 "git ls-remote --exit-code --heads origin \"refs/heads/$ref\" >/dev/null 2>&1",
                 "git -c push.recurseSubmodules=no -c push.followTags=false push -q origin \"$2:refs/heads/$ref\" >/dev/null 2>&1 || { answer 'failed push'; return 0; }",
             ],
@@ -3657,10 +3666,10 @@ mod tests {
         let env: Vec<&str> = script.lines().filter(|l| l.contains("box.env") && !l.trim_start().starts_with('#')).collect();
         assert_eq!(
             env,
-            ["[ -f \"$pinned/box.env\" ] && { assigned <\"$pinned/box.env\" || { answer 'failed scan'; answer done; exit 0; }; }"],
-            "box.env is only read, as awk's input: never run, printed or put on a command line"
+            ["  { [ -e \"$pinned/box.env\" ] || [ -L \"$pinned/box.env\" ]; } && env=\"$pinned/box.env\""],
+            "box.env is only read, by awk's own getline: never run, printed or put on a command line"
         );
-        assert_eq!(script.matches("/environ\"").count(), 2, "the node's environment, too, only as input");
+        assert_eq!(script.matches("/environ\"").count(), 1, "the node's environment, too, only by awk's getline");
         for line in script.lines().filter(|l| l.contains("git ")) {
             assert!(!line.contains(" -f "), "no git call forces: {line}");
         }
@@ -4511,7 +4520,8 @@ mod tests {
         let not_the_node = run.rescue_in(RescueMode::Commits);
         let _ = (node.kill(), node.wait(), other.kill(), other.wait());
         assert_eq!(answer, "pinned-rescue: refused secret\npinned-rescue: done\n");
-        assert_eq!(not_the_node, "pinned-rescue: saved wip/rescue/task-1a2b3c4d\npinned-rescue: done\n", "a pid file whose process is not the node is not read");
+        assert_eq!(not_the_node, "pinned-rescue: refused secret\npinned-rescue: done\n", "a pid file whose process is not the node is not read, and nothing is pushed");
+        assert_eq!(run.remote_branches(), "refs/heads/main\n");
     }
 
     #[cfg(unix)]
@@ -4668,7 +4678,8 @@ mod tests {
         let lib_main = run.git(&lib, &["rev-parse", "refs/heads/main"]);
         let head = run.git(&run.clone, &["rev-parse", "HEAD"]);
         let _ = std::fs::remove_file(run._root.path().join("git.log"));
-        assert_eq!(run.rescue_in(RescueMode::Commits), "pinned-rescue: saved wip/rescue/task-1a2b3c4d\npinned-rescue: done\n");
+        // Full mode: a public repository's rescue refuses a branch a tag origin does not have holds.
+        assert_eq!(run.rescue_in(RescueMode::Full), "pinned-rescue: saved wip/rescue/task-1a2b3c4d\npinned-rescue: done\n");
         assert_eq!(run.writes(), [format!("{PUSH} {}:refs/heads/wip/rescue/task-1a2b3c4d", head.trim())]);
         assert_eq!(run.git(&lib, &["for-each-ref", "--format=%(refname) %(objectname)"]), format!("refs/heads/main {lib_main}"), "the submodule's remote is as it was");
         assert_eq!(run.remote_branches(), "refs/heads/main\nrefs/heads/wip/rescue/task-1a2b3c4d\n", "no tag");
@@ -4749,7 +4760,7 @@ mod tests {
         let loader = lines[start..=end].join("\n");
         assert!(loader.contains("awk "), "{loader}");
         for word in ["print", "system(", "| getline", "|getline", "fflush"] {
-            assert!(!loader.contains(word), "the loader writes nothing out and runs nothing: {word}");
+            assert!(!loader.replace("sprintf(", "").contains(word), "the loader writes nothing out and runs nothing: {word}");
         }
         assert!(!loader.contains("source ") && !loader.contains(". \"$") && !loader.contains("eval"), "the loader runs no value source");
     }
