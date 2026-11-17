@@ -202,6 +202,11 @@ impl Trigger {
     }
 }
 
+/// Whether a Linear change is one `trigger` fires on. `viewer` is the Linear user id of the account's key, if known.
+pub fn matches(_trigger: &Trigger, _change: &linear::Change, _viewer: Option<&str>) -> bool {
+    false
+}
+
 /// Refuses a schedule that runs once, and a cron or zone `schedule` can't read.
 fn check_schedule(schedule: &schedule::Schedule, tz: &str) -> Result<(), String> {
     if matches!(schedule, schedule::Schedule::Once { .. }) {
@@ -12369,5 +12374,97 @@ mod tests {
         let mut losses = upgrade_losses(&format!("{DIR}/connectors.json"), store, Some(runs), &workflows, &run_ids);
         losses.extend(upgrade_losses(&format!("{DIR}/connectors-box-variants.json"), boxes, None, &[], &[]));
         assert!(losses.is_empty(), "a store saved by v0.18.1 loses {} values when it loads and saves again:\n{}", losses.len(), losses.join("\n"));
+    }
+
+    fn linear_person(id: &str, name: &str) -> linear::Person {
+        linear::Person { id: id.into(), name: name.into() }
+    }
+
+    fn linear_change(kind: linear::ChangeKind) -> linear::Change {
+        linear::Change {
+            issue_id: "issue-1".into(),
+            identifier: "ENG-1".into(),
+            title: "Fix the thing".into(),
+            description: None,
+            url: "https://linear.app/acme/issue/ENG-1".into(),
+            history_id: "history-1".into(),
+            at: "2026-11-17T10:00:00Z".into(),
+            actor: linear_person("u-other", "Other"),
+            kind,
+            from_state: Some("Todo".into()),
+            to_state: Some("Done".into()),
+            from_assignee: None,
+            to_assignee: None,
+            team_key: "ENG".into(),
+            team_name: "Engineering".into(),
+            project: None,
+        }
+    }
+
+    fn linear_scope(team: &str, project: &str) -> LinearScope {
+        LinearScope { team: team.into(), project: project.into() }
+    }
+
+    #[test]
+    fn a_linear_change_matches_its_trigger_by_kind_status_assignee_scope_and_actor() {
+        let any = || linear_scope("", "");
+        let status = || linear_change(linear::ChangeKind::Status);
+        let assignee = |to: Option<linear::Person>| linear::Change { to_assignee: to, ..linear_change(linear::ChangeKind::Assignee) };
+        let status_of = |from: &str, to: &str| Trigger::LinearStatus { from: from.into(), to: to.into(), scope: any(), by: By::Anyone };
+        let assigned_to = |to: Assignee| Trigger::LinearAssigned { to, scope: any(), by: By::Anyone };
+        let mine = linear_person("u-me", "Me");
+        let other = linear_person("u-other", "Other");
+        let me = Some("u-me");
+        let rows: Vec<(Trigger, linear::Change, Option<&str>, bool)> = vec![
+            (status_of("", ""), assignee(Some(other.clone())), me, false),
+            (assigned_to(Assignee::Anyone), status(), me, false),
+            (status_of("", ""), status(), me, true),
+            (status_of("Todo", ""), status(), me, true),
+            (status_of("In Progress", ""), status(), me, false),
+            (status_of("", "Done"), status(), me, true),
+            (status_of("", "Started"), status(), me, false),
+            (status_of("Todo", "Done"), status(), me, true),
+            (status_of("Todo", "Started"), status(), me, false),
+            (status_of("  todo ", " DONE  "), status(), me, true),
+            (status_of("   ", "  "), status(), me, true),
+            (status_of("Todo", ""), linear::Change { from_state: None, ..status() }, me, false),
+            (status_of("", "Done"), linear::Change { to_state: None, ..status() }, me, false),
+            (status_of("", ""), linear::Change { from_state: None, ..status() }, me, true),
+            (Trigger::LinearStatus { from: "".into(), to: "".into(), scope: linear_scope("ENG", ""), by: By::Anyone }, status(), me, true),
+            (Trigger::LinearStatus { from: "".into(), to: "".into(), scope: linear_scope(" engineering ", ""), by: By::Anyone }, status(), me, true),
+            (Trigger::LinearStatus { from: "".into(), to: "".into(), scope: linear_scope("OPS", ""), by: By::Anyone }, status(), me, false),
+            (Trigger::LinearStatus { from: "".into(), to: "".into(), scope: linear_scope("", "Launch"), by: By::Anyone }, linear::Change { project: Some("launch".into()), ..status() }, me, true),
+            (Trigger::LinearStatus { from: "".into(), to: "".into(), scope: linear_scope("", "Launch"), by: By::Anyone }, status(), me, false),
+            (Trigger::LinearStatus { from: "".into(), to: "".into(), scope: linear_scope("", "Launch"), by: By::Anyone }, linear::Change { project: Some("Other".into()), ..status() }, me, false),
+            (Trigger::LinearStatus { from: "".into(), to: "".into(), scope: any(), by: By::Anyone }, linear::Change { project: Some("Other".into()), ..status() }, me, true),
+            (assigned_to(Assignee::Anyone), assignee(Some(other.clone())), me, true),
+            (assigned_to(Assignee::Anyone), assignee(None), me, false),
+            (assigned_to(Assignee::Nobody), assignee(None), me, true),
+            (assigned_to(Assignee::Nobody), assignee(Some(other.clone())), me, false),
+            (assigned_to(Assignee::Me), assignee(Some(mine.clone())), me, true),
+            (assigned_to(Assignee::Me), assignee(Some(other.clone())), me, false),
+            (assigned_to(Assignee::User { id: "u-other".into(), name: "Someone Else".into() }), assignee(Some(other.clone())), me, true),
+            (assigned_to(Assignee::User { id: "u-third".into(), name: "Other".into() }), assignee(Some(other.clone())), me, false),
+            (assigned_to(Assignee::User { id: "u-other".into(), name: "Other".into() }), assignee(None), me, false),
+            (Trigger::LinearAssigned { to: Assignee::Anyone, scope: linear_scope("OPS", ""), by: By::Anyone }, assignee(Some(other.clone())), me, false),
+            (Trigger::LinearAssigned { to: Assignee::Anyone, scope: linear_scope("ENG", ""), by: By::Anyone }, assignee(Some(other.clone())), me, true),
+            (status_of("", ""), status(), me, true),
+            (Trigger::LinearStatus { from: "".into(), to: "".into(), scope: any(), by: By::Me }, status(), me, false),
+            (Trigger::LinearStatus { from: "".into(), to: "".into(), scope: any(), by: By::Me }, linear::Change { actor: mine.clone(), ..status() }, me, true),
+            (Trigger::LinearStatus { from: "".into(), to: "".into(), scope: any(), by: By::NotMe }, status(), me, true),
+            (Trigger::LinearStatus { from: "".into(), to: "".into(), scope: any(), by: By::NotMe }, linear::Change { actor: mine.clone(), ..status() }, me, false),
+            (Trigger::LinearAssigned { to: Assignee::Me, scope: any(), by: By::NotMe }, assignee(Some(mine.clone())), me, true),
+            (assigned_to(Assignee::Me), assignee(Some(mine.clone())), None, false),
+            (Trigger::LinearStatus { from: "".into(), to: "".into(), scope: any(), by: By::Me }, linear::Change { actor: mine.clone(), ..status() }, None, false),
+            (Trigger::LinearStatus { from: "".into(), to: "".into(), scope: any(), by: By::NotMe }, status(), None, false),
+            (Trigger::LinearStatus { from: "".into(), to: "".into(), scope: any(), by: By::Anyone }, status(), None, true),
+            (Trigger::Manual, status(), me, false),
+            (Trigger::LinearLabel { label: "bug".into() }, status(), me, false),
+            (Trigger::SlackMention { channel: "general".into() }, status(), me, false),
+            (Trigger::Schedule { schedule: schedule::Schedule::Cron { expr: "0 9 * * *".into() }, tz: "UTC".into() }, status(), me, false),
+        ];
+        for (i, (trigger, change, viewer, expected)) in rows.iter().enumerate() {
+            assert_eq!(matches(trigger, change, *viewer), *expected, "row {i}: {trigger:?} on {change:?} for viewer {viewer:?}");
+        }
     }
 }
