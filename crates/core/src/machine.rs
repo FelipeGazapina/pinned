@@ -10199,6 +10199,17 @@ pub(crate) mod tests {
         assert_eq!(go_settings(&login_tab_env(&own)), own.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<BTreeMap<_, _>>());
     }
 
+    #[test]
+    fn an_empty_go_key_leaves_a_login_session_the_users_own_anthropic_settings() {
+        let own: Vec<(String, String)> = crate::opencode_go::SESSION_ENV
+            .iter()
+            .map(|name| (name.to_string(), if *name == "ANTHROPIC_BASE_URL" { "https://example.invalid/anthropic".to_owned() } else { format!("own-{name}") }))
+            .collect();
+        let mut parent: Vec<(&str, &str)> = own.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        parent.push((crate::opencode_go::KEY_ENV, ""));
+        assert_eq!(go_settings(&login_tab_env(&parent)), go_settings(&own));
+    }
+
     /// Writes a Go account and its key without validation, so a launch test stays offline.
     #[cfg(unix)]
     fn write_go_account(root: &Path) {
