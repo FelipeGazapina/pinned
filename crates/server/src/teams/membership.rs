@@ -108,8 +108,14 @@ pub fn credential_in(settings: &pinned_core::connectors::Settings) -> Credential
 /// A team as `member` sees it, from its `teams_of` row.
 async fn view(hub: &Arc<Hub>, row: db::TeamRow) -> Result<Team, String> {
     let account = hub.account(row.id).await?;
-    let credential = credential(hub, &account).await?;
-    Ok(Team { id: row.id.to_string(), name: row.name, owner: row.owner.to_string(), role: row.role, credential })
+    // A team whose settings can't be read is still listed, with no key shown as set: its owner
+    // sees why while its waiting line is held for it (`line_held`).
+    let credential = match credential(hub, &account).await {
+        Err(e) if e == crate::db::BUSY => return Err(e),
+        read => read.unwrap_or_default(),
+    };
+    let line_held = row.line_held.filter(|_| row.role == Role::Owner);
+    Ok(Team { id: row.id.to_string(), name: row.name, owner: row.owner.to_string(), role: row.role, credential, line_held })
 }
 
 /// Every team `person` is a member of, with its role and the team's keys' presence.
@@ -127,7 +133,7 @@ pub async fn create(hub: &Arc<Hub>, person: Uuid, name: &str) -> Result<Team, St
     let name = team_name(name)?;
     let id = db::create_team(&hub.db, person, name).await?;
     eprintln!("pinned-server: account {person} made team {id}");
-    Ok(Team { id: id.to_string(), name: name.to_owned(), owner: person.to_string(), role: pinned_core::teams::Role::Owner, credential: CredentialState::default() })
+    Ok(Team { id: id.to_string(), name: name.to_owned(), owner: person.to_string(), role: pinned_core::teams::Role::Owner, credential: CredentialState::default(), line_held: None })
 }
 
 /// Joins the team of invite `code` as a member, once: `db::take_invite` with the code's sha256
