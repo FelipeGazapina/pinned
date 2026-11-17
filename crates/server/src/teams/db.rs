@@ -642,10 +642,10 @@ macro_rules! waited {
 /// A `team_runs` row as `run_of` reads it. Its waiting time is its closed waits (`waiting_secs`)
 /// and the open one (since `waiting_since`); its active time is the rest of the time from its
 /// session's open (`opened_at`, or its start for a run that opened with its row) to its end, or
-/// now while it is live: 0 while its place is only reserved. Its cost is its box's (`cost_usd`)
-/// and its model's (`model_usd`) together.
+/// now while it is live: 0 while its place is only reserved. Its box's cost (`cost_usd`) and its
+/// model's (`model_usd`) are read apart: `cost_usd` keeps its meaning for an older app.
 const RUN_COLUMNS: &str = concat!(
-    "id, workflow, state, controller, cost_usd + model_usd, case when reserved then 0 else greatest(0, extract(epoch from coalesce(ended_at, now()) - coalesce(opened_at, started_at))::bigint - ",
+    "id, workflow, state, controller, cost_usd, case when reserved then 0 else greatest(0, extract(epoch from coalesce(ended_at, now()) - coalesce(opened_at, started_at))::bigint - ",
     waited!(),
     ") end, extract(epoch from started_at)::bigint, extract(epoch from ended_at)::bigint, outcome, started_by #>> '{}', ",
     waited!(),
@@ -667,7 +667,7 @@ fn run_of(r: &Row) -> Run {
         state: RunState::parse(r.get(2)).unwrap_or(RunState::Failed),
         controller: r.get::<_, Option<Uuid>>(3).map(|c| c.to_string()),
         cost_usd: r.get(4),
-        model_usd: r.get(11),
+        model_usd: Some(r.get(11)),
         active_secs: r.get::<_, i64>(5).max(0) as u64,
         started_at: r.get(6),
         ended_at: r.get(7),

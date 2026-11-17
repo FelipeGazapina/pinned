@@ -141,7 +141,7 @@ impl TeamBox {
             state: RunState::Working,
             controller: None,
             cost_usd: 0.0,
-            model_usd: 0.0,
+            model_usd: Some(0.0),
             active_secs: 0, waiting_secs: 0,
             started_at: 0,
             ended_at: None,

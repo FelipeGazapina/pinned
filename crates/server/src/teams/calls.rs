@@ -558,14 +558,18 @@ fn life_limit(secs: u64) -> String {
     }
 }
 
+/// The most a run's model cost may be reported as, in USD.
+pub const MAX_RUN_MODEL_USD: f64 = 10_000.0;
+
 /// Keeps what a team box's node reports its workflow session on `subject` has spent on its model
 /// so far, a running total, on that run (`db::record_model_cost`). Only the box the hub bound the
 /// live run to reports for it: any other machine, of this team or another, is refused, and
 /// nothing is stored.
 pub async fn model_cost(hub: &Arc<Hub>, team: &Arc<Account>, machine: &str, workflow: &str, subject: &Subject, usd: f64) -> Result<(), String> {
     const NOT_ITS_RUN: &str = "this box runs no live run of that workflow on that subject";
-    if !usd.is_finite() || usd < 0.0 {
-        return Err("a model cost is a number of dollars, 0 or more".into());
+    // The hub keeps the most it was told, so a total past any real run's would stand for good.
+    if !(0.0..=MAX_RUN_MODEL_USD).contains(&usd) {
+        return Err(format!("a model cost is a number of dollars, 0 to {MAX_RUN_MODEL_USD}"));
     }
     if !db::is_team(&hub.db, team.id).await? {
         return Err(NOT_ITS_RUN.into());

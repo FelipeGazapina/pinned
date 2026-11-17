@@ -370,13 +370,14 @@ pub struct Run {
     /// The member who took it over.
     #[serde(default)]
     pub controller: Option<String>,
-    /// Its box's cost and its model's (`model_usd`) together: what its `BotLimits::usd` caps.
+    /// Its box's cost only, as before a run had a model cost, so an older app that reads it as
+    /// the box's still shows the box's. Its `BotLimits::usd` caps this and `model_usd` together.
     #[serde(default)]
     pub cost_usd: f64,
-    /// The model cost its box's node reported, included in `cost_usd`. 0 from a node that never
-    /// reports one, whose runs cost their box only.
-    #[serde(default)]
-    pub model_usd: f64,
+    /// The model cost its box's node reported, apart from `cost_usd`: 0 from a node that never
+    /// reports one. None from an older hub, which sends none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_usd: Option<f64>,
     /// Seconds of work: from `started_at` to its end (or now), less `waiting_secs`. A run's
     /// `BotLimits::minutes` count these only.
     #[serde(default)]
@@ -751,10 +752,10 @@ mod tests {
         let run = json!({ "id": "r1", "workflow": "c1", "state": "taken_over", "controller": "a1", "cost_usd": 0.5, "active_secs": 60, "started_at": 1, "ended_at": null, "outcome": null, "started_by": "a1" });
         let event = json!({ "kind": "run_changed", "run": run });
         let parsed: TeamEvent = serde_json::from_value(event.clone()).unwrap();
-        // An older hub sends no `waiting_secs` or `model_usd`: each reads as 0, and goes out with the run.
+        // An older hub sends no `waiting_secs`: it reads as 0, and goes out with the run. Nor
+        // `model_usd`, which stays out, so the app tells a run with no model cost from an older hub.
         let mut sent = event.clone();
         sent["run"]["waiting_secs"] = json!(0);
-        sent["run"]["model_usd"] = json!(0.0);
         assert_eq!(serde_json::to_value(parsed).unwrap(), sent);
         let parsed: TeamEvent = serde_json::from_value(sent.clone()).unwrap();
         assert_eq!(serde_json::to_value(parsed).unwrap(), sent);
