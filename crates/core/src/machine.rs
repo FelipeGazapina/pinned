@@ -3944,8 +3944,71 @@ impl Machine {
         self.delegates.meter(&used, self.launch.path_env.as_deref());
     }
 
-    /// Sends the hub the model cost so far of each workflow session in this team box.
-    fn report_run_costs(&self, _now: Instant) {}
+    /// Sends the hub the model cost so far of each workflow session in this team box
+    /// (`TeamOp::RunModelCost`): its running total, at most every `RUN_COST_EVERY` while the
+    /// session runs, and once more when it ends, then nothing. A total, never a delta, so a report
+    /// lost or sent twice never counts twice. A session that spent no tokens is not reported.
+    /// Waits on the hub: the 1 s pass calls it on a thread of its own (`send_run_costs`).
+    fn report_run_costs(&self, now: Instant) {
+        if !self.team_box.load(Ordering::Relaxed) {
+            return;
+        }
+        let live: Vec<(String, (String, crate::agent::Subject))> =
+            self.tabs.lock().unwrap().iter().filter(|(_, t)| t.live()).filter_map(|(id, t)| Some((id.clone(), session_of(&t.env)?))).collect();
+        let found: Vec<Option<PathBuf>> = live.iter().map(|(tab, _)| self.transcript_of(tab).ok().flatten()).collect();
+        let mut due = vec![];
+        {
+            let mut costs = self.run_costs.lock().unwrap();
+            for ((tab, work), file) in live.iter().zip(found) {
+                let cost = costs.entry(tab.clone()).or_default();
+                cost.work = Some(work.clone());
+                if file.is_some() {
+                    cost.transcript = file;
+                }
+                if let Some(file) = &cost.transcript {
+                    let _ = cost.meter.advance(file);
+                }
+                if !cost.meter.is_empty() && cost.sent.map_or(true, |sent| now >= sent + RUN_COST_EVERY) {
+                    cost.sent = Some(now);
+                    due.push((work.clone(), cost.meter.clone()));
+                }
+            }
+            let ended: Vec<String> = costs.keys().filter(|tab| !live.iter().any(|(id, _)| id == *tab)).cloned().collect();
+            for tab in ended {
+                let Some(mut cost) = costs.remove(&tab) else { continue };
+                if let Some(file) = &cost.transcript {
+                    let _ = cost.meter.advance(file);
+                }
+                if let (Some(work), false) = (cost.work, cost.meter.is_empty()) {
+                    due.push((work, cost.meter));
+                }
+            }
+        }
+        if due.is_empty() {
+            return;
+        }
+        let (rates, book) = (self.meter_rates(), usage::PriceBook::load(self.prices_file().as_deref()));
+        for ((workflow, subject), meter) in due {
+            let Some(usd) = meter.usage(&rates, &book).cost_usd else { continue };
+            let op = crate::teams::TeamOp::RunModelCost { workflow, subject, usd };
+            if let Err(e) = self.call_hub(HubCall::Team { team: None, op }) {
+                eprintln!("pinned: the hub did not take a run's model cost: {e}");
+            }
+        }
+    }
+
+    /// Reports the team box's runs' model costs (`report_run_costs`) on a thread, one at a time.
+    fn send_run_costs(&self) {
+        if !self.team_box.load(Ordering::Relaxed) || self.sending_run_costs.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let me = self.me.clone();
+        std::thread::spawn(move || {
+            let Some(machine) = me.upgrade() else { return };
+            machine.report_run_costs(Instant::now());
+            machine.sending_run_costs.store(false, Ordering::SeqCst);
+        });
+    }
 
     /// The price list, read again each hour.
     fn meter_rates(&self) -> Arc<usage::RateTable> {
@@ -6046,6 +6109,7 @@ impl Machine {
                 machine.send_remote_asks(Instant::now());
                 machine.watch_sleep(unix_now());
                 machine.meter_workers();
+                machine.send_run_costs();
                 if !machine.delegates.unrecorded(1).is_empty() {
                     machine.send_records();
                 }
