@@ -2580,7 +2580,7 @@ impl Connectors {
                     found.push(match &category.workflow {
                         None => Found::Stopped { channel: channel.clone(), thread: message.ts, page },
                         Some(workflow) => Found::Routed {
-                            posts: slack::thread_with(&token, &channel, &message.ts, apps.as_ref()).await?,
+                            posts: opened_by(slack::thread(&token, &channel, &message.ts).await?, &message, apps.is_some()),
                             channel: channel.clone(),
                             channel_name: channel_name.to_owned(),
                             thread: message.ts,
@@ -2618,7 +2618,7 @@ impl Connectors {
         let channel_name = channel_name(name).to_owned();
         let mut found = vec![];
         for message in messages {
-            let posts = slack::thread_with(&token, &channel, &message.ts, apps.as_ref()).await?;
+            let posts = opened_by(slack::thread(&token, &channel, &message.ts).await?, &message, apps.is_some());
             found.push(Found::Mention {
                 channel: channel.clone(),
                 channel_name: channel_name.clone(),
@@ -3158,6 +3158,16 @@ fn transcript(posts: &[slack::Post]) -> String {
 /// 49 characters (`AUTHOR_CHARS` and the "…") keep it within `pinned_lines::HEADER_CHARS` (80), so
 /// the guard escapes a forged copy of it in a post's text. It takes the author as the post has it
 /// and cleans it itself, so no caller can put a raw one in.
+/// The thread `slack::thread` read for `message`, a post a channel read just took. With `apps` its
+/// opening post reads as that read gave it: an app post's text is in its attachments and blocks,
+/// which `slack::thread` leaves out, so an alert with only those would open its run empty.
+fn opened_by(mut posts: Vec<slack::Post>, message: &slack::Post, apps: bool) -> Vec<slack::Post> {
+    if let Some(first) = posts.first_mut().filter(|first| apps && first.ts == message.ts) {
+        *first = slack::Post { ts: message.ts.clone(), author: message.author.clone(), text: message.text.clone() };
+    }
+    posts
+}
+
 fn reply_header(author: &str) -> String {
     format!("[Slack reply from {} in the thread]", pinned_lines::author(author))
 }

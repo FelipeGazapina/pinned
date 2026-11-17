@@ -703,20 +703,8 @@ fn posts(messages: &Value, names: &HashMap<String, String>) -> Vec<Post> {
 
 /// Every message of the thread, oldest first.
 pub async fn thread(token: &str, channel: &str, thread: &str) -> Result<Vec<Post>, String> {
-    thread_with(token, channel, thread, None).await
-}
-
-/// `thread`, and with `apps` the posts of apps and integrations in it read as `app_post` reads
-/// them, by the app's name and with no person looked up, as the message that started the thread
-/// was. Messages of the account's own bots and of people read as they always did.
-pub async fn thread_with(token: &str, channel: &str, thread: &str, apps: Option<&Apps<'_>>) -> Result<Vec<Post>, String> {
     let replies = call(token, "conversations.replies", &[("channel", channel), ("ts", thread), ("limit", "1000")]).await?;
-    let messages = &replies["messages"];
-    let Some(apps) = apps else { return Ok(posts(messages, &names(token, messages).await?)) };
-    let by_app = |m: &Value| is_app_post(m) && !apps.own.wrote(m);
-    let rest = Value::Array(messages.as_array().into_iter().flatten().filter(|m| !by_app(m)).cloned().collect());
-    let mut people = posts(&rest, &names(token, &rest).await?).into_iter();
-    Ok(messages.as_array().into_iter().flatten().filter_map(|m| if by_app(m) { Some(app_post(m)) } else { people.next() }).collect())
+    Ok(posts(&replies["messages"], &names(token, &replies["messages"]).await?))
 }
 
 /// The display name of each user `messages` names.
