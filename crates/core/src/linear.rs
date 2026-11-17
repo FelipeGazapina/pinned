@@ -298,8 +298,9 @@ pub struct Scope {
     pub project: String,
 }
 
-/// The changes one read found. `oldest` is set only when the read stopped at its page cap: the caller then
-/// moves its watermark to `oldest`, the oldest `updatedAt` read, and not further.
+/// The changes one read found. `read_to` is set only when the read stopped at its page cap: the caller then
+/// moves its watermark to `read_to`, the newest `updatedAt` among the issues read. Every issue updated before
+/// `read_to` was read.
 #[derive(Debug, PartialEq)]
 pub struct Changes {
     pub changes: Vec<Change>,
@@ -308,21 +309,24 @@ pub struct Changes {
 
 const CHANGES_PAGES: usize = 4;
 
-const CHANGES: &str = "query($filter: IssueFilter, $after: String) {
-  issues(first: 50, after: $after, orderBy: updatedAt, filter: $filter) {
+/// `last` with `before` reads from the oldest update forward: Linear sends each page oldest first, and the
+/// `endCursor` of a page, its newest issue, is the `before` of the page after it.
+const CHANGES: &str = "query($filter: IssueFilter, $before: String) {
+  issues(last: 50, before: $before, orderBy: updatedAt, filter: $filter) {
     nodes { id identifier title description url updatedAt team { key name } project { name }
       history(first: 20) { nodes { id createdAt actor { id name } fromState { name } toState { name }
         fromAssignee { id name } toAssignee { id name } } } }
-    pageInfo { hasNextPage endCursor }
+    pageInfo { hasPreviousPage endCursor }
   }
 }";
 
 /// The API's answer to a `viewer` query, by a hash of the API key: the map holds no key.
 static VIEWERS: std::sync::Mutex<BTreeMap<[u8; 32], String>> = std::sync::Mutex::new(BTreeMap::new());
 
-/// The changes to issues in `scope` made after `since` (RFC 3339), read up to four pages of 50 issues.
-/// When the four pages end with more to read, `oldest` is the oldest `updatedAt` read. That is a safe
-/// watermark only if Linear sends issues newest update first, so that every issue updated after it was read.
+/// The changes to issues in `scope` made after `since` (RFC 3339), read from the oldest update up, four pages
+/// of 50 issues at most. When the read stops at the cap, `read_to` is the newest `updatedAt` among the issues
+/// read, and the caller moves its watermark there. The next read is strictly after `read_to`, so an issue
+/// updated at exactly `read_to` that the cap left unread is not in it.
 pub async fn changes(key: &str, since: &str, scope: &Scope) -> Result<Changes, String> {
     since_time(since)?;
     let mut filter = json!({ "updatedAt": { "gt": since } });
@@ -335,20 +339,20 @@ pub async fn changes(key: &str, since: &str, scope: &Scope) -> Result<Changes, S
         filter["project"] = json!({ "name": { "eqIgnoreCase": project } });
     }
     let mut changes = Vec::new();
-    let mut oldest = None;
-    let mut after: Option<String> = None;
+    let mut read_to = None;
+    let mut before: Option<String> = None;
     for _ in 0..CHANGES_PAGES {
-        let data = strict_query(key, CHANGES, json!({ "filter": filter.clone(), "after": after })).await?;
+        let data = strict_query(key, CHANGES, json!({ "filter": filter.clone(), "before": before })).await?;
         changes.extend(changes_in(&data, since)?);
-        oldest = earlier_update(&data, oldest);
+        read_to = later_update(&data, read_to);
         let page = &data["issues"]["pageInfo"];
-        if page["hasNextPage"].as_bool() != Some(true) {
+        if page["hasPreviousPage"].as_bool() != Some(true) {
             return Ok(Changes { changes, read_to: None });
         }
-        after = Some(page["endCursor"].as_str().ok_or("Linear sent a page with no cursor")?.to_owned());
+        before = Some(page["endCursor"].as_str().ok_or("Linear sent a page with no cursor")?.to_owned());
     }
-    let oldest = oldest.ok_or("Linear sent a full read with no issues")?;
-    Ok(Changes { changes, read_to: Some(oldest) })
+    let read_to = read_to.ok_or("Linear sent a full read with no issues")?;
+    Ok(Changes { changes, read_to: Some(read_to) })
 }
 
 /// `query`, but a failure is named by its class only. Linear's message and its response body are text
@@ -418,13 +422,14 @@ fn changes_in(data: &Value, since: &str) -> Result<Vec<Change>, String> {
     Ok(changes)
 }
 
-/// The earlier of `oldest` and the earliest `updatedAt` among the issues in `data`, as Linear sent it.
-fn earlier_update(data: &Value, oldest: Option<String>) -> Option<String> {
+/// The later of `read_to` and the newest `updatedAt` among the issues in `data`, as Linear sent it. It takes the
+/// maximum over every issue, so it does not depend on the order the issues come in.
+fn later_update(data: &Value, read_to: Option<String>) -> Option<String> {
     nodes(&data["issues"])
         .filter_map(|i| i["updatedAt"].as_str())
-        .chain(oldest.as_deref())
+        .chain(read_to.as_deref())
         .filter_map(|t| DateTime::parse_from_rfc3339(t).ok().map(|at| (at, t)))
-        .min_by_key(|(at, _)| *at)
+        .max_by_key(|(at, _)| *at)
         .map(|(_, t)| t.to_owned())
 }
 
