@@ -441,7 +441,8 @@ export function switchProblem(graph, node) {
 function watchOf(trigger) {
   const kind = trigger?.kind ?? "called";
   if (kind === "linear-label") return { kind, label: trigger.label ?? "" };
-  if (kind === "slack-mention" || kind === "slack-message") return { kind, channel: trigger.channel ?? "" };
+  if (kind === "slack-message") return { kind, channel: trigger.channel ?? "", ...(trigger.apps ? { apps: true } : {}) };
+  if (kind === "slack-mention") return { kind, channel: trigger.channel ?? "" };
   return { kind: "called" };
 }
 

@@ -89,7 +89,7 @@ fn watch_of(trigger: &Trigger) -> Watch {
     match trigger {
         Trigger::LinearLabel { label } => Watch::LinearLabel { label: label.clone() },
         Trigger::SlackMention { channel } => Watch::SlackMention { channel: channel.clone() },
-        Trigger::SlackMessage { channel, .. } => Watch::SlackMessage { channel: channel.clone(), apps: false },
+        Trigger::SlackMessage { channel, apps, .. } => Watch::SlackMessage { channel: channel.clone(), apps: *apps },
         Trigger::Called => Watch::Called,
         Trigger::Manual => Watch::Manual,
         Trigger::LinearStatus { from, to, scope, by } => Watch::LinearStatus { from: from.clone(), to: to.clone(), scope: scope.clone(), by: by.clone() },

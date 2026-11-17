@@ -359,6 +359,12 @@ fn mentions_in(messages: &Value, bot: &str, since: DateTime<Utc>) -> Vec<Mention
         .collect()
 }
 
+/// Whether `message` is a top-level message, or the first of its thread, after `since` micros.
+fn top_level_after(message: &Value, since: i64) -> bool {
+    message["ts"].as_str().and_then(micros).is_some_and(|at| at > since)
+        && message["thread_ts"].as_str().is_none_or(|thread| Some(thread) == message["ts"].as_str())
+}
+
 fn from_people(messages: &Value, bot: &str, since: DateTime<Utc>) -> Vec<Value> {
     let since = since.timestamp_micros();
     let mut people: Vec<Value> = messages
@@ -366,8 +372,7 @@ fn from_people(messages: &Value, bot: &str, since: DateTime<Utc>) -> Vec<Value> 
         .into_iter()
         .flatten()
         .filter(|m| m["user"].as_str().is_some_and(|u| u != bot) && m.get("subtype").is_none() && m.get("bot_id").is_none())
-        .filter(|m| m["ts"].as_str().and_then(micros).is_some_and(|at| at > since))
-        .filter(|m| m["thread_ts"].as_str().is_none_or(|thread| Some(thread) == m["ts"].as_str()))
+        .filter(|m| top_level_after(m, since))
         .cloned()
         .collect();
     people.sort_by_key(|m| m["ts"].as_str().and_then(micros));
@@ -376,18 +381,33 @@ fn from_people(messages: &Value, bot: &str, since: DateTime<Utc>) -> Vec<Value> 
 
 /// The most app posts one workflow takes at one check. A channel that is mostly app output can
 /// post hundreds a minute, and each post taken costs a classify call and may open a session.
+/// Posts past it are skipped, never queued; people's messages are never counted against it.
 pub const APPS_PER_CHECK: usize = 10;
 /// The longest trigger text an app post gets, in characters. Slack lets one message hold 40,000,
 /// far more than a model needs to sort an alert; 4,000 keeps a title, the body and a stack
 /// summary and bounds what one post can cost.
 pub const APP_TEXT_MAX: usize = 4000;
 
-/// The account's own Slack bots, which a channel read never takes a post from: their user ids
-/// (`U…`) and their bot ids (`B…`).
+/// The account's own Slack bots, which a channel read never takes a post from, so a workflow
+/// cannot answer itself: their user ids (`U…`) and their bot ids (`B…`).
 #[derive(Debug, Default, Clone)]
 pub struct Own {
     pub users: std::collections::HashSet<String>,
     pub bots: std::collections::HashSet<String>,
+}
+
+impl Own {
+    /// Whether one of the account's bots wrote `message`, by its user id or its bot id.
+    fn wrote(&self, message: &Value) -> bool {
+        message["user"].as_str().is_some_and(|u| self.users.contains(u)) || message["bot_id"].as_str().is_some_and(|b| self.bots.contains(b))
+    }
+}
+
+/// A workflow that also reads posts from apps and integrations: its id, for the log, and the
+/// account's own bots, which it never reads back.
+pub struct Apps<'a> {
+    pub workflow: &'a str,
+    pub own: &'a Own,
 }
 
 /// What one history page gives a workflow: the messages it takes, oldest first, and the
@@ -398,30 +418,143 @@ pub struct Selected {
     pub skipped: Vec<String>,
 }
 
-fn select(messages: &Value, bot: &str, _own: &Own, since: DateTime<Utc>, _apps: bool) -> Selected {
-    Selected { taken: from_people(messages, bot, since), skipped: vec![] }
+/// A post from an app or integration: a `bot_message`, or a message with a `bot_id` and no
+/// other subtype. Every other subtype (edits, joins, broadcasts) is not one.
+fn is_app_post(message: &Value) -> bool {
+    match message["subtype"].as_str() {
+        None => message.get("subtype").is_none() && message["bot_id"].is_string(),
+        Some(subtype) => subtype == "bot_message",
+    }
 }
 
-/// The text of an app post.
-fn app_text(message: &Value) -> String {
-    message["text"].as_str().unwrap_or_default().to_owned()
+/// The messages of a history page after `since` that `from_people` takes and, with `apps`, the
+/// top-level posts of apps and integrations, up to `APPS_PER_CHECK` of them, oldest first. Never
+/// a post by the account's own bots (`own`, and `bot`, the one reading), whether `apps` is on or not.
+fn select(messages: &Value, bot: &str, own: &Own, since: DateTime<Utc>, apps: bool) -> Selected {
+    let wrote = |m: &Value| own.wrote(m) || m["user"].as_str() == Some(bot);
+    let mut taken = from_people(messages, bot, since);
+    taken.retain(|m| !wrote(m));
+    let mut skipped = vec![];
+    if apps {
+        let after = since.timestamp_micros();
+        let mut posts: Vec<Value> =
+            messages.as_array().into_iter().flatten().filter(|m| is_app_post(m) && !wrote(m) && top_level_after(m, after)).cloned().collect();
+        posts.sort_by_key(|m| m["ts"].as_str().and_then(micros));
+        skipped = posts.split_off(posts.len().min(APPS_PER_CHECK)).iter().filter_map(|m| m["ts"].as_str().map(str::to_owned)).collect();
+        taken.extend(posts);
+        taken.sort_by_key(|m| m["ts"].as_str().and_then(micros));
+    }
+    Selected { taken, skipped }
 }
 
-/// The author an app post shows.
-fn app_author(message: &Value) -> String {
-    message["username"].as_str().unwrap_or("someone").to_owned()
-}
-
-/// What the log says of an app post a check left out.
+/// What the log says of an app post a check left out: the workflow's id and the post's ts, never
+/// its text or its author.
 fn skipped_line(workflow: &str, ts: &str) -> String {
-    format!("{workflow} {ts}")
+    format!("pinned: workflow {workflow} skipped app post {ts} over the cap of {APPS_PER_CHECK} per check")
+}
+
+/// The text of every part of a rich text block, one line per section or list item.
+fn rich_lines(elements: &Value, lines: &mut Vec<String>) {
+    fn inline(elements: &Value) -> String {
+        elements
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|e| match e["type"].as_str() {
+                Some("text") => e["text"].as_str().unwrap_or_default().to_owned(),
+                Some("link") => e["text"].as_str().or(e["url"].as_str()).unwrap_or_default().to_owned(),
+                Some("user") => format!("<@{}>", e["user_id"].as_str().unwrap_or_default()),
+                Some("channel") => format!("<#{}>", e["channel_id"].as_str().unwrap_or_default()),
+                Some("emoji") => format!(":{}:", e["name"].as_str().unwrap_or_default()),
+                Some("broadcast") => format!("@{}", e["range"].as_str().unwrap_or("here")),
+                _ => String::new(),
+            })
+            .collect()
+    }
+    for element in elements.as_array().into_iter().flatten() {
+        match element["type"].as_str() {
+            Some("rich_text_list") => {
+                for item in element["elements"].as_array().into_iter().flatten() {
+                    lines.push(inline(&item["elements"]));
+                }
+            }
+            _ => lines.push(inline(&element["elements"])),
+        }
+    }
+}
+
+/// The text of the block kinds that carry some.
+fn block_lines(block: &Value, lines: &mut Vec<String>) {
+    let text = |v: &Value| v["text"].as_str().map(str::to_owned);
+    match block["type"].as_str() {
+        Some("header" | "section") => {
+            lines.extend(text(&block["text"]));
+            lines.extend(block["fields"].as_array().into_iter().flatten().filter_map(text));
+        }
+        Some("markdown") => lines.extend(text(block)),
+        Some("context") => lines.extend(block["elements"].as_array().into_iter().flatten().filter_map(text)),
+        Some("rich_text") => rich_lines(&block["elements"], lines),
+        _ => {}
+    }
+}
+
+/// The text of an app post as plain text: `text`, then each attachment's `pretext`, `title`,
+/// `text` and `fields` (its `fallback` only when it has nothing else), then the text of its
+/// blocks. Lines are joined by newlines, a line already given is not given twice, and the whole
+/// is clipped to `APP_TEXT_MAX`. Slack's markup is left as it is, as in a person's message.
+fn app_text(message: &Value) -> String {
+    let mut lines: Vec<String> = vec![message["text"].as_str().unwrap_or_default().to_owned()];
+    for attachment in message["attachments"].as_array().into_iter().flatten() {
+        let from = lines.len();
+        let field = |key: &str| attachment[key].as_str().map(str::to_owned);
+        lines.extend(["pretext", "title", "text"].into_iter().filter_map(field));
+        for f in attachment["fields"].as_array().into_iter().flatten() {
+            let (title, value) = (f["title"].as_str().unwrap_or_default().trim(), f["value"].as_str().unwrap_or_default().trim());
+            lines.push(match (title.is_empty(), value.is_empty()) {
+                (false, false) => format!("{title}: {value}"),
+                _ => format!("{title}{value}"),
+            });
+        }
+        if lines[from..].iter().all(|l| l.trim().is_empty()) {
+            lines.extend(field("fallback"));
+        }
+    }
+    for block in message["blocks"].as_array().into_iter().flatten() {
+        block_lines(block, &mut lines);
+    }
+    let mut seen = std::collections::HashSet::new();
+    let text = lines.iter().map(|l| l.trim()).filter(|l| !l.is_empty() && seen.insert(*l)).collect::<Vec<_>>().join("\n");
+    match text.chars().count() > APP_TEXT_MAX {
+        true => text.chars().take(APP_TEXT_MAX - 1).chain(['…']).collect(),
+        false => text,
+    }
+}
+
+/// The app or bot an app post is by: its name, never a person looked up.
+fn app_author(message: &Value) -> String {
+    message["bot_profile"]["name"].as_str().or(message["username"].as_str()).filter(|n| !n.is_empty()).unwrap_or("an app").to_owned()
+}
+
+fn app_post(message: &Value) -> Post {
+    Post { ts: message["ts"].as_str().unwrap_or_default().to_owned(), author: app_author(message), text: app_text(message) }
 }
 
 /// The top-level messages people wrote in `channel` after `since`, oldest first, by author name.
-pub async fn messages(token: &str, channel: &str, bot: &str, since: DateTime<Utc>) -> Result<Vec<Post>, String> {
+/// With `apps`, also the posts of apps and integrations (`select`), by the app's name, with no
+/// person looked up for them; each one past `APPS_PER_CHECK` is logged by its workflow and ts.
+pub async fn messages(token: &str, channel: &str, bot: &str, since: DateTime<Utc>, apps: Option<&Apps<'_>>) -> Result<Vec<Post>, String> {
     let history = call(token, "conversations.history", &[("channel", channel), ("oldest", &ts(since)), ("limit", PAGE)]).await?;
-    let people = Value::Array(from_people(&history["messages"], bot, since));
-    Ok(posts(&people, &names(token, &people).await?))
+    let none = Own::default();
+    let Selected { taken, skipped } = select(&history["messages"], bot, apps.map_or(&none, |a| a.own), since, apps.is_some());
+    for ts in &skipped {
+        eprintln!("{}", skipped_line(apps.map_or("", |a| a.workflow), ts));
+    }
+    let (from_apps, people): (Vec<Value>, Vec<Value>) = taken.into_iter().partition(is_app_post);
+    let people = Value::Array(people);
+    let mut posts = posts(&people, &names(token, &people).await?);
+    posts.extend(from_apps.iter().map(app_post));
+    posts.sort_by_key(|p| micros(&p.ts));
+    Ok(posts)
 }
 
 /// Threads in a history page whose last reply came after `since`.
@@ -570,8 +703,20 @@ fn posts(messages: &Value, names: &HashMap<String, String>) -> Vec<Post> {
 
 /// Every message of the thread, oldest first.
 pub async fn thread(token: &str, channel: &str, thread: &str) -> Result<Vec<Post>, String> {
+    thread_with(token, channel, thread, None).await
+}
+
+/// `thread`, and with `apps` the posts of apps and integrations in it read as `app_post` reads
+/// them, by the app's name and with no person looked up, as the message that started the thread
+/// was. Messages of the account's own bots and of people read as they always did.
+pub async fn thread_with(token: &str, channel: &str, thread: &str, apps: Option<&Apps<'_>>) -> Result<Vec<Post>, String> {
     let replies = call(token, "conversations.replies", &[("channel", channel), ("ts", thread), ("limit", "1000")]).await?;
-    Ok(posts(&replies["messages"], &names(token, &replies["messages"]).await?))
+    let messages = &replies["messages"];
+    let Some(apps) = apps else { return Ok(posts(messages, &names(token, messages).await?)) };
+    let by_app = |m: &Value| is_app_post(m) && !apps.own.wrote(m);
+    let rest = Value::Array(messages.as_array().into_iter().flatten().filter(|m| !by_app(m)).cloned().collect());
+    let mut people = posts(&rest, &names(token, &rest).await?).into_iter();
+    Ok(messages.as_array().into_iter().flatten().filter_map(|m| if by_app(m) { Some(app_post(m)) } else { people.next() }).collect())
 }
 
 /// The display name of each user `messages` names.

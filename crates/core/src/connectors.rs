@@ -113,8 +113,14 @@ pub enum Trigger {
     /// A Slack message in this channel, by name or id, that mentions the bot.
     SlackMention { channel: String },
     /// Every new message people start in this channel, by name or id, which a decision model sorts
-    /// into one of `decide`'s categories. The workflow has no session of its own.
-    SlackMessage { channel: String, decide: Decide, apps: bool },
+    /// into one of `decide`'s categories. The workflow has no session of its own. With `apps`, the
+    /// top-level posts of apps and integrations count too, never those of the account's own bots.
+    SlackMessage {
+        channel: String,
+        decide: Decide,
+        #[serde(default)]
+        apps: bool,
+    },
     /// A Slack thread a message workflow's category hands it, which its session answers as a
     /// mention's session would. It watches no channel of its own.
     Called,
@@ -1942,6 +1948,9 @@ pub struct Connectors {
     tab_facts: Mutex<HashMap<String, TabFacts>>,
     /// The Slack bots `fill_bots` already asked Slack about, so it asks once per bot.
     bots_filled: Mutex<std::collections::HashSet<String>>,
+    /// The bot id (`B…`) of each Slack bot, by its user id, which `auth.test` gives and no store
+    /// keeps. Asked once per bot, the first time a workflow that reads app posts checks.
+    bot_ids: Mutex<HashMap<String, String>>,
     /// Why runs failed when their box ended, for the next check to report on the workflows card.
     box_failures: Mutex<Vec<String>>,
     /// Subjects, by `subject_key`, whose box failed to boot while a run opened it: that open's
@@ -2086,6 +2095,7 @@ impl Connectors {
             known_tabs: Mutex::new(HashMap::new()),
             tab_facts: Mutex::new(HashMap::new()),
             bots_filled: Mutex::new(std::collections::HashSet::new()),
+            bot_ids: Mutex::new(HashMap::new()),
             box_failures: Mutex::new(vec![]),
             boot_failed: Mutex::new(std::collections::HashSet::new()),
             admission: std::sync::OnceLock::new(),
@@ -2505,12 +2515,14 @@ impl Connectors {
                 Ok(Some(found))
             }
             Trigger::SlackMessage { channel: name, .. } if c.graph.is_some() => self.scan_graph_channel(c, name, now).await,
-            Trigger::SlackMessage { channel: name, decide, .. } => {
+            Trigger::SlackMessage { channel: name, decide, apps } => {
                 let Some(bot) = self.scan_bot(c)? else { return Ok(None) };
                 let token = bot.token.clone();
                 let channel = self.channel_id(&bot, name).await?;
                 let since = DateTime::parse_from_rfc3339(&c.since).map_or(now, Into::into);
-                let mut messages = slack::messages(&token, &channel, &bot.user_id, since).await?;
+                let own = self.own_bots_for(*apps).await?;
+                let apps = own.as_ref().map(|own| slack::Apps { workflow: &c.id, own });
+                let mut messages = slack::messages(&token, &channel, &bot.user_id, since, apps.as_ref()).await?;
                 messages.retain(|m| !self.busy(&thread_key(&channel, &m.ts)));
                 if messages.is_empty() {
                     return Ok(Some(vec![]));
@@ -2532,7 +2544,7 @@ impl Connectors {
                     found.push(match &category.workflow {
                         None => Found::Stopped { channel: channel.clone(), thread: message.ts, page },
                         Some(workflow) => Found::Routed {
-                            posts: slack::thread(&token, &channel, &message.ts).await?,
+                            posts: slack::thread_with(&token, &channel, &message.ts, apps.as_ref()).await?,
                             channel: channel.clone(),
                             channel_name: channel_name.to_owned(),
                             thread: message.ts,
@@ -2563,12 +2575,14 @@ impl Connectors {
         let token = bot.token.clone();
         let channel = self.channel_id(&bot, name).await?;
         let since = DateTime::parse_from_rfc3339(&c.since).map_or(now, Into::into);
-        let mut messages = slack::messages(&token, &channel, &bot.user_id, since).await?;
+        let own = self.own_bots_for(matches!(c.trigger, Trigger::SlackMessage { apps: true, .. })).await?;
+        let apps = own.as_ref().map(|own| slack::Apps { workflow: &c.id, own });
+        let mut messages = slack::messages(&token, &channel, &bot.user_id, since, apps.as_ref()).await?;
         messages.retain(|m| !self.busy(&thread_key(&channel, &m.ts)));
         let channel_name = channel_name(name).to_owned();
         let mut found = vec![];
         for message in messages {
-            let posts = slack::thread(&token, &channel, &message.ts).await?;
+            let posts = slack::thread_with(&token, &channel, &message.ts, apps.as_ref()).await?;
             found.push(Found::Mention {
                 channel: channel.clone(),
                 channel_name: channel_name.clone(),
@@ -5108,6 +5122,40 @@ impl Connectors {
             None if !c.slack_bot.is_empty() && !matches!(c.trigger, Trigger::Called) => Err(format!("workflow {:?}: {BOT_GONE}", c.name)),
             bot => Ok(bot),
         }
+    }
+
+    /// The account's own Slack bots, for a workflow that reads app posts (`on`) to leave out; None
+    /// when it does not, which asks Slack nothing. A bot's `B…` id comes from `auth.test` with its
+    /// own token, which needs no scope, once per bot. Err when Slack cannot say, so the check
+    /// stops and tries again instead of reading a bot's own post back as an app's. A bot whose
+    /// token is gone cannot post, so only its user id is kept.
+    async fn own_bots_for(&self, on: bool) -> Result<Option<slack::Own>, String> {
+        if !on {
+            return Ok(None);
+        }
+        let bots: Vec<slack::Bot> = {
+            let store = self.store.lock().unwrap();
+            match store.slack_bots.is_empty() {
+                false => store.slack_bots.clone(),
+                true => store.default_bot().into_iter().collect(),
+            }
+        };
+        let mut own = slack::Own::default();
+        for bot in bots {
+            own.users.insert(bot.user_id.clone());
+            let known = self.bot_ids.lock().unwrap().get(&bot.id).cloned();
+            let bot_id = match known {
+                Some(bot_id) => bot_id,
+                None => {
+                    let Some(token) = self.slack_token(&bot.id) else { continue };
+                    let (_, bot_id) = slack::identify(&token).await.map_err(|e| format!("could not tell the account's own Slack bots from apps: {e}"))?;
+                    self.bot_ids.lock().unwrap().insert(bot.id.clone(), bot_id.clone());
+                    bot_id
+                }
+            };
+            own.bots.insert(bot_id);
+        }
+        Ok(Some(own))
     }
 
     /// The connected bot `id` with its token.
@@ -12165,6 +12213,91 @@ mod tests {
             assert!(block_on(connectors.slack_reply("cb", "C0123ABCD", THREAD, "hi")).is_ok());
             assert!(calls(&seen, "xoxb-test-A").iter().any(|c| c.starts_with("/chat.postMessage")), "{seen:?}");
             assert!(calls(&seen, "xoxb-test-B").is_empty(), "{seen:?}");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        /// A #support page of one person, one integration (text only in its attachments) and one
+        /// post by bot UB, which `auth.test` says is BUB.
+        fn apps_page(now: DateTime<Utc>) -> (Workspace, [String; 3]) {
+            let ts = [60, 50, 40].map(|ago| slack_ts(now - chrono::Duration::seconds(ago)));
+            let history = json!([
+                { "ts": ts[2], "subtype": "bot_message", "bot_id": "BUB", "username": "bot-UB", "text": "I am the other pinned bot" },
+                { "ts": ts[1], "subtype": "bot_message", "bot_id": "B9", "username": "CI Bot", "text": "", "attachments": [{ "title": "Deploy failed", "text": "api went red" }] },
+                { "ts": ts[0], "user": "U1", "text": "the footer is broken" },
+            ]);
+            let threads: serde_json::Map<String, Value> = history.as_array().unwrap().iter().map(|m| (m["ts"].as_str().unwrap().to_owned(), json!([m]))).collect();
+            (Workspace { history, threads: Value::Object(threads), ..workspace("xoxb-test-A", "TA", "UA", "CA1") }, ts)
+        }
+
+        /// What the runs a check made were started by, by thread ts.
+        fn started_by(connectors: &Connectors) -> Vec<(String, String)> {
+            let mut runs: Vec<(String, String)> = connectors
+                .runs
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|run| match &run.subject {
+                    Subject::SlackThread { thread, .. } => Some((thread.clone(), trigger_text(&trigger_of(run).ok()?))),
+                    _ => None,
+                })
+                .collect();
+            runs.sort();
+            runs
+        }
+
+        fn message_workflow(apps: bool) -> Connector {
+            let mut connector = watching("ca", "Alerts", "UA");
+            connector.trigger = Trigger::SlackMessage {
+                channel: "#support".into(),
+                decide: Decide { model: String::new(), instructions: String::new(), categories: vec![], fallback: None },
+                apps,
+            };
+            let mut graph = talks(&["one"]);
+            graph.nodes[0].kind = NodeKind::Trigger { watch: Watch::SlackMessage { channel: "#support".into(), apps } };
+            connector.graph = Some(graph);
+            connector
+        }
+
+        #[test]
+        fn a_message_workflow_with_apps_starts_for_an_integration_post_and_never_for_a_pinned_bot() {
+            let _api = slack::lock_api();
+            let _restore = RestoreSlack;
+            let (a, ts) = apps_page(Utc::now());
+            let seen = serve(vec![a, workspace("xoxb-test-B", "TB", "UB", "CB1")], vec![]);
+            let (connectors, dir) = two_bots("apps-on", vec![message_workflow(true)]);
+            assert_eq!(block_on(connectors.poll()).1, None);
+            let runs = started_by(&connectors);
+            assert_eq!(runs.iter().map(|(thread, _)| thread.as_str()).collect::<Vec<_>>(), [ts[0].as_str(), ts[1].as_str()], "{runs:?}");
+            assert!(runs[1].1.contains("CI Bot") && runs[1].1.contains("Deploy failed") && runs[1].1.contains("api went red"), "{runs:?}");
+            let own = calls(&seen, "xoxb-test-A");
+            assert!(own.iter().any(|c| c.starts_with("/auth.test")) && calls(&seen, "xoxb-test-B").iter().any(|c| c.starts_with("/auth.test")), "{seen:?}");
+            assert!(!seen.lock().unwrap().iter().any(|c| c.contains("/bots.info") || c.contains("U9") || c.contains("B9")), "no new scope and no lookup for an app: {seen:?}");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn a_message_workflow_without_apps_starts_for_the_person_only_and_asks_nothing_more() {
+            let _api = slack::lock_api();
+            let _restore = RestoreSlack;
+            let (a, ts) = apps_page(Utc::now());
+            let seen = serve(vec![a, workspace("xoxb-test-B", "TB", "UB", "CB1")], vec![]);
+            let (connectors, dir) = two_bots("apps-off", vec![message_workflow(false)]);
+            assert_eq!(block_on(connectors.poll()).1, None);
+            assert_eq!(started_by(&connectors).iter().map(|(thread, _)| thread.as_str()).collect::<Vec<_>>(), [ts[0].as_str()]);
+            assert!(!seen.lock().unwrap().iter().any(|c| c.contains("/auth.test")), "an off workflow asks Slack who the bots are never: {seen:?}");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn a_pinned_bot_slack_cannot_identify_stops_the_read_of_apps() {
+            let _api = slack::lock_api();
+            let _restore = RestoreSlack;
+            let (a, _) = apps_page(Utc::now());
+            let _seen = serve(vec![a], vec![]);
+            let (connectors, dir) = two_bots("apps-unknown-bot", vec![message_workflow(true)]);
+            let (_, error) = block_on(connectors.poll());
+            assert!(error.as_deref().is_some_and(|e| e.contains("could not tell the account's own Slack bots from apps")), "{error:?}");
+            assert!(started_by(&connectors).is_empty());
             let _ = std::fs::remove_dir_all(dir);
         }
 
