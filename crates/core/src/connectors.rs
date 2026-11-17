@@ -10517,6 +10517,66 @@ mod tests {
         assert!(!prompt.replace(&framed, "").contains(PLANTED), "the planted line is only inside the frame: {prompt}");
     }
 
+    /// A local router on #support that reads app posts and hands every escalation to "Answer"
+    /// (c6), and the stand-in for its channel and model, whose model sorts every message as an
+    /// escalation. Stop the stand-in with the flag once done.
+    fn app_router(name: &str, channel: Value) -> (Connectors, PathBuf, std::sync::Arc<Mutex<Vec<String>>>, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        install_rustls();
+        let seen = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let root = serve_channel_and_linear(seen.clone(), stop.clone(), std::sync::Arc::new(Mutex::new(channel)));
+        slack::set_api_root(Some(root.clone()));
+        std::env::set_var(crate::vercel::API_ROOT_ENV, root.trim_end_matches('/'));
+        let decide = Decide {
+            model: "typesafe-ai/jev".into(),
+            instructions: "Categorize this Slack message.".into(),
+            categories: vec![category("escalation", "Someone needs an engineer now", Some("c6"), None), category("ignore", "Anything else", None, None)],
+            fallback: None,
+        };
+        let router = Connector {
+            trigger: Trigger::SlackMessage { channel: "#support".into(), decide, apps: true },
+            since: (Utc::now() - chrono::Duration::minutes(10)).to_rfc3339(),
+            ..router()
+        };
+        let (connectors, dir) = stored(name, vec![router, called()]);
+        for (name, key) in [("slack-key", "xoxb-test"), ("vercel-key", "vck-test")] {
+            std::fs::write(dir.join(name), key).unwrap();
+        }
+        connectors.store.lock().unwrap().slack = Some(slack::Account { team: "T".into(), user_id: "UBOT".into(), name: "pinned".into() });
+        connectors.channels.lock().unwrap().insert(("UBOT".into(), "#support".into()), "C0123ABCD".into());
+        connectors.bot_ids.lock().unwrap().insert("UBOT".into(), Some(("UBOT".into(), "BBOT".into())));
+        (connectors, dir, seen, stop)
+    }
+
+    /// A local router that reads app posts opens ten of fifteen at a check, and none of the five
+    /// it left out over the cap at the next check.
+    #[test]
+    fn a_local_router_never_takes_the_app_posts_a_check_left_out_over_the_cap() {
+        let _api = slack::lock_api();
+        let _restore = (RestoreSlack, RestoreVercelRoot);
+        let now = Utc::now();
+        let ts: Vec<String> = (0..15).map(|i| slack_ts(now - chrono::Duration::seconds(40 - i))).collect();
+        let posts: Vec<Value> = ts.iter().map(|ts| json!({ "ts": ts, "subtype": "bot_message", "bot_id": "B9", "username": "CI Bot", "text": format!("alert {ts}") })).collect();
+        let threads: serde_json::Map<String, Value> = posts.iter().map(|m| (m["ts"].as_str().unwrap().to_owned(), json!([m]))).collect();
+        let (connectors, dir, _, stop) = app_router("apps-router-cap", json!({ "history": posts, "threads": threads }));
+        let opened = Mutex::new(Vec::<String>::new());
+        let open = |work: Work| {
+            if let Work::Run(Run { subject: Subject::SlackThread { thread, .. }, .. }) = &work {
+                opened.lock().unwrap().push(thread.clone());
+            }
+            placed(work)
+        };
+        slack::take_skipped_log();
+        assert_eq!(block_on(connectors.check_once(&open)).error, None);
+        assert_eq!(*opened.lock().unwrap(), ts[..slack::APPS_PER_CHECK].to_vec(), "the oldest ten are opened");
+        assert_eq!(slack::take_skipped_log().len(), 5);
+        assert_eq!(block_on(connectors.check_once(&open)).error, None);
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(*opened.lock().unwrap(), ts[..slack::APPS_PER_CHECK].to_vec(), "the second check opens none of the fifteen");
+        assert_eq!(slack::take_skipped_log(), Vec::<String>::new(), "and logs none of them again");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// The run a router hands an app post to reads the post as the router did, its attachments
     /// included, though the post's own `text` is empty.
     #[test]
@@ -12191,7 +12251,7 @@ mod tests {
         /// A stand-in for Slack with one workspace per bot token. It records every call as
         /// `<bearer token> <path>`. A token in `limited` is rate limited on all but `auth.test`, and
         /// `bots.info` always lacks its scope.
-        fn serve_workspaces(spaces: Vec<Workspace>, limited: Vec<&'static str>, seen: std::sync::Arc<Mutex<Vec<String>>>) -> String {
+        fn serve_workspaces(spaces: std::sync::Arc<Mutex<Vec<Workspace>>>, limited: Vec<&'static str>, seen: std::sync::Arc<Mutex<Vec<String>>>) -> String {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let address = listener.local_addr().unwrap();
             std::thread::spawn(move || {
@@ -12220,6 +12280,7 @@ mod tests {
                         .unwrap_or_default();
                     seen.lock().unwrap().push(format!("{token} {path}"));
                     let param = |name: &str| path.split(['?', '&']).find_map(|pair| pair.strip_prefix(&format!("{name}="))).unwrap_or_default().to_owned();
+                    let spaces = spaces.lock().unwrap();
                     let space = spaces.iter().find(|w| w.token == token);
                     let (status, answer) = match space {
                         None => ("200 OK", json!({ "ok": false, "error": "invalid_auth" })),
@@ -12288,6 +12349,11 @@ mod tests {
         }
 
         fn serve(spaces: Vec<Workspace>, limited: Vec<&'static str>) -> std::sync::Arc<Mutex<Vec<String>>> {
+            serve_shared(std::sync::Arc::new(Mutex::new(spaces)), limited)
+        }
+
+        /// `serve` of workspaces a test changes between checks.
+        fn serve_shared(spaces: std::sync::Arc<Mutex<Vec<Workspace>>>, limited: Vec<&'static str>) -> std::sync::Arc<Mutex<Vec<String>>> {
             install_rustls();
             let seen = std::sync::Arc::new(Mutex::new(Vec::<String>::new()));
             slack::set_api_root(Some(serve_workspaces(spaces, limited, seen.clone())));
@@ -12491,6 +12557,141 @@ mod tests {
             assert_eq!(block_on(connectors.poll()).1, None);
             assert_eq!(threads_started(&connectors), ts[slack::APPS_PER_CHECK..].to_vec(), "the five new posts, though ten older ones are in the page");
             assert_eq!(slack::take_skipped_log(), Vec::<String>::new());
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        /// A person's mention of the bot in the thread of an app post that a check left out over
+        /// the cap reaches the mention workflow on the same channel as it does when no workflow
+        /// reads app posts.
+        #[test]
+        fn a_mention_in_the_thread_of_an_app_post_left_out_reaches_the_mention_workflow() {
+            let _api = slack::lock_api();
+            let _restore = RestoreSlack;
+            // The threads `ca`, a message workflow, and `cm`, a mention workflow, start a run of at
+            // the check, by workflow and thread ts.
+            let check = |apps: bool, left_out: &mut String| -> Vec<(String, String)> {
+                let now = Utc::now();
+                let (mut a, ts) = app_posts(now, 15);
+                *left_out = ts[12].clone();
+                let reply_ts = slack_ts(now - chrono::Duration::seconds(5));
+                let reply = json!({ "ts": reply_ts, "thread_ts": ts[12], "user": "U1", "text": "<@UA> can someone look at this one?" });
+                for message in a.history.as_array_mut().unwrap().iter_mut().filter(|m| m["ts"] == json!(ts[12])) {
+                    message["latest_reply"] = json!(reply_ts);
+                    message["reply_count"] = json!(1);
+                }
+                a.threads[&ts[12]].as_array_mut().unwrap().push(reply);
+                let _seen = serve(vec![a, workspace("xoxb-test-B", "TB", "UB", "CB1")], vec![]);
+                let name = format!("apps-left-out-mention-{apps}");
+                let (connectors, dir) = two_bots(&name, vec![message_workflow(apps), watching("cm", "Mentions", "UA")]);
+                let (work, error) = block_on(connectors.poll());
+                assert_eq!(error, None);
+                let mut started: Vec<(String, String)> = work
+                    .iter()
+                    .filter_map(|w| match w {
+                        Work::Run(run) => match &run.subject {
+                            Subject::SlackThread { thread, .. } => Some((run.connector.clone(), thread.clone())),
+                            _ => None,
+                        },
+                        _ => None,
+                    })
+                    .collect();
+                started.extend(connectors.runs.lock().unwrap().iter().filter_map(|run| match &run.subject {
+                    Subject::SlackThread { thread, .. } => Some((run.connector.clone(), thread.clone())),
+                    _ => None,
+                }));
+                let _ = std::fs::remove_dir_all(dir);
+                started.retain(|(_, thread)| *thread == ts[12]);
+                started.sort();
+                started
+            };
+            let (mut on, mut off) = (String::new(), String::new());
+            let without_apps = check(false, &mut off);
+            assert!(without_apps.contains(&("cm".to_owned(), off.clone())), "{without_apps:?}");
+            let with_apps = check(true, &mut on);
+            let without_apps: Vec<(String, String)> = without_apps.into_iter().map(|(workflow, _)| (workflow, on.clone())).collect();
+            assert_eq!(with_apps, without_apps, "the mention in the thread of the app post left out starts what it starts without apps");
+        }
+
+        /// #support's page at check `check` of a channel that gets 200 new CI Bot posts between
+        /// checks, a millisecond apart, each its own thread, oldest first by ts: its history, its
+        /// threads, and their ts.
+        fn noisy_page(start: DateTime<Utc>, check: i64) -> (Value, Value, Vec<String>) {
+            let ts: Vec<String> = (0..200).map(|i| slack_ts(start + chrono::Duration::milliseconds(check * 200 + i))).collect();
+            let history: Vec<Value> =
+                ts.iter().rev().map(|ts| json!({ "ts": ts, "subtype": "bot_message", "bot_id": "B9", "username": "CI Bot", "text": format!("alert {ts}") })).collect();
+            let threads: serde_json::Map<String, Value> = history.iter().map(|m| (m["ts"].as_str().unwrap().to_owned(), json!([m]))).collect();
+            (Value::Array(history), Value::Object(threads), ts)
+        }
+
+        /// Thirty checks of a channel with 200 new app posts each: the store holds an entry for
+        /// none of the 190 a check leaves out over the cap, and one record for the workflow.
+        #[test]
+        fn a_noisy_channel_stores_nothing_for_the_app_posts_it_leaves_out() {
+            let _api = slack::lock_api();
+            let _restore = RestoreSlack;
+            let start = Utc::now() - chrono::Duration::seconds(50);
+            let spaces = std::sync::Arc::new(Mutex::new(vec![workspace("xoxb-test-A", "TA", "UA", "CA1"), workspace("xoxb-test-B", "TB", "UB", "CB1")]));
+            let _seen = serve_shared(spaces.clone(), vec![]);
+            let (connectors, dir) = two_bots("apps-noisy", vec![message_workflow(true)]);
+            let mut left_out = std::collections::HashSet::new();
+            for check in 0..30 {
+                let (history, threads, ts) = noisy_page(start, check);
+                {
+                    let mut spaces = spaces.lock().unwrap();
+                    (spaces[0].history, spaces[0].threads) = (history, threads);
+                }
+                assert_eq!(block_on(connectors.poll()).1, None, "check {check}");
+                left_out.extend(ts[slack::APPS_PER_CHECK..].iter().map(|ts| thread_key("CA1", ts)));
+                let stored = serde_json::to_value(&*connectors.store.lock().unwrap()).unwrap();
+                let mut keys: Vec<String> = stored["slack_threads"].as_object().into_iter().flatten().map(|(key, _)| key.clone()).collect();
+                for connector in stored["connectors"].as_array().into_iter().flatten() {
+                    keys.extend(connector["handled"].as_array().into_iter().flatten().filter_map(|key| key.as_str().map(str::to_owned)));
+                }
+                assert_eq!(keys.iter().filter(|key| left_out.contains(*key)).count(), 0, "check {check}");
+                assert_eq!(stored["apps_seen"].as_object().map_or(0, |seen| seen.len()), 1, "check {check}: {}", stored["apps_seen"]);
+            }
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        /// A hub's team that keeps every event waiting until `go` is set, then runs it now.
+        struct WaitingAdmission(std::sync::Arc<AtomicBool>);
+
+        impl Admission for WaitingAdmission {
+            fn admit(&self, event: Event) -> Pending<Result<Admitted, String>> {
+                let _ = event;
+                let go = self.0.load(std::sync::atomic::Ordering::SeqCst);
+                Box::pin(async move { Ok(if go { Admitted::Go } else { Admitted::Waiting }) })
+            }
+
+            fn release(&self, connector: String, subject: Subject) -> Pending<()> {
+                let _ = (connector, subject);
+                Box::pin(async {})
+            }
+        }
+
+        /// Ten app posts a team keeps waiting take no turn from the five newer ones: once the ten
+        /// start, the next check takes the five.
+        #[test]
+        fn app_posts_a_team_keeps_waiting_leave_the_newer_ones_for_a_later_check() {
+            let _api = slack::lock_api();
+            let _restore = RestoreSlack;
+            let (a, ts) = app_posts(Utc::now(), 15);
+            let _seen = serve(vec![a, workspace("xoxb-test-B", "TB", "UB", "CB1")], vec![]);
+            let (connectors, dir) = two_bots("apps-waiting", vec![message_workflow(true)]);
+            let go = std::sync::Arc::new(AtomicBool::new(false));
+            connectors.set_admission(std::sync::Arc::new(WaitingAdmission(go.clone())));
+            for _ in 0..2 {
+                assert_eq!(block_on(connectors.poll()).1, None);
+                assert_eq!(threads_started(&connectors), Vec::<String>::new(), "the team keeps the ten waiting");
+            }
+            // The team starts the ten it kept waiting, as a hub that grants their place does.
+            for thread in &ts[..slack::APPS_PER_CHECK] {
+                let subject = Subject::SlackThread { channel: "CA1".into(), thread: thread.clone() };
+                connectors.begin("ca".into(), subject, slack_trigger(None), &Utc::now().to_rfc3339()).unwrap();
+            }
+            go.store(true, std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(block_on(connectors.poll()).1, None);
+            assert_eq!(threads_started(&connectors), ts, "the next check takes the five newer posts");
             let _ = std::fs::remove_dir_all(dir);
         }
 
