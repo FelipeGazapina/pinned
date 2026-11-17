@@ -334,7 +334,7 @@ pub fn group_mention(id: &str) -> String {
 }
 
 /// Slack's message timestamp (`"1712345678.123456"`) in microseconds, to compare exactly.
-fn micros(ts: &str) -> Option<i64> {
+pub(crate) fn micros(ts: &str) -> Option<i64> {
     let (secs, frac) = ts.split_once('.').unwrap_or((ts, ""));
     let frac = format!("{frac:0<6}");
     Some(secs.parse::<i64>().ok()? * 1_000_000 + frac.get(..6)?.parse::<i64>().ok()?)

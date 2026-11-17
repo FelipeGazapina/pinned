@@ -1070,7 +1070,7 @@ impl Store {
     /// Drops the bots of threads no workflow handles or follows and no run works on anymore, and
     /// the box-end marks older than `BOX_RELEASE_WINDOW_MS` at `now` or of a deleted workflow.
     fn prune_thread_bots(&mut self, runs: &[runner::Run], starting: &[String], now: u64) -> bool {
-        let before = (self.slack_threads.len(), self.box_released_at.values().map(|keys| keys.len()).sum::<usize>());
+        let before = (self.slack_threads.len(), self.box_released_at.values().map(|keys| keys.len()).sum::<usize>(), self.apps_seen.len());
         let connectors = &self.connectors;
         let tracked = |key: &String| {
             connectors.iter().any(|c| c.handled.iter().any(|h| h == key) || c.followed.contains_key(key)) || runs.iter().any(|run| subject_key(&run.subject) == *key)
@@ -1083,7 +1083,7 @@ impl Store {
             keys.retain(|_, at| box_release_is_live(Some(*at), now));
         }
         self.box_released_at.retain(|_, keys| !keys.is_empty());
-        (self.slack_threads.len(), self.box_released_at.values().map(|keys| keys.len()).sum::<usize>()) != before
+        (self.slack_threads.len(), self.box_released_at.values().map(|keys| keys.len()).sum::<usize>(), self.apps_seen.len()) != before
     }
 
     /// Frees `subject` of workflow `connector` after its run's box ended, as `release` allows:
@@ -2712,9 +2712,13 @@ impl Connectors {
 
     /// Moves each workflow's `Store::apps_seen` to the newest app post its scan left out this
     /// check, once every app post that scan took started: it is `busy`, and it is not among
-    /// `opening`, the subjects (`subject_key`) of runs no tab opened yet. A taken post that did not
-    /// start (a hub's team held it or keeps it waiting, or its open failed) leaves `apps_seen`
-    /// where it was, so the posts left out after it are read again at the next check.
+    /// `opening`, the subjects (`subject_key`) of runs no tab opened yet. `poll` settles right
+    /// after its graph starts, with this check's runs no tab opened yet as `opening`;
+    /// `check_once` settles once more after handing them over, with none. A taken post that did
+    /// not start by then holds `apps_seen` where it was until a later check's scan reads it again:
+    /// one a hub's team keeps waiting (it records nothing), one whose start failed, or one whose
+    /// open failed (`unclaim` frees it). A post the watermark passed that later comes back
+    /// unclaimed is taken again by `came_back`. Saves only when a watermark moved.
     fn settle_apps(&self, opening: &[String]) -> Result<(), String> {
         let read = std::mem::take(&mut *self.apps_read.lock().unwrap());
         let (started, waiting): (Vec<AppsRead>, Vec<AppsRead>) = read.into_iter().partition(|read| {
@@ -2725,12 +2729,20 @@ impl Connectors {
             return Ok(());
         }
         let mut store = self.store.lock().unwrap();
+        let mut moved = false;
         for read in started {
-            if let Some(newest) = read.posts.skipped.last() {
+            let Some(newest) = read.posts.skipped.last() else { continue };
+            // Never back: posts that came back can be left out at or before it.
+            let at = store.apps_seen.get(&read.workflow).and_then(|seen| seen.strip_prefix(&thread_key(&read.channel, ""))).and_then(slack::micros);
+            if at.is_none_or(|at| slack::micros(newest).is_some_and(|newest| newest > at)) {
                 store.apps_seen.insert(read.workflow, thread_key(&read.channel, newest));
+                moved = true;
             }
         }
-        self.save(&store)
+        match moved {
+            true => self.save(&store),
+            false => Ok(()),
+        }
     }
 
     /// The connector's followed threads by the bot that answers each: the one that claimed it,
