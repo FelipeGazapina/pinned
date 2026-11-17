@@ -468,6 +468,25 @@ struct Field {
 }
 
 fn node(schema: &Value, root: &Value) -> Node {
+    node_in(schema, root, &mut Vec::new())
+}
+
+/// `expanding` holds the `$ref`s being built around `schema`. A type that holds itself, as a plan
+/// step holds fixes that hold steps, reads as a leaf where it comes back, so the tree ends.
+fn node_in(schema: &Value, root: &Value, expanding: &mut Vec<String>) -> Node {
+    let Some(reference) = schema.get("$ref").and_then(|r| r.as_str()) else {
+        return node_of(schema, root, expanding);
+    };
+    if expanding.iter().any(|item| item == reference) {
+        return Node::Leaf(format!("recursive {}", reference.rsplit('/').next().unwrap_or(reference)));
+    }
+    expanding.push(reference.to_owned());
+    let built = node_of(schema, root, expanding);
+    expanding.pop();
+    built
+}
+
+fn node_of(schema: &Value, root: &Value, expanding: &mut Vec<String>) -> Node {
     let flat = concrete(schema, root, &mut Vec::new());
     if let Some(branches) = union_branches(&flat) {
         let parent = flat.get("properties").is_some().then(|| strip_union(&flat));
@@ -486,7 +505,7 @@ fn node(schema: &Value, root: &Value) -> Node {
                 Some(parent) => merge_objects(parent, &resolved),
                 None => resolved,
             };
-            items.push((name, node(&merged, root)));
+            items.push((name, node_in(&merged, root, expanding)));
         }
         return Node::Union(items);
     }
@@ -498,22 +517,22 @@ fn node(schema: &Value, root: &Value) -> Node {
                 .collect(),
         );
     }
-    if let Some(items) = array_items(&flat, root) {
+    if let Some(items) = array_items(&flat, root, expanding) {
         return Node::Array(Box::new(items));
     }
-    if let Some(values) = map_values(&flat, root) {
+    if let Some(values) = map_values(&flat, root, expanding) {
         return Node::Map(Box::new(values));
     }
     if flat.get("properties").is_some()
         || flat.get("type").and_then(|t| t.as_str()) == Some("object")
             && flat.get("additionalProperties").is_none()
     {
-        return Node::Object(fields_of(&flat, root));
+        return Node::Object(fields_of(&flat, root, expanding));
     }
     Node::Leaf(leaf(&flat))
 }
 
-fn fields_of(schema: &Value, root: &Value) -> BTreeMap<String, Field> {
+fn fields_of(schema: &Value, root: &Value, expanding: &mut Vec<String>) -> BTreeMap<String, Field> {
     let required = required_names(schema);
     let mut fields = BTreeMap::new();
     let Some(props) = schema.get("properties").and_then(|p| p.as_object()) else {
@@ -523,12 +542,12 @@ fn fields_of(schema: &Value, root: &Value) -> BTreeMap<String, Field> {
         if prop.get("const").is_some() {
             continue;
         }
-        let resolved = concrete(prop, root, &mut Vec::new());
+        // Unresolved, so `node_in` sees the field's `$ref`.
         fields.insert(
             name.clone(),
             Field {
                 required: required.contains(name),
-                node: node(&resolved, root),
+                node: node_in(prop, root, expanding),
             },
         );
     }
@@ -651,7 +670,7 @@ fn strip_union(schema: &Value) -> Value {
     kept
 }
 
-fn array_items(schema: &Value, root: &Value) -> Option<Node> {
+fn array_items(schema: &Value, root: &Value, expanding: &mut Vec<String>) -> Option<Node> {
     let typed = schema.get("type").and_then(|t| t.as_str()) == Some("array")
         || schema.get("prefixItems").is_some()
         || schema.get("items").is_some();
@@ -661,17 +680,17 @@ fn array_items(schema: &Value, root: &Value) -> Option<Node> {
     if let Some(prefix) = schema.get("prefixItems").and_then(|p| p.as_array()) {
         let mut items = Vec::new();
         for (i, item) in prefix.iter().enumerate() {
-            items.push((i.to_string(), node(item, root)));
+            items.push((i.to_string(), node_in(item, root, expanding)));
         }
         return Some(Node::Union(items));
     }
     Some(match schema.get("items") {
-        Some(items) => node(items, root),
+        Some(items) => node_in(items, root, expanding),
         None => Node::Leaf("any".into()),
     })
 }
 
-fn map_values(schema: &Value, root: &Value) -> Option<Node> {
+fn map_values(schema: &Value, root: &Value, expanding: &mut Vec<String>) -> Option<Node> {
     if schema.get("type").and_then(|t| t.as_str()) != Some("object") {
         return None;
     }
@@ -679,7 +698,7 @@ fn map_values(schema: &Value, root: &Value) -> Option<Node> {
     if extra.as_bool() == Some(true) || schema.get("properties").is_some() {
         return None;
     }
-    Some(node(extra, root))
+    Some(node_in(extra, root, expanding))
 }
 
 fn leaf(schema: &Value) -> String {
