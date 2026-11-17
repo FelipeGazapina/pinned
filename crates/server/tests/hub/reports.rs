@@ -1478,6 +1478,9 @@ fn a_dev_hub_never_sends_the_token_variable_and_says_so_by_name_alone() {
     let fake = Fake::start();
     // The only test that sets this variable, to an invented value, to prove a --dev hub ignores it.
     let hub = DevHub::start("reports_dev_token_ignored", &[("PINNED_REPORTS_GITHUB_TOKEN", "ghp_must-not-be-sent"), ("PINNED_REPORTS_GITHUB_API", &fake.github.url)]);
+    // Checked before any call that reaches GitHub: a hub that read the variable would search with it first.
+    let said = hub.said();
+    assert!(said.contains("pinned-server: PINNED_REPORTS_GITHUB_TOKEN is ignored under --dev: a dev hub sends only its own fake token, to a local fake\n"), "{said}");
     let token = account::signup(&hub.url, "ana@example.test", PASSWORD).unwrap().0;
     let mut ana = Client::app(&hub.url, &token);
     assert_eq!(ask(&mut ana, json!({ "op": "status" })).unwrap(), json!({ "available": true, "left_today": 5 }), "{}", hub.said());
@@ -1490,12 +1493,10 @@ fn a_dev_hub_never_sends_the_token_variable_and_says_so_by_name_alone() {
     assert!(!said.contains("ghp_must-not-be-sent") && !said.contains("must-not"), "{said}");
 }
 
-#[test]
-fn a_dev_hub_sends_its_reports_calls_to_the_local_fake_past_any_proxy_variable() {
-    let fake = Fake::start();
-    // A proxy on this machine that counts each connection and closes it at once.
+/// A proxy on this machine that counts each connection and closes it at once: its address, and the count.
+fn counting_proxy() -> (String, Arc<AtomicU64>) {
     let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
-    let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
+    let url = format!("http://{}", proxy.local_addr().unwrap());
     let reached = Arc::new(AtomicU64::new(0));
     let counted = reached.clone();
     std::thread::spawn(move || {
@@ -1504,6 +1505,13 @@ fn a_dev_hub_sends_its_reports_calls_to_the_local_fake_past_any_proxy_variable()
             drop(stream);
         }
     });
+    (url, reached)
+}
+
+#[test]
+fn a_dev_hub_sends_its_reports_calls_to_the_local_fake_past_any_proxy_variable() {
+    let fake = Fake::start();
+    let (proxy_url, reached) = counting_proxy();
     let vars = [("PINNED_REPORTS_GITHUB_API", fake.github.url.as_str()), ("http_proxy", &proxy_url), ("HTTP_PROXY", &proxy_url), ("all_proxy", &proxy_url)];
     let hub = DevHub::start("reports_dev_proxy", &vars);
     let token = account::signup(&hub.url, "ana@example.test", PASSWORD).unwrap().0;
@@ -1511,4 +1519,22 @@ fn a_dev_hub_sends_its_reports_calls_to_the_local_fake_past_any_proxy_variable()
     assert_eq!(reached.load(Ordering::SeqCst), 0, "the proxy saw no connection: {}", hub.said());
     assert_eq!(fake.github.tokens(), [DEV_HUB_TOKEN], "the search reached the local fake");
     assert_eq!(similar, Ok(json!([])));
+}
+
+#[test]
+fn a_dev_hub_with_the_token_variable_and_no_local_fake_has_reporting_off_and_calls_nothing() {
+    // Any call, to the real GitHub too, would have to pass this proxy.
+    let (proxy_url, reached) = counting_proxy();
+    let mut vars = vec![("PINNED_REPORTS_GITHUB_TOKEN", "ghp_invented-for-this-test")];
+    for name in ["http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"] {
+        vars.push((name, &proxy_url));
+    }
+    let hub = DevHub::start("reports_dev_token_no_fake", &vars);
+    let said = hub.said();
+    assert!(said.contains("pinned-server: PINNED_REPORTS_GITHUB_TOKEN is ignored under --dev: a dev hub sends only its own fake token, to a local fake\n"), "{said}");
+    assert!(said.contains("pinned-server: reporting is off under --dev: set PINNED_REPORTS_GITHUB_API to a local fake\n"), "{said}");
+    assert_eq!(dev_status(&hub), json!({ "available": false }), "{}", hub.said());
+    assert_eq!(reached.load(Ordering::SeqCst), 0, "no call left the hub: {}", hub.said());
+    let said = hub.said();
+    assert!(!said.contains("ghp_invented") && !said.contains("invented-for-this-test"), "{said}");
 }
