@@ -3734,7 +3734,7 @@ mod tests {
         );
         assert_eq!(Rescue { lfs: true, ..Rescue::failed("the push was refused") }.notice().as_deref(), Some("Unpushed work could not be saved: the push was refused."), "nothing saved, no LFS line");
         let unsaved = |why| Rescue { unsaved: Some(why), ..saved(&["wip/rescue/task-1"]) };
-        assert_eq!(unsaved(NOT_PRIVATE).notice().as_deref(), Some("Unpushed work on this box was not saved: the repository is not confirmed private."), "the one line, alone");
+        assert_eq!(unsaved(NOT_PRIVATE).notice().as_deref(), Some("Any unpushed work on this box was not saved: the repository is not confirmed private."), "the one line, alone");
         assert_eq!(unsaved(OTHER_REMOTE).notice().as_deref(), Some("Unpushed work on this box was not saved: its push remote is not the task's repository."), "the one line, alone");
         assert_eq!(Rescue { unsaved: Some(OTHER_REMOTE), ..Rescue::failed("the rescue did not finish") }.notice().as_deref(), Some(OTHER_REMOTE));
         let notice = "Unpushed work was saved to branch wip/rescue/task-1.";

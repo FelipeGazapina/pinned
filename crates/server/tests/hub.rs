@@ -6388,7 +6388,7 @@ fn box_home_with_work(name: &str) -> (PathBuf, PathBuf) {
 
 /// What a box's end adds when GitHub did not confirm its repository private: here, with no GitHub
 /// token connected, no one asked it.
-const NOT_CONFIRMED_PRIVATE: &str = "Unpushed work on this box was not saved: the repository is not confirmed private.";
+const NOT_CONFIRMED_PRIVATE: &str = "Any unpushed work on this box was not saved: the repository is not confirmed private.";
 
 #[test]
 fn a_worker_box_offline_past_the_grace_whose_repository_is_not_confirmed_private_goes_with_nothing_pushed() {
