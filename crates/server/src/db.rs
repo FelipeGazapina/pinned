@@ -1802,6 +1802,14 @@ impl Db {
         Ok(self.client().await?.query(&query, &[&account]).await.map_err(err)?.iter().map(|r| held(r).confirmation).collect())
     }
 
+    /// How many of the account's extend_box confirmations wait, each adding an amount above zero,
+    /// read without listing them.
+    pub async fn waiting_extends(&self, account: Uuid) -> Result<i64, String> {
+        let query = "select count(*) from agent_confirmations where account = $1 and decided_at is null and action = 'extend_box'
+                       and case when jsonb_typeof(args->'extra_usd') = 'number' then (args->>'extra_usd')::float8 > 0 else false end";
+        Ok(self.client().await?.query_one(query, &[&account]).await.map_err(err)?.get(0))
+    }
+
     /// Decides the account's waiting confirmation `id`, once: None when it is unknown, another
     /// account's, or decided already.
     pub async fn decide_confirmation(&self, account: Uuid, id: Uuid, approved: bool) -> Result<Option<Held>, String> {
