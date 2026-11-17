@@ -8003,6 +8003,94 @@ mod tests {
         assert!(serde_json::from_value::<Trigger>(serde_json::json!({ "kind": "slack-message", "channel": "support" })).is_err(), "a message trigger needs its decision");
     }
 
+    /// A trigger read from `json` as part of a whole workflow.
+    fn connector_with(trigger: Value) -> Connector {
+        let mut json = serde_json::to_value(linear_connector()).unwrap();
+        json["trigger"] = trigger;
+        serde_json::from_value(json).unwrap()
+    }
+
+    /// The trigger round-trips through JSON and through the graph an editor sees and back.
+    fn round_trips(connector: &Connector, trigger: &Trigger) {
+        assert_eq!(&connector.trigger, trigger);
+        let json = serde_json::to_value(connector).unwrap();
+        assert_eq!(serde_json::from_value::<Connector>(json).unwrap().trigger, *trigger);
+        assert_eq!(project(&migrate(connector)).trigger, *trigger);
+    }
+
+    #[test]
+    fn linear_change_and_schedule_triggers_parse_and_map_back() {
+        let status = connector_with(json!({ "kind": "linear-status", "to": "Ready to Dev" }));
+        let want = Trigger::LinearStatus { from: String::new(), to: "Ready to Dev".into(), scope: LinearScope::default(), by: By::Anyone };
+        round_trips(&status, &want);
+        assert_eq!(
+            serde_json::to_value(&want).unwrap(),
+            json!({ "kind": "linear-status", "from": "", "to": "Ready to Dev", "scope": { "team": "", "project": "" }, "by": "anyone" })
+        );
+        let NodeKind::Trigger { watch } = &migrate(&status).trigger().kind else { unreachable!() };
+        assert_eq!(*watch, Watch::LinearStatus { from: String::new(), to: "Ready to Dev".into(), scope: LinearScope::default(), by: By::Anyone });
+
+        let scoped = json!({ "kind": "linear-status", "from": "Todo", "to": "Done", "scope": { "team": "ENG", "project": "Hub" }, "by": "not-me" });
+        let want = Trigger::LinearStatus {
+            from: "Todo".into(),
+            to: "Done".into(),
+            scope: LinearScope { team: "ENG".into(), project: "Hub".into() },
+            by: By::NotMe,
+        };
+        round_trips(&connector_with(scoped), &want);
+
+        let cron = json!({ "kind": "schedule", "schedule": { "kind": "cron", "expr": "0 9 * * 1-5" }, "tz": "America/Sao_Paulo" });
+        let want = Trigger::Schedule { schedule: schedule::Schedule::Cron { expr: "0 9 * * 1-5".into() }, tz: "America/Sao_Paulo".into() };
+        let scheduled = connector_with(cron.clone());
+        round_trips(&scheduled, &want);
+        assert_eq!(serde_json::to_value(&want).unwrap(), cron);
+        let NodeKind::Trigger { watch } = &migrate(&scheduled).trigger().kind else { unreachable!() };
+        assert_eq!(*watch, Watch::Schedule { schedule: schedule::Schedule::Cron { expr: "0 9 * * 1-5".into() }, tz: "America/Sao_Paulo".into() });
+    }
+
+    #[test]
+    fn linear_assigned_round_trips_every_assignee_and_by() {
+        let assignees = [
+            (json!({ "kind": "anyone" }), Assignee::Anyone),
+            (json!({ "kind": "me" }), Assignee::Me),
+            (json!({ "kind": "user", "id": "u-42", "name": "Ana" }), Assignee::User { id: "u-42".into(), name: "Ana".into() }),
+            (json!({ "kind": "nobody" }), Assignee::Nobody),
+        ];
+        let bys = [(json!("anyone"), By::Anyone), (json!("me"), By::Me), (json!("not-me"), By::NotMe)];
+        for (to_json, to) in &assignees {
+            for (by_json, by) in &bys {
+                let json = json!({ "kind": "linear-assigned", "to": to_json, "scope": { "team": "eng", "project": "" }, "by": by_json });
+                let want = Trigger::LinearAssigned { to: to.clone(), scope: LinearScope { team: "eng".into(), project: String::new() }, by: by.clone() };
+                let connector = connector_with(json.clone());
+                round_trips(&connector, &want);
+                assert_eq!(serde_json::to_value(&want).unwrap(), json);
+            }
+        }
+        let bare = connector_with(json!({ "kind": "linear-assigned", "to": { "kind": "me" } }));
+        assert_eq!(bare.trigger, Trigger::LinearAssigned { to: Assignee::Me, scope: LinearScope::default(), by: By::Anyone });
+    }
+
+    #[test]
+    fn a_save_refuses_a_one_time_schedule_and_an_unknown_zone() {
+        let (connectors, dir) = stored("schedule-refusals", vec![]);
+        let once = Trigger::Schedule { schedule: schedule::Schedule::Once { at: "2026-12-01T09:00".into() }, tz: "America/Sao_Paulo".into() };
+        let mars = Trigger::Schedule { schedule: schedule::Schedule::Cron { expr: "0 9 * * *".into() }, tz: "Mars/Base".into() };
+        let mars_text = "unknown time zone \"Mars/Base\": use an IANA name such as America/Sao_Paulo";
+        for (trigger, text) in [(&once, "a scheduled workflow repeats: use a Task for a one-time run"), (&mars, mars_text)] {
+            let workflow = Connector { trigger: trigger.clone(), ..linear_connector() };
+            assert_eq!(connectors.save_connector(workflow.clone()).err().as_deref(), Some(text));
+            let mut graph = migrate(&Connector { trigger: Trigger::Manual, ..linear_connector() });
+            let at = graph.nodes.iter().position(|n| matches!(n.kind, NodeKind::Trigger { .. })).unwrap();
+            graph.nodes[at].kind = migrate(&workflow).trigger().kind.clone();
+            let edited = Connector { trigger: Trigger::Manual, graph: Some(graph), ..linear_connector() };
+            assert_eq!(connectors.save_connector(edited).err().as_deref(), Some(text), "the graph's trigger is checked too");
+        }
+        assert!(on_disk(&dir)["connectors"].as_array().unwrap().is_empty(), "nothing refused was stored");
+        let fine = Trigger::Schedule { schedule: schedule::Schedule::Cron { expr: "0 9 * * 1-5".into() }, tz: "America/Sao_Paulo".into() };
+        assert_eq!(connectors.save_connector(Connector { trigger: fine.clone(), ..linear_connector() }).unwrap().trigger, fine);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn a_fallback_round_trips_and_defaults_to_the_models_guess() {
         let Trigger::SlackMessage { decide, .. } = router().trigger else { unreachable!() };
