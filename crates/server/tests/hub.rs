@@ -8,6 +8,7 @@ use pinned_core::convex::client::Replay;
 use pinned_core::global_orchestrator::{CaptainReport, RelayTo};
 use pinned_core::link::{self, Link};
 use pinned_core::machine::{Launch, Machine};
+use pinned_core::surface::{ActorRole, Confirmation};
 use pinned_core::sync;
 use pinned_core::taste::{TastePatch, TasteScope, Tastes};
 use pinned_core::upstash::{BoxId, Exec, Listed, NewBox};
@@ -1119,6 +1120,36 @@ fn a_taste_chat_cannot_change_the_review_settings_through_the_hub() {
 }
 
 #[test]
+fn a_machine_forwarding_a_taste_chat_cannot_change_the_review_settings_at_the_hub() {
+    let hub = TestHub::start("forward_review");
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = Client::connect(&url, &token);
+    ana.wait("hello", |f| f["type"] == "hello");
+    let (_, machine_token) = account::register_machine(&url, &token, "ana-old-mac", "macos").unwrap();
+    // An app from before the refusal: its taste chat still offers both review settings, and it forwards them as it always did.
+    let chat = json!({ "kind": "tabs", "tabs": [{ "id": "tab-chat", "cwd": "/w/site", "bypass": false, "running": false, "status": null, "title": "Way of working", "message": null, "resume_at": null, "opened": 1, "session": "conv-chat", "taste_chat": true }] });
+    let raw = RawMachine::start_with(&url, &machine_token, vec![chat], |_| RawReply::Ok(Value::Null));
+    ana.wait_machines(&[("ana-old-mac", true)]);
+    ana.wait("the chat's tab at the hub", |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == "tab-chat" && t["taste_chat"] == true));
+
+    let site = json!({ "kind": "project", "repo": "github.com/acme/site" });
+    let stored = |client: &mut Client| client.hub(json!({ "cmd": "get_tastes" })).unwrap()["projects"].clone();
+    let one = "review_diffs is changed only by the user, on the Way of working page; nothing changed";
+    let other = "second_opinion is changed only by the user, on the Way of working page; nothing changed";
+    let set = |patch: Value| json!({ "cmd": "set_taste", "scope": site, "patch": patch });
+    assert_eq!(raw.ask(set(json!({ "review_diffs": false }))), Err(one.into()), "a forwarded set of review_diffs is refused");
+    assert_eq!(raw.ask(set(json!({ "second_opinion": true }))), Err(other.into()), "a forwarded set of second_opinion is refused");
+    assert_eq!(raw.ask(json!({ "cmd": "reset_taste_field", "scope": site, "field": "review_diffs" })), Err(one.into()), "a forwarded reset of review_diffs is refused");
+    assert_eq!(raw.ask(json!({ "cmd": "reset_taste_field", "scope": site, "field": "second_opinion" })), Err(other.into()), "a forwarded reset of second_opinion is refused");
+    assert_eq!(raw.ask(set(json!({ "parallel": 2, "review_diffs": false }))), Err(one.into()), "a forwarded mixed patch is refused whole");
+    assert_eq!(stored(&mut ana), json!({}), "a refused forward changed the way of working");
+
+    assert!(raw.ask(set(json!({ "parallel": 2 }))).is_ok(), "a forwarded allowed field alone still works");
+    assert_eq!(stored(&mut ana), json!({ "github.com/acme/site": { "parallel": 2 } }), "only the allowed field landed");
+}
+
+#[test]
 fn an_agents_act_refuses_a_review_setting_before_any_ask_is_held() {
     let hub = TestHub::start("act_review");
     let url = hub.url.clone();
@@ -1166,6 +1197,42 @@ fn an_agents_act_with_a_review_setting_changes_nothing_and_an_allowed_field_alon
     ana.client.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
     assert_eq!(ana.client.hub(json!({ "cmd": "decide_confirmation", "id": held["id"], "approve": true })).unwrap()["outcome"], "done");
     assert_eq!(stored(&mut ana.client), json!({ "github.com/acme/site": { "parallel": 2 } }), "the approved allowed field lands, and no review setting did");
+}
+
+#[test]
+fn a_review_setting_held_before_the_refusal_fails_when_the_owner_approves_it() {
+    let hub = TestHub::start("held_review");
+    let url = hub.url.clone();
+    let (token, owner) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &token, "ana@acme.dev", "held-review-mac");
+    let (machine, tab) = (ana.machine.clone(), ana.tab.clone());
+    let site = json!({ "kind": "project", "repo": "github.com/acme/site" });
+    let stored = |client: &mut Client| client.hub(json!({ "cmd": "get_tastes" })).unwrap()["projects"].clone();
+    let one = "review_diffs is changed only by the user, on the Way of working page; nothing changed";
+    let other = "second_opinion is changed only by the user, on the Way of working page; nothing changed";
+    // Asks an app from before the refusal held, straight into the table, as the hub held them then.
+    let hold = |request: &str, action: &str, args: Value| {
+        let asked = Confirmation { id: String::new(), at: 1, machine: machine.clone(), machine_name: "held-review-mac".into(), tab: tab.clone(), title: "Way of working".into(), role: ActorRole::Session, action: action.into(), about: String::new(), args, target: None, request_id: Some(request.into()), decision: None, decided_at: None, outcome: None };
+        let (account_id, machine_id) = (uuid::Uuid::parse_str(&owner.id).unwrap(), uuid::Uuid::parse_str(&machine).unwrap());
+        hub.runtime.block_on(hub.hub().db.hold_confirmation(account_id, machine_id, None, &asked)).unwrap().0.to_string()
+    };
+    let review = hold("held-review", "set_taste", json!({ "scope": site, "patch": { "review_diffs": false } }));
+    let reset = hold("held-reset", "reset_taste_field", json!({ "scope": site, "field": "second_opinion" }));
+    let denied = hold("held-denied", "set_taste", json!({ "scope": site, "patch": { "second_opinion": true } }));
+    let lands = hold("held-lands", "set_taste", json!({ "scope": site, "patch": { "parallel": 2 } }));
+    ana.client.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    let decide = |client: &mut Client, id: &str, approve: bool| client.hub(json!({ "cmd": "decide_confirmation", "id": id, "approve": approve })).unwrap();
+
+    let refused = decide(&mut ana.client, &review, true);
+    assert_eq!(refused["outcome"], format!("failed: {one}"), "an approved held review_diffs fails with the refusal: {refused}");
+    let refused = decide(&mut ana.client, &reset, true);
+    assert_eq!(refused["outcome"], format!("failed: {other}"), "an approved held reset of second_opinion fails with the refusal: {refused}");
+    assert_eq!(stored(&mut ana.client), json!({}), "an approved held review setting changed the way of working");
+    let no = decide(&mut ana.client, &denied, false);
+    assert_eq!((&no["decision"], &no["outcome"]), (&json!("denied"), &json!("denied")), "a denied held review setting still ends as denied: {no}");
+    let landed = decide(&mut ana.client, &lands, true);
+    assert_eq!(landed["outcome"], "done", "an approved held allowed field still lands: {landed}");
+    assert_eq!(stored(&mut ana.client), json!({ "github.com/acme/site": { "parallel": 2 } }), "only the allowed field landed");
 }
 
 #[test]
