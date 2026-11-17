@@ -2551,23 +2551,27 @@ impl Connectors {
                 let channel = self.channel_id(&bot, name).await?;
                 let since = DateTime::parse_from_rfc3339(&c.since).map_or(now, Into::into);
                 let own = self.own_bots_for(*apps).await?;
-                let apps = own.as_ref().map(|own| slack::Apps { workflow: &c.id, own });
-                let mut messages = slack::messages(&token, &channel, &bot.user_id, since, apps.as_ref()).await?;
-                messages.retain(|m| !self.busy(&thread_key(&channel, &m.ts)));
+                let busy = |ts: &str| self.busy(&thread_key(&channel, ts));
+                let apps = own.as_ref().map(|own| slack::Apps { workflow: &c.id, own, busy: &busy });
+                let (mut messages, skipped) = slack::messages(&token, &channel, &bot.user_id, since, apps.as_ref()).await?;
+                messages.retain(|m| !busy(&m.ts));
+                // An app post skipped over the cap is handled, as a stopped one is: no check reads it again.
+                let skipped = skipped.into_iter().map(|thread| Found::Stopped { channel: channel.clone(), thread, page: None });
                 if messages.is_empty() {
-                    return Ok(Some(vec![]));
+                    return Ok(Some(skipped.collect()));
                 }
                 let key = self.key(VERCEL_KEY).ok_or("the Vercel AI Gateway is not connected: connect it in pinned's Connectors settings")?;
                 let choices = decide.choices(&c.name)?;
                 let pages = self.pages(&token, c, decide).await?;
                 let channel_name = channel_name(name);
+                let skipped: Vec<Found> = skipped.collect();
                 // What the decision model reads of each message, framed as `decide_state` frames it.
                 let framed = self.framed(&c.id);
                 let outside = |value: &str| match framed && !value.trim().is_empty() {
                     true => crate::untrusted::frame(crate::untrusted::SLACK_THREAD, value),
                     false => value.to_owned(),
                 };
-                let mut found = vec![];
+                let mut found = skipped;
                 for message in messages {
                     let state = json!({ "channel": format!("#{}", outside(channel_name)), "author": outside(&message.author), "message": outside(&message.text) });
                     let chosen = vercel::choose(&key, decide.model.trim(), &decide.instructions, &choices, &state).await?;
@@ -2612,11 +2616,13 @@ impl Connectors {
         let channel = self.channel_id(&bot, name).await?;
         let since = DateTime::parse_from_rfc3339(&c.since).map_or(now, Into::into);
         let own = self.own_bots_for(matches!(c.trigger, Trigger::SlackMessage { apps: true, .. })).await?;
-        let apps = own.as_ref().map(|own| slack::Apps { workflow: &c.id, own });
-        let mut messages = slack::messages(&token, &channel, &bot.user_id, since, apps.as_ref()).await?;
-        messages.retain(|m| !self.busy(&thread_key(&channel, &m.ts)));
+        let busy = |ts: &str| self.busy(&thread_key(&channel, ts));
+        let apps = own.as_ref().map(|own| slack::Apps { workflow: &c.id, own, busy: &busy });
+        let (mut messages, skipped) = slack::messages(&token, &channel, &bot.user_id, since, apps.as_ref()).await?;
+        messages.retain(|m| !busy(&m.ts));
         let channel_name = channel_name(name).to_owned();
-        let mut found = vec![];
+        // An app post skipped over the cap is handled, as a stopped one is: no check reads it again.
+        let mut found: Vec<Found> = skipped.into_iter().map(|thread| Found::Stopped { channel: channel.clone(), thread, page: None }).collect();
         for message in messages {
             let posts = opened_by(slack::thread(&token, &channel, &message.ts).await?, &message, apps.is_some());
             found.push(Found::Mention {

@@ -403,11 +403,13 @@ impl Own {
     }
 }
 
-/// A workflow that also reads posts from apps and integrations: its id, for the log, and the
-/// account's own bots, which it never reads back.
+/// A workflow that also reads posts from apps and integrations: its id, for the log, the
+/// account's own bots, which it never reads back, and whether it already handles a post, by ts:
+/// such a post takes no place under `APPS_PER_CHECK`.
 pub struct Apps<'a> {
     pub workflow: &'a str,
     pub own: &'a Own,
+    pub busy: &'a dyn Fn(&str) -> bool,
 }
 
 /// What one history page gives a workflow: the messages it takes, oldest first, and the
@@ -428,9 +430,10 @@ fn is_app_post(message: &Value) -> bool {
 }
 
 /// The messages of a history page after `since` that `from_people` takes and, with `apps`, the
-/// top-level posts of apps and integrations, up to `APPS_PER_CHECK` of them, oldest first. Never
-/// a post by the account's own bots (`own`, and `bot`, the one reading), whether `apps` is on or not.
-fn select(messages: &Value, bot: &str, own: &Own, since: DateTime<Utc>, apps: bool) -> Selected {
+/// top-level posts of apps and integrations, up to `APPS_PER_CHECK` of them, oldest first, of
+/// those not `busy` already (by ts). Never a post by the account's own bots (`own`, and `bot`,
+/// the one reading), whether `apps` is on or not.
+fn select(messages: &Value, bot: &str, own: &Own, since: DateTime<Utc>, apps: bool, busy: &dyn Fn(&str) -> bool) -> Selected {
     let wrote = |m: &Value| own.wrote(m) || m["user"].as_str() == Some(bot);
     let mut taken = from_people(messages, bot, since);
     taken.retain(|m| !wrote(m));
@@ -438,7 +441,9 @@ fn select(messages: &Value, bot: &str, own: &Own, since: DateTime<Utc>, apps: bo
     if apps {
         let after = since.timestamp_micros();
         let mut posts: Vec<Value> =
-            messages.as_array().into_iter().flatten().filter(|m| is_app_post(m) && !wrote(m) && top_level_after(m, after)).cloned().collect();
+            messages.as_array().into_iter().flatten().filter(|m| is_app_post(m) && !wrote(m) && top_level_after(m, after) && !m["ts"].as_str().is_some_and(busy))
+                .cloned()
+                .collect();
         posts.sort_by_key(|m| m["ts"].as_str().and_then(micros));
         skipped = posts.split_off(posts.len().min(APPS_PER_CHECK)).iter().filter_map(|m| m["ts"].as_str().map(str::to_owned)).collect();
         taken.extend(posts);
@@ -551,11 +556,13 @@ fn app_post(message: &Value) -> Post {
 
 /// The top-level messages people wrote in `channel` after `since`, oldest first, by author name.
 /// With `apps`, also the posts of apps and integrations (`select`), by the app's name, with no
-/// person looked up for them; each one past `APPS_PER_CHECK` is logged by its workflow and ts.
-pub async fn messages(token: &str, channel: &str, bot: &str, since: DateTime<Utc>, apps: Option<&Apps<'_>>) -> Result<Vec<Post>, String> {
+/// person looked up for them; each one past `APPS_PER_CHECK` is logged by its workflow and ts,
+/// and its ts is given second, for the check to handle it, so no check reads it again.
+pub async fn messages(token: &str, channel: &str, bot: &str, since: DateTime<Utc>, apps: Option<&Apps<'_>>) -> Result<(Vec<Post>, Vec<String>), String> {
     let history = call(token, "conversations.history", &[("channel", channel), ("oldest", &ts(since)), ("limit", PAGE)]).await?;
     let none = Own::default();
-    let Selected { taken, skipped } = select(&history["messages"], bot, apps.map_or(&none, |a| a.own), since, apps.is_some());
+    let busy = |ts: &str| apps.is_some_and(|a| (a.busy)(ts));
+    let Selected { taken, skipped } = select(&history["messages"], bot, apps.map_or(&none, |a| a.own), since, apps.is_some(), &busy);
     for ts in &skipped {
         let line = skipped_line(apps.map_or("", |a| a.workflow), ts);
         #[cfg(test)]
@@ -567,7 +574,7 @@ pub async fn messages(token: &str, channel: &str, bot: &str, since: DateTime<Utc
     let mut posts = posts(&people, &names(token, &people).await?);
     posts.extend(from_apps.iter().map(app_post));
     posts.sort_by_key(|p| micros(&p.ts));
-    Ok(posts)
+    Ok((posts, skipped))
 }
 
 /// Threads in a history page whose last reply came after `since`.
@@ -915,7 +922,7 @@ mod tests {
     #[test]
     fn a_channel_read_without_apps_takes_only_what_people_started() {
         let since = DateTime::from_timestamp(1792395000, 0).unwrap();
-        let selected = select(&mixed_page(), "UBOT", &own_bots(), since, false);
+        let selected = select(&mixed_page(), "UBOT", &own_bots(), since, false, &|_| false);
         assert_eq!(ts_of(&selected.taken), ["1792400110.000000"]);
         assert_eq!(selected.taken, from_people(&mixed_page(), "UBOT", since), "with apps off the page reads as it always did");
         assert!(selected.skipped.is_empty());
@@ -924,7 +931,7 @@ mod tests {
     #[test]
     fn a_channel_read_with_apps_adds_integration_posts_and_nothing_else() {
         let since = DateTime::from_timestamp(1792395000, 0).unwrap();
-        let selected = select(&mixed_page(), "UBOT", &own_bots(), since, true);
+        let selected = select(&mixed_page(), "UBOT", &own_bots(), since, true, &|_| false);
         assert_eq!(
             ts_of(&selected.taken),
             ["1792400110.000000", "1792400120.000000"],
@@ -997,7 +1004,7 @@ mod tests {
             .collect();
         page.extend((0..3).map(|i| json!({ "ts": format!("17924002{:02}.000000", i), "user": format!("U{i}"), "text": "person" })));
         let since = DateTime::from_timestamp(1792395000, 0).unwrap();
-        let selected = select(&Value::Array(page), "UBOT", &own_bots(), since, true);
+        let selected = select(&Value::Array(page), "UBOT", &own_bots(), since, true, &|_| false);
         let apps = selected.taken.iter().filter(|m| m["bot_id"].is_string()).count();
         let people = selected.taken.iter().filter(|m| m["user"].is_string()).count();
         assert_eq!((apps, people), (APPS_PER_CHECK, 3));
