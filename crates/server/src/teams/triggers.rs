@@ -36,6 +36,9 @@ fn kind(trigger: &Trigger) -> &'static str {
         Trigger::Called => "called",
         // Refused before a start: a manual workflow runs only by Run now.
         Trigger::Manual => "manual",
+        Trigger::LinearStatus { .. } => "linear_status",
+        Trigger::LinearAssigned { .. } => "linear_assigned",
+        Trigger::Schedule { .. } => "schedule",
     }
 }
 

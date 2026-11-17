@@ -92,6 +92,9 @@ fn watch_of(trigger: &Trigger) -> Watch {
         Trigger::SlackMessage { channel, .. } => Watch::SlackMessage { channel: channel.clone() },
         Trigger::Called => Watch::Called,
         Trigger::Manual => Watch::Manual,
+        Trigger::LinearStatus { from, to, scope, by } => Watch::LinearStatus { from: from.clone(), to: to.clone(), scope: scope.clone(), by: by.clone() },
+        Trigger::LinearAssigned { to, scope, by } => Watch::LinearAssigned { to: to.clone(), scope: scope.clone(), by: by.clone() },
+        Trigger::Schedule { schedule, tz } => Watch::Schedule { schedule: schedule.clone(), tz: tz.clone() },
     }
 }
 
