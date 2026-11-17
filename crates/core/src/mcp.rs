@@ -427,18 +427,22 @@ fn private_file(name: &str, bytes: &[u8]) -> std::io::Result<(tempfile::TempDir,
 /// The project MCP servers a Claude Code session in `cwd` carries as approved, by name: those
 /// the person approved in `.claude/settings.local.json` at the project's main checkout (the root
 /// Claude Code files its approvals under, also for a worktree), less those declined there, that
-/// `cwd`'s own `.mcp.json` lists. Nothing else is read: no account's `.claude.json`, and not
-/// "all future", whose answer lists its names too. A file missing or unreadable carries none.
+/// `cwd`'s own `.mcp.json` lists with the same definition as the main checkout's own `.mcp.json`,
+/// the one the person saw when approving. Nothing else is read: no account's `.claude.json`, and
+/// not "all future", whose answer lists its names too. A file missing or unreadable carries none.
 pub fn carried_approvals(cwd: &Path) -> Vec<String> {
     let listed = read_json(&cwd.join(".mcp.json")).unwrap_or(Value::Null);
     let Some(listed) = listed["mcpServers"].as_object().filter(|servers| !servers.is_empty()) else { return vec![] };
     let Some(root) = main_checkout(cwd) else { return vec![] };
+    let approved = read_json(&root.join(".mcp.json")).unwrap_or(Value::Null);
+    let Some(approved) = approved["mcpServers"].as_object() else { return vec![] };
     let local = read_json(&root.join(".claude").join("settings.local.json")).unwrap_or(Value::Null);
     let names = |key: &str| local[key].as_array().map(|names| names.iter().filter_map(Value::as_str).collect::<Vec<_>>()).unwrap_or_default();
     let declined = names("disabledMcpjsonServers");
     let mut carried: Vec<String> = vec![];
     for name in names("enabledMcpjsonServers") {
-        if !declined.contains(&name) && listed.contains_key(name) && !carried.iter().any(|c| c == name) {
+        let same = listed.get(name).is_some_and(|server| approved.get(name) == Some(server));
+        if !declined.contains(&name) && same && !carried.iter().any(|c| c == name) {
             carried.push(name.to_owned());
         }
     }
@@ -446,7 +450,8 @@ pub fn carried_approvals(cwd: &Path) -> Vec<String> {
 }
 
 /// The main checkout of the repository `cwd` is in, as Claude Code finds it: the folder holding
-/// the git common dir, which a worktree shares with it.
+/// the git common dir, which a worktree shares with it. None when the common dir is not a `.git`
+/// folder, as with a separate git dir or a bare repository, where its parent is not the project.
 fn main_checkout(cwd: &Path) -> Option<PathBuf> {
     let out = crate::process::command("git")
         .arg("-C")
@@ -457,7 +462,8 @@ fn main_checkout(cwd: &Path) -> Option<PathBuf> {
         .output()
         .ok()?;
     let common = String::from_utf8(out.stdout).ok().filter(|_| out.status.success())?;
-    Path::new(common.trim_end_matches(['\n', '\r'])).parent().map(Path::to_owned)
+    let common = Path::new(common.trim_end_matches(['\n', '\r']));
+    (common.file_name()? == ".git").then(|| common.parent().map(Path::to_owned)).flatten()
 }
 
 /// A session's own Claude Code settings: the file it would have used, plus the project MCP
