@@ -97,16 +97,24 @@ fn json<T: serde::Serialize>(value: T) -> Result<Value, String> {
 /// Runs `act` for the session in tab `act.tab` of `origin`, a machine of `account`, or holds it
 /// for the user's approval. Every outcome but a repeat or a busy refusal writes one audit row.
 pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: AgentAct) -> Result<Value, String> {
+    // An extend's wait counts from here, its own start, so its reads before its turn count in it.
+    let deadline = ExtendTurn::deadline();
     let caller = Caller::of(account, origin, &act.tab)?;
     let request_id = act.request_id.as_deref().filter(|id| !id.is_empty());
     let trail = Trail { hub, account: account.id, machine: caller.machine, tab: &caller.tab, role: caller.role, action: &act.action, args: surface::summary(&act.args), request_id, task: Default::default() };
     if let Some(id) = request_id {
-        match hub.db.audited(account.id, caller.machine, &caller.tab, &act.action, id).await? {
+        // An extend's repeat check counts in its 2 s too: one that has not answered by then is busy, and writes no row.
+        let earlier = if act.action == "extend_box" {
+            tokio::time::timeout_at(deadline, hub.db.audited(account.id, caller.machine, &caller.tab, &act.action, id)).await.map_err(|_| crate::db::BUSY.to_owned())??
+        } else {
+            hub.db.audited(account.id, caller.machine, &caller.tab, &act.action, id).await?
+        };
+        match earlier {
             Some((AuditOutcome::Pending, _)) | None => {}
             Some((earlier, at)) => return json(ActAnswer::Repeat { earlier, at }),
         }
     }
-    let mut admitted = match admit(hub, account, origin, &caller, &act).await {
+    let mut admitted = match admit(hub, account, origin, &caller, &act, deadline).await {
         Ok(admitted) => admitted,
         // Refused for a busy lock, nothing was done: no row, so the same request_id asks again.
         Err(busy) if busy == crate::db::BUSY => return Err(busy),
@@ -227,7 +235,7 @@ async fn end_turn(turn: Option<ExtendTurn>) {
 }
 
 /// The act as it may run, or why it may not, checked in the order the contract lists.
-async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act: &AgentAct) -> Result<Admitted, String> {
+async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act: &AgentAct, deadline: tokio::time::Instant) -> Result<Admitted, String> {
     if !caller.known {
         let name = account.name_of(origin).unwrap_or_else(|| origin.to_owned());
         return Err(format!("{name} runs no session {}", caller.tab));
@@ -268,20 +276,27 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
         let machine = Uuid::parse_str(machine).map_err(|_| format!("this account has no machine {machine}"))?;
         // An ask that could be no extend, or that the account's cap refuses already, is refused
         // before it takes a turn and its connection. The cap is counted again in the turn.
-        crate::boxes::extend_of(hub, account, machine, *extra_usd).await?;
-        if !asked_before(hub, account, caller, act).await? && hub.db.waiting_extends(account.id).await? >= MAX_WAITING_EXTENDS_PER_ACCOUNT as i64 {
+        // These reads share the ask's wait: one that has not answered by its deadline is busy, as its turn would be.
+        tokio::time::timeout_at(deadline, crate::boxes::extend_of(hub, account, machine, *extra_usd)).await.map_err(|_| crate::db::BUSY.to_owned())??;
+        let capped = tokio::time::timeout_at(deadline, async {
+            Ok::<bool, String>(!asked_before(hub, account, caller, act).await? && hub.db.waiting_extends(account.id).await? >= MAX_WAITING_EXTENDS_PER_ACCOUNT as i64)
+        })
+        .await
+        .map_err(|_| crate::db::BUSY.to_owned())??;
+        if capped {
             return Err(TOO_MANY_EXTENDS.into());
         }
-        let held = ExtendTurn::ask(hub, account.id, machine).await?;
-        if !asked_before(hub, account, caller, act).await? {
-            let waiting = waiting_extends(hub, account).await?;
-            let live = hub.db.live_boxes(account.id).await?;
+        let held = ExtendTurn::ask(hub, account.id, machine, deadline).await?;
+        // The reads before the turn is held share the ask's wait too: one that has not answered by its deadline is busy.
+        if !tokio::time::timeout_at(deadline, asked_before(hub, account, caller, act)).await.map_err(|_| crate::db::BUSY.to_owned())?? {
+            let waiting = tokio::time::timeout_at(deadline, waiting_extends(hub, account)).await.map_err(|_| crate::db::BUSY.to_owned())??;
+            let live = tokio::time::timeout_at(deadline, hub.db.live_boxes(account.id)).await.map_err(|_| crate::db::BUSY.to_owned())??;
             if waiting.iter().filter(|(of, _, _)| of.is_some_and(|of| live.contains(&of))).count() >= MAX_WAITING_EXTENDS_PER_ACCOUNT {
                 return Err(TOO_MANY_EXTENDS.into());
             }
             let since = (pinned_core::connectors::unix_millis() / 1000).saturating_sub(EXTENDS_COUNTED_FOR.as_secs()) as i64;
             let for_box = waiting.iter().filter(|(of, _, at)| *of == Some(machine) && *at > since).map(|(_, usd, _)| usd).sum();
-            crate::boxes::extended(hub, account, machine, *extra_usd, for_box).await?;
+            tokio::time::timeout_at(deadline, crate::boxes::extended(hub, account, machine, *extra_usd, for_box)).await.map_err(|_| crate::db::BUSY.to_owned())??;
         }
         turn = Some(held);
     }
