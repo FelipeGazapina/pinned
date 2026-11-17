@@ -208,9 +208,18 @@ function drawNeedsYou() {
   tickNeedsYou();
 }
 
+/** The page's heading: it says Personal while a team is current, so the person's own asks say whose they are. */
+const needsYouTeamCurrent = () => typeof teamsNow !== "undefined" && teamsNow !== null;
+const needsYouTitle = () => (needsYouTeamCurrent() ? "Needs you · Personal" : "Needs you");
+/** Sets both headings of the open page to the title, after a team switch. */
+function paintNeedsYouTitle() {
+  for (const h of pageView.querySelectorAll(".page-head h1, .ny-title h1")) h.textContent = needsYouTitle();
+}
+document.addEventListener("teams:changed", () => needsYouLive && paintNeedsYouTitle());
+
 function showNeedsYou() {
-  setPage(`${headHtml("Needs you", `<span class="range ny-count"></span>`)}<div class="page-body"><div class="ny-wrap">
-    <div class="ny-title"><h1>Needs you</h1><span class="ny-count"></span></div>
+  setPage(`${headHtml(needsYouTitle(), `<span class="range ny-count"></span>`)}<div class="page-body"><div class="ny-wrap">
+    <div class="ny-title"><h1>${needsYouTitle()}</h1><span class="ny-count"></span></div>
     <section class="ny-list" aria-label="Threads that need you"></section>
     <p class="ny-empty" role="status" hidden>Nothing needs you right now.</p>
   </div></div>`);

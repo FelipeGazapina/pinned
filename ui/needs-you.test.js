@@ -35,6 +35,8 @@ function page(world) {
     },
     Intl,
     SHELL_PAGES: {},
+    // The whole page script runs here, and it listens for a team switch.
+    document: { addEventListener: () => {} },
     pageView: { addEventListener: () => {} },
     esc: (text) => String(text ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`),
     clock: new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit", timeZone: "UTC" }),

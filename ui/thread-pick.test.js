@@ -220,7 +220,7 @@ function paletteOf(team) {
     },
   };
   vm.createContext(context);
-  vm.runInContext(`${between(shell, "const PALETTE_VIEWS = {", "const submitButton")}\nglobalThis.PALETTE_VIEWS = PALETTE_VIEWS;`, context);
+  vm.runInContext(`${between(shell, "const paletteTeamCurrent", "const PALETTE_VIEWS = {")}${between(shell, "const PALETTE_VIEWS = {", "const submitButton")}\nglobalThis.PALETTE_VIEWS = PALETTE_VIEWS;`, context);
   return context;
 }
 
@@ -238,10 +238,10 @@ test("⌘N's new-thread palette says it starts a personal thread while a team is
 });
 
 test("⌘K's thread groups sit under Personal while a team is current, and keep their labels with none", () => {
-  const labels = (team) => paletteOf(team).PALETTE_VIEWS.root.groups("").map((g) => g.label);
+  const labels = (team) => Array.from(paletteOf(team).PALETTE_VIEWS.root.groups(""), (g) => g.label);
   assert.deepEqual(labels(TEAM), ["Actions", "Personal · Recent Threads"]);
   assert.deepEqual(labels(null), ["Actions", "Recent Threads"]);
-  const searched = (team) => paletteOf(team).PALETTE_VIEWS.root.groups("thread").map((g) => g.label);
+  const searched = (team) => Array.from(paletteOf(team).PALETTE_VIEWS.root.groups("thread"), (g) => g.label);
   assert.deepEqual(searched(TEAM), ["Actions", "Projects", "Settings", "Personal · Threads"]);
   assert.deepEqual(searched(null), ["Actions", "Projects", "Settings", "Threads"]);
 });
