@@ -3633,7 +3633,7 @@ impl Machine {
             ProjectTool::MemoryForget { id } => self.memories.forget(&self.project_of_tab(tab)?, id).map(|m| format!("Forgot #{} {}.", m.id, pinned_lines::quoted(&m.title, memory::MEMORY_TITLE_CHARS))),
             ProjectTool::Actions { search } => text_json(json!({ "actions": surface::listing(search.as_deref()) })),
             ProjectTool::Convex { ask } => self.convex(tab, ask),
-            // The socket's caller is vouched for in `listen`; from anywhere else, no session is.
+            // The socket's caller is vouched for in `listen_vouched`; from anywhere else, no session is.
             ProjectTool::Act { action, args, request_id, machine } => self.send_act(surface::AgentAct { tab: tab.to_owned(), action, args, request_id, machine, vouched: Some(false) }),
         }
     }
@@ -4713,13 +4713,15 @@ impl Machine {
 
     /// Answers the hook socket. Hook events and usage update the tabs and project tools act on
     /// them; every other message, a connector session's callbacks and the reminders tools, goes to `other`.
+    /// Tests only: a listener that acts on a workflow callback takes `listen_vouched`'s vouch.
+    #[cfg(test)]
     pub fn listen(&self, other: impl Fn(Message) -> Result<String, String> + Send + Sync + 'static) -> std::io::Result<()> {
         self.listen_vouched(move |message, _| other(message))
     }
 
-    /// `listen`, telling `other` what the machine found of the session a workflow session's
-    /// callback came from (`Vouch::Unchecked` for every other message). One from outside every
-    /// session is refused here and never reaches `other`.
+    /// Answers the hook socket as `listen` does, telling `other` what the machine found of the
+    /// session a workflow session's callback came from (`Vouch::Unchecked` for every other
+    /// message). One from outside every session is refused here and never reaches `other`.
     pub fn listen_vouched(&self, other: impl Fn(Message, crate::agent::Vouch) -> Result<String, String> + Send + Sync + 'static) -> std::io::Result<()> {
         let me = self.me.clone();
         hooks::answer(self.launch.sock.clone(), move |message, peer| {

@@ -17,7 +17,7 @@ fn a_machines_ask_people_frame_reaches_the_teams_machine_call() {
     let link = node.link.as_ref().unwrap();
 
     let ask = |situation| agent::Message::AskPeople { situation, question: "Which color?".into(), choices: vec!["red".into(), "blue".into()], step: None };
-    let refused = link.forward(ask(Situation::InDoubt)).expect_err("no team's box runs this node, so nobody can be asked");
+    let refused = link.forward_from(ask(Situation::InDoubt), pinned_core::agent::Vouch::Unchecked).expect_err("no team's box runs this node, so nobody can be asked");
     // Whatever the calls unit answers (not built yet, or a refusal of a machine that is no team's),
     // the frame got to `ask_people`: the hub neither failed to read it nor refused the op itself.
     for not_this in ["unknown", "may not send", "not a hub call", "only a workflow session"] {
@@ -27,9 +27,9 @@ fn a_machines_ask_people_frame_reaches_the_teams_machine_call() {
 
     // The CLI end to end, minus the socket: its message goes through the same forward.
     let args: Vec<String> = ["--before", "tag a release", "--choice", "Go ahead", "--choice", "Don't"].map(String::from).into();
-    let outcome = pinned_core::team_call::run(&args, true, |message| link.forward(message));
+    let outcome = pinned_core::team_call::run(&args, true, |message| link.forward_from(message, pinned_core::agent::Vouch::Unchecked));
     assert_eq!((outcome.code, outcome.out.as_str()), (1, ""), "{outcome:?}");
     assert_eq!(outcome.err, refused);
-    let outside = pinned_core::team_call::run(&args, false, |message| link.forward(message));
+    let outside = pinned_core::team_call::run(&args, false, |message| link.forward_from(message, pinned_core::agent::Vouch::Unchecked));
     assert_eq!((outside.code, outside.err.as_str()), (2, "pinned call works only in a team's box"));
 }

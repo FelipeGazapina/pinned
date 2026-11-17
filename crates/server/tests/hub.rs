@@ -903,7 +903,7 @@ fn a_connector_run_goes_to_its_machine_else_another_online_one() {
     assert_eq!(node_a.machine.run(&again.spec()), Ok(started.clone()), "a machine answers a run sent again with the session it started");
     assert_eq!((connector_tabs(&node_a), connector_tabs(&node_b)), (1, 1));
 
-    let forward = |node: &Node, subject: Subject| node.link.as_ref().unwrap().forward(agent::Message::Stage { connector: id.clone(), subject, stage: Stage::Coding });
+    let forward = |node: &Node, subject: Subject| node.link.as_ref().unwrap().forward_from(agent::Message::Stage { connector: id.clone(), subject, stage: Stage::Coding }, pinned_core::agent::Vouch::Unchecked);
     assert_eq!(
         forward(&node_b, issue.clone()),
         Ok("this workflow has no column for that stage, so the issue stays where it is".into()),
@@ -1047,7 +1047,7 @@ fn a_taste_chat_changes_its_own_accounts_taste_live_and_never_another_accounts()
         let creds = Credentials { hub: url.clone(), email: account.email, user_token: token, machine_id: machine.id, machine_token };
         creds.save(&dir).unwrap();
         let node = Node::start(&dir, creds);
-        node.machine.listen(|_| Err("unexpected".into())).unwrap();
+        node.machine.listen_vouched(|_, _| Err("unexpected".into())).unwrap();
         client.wait_machines(&[(name, true)]);
         (client, node, dir)
     };
@@ -1892,7 +1892,7 @@ fn a_client_that_connects_later_sees_the_usage_a_machine_reported_before() {
     let dir = temp("usage-node");
     let creds = pair(&url, &mut client, "vps", &dir);
     let mut node = Node::start(&dir, creds.clone());
-    node.machine.listen(|_| Err("unexpected".into())).unwrap();
+    node.machine.listen_vouched(|_, _| Err("unexpected".into())).unwrap();
     client.wait_machines(&[("vps", true)]);
     let report = r#"{"kind":"usage","five_hour":{"used_percentage":23.5,"resets_at":4102444800}}"#;
     std::io::Write::write_all(&mut std::os::unix::net::UnixStream::connect(dir.join("sock")).unwrap(), format!("{report}\n").as_bytes()).unwrap();
@@ -2617,7 +2617,7 @@ fn a_limit_one_accounts_provider_hit_shows_on_its_machines_and_never_on_another_
         let (machine, machine_token) = account::register_machine(&url, token, name, "linux").unwrap();
         let creds = Credentials { hub: url.clone(), email: email.into(), user_token: token.into(), machine_id: machine.id.clone(), machine_token };
         let node = Node::start(&dir, creds);
-        node.machine.listen(|_| Err("unexpected".into())).unwrap();
+        node.machine.listen_vouched(|_, _| Err("unexpected".into())).unwrap();
         client.wait_machines(&[(name, true)]);
         (node, dir, machine.id)
     };
@@ -3000,7 +3000,7 @@ fn a_box_run_boots_its_own_node_and_the_box_goes_when_its_tab_closes() {
     let tabs = hub.boxes.with_node(|node| node.machine.tabs());
     assert_eq!((tabs.len(), tabs[0].connector.as_deref(), tabs[0].subject.clone()), (1, Some(ana.connector.as_str()), Some(issue("uuid-1"))));
 
-    let forward = |subject| hub.boxes.with_node(|node| node.link.as_ref().unwrap().forward(agent::Message::Stage { connector: ana.connector.clone(), subject, stage: Stage::Coding }));
+    let forward = |subject| hub.boxes.with_node(|node| node.link.as_ref().unwrap().forward_from(agent::Message::Stage { connector: ana.connector.clone(), subject, stage: Stage::Coding }, pinned_core::agent::Vouch::Unchecked));
     assert_eq!(
         forward(issue("uuid-1")),
         Ok("this workflow has no column for that stage, so the issue stays where it is".into()),
@@ -3325,7 +3325,7 @@ fn a_box_goes_once_its_session_opened_its_pull_request_and_stopped() {
     let account = ana.id;
     assert_eq!(hub.runtime.block_on(hub.hub().open(account, ana.box_run(issue("uuid-1")))), Ok(()));
     ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
-    let stage = |stage| hub.boxes.with_node(|node| node.link.as_ref().unwrap().forward(agent::Message::Stage { connector: ana.connector.clone(), subject: issue("uuid-1"), stage }));
+    let stage = |stage| hub.boxes.with_node(|node| node.link.as_ref().unwrap().forward_from(agent::Message::Stage { connector: ana.connector.clone(), subject: issue("uuid-1"), stage }, pinned_core::agent::Vouch::Unchecked));
     stage(Stage::Coding).unwrap();
     std::thread::sleep(Duration::from_millis(600));
     assert_eq!(hub.boxes.live().len(), 1, "a quiet session without a pull request keeps its box until idle");
@@ -3466,7 +3466,7 @@ fn a_fixed_box_stays_after_its_session_ends_so_the_next_run_reuses_it() {
     let machine = ana.box_machine();
     let stage = |stage| {
         hub.boxes.with_node(|node| {
-            node.link.as_ref().unwrap().forward(agent::Message::Stage { connector: ana.connector.clone(), subject: issue("uuid-1"), stage })
+            node.link.as_ref().unwrap().forward_from(agent::Message::Stage { connector: ana.connector.clone(), subject: issue("uuid-1"), stage }, pinned_core::agent::Vouch::Unchecked)
         })
     };
     stage(Stage::Review).unwrap();
@@ -4240,7 +4240,7 @@ fn an_external_agent_connects_through_oauth_and_works_only_where_it_was_let_in()
     // Like claude's TUI, it reads keys raw, so the node types prompts into it rather than holding them.
     std::fs::write(dir.join("claude"), "#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && { echo '{\"loggedIn\":true}'; exit 0; }\nstty raw -echo 2>/dev/null\nexec cat\n").unwrap();
     client.wait_machines(&[("mac", true)]);
-    node.machine.listen(|_| Err("not in this test".into())).unwrap();
+    node.machine.listen_vouched(|_, _| Err("not in this test".into())).unwrap();
     let project = dir.join("app");
     std::fs::create_dir_all(&project).unwrap();
     let project = node.machine.open_project(project).display().to_string();
@@ -4613,7 +4613,7 @@ impl Fleet {
             std::fs::write(dir.join("claude"), "#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && { echo '{\"loggedIn\":true}'; exit 0; }\nprintf '%s\\n' \"$@\" >> \"$0.$PINNED_TAB.args\"\nexec cat\n").unwrap();
         }
         client.wait_machines(&[("mac", true), ("mini", true)]);
-        mini.machine.listen(|_| Err("not in this test".into())).unwrap();
+        mini.machine.listen_vouched(|_, _| Err("not in this test".into())).unwrap();
         client.call(&mini_id, json!({ "cmd": "set_global_orchestrator_settings", "settings": { "host": true } })).unwrap();
         let global = client.call(&mini_id, json!({ "cmd": "open_global_orchestrator" })).unwrap().as_str().unwrap().to_owned();
         std::fs::create_dir_all(mac_dir.join("site")).unwrap();
@@ -5648,7 +5648,7 @@ fn running_tab(client: &mut Client, machine: &str, path: &str) -> String {
 fn the_global_orchestrator_lists_every_session_of_every_machine_and_account_and_reads_one_to_its_end() {
     let mut fleet = Fleet::start("sessions");
     let (mac, mini) = (fleet.mac_id.clone(), fleet.mini_id.clone());
-    fleet.mac.machine.listen(|_| Err("not in this test".into())).unwrap();
+    fleet.mac.machine.listen_vouched(|_, _| Err("not in this test".into())).unwrap();
     let apps = fleet.mac_dir.join("client-apps");
     origin(&apps, "git@github.com:acme/client-apps.git");
     let commit = ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"];
@@ -5788,7 +5788,7 @@ fn hosting_node(url: &str, client: &mut Client, name: &str, dir: &Path) -> (Node
     let id = creds.machine_id.clone();
     let node = Node::start(dir, creds);
     client.wait_machines(&[(name, true)]);
-    node.machine.listen(|_| Err("not in this test".into())).unwrap();
+    node.machine.listen_vouched(|_, _| Err("not in this test".into())).unwrap();
     client.call(&id, json!({ "cmd": "set_global_orchestrator_settings", "settings": { "host": true } })).unwrap();
     let global = client.call(&id, json!({ "cmd": "open_global_orchestrator" })).unwrap().as_str().unwrap().to_owned();
     (node, id, global)
@@ -6013,7 +6013,7 @@ fn a_captain_delegates_to_another_machine_and_task_status_hears_how_it_ended() {
     origin(&fleet.mini_dir.join("site"), SITE);
     let there = fleet.mini.machine.open_project(fleet.mini_dir.join("site")).display().to_string();
     fleet.mini.machine.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
-    fleet.mac.machine.listen(|_| Err("not in this test".into())).unwrap();
+    fleet.mac.machine.listen_vouched(|_, _| Err("not in this test".into())).unwrap();
     let (mac, mini, mac_dir, mini_dir) = (fleet.mac_id.clone(), fleet.mini_id.clone(), fleet.mac_dir.clone(), fleet.mini_dir.clone());
     let captain = fleet.client.call(&mac, json!({ "cmd": "open_orchestrator", "path": fleet.site })).unwrap().as_str().unwrap().to_owned();
 
@@ -6082,7 +6082,7 @@ fn a_remote_workers_approval_shows_on_the_captains_task_and_in_waiting_with_its_
     origin(&fleet.mini_dir.join("site"), SITE);
     let there = fleet.mini.machine.open_project(fleet.mini_dir.join("site")).display().to_string();
     fleet.mini.machine.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
-    fleet.mac.machine.listen(|_| Err("not in this test".into())).unwrap();
+    fleet.mac.machine.listen_vouched(|_, _| Err("not in this test".into())).unwrap();
     let (mac, mini, mac_dir, mini_dir) = (fleet.mac_id.clone(), fleet.mini_id.clone(), fleet.mac_dir.clone(), fleet.mini_dir.clone());
     let captain = fleet.client.call(&mac, json!({ "cmd": "open_orchestrator", "path": fleet.site })).unwrap().as_str().unwrap().to_owned();
     let started = delegate_from(&mac_dir, &captain, json!({ "task": "Push the footer fix.", "title": "Push footer", "target": { "machine": "mini", "providerInstanceId": "work" } })).unwrap();
@@ -6124,7 +6124,7 @@ fn a_box_worker_signs_in_with_the_named_token_nests_under_its_caller_and_goes_wh
     let creds = pair(&hub.url, &mut ana.client, "mac", &mac_dir);
     let mac_id = creds.machine_id.clone();
     let mac = Node::start(&mac_dir, creds);
-    mac.machine.listen(|_| Err("not in this test".into())).unwrap();
+    mac.machine.listen_vouched(|_, _| Err("not in this test".into())).unwrap();
     ana.client.wait_machines(&[("mac", true)]);
     origin(&mac_dir.join("site"), SITE);
     let site = mac.machine.open_project(mac_dir.join("site")).display().to_string();
@@ -6166,7 +6166,7 @@ fn a_box_worker_signs_in_with_the_named_token_nests_under_its_caller_and_goes_wh
     assert_eq!(task_status(&mac_dir, &captain, &task)["workState"], "working");
 
     let box_dir = hub.boxes.root.join(&hub.boxes.live()[0]);
-    hub.boxes.with_node(|node| node.machine.listen(|_| Err("not in this test".into())).unwrap());
+    hub.boxes.with_node(|node| node.machine.listen_vouched(|_, _| Err("not in this test".into())).unwrap());
     hook(&box_dir, json!({ "kind": "agent", "status": "working", "tab": child.id }));
     hook(&box_dir, json!({ "kind": "agent", "status": "done", "tab": child.id }));
     wait_for("the box to go once its task ended", || hub.boxes.live().is_empty());
@@ -6198,7 +6198,7 @@ fn mac_with_captain(hub: &TestHub, ana: &mut BoxAccount, dir: &Path) -> (Node, S
     let creds = pair(&hub.url, &mut ana.client, "mac", dir);
     let mac_id = creds.machine_id.clone();
     let mac = Node::start(dir, creds);
-    mac.machine.listen(|_| Err("not in this test".into())).unwrap();
+    mac.machine.listen_vouched(|_, _| Err("not in this test".into())).unwrap();
     ana.client.wait_machines(&[("mac", true)]);
     origin(&dir.join("site"), SITE);
     let site = mac.machine.open_project(dir.join("site")).display().to_string();
@@ -6494,7 +6494,7 @@ fn the_global_orchestrator_opens_a_captain_in_a_box_with_the_accounts_connection
     let creds = pair(&hub.url, &mut ana.client, "mini", &mini_dir);
     let mini_id = creds.machine_id.clone();
     let mini = Node::start(&mini_dir, creds);
-    mini.machine.listen(|_| Err("not in this test".into())).unwrap();
+    mini.machine.listen_vouched(|_, _| Err("not in this test".into())).unwrap();
     ana.client.wait_machines(&[("mini", true)]);
     ana.client.call(&mini_id, json!({ "cmd": "set_global_orchestrator_settings", "settings": { "host": true } })).unwrap();
     let global = ana.client.call(&mini_id, json!({ "cmd": "open_global_orchestrator" })).unwrap().as_str().unwrap().to_owned();
@@ -8181,7 +8181,7 @@ fn notes_machine(url: &str, token: &str, email: &str, name: &str) -> (Node, Path
     let creds = Credentials { hub: url.to_owned(), email: email.to_owned(), user_token: token.to_owned(), machine_id: machine.id.clone(), machine_token };
     creds.save(&dir).unwrap();
     let node = Node::start(&dir, creds);
-    node.machine.listen(|_| Err("unexpected".into())).unwrap();
+    node.machine.listen_vouched(|_, _| Err("unexpected".into())).unwrap();
     std::fs::create_dir_all(dir.join("notes")).unwrap();
     std::fs::write(dir.join("notes/todo.md"), "Ship the form.\n").unwrap();
     let tab = node.machine.open_tab(Some(dir.join("notes").display().to_string()), false).unwrap();
@@ -9071,7 +9071,7 @@ fn a_worker_box_follows_only_its_access_setting_and_the_owner_answers_its_ask_on
     let creds = pair(&hub.url, &mut ana.client, "mac", &mac_dir);
     let mac_id = creds.machine_id.clone();
     let mac = Node::start(&mac_dir, creds);
-    mac.machine.listen(|_| Err("not in this test".into())).unwrap();
+    mac.machine.listen_vouched(|_, _| Err("not in this test".into())).unwrap();
     ana.client.wait_machines(&[("mac", true)]);
     origin(&mac_dir.join("site"), SITE);
     let site = mac.machine.open_project(mac_dir.join("site")).display().to_string();
@@ -9104,7 +9104,7 @@ fn a_captain_box_follows_only_its_access_setting_and_the_owner_answers_its_ask_o
     let creds = pair(&hub.url, &mut ana.client, "mini", &mini_dir);
     let mini_id = creds.machine_id.clone();
     let mini = Node::start(&mini_dir, creds);
-    mini.machine.listen(|_| Err("not in this test".into())).unwrap();
+    mini.machine.listen_vouched(|_, _| Err("not in this test".into())).unwrap();
     ana.client.wait_machines(&[("mini", true)]);
     ana.client.call(&mini_id, json!({ "cmd": "set_global_orchestrator_settings", "settings": { "host": true } })).unwrap();
     let global = ana.client.call(&mini_id, json!({ "cmd": "open_global_orchestrator" })).unwrap().as_str().unwrap().to_owned();
@@ -9249,7 +9249,7 @@ fn machine_with_site(url: &str, owner: &mut BoxAccount, email: &str, name: &str,
     let client = &mut owner.client;
     let id = creds.machine_id.clone();
     let node = Node::start(dir, creds);
-    node.machine.listen(|_| Err("not in this test".into())).unwrap();
+    node.machine.listen_vouched(|_, _| Err("not in this test".into())).unwrap();
     client.wait("the machine online", |f| f["type"] == "machines" && f["machines"].as_array().unwrap().iter().any(|m| m["id"] == id.as_str() && m["online"] == true));
     std::fs::write(dir.join("claude"), "#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && { echo '{\"loggedIn\":true}'; exit 0; }\nexec cat\n").unwrap();
     origin(&dir.join("site"), SITE);
@@ -9514,7 +9514,7 @@ fn a_machines_load_and_accounts_reach_the_hub_and_show_in_another_machines_capab
     let (mini_creds, mini_id) = registered(&url, &token, "ana@acme.dev", "mini");
     let book_home = temp("machine-load-book");
     let book = Node::start(&book_home, book_creds);
-    book.machine.listen(|_| Err("unexpected".into())).unwrap();
+    book.machine.listen_vouched(|_, _| Err("unexpected".into())).unwrap();
     client.wait_machines(&[("book", true), ("mini", false)]);
 
     assert_eq!(state_of(&mut client, &mini_id), None, "a machine that reported nothing shows none");
@@ -9582,7 +9582,7 @@ fn one_account_never_sees_another_accounts_machines_load_or_accounts() {
     let _ana = reporting(&url, &ana_creds.machine_token, the_minis_state());
     let bruno_home = temp("machine-load-bruno");
     let bruno = Node::start(&bruno_home, bruno_creds);
-    bruno.machine.listen(|_| Err("unexpected".into())).unwrap();
+    bruno.machine.listen_vouched(|_, _| Err("unexpected".into())).unwrap();
     ana_client.wait_machines(&[("ana-mini", true)]);
     bruno_client.wait_machines(&[("bruno-mac", true)]);
     wait_for("Ana's summary is kept", || state_of(&mut ana_client, &ana_id).is_some());
@@ -9611,7 +9611,7 @@ fn projects_shows_the_load_of_the_machine_that_holds_each_checkout() {
     let (creds, id) = registered(&url, &token, "ana@acme.dev", "book");
     let home = temp("machine-load-projects");
     let node = Node::start(&home, creds);
-    node.machine.listen(|_| Err("unexpected".into())).unwrap();
+    node.machine.listen_vouched(|_, _| Err("unexpected".into())).unwrap();
     client.wait_machines(&[("book", true)]);
     let folder = home.join("site");
     std::fs::create_dir_all(&folder).unwrap();
@@ -10756,7 +10756,7 @@ fn sleepy_mac(hub: &TestHub, ana: &mut BoxAccount, dir: &Path) -> (Node, Credent
     hub.boxes.state.lock().unwrap().checkout = Some(("site".into(), SITE.into()));
     let creds = pair(&hub.url, &mut ana.client, "mac", dir);
     let mac = Node::start(dir, creds.clone());
-    mac.machine.listen(|_| Err("not in this test".into())).unwrap();
+    mac.machine.listen_vouched(|_, _| Err("not in this test".into())).unwrap();
     ana.client.wait_machines(&[("mac", true)]);
     origin(&dir.join("site"), SITE);
     let site = mac.machine.open_project(dir.join("site")).display().to_string();
@@ -10771,7 +10771,7 @@ fn box_worker(hub: &TestHub, ana: &mut BoxAccount, mac_dir: &Path, captain: &str
     let started = delegate_from(mac_dir, captain, json!({ "task": "Run the slow suite.", "title": "Slow suite", "target": { "box": true } })).unwrap();
     wait_for("the worker thread running on the box", || box_tabs(&hub.boxes).iter().any(|t| t.role == Some(Role::Worker) && t.running));
     ana.client.wait_machines(&[("mac", true), ("Box · Slow suite", true)]);
-    hub.boxes.with_node(|node| node.machine.listen(|_| Err("not in this test".into())).unwrap());
+    hub.boxes.with_node(|node| node.machine.listen_vouched(|_, _| Err("not in this test".into())).unwrap());
     let child = box_tabs(&hub.boxes).into_iter().find(|t| t.role == Some(Role::Worker)).unwrap();
     (started["taskId"].as_str().unwrap().to_owned(), child)
 }
@@ -11311,7 +11311,7 @@ fn a_captain_box_whose_worker_hangs_is_not_idle_reaped_and_still_meets_its_max_l
         let mini_dir = temp(&format!("held-reap-{limit}-mini"));
         let creds = pair(&hub.url, &mut ana.client, "mini", &mini_dir);
         let mini = Node::start(&mini_dir, creds.clone());
-        mini.machine.listen(|_| Err("not in this test".into())).unwrap();
+        mini.machine.listen_vouched(|_, _| Err("not in this test".into())).unwrap();
         ana.client.wait_machines(&[("mini", true)]);
         let fresh = json!({ "workflow": { "mode": "fresh" }, "session": { "mode": "off" }, "worker": { "mode": "fresh" }, "orchestrator": { "mode": "fresh" } });
         ana.client.hub(json!({ "cmd": "set_box_access", "access": fresh })).unwrap();
@@ -11323,7 +11323,7 @@ fn a_captain_box_whose_worker_hangs_is_not_idle_reaped_and_still_meets_its_max_l
         let captain = box_tabs(&hub.boxes).into_iter().find(|t| t.role == Some(Role::Orchestrator)).unwrap();
         let captain_dir = hub.boxes.root.join(&captain_box);
         let node_of = |id: &str| hub.boxes.state.lock().unwrap().boxes.get(id).and_then(|b| b.node.clone());
-        node_of(&captain_box).unwrap().machine.listen(|_| Err("not in this test".into())).unwrap();
+        node_of(&captain_box).unwrap().machine.listen_vouched(|_, _| Err("not in this test".into())).unwrap();
         let captain_machine = ana.box_machine();
         if limit == "budget" {
             // 0.0001 USD lasts 3.6 s at the box rate.
@@ -11336,7 +11336,7 @@ fn a_captain_box_whose_worker_hangs_is_not_idle_reaped_and_still_meets_its_max_l
         let worker_dir = hub.boxes.root.join(&worker_box);
         wait_for("the worker running", || node_of(&worker_box).is_some_and(|node| node.machine.tabs().iter().any(|t| t.role == Some(Role::Worker) && t.running)));
         let node = node_of(&worker_box).unwrap();
-        node.machine.listen(|_| Err("not in this test".into())).unwrap();
+        node.machine.listen_vouched(|_, _| Err("not in this test".into())).unwrap();
         let worker = node.machine.tabs().into_iter().find(|t| t.role == Some(Role::Worker)).unwrap();
         // It works and never ends.
         hook(&worker_dir, json!({ "kind": "agent", "status": "working", "tab": worker.id }));

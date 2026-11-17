@@ -104,7 +104,7 @@ impl TeamBox {
             tab = tabs.first().map(|t| t.id.clone()).unwrap_or_default();
             !tab.is_empty()
         });
-        on_node(hub, &box_id, |node| node.machine.listen(|_| Err("unexpected".into())).unwrap());
+        on_node(hub, &box_id, |node| node.machine.listen_vouched(|_, _| Err("unexpected".into())).unwrap());
         // Its run and bot rows are cleared again, as each test writes the ones it needs. In the same
         // statement a holding run takes the box's place, with no box yet, so no tick ends the box
         // before `run` replaces it. It is written only once the session is up, which claims a run

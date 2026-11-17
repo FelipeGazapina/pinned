@@ -94,7 +94,7 @@ esac"#,
     };
     let machine = Machine::new(launch, Some(dir.clone()), Some(dir.clone()), |_| {});
     machine
-        .listen(|_| Err("not a connector callback".into()))
+        .listen_vouched(|_, _| Err("not a connector callback".into()))
         .unwrap();
     std::env::set_var(SOCK_ENV, machine.launch().sock.clone());
     std::env::remove_var(TAB_ENV);

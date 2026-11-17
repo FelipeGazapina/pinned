@@ -438,7 +438,7 @@ fn agents_in(url: &str, token: &str, email: &str, name: &str, folders: &[&str]) 
     let creds = Credentials { hub: url.to_owned(), email: email.to_owned(), user_token: token.to_owned(), machine_id: machine.id.clone(), machine_token };
     creds.save(&dir).unwrap();
     let node = Node::start(&dir, creds);
-    node.machine.listen(|_| Err("unexpected".into())).unwrap();
+    node.machine.listen_vouched(|_, _| Err("unexpected".into())).unwrap();
     client.wait_machines(&[(name, true)]);
     let mut tabs = vec![];
     for folder in folders {

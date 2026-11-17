@@ -192,15 +192,9 @@ impl Link {
         self.shared.call(call)
     }
 
-    /// Passes a connector session's callback to the hub and answers what the session prints, with
-    /// nothing found of the session it came from. Every other socket message is the machine's own
-    /// business.
-    pub fn forward(&self, message: Message) -> Result<String, String> {
-        self.forward_from(message, Vouch::Unchecked)
-    }
-
-    /// `forward`, with what the machine found of the session the callback came from
-    /// (`Machine::listen_vouched`).
+    /// Passes a connector session's callback to the hub, with what the machine found of the session
+    /// it came from (`Machine::listen_vouched`), and answers what the session prints. Every other
+    /// socket message is the machine's own business.
     pub fn forward_from(&self, message: Message, vouch: Vouch) -> Result<String, String> {
         forward(&self.shared, message, &vouch)
     }

@@ -158,7 +158,7 @@ fn hub_status(crew: &Crew, machine: &str, tab: &str) -> Option<pinned_core::agen
 /// the session ended its own turn. Waits until the hub has heard it.
 fn turn_ends(crew: &Crew, node: &Node, machine: &str, tab: &str) {
     use std::io::Write;
-    node.machine.listen(|_| Err("not in this test".into())).unwrap();
+    node.machine.listen_vouched(|_, _| Err("not in this test".into())).unwrap();
     let event = pinned_core::agent::AgentEvent { tab: Some(tab.into()), ..pinned_core::hooks::event_from(Some("done"), "{}").unwrap() };
     let sock = crew.hub.boxes.root.join(&crew.hub.boxes.live()[0]).join("sock");
     let mut stream = std::os::unix::net::UnixStream::connect(sock).unwrap();

@@ -20,7 +20,7 @@ fn live_cursor_and_claude_through_pinned_mcp() {
     let launch = Launch::prepare(&exe).expect("prepare");
     let machine = Machine::new(launch, Some(dir.clone()), Some(root), |_| {});
     machine
-        .listen(|_| Err("not a connector callback".into()))
+        .listen_vouched(|_, _| Err("not a connector callback".into()))
         .unwrap();
     let sock = machine.launch().sock.clone();
     let tab = machine.open_tab(Some(dir.display().to_string()), false).unwrap();
@@ -47,7 +47,7 @@ fn live_claude_child_is_a_worker_thread_that_ends_its_task_on_its_first_reply() 
     std::fs::create_dir_all(&dir).unwrap();
     let launch = Launch::prepare(&exe).expect("prepare");
     let machine = Machine::new(launch, Some(dir.clone()), Some(root), |_| {});
-    machine.listen(|_| Err("not a connector callback".into())).unwrap();
+    machine.listen_vouched(|_, _| Err("not a connector callback".into())).unwrap();
     let sock = machine.launch().sock.clone();
     let tab = machine.open_tab(Some(dir.display().to_string()), false).unwrap();
 

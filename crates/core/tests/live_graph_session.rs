@@ -59,7 +59,7 @@ fn run_case(name: &str, proof: Proof) {
     let _trust = trust_folder(&workspace(name));
     let mut kept = Kept::new(name);
     let machine = machine(&exe, &kept.machine_dir);
-    machine.listen(|_| Err("the live graph test has no hub call".into())).expect("listen");
+    machine.listen_vouched(|_, _| Err("the live graph test has no hub call".into())).expect("listen");
     kept.machine = Some(machine.clone());
     let connectors = connectors(&exe, &kept.store_dir, &kept.folder);
     let saved = connectors.save_connector(talks_connector(&kept.folder)).expect("save graph");
