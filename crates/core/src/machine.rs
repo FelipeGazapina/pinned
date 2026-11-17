@@ -95,6 +95,11 @@ const REMOTE_CHECK: Duration = Duration::from_secs(60);
 const HOLD_CLEAR: Duration = Duration::from_secs(5);
 /// An idle notice this soon after a submit may have been on its way before it: the submit still counts.
 const IDLE_NOTICE_GRACE: Duration = Duration::from_secs(10);
+/// Claude Code's built-in commands that run at its prompt and start no turn, so no hook answers
+/// them. An unknown command, a skill or a custom command included, waits for Done like a prompt.
+const LOCAL_COMMANDS: [&str; 26] = [
+    "effort", "model", "config", "status", "cost", "usage", "help", "context", "permissions", "hooks", "mcp", "doctor", "theme", "vim", "output-style", "privacy-settings", "terminal-setup", "agents", "plugin", "release-notes", "export", "statusline", "add-dir", "ide", "todos", "fast",
+];
 /// How long a compaction's mark holds when no end comes for it: the tab then reads as it did before.
 const COMPACT_WAIT: Duration = Duration::from_secs(600);
 const NO_PROJECT_WORK: &str = "the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain";
@@ -773,8 +778,8 @@ struct Tab {
     seen: Option<SystemTime>,
     /// When the latest submit went in. Cleared by Done, Failed, and a new session.
     turn_pending: Option<Instant>,
-    /// When the user last submitted what they typed. A local command such as `/effort` starts no
-    /// turn and fires no hook. Cleared by any hook but a question, and by a new session.
+    /// When the user last submitted one of `LOCAL_COMMANDS`, such as `/effort`, which starts no turn
+    /// and fires no hook. Cleared by any hook but a question, by pinned's own prompt, and by a new session.
     typed_at: Option<Instant>,
     /// When Claude Code's PreCompact hook last marked the session compacting.
     compacting_since: Option<Instant>,
@@ -907,7 +912,7 @@ impl Tab {
         if self.session.is_some() {
             return self.notice_idle();
         }
-        self.status != Some(AgentStatus::Working) && !self.interrupted && !self.submit_pending() && self.draft.empty()
+        self.status != Some(AgentStatus::Working) && !self.interrupted && self.turn_pending.is_none() && self.draft.empty()
     }
 
     /// The session sits at its prompt with nothing typed, held or pending.
@@ -927,14 +932,20 @@ impl Tab {
         self.bare && self.status.is_none() && self.session.as_ref().is_some_and(pty::Session::untouched)
     }
 
-    /// A submit waits for its turn, unless it is one the user typed into Claude Code that no hook
-    /// answered within `IDLE_NOTICE_GRACE`: that was a local command, and no Stop hook would end it.
+    /// A submit waits for its turn, unless it is a local command the user sent to Claude Code that
+    /// no hook answered within `IDLE_NOTICE_GRACE`, with no compaction running: no Stop hook would end it.
     fn submit_pending(&self) -> bool {
-        self.turn_pending.is_some_and(|at| {
-            // No submit went in after the user's own: the pending one is theirs.
-            let typed = self.typed_at.is_some_and(|typed| typed >= at);
-            !(typed && self.account.provider == Provider::Claude && at.elapsed() >= IDLE_NOTICE_GRACE)
-        })
+        self.turn_pending.is_some_and(|at| !(self.typed_local() && self.account.provider == Provider::Claude && at.elapsed() >= IDLE_NOTICE_GRACE && !self.compacting()))
+    }
+
+    /// The pending submit is the user's local command: no submit went in after it.
+    fn typed_local(&self) -> bool {
+        self.turn_pending.is_some_and(|at| self.typed_at.is_some_and(|typed| typed >= at))
+    }
+
+    /// A prompt, pinned's or the user's, waits for its turn: a line sent now goes into that turn.
+    fn prompt_pending(&self) -> bool {
+        self.turn_pending.is_some() && !self.typed_local()
     }
 
     fn notice_idle(&self) -> bool {
@@ -954,11 +965,16 @@ impl Tab {
         }
     }
 
-    fn note_submit(&mut self) {
-        let now = Instant::now();
-        (self.turn_pending, self.typed_at) = (Some(now), Some(now));
+    /// The user submitted a line, `local` when it was one of `LOCAL_COMMANDS`. Typed while a prompt
+    /// still waits for its turn, the line goes into that turn and leaves its marks as they are.
+    fn note_submit(&mut self, local: bool) {
+        if !self.prompt_pending() {
+            let now = Instant::now();
+            (self.turn_pending, self.typed_at) = (Some(now), local.then_some(now));
+        }
         self.stopped = None;
     }
+
 
     /// Types a local slash command. Unlike a prompt it leaves `turn_pending` alone: a local
     /// command fires no Stop hook, so nothing would ever clear it (probed on Claude Code 2.1.319).
@@ -1596,7 +1612,7 @@ impl Machine {
                 let views: Vec<crate::plan::PlanView> = kept.iter().filter(|p| plan.as_deref().is_none_or(|id| p.id == id)).map(|p| crate::plan::derive(p, &[])).collect();
                 Ok(json!(views))
             }
-            Call::Prompt { tab, text } => json(self.type_prompt(&tab, &text).map_err(NotTyped::for_person)?),
+            Call::Prompt { tab, text } => json(self.type_line(&tab, &text, true).map_err(NotTyped::for_person)?),
             Call::Workspace { tab } => {
                 let cwd = self.tab(&tab, |t| t.cwd.clone())?;
                 json(workspace::Workspace { scratch: cwd == self.scratch, ..workspace::of(&cwd) })
@@ -2964,7 +2980,7 @@ impl Machine {
                     let mut wrote = false;
                     for text in std::mem::take(&mut t.held) {
                         if s.write(&paste(&text)).is_ok() {
-                            t.turn_pending = Some(Instant::now());
+                            (t.turn_pending, t.typed_at) = (Some(Instant::now()), None);
                             wrote = true;
                         }
                     }
@@ -3028,7 +3044,7 @@ impl Machine {
             // The terminal's own replies to the screen start with an escape and are not the user.
             cleared = !data.starts_with(b"\x1b") && t.cut_by_sleep.take().is_some();
             if submitted {
-                t.note_submit();
+                t.note_submit(t.draft.sent_local);
             }
             let mode_unknown = t.account.provider.spec().harness && !t.permission_unknown && data.windows(3).any(|window| window == b"\x1b[Z");
             if mode_unknown {
@@ -4705,6 +4721,11 @@ impl Machine {
     /// see a prompt.
     /// Nothing is typed while the screen shows a menu or dialog, held prompts included.
     fn type_prompt(&self, tab: &str, text: &str) -> Result<(), NotTyped> {
+        self.type_line(tab, text, false)
+    }
+
+    /// `type_prompt`, of the user's own `text` when `user`.
+    fn type_line(&self, tab: &str, text: &str, user: bool) -> Result<(), NotTyped> {
         self.awake(tab).map_err(NotTyped::Failed)?;
         // Read under the screen lock alone: held across the write, a paste larger than the pty's
         // free input would block it, and the reader thread would wait on the lock for good.
@@ -4720,10 +4741,13 @@ impl Machine {
                 }
                 for held in std::mem::take(&mut t.held) {
                     s.write(&paste(&held)).map_err(failed)?;
-                    t.turn_pending = Some(Instant::now());
+                    (t.turn_pending, t.typed_at) = (Some(Instant::now()), None);
                 }
                 s.write(&paste(text)).map_err(failed)?;
-                t.turn_pending = Some(Instant::now());
+                // The user's local command from the app starts no turn, as one typed in the terminal.
+                let local = user && local_command(text) && !t.prompt_pending();
+                let now = Instant::now();
+                (t.turn_pending, t.typed_at) = (Some(now), local.then_some(now));
                 Ok(true)
             }
             Some(_) => {
@@ -4931,7 +4955,7 @@ impl Machine {
                     // A Stop hook that hands news over continues the turn: nothing is typed over it.
                     if let Some(taken) = taken.as_mut().filter(|_| event.status == AgentStatus::Done) {
                         let at = Instant::now();
-                        taken.pending = machine.tab(&taken.tab, |t| t.turn_pending = Some(at)).ok().map(|_| at);
+                        taken.pending = machine.tab(&taken.tab, |t| (t.turn_pending, t.typed_at) = (Some(at), None)).ok().map(|_| at);
                     }
                     let reply = Ok(merge_context(&machine.recall(&event), &notices));
                     let Some(taken) = taken else { return reply.into() };
@@ -6302,7 +6326,7 @@ impl Machine {
             match t.session.as_mut() {
                 Some(s) if s.raw() => {
                     s.write(&paste(text)).map_err(|e| e.to_string())?;
-                    t.turn_pending = Some(Instant::now());
+                    (t.turn_pending, t.typed_at) = (Some(Instant::now()), None);
                     Ok(true)
                 }
                 Some(_) => Ok(false),
@@ -7333,18 +7357,103 @@ struct Draft {
     chars: usize,
     /// Up or down put an earlier prompt in the line. Its length is unknown, so backspace cannot empty it.
     recalled: bool,
+    /// How far the line's first word matches `LOCAL_COMMANDS`.
+    head: Head,
+    /// The line the last Enter submitted was one of `LOCAL_COMMANDS`.
+    sent_local: bool,
 }
 
 impl Draft {
     fn empty(&self) -> bool {
         self.chars == 0 && !self.recalled
     }
+
+    fn push(&mut self, byte: u8) {
+        self.chars += 1;
+        self.head = self.head.push(byte, self.chars);
+    }
+
+    fn back(&mut self) {
+        self.chars = self.chars.saturating_sub(1);
+        self.head = self.head.back(self.chars);
+    }
+
+    fn clear(&mut self) {
+        *self = Draft { sent_local: self.sent_local, ..Draft::default() };
+    }
+
+    /// A key that edits the line in a way the head cannot follow, which an empty line has nothing to lose to.
+    fn edit(&mut self) {
+        if !self.empty() {
+            self.head = Head::Other;
+        }
+    }
+}
+
+/// The line's first word, followed key by key against `LOCAL_COMMANDS` without keeping the text.
+#[derive(Clone, Copy, Debug, Default)]
+enum Head {
+    /// Nothing but spaces yet.
+    #[default]
+    Blank,
+    /// A slash and `len` characters, with which the commands set in `could_be` begin.
+    Command { could_be: u32, len: usize },
+    /// A local command and a space, which the line holds while it keeps `chars` characters.
+    Local { chars: usize },
+    /// Anything else, or a line edited in a way the keys cannot follow.
+    Other,
+}
+
+impl Head {
+    /// The head once `byte` is added and the line has `chars` characters.
+    fn push(self, byte: u8, chars: usize) -> Head {
+        match (self, byte) {
+            (Head::Blank, b' ') => Head::Blank,
+            (Head::Blank, b'/') => Head::Command { could_be: (1 << LOCAL_COMMANDS.len()) - 1, len: 0 },
+            (Head::Command { could_be, len }, b' ') if whole_command(could_be, len) => Head::Local { chars },
+            (Head::Command { could_be, len }, _) if byte != b' ' => {
+                let could_be = LOCAL_COMMANDS.iter().enumerate().filter(|(i, command)| could_be & 1 << i != 0 && command.as_bytes().get(len) == Some(&byte)).fold(0, |bits, (i, _)| bits | 1 << i);
+                if could_be == 0 { Head::Other } else { Head::Command { could_be, len: len + 1 } }
+            }
+            (Head::Local { .. }, _) => self,
+            _ => Head::Other,
+        }
+    }
+
+    /// The head once a backspace leaves the line `chars` characters. A removed letter cannot be known.
+    fn back(self, chars: usize) -> Head {
+        match self {
+            _ if chars == 0 => Head::Blank,
+            Head::Blank => Head::Blank,
+            Head::Local { chars: kept } if chars >= kept => self,
+            _ => Head::Other,
+        }
+    }
+
+    fn local(self) -> bool {
+        match self {
+            Head::Command { could_be, len } => whole_command(could_be, len),
+            Head::Local { .. } => true,
+            Head::Blank | Head::Other => false,
+        }
+    }
+}
+
+/// One of the commands set in `could_be` is `len` characters long.
+fn whole_command(could_be: u32, len: usize) -> bool {
+    LOCAL_COMMANDS.iter().enumerate().any(|(i, command)| could_be & 1 << i != 0 && command.len() == len)
+}
+
+/// `text`'s first word, after leading spaces, is a slash and one of `LOCAL_COMMANDS`.
+fn local_command(text: &str) -> bool {
+    text.bytes().enumerate().fold(Head::Blank, |head, (i, byte)| head.push(byte, i + 1)).local()
 }
 
 /// Follows the terminal's input line. Printable text adds a character, including newlines inside
 /// a bracketed paste. Backspace removes one, floored at 0. Ctrl-C, Ctrl-U, and Enter clear the line.
 /// Enter on a non-empty line is a submit. Up and down recall a prompt, so the line stays occupied
 /// until Enter, Ctrl-U, or Ctrl-C. Other escape sequences, such as focus reports, are ignored.
+/// A key that moves the cursor or edits the line another way leaves its first word unknown.
 fn note_draft(draft: &mut Draft, data: &[u8]) -> bool {
     let mut submitted = false;
     let mut pasting = false;
@@ -7357,20 +7466,25 @@ fn note_draft(draft: &mut Draft, data: &[u8]) -> bool {
                     b"[200~" => pasting = true,
                     b"[201~" => pasting = false,
                     b"[A" | b"[B" | b"OA" | b"OB" => draft.recalled = true,
+                    // Arrows, Home, End, Delete, and Alt with a key.
+                    [b'[' | b'O', .., b'C' | b'D' | b'H' | b'F' | b'~'] | [_] => draft.edit(),
                     _ => {}
                 }
                 i += len;
             }
-            b'\r' | b'\n' if pasting => draft.chars += 1,
+            byte @ (b'\r' | b'\n') if pasting => draft.push(byte),
             b'\r' => {
-                submitted |= !draft.empty();
-                *draft = Draft::default();
+                if !draft.empty() {
+                    submitted = true;
+                    draft.sent_local = !draft.recalled && draft.head.local();
+                }
+                draft.clear();
             }
-            0x03 | 0x15 => *draft = Draft::default(),
-            0x08 | 0x7f => draft.chars = draft.chars.saturating_sub(1),
+            0x03 | 0x15 => draft.clear(),
+            0x08 | 0x7f => draft.back(),
             0x80..=0xbf => {}
-            byte if byte >= 0x20 => draft.chars += 1,
-            _ => {}
+            byte if byte >= 0x20 => draft.push(byte),
+            _ => draft.edit(),
         }
         i += 1;
     }
@@ -11504,6 +11618,33 @@ exec sleep 30
         assert_eq!(draft.chars, 1);
         assert!(!note_draft(&mut draft, b"\x7f\x7f"));
         assert_eq!(draft.chars, 0, "backspace stops at an empty line");
+    }
+
+    #[test]
+    fn a_submit_is_local_only_when_its_first_word_is_a_built_in_local_command() {
+        let lines = [
+            (&b"/effort\r"[..], true),
+            (b"  /model opus\r", true),
+            (b"/model opus\x7f\x7f\r", true),
+            (b"\x1b[C/effort\r", true),
+            (b"\x1b[200~/effort\x1b[201~\r", true),
+            (b"/models\r", false),
+            (b"/mod\r", false),
+            (b"/review\r", false),
+            (b"/compact\r", false),
+            (b"Fix /effort\r", false),
+            (b"/efforts\x7f\r", false),
+            (b"/effort\x1b[H\x1b[DFix \r", false),
+            (b"/eff\t\r", false),
+            (b"\x1b[A\r", false),
+        ];
+        for (keys, local) in lines {
+            let mut draft = Draft::default();
+            assert!(note_draft(&mut draft, keys), "{keys:?} is a submit");
+            assert_eq!(draft.sent_local, local, "{keys:?}");
+        }
+        assert!(local_command("/model opus") && local_command(" /effort"));
+        assert!(!local_command("/models") && !local_command("/effort\nand more") && !local_command("Run /effort"));
     }
 
     #[test]
