@@ -179,11 +179,16 @@ fn hub(args: &[String]) -> Result<(), String> {
     })
 }
 
-/// Where reports are filed, from the environment (`PINNED_REPORTS_GITHUB_TOKEN` and, under `--dev`, a local fake API and repository).
+/// Where reports are filed, from the environment: `PINNED_REPORTS_GITHUB_TOKEN` on a release hub, a local fake API
+/// and repository under `--dev`.
 fn reports_config(dev: bool) -> Option<pinned_server::reports::Config> {
     let config = pinned_server::reports::Config::from_env(dev, &|name| std::env::var(name).ok());
     if config.is_none() {
-        // With a token set, `from_env` has already said under `--dev` why reporting is off.
+        // Under `--dev`, `from_env` has already said why reporting is off, and the token is never read.
+        if dev {
+            eprintln!("pinned-server: reporting an issue from the app is not available");
+            return None;
+        }
         match std::env::var(pinned_server::reports::TOKEN_VARIABLE).map(|v| v.trim().is_empty()) {
             Ok(false) => eprintln!("pinned-server: reporting an issue from the app is not available"),
             _ => eprintln!("pinned-server: reporting an issue from the app is not available: {} is not set", pinned_server::reports::TOKEN_VARIABLE),

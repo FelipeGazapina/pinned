@@ -1424,7 +1424,7 @@ fn a_dev_hub_with_no_local_fake_has_reporting_off() {
     assert_eq!(dev_status(&hub), json!({ "available": false }), "a dev hub never files on the real GitHub: {}", hub.said());
     let said = hub.said();
     assert!(said.contains("pinned-server: reporting is off under --dev: set PINNED_REPORTS_GITHUB_API to a local fake\n"), "{said}");
-    assert!(!said.contains("is ignored"), "{said}");
+    assert!(!said.contains("is ignored") && !said.contains("PINNED_REPORTS_GITHUB_TOKEN"), "a dev hub never asks for the token: {said}");
 }
 
 #[test]
