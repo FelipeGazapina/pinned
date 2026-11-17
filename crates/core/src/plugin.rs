@@ -56,6 +56,12 @@ mod tests {
         assert!(proposta.contains("template.html"));
         let template = std::fs::read_to_string(dir.join("skills/proposta-blueprint/template.html")).unwrap();
         assert!(template.contains("class=\"sheet\""));
+        let pendencias = std::fs::read_to_string(dir.join("skills/pendencias/SKILL.md")).unwrap();
+        assert!(pendencias.starts_with("---\nname: pendencias\n"));
+        assert!(pendencias.contains("template.html"));
+        let pendencias_template = std::fs::read_to_string(dir.join("skills/pendencias/template.html")).unwrap();
+        assert!(pendencias_template.contains("const ITEMS"));
+        assert!(pendencias_template.contains("answers/"));
         assert!(std::fs::read_to_string(dir.join(".claude-plugin/plugin.json")).unwrap().contains("\"name\": \"pinned\""));
         std::fs::remove_dir_all(dir).unwrap();
     }
