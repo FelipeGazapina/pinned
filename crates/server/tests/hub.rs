@@ -9269,8 +9269,8 @@ const TOO_MANY_EXTENDS: &str = "too many box extends are waiting for the owner; 
 
 /// What waits for the owner is bounded for the account too, not only per box: once 10 extends of
 /// its boxes wait, an ask for any of its boxes is refused and does not wait, while another
-/// account's boxes are not touched. An answer, an ask older than a day or an amount not above
-/// zero makes room again.
+/// account's boxes are not touched. An answer or an amount not above zero makes room again; an
+/// ask older than a day does not, as the owner still sees it waiting.
 #[test]
 fn an_accounts_waiting_extend_box_asks_are_capped_across_its_boxes() {
     let ExtendSetup { hub, ana, mut owner, machine, .. } = extend_setup("extend_account_cap");
@@ -9299,7 +9299,8 @@ fn an_accounts_waiting_extend_box_asks_are_capped_across_its_boxes() {
 
     let id = asked[1]["id"].as_str().unwrap();
     admin_on(&hub.database, &format!("update agent_confirmations set created_at = now() - interval '24 hours 1 minute' where id = '{id}'"));
-    assert_eq!(extend_as(&ana.dir, &ana.tab, &boxes[0], 0.1, None).unwrap()["outcome"], "pending", "an ask older than a day no longer counts");
+    assert_eq!(waiting_actions(&mut owner).len(), 10, "the owner still sees an ask older than a day");
+    assert_eq!(extend_as(&ana.dir, &ana.tab, &boxes[0], 0.1, None), Err(TOO_MANY_EXTENDS.into()), "so it still counts toward the cap");
     let id = asked[2]["id"].as_str().unwrap();
     admin_on(&hub.database, &format!("update agent_confirmations set args = jsonb_set(args, '{{extra_usd}}', '0') where id = '{id}'"));
     assert_eq!(extend_as(&ana.dir, &ana.tab, &boxes[0], 0.1, None).unwrap()["outcome"], "pending", "an amount not above zero does not count");
@@ -9347,6 +9348,15 @@ struct ExtendLockHolder {
 
 impl ExtendLockHolder {
     fn take(database: &str, account: uuid::Uuid, machines: &[&str]) -> ExtendLockHolder {
+        ExtendLockHolder::take_with(database, account, machines, false)
+    }
+
+    /// The lock of all of the account's extend asks, as another hub's ask holds it.
+    fn take_account(database: &str, account: uuid::Uuid) -> ExtendLockHolder {
+        ExtendLockHolder::take_with(database, account, &[], true)
+    }
+
+    fn take_with(database: &str, account: uuid::Uuid, machines: &[&str], of_account: bool) -> ExtendLockHolder {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         let (held, watcher, pid) = runtime.block_on(async {
             let connect = || async {
@@ -9360,15 +9370,18 @@ impl ExtendLockHolder {
                 let machine: uuid::Uuid = machine.parse().unwrap();
                 held.execute(&format!("select pg_advisory_xact_lock({})", pinned_server::boxes::EXTEND_KEY), &[&account, &machine]).await.unwrap();
             }
+            if of_account {
+                held.execute(&format!("select pg_advisory_xact_lock({})", pinned_server::boxes::EXTEND_ACCOUNT_KEY), &[&account]).await.unwrap();
+            }
             let pid: i32 = held.query_one("select pg_backend_pid()", &[]).await.unwrap().get(0);
             (held, watcher, pid)
         });
         ExtendLockHolder { runtime, held, watcher, pid }
     }
 
-    /// The connections of the hub's that ran a box's extend lock and are open now.
+    /// The connections of the hub's that ran a box's or an account's extend lock and are open now.
     fn turns(&self) -> i64 {
-        let sql = "select count(*) from pg_stat_activity where datname = current_database() and pid <> pg_backend_pid() and pid <> $1 and query like '%pinned-extend-box%'";
+        let sql = "select count(*) from pg_stat_activity where datname = current_database() and pid <> pg_backend_pid() and pid <> $1 and query like '%pinned-extend-%'";
         self.runtime.block_on(self.watcher.query_one(sql, &[&self.pid])).unwrap().get(0)
     }
 
@@ -9467,6 +9480,118 @@ fn an_extend_box_ask_and_its_decision_wait_on_the_boxs_postgres_lock() {
     assert_eq!(extend_as(&ana.dir, &ana.tab, &machine, 0.5, None).unwrap()["outcome"], "pending");
     let done = decide(&mut owner).unwrap();
     assert_eq!((done["outcome"].as_str(), done["result"]["budget_usd"].as_f64()), (Some("done"), Some(1.5)), "{done}");
+}
+
+/// A steady stream of asks for one box, each refused only once it has its turn, never keeps the
+/// owner from deciding on that box: the hub lets only a few asks wait for the box's turn and
+/// refuses the rest as busy at once, while the owner's decision always waits its turn. Many other
+/// acts wait for the owner, so each ask's check in its turn takes a while.
+#[test]
+fn a_flood_of_extend_box_asks_for_one_box_never_starves_the_owners_decision() {
+    let ExtendSetup { hub, account, ana, mut owner, machine, .. } = extend_setup("extend_flood");
+    let first = extend_as(&ana.dir, &ana.tab, &machine, 0.5, None).unwrap();
+    assert_eq!(first["outcome"], "pending", "{first}");
+    let id = first["id"].as_str().unwrap();
+    admin_on(&hub.database, &format!("insert into agent_confirmations (id, account, machine, tab, role, action, args) select gen_random_uuid(), account, machine, tab, role, 'open_box', args || jsonb_build_object('pad', repeat('x', 200)) from agent_confirmations, generate_series(1, 20000) where id = '{id}'"));
+    let account = hub.runtime.block_on(hub.hub().account(account)).unwrap();
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flood: Vec<_> = (0..200)
+        .map(|n| {
+            let (running, account, origin, stop) = (hub.hub().clone(), account.clone(), ana.machine.clone(), stop.clone());
+            let ask = json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": machine, "extra_usd": 1.75 } });
+            hub.runtime.spawn(async move {
+                // A steady stream: the asks start 10 ms apart, so some ask is always new in the line.
+                tokio::time::sleep(Duration::from_millis(10 * n)).await;
+                let mut answers = vec![];
+                while !stop.load(Ordering::SeqCst) {
+                    answers.push(pinned_server::surface::act(&running, &account, &origin, serde_json::from_value(ask.clone()).unwrap()).await);
+                }
+                answers
+            })
+        })
+        .collect();
+    std::thread::sleep(Duration::from_millis(2500));
+    let decided = owner.hub(json!({ "cmd": "decide_confirmation", "id": first["id"], "approve": true }));
+    stop.store(true, Ordering::SeqCst);
+    let answers: Vec<_> = flood.into_iter().flat_map(|ask| hub.runtime.block_on(ask).unwrap()).collect();
+    assert!(answers.iter().all(|a| *a == Err(extend_waits("US$ 0.50")) || *a == Err(EXTEND_CEILING.to_owned()) || *a == Err(pinned_core::wire::HUB_BUSY.to_owned())), "every flooding ask is refused");
+    let decided = decided.unwrap();
+    assert_eq!((decided["outcome"].as_str(), decided["result"]["budget_usd"].as_f64()), (Some("done"), Some(1.5)), "the owner's decision got its turn: {decided}");
+}
+
+/// An ask while the account already has 10 extends waiting is refused with the cap's text before it
+/// takes any turn: it opens no connection and does not wait, even while another hub holds the box's lock.
+#[test]
+fn an_extend_box_ask_past_the_accounts_cap_is_refused_before_it_takes_a_turn() {
+    let ExtendSetup { hub, account, ana, mut owner, machine, .. } = extend_setup("extend_cap_first");
+    for _ in 0..10 {
+        assert_eq!(extend_as(&ana.dir, &ana.tab, &machine, 0.1, None).unwrap()["outcome"], "pending");
+    }
+    let lock = ExtendLockHolder::take(&hub.database, account, &[&machine]);
+    let started = Instant::now();
+    let (answers, turns) = extends_watched(&hub, account, &ana, &[json!({ "machine": machine, "extra_usd": 0.1 })], &lock);
+    assert_eq!(answers, [Err(TOO_MANY_EXTENDS.to_owned())]);
+    assert!(started.elapsed() < Duration::from_secs(1), "refused at once, not after the box's turn: {:?}", started.elapsed());
+    assert_eq!(turns, 0, "the refused ask opened no turn connection");
+    lock.release();
+    assert_eq!(waiting_actions(&mut owner).len(), 10);
+}
+
+/// Asks for several boxes of one account made at once while another hub holds the account's lock:
+/// they wait in this hub's line of the account, so the hub opens one turn connection at a time for
+/// them, not one for each box, and every one hears the hub is busy.
+#[test]
+fn extend_box_asks_for_several_boxes_of_one_account_hold_one_connection_at_a_time() {
+    let ExtendSetup { hub, account, ana, mut owner, machine, .. } = extend_setup("extend_account_line");
+    let boxes = [machine.clone(), open_extend_box(&ana), open_extend_box(&ana), open_extend_box(&ana)];
+    let lock = ExtendLockHolder::take_account(&hub.database, account);
+    let asks: Vec<_> = boxes.iter().flat_map(|machine| vec![json!({ "machine": machine, "extra_usd": 0.5 }); 2]).collect();
+    let (answers, turns) = extends_watched(&hub, account, &ana, &asks, &lock);
+    assert_eq!(answers, vec![Err(pinned_core::wire::HUB_BUSY.to_owned()); 8]);
+    assert_eq!(turns, 1, "one turn connection waits on the account's lock, the other asks wait in the hub's line");
+    lock.release();
+    assert_eq!(waiting_actions(&mut owner), Vec::<String>::new(), "no busy ask waits for the owner");
+}
+
+/// An ask waits for its turn 2 s from its own start, all its waits together: one that joins the
+/// line 1 s after another, while another hub holds the box's lock, hears busy about 2 s after it asked.
+#[test]
+fn a_later_extend_box_ask_waits_2_s_from_its_own_start() {
+    let ExtendSetup { hub, account, ana, machine, .. } = extend_setup("extend_own_deadline");
+    let lock = ExtendLockHolder::take(&hub.database, account, &[&machine]);
+    let account = hub.runtime.block_on(hub.hub().account(account)).unwrap();
+    let ask = || {
+        let (running, account, origin) = (hub.hub().clone(), account.clone(), ana.machine.clone());
+        let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": machine, "extra_usd": 0.5 } })).unwrap();
+        hub.runtime.spawn(async move {
+            let started = tokio::time::Instant::now();
+            let answer = tokio::time::timeout(Duration::from_secs(6), pinned_server::surface::act(&running, &account, &origin, act)).await;
+            (answer, started.elapsed())
+        })
+    };
+    let first = ask();
+    std::thread::sleep(Duration::from_secs(1));
+    let second = ask();
+    for (n, ask) in [first, second].into_iter().enumerate() {
+        let (answer, waited) = hub.runtime.block_on(ask).unwrap();
+        assert_eq!(answer, Ok(Err(pinned_core::wire::HUB_BUSY.to_owned())), "ask {n}");
+        assert!(waited >= Duration::from_millis(1700) && waited < Duration::from_millis(2600), "ask {n} waits about 2 s from its own start: {waited:?}");
+    }
+    lock.release();
+}
+
+/// An ask whose turn connection cannot be opened did nothing: it hears the hub is busy, writes no
+/// refusal, and the same request id asks again once Postgres takes connections.
+#[test]
+fn an_extend_box_ask_that_cannot_open_its_turn_connection_is_busy_and_asked_again() {
+    let ExtendSetup { hub, ana, mut owner, machine, .. } = extend_setup("extend_no_connection");
+    admin_on("postgres", &format!("alter database {} allow_connections false", hub.database));
+    let refused = extend_as(&ana.dir, &ana.tab, &machine, 0.5, Some("r-connect"));
+    admin_on("postgres", &format!("alter database {} allow_connections true", hub.database));
+    assert_eq!(refused, Err(pinned_core::wire::HUB_BUSY.into()));
+    assert_eq!(refused_extends(&mut owner), 0, "the ask wrote no refusal");
+    let again = extend_as(&ana.dir, &ana.tab, &machine, 0.5, Some("r-connect")).unwrap();
+    assert_eq!(again["outcome"], "pending", "the same request id asks again: {again}");
 }
 
 #[test]
