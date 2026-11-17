@@ -94,7 +94,7 @@ fn states(hub: &TestHub) -> Vec<(Uuid, String)> {
 /// What a hub logs while it opens `hub`'s database: `opens_the_database_the_boot_test_names`, run
 /// in a process of its own whose log this reads.
 fn boot_log(hub: &TestHub) -> String {
-    let out = std::process::Command::new(std::env::current_exe().unwrap())
+    let out = pinned_core::process::command(std::env::current_exe().unwrap())
         .args(["teams_one_live_run::opens_the_database_the_boot_test_names", "--exact", "--nocapture", "--test-threads=1"])
         .env(CHILD_DATABASE, format!("{}/{}", postgres(), hub.database))
         .output()
