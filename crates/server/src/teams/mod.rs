@@ -20,7 +20,7 @@ pub mod triggers;
 use crate::hub::{Account, Hub};
 use pinned_core::surface::{self, Side};
 use pinned_core::teams::{Role, TeamEvent, TeamOp};
-use pinned_core::wire::{HubCall, ToClient};
+use pinned_core::wire::{Call, HubCall, ToClient};
 use serde::Serialize;
 use serde_json::Value;
 use std::sync::Arc;
@@ -76,19 +76,23 @@ pub async fn members_only(hub: &Arc<Hub>, team: Uuid, ids: &[&str]) -> Result<Ve
     Ok(kept)
 }
 
-/// A member's team op with the personal call inside `TeamOp::Hub` read into its type, once, by
-/// `Op::read`: the unlock check (`owner_only`), the allowlist (`hub_rule`) and the run all see
-/// that one typed call, and nothing in Teams reads a field of the JSON it came as.
+/// A member's team op with the personal call inside `TeamOp::Hub` or `TeamOp::Session` read into
+/// its type, once, by `Op::read`: the unlock check (`owner_only`), the allowlist (`hub_rule`,
+/// `sessions::session_rule`) and the run all see that one typed call, and nothing in Teams reads
+/// a field of the JSON it came as.
 pub enum Op {
-    /// Every op but `TeamOp::Hub`.
+    /// Every op but `TeamOp::Hub` and `TeamOp::Session`.
     Team(TeamOp),
     Hub(HubCall),
+    /// A machine call in the team session `run`.
+    Session { run: String, call: Call },
 }
 
 impl Op {
     pub fn read(op: TeamOp) -> Result<Op, String> {
         match op {
             TeamOp::Hub { call } => TeamOp::hub_call(call).map(Op::Hub),
+            TeamOp::Session { run, call } => TeamOp::session_call(call).map(|call| Op::Session { run, call }),
             op => Ok(Op::Team(op)),
         }
     }
@@ -103,10 +107,12 @@ pub fn team_id(team: Option<String>) -> Result<Option<Uuid>, String> {
 /// needs what it needs on the person's own account (`surface::owner_only`), and the team asks too
 /// before anything that changes who is on it, its projects, groups, keys or bots, starts or steers
 /// a run, answers a call or talks in its chat. A stop, giving a run back and the reads do not ask.
+/// A call in a team session asks what the same call asks on a person's own machine.
 /// Exhaustive on purpose: a new op does not compile until it is placed here.
 pub fn owner_only(op: &Op, locked: bool) -> bool {
     let team = match op {
         Op::Hub(call) => return surface::owner_only(Side::Hub, &surface::cmd_of(call), locked) || (locked && hub_rule(call).unlock),
+        Op::Session { call, .. } => return surface::owner_only(Side::Node, &surface::cmd_of(call), locked),
         Op::Team(op) => match op {
             TeamOp::Rename { .. }
             | TeamOp::Invite
@@ -127,6 +133,8 @@ pub fn owner_only(op: &Op, locked: bool) -> bool {
             | TeamOp::AnswerCall { .. }
             | TeamOp::TakeOver { .. }
             | TeamOp::Chat { .. }
+            | TeamOp::SetSessionAccess { .. }
+            | TeamOp::Session { .. }
             | TeamOp::Hub { .. } => true,
             // A stop, giving a run back, and what only reads.
             TeamOp::List
@@ -157,7 +165,13 @@ pub async fn call(hub: &Arc<Hub>, person: &Arc<Account>, team: Option<Uuid>, op:
             let (team, role) = team_scope(hub, person, team).await?;
             return run_hub_call(hub, &Scope { team, member: person.id, role }, call).await;
         }
+        Op::Session { run, call } => {
+            let team = team.ok_or("name the team")?;
+            let (team, role) = team_scope(hub, person, team).await?;
+            return sessions::session(hub, &Scope { team, member: person.id, role }, &run, call).await;
+        }
         Op::Team(TeamOp::Hub { .. }) => return Err("a team's hub call is read by Op::read first".into()),
+        Op::Team(TeamOp::Session { .. }) => return Err("a team session's call is read by Op::read first".into()),
         Op::Team(op) => op,
     };
     match op {
@@ -172,7 +186,7 @@ pub async fn call(hub: &Arc<Hub>, person: &Arc<Account>, team: Option<Uuid>, op:
     let scope = Scope { team, member: person.id, role };
     let s = &scope;
     match op {
-        TeamOp::List | TeamOp::Create { .. } | TeamOp::Join { .. } | TeamOp::AskPeople { .. } | TeamOp::Hub { .. } => unreachable!("answered above"),
+        TeamOp::List | TeamOp::Create { .. } | TeamOp::Join { .. } | TeamOp::AskPeople { .. } | TeamOp::Hub { .. } | TeamOp::Session { .. } => unreachable!("answered above"),
         TeamOp::Rename { name } => json(membership::rename(hub, s, &name).await?),
         TeamOp::Members => json(membership::members(hub, s).await?),
         TeamOp::Invite => json(membership::invite(hub, s).await?),
@@ -201,6 +215,7 @@ pub async fn call(hub: &Arc<Hub>, person: &Arc<Account>, team: Option<Uuid>, op:
         TeamOp::SetBotCeiling { workflow, usd, minutes } => json(bots::set_bot_ceiling(hub, s, &workflow, usd, minutes).await?),
         TeamOp::RunLog { run } => json(run_log::run_log(hub, s, &run).await?),
         TeamOp::Chat { text } => json(chat::chat(hub, s, &text).await?),
+        TeamOp::SetSessionAccess { member, on } => json(sessions::set_session_access(hub, s, &member, on).await?),
     }
 }
 
@@ -250,8 +265,9 @@ pub struct Rule {
 
 /// The team's rule for `call`. Members read a box's status; only the owner sets the team's keys
 /// and box access and spends more on a box. A team's workflows are kept and run as its bots. Everything
-/// else is refused: a team has no machines but its boxes, no files, no password, no agents and
-/// no sessions of its own. Exhaustive on purpose, with no catch-all: a new `HubCall` does not
+/// else is refused: a team has no machines but its boxes, no files, no password and no agents. Its
+/// sessions are opened and driven through `TeamOp::OpenSession` and `TeamOp::Session`, never
+/// through a person's calls. Exhaustive on purpose, with no catch-all: a new `HubCall` does not
 /// compile until it is placed here.
 pub fn hub_rule(call: &HubCall) -> Rule {
     let (gate, unlock) = match call {
@@ -543,6 +559,7 @@ mod tests {
             json!({ "op": "answer_call", "id": "k1", "answer": { "kind": { "kind": "pass_to", "handle": "design" } } }),
             json!({ "op": "take_over", "run": "r1" }),
             json!({ "op": "chat", "text": "hi" }),
+            json!({ "op": "set_session_access", "member": "a1", "on": true }),
         ];
         for op in changes {
             let op = Op::read(serde_json::from_value(op.clone()).unwrap()).unwrap_or_else(|e| panic!("{e}"));

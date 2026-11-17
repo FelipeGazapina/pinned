@@ -174,6 +174,7 @@ pub async fn members(hub: &Arc<Hub>, scope: &Scope) -> Result<Vec<Member>, Strin
             groups: groups.iter().filter(|(member, _)| *member == row.account).map(|(_, handle)| handle.clone()).collect(),
             email: row.email,
             role: row.role,
+            session_access: row.session_access,
         })
         .collect())
 }

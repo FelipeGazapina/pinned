@@ -64,6 +64,7 @@ fn run_in(hub: &TestHub, team: Uuid, started_by: Uuid, box_machine: Option<&str>
         ended_at: None,
         outcome: None,
         started_by: started_by.to_string(),
+        kind: pinned_core::teams::RunKind::Bot, project: None, machine: None, tab: None,
     };
     hub.runtime.block_on(teams::db::insert_run(&hub.hub().db, team, &run, box_machine)).unwrap();
     id

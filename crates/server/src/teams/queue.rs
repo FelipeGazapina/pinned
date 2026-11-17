@@ -12,7 +12,7 @@ use super::{calls, db};
 use crate::hub::{Account, Hub};
 use pinned_core::agent::Subject;
 use pinned_core::connectors::{Admitted, Delivery, Event, Placement, Replies, RunsOn, Trigger, TriggerInput};
-use pinned_core::teams::{Run, RunState, SkipReason};
+use pinned_core::teams::{Run, RunKind, RunState, SkipReason};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -258,6 +258,10 @@ async fn reserve(turn: &Turn, team: &Arc<Account>, workflow: &str, started_by: S
         ended_at: None,
         outcome: None,
         started_by,
+        kind: RunKind::Bot,
+        project: None,
+        machine: None,
+        tab: None,
     };
     Ok(db::insert_reserved(&turn.held, team.id, &run, subject).await?.then_some(run))
 }

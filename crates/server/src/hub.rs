@@ -29,7 +29,7 @@ use crate::store_writes::{self, Landed, Writes};
 use tokio::sync::{mpsc, oneshot, OnceCell};
 use uuid::Uuid;
 
-const MACHINE_CALL_WAIT: Duration = Duration::from_secs(300);
+pub(crate) const MACHINE_CALL_WAIT: Duration = Duration::from_secs(300);
 /// Longer than a machine's `claude setup-token` waits for the user's approval in the browser.
 const MINT_WAIT: Duration = Duration::from_secs(pinned_core::setup_token::WAIT.as_secs() + 30);
 /// How long importing an MCP server waits for the machine to read its account's config.

@@ -228,6 +228,14 @@ alter table team_runs add column if not exists reserved_at timestamptz;
 -- A run's limit call the limits tick opened (`teams::calls::tick`): the only call that counts as
 -- its limit call (`teams::db::runs_at_limit`). A session's own ask never sets it.
 alter table team_calls add column if not exists opened_by_hub boolean not null default false;
+-- A team session (`kind` 'session') is a member's chat session in a box of the team's account,
+-- reached only through `TeamOp::Session`: the team project it clones, its tab in its box, and
+-- what is kept of it at its end. A member drives one only while the owner lets it (`session_access`).
+alter table team_runs add column if not exists kind text not null default 'bot';
+alter table team_runs add column if not exists project text;
+alter table team_runs add column if not exists tab text;
+alter table team_runs add column if not exists kept jsonb;
+alter table team_members add column if not exists session_access boolean not null default false;
 ";
 /// How long the hub keeps an end that its machine never came back for.
 const HELD_FOR: &str = "interval '30 days'";

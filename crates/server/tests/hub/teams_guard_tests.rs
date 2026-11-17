@@ -26,6 +26,7 @@ fn run_row(workflow: &str) -> TeamRun {
         ended_at: None,
         outcome: None,
         started_by: "trigger:linear_label".into(),
+        kind: pinned_core::teams::RunKind::Bot, project: None, machine: None, tab: None,
     }
 }
 

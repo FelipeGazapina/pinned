@@ -12090,6 +12090,46 @@
                 ]
               },
               {
+                "description": "Owner only: whether `member` may open and drive team sessions. `Vec<Member>`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "set_session_access"
+                  },
+                  "member": {
+                    "type": "string"
+                  },
+                  "on": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "op",
+                  "member",
+                  "on"
+                ]
+              },
+              {
+                "description": "A personal machine `Call` on the team session `run`, sent to the session's box if the\nhub's `session_rule` lets the member. A `Call` as JSON, which the hub parses, as `Hub` takes\nits call. It names the session's own tab; a `Tabs` answer lists that tab only.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "session"
+                  },
+                  "run": {
+                    "type": "string"
+                  },
+                  "call": true
+                },
+                "required": [
+                  "op",
+                  "run",
+                  "call"
+                ]
+              },
+              {
                 "description": "A personal `HubCall` run on the team's account, if the hub's `hub_call_allowed` lets the\nrole. A `HubCall` as JSON, which the hub parses: a recursive schema overflows the wire\nchecker's stack.",
                 "type": "object",
                 "properties": {
@@ -24346,6 +24386,46 @@
                 ]
               },
               {
+                "description": "Owner only: whether `member` may open and drive team sessions. `Vec<Member>`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "set_session_access"
+                  },
+                  "member": {
+                    "type": "string"
+                  },
+                  "on": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "op",
+                  "member",
+                  "on"
+                ]
+              },
+              {
+                "description": "A personal machine `Call` on the team session `run`, sent to the session's box if the\nhub's `session_rule` lets the member. A `Call` as JSON, which the hub parses, as `Hub` takes\nits call. It names the session's own tab; a `Tabs` answer lists that tab only.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "session"
+                  },
+                  "run": {
+                    "type": "string"
+                  },
+                  "call": true
+                },
+                "required": [
+                  "op",
+                  "run",
+                  "call"
+                ]
+              },
+              {
                 "description": "A personal `HubCall` run on the team's account, if the hub's `hub_call_allowed` lets the\nrole. A `HubCall` as JSON, which the hub parses: a recursive schema overflows the wire\nchecker's stack.",
                 "type": "object",
                 "properties": {
@@ -33797,6 +33877,46 @@
                 ]
               },
               {
+                "description": "Owner only: whether `member` may open and drive team sessions. `Vec<Member>`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "set_session_access"
+                  },
+                  "member": {
+                    "type": "string"
+                  },
+                  "on": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "op",
+                  "member",
+                  "on"
+                ]
+              },
+              {
+                "description": "A personal machine `Call` on the team session `run`, sent to the session's box if the\nhub's `session_rule` lets the member. A `Call` as JSON, which the hub parses, as `Hub` takes\nits call. It names the session's own tab; a `Tabs` answer lists that tab only.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "session"
+                  },
+                  "run": {
+                    "type": "string"
+                  },
+                  "call": true
+                },
+                "required": [
+                  "op",
+                  "run",
+                  "call"
+                ]
+              },
+              {
                 "description": "A personal `HubCall` run on the team's account, if the hub's `hub_call_allowed` lets the\nrole. A `HubCall` as JSON, which the hub parses: a recursive schema overflows the wire\nchecker's stack.",
                 "type": "object",
                 "properties": {
@@ -42900,6 +43020,46 @@
                 "required": [
                   "op",
                   "text"
+                ]
+              },
+              {
+                "description": "Owner only: whether `member` may open and drive team sessions. `Vec<Member>`.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "set_session_access"
+                  },
+                  "member": {
+                    "type": "string"
+                  },
+                  "on": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "op",
+                  "member",
+                  "on"
+                ]
+              },
+              {
+                "description": "A personal machine `Call` on the team session `run`, sent to the session's box if the\nhub's `session_rule` lets the member. A `Call` as JSON, which the hub parses, as `Hub` takes\nits call. It names the session's own tab; a `Tabs` answer lists that tab only.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "session"
+                  },
+                  "run": {
+                    "type": "string"
+                  },
+                  "call": true
+                },
+                "required": [
+                  "op",
+                  "run",
+                  "call"
                 ]
               },
               {
@@ -63259,6 +63419,10 @@
               "type": "string"
             },
             "default": []
+          },
+          "session_access": {
+            "description": "Whether the owner let the member open and drive team sessions (`TeamOp::SetSessionAccess`).\nOff for a new member; the owner always may.",
+            "type": "boolean"
           }
         },
         "required": [
@@ -63300,6 +63464,10 @@
               "type": "string"
             },
             "default": []
+          },
+          "session_access": {
+            "description": "Whether the owner let the member open and drive team sessions (`TeamOp::SetSessionAccess`).\nOff for a new member; the owner always may.",
+            "type": "boolean"
           }
         },
         "required": [
@@ -63489,6 +63657,31 @@
             "description": "Who or what started it: a member's account id, or `schedule:<id>`.",
             "type": "string",
             "default": ""
+          },
+          "kind": {
+            "description": "A bot's run, or a member's chat session on the team's account.",
+            "$ref": "#/$defs/RunKind"
+          },
+          "project": {
+            "description": "A session's team project key, the one its box cloned.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "machine": {
+            "description": "The machine of the box it runs in, once it has one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tab": {
+            "description": "A session's tab in its box, once the box reported it.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -63532,6 +63725,14 @@
                 "type": "string",
                 "const": "gave_up"
               }
+            ]
+          },
+          "RunKind": {
+            "description": "What a `team_runs` row is: a bot's run, or a member's chat session in a box of the team's\naccount, which members reach only through `TeamOp::Session`.",
+            "type": "string",
+            "enum": [
+              "bot",
+              "session"
             ]
           }
         }
@@ -63601,6 +63802,31 @@
             "description": "Who or what started it: a member's account id, or `schedule:<id>`.",
             "type": "string",
             "default": ""
+          },
+          "kind": {
+            "description": "A bot's run, or a member's chat session on the team's account.",
+            "$ref": "#/$defs/RunKind"
+          },
+          "project": {
+            "description": "A session's team project key, the one its box cloned.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "machine": {
+            "description": "The machine of the box it runs in, once it has one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tab": {
+            "description": "A session's tab in its box, once the box reported it.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -63637,6 +63863,14 @@
                 "type": "string",
                 "const": "gave_up"
               }
+            ]
+          },
+          "RunKind": {
+            "description": "What a `team_runs` row is: a bot's run, or a member's chat session in a box of the team's\naccount, which members reach only through `TeamOp::Session`.",
+            "type": "string",
+            "enum": [
+              "bot",
+              "session"
             ]
           }
         }
@@ -68391,6 +68625,31 @@
                 "description": "Who or what started it: a member's account id, or `schedule:<id>`.",
                 "type": "string",
                 "default": ""
+              },
+              "kind": {
+                "description": "A bot's run, or a member's chat session on the team's account.",
+                "$ref": "#/$defs/RunKind"
+              },
+              "project": {
+                "description": "A session's team project key, the one its box cloned.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "machine": {
+                "description": "The machine of the box it runs in, once it has one.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tab": {
+                "description": "A session's tab in its box, once the box reported it.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -68434,6 +68693,14 @@
                 "type": "string",
                 "const": "gave_up"
               }
+            ]
+          },
+          "RunKind": {
+            "description": "What a `team_runs` row is: a bot's run, or a member's chat session in a box of the team's\naccount, which members reach only through `TeamOp::Session`.",
+            "type": "string",
+            "enum": [
+              "bot",
+              "session"
             ]
           }
         }
@@ -72962,6 +73229,31 @@
                 "description": "Who or what started it: a member's account id, or `schedule:<id>`.",
                 "type": "string",
                 "default": ""
+              },
+              "kind": {
+                "description": "A bot's run, or a member's chat session on the team's account.",
+                "$ref": "#/$defs/RunKind"
+              },
+              "project": {
+                "description": "A session's team project key, the one its box cloned.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "machine": {
+                "description": "The machine of the box it runs in, once it has one.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tab": {
+                "description": "A session's tab in its box, once the box reported it.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -72998,6 +73290,14 @@
                 "type": "string",
                 "const": "gave_up"
               }
+            ]
+          },
+          "RunKind": {
+            "description": "What a `team_runs` row is: a bot's run, or a member's chat session in a box of the team's\naccount, which members reach only through `TeamOp::Session`.",
+            "type": "string",
+            "enum": [
+              "bot",
+              "session"
             ]
           }
         }

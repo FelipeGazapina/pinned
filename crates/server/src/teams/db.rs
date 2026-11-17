@@ -6,7 +6,7 @@ use crate::db::{err, Db};
 use tokio_postgres::Client;
 use pinned_core::agent::Subject;
 use pinned_core::preauth::team_hook::GO_AHEAD;
-use pinned_core::teams::{Answer, Bot, BotLimits, Call, Group, Role, Run, RunState, SkipReason, Skipped, TeamProject, Who};
+use pinned_core::teams::{Answer, Bot, BotLimits, Call, Group, Role, Run, RunKind, RunState, SkipReason, Skipped, TeamProject, Who};
 use tokio_postgres::error::SqlState;
 use uuid::Uuid;
 
@@ -23,6 +23,7 @@ pub struct MemberRow {
     pub account: Uuid,
     pub email: String,
     pub role: Role,
+    pub session_access: bool,
 }
 
 /// An open invite of a team, with its maker's email from `accounts`.
@@ -40,6 +41,18 @@ pub struct OpenInviteRow {
 pub async fn role(db: &Db, team: Uuid, member: Uuid) -> Result<Option<Role>, String> {
     let row = db.client().await?.query_opt("select role from team_members where team = $1 and member = $2", &[&team, &member]).await.map_err(err)?;
     Ok(row.map(|r| Role::parse(r.get(0))))
+}
+
+/// Whether the owner let `member` open and drive team sessions; false for one who is no member.
+pub async fn session_access(db: &Db, team: Uuid, member: Uuid) -> Result<bool, String> {
+    let row = db.client().await?.query_opt("select session_access from team_members where team = $1 and member = $2", &[&team, &member]).await.map_err(err)?;
+    Ok(row.is_some_and(|r| r.get(0)))
+}
+
+/// Sets whether `member` may open and drive team sessions; false when it is no member.
+pub async fn set_session_access(db: &Db, team: Uuid, member: Uuid, on: bool) -> Result<bool, String> {
+    let n = db.client().await?.execute("update team_members set session_access = $3 where team = $1 and member = $2", &[&team, &member, &on]).await.map_err(err)?;
+    Ok(n == 1)
 }
 
 /// Every member's account id.
@@ -110,13 +123,13 @@ pub async fn members(db: &Db, team: Uuid) -> Result<Vec<MemberRow>, String> {
         .client()
         .await?
         .query(
-            "select m.member, a.email, m.role from team_members m join accounts a on a.id = m.member
+            "select m.member, a.email, m.role, m.session_access from team_members m join accounts a on a.id = m.member
              where m.team = $1 order by m.role <> 'owner', m.joined_at, m.member",
             &[&team],
         )
         .await
         .map_err(err)?;
-    Ok(rows.iter().map(|r| MemberRow { account: r.get(0), email: r.get(1), role: Role::parse(r.get(2)) }).collect())
+    Ok(rows.iter().map(|r| MemberRow { account: r.get(0), email: r.get(1), role: Role::parse(r.get(2)), session_access: r.get(3) }).collect())
 }
 
 /// Each member's group handles, as `(member, handle)` rows, by handle.
@@ -653,7 +666,8 @@ const RUN_COLUMNS: &str = concat!(
     "id, workflow, state, controller, cost_usd, case when reserved then 0 else greatest(0, extract(epoch from coalesce(ended_at, now()) - coalesce(opened_at, started_at))::bigint - ",
     waited!(),
     ") end, extract(epoch from started_at)::bigint, extract(epoch from ended_at)::bigint, outcome, started_by #>> '{}', ",
-    waited!()
+    waited!(),
+    ", kind, project, box, tab"
 );
 
 /// A `team_calls` row `c` with its run `r`, as `call_of` reads it.
@@ -677,6 +691,10 @@ fn run_of(r: &Row) -> Run {
         outcome: r.get(8),
         started_by: r.get::<_, Option<String>>(9).unwrap_or_default(),
         waiting_secs: r.get::<_, i64>(10).max(0) as u64,
+        kind: RunKind::parse(r.get(11)),
+        project: r.get(12),
+        machine: r.get(13),
+        tab: r.get(14),
     }
 }
 
@@ -736,12 +754,12 @@ pub async fn insert_run(db: &Db, team: Uuid, run: &Run, machine: Option<&str>) -
         .map(drop)
 }
 
-/// The team's runs, newest first, at most `limit`.
+/// The team's bot runs, newest first, at most `limit`. Its sessions are not listed here.
 pub async fn runs(db: &Db, team: Uuid, limit: i64) -> Result<Vec<Run>, String> {
     let rows = db
         .client()
         .await?
-        .query(&format!("select {RUN_COLUMNS} from team_runs where team = $1 order by started_at desc, id limit $2"), &[&team, &limit])
+        .query(&format!("select {RUN_COLUMNS} from team_runs where team = $1 and kind = 'bot' order by started_at desc, id limit $2"), &[&team, &limit])
         .await
         .map_err(err)?;
     Ok(rows.iter().map(run_of).collect())

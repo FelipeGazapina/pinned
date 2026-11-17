@@ -33,8 +33,8 @@ fn a_member_reads_a_team_session_and_only_its_driver_with_access_drives_it() {
     // Only the owner turns team sessions on for a member, and each member starts with them off.
     assert_eq!(access(team, &mut bea.client, caio.id, true), Err("only the team's owner does this".into()));
     let members = access(team, &mut olga.client, caio.id, true).unwrap();
-    let on = |id: Uuid| members.as_array().unwrap().iter().find(|m| m["account"] == id.to_string()).unwrap()["session_access"].clone();
-    assert_eq!((on(caio.id), on(bea.id)), (json!(true), json!(false)));
+    let on = |id: Uuid| members.as_array().unwrap().iter().find(|m| m["account"] == id.to_string()).unwrap()["session_access"] == json!(true);
+    assert_eq!((on(caio.id), on(bea.id)), (true, false));
 
     // The team's box: a machine of the team's account that answers every call with its name.
     let (machine, token) = hub.runtime.block_on(hub.hub().db.create_machine(team, "box", "linux")).unwrap();

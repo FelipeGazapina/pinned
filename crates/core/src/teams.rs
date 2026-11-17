@@ -71,6 +71,10 @@ pub struct Member {
     /// The handles of the groups the member is in.
     #[serde(default)]
     pub groups: Vec<String>,
+    /// Whether the owner let the member open and drive team sessions (`TeamOp::SetSessionAccess`).
+    /// Off for a new member; the owner always may.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub session_access: bool,
 }
 
 /// A new invite, the only time its code is shown. `hint` names it after: its first group.
@@ -388,6 +392,49 @@ pub struct Run {
     /// Who or what started it: a member's account id, or `schedule:<id>`.
     #[serde(default)]
     pub started_by: String,
+    /// A bot's run, or a member's chat session on the team's account.
+    #[serde(default, skip_serializing_if = "RunKind::is_bot")]
+    pub kind: RunKind,
+    /// A session's team project key, the one its box cloned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    /// The machine of the box it runs in, once it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine: Option<String>,
+    /// A session's tab in its box, once the box reported it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab: Option<String>,
+}
+
+/// What a `team_runs` row is: a bot's run, or a member's chat session in a box of the team's
+/// account, which members reach only through `TeamOp::Session`.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RunKind {
+    #[default]
+    Bot,
+    Session,
+}
+
+impl RunKind {
+    pub fn is_bot(&self) -> bool {
+        *self == RunKind::Bot
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RunKind::Bot => "bot",
+            RunKind::Session => "session",
+        }
+    }
+
+    /// A kind this hub does not know reads as a bot's run, which `TeamOp::Session` refuses.
+    pub fn parse(text: &str) -> RunKind {
+        match text {
+            "session" => RunKind::Session,
+            _ => RunKind::Bot,
+        }
+    }
 }
 
 /// How a person answered a call.
@@ -575,6 +622,12 @@ pub enum TeamOp {
     RunLog { run: String },
     /// Text to the team's chat; answers its reply.
     Chat { text: String },
+    /// Owner only: whether `member` may open and drive team sessions. `Vec<Member>`.
+    SetSessionAccess { member: String, on: bool },
+    /// A personal machine `Call` on the team session `run`, sent to the session's box if the
+    /// hub's `session_rule` lets the member. A `Call` as JSON, which the hub parses, as `Hub` takes
+    /// its call. It names the session's own tab; a `Tabs` answer lists that tab only.
+    Session { run: String, call: Value },
     /// A personal `HubCall` run on the team's account, if the hub's `hub_call_allowed` lets the
     /// role. A `HubCall` as JSON, which the hub parses: a recursive schema overflows the wire
     /// checker's stack.
@@ -607,6 +660,14 @@ impl TeamOp {
             return Err("not a hub call: a hub call is a JSON object".into());
         }
         serde_json::from_value(call).map_err(|e| format!("not a hub call: {e}"))
+    }
+
+    /// The machine call inside `Session`, as the hub reads it: only a JSON object, as `hub_call`.
+    pub fn session_call(call: Value) -> Result<crate::wire::Call, String> {
+        if !call.is_object() {
+            return Err("not a session call: a session call is a JSON object".into());
+        }
+        serde_json::from_value(call).map_err(|e| format!("not a session call: {e}"))
     }
 
     /// The op's wire name, for logs.
@@ -675,6 +736,8 @@ mod tests {
             json!({ "op": "run_log", "run": "r1" }),
             json!({ "op": "chat", "text": "hi" }),
             json!({ "op": "hub", "call": { "cmd": "get_settings" } }),
+            json!({ "op": "set_session_access", "member": "a1", "on": true }),
+            json!({ "op": "session", "run": "r1", "call": { "cmd": "thread", "tab": "tab-1", "from": 0 } }),
             json!({ "op": "ask_people", "situation": "in_doubt", "question": "Which?", "choices": ["red", "blue"] }),
         ];
         for case in cases {

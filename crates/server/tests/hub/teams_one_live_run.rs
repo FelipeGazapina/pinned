@@ -32,6 +32,7 @@ fn run_of(workflow: &str) -> Run {
         ended_at: None,
         outcome: None,
         started_by: "trigger:linear_label".to_owned(),
+        kind: pinned_core::teams::RunKind::Bot, project: None, machine: None, tab: None,
     }
 }
 

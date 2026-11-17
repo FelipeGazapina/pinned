@@ -15,7 +15,7 @@ use crate::boxes::End;
 use crate::hub::{Account, Hub, LastTurn};
 use futures_util::future::BoxFuture;
 use pinned_core::agent::Subject;
-use pinned_core::teams::{Answer, AnswerKind, Call, Role, Run, RunState, Situation, SkipReason, TeamEvent, TeamPolicy, Who};
+use pinned_core::teams::{Answer, AnswerKind, Call, Role, Run, RunKind, RunState, Situation, SkipReason, TeamEvent, TeamPolicy, Who};
 use pinned_core::wire::{Call as MachineCall, TabView};
 use serde::Serialize;
 use serde_json::Value;
@@ -172,6 +172,10 @@ pub async fn answer_call(hub: &Arc<Hub>, scope: &Scope, id: &str, mut answer: An
 /// open, which its answer moves on. One controller at a time. Pushes `TeamEvent::RunChanged`.
 pub async fn take_over(hub: &Arc<Hub>, scope: &Scope, run: &str) -> Result<Run, String> {
     let (run_id, run) = live_run(hub, scope, run).await?;
+    if run.kind == RunKind::Session {
+        // Only the owner takes over a member's team session.
+        scope.owner_only()?;
+    }
     may_steer(hub, scope, run_id, &run).await?;
     match db::take_over(&hub.db, scope.team.id, run_id, scope.member).await? {
         Some(run) => {
