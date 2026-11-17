@@ -3753,11 +3753,13 @@ mod tests {
     }
 
     /// A Box API whose exec answers each rescue script with `answer`, fails as an unreachable box
-    /// when it is None, or never answers when `hang`; it counts the scripts it ran.
+    /// when it is None, or never answers when `hang`; it counts the scripts it ran. With `run`, it
+    /// runs each script it is sent there and answers what that printed.
     struct Rescuing {
         answer: Option<String>,
         hang: bool,
         scripts: Mutex<Vec<String>>,
+        run: Option<Box<dyn Fn(&str) -> String + Send + Sync>>,
     }
 
     impl BoxApi for Rescuing {
@@ -3772,9 +3774,12 @@ mod tests {
         }
         fn exec<'a>(&'a self, _: &'a str, _: &'a BoxId, script: String) -> BoxFuture<'a, Result<Exec, String>> {
             Box::pin(async move {
-                self.scripts.lock().unwrap().push(script);
+                self.scripts.lock().unwrap().push(script.clone());
                 if self.hang {
                     std::future::pending::<()>().await;
+                }
+                if let Some(run) = &self.run {
+                    return Ok(Exec { exit_code: 0, output: run(&script), error: String::new() });
                 }
                 self.answer.clone().map(|output| Exec { exit_code: 0, output, error: String::new() }).ok_or_else(|| "Upstash Box: box_1 is not running".into())
             })
@@ -3785,7 +3790,7 @@ mod tests {
     }
 
     fn rescuing(answer: Option<&str>, hang: bool) -> (Boxes, Arc<Rescuing>) {
-        let api = Arc::new(Rescuing { answer: answer.map(str::to_owned), hang, scripts: Mutex::default() });
+        let api = Arc::new(Rescuing { answer: answer.map(str::to_owned), hang, scripts: Mutex::default(), run: None });
         (Boxes::new(api.clone(), Policy::default(), "https://hub.test"), api)
     }
 
@@ -3933,8 +3938,14 @@ mod tests {
     /// the box answering a script with `answer`: the scripts sent to the box, and the notice its
     /// task's end adds.
     async fn gated(status: u16, body: &'static str, token: Option<&str>, answer: &str) -> (Vec<String>, Option<String>) {
+        gated_in(status, body, token, Rescuing { answer: Some(answer.to_owned()), hang: false, scripts: Mutex::default(), run: None }).await
+    }
+
+    /// `gated`, with `api` the box's.
+    async fn gated_in(status: u16, body: &'static str, token: Option<&str>, api: Rescuing) -> (Vec<String>, Option<String>) {
         let (url, _) = fake_github(status, body, GITHUB_TOKEN).await;
-        let (mut boxes, api) = rescuing(Some(answer), false);
+        let api = Arc::new(api);
+        let mut boxes = Boxes::new(api.clone(), Policy::default(), "https://hub.test");
         boxes.github_api = url;
         let rescue = rescue_once(&boxes, &worker_row(Phase::Running), Some(KEY), token).await;
         let scripts = api.scripts.lock().unwrap().clone();
@@ -4347,7 +4358,7 @@ mod tests {
     #[tokio::test]
     async fn a_public_repository_box_is_sent_no_script_and_its_clone_stays_as_the_worker_left_it() {
         let _ = rustls::crypto::ring::default_provider().install_default();
-        let run = RescueRun::new();
+        let run = Arc::new(RescueRun::new());
         run.git(&run.clone, &["checkout", "-q", "-b", "feature"]);
         run.commit_all(&[("feature.txt", "committed\n")], "feature work");
         std::fs::write(run.clone.join(".env"), "TOKEN=invented\n").unwrap();
@@ -4356,16 +4367,24 @@ mod tests {
         std::fs::write(run.clone.join("new.txt"), "new\n").unwrap();
         let index = std::fs::read(run.clone.join(".git/index")).unwrap();
         let _ = std::fs::remove_file(run._root.path().join("git.log"));
-        // The fake box would answer a saved branch, were a script sent to it.
-        let (scripts, notice) = gated(200, r#"{"private":false,"visibility":"public"}"#, Some(GITHUB_TOKEN), "pinned-rescue: saved wip/rescue/task-1a2b3c4d\npinned-rescue: done\n").await;
-        assert_eq!(scripts, Vec::<String>::new(), "no script for a public repository");
-        assert_eq!(notice.as_deref(), Some(NOT_PRIVATE));
-        // So nothing ran in the box the worker left.
+        // The fake box runs whatever script it is sent against this clone, with the folder of box.env
+        // this run's and origin taken over ssh, as this run serves it.
+        let ran = run.clone();
+        let box_run = move |script: &str| {
+            let dir = format!("\npinned='{DIR}'\n");
+            assert_eq!(script.matches(&dir).count(), 1, "{script}");
+            ran.run_script(&over_ssh(&script.replacen(&dir, &format!("\npinned='{}'\n", ran.pinned.display()), 1)), &[]).0
+        };
+        let api = Rescuing { answer: None, hang: false, scripts: Mutex::default(), run: Some(Box::new(box_run)) };
+        let (scripts, notice) = gated_in(200, r#"{"private":false,"visibility":"public"}"#, Some(GITHUB_TOKEN), api).await;
+        // Nothing ran in the box the worker left.
         assert_eq!(run.remote_branches(), "refs/heads/main\n", "not even the worker's commit is pushed");
         assert!(!run.remote_paths().lines().any(|p| p == ".env" || p == "new.txt" || p == "feature.txt"), "{}", run.remote_paths());
         assert!(run.writes().is_empty(), "no add, no commit, no reset, no push: {:?}", run.writes());
         assert_eq!(std::fs::read(run.clone.join(".git/index")).unwrap(), index, "the index is as the worker left it");
         assert_eq!(std::fs::read_to_string(run.clone.join("notes.txt")).unwrap(), "half done\n");
+        assert_eq!(scripts, Vec::<String>::new(), "no script for a public repository");
+        assert_eq!(notice.as_deref(), Some(NOT_PRIVATE));
     }
 
     #[cfg(unix)]

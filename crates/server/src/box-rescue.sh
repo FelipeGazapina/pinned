@@ -107,8 +107,8 @@ found() {
 checked=$(printf '%s' "$github" | tr 'A-Z' 'a-z') || checked=''
 # Whether origin, as git reads it in the tree it runs in, fetches from and pushes to the checked
 # repository alone: one URL, on github.com, over https (or ssh, under the tests alone), with no
-# other user, and its push URL that same one. git expands insteadOf and pushInsteadOf in what it reads, and reads a worktree's
-# own config in that worktree.
+# other user, and its push URL that same one. git expands insteadOf and pushInsteadOf in what it
+# reads, and reads a worktree's own config in that worktree.
 bound() {
   [ -n "$checked" ] || return 1
   url=$(git remote get-url --all origin 2>/dev/null) || return 1
