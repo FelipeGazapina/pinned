@@ -38,7 +38,7 @@ const SYNC_EVERY: Duration = Duration::from_secs(20);
 /// After the hub refuses a project's push, the same files wait this long before they go again,
 /// twice as long after each refusal of them, up to `PUSH_HOLD_MAX`.
 const PUSH_HOLD_MIN: Duration = SYNC_EVERY;
-const PUSH_HOLD_MAX: Duration = Duration::from_secs(30 * 60);
+const PUSH_HOLD_MAX: Duration = Duration::from_secs(10 * 60);
 /// The close code the hub sends when it doesn't know the token a socket signed in with.
 pub const UNAUTHORIZED: u16 = 4001;
 /// How long a box's node is refused with `UNAUTHORIZED`, with no hello accepted in between, before
@@ -297,6 +297,11 @@ struct Held {
     until: Instant,
 }
 
+/// The key a plugin share's push is held under: the Claude home it publishes.
+fn share_key(share: &sync::PluginShare) -> String {
+    format!("{} {}", sync::PLUGINS_KEY, share.claude_home.display())
+}
+
 impl PushBackoff {
     fn sync(&mut self, hub: &impl sync::Hub, state: &mut sync::State, checkout: &sync::Checkout, now: Instant) -> Result<sync::Synced, String> {
         let key = &checkout.project.key;
@@ -306,7 +311,7 @@ impl PushBackoff {
     }
 
     fn sync_plugins(&mut self, hub: &impl sync::Hub, state: &mut sync::State, share: &sync::PluginShare, now: Instant) -> Result<sync::Synced, String> {
-        let key = format!("{} {}", sync::PLUGINS_KEY, share.claude_home.display());
+        let key = share_key(share);
         let done = sync::sync_plugins_with(hub, state, share, SystemTime::now(), self.hold(&key, now))?;
         self.record(&key, &done.push, now);
         Ok(done)
@@ -342,7 +347,7 @@ impl Syncer {
                 if *stopped.borrow() || stopped.has_changed().is_err() {
                     break 'run;
                 }
-                if shared.sync_now.swap(false, Ordering::SeqCst) {
+                if shared.sync_now.load(Ordering::SeqCst) && shared.online() {
                     break;
                 }
                 std::thread::park_timeout(left);
@@ -350,8 +355,9 @@ impl Syncer {
             wait = SYNC_EVERY;
             if shared.online() {
                 report_state(shared, machine);
-                if let Some(file) = file {
-                    self.cycle(shared, machine, file);
+                match file {
+                    Some(file) => self.cycle(shared, shared, machine, file),
+                    None => shared.sync_now.store(false, Ordering::SeqCst),
                 }
             }
         }
@@ -361,9 +367,14 @@ impl Syncer {
             }
         }
         machine.hold_sync_state(false);
+        machine.hold_sync_limit(false);
     }
 
-    fn cycle(&mut self, shared: &Shared, machine: &Machine, file: &Path) {
+    fn cycle(&mut self, shared: &Shared, hub: &impl sync::Hub, machine: &Machine, file: &Path) {
+        // A user action ends every hold, so the refused pushes go out in this cycle.
+        if shared.sync_now.swap(false, Ordering::SeqCst) {
+            self.backoff.0.clear();
+        }
         if self.state.is_none() {
             match sync::State::load(file, &crate::machine::home().join(".claude")) {
                 Ok(loaded) => {
@@ -380,7 +391,11 @@ impl Syncer {
             }
         }
         let Some(state) = self.state.as_mut() else { return };
-        for checkout in machine.checkouts() {
+        let checkouts = machine.checkouts();
+        let shares = machine.plugin_shares();
+        // A project that left the machine no longer holds the notice.
+        self.backoff.0.retain(|key, _| checkouts.iter().any(|c| &c.project.key == key) || shares.iter().any(|s| share_key(s) == *key));
+        for checkout in checkouts {
             if !shared.online() {
                 break;
             }
@@ -388,7 +403,7 @@ impl Syncer {
             if !self.shared_projects.contains(&key) && shared.call(HubCall::ShareProject { project: checkout.project.clone() }).is_ok() {
                 self.shared_projects.insert(key.clone());
             }
-            match self.backoff.sync(shared, state, &checkout, Instant::now()) {
+            match self.backoff.sync(hub, state, &checkout, Instant::now()) {
                 Ok(done) => {
                     machine.skills_changed(&skills::pulled_by_project_sync(&checkout, &done.pulled));
                     if !done.pushed.is_empty() || !done.pulled.is_empty() {
@@ -401,8 +416,8 @@ impl Syncer {
                 Err(e) => eprintln!("pinned: could not sync {key}: {e}"),
             }
         }
-        for share in machine.plugin_shares() {
-            match self.backoff.sync_plugins(shared, state, &share, Instant::now()) {
+        for share in shares {
+            match self.backoff.sync_plugins(hub, state, &share, Instant::now()) {
                 Ok(done) => {
                     self.reported_old_hub = false;
                     machine.skills_changed(&skills::pulled_by_plugin_sync(&share, &done.pulled));
@@ -423,6 +438,7 @@ impl Syncer {
                 Err(e) => eprintln!("pinned: could not sync plugins: {e}"),
             }
         }
+        machine.hold_sync_limit(!self.backoff.0.is_empty());
         if let Err(e) = state.flush() {
             eprintln!("pinned: {e}");
         }
@@ -850,13 +866,13 @@ mod tests {
         let (out, _frames) = channel::unbounded_channel();
         *shared.out.lock().unwrap() = Some(out);
         let mut syncer = Syncer::default();
-        syncer.cycle(&shared, &machine, &file);
+        syncer.cycle(&shared, &shared, &machine, &file);
         assert_eq!(std::fs::read(&file).unwrap(), b"", "a stopped sync leaves the file as it was");
         let why = format!("the sync state {} is corrupt (EOF while parsing a value at line 1 column 0)", file.display());
         assert_eq!(machine.call(Call::SyncStopped), Ok(Value::String(why)));
         assert_eq!(machine.call(Call::ResetSync), Ok(Value::Null));
         assert_eq!(machine.call(Call::SyncStopped), Ok(Value::Null));
-        syncer.cycle(&shared, &machine, &file);
+        syncer.cycle(&shared, &shared, &machine, &file);
         let saved: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
         assert_eq!(saved, serde_json::json!({ "hashes": {}, "agreed": {}, "claude_homes": {} }));
         assert_eq!(std::fs::read(dir.join("sync.json.damaged")).unwrap(), b"");
@@ -881,10 +897,10 @@ mod tests {
     fn a_state_file_that_breaks_while_the_loop_holds_its_state_still_reads_as_syncing() {
         let (dir, file, machine, shared, _frames) = stopped_sync_fixture("held");
         let mut syncer = Syncer::default();
-        syncer.cycle(&shared, &machine, &file);
+        syncer.cycle(&shared, &shared, &machine, &file);
         std::fs::write(&file, b"").unwrap();
         assert_eq!(machine.call(Call::SyncStopped), Ok(Value::Null));
-        syncer.cycle(&shared, &machine, &file);
+        syncer.cycle(&shared, &shared, &machine, &file);
         assert_eq!(machine.call(Call::SyncStopped), Ok(Value::Null), "an idle cycle keeps the state it holds and doesn't rewrite the file");
         assert_eq!(std::fs::read(&file).unwrap(), b"");
         let _ = std::fs::remove_dir_all(dir);
@@ -894,7 +910,7 @@ mod tests {
     fn once_the_sync_loop_ends_the_state_file_decides_again() {
         let (dir, file, machine, shared, _frames) = stopped_sync_fixture("ended");
         let mut syncer = Syncer::default();
-        syncer.cycle(&shared, &machine, &file);
+        syncer.cycle(&shared, &shared, &machine, &file);
         std::fs::write(&file, b"").unwrap();
         let (_stop, stopped) = watch::channel(true);
         syncer.run(&shared, &machine, Some(&file), &stopped);
@@ -987,7 +1003,7 @@ mod tests {
     fn a_state_file_restored_by_hand_reads_as_syncing_before_the_next_cycle() {
         let (dir, file, machine, shared, _frames) = stopped_sync_fixture("restored");
         std::fs::write(&file, b"").unwrap();
-        Syncer::default().cycle(&shared, &machine, &file);
+        Syncer::default().cycle(&shared, &shared, &machine, &file);
         assert!(matches!(machine.call(Call::SyncStopped), Ok(Value::String(_))));
         std::fs::write(&file, br#"{"hashes":{},"agreed":{},"claude_homes":{}}"#).unwrap();
         assert_eq!(machine.call(Call::SyncStopped), Ok(Value::Null));
@@ -1672,12 +1688,12 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_push_waits_twice_as_long_each_time_up_to_half_an_hour_while_the_project_lists_every_cycle() {
+    fn a_refused_push_waits_twice_as_long_each_time_up_to_ten_minutes_while_the_project_lists_every_cycle() {
         let (dir, checkout, _) = full_checkout("full-hub");
         let hub = FullHub::default();
-        let at = pushed_at(&hub, &checkout, 311, |_| {});
-        assert_eq!(at, [0, 20, 60, 140, 300, 620, 1260, 2540, 4340, 6140]);
-        assert_eq!(hub.lists.get(), 311, "the project still lists and pulls every cycle");
+        let at = pushed_at(&hub, &checkout, 400, |_| {});
+        assert_eq!(at, [0, 20, 60, 140, 300, 620, 1220, 1820, 2420, 3020, 3620, 4220, 4820, 5420, 6020, 6620, 7220, 7820]);
+        assert_eq!(hub.lists.get(), 400, "the project still lists and pulls every cycle");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -1761,6 +1777,72 @@ mod tests {
             _ => {}
         });
         assert_eq!(at, [0, 20, 40, 60, 80]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_user_action_sends_a_refused_project_again_at_once_instead_of_after_its_hold() {
+        let (dir, file, machine, shared, _frames) = stopped_sync_fixture("wake");
+        let app = dir.join("app");
+        std::fs::create_dir_all(app.join(".claude/skills")).unwrap();
+        for args in [&["init", "-q"][..], &["remote", "add", "origin", "git@github.com:acme/app.git"]] {
+            assert!(std::process::Command::new("git").arg("-C").arg(&app).args(args).status().unwrap().success());
+        }
+        std::fs::write(app.join(".claude/skills/skill.md"), "a skill").unwrap();
+        machine.open_project(app);
+        let hub = FullHub::default();
+        let mut syncer = Syncer { shared_projects: HashSet::from(["github.com/acme/app".to_owned()]), ..Syncer::default() };
+        syncer.cycle(&shared, &hub, &machine, &file);
+        assert_eq!(hub.pushes.get(), 1, "the hub refuses the first push");
+        syncer.cycle(&shared, &hub, &machine, &file);
+        assert_eq!(hub.pushes.get(), 1, "the refused push waits out its hold");
+        shared.sync_now.store(true, Ordering::SeqCst);
+        syncer.cycle(&shared, &hub, &machine, &file);
+        assert_eq!(hub.pushes.get(), 2, "a user action sends the refused push again at once");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A project at the account's limit, open on a machine whose sync loop has the state file.
+    fn refused_project(name: &str) -> (std::path::PathBuf, std::path::PathBuf, Arc<Machine>, Shared, std::path::PathBuf) {
+        let (dir, file, machine, shared, _frames) = stopped_sync_fixture(name);
+        let app = dir.join("app");
+        std::fs::create_dir_all(app.join(".claude/skills")).unwrap();
+        for args in [&["init", "-q"][..], &["remote", "add", "origin", "git@github.com:acme/app.git"]] {
+            assert!(std::process::Command::new("git").arg("-C").arg(&app).args(args).status().unwrap().success());
+        }
+        std::fs::write(app.join(".claude/skills/skill.md"), "a skill").unwrap();
+        machine.open_project(app.clone());
+        (dir, file, machine, shared, app)
+    }
+
+    #[test]
+    fn a_refused_push_shows_the_limit_notice_until_a_push_is_taken() {
+        let (dir, file, machine, shared, _app) = refused_project("limit-notice");
+        let hub = FullHub::default();
+        let mut syncer = Syncer { shared_projects: HashSet::from(["github.com/acme/app".to_owned()]), ..Syncer::default() };
+        assert_eq!(machine.call(Call::SyncLimit), Ok(Value::Null), "nothing refused yet");
+        syncer.cycle(&shared, &hub, &machine, &file);
+        let notice = "Sync stopped: your synced projects would pass 1024 MB. Nothing was lost; this machine keeps everything.";
+        assert_eq!(machine.call(Call::SyncLimit), Ok(Value::String(notice.into())), "the refused push shows the notice");
+        syncer.cycle(&shared, &hub, &machine, &file);
+        assert_eq!(machine.call(Call::SyncLimit), Ok(Value::String(notice.into())), "a held push keeps the notice");
+        hub.room.set(true);
+        shared.sync_now.store(true, Ordering::SeqCst);
+        syncer.cycle(&shared, &hub, &machine, &file);
+        assert_eq!(machine.call(Call::SyncLimit), Ok(Value::Null), "a push the hub takes clears it");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_refused_project_that_leaves_the_machine_clears_the_limit_notice() {
+        let (dir, file, machine, shared, app) = refused_project("limit-gone");
+        let hub = FullHub::default();
+        let mut syncer = Syncer { shared_projects: HashSet::from(["github.com/acme/app".to_owned()]), ..Syncer::default() };
+        syncer.cycle(&shared, &hub, &machine, &file);
+        assert_eq!(machine.call(Call::SyncLimit), Ok(Value::String("Sync stopped: your synced projects would pass 1024 MB. Nothing was lost; this machine keeps everything.".into())));
+        std::fs::remove_dir_all(app.join(".git")).unwrap();
+        syncer.cycle(&shared, &hub, &machine, &file);
+        assert_eq!(machine.call(Call::SyncLimit), Ok(Value::Null), "a project no longer on the machine holds no notice");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

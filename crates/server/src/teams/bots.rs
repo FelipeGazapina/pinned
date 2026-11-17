@@ -468,7 +468,6 @@ pub async fn ready_in(hub: &Arc<Hub>, team: &TeamWorkflows, workflow_id: &str) -
         Err(e) => return Ok(Err(e)),
     };
     let bot = db::bot(&hub.db, team.team, workflow_id).await?;
-    let callees = callees_read(hub, team.team, workflow, workflows).await?;
     if !bot.as_ref().is_some_and(|b| b.on) || !workflow.enabled {
         return Ok(Err(IS_A_DRAFT.into()));
     }
@@ -476,6 +475,8 @@ pub async fn ready_in(hub: &Arc<Hub>, team: &TeamWorkflows, workflow_id: &str) -
     if !bot.is_some_and(|b| b.limits.usd.is_finite() && b.limits.usd > 0.0 && b.limits.minutes > 0) {
         return Ok(Err(NO_LIMIT.into()));
     }
+    // Read only once the bot's own refusals are decided: a callee read that fails never hides them.
+    let callees = callees_read(hub, team.team, workflow, workflows).await?;
     if let Err(e) = available(workflow, workflows).and(callees) {
         return Ok(Err(e));
     }

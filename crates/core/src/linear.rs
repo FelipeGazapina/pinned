@@ -1,6 +1,8 @@
-use chrono::DateTime;
+use chrono::{DateTime, FixedOffset, SecondsFormat, TimeDelta};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 
 const API: &str = "https://api.linear.app/graphql";
 /// A debug build's stand-in for `API`, a loopback http(s) address only (`slack::loopback_root`).
@@ -41,15 +43,18 @@ pub fn set_api(url: Option<String>) {
 #[cfg(test)]
 static API_ROOT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
-async fn query(key: &str, query: &str, variables: Value) -> Result<Value, String> {
-    let response = reqwest::Client::new()
+async fn send(key: &str, query: &str, variables: Value) -> Result<reqwest::Response, reqwest::Error> {
+    reqwest::Client::new()
         .post(api())
         .timeout(crate::connectors::CALL_TIMEOUT)
         .header("Authorization", key)
         .json(&json!({ "query": query, "variables": variables }))
         .send()
         .await
-        .map_err(|e| format!("Linear unreachable: {e}"))?;
+}
+
+async fn query(key: &str, query: &str, variables: Value) -> Result<Value, String> {
+    let response = send(key, query, variables).await.map_err(|e| format!("Linear unreachable: {e}"))?;
     let status = response.status();
     let body: Value = response.json().await.map_err(|e| format!("Linear sent a bad response: {e}"))?;
     if let Some(message) = body["errors"][0]["message"].as_str() {
@@ -249,9 +254,237 @@ pub async fn labeled_issues(key: &str, label: &str, since: &str) -> Result<Vec<I
     labeled(&data, label, since)
 }
 
+/// A person in Linear: who made a change, or who an issue is assigned to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Person {
+    pub id: String,
+    pub name: String,
+}
+
+/// What a `Change` changed: the issue's status, or its assignee.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ChangeKind {
+    Status,
+    Assignee,
+}
+
+/// One change to an issue, read from its history: a status move, or an assignee change (an unassign too).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Change {
+    pub issue_id: String,
+    pub identifier: String,
+    pub title: String,
+    pub description: Option<String>,
+    pub url: String,
+    /// Linear's id for the history entry. An entry that changes both status and assignee gives two changes with this id.
+    pub history_id: String,
+    /// When the change happened, as Linear sent it (RFC 3339).
+    pub at: String,
+    pub actor: Person,
+    pub kind: ChangeKind,
+    pub from_state: Option<String>,
+    pub to_state: Option<String>,
+    pub from_assignee: Option<Person>,
+    pub to_assignee: Option<Person>,
+    pub team_key: String,
+    pub team_name: String,
+    pub project: Option<String>,
+}
+
+/// Which issues a read covers: a team and a project, each by name or key. Empty means any.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Scope {
+    pub team: String,
+    pub project: String,
+}
+
+/// The changes one read found. `read_to` is set only when the read stopped at its page cap: it is the newest
+/// `updatedAt` among the issues read, and every issue updated before it was read. When `read_to` is Some, the caller
+/// keeps its `since` and passes `read_to` as `from` to the next read. When it is None the read was complete, and the
+/// caller may move `since` on and drop `from`.
+#[derive(Debug, PartialEq)]
+pub struct Changes {
+    pub changes: Vec<Change>,
+    pub read_to: Option<String>,
+}
+
+const CHANGES_PAGES: usize = 4;
+
+/// The issues in a page of a changes read. A read is complete when a page holds fewer than this many, not when
+/// Linear's page flags say so: the flags for the older pages of `last` are not checked against the live API, and a
+/// read that trusted the wrong flag would stop at its first page and skip the rest. A full page asks for the next one.
+const CHANGES_PAGE: usize = 50;
+
+/// `last` with `before` reads from the oldest update forward: Linear sends each page oldest first, and the
+/// `endCursor` of a page, its newest issue, is the `before` of the page after it.
+fn changes_query(page: usize) -> String {
+    format!(
+        "query($filter: IssueFilter, $before: String) {{
+  issues(last: {page}, before: $before, orderBy: updatedAt, filter: $filter) {{
+    nodes {{ id identifier title description url updatedAt team {{ key name }} project {{ name }}
+      history(first: 20) {{ nodes {{ id createdAt actor {{ id name }} fromState {{ name }} toState {{ name }}
+        fromAssignee {{ id name }} toAssignee {{ id name }} }} }} }}
+    pageInfo {{ endCursor }}
+  }}
+}}"
+    )
+}
+
+/// The API's answer to a `viewer` query, by a hash of the API key: the map holds no key.
+static VIEWERS: std::sync::Mutex<BTreeMap<[u8; 32], String>> = std::sync::Mutex::new(BTreeMap::new());
+
+/// The changes to issues in `scope`, read from the oldest update up, four pages of `CHANGES_PAGE` issues at most.
+/// `since` (RFC 3339) is the history floor: a change counts when it was made after `since`, whichever issue it is on.
+/// `from` is the issue cursor. With None, the read takes the issues updated after `since`. With `Some(read_to)`
+/// it takes the issues updated at or after `read_to`, so a read that resumes a capped one reads the issues at its
+/// watermark again. Those come back with the same `history_id` and kind, so a caller drops a repeat by them.
+/// When the cap stops the read, `read_to` is the newest `updatedAt` among the issues read. If that is `from`
+/// itself, more issues than the cap share that millisecond and the read cannot get past it, so `read_to` is one
+/// millisecond later instead, and the caller's loop ends. The one known skip is a tie beyond the cap at a single
+/// millisecond: those issues are not read.
+pub async fn changes(key: &str, since: &str, from: Option<&str>, scope: &Scope) -> Result<Changes, String> {
+    read_changes(key, since, from, scope, CHANGES_PAGE).await
+}
+
+/// `changes` with `page` issues to a page. The tests read with a small page, so the four-page cap is reached with a
+/// few issues.
+async fn read_changes(key: &str, since: &str, from: Option<&str>, scope: &Scope, page: usize) -> Result<Changes, String> {
+    since_time(since)?;
+    let mut filter = match from {
+        Some(from) => {
+            since_time(from)?;
+            json!({ "updatedAt": { "gte": from } })
+        }
+        None => json!({ "updatedAt": { "gt": since } }),
+    };
+    let team = scope.team.trim();
+    if !team.is_empty() {
+        filter["team"] = json!({ "or": [{ "key": { "eqIgnoreCase": team } }, { "name": { "eqIgnoreCase": team } }] });
+    }
+    let project = scope.project.trim();
+    if !project.is_empty() {
+        filter["project"] = json!({ "name": { "eqIgnoreCase": project } });
+    }
+    let mut changes = Vec::new();
+    let mut read_to = None;
+    let mut before: Option<String> = None;
+    let query = changes_query(page);
+    for _ in 0..CHANGES_PAGES {
+        let data = strict_query(key, &query, json!({ "filter": filter.clone(), "before": before })).await?;
+        let issues = nodes(&data["issues"]).count();
+        changes.extend(changes_in(&data, since)?);
+        read_to = later_update(&data, read_to);
+        if issues < page {
+            return Ok(Changes { changes, read_to: None });
+        }
+        let end = data["issues"]["pageInfo"]["endCursor"].as_str().ok_or("Linear sent a page with no cursor")?;
+        before = Some(end.to_owned());
+    }
+    let read_to = read_to.ok_or("Linear sent a full read with no issues")?;
+    let read_to = match from {
+        Some(from) if since_time(from)? == since_time(&read_to)? => {
+            (since_time(from)? + TimeDelta::milliseconds(1)).to_rfc3339_opts(SecondsFormat::Millis, true)
+        }
+        _ => read_to,
+    };
+    Ok(Changes { changes, read_to: Some(read_to) })
+}
+
+/// `query`, but a failure is named by its class only. Linear's message and its response body are text
+/// from issues and people, so neither reaches the error.
+async fn strict_query(key: &str, query: &str, variables: Value) -> Result<Value, String> {
+    let response = send(key, query, variables).await.map_err(|_| "Linear did not answer".to_owned())?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("Linear answered {}", status.as_u16()));
+    }
+    let body: Value = response.json().await.map_err(|_| "Linear sent a bad response".to_owned())?;
+    if !body["errors"].is_null() {
+        return Err("Linear answered with a GraphQL error".into());
+    }
+    Ok(body["data"].clone())
+}
+
+fn since_time(since: &str) -> Result<DateTime<FixedOffset>, String> {
+    DateTime::parse_from_rfc3339(since).map_err(|e| format!("bad time {since:?}: {e}"))
+}
+
+fn text(v: &Value, key: &str) -> String {
+    v[key].as_str().unwrap_or_default().to_owned()
+}
+
+/// The changes in the issues of `data` made after `since`: each history entry that moves the status or
+/// changes the assignee, an unassign included. An entry that does both gives a status change and an assignee change.
+fn changes_in(data: &Value, since: &str) -> Result<Vec<Change>, String> {
+    let since = since_time(since)?;
+    let person = |v: &Value| (!v.is_null()).then(|| Person { id: text(v, "id"), name: text(v, "name") });
+    let name = |v: &Value| v["name"].as_str().map(str::to_owned);
+    let mut changes = Vec::new();
+    for issue in nodes(&data["issues"]) {
+        for entry in nodes(&issue["history"]) {
+            let after = entry["createdAt"].as_str().and_then(|t| DateTime::parse_from_rfc3339(t).ok()).is_some_and(|t| t > since);
+            if !after {
+                continue;
+            }
+            // An entry Linear sends without an actor, such as an automation's, has an empty one.
+            let base = Change {
+                issue_id: text(issue, "id"),
+                identifier: text(issue, "identifier"),
+                title: text(issue, "title"),
+                description: issue["description"].as_str().map(str::to_owned),
+                url: text(issue, "url"),
+                history_id: text(entry, "id"),
+                at: text(entry, "createdAt"),
+                actor: person(&entry["actor"]).unwrap_or(Person { id: String::new(), name: String::new() }),
+                kind: ChangeKind::Status,
+                from_state: None,
+                to_state: None,
+                from_assignee: None,
+                to_assignee: None,
+                team_key: text(&issue["team"], "key"),
+                team_name: text(&issue["team"], "name"),
+                project: issue["project"]["name"].as_str().map(str::to_owned),
+            };
+            if !entry["fromState"].is_null() || !entry["toState"].is_null() {
+                changes.push(Change { from_state: name(&entry["fromState"]), to_state: name(&entry["toState"]), ..base.clone() });
+            }
+            if !entry["fromAssignee"].is_null() || !entry["toAssignee"].is_null() {
+                let (from_assignee, to_assignee) = (person(&entry["fromAssignee"]), person(&entry["toAssignee"]));
+                changes.push(Change { kind: ChangeKind::Assignee, from_assignee, to_assignee, ..base.clone() });
+            }
+        }
+    }
+    Ok(changes)
+}
+
+/// The later of `read_to` and the newest `updatedAt` among the issues in `data`, as Linear sent it. It takes the
+/// maximum over every issue, so it does not depend on the order the issues come in.
+fn later_update(data: &Value, read_to: Option<String>) -> Option<String> {
+    nodes(&data["issues"])
+        .filter_map(|i| i["updatedAt"].as_str())
+        .chain(read_to.as_deref())
+        .filter_map(|t| DateTime::parse_from_rfc3339(t).ok().map(|at| (at, t)))
+        .max_by_key(|(at, _)| *at)
+        .map(|(_, t)| t.to_owned())
+}
+
+/// The id of the user the API key `key` belongs to. Read once per key, then kept in memory.
+pub async fn viewer_id(key: &str) -> Result<String, String> {
+    let digest: [u8; 32] = Sha256::digest(key.as_bytes()).into();
+    let cached = VIEWERS.lock().unwrap().get(&digest).cloned();
+    if let Some(id) = cached {
+        return Ok(id);
+    }
+    let data = query(key, "{ viewer { id } }", json!({})).await?;
+    let id = data["viewer"]["id"].as_str().filter(|id| !id.is_empty()).ok_or("Linear did not say who owns the API key")?;
+    VIEWERS.lock().unwrap().insert(digest, id.to_owned());
+    Ok(id.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     fn workspace() -> Value {
         json!({
@@ -372,5 +605,519 @@ mod tests {
             labeled(&json!({ "issues": { "nodes": [] } }), "AGENTIC", "yesterday"),
             Err("bad time \"yesterday\": premature end of input".into())
         );
+    }
+
+    const SINCE: &str = "2026-11-09T18:00:00.000Z";
+    const WATERMARK: &str = "2026-11-10T08:00:00.000Z";
+
+    fn person(id: &str, name: &str) -> Person {
+        Person { id: id.into(), name: name.into() }
+    }
+
+    /// ENG-1 with the given history entries, oldest first.
+    fn issue_with(history: Value) -> Value {
+        json!({ "issues": { "nodes": [{
+            "id": "i-1", "identifier": "ENG-1", "title": "Export 500s", "description": null,
+            "url": "https://linear.app/x/issue/ENG-1", "updatedAt": "2026-11-10T13:00:00.000Z",
+            "team": { "key": "ENG", "name": "Engineering" }, "project": { "name": "Exports" },
+            "history": { "nodes": history },
+        }] } })
+    }
+
+    /// The change to ENG-1 that `history_id` is, with no from or to fields set.
+    fn change(history_id: &str, at: &str, actor: Person, kind: ChangeKind) -> Change {
+        Change {
+            issue_id: "i-1".into(),
+            identifier: "ENG-1".into(),
+            title: "Export 500s".into(),
+            description: None,
+            url: "https://linear.app/x/issue/ENG-1".into(),
+            history_id: history_id.into(),
+            at: at.into(),
+            actor,
+            kind,
+            from_state: None,
+            to_state: None,
+            from_assignee: None,
+            to_assignee: None,
+            team_key: "ENG".into(),
+            team_name: "Engineering".into(),
+            project: Some("Exports".into()),
+        }
+    }
+
+    /// A history entry that changes nothing but a label: all four change fields are null, as Linear sends them.
+    fn label_only() -> Value {
+        json!({ "id": "h-label", "createdAt": "2026-11-10T13:00:00.000Z", "actor": { "id": "u-ana", "name": "Ana Souza" },
+            "fromState": null, "toState": null, "fromAssignee": null, "toAssignee": null })
+    }
+
+    #[test]
+    fn a_status_move_and_assignee_changes_after_since_are_reported_and_nothing_else() {
+        let found = changes_in(
+            &issue_with(json!([
+                { "id": "h-state", "createdAt": "2026-11-10T10:00:00.000Z", "actor": { "id": "u-ana", "name": "Ana Souza" },
+                  "fromState": { "name": "Todo" }, "toState": { "name": "Ready to Dev" }, "fromAssignee": null, "toAssignee": null },
+                { "id": "h-assign", "createdAt": "2026-11-10T11:00:00.000Z", "actor": { "id": "u-ana", "name": "Ana Souza" },
+                  "fromState": null, "toState": null, "fromAssignee": null, "toAssignee": { "id": "u-bruno", "name": "Bruno Lima" } },
+                { "id": "h-unassign", "createdAt": "2026-11-10T12:00:00.000Z", "actor": { "id": "u-bruno", "name": "Bruno Lima" },
+                  "fromState": null, "toState": null, "fromAssignee": { "id": "u-bruno", "name": "Bruno Lima" }, "toAssignee": null },
+                label_only(),
+                { "id": "h-old", "createdAt": "2026-11-09T10:00:00.000Z", "actor": { "id": "u-ana", "name": "Ana Souza" },
+                  "fromState": { "name": "Backlog" }, "toState": { "name": "Todo" }, "fromAssignee": null, "toAssignee": null },
+            ])),
+            SINCE,
+        );
+        assert_eq!(
+            found,
+            Ok(vec![
+                Change {
+                    from_state: Some("Todo".into()),
+                    to_state: Some("Ready to Dev".into()),
+                    ..change("h-state", "2026-11-10T10:00:00.000Z", person("u-ana", "Ana Souza"), ChangeKind::Status)
+                },
+                Change {
+                    to_assignee: Some(person("u-bruno", "Bruno Lima")),
+                    ..change("h-assign", "2026-11-10T11:00:00.000Z", person("u-ana", "Ana Souza"), ChangeKind::Assignee)
+                },
+                Change {
+                    from_assignee: Some(person("u-bruno", "Bruno Lima")),
+                    ..change("h-unassign", "2026-11-10T12:00:00.000Z", person("u-bruno", "Bruno Lima"), ChangeKind::Assignee)
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn an_entry_that_moves_status_and_changes_assignee_gives_two_changes() {
+        let found = changes_in(
+            &issue_with(json!([
+                { "id": "h-both", "createdAt": "2026-11-10T10:00:00.000Z", "actor": { "id": "u-bruno", "name": "Bruno Lima" },
+                  "fromState": { "name": "Ready to Dev" }, "toState": { "name": "In Progress" },
+                  "fromAssignee": null, "toAssignee": { "id": "u-ana", "name": "Ana Souza" } },
+            ])),
+            SINCE,
+        );
+        assert_eq!(
+            found,
+            Ok(vec![
+                Change {
+                    from_state: Some("Ready to Dev".into()),
+                    to_state: Some("In Progress".into()),
+                    ..change("h-both", "2026-11-10T10:00:00.000Z", person("u-bruno", "Bruno Lima"), ChangeKind::Status)
+                },
+                Change {
+                    to_assignee: Some(person("u-ana", "Ana Souza")),
+                    ..change("h-both", "2026-11-10T10:00:00.000Z", person("u-bruno", "Bruno Lima"), ChangeKind::Assignee)
+                },
+            ])
+        );
+    }
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(future)
+    }
+
+    /// Points Linear back at the real API when a test ends.
+    struct RestoreLinear;
+
+    impl Drop for RestoreLinear {
+        fn drop(&mut self) {
+            set_api(None);
+        }
+    }
+
+    /// The body of the one HTTP request on `stream`, read up to its Content-Length.
+    fn read_body(stream: &mut std::net::TcpStream) -> String {
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        while let Ok(n) = std::io::Read::read(stream, &mut chunk) {
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+            let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") else { continue };
+            let head = String::from_utf8_lossy(&buf[..end]).to_ascii_lowercase();
+            let length = head.lines().find_map(|l| l.strip_prefix("content-length:")).and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(0);
+            if buf.len() >= end + 4 + length {
+                return String::from_utf8_lossy(&buf[end + 4..]).into_owned();
+            }
+        }
+        String::new()
+    }
+
+    /// A loopback Linear for one test. `answer` gets each request's JSON body and returns the status and body
+    /// to send back. Every request body is kept in order, for the test to read.
+    fn stand_in(answer: impl Fn(&Value) -> (u16, String) + Send + 'static) -> (String, Arc<Mutex<Vec<Value>>>) {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let root = format!("http://{}/graphql", listener.local_addr().unwrap());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let kept = seen.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let body: Value = serde_json::from_str(&read_body(&mut stream)).unwrap_or(Value::Null);
+                kept.lock().unwrap().push(body.clone());
+                let (status, reply) = answer(&body);
+                let head = format!("HTTP/1.1 {status} stand-in\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", reply.len());
+                let _ = std::io::Write::write_all(&mut stream, format!("{head}{reply}").as_bytes());
+            }
+        });
+        (root, seen)
+    }
+
+    /// ENG-`k` updated at `at`, whose one history entry is a status move made then: Todo to In Progress by Ana.
+    fn moved_issue(k: u32, at: &str) -> Value {
+        json!({
+            "id": format!("i-{k}"), "identifier": format!("ENG-{k}"), "title": "t", "description": null, "url": "u",
+            "updatedAt": at, "team": { "key": "ENG", "name": "Engineering" }, "project": null,
+            "history": { "nodes": [{ "id": format!("h-{k}"), "createdAt": at, "actor": { "id": "u-ana", "name": "Ana Souza" },
+                "fromState": { "name": "Todo" }, "toState": { "name": "In Progress" }, "fromAssignee": null, "toAssignee": null }] },
+        })
+    }
+
+    /// Issues ENG-1 to ENG-`count`, newest updated first, as Linear sends them. ENG-k was updated at
+    /// 2026-11-10 k:00 UTC by one status move, which is its only history entry.
+    fn fixture(count: u32) -> Vec<Value> {
+        (1..=count).rev().map(|k| moved_issue(k, &format!("2026-11-10T{k:02}:00:00.000Z"))).collect()
+    }
+
+    /// Minute `k` after midnight UTC on 2026-11-10, when ENG-`k` is updated by `busy_fixture`. Hours would run out at 24.
+    fn minute_at(k: u32) -> String {
+        format!("2026-11-10T{:02}:{:02}:00.000Z", k / 60, k % 60)
+    }
+
+    /// Issues ENG-1 to ENG-`count`, newest updated first, each updated at its `minute_at` by one status move.
+    fn busy_fixture(count: u32) -> Vec<Value> {
+        (1..=count).rev().map(|k| moved_issue(k, &minute_at(k))).collect()
+    }
+
+    /// `answer`, with the page flags replaced by `false`: the stand-in never says a page has another one.
+    fn without_page_flags(answer: impl Fn(&Value) -> (u16, String) + Send + 'static) -> impl Fn(&Value) -> (u16, String) + Send + 'static {
+        move |request| {
+            let (status, body) = answer(request);
+            let Ok(mut reply) = serde_json::from_str::<Value>(&body) else { return (status, body) };
+            if let Some(info) = reply["data"]["issues"]["pageInfo"].as_object_mut() {
+                info.insert("hasPreviousPage".into(), json!(false));
+                info.insert("hasNextPage".into(), json!(false));
+            }
+            (status, reply.to_string())
+        }
+    }
+
+    /// The change `fixture` makes to ENG-`k`: its one status move.
+    fn moved(k: u32) -> Change {
+        moved_at(k, &format!("2026-11-10T{k:02}:00:00.000Z"))
+    }
+
+    /// The change `moved_issue(k, at)` holds.
+    fn moved_at(k: u32, at: &str) -> Change {
+        Change {
+            issue_id: format!("i-{k}"),
+            identifier: format!("ENG-{k}"),
+            title: "t".into(),
+            description: None,
+            url: "u".into(),
+            history_id: format!("h-{k}"),
+            at: at.into(),
+            actor: person("u-ana", "Ana Souza"),
+            kind: ChangeKind::Status,
+            from_state: Some("Todo".into()),
+            to_state: Some("In Progress".into()),
+            from_assignee: None,
+            to_assignee: None,
+            team_key: "ENG".into(),
+            team_name: "Engineering".into(),
+            project: None,
+        }
+    }
+
+    /// The changes of several reads, each once. A read from a watermark returns the issues at it again, so a
+    /// change is kept by its `history_id` and kind, the way a caller drops a repeat.
+    fn union(reads: Vec<Vec<Change>>) -> Vec<Change> {
+        let mut out: Vec<Change> = Vec::new();
+        for change in reads.into_iter().flatten() {
+            if !out.iter().any(|c| c.history_id == change.history_id && c.kind == change.kind) {
+                out.push(change);
+            }
+        }
+        out
+    }
+
+    /// Two issues to a page, the most a stand-in page holds.
+    const PAGE: usize = 2;
+
+    /// Linear's `issues` over `issues` (newest updated first), read as Relay pages. The `updatedAt` filter is `gte` or
+    /// `gt`, compared as text, which holds for the fixtures' UTC times with milliseconds. `last` with `before` reads
+    /// the issues just before the `before` cursor, a cursor being an issue's identifier; with no `before` the
+    /// read starts at the oldest update. A page holds its issues oldest first, with `endCursor` its newest one,
+    /// which is the `before` of the next page. `hasPreviousPage` says the newer side has more issues.
+    fn linear_pages(issues: Vec<Value>, served: usize) -> impl Fn(&Value) -> (u16, String) + Send + 'static {
+        move |request| {
+            let bound = &request["variables"]["filter"]["updatedAt"];
+            let live: Vec<&Value> = issues
+                .iter()
+                .filter(|i| {
+                    let at = i["updatedAt"].as_str().unwrap_or_default();
+                    match (bound["gte"].as_str(), bound["gt"].as_str()) {
+                        (Some(from), _) => at >= from,
+                        (None, Some(since)) => at > since,
+                        (None, None) => true,
+                    }
+                })
+                .collect();
+            let asked = request["query"]
+                .as_str()
+                .and_then(|q| q.split("last: ").nth(1))
+                .and_then(|t| t.split(|c: char| !c.is_ascii_digit()).next())
+                .and_then(|n| n.parse::<usize>().ok())
+                .unwrap_or(50);
+            let end = match request["variables"]["before"].as_str() {
+                None => live.len(),
+                Some(cursor) => match live.iter().position(|i| i["identifier"] == cursor) {
+                    Some(at) => at,
+                    None => return (200, json!({ "errors": [{ "message": "no such cursor" }] }).to_string()),
+                },
+            };
+            let start = end.saturating_sub(asked.min(served));
+            let nodes: Vec<&Value> = live[start..end].iter().rev().copied().collect();
+            let info = json!({
+                "hasPreviousPage": start > 0,
+                "startCursor": nodes.first().map(|i| i["identifier"].clone()),
+                "endCursor": nodes.last().map(|i| i["identifier"].clone()),
+            });
+            (200, json!({ "data": { "issues": { "nodes": nodes, "pageInfo": info } } }).to_string())
+        }
+    }
+
+    #[test]
+    fn a_read_stops_at_four_pages_and_names_the_newest_update_it_read() {
+        let _api = crate::slack::lock_api();
+        let _restore = RestoreLinear;
+        let (root, seen) = stand_in(linear_pages(fixture(12), PAGE));
+        set_api(Some(root));
+        let read = block_on(read_changes("lin-cap", SINCE, None, &Scope::default(), PAGE)).unwrap();
+        assert_eq!(seen.lock().unwrap().len(), 4, "the read asks for four pages and no more");
+        assert_eq!(read.read_to.as_deref(), Some("2026-11-10T08:00:00.000Z"), "the newest updatedAt read is the watermark");
+        assert_eq!(read.changes, (1..=8).map(moved).collect::<Vec<_>>(), "the four oldest pages, oldest first");
+    }
+
+    #[test]
+    fn the_read_from_the_watermark_takes_the_rest_and_no_change_is_missing() {
+        let _api = crate::slack::lock_api();
+        let _restore = RestoreLinear;
+        let (root, seen) = stand_in(linear_pages(fixture(12), PAGE));
+        set_api(Some(root));
+        let first = block_on(read_changes("lin-union-1", SINCE, None, &Scope::default(), PAGE)).unwrap();
+        let watermark = first.read_to.clone().expect("a capped read names its watermark");
+        let second = block_on(read_changes("lin-union-2", SINCE, Some(&watermark), &Scope::default(), PAGE)).unwrap();
+        assert_eq!(second.read_to, None, "the three pages left fit under the cap");
+        assert_eq!(seen.lock().unwrap().len(), 7, "four requests for the capped read, then three");
+        let again: Vec<&str> = second.changes.iter().map(|c| c.identifier.as_str()).collect();
+        assert_eq!(again, ["ENG-8", "ENG-9", "ENG-10", "ENG-11", "ENG-12"], "ENG-8 is at the watermark, so it comes again");
+        assert_eq!(union(vec![first.changes, second.changes]), (1..=12).map(moved).collect::<Vec<_>>(), "every change once, oldest first");
+    }
+
+    #[test]
+    fn a_read_of_120_issues_in_pages_of_50_is_complete_though_no_page_flag_says_so() {
+        let _api = crate::slack::lock_api();
+        let _restore = RestoreLinear;
+        // Pages of 50, 50 and 20. Every page says there is no previous and no next page: only the page size says more follow.
+        let (root, seen) = stand_in(without_page_flags(linear_pages(busy_fixture(120), 50)));
+        set_api(Some(root));
+        let read = block_on(changes("lin-120", SINCE, None, &Scope::default())).unwrap();
+        assert_eq!(seen.lock().unwrap().len(), 3, "a full page asks for the next one: 50, then 50, then 20, which is short");
+        assert_eq!(read.read_to, None, "the short last page makes the read complete");
+        assert_eq!(read.changes.len(), 120, "the changes of all 120 issues are read");
+        assert_eq!(read.changes, (1..=120).map(|k| moved_at(k, &minute_at(k))).collect::<Vec<_>>(), "oldest first, none skipped");
+    }
+
+    #[test]
+    fn a_read_of_exactly_50_issues_asks_once_more_and_is_complete() {
+        let _api = crate::slack::lock_api();
+        let _restore = RestoreLinear;
+        let (root, seen) = stand_in(without_page_flags(linear_pages(busy_fixture(50), 50)));
+        set_api(Some(root));
+        let read = block_on(changes("lin-50", SINCE, None, &Scope::default())).unwrap();
+        assert_eq!(seen.lock().unwrap().len(), 2, "the first page is full, so the read asks again and gets an empty page");
+        assert_eq!(read.read_to, None, "an empty page after a full one makes the read complete");
+        assert_eq!(read.changes, (1..=50).map(|k| moved_at(k, &minute_at(k))).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_read_that_ends_before_the_cap_names_no_watermark() {
+        let _api = crate::slack::lock_api();
+        let _restore = RestoreLinear;
+        let (root, seen) = stand_in(linear_pages(fixture(4), PAGE));
+        set_api(Some(root));
+        let read = block_on(read_changes("lin-short", SINCE, None, &Scope::default(), PAGE)).unwrap();
+        assert_eq!(seen.lock().unwrap().len(), 3, "a full page asks for the next one, and the third page is empty, so the read is complete");
+        assert_eq!(read.read_to, None);
+    }
+
+    #[test]
+    fn a_429_a_500_and_a_graphql_error_are_named_by_class_only() {
+        let _api = crate::slack::lock_api();
+        let _restore = RestoreLinear;
+        let (root, _) = stand_in(|_| (429, json!({ "errors": [{ "message": "slow down for Export 500s" } ] }).to_string()));
+        set_api(Some(root));
+        assert_eq!(block_on(read_changes("lin-429", SINCE, None, &Scope::default(), PAGE)), Err("Linear answered 429".into()));
+
+        let pages = linear_pages(fixture(12), PAGE);
+        let (root, _) = stand_in(move |request| if request["variables"]["before"].is_null() { pages(request) } else { (500, "upstream text".into()) });
+        set_api(Some(root));
+        assert_eq!(block_on(read_changes("lin-500", SINCE, None, &Scope::default(), PAGE)), Err("Linear answered 500".into()), "a failed later page is an error, not a partial read");
+
+        let (root, _) = stand_in(|_| (200, json!({ "errors": [{ "message": "invalid filter for Ana Souza" }] }).to_string()));
+        set_api(Some(root));
+        assert_eq!(block_on(read_changes("lin-gql", SINCE, None, &Scope::default(), PAGE)), Err("Linear answered with a GraphQL error".into()));
+    }
+
+    #[test]
+    fn the_scope_and_the_watermark_go_into_the_filter() {
+        let _api = crate::slack::lock_api();
+        let _restore = RestoreLinear;
+        let (root, seen) = stand_in(linear_pages(fixture(2), PAGE));
+        set_api(Some(root));
+        let scope = Scope { team: " ENG ".into(), project: "Exports".into() };
+        block_on(read_changes("lin-scope", SINCE, None, &scope, PAGE)).unwrap();
+        block_on(read_changes("lin-scope", SINCE, None, &Scope::default(), PAGE)).unwrap();
+        block_on(read_changes("lin-scope", SINCE, Some(WATERMARK), &Scope::default(), PAGE)).unwrap();
+        // Each read here is two requests, a full page of two issues and then an empty one, so the reads' first requests are 0, 2 and 4.
+        let sent = seen.lock().unwrap().clone();
+        assert_eq!(
+            sent[0]["variables"]["filter"],
+            json!({
+                "updatedAt": { "gt": SINCE },
+                "team": { "or": [{ "key": { "eqIgnoreCase": "ENG" } }, { "name": { "eqIgnoreCase": "ENG" } }] },
+                "project": { "name": { "eqIgnoreCase": "Exports" } },
+            })
+        );
+        assert_eq!(sent[2]["variables"]["filter"], json!({ "updatedAt": { "gt": SINCE } }), "an empty scope filters by time alone");
+        assert_eq!(sent[4]["variables"]["filter"], json!({ "updatedAt": { "gte": WATERMARK } }), "a read from a watermark takes the issues at it, too");
+    }
+
+    #[test]
+    fn a_bad_since_is_an_error_before_any_request() {
+        let _api = crate::slack::lock_api();
+        let _restore = RestoreLinear;
+        let (root, seen) = stand_in(linear_pages(fixture(2), PAGE));
+        set_api(Some(root));
+        assert_eq!(
+            block_on(read_changes("lin-since", "yesterday", None, &Scope::default(), PAGE)),
+            Err("bad time \"yesterday\": premature end of input".into())
+        );
+        assert!(block_on(read_changes("lin-from", SINCE, Some("soon"), &Scope::default(), PAGE)).is_err(), "a bad watermark is an error too");
+        assert_eq!(seen.lock().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn a_change_before_the_watermark_is_read_from_the_issue_that_holds_it() {
+        let _api = crate::slack::lock_api();
+        let _restore = RestoreLinear;
+        // ENG-9 is unread by the capped read: its last update, a label edit at 09:00, is after the watermark at 08:00.
+        // Its status move at 05:30 is before the watermark, so a read whose history floor is the watermark loses it.
+        let held = json!({
+            "id": "i-9", "identifier": "ENG-9", "title": "t", "description": null, "url": "u",
+            "updatedAt": "2026-11-10T09:00:00.000Z", "team": { "key": "ENG", "name": "Engineering" }, "project": null,
+            "history": { "nodes": [
+                { "id": "h-9", "createdAt": "2026-11-10T05:30:00.000Z", "actor": { "id": "u-ana", "name": "Ana Souza" },
+                  "fromState": { "name": "Todo" }, "toState": { "name": "In Progress" }, "fromAssignee": null, "toAssignee": null },
+                { "id": "h-9-label", "createdAt": "2026-11-10T09:00:00.000Z", "actor": { "id": "u-ana", "name": "Ana Souza" },
+                  "fromState": null, "toState": null, "fromAssignee": null, "toAssignee": null },
+            ] },
+        });
+        let mut issues = vec![held];
+        issues.extend(fixture(8));
+        let (root, seen) = stand_in(linear_pages(issues, PAGE));
+        set_api(Some(root));
+        let first = block_on(read_changes("lin-held-1", SINCE, None, &Scope::default(), PAGE)).unwrap();
+        assert_eq!(first.read_to.as_deref(), Some(WATERMARK), "the cap reads ENG-1 to ENG-8 and names their newest update");
+        assert_eq!(first.changes, (1..=8).map(moved).collect::<Vec<_>>());
+
+        let second = block_on(read_changes("lin-held-2", SINCE, first.read_to.as_deref(), &Scope::default(), PAGE)).unwrap();
+        assert_eq!(second.read_to, None, "ENG-8 and ENG-9 fit under the cap");
+        let again: Vec<&str> = second.changes.iter().map(|c| c.history_id.as_str()).collect();
+        assert_eq!(again, ["h-8", "h-9"], "ENG-8 comes again at the watermark; ENG-9's status move is read though it is before it");
+        let status = &second.changes[1];
+        assert_eq!(status.identifier, "ENG-9");
+        assert_eq!(status.from_state.as_deref(), Some("Todo"));
+        assert_eq!(status.to_state.as_deref(), Some("In Progress"));
+        assert_eq!(status.actor, person("u-ana", "Ana Souza"));
+        assert_eq!(status.at, "2026-11-10T05:30:00.000Z");
+        assert_eq!(
+            union(vec![first.changes, second.changes]),
+            (1..=8).map(moved).chain([moved_at(9, "2026-11-10T05:30:00.000Z")]).collect::<Vec<_>>(),
+            "every change in the fixture, once, oldest first"
+        );
+        assert_eq!(seen.lock().unwrap().len(), 6, "four requests for the capped read, then two for the next: a full page, then an empty one");
+    }
+
+    #[test]
+    fn an_issue_updated_at_the_watermark_is_read_by_the_next_read() {
+        let _api = crate::slack::lock_api();
+        let _restore = RestoreLinear;
+        // ENG-9 and ENG-8 are both updated at the watermark. The cap reads ENG-8 and leaves ENG-9 for the next read.
+        let mut issues = vec![moved_issue(9, WATERMARK)];
+        issues.extend(fixture(8));
+        let (root, seen) = stand_in(linear_pages(issues, PAGE));
+        set_api(Some(root));
+        let first = block_on(read_changes("lin-tie-1", SINCE, None, &Scope::default(), PAGE)).unwrap();
+        assert_eq!(first.read_to.as_deref(), Some(WATERMARK));
+        assert_eq!(first.changes, (1..=8).map(moved).collect::<Vec<_>>());
+
+        let second = block_on(read_changes("lin-tie-2", SINCE, first.read_to.as_deref(), &Scope::default(), PAGE)).unwrap();
+        assert_eq!(second.read_to, None);
+        assert_eq!(
+            second.changes,
+            vec![moved(8), moved_at(9, WATERMARK)],
+            "ENG-9, updated at exactly the watermark and unread by the cap, is in the next read"
+        );
+        assert_eq!(seen.lock().unwrap().len(), 6, "four requests for the capped read, then two for the next: a full page, then an empty one");
+    }
+
+    #[test]
+    fn a_watermark_that_more_issues_share_moves_one_millisecond_on() {
+        let _api = crate::slack::lock_api();
+        let _restore = RestoreLinear;
+        // Ten issues share the watermark, more than the cap reads. Without the step past it the caller would read
+        // the same watermark forever, so the caller's loop here is bounded: it fails rather than hangs.
+        let issues: Vec<Value> = (1..=10).rev().map(|k| moved_issue(k, WATERMARK)).collect();
+        let (root, seen) = stand_in(linear_pages(issues, PAGE));
+        set_api(Some(root));
+        let mut from = Some(WATERMARK.to_owned());
+        let mut found = Vec::new();
+        let mut reads = 0;
+        while let Some(watermark) = from.take() {
+            reads += 1;
+            assert!(reads <= 3, "the reads must end; this one is read number {reads} from the same watermark");
+            let read = block_on(read_changes("lin-stall", SINCE, Some(&watermark), &Scope::default(), PAGE)).unwrap();
+            found.extend(read.changes);
+            from = read.read_to;
+            if reads == 1 {
+                assert_eq!(from.as_deref(), Some("2026-11-10T08:00:00.001Z"), "the first read steps one millisecond past the shared update");
+            }
+        }
+        assert_eq!(reads, 2, "the second read starts past the shared millisecond and finds nothing");
+        assert_eq!(
+            found,
+            (1..=8).map(|k| moved_at(k, WATERMARK)).collect::<Vec<_>>(),
+            "ENG-9 and ENG-10 share the millisecond beyond the cap: the one known skip"
+        );
+        assert_eq!(seen.lock().unwrap().len(), 5, "four requests for the capped read, one for the next");
+    }
+
+    #[test]
+    fn the_viewer_is_read_once_per_key() {
+        let _api = crate::slack::lock_api();
+        let _restore = RestoreLinear;
+        let (root, seen) = stand_in(|_| (200, json!({ "data": { "viewer": { "id": "u-viewer" } } }).to_string()));
+        set_api(Some(root));
+        assert_eq!(block_on(viewer_id("lin-viewer-once")), Ok("u-viewer".into()));
+        assert_eq!(block_on(viewer_id("lin-viewer-once")), Ok("u-viewer".into()));
+        assert_eq!(seen.lock().unwrap().len(), 1, "a second call with the same key is answered from memory");
+        assert_eq!(block_on(viewer_id("lin-viewer-other")), Ok("u-viewer".into()));
+        assert_eq!(seen.lock().unwrap().len(), 2, "a new key is read");
     }
 }

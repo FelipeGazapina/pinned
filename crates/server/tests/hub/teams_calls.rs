@@ -1,11 +1,11 @@
 //! Teams: a bot in a team box asks people, the first answer wins, an unanswered call escalates
 //! to the owner and then gives up, and a person takes over, gives back or stops the run.
 //!
-//! Members, groups, bots and runs are written with SQL (and `teams::db::insert_run`): their own
+//! Members, groups, bots and runs are written with SQL: their own
 //! ops belong to other units and may still be stubs here.
 
 use super::*;
-use pinned_core::teams::{Run as TeamRun, RunState, Situation, TeamOp, TeamPolicy};
+use pinned_core::teams::{Situation, TeamOp, TeamPolicy};
 use pinned_server::teams;
 use uuid::Uuid;
 
@@ -146,21 +146,16 @@ impl TeamBox {
     /// A run of the bot working in this box.
     pub(super) fn run(&self, hub: &TestHub) -> Uuid {
         let id = Uuid::new_v4();
-        let run = TeamRun {
-            id: id.to_string(),
-            workflow: self.workflow.clone(),
-            state: RunState::Working,
-            controller: None,
-            cost_usd: 0.0,
-            active_secs: 0, waiting_secs: 0,
-            started_at: 0,
-            ended_at: None,
-            outcome: None,
-            started_by: self.owner.id.to_string(),
-        };
-        hub.runtime.block_on(teams::db::insert_run(&hub.hub().db, self.team, &run, Some(&self.machine))).unwrap();
-        // The box is held by this run from its insert, so the holding run can go.
-        sql(hub, &format!("delete from team_runs where id = '{}'", self.holding));
+        // The holding run gives way to this run in one transaction: a bot has one live run at a time,
+        // and no tick sees the box between the two with no run holding it. The row is the one
+        // `teams::db::insert_run` writes.
+        sql(hub, &format!(
+            "begin;
+             delete from team_runs where id = '{}';
+             insert into team_runs (id, team, workflow, box, started_by, state) values ('{id}', '{}', '{}', '{}', to_jsonb('{}'::text), 'working');
+             commit",
+            self.holding, self.team, self.workflow, self.machine, self.owner.id
+        ));
         id
     }
 

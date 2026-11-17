@@ -18,7 +18,7 @@ body[data-page="needs-you"] #page-view .page-head .range { display: block; }
 .ny-card[data-kind="shown"] .agent-once button { height: 44px; padding: 0 14px; border-radius: 12px; }
 .ny-head { display: flex; align-items: center; gap: 10px; min-width: 0; font-size: 13px; color: var(--g-side-muted); }
 .ny-kind { flex: none; color: var(--g-warning-fg); font-weight: 600; }
-.ny-card:is([data-kind="limit"], [data-kind="failed"]) .ny-kind { color: color-mix(in srgb, var(--g-error) 62%, var(--g-ink)); }
+.ny-card:is([data-kind="limit"], [data-kind="failed"], [data-kind="stopped"]) .ny-kind { color: color-mix(in srgb, var(--g-error) 62%, var(--g-ink)); }
 .ny-card[data-kind="limit"] .status-glyph { border-radius: 2px; }
 .ny-where { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ny-when { flex: none; font-variant-numeric: tabular-nums; }
@@ -27,7 +27,7 @@ body[data-page="needs-you"] #page-view .page-head .range { display: block; }
 .ny-texts .ny-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ny-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--g-side-muted); }
 .ny-line { margin: 0; font-size: 15px; color: var(--g-side-muted); overflow-wrap: anywhere; }
-.ny-card[data-kind="failed"] .ny-line { color: var(--g-fg); }
+.ny-card:is([data-kind="failed"], [data-kind="stopped"]) .ny-line { color: var(--g-fg); }
 .ny-card pre { margin: 0; max-height: 9.8em; overflow: auto; padding: 9px 11px; border-radius: 10px; background: var(--g-canvas); color: var(--g-code-fg);
   font: 13px/1.4 var(--g-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
 .ny-note { margin: 0; font-size: 13px; color: var(--g-side-muted); }

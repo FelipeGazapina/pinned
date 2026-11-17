@@ -227,6 +227,21 @@ async function refreshSyncStopped(machine) {
   if (settingsOpen() && page === "machines" && !machinesUi.renaming) showMachinesPage();
 }
 
+/** Asks a machine whether the account's size limit is stopping its sync, so the sidebar's notice shows and clears. */
+async function refreshSyncLimit(machine) {
+  const m = machines.get(machine);
+  if (!m) return;
+  const limit = await callOn(machine, { cmd: "sync_limit" }).catch(() => m.syncLimit ?? null);
+  if (machines.get(machine) !== m || m.syncLimit === limit) return;
+  m.syncLimit = limit;
+  render();
+}
+
+function refreshSyncLimits() {
+  for (const [id, m] of machines) if (id === LOCAL ? m.hubView : m.view?.online) refreshSyncLimit(id);
+}
+visibleInterval(refreshSyncLimits, 60 * 1000);
+
 /** Opens a tab running the CLI's login for the account and shows it. */
 async function signIn(machine, account) {
   const id = await callOn(machine, { cmd: "sign_in", account });
