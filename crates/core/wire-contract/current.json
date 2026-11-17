@@ -26323,6 +26323,17 @@
                 "format": "uint64",
                 "minimum": 0
               },
+              "pressure": {
+                "description": "How the OS rates memory pressure. None where the OS gives no reading (Linux, boxes).",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Pressure"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "disk_total_mb": {
                 "type": [
                   "integer",
@@ -26340,6 +26351,15 @@
                 "minimum": 0
               }
             }
+          },
+          "Pressure": {
+            "description": "How the OS rates memory pressure, as macOS reports it.",
+            "type": "string",
+            "enum": [
+              "normal",
+              "warn",
+              "critical"
+            ]
           },
           "AccountState": {
             "description": "One agent account of a machine, as far as a caller needs to choose it.",
@@ -35685,6 +35705,17 @@
                 "format": "uint64",
                 "minimum": 0
               },
+              "pressure": {
+                "description": "How the OS rates memory pressure. None where the OS gives no reading (Linux, boxes).",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Pressure"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "disk_total_mb": {
                 "type": [
                   "integer",
@@ -35702,6 +35733,15 @@
                 "minimum": 0
               }
             }
+          },
+          "Pressure": {
+            "description": "How the OS rates memory pressure, as macOS reports it.",
+            "type": "string",
+            "enum": [
+              "normal",
+              "warn",
+              "critical"
+            ]
           },
           "AccountState": {
             "description": "One agent account of a machine, as far as a caller needs to choose it.",
@@ -49957,6 +49997,17 @@
                 "format": "uint64",
                 "minimum": 0
               },
+              "pressure": {
+                "description": "How the OS rates memory pressure. None where the OS gives no reading (Linux, boxes).",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Pressure"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "disk_total_mb": {
                 "type": [
                   "integer",
@@ -49974,6 +50025,15 @@
                 "minimum": 0
               }
             }
+          },
+          "Pressure": {
+            "description": "How the OS rates memory pressure, as macOS reports it.",
+            "type": "string",
+            "enum": [
+              "normal",
+              "warn",
+              "critical"
+            ]
           },
           "AccountState": {
             "description": "One agent account of a machine, as far as a caller needs to choose it.",
@@ -50256,6 +50316,17 @@
                 "format": "uint64",
                 "minimum": 0
               },
+              "pressure": {
+                "description": "How the OS rates memory pressure. None where the OS gives no reading (Linux, boxes).",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Pressure"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "disk_total_mb": {
                 "type": [
                   "integer",
@@ -50273,6 +50344,15 @@
                 "minimum": 0
               }
             }
+          },
+          "Pressure": {
+            "description": "How the OS rates memory pressure, as macOS reports it.",
+            "type": "string",
+            "enum": [
+              "normal",
+              "warn",
+              "critical"
+            ]
           },
           "AccountState": {
             "description": "One agent account of a machine, as far as a caller needs to choose it.",
@@ -51278,6 +51358,17 @@
                 "format": "uint64",
                 "minimum": 0
               },
+              "pressure": {
+                "description": "How the OS rates memory pressure. None where the OS gives no reading (Linux, boxes).",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Pressure"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "disk_total_mb": {
                 "type": [
                   "integer",
@@ -51295,6 +51386,15 @@
                 "minimum": 0
               }
             }
+          },
+          "Pressure": {
+            "description": "How the OS rates memory pressure, as macOS reports it.",
+            "type": "string",
+            "enum": [
+              "normal",
+              "warn",
+              "critical"
+            ]
           },
           "Waiting": {
             "description": "A tab that waits on the user.",
@@ -51911,6 +52011,17 @@
                 "format": "uint64",
                 "minimum": 0
               },
+              "pressure": {
+                "description": "How the OS rates memory pressure. None where the OS gives no reading (Linux, boxes).",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Pressure"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "disk_total_mb": {
                 "type": [
                   "integer",
@@ -51928,6 +52039,15 @@
                 "minimum": 0
               }
             }
+          },
+          "Pressure": {
+            "description": "How the OS rates memory pressure, as macOS reports it.",
+            "type": "string",
+            "enum": [
+              "normal",
+              "warn",
+              "critical"
+            ]
           },
           "Waiting": {
             "description": "A tab that waits on the user.",
@@ -52674,6 +52794,17 @@
                 "format": "uint64",
                 "minimum": 0
               },
+              "pressure": {
+                "description": "How the OS rates memory pressure. None where the OS gives no reading (Linux, boxes).",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Pressure"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "disk_total_mb": {
                 "type": [
                   "integer",
@@ -52691,6 +52822,15 @@
                 "minimum": 0
               }
             }
+          },
+          "Pressure": {
+            "description": "How the OS rates memory pressure, as macOS reports it.",
+            "type": "string",
+            "enum": [
+              "normal",
+              "warn",
+              "critical"
+            ]
           },
           "AccountState": {
             "description": "One agent account of a machine, as far as a caller needs to choose it.",
@@ -52997,6 +53137,17 @@
                 "format": "uint64",
                 "minimum": 0
               },
+              "pressure": {
+                "description": "How the OS rates memory pressure. None where the OS gives no reading (Linux, boxes).",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Pressure"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "disk_total_mb": {
                 "type": [
                   "integer",
@@ -53014,6 +53165,15 @@
                 "minimum": 0
               }
             }
+          },
+          "Pressure": {
+            "description": "How the OS rates memory pressure, as macOS reports it.",
+            "type": "string",
+            "enum": [
+              "normal",
+              "warn",
+              "critical"
+            ]
           },
           "AccountState": {
             "description": "One agent account of a machine, as far as a caller needs to choose it.",
@@ -53725,6 +53885,17 @@
                 "format": "uint64",
                 "minimum": 0
               },
+              "pressure": {
+                "description": "How the OS rates memory pressure. None where the OS gives no reading (Linux, boxes).",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Pressure"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "disk_total_mb": {
                 "type": [
                   "integer",
@@ -53742,6 +53913,15 @@
                 "minimum": 0
               }
             }
+          },
+          "Pressure": {
+            "description": "How the OS rates memory pressure, as macOS reports it.",
+            "type": "string",
+            "enum": [
+              "normal",
+              "warn",
+              "critical"
+            ]
           },
           "AccountState": {
             "description": "One agent account of a machine, as far as a caller needs to choose it.",
@@ -54039,6 +54219,17 @@
                 "format": "uint64",
                 "minimum": 0
               },
+              "pressure": {
+                "description": "How the OS rates memory pressure. None where the OS gives no reading (Linux, boxes).",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Pressure"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "disk_total_mb": {
                 "type": [
                   "integer",
@@ -54056,6 +54247,15 @@
                 "minimum": 0
               }
             }
+          },
+          "Pressure": {
+            "description": "How the OS rates memory pressure, as macOS reports it.",
+            "type": "string",
+            "enum": [
+              "normal",
+              "warn",
+              "critical"
+            ]
           },
           "AccountState": {
             "description": "One agent account of a machine, as far as a caller needs to choose it.",
@@ -64903,6 +65103,17 @@
                 "format": "uint64",
                 "minimum": 0
               },
+              "pressure": {
+                "description": "How the OS rates memory pressure. None where the OS gives no reading (Linux, boxes).",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Pressure"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "disk_total_mb": {
                 "type": [
                   "integer",
@@ -64920,6 +65131,15 @@
                 "minimum": 0
               }
             }
+          },
+          "Pressure": {
+            "description": "How the OS rates memory pressure, as macOS reports it.",
+            "type": "string",
+            "enum": [
+              "normal",
+              "warn",
+              "critical"
+            ]
           },
           "AccountState": {
             "description": "One agent account of a machine, as far as a caller needs to choose it.",
@@ -69682,6 +69902,17 @@
                 "format": "uint64",
                 "minimum": 0
               },
+              "pressure": {
+                "description": "How the OS rates memory pressure. None where the OS gives no reading (Linux, boxes).",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Pressure"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "disk_total_mb": {
                 "type": [
                   "integer",
@@ -69699,6 +69930,15 @@
                 "minimum": 0
               }
             }
+          },
+          "Pressure": {
+            "description": "How the OS rates memory pressure, as macOS reports it.",
+            "type": "string",
+            "enum": [
+              "normal",
+              "warn",
+              "critical"
+            ]
           },
           "AccountState": {
             "description": "One agent account of a machine, as far as a caller needs to choose it.",
@@ -74255,6 +74495,17 @@
                 "format": "uint64",
                 "minimum": 0
               },
+              "pressure": {
+                "description": "How the OS rates memory pressure. None where the OS gives no reading (Linux, boxes).",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Pressure"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "disk_total_mb": {
                 "type": [
                   "integer",
@@ -74272,6 +74523,15 @@
                 "minimum": 0
               }
             }
+          },
+          "Pressure": {
+            "description": "How the OS rates memory pressure, as macOS reports it.",
+            "type": "string",
+            "enum": [
+              "normal",
+              "warn",
+              "critical"
+            ]
           },
           "AccountState": {
             "description": "One agent account of a machine, as far as a caller needs to choose it.",
@@ -79850,6 +80110,17 @@
                 "format": "uint64",
                 "minimum": 0
               },
+              "pressure": {
+                "description": "How the OS rates memory pressure. None where the OS gives no reading (Linux, boxes).",
+                "anyOf": [
+                  {
+                    "$ref": "#/$defs/Pressure"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "disk_total_mb": {
                 "type": [
                   "integer",
@@ -79867,6 +80138,15 @@
                 "minimum": 0
               }
             }
+          },
+          "Pressure": {
+            "description": "How the OS rates memory pressure, as macOS reports it.",
+            "type": "string",
+            "enum": [
+              "normal",
+              "warn",
+              "critical"
+            ]
           },
           "AccountState": {
             "description": "One agent account of a machine, as far as a caller needs to choose it.",
