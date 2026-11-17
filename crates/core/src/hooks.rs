@@ -853,7 +853,11 @@ mod tests {
         assert_eq!(settings["permissions"]["deny"], serde_json::json!(["Bash", "NotebookEdit"]));
         assert_eq!(
             settings["hooks"]["PreToolUse"],
-            serde_json::json!([{ "matcher": "Read|Write|Edit|MultiEdit|Grep|Glob|LS", "hooks": [{ "type": "command", "command": "'/Applications/pinned.app/Contents/MacOS/pinned' guard" }] }])
+            serde_json::json!([
+                { "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit", "hooks": [{ "type": "command", "command": "'/Applications/pinned.app/Contents/MacOS/pinned' team-guard" }] },
+                { "matcher": "Read|Write|Edit|MultiEdit|Grep|Glob|LS", "hooks": [{ "type": "command", "command": "'/Applications/pinned.app/Contents/MacOS/pinned' guard" }] },
+            ]),
+            "the owner's files stay blocked here too"
         );
         assert_eq!(settings["hooks"]["Stop"], serde_json::json!([{ "hooks": [{ "type": "command", "command": "'/Applications/pinned.app/Contents/MacOS/pinned' hook done" }] }]), "its turns still report");
         assert_eq!(settings["permissions"]["allow"], serde_json::json!(reminders::permissions()));

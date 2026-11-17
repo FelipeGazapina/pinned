@@ -381,14 +381,63 @@ mod tests {
         }
     }
 
+    fn owners(name: &str) -> String {
+        format!("{name} is the owner's file, and an agent may not change it: ask the user to make this change.")
+    }
+
     #[test]
-    fn only_a_team_boxs_settings_register_the_hook() {
+    fn writing_an_owners_file_is_denied_on_every_machine_and_nobody_is_asked() {
+        let calls = [
+            (payload("Write", json!({ "file_path": "/x/.mcp.json", "content": "{}" })), ".mcp.json"),
+            (payload("Edit", json!({ "file_path": "/x/.claude/settings.local.json", "old_string": "a", "new_string": "b" })), "settings.local.json"),
+            (payload("MultiEdit", json!({ "file_path": "/x/sub/../.mcp.json", "edits": [] })), ".mcp.json"),
+            (payload("NotebookEdit", json!({ "notebook_path": "/x/settings.local.json", "new_source": "" })), "settings.local.json"),
+            (payload("Bash", json!({ "command": "echo {} > .mcp.json" })), ".mcp.json"),
+            (payload("Bash", json!({ "command": "echo x >> ./sub/.mcp.json" })), ".mcp.json"),
+            (payload("Bash", json!({ "command": "sed -i s/a/b/ .claude/settings.local.json" })), "settings.local.json"),
+            (payload("Bash", json!({ "command": "echo {} | tee .mcp.json" })), ".mcp.json"),
+            (payload("Bash", json!({ "command": "cp /tmp/x.json .claude/settings.local.json" })), "settings.local.json"),
+            (payload("Bash", json!({ "command": "mv other.json .mcp.json" })), ".mcp.json"),
+            (payload("Bash", json!({ "command": "rm .mcp.json" })), ".mcp.json"),
+        ];
+        for (call, name) in calls {
+            for team_box in [false, true] {
+                let (out, message) = decision(&call, team_box, Ok(r#"{"id":"k1","granted":true}"#));
+                let out = out.unwrap_or_else(|| panic!("allowed: {call} (team box {team_box})"));
+                assert_eq!(denied(&out), owners(name), "{call}");
+                assert!(message.is_none(), "the team was asked about the owner's file: {call}");
+            }
+        }
+    }
+
+    #[test]
+    fn reading_an_owners_file_or_writing_a_lookalike_runs() {
+        let calls = [
+            payload("Write", json!({ "file_path": "/x/mcp.json.md", "content": "" })),
+            payload("Write", json!({ "file_path": "/x/.mcp.json.bak", "content": "" })),
+            payload("Write", json!({ "file_path": "/x/settings.json", "content": "" })),
+            payload("Read", json!({ "file_path": "/x/.mcp.json" })),
+            payload("Read", json!({ "file_path": "/x/.claude/settings.local.json" })),
+            payload("Bash", json!({ "command": "cat .mcp.json" })),
+            payload("Bash", json!({ "command": "jq . .claude/settings.local.json > /tmp/out.json" })),
+            payload("Bash", json!({ "command": "cp .mcp.json /tmp/mcp.json" })),
+        ];
+        for call in calls {
+            let (out, message) = decision(&call, false, Ok(r#"{"id":"k1"}"#));
+            assert!(out.is_none() && message.is_none(), "{call}");
+        }
+    }
+
+    #[test]
+    fn every_sessions_settings_register_the_hook_and_a_team_box_runs_it_on_every_tool() {
         let exe = Path::new("/usr/local/bin/pinned");
         let plain = crate::hooks::settings_for(exe, false);
         let team = crate::hooks::settings_for(exe, true);
-        assert_eq!(plain["hooks"]["PreToolUse"], Value::Null);
         #[cfg(unix)]
-        assert_eq!(team["hooks"]["PreToolUse"], json!([{ "hooks": [{ "type": "command", "command": "'/usr/local/bin/pinned' team-guard" }] }]));
+        {
+            assert_eq!(plain["hooks"]["PreToolUse"], json!([{ "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit", "hooks": [{ "type": "command", "command": "'/usr/local/bin/pinned' team-guard" }] }]));
+            assert_eq!(team["hooks"]["PreToolUse"], json!([{ "hooks": [{ "type": "command", "command": "'/usr/local/bin/pinned' team-guard" }] }]));
+        }
         assert_eq!(team["hooks"]["Stop"], plain["hooks"]["Stop"]);
         assert_eq!(team["permissions"], plain["permissions"], "the hook loosens nothing");
     }

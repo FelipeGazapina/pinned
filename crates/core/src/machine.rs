@@ -11766,6 +11766,50 @@ while True:
         claude
     }
 
+    #[test]
+    fn a_new_captain_and_the_global_orchestrator_open_in_full_access_and_their_workers_stay_capped() {
+        use crate::delegate::{parse_request, resolve_access, Access};
+        let dir = temp("full-by-default");
+        let project = dir.join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let path = m.open_project(project).display().to_string();
+        let captain = m.open_orchestrator(&path).unwrap();
+        let global = m.open_global_orchestrator().unwrap();
+        assert!(m.view(&captain).unwrap().bypass, "a new Captain stops on permission prompts");
+        assert!(m.view(&global).unwrap().bypass, "a new global Orchestrator stops on permission prompts");
+        for tab in [&captain, &global] {
+            let ceiling = m.tab(tab, |t| t.child_access()).unwrap();
+            let ask = |args: Value| resolve_access(ceiling, &parse_request(&args).unwrap());
+            assert_eq!(ask(json!({ "task": "look", "runtimeMode": "auto" })), Ok(Access::Auto), "an auto worker went wider");
+            assert_eq!(ask(json!({ "task": "look", "interactionMode": "plan" })), Ok(Access::ReadOnly), "a read-only worker went wider");
+        }
+        m.tab(&captain, |t| t.bypass = false).unwrap();
+        let ceiling = m.tab(&captain, |t| t.child_access()).unwrap();
+        assert!(resolve_access(ceiling, &parse_request(&json!({ "task": "look", "runtimeMode": "full-access" })).unwrap()).is_err(), "a child is never wider than its parent");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_restored_captain_or_orchestrator_keeps_the_mode_it_was_saved_with() {
+        let dir = temp("restore-mode");
+        let (app, config) = (dir.join("app"), dir.join("config"));
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&config).unwrap();
+        let captain = role_env(Role::Orchestrator, &app);
+        let saved = json!([
+            { "cwd": app, "session": "s1", "env": captain, "bypass": false },
+            { "cwd": app, "session": "s2", "env": captain, "bypass": true },
+            { "cwd": app, "session": "s3", "env": global::env(), "bypass": false },
+        ]);
+        std::fs::write(config.join("sessions.json"), saved.to_string()).unwrap();
+        let m = Machine::new(launch(), Some(config), None, |_| {});
+        let tabs = m.restore_tabs();
+        let modes: Vec<bool> = tabs.iter().map(|tab| m.view(tab).unwrap().bypass).collect();
+        assert_eq!(modes, [false, true, false], "an update changed a saved tab's mode");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[cfg(unix)]
     fn started(claude: &Path, tab: &str) -> Vec<String> {
         let file = PathBuf::from(format!("{}.{tab}", claude.display()));

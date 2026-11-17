@@ -688,6 +688,18 @@ mod tests {
     }
 
     #[test]
+    fn a_headless_claude_child_gets_the_block_on_the_owners_files() {
+        let block = crate::hooks::settings_for(Path::new("/bin/pinned"), false)["hooks"]["PreToolUse"].clone();
+        assert!(block.is_array(), "{block}");
+        for access in [Access::Full, Access::Auto, Access::ReadOnly] {
+            let args = driver_args(Provider::Claude, &spec("do the thing", access));
+            let at = args.iter().position(|arg| arg == "--settings").unwrap_or_else(|| panic!("no --settings for {access:?}: {args:?}"));
+            let settings: serde_json::Value = serde_json::from_str(&args[at + 1]).unwrap();
+            assert_eq!(settings, serde_json::json!({ "hooks": { "PreToolUse": block } }), "{access:?}");
+        }
+    }
+
+    #[test]
     fn a_headless_child_loads_the_accounts_mcp_servers_beside_pinneds() {
         let load: crate::mcp::Load = serde_json::from_value(serde_json::json!({ "server": { "name": "ctx", "transport": { "type": "stdio", "command": "npx", "env": ["API_KEY"] } }, "secrets": { "env": { "API_KEY": "ctx-secret-1" } } })).unwrap();
         let files = crate::mcp::SessionFiles::write(&[&load]).unwrap().unwrap();
