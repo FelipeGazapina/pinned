@@ -17,9 +17,8 @@ const RETRY_AFTER: Duration = Duration::from_secs(60);
 static FAILED_AT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
 /// What a team box prices a model the price list has no price for at, in USD per token, every
 /// model while it has no list at all, so its runs' spend limits fire early rather than never:
-/// US$ 30 input and US$ 150 output per million, the dearest Claude rate in LiteLLM's list,
-/// `claude-opus-4-6` in fast mode (6 times its US$ 5 / 25). Claude Opus 4.1, 4 and 3 list
-/// US$ 15 / 75, and Claude Fable 5.1 US$ 10 / 50. Cache reads and writes take the input rate.
+/// US$ 30 input and US$ 150 output per million, above every Claude rate in LiteLLM's list (the
+/// dearest listed is US$ 27.50 / 137.50 per million). Cache reads and writes take the input rate.
 pub const CEILING_INPUT_USD: f64 = 30e-6;
 pub const CEILING_OUTPUT_USD: f64 = 150e-6;
 /// A transcript last written this long before the window opens can't hold a line inside it.
