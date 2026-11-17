@@ -678,7 +678,7 @@ async fn needed(client: &Client, needs: &Needs<'_>) -> Result<bool, tokio_postgr
 }
 
 /// Whether Postgres refused `e` for waiting on a lock past `LOCK_LIMIT`.
-fn lock_refused(e: &tokio_postgres::Error) -> bool {
+pub(crate) fn lock_refused(e: &tokio_postgres::Error) -> bool {
     e.code() == Some(&tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE)
 }
 
@@ -1379,6 +1379,12 @@ impl Db {
         Ok(rows.iter().map(box_row).collect())
     }
 
+    /// The machines of the account's boxes that have not ended: each is creating, booting or running.
+    pub async fn live_boxes(&self, account: Uuid) -> Result<Vec<Uuid>, String> {
+        let rows = self.client().await?.query("select machine from boxes where account = $1 and phase in ('creating', 'booting', 'running')", &[&account]).await.map_err(err)?;
+        Ok(rows.iter().map(|row| row.get(0)).collect())
+    }
+
     pub async fn box_of(&self, account: Uuid, machine: Uuid) -> Result<Option<BoxRow>, String> {
         let row = self.client().await?.query_opt(&format!("select {BOX_COLUMNS} from boxes where account = $1 and machine = $2"), &[&account, &machine]).await.map_err(err)?;
         row.as_ref().map(|r| readable(box_row(r))).transpose()
@@ -1776,6 +1782,17 @@ impl Db {
         Ok((row.get(0), false))
     }
 
+    /// The id of the confirmation the session in `tab` on `machine` asked with `action` and `request_id`, if it asked one.
+    pub async fn asked_confirmation(&self, account: Uuid, machine: Uuid, tab: &str, action: &str, request_id: &str) -> Result<Option<Uuid>, String> {
+        let row = self
+            .client()
+            .await?
+            .query_opt("select id from agent_confirmations where account = $1 and machine = $2 and tab = $3 and action = $4 and request_id = $5", &[&account, &machine, &tab, &action, &request_id])
+            .await
+            .map_err(err)?;
+        Ok(row.map(|r| r.get(0)))
+    }
+
     /// The account's confirmation `id`.
     pub async fn confirmation(&self, account: Uuid, id: Uuid) -> Result<Option<Held>, String> {
         let query = format!("select {CONFIRMATION_COLUMNS} from agent_confirmations c left join machines m on m.id = c.machine and m.account = c.account where c.account = $1 and c.id = $2");
@@ -1792,6 +1809,17 @@ impl Db {
                where c.account = $1 and c.decided_at is not null order by c.decided_at desc limit 20)"
         );
         Ok(self.client().await?.query(&query, &[&account]).await.map_err(err)?.iter().map(|r| held(r).confirmation).collect())
+    }
+
+    /// How many of the account's extend_box confirmations wait, each adding an amount above zero to
+    /// a box that has not ended, read without listing them. It never counts more than the turn's
+    /// count does: an ask that names its box other than as the box's id reads is left to that one.
+    pub async fn waiting_extends(&self, account: Uuid) -> Result<i64, String> {
+        let query = "select count(*) from agent_confirmations where account = $1 and decided_at is null and action = 'extend_box'
+                       and case when jsonb_typeof(args->'extra_usd') = 'number' then (args->>'extra_usd')::float8 > 0 else false end
+                       and exists (select 1 from boxes where boxes.account = $1 and boxes.machine::text = lower(agent_confirmations.args->>'machine')
+                                   and boxes.phase in ('creating', 'booting', 'running'))";
+        Ok(self.client().await?.query_one(query, &[&account]).await.map_err(err)?.get(0))
     }
 
     /// Decides the account's waiting confirmation `id`, once: None when it is unknown, another

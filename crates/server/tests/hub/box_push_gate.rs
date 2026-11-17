@@ -36,7 +36,7 @@ fn setup(name: &str) -> Setup {
 
 fn add_box_row(hub: &TestHub, account: &str, machine: &str) {
     admin_on(&hub.database, &format!(
-        "insert into boxes (id, account, machine, upstash, connector, subject, spec, size, phase) values ('box-1', '{account}', '{machine}', 'box_123', 'c1', '{{\"issue\":\"i1\"}}', '{{}}', 'small', 'running')",
+        "insert into boxes (id, account, machine, upstash, connector, subject, spec, size, phase) values ('box-1', '{account}', '{machine}', 'box_123', 'c1', '{{\"issue\":\"i1\"}}', '{{\"folder\":\"/w\",\"args\":[]}}', 'small', 'running')",
     ));
 }
 

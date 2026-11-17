@@ -1302,6 +1302,28 @@ mod tests {
         root
     }
 
+    /// A Captain's plans stay on the machine that keeps them: `plans.json` in its data dir is no
+    /// file a sync collects or pushes, beside the sessions, memory, skills and turns it does.
+    #[test]
+    fn a_sync_never_pushes_the_machines_plans() {
+        let hub = MemHub(RefCell::default());
+        let mut mac = Side::new(&root("plans-stay"), "mac", "app");
+        std::fs::write(mac.home.join(crate::plan_store::FILE), r#"{"cap-1":[{"id":"p1","title":"Ship the form"}]}"#).unwrap();
+        std::fs::create_dir_all(mac.claude("memory")).unwrap();
+        std::fs::write(mac.claude("s1.jsonl"), "{}\n").unwrap();
+        std::fs::write(mac.claude("memory/MEMORY.md"), "notes").unwrap();
+        std::fs::create_dir_all(mac.home.join("history")).unwrap();
+        std::fs::write(mac.home.join("history/app.jsonl"), "{}\n").unwrap();
+        std::fs::create_dir_all(mac.checkout.path.join(".claude/skills/deploy")).unwrap();
+        std::fs::write(mac.checkout.path.join(".claude/skills/deploy/SKILL.md"), "deploy").unwrap();
+
+        let collected: Vec<String> = Roots::new(&mac.checkout).files().into_iter().map(|(name, path)| format!("{name} {}", path.display())).collect();
+        assert!(!collected.iter().any(|f| f.contains("plans.json")), "a sync collects plans.json: {collected:?}");
+        let pushed = mac.sync(&hub).pushed;
+        assert_eq!(pushed.len(), 4, "the shared files go up: {pushed:?}");
+        assert!(!pushed.iter().chain(hub.0.borrow().keys()).any(|path| path.contains("plans.json")), "a sync pushed plans.json: {pushed:?}");
+    }
+
     #[test]
     fn claude_names_a_project_folder_by_its_path() {
         assert_eq!(claude_dir(Path::new("/h/.claude"), Path::new("/Users/ana/my.app")), PathBuf::from("/h/.claude/projects/-Users-ana-my-app"));
