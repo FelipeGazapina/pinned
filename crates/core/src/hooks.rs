@@ -24,6 +24,8 @@ const COMPACTION: [(&str, &str, bool); 2] = [("PreCompact", "compacting", true),
 pub const GLOBAL_SETTINGS: &str = "claude-settings-global.json";
 /// The file tools the global orchestrator keeps, each held to its folders by the guard hook.
 const GUARDED: &str = "Read|Write|Edit|MultiEdit|Grep|Glob|LS";
+/// The tools that can write one of the owner's files, which the team-guard hook checks on every machine.
+const OWNERS_GUARDED: &str = "Bash|Edit|Write|MultiEdit|NotebookEdit";
 
 /// What the harness answers to each socket line.
 type Reply = Result<String, String>;
@@ -48,12 +50,12 @@ pub fn write_settings(path: &Path, exe: &Path) -> std::io::Result<()> {
 pub fn write_global_settings(path: &Path, exe: &Path) -> std::io::Result<()> {
     let mut settings = settings(exe);
     settings["permissions"]["deny"] = serde_json::json!(["Bash", "NotebookEdit"]);
-    settings["hooks"]["PreToolUse"] = serde_json::json!([{ "matcher": GUARDED, "hooks": [subcommand(exe, GUARD_SUBCOMMAND)] }]);
+    settings["hooks"]["PreToolUse"].as_array_mut().expect("every session's settings hold PreToolUse").push(serde_json::json!({ "matcher": GUARDED, "hooks": [subcommand(exe, GUARD_SUBCOMMAND)] }));
     std::fs::write(path, serde_json::to_vec_pretty(&settings)?)
 }
 
-/// Every session's settings, plus, in a team's box, the hook that asks the team before a step the
-/// never list holds.
+/// Every session's settings, with the hook that blocks the owner's files, which in a team's box
+/// also asks the team before a step the never list holds.
 fn settings(exe: &Path) -> serde_json::Value {
     settings_for(exe, crate::team_call::in_team_box())
 }
@@ -66,9 +68,7 @@ pub(crate) fn settings_for(exe: &Path, team_box: bool) -> serde_json::Value {
     for (hook_event, arg, _) in COMPACTION {
         hooks.insert(hook_event.into(), serde_json::json!([{ "hooks": [hook_command(exe, arg)] }]));
     }
-    if team_box {
-        hooks.insert("PreToolUse".into(), serde_json::json!([{ "hooks": [subcommand(exe, crate::preauth::team_hook::SUBCOMMAND)] }]));
-    }
+    hooks.insert("PreToolUse".into(), pre_tool_use(exe, team_box));
     serde_json::json!({
         "hooks": hooks,
         "statusLine": { "type": "command", "command": statusline_command(exe) },
@@ -77,6 +77,17 @@ pub(crate) fn settings_for(exe: &Path, team_box: bool) -> serde_json::Value {
         // tab no one may be watching. Without the bypass flag the warning never shows.
         "skipDangerousModePermissionPrompt": true,
     })
+}
+
+/// The PreToolUse hook every session pinned starts gets: `pinned team-guard`, for the tools that
+/// write on any machine (the owner's files), for every tool in a team's box (the never list).
+pub(crate) fn pre_tool_use(exe: &Path, team_box: bool) -> serde_json::Value {
+    let hook = subcommand(exe, crate::preauth::team_hook::SUBCOMMAND);
+    if team_box {
+        serde_json::json!([{ "hooks": [hook] }])
+    } else {
+        serde_json::json!([{ "matcher": OWNERS_GUARDED, "hooks": [hook] }])
+    }
 }
 
 #[cfg(unix)]

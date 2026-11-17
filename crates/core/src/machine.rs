@@ -3164,7 +3164,8 @@ impl Machine {
         if !account.provider.spec().harness {
             return Err(format!("account {} runs {}, which can't be a project's orchestrator", account.id, account.provider.spec().name));
         }
-        let id = self.add_tab(project.clone(), account, vec![], role_env(Role::Orchestrator, &project), false, None);
+        // It runs unattended, so it opens in Full access; the owner's files stay blocked by the hook.
+        let id = self.add_tab(project.clone(), account, vec![], role_env(Role::Orchestrator, &project), true, None);
         self.emit_tabs();
         Ok(id)
     }
@@ -3182,7 +3183,7 @@ impl Machine {
         if !account.provider.spec().harness {
             return Err(format!("account {} runs {}, which can't be the global orchestrator", account.id, account.provider.spec().name));
         }
-        let id = self.add_tab(folder, account, vec![], global::env(), false, None);
+        let id = self.add_tab(folder, account, vec![], global::env(), true, None);
         self.emit_tabs();
         Ok(id)
     }

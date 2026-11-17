@@ -722,6 +722,7 @@ mod tests {
 
     #[test]
     fn each_provider_builds_the_argv_for_its_access() {
+        let hook = serde_json::json!({ "hooks": { "PreToolUse": crate::hooks::settings_for(Path::new("/bin/pinned"), false)["hooks"]["PreToolUse"] } }).to_string();
         let mut full = spec("do the thing", Access::Full);
         full.model = Some("claude-haiku-5-5");
         full.effort = Some("low");
@@ -734,6 +735,8 @@ mod tests {
                 "--output-format",
                 "stream-json",
                 "--verbose",
+                "--settings",
+                &hook,
                 "--model",
                 "claude-haiku-5-5",
                 "--effort",
@@ -751,6 +754,8 @@ mod tests {
                 "--output-format",
                 "stream-json",
                 "--verbose",
+                "--settings",
+                &hook,
                 "--permission-mode",
                 "auto",
             ],
@@ -763,6 +768,8 @@ mod tests {
                 "--output-format",
                 "stream-json",
                 "--verbose",
+                "--settings",
+                &hook,
                 "--permission-mode",
                 "plan",
             ],

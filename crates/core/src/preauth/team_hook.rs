@@ -9,10 +9,12 @@
 //! minutes: when the bot makes it again, the hub answers `granted` and the hook lets it through.
 //! Any other step, or the same one again, is asked again.
 //!
-//! Outside a team box (`PINNED_TEAM_BOX` not `1`) the hook does nothing, and no settings file
-//! registers it: the never list is still only a pure function there.
+//! On every machine, team box or not, the hook denies a write, move or delete of the owner's
+//! files (`never::OWNERS_FILES`: `.mcp.json`, `settings.local.json`) and asks nobody: they would let
+//! an agent grant itself MCP servers or permissions, and Full access skips every prompt. Outside a
+//! team box that is all it does, and Claude Code runs it only for the tools that write.
 
-use super::never::{never, Ask, AskCtx};
+use super::never::{never, owners_file, Ask, AskCtx};
 use crate::agent::Message;
 use crate::team_call;
 use crate::teams::Situation;
@@ -71,13 +73,16 @@ pub fn run() {
 /// never-list hit, or a payload that is no tool call), else a deny. `ask` sends the node a message
 /// and returns the hub's answer.
 pub fn decide(payload: &str, env: &HookEnv, ask: impl FnOnce(Message) -> Result<String, String>) -> Option<String> {
-    if !env.team_box {
-        return None;
-    }
     let hook: Value = serde_json::from_str(payload).ok()?;
     let input = &hook["tool_input"];
     let tool_ask = Ask::from_tool(hook["tool_name"].as_str()?, input)?;
     let cwd = PathBuf::from(hook["cwd"].as_str()?);
+    if let Some(name) = owners_file(&AskCtx { worktree: &cwd, scratch: None, home: &env.home, cwd: &cwd, default_branch: "main", current_branch: None }, &tool_ask) {
+        return Some(deny(&owners(name)));
+    }
+    if !env.team_box {
+        return None;
+    }
     let start = env.project_dir.clone().unwrap_or_else(|| cwd.clone());
     let worktree = repo_top(&start).unwrap_or_else(|| start.clone());
     let worktree = std::fs::canonicalize(&worktree).unwrap_or(worktree);
@@ -104,6 +109,11 @@ pub fn decide(payload: &str, env: &HookEnv, ask: impl FnOnce(Message) -> Result<
         Err(e) if e == crate::wire::HUB_BUSY => Some(deny(ASK_AGAIN)),
         Err(_) => Some(deny(COULD_NOT_ASK)),
     }
+}
+
+/// What a session reads when it would write one of the owner's files, on any machine.
+fn owners(name: &str) -> String {
+    format!("{name} is the owner's file, and an agent may not change it: ask the user to make this change.")
 }
 
 fn deny(reason: &str) -> String {

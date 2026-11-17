@@ -50,6 +50,9 @@ fn claude_args(spec: &SpawnSpec) -> Vec<String> {
         "--output-format".into(),
         "stream-json".into(),
         "--verbose".into(),
+        // The hook that keeps the owner's files from the agent, whatever its access.
+        "--settings".into(),
+        serde_json::json!({ "hooks": { "PreToolUse": crate::hooks::pre_tool_use(spec.exe, crate::team_call::in_team_box()) } }).to_string(),
     ];
     if let Some(model) = spec.model {
         args.extend(["--model".into(), model.into()]);

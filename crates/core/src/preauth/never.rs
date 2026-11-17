@@ -106,6 +106,19 @@ pub struct NeverHit {
 
 /// Whether only the user may approve `ask`, and why.
 pub fn never(ctx: &AskCtx, ask: &Ask) -> Option<NeverHit> {
+    scan(ctx, ask).hits.into_iter().min_by_key(|h| h.item)
+}
+
+/// The files that would let an agent grant itself MCP servers or permissions: only the owner
+/// writes them, on every machine, whatever mode the session runs in.
+pub const OWNERS_FILES: [&str; 2] = [".mcp.json", "settings.local.json"];
+
+/// Which of `OWNERS_FILES` the ask writes, moves or deletes, if any. A read is no hit.
+pub fn owners_file(ctx: &AskCtx, ask: &Ask) -> Option<&'static str> {
+    scan(ctx, ask).owners
+}
+
+fn scan<'c, 'a>(ctx: &'c AskCtx<'a>, ask: &Ask) -> Scan<'c, 'a> {
     let mut scan = Scan::new(ctx);
     match ask {
         Ask::Bash { command } => {
@@ -123,7 +136,7 @@ pub fn never(ctx: &AskCtx, ask: &Ask) -> Option<NeverHit> {
         }
         Ask::Mcp { name, args } => scan.mcp(name, args),
     }
-    scan.hits.into_iter().min_by_key(|h| h.item)
+    scan
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -226,10 +239,18 @@ fn secret(c: &[String]) -> Option<&'static str> {
     None
 }
 
+/// The one of `OWNERS_FILES` the path text names as its last component, with case folded where
+/// the OS folds it (macOS, Windows) and kept where it does not.
+fn owners_name(text: &str) -> Option<&'static str> {
+    let last = text.split(['/', '\\']).rfind(|c| !c.is_empty() && *c != ".")?;
+    let same = |name: &str| if cfg!(any(target_os = "macos", windows)) { last.eq_ignore_ascii_case(name) } else { last == name };
+    OWNERS_FILES.into_iter().find(|name| same(name))
+}
+
 /// Whether writing the path changes what the agent may do, or what runs on this machine.
 fn self_grant(c: &[String]) -> bool {
     let Some(last) = c.last() else { return false };
-    if last == ".mcp.json" || last == "claude-settings.json" || last == "claude-mcp.json" || last.starts_with("approval-policy") {
+    if last == ".mcp.json" || last == "settings.local.json" || last == "claude-settings.json" || last == "claude-mcp.json" || last.starts_with("approval-policy") {
         return true;
     }
     for (i, s) in c.iter().enumerate() {
@@ -1027,6 +1048,8 @@ struct Scan<'c, 'a> {
     work: PathBuf,
     scratch: Option<PathBuf>,
     hits: Vec<NeverHit>,
+    /// The owner's file a write, move or delete targets.
+    owners: Option<&'static str>,
     tagged: bool,
     pushed: bool,
 }
@@ -1035,7 +1058,7 @@ const DEV_OK: &[&str] = &["/dev/null", "/dev/stdout", "/dev/stderr", "/dev/stdin
 
 impl<'c, 'a> Scan<'c, 'a> {
     fn new(ctx: &'c AskCtx<'a>) -> Self {
-        let mut scan = Scan { ctx, work: PathBuf::new(), scratch: None, hits: vec![], tagged: false, pushed: false };
+        let mut scan = Scan { ctx, work: PathBuf::new(), scratch: None, hits: vec![], owners: None, tagged: false, pushed: false };
         scan.work = walk(&scan.abs(ctx.worktree));
         scan.scratch = ctx.scratch.map(|s| walk(&scan.abs(s)));
         scan
@@ -1262,6 +1285,7 @@ impl<'c, 'a> Scan<'c, 'a> {
     }
 
     fn write_check(&mut self, raw: &str, shown: &str, path: Option<PathBuf>, unresolved: bool) {
+        self.owners_check(raw, path.as_deref());
         if self_grant(&comps(raw)) || path.as_deref().is_some_and(|p| self_grant(&path_comps(p))) {
             self.hit(NeverItem::SelfGrant, format!("writes {}", short(shown)));
         }
@@ -1270,9 +1294,16 @@ impl<'c, 'a> Scan<'c, 'a> {
         }
     }
 
+    fn owners_check(&mut self, raw: &str, path: Option<&Path>) {
+        if let Some(name) = owners_name(raw).or_else(|| path.and_then(|p| owners_name(&p.to_string_lossy()))) {
+            self.owners.get_or_insert(name);
+        }
+    }
+
     fn delete(&mut self, cwd: &Option<PathBuf>, targets: &[&Word], risky: bool, what: &str) {
         for w in targets {
             let t = self.tgt(cwd, w);
+            self.owners_check(&w.text, t.path.as_deref());
             let bad = match &t.path {
                 _ if t.top_var => true,
                 None => true,
