@@ -3094,7 +3094,7 @@ mod tests {
         }
     }
 
-    const QUOTA_REFUSAL: &str = "the account's synced projects would pass 1024 MB; delete old sessions to sync more";
+    const QUOTA_REFUSAL: &str = "the account's synced projects would pass 1024 MB; nothing is deleted, the push is refused";
 
     /// Keeps what it is sent while the account's compressed bytes stay within `limit`, the way the
     /// hub does, and records every push it is sent: each file's path, and whether it was a deletion.
