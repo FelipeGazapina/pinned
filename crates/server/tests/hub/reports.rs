@@ -1362,3 +1362,93 @@ fn a_send_whose_draft_another_transaction_is_writing_is_refused_after_a_short_wa
     assert_eq!((sent["id"].clone(), sent["state"].clone(), sent["issue"].clone()), (json!(id), json!({ "state": "open" }), json!(1)), "{sent}");
     assert_eq!(left_today(&mut ana), json!(4));
 }
+
+/// `pinned-server hub --dev`, started the way the dev stack starts it, with `vars` set and every reports variable
+/// not in `vars` taken out. Dropping it stops the hub and drops its database.
+struct DevHub {
+    child: std::process::Child,
+    url: String,
+    dir: PathBuf,
+    database: String,
+}
+
+impl DevHub {
+    fn start(name: &str, vars: &[(&str, &str)]) -> DevHub {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let database = format!("pinned_test_{name}_{}", std::process::id());
+        admin(&format!("drop database if exists {database} with (force)"));
+        admin(&format!("create database {database}"));
+        let dir = temp(&format!("hub-{name}"));
+        for sub in ["ui", "downloads"] {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+        }
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let listen = format!("127.0.0.1:{port}");
+        let (db, ui, downloads, key) = (format!("{}/{database}", postgres()), dir.join("ui"), dir.join("downloads"), dir.join("hub.key"));
+        let mut command = std::process::Command::new(BIN);
+        command.args(["hub", "--dev", "--db", &db, "--listen", &listen]).arg("--ui").arg(&ui).arg("--downloads").arg(&downloads).arg("--key-file").arg(&key);
+        for name in ["PINNED_REPORTS_GITHUB_TOKEN", "PINNED_REPORTS_GITHUB_API", "PINNED_REPORTS_REPO", "PINNED_REPORTS_POLL_SECS", "PINNED_DEV_TIME_SCALE"] {
+            command.env_remove(name);
+        }
+        command.env("UPSTASH_BOX_BASE_URL", "http://127.0.0.1:9").env("PINNED_SLACK_API_BASE", "http://127.0.0.1:9").env("HOME", &dir).envs(vars.iter().copied());
+        let child = without_app_env(&mut command).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::fs::File::create(dir.join("stderr")).unwrap()).spawn().unwrap();
+        let hub = DevHub { child, url: format!("http://{listen}"), dir, database };
+        wait_long("the dev hub to listen", Duration::from_secs(30), || TcpStream::connect(&listen).is_ok());
+        hub
+    }
+
+    /// What the hub wrote to stderr so far.
+    fn said(&self) -> String {
+        std::fs::read_to_string(self.dir.join("stderr")).unwrap_or_default()
+    }
+}
+
+impl Drop for DevHub {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        admin(&format!("drop database if exists {} with (force)", self.database));
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// The reports status a signed-in app sees on `hub`.
+fn dev_status(hub: &DevHub) -> Value {
+    let token = account::signup(&hub.url, "ana@example.test", PASSWORD).unwrap().0;
+    ask(&mut Client::app(&hub.url, &token), json!({ "op": "status" })).unwrap()
+}
+
+#[test]
+fn a_dev_hub_with_a_token_and_no_local_fake_has_reporting_off() {
+    let hub = DevHub::start("reports_dev_no_fake", &[("PINNED_REPORTS_GITHUB_TOKEN", "dummy-test-token")]);
+    assert_eq!(dev_status(&hub), json!({ "available": false }), "a dev hub never files on the real GitHub: {}", hub.said());
+    let said = hub.said();
+    assert!(said.contains("pinned-server: reporting is off under --dev: set PINNED_REPORTS_GITHUB_API to a local fake\n"), "{said}");
+    assert!(!said.contains("is ignored") && !said.contains("dummy-test-token"), "{said}");
+}
+
+#[test]
+fn a_dev_hub_refuses_a_reports_api_that_is_not_on_this_machine() {
+    for (i, api) in ["https://api.example.test", "http://user:pw@127.0.0.1:9"].into_iter().enumerate() {
+        let hub = DevHub::start(&format!("reports_dev_remote_{i}"), &[("PINNED_REPORTS_GITHUB_TOKEN", "dummy-test-token"), ("PINNED_REPORTS_GITHUB_API", api)]);
+        assert_eq!(dev_status(&hub), json!({ "available": false }), "{api}: {}", hub.said());
+        let said = hub.said();
+        assert!(said.contains("pinned-server: reporting is off under --dev: PINNED_REPORTS_GITHUB_API must be an http(s) address on this machine, with no user or password\n"), "{api}: {said}");
+        assert!(!said.contains("example.test") && !said.contains("user:pw") && !said.contains("dummy-test-token"), "a log line names the variable, never its value: {said}");
+    }
+}
+
+#[test]
+fn a_dev_hub_files_on_the_local_fake_its_override_names() {
+    let fake = Fake::start();
+    let hub = DevHub::start("reports_dev_fake", &[("PINNED_REPORTS_GITHUB_TOKEN", "fake-dummy-test-token"), ("PINNED_REPORTS_GITHUB_API", &fake.github.url), ("PINNED_REPORTS_REPO", "acme/app")]);
+    // Checked before any call that reaches GitHub: a hub that ignored the override would file on the real one.
+    let said = hub.said();
+    assert!(!said.contains("is ignored") && !said.contains("reporting is off"), "{said}");
+    let token = account::signup(&hub.url, "ana@example.test", PASSWORD).unwrap().0;
+    let mut app = Client::app(&hub.url, &token);
+    assert_eq!(ask(&mut app, json!({ "op": "status" })).unwrap(), json!({ "available": true, "left_today": 5 }));
+    assert_eq!(ask(&mut app, json!({ "op": "similar", "title": "Upload stops at 90%" })).unwrap(), json!([]));
+    let searched: Vec<String> = fake.github.requests().iter().map(|r| format!("{} {}", r.method, r.path)).collect();
+    assert_eq!(searched, ["GET /search/issues"], "the search went to the local fake");
+}
