@@ -1213,6 +1213,10 @@ mod tests {
             Ok(self.0.borrow().values().map(|f| f.entry.clone()).collect())
         }
         fn push(&self, _: &str, files: Vec<File>) -> Result<(), String> {
+            let held = |path: &str| self.0.borrow().get(path).map_or(String::new(), |f| f.entry.sha.clone());
+            if files.iter().any(|f| f.base.as_ref().is_some_and(|base| *base != held(&f.entry.path))) {
+                return Err(STALE_REFUSAL.into());
+            }
             for f in files {
                 self.0.borrow_mut().insert(f.entry.path.clone(), f);
             }
@@ -1382,6 +1386,68 @@ mod tests {
         assert_eq!(mac.sync(&hub).pushed, vec!["claude/memory/MEMORY.md"]);
         assert_eq!(mini.sync(&hub).pulled, vec!["claude/memory/MEMORY.md"]);
         assert!(!mini.claude("memory/MEMORY.md").exists(), "a deletion travels too");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// Runs `then` right before the first push, so another machine's push lands between this
+    /// machine's list and its push. `stale` refuses every history push with a base instead.
+    struct PushThen<'a> {
+        inner: &'a MemHub,
+        then: RefCell<Option<Box<dyn FnOnce() + 'a>>>,
+        stale: Cell<usize>,
+    }
+
+    impl Hub for PushThen<'_> {
+        fn list(&self, project: &str) -> Result<Vec<Entry>, String> {
+            self.inner.list(project)
+        }
+        fn push(&self, project: &str, files: Vec<File>) -> Result<(), String> {
+            if let Some(then) = self.then.borrow_mut().take() {
+                then();
+            }
+            if self.stale.get() > 0 && files.iter().any(|f| f.base.is_some()) {
+                self.stale.set(self.stale.get() - 1);
+                return Err(STALE_REFUSAL.into());
+            }
+            self.inner.push(project, files)
+        }
+        fn pull(&self, project: &str, paths: Vec<String>) -> Result<Vec<File>, String> {
+            self.inner.pull(project, paths)
+        }
+        fn mark_executable(&self, project: &str, repairs: Vec<ModeRepair>) -> Result<(), String> {
+            self.inner.mark_executable(project, repairs)
+        }
+    }
+
+    #[test]
+    fn two_machines_sending_their_own_turns_at_once_both_keep_them() {
+        let root = root("history-race");
+        let hub = MemHub::default();
+        let (mut mac, mut mini) = (Side::new(&root, "mac", "app"), Side::new(&root, "mini", "app"));
+        let history = |side: &Side| side.checkout.history.clone().unwrap();
+        put(&history(&mac), "{\"session\":\"a\",\"ended\":1}\n");
+        mac.sync(&hub);
+        assert_eq!(mini.sync(&hub).pulled, vec![HISTORY]);
+        put(&history(&mac), "{\"session\":\"a\",\"ended\":1}\n{\"session\":\"m\",\"ended\":2}\n");
+        put(&history(&mini), "{\"session\":\"a\",\"ended\":1}\n{\"session\":\"n\",\"ended\":3}\n");
+        let racing = PushThen { inner: &hub, then: RefCell::new(Some(Box::new(|| assert_eq!(mac.sync(&hub).pushed, vec![HISTORY])))), stale: Cell::new(0) };
+        assert_eq!(sync(&racing, &mut mini.state, &mini.checkout, SystemTime::now()).unwrap().pushed, vec![HISTORY], "mini merges mac's turn in and sends again");
+        drop(racing);
+        let all = "{\"session\":\"a\",\"ended\":1}\n{\"session\":\"m\",\"ended\":2}\n{\"session\":\"n\",\"ended\":3}\n";
+        assert_eq!(unpack(hub.0.borrow()[HISTORY].data.as_ref().unwrap()).unwrap(), all.as_bytes());
+        assert_eq!(std::fs::read_to_string(history(&mini)).unwrap(), all);
+        assert_eq!(mac.sync(&hub).pulled, vec![HISTORY]);
+        assert_eq!(std::fs::read_to_string(history(&mac)).unwrap(), all);
+
+        put(&history(&mac), &format!("{all}{{\"session\":\"x\",\"ended\":4}}\n"));
+        let busy = PushThen { inner: &hub, then: RefCell::new(None), stale: Cell::new(HISTORY_TRIES) };
+        let synced = sync(&busy, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap();
+        assert_eq!((synced.pushed, synced.push), (vec![], Push::Done), "a hub that keeps changing is tried a few times, then left to the next sync");
+        assert_eq!(unpack(hub.0.borrow()[HISTORY].data.as_ref().unwrap()).unwrap(), all.as_bytes());
+        assert_eq!(mac.sync(&hub).pushed, vec![HISTORY], "the next sync sends it");
+        assert_eq!(std::fs::read_to_string(history(&mini)).unwrap(), all);
+        assert_eq!(mini.sync(&hub).pulled, vec![HISTORY]);
+        assert_eq!(std::fs::read_to_string(history(&mini)).unwrap(), format!("{all}{{\"session\":\"x\",\"ended\":4}}\n"), "each turn once");
         let _ = std::fs::remove_dir_all(root);
     }
 
