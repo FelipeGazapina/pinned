@@ -73,7 +73,7 @@ function world() {
       { id: "r1", workflow: "w1", state: "waiting", controller: null, cost_usd: 0.62, active_secs: 300, started_at: at(15, 0), ended_at: null, outcome: null, started_by: "schedule:daily" },
       { id: "r2", workflow: "w2", state: "waiting", controller: null, cost_usd: 0.3, active_secs: 120, started_at: at(14, 50), ended_at: null, outcome: null, started_by: "schedule:hourly" },
       { id: "r3", workflow: "w2", state: "working", controller: null, cost_usd: 0.1, active_secs: 60, started_at: at(15, 9), ended_at: null, outcome: null, started_by: "schedule:hourly" },
-      { id: "r4", workflow: "w4", state: "working", controller: null, cost_usd: 0.42, active_secs: 1440, waiting_secs: 720, started_at: at(14, 35), ended_at: null, outcome: null, started_by: ME },
+      { id: "r4", workflow: "w4", state: "working", controller: null, cost_usd: 0.42, model_usd: 0.3, active_secs: 1440, waiting_secs: 720, started_at: at(14, 35), ended_at: null, outcome: null, started_by: ME },
       { id: "r5", workflow: "w2", state: "done", controller: null, cost_usd: 0.4, active_secs: 500, started_at: at(11, 5), ended_at: at(11, 25), outcome: "Asked for a fix on PR 50", started_by: "schedule:hourly" },
       ...[9, 10, 12, 13].map((h, i) => ({ id: `d${i}`, workflow: "w2", state: "done", controller: null, cost_usd: 0.2, active_secs: 300, started_at: at(h, 2), ended_at: at(h, 9), outcome: "Reviewed", started_by: "schedule:hourly" })),
     ],
@@ -324,7 +324,7 @@ for (const scheme of ["dark", "light"]) {
     await page.evaluate(() => openTeamRun("r4"));
     await page.waitForSelector(".tc-facts");
     const facts = await text(page, ".tc-facts");
-    check(facts.includes("Active time: 24 min") && facts.includes("Waiting for people: 12 min (not counted toward the time limit)") && facts.includes("Box cost: US$ 0.42 (model usage not included)"), `the run page shows the times and the box cost (${facts.replace(/\n/g, " | ")})`);
+    check(facts.includes("Active time: 24 min") && facts.includes("Waiting for people: 12 min (not counted toward the time limit)") && facts.includes("Cost: Box US$ 0.12 · Model US$ 0.30"), `the run page shows the times and the box and model cost (${facts.replace(/\n/g, " | ")})`);
     await shot(page, "run-working", scheme);
     await context.close();
   }

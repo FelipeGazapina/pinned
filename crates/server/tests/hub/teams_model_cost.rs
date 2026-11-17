@@ -94,18 +94,28 @@ fn a_report_sent_twice_or_out_of_order_keeps_the_most_told() {
 #[test]
 fn only_the_box_that_runs_the_run_reports_its_model_cost() {
     let hub = TestHub::start_with_team_policy("teams_model_cost_owner", fast(), policy());
-    let mut tb = TeamBox::new(&hub);
+    // A box with no live run idles out: each team's run is there before the next box boots.
     let other = TeamBox::new_as(&hub, "rita@example.test");
+    bot(&hub, &other, 5.0);
+    let other_run = run(&hub, &other);
+    let mut tb = TeamBox::new(&hub);
     bot(&hub, &tb, 5.0);
     let run = run(&hub, &tb);
     let refused = Err("this box runs no live run of that workflow on that subject".to_owned());
     assert_eq!(report(&hub, &other.box_id, &tb.workflow, 4.0), refused, "another team's box");
+    // Team A's run names team B's box as its own: B's box is still no box of team A.
+    sql(&hub, &format!("update team_runs set box = '{}' where id = '{run}'", other.machine));
+    assert_eq!(report(&hub, &other.box_id, &tb.workflow, 4.0), refused, "another team's box the run names");
+    assert_eq!(model_usd(&hub, other_run), "0");
     // The run moved to another machine of the team: this box no longer runs it.
     sql(&hub, &format!("update team_runs set box = '{}' where id = '{run}'", Uuid::new_v4()));
     assert_eq!(report(&hub, &tb.box_id, &tb.workflow, 4.0), refused, "a box the run is not bound to");
     assert_eq!(report(&hub, &tb.box_id, &tb.workflow, -1.0), Err("a model cost is a number of dollars, 0 or more".to_owned()));
     assert_eq!(model_usd(&hub, run), "0", "nothing was stored");
     assert_eq!(listed(&mut tb, run)["model_usd"], json!(0.0));
+    sql(&hub, &format!("update team_runs set box = '{}' where id = '{run}'", tb.machine));
+    assert_eq!(report(&hub, &tb.box_id, &tb.workflow, 0.5), Ok(Value::Null), "the box that runs it reports");
+    assert_eq!((model_usd(&hub, run), model_usd(&hub, other_run)), ("0.5".to_owned(), "0".to_owned()));
 }
 
 #[test]

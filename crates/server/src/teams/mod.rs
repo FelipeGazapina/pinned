@@ -223,6 +223,7 @@ async fn run_hub_call(hub: &Arc<Hub>, s: &Scope, call: HubCall) -> Result<Value,
 pub async fn machine_call(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, op: TeamOp) -> Result<Value, String> {
     match op {
         TeamOp::AskPeople { situation, question, choices, step } => json(calls::ask_people(hub, account, machine, situation, &question, choices, step.as_deref()).await?),
+        TeamOp::RunModelCost { workflow, subject, usd } => json(calls::model_cost(hub, account, machine, &workflow, &subject, usd).await?),
         op => Err(format!("a machine may not send the team op {}", op.name())),
     }
 }

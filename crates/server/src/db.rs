@@ -225,6 +225,9 @@ alter table team_run_queue add column if not exists run uuid;
 -- How many of the team's turns found a waiting row's bot unreadable (`teams::queue::UNREAD_PASSES`).
 alter table team_run_queue add column if not exists unread_passes integer not null default 0;
 alter table team_runs add column if not exists reserved_at timestamptz;
+-- The model cost a run's box reported (`teams::db::record_model_cost`), the most it told: the
+-- run costs `cost_usd` (its box's time) plus this, which its bot's dollars limit caps.
+alter table team_runs add column if not exists model_usd double precision not null default 0;
 -- A run's limit call the limits tick opened (`teams::calls::tick`): the only call that counts as
 -- its limit call (`teams::db::runs_at_limit`). A session's own ask never sets it.
 alter table team_calls add column if not exists opened_by_hub boolean not null default false;

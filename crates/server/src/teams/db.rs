@@ -642,12 +642,14 @@ macro_rules! waited {
 /// A `team_runs` row as `run_of` reads it. Its waiting time is its closed waits (`waiting_secs`)
 /// and the open one (since `waiting_since`); its active time is the rest of the time from its
 /// session's open (`opened_at`, or its start for a run that opened with its row) to its end, or
-/// now while it is live: 0 while its place is only reserved.
+/// now while it is live: 0 while its place is only reserved. Its cost is its box's (`cost_usd`)
+/// and its model's (`model_usd`) together.
 const RUN_COLUMNS: &str = concat!(
-    "id, workflow, state, controller, cost_usd, case when reserved then 0 else greatest(0, extract(epoch from coalesce(ended_at, now()) - coalesce(opened_at, started_at))::bigint - ",
+    "id, workflow, state, controller, cost_usd + model_usd, case when reserved then 0 else greatest(0, extract(epoch from coalesce(ended_at, now()) - coalesce(opened_at, started_at))::bigint - ",
     waited!(),
     ") end, extract(epoch from started_at)::bigint, extract(epoch from ended_at)::bigint, outcome, started_by #>> '{}', ",
-    waited!()
+    waited!(),
+    ", model_usd"
 );
 
 /// A `team_calls` row `c` with its run `r`, as `call_of` reads it.
@@ -665,7 +667,7 @@ fn run_of(r: &Row) -> Run {
         state: RunState::parse(r.get(2)).unwrap_or(RunState::Failed),
         controller: r.get::<_, Option<Uuid>>(3).map(|c| c.to_string()),
         cost_usd: r.get(4),
-        model_usd: 0.0,
+        model_usd: r.get(11),
         active_secs: r.get::<_, i64>(5).max(0) as u64,
         started_at: r.get(6),
         ended_at: r.get(7),
@@ -1590,8 +1592,8 @@ pub async fn skipped(db: &Db, team: Uuid, workflow: &str) -> Result<Vec<Skipped>
 // ---- limits (calls::tick) ----
 
 /// Charges each run at work (`working` or `taken_over`) in a box for its active time at its box's
-/// hourly rate (`small`, `medium`, `large` in `rates`; a size it does not know at the largest):
-/// its `cost_usd` never goes down, and a
+/// hourly rate (`small`, `medium`, `large` in `rates`; a size it does not know at the largest), in
+/// its row's `cost_usd`, which holds the box's part (the model's is `model_usd`): it never goes down, and a
 /// waiting run is not charged, so a wait costs nothing toward its `BotLimits::usd`.
 pub async fn charge_working_runs(db: &Db, rates: [f64; 3]) -> Result<(), String> {
     db.client()
@@ -1608,6 +1610,22 @@ pub async fn charge_working_runs(db: &Db, rates: [f64; 3]) -> Result<(), String>
     Ok(())
 }
 
+/// Keeps `usd` as the model cost of the live run of the team's `workflow` on `subject` bound to
+/// `machine`, unless it was told more already: a report sent twice or arriving late lowers and
+/// adds nothing. False when this machine runs no such run, and nothing is stored.
+pub async fn record_model_cost(db: &Db, team: Uuid, machine: &str, workflow: &str, subject: &Subject, usd: f64) -> Result<bool, String> {
+    let kept = db
+        .client()
+        .await?
+        .execute(
+            &format!("update team_runs set model_usd = greatest(model_usd, $5) where team = $1 and box = $2 and workflow = $3 and subject = $4 and state in {LIVE}"),
+            &[&team, &machine, &workflow, &json(subject)?, &usd],
+        )
+        .await
+        .map_err(err)?;
+    Ok(kept > 0)
+}
+
 /// A run at work that reached a limit of its bot and was not called for it yet.
 pub struct AtLimit {
     pub team: Uuid,
@@ -1618,7 +1636,7 @@ pub struct AtLimit {
 }
 
 /// The runs at work (not reserved) whose active time reached their bot's `minutes`, or whose
-/// `cost_usd` its `usd`, and that have no `on_limit` call the hub opened yet (`opened_by_hub`):
+/// cost, its box's and its model's together, its `usd`, and that have no `on_limit` call the hub opened yet (`opened_by_hub`):
 /// one limit call per run, and none a session opened counts. A limit above `most` (the ceiling)
 /// is held at it.
 pub async fn runs_at_limit(db: &Db, most: &BotLimits) -> Result<Vec<AtLimit>, String> {
@@ -1632,10 +1650,10 @@ pub async fn runs_at_limit(db: &Db, most: &BotLimits) -> Result<Vec<AtLimit>, St
         .await?
         .query(
             &format!(
-                "select r.team, r.id, b.limits, coalesce(r.cost_usd::numeric >= {usd}, false), b.workflow
+                "select r.team, r.id, b.limits, coalesce((r.cost_usd + r.model_usd)::numeric >= {usd}, false), b.workflow
                  from team_runs r join team_bots b on b.team = r.team and b.workflow = r.workflow
                  where r.state in ('working', 'taken_over') and not r.reserved
-                   and (r.cost_usd::numeric >= {usd}
+                   and ((r.cost_usd + r.model_usd)::numeric >= {usd}
                         or extract(epoch from now() - coalesce(r.opened_at, r.started_at))::bigint - r.waiting_secs >= {minutes} * 60)
                    and not exists (select 1 from team_calls c where c.run = r.id and c.situation = 'on_limit' and c.opened_by_hub)"
             ),
