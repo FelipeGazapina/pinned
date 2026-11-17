@@ -297,6 +297,11 @@ struct Held {
     until: Instant,
 }
 
+/// The key a plugin share's push is held under: the Claude home it publishes.
+fn share_key(share: &sync::PluginShare) -> String {
+    format!("{} {}", sync::PLUGINS_KEY, share.claude_home.display())
+}
+
 impl PushBackoff {
     fn sync(&mut self, hub: &impl sync::Hub, state: &mut sync::State, checkout: &sync::Checkout, now: Instant) -> Result<sync::Synced, String> {
         let key = &checkout.project.key;
@@ -306,7 +311,7 @@ impl PushBackoff {
     }
 
     fn sync_plugins(&mut self, hub: &impl sync::Hub, state: &mut sync::State, share: &sync::PluginShare, now: Instant) -> Result<sync::Synced, String> {
-        let key = format!("{} {}", sync::PLUGINS_KEY, share.claude_home.display());
+        let key = share_key(share);
         let done = sync::sync_plugins_with(hub, state, share, SystemTime::now(), self.hold(&key, now))?;
         self.record(&key, &done.push, now);
         Ok(done)
@@ -362,6 +367,7 @@ impl Syncer {
             }
         }
         machine.hold_sync_state(false);
+        machine.hold_sync_limit(false);
     }
 
     fn cycle(&mut self, shared: &Shared, hub: &impl sync::Hub, machine: &Machine, file: &Path) {
@@ -385,7 +391,11 @@ impl Syncer {
             }
         }
         let Some(state) = self.state.as_mut() else { return };
-        for checkout in machine.checkouts() {
+        let checkouts = machine.checkouts();
+        let shares = machine.plugin_shares();
+        // A project that left the machine no longer holds the notice.
+        self.backoff.0.retain(|key, _| checkouts.iter().any(|c| &c.project.key == key) || shares.iter().any(|s| share_key(s) == *key));
+        for checkout in checkouts {
             if !shared.online() {
                 break;
             }
@@ -406,7 +416,7 @@ impl Syncer {
                 Err(e) => eprintln!("pinned: could not sync {key}: {e}"),
             }
         }
-        for share in machine.plugin_shares() {
+        for share in shares {
             match self.backoff.sync_plugins(hub, state, &share, Instant::now()) {
                 Ok(done) => {
                     self.reported_old_hub = false;
@@ -428,6 +438,7 @@ impl Syncer {
                 Err(e) => eprintln!("pinned: could not sync plugins: {e}"),
             }
         }
+        machine.hold_sync_limit(!self.backoff.0.is_empty());
         if let Err(e) = state.flush() {
             eprintln!("pinned: {e}");
         }

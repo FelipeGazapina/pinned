@@ -778,6 +778,8 @@ pub struct Machine {
     sleeps: Mutex<sleep::Watch>,
     sync_file: Option<PathBuf>,
     sync_loop_holds_state: AtomicBool,
+    /// Set while the sync loop's last push was refused at the account's size limit, and no push has been taken since.
+    sync_limited: AtomicBool,
     projects: Mutex<Vec<projects::Project>>,
     projects_file: Option<PathBuf>,
     accounts: Accounts,
@@ -1001,6 +1003,7 @@ impl Machine {
             sleeps: Mutex::new(sleep::Watch::with_window(dir.as_ref().and_then(|d| sleep::load(&d.join("sleep.json"))))),
             sync_file: dir.as_ref().map(|d| d.join("sync.json")),
             sync_loop_holds_state: AtomicBool::new(false),
+            sync_limited: AtomicBool::new(false),
             projects: Mutex::new(projects),
             projects_file,
             accounts,
@@ -1210,6 +1213,7 @@ impl Machine {
             Call::SetFolder { tab, path } => json(self.set_folder(&tab, &path)?),
             Call::ListProjects => json(self.list_projects()),
             Call::SyncStopped => json(self.sync_stopped()),
+            Call::SyncLimit => json(self.sync_limit()),
             Call::State => json(self.state()),
             Call::ResetSync => {
                 if let Some(file) = &self.sync_file {
@@ -4071,6 +4075,14 @@ impl Machine {
 
     pub(crate) fn hold_sync_state(&self, held: bool) {
         self.sync_loop_holds_state.store(held, Ordering::SeqCst);
+    }
+
+    pub(crate) fn hold_sync_limit(&self, limited: bool) {
+        self.sync_limited.store(limited, Ordering::SeqCst);
+    }
+
+    fn sync_limit(&self) -> Option<String> {
+        self.sync_limited.load(Ordering::SeqCst).then(|| sync::LIMIT_NOTICE.to_owned())
     }
 
     fn sync_stopped(&self) -> Option<String> {

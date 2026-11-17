@@ -244,6 +244,7 @@ pub const ACTIONS: &[Action] = &[
     n("watch_threads", Excluded, "the app's live transcript updates"),
     n("update_self", Confirm, "Updates pinned on the machine to the latest release and restarts it, which stops the sessions it runs.").wired(),
     n("sync_stopped", Read, "Why the machine stopped syncing projects and plugins, or null while it syncs.").wired(),
+    n("sync_limit", Read, "The notice that the account's synced projects are at their size limit, or null while sync works.").wired(),
     n("reset_sync", Write, "Sets an unreadable sync state aside, so the machine's next sync starts over as a new machine's."),
     n("delegate", Excluded, "the hub's way to start a worker here for another machine: call delegate_task with target.machine").named("node_delegate"),
     n("remote_task", Excluded, "the hub's way to read a worker running here for another machine: call task_status").named("node_remote_task"),
