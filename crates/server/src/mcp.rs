@@ -762,6 +762,7 @@ mod tests {
             asleep: false,
             headless: false,
             stopped: None,
+            stopped_on_error: None,
             questions: None,
             read_only: false,
         }
