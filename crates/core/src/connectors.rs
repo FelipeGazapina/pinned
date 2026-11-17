@@ -12478,7 +12478,6 @@ mod tests {
             (assigned_to(Assignee::User { id: "u-other".into(), name: "Other".into() }), assignee(None), me, false),
             (Trigger::LinearAssigned { to: Assignee::Anyone, scope: linear_scope("OPS", ""), by: By::Anyone }, assignee(Some(other.clone())), me, false),
             (Trigger::LinearAssigned { to: Assignee::Anyone, scope: linear_scope("ENG", ""), by: By::Anyone }, assignee(Some(other.clone())), me, true),
-            (status_of("", ""), status(), me, true),
             (Trigger::LinearStatus { from: "".into(), to: "".into(), scope: any(), by: By::Me }, status(), me, false),
             (Trigger::LinearStatus { from: "".into(), to: "".into(), scope: any(), by: By::Me }, linear::Change { actor: mine.clone(), ..status() }, me, true),
             (Trigger::LinearStatus { from: "".into(), to: "".into(), scope: any(), by: By::NotMe }, status(), me, true),
@@ -12492,6 +12491,15 @@ mod tests {
             (Trigger::LinearLabel { label: "bug".into() }, status(), me, false),
             (Trigger::SlackMention { channel: "general".into() }, status(), me, false),
             (Trigger::Schedule { schedule: schedule::Schedule::Cron { expr: "0 9 * * *".into() }, tz: "UTC".into() }, status(), me, false),
+            (status_of("", "Concluido"), linear::Change { to_state: Some("Concluído".into()), ..status() }, me, true),
+            (status_of("", "concluído"), linear::Change { to_state: Some("CONCLUIDO".into()), ..status() }, me, true),
+            (status_of("", "concluído"), linear::Change { to_state: Some("CONCLUÍDO".into()), ..status() }, me, true),
+            (status_of("Em revisão", ""), linear::Change { from_state: Some("EM REVISAO".into()), ..status() }, me, true),
+            (Trigger::LinearStatus { from: "".into(), to: "".into(), scope: linear_scope(" equipe ", ""), by: By::Anyone }, linear::Change { team_name: "Équipe".into(), ..status() }, me, true),
+            (Trigger::LinearStatus { from: "".into(), to: "".into(), scope: linear_scope("", "Lancamento"), by: By::Anyone }, linear::Change { project: Some("LANÇAMENTO".into()), ..status() }, me, true),
+            (status_of("", "Concluido"), linear::Change { to_state: Some("Cancelado".into()), ..status() }, me, false),
+            (status_of("", "feito"), linear::Change { to_state: Some("Feito em parte".into()), ..status() }, me, false),
+            (assigned_to(Assignee::User { id: "U-OTHER".into(), name: "Other".into() }), assignee(Some(other.clone())), me, false),
         ];
         for (i, (trigger, change, viewer, expected)) in rows.iter().enumerate() {
             assert_eq!(matches(trigger, change, *viewer), *expected, "row {i}: {trigger:?} on {change:?} for viewer {viewer:?}");
