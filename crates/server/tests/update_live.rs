@@ -487,6 +487,12 @@ fn updating(live: &Live, script: &str, extra: &[(&str, &str)]) -> Node {
     Node::spawn(&live.dest, &live.dir, &env)
 }
 
+/// The guard runs before a live test starts its hub or any node.
+#[test]
+fn a_live_test_in_a_real_home_stops_before_any_node_starts() {
+    pinned_core::machine::assert_refused_in_a_real_home("a_restart_after_stage_puts_the_old_bytes_back_online");
+}
+
 #[test]
 fn a_good_update_keeps_one_offline_gap_and_reports_the_new_version() {
     let mut live = Live::start("good");
