@@ -3413,9 +3413,14 @@ mod tests {
         for task in ["task-1'; rm -rf ~; '", "$(id)", "`id`", "-f", ".hidden", "a..b", "x.lock", "x.", "a b", "a/b", "a\nb", "", "\u{e9}t\u{e9}"] {
             assert_eq!(rescue_script(SITE, task), None, "{task:?}");
         }
-        for repo in ["https://github.com/acme/si'te.git", "acme/$(id)", "acme/-x", "acme/a b"] {
+        for repo in ["https://github.com/acme/si'te.git", "acme/$(id)", "acme/-x", "acme/a b", "acme/.x.", "acme/a..b", "acme/x.lock", "acme/$x"] {
             assert_eq!(rescue_script(repo, TASK), None, "{repo:?}");
         }
+        for (repo, name) in [("https://github.com/acme/.github.git", ".github"), ("acme/_site", "_site")] {
+            let script = rescue_script(repo, TASK).unwrap_or_else(|| panic!("{repo:?}"));
+            assert!(script.contains(&format!("cd \"$HOME/pinned/{name}\" ")), "a repository's name may start with . or _: {repo:?}");
+        }
+        assert_eq!(rescue_script(SITE, "_task-1"), None, "a task id starts with a letter or a digit");
         assert_eq!(rescue_script(SITE, &"t".repeat(101)), None, "an id past 100 characters");
     }
 
@@ -3451,6 +3456,11 @@ mod tests {
         assert_eq!(
             answer("pinned-rescue: saved wip/rescue/task-1a2b3c4d (left out 2 files that may hold secrets)\npinned-rescue: saved wip/rescue/task-1a2b3c4d-2 (left out 1 files that may hold secrets)\npinned-rescue: done\n"),
             Rescue { saved: vec!["wip/rescue/task-1a2b3c4d".into(), "wip/rescue/task-1a2b3c4d-2".into()], left_out: 3, ..Rescue::default() }
+        );
+        assert_eq!(
+            answer(&format!("pinned-rescue: saved wip/rescue/task-1a2b3c4d (left out {} files that may hold secrets)\npinned-rescue: saved wip/rescue/task-1a2b3c4d-2 (left out 1 files that may hold secrets)\npinned-rescue: done\n", usize::MAX)).left_out,
+            usize::MAX,
+            "a count the box gives stops at the most a count holds"
         );
         assert_eq!(answer("pinned-rescue: saved main (left out 2 files that may hold secrets)\npinned-rescue: done\n"), Rescue::failed("the box named a branch that is not the task's"));
         assert_eq!(answer("pinned-rescue: saved wip/rescue/task-1a2b3c4d (left out x files that may hold secrets)\npinned-rescue: done\n"), Rescue::failed("the box named a branch that is not the task's"));
@@ -3569,9 +3579,9 @@ mod tests {
         let (boxes, _) = rescuing(None, true);
         let started = tokio::time::Instant::now();
         let rescue = boxes.run_rescue(&worker_row(Phase::Running), TASK, Some(KEY), RESCUE_WAIT).await;
-        assert_eq!(rescue, Rescue::failed("it took longer than 1 min"));
-        assert_eq!(started.elapsed(), Duration::from_secs(60));
-        assert_eq!(RESCUE_WAIT, Duration::from_secs(60));
+        assert_eq!(rescue, Rescue::failed("it took longer than 30 s"));
+        assert_eq!(started.elapsed(), Duration::from_secs(30));
+        assert_eq!(RESCUE_WAIT, Duration::from_secs(30), "well inside the 60 s a node waits for the hub's answer");
     }
 
     /// A box home whose `pinned/site` clones a bare remote, with `git` on PATH a shim that logs each
@@ -3641,10 +3651,48 @@ mod tests {
             String::from_utf8(ran.stdout).unwrap()
         }
 
+        /// Runs the task's rescue script in `mode`, with `env` set as well, and answers what it printed.
+        fn rescue_with(&self, mode: &str, env: &[(&str, &str)]) -> String {
+            let ran = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(script_in(mode))
+                .env_clear()
+                .env("HOME", &self.home)
+                .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
+                .envs(env.iter().copied())
+                .output()
+                .unwrap();
+            assert!(ran.status.success());
+            String::from_utf8(ran.stdout).unwrap()
+        }
+
+        fn rescue_in(&self, mode: &str) -> String {
+            self.rescue_with(mode, &[])
+        }
+
+        /// Every path any commit the remote holds touched, one per line.
+        fn remote_paths(&self) -> String {
+            self.git(&self.remote, &["log", "--all", "--format=", "--name-only"])
+        }
+
+        fn remote_branches(&self) -> String {
+            self.git(&self.remote, &["for-each-ref", "--format=%(refname)"])
+        }
+
+        fn commit_all(&self, files: &[(&str, &str)], message: &str) {
+            for (path, text) in files {
+                let path = self.clone.join(path);
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, text).unwrap();
+            }
+            self.git(&self.clone, &["add", "-A"]);
+            self.git(&self.clone, &["commit", "-q", "-m", message]);
+        }
+
         /// Each git call the script made that wrote: its commits and pushes, as their arguments.
         fn writes(&self) -> Vec<String> {
             let log = std::fs::read_to_string(self._root.path().join("git.log")).unwrap_or_default();
-            log.lines().filter(|l| l.starts_with("commit") || l.starts_with("push") || l.starts_with("add")).map(str::to_owned).collect()
+            log.lines().filter(|l| l.starts_with("commit") || l.starts_with("push") || l.starts_with("add") || l.starts_with("reset")).map(str::to_owned).collect()
         }
 
         fn branch(&self, name: &str, path: &str) -> String {
@@ -3794,5 +3842,193 @@ mod tests {
         std::fs::rename(&run.clone, run.home.join("pinned/other")).unwrap();
         assert_eq!(run.rescue(), "pinned-rescue: done\n");
         assert_eq!(run.writes(), Vec::<String>::new());
+    }
+
+    /// The task's rescue script in `mode`, as the hub fills it.
+    #[cfg(unix)]
+    fn script_in(mode: &str) -> String {
+        rescue_script(SITE, TASK).unwrap().replace("{{mode}}", mode)
+    }
+
+    /// A value shaped like a secret that no service issued: `prefix` and `len` copies of `fill`, built
+    /// here so this file holds no such shape.
+    fn invented(prefix: &str, fill: char, len: usize) -> String {
+        format!("{prefix}{}", fill.to_string().repeat(len))
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_public_repository_rescue_pushes_only_the_workers_commits_and_counts_the_uncommitted_files() {
+        let run = RescueRun::new();
+        run.git(&run.clone, &["checkout", "-q", "-b", "feature"]);
+        run.commit_all(&[("feature.txt", "committed\n")], "feature work");
+        std::fs::write(run.clone.join(".env"), "TOKEN=invented\n").unwrap();
+        run.git(&run.clone, &["add", ".env"]);
+        std::fs::write(run.clone.join("notes.txt"), "half done\n").unwrap();
+        std::fs::write(run.clone.join("new.txt"), "new\n").unwrap();
+        let index = std::fs::read(run.clone.join(".git/index")).unwrap();
+        let _ = std::fs::remove_file(run._root.path().join("git.log"));
+        assert_eq!(run.rescue_in("commits"), "pinned-rescue: saved wip/rescue/task-1a2b3c4d\npinned-rescue: uncommitted 3\npinned-rescue: done\n");
+        assert_eq!(run.git(&run.remote, &["ls-tree", "-r", "--name-only", "refs/heads/wip/rescue/task-1a2b3c4d"]), "feature.txt\nnotes.txt\n");
+        assert_eq!(run.branch("wip/rescue/task-1a2b3c4d", "notes.txt"), "started\n", "the uncommitted change stays in the box");
+        assert_eq!(run.git(&run.remote, &["log", "-1", "--format=%s", "refs/heads/wip/rescue/task-1a2b3c4d"]), "feature work\n");
+        assert!(!run.remote_paths().lines().any(|p| p == ".env" || p == "new.txt"), "{}", run.remote_paths());
+        assert!(run.writes().iter().all(|w| w.starts_with("push ")), "no add, no commit, no reset: {:?}", run.writes());
+        assert_eq!(std::fs::read(run.clone.join(".git/index")).unwrap(), index, "the index is as the worker left it");
+        assert_eq!(std::fs::read_to_string(run.clone.join("notes.txt")).unwrap(), "half done\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_branch_the_worker_committed_on_and_left_is_pushed_in_either_mode() {
+        for mode in ["commits", "full"] {
+            let run = RescueRun::new();
+            run.git(&run.clone, &["checkout", "-q", "-b", "left"]);
+            run.commit_all(&[("left.txt", "left behind\n")], "left work");
+            run.git(&run.clone, &["checkout", "-q", "-"]);
+            assert_eq!(run.rescue_in(mode), "pinned-rescue: saved wip/rescue/task-1a2b3c4d\npinned-rescue: done\n", "{mode}");
+            assert_eq!(run.branch("wip/rescue/task-1a2b3c4d", "left.txt"), "left behind\n", "{mode}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_private_repository_rescue_whose_change_holds_a_token_shape_pushes_nothing_and_keeps_the_file() {
+        let run = RescueRun::new();
+        run.commit_all(&[("notes.txt", "mine\n")], "mine");
+        let filled = format!("aws = \"{}\"\n", invented("AKIA", 'X', 16));
+        std::fs::write(run.clone.join("notes.txt"), &filled).unwrap();
+        assert_eq!(run.rescue_in("full"), "pinned-rescue: refused secret\npinned-rescue: done\n");
+        assert_eq!(run.remote_branches(), "refs/heads/main\n", "nothing of the branch is pushed, not even the worker's own commit");
+        assert_eq!(std::fs::read_to_string(run.clone.join("notes.txt")).unwrap(), filled, "the worker's file stays");
+        assert_eq!(run.git(&run.clone, &["log", "-1", "--format=%s"]), "mine\n", "the rescue commit is undone");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_commit_holding_a_token_shape_is_refused_whole_in_either_mode() {
+        let key = format!("-----BEGIN OPENSSH {}-----", "PRIVATE KEY");
+        let shapes = [
+            invented("sk-", 'x', 20),
+            invented("sk-ant-oat01-", 'x', 20),
+            invented("ghp_", 'x', 30),
+            invented("gho_", 'x', 30),
+            invented("ghu_", 'x', 30),
+            invented("ghs_", 'x', 30),
+            invented("ghr_", 'x', 30),
+            invented("github_pat_", 'x', 4),
+            invented("xoxb-", 'x', 4),
+            invented("box_", 'x', 16),
+            invented("AKIA", 'X', 16),
+            key,
+        ];
+        for mode in ["commits", "full"] {
+            for shape in &shapes {
+                let run = RescueRun::new();
+                run.commit_all(&[("deploy.sh", &format!("export X='{shape}'\n"))], "deploy");
+                run.commit_all(&[("notes.txt", "clean on top\n")], "clean");
+                assert_eq!(run.rescue_in(mode), "pinned-rescue: refused secret\npinned-rescue: done\n", "{mode} {}", &shape[..6]);
+                assert_eq!(run.remote_branches(), "refs/heads/main\n", "{mode} {}", &shape[..6]);
+            }
+        }
+        let run = RescueRun::new();
+        let near = [invented("sk-", 'x', 19), invented("ghp_", 'x', 29), "box_usage".to_owned(), invented("AKIA", 'x', 16), "-----BEGIN PUBLIC KEY-----".to_owned()];
+        run.commit_all(&[("notes.txt", &near.join("\n"))], "near misses");
+        assert_eq!(run.rescue_in("commits"), "pinned-rescue: saved wip/rescue/task-1a2b3c4d\npinned-rescue: done\n", "a shorter or other value is no token");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_env_dump_holding_the_value_of_a_secret_named_variable_is_refused() {
+        let value = "invented-value-0123456789";
+        let dump = format!("FAKE_API_TOKEN={value}\n");
+        let run = RescueRun::new();
+        std::fs::write(run.clone.join("dump.txt"), &dump).unwrap();
+        assert_eq!(run.rescue_with("full", &[("FAKE_API_TOKEN", value)]), "pinned-rescue: refused secret\npinned-rescue: done\n");
+        assert_eq!(run.remote_branches(), "refs/heads/main\n");
+        assert_eq!(std::fs::read_to_string(run.clone.join("dump.txt")).unwrap(), dump, "the dump stays in the box");
+        assert_eq!(run.git(&run.clone, &["log", "-1", "--format=%s"]), "start\n", "the rescue commit is undone");
+
+        let run = RescueRun::new();
+        run.commit_all(&[("dump.txt", &dump)], "dump");
+        assert_eq!(run.rescue_with("commits", &[("FAKE_API_TOKEN", value)]), "pinned-rescue: refused secret\npinned-rescue: done\n");
+        assert_eq!(run.remote_branches(), "refs/heads/main\n");
+
+        let run = RescueRun::new();
+        run.commit_all(&[("dump.txt", &format!("FAKE_NOTE={value}\nFAKE_TOKEN=short-value\n"))], "dump");
+        assert_eq!(
+            run.rescue_with("commits", &[("FAKE_NOTE", value), ("FAKE_TOKEN", "short-value")]),
+            "pinned-rescue: saved wip/rescue/task-1a2b3c4d\npinned-rescue: done\n",
+            "a variable not named like a secret, or a value under 12 characters, is not looked for"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_private_repository_rescue_saves_a_clean_change_and_leaves_out_only_secret_names() {
+        let run = RescueRun::new();
+        for (path, text) in [("notes.txt", "half done\n"), ("src/tokenizer.rs", "fn lex() {}\n"), ("design-tokens/x.css", "a {}\n"), ("api_token.txt", "invented\n")] {
+            let path = run.clone.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        assert_eq!(run.rescue_in("full"), "pinned-rescue: saved wip/rescue/task-1a2b3c4d (left out 1 files that may hold secrets)\npinned-rescue: done\n");
+        assert_eq!(run.git(&run.remote, &["ls-tree", "-r", "--name-only", "refs/heads/wip/rescue/task-1a2b3c4d"]), "design-tokens/x.css\nnotes.txt\nsrc/tokenizer.rs\n");
+        assert_eq!(run.branch("wip/rescue/task-1a2b3c4d", "notes.txt"), "half done\n");
+        assert!(run.clone.join("api_token.txt").exists(), "the file left out stays in the box");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_private_repository_rescue_leaves_out_every_secret_name_and_keeps_plain_source() {
+        let run = RescueRun::new();
+        let secrets = [
+            "id_ed25519", ".npmrc", "web/.netrc", ".pgpass", ".htpasswd", ".dockercfg", "cert.pfx", "store.jks", "release.keystore", "infra/terraform.tfstate",
+            "prod.tfvars", "kubeconfig", "ops/my-kubeconfig.yaml", ".mcp.json", "prod.env", "env.local", ".claude/settings.local.json", "token", "tokens.json",
+            ".token", "secrets.yml", "credentials.json", "config/client_secret.json",
+        ];
+        for (n, path) in secrets.iter().enumerate() {
+            let path = run.clone.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, format!("invented-{n}\n")).unwrap();
+        }
+        for path in ["src/tokenizer.rs", "design-tokens/x.css", "keyboard.rs", "src/secretary.rs"] {
+            let path = run.clone.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "plain\n").unwrap();
+        }
+        assert_eq!(run.rescue_in("full"), format!("pinned-rescue: saved wip/rescue/task-1a2b3c4d (left out {} files that may hold secrets)\npinned-rescue: done\n", secrets.len()));
+        assert_eq!(
+            run.git(&run.remote, &["ls-tree", "-r", "--name-only", "refs/heads/wip/rescue/task-1a2b3c4d"]),
+            "design-tokens/x.css\nkeyboard.rs\nnotes.txt\nsrc/secretary.rs\nsrc/tokenizer.rs\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_staged_env_file_is_unstaged_before_a_private_repository_rescue_adds_the_tree() {
+        let run = RescueRun::new();
+        std::fs::write(run.clone.join(".env"), "TOKEN=invented\n").unwrap();
+        run.git(&run.clone, &["add", ".env"]);
+        std::fs::write(run.clone.join("notes.txt"), "half done\n").unwrap();
+        assert_eq!(run.rescue_in("full"), "pinned-rescue: saved wip/rescue/task-1a2b3c4d (left out 1 files that may hold secrets)\npinned-rescue: done\n");
+        assert_eq!(run.git(&run.remote, &["ls-tree", "-r", "--name-only", "refs/heads/wip/rescue/task-1a2b3c4d"]), "notes.txt\n");
+        assert!(!run.remote_paths().lines().any(|p| p == ".env"), "{}", run.remote_paths());
+        assert!(run.clone.join(".env").exists(), "the file left out stays in the box");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_private_repository_rescue_never_adds_a_nested_repository() {
+        let run = RescueRun::new();
+        let nested = run.clone.join("vendor/lib");
+        std::fs::create_dir_all(&nested).unwrap();
+        run.git(&nested, &["init", "-q"]);
+        std::fs::write(nested.join("lib.rs"), "fn lib() {}\n").unwrap();
+        run.git(&nested, &["add", "lib.rs"]);
+        run.git(&nested, &["commit", "-q", "-m", "lib"]);
+        std::fs::write(run.clone.join("notes.txt"), "half done\n").unwrap();
+        assert_eq!(run.rescue_in("full"), "pinned-rescue: saved wip/rescue/task-1a2b3c4d\npinned-rescue: done\n");
+        assert_eq!(run.git(&run.remote, &["ls-tree", "-r", "--name-only", "refs/heads/wip/rescue/task-1a2b3c4d"]), "notes.txt\n", "no gitlink");
     }
 }
