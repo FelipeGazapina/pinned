@@ -153,6 +153,9 @@ async fn remote_task(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, machine
         (Some(row), Some(reason)) => {
             let mut answer = answer.unwrap_or_else(|_| json!({ "workState": "cancelled", "error": reason }));
             hub.boxes.add_box_usage(hub, account, &row, &mut answer).await;
+            if let Some(notice) = hub.boxes.rescue_delegate(hub, account, &row).await {
+                crate::boxes::add_rescue_notice_to_answer(&mut answer, &notice);
+            }
             // A box cancelled while its link is down ends for that, not as done.
             let why = if offline.as_deref() == Some(pinned_core::delegate::BOX_OFFLINE) { crate::boxes::End::Offline } else { crate::boxes::End::Done };
             hub.boxes.end_delegate(hub, account, row, why).await?;
@@ -181,6 +184,10 @@ async fn ended(hub: &Arc<Hub>, account: &Arc<Account>, from: &str, to: &str, tab
     let mut end = end;
     if let Some(row) = &worker_box {
         hub.boxes.add_end_box_usage(hub, account, row, &mut end).await;
+        // Before the end goes on, which names the branch it saved to.
+        if let Some(notice) = hub.boxes.rescue_delegate(hub, account, row).await {
+            crate::boxes::add_rescue_notice(&mut end, &notice);
+        }
     }
     // One delivery of the task's end at a time, as `deliver_held` and a status look take it, so this
     // end's write never overtakes theirs.

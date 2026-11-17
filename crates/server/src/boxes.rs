@@ -30,6 +30,13 @@ use uuid::Uuid;
 const DIR: &str = "/workspace/home/.pinned";
 const BOOTSTRAP: &str = include_str!("box-bootstrap.sh");
 const START: &str = include_str!("box-start.sh");
+const RESCUE: &str = include_str!("box-rescue.sh");
+/// How long the rescue of a worker box's unpushed work may take. The box is deleted after it either way.
+const RESCUE_WAIT: Duration = Duration::from_secs(60);
+/// What starts each line of the rescue script's answer; the hub reads no other line.
+const RESCUE_MARK: &str = "pinned-rescue: ";
+/// The branch a rescue pushes to is this and the task's id, with `-<n>` after it when that is taken.
+const RESCUE_BRANCH: &str = "wip/rescue/";
 /// How `end` words a delete that cannot run without the Box API key. The one place it is worded:
 /// `delete_box` builds its error from it, and `stuck_reason` recognises that error by it.
 const NOT_CONNECTED_END: &str = "Upstash Box is not connected,";
@@ -923,6 +930,126 @@ fn tail(exec: &Exec) -> String {
     text[start..].to_owned()
 }
 
+/// What the rescue of a worker box's unpushed work came to. Nothing saved and nothing failed is a
+/// box with nothing to save, or one no rescue is for.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Rescue {
+    /// The branches the work was pushed to, one per clone or worktree that held some.
+    pub saved: Vec<String>,
+    /// Why some work could not be saved, as the end notice words it.
+    pub failed: Option<String>,
+}
+
+impl Rescue {
+    fn failed(why: impl Into<String>) -> Rescue {
+        Rescue { saved: Vec::new(), failed: Some(why.into()) }
+    }
+
+    /// The sentence the task's end notice adds, or None when there was nothing to save.
+    pub fn notice(&self) -> Option<String> {
+        let saved = match self.saved.as_slice() {
+            [] => None,
+            [one] => Some(format!("Unpushed work was saved to branch {one}.")),
+            many => Some(format!("Unpushed work was saved to branches {}.", many.join(", "))),
+        };
+        match (saved, &self.failed) {
+            (Some(saved), Some(why)) => Some(format!("{saved} Other unpushed work could not be saved: {why}.")),
+            (None, Some(why)) => Some(format!("Unpushed work could not be saved: {why}.")),
+            (saved, None) => saved,
+        }
+    }
+}
+
+/// `id` when it may stand in a git branch name and a shell word as it is: ASCII letters, digits,
+/// `.`, `_` and `-`, starting with a letter or a digit, with no `..` and not ending in `.` or
+/// `.lock`. A task id (`task-1a2b3c4d`) and a repository's name are.
+fn safe_id(id: &str) -> Option<&str> {
+    let chars = id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    let ends = id.starts_with(|c: char| c.is_ascii_alphanumeric()) && !id.ends_with('.') && !id.ends_with(".lock");
+    (chars && ends && id.len() <= 100 && !id.contains("..")).then_some(id)
+}
+
+/// The script that saves task `task`'s unpushed work in the box's clone of `repo` (`~/pinned/<its
+/// name>`) and the clone's worktrees, or None when the repository's name or the task's id is not
+/// safe to put in it. It carries nothing but the two.
+fn rescue_script(repo: &str, task: &str) -> Option<String> {
+    let name = safe_id(machine::repo_name(repo)?)?;
+    let task = safe_id(task)?;
+    Some(RESCUE.replace("{{repo}}", name).replace("{{task}}", task))
+}
+
+/// Whether `branch` is one of task `task`'s rescue branches: `wip/rescue/<task>`, or that and `-<n>`.
+fn is_rescue_branch(branch: &str, task: &str) -> bool {
+    match branch.strip_prefix(RESCUE_BRANCH).and_then(|rest| rest.strip_prefix(task)) {
+        Some("") => true,
+        Some(n) => n.strip_prefix('-').is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())),
+        None => false,
+    }
+}
+
+/// What the rescue script's answer says for task `task`. Only its own lines are read, a branch only
+/// when it is one of the task's, and an answer without its closing `done` did not finish.
+fn rescued(exec: &Exec, task: &str) -> Rescue {
+    let mut rescue = Rescue::default();
+    let mut done = false;
+    for said in exec.output.lines().filter_map(|line| line.strip_prefix(RESCUE_MARK)) {
+        let why = match said.trim() {
+            "done" => {
+                done = true;
+                continue;
+            }
+            said => match said.strip_prefix("saved ") {
+                Some(branch) if is_rescue_branch(branch, task) => {
+                    rescue.saved.push(branch.to_owned());
+                    continue;
+                }
+                Some(_) => "the box named a branch that is not the task's",
+                None => match said {
+                    "failed add" => "git could not stage the changes",
+                    "failed commit" => "the rescue commit failed",
+                    "failed remote" => "the clone's remote could not be reached",
+                    "failed name" => "every rescue branch name of the task is taken",
+                    "failed push" => "the push was refused",
+                    _ => "the box answered something unexpected",
+                },
+            },
+        };
+        rescue.failed.get_or_insert_with(|| why.to_owned());
+    }
+    if !done {
+        rescue.failed.get_or_insert_with(|| "the rescue did not finish".to_owned());
+    }
+    rescue
+}
+
+/// `text` with `notice` after it as a sentence of its own.
+fn with_notice(text: &str, notice: &str) -> String {
+    let text = text.trim_end();
+    match text.chars().last() {
+        None => notice.to_owned(),
+        Some('.' | '!' | '?') => format!("{text} {notice}"),
+        Some(_) => format!("{text}. {notice}"),
+    }
+}
+
+/// Adds a rescue's `notice` to a task's end: to its summary when its work came back, after a blank
+/// line, else to its error.
+pub fn add_rescue_notice(end: &mut RemoteEnd, notice: &str) {
+    if end.state == "result_available" {
+        end.summary = Some(match end.summary.as_deref().map(str::trim_end).filter(|s| !s.is_empty()) {
+            Some(summary) => format!("{summary}\n\n{notice}"),
+            None => notice.to_owned(),
+        });
+    } else {
+        end.error = Some(with_notice(end.error.as_deref().unwrap_or_default(), notice));
+    }
+}
+
+/// Adds a rescue's `notice` to the error of a task's status answer.
+pub fn add_rescue_notice_to_answer(answer: &mut serde_json::Value, notice: &str) {
+    answer["error"] = serde_json::Value::String(with_notice(answer["error"].as_str().unwrap_or_default(), notice));
+}
+
 /// Marks a row as driven while it lives, so an open and a reap never drive one row at once. A row
 /// is the account's and its id, so a row id an account's client wrote never meets another account's.
 struct Driving<'a> {
@@ -947,6 +1074,9 @@ pub struct Boxes {
     swept: Mutex<HashMap<Uuid, Instant>>,
     /// Row id → why its last delete failed, for rows still `Ending`. Cleared once the delete works.
     stuck: Mutex<HashMap<String, StuckRecord>>,
+    /// The rescue of each worker box that has one, held while it runs and kept once it ran, so it
+    /// runs once and no end deletes the box under it. Cleared once the box is deleted.
+    rescues: Mutex<HashMap<(Uuid, String), Arc<tokio::sync::Mutex<Option<Rescue>>>>>,
 }
 
 impl Boxes {
@@ -960,6 +1090,7 @@ impl Boxes {
             cooling: Mutex::default(),
             swept: Mutex::default(),
             stuck: Mutex::default(),
+            rescues: Mutex::default(),
         }
     }
 
@@ -1422,7 +1553,7 @@ impl Boxes {
                 if hub.db.set_box_phase(account.id, &row.id, &from, &failed).await? {
                     let mut row = row.clone();
                     row.phase = failed.clone();
-                    self.tell_origin(hub, account, &row, &End::Failed(e.clone())).await;
+                    self.tell_origin(hub, account, &row, &End::Failed(e.clone()), None).await;
                     if let Err(failed) = crate::teams::calls::box_failed(hub, account, row.machine, &row.connector, &row.subject, e).await {
                         eprintln!("pinned-server: box {} of account {} failed, but its team run did not end yet: {failed}", row.id, account.id);
                     }
@@ -1569,6 +1700,7 @@ impl Boxes {
     /// then the box, then the row. Deleting needs only the Box API key, not the Claude token. Without
     /// it the row stays, to be retried once it is back.
     async fn end(&self, hub: &Hub, account: &Arc<Account>, row: &Remains, key: Option<&str>) -> Result<(), String> {
+        self.rescue_settled(row.account, &row.id).await;
         let ended = self.end_steps(hub, account, row, key).await;
         self.settle(row, &ended, key);
         ended.map_err(Failed::into_message)
@@ -1618,6 +1750,7 @@ impl Boxes {
         match ended {
             Ok(()) => {
                 self.timers.lock().unwrap().remove(&(row.account, id.to_owned()));
+                self.rescues.lock().unwrap().remove(&(row.account, id.to_owned()));
                 self.stuck.lock().unwrap().remove(id);
             }
             Err(Failed::Box(e)) => {
@@ -1642,10 +1775,13 @@ impl Boxes {
 
     /// A worker box ended before its task did: the machine whose tab delegated the task hears it
     /// failed, so it does not wait on it. One that can't hear it now gets it from the hub's held ends. A box that ends for its task's end, `Done`, has nothing to tell.
-    async fn tell_origin(&self, hub: &Hub, account: &Account, row: &BoxRow, why: &End) {
+    async fn tell_origin(&self, hub: &Hub, account: &Account, row: &BoxRow, why: &End, rescue: Option<&str>) {
         let BoxWork::Delegate { origin, .. } = &row.work else { return };
         let Some(error) = self.box_end_error(why) else { return };
         let mut end = RemoteEnd { state: "failed".into(), summary: None, error: Some(error), usage: None };
+        if let Some(notice) = rescue {
+            add_rescue_notice(&mut end, notice);
+        }
         self.add_end_box_usage(hub, account, row, &mut end).await;
         let ended = Call::RemoteEnded { from: row.machine.to_string(), tab: origin.tab.clone(), task: origin.task.clone(), end: end.clone() };
         if let Err(e) = hub.call_machine(account, &origin.machine, ended, ORIGIN_WAIT).await {
@@ -1732,6 +1868,67 @@ impl Boxes {
         end.usage = Some(Self::with_box_time(end.usage, row.size, ms));
     }
 
+    /// The rescue of a worker box whose task ran, locked, for a person's account: a team's boxes
+    /// run its bots' workflow runs, whose work is the bot's own to push. None for any other box.
+    async fn rescue_slot(&self, account: &Account, row: &BoxRow) -> Option<tokio::sync::OwnedMutexGuard<Option<Rescue>>> {
+        if account.team || row.phase != Phase::Running || !matches!(row.work, BoxWork::Delegate { .. }) {
+            return None;
+        }
+        let slot = self.rescues.lock().unwrap().entry((row.account, row.id.clone())).or_default().clone();
+        Some(slot.lock_owned().await)
+    }
+
+    /// The rescue `slot` holds, run now unless it ran already.
+    async fn rescue_in(&self, mut slot: tokio::sync::OwnedMutexGuard<Option<Rescue>>, row: &BoxRow, key: Option<&str>) -> Rescue {
+        if let Some(ran) = slot.as_ref() {
+            return ran.clone();
+        }
+        let BoxWork::Delegate { origin, .. } = &row.work else { return Rescue::default() };
+        let rescue = self.run_rescue(row, &origin.task, key, RESCUE_WAIT).await;
+        *slot = Some(rescue.clone());
+        rescue
+    }
+
+    /// Before a worker box goes with its task's end, which its caller passes on: saves its unpushed
+    /// work, once per box, and answers the sentence that end adds, if any.
+    pub async fn rescue_delegate(&self, hub: &Hub, account: &Account, row: &BoxRow) -> Option<String> {
+        let slot = self.rescue_slot(account, row).await?;
+        let key = hub.connectors(account).await.ok().and_then(|c| c.box_api_key());
+        self.rescue_in(slot, row, key.as_deref()).await.notice()
+    }
+
+    /// Waits until a rescue of row `id`'s box that runs now has ended.
+    async fn rescue_settled(&self, account: Uuid, id: &str) {
+        let slot = self.rescues.lock().unwrap().get(&(account, id.to_owned())).cloned();
+        if let Some(slot) = slot {
+            drop(slot.lock().await);
+        }
+    }
+
+    /// Runs the rescue script in the row's box through the Box API, for task `task`, for at most
+    /// `wait`. Logs one line when it saved work, and one when it could not.
+    async fn run_rescue(&self, row: &BoxRow, task: &str, key: Option<&str>, wait: Duration) -> Rescue {
+        let Some(script) = row.spec.repo.as_deref().and_then(|repo| rescue_script(repo, task)) else {
+            return Rescue::failed("its repository or task id cannot name a branch safely");
+        };
+        let rescue = match (key, &row.upstash) {
+            (Some(key), Some(id)) => match tokio::time::timeout(wait, self.api.exec(key, id, script)).await {
+                Ok(Ok(exec)) => rescued(&exec, task),
+                Ok(Err(_)) => Rescue::failed("the box could not be reached"),
+                Err(_) => Rescue::failed(format!("it took longer than {}", wait_span(wait))),
+            },
+            (None, _) => Rescue::failed("Upstash Box is not connected"),
+            (_, None) => Rescue::failed("the box could not be reached"),
+        };
+        if !rescue.saved.is_empty() {
+            eprintln!("pinned-server: saved the unpushed work of box {} to {}", row.id, rescue.saved.join(", "));
+        }
+        if let Some(why) = &rescue.failed {
+            eprintln!("pinned-server: could not save the unpushed work of box {}: {why}", row.id);
+        }
+        rescue
+    }
+
     /// Ends the row for `why`, unless it is ending already, and deletes its box.
     async fn finish(&self, hub: &Hub, account: &Arc<Account>, row: BoxRow, why: End, key: Option<&str>) -> Result<(), String> {
         self.finish_told(hub, account, row, why, key, true).await
@@ -1741,13 +1938,19 @@ impl Boxes {
     async fn finish_told(&self, hub: &Hub, account: &Arc<Account>, mut row: BoxRow, why: End, key: Option<&str>, tell: bool) -> Result<(), String> {
         let failed = matches!(why, End::Failed(_));
         if !matches!(row.phase, Phase::Ending(_)) {
+            // Taken before the row reads as ending, so no other end deletes the box under the rescue.
+            let rescuing = self.rescue_slot(account, &row).await;
             let ending = Phase::Ending(why.clone());
             if !hub.db.set_box_phase(account.id, &row.id, &row.phase, &ending).await? {
                 return Err(format!("box {} changed while pinned ended it; it ends on the next check", row.id));
             }
             row.phase = ending;
+            let rescue = match rescuing {
+                Some(slot) => self.rescue_in(slot, &row, key).await,
+                None => Rescue::default(),
+            };
             if tell {
-                self.tell_origin(hub, account, &row, &why).await;
+                self.tell_origin(hub, account, &row, &why, rescue.notice().as_deref()).await;
             }
         }
         self.fail_held_runs(hub, account, &row, &why).await?;
