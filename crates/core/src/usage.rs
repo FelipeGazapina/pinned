@@ -163,7 +163,7 @@ impl Tokens {
 /// Every transcript under each of `projects` with a line at or after `since`, summed per quarter hour,
 /// model, session and speed, a mapped model counted as the one `book` maps it to. Claude Code
 /// repeats a message's usage on each of its content blocks and copies messages into resumed and
-/// forked sessions, so a message counts once, by id and request.
+/// forked sessions, so a message counts once, by id and request (`add_line`).
 pub fn read(projects: &[PathBuf], since: u64, rates: &RateTable, book: &PriceBook) -> Vec<Row> {
     let targets = book.targets();
     let mut files = vec![];
@@ -171,7 +171,7 @@ pub fn read(projects: &[PathBuf], since: u64, rates: &RateTable, book: &PriceBoo
         walk(dir, since.saturating_sub(MTIME_SLACK), &mut files);
     }
     files.sort();
-    let mut seen = HashSet::new();
+    let mut seen = HashMap::new();
     let mut sessions: HashMap<String, u32> = HashMap::new();
     let mut sums: HashMap<(u64, String, u32, Speed), [u64; 5]> = HashMap::new();
     for file in files {
@@ -184,17 +184,11 @@ pub fn read(projects: &[PathBuf], since: u64, rates: &RateTable, book: &PriceBoo
             let Some(message) = line.message.filter(|_| line.kind == "assistant") else { continue };
             let (Some(tokens), Some(model)) = (message.usage, message.model.filter(|m| !m.is_empty() && m != "<synthetic>")) else { continue };
             let Some(at) = line.timestamp.as_deref().and_then(unix_of).filter(|at| *at >= since) else { continue };
-            if (message.id.is_some() || line.request.is_some()) && !seen.insert((message.id, line.request)) {
-                continue;
-            }
             let next = sessions.len() as u32;
             let session = *sessions.entry(line.session).or_insert(next);
             let speed = if tokens.speed.as_deref() == Some("fast") { Speed::Fast } else { Speed::Standard };
             let model = targets.get(model.as_str()).map_or(model, |&target| target.to_owned());
-            let sum = sums.entry((at - at % SLICE, model, session, speed)).or_default();
-            for (total, n) in sum.iter_mut().zip(tokens.counts()) {
-                *total += n;
-            }
+            add_line(&mut seen, &mut sums, (message.id, line.request), (at - at % SLICE, model, session, speed), tokens.counts());
         }
     }
     let mut rows: Vec<Row> = sums
@@ -231,7 +225,7 @@ pub struct TaskUsage {
 #[derive(Clone, Debug, Default)]
 pub struct Meter {
     offsets: HashMap<PathBuf, u64>,
-    seen: HashSet<(Option<String>, Option<String>)>,
+    seen: HashMap<MessageId, ((String, Speed), [u64; 5])>,
     sums: HashMap<(String, Speed), [u64; 5]>,
 }
 
@@ -263,14 +257,8 @@ impl Meter {
             let Ok(line) = serde_json::from_slice::<Line>(raw) else { continue };
             let Some(message) = line.message.filter(|_| line.kind == "assistant") else { continue };
             let (Some(tokens), Some(model)) = (message.usage, message.model.filter(|m| !m.is_empty() && m != "<synthetic>")) else { continue };
-            if (message.id.is_some() || line.request.is_some()) && !self.seen.insert((message.id, line.request)) {
-                continue;
-            }
             let speed = if tokens.speed.as_deref() == Some("fast") { Speed::Fast } else { Speed::Standard };
-            let sum = self.sums.entry((model, speed)).or_default();
-            for (total, n) in sum.iter_mut().zip(tokens.counts()) {
-                *total += n;
-            }
+            add_line(&mut self.seen, &mut self.sums, (message.id, line.request), (model, speed), tokens.counts());
         }
         self.offsets.insert(file.to_owned(), offset + whole as u64);
         Ok(whole > 0)
@@ -389,6 +377,34 @@ impl PriceBook {
             }
         }
         resolved
+    }
+}
+
+/// A message's id and request.
+type MessageId = (Option<String>, Option<String>);
+
+/// Adds a line's `counts` to `sums` under `key`. Claude Code writes a message's usage again on
+/// each of its content blocks, and while it streams some of those lines carry partial counts, so
+/// the lines of one message count once, at the most each counter of them reached, under the key
+/// of its first line. A line with neither id nor request always adds.
+fn add_line<K: Clone + Eq + std::hash::Hash>(seen: &mut HashMap<MessageId, (K, [u64; 5])>, sums: &mut HashMap<K, [u64; 5]>, id: MessageId, key: K, counts: [u64; 5]) {
+    let (key, add) = match id {
+        (None, None) => (key, counts),
+        id => match seen.entry(id) {
+            std::collections::hash_map::Entry::Vacant(entry) => entry.insert((key, counts)).clone(),
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                let (key, most) = entry.get_mut();
+                let mut add = [0; 5];
+                for ((most, add), n) in most.iter_mut().zip(&mut add).zip(counts) {
+                    *add = n.saturating_sub(*most);
+                    *most = (*most).max(n);
+                }
+                (key.clone(), add)
+            }
+        },
+    };
+    for (total, n) in sums.entry(key).or_default().iter_mut().zip(add) {
+        *total += n;
     }
 }
 
