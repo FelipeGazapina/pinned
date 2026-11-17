@@ -9239,7 +9239,9 @@ fn an_agents_extend_box_counts_only_recent_positive_asks_of_the_same_box() {
     assert_eq!(extend_as(&ana.dir, &ana.tab, &machine, 1.5, None), Err(extend_waits("US$ 1.00")), "an amount below zero does not make room");
 }
 
-/// Asks for one box that each fit alone, made at once: the first waits, every other one hears it waits.
+/// Asks for one box that each fit alone, made at once: the first waits, every other one hears it
+/// waits. The box's line takes 3 at a time and refuses the rest as busy, and an ask refused as
+/// busy did nothing, so each asks again with its request id until it hears more.
 #[test]
 fn concurrent_extend_box_asks_for_one_box_wait_only_as_far_as_the_box_budget_goes() {
     let ExtendSetup { hub, account, ana, mut owner, machine, .. } = extend_setup("extend_concurrent");
@@ -9247,10 +9249,17 @@ fn concurrent_extend_box_asks_for_one_box_wait_only_as_far_as_the_box_budget_goe
     let answers: Vec<Result<Value, String>> = hub.runtime.block_on(async {
         let account = hub.hub().account(account).await.unwrap();
         let asks: Vec<_> = (0..8)
-            .map(|_| {
+            .map(|n| {
                 let (running, account, origin) = (hub.hub().clone(), account.clone(), ana.machine.clone());
-                let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": machine, "extra_usd": 1.5 } })).unwrap();
-                tokio::spawn(async move { pinned_server::surface::act(&running, &account, &origin, act).await })
+                let ask = json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": machine, "extra_usd": 1.5 }, "request_id": format!("r-{n}") });
+                tokio::spawn(async move {
+                    loop {
+                        match pinned_server::surface::act(&running, &account, &origin, serde_json::from_value(ask.clone()).unwrap()).await {
+                            Err(busy) if busy == pinned_core::wire::HUB_BUSY => tokio::time::sleep(Duration::from_millis(10)).await,
+                            answer => return answer,
+                        }
+                    }
+                })
             })
             .collect();
         let mut answers = vec![];
@@ -9620,7 +9629,12 @@ fn a_flood_of_extend_box_asks_for_one_box_keeps_another_box_waiting_behind_at_mo
                 tokio::time::sleep(Duration::from_millis(5 * n)).await;
                 let mut answers = vec![];
                 while !stop.load(Ordering::SeqCst) {
-                    answers.push(pinned_server::surface::act(&running, &account, &origin, serde_json::from_value(ask.clone()).unwrap()).await);
+                    let answer = pinned_server::surface::act(&running, &account, &origin, serde_json::from_value(ask.clone()).unwrap()).await;
+                    // A client asks again a little after a busy answer, as one that asks at once would only load the hub.
+                    if answer == Err(pinned_core::wire::HUB_BUSY.to_owned()) {
+                        tokio::time::sleep(Duration::from_millis(20)).await;
+                    }
+                    answers.push(answer);
                 }
                 answers
             })
@@ -9823,13 +9837,15 @@ fn an_extend_box_ask_whose_turn_connection_ends_in_its_check_is_busy_and_does_no
 /// same request id asks again once Postgres answers.
 #[test]
 fn an_extend_box_ask_whose_turn_connection_never_answers_is_busy_within_its_wait() {
-    let ExtendSetup { mut hub, account, ana, machine, .. } = extend_setup("extend_stalled_connection");
+    let mut hub = TestHub::start_with_boxes("extend_stalled_connection", Signup::Open, fast());
     let postgres = StallingPostgres::start();
-    let addr = hub.stop();
-    let running = hub.runtime.block_on(pinned_server::start(pinned_server::Config { db: postgres.url(&hub.database), ..hub.config(&addr) })).unwrap();
+    hub.stop();
+    let running = hub.runtime.block_on(pinned_server::start(pinned_server::Config { db: postgres.url(&hub.database), ..hub.config("127.0.0.1:0") })).unwrap();
+    hub.url = format!("http://{}", running.addr);
     hub.running = Some(running);
+    let (account, ana, _owner) = extend_account(&hub, "ana@acme.dev", "ana-mac");
+    let machine = open_extend_box(&ana);
     let account = hub.runtime.block_on(hub.hub().account(account)).unwrap();
-    wait_for("ana's tab at the restarted hub", || account.tab(&ana.machine, &ana.tab).is_some());
     postgres.stall(true);
     let (refused, waited) = hub.runtime.block_on(async {
         let ask = timed_extend(&hub, &account, &ana, &machine, 0.5, Some("r-stalled"));
