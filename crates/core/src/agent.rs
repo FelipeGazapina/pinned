@@ -362,6 +362,8 @@ impl Usage {
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Message {
     Agent(AgentEvent),
+    /// Claude Code's PreCompact hook (`compacting`) or PostCompact hook (`compacted`) for the tab's session.
+    Compacting { tab: String, compacting: bool },
     Stage {
         connector: String,
         #[serde(flatten)]

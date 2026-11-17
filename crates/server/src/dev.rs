@@ -34,6 +34,7 @@ impl Dev {
             done: self.scale(policy.done),
             exited: self.scale(policy.exited),
             tab_gone: self.scale(policy.tab_gone),
+            first_turn: self.scale(policy.first_turn),
             offline: self.scale(policy.offline),
             max_life: self.scale(policy.max_life),
             cooldown: self.scale(policy.cooldown),
