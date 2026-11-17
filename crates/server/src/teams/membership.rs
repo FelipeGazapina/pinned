@@ -109,12 +109,13 @@ pub fn credential_in(settings: &pinned_core::connectors::Settings) -> Credential
 async fn view(hub: &Arc<Hub>, row: db::TeamRow) -> Result<Team, String> {
     let account = hub.account(row.id).await?;
     // A team whose settings can't be read is still listed, with no key shown as set: its owner
-    // sees why while its waiting line is held for it (`line_held`).
-    let credential = match credential(hub, &account).await {
+    // sees why while its waiting line is held for it (`line_held`). A held mark this very read
+    // contradicts is not shown: only the team's next turn lets it go.
+    let (credential, line_held) = match credential(hub, &account).await {
         Err(e) if e == crate::db::BUSY => return Err(e),
-        read => read.unwrap_or_default(),
+        Ok(credential) => (credential, None),
+        Err(_) => (CredentialState::default(), row.line_held.filter(|_| row.role == Role::Owner)),
     };
-    let line_held = row.line_held.filter(|_| row.role == Role::Owner);
     Ok(Team { id: row.id.to_string(), name: row.name, owner: row.owner.to_string(), role: row.role, credential, line_held })
 }
 
