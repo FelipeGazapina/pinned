@@ -304,6 +304,19 @@ pub fn fix(
     commit(plans, |plans| fix_on(plans, call, facts, now))
 }
 
+/// What a link did: the step or list the task now drives, and the plan's text after the write.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Linked {
+    pub id: String,
+    pub answer: String,
+}
+
+/// Links a new task to a step or a list. Stub: red until the link is built.
+pub fn link(plans: &mut CaptainPlans, target: &str, task: &str, title: &str, facts: &[TaskFacts], now: u64) -> Result<Linked, String> {
+    let _ = (plans, target, task, title, facts, now);
+    Err("link is not built yet".into())
+}
+
 /// Closes a plan. Returns the answer text.
 pub fn close(
     plans: &mut CaptainPlans,
@@ -2894,7 +2907,7 @@ mod tests {
         let before = bytes(&p);
         let err =
             report(&mut p, "s1", "done", &[task("t1", Work::Working)], 1500).expect_err("refused");
-        assert_eq!(err, "s1 follows task t1, which has not ended. Wait for it, or cancel t1 first. Nothing changed.");
+        assert_eq!(err, "t1 runs this step. Wait for it, or cancel t1 first. Nothing changed.");
         assert_eq!(bytes(&p), before);
     }
 
@@ -3035,7 +3048,7 @@ mod tests {
         let working = [task("t1", Work::Working)];
         assert_eq!(
             report(&mut p, "s1", "done", &working, 2),
-            Err("s1 follows task t1, which has not ended. Wait for it, or cancel t1 first. Nothing changed.".to_string())
+            Err("t1 runs this step. Wait for it, or cancel t1 first. Nothing changed.".to_string())
         );
         report(&mut p, "s2", "done", &working, 3).unwrap();
         assert_eq!(
@@ -3331,5 +3344,136 @@ mod tests {
         assert_eq!(list.len(), 6);
         let len = serde_json::to_string(&list).unwrap().len();
         assert!(len < 4096, "glance list is {len} bytes");
+    }
+
+    // ---- links from delegate_task ----
+
+    #[test]
+    fn a_link_to_an_id_no_plan_holds_is_refused_and_changes_nothing() {
+        let mut p = three_steps();
+        let before = bytes(&p);
+        assert_eq!(link(&mut p, "s9", "task-1", "Parser", &[], 2), Err("no step or list s9 in any plan of this Captain. Nothing changed.".to_string()));
+        assert_eq!(bytes(&p), before);
+    }
+
+    #[test]
+    fn a_link_into_a_closed_plan_is_refused_for_its_step_and_for_its_list() {
+        let mut p = three_steps();
+        close_on(&mut p, "p1", "Stopped", &[], 2).unwrap();
+        let before = bytes(&p);
+        let refused = "p1 is closed, so its steps are frozen. Nothing changed.";
+        assert_eq!(link(&mut p, "s1", "task-1", "Parser", &[], 3), Err(refused.to_string()));
+        assert_eq!(link(&mut p, "l1", "task-1", "Parser", &[], 3), Err(refused.to_string()));
+        assert_eq!(bytes(&p), before);
+    }
+
+    #[test]
+    fn a_step_link_reads_running_waiting_done_or_failed_as_its_task_does() {
+        let mut p = three_steps();
+        assert_eq!(link(&mut p, "s2", "task-1", "Parser", &[task("task-1", Work::Working)], 2).unwrap().id, "s2");
+        assert_eq!(glance(plan_of(&p, "p1"), &[task("task-1", Work::Working)]).strips, vec!["prp".to_string()]);
+        let asking = TaskFacts { waits_on_user: true, ..task("task-1", Work::Working) };
+        assert_eq!(glance(plan_of(&p, "p1"), &[asking]).strips, vec!["pwp".to_string()]);
+        assert_eq!(glance(plan_of(&p, "p1"), &[ended("task-1", Work::ResultAvailable, 9)]).strips, vec!["pdp".to_string()]);
+        assert_eq!(glance(plan_of(&p, "p1"), &[ended("task-1", Work::Failed, 9)]).strips, vec!["pfp".to_string()]);
+    }
+
+    #[test]
+    fn a_list_link_runs_its_first_open_step_and_a_step_link_of_its_own_wins_over_it() {
+        let mut p = three_steps();
+        assert_eq!(link(&mut p, "l1", "task-2", "Build", &[task("task-2", Work::Working)], 2).unwrap().id, "l1");
+        assert_eq!(glance(plan_of(&p, "p1"), &[task("task-2", Work::Working)]).strips, vec!["rpp".to_string()]);
+        assert_eq!(link(&mut p, "s2", "task-3", "API", &[task("task-2", Work::Working), task("task-3", Work::Working)], 3).unwrap().id, "s2");
+        let facts = [ended("task-2", Work::ResultAvailable, 9), task("task-3", Work::Working)];
+        assert_eq!(glance(plan_of(&p, "p1"), &facts).strips, vec!["drd".to_string()]);
+    }
+
+    #[test]
+    fn a_list_task_that_fails_fails_its_running_step_with_the_reason() {
+        let mut p = three_steps();
+        link(&mut p, "l1", "task-9", "Build", &[task("task-9", Work::Working)], 2).unwrap();
+        let facts = [TaskFacts { failure: Some("Usage limit reached".into()), ..ended("task-9", Work::Failed, 9) }];
+        assert_eq!(glance(plan_of(&p, "p1"), &facts).strips, vec!["fpp".to_string()]);
+        assert_eq!(s1_under(&p, &facts).why.as_deref(), Some("Usage limit reached"));
+    }
+
+    #[test]
+    fn a_retry_on_a_failed_step_opens_one_fix_named_for_the_task_and_links_it() {
+        let mut p = three_steps();
+        report(&mut p, "s2", "failed", &[], 2).unwrap();
+        let linked = link(&mut p, "s2", "task-5", "Fix the parser", &[task("task-5", Work::Working)], 3).unwrap();
+        assert_eq!(linked.id, "s4");
+        assert_eq!(linked.answer.lines().next(), Some("Fix f1 on s2 has steps s4."));
+        let fix = &p.plans[0].lists[0].steps[1].fixes[0];
+        assert_eq!((fix.id.as_str(), fix.steps[0].name.as_str(), fix.steps[0].task.as_deref()), ("f1", "Retry: Fix the parser", Some("task-5")));
+        let running = [task("task-5", Work::Working)];
+        assert_eq!(glance(plan_of(&p, "p1"), &running).strips, vec!["pfp".to_string()]);
+        assert_eq!(glance(plan_of(&p, "p1"), &running).now.as_deref(), Some("Retry: Fix the parser"));
+        assert_eq!(glance(plan_of(&p, "p1"), &[ended("task-5", Work::ResultAvailable, 9)]).strips, vec!["pxp".to_string()]);
+    }
+
+    #[test]
+    fn a_retry_while_the_fix_is_open_is_refused_and_a_fix_step_takes_the_link() {
+        let mut p = three_steps();
+        report(&mut p, "s2", "failed", &[], 2).unwrap();
+        link(&mut p, "s2", "task-5", "Fix", &[task("task-5", Work::Working)], 3).unwrap();
+        let before = bytes(&p);
+        let open = [ended("task-5", Work::Failed, 9)];
+        assert_eq!(link(&mut p, "s2", "task-6", "Again", &open, 4), Err("s2 has an open fix f1; name one of its steps. Nothing changed.".to_string()));
+        assert_eq!(bytes(&p), before);
+        // A failed fix step takes the retry as its own fix, nested under it.
+        let linked = link(&mut p, "s4", "task-6", "Again", &open, 5).unwrap();
+        assert_eq!((linked.id.as_str(), linked.answer.lines().next()), ("s5", Some("Fix f2 on s4 has steps s5.")));
+    }
+
+    #[test]
+    fn a_task_that_ends_saves_its_state_and_cost_on_the_step_for_a_view_without_the_registry() {
+        let mut p = three_steps();
+        let running = TaskFacts { cost: Some(1.5), ..task("task-4", Work::Working) };
+        link(&mut p, "s2", "task-4", "Parser", std::slice::from_ref(&running), 2).unwrap();
+        let finished = TaskFacts { cost: Some(2.25), ..ended("task-4", Work::ResultAvailable, 9) };
+        assert!(settle(&mut p, std::slice::from_ref(&finished), 10));
+        let gone = derive(plan_of(&p, "p1"), &[]);
+        assert_eq!(
+            serde_json::to_value(view_step(&gone, "s2")).unwrap(),
+            json!({ "id": "s2", "name": "B", "what": "", "state": "done", "why": null, "cost": 2.25, "task": "task-4", "fixes": [] })
+        );
+        assert_eq!(glance(plan_of(&p, "p1"), &[]).strips, vec!["pdp".to_string()]);
+    }
+
+    #[test]
+    fn a_list_task_that_ends_saves_each_step_cost_as_the_rise_while_it_ran() {
+        let mut p = three_steps();
+        let working = TaskFacts { cost: Some(1.0), ..task("task-2", Work::Working) };
+        link(&mut p, "l1", "task-2", "Build", std::slice::from_ref(&working), 2).unwrap();
+        settle(&mut p, std::slice::from_ref(&working), 3);
+        let finished = TaskFacts { cost: Some(3.5), ..ended("task-2", Work::ResultAvailable, 9) };
+        settle(&mut p, std::slice::from_ref(&finished), 10);
+        let gone = derive(plan_of(&p, "p1"), &[]);
+        assert_eq!(
+            serde_json::to_value(view_step(&gone, "s1")).unwrap(),
+            json!({ "id": "s1", "name": "A", "what": "", "state": "done", "why": "Done with the list's task", "cost": 2.5, "task": null, "fixes": [] })
+        );
+    }
+
+    #[test]
+    fn a_newer_link_replaces_the_older_and_the_older_task_ends_without_effect() {
+        let mut p = three_steps();
+        link(&mut p, "s2", "task-6", "Old", &[task("task-6", Work::Working)], 2).unwrap();
+        link(&mut p, "s2", "task-7", "New", &[task("task-6", Work::Working), task("task-7", Work::Working)], 3).unwrap();
+        assert_eq!(plan_of(&p, "p1").lists[0].steps[1].task.as_deref(), Some("task-7"));
+        let facts = [TaskFacts { cost: None, ..ended("task-6", Work::Cancelled, 9) }, task("task-7", Work::Working)];
+        assert_eq!(glance(plan_of(&p, "p1"), &facts).strips, vec!["prp".to_string()]);
+    }
+
+    #[test]
+    fn a_link_into_one_plan_leaves_the_other_plan_bytes_equal() {
+        let mut p = two_plans();
+        let p1 = plan_bytes(&p, "p1");
+        let rev = plan_of(&p, "p1").rev;
+        link(&mut p, "s5", "task-8", "Check", &[task("task-8", Work::Working)], 7).unwrap();
+        assert_eq!(plan_bytes(&p, "p1"), p1);
+        assert_eq!(plan_of(&p, "p1").rev, rev);
+        assert_eq!(plan_of(&p, "p2").lists[0].steps[1].task.as_deref(), Some("task-8"));
     }
 }
