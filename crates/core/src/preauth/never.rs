@@ -1266,11 +1266,10 @@ impl<'c, 'a> Scan<'c, 'a> {
         if grant {
             self.hit(NeverItem::SelfGrant, format!("writes {}", short(shown)));
         }
-        // A self-grant is never approved ahead of time, and a write outside may be, so one in
-        // another checkout, such as the main one of this worktree, stops as a self-grant only.
-        // The account's own `~/.claude` stays a write outside, as the design's table has it.
-        let account_own = path.as_deref().is_some_and(|p| p.starts_with(self.ctx.home.join(".claude")));
-        if (unresolved || path.as_deref().is_some_and(|p| self.outside(p))) && (!grant || account_own) {
+        // A self-grant is never approved ahead of time, and a write outside may be, so a write that
+        // is a self-grant stops as one only: one in another checkout, such as the main one of this
+        // worktree, or one in the account's own `~/.claude`, such as its settings and hooks.
+        if (unresolved || path.as_deref().is_some_and(|p| self.outside(p))) && !grant {
             self.hit(NeverItem::WriteOutside, format!("writes {}", short(shown)));
         }
     }
