@@ -1,6 +1,8 @@
-use chrono::DateTime;
+use chrono::{DateTime, FixedOffset};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 
 const API: &str = "https://api.linear.app/graphql";
 /// A debug build's stand-in for `API`, a loopback http(s) address only (`slack::loopback_root`).
@@ -41,15 +43,18 @@ pub fn set_api(url: Option<String>) {
 #[cfg(test)]
 static API_ROOT: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
-async fn query(key: &str, query: &str, variables: Value) -> Result<Value, String> {
-    let response = reqwest::Client::new()
+async fn send(key: &str, query: &str, variables: Value) -> Result<reqwest::Response, reqwest::Error> {
+    reqwest::Client::new()
         .post(api())
         .timeout(crate::connectors::CALL_TIMEOUT)
         .header("Authorization", key)
         .json(&json!({ "query": query, "variables": variables }))
         .send()
         .await
-        .map_err(|e| format!("Linear unreachable: {e}"))?;
+}
+
+async fn query(key: &str, query: &str, variables: Value) -> Result<Value, String> {
+    let response = send(key, query, variables).await.map_err(|e| format!("Linear unreachable: {e}"))?;
     let status = response.status();
     let body: Value = response.json().await.map_err(|e| format!("Linear sent a bad response: {e}"))?;
     if let Some(message) = body["errors"][0]["message"].as_str() {
@@ -301,19 +306,139 @@ pub struct Changes {
     pub oldest: Option<String>,
 }
 
+const CHANGES_PAGES: usize = 4;
+
+const CHANGES: &str = "query($filter: IssueFilter, $after: String) {
+  issues(first: 50, after: $after, orderBy: updatedAt, filter: $filter) {
+    nodes { id identifier title description url updatedAt team { key name } project { name }
+      history(first: 20) { nodes { id createdAt actor { id name } fromState { name } toState { name }
+        fromAssignee { id name } toAssignee { id name } } } }
+    pageInfo { hasNextPage endCursor }
+  }
+}";
+
+/// The API's answer to a `viewer` query, by a hash of the API key: the map holds no key.
+static VIEWERS: std::sync::Mutex<BTreeMap<[u8; 32], String>> = std::sync::Mutex::new(BTreeMap::new());
+
 /// The changes to issues in `scope` made after `since` (RFC 3339), read up to four pages of 50 issues.
-pub async fn changes(_key: &str, _since: &str, _scope: &Scope) -> Result<Changes, String> {
-    Ok(Changes { changes: Vec::new(), oldest: None })
+/// Issues are read newest update first; when the four pages end with more to read, `oldest` is the
+/// oldest `updatedAt` read, and every issue updated after it was among those read.
+pub async fn changes(key: &str, since: &str, scope: &Scope) -> Result<Changes, String> {
+    since_time(since)?;
+    let mut filter = json!({ "updatedAt": { "gt": since } });
+    let team = scope.team.trim();
+    if !team.is_empty() {
+        filter["team"] = json!({ "or": [{ "key": { "eqIgnoreCase": team } }, { "name": { "eqIgnoreCase": team } }] });
+    }
+    let project = scope.project.trim();
+    if !project.is_empty() {
+        filter["project"] = json!({ "name": { "eqIgnoreCase": project } });
+    }
+    let mut changes = Vec::new();
+    let mut oldest = None;
+    let mut after: Option<String> = None;
+    for _ in 0..CHANGES_PAGES {
+        let data = strict_query(key, CHANGES, json!({ "filter": filter.clone(), "after": after })).await?;
+        changes.extend(changes_in(&data, since)?);
+        oldest = earlier_update(&data, oldest);
+        let page = &data["issues"]["pageInfo"];
+        if page["hasNextPage"].as_bool() != Some(true) {
+            return Ok(Changes { changes, oldest: None });
+        }
+        after = Some(page["endCursor"].as_str().ok_or("Linear sent a page with no cursor")?.to_owned());
+    }
+    let oldest = oldest.ok_or("Linear sent a full read with no issues")?;
+    Ok(Changes { changes, oldest: Some(oldest) })
 }
 
-/// The changes in the issues of `data` made after `since`.
-fn changes_in(_data: &Value, _since: &str) -> Result<Vec<Change>, String> {
-    Ok(Vec::new())
+/// `query`, but a failure is named by its class only. Linear's message and its response body are text
+/// from issues and people, so neither reaches the error.
+async fn strict_query(key: &str, query: &str, variables: Value) -> Result<Value, String> {
+    let response = send(key, query, variables).await.map_err(|_| "Linear did not answer".to_owned())?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("Linear answered {}", status.as_u16()));
+    }
+    let body: Value = response.json().await.map_err(|_| "Linear sent a bad response".to_owned())?;
+    if !body["errors"].is_null() {
+        return Err("Linear answered with a GraphQL error".into());
+    }
+    Ok(body["data"].clone())
+}
+
+fn since_time(since: &str) -> Result<DateTime<FixedOffset>, String> {
+    DateTime::parse_from_rfc3339(since).map_err(|e| format!("bad time {since:?}: {e}"))
+}
+
+fn text(v: &Value, key: &str) -> String {
+    v[key].as_str().unwrap_or_default().to_owned()
+}
+
+/// The changes in the issues of `data` made after `since`: each history entry that moves the status or
+/// changes the assignee, an unassign included. An entry that does both gives a status change and an assignee change.
+fn changes_in(data: &Value, since: &str) -> Result<Vec<Change>, String> {
+    let since = since_time(since)?;
+    let person = |v: &Value| (!v.is_null()).then(|| Person { id: text(v, "id"), name: text(v, "name") });
+    let name = |v: &Value| v["name"].as_str().map(str::to_owned);
+    let mut changes = Vec::new();
+    for issue in nodes(&data["issues"]) {
+        for entry in nodes(&issue["history"]) {
+            let after = entry["createdAt"].as_str().and_then(|t| DateTime::parse_from_rfc3339(t).ok()).is_some_and(|t| t > since);
+            if !after {
+                continue;
+            }
+            // An entry Linear sends without an actor, such as an automation's, has an empty one.
+            let base = Change {
+                issue_id: text(issue, "id"),
+                identifier: text(issue, "identifier"),
+                title: text(issue, "title"),
+                description: issue["description"].as_str().map(str::to_owned),
+                url: text(issue, "url"),
+                history_id: text(entry, "id"),
+                at: text(entry, "createdAt"),
+                actor: person(&entry["actor"]).unwrap_or(Person { id: String::new(), name: String::new() }),
+                kind: ChangeKind::Status,
+                from_state: None,
+                to_state: None,
+                from_assignee: None,
+                to_assignee: None,
+                team_key: text(&issue["team"], "key"),
+                team_name: text(&issue["team"], "name"),
+                project: issue["project"]["name"].as_str().map(str::to_owned),
+            };
+            if !entry["fromState"].is_null() || !entry["toState"].is_null() {
+                changes.push(Change { from_state: name(&entry["fromState"]), to_state: name(&entry["toState"]), ..base.clone() });
+            }
+            if !entry["fromAssignee"].is_null() || !entry["toAssignee"].is_null() {
+                let (from_assignee, to_assignee) = (person(&entry["fromAssignee"]), person(&entry["toAssignee"]));
+                changes.push(Change { kind: ChangeKind::Assignee, from_assignee, to_assignee, ..base.clone() });
+            }
+        }
+    }
+    Ok(changes)
+}
+
+/// The earlier of `oldest` and the earliest `updatedAt` among the issues in `data`, as Linear sent it.
+fn earlier_update(data: &Value, oldest: Option<String>) -> Option<String> {
+    nodes(&data["issues"])
+        .filter_map(|i| i["updatedAt"].as_str())
+        .chain(oldest.as_deref())
+        .filter_map(|t| DateTime::parse_from_rfc3339(t).ok().map(|at| (at, t)))
+        .min_by_key(|(at, _)| *at)
+        .map(|(_, t)| t.to_owned())
 }
 
 /// The id of the user the API key `key` belongs to. Read once per key, then kept in memory.
-pub async fn viewer_id(_key: &str) -> Result<String, String> {
-    Ok(String::new())
+pub async fn viewer_id(key: &str) -> Result<String, String> {
+    let digest: [u8; 32] = Sha256::digest(key.as_bytes()).into();
+    let cached = VIEWERS.lock().unwrap().get(&digest).cloned();
+    if let Some(id) = cached {
+        return Ok(id);
+    }
+    let data = query(key, "{ viewer { id } }", json!({})).await?;
+    let id = data["viewer"]["id"].as_str().filter(|id| !id.is_empty()).ok_or("Linear did not say who owns the API key")?;
+    VIEWERS.lock().unwrap().insert(digest, id.to_owned());
+    Ok(id.to_owned())
 }
 
 #[cfg(test)]
