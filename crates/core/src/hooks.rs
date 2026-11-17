@@ -18,6 +18,8 @@ pub const LINEAR_SUBCOMMAND: &str = "linear";
 pub const RUN_SUBCOMMAND: &str = "run";
 pub const STATUSLINE_SUBCOMMAND: &str = "statusline";
 pub const GUARD_SUBCOMMAND: &str = "guard";
+/// Claude Code's compaction hooks, each with the `hook` arg it runs and whether it marks the session compacting.
+const COMPACTION: [(&str, &str, bool); 2] = [("PreCompact", "compacting", true), ("PostCompact", "compacted", false)];
 /// The global orchestrator's own settings file, beside the one every other session loads.
 pub const GLOBAL_SETTINGS: &str = "claude-settings-global.json";
 /// The file tools the global orchestrator keeps, each held to its folders by the guard hook.
@@ -59,6 +61,9 @@ fn settings(exe: &Path) -> serde_json::Value {
 pub(crate) fn settings_for(exe: &Path, team_box: bool) -> serde_json::Value {
     let mut hooks = serde_json::Map::new();
     for (_, arg, hook_event) in AgentStatus::ALL {
+        hooks.insert(hook_event.into(), serde_json::json!([{ "hooks": [hook_command(exe, arg)] }]));
+    }
+    for (hook_event, arg, _) in COMPACTION {
         hooks.insert(hook_event.into(), serde_json::json!([{ "hooks": [hook_command(exe, arg)] }]));
     }
     if team_box {
@@ -135,10 +140,24 @@ fn statusline_command(exe: &Path) -> String {
     format!("'{exe}' {STATUSLINE_SUBCOMMAND}")
 }
 
+/// The compaction a hook arg reports: `Some(true)` for `compacting` (PreCompact), `Some(false)` for
+/// `compacted` (PostCompact), and `None` for any other hook.
+pub fn compaction_of(arg: Option<&str>) -> Option<bool> {
+    COMPACTION.iter().find(|(_, name, _)| Some(*name) == arg).map(|(_, _, compacting)| *compacting)
+}
+
 /// Runs inside the hook process Claude Code spawns: read the hook payload from stdin and
 /// forward it to the tab that owns this session, and print what Claude Code should add to a
 /// prompt. Never fails loudly, so it can't disturb the agent.
 pub fn forward(arg: Option<&str>) {
+    if let Some(compacting) = compaction_of(arg) {
+        // The mark needs nothing from the payload, but Claude Code writes it to stdin, so it is read.
+        let _ = hook_payload();
+        if let (Ok(sock), Ok(tab)) = (std::env::var(SOCK_ENV), std::env::var(TAB_ENV)) {
+            tell(&sock, &Message::Compacting { tab, compacting });
+        }
+        return;
+    }
     if AgentStatus::ALL.iter().all(|(_, name, _)| Some(*name) != arg) {
         eprintln!("usage: pinned {SUBCOMMAND} <working|done|needs-input|failed>");
         return;
@@ -800,11 +819,29 @@ mod tests {
             serde_json::json!([{ "hooks": [{ "type": "command", "command": "'/Applications/pinned.app/Contents/MacOS/pinned' hook failed" }] }])
         );
         assert_eq!(
+            settings["hooks"]["PreCompact"],
+            serde_json::json!([{ "hooks": [{ "type": "command", "command": "'/Applications/pinned.app/Contents/MacOS/pinned' hook compacting" }] }]),
+            "every compaction, not only /compact, marks its tab"
+        );
+        assert_eq!(
+            settings["hooks"]["PostCompact"],
+            serde_json::json!([{ "hooks": [{ "type": "command", "command": "'/Applications/pinned.app/Contents/MacOS/pinned' hook compacted" }] }]),
+            "a compaction that ran clears its tab's mark"
+        );
+        assert_eq!(
             settings["statusLine"],
             serde_json::json!({ "type": "command", "command": "'/Applications/pinned.app/Contents/MacOS/pinned' statusline" })
         );
         assert_eq!(settings["skipDangerousModePermissionPrompt"], true, "a bypass session must not wait on Claude Code's warning");
         let _ = std::fs::remove_file(file);
+    }
+
+    #[test]
+    fn a_compaction_hook_arg_says_whether_the_session_is_compacting() {
+        assert_eq!(compaction_of(Some("compacting")), Some(true), "PreCompact marks the session compacting");
+        assert_eq!(compaction_of(Some("compacted")), Some(false), "PostCompact clears the mark");
+        assert_eq!(compaction_of(Some("done")), None, "a turn's hook is no compaction");
+        assert_eq!(compaction_of(None), None);
     }
 
     #[cfg(unix)]

@@ -45,7 +45,7 @@ const FIRST_RUN_WAIT: Duration = Duration::from_secs(60);
 /// Why a task the user cancelled from its card stopped.
 const CARD_CANCEL: &str = "cancelled from the card";
 /// How long a fresh session may start without reporting before its start fails.
-const STARTING_LIMIT: Duration = Duration::from_secs(10 * 60);
+pub const STARTING_LIMIT: Duration = Duration::from_secs(10 * 60);
 /// Claude logs a turn's duration only after its Stop hook returns, within a second in practice.
 const TURN_LOG_WAIT: (u32, Duration) = (25, Duration::from_millis(200));
 const THREAD_LOOK_EVERY: Duration = Duration::from_millis(40);
@@ -94,6 +94,8 @@ const REMOTE_CHECK: Duration = Duration::from_secs(60);
 const HOLD_CLEAR: Duration = Duration::from_secs(5);
 /// An idle notice this soon after a submit may have been on its way before it: the submit still counts.
 const IDLE_NOTICE_GRACE: Duration = Duration::from_secs(10);
+/// How long a compaction's mark holds when no end comes for it: the tab then reads as it did before.
+const COMPACT_WAIT: Duration = Duration::from_secs(600);
 const NO_PROJECT_WORK: &str = "the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain";
 
 pub type Event = MachineEvent;
@@ -579,6 +581,10 @@ struct Tab {
     task: Option<String>,
     /// Working tree and prompt as the running turn began, to diff against when it ends.
     turn: Option<(String, Option<String>)>,
+    /// The running session started a new conversation on a prompt in its arguments, and no hook
+    /// has reported a turn since: a notice alone, as one Claude Code sends while a dialog waits,
+    /// does not mean the prompt reached the session.
+    owes_turn: bool,
     status: Option<AgentStatus>,
     updated: Option<u64>,
     title: Option<String>,
@@ -595,6 +601,8 @@ struct Tab {
     seen: Option<SystemTime>,
     /// When the latest submit went in. Cleared by Done, Failed, and a new session.
     turn_pending: Option<Instant>,
+    /// When Claude Code's PreCompact hook last marked the session compacting.
+    compacting_since: Option<Instant>,
     /// Set while a worker's turn has ended with background work it started still pending: Claude
     /// Code resumes the session when that work hands back, so the turn end is not the worker's end.
     background_wait: Option<BackgroundWait>,
@@ -616,6 +624,12 @@ struct Tab {
 }
 
 impl Tab {
+    /// Whether claude is compacting: its PreCompact mark holds until PostCompact, the turn's end, or
+    /// the time COMPACT_WAIT lapses.
+    fn compacting(&self) -> bool {
+        self.compacting_since.is_some_and(|at| at.elapsed() < COMPACT_WAIT)
+    }
+
     /// What reopens the tab's conversation, once claude has reported one.
     /// A sign-in tab has no conversation to resume.
     fn saved(&self) -> Option<sessions::Saved> {
@@ -657,6 +671,7 @@ impl Tab {
     /// from the global orchestrator started.
     fn view(&self, id: &str, turns: &HashSet<PathBuf>, queued: &HashMap<String, u32>, work: &HashMap<String, crate::delegate::WorkCost>) -> TabView {
         let role = role_of(&self.env);
+        let compacting = self.compacting();
         TabView {
             id: id.to_owned(),
             cwd: self.cwd.display().to_string(),
@@ -664,11 +679,17 @@ impl Tab {
             program: self.program,
             bypass: self.bypass,
             running: self.live(),
-            status: self.status,
+            // A compaction is work: the tab reads busy, unless it waits on the user or failed.
+            status: match self.status {
+                Some(AgentStatus::NeedsInput | AgentStatus::Failed) => self.status,
+                _ if compacting => Some(AgentStatus::Working),
+                _ => self.status,
+            },
             title: self.title.clone(),
             message: self.message.clone(),
             resume_at: self.resume_at,
             held: self.held_at_limit,
+            compacting,
             connector: self.env.iter().find(|(k, _)| k == CONNECTOR_ENV).map(|(_, v)| v.clone()),
             subject: session_of(&self.env).map(|(_, subject)| subject),
             opened: tab_number(id).into(),
@@ -2215,6 +2236,7 @@ impl Machine {
                 t.tally = Tally::default();
             }
             let mut args = std::mem::take(&mut t.launch);
+            t.owes_turn = t.claude_session.is_none() && !args.is_empty();
             let asked = args.clone();
             t.bare = t.claude_session.as_deref().is_some_and(|session| args == crate::delegate::resume_args(t.account.provider, session));
             t.mode_live = args.iter().any(|a| a == "--permission-mode");
@@ -2319,7 +2341,7 @@ impl Machine {
                 if screen.lock().unwrap().session != session {
                     return;
                 }
-                let Ok(Some((cwd, bypass))) = machine.tab(&tab, |t| (t.status.is_none() && t.session.is_some()).then(|| (t.cwd.clone(), t.bypass))) else { return };
+                let Ok(Some((cwd, bypass))) = machine.tab(&tab, |t| (t.session.is_some() && (t.status.is_none() || t.owes_turn)).then(|| (t.cwd.clone(), t.bypass))) else { return };
                 let Some(found) = crate::first_run::showing(&machine.screen_text(&tab)) else { continue };
                 if answered.contains(&found) {
                     continue;
@@ -2340,14 +2362,20 @@ impl Machine {
                     Err(reason) => return machine.end_start(&tab, reason),
                 }
             }
-            // A fresh start that never reported, at its limit. A resume at its prompt fires no hook
-            // until a turn, but has its conversation's id.
+            // A fresh start that never reported, or whose first prompt never started a turn, at its
+            // limit. A resume at its prompt fires no hook until a turn, but has its conversation's id.
             let Some(machine) = me.upgrade() else { return };
-            if screen.lock().unwrap().session != session || !machine.tab(&tab, |t| t.status.is_none() && t.session.is_some() && t.claude_session.is_none()).unwrap_or(false) {
+            let unstarted = |t: &mut Tab| t.session.is_some() && ((t.status.is_none() && t.claude_session.is_none()) || t.owes_turn);
+            if screen.lock().unwrap().session != session || !machine.tab(&tab, unstarted).unwrap_or(false) {
                 return;
             }
+            // The screen is scrubbed before it is quoted; a line that does not scrub is not quoted.
             let shown = crate::setup_token::last_line(machine.screen_text(&tab).as_bytes());
-            machine.end_start(&tab, format!("it did not start within {}; its screen shows: {shown}", wait_text(limit)));
+            let reason = match crate::reports::scrub(&shown, &crate::reports::Context::default()) {
+                Ok(shown) => format!("it did not start within {}; its screen shows: {shown}", wait_text(limit)),
+                Err(_) => format!("it did not start within {}", wait_text(limit)),
+            };
+            machine.end_start(&tab, reason);
         });
     }
 
@@ -4625,6 +4653,10 @@ impl Machine {
                     // After the event: the turn that just ended did not answer what the hook hands over.
                     return hooks::Answer { reply, sent: Some(Box::new(move |read| machine.handed(taken, read))) };
                 }
+                Message::Compacting { tab, compacting } => {
+                    machine.record_compacting(&tab, compacting);
+                    Ok(String::new())
+                }
                 Message::Usage { usage, account } => {
                     machine.record_usage(account.unwrap_or_else(accounts::default_account), usage);
                     Ok(String::new())
@@ -6346,6 +6378,7 @@ impl Machine {
             origin: None,
             task: None,
             turn: None,
+            owes_turn: false,
             status: None,
             updated: None,
             title: None,
@@ -6356,6 +6389,7 @@ impl Machine {
             keys: vec![],
             seen: None,
             turn_pending: None,
+            compacting_since: None,
             background_wait: None,
             draft: Draft::default(),
             owes_reload: false,
@@ -6527,6 +6561,24 @@ impl Machine {
         Some(turns)
     }
 
+    /// Marks the tab compacting from PreCompact and clears the mark at PostCompact. The mark lapses
+    /// on its own after COMPACT_WAIT, and a timer tells the clients then, as no other event may come.
+    fn record_compacting(&self, tab: &str, compacting: bool) {
+        if self.tab(tab, |t| t.compacting_since = compacting.then(Instant::now)).is_err() {
+            return;
+        }
+        self.emit_tabs();
+        if compacting {
+            let me = self.me.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(COMPACT_WAIT);
+                if let Some(machine) = me.upgrade() {
+                    machine.emit_tabs();
+                }
+            });
+        }
+    }
+
     fn record_status(&self, tab: &str, event: &AgentEvent) {
         // Claude says it waits for input a while after every finished turn too, which asks nothing.
         let was_done = self.tab(tab, |t| t.status == Some(AgentStatus::Done)).unwrap_or(false);
@@ -6564,6 +6616,10 @@ impl Machine {
             if matches!(event.status, AgentStatus::Done | AgentStatus::Failed) {
                 t.turn_pending = None;
             }
+            // A turn's start or end settles any compaction the hooks marked; a question does not.
+            if event.status != AgentStatus::NeedsInput {
+                t.compacting_since = None;
+            }
             if matches!(event.status, AgentStatus::Working | AgentStatus::Failed) {
                 t.background_wait = None;
             }
@@ -6572,6 +6628,7 @@ impl Machine {
             }
             t.ask_detail = detail;
             t.status = Some(event.status);
+            t.owes_turn &= event.status == AgentStatus::NeedsInput;
             // The turn that starts may end the shells an earlier one left, and its end says which still run.
             if event.status == AgentStatus::Working {
                 t.shells_left = false;
@@ -11086,6 +11143,38 @@ while True:
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    #[test]
+    #[cfg(unix)]
+    fn a_compaction_marks_its_tab_busy_until_its_end_its_turn_end_or_ten_minutes_clear_it() {
+        let dir = temp("compacting");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let sock = dir.join("pinned.sock");
+        let m = Machine::new(Launch { sock: sock.clone(), ..launch() }, Some(dir.join("config")), None, |_| {});
+        m.listen(|_| Err("not the machine's".into())).unwrap();
+        let path = project.display().to_string();
+        let tab = idle_captain(&m, &path, &dir.join("typed.bin"));
+        let mark = |compacting| serde_json::to_string(&Message::Compacting { tab: tab.clone(), compacting }).unwrap();
+        let shown = |m: &Machine| m.view(&tab).map(|v| (v.compacting, v.status)).unwrap();
+
+        assert_eq!(shown(&m), (false, Some(AgentStatus::Done)), "an idle tab is not compacting");
+        assert_eq!(ask(&sock, &mark(true)), Ok(String::new()));
+        assert_eq!(shown(&m), (true, Some(AgentStatus::Working)), "PreCompact marks the tab, which reads busy");
+        assert_eq!(ask(&sock, &mark(false)), Ok(String::new()));
+        assert_eq!(shown(&m), (false, Some(AgentStatus::Done)), "PostCompact clears the mark, and the tab reads its own status again");
+
+        assert_eq!(ask(&sock, &mark(true)), Ok(String::new()));
+        m.record_event(hook(&tab, AgentStatus::Done));
+        assert_eq!(shown(&m), (false, Some(AgentStatus::Done)), "a turn's Stop clears a mark whose end never came");
+
+        assert_eq!(ask(&sock, &mark(true)), Ok(String::new()));
+        m.tab(&tab, |t| t.compacting_since = Some(Instant::now() - Duration::from_secs(60))).unwrap();
+        assert_eq!(shown(&m), (true, Some(AgentStatus::Working)), "a mark a minute old still holds");
+        m.tab(&tab, |t| t.compacting_since = Some(Instant::now() - Duration::from_secs(601))).unwrap();
+        assert_eq!(shown(&m), (false, Some(AgentStatus::Done)), "a mark older than ten minutes lapses on its own");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// Sends `line` as a hook that stopped waiting does: it hangs up before the reply comes.
     #[cfg(unix)]
     fn hang_up(sock: &Path, line: &str) {
@@ -13041,6 +13130,104 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!((info.state.as_str(), info.error.as_deref()), ("failed", Some(reason)));
         let thread = m.view(&info.thread.unwrap().tab).unwrap();
         assert_eq!((thread.status, thread.message.as_deref()), (Some(AgentStatus::Failed), Some(reason)));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// What a hook reports from `tab`'s session `session`.
+    fn reported(tab: &str, status: AgentStatus, session: &str, message: Option<&str>, prompt: Option<&str>) -> AgentEvent {
+        AgentEvent { status, cwd: None, message: message.map(Into::into), tab: Some(tab.into()), session: Some(session.into()), title: None, resume_at: None, prompt: prompt.map(Into::into), snapshot: None, permission_mode: None, hook_feedback: false, reply: None }
+    }
+
+    const PARKED_SCREEN: &str = " Use the docs server this folder lists?  1. Use it  2. Skip it  Enter to confirm · Esc to cancel";
+
+    #[test]
+    #[cfg(unix)]
+    fn a_worker_parked_before_its_first_prompt_fails_at_the_starting_limit_though_a_notice_named_its_session() {
+        let root = temp("starting-limit-notice");
+        let (claude, keys) = claude_on_screens(&root, &[PARKED_SCREEN]);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), starting_limit: Duration::from_secs(2), ..launch() }, Some(root.join("config")), None, |_| {});
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        let task = delegate_from(&m, &app, "shared");
+        let tab = m.delegates.get(&task).unwrap().thread.unwrap().tab;
+        wait_for("the dialog on its screen", || m.screen_text(&tab).contains("Enter to confirm"));
+        // Claude Code names its session in a notice while the dialog waits; the brief was never submitted.
+        m.record_event(reported(&tab, AgentStatus::NeedsInput, "s-parked", Some("Claude needs your attention"), None));
+        wait_for("the start to fail", || m.delegates.get(&task).is_some_and(|t| t.state.terminal()));
+        let info = m.delegates.get(&task).unwrap();
+        let reason = "it did not start within 2 s; its screen shows: Use the docs server this folder lists?  1. Use it  2. Skip it  Enter to confirm · Esc to cancel";
+        assert_eq!((info.state.as_str(), info.error.as_deref()), ("failed", Some(reason)));
+        assert_eq!((m.view(&tab).unwrap().status, m.view(&tab).unwrap().message.as_deref()), (Some(AgentStatus::Failed), Some(reason)));
+        assert!(!keys.exists(), "nothing was typed into a dialog pinned does not know");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_parked_first_start_quotes_its_screen_line_scrubbed_of_paths_and_tokens() {
+        let root = temp("starting-limit-scrub");
+        let line = " Use the docs server at /home/boxuser/pinned/app with sk-ant-oat01-ABCDEFGHIJKLMNOPQRSTUVWX?  1. Use it  2. Skip it  Enter to confirm · Esc to cancel";
+        let (claude, keys) = claude_on_screens(&root, &[line]);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), starting_limit: Duration::from_secs(2), ..launch() }, Some(root.join("config")), None, |_| {});
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        let task = delegate_from(&m, &app, "shared");
+        let tab = m.delegates.get(&task).unwrap().thread.unwrap().tab;
+        wait_for("the dialog on its screen", || m.screen_text(&tab).contains("Enter to confirm"));
+        wait_for("the start to fail", || m.delegates.get(&task).is_some_and(|t| t.state.terminal()));
+        let info = m.delegates.get(&task).unwrap();
+        let reason = info.error.clone().unwrap();
+        assert_eq!(reason, "it did not start within 2 s; its screen shows: Use the docs server at [folder] with [hidden]?  1. Use it  2. Skip it  Enter to confirm · Esc to cancel");
+        for secret in ["/home", "boxuser", "sk-ant-oat01", "ABCDEFGHIJKLMNOP"] {
+            assert!(!reason.contains(secret), "{secret} leaked into {reason}");
+        }
+        assert_eq!(m.view(&tab).unwrap().message.as_deref(), Some(reason.as_str()), "the tab quotes the same reason");
+        assert!(!keys.exists(), "nothing was typed into a dialog pinned does not know");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_resumed_tab_at_its_prompt_and_a_worker_that_started_its_turn_outlive_the_starting_limit() {
+        let root = temp("starting-limit-kept");
+        let (claude, _) = claude_on_screens(&root, &["? for shortcuts"]);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), starting_limit: Duration::from_secs(1), ..launch() }, Some(root.join("config")), None, |_| {});
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        let resumed = m.add_tab(app.clone(), Account::builtin(Provider::Claude), vec!["--resume".into(), "s-1".into()], vec![], false, Some("s-1".into()));
+        m.start_claude(&resumed, 120, 32).unwrap();
+        let task = delegate_from(&m, &app, "shared");
+        let worker = m.delegates.get(&task).unwrap().thread.unwrap().tab;
+        // The brief started its turn, which then asks for a permission past the limit.
+        m.record_event(reported(&worker, AgentStatus::Working, "s-2", None, Some("look")));
+        m.record_event(reported(&worker, AgentStatus::NeedsInput, "s-2", Some("Claude needs your permission to use Bash"), None));
+        std::thread::sleep(Duration::from_millis(2500));
+        assert_eq!((m.view(&resumed).unwrap().status, m.view(&resumed).unwrap().message), (None, None), "a resume at its prompt fires no hook until a turn");
+        assert_eq!(m.view(&worker).unwrap().status, Some(AgentStatus::NeedsInput), "a worker that started its turn");
+        assert!(!m.delegates.get(&task).unwrap().state.terminal(), "{:?}", m.delegates.get(&task).unwrap().error);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_worktree_made_after_the_node_started_is_trusted_in_the_home_claude_config_before_its_session_starts() {
+        let root = temp("worktree-trust-home");
+        let (claude, _) = claude_on_screens(&root, &["? for shortcuts"]);
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join(".claude.json"), r#"{"projects":{"/elsewhere":{"allowedTools":["Bash"]}}}"#).unwrap();
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), claude_home: Some(home.clone()), ..launch() }, Some(root.join("config")), None, |_| {});
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "first"]);
+        let task = delegate_from(&m, &repo, "worktree");
+        let worktree = m.delegates.get(&task).unwrap().cwd;
+        assert!(worktree.starts_with(dunce::canonicalize(&repo).unwrap().join(".claude/worktrees")), "{}", worktree.display());
+        let config = claude_config_at(&home.join(".claude.json"));
+        assert!(trusted(&config, &worktree), "{config}");
+        assert!(!trusted(&config, &repo), "the repository the user opened stays the user's call: {config}");
+        assert_eq!(config["projects"]["/elsewhere"], json!({"allowedTools": ["Bash"]}), "another folder stays as it was");
         let _ = std::fs::remove_dir_all(root);
     }
 

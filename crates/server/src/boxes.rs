@@ -47,6 +47,13 @@ const NOT_CONNECTED_END: &str = "Upstash Box is not connected,";
 const NO_KEYS: &str = "Upstash is not connected";
 /// The longest reason the Usage page gets.
 const WHY_MAX: usize = 300;
+/// How long a worker box's session may run without starting its first turn before the box ends
+/// and its task fails. The node's own start limit, which quotes the session's screen, ends such a
+/// start first; this ends one the node did not.
+pub const FIRST_TURN_WAIT: Duration = pinned_core::machine::STARTING_LIMIT.saturating_add(Duration::from_secs(2 * 60));
+/// Why a worker box ended whose session never started its first turn. The hub sees no screen, so
+/// it names no cause.
+const NEVER_STARTED: &str = "the worker did not start its first turn";
 
 /// The shortest run of key characters after `box_` that is taken for a Box API key. A real key is
 /// a long random run, well past this; the words that start with `box_` in pinned's own names and
@@ -179,6 +186,8 @@ pub struct Policy {
     pub exited: Duration,
     /// With no tab for the run, which covers the time from the run to the node's first tabs.
     pub tab_gone: Duration,
+    /// With a worker's session running and no turn started yet.
+    pub first_turn: Duration,
     pub offline: Duration,
     /// From the row's creation, whatever the session does.
     pub max_life: Duration,
@@ -201,6 +210,7 @@ impl Default for Policy {
             done: minutes(2),
             exited: minutes(5),
             tab_gone: minutes(2),
+            first_turn: FIRST_TURN_WAIT,
             offline: minutes(10),
             max_life: minutes(4 * 60),
             cooldown: minutes(10),
@@ -311,6 +321,8 @@ pub enum End {
     /// Someone deleted the box outside pinned.
     Vanished,
     Disconnected,
+    /// The worker's session ran for `Policy::first_turn` without starting a turn.
+    NeverStarted,
     Failed(String),
 }
 
@@ -336,6 +348,7 @@ fn box_end_error(p: &Policy, why: &End) -> Option<String> {
         End::Done => return None,
         End::Failed(e) => format!("Upstash Box: {e}"),
         End::Offline => format!("Upstash Box: its box went offline and did not come back within {}", wait_span(p.offline)),
+        End::NeverStarted => format!("Upstash Box: {NEVER_STARTED} within {}", wait_span(p.first_turn)),
         why => format!("Upstash Box: the box ended before its task did: {}", ended_because(why)),
     })
 }
@@ -369,6 +382,7 @@ fn ended_because(why: &End) -> String {
         End::Removed => "someone removed its machine".into(),
         End::Vanished => "it was deleted outside pinned".into(),
         End::Disconnected => "Upstash Box was disconnected".into(),
+        End::NeverStarted => NEVER_STARTED.into(),
         End::Failed(e) => e.clone(),
     }
 }
@@ -376,7 +390,7 @@ fn ended_because(why: &End) -> String {
 /// How long the hub waits on the delegating machine to take a box's end.
 const ORIGIN_WAIT: Duration = Duration::from_secs(30);
 
-const ENDS: [(End, &str); 9] = [
+const ENDS: [(End, &str); 10] = [
     (End::TabClosed, "tab-closed"),
     (End::Exited, "exited"),
     (End::Idle, "idle"),
@@ -386,6 +400,7 @@ const ENDS: [(End, &str); 9] = [
     (End::Removed, "removed"),
     (End::Vanished, "vanished"),
     (End::Disconnected, "disconnected"),
+    (End::NeverStarted, "never-started"),
 ];
 const FAILED: &str = "failed: ";
 
@@ -426,6 +441,9 @@ pub enum Seen {
     /// `quiet`: nothing holds the box, so the session is neither working nor waiting on an open
     /// questionnaire.
     Tab { running: bool, quiet: bool },
+    /// A worker box's session runs and none of its tabs has started a turn: no hook has reported
+    /// a conversation yet. It is not idle between turns, so only `Policy::first_turn` ends it.
+    Starting,
 }
 
 /// When each condition of a running row began, by the hub's clock. A restart resets them, and
@@ -436,6 +454,8 @@ pub(crate) struct Timers {
     exited_since: Option<Instant>,
     gone_since: Option<Instant>,
     offline_since: Option<Instant>,
+    /// A worker's session ran with no turn started.
+    starting_since: Option<Instant>,
     /// The session reported its pull request opened.
     done: bool,
 }
@@ -477,6 +497,7 @@ pub fn agent_box_record(row: &BoxRow, opener: &Opener, started: u64, ended: u64,
     let box_ms = ended.saturating_sub(started);
     let (outcome, reason, limit) = match why {
         End::Failed(why) => (TaskOutcome::Failed, Some(why.clone()), None),
+        End::NeverStarted => (TaskOutcome::Failed, Some(NEVER_STARTED.to_owned()), None),
         End::Expired if over_budget(&row.spec, row.size, Duration::from_millis(box_ms)) => (TaskOutcome::Limit, None, Some("budget".to_owned())),
         End::Expired => (TaskOutcome::Limit, None, Some("time".to_owned())),
         End::Removed | End::Disconnected => (TaskOutcome::Cancelled, None, None),
@@ -553,6 +574,13 @@ pub(crate) fn verdict(age: Duration, seen: Seen, t: &mut Timers, now: Instant, p
         Seen::NoTab => (Some(false), Some(true), None, None),
         Seen::Tab { .. } if delegating => (Some(false), Some(false), Some(false), Some(false)),
         Seen::Tab { running, quiet } => (Some(false), Some(false), Some(!running), Some(quiet)),
+        Seen::Starting => (Some(false), Some(false), Some(false), Some(false)),
+    };
+    // A box others delegate from waits on its workers, never on its own start.
+    let starting = match seen {
+        Seen::Offline => None,
+        Seen::Starting => Some(!delegating),
+        _ => Some(false),
     };
     let held = |since: &mut Option<Instant>, on: Option<bool>| match on {
         Some(false) => {
@@ -567,6 +595,8 @@ pub(crate) fn verdict(age: Duration, seen: Seen, t: &mut Timers, now: Instant, p
         (held(&mut t.offline_since, offline).is_some_and(|h| h >= p.offline), End::Offline),
         (held(&mut t.gone_since, gone).is_some_and(|h| h >= p.tab_gone), End::TabClosed),
         (held(&mut t.exited_since, exited).is_some_and(|h| h >= p.exited), End::Exited),
+        // Only a look that sees the session starting ends it so: time offline ends as Offline.
+        (held(&mut t.starting_since, starting).is_some_and(|h| h >= p.first_turn) && seen == Seen::Starting, End::NeverStarted),
         (t.done && quiet.is_some_and(|h| h >= p.done), End::Done),
         (quiet.is_some_and(|h| h >= p.idle), End::Idle),
     ];
@@ -2221,6 +2251,7 @@ impl Boxes {
                         // A worker's or a Captain's box holds that one thread and the threads it starts.
                         let seen = match row.work {
                             BoxWork::Run => account.seen(&machine, &row.connector, &row.subject),
+                            BoxWork::Delegate { .. } => account.seen_worker(&machine),
                             _ => account.seen_any(&machine),
                         };
                         let mut timers = self.timers.lock().unwrap();
@@ -2555,6 +2586,47 @@ mod tests {
             assert_eq!(after(seen, 21 * MIN, MIN), Some(end), "{seen:?} for 21 of 20 minutes");
         }
         assert_eq!(after(Seen::Tab { running: true, quiet: false }, 21 * MIN, MIN), None, "a working session never idles");
+    }
+
+    #[test]
+    fn a_worker_that_never_starts_a_turn_ends_after_the_first_turn_wait_and_says_why() {
+        let p = Policy::default();
+        let start = Instant::now();
+        let (stuck, mut t) = (Seen::Starting, Timers::default());
+        assert_eq!(verdict(MIN, stuck, &mut t, start, &p, false), None, "its first look");
+        assert_eq!(verdict(MIN, stuck, &mut t, start + p.idle, &p, false), None, "a session that never started a turn is not idle");
+        assert_eq!(verdict(MIN, stuck, &mut t, start + FIRST_TURN_WAIT - Duration::from_secs(1), &p, false), None, "short of the wait");
+        assert_eq!(verdict(MIN, stuck, &mut t, start + FIRST_TURN_WAIT, &p, false), Some(End::NeverStarted), "no first turn after the wait");
+        // A worker that started its turn is never ended for it, however long it then works or waits.
+        let mut t = Timers::default();
+        assert_eq!(verdict(MIN, Seen::Starting, &mut t, start, &p, false), None);
+        for minute in [3, 5, 30, 3 * 60] {
+            assert_eq!(verdict(MIN, Seen::Tab { running: true, quiet: false }, &mut t, start + minute * MIN, &p, false), None, "a started worker at {minute} min");
+        }
+        // A box others delegate from waits on its workers, never on its own start.
+        let mut t = Timers::default();
+        for minute in [0, 5, 60] {
+            assert_eq!(verdict(MIN, Seen::Starting, &mut t, start + minute * MIN, &p, true), None, "delegating at {minute} min");
+        }
+        // Its max life and budget still bound it.
+        assert_eq!(verdict(p.max_life, Seen::Starting, &mut Timers::default(), start, &p, false), Some(End::Expired));
+        assert_eq!(ended_because(&End::NeverStarted), "the worker did not start its first turn");
+        assert_eq!(box_end_error(&p, &End::NeverStarted).as_deref(), Some("Upstash Box: the worker did not start its first turn within 12 min"));
+        assert_eq!(release_for(&End::NeverStarted), BoxEndRelease::Once);
+        // The node's own start limit, which quotes the session's screen, ends it first.
+        assert_eq!(FIRST_TURN_WAIT, pinned_core::machine::STARTING_LIMIT + 2 * MIN);
+    }
+
+    #[test]
+    fn a_starting_worker_whose_box_goes_offline_keeps_the_offline_allowance() {
+        // A first-turn wait shorter than the offline allowance, so time spent offline would reach it first.
+        let p = Policy { first_turn: 4 * MIN, ..Policy::default() };
+        let (start, s) = (Instant::now(), Duration::from_secs);
+        let mut t = Timers::default();
+        assert_eq!(verdict(MIN, Seen::Starting, &mut t, start, &p, false), None);
+        assert_eq!(verdict(MIN, Seen::Offline, &mut t, start + s(30), &p, false), None, "offline at 0:30");
+        assert_eq!(verdict(MIN, Seen::Offline, &mut t, start + p.first_turn + s(1), &p, false), None, "offline past the first-turn wait");
+        assert_eq!(verdict(MIN, Seen::Offline, &mut t, start + s(30) + p.offline, &p, false), Some(End::Offline), "it ends as offline");
     }
 
     fn spec_with(budget_usd: Option<f64>) -> RunSpec {
@@ -2966,6 +3038,7 @@ mod tests {
             Phase::Ending(End::Idle),
             Phase::Ending(End::TabClosed),
             Phase::Ending(End::Done),
+            Phase::Ending(End::NeverStarted),
             Phase::Ending(End::Failed("the bootstrap failed: curl: (22) 404".into())),
         ] {
             let (stored, reason) = phase.stored();
@@ -3083,7 +3156,12 @@ mod tests {
 
         /// Runs the script once and returns what the node it launched saw as `PINNED_BOX`, if it launched one.
         fn start(&self) -> Option<String> {
-            let script = start_script("fake-login", None);
+            self.start_for(None)
+        }
+
+        /// As `start`, for a box that clones `repo`.
+        fn start_for(&self, repo: Option<&str>) -> Option<String> {
+            let script = start_script("fake-login", repo);
             let script = script.replace("DIR=/workspace/home/.pinned", &format!("DIR={}", self.dir.display()));
             assert!(script.contains(&format!("DIR={}\n", self.dir.display())), "the script no longer sets DIR on its own line");
             let _ = std::fs::remove_file(self.dir.join("started"));
@@ -3156,6 +3234,35 @@ mod tests {
         assert_eq!(refused_for_an_hour(&access, "fixed-row").await, (false, 0, true), "the fixed box's node left");
         // The same refusals end a fresh box's node, so the check above can fail.
         assert_eq!(refused_for_an_hour(&access, "fresh-row").await, (true, 1, false), "a fresh box's node stayed");
+    }
+
+    /// The `node` on this machine's PATH, which writes Claude Code's config in the start script.
+    #[cfg(target_os = "linux")]
+    fn real_node() -> std::path::PathBuf {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        std::env::split_paths(&path).map(|dir| dir.join("node")).find(|node| node.is_file()).expect("these tests run the start script's config step with node, and no node is on PATH")
+    }
+
+    // The script launches the node with `setsid`, which macOS lacks; a box only ever runs on Linux.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_start_script_trusts_the_clone_and_keeps_every_other_folder() {
+        let run = StartRun::new();
+        std::fs::remove_file(run.bin.join("node")).unwrap();
+        std::os::unix::fs::symlink(real_node(), run.bin.join("node")).unwrap();
+        std::fs::write(run.dir.join("account.json"), "{}").unwrap();
+        let clone = run.home.join("pinned/app");
+        std::fs::create_dir_all(&clone).unwrap();
+        std::fs::write(run.home.join(".claude.json"), r#"{"projects":{"/elsewhere":{"hasTrustDialogAccepted":false,"allowedTools":["Bash"]}}}"#).unwrap();
+        let _ = run.start_for(Some("acme/app"));
+        let config: serde_json::Value = serde_json::from_slice(&std::fs::read(run.home.join(".claude.json")).unwrap()).unwrap();
+        let trusted = |folder: &std::path::Path| config["projects"][folder.display().to_string()]["hasTrustDialogAccepted"] == true;
+        assert!(trusted(&run.home), "{config}");
+        assert!(trusted(&clone), "the clone: {config}");
+        assert_eq!(config["projects"]["/elsewhere"], serde_json::json!({"hasTrustDialogAccepted": false, "allowedTools": ["Bash"]}), "another folder stays as it was");
+        assert_eq!(config["hasCompletedOnboarding"], true);
+        let settings: serde_json::Value = serde_json::from_slice(&std::fs::read(run.home.join(".claude/settings.json")).unwrap()).unwrap();
+        assert_eq!(settings, serde_json::json!({"skipDangerousModePermissionPrompt": true}), "no permission beyond the bypass warning");
     }
 
     #[cfg(unix)]
