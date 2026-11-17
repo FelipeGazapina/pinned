@@ -1135,7 +1135,7 @@ fn machines_share_a_projects_memory_through_the_hub_wherever_they_keep_it() {
     assert_eq!(pulled, vec!["claude/memory/MEMORY.md"]);
     assert_eq!(std::fs::read_to_string(memory(&on_mini)).unwrap(), "- deploys go through the VPS");
 
-    let outside = sync::File { entry: sync::Entry { path: "../.ssh/authorized_keys".into(), sha: "x".into(), modified: 1, size: 1, executable: None }, data: Some("eA==".into()), agreed: None };
+    let outside = sync::File { entry: sync::Entry { path: "../.ssh/authorized_keys".into(), sha: "x".into(), modified: 1, size: 1, executable: None }, data: Some("eA==".into()), agreed: None, base: None };
     assert_eq!(
         mac_link.call_hub(HubCall::SyncPush { project: project.key.clone(), files: vec![outside] }),
         Err("../.ssh/authorized_keys is not a file a project shares".into())
@@ -1209,7 +1209,7 @@ fn a_plugin_tree_is_stored_without_settings_env_or_claude_json() {
     pulled.sort();
     assert_eq!(pulled, stored);
     assert_eq!(std::fs::read_to_string(mini_home.join("synced-plugins/plugins/toy@demo/skills/greet/SKILL.md")).unwrap(), skill);
-    let secret = |path: &str| sync::File { entry: sync::Entry { path: path.into(), sha: "x".into(), modified: 1, size: 1, executable: None }, data: Some("eA==".into()), agreed: None };
+    let secret = |path: &str| sync::File { entry: sync::Entry { path: path.into(), sha: "x".into(), modified: 1, size: 1, executable: None }, data: Some("eA==".into()), agreed: None, base: None };
     for path in [
         "plugins/toy@demo/settings.json",
         "plugins/toy@demo/.claude.json",
@@ -1233,6 +1233,7 @@ fn a_plugin_tree_is_stored_without_settings_env_or_claude_json() {
         entry: sync::Entry { path: "plugins/toy@demo/skills/greet/blob.bin".into(), sha: "x".into(), modified: 1, size: raw.len() as u64, executable: None },
         data: Some(base64::engine::general_purpose::STANDARD.encode(&raw)),
         agreed: None,
+        base: None,
     };
     assert_eq!(
         mac_link.call_hub(HubCall::SyncPush { project: sync::PLUGINS_KEY.into(), files: vec![oversized] }),
@@ -1562,6 +1563,7 @@ fn plugin_hook(body: &[u8], modified: u64, executable: bool) -> sync::File {
         entry: sync::Entry { path: HOOK_PATH.into(), sha: sha256_hex(body), modified, size: packed.len() as u64, executable: Some(executable) },
         data: Some(base64::engine::general_purpose::STANDARD.encode(packed)),
         agreed: None,
+        base: None,
     }
 }
 
@@ -11926,4 +11928,126 @@ fn over_the_sync_limit_a_stale_deletion_frees_nothing_and_agreed_on_a_file_is_ig
     assert_eq!(sha_of(&mut ana, "claude/memory/more.md"), None);
     let current = json!({ "path": "claude/big-1.jsonl", "sha": "", "modified": 2, "agreed": "big1" });
     assert_eq!(push(&mut ana, vec![current, file("claude/memory/more.md", "one more note")]), Ok(Value::Null));
+}
+
+/// Runs `then` right before this machine's first push, so another machine's push lands between
+/// this machine's merge and its push.
+struct PushThen<'a> {
+    link: &'a Link,
+    then: std::cell::RefCell<Option<Box<dyn FnOnce() + 'a>>>,
+}
+
+impl sync::Hub for PushThen<'_> {
+    fn list(&self, project: &str) -> Result<Vec<sync::Entry>, String> {
+        sync::Hub::list(self.link, project)
+    }
+    fn push(&self, project: &str, files: Vec<sync::File>) -> Result<(), String> {
+        if let Some(then) = self.then.borrow_mut().take() {
+            then();
+        }
+        sync::Hub::push(self.link, project, files)
+    }
+    fn pull(&self, project: &str, paths: Vec<String>) -> Result<Vec<sync::File>, String> {
+        sync::Hub::pull(self.link, project, paths)
+    }
+    fn mark_executable(&self, project: &str, repairs: Vec<sync::ModeRepair>) -> Result<(), String> {
+        sync::Hub::mark_executable(self.link, project, repairs)
+    }
+}
+
+#[test]
+fn two_machines_merging_the_history_at_once_both_keep_their_new_lines() {
+    let hub = TestHub::start("sync_history_race");
+    let url = hub.url.clone();
+    let (token, account) = account::signup(&url, "ana@example.test", "correct horse").unwrap();
+    let start = |name: &str| {
+        let dir = temp(&format!("history-race-{name}"));
+        let (machine, machine_token) = account::register_machine(&url, &token, name, "macos").unwrap();
+        let creds = Credentials { hub: url.clone(), email: account.email.clone(), user_token: token.clone(), machine_id: machine.id, machine_token };
+        creds.save(&dir).unwrap();
+        let node = Node::start(&dir, creds);
+        wait_for("the machine online", || node.online());
+        (node, dir)
+    };
+    let ((mac, mac_home), (mini, mini_home)) = (start("mac"), start("mini"));
+    let project = sync::Project { key: "github.com/acme/app".into(), name: "app".into(), repo: "git@github.com:acme/app.git".into() };
+    let checkout = |home: &Path| sync::Checkout { project: project.clone(), path: home.join("app"), history: Some(home.join("history/app.jsonl")), claude_home: None };
+    let (on_mac, on_mini, on_air) = (checkout(&mac_home), checkout(&mini_home), checkout(&mac_home.join("air")));
+    let history = |c: &sync::Checkout| c.history.clone().unwrap();
+    let append = |c: &sync::Checkout, line: &str| {
+        std::fs::create_dir_all(history(c).parent().unwrap()).unwrap();
+        let before = std::fs::read_to_string(history(c)).unwrap_or_default();
+        std::fs::write(history(c), format!("{before}{line}\n")).unwrap();
+    };
+    for c in [&on_mac, &on_mini, &on_air] {
+        std::fs::create_dir_all(&c.path).unwrap();
+    }
+    let (mac_link, mini_link) = (mac.link.as_ref().unwrap(), mini.link.as_ref().unwrap());
+    let now = std::time::SystemTime::now();
+    let (mut mac_state, mut mini_state, mut air_state) = (sync::State::default(), sync::State::default(), sync::State::default());
+    append(&on_mac, r#"{"session":"a","ended":1}"#);
+    assert_eq!(sync::sync(&Through(mac_link), &mut mac_state, &on_mac, now).unwrap().pushed, vec![sync::HISTORY]);
+    assert_eq!(sync::sync(&Through(mini_link), &mut mini_state, &on_mini, now).unwrap().pulled, vec![sync::HISTORY]);
+    assert_eq!(sync::sync(&Through(mac_link), &mut air_state, &on_air, now).unwrap().pulled, vec![sync::HISTORY]);
+    // A third machine moves the hub's copy on, so the next sync of mac and of mini merges.
+    append(&on_air, r#"{"session":"c","ended":2}"#);
+    assert_eq!(sync::sync(&Through(mac_link), &mut air_state, &on_air, now).unwrap().pushed, vec![sync::HISTORY]);
+    append(&on_mac, r#"{"session":"m","ended":3}"#);
+    append(&on_mini, r#"{"session":"n","ended":4}"#);
+
+    // mini merges with the hub's copy; mac merges with the same copy and pushes before mini does.
+    let mac_merges = || {
+        let synced = sync::sync(&Through(mac_link), &mut mac_state, &on_mac, now).unwrap();
+        assert_eq!(synced.pushed, vec![sync::HISTORY]);
+    };
+    let racing = PushThen { link: mini_link, then: std::cell::RefCell::new(Some(Box::new(mac_merges))) };
+    assert_eq!(sync::sync(&racing, &mut mini_state, &on_mini, now).unwrap().pushed, vec![sync::HISTORY]);
+    drop(racing);
+
+    let all = "{\"session\":\"a\",\"ended\":1}\n{\"session\":\"c\",\"ended\":2}\n{\"session\":\"m\",\"ended\":3}\n{\"session\":\"n\",\"ended\":4}\n";
+    let on_new = checkout(&mini_home.join("new"));
+    std::fs::create_dir_all(&on_new.path).unwrap();
+    assert_eq!(sync::sync(&Through(mini_link), &mut sync::State::default(), &on_new, now).unwrap().pulled, vec![sync::HISTORY]);
+    assert_eq!(std::fs::read_to_string(history(&on_new)).unwrap(), all, "the hub's copy holds both machines' new lines");
+    assert_eq!(std::fs::read_to_string(history(&on_mini)).unwrap(), all);
+    assert_eq!(sync::sync(&Through(mac_link), &mut mac_state, &on_mac, now).unwrap().pulled, vec![sync::HISTORY]);
+    assert_eq!(std::fs::read_to_string(history(&on_mac)).unwrap(), all, "mac keeps its own line");
+    assert_eq!(sync::sync(&Through(mini_link), &mut mini_state, &on_mini, now).unwrap(), sync::Synced::default(), "nothing moves once both agree");
+    let (mut mac, mut mini) = (mac, mini);
+    mac.kill();
+    mini.kill();
+}
+
+#[test]
+fn a_history_push_naming_a_base_the_hub_no_longer_holds_is_refused_and_one_naming_none_is_taken() {
+    let hub = TestHub::start("sync_history_base");
+    let url = hub.url.clone();
+    let (_, _, mut ana) = signed_in(&url, "ana@example.test");
+    let project = "github.com/acme/site";
+    let file = |text: &str| {
+        json!({ "path": "history.jsonl", "sha": sha256_hex(text.as_bytes()), "modified": 1, "data": base64::engine::general_purpose::STANDARD.encode(gzip_bytes(text.as_bytes())) })
+    };
+    let based = |text: &str, base: &str| {
+        let mut file = file(text);
+        file["base"] = json!(base);
+        file
+    };
+    let push = |client: &mut Client, files: Vec<Value>| client.hub(json!({ "cmd": "sync_push", "project": project, "files": files }));
+    let sha_of = |client: &mut Client| {
+        let listed = client.hub(json!({ "cmd": "sync_list", "project": project })).unwrap();
+        listed.as_array().unwrap().iter().find(|e| e["path"] == "history.jsonl").map(|e| e["sha"].as_str().unwrap().to_owned())
+    };
+    let (one, two, three) = ("{\"ended\":1}\n", "{\"ended\":1}\n{\"ended\":2}\n", "{\"ended\":1}\n{\"ended\":3}\n");
+    let stale = Err("the hub's copy of the history changed since this machine merged it".to_owned());
+
+    assert_eq!(push(&mut ana, vec![based(one, "an older copy")]), stale, "the hub holds no copy yet");
+    assert_eq!(sha_of(&mut ana), None);
+    assert_eq!(push(&mut ana, vec![based(one, "")]), Ok(Value::Null), "an empty base names no copy on the hub");
+    assert_eq!(sha_of(&mut ana), Some(sha256_hex(one.as_bytes())));
+    assert_eq!(push(&mut ana, vec![based(two, &sha256_hex(one.as_bytes()))]), Ok(Value::Null));
+    assert_eq!(sha_of(&mut ana), Some(sha256_hex(two.as_bytes())));
+    assert_eq!(push(&mut ana, vec![based(three, &sha256_hex(one.as_bytes()))]), stale, "merged with a copy the hub replaced since");
+    assert_eq!(sha_of(&mut ana), Some(sha256_hex(two.as_bytes())));
+    assert_eq!(push(&mut ana, vec![file(three)]), Ok(Value::Null), "an older app sends no base and replaces the copy as before");
+    assert_eq!(sha_of(&mut ana), Some(sha256_hex(three.as_bytes())));
 }

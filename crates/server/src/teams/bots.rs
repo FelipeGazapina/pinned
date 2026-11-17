@@ -74,15 +74,20 @@ fn available(workflow: &Connector, workflows: &[Connector]) -> Result<(), String
 /// team: a draft, an off bot, or one the team does not have (deleted, or another account's).
 /// Checked at save, at turn-on and when a run starts; the graph runner checks again at the step.
 async fn callees_on(hub: &Arc<Hub>, team: Uuid, workflow: &Connector, workflows: &[Connector]) -> Result<(), String> {
+    callees_read(hub, team, workflow, workflows).await?
+}
+
+/// `callees_on`, with a read of a bot row that failed (`Err`) apart from a refusal (`Ok(Err)`).
+async fn callees_read(hub: &Arc<Hub>, team: Uuid, workflow: &Connector, workflows: &[Connector]) -> Result<Result<(), String>, String> {
     let graph = workflow.graph.clone().unwrap_or_else(|| migrate(workflow));
     for node in &graph.nodes {
         let NodeKind::Call { workflow: target } = &node.kind else { continue };
         let enabled = workflows.iter().any(|c| &c.id == target && c.enabled);
         if !enabled || !db::bot(&hub.db, team, target).await?.is_some_and(|b| b.on) {
-            return Err(NOT_AN_ON_BOT.into());
+            return Ok(Err(NOT_AN_ON_BOT.into()));
         }
     }
-    Ok(())
+    Ok(Ok(()))
 }
 
 /// Saves the team workflow `id` with `enabled` as given, if it is not so already.
@@ -414,31 +419,57 @@ pub async fn run_now(hub: &Arc<Hub>, scope: &Scope, workflow_id: &str) -> Result
 /// Whether bot `workflow_id` may start a run now: it is on, its limits are above 0 (`NO_LIMIT`),
 /// its workflow is one a bot can have, and the team keeps its Upstash key and Claude token.
 pub async fn ready(hub: &Arc<Hub>, team: &Account, workflow_id: &str) -> Result<(), String> {
-    ready_in(hub, team, &*hub.connectors(team).await?, workflow_id).await
+    ready_in(hub, &TeamWorkflows::read(hub, team).await?, workflow_id).await?
 }
 
-/// `ready` with the team's workflows and keys as already read (`connectors`): what it reads
-/// itself is only bot rows, `workflow_id`'s and those of the bots its workflow calls.
-pub async fn ready_in(hub: &Arc<Hub>, team: &Account, connectors: &pinned_core::connectors::Connectors, workflow_id: &str) -> Result<(), String> {
-    let settings = connectors.get_settings();
+/// A team's workflows, keys and settings as read once (`Hub::connectors`), with the team they are
+/// of: what `ready_in` and the waiting line decide on, so no caller hands them another team's.
+pub struct TeamWorkflows {
+    team: Uuid,
+    connectors: Arc<pinned_core::connectors::Connectors>,
+}
+
+impl TeamWorkflows {
+    pub async fn read(hub: &Hub, team: &Account) -> Result<TeamWorkflows, String> {
+        Ok(TeamWorkflows { team: team.id, connectors: hub.connectors(team).await? })
+    }
+
+    pub fn team(&self) -> Uuid {
+        self.team
+    }
+
+    pub fn connectors(&self) -> &pinned_core::connectors::Connectors {
+        &self.connectors
+    }
+}
+
+/// `ready` with the team's workflows and keys as already read (`team`): what it reads itself is
+/// only bot rows, `workflow_id`'s and those of the bots its workflow calls. A read of one that
+/// failed, busy or not, is `Err`, apart from a refusal (`Ok(Err)`): it says nothing of the bot.
+pub async fn ready_in(hub: &Arc<Hub>, team: &TeamWorkflows, workflow_id: &str) -> Result<Result<(), String>, String> {
+    let settings = team.connectors.get_settings();
     let workflows = &settings.connectors;
-    let workflow = find(workflows, workflow_id)?;
-    let on = db::bot(&hub.db, team.id, workflow_id).await?.is_some_and(|b| b.on);
-    if !on || !workflow.enabled {
-        return Err(IS_A_DRAFT.into());
+    let workflow = match find(workflows, workflow_id) {
+        Ok(workflow) => workflow,
+        Err(e) => return Ok(Err(e)),
+    };
+    let bot = db::bot(&hub.db, team.team, workflow_id).await?;
+    let callees = callees_read(hub, team.team, workflow, workflows).await?;
+    if !bot.as_ref().is_some_and(|b| b.on) || !workflow.enabled {
+        return Ok(Err(IS_A_DRAFT.into()));
     }
     // A run is held by its limits (`calls::tick`): a bot without them never starts one.
-    let limits = db::bot(&hub.db, team.id, workflow_id).await?.map(|b| b.limits);
-    if !limits.is_some_and(|l| l.usd.is_finite() && l.usd > 0.0 && l.minutes > 0) {
-        return Err(NO_LIMIT.into());
+    if !bot.is_some_and(|b| b.limits.usd.is_finite() && b.limits.usd > 0.0 && b.limits.minutes > 0) {
+        return Ok(Err(NO_LIMIT.into()));
     }
-    available(workflow, workflows)?;
-    callees_on(hub, team.id, workflow, workflows).await?;
+    if let Err(e) = available(workflow, workflows).and(callees) {
+        return Ok(Err(e));
+    }
     let credential = super::membership::credential_in(&settings);
     if !(credential.upstash && credential.claude) {
-        return Err(NEEDS_KEYS.into());
+        return Ok(Err(NEEDS_KEYS.into()));
     }
-    Ok(())
+    Ok(Ok(()))
 }
 
 /// What a run of bot `workflow_id` opens, and who starts it (the member, or `trigger:<kind>`),
