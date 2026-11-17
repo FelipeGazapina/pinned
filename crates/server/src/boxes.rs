@@ -4269,6 +4269,31 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn a_worktree_whose_own_config_moves_origin_saves_nothing_anywhere() {
+        let changes: [(&str, fn(&str) -> [String; 2]); 3] = [
+            ("a push URL", |other| ["remote.origin.pushurl".into(), format!("{other}/site.git")]),
+            ("a fetch URL", |other| ["remote.origin.url".into(), format!("{other}/site.git")]),
+            ("an insteadOf", |other| [format!("url.{other}/.insteadOf"), "git@github.com:acme/".into()]),
+        ];
+        for (change, setting) in changes {
+            let run = RescueRun::new();
+            let other = run._root.path().join("elsewhere");
+            run.git(&run.home, &["init", "-q", "--bare", other.join("site.git").to_str().unwrap()]);
+            let tree = run.clone.join(".claude/worktrees/pinned-1");
+            run.git(&run.clone, &["worktree", "add", "-q", "-b", "eng-7", tree.to_str().unwrap()]);
+            run.git(&run.clone, &["config", "extensions.worktreeConfig", "true"]);
+            let [name, value] = setting(other.to_str().unwrap());
+            run.git(&tree, &["config", "--worktree", &name, &value]);
+            std::fs::write(tree.join("notes.txt"), "in the worktree\n").unwrap();
+            assert_eq!(run.rescue(), "pinned-rescue: refused remote\npinned-rescue: done\n", "{change}");
+            assert_eq!(run.remote_branches(), "refs/heads/main\n", "{change}: the checked repository got nothing");
+            assert_eq!(run.git(&other.join("site.git"), &["for-each-ref", "--format=%(refname)"]), "", "{change}: the other repository got nothing");
+            assert!(run.writes().iter().all(|w| !w.starts_with(PUSH) && !git_command(w).starts_with("push")), "{change}: {:?}", run.writes());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn a_box_with_no_clone_of_the_tasks_repository_has_nothing_to_rescue() {
         let run = RescueRun::new();
         std::fs::rename(&run.clone, run.home.join("pinned/other")).unwrap();
