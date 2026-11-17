@@ -810,3 +810,67 @@ fn a_change_whose_first_run_failed_to_start_starts_on_the_retry_and_counts_one_s
     assert_eq!(starts, 1, "the cap counts one start");
     no_unlisted(&fake);
 }
+
+/// An Ask step that stops a run whose issue a coding agent cannot handle.
+fn agent_ask() -> Ask {
+    Ask {
+        model: "google/gemini-3.5-flash".into(),
+        instructions: "Classify.".into(),
+        questions: vec![Question { name: "agent".into(), ask: "Can a coding agent handle it?".into(), choices: vec!["yes".into(), "no".into()], stop_on: vec!["no".into()] }],
+    }
+}
+
+/// `reads` checks' reads of the account, each before any of their runs is handed over, then the
+/// hand-over of every run they found, each answered `answer`: the runs each read found, and the
+/// runs handed to `open`.
+fn reads_then_hand_over(connectors: &Connectors, reads: usize, answer: Result<(), String>) -> (Vec<usize>, Vec<Run>) {
+    let mut found = vec![];
+    let mut work = vec![];
+    for _ in 0..reads {
+        let (read, _) = block_on(connectors.poll());
+        found.push(read.iter().filter(|work| matches!(work, Work::Run(_))).count());
+        work.extend(read);
+    }
+    let opened = Mutex::new(vec![]);
+    let open = |work: Work| {
+        if let Work::Run(run) = &work {
+            opened.lock().unwrap().push(run.clone());
+        }
+        let answer = answer.clone();
+        async move { answer }
+    };
+    for work in work {
+        let _ = block_on(connectors.hand_over(work, &open));
+    }
+    (found, opened.into_inner().unwrap())
+}
+
+/// #346 E3 item 1: two moves of one issue into Ready to Dev, 20 minutes apart (past the
+/// cooldown), read in one check by a workflow with an Ask step. A check starts at most one run on
+/// the issue, so the later move waits for the next check; each run's Ask step reads the issue and
+/// the change (Ana, Todo) only inside the frame, whatever the order the runs are handed over in;
+/// and each run that does not start gives back its own claim.
+#[test]
+fn two_changes_on_one_issue_start_one_run_a_check_each_framed_and_each_gives_back_its_own_claim() {
+    let _api = slack::lock_api();
+    let _restore = RestoreLinear;
+    let fake = fake_with(vec![issue(1, ago(20), vec![moved("h-1", ago(40), "Backlog", "Ready to Dev"), moved("h-2", ago(20), "Todo", "Ready to Dev")])]);
+    let claims = Claims::default();
+    let connectors = on(&claims, vec![Connector { ask: Some(agent_ask()), ..ready_to_dev("w1", ago(50)) }], "lin-e3-two");
+    claims.inner.write_key(VERCEL_KEY, "vck_testtwo").unwrap();
+    let _reply = TestReply::set(r#"{"agent":"yes"}"#.into());
+    crate::vercel::take_test_inputs();
+
+    let (found, runs) = reads_then_hand_over(&connectors, 2, Err("the machine refused the run".into()));
+    assert_eq!(found, [1, 1], "one run on the issue a check: the later move waits for the next");
+    let inputs = crate::vercel::take_test_inputs();
+    assert_eq!(inputs.len(), 2, "each run asks once");
+    assert!(runs[0].input.contains("Moved from Backlog to Ready to Dev by Ana."), "{}", runs[0].input);
+    assert!(runs[1].input.contains("Moved from Todo to Ready to Dev by Ana."), "{}", runs[1].input);
+    for (input, run) in inputs.iter().zip(&runs) {
+        assert_eq!(input, &crate::untrusted::frame("a Linear issue", &run.input), "the Ask step reads the change only framed");
+    }
+    assert_eq!(*claims.released.lock().unwrap(), ["linear:i-1#h-1:state", "linear:i-1#h-2:state"], "each run gives back its own claim");
+    assert!(claims.rows.lock().unwrap().is_empty());
+    no_unlisted(&fake);
+}
