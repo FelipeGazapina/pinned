@@ -171,11 +171,31 @@ pub(crate) fn too_old_for_run_now(account: &Account, machine: &str, subject: &Su
 pub const CENSUS_EVERY: Duration = Duration::from_secs(300);
 
 /// `census_accounts`' line for one account.
-fn account_census(id: Uuid, runs: usize, (store_bytes, runs_bytes, pending): (usize, usize, store_writes::Pending)) -> String {
+fn account_census(id: Uuid, runs: usize, (store_bytes, runs_bytes, pending): (usize, usize, store_writes::Pending), (check_age_s, check_failing): (i64, bool)) -> String {
     format!(
-        "pinned-server: census-account id={id} runs={runs} runs_bytes={runs_bytes} store_bytes={store_bytes} store_pending={} store_pending_bytes={} secrets_pending={} secrets_pending_bytes={}",
-        pending.store, pending.store_bytes, pending.secrets, pending.secrets_bytes
+        "pinned-server: census-account id={id} runs={runs} runs_bytes={runs_bytes} store_bytes={store_bytes} store_pending={} store_pending_bytes={} secrets_pending={} secrets_pending_bytes={} check_age_s={check_age_s} check_failing={}",
+        pending.store, pending.store_bytes, pending.secrets, pending.secrets_bytes, u8::from(check_failing)
     )
+}
+
+/// What the hub's check log keeps of an account's previous check: when it ran, its error as
+/// `log_error` cuts it, and when that error began.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct CheckLog {
+    at: Option<i64>,
+    error: Option<String>,
+    error_since: i64,
+}
+
+/// The check log's lines for one new check of `account`, and what it keeps for the next one.
+fn log_check(prev: &CheckLog, _account: Uuid, _check: &pinned_core::connectors::Check, _now: i64) -> (CheckLog, Vec<String>) {
+    (prev.clone(), vec![])
+}
+
+/// `account_census`' check fields: the last check's age in whole seconds at `now` (-1 when there is
+/// none), and whether it failed.
+fn check_census(_check: Option<&pinned_core::connectors::Check>, _now: i64) -> (i64, bool) {
+    (0, false)
 }
 
 /// The resident set size, in KiB, from the text of `/proc/self/status`.
@@ -488,7 +508,7 @@ impl Hub {
             .iter()
             .map(|(id, p)| {
                 let runs = accounts.get(id).and_then(|account| account.connectors.get()).map_or(0, |connectors| connectors.census().runs);
-                account_census(*id, runs, p.census())
+                account_census(*id, runs, p.census(), (-1, false))
             })
             .collect()
     }
@@ -2226,7 +2246,7 @@ mod tests {
     }
 
     /// The fields of a census line after its prefix, each `name=<number>`, or the failure.
-    fn numeric_fields<'a>(line: &'a str, prefix: &str) -> Vec<(&'a str, u64)> {
+    fn numeric_fields<'a>(line: &'a str, prefix: &str) -> Vec<(&'a str, i64)> {
         let rest = line.strip_prefix(prefix).unwrap_or_else(|| panic!("{line:?} starts with {prefix:?}"));
         rest.split_whitespace()
             .map(|field| {
@@ -2244,7 +2264,7 @@ mod tests {
         crate::traffic::received("machine_reply", 7);
         crate::traffic::sync_pulled(4096);
         let line = format!("pinned-server: census{}{}", crate::heap::census(), crate::traffic::take().fields());
-        let fields: HashMap<&str, u64> = numeric_fields(&line, "pinned-server: census").into_iter().collect();
+        let fields: HashMap<&str, i64> = numeric_fields(&line, "pinned-server: census").into_iter().collect();
         for name in ["heap_live_mb", "heap_big_live_mb", "heap_allocated_gb", "sent_n", "sent_bytes", "sent_max", "recv_n", "recv_bytes", "recv_max", "sync_pulls", "sync_pull_bytes"] {
             assert!(fields.contains_key(name), "{name} in {line}");
         }
@@ -2253,12 +2273,63 @@ mod tests {
         assert!(fields["recv_machine_reply_n"] >= 1 && fields["sync_pull_bytes"] >= 4096, "{line}");
         let pending = store_writes::Pending { store: 1, store_bytes: 1234, secrets: 0, secrets_bytes: 0 };
         let id = Uuid::from_u128(7);
-        let account = account_census(id, 3, (100, 200, pending));
+        let account = account_census(id, 3, (100, 200, pending), check_census(None, 42));
         let fields = numeric_fields(&account, &format!("pinned-server: census-account id={id}"));
         assert_eq!(
             fields,
-            vec![("runs", 3), ("runs_bytes", 200), ("store_bytes", 100), ("store_pending", 1), ("store_pending_bytes", 1234), ("secrets_pending", 0), ("secrets_pending_bytes", 0)]
+            vec![("runs", 3), ("runs_bytes", 200), ("store_bytes", 100), ("store_pending", 1), ("store_pending_bytes", 1234), ("secrets_pending", 0), ("secrets_pending_bytes", 0), ("check_age_s", -1), ("check_failing", 0)]
         );
+    }
+
+    #[test]
+    fn the_account_census_says_how_old_the_last_check_is_and_whether_it_failed() {
+        let id = Uuid::from_u128(7);
+        let pending = || store_writes::Pending { store: 0, store_bytes: 0, secrets: 0, secrets_bytes: 0 };
+        let failed = check_at("1970-01-01T00:00:00+00:00", Some("Linear answered 500"));
+        assert_eq!(check_census(Some(&failed), 42), (42, true));
+        assert_eq!(check_census(None, 42), (-1, false));
+        let line = account_census(id, 3, (100, 200, pending()), check_census(Some(&failed), 42));
+        assert!(line.ends_with(" check_age_s=42 check_failing=1"), "{line}");
+        let line = account_census(id, 3, (100, 200, pending()), check_census(None, 42));
+        assert!(line.ends_with(" check_age_s=-1 check_failing=0"), "{line}");
+    }
+
+    /// A check that ran at `at`, which the log does not read, with `error`.
+    fn check_at(at: &str, error: Option<&str>) -> pinned_core::connectors::Check {
+        pinned_core::connectors::Check { at: at.into(), error: error.map(Into::into) }
+    }
+
+    #[test]
+    fn the_check_log_names_late_checks_and_changes_in_the_error_only() {
+        let id = Uuid::from_u128(0x1234_5678_9abc_def0_1111_2222_3333_4444);
+        let log = |prev: &CheckLog, error: Option<&str>, now: i64| log_check(prev, id, &check_at("", error), now);
+        let (state, lines) = log(&CheckLog::default(), None, 1000);
+        assert!(lines.is_empty(), "{lines:?}");
+        let (state, lines) = log(&state, None, 1030);
+        assert!(lines.is_empty(), "{lines:?}");
+        let (state, lines) = log(&state, None, 1180);
+        assert_eq!(lines, ["pinned-server: check-late account=12345678 gap_s=150"]);
+        let (state, lines) = log(&state, Some("Linear answered 500"), 1240);
+        assert_eq!(lines, ["pinned-server: check-error account=12345678 error=Linear answered 500"]);
+        let (state, lines) = log(&state, Some("Linear answered 500"), 1300);
+        assert!(lines.is_empty(), "{lines:?}");
+        let (state, lines) = log(&state, Some("Slack answered 403"), 1360);
+        assert_eq!(lines, ["pinned-server: check-error account=12345678 error=Slack answered 403"]);
+        let (_, lines) = log(&state, None, 1450);
+        assert_eq!(lines, ["pinned-server: check-ok account=12345678 after_s=90"]);
+
+        // A repeated error lasts from its first check, so the recovery says 120 s here.
+        let (state, _) = log(&CheckLog::default(), Some("Linear answered 500"), 100);
+        let (state, _) = log(&state, Some("Linear answered 500"), 150);
+        let (_, lines) = log(&state, None, 220);
+        assert_eq!(lines, ["pinned-server: check-ok account=12345678 after_s=120"]);
+
+        // The error is one line, cut before any query string, and at most 200 characters.
+        let (_, lines) = log(&CheckLog::default(), Some("Bad\nthing?token=x&more"), 0);
+        assert_eq!(lines, ["pinned-server: check-error account=12345678 error=Bad thing"]);
+        let long = "x".repeat(500);
+        let (_, lines) = log(&CheckLog::default(), Some(&long), 0);
+        assert_eq!(lines, [format!("pinned-server: check-error account=12345678 error={}", "x".repeat(200))]);
     }
 
     #[test]
