@@ -14,10 +14,31 @@ pub struct PlanStore {
 }
 
 impl PlanStore {
-    /// The plans saved in `dir`, or none when the file is missing or unreadable.
+    /// The plans saved in `dir`, or none when the file is missing. A file that can't be read or
+    /// parsed is renamed to `plans.json.bad` before anything is saved over it; when even that
+    /// fails, the plans stay in memory only.
     pub fn load(dir: Option<&Path>) -> Self {
-        let file = dir.map(|d| d.join(FILE));
-        let by_session = file.as_ref().and_then(|f| std::fs::read(f).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        let mut file = dir.map(|d| d.join(FILE));
+        let mut by_session = HashMap::new();
+        if let Some(path) = &file {
+            let read = match std::fs::read(path) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(HashMap::new()),
+                Err(e) => Err(e.to_string()),
+                // serde's message may quote the file, and a plan's text stays out of the log.
+                Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| format!("no JSON plans at line {} column {}", e.line(), e.column())),
+            };
+            match read {
+                Ok(saved) => by_session = saved,
+                Err(e) => {
+                    let bad = path.with_extension("json.bad");
+                    eprintln!("pinned: {FILE} is unreadable ({e}); kept aside as {FILE}.bad");
+                    if let Err(e) = std::fs::rename(path, &bad) {
+                        eprintln!("pinned: {FILE} could not be kept aside ({e}); plans will not save");
+                        file = None;
+                    }
+                }
+            }
+        }
         PlanStore { by_session, file }
     }
 
