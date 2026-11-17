@@ -38,7 +38,7 @@ const SYNC_EVERY: Duration = Duration::from_secs(20);
 /// After the hub refuses a project's push, the same files wait this long before they go again,
 /// twice as long after each refusal of them, up to `PUSH_HOLD_MAX`.
 const PUSH_HOLD_MIN: Duration = SYNC_EVERY;
-const PUSH_HOLD_MAX: Duration = Duration::from_secs(30 * 60);
+const PUSH_HOLD_MAX: Duration = Duration::from_secs(10 * 60);
 /// The close code the hub sends when it doesn't know the token a socket signed in with.
 pub const UNAUTHORIZED: u16 = 4001;
 /// How long a box's node is refused with `UNAUTHORIZED`, with no hello accepted in between, before
