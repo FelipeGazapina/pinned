@@ -288,17 +288,35 @@ struct Syncer {
 /// Holds back the account's pushes once the hub refused one at its limit. The hub refuses a push
 /// that grows the account past its limit whichever project sends it, so one hold covers every
 /// project and plugin share. Until it ends, a sync sends only what does not grow the hub's copy
-/// (see `sync::sync_shrinking`); when it ends, the next sync is a probe that sends everything. The
-/// hold is not restarted when the files to send change: it grows only with each refused probe.
-/// The project lists and pulls every cycle all the same.
+/// (see `sync::sync_shrinking`); when the wait is over, the next cycle is a probe that sends
+/// everything. A probe cycle in which every sync is `Ok` and none is refused ends the hold; one in
+/// which any is refused doubles it, whatever the other projects did. The hold is not restarted when
+/// the files to send change. The project lists and pulls every cycle all the same.
+///
+/// A cycle runs `begin`, then a sync of each project and plugin share, then `finish`.
 struct PushBackoff {
     limit: Option<Limit>,
     draw: fn() -> f64,
+    round: Round,
+}
+
+/// What the syncs of the cycle in progress did.
+#[derive(Default)]
+struct Round {
+    /// The hold is on, and its wait is over: this cycle is a probe.
+    probe: bool,
+    /// The hold is on, and its wait is not over: this cycle only shrinks.
+    held: bool,
+    refused: bool,
+    /// A sync of the cycle failed or never ran, so the cycle says nothing of the hub's room.
+    unclean: bool,
 }
 
 struct Limit {
-    /// The hold before jitter: `PUSH_HOLD_MIN` after the first refusal, doubled after each refused probe.
+    /// The hold before jitter: `PUSH_HOLD_MIN` after the first refusal, doubled after each refused
+    /// probe cycle, up to `PUSH_HOLD_MAX`.
     wait: Duration,
+    /// The end of the wait: the jittered hold, never past `PUSH_HOLD_MAX`.
     until: Instant,
 }
 
@@ -311,21 +329,39 @@ impl Default for PushBackoff {
 impl PushBackoff {
     /// `draw` is the jitter source: a draw in `0.0..1.0` for each hold.
     fn with_draw(draw: fn() -> f64) -> Self {
-        PushBackoff { limit: None, draw }
+        PushBackoff { limit: None, draw, round: Round::default() }
+    }
+
+    /// Starts a cycle: with the hold on and its wait over it is a probe.
+    fn begin(&mut self, now: Instant) {
+        let on = self.limit.is_some();
+        let shrinking = self.shrinking(now);
+        self.round = Round { probe: on && !shrinking, held: on && shrinking, ..Round::default() };
+    }
+
+    /// Ends the cycle: the hold ends when a probe cycle was clean.
+    fn finish(&mut self) {
+        let round = std::mem::take(&mut self.round);
+        if round.probe && !round.refused && !round.unclean {
+            self.limit = None;
+        }
+    }
+
+    /// Marks the cycle as one that left a project or plugin share unsynced.
+    fn skipped(&mut self) {
+        self.round.unclean = true;
     }
 
     fn sync(&mut self, hub: &impl sync::Hub, state: &mut sync::State, checkout: &sync::Checkout, now: Instant) -> Result<sync::Synced, String> {
         let shrinking = self.shrinking(now);
-        let done = if shrinking { sync::sync_shrinking(hub, state, checkout, SystemTime::now()) } else { sync::sync(hub, state, checkout, SystemTime::now()) }?;
-        self.record(&done, shrinking, now);
-        Ok(done)
+        let done = if shrinking { sync::sync_shrinking(hub, state, checkout, SystemTime::now()) } else { sync::sync(hub, state, checkout, SystemTime::now()) };
+        self.record(done, now)
     }
 
     fn sync_plugins(&mut self, hub: &impl sync::Hub, state: &mut sync::State, share: &sync::PluginShare, now: Instant) -> Result<sync::Synced, String> {
         let shrinking = self.shrinking(now);
-        let done = if shrinking { sync::sync_plugins_shrinking(hub, state, share, SystemTime::now()) } else { sync::sync_plugins(hub, state, share, SystemTime::now()) }?;
-        self.record(&done, shrinking, now);
-        Ok(done)
+        let done = if shrinking { sync::sync_plugins_shrinking(hub, state, share, SystemTime::now()) } else { sync::sync_plugins(hub, state, share, SystemTime::now()) };
+        self.record(done, now)
     }
 
     /// Whether the hold is on at `now`: pushes send only what does not grow the hub's copy.
@@ -333,19 +369,25 @@ impl PushBackoff {
         self.limit.as_ref().is_some_and(|limit| now < limit.until)
     }
 
-    fn record(&mut self, done: &sync::Synced, shrinking: bool, now: Instant) {
-        match &done.push {
-            sync::Push::Refused { .. } => {
-                let wait = match &self.limit {
-                    Some(limit) => (limit.wait * 2).min(PUSH_HOLD_MAX),
-                    None => PUSH_HOLD_MIN,
-                };
-                self.limit = Some(Limit { wait, until: now + jittered(wait, (self.draw)()) });
+    /// Notes what a sync did. The first refusal of a cycle sets the hold, or doubles it when the
+    /// cycle is a probe; a refusal of a cycle that only shrinks leaves the hold as it is.
+    fn record(&mut self, done: Result<sync::Synced, String>, now: Instant) -> Result<sync::Synced, String> {
+        match &done {
+            Ok(synced) if matches!(synced.push, sync::Push::Refused { .. }) => {
+                let first = !self.round.refused;
+                self.round.refused = true;
+                if first && !self.round.held {
+                    let wait = match &self.limit {
+                        Some(limit) => (limit.wait * 2).min(PUSH_HOLD_MAX),
+                        None => PUSH_HOLD_MIN,
+                    };
+                    self.limit = Some(Limit { wait, until: now + jittered(wait, (self.draw)()).min(PUSH_HOLD_MAX) });
+                }
             }
-            // A probe the hub takes ends the hold. A shrinking push leaves the growth for the probe.
-            sync::Push::Done if !shrinking && !done.pushed.is_empty() => self.limit = None,
-            _ => {}
+            Ok(_) => {}
+            Err(_) => self.round.unclean = true,
         }
+        done
     }
 
     /// Whether the hub's limit holds the account's pushes, probe due or not.
@@ -418,8 +460,10 @@ impl Syncer {
         if checkouts.is_empty() && shares.is_empty() {
             self.backoff.end();
         }
+        self.backoff.begin(Instant::now());
         for checkout in checkouts {
             if !shared.online() {
+                self.backoff.skipped();
                 break;
             }
             let key = checkout.project.key.clone();
@@ -461,6 +505,7 @@ impl Syncer {
                 Err(e) => eprintln!("pinned: could not sync plugins: {e}"),
             }
         }
+        self.backoff.finish();
         machine.hold_sync_limit(self.backoff.limited());
         if let Err(e) = state.flush() {
             eprintln!("pinned: {e}");
@@ -1711,7 +1756,9 @@ mod tests {
             let seconds = (SYNC_EVERY * cycle).as_secs();
             before(seconds);
             let pushes = hub.pushes.get();
+            backoff.begin(start + SYNC_EVERY * cycle);
             let _ = backoff.sync(hub, &mut state, checkout, start + SYNC_EVERY * cycle);
+            backoff.finish();
             if hub.pushes.get() > pushes {
                 at.push(seconds);
             }
@@ -1779,7 +1826,9 @@ mod tests {
                 append(&mac_history, &turn("mac", 3));
             }
             let pushes = hub.pushes.get();
+            backoff.begin(start + SYNC_EVERY * cycle);
             backoff.sync(&hub, &mut mac_state, &mac, start + SYNC_EVERY * cycle).unwrap();
+            backoff.finish();
             if hub.pushes.get() > pushes {
                 at.push(seconds);
             }
@@ -1872,9 +1921,11 @@ mod tests {
             let seconds = (SYNC_EVERY * cycle).as_secs();
             before(seconds);
             let pushes = hub.pushes.get();
+            backoff.begin(start + SYNC_EVERY * cycle);
             for checkout in checkouts {
                 let _ = backoff.sync(hub, &mut state, checkout, start + SYNC_EVERY * cycle);
             }
+            backoff.finish();
             if hub.pushes.get() > pushes {
                 calls.push((seconds, hub.pushes.get() - pushes));
             }
@@ -1985,7 +2036,9 @@ mod tests {
         let mut errors = vec![];
         for cycle in 0..4 {
             std::fs::write(&notes, grown(SYNC_EVERY.as_secs() * cycle as u64)).unwrap();
+            backoff.begin(start + SYNC_EVERY * cycle);
             errors.push(backoff.sync(&hub, &mut state, &checkout, start + SYNC_EVERY * cycle).err());
+            backoff.finish();
         }
         assert_eq!(errors, vec![Some("the hub is restarting".to_owned()); 4], "each refusal is an error of the sync, as before");
         assert_eq!(hub.pushes.get(), 4, "a refusal that is not the limit is not held: every cycle sends again");
