@@ -783,3 +783,30 @@ fn an_old_store_reads_the_guard_counts_as_zeros() {
     assert_eq!((counts.skipped_away, counts.claim_errors, counts.not_started), (2, 1, 1));
     assert_eq!((counts.echoes, counts.cooled, counts.capped), (0, 0, 0));
 }
+
+/// #346 E3 item 4: a change whose run fails to start, read again in the next check's overlap,
+/// starts there once. Its first try was no start: it is not cooled, and the cap counts one start.
+#[test]
+fn a_change_whose_first_run_failed_to_start_starts_on_the_retry_and_counts_one_start() {
+    let _api = slack::lock_api();
+    let _restore = RestoreLinear;
+    let at = Utc::now() - chrono::Duration::seconds(10);
+    let fake = fake_with(vec![issue(1, at, vec![moved("h-1", at, "Backlog", "Ready to Dev")])]);
+    let claims = Claims::default();
+    let connectors = on(&claims, vec![ready_to_dev("w1", ago(10))], "lin-e3-started");
+
+    let (runs, error) = check_answering(&connectors, Err("the machine refused the run".into()));
+    assert_eq!(runs.len(), 1, "the start was tried");
+    assert!(error.is_some());
+    let mut started = 0;
+    for _ in 0..2 {
+        let (runs, error) = check(&connectors);
+        assert_eq!(error, None);
+        started += runs.len();
+    }
+    assert_eq!(connectors.change_counts()["w1"].cooled, 0, "a run that did not start cools nothing");
+    assert_eq!(started, 1, "the retry starts it once");
+    let starts = connectors.guards.lock().unwrap().starts.get("i-1").map_or(0, Vec::len);
+    assert_eq!(starts, 1, "the cap counts one start");
+    no_unlisted(&fake);
+}
