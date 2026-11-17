@@ -1919,8 +1919,9 @@ struct Fires {
     runtime: tokio::runtime::Handle,
 }
 
-/// How long `PgStorage::claim_fire` waits for the database before it answers an error, well
-/// within a check's call timeout.
+/// How long `PgStorage::claim_fire` waits for the database before it answers an error. A check
+/// claims its changes one at a time and stops at the first claim that answers an error, so a
+/// stalled database holds a check up for one `CLAIM_WAIT` at most, within its call timeout.
 const CLAIM_WAIT: Duration = Duration::from_secs(10);
 
 /// The name of the listed project that holds `cwd`, the innermost one, else the folder's own name.
@@ -2108,21 +2109,36 @@ impl Storage for PgStorage {
         }
     }
 
-    /// The one call of the store that waits on Postgres: the claim must be the database's, so
-    /// two hubs on it see one winner. The hub's runtime has many threads, and this one hands its
+    /// The calls of the store that wait on Postgres: the claim must be the database's, so two
+    /// hubs on it see one winner. The hub's runtime has many threads, and this one hands its
     /// other tasks to them while it waits.
-    fn claim_fire(&self, workflow: &str, key: &str, _claimer: &str, _retry: bool) -> Result<bool, String> {
+    fn claim_fire(&self, workflow: &str, key: &str, claimer: &str, retry: bool) -> Result<bool, String> {
         let Some(fires) = &self.0.fires else { return Err("no database to claim the fire in".into()) };
         let claim = async {
-            tokio::time::timeout(CLAIM_WAIT, fires.db.claim_fire(fires.account, workflow, key))
+            tokio::time::timeout(CLAIM_WAIT, fires.db.claim_fire(fires.account, workflow, key, claimer, retry))
                 .await
                 .map_err(|_| "could not claim the fire: the database did not answer".to_owned())?
         };
-        match tokio::runtime::Handle::try_current().map(|current| current.runtime_flavor()) {
-            Err(_) => fires.runtime.block_on(claim),
-            Ok(tokio::runtime::RuntimeFlavor::CurrentThread) => Err("could not claim the fire: a single-threaded runtime cannot wait for it".into()),
-            Ok(_) => tokio::task::block_in_place(|| fires.runtime.block_on(claim)),
-        }
+        wait_on_fires(fires, claim)
+    }
+
+    fn release_fire(&self, workflow: &str, key: &str, claimer: &str) -> Result<(), String> {
+        let Some(fires) = &self.0.fires else { return Err("no database to release the fire in".into()) };
+        let release = async {
+            tokio::time::timeout(CLAIM_WAIT, fires.db.release_fire(fires.account, workflow, key, claimer))
+                .await
+                .map_err(|_| "could not give back the fire: the database did not answer".to_owned())?
+        };
+        wait_on_fires(fires, release)
+    }
+}
+
+/// Waits for a `trigger_fires` call from a check, on the runtime of its database connection.
+fn wait_on_fires<T>(fires: &Fires, call: impl std::future::Future<Output = Result<T, String>>) -> Result<T, String> {
+    match tokio::runtime::Handle::try_current().map(|current| current.runtime_flavor()) {
+        Err(_) => fires.runtime.block_on(call),
+        Ok(tokio::runtime::RuntimeFlavor::CurrentThread) => Err("could not claim the fire: a single-threaded runtime cannot wait for it".into()),
+        Ok(_) => tokio::task::block_in_place(|| fires.runtime.block_on(call)),
     }
 }
 
