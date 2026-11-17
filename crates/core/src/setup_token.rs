@@ -43,12 +43,7 @@ impl SetupTokens {
         let mut cmd = CommandBuilder::new(bin);
         cmd.arg("setup-token");
         cmd.cwd(std::env::temp_dir());
-        for key in crate::machine::INHERITED_SESSION_ENV.iter().chain(&["CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY"]) {
-            cmd.env_remove(key);
-        }
-        for (key, value) in env {
-            cmd.env(key, value);
-        }
+        child_env(env).apply(&mut cmd);
         crate::process::fix_pty_env(&mut cmd);
         let mut child = {
             let mut running = self.0.lock().unwrap();

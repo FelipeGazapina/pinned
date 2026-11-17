@@ -197,6 +197,9 @@ pub enum ProjectTool {
         machine: Option<String>,
     },
 }
+/// Set to `1` in the environment of a worker box's node, by the box's `box.env`.
+pub const BOX_ENV: &str = "PINNED_BOX";
+
 /// Set on sessions a connector started, so `pinned stage` knows which issue and flow it reports on.
 pub const CONNECTOR_ENV: &str = "PINNED_CONNECTOR";
 pub const ISSUE_ENV: &str = "PINNED_ISSUE";

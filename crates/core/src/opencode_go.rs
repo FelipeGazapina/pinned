@@ -231,8 +231,8 @@ pub fn prepare_home(home: &std::path::Path) -> Result<(), String> {
 pub fn clear_login(home: &std::path::Path, claude: &std::path::Path, path_env: Option<&str>) {
     let _ = std::fs::remove_file(home.join(".credentials.json"));
     let mut cmd = crate::process::command(claude);
+    crate::machine::ChildEnv::new(&[], vec![("CLAUDE_CONFIG_DIR".into(), home.display().to_string())]).apply(&mut cmd);
     cmd.args(["auth", "logout"])
-        .env("CLAUDE_CONFIG_DIR", home)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());

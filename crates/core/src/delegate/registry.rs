@@ -1925,6 +1925,7 @@ fn list_cursor_text(bin: &Path, path: Option<&str>) -> String {
         return String::new();
     }
     let mut cmd = crate::process::command(bin);
+    crate::machine::ChildEnv::none().apply(&mut cmd);
     cmd.arg("--list-models")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

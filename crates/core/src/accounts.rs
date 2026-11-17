@@ -359,15 +359,15 @@ impl Accounts {
         Ok(())
     }
 
-    /// The CLI home the account's sessions run on. A built-in account's sessions inherit pinned's
-    /// own `home_env`, when it has one.
+    /// The CLI home the account's sessions run on. A built-in account's is the CLI's default one:
+    /// its sessions never inherit pinned's own `home_env`, which may name another account's home.
     pub fn home(&self, account: &Account) -> PathBuf {
         let spec = account.provider.spec();
         match (&self.dir, &self.claude_home) {
             (Some(dir), _) if !account.is_builtin() => dir.join("accounts").join(&account.id),
             (_, Some(claude_home)) if account.provider == Provider::Claude => claude_home.clone(),
             _ if spec.home_env.is_empty() => self.home.clone(),
-            _ => std::env::var_os(spec.home_env).map_or_else(|| self.home.join(spec.default_home), PathBuf::from),
+            _ => self.home.join(spec.default_home),
         }
     }
 
@@ -400,7 +400,8 @@ impl Accounts {
         }
         let spec = account.provider.spec();
         let mut cmd = crate::process::command(bin);
-        cmd.args(spec.status).envs(self.env(account)).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        self.child_env(account).apply(&mut cmd);
+        cmd.args(spec.status).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
         if let Some(path) = path_env {
             cmd.env("PATH", path);
         }

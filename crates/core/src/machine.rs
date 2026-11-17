@@ -1,5 +1,6 @@
 use crate::accounts::{self, Account, Accounts, Auth, Provider};
-use crate::agent::{role_env, role_of, session_of, AgentEvent, AgentStatus, LimitWindow, Message, ProjectTool, Role, Usage, CONNECTOR_ENV, SOCK_ENV, TAB_ENV, TASK_ENV};
+use crate::agent::{role_env, role_of, session_of, AgentEvent, AgentStatus, LimitWindow, Message, ProjectTool, Role, Usage, BOX_ENV, CONNECTOR_ENV, ISSUE_ENV, PROJECT_ENV, ROLE_ENV, SLACK_CHANNEL_ENV, SLACK_THREAD_ENV, SOCK_ENV, TAB_ENV, TASK_ENV};
+use crate::team_call::TEAM_BOX_ENV;
 use crate::stats::{ThreadStats, Tally};
 use crate::pinned_lines;
 use crate::wire::{CutBySleep, Call, HubCall, MachineEvent, Program, ProjectView, RunSpec, TabId, TabView, ThreadMatch, ThreadPage, UpdateStatus, EXE_PLACEHOLDER};
@@ -212,14 +213,6 @@ impl Launch {
         let provider = account.provider;
         let spec = provider.spec();
         let mut cmd = CommandBuilder::new(self.bin(provider));
-        for key in INHERITED_SESSION_ENV {
-            cmd.env_remove(key);
-        }
-        if account.auth == Auth::OpenCodeGo {
-            for key in crate::opencode_go::STRIP_ENV {
-                cmd.env_remove(key);
-            }
-        }
         match program {
             Program::Agent => {
                 if spec.harness {
@@ -249,7 +242,6 @@ impl Launch {
                         .iter()
                         .find(|(key, _)| key == "CODEX_HOME")
                         .map(|(_, value)| PathBuf::from(value))
-                        .or_else(|| std::env::var_os("CODEX_HOME").map(PathBuf::from))
                         .unwrap_or_else(|| home().join(".codex"));
                     let user = crate::delegate::codex_user_notify(&std::fs::read_to_string(home.join("config.toml")).unwrap_or_default());
                     cmd.args(crate::delegate::codex_notify_flag(&self.exe, &user));
@@ -264,12 +256,7 @@ impl Launch {
         cmd.cwd(cwd);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
-        cmd.env(SOCK_ENV, &self.sock);
-        cmd.env(TAB_ENV, tab);
-        cmd.env(plugin::HELPER_ENV, &self.tutorial_helper);
-        for (k, v) in env {
-            cmd.env(k, v);
-        }
+        self.child_env(account, tab, env).apply(&mut cmd);
         if let Some(path) = &self.path_env {
             cmd.env("PATH", path);
         }
@@ -277,10 +264,13 @@ impl Launch {
     }
 }
 
-/// What a Claude Code session or a parent shell can leak into a pinned session. pinned strips
-/// them before it applies the account's own env, so a nested Claude session is not mistaken for
-/// this one and a stale Go marker cannot make a login account report Go usage.
-pub(crate) const INHERITED_SESSION_ENV: [&str; 12] = [
+/// What a Claude Code session, a pinned session or a parent shell can leak into a pinned session:
+/// what names who or what a session is, and the CLI homes that name its account. Every session
+/// and agent process pinned starts drops them all through `ChildEnv` before it sets what its kind
+/// is meant to have, so a nested Claude session is not mistaken for this one, a node started from
+/// inside a worker hands no role or project to its threads, a stale Go marker cannot make a login
+/// account report Go usage, and a built-in account never runs on another account's home.
+pub const INHERITED_SESSION_ENV: [&str; 27] = [
     "CLAUDECODE",
     "CLAUDE_PID",
     "CLAUDE_EFFORT",
@@ -293,7 +283,27 @@ pub(crate) const INHERITED_SESSION_ENV: [&str; 12] = [
     "CLAUDE_CODE_MESSAGING_TOKEN",
     "CLAUDE_CODE_SSE_PORT",
     "PINNED_OPENCODE_GO_KEY",
+    SOCK_ENV,
+    TAB_ENV,
+    TASK_ENV,
+    ROLE_ENV,
+    PROJECT_ENV,
+    accounts::ACCOUNT_ENV,
+    plugin::HELPER_ENV,
+    CONNECTOR_ENV,
+    ISSUE_ENV,
+    SLACK_CHANNEL_ENV,
+    SLACK_THREAD_ENV,
+    BOX_ENV,
+    TEAM_BOX_ENV,
+    "CLAUDE_CONFIG_DIR",
+    "CODEX_HOME",
 ];
+
+/// Facts about the machine the node runs on rather than about a session: a box's sessions are
+/// meant to know they run in one, for `pinned call` and the team's hook. A session gets one only
+/// as the node's own `1`.
+const MACHINE_FACTS: [&str; 2] = [BOX_ENV, TEAM_BOX_ENV];
 
 /// The environment a headless `claude -p` gets, and the variables it must drop before applying it.
 pub struct Headless<'a> {
@@ -321,9 +331,63 @@ impl<'a> ChildEnv<'a> {
         ChildEnv { strip, set }
     }
 
+    /// What a child of a process whose variables `parent` looks up removes and then sets.
+    fn changes(&self, parent: impl Fn(&str) -> Option<String>) -> (Vec<&'a str>, Vec<(String, String)>) {
+        let remove = INHERITED_SESSION_ENV.iter().chain(self.strip).copied().collect();
+        let facts = MACHINE_FACTS.iter().filter(|key| parent(key).as_deref() == Some("1")).map(|key| (key.to_string(), "1".to_owned()));
+        (remove, facts.chain(self.set.iter().cloned()).collect())
+    }
+
     /// The environment a child of a process with `parent` gets.
+    #[cfg(test)]
     pub(crate) fn of(&self, parent: &[(String, String)]) -> Vec<(String, String)> {
-        parent.to_vec()
+        let (remove, set) = self.changes(|key| parent.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone()));
+        let mut env: Vec<(String, String)> = parent.iter().filter(|(key, _)| !remove.contains(&key.as_str())).cloned().collect();
+        for (key, value) in set {
+            env.retain(|(k, _)| *k != key);
+            env.push((key, value));
+        }
+        env
+    }
+
+    /// Applies the change to `cmd`, which would otherwise inherit pinned's own environment.
+    pub(crate) fn apply(&self, cmd: &mut impl ChildCommand) {
+        let (remove, set) = self.changes(|key| std::env::var(key).ok());
+        for key in remove {
+            cmd.remove_var(key);
+        }
+        for (key, value) in set {
+            cmd.set_var(&key, &value);
+        }
+    }
+
+    /// No session variable at all, for a probe of a CLI or a user's shell.
+    pub(crate) fn none() -> ChildEnv<'static> {
+        ChildEnv::new(&[], vec![])
+    }
+}
+
+/// A process about to start, whose environment `ChildEnv` sets.
+pub(crate) trait ChildCommand {
+    fn remove_var(&mut self, key: &str);
+    fn set_var(&mut self, key: &str, value: &str);
+}
+
+impl ChildCommand for std::process::Command {
+    fn remove_var(&mut self, key: &str) {
+        self.env_remove(key);
+    }
+    fn set_var(&mut self, key: &str, value: &str) {
+        self.env(key, value);
+    }
+}
+
+impl ChildCommand for CommandBuilder {
+    fn remove_var(&mut self, key: &str) {
+        self.env_remove(key);
+    }
+    fn set_var(&mut self, key: &str, value: &str) {
+        self.env(key, value);
     }
 }
 
@@ -1061,11 +1125,10 @@ impl Machine {
         taste::migrate_worker_cap(dir.as_deref());
         let home = home();
         // A test must never write the user's own claude config.
-        let builtin_claude_config = match (&launch.claude_home, test_binary(), std::env::var_os("CLAUDE_CONFIG_DIR")) {
-            (Some(claude_home), ..) => claude_home.clone(),
-            (None, true, _) => dir.clone().unwrap_or_else(std::env::temp_dir).join("home"),
-            (None, false, Some(config)) => PathBuf::from(config),
-            (None, false, None) => home.clone(),
+        let builtin_claude_config = match (&launch.claude_home, test_binary()) {
+            (Some(claude_home), _) => claude_home.clone(),
+            (None, true) => dir.clone().unwrap_or_else(std::env::temp_dir).join("home"),
+            (None, false) => home.clone(),
         }
         .join(".claude.json");
         let global_dir = if test_binary() { dir.clone().unwrap_or_else(std::env::temp_dir).join("home") } else { home.clone() }.join(global::FOLDER[0]).join(global::FOLDER[1]);
@@ -2364,7 +2427,7 @@ impl Machine {
             args.extend(["--append-system-prompt".to_owned(), prompt.join("\n\n")]);
         }
         self.save_sessions();
-        let env = [self.accounts.env(&account), env].concat();
+        let env = self.launch_env(&account, env);
         let plugin_dirs = self.shared_plugin_dirs(&account);
         let mcp = if program == Program::Agent { self.session_mcp(&account, &cwd) } else { None };
         let first_run = program == Program::Agent && account.provider == Provider::Claude;
@@ -5780,18 +5843,12 @@ impl Machine {
                 reminders: self.launch.reminders,
             },
         );
-        let mut env = self.accounts.env(&account);
-        env.push((SOCK_ENV.to_owned(), self.launch.sock.display().to_string()));
-        env.push((TASK_ENV.to_owned(), task.id.clone()));
+        let child = self.delegate_env(&account, &task.id);
         let id = task.id.clone();
         let me = self.me.clone();
         let path_env = self.launch.path_env.clone();
-        let mut strip: Vec<&str> = INHERITED_SESSION_ENV.to_vec();
-        if account.auth == Auth::OpenCodeGo {
-            strip.extend_from_slice(&crate::opencode_go::STRIP_ENV);
-        }
         let pid = match spawn(
-            ChildSpec { bin: &bin, argv: &argv, cwd: &cwd, env: &env, path: self.launch.path_env.as_deref(), strip: &strip },
+            ChildSpec { bin: &bin, argv: &argv, cwd: &cwd, env: &child.set, path: self.launch.path_env.as_deref(), strip: child.strip },
             move |event| {
                 // The child's MCP config lives as long as its output does, which ends with it.
                 let _ = &mcp;
