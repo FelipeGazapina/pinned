@@ -2887,17 +2887,22 @@ impl Connectors {
             Err(e) => eprintln!("pinned: workflow {workflow} could not give back its claim of {key}: {e}"),
         }
         let counts = store.change_counts.entry(workflow.to_owned()).or_default();
-        counts.not_started += 1;
+        // A retry was counted when its first fire did not start: ending it does not count again.
+        if !fire.retry {
+            counts.not_started += 1;
+        }
         counts.released += u64::from(released.is_ok());
         let _ = self.save(&store);
     }
 
-    /// The fire `key` of `workflow` won its claim and its Ask step stopped the run: it is counted
-    /// as not started, and the claim is kept.
-    fn fire_stopped(&self, workflow: &str, key: &str) {
-        eprintln!("pinned: workflow {workflow} keeps its claim of {key}: its Ask step stopped the run");
+    /// The won fire of `workflow` whose Ask step stopped the run: it is counted as not started,
+    /// unless it is a retry (counted when its first fire did not start), and the claim is kept.
+    fn fire_stopped(&self, workflow: &str, fire: &ChangeFire) {
+        eprintln!("pinned: workflow {workflow} keeps its claim of {}: its Ask step stopped the run", fire.key);
         let mut store = self.store.lock().unwrap();
-        store.change_counts.entry(workflow.to_owned()).or_default().not_started += 1;
+        if !fire.retry {
+            store.change_counts.entry(workflow.to_owned()).or_default().not_started += 1;
+        }
         let _ = self.save(&store);
     }
 
@@ -3145,7 +3150,7 @@ impl Connectors {
                     // Its model was asked: the claim stays, so a later read of the change does
                     // not ask again, and the model call is a start for the loop guards.
                     if let Some(fire) = &fire {
-                        self.fire_stopped(&connector, &fire.key);
+                        self.fire_stopped(&connector, fire);
                         self.fire_started(&connector, fire);
                     }
                     self.keep_stopped(&connector, &subject)?;

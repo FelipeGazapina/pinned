@@ -1072,6 +1072,58 @@ fn a_change_held_by_a_running_graph_run_survives_a_reload_and_starts_once_the_ru
     no_unlisted(&fake);
 }
 
+/// #346 E3 round 5: a retry counts once, when its first start fails. Ending it too old does not
+/// count it again.
+#[test]
+fn a_retry_that_ends_too_old_is_counted_once() {
+    let _api = slack::lock_api();
+    let _restore = RestoreLinear;
+    // Nearly an hour old, so the first start is still in time; its claim takes a second, so the
+    // retry is past the catch-up when its start fails. The issue itself was updated just now.
+    let at = Utc::now() - chrono::Duration::milliseconds(3_599_500);
+    let fake = fake_with(vec![issue(1, Utc::now(), vec![moved("h-1", at, "Backlog", "Ready to Dev")])]);
+    let claims = Claims::default();
+    let connectors = on(&claims, vec![ready_to_dev("w1", ago(90))], "lin-e5-too-old");
+    let (runs, error) = check_answering(&connectors, Err("the machine refused the run".into()));
+    assert_eq!((runs.len(), error.is_some()), (1, true), "the start was tried and failed");
+    assert_eq!(connectors.change_counts()["w1"].not_started, 1, "counted when its first start failed");
+
+    *claims.wait.lock().unwrap() = Duration::from_secs(1);
+    let (runs, error) = check_answering(&connectors, Err("the machine refused the run".into()));
+    assert_eq!((runs.len(), error.is_some()), (1, true), "the retry's start was tried and failed");
+    let counts = connectors.change_counts()["w1"].clone();
+    assert_eq!((counts.not_started, counts.released), (1, 2), "the retry ended too old: counted once, given back twice");
+    assert!(connectors.store.lock().unwrap().change_retries.values().all(|keys| keys.is_empty()), "and the retry is gone");
+    no_unlisted(&fake);
+}
+
+/// #346 E3 round 5: a retry its Ask step stops counts once, when its first start failed.
+#[test]
+fn a_retry_its_ask_step_stops_is_counted_once() {
+    let _api = slack::lock_api();
+    let _restore = RestoreLinear;
+    let at = Utc::now() - chrono::Duration::seconds(10);
+    let fake = fake_with(vec![issue(1, at, vec![moved("h-1", at, "Backlog", "Ready to Dev")])]);
+    let claims = Claims::default();
+    let connectors = on(&claims, vec![ready_to_dev("w1", ago(10))], "lin-e5-ask-retry");
+    let (runs, error) = check_answering(&connectors, Err("the machine refused the run".into()));
+    assert_eq!((runs.len(), error.is_some()), (1, true), "the start was tried and failed");
+
+    // The Ask step is added before the retry, and it stops the run.
+    let ask = Ask {
+        model: "google/gemini-3.5-flash".into(),
+        instructions: "Classify.".into(),
+        questions: vec![Question { name: "agent".into(), ask: "Can a coding agent handle it?".into(), choices: vec!["yes".into(), "no".into()], stop_on: vec!["no".into()] }],
+    };
+    connectors.store.lock().unwrap().connectors[0].ask = Some(ask);
+    claims.inner.write_key(VERCEL_KEY, "vck_teststop").unwrap();
+    let _reply = TestReply::set(r#"{"agent":"no"}"#.into());
+    let (runs, error) = check(&connectors);
+    assert_eq!((runs.len(), error), (0, None), "the Ask step stops the retry");
+    assert_eq!(connectors.change_counts()["w1"].not_started, 1, "counted once, when its first start failed");
+    no_unlisted(&fake);
+}
+
 /// #346 E3 round 4 item 3: a retry pending when its workflow is turned off and on is dropped with
 /// the `since` reset, so the change from before the turn-on does not start.
 #[test]
