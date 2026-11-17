@@ -1819,6 +1819,25 @@ impl Db {
         Ok(self.client().await?.query_one(query, &[&account]).await.map_err(err)?.get(0))
     }
 
+    /// Closes the account's extend_box asks still waiting for the box on `machine`, which ended,
+    /// matched as `waiting_extends` matches them: each reads denied with `EXTEND_BOX_ENDED`, an
+    /// outcome the sweep of interrupted decisions leaves as it is. It runs after the box's move to
+    /// ending is committed, so an ask stored meanwhile is either closed here or finds the box ending
+    /// once stored, and closes itself. Answers the asks it closed.
+    pub async fn close_extends(&self, account: Uuid, machine: Uuid) -> Result<Vec<Uuid>, String> {
+        let rows = self
+            .client()
+            .await?
+            .query(
+                "update agent_confirmations set decided_at = now(), approved = false, outcome = $3, result = 'null'::jsonb
+                 where account = $1 and action = 'extend_box' and decided_at is null and lower(args->>'machine') = $2::uuid::text returning id",
+                &[&account, &machine, &EXTEND_BOX_ENDED],
+            )
+            .await
+            .map_err(err)?;
+        Ok(rows.iter().map(|row| row.get(0)).collect())
+    }
+
     /// Decides the account's waiting confirmation `id`, once: None when it is unknown, another
     /// account's, or decided already.
     pub async fn decide_confirmation(&self, account: Uuid, id: Uuid, approved: bool) -> Result<Option<Held>, String> {
@@ -2184,6 +2203,9 @@ const AGENT_REQUEST_MINUTES: i32 = 10;
 const AGENT_CODE_MINUTES: i32 = 5;
 pub const AGENT_ACCESS_SECS: i64 = 3600;
 const AGENT_REFRESH_DAYS: i32 = 30;
+/// What an extend_box ask still waiting for the owner reads as once its box ends.
+pub const EXTEND_BOX_ENDED: &str = "the box ended before the owner answered";
+
 /// A call still pending this long was cut off, as by a hub restart, so its outcome is unknown.
 const AGENT_CALL_STALE_SECS: i64 = 600;
 

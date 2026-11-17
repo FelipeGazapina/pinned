@@ -170,6 +170,12 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
         }
         let (id, held) = hub.db.hold_confirmation(account.id, caller.machine, caller.session.as_deref(), &asked).await?;
         end_turn(turn).await;
+        if held {
+            if let Some(ended) = extend_ended(hub, account, &admitted.call, id).await? {
+                trail.write(AuditOutcome::Refused, &ended).await?;
+                return Err(ended);
+            }
+        }
         if !held {
             let earlier = hub.db.confirmation(account.id, id).await?.map(|held| held.confirmation);
             if let Some(Confirmation { decision: Some(decision), decided_at, .. }) = earlier {
@@ -310,6 +316,43 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
         return Err(format!("{name} starts work only on this session's own machine for now"));
     }
     Ok(Admitted { action, call, target, on_origin, turn })
+}
+
+/// Why the extend just stored as `id` can never run: its box ended between the ask's check and its
+/// store, after the end closed what waited. It closes the asks still waiting for the box, this one
+/// among them, whose session hears the refusal and no notice. None for any other act, or a box that runs.
+async fn extend_ended(hub: &Hub, account: &Arc<Account>, call: &Parsed, id: Uuid) -> Result<Option<String>, String> {
+    let Parsed::Hub(HubCall::ExtendBox { machine, .. }) = call else { return Ok(None) };
+    let machine = Uuid::parse_str(machine).map_err(|_| format!("this account has no machine {machine}"))?;
+    let Err(ended) = crate::boxes::still_open(hub.db.box_of(account.id, machine).await?) else { return Ok(None) };
+    let closed = hub.db.close_extends(account.id, machine).await?;
+    hub.db.notified(account.id, id).await?;
+    closed_extends(hub, account, closed.into_iter().filter(|closed| *closed != id).collect()).await;
+    Ok(Some(ended))
+}
+
+/// Tells the account's apps what waits now that a box's end closed the extend asks `closed`, and
+/// each asking session that its box ended. A session no tab runs gets its notice once its machine
+/// connects (`deliver_notices`).
+pub async fn closed_extends(hub: &Hub, account: &Arc<Account>, closed: Vec<Uuid>) {
+    if closed.is_empty() {
+        return;
+    }
+    push_confirmations(hub, account).await;
+    let Some(hub) = hub.arc() else { return };
+    let account = account.clone();
+    tokio::spawn(async move {
+        for id in closed {
+            let told = match hub.db.confirmation(account.id, id).await {
+                Ok(Some(held)) => notify(&hub, &account, &held).await.map(drop),
+                Ok(None) => Ok(()),
+                Err(e) => Err(e),
+            };
+            if let Err(e) = told {
+                eprintln!("pinned-server: the session whose extend {id} closed with its box gets its notice later: {e}");
+            }
+        }
+    });
 }
 
 /// Whether the session already asked this act with its `request_id`, so the hold answers it.

@@ -504,11 +504,25 @@ pub async fn extend_of(hub: &Hub, account: &Account, machine: Uuid, extra_usd: f
     if !(extra_usd > 0.0) {
         return Err("name an amount above zero".into());
     }
-    let row = hub.db.box_of(account.id, machine).await?.ok_or_else(|| "this machine is no box".to_owned())?;
+    still_open(hub.db.box_of(account.id, machine).await?)
+}
+
+/// The box `row`, or why it can take no extend: no box of the account's, or one already ending.
+pub fn still_open(row: Option<BoxRow>) -> Result<BoxRow, String> {
+    let row = row.ok_or_else(|| "this machine is no box".to_owned())?;
     if matches!(row.phase, Phase::Ending(_)) {
         return Err("this box is already ending".into());
     }
     Ok(row)
+}
+
+/// Closes the extend asks still waiting for the box `machine`, which moved to ending, and tells
+/// their sessions. A failure is only logged: the row's delete closes them first.
+async fn close_extends(hub: &Hub, account: &Arc<Account>, machine: Uuid) {
+    match hub.db.close_extends(account.id, machine).await {
+        Ok(closed) => crate::surface::closed_extends(hub, account, closed).await,
+        Err(e) => eprintln!("pinned-server: could not close the extend asks of the box on machine {machine}: {e}"),
+    }
 }
 
 /// The key of the advisory lock of one box's extends: the account and the box's machine, as two
@@ -1639,6 +1653,7 @@ impl Boxes {
             let failed = Phase::Ending(End::Failed(e.clone()));
             for from in [Phase::Creating, Phase::Booting] {
                 if hub.db.set_box_phase(account.id, &row.id, &from, &failed).await? {
+                    close_extends(hub, account, row.machine).await;
                     let mut row = row.clone();
                     row.phase = failed.clone();
                     self.tell_origin(hub, account, &row, &End::Failed(e.clone())).await;
@@ -1799,6 +1814,9 @@ impl Boxes {
         account.went_offline(&machine, None);
         hub.push_machines(account).await;
         self.delete_box(key, row).await?;
+        // Before the row goes, on every try, so no row is deleted with an ask still waiting for its box.
+        let closed = hub.db.close_extends(account.id, row.machine).await.map_err(Failed::Row)?;
+        crate::surface::closed_extends(hub, account, closed).await;
         if hub.db.delete_box(row.account, &row.id).await.map_err(Failed::Row)? == 0 {
             eprintln!("pinned-server: delete_box of row {} matched no row", row.id);
         }
@@ -1965,6 +1983,7 @@ impl Boxes {
                 return Err(format!("box {} changed while pinned ended it; it ends on the next check", row.id));
             }
             row.phase = ending;
+            close_extends(hub, account, row.machine).await;
             if tell {
                 self.tell_origin(hub, account, &row, &why).await;
             }
