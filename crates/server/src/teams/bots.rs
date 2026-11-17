@@ -44,9 +44,8 @@ pub const SORTS_AT_THE_CHECK: &str =
 
 /// Refuses a workflow whose trigger is not one a bot can have yet ("GitHub-event bots are not
 /// available yet"). Linear, Slack, manual and schedule triggers are fine, and today they are the
-/// only kinds. A schedule that runs once, or names a zone or cron that can't be read, is refused
-/// as a personal workflow's save refuses it (`check_triggers`). The matches name every kind on
-/// purpose: a GitHub-event trigger added later does not compile until it is refused here. Refuses a graph that holds more than one session or talk step,
+/// only kinds. The matches name every kind on purpose: a GitHub-event trigger added later does not
+/// compile until it is refused here. Refuses a graph that holds more than one session or talk step,
 /// with those of the team's `workflows` it calls (`MORE_THAN_ONE_SESSION`).
 fn available(workflow: &Connector, workflows: &[Connector]) -> Result<(), String> {
     match &workflow.trigger {
@@ -59,7 +58,6 @@ fn available(workflow: &Connector, workflows: &[Connector]) -> Result<(), String
         | Trigger::LinearAssigned { .. }
         | Trigger::Schedule { .. } => {}
     }
-    pinned_core::connectors::check_triggers(workflow, workflow.graph.as_ref())?;
     if workflow.sorts_messages_at_the_check() {
         return Err(SORTS_AT_THE_CHECK.into());
     }

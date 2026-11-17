@@ -211,7 +211,7 @@ fn check_schedule(schedule: &schedule::Schedule, tz: &str) -> Result<(), String>
 }
 
 /// The save check of every trigger the workflow has: its graph's when it has one, else its own.
-pub fn check_triggers(connector: &Connector, graph: Option<&Graph>) -> Result<(), String> {
+fn check_triggers(connector: &Connector, graph: Option<&Graph>) -> Result<(), String> {
     let Some(graph) = graph else {
         return match &connector.trigger {
             Trigger::Schedule { schedule, tz } => check_schedule(schedule, tz),
