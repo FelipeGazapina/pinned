@@ -216,6 +216,12 @@ async fn answer(response: reqwest::Response) -> Result<Value, String> {
     Ok(body)
 }
 
+/// Whether `error`, as a call gives it, says Slack no longer takes the token at all: revoked, never
+/// valid, or its user or workspace gone. A network error, a 5xx or a rate limit is not one.
+pub fn token_dead(error: &str) -> bool {
+    ["invalid_auth", "token_revoked", "account_inactive", "not_authed"].iter().any(|dead| error.strip_prefix("Slack: ") == Some(*dead))
+}
+
 /// The bot a token belongs to, with no key hint.
 pub async fn bot(token: &str) -> Result<Bot, String> {
     identify(token).await.map(|(bot, _)| bot)
@@ -918,6 +924,16 @@ mod tests {
 
     fn ts_of(messages: &[Value]) -> Vec<&str> {
         messages.iter().filter_map(|m| m["ts"].as_str()).collect()
+    }
+
+    #[test]
+    fn only_a_token_slack_no_longer_takes_is_dead() {
+        for dead in ["Slack: invalid_auth", "Slack: token_revoked", "Slack: account_inactive", "Slack: not_authed"] {
+            assert!(token_dead(dead), "{dead}");
+        }
+        for alive in [RATE_LIMITED, "Slack: fatal_error", "Slack unreachable: timed out", "Slack sent a bad response: eof", "invalid_auth"] {
+            assert!(!token_dead(alive), "{alive}");
+        }
     }
 
     #[test]

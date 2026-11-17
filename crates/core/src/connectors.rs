@@ -1978,9 +1978,10 @@ pub struct Connectors {
     tab_facts: Mutex<HashMap<String, TabFacts>>,
     /// The Slack bots `fill_bots` already asked Slack about, so it asks once per bot.
     bots_filled: Mutex<std::collections::HashSet<String>>,
-    /// The bot id (`B…`) of each Slack bot, by its user id, which `auth.test` gives and no store
-    /// keeps. Asked once per bot, the first time a workflow that reads app posts checks.
-    bot_ids: Mutex<HashMap<String, String>>,
+    /// Who each Slack bot's token posts as, by the bot's user id: the user id and bot id (`B…`)
+    /// `auth.test` gives, which no store keeps, or None when Slack no longer takes the token.
+    /// Asked once per bot, the first time a workflow that reads app posts checks.
+    bot_ids: Mutex<HashMap<String, Option<(String, String)>>>,
     /// Why runs failed when their box ended, for the next check to report on the workflows card.
     box_failures: Mutex<Vec<String>>,
     /// Subjects, by `subject_key`, whose box failed to boot while a run opened it: that open's
@@ -5188,9 +5189,11 @@ impl Connectors {
 
     /// The account's own Slack bots, for a workflow that reads app posts (`on`) to leave out; None
     /// when it does not, which asks Slack nothing. A bot's `B…` id comes from `auth.test` with its
-    /// own token, which needs no scope, once per bot. Err when Slack cannot say, so the check
-    /// stops and tries again instead of reading a bot's own post back as an app's. A bot whose
-    /// token is gone cannot post, so only its user id is kept.
+    /// own token, which needs no scope, once per bot; a token that answers as another bot posts as
+    /// that one, which is left out too. A bot whose token Slack no longer takes (`slack::token_dead`)
+    /// cannot post, so only its user id is kept, and the log says so once. Err on any other error,
+    /// naming the bot, so the check stops and tries again instead of reading a bot's own post back
+    /// as an app's; a rate limit is `slack::RATE_LIMITED`, as the check's other calls give it.
     async fn own_bots_for(&self, on: bool) -> Result<Option<slack::Own>, String> {
         if !on {
             return Ok(None);
@@ -5206,16 +5209,32 @@ impl Connectors {
         for bot in bots {
             own.users.insert(bot.user_id.clone());
             let known = self.bot_ids.lock().unwrap().get(&bot.id).cloned();
-            let bot_id = match known {
-                Some(bot_id) => bot_id,
+            let posts_as = match known {
+                Some(posts_as) => posts_as,
                 None => {
                     let Some(token) = self.slack_token(&bot.id) else { continue };
-                    let (_, bot_id) = slack::identify(&token).await.map_err(|e| format!("could not tell the account's own Slack bots from apps: {e}"))?;
-                    self.bot_ids.lock().unwrap().insert(bot.id.clone(), bot_id.clone());
-                    bot_id
+                    let posts_as = match slack::identify(&token).await {
+                        Ok((found, bot_id)) => {
+                            if found.user_id != bot.user_id {
+                                eprintln!("pinned: the token of Slack bot {} posts as {}: leaving both out of app posts", bot.id, found.user_id);
+                            }
+                            Some((found.user_id, bot_id))
+                        }
+                        Err(e) if slack::token_dead(&e) => {
+                            eprintln!("pinned: Slack bot {} has a token Slack no longer takes ({e}): it cannot post, so app posts leave out its user id only", bot.id);
+                            None
+                        }
+                        Err(e) if e == slack::RATE_LIMITED => return Err(e),
+                        Err(e) => return Err(format!("could not tell the account's own Slack bots from apps: Slack bot {}: {e}", bot.id)),
+                    };
+                    self.bot_ids.lock().unwrap().insert(bot.id.clone(), posts_as.clone());
+                    posts_as
                 }
             };
-            own.bots.insert(bot_id);
+            if let Some((user_id, bot_id)) = posts_as {
+                own.users.insert(user_id);
+                own.bots.insert(bot_id);
+            }
         }
         Ok(Some(own))
     }
@@ -10460,7 +10479,7 @@ mod tests {
         }
         connectors.store.lock().unwrap().slack = Some(slack::Account { team: "T".into(), user_id: "UBOT".into(), name: "pinned".into() });
         connectors.channels.lock().unwrap().insert(("UBOT".into(), "#support".into()), "C0123ABCD".into());
-        connectors.bot_ids.lock().unwrap().insert("UBOT".into(), "BBOT".into());
+        connectors.bot_ids.lock().unwrap().insert("UBOT".into(), Some(("UBOT".into(), "BBOT".into())));
         let (work, error) = block_on(connectors.poll());
         stop.store(true, std::sync::atomic::Ordering::SeqCst);
         assert_eq!(error, None);
