@@ -1419,9 +1419,21 @@ impl Db {
         row.as_ref().map(|r| readable(box_row(r))).transpose()
     }
 
-    /// Adds to the row's budget, kept in its spec beside the run.
+    /// Adds to the row's budget, kept in its spec beside the run. Only a box that still runs takes
+    /// it: one that moved to ending since its extend was checked keeps its budget, and reads so.
     pub async fn set_box_budget(&self, account: Uuid, id: &str, budget: f64) -> Result<(), String> {
-        self.client().await?.execute("update boxes set spec = spec || jsonb_build_object('budget_usd', $2::float8) where id = $1 and account = $3", &[&id, &budget, &account]).await.map_err(err)?;
+        let written = self
+            .client()
+            .await?
+            .execute(
+                "update boxes set spec = spec || jsonb_build_object('budget_usd', $2::float8) where id = $1 and account = $3 and phase in ('creating', 'booting', 'running')",
+                &[&id, &budget, &account],
+            )
+            .await
+            .map_err(err)?;
+        if written == 0 {
+            return Err("this box is already ending".into());
+        }
         Ok(())
     }
 
