@@ -477,7 +477,13 @@ pub fn rates(cache: Option<&Path>) -> RateTable {
     body.and_then(|b| serde_json::from_slice::<Value>(&b).ok()).map(|doc| parse_rates(&doc)).unwrap_or_default()
 }
 
-fn download() -> Option<Vec<u8>> {
+/// The price list as `download` gets it, never read from or written to a file; none when the
+/// download fails. The caller spaces its tries (`Machine::meter_rates_at`).
+pub fn downloaded(download: fn() -> Option<Vec<u8>>) -> RateTable {
+    download().and_then(|body| serde_json::from_slice::<Value>(&body).ok()).map(|doc| parse_rates(&doc)).unwrap_or_default()
+}
+
+pub(crate) fn download() -> Option<Vec<u8>> {
     let body = reqwest::blocking::Client::builder().timeout(Duration::from_secs(10)).build().ok()?.get(PRICES_URL).send().ok()?.error_for_status().ok()?.bytes().ok()?.to_vec();
     serde_json::from_slice::<Value>(&body).ok()?;
     Some(body)

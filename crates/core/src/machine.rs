@@ -1090,7 +1090,7 @@ impl Machine {
             meters: Mutex::default(),
             worker_unpriced: Mutex::default(),
             meter_rates: Mutex::default(),
-            list_rates: Mutex::new(Arc::new(|| usage::rates(None))),
+            list_rates: Mutex::new(team_box_rates(usage::download)),
             tastes_shared: Arc::default(),
             mcp_loaded: Mutex::default(),
             mcp_waited: AtomicBool::new(false),
@@ -7471,6 +7471,12 @@ fn save_file(cwd: &Path, path: &str, text: &str) -> Result<String, String> {
 
 /// How often a team box's workflow session tells the hub its model cost so far.
 const RUN_COST_EVERY: Duration = Duration::from_secs(15);
+
+/// Where a team box gets its price list: from `download`, held in memory only, never from its
+/// config dir, whose file its sessions can write.
+fn team_box_rates(download: fn() -> Option<Vec<u8>>) -> Arc<dyn Fn() -> usage::RateTable + Send + Sync> {
+    Arc::new(move || usage::downloaded(download))
+}
 
 /// How long a team box waits after it tried to download the price list before it tries again.
 const LIST_RETRY: Duration = Duration::from_secs(60);
