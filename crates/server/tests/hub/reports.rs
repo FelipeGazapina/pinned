@@ -1387,7 +1387,7 @@ impl DevHub {
         let (db, ui, downloads, key) = (format!("{}/{database}", postgres()), dir.join("ui"), dir.join("downloads"), dir.join("hub.key"));
         let mut command = pinned_core::process::command(BIN);
         command.args(["hub", "--dev", "--db", &db, "--listen", &listen]).arg("--ui").arg(&ui).arg("--downloads").arg(&downloads).arg("--key-file").arg(&key);
-        for name in ["PINNED_REPORTS_GITHUB_TOKEN", "PINNED_REPORTS_GITHUB_API", "PINNED_REPORTS_REPO", "PINNED_REPORTS_POLL_SECS", "PINNED_DEV_TIME_SCALE"] {
+        for name in ["PINNED_REPORTS_GITHUB_TOKEN", "PINNED_REPORTS_GITHUB_API", "PINNED_REPORTS_REPO", "PINNED_REPORTS_POLL_SECS", "PINNED_DEV_TIME_SCALE", "no_proxy", "NO_PROXY"] {
             command.env_remove(name);
         }
         command.env("UPSTASH_BOX_BASE_URL", "http://127.0.0.1:9").env("PINNED_SLACK_API_BASE", "http://127.0.0.1:9").env("HOME", &dir).envs(vars.iter().copied());
@@ -1488,4 +1488,27 @@ fn a_dev_hub_never_sends_the_token_variable_and_says_so_by_name_alone() {
     assert!(said.contains("pinned-server: PINNED_REPORTS_GITHUB_TOKEN is ignored under --dev: a dev hub sends only its own fake token, to a local fake\n"), "{said}");
     assert_eq!(said.matches("PINNED_REPORTS_GITHUB_TOKEN").count(), 1, "one warning: {said}");
     assert!(!said.contains("ghp_must-not-be-sent") && !said.contains("must-not"), "{said}");
+}
+
+#[test]
+fn a_dev_hub_sends_its_reports_calls_to_the_local_fake_past_any_proxy_variable() {
+    let fake = Fake::start();
+    // A proxy on this machine that counts each connection and closes it at once.
+    let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+    let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
+    let reached = Arc::new(AtomicU64::new(0));
+    let counted = reached.clone();
+    std::thread::spawn(move || {
+        for stream in proxy.incoming() {
+            counted.fetch_add(1, Ordering::SeqCst);
+            drop(stream);
+        }
+    });
+    let vars = [("PINNED_REPORTS_GITHUB_API", fake.github.url.as_str()), ("http_proxy", &proxy_url), ("HTTP_PROXY", &proxy_url), ("all_proxy", &proxy_url)];
+    let hub = DevHub::start("reports_dev_proxy", &vars);
+    let token = account::signup(&hub.url, "ana@example.test", PASSWORD).unwrap().0;
+    let similar = ask(&mut Client::app(&hub.url, &token), json!({ "op": "similar", "title": "Upload stops at 90%" }));
+    assert_eq!(reached.load(Ordering::SeqCst), 0, "the proxy saw no connection: {}", hub.said());
+    assert_eq!(fake.github.tokens(), [DEV_HUB_TOKEN], "the search reached the local fake");
+    assert_eq!(similar, Ok(json!([])));
 }
