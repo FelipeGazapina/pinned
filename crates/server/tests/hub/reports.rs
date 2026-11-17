@@ -1450,5 +1450,5 @@ fn a_dev_hub_files_on_the_local_fake_its_override_names() {
     assert_eq!(ask(&mut app, json!({ "op": "status" })).unwrap(), json!({ "available": true, "left_today": 5 }));
     assert_eq!(ask(&mut app, json!({ "op": "similar", "title": "Upload stops at 90%" })).unwrap(), json!([]));
     let searched: Vec<String> = fake.github.requests().iter().map(|r| format!("{} {}", r.method, r.path)).collect();
-    assert_eq!(searched, ["GET /search/issues"], "the search went to the local fake");
+    assert_eq!(searched, ["GET /search/issues?q=upload+stops+repo%3Aacme%2Fapp+is%3Aissue+is%3Aopen+in%3Atitle%2Cbody&per_page=5"], "the search went to the local fake, in the override repository");
 }

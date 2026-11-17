@@ -149,8 +149,8 @@ fn hub(args: &[String]) -> Result<(), String> {
         convex_http: std::sync::Arc::new(pinned_core::convex::client::Reqwest),
         learning_db: args.flags.get("learning-db").cloned(),
         access: pinned_server::http::Access { trusted_proxy, max_accounts, hashing: None },
-        // The repository and API overrides of reports stay off on every hub, `--dev` included.
-        reports: reports_config(false),
+        // A `--dev` hub files only on a local fake its override names, and reports nothing without one.
+        reports: reports_config(dev_mode),
     };
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     runtime.block_on(async {
