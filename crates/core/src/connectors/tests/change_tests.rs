@@ -511,6 +511,33 @@ fn a_won_claim_whose_run_does_not_start_is_given_back_and_counted() {
     no_unlisted(&fake);
 }
 
+/// Item 6: an Ask step that stops a change's run already asked its model, so the claim is kept:
+/// the next check, whose overlap reads the change again, neither asks again nor starts it.
+#[test]
+fn an_ask_step_that_stops_a_change_run_keeps_its_claim() {
+    let _api = slack::lock_api();
+    let _restore = RestoreLinear;
+    let at = Utc::now() - chrono::Duration::seconds(10);
+    let fake = fake_with(vec![issue(1, at, vec![moved("h-1", at, "Backlog", "Ready to Dev")])]);
+    let claims = Claims::default();
+    let ask = Ask {
+        model: "google/gemini-3.5-flash".into(),
+        instructions: "Classify.".into(),
+        questions: vec![Question { name: "agent".into(), ask: "Can a coding agent handle it?".into(), choices: vec!["yes".into(), "no".into()], stop_on: vec!["no".into()] }],
+    };
+    let connectors = on(&claims, vec![Connector { ask: Some(ask), ..ready_to_dev("w1", ago(10)) }], "lin-e1-ask-stop");
+    claims.inner.write_key(VERCEL_KEY, "vck_teststop").unwrap();
+    let _reply = TestReply::set(r#"{"agent":"no"}"#.into());
+
+    for _ in 0..2 {
+        let (runs, error) = check(&connectors);
+        assert_eq!((runs.len(), error), (0, None), "the Ask step stops the run");
+    }
+    assert!(claims.released.lock().unwrap().is_empty(), "the stopped run keeps its claim");
+    assert_eq!(connectors.change_counts()["w1"].not_started, 1, "the model is asked once");
+    no_unlisted(&fake);
+}
+
 /// Item 2: a change older than the catch-up floor is never claimed, so once its claim expired
 /// (after `FIRES_KEPT`, longer than `CATCH_UP`) it does not fire again.
 #[test]
