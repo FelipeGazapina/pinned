@@ -755,6 +755,31 @@ mod tests {
     }
 
     #[test]
+    fn a_one_hour_cache_write_costs_twice_the_input_rate_and_the_ceilings_cache_writes_twice_its_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("s.jsonl");
+        let split = |model: &str, id: &str| {
+            let usage = json!({ "input_tokens": 0, "output_tokens": 0, "cache_creation_input_tokens": 3_000_000, "cache_creation": { "ephemeral_5m_input_tokens": 1_000_000, "ephemeral_1h_input_tokens": 2_000_000 } });
+            assistant(id, id, "s", "2026-11-09T10:00:00Z", model, usage)
+        };
+        let total_only = assistant("m2", "m2", "s", "2026-11-09T10:00:01Z", "claude-haiku-5", json!({ "input_tokens": 0, "output_tokens": 0, "cache_creation_input_tokens": 1_000_000 }));
+        std::fs::write(&file, format!("{}\n{total_only}\n", split("claude-haiku-5", "m1"))).unwrap();
+        let mut meter = Meter::default();
+        meter.advance(&file).unwrap();
+        let used = meter.usage(&table(), &PriceBook::default());
+        // Haiku's cache writes take its US$ 1 input rate: 2 million at the 5-minute rate (the split's
+        // and the line with no split), 2 million at twice that.
+        assert_eq!((used.tokens_in, used.cost_usd.map(|usd| (usd * 100.0).round())), (4_000_000, Some(600.0)));
+
+        let unlisted = dir.path().join("u.jsonl");
+        std::fs::write(&unlisted, format!("{}\n", split("claude-unlisted-1", "m3"))).unwrap();
+        let mut meter = Meter::default();
+        meter.advance(&unlisted).unwrap();
+        let (usd, unpriced) = meter.priced(&table(), &PriceBook::default());
+        assert_eq!(((usd * 100.0).round(), unpriced), (18_000.0, vec!["claude-unlisted-1".to_owned()]), "3 million cache writes at twice the ceiling's US$ 30");
+    }
+
+    #[test]
     fn a_meter_counts_the_subagents_and_keeps_the_total_across_a_new_session() {
         let dir = tempfile::tempdir().unwrap();
         let usage = |output: u64| json!({ "input_tokens": 0, "output_tokens": output });
