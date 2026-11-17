@@ -910,6 +910,7 @@ mod tests {
                 "ts": "1792400120.000000", "subtype": "bot_message", "bot_id": "B9", "username": "CI Bot", "text": "",
                 "attachments": [{ "title": "Deploy failed", "text": "api went red on 3 hosts", "fallback": "Deploy failed" }]
             },
+            { "ts": "1792400125.000000", "user": "U8", "bot_id": "B8", "app_id": "A8", "bot_profile": { "name": "Deploy Bot" }, "text": "deploy 41 finished" },
             { "ts": "1792400110.000000", "user": "U1", "text": "can someone look at the footer?" },
             { "ts": "1792390000.000000", "subtype": "bot_message", "bot_id": "B9", "username": "CI Bot", "text": "before the watermark" },
         ])
@@ -934,8 +935,8 @@ mod tests {
         let selected = select(&mixed_page(), "UBOT", &own_bots(), since, true, &|_| false);
         assert_eq!(
             ts_of(&selected.taken),
-            ["1792400110.000000", "1792400120.000000"],
-            "the person's message and the integration's post; not the pinned bots, the thread reply, the join, the edit or the broadcast"
+            ["1792400110.000000", "1792400120.000000", "1792400125.000000"],
+            "the person's message, the integration's bot_message and the modern app's post (a bot_id and no subtype); not the pinned bots, the thread reply, the join, the edit or the broadcast"
         );
         assert!(selected.skipped.is_empty());
     }

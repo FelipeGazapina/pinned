@@ -12204,6 +12204,8 @@ mod tests {
                     let space = spaces.iter().find(|w| w.token == token);
                     let (status, answer) = match space {
                         None => ("200 OK", json!({ "ok": false, "error": "invalid_auth" })),
+                        Some(w) if path.starts_with("/auth.test") && w.team == "T5XX" => ("500 Internal Server Error", json!({ "ok": false, "error": "fatal_error" })),
+                        Some(w) if path.starts_with("/auth.test") && w.team == "T429" => ("429 Too Many Requests", json!({ "ok": false, "error": "ratelimited" })),
                         Some(w) if path.starts_with("/auth.test") => {
                             ("200 OK", json!({ "ok": true, "bot_id": format!("B{}", w.user), "team": format!("Team {}", w.team), "team_id": w.team, "user_id": w.user, "user": format!("bot-{}", w.user) }))
                         }
@@ -12486,16 +12488,76 @@ mod tests {
             let _ = std::fs::remove_dir_all(dir);
         }
 
+        /// #support with a person's message, an integration's post, and a post by the bot id of
+        /// UA, the bot that reads it, which `auth.test` says is BUA.
+        fn own_bot_page(now: DateTime<Utc>) -> (Workspace, [String; 3]) {
+            let ts = [60, 50, 40].map(|ago| slack_ts(now - chrono::Duration::seconds(ago)));
+            let history = json!([
+                { "ts": ts[2], "subtype": "bot_message", "bot_id": "BUA", "username": "bot-UA", "text": "I am the pinned bot reading" },
+                { "ts": ts[1], "subtype": "bot_message", "bot_id": "B9", "username": "CI Bot", "text": "Deploy failed" },
+                { "ts": ts[0], "user": "U1", "text": "the footer is broken" },
+            ]);
+            let threads: serde_json::Map<String, Value> = history.as_array().unwrap().iter().map(|m| (m["ts"].as_str().unwrap().to_owned(), json!([m]))).collect();
+            (Workspace { history, threads: Value::Object(threads), ..workspace("xoxb-test-A", "TA", "UA", "CA1") }, ts)
+        }
+
+        /// A bot whose token Slack no longer takes cannot post: the read goes on without its bot id.
+        #[test]
+        fn a_pinned_bot_with_a_revoked_token_does_not_stop_the_read_of_apps() {
+            let _api = slack::lock_api();
+            let _restore = RestoreSlack;
+            let (a, ts) = own_bot_page(Utc::now());
+            let _seen = serve(vec![a], vec![]);
+            let (connectors, dir) = two_bots("apps-revoked-bot", vec![message_workflow(true)]);
+            assert_eq!(block_on(connectors.poll()).1, None);
+            assert_eq!(threads_started(&connectors), [ts[0].clone(), ts[1].clone()], "the person and the integration, never the healthy bot's own post");
+            assert_eq!(block_on(connectors.poll()).1, None, "and the next check goes on too");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        /// Any other error from Slack (here a 500) leaves the bot unknown: the check stops, and
+        /// says which bot.
         #[test]
         fn a_pinned_bot_slack_cannot_identify_stops_the_read_of_apps() {
             let _api = slack::lock_api();
             let _restore = RestoreSlack;
-            let (a, _) = apps_page(Utc::now());
-            let _seen = serve(vec![a], vec![]);
+            let (a, _) = own_bot_page(Utc::now());
+            let _seen = serve(vec![a, workspace("xoxb-test-B", "T5XX", "UB", "CB1")], vec![]);
             let (connectors, dir) = two_bots("apps-unknown-bot", vec![message_workflow(true)]);
             let (_, error) = block_on(connectors.poll());
-            assert!(error.as_deref().is_some_and(|e| e.contains("could not tell the account's own Slack bots from apps")), "{error:?}");
+            assert!(error.as_deref().is_some_and(|e| e.contains("could not tell the account's own Slack bots from apps") && e.contains("UB")), "{error:?}");
             assert!(started_by(&connectors).is_empty());
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn a_rate_limit_while_identifying_a_pinned_bot_reads_as_a_rate_limit() {
+            let _api = slack::lock_api();
+            let _restore = RestoreSlack;
+            let (a, _) = own_bot_page(Utc::now());
+            let _seen = serve(vec![a, workspace("xoxb-test-B", "T429", "UB", "CB1")], vec![]);
+            let (connectors, dir) = two_bots("apps-limited-bot", vec![message_workflow(true)]);
+            assert_eq!(block_on(connectors.poll()).1.as_deref(), Some(slack::RATE_LIMITED));
+            assert!(started_by(&connectors).is_empty());
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        /// A token stored for UB that Slack says is another bot's (UZ) posts as UZ: a check never
+        /// takes a post by UZ either.
+        #[test]
+        fn a_pinned_bot_whose_token_is_another_bots_leaves_that_bot_out_too() {
+            let _api = slack::lock_api();
+            let _restore = RestoreSlack;
+            let now = Utc::now();
+            let (mut a, ts) = own_bot_page(now);
+            let by_uz = slack_ts(now - chrono::Duration::seconds(30));
+            let post = json!({ "ts": by_uz, "user": "UZ", "text": "posted with the token stored for UB" });
+            a.history.as_array_mut().unwrap().insert(0, post.clone());
+            a.threads[by_uz.as_str()] = json!([post]);
+            let _seen = serve(vec![a, workspace("xoxb-test-B", "TB", "UZ", "CB1")], vec![]);
+            let (connectors, dir) = two_bots("apps-other-identity", vec![message_workflow(true)]);
+            assert_eq!(block_on(connectors.poll()).1, None);
+            assert_eq!(threads_started(&connectors), [ts[0].clone(), ts[1].clone()]);
             let _ = std::fs::remove_dir_all(dir);
         }
 
