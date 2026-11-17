@@ -373,7 +373,12 @@ pub async fn closed_extends(hub: &Hub, account: &Arc<Account>, closed: Vec<Uuid>
     tokio::spawn(async move {
         for id in closed.into_iter().filter(|id| Some(*id) != asked) {
             let told = match hub.db.confirmation(account.id, id).await {
-                Ok(Some(held)) => notify(&hub, &account, &held).await.map(drop),
+                Ok(Some(held)) => {
+                    if let Err(e) = closed_row(&hub, account.id, &held.confirmation).await {
+                        eprintln!("pinned-server: the extend {id} closed with its box has no denied row in account {}'s trail: {e}", account.id);
+                    }
+                    notify(&hub, &account, &held).await.map(drop)
+                }
                 Ok(None) => Ok(()),
                 Err(e) => Err(e),
             };
@@ -382,6 +387,14 @@ pub async fn closed_extends(hub: &Hub, account: &Arc<Account>, closed: Vec<Uuid>
             }
         }
     });
+}
+
+/// The trail row of an extend ask that the box's end closed: denied with the box's end, as the
+/// owner's decision writes a denied ask's row.
+async fn closed_row(hub: &Hub, account: Uuid, asked: &Confirmation) -> Result<(), String> {
+    let machine = Uuid::parse_str(&asked.machine).map_err(|e| e.to_string())?;
+    let trail = Trail { hub, account, machine, tab: &asked.tab, role: asked.role, action: &asked.action, args: surface::summary(&asked.args), request_id: asked.request_id.as_deref(), task: Default::default() };
+    trail.write(AuditOutcome::Denied, crate::db::EXTEND_BOX_ENDED).await
 }
 
 /// Whether the session already asked this act with its `request_id`, so the hold answers it.
