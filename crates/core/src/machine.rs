@@ -9663,6 +9663,198 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A fake `claude` that copies the settings file it was started with to `<root>/settings-got`,
+    /// then writes that file's path to `<root>/settings-path`.
+    #[cfg(unix)]
+    fn claude_keeping_settings(root: &Path) -> PathBuf {
+        let claude = root.join("claude");
+        let (got, path) = (root.join("settings-got"), root.join("settings-path"));
+        let body = format!(
+            "#!/bin/sh\nif [ \"$1\" = auth ] && [ \"$2\" = status ]; then echo '{{\"loggedIn\":true,\"email\":\"ana@acme.dev\"}}'; exit 0; fi\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = --settings ]; then cat \"$2\" > '{got}'; printf '%s' \"$2\" > '{path}.tmp'; mv '{path}.tmp' '{path}'; fi\n  shift\ndone\necho started\nsleep 30\n",
+            got = got.display(),
+            path = path.display()
+        );
+        std::fs::write(&claude, body).unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        claude
+    }
+
+    /// A machine whose sessions run `claude_keeping_settings`, and the shared settings file it
+    /// passes them, written as `Launch::prepare` writes it.
+    #[cfg(unix)]
+    fn carrying_machine(root: &Path) -> (Arc<Machine>, PathBuf) {
+        let shared = root.join("claude-settings.json");
+        hooks::write_settings(&shared, Path::new("/opt/pinned/bin/pinned")).unwrap();
+        let claude = claude_keeping_settings(root);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), settings: shared.clone(), ..launch() }, Some(root.join("config")), None, |_| {});
+        (m, shared)
+    }
+
+    fn mcp_json(names: &[&str]) -> String {
+        let servers: serde_json::Map<String, Value> = names.iter().map(|name| (name.to_string(), json!({ "command": "npx", "args": ["-y", name] }))).collect();
+        json!({ "mcpServers": servers }).to_string()
+    }
+
+    /// A repository whose commit has a `.mcp.json` listing `committed`. Its main checkout's own
+    /// `.mcp.json` then lists `main`, and its `.claude/settings.local.json` holds `local`.
+    #[cfg(unix)]
+    fn mcp_repo(root: &Path, committed: &[&str], main: &[&str], local: Option<Value>) -> PathBuf {
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join(".mcp.json"), mcp_json(committed)).unwrap();
+        git(&repo, &["add", ".mcp.json"]);
+        git(&repo, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "-m", "first"]);
+        std::fs::write(repo.join(".mcp.json"), mcp_json(main)).unwrap();
+        if let Some(local) = local {
+            std::fs::create_dir_all(repo.join(".claude")).unwrap();
+            std::fs::write(repo.join(".claude/settings.local.json"), local.to_string()).unwrap();
+        }
+        repo
+    }
+
+    /// The path and content of the settings file the next session started with.
+    #[cfg(unix)]
+    fn started_settings(root: &Path) -> (PathBuf, Value) {
+        wait_for("the session's settings", || root.join("settings-path").exists());
+        let path = PathBuf::from(std::fs::read_to_string(root.join("settings-path")).unwrap());
+        let got = serde_json::from_slice(&std::fs::read(root.join("settings-got")).unwrap()).unwrap();
+        for file in ["settings-path", "settings-got"] {
+            std::fs::remove_file(root.join(file)).unwrap();
+        }
+        (path, got)
+    }
+
+    /// Starts a session of the built-in account in `folder`, a folder the user opened.
+    #[cfg(unix)]
+    fn start_in(m: &Machine, folder: &Path) -> TabId {
+        let tab = m.open_tab(Some(folder.display().to_string()), false).unwrap();
+        m.start_claude(&tab, 200, 24).unwrap();
+        tab
+    }
+
+    /// `got` is the shared settings plus `enabledMcpjsonServers: names`, every other key the same.
+    fn carries(got: &Value, shared: &Value, names: &[&str]) {
+        assert_eq!(got["enabledMcpjsonServers"], json!(names), "the approved names are carried");
+        let mut rest = got.as_object().unwrap().clone();
+        rest.remove("enabledMcpjsonServers");
+        assert_eq!(&Value::Object(rest), shared, "every key of the shared settings, unchanged");
+        assert!(got.get("enableAllProjectMcpServers").is_none(), "{got}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_worker_in_a_worktree_pinned_made_carries_the_main_checkouts_approved_mcp_servers() {
+        let root = temp("mcp-carry-worktree");
+        let (m, shared) = carrying_machine(&root);
+        let shared_json: Value = serde_json::from_slice(&std::fs::read(&shared).unwrap()).unwrap();
+        let repo = mcp_repo(&root, &["a", "b"], &["a", "b"], Some(json!({ "enabledMcpjsonServers": ["a"] })));
+        let task = delegate_from(&m, &repo, "worktree");
+        let (path, got) = started_settings(&root);
+        let cwd = m.delegates.get(&task).unwrap().cwd;
+        assert_ne!(dunce::canonicalize(&cwd).unwrap(), dunce::canonicalize(&repo).unwrap(), "the worker runs in a worktree of its own");
+        carries(&got, &shared_json, &["a"]);
+        assert_ne!(path, shared, "the session has a settings file of its own");
+        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&path).unwrap().permissions()) & 0o777, 0o600, "only its user reads it");
+        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(path.parent().unwrap()).unwrap().permissions()) & 0o777, 0o700, "in a folder only its user opens");
+        assert_eq!(std::fs::read(&shared).unwrap(), serde_json::to_vec_pretty(&shared_json).unwrap(), "the shared file is never written");
+        let config = claude_config_at(&root.join("config/home/.claude.json"));
+        assert!(!trusted(&config, &repo), "the main checkout is never trusted: {config}");
+        assert!(!config.to_string().contains("McpServers"), "nothing is approved in the account's config: {config}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_declined_server_is_never_carried() {
+        let root = temp("mcp-carry-declined");
+        let (m, shared) = carrying_machine(&root);
+        let shared_json: Value = serde_json::from_slice(&std::fs::read(&shared).unwrap()).unwrap();
+        let repo = mcp_repo(&root, &["a", "b"], &["a", "b"], Some(json!({ "enabledMcpjsonServers": ["a", "b"], "disabledMcpjsonServers": ["a"] })));
+        delegate_from(&m, &repo, "worktree");
+        let (_, got) = started_settings(&root);
+        carries(&got, &shared_json, &["b"]);
+        let local = repo.join(".claude/settings.local.json");
+        std::fs::write(&local, json!({ "enabledMcpjsonServers": ["a"], "disabledMcpjsonServers": ["a"] }).to_string()).unwrap();
+        delegate_from(&m, &repo, "worktree");
+        let (path, got) = started_settings(&root);
+        assert_eq!((path, got), (shared, shared_json), "with every approved name declined, the session gets the shared settings");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn only_servers_in_the_opened_checkouts_mcp_json_are_carried() {
+        let root = temp("mcp-carry-listed");
+        let (m, shared) = carrying_machine(&root);
+        let shared_json: Value = serde_json::from_slice(&std::fs::read(&shared).unwrap()).unwrap();
+        // The worktree has the committed `.mcp.json`, with `a` only; the main checkout's lists more.
+        let repo = mcp_repo(&root, &["a"], &["a", "b", "gone"], Some(json!({ "enabledMcpjsonServers": ["a", "gone", "b"] })));
+        delegate_from(&m, &repo, "worktree");
+        let (_, got) = started_settings(&root);
+        carries(&got, &shared_json, &["a"]);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn all_future_servers_carry_only_the_names_it_lists() {
+        let root = temp("mcp-carry-all-future");
+        let (m, shared) = carrying_machine(&root);
+        let shared_json: Value = serde_json::from_slice(&std::fs::read(&shared).unwrap()).unwrap();
+        let repo = mcp_repo(&root, &["a", "b"], &["a", "b"], Some(json!({ "enableAllProjectMcpServers": true, "enabledMcpjsonServers": ["b"] })));
+        delegate_from(&m, &repo, "worktree");
+        let (_, got) = started_settings(&root);
+        carries(&got, &shared_json, &["b"]);
+        std::fs::write(repo.join(".claude/settings.local.json"), json!({ "enableAllProjectMcpServers": true, "enabledMcpjsonServers": [] }).to_string()).unwrap();
+        delegate_from(&m, &repo, "worktree");
+        let (path, got) = started_settings(&root);
+        assert!(got.get("enableAllProjectMcpServers").is_none(), "{got}");
+        assert_eq!((path, got), (shared, shared_json), "\"all future\" alone carries no name");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn without_a_mcp_json_or_approvals_a_session_gets_the_shared_settings() {
+        let root = temp("mcp-carry-none");
+        let (m, shared) = carrying_machine(&root);
+        let shared_json: Value = serde_json::from_slice(&std::fs::read(&shared).unwrap()).unwrap();
+        let repo = mcp_repo(&root, &["a"], &["a"], Some(json!({ "enabledMcpjsonServers": ["a"] })));
+        start_in(&m, &repo);
+        let (_, got) = started_settings(&root);
+        carries(&got, &shared_json, &["a"]);
+        std::fs::remove_file(repo.join(".mcp.json")).unwrap();
+        start_in(&m, &repo);
+        assert_eq!(started_settings(&root), (shared.clone(), shared_json.clone()), "no .mcp.json in the opened folder");
+        std::fs::write(repo.join(".mcp.json"), mcp_json(&["a"])).unwrap();
+        std::fs::remove_file(repo.join(".claude/settings.local.json")).unwrap();
+        start_in(&m, &repo);
+        assert_eq!(started_settings(&root), (shared.clone(), shared_json.clone()), "no settings.local.json");
+        std::fs::write(repo.join(".claude/settings.local.json"), "not json").unwrap();
+        start_in(&m, &repo);
+        assert_eq!(started_settings(&root), (shared, shared_json), "an unreadable settings.local.json");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn carrying_approvals_never_writes_the_accounts_config() {
+        let root = temp("mcp-carry-config");
+        let (m, shared) = carrying_machine(&root);
+        let shared_json: Value = serde_json::from_slice(&std::fs::read(&shared).unwrap()).unwrap();
+        let repo = mcp_repo(&root, &["a", "b"], &["a", "b"], Some(json!({ "enabledMcpjsonServers": ["a", "b"] })));
+        let config = root.join("config/home/.claude.json");
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        let before = serde_json::to_vec_pretty(&json!({ "hasCompletedOnboarding": true, "theme": "light", "numStartups": 3, "projects": { "/old": { "allowedTools": ["Bash"] } } })).unwrap();
+        std::fs::write(&config, &before).unwrap();
+        start_in(&m, &repo);
+        let (_, got) = started_settings(&root);
+        carries(&got, &shared_json, &["a", "b"]);
+        assert_eq!(std::fs::read(&config).unwrap(), before, "the account's config is byte-identical: nothing trusted, nothing approved");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     #[cfg(unix)]
     fn the_bypass_warning_is_never_accepted_for_a_session_started_without_bypass() {
