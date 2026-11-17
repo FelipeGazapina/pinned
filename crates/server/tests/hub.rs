@@ -9411,6 +9411,21 @@ fn a_box_that_ends_closes_the_extend_box_asks_that_wait_for_it() {
     assert_eq!(hub.runtime.block_on(ending).unwrap(), Ok(true));
 }
 
+/// Deleting a box's row closes the extend asks still waiting for its box, as the row a hub left
+/// ending before it closed them: the reaper deletes it, and its asks read as the box's end.
+#[test]
+fn a_deleted_box_row_closes_the_extend_box_asks_that_wait_for_it() {
+    let ExtendSetup { hub, ana, mut owner, machine, .. } = extend_setup("extend_closed_deleted");
+    let other = open_extend_box(&ana);
+    let asked = extend_as(&ana.dir, &ana.tab, &machine, 0.5, None).unwrap();
+    let kept = extend_as(&ana.dir, &ana.tab, &other, 0.5, None).unwrap();
+    assert_eq!((asked["outcome"].as_str(), kept["outcome"].as_str()), (Some("pending"), Some("pending")), "{asked} {kept}");
+    admin_on(&hub.database, &format!("update boxes set phase = 'ending', reason = 'done' where machine = '{machine}'"));
+    wait_for("the reaper to delete the row", || count_on(&hub.database, &format!("select count(*) from boxes where machine = '{machine}'")) == 0);
+    assert_eq!(waiting_ids(&mut owner), [kept["id"].clone()], "only the ask for the box that runs still waits");
+    assert_eq!(decided(&mut owner, &asked["id"]), (json!("denied"), json!(BOX_ENDED)));
+}
+
 /// Asks for different boxes of one account made at once, with one place left under the account's
 /// cap: each box's turn lets them in together, the account's lock lets exactly one wait.
 #[test]
