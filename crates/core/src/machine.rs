@@ -14366,6 +14366,43 @@ Have another model review a risky change before it goes ahead.";
 
     #[test]
     #[cfg(unix)]
+    fn a_team_boxs_run_cost_is_priced_at_the_ceiling_when_its_first_download_fails() {
+        let RunCostBox { dir, m, sent, subject, transcript, .. } = run_costs_box("run-costs-first-download-fails");
+        *m.list_rates.lock().unwrap() = Arc::new(usage::RateTable::new);
+        append(&transcript, &[run_spent("m2", "claude-sonnet-5-5", 1_000_000)]);
+        m.report_run_costs(Instant::now());
+        assert_eq!(*sent.lock().unwrap(), vec![("wf-1".to_owned(), subject, 15_150.0)], "1 010 000 output tokens at the ceiling's US$ 150 per million, not 0");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_team_boxs_session_on_a_model_the_list_lacks_is_priced_at_the_ceiling() {
+        let RunCostBox { dir, m, sent, subject, transcript, .. } = run_costs_box("run-costs-unlisted-only");
+        std::fs::write(&transcript, format!("{}\n", run_spent("m1", "claude-unlisted-1", 100_000))).unwrap();
+        m.report_run_costs(Instant::now());
+        assert_eq!(*sent.lock().unwrap(), vec![("wf-1".to_owned(), subject, 1_500.0)], "100 000 output tokens at the ceiling's US$ 150 per million, not 0");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_team_boxs_run_cost_takes_the_list_price_again_after_a_good_download() {
+        let RunCostBox { dir, m, sent, subject, transcript, .. } = run_costs_box("run-costs-download-recovers");
+        *m.list_rates.lock().unwrap() = Arc::new(usage::RateTable::new);
+        let t0 = Instant::now();
+        m.report_run_costs(t0);
+        *m.list_rates.lock().unwrap() = Arc::new(|| usage::parse_rates(&json!({ "claude-sonnet-5-5": { "input_cost_per_token": 0.000003, "output_cost_per_token": 0.000015 } })));
+        m.meter_rates_at(Instant::now() + Duration::from_secs(61));
+        append(&transcript, &[run_spent("m2", "claude-sonnet-5-5", 1_000_000)]);
+        m.report_run_costs(t0 + RUN_COST_EVERY);
+        let cents = |usd: f64| ("wf-1".to_owned(), subject.clone(), usd);
+        assert_eq!(*sent.lock().unwrap(), vec![cents(150.0), cents(1_515.0)], "10 000 tokens at the ceiling, then all 1 010 000 at the list's US$ 15 per million");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn a_team_boxs_session_not_live_for_a_pass_keeps_its_earlier_total() {
         let RunCostBox { dir, m, sent, subject, tab, transcript, .. } = run_costs_box("run-costs-not-live");
         let t0 = Instant::now();
