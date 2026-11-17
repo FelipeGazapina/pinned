@@ -30,6 +30,17 @@ pub const CATCH_UP: Duration = Duration::from_secs(60 * 60);
 /// change older than `CATCH_UP` never fires, so its key is never claimed again once dropped.
 pub const FIRES_KEPT: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 const _: () = assert!(CATCH_UP.as_secs() < FIRES_KEPT.as_secs());
+// The loop guards of the Linear change triggers (`Guards`), kept in memory per account.
+/// How long pinned keeps each of its own Linear writes (`Guards::wrote`).
+const OWN_WRITES_KEPT: Duration = Duration::from_secs(10 * 60);
+/// A change that sets what pinned wrote within this long of the write is pinned's own echo.
+const ECHO_WINDOW: Duration = Duration::from_secs(2 * 60);
+/// A change trigger does not start the same workflow on the same issue again within this long.
+const COOLDOWN: Duration = Duration::from_secs(15 * 60);
+/// At most this many change-trigger starts per issue per `CAP_WINDOW`, across the account's workflows.
+const ISSUE_CAP: usize = 4;
+const CAP_WINDOW: Duration = Duration::from_secs(60 * 60);
+const _: () = assert!(ECHO_WINDOW.as_secs() < OWN_WRITES_KEPT.as_secs() && COOLDOWN.as_secs() < CAP_WINDOW.as_secs());
 const LINEAR_KEY: &str = "linear-key";
 /// Where a node without hub keeps its claimed fires (`FileStorage::claim_fire`).
 const FIRES_FILE: &str = "fires.json";
@@ -1045,8 +1056,14 @@ pub struct ChangeCounts {
     /// Won claims whose run did not start.
     #[serde(default)]
     pub not_started: u64,
+    /// Changes pinned made itself (`Guards::echo`).
+    #[serde(default)]
     pub echoes: u64,
+    /// Changes within `COOLDOWN` of the workflow's last start on the issue.
+    #[serde(default)]
     pub cooled: u64,
+    /// Changes over `ISSUE_CAP` on their issue.
+    #[serde(default)]
     pub capped: u64,
 }
 
@@ -1904,10 +1921,111 @@ fn is_change(trigger: &Trigger) -> bool {
     matches!(trigger, Trigger::LinearStatus { .. } | Trigger::LinearAssigned { .. })
 }
 
+/// Which field of an issue pinned wrote.
+#[derive(Clone, Copy, PartialEq)]
+enum Field {
+    State,
+    Assignee,
+}
+
+/// One Linear write pinned made: the status name or the assignee's id it set, None for any value
+/// (an issue pinned created).
+struct OwnWrite {
+    issue: String,
+    field: Field,
+    to: Option<String>,
+    at: DateTime<Utc>,
+}
+
+/// Why a guard refused a change's start.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Refusal {
+    Echo,
+    Cooled,
+    Capped,
+}
+
+/// The loop guards of an account's Linear change triggers: pinned's own writes, and the starts
+/// change triggers made, each at its change's time. In memory: a restart drops them, and the
+/// claim keys still keep a change from firing twice.
+#[derive(Default)]
+struct Guards {
+    writes: Vec<OwnWrite>,
+    /// The last start of each workflow on each issue, by (workflow, issue).
+    last_start: HashMap<(String, String), DateTime<Utc>>,
+    /// The starts on each issue, across the account's workflows.
+    starts: HashMap<String, Vec<DateTime<Utc>>>,
+    /// When each issue's cap was last logged.
+    cap_logged: HashMap<String, DateTime<Utc>>,
+}
+
+fn within(a: DateTime<Utc>, b: DateTime<Utc>, window: Duration) -> bool {
+    (a - b).abs() < chrono::Duration::from_std(window).expect("the guard windows fit")
+}
+
+impl Guards {
+    /// Keeps a write pinned makes to Linear, for `OWN_WRITES_KEPT`.
+    fn wrote(&mut self, issue: &str, field: Field, to: Option<&str>, now: DateTime<Utc>) {
+        self.writes.retain(|w| within(w.at, now, OWN_WRITES_KEPT));
+        self.writes.push(OwnWrite { issue: issue.to_owned(), field, to: to.map(str::to_owned), at: now });
+    }
+
+    /// Whether `change` sets what pinned wrote to its issue, within `ECHO_WINDOW` of the write.
+    fn echo(&self, change: &linear::Change, at: DateTime<Utc>) -> bool {
+        self.writes.iter().any(|w| {
+            let same = match (w.field, change.kind) {
+                (Field::State, linear::ChangeKind::Status) => {
+                    w.to.as_deref().is_none_or(|to| change.to_state.as_deref().is_some_and(|state| fold(state) == fold(to)))
+                }
+                (Field::Assignee, linear::ChangeKind::Assignee) => {
+                    w.to.as_deref().is_none_or(|to| change.to_assignee.as_ref().is_some_and(|p| p.id == to))
+                }
+                _ => false,
+            };
+            w.issue == change.issue_id && same && within(w.at, at, ECHO_WINDOW)
+        })
+    }
+
+    /// Whether a guard refuses the start of `workflow` on `change`, made at `at`.
+    fn refusal(&self, workflow: &str, change: &linear::Change, at: DateTime<Utc>) -> Option<Refusal> {
+        if self.echo(change, at) {
+            return Some(Refusal::Echo);
+        }
+        if self.last_start.get(&(workflow.to_owned(), change.issue_id.clone())).is_some_and(|last| within(*last, at, COOLDOWN)) {
+            return Some(Refusal::Cooled);
+        }
+        let started = self.starts.get(&change.issue_id).map_or(0, |starts| starts.iter().filter(|s| within(**s, at, CAP_WINDOW)).count());
+        (started >= ISSUE_CAP).then_some(Refusal::Capped)
+    }
+
+    /// Keeps a start, and drops what no change a check reads can reach any more.
+    fn started(&mut self, workflow: &str, issue: &str, at: DateTime<Utc>, now: DateTime<Utc>) {
+        let reach = CATCH_UP + CAP_WINDOW;
+        self.last_start.retain(|_, last| within(*last, now, reach));
+        self.starts.values_mut().for_each(|starts| starts.retain(|s| within(*s, now, reach)));
+        self.starts.retain(|_, starts| !starts.is_empty());
+        self.cap_logged.retain(|_, logged| within(*logged, now, CAP_WINDOW));
+        self.last_start.insert((workflow.to_owned(), issue.to_owned()), at);
+        self.starts.entry(issue.to_owned()).or_default().push(at);
+    }
+
+    /// Whether the cap on `issue` is logged now: once per issue per `CAP_WINDOW`.
+    fn log_cap(&mut self, issue: &str, now: DateTime<Utc>) -> bool {
+        let logged = self.cap_logged.get(issue).is_some_and(|logged| within(*logged, now, CAP_WINDOW));
+        if !logged {
+            self.cap_logged.insert(issue.to_owned(), now);
+        }
+        !logged
+    }
+}
+
 /// The cap's log lines, for a test to read.
 #[cfg(test)]
+static CAP_LINES: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+#[cfg(test)]
 fn cap_lines() -> Vec<String> {
-    vec![]
+    CAP_LINES.lock().unwrap().clone()
 }
 
 /// A Linear change whose fire a workflow claimed.
@@ -2259,6 +2377,8 @@ pub struct Connectors {
     /// The won fire of each Linear change run not yet handed over, by connector and `subject_key`:
     /// its claim is given back when the run does not start.
     fire_runs: Mutex<HashMap<(String, String), String>>,
+    /// The loop guards of this account's Linear change triggers.
+    guards: Mutex<Guards>,
 }
 
 /// What a box's end does to the subject of the run it failed.
@@ -2400,6 +2520,7 @@ impl Connectors {
             claimer: new_claimer(),
             unsure: Mutex::new(std::collections::HashSet::new()),
             fire_runs: Mutex::new(HashMap::new()),
+            guards: Mutex::new(Guards::default()),
         }
     }
 
@@ -2562,8 +2683,18 @@ impl Connectors {
                     *pass.skipped.entry(c.id.clone()).or_default() += 1;
                     continue;
                 }
+                // The guards decide before the claim, which a refused change wins all the same: a
+                // read of it again (the overlap, another hub of the account) neither starts nor
+                // counts it.
+                let refused = self.guards.lock().unwrap().refusal(&c.id, &change, at);
                 match self.claim_change(&c.id, &key) {
-                    Ok(true) => pass.fires.push(Fire { workflow: c.id.clone(), key: key.clone(), change: change.clone() }),
+                    Ok(true) => match refused {
+                        Some(refusal) => self.refuse(&c.id, &key, &change.issue_id, refusal, now),
+                        None => {
+                            self.guards.lock().unwrap().started(&c.id, &change.issue_id, at, now);
+                            pass.fires.push(Fire { workflow: c.id.clone(), key: key.clone(), change: change.clone() });
+                        }
+                    },
                     // Another check of the account fired it.
                     Ok(false) => {}
                     Err(e) => {
@@ -2586,6 +2717,40 @@ impl Connectors {
             }
         }
         pass
+    }
+
+    /// A guard refused the won fire `key` of `workflow` on `issue`: it starts nothing, and is
+    /// counted. The count is saved with the check's watermark.
+    fn refuse(&self, workflow: &str, key: &str, issue: &str, refusal: Refusal, now: DateTime<Utc>) {
+        let why = match refusal {
+            Refusal::Echo => "pinned made the change itself",
+            Refusal::Cooled => "it started there within the cooldown",
+            Refusal::Capped => "the issue reached its cap of change-trigger starts this hour",
+        };
+        let line = format!("pinned: workflow {workflow} did not start on issue {issue} ({key}): {why}");
+        match refusal {
+            Refusal::Capped => {
+                if self.guards.lock().unwrap().log_cap(issue, now) {
+                    eprintln!("{line}");
+                    #[cfg(test)]
+                    CAP_LINES.lock().unwrap().push(line);
+                }
+            }
+            Refusal::Echo | Refusal::Cooled => eprintln!("{line}"),
+        }
+        let mut store = self.store.lock().unwrap();
+        let counts = store.change_counts.entry(workflow.to_owned()).or_default();
+        match refusal {
+            Refusal::Echo => counts.echoes += 1,
+            Refusal::Cooled => counts.cooled += 1,
+            Refusal::Capped => counts.capped += 1,
+        }
+    }
+
+    /// Keeps a write pinned makes to a Linear issue, so the change it makes is not taken as
+    /// someone else's (`Guards::echo`).
+    fn wrote(&self, issue: &str, field: Field, to: Option<&str>) {
+        self.guards.lock().unwrap().wrote(issue, field, to, Utc::now());
     }
 
     /// The fire `key` of `workflow` won its claim but its run did not start: the claim is given
@@ -3195,6 +3360,8 @@ impl Connectors {
             return Ok("this workflow has no column for that stage, so the issue stays where it is".into());
         }
         let key = self.key(LINEAR_KEY).ok_or("Linear is not connected")?;
+        // Kept before the write, so a check that reads the move while Linear answers knows it.
+        self.wrote(&issue, Field::State, Some(&column));
         linear::move_issue(&key, &issue, &column).await?;
         Ok(format!("moved the issue to {column}"))
     }
@@ -3251,6 +3418,9 @@ impl Connectors {
         let link = slack::permalink(&token, channel, thread).await?;
         let description = format!("{}\n\nSlack thread: {link}", description.trim());
         let issue = linear::create_issue(&key, team, title.trim(), &description, label, assignee).await?;
+        // Whatever status and assignee the new issue got, pinned set them.
+        self.wrote(&issue.id, Field::State, None);
+        self.wrote(&issue.id, Field::Assignee, None);
         let filed = Filed { id: issue.id, identifier: issue.identifier, url: issue.url };
         let mut store = self.store.lock().unwrap();
         // The connector may have been deleted while Linear answered; the issue exists all the same.
@@ -5476,6 +5646,7 @@ impl Connectors {
             store.connector(connector)?.issue(&run.subject)?
         };
         let key = self.key(LINEAR_KEY).ok_or("Linear is not connected")?;
+        self.wrote(&issue, Field::State, Some(column.trim()));
         linear::move_issue(&key, &issue, column.trim()).await?;
         let _ = run;
         Ok(Supplied::Done)
