@@ -474,14 +474,21 @@ fn node(schema: &Value, root: &Value) -> Node {
 /// `expanding` holds the `$ref`s being built around `schema`. A type that holds itself, as a plan
 /// step holds fixes that hold steps, reads as a leaf where it comes back, so the tree ends.
 fn node_in(schema: &Value, root: &Value, expanding: &mut Vec<String>) -> Node {
-    let Some(reference) = schema.get("$ref").and_then(|r| r.as_str()) else {
-        return node_of(schema, root, expanding);
+    let reference = schema.get("$ref").and_then(|r| r.as_str());
+    guarded(reference, expanding, |expanding| node_of(schema, root, expanding))
+}
+
+/// Runs `build` with `reference` among the `$ref`s being built, or answers the recursive leaf
+/// when it already is.
+fn guarded(reference: Option<&str>, expanding: &mut Vec<String>, build: impl FnOnce(&mut Vec<String>) -> Node) -> Node {
+    let Some(reference) = reference else {
+        return build(expanding);
     };
     if expanding.iter().any(|item| item == reference) {
         return Node::Leaf(format!("recursive {}", reference.rsplit('/').next().unwrap_or(reference)));
     }
     expanding.push(reference.to_owned());
-    let built = node_of(schema, root, expanding);
+    let built = build(expanding);
     expanding.pop();
     built
 }
@@ -505,7 +512,10 @@ fn node_of(schema: &Value, root: &Value, expanding: &mut Vec<String>) -> Node {
                 Some(parent) => merge_objects(parent, &resolved),
                 None => resolved,
             };
-            items.push((name, node_in(&merged, root, expanding)));
+            // `concrete` resolved the branch's `$ref`, so it is tracked here or a type that holds
+            // itself through an Option or an enum would never end.
+            let reference = branch.get("$ref").and_then(|r| r.as_str());
+            items.push((name, guarded(reference, expanding, |expanding| node_in(&merged, root, expanding))));
         }
         return Node::Union(items);
     }
