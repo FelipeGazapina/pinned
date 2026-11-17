@@ -3251,6 +3251,19 @@
                 ]
               },
               {
+                "description": "The notice the app shows while the account's size limit refuses a push, or `null` while sync works.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "sync_limit"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
                 "description": "`load::MachineState`: the machine's load and accounts now, which the hub asks for before it\nrefuses a delegation on what the machine reported earlier.",
                 "type": "object",
                 "properties": {
@@ -15713,6 +15726,19 @@
                 ]
               },
               {
+                "description": "The notice the app shows while the account's size limit refuses a push, or `null` while sync works.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "sync_limit"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
                 "description": "`load::MachineState`: the machine's load and accounts now, which the hub asks for before it\nrefuses a delegation on what the machine reported earlier.",
                 "type": "object",
                 "properties": {
@@ -25482,6 +25508,13 @@
                   "null"
                 ]
               },
+              "stopped_on_error": {
+                "description": "The API or stream error the last turn ended on, its first line, while the session waits for\na message to try again. Read from the transcript once Claude Code went idle after the error.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "questions": {
                 "description": "The questionnaire the session waits on the user to answer, which `Call::AnswerQuestions`\nanswers. While it is open the tab reads as a question mid-turn, so an app that predates it\nstill shows the tab waiting.",
                 "anyOf": [
@@ -34788,6 +34821,13 @@
               },
               "stopped": {
                 "description": "Why the tab's last process ended mid-turn, until a new turn or input starts it again.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "stopped_on_error": {
+                "description": "The API or stream error the last turn ended on, its first line, while the session waits for\na message to try again. Read from the transcript once Claude Code went idle after the error.",
                 "type": [
                   "string",
                   "null"
@@ -51161,6 +51201,11 @@
                 ]
               },
               {
+                "description": "The turn ended on an API or stream error, and the session waits for a message to try again.\nIts `message` is that error's first line, not a question.",
+                "type": "string",
+                "const": "stopped_on_error"
+              },
+              {
                 "description": "An agent's action waits on the user's approval in the app. Only a node's `waiting` tool\nlists it, from `HubCall::Confirmations`; the hub's `Overview` never does.",
                 "type": "string",
                 "const": "confirm"
@@ -51474,6 +51519,11 @@
                 "const": "error"
               },
               {
+                "description": "Its last turn ended on an API or stream error, and a message tries it again (`waiting_kind` is\n`stopped_on_error`). Its message is that error's first line.",
+                "type": "string",
+                "const": "stopped_on_error"
+              },
+              {
                 "description": "Its session is not running. A message starts it again.",
                 "type": "string",
                 "const": "settled"
@@ -51784,6 +51834,11 @@
                 ]
               },
               {
+                "description": "The turn ended on an API or stream error, and the session waits for a message to try again.\nIts `message` is that error's first line, not a question.",
+                "type": "string",
+                "const": "stopped_on_error"
+              },
+              {
                 "description": "An agent's action waits on the user's approval in the app. Only a node's `waiting` tool\nlists it, from `HubCall::Confirmations`; the hub's `Overview` never does.",
                 "type": "string",
                 "const": "confirm"
@@ -52085,6 +52140,11 @@
                 "description": "It stopped on a failure, a usage limit included (`waiting_kind` is `failed`).",
                 "type": "string",
                 "const": "error"
+              },
+              {
+                "description": "Its last turn ended on an API or stream error, and a message tries it again (`waiting_kind` is\n`stopped_on_error`). Its message is that error's first line.",
+                "type": "string",
+                "const": "stopped_on_error"
               },
               {
                 "description": "Its session is not running. A message starts it again.",
@@ -60075,6 +60135,13 @@
               "null"
             ]
           },
+          "stopped_on_error": {
+            "description": "The API or stream error the last turn ended on, its first line, while the session waits for\na message to try again. Read from the transcript once Claude Code went idle after the error.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "questions": {
             "description": "The questionnaire the session waits on the user to answer, which `Call::AnswerQuestions`\nanswers. While it is open the tab reads as a question mid-turn, so an app that predates it\nstill shows the tab waiting.",
             "anyOf": [
@@ -60625,6 +60692,13 @@
           },
           "stopped": {
             "description": "Why the tab's last process ended mid-turn, until a new turn or input starts it again.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "stopped_on_error": {
+            "description": "The API or stream error the last turn ended on, its first line, while the session waits for\na message to try again. Read from the transcript once Claude Code went idle after the error.",
             "type": [
               "string",
               "null"
@@ -64397,6 +64471,13 @@
               },
               "stopped": {
                 "description": "Why the tab's last process ended mid-turn, until a new turn or input starts it again.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "stopped_on_error": {
+                "description": "The API or stream error the last turn ended on, its first line, while the session waits for\na message to try again. Read from the transcript once Claude Code went idle after the error.",
                 "type": [
                   "string",
                   "null"
@@ -69096,6 +69177,13 @@
               },
               "stopped": {
                 "description": "Why the tab's last process ended mid-turn, until a new turn or input starts it again.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "stopped_on_error": {
+                "description": "The API or stream error the last turn ended on, its first line, while the session waits for\na message to try again. Read from the transcript once Claude Code went idle after the error.",
                 "type": [
                   "string",
                   "null"
@@ -76456,6 +76544,19 @@
                 ]
               },
               {
+                "description": "The notice the app shows while the account's size limit refuses a push, or `null` while sync works.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "sync_limit"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
                 "description": "`load::MachineState`: the machine's load and accounts now, which the hub asks for before it\nrefuses a delegation on what the machine reported earlier.",
                 "type": "object",
                 "properties": {
@@ -81984,6 +82085,19 @@
                   "cmd": {
                     "type": "string",
                     "const": "sync_stopped"
+                  }
+                },
+                "required": [
+                  "cmd"
+                ]
+              },
+              {
+                "description": "The notice the app shows while the account's size limit refuses a push, or `null` while sync works.",
+                "type": "object",
+                "properties": {
+                  "cmd": {
+                    "type": "string",
+                    "const": "sync_limit"
                   }
                 },
                 "required": [
