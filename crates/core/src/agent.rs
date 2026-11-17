@@ -628,4 +628,11 @@ mod tests {
             assert!(!prompt.contains(line), "the worker prompt has a captain-only line: {line}");
         }
     }
+
+    #[test]
+    fn the_worker_prompt_warns_against_rm_with_sh_c() {
+        let line = "In one Bash command, never combine rm with sh -c, bash -c, eval or a path built from a variable: write each path out, and remove containers with docker run --rm or docker stop. Claude asks a person for such commands even in Full access, and the command is denied after 2 minutes.";
+        assert!(Role::Worker.prompt().contains(line), "the worker prompt lacks the rm warning");
+        assert!(!Role::Orchestrator.prompt().contains(line), "the captain prompt has the worker's rm warning");
+    }
 }
