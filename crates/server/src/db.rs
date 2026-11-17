@@ -685,7 +685,88 @@ pub(crate) fn err(e: tokio_postgres::Error) -> String {
     if lock_refused(&e) {
         return BUSY.into();
     }
+    if one_live_run_refused(&e) {
+        return ONE_LIVE_RUN.into();
+    }
     e.to_string()
+}
+
+/// The index that holds, in Postgres too, the rule the team's turn keeps (`teams::queue`): a bot
+/// has at most one live run. A write of a second one, by any path, is refused.
+const ONE_LIVE_RUN_INDEX: &str = "team_runs_one_live_per_bot";
+/// What a write refused by `ONE_LIVE_RUN_INDEX` answers.
+pub const ONE_LIVE_RUN: &str = "this bot already has a live run; try again once it ends";
+
+/// Whether Postgres refused `e` for giving a bot a second live run (`ONE_LIVE_RUN_INDEX`).
+pub(crate) fn one_live_run_refused(e: &tokio_postgres::Error) -> bool {
+    e.code() == Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION) && e.as_db_error().and_then(|d| d.constraint()) == Some(ONE_LIVE_RUN_INDEX)
+}
+
+/// Sets `ONE_LIVE_RUN_INDEX` at the hub's start, unless it is there. A database where some bot
+/// already has more than one live run (left by an older hub) keeps them as they are: the index is
+/// not set, the start says so, and the next start tries again. No failure here stops the start:
+/// the team's turn still holds the rule, and the start logs that the index is not set.
+async fn one_live_run_per_bot(url: &str) {
+    let set = async {
+        let client = open(url).await.map_err(|_| "it could not connect".to_owned())?;
+        set_one_live_run(&client).await.map_err(|e| format!("Postgres refused it ({})", e.code().map_or("no code", |c| c.code())))
+    };
+    match set.await {
+        Ok(clashing) if clashing.is_empty() => {}
+        Ok(clashing) => eprintln!("pinned-server: {}", clashing_line(&clashing)),
+        Err(why) => eprintln!("pinned-server: one live run per bot: the rule was not set: {why}; the next start tries again"),
+    }
+}
+
+/// How many bots of the start's log `clashing_line` names; the rest it counts.
+const CLASHING_NAMED: usize = 20;
+
+/// What a start logs when the bots `clashing` (team, workflow) have more than one live run: their
+/// count, and the ids of the first `CLASHING_NAMED`. A workflow id that is not a uuid is not shown.
+fn clashing_line(clashing: &[(Uuid, String)]) -> String {
+    let count = match clashing.len() {
+        1 => "1 bot has".to_owned(),
+        n => format!("{n} bots have"),
+    };
+    let named: Vec<String> = clashing
+        .iter()
+        .take(CLASHING_NAMED)
+        .map(|(team, workflow)| format!("({team}, {})", Uuid::parse_str(workflow).map_or_else(|_| "an id that is not a uuid".to_owned(), |w| w.to_string())))
+        .collect();
+    let more = match clashing.len().saturating_sub(CLASHING_NAMED) {
+        0 => String::new(),
+        n => format!(" and {n} more"),
+    };
+    format!(
+        "one live run per bot: {count} more than one live run; the rule starts on the first start after they end; bots (team, workflow): {}{more}",
+        named.join(", ")
+    )
+}
+
+/// The bots (team, workflow) that have more than one live run; when none, the index is set. A start that finds the
+/// index takes no lock. Otherwise the count and the index are one transaction holding `share row
+/// exclusive` on `team_runs` (it waits as long as it must, as a needed schema statement does): no
+/// run is written between the two, and a second hub starting meanwhile waits for it, then finds the
+/// index. That lock blocks writes of team runs, not reads, for one scan of the table and the sort
+/// of its live rows. Dropping `client` on an error rolls the transaction back.
+async fn set_one_live_run(client: &Client) -> Result<Vec<(Uuid, String)>, tokio_postgres::Error> {
+    const FOUND: &str = "select to_regclass($1::text) is not null";
+    if client.query_one(FOUND, &[&ONE_LIVE_RUN_INDEX]).await?.get(0) {
+        return Ok(vec![]);
+    }
+    let live = crate::teams::db::LIVE;
+    client.batch_execute("begin; set local lock_timeout = 0; lock table team_runs in share row exclusive mode").await?;
+    let clashing: Vec<(Uuid, String)> = client
+        .query(&format!("select team, workflow from team_runs where state in {live} group by team, workflow having count(*) > 1 order by team, workflow"), &[])
+        .await?
+        .iter()
+        .map(|r| (r.get(0), r.get(1)))
+        .collect();
+    if clashing.is_empty() {
+        client.batch_execute(&format!("create unique index if not exists {ONE_LIVE_RUN_INDEX} on team_runs (team, workflow) where state in {live}")).await?;
+    }
+    client.batch_execute("commit").await?;
+    Ok(clashing)
 }
 
 /// The row, or what deleting its box takes when its run is in a shape this hub can't read.
@@ -768,9 +849,15 @@ impl Learning {
     }
 }
 
+/// A file a machine pushes: its entry, its stored bytes, the sha a deletion `agreed` on, and the
+/// `base` a history was merged with.
+pub type PushedFile = (sync::Entry, Vec<u8>, Option<String>, Option<String>);
+
 impl Db {
     pub async fn connect(url: &str, sealer: Sealer) -> Result<Db, String> {
-        Ok(Db { sealer, connection: Connection::open(url, SCHEMA).await?, transactions: Arc::default() })
+        let connection = Connection::open(url, SCHEMA).await?;
+        one_live_run_per_bot(url).await;
+        Ok(Db { sealer, connection, transactions: Arc::default() })
     }
 
     pub(crate) async fn client(&self) -> Result<Arc<Client>, String> {
@@ -855,9 +942,12 @@ impl Db {
     ///
     /// A deletion that names the sha its sender `agreed` on is skipped when the hub holds another
     /// sha by then: another machine changed the file after the sender last saw it.
-    pub async fn sync_push(&self, account: Uuid, project: &str, files: Vec<(sync::Entry, Vec<u8>, Option<String>)>) -> Result<(), String> {
+    ///
+    /// A file that names the `base` it was merged with, empty for none, is refused with
+    /// `sync::STALE_REFUSAL`, the whole push with it, when the hub holds another copy by then.
+    pub async fn sync_push(&self, account: Uuid, project: &str, mut files: Vec<PushedFile>) -> Result<(), String> {
         let client = self.client().await?;
-        let paths: Vec<&str> = files.iter().map(|(e, _, _)| e.path.as_str()).collect();
+        let paths: Vec<&str> = files.iter().map(|(e, _, _, _)| e.path.as_str()).collect();
         let used: i64 = client
             .query_one("select coalesce(sum(octet_length(data)), 0)::bigint from project_files where account = $1", &[&account])
             .await
@@ -870,31 +960,41 @@ impl Db {
             .iter()
             .map(|r| (r.get(0), (r.get(1), r.get(2))))
             .collect();
+        let held = |path: &str| stored.get(path).map_or("", |(sha, _)| sha.as_str());
+        if files.iter().any(|(e, _, _, base)| base.as_ref().is_some_and(|base| base != held(&e.path))) {
+            return Err(sync::STALE_REFUSAL.into());
+        }
         let kept = |path: &str, agreed: &Option<String>| match (agreed, stored.get(path)) {
             (Some(agreed), Some((sha, _))) => agreed == sha,
             _ => true,
         };
         // The paths this push replaces: a deletion skipped for its stale `agreed` replaces nothing.
-        let replacing: BTreeSet<&str> = files.iter().filter(|(e, _, agreed)| kept(&e.path, agreed)).map(|(e, _, _)| e.path.as_str()).collect();
+        let replacing: BTreeSet<&str> = files.iter().filter(|(e, _, agreed, _)| kept(&e.path, agreed)).map(|(e, _, _, _)| e.path.as_str()).collect();
         let replaced: i64 = stored.iter().filter(|(path, _)| replacing.contains(path.as_str())).map(|(_, (_, size))| size).sum();
-        let incoming: i64 = files.iter().map(|(_, data, _)| data.len() as i64).sum();
+        let incoming: i64 = files.iter().map(|(_, data, _, _)| data.len() as i64).sum();
         if incoming > replaced && used - replaced + incoming > SYNC_QUOTA {
             return Err(format!("{}{} MB; delete old sessions to sync more", sync::LIMIT_REFUSAL, SYNC_QUOTA >> 20));
         }
-        for (entry, data, agreed) in &files {
+        // A file with a base goes first, so another machine's push landing since the check above
+        // refuses this push before any of its files is kept.
+        files.sort_by_key(|(_, _, _, base)| base.is_none());
+        for (entry, data, agreed, base) in &files {
             // `known` is false when the sender omitted the mode, so a stored true survives. A null column would be omitted on the way out, and a unix machine would never send the bit.
             let known = entry.executable.is_some();
             let bit = entry.executable.unwrap_or(false);
-            client
+            let written = client
                 .execute(
                     "insert into project_files (account, project, path, sha, modified, data, executable) values ($1, $2, $3, $4, $5, $6, $7) \
                      on conflict (account, project, path) do update set sha = excluded.sha, modified = excluded.modified, data = excluded.data, \
                      executable = case when $8 then excluded.executable else project_files.executable end \
-                     where $9::text is null or project_files.sha = $9",
-                    &[&account, &project, &entry.path, &entry.sha, &(entry.modified as i64), data, &bit, &known, agreed],
+                     where ($9::text is null or project_files.sha = $9) and ($10::text is null or project_files.sha = $10)",
+                    &[&account, &project, &entry.path, &entry.sha, &(entry.modified as i64), data, &bit, &known, agreed, base],
                 )
                 .await
                 .map_err(err)?;
+            if base.is_some() && written == 0 {
+                return Err(sync::STALE_REFUSAL.into());
+            }
         }
         Ok(())
     }

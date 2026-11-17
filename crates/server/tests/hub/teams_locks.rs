@@ -6,6 +6,7 @@ use super::teams_admission::{none, Crew};
 use super::*;
 use pinned_core::teams::TeamOp;
 use pinned_server::teams;
+use std::sync::mpsc;
 use uuid::Uuid;
 
 /// What a call refused for a lock it waited on too long answers.
@@ -558,6 +559,69 @@ fn a_session_whose_open_write_is_busy_twice_never_keeps_working_on_a_reserved_ru
     assert_eq!(open_tries(&crew), 2);
 }
 
+/// `open_write_busy` with its one refused try paused a second first, so a lock another connection
+/// asks for meanwhile is granted when the refused try ends, and the hub's retry waits on it.
+fn open_write_busy_after_pause(crew: &Crew) {
+    admin_on(
+        &crew.hub.database,
+        "create sequence open_tries;
+         create function open_busy() returns trigger language plpgsql as $$
+           begin
+             if old.reserved and not new.reserved and nextval('open_tries') = 1 then
+               perform pg_sleep(1);
+               raise exception 'lock held elsewhere' using errcode = '55P03';
+             end if;
+             return new;
+           end $$;
+         create trigger open_busy before update on team_runs for each row execute function open_busy()",
+    );
+}
+
+/// Takes `team_runs` in an exclusive lock, in a transaction of its own, once the first open try of
+/// a run is refused (`open_write_busy_after_pause`), and keeps it until the returned sender sends.
+/// The first receiver answers once the lock is granted.
+fn hold_team_runs_after_first_try(database: &str) -> (mpsc::Receiver<()>, mpsc::Sender<()>) {
+    let url = format!("{}/{database}", postgres());
+    let (granted_tx, granted) = mpsc::channel();
+    let (release, release_rx) = mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let (db, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls).await.unwrap();
+            tokio::spawn(connection);
+            let deadline = Instant::now() + WAIT;
+            while !db.query_one("select is_called and last_value = 1 from open_tries", &[]).await.unwrap().get::<_, bool>(0) {
+                assert!(Instant::now() < deadline, "the first open try was never refused");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            db.batch_execute("begin; lock table team_runs in access exclusive mode").await.unwrap();
+            granted_tx.send(()).unwrap();
+            let _ = tokio::task::spawn_blocking(move || release_rx.recv()).await;
+            db.batch_execute("rollback").await.unwrap();
+        });
+    });
+    (granted, release)
+}
+
+#[test]
+fn a_session_whose_open_and_reservation_reads_are_both_busy_ends_its_box() {
+    let crew = Crew::new("tl_open_read_busy");
+    let pages = crew.on_bot("Pages");
+    open_write_busy_after_pause(&crew);
+    let boxes = crew.boxes_created();
+    let (granted, release) = hold_team_runs_after_first_try(&crew.hub.database);
+    let reply = crew.call(&crew.bob, TeamOp::RunNow { workflow: pages.clone() });
+    // The lock was held when the retry came, and the read of the run's row after it waited on the same lock.
+    assert!(granted.try_recv().is_ok(), "the lock was granted while the first try was refused");
+    release.send(()).unwrap();
+    assert_eq!(reply, Err(BUSY.to_owned()), "the Run now hears that the hub was busy");
+    wait_for("the box of the run that never opened to end", || crew.hub.boxes.live().is_empty());
+    assert_eq!(crew.boxes_created(), boxes + 1, "one box was created");
+    assert_eq!(opened(&crew, &pages), 0, "no run opened");
+    assert_eq!(crew.live_of(&pages), Vec::<String>::new(), "the run is no longer live");
+    assert_eq!(open_tries(&crew), 1, "only the first try reached the write: the retry waited on the lock");
+}
+
 /// The open write of a reserved run is written by another connection, which commits, while the
 /// hub's own first try fails as a connection that dropped after its commit would. Needs `dblink`.
 fn open_written_elsewhere(crew: &Crew) {
@@ -893,7 +957,7 @@ fn a_waiting_event_whose_bot_read_is_busy_still_waits_and_starts_later() {
     wait_for("the start after the end to give up on the held table", || held.waiters() == 0);
     held.release();
 
-    assert!(crew.waiting(&pages) == 1 || opened(&crew, &pages) == 1, "the event still waits, or it started");
+    assert_eq!((crew.waiting(&pages), opened(&crew, &pages)), (1, 0), "the event still waits: its bot's read was busy, so it did not start");
     assert_eq!(crew.skipped(&pages), skipped, "nothing was counted as skipped");
     crew.reaper_pass();
     wait_for("the event to open its session", || opened(&crew, &pages) == 1 && crew.waiting(&pages) == 0);

@@ -1,6 +1,6 @@
 //! An in-memory GitHub repository behind the routes `github::Github` calls, for tests and the dev
 //! stack. It takes tokens that start `fake-` and nothing else, and logs every request except the
-//! `Authorization` header.
+//! `Authorization` header. Of that header it keeps only a `fake-` token; any other is kept as `NOT_FAKE`.
 
 use axum::body::Bytes;
 use axum::extract::State;
@@ -20,6 +20,9 @@ pub const HUB_LOGIN: &str = "pinned-hub";
 const OTHER_LOGIN: &str = "octo-reporter";
 /// The only headers kept of a request besides method, path and body.
 const KEPT_HEADERS: [&str; 3] = ["accept", "user-agent", "x-github-api-version"];
+
+/// What `tokens` holds for a request whose token is missing or does not start `fake-`: never the value.
+pub const NOT_FAKE: &str = "(not a fake- token)";
 
 /// One request the fake received.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,6 +70,8 @@ struct Repo {
     /// Seconds the clock has moved on from `CLOCK_START`; every new thing happens a second later.
     ticks: i64,
     requests: Vec<Request>,
+    /// The token of each request, as `tokens` tells it.
+    tokens: Vec<String>,
     /// Answers the next request with this instead of serving it: status, message and `x-ratelimit-remaining`.
     fail: Option<(u16, String, Option<String>)>,
     /// Serves the next POST, then holds its answer this long.
@@ -165,6 +170,11 @@ impl FakeGithub {
     /// Every request so far, oldest first.
     pub fn requests(&self) -> Vec<Request> {
         self.repo().requests.clone()
+    }
+
+    /// The bearer token of every request so far, oldest first: a `fake-` token as sent, anything else as `NOT_FAKE`.
+    pub fn tokens(&self) -> Vec<String> {
+        self.repo().tokens.clone()
     }
 
     /// `accept`, `user-agent` and `x-github-api-version` of the latest request, sorted by name.
@@ -405,8 +415,10 @@ async fn handle(State(shared): State<Shared>, method: Method, uri: Uri, headers:
 
 fn serve_now(shared: &Shared, method: Method, uri: Uri, headers: HeaderMap, body: Bytes) -> Response {
     let body_text = String::from_utf8_lossy(&body).into_owned();
-    let authorized = headers.get("authorization").and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")).is_some_and(|token| token.starts_with("fake-"));
+    let token = headers.get("authorization").and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")).filter(|token| token.starts_with("fake-"));
+    let authorized = token.is_some();
     let mut repo = lock(shared);
+    repo.tokens.push(token.unwrap_or(NOT_FAKE).to_owned());
     repo.requests.push(Request { method: method.to_string(), path: uri.path_and_query().map(|p| p.as_str().to_owned()).unwrap_or_default(), body: body_text.clone() });
     repo.last_headers = KEPT_HEADERS.iter().filter_map(|name| Some((name.to_string(), headers.get(*name)?.to_str().ok()?.to_owned()))).collect();
     if let Some((status, message, remaining)) = repo.fail.take() {

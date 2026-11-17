@@ -2,7 +2,7 @@
 // The hub-facing steps of e2e-empty.sh, run against a stack dev.sh up started. Prints emails and
 // Slack method names only: never a password, token or key.
 //
-//   TEAMS_DEV_DIR=<dir> node e2e-steps.mjs signin | slack | empty <old-accounts.json>
+//   TEAMS_DEV_DIR=<dir> node e2e-steps.mjs signin | slack | reports | empty <old-accounts.json>
 import crypto from "node:crypto";
 import fs from "node:fs";
 import { connect, signIn, post, readAccounts } from "./hub-client.mjs";
@@ -45,6 +45,21 @@ const steps = {
     }
   },
 
+  // Reporting is on, and a search answers: the hub's token is a fake- placeholder that only the fake GitHub
+  // takes, so an answer means the hub asked the fake and not the real GitHub.
+  async reports() {
+    const hub = await connect(await signIn("ana@example.test"));
+    try {
+      const status = await hub.call({ cmd: "reports", ask: { op: "status" } });
+      must(status?.available === true, `reporting is not available on the dev hub (got: ${JSON.stringify(status)})`);
+      const found = await hub.call({ cmd: "reports", ask: { op: "similar", title: "Upload stops at 90%" } });
+      must(Array.isArray(found), `the search did not answer a list (got: ${JSON.stringify(found)})`);
+      console.log(`reports are available and a search answered ${found.length} issues from the fake GitHub`);
+    } finally {
+      hub.close();
+    }
+  },
+
   // After a reset: the same three accounts with new passwords, no box, no Slack, no Upstash.
   async empty(oldFile) {
     const old = JSON.parse(fs.readFileSync(oldFile, "utf8"));
@@ -70,7 +85,7 @@ const steps = {
 
 const [name, ...rest] = process.argv.slice(2);
 if (!steps[name]) {
-  console.error("usage: e2e-steps.mjs signin | slack | empty <old-accounts.json>");
+  console.error("usage: e2e-steps.mjs signin | slack | reports | empty <old-accounts.json>");
   process.exit(2);
 }
 try {

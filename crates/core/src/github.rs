@@ -110,7 +110,12 @@ impl Client {
 
     async fn call(&self, agent: &str, method: reqwest::Method, path: &str, body: Option<&Value>) -> Result<Value, Error> {
         // No redirect is followed: a 307 would resend the token and the body to wherever it points.
-        let http = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().map_err(|e| Error::Unreachable(format!("GitHub unreachable: {e}")))?;
+        let mut http = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
+        // A proxy variable applies to the real GitHub only: a call to any other API goes straight to it.
+        if self.api != API {
+            http = http.no_proxy();
+        }
+        let http = http.build().map_err(|e| Error::Unreachable(format!("GitHub unreachable: {e}")))?;
         let mut request = http
             .request(method, format!("{}{path}", self.api))
             .timeout(self.timeout)

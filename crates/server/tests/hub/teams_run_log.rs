@@ -245,3 +245,22 @@ fn an_ended_run_still_reads_its_log_while_its_box_exists() {
     assert_eq!(rows(&hub, &format!("select state from team_runs where id = '{run}'")), vec![vec![Some("done".to_owned())]]);
     assert_eq!(log(tb.team, &mut tb.owner.client, &run), Ok(vec![line(NOON + 10, "bot", "All done.")]));
 }
+
+#[test]
+fn a_run_that_ended_done_is_listed_and_its_log_says_it_was_not_kept() {
+    let hub = TestHub::start_with_team_policy("run_log_ended_done", fast(), TeamPolicy::default());
+    let mut tb = TeamBox::new(&hub);
+    let run = tb.run(&hub).to_string();
+    transcript(&hub, &tb, &[typed("Fix the footer", 0), said("Done.", 10)]);
+    // Claude's Stop hook ends the turn, then its tab closes: the run ends done and its box goes with it.
+    hook(&tb.dir, json!({ "kind": "agent", "status": "done", "tab": tb.tab }));
+    let tab = tb.tab.clone();
+    assert!(on_node(&hub, &tb.box_id, |node| node.machine.close_tab(&tab)), "the session ends");
+    wait_long("the box to end", Duration::from_secs(15), || hub.boxes.live().is_empty());
+    wait_for("the run to end", || rows(&hub, &format!("select state from team_runs where id = '{run}'")) == vec![vec![Some("done".to_owned())]]);
+
+    let listed = op(tb.team, &mut tb.owner.client, json!({ "op": "runs" })).unwrap();
+    let mine = listed.as_array().unwrap().iter().find(|r| r["id"] == json!(run)).expect("runs lists the ended run");
+    assert_eq!(mine["state"], json!("done"));
+    assert_eq!(log(tb.team, &mut tb.owner.client, &run), Err("this run's log was not kept after it ended".into()), "its box and session are gone");
+}

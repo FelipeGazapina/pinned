@@ -18,6 +18,8 @@ pub const LINEAR_SUBCOMMAND: &str = "linear";
 pub const RUN_SUBCOMMAND: &str = "run";
 pub const STATUSLINE_SUBCOMMAND: &str = "statusline";
 pub const GUARD_SUBCOMMAND: &str = "guard";
+/// Claude Code's compaction hooks, each with the `hook` arg it runs and whether it marks the session compacting.
+const COMPACTION: [(&str, &str, bool); 2] = [("PreCompact", "compacting", true), ("PostCompact", "compacted", false)];
 /// The global orchestrator's own settings file, beside the one every other session loads.
 pub const GLOBAL_SETTINGS: &str = "claude-settings-global.json";
 /// The file tools the global orchestrator keeps, each held to its folders by the guard hook.
@@ -30,8 +32,8 @@ type Reply = Result<String, String>;
 /// goes on without it.
 const RECALL_WAIT: Duration = Duration::from_millis(300);
 
-/// How long a Stop hook waits for the machine's reply. The machine counts the queue it hands over
-/// there as delivered, and the turn ends without it when the hook stops waiting first.
+/// How long a Stop hook waits for the machine's reply. The turn ends without it when the hook
+/// stops waiting first, and the queue it would have handed over stays queued.
 const HAND_OVER_WAIT: Duration = Duration::from_secs(10);
 
 /// Claude Code settings layered onto the harnessed session via `--settings`, so the user's
@@ -59,6 +61,9 @@ fn settings(exe: &Path) -> serde_json::Value {
 pub(crate) fn settings_for(exe: &Path, team_box: bool) -> serde_json::Value {
     let mut hooks = serde_json::Map::new();
     for (_, arg, hook_event) in AgentStatus::ALL {
+        hooks.insert(hook_event.into(), serde_json::json!([{ "hooks": [hook_command(exe, arg)] }]));
+    }
+    for (hook_event, arg, _) in COMPACTION {
         hooks.insert(hook_event.into(), serde_json::json!([{ "hooks": [hook_command(exe, arg)] }]));
     }
     if team_box {
@@ -135,10 +140,24 @@ fn statusline_command(exe: &Path) -> String {
     format!("'{exe}' {STATUSLINE_SUBCOMMAND}")
 }
 
+/// The compaction a hook arg reports: `Some(true)` for `compacting` (PreCompact), `Some(false)` for
+/// `compacted` (PostCompact), and `None` for any other hook.
+pub fn compaction_of(arg: Option<&str>) -> Option<bool> {
+    COMPACTION.iter().find(|(_, name, _)| Some(*name) == arg).map(|(_, _, compacting)| *compacting)
+}
+
 /// Runs inside the hook process Claude Code spawns: read the hook payload from stdin and
 /// forward it to the tab that owns this session, and print what Claude Code should add to a
 /// prompt. Never fails loudly, so it can't disturb the agent.
 pub fn forward(arg: Option<&str>) {
+    if let Some(compacting) = compaction_of(arg) {
+        // The mark needs nothing from the payload, but Claude Code writes it to stdin, so it is read.
+        let _ = hook_payload();
+        if let (Ok(sock), Ok(tab)) = (std::env::var(SOCK_ENV), std::env::var(TAB_ENV)) {
+            tell(&sock, &Message::Compacting { tab, compacting });
+        }
+        return;
+    }
     if AgentStatus::ALL.iter().all(|(_, name, _)| Some(*name) != arg) {
         eprintln!("usage: pinned {SUBCOMMAND} <working|done|needs-input|failed>");
         return;
@@ -465,9 +484,28 @@ pub(crate) fn ask(message: Message) -> Reply {
     serde_json::from_str::<Reply>(&reply).map_err(|e| format!("pinned sent a bad answer {reply:?}: {e}"))?
 }
 
+/// What `listen`'s handler answers to one line, and what it learns once the answer is sent.
+pub struct Answer {
+    pub reply: Reply,
+    /// Told whether the reply reached a reader that still waits for it. A hook that stopped
+    /// waiting has hung up, so what the reply hands over never reached its session.
+    pub sent: Option<Box<dyn FnOnce(bool) + Send>>,
+}
+
+impl From<Reply> for Answer {
+    fn from(reply: Reply) -> Self {
+        Answer { reply, sent: None }
+    }
+}
+
 /// Answers every line on the socket with `on_message`'s reply. Each connection gets its own
 /// thread, so a slow Linear call for one session doesn't hold up another session's hooks.
 pub fn listen(sock: PathBuf, on_message: impl Fn(Message) -> Reply + Send + Sync + 'static) -> std::io::Result<()> {
+    answer(sock, move |message| on_message(message).into())
+}
+
+/// `listen`, with an `Answer` that learns whether its reply was sent.
+pub fn answer(sock: PathBuf, on_message: impl Fn(Message) -> Answer + Send + Sync + 'static) -> std::io::Result<()> {
     let _ = std::fs::remove_file(&sock);
     let listener = UnixListener::bind(&sock)?;
     let on_message = Arc::new(on_message);
@@ -477,12 +515,18 @@ pub fn listen(sock: PathBuf, on_message: impl Fn(Message) -> Reply + Send + Sync
             std::thread::spawn(move || {
                 let Ok(reader) = stream.try_clone() else { return };
                 for line in BufReader::new(reader).lines().map_while(Result::ok) {
-                    let reply = match serde_json::from_str(&line) {
+                    let answer = match serde_json::from_str(&line) {
                         Ok(message) => on_message(message),
-                        Err(e) => Err(format!("bad message {line:?}: {e}")),
+                        Err(e) => Answer::from(Err(format!("bad message {line:?}: {e}"))),
                     };
-                    // Hook forwarders hang up without reading the reply.
-                    let _ = writeln!(stream, "{}", serde_json::to_string(&reply).unwrap());
+                    let reply = serde_json::to_string(&answer.reply).unwrap();
+                    // Hook forwarders hang up without reading the reply. The reader takes the reply
+                    // at its newline, so `sent` learns its fate before the reader can act on it.
+                    let reached = stream.write_all(reply.as_bytes()).is_ok();
+                    if let Some(sent) = answer.sent {
+                        sent(reached);
+                    }
+                    let _ = stream.write_all(b"\n");
                 }
             });
         }
@@ -775,11 +819,29 @@ mod tests {
             serde_json::json!([{ "hooks": [{ "type": "command", "command": "'/Applications/pinned.app/Contents/MacOS/pinned' hook failed" }] }])
         );
         assert_eq!(
+            settings["hooks"]["PreCompact"],
+            serde_json::json!([{ "hooks": [{ "type": "command", "command": "'/Applications/pinned.app/Contents/MacOS/pinned' hook compacting" }] }]),
+            "every compaction, not only /compact, marks its tab"
+        );
+        assert_eq!(
+            settings["hooks"]["PostCompact"],
+            serde_json::json!([{ "hooks": [{ "type": "command", "command": "'/Applications/pinned.app/Contents/MacOS/pinned' hook compacted" }] }]),
+            "a compaction that ran clears its tab's mark"
+        );
+        assert_eq!(
             settings["statusLine"],
             serde_json::json!({ "type": "command", "command": "'/Applications/pinned.app/Contents/MacOS/pinned' statusline" })
         );
         assert_eq!(settings["skipDangerousModePermissionPrompt"], true, "a bypass session must not wait on Claude Code's warning");
         let _ = std::fs::remove_file(file);
+    }
+
+    #[test]
+    fn a_compaction_hook_arg_says_whether_the_session_is_compacting() {
+        assert_eq!(compaction_of(Some("compacting")), Some(true), "PreCompact marks the session compacting");
+        assert_eq!(compaction_of(Some("compacted")), Some(false), "PostCompact clears the mark");
+        assert_eq!(compaction_of(Some("done")), None, "a turn's hook is no compaction");
+        assert_eq!(compaction_of(None), None);
     }
 
     #[cfg(unix)]
