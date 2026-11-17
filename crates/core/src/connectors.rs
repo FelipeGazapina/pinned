@@ -1045,6 +1045,9 @@ pub struct ChangeCounts {
     /// Won claims whose run did not start.
     #[serde(default)]
     pub not_started: u64,
+    pub echoes: u64,
+    pub cooled: u64,
+    pub capped: u64,
 }
 
 impl Store {
@@ -1899,6 +1902,12 @@ fn fire_key(change: &linear::Change) -> String {
 
 fn is_change(trigger: &Trigger) -> bool {
     matches!(trigger, Trigger::LinearStatus { .. } | Trigger::LinearAssigned { .. })
+}
+
+/// The cap's log lines, for a test to read.
+#[cfg(test)]
+fn cap_lines() -> Vec<String> {
+    vec![]
 }
 
 /// A Linear change whose fire a workflow claimed.

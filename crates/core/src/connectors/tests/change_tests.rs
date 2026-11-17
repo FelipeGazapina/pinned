@@ -3,8 +3,9 @@
 use super::*;
 use std::sync::Arc;
 
-/// What the loopback Linear answers. It knows two queries, `{ viewer { id } }` and the changes
-/// read; any other request is kept in `unlisted`, answered 500, and fails the test.
+/// What the loopback Linear answers. It knows `{ viewer { id } }`, the changes read, and a move
+/// (the issue's team states, then `issueUpdate`); any other request is kept in `unlisted`,
+/// answered 500, and fails the test.
 #[derive(Default)]
 struct Fake {
     issues: Vec<Value>,
@@ -50,6 +51,11 @@ fn serve_linear(fake: Arc<Mutex<Fake>>) {
                 (fake.status, json!({}))
             } else if query.contains("issues(") {
                 (200, json!({ "data": { "issues": { "nodes": fake.issues.clone(), "pageInfo": { "endCursor": "c-1" } } } }))
+            } else if query.contains("issue(id: $id)") {
+                let states = json!([{ "id": "s-todo", "name": "Todo" }, { "id": "s-progress", "name": "In Progress" }]);
+                (200, json!({ "data": { "issue": { "identifier": "ENG-1", "team": { "name": "Engineering", "states": { "nodes": states } } } } }))
+            } else if query.contains("issueUpdate(") {
+                (200, json!({ "data": { "issueUpdate": { "success": true } } }))
             } else {
                 fake.unlisted.push(query.chars().take(80).collect());
                 (500, json!({ "errors": [{ "message": "the stand-in knows no such query" }] }))
@@ -630,4 +636,150 @@ fn a_change_trigger_says_what_changed() {
     assert!(trigger_text(&base(Some(change(IssueChangeKind::Assignee, None, Some("Bia"))))).contains("\nAssigned to Bia by Ana.\n"));
     assert!(trigger_text(&base(Some(change(IssueChangeKind::Assignee, Some("Bia"), None)))).contains("\nUnassigned by Ana.\n"));
     assert!(!serde_json::to_string(&base(None)).unwrap().contains("change"), "older apps see no change field");
+}
+
+/// A workflow that fires on a move into `to`.
+fn into(id: &str, to: &str, since: DateTime<Utc>) -> Connector {
+    Connector { trigger: Trigger::LinearStatus { from: String::new(), to: to.into(), scope: LinearScope::default(), by: By::Anyone }, ..ready_to_dev(id, since) }
+}
+
+/// E2 item 1: a move pinned made itself (its stage step) comes back as a change; that echo starts
+/// no workflow and is counted. The same move made by someone else, with no write of pinned's
+/// within `ECHO_WINDOW` of it, starts one run.
+#[test]
+fn pinneds_own_move_starts_nothing_and_the_same_move_by_someone_else_starts_one_run() {
+    let _api = slack::lock_api();
+    let _restore = RestoreLinear;
+    let fake = fake_with(vec![]);
+    let claims = Claims::default();
+    let workflow = Connector { columns: Columns { picked: "In Progress".into(), ..Columns::default() }, ..into("w1", "In Progress", ago(10)) };
+    let connectors = on(&claims, vec![workflow], "lin-e2-echo");
+    // Its stage step moves ENG-1 and ENG-3 into In Progress; ENG-2 nobody in pinned moved.
+    for issue in ["i-1", "i-3"] {
+        let moved_to = block_on(connectors.stage("w1", &Subject::LinearIssue { issue: issue.into() }, Stage::Picked));
+        assert_eq!(moved_to, Ok("moved the issue to In Progress".into()));
+    }
+    let now = Utc::now();
+    fake.lock().unwrap().issues = vec![
+        issue(1, now, vec![moved("h-1", now, "Todo", "In Progress")]),
+        issue(2, ago(1), vec![moved("h-2", ago(1), "Todo", "In Progress")]),
+        // Three minutes before pinned's write: not its echo.
+        issue(3, ago(3), vec![moved("h-3", ago(3), "Todo", "In Progress")]),
+    ];
+
+    let (runs, error) = check(&connectors);
+    assert_eq!(error, None);
+    let mut started: Vec<String> = runs.iter().map(|run| subject_key(&run.subject)).collect();
+    started.sort();
+    assert_eq!(started, ["i-2", "i-3"], "the echo starts nothing; the others start one run each");
+    assert_eq!(connectors.change_counts()["w1"].echoes, 1);
+    let (runs, error) = check(&connectors);
+    assert_eq!((runs.len(), error), (0, None), "the next check, which reads the echo again, starts none");
+    assert_eq!(connectors.change_counts()["w1"].echoes, 1, "and counts it once");
+    no_unlisted(&fake);
+}
+
+/// E2 item 2: two moves into the same status on one issue 5 minutes apart start the workflow
+/// once, the second counted as cooled; 16 minutes apart, twice.
+#[test]
+fn a_second_move_within_the_cooldown_starts_nothing_and_after_it_starts_again() {
+    let _api = slack::lock_api();
+    let _restore = RestoreLinear;
+    let fake = fake_with(vec![
+        issue(1, ago(7), vec![moved("h-1", ago(12), "Backlog", "Ready to Dev"), moved("h-2", ago(7), "Todo", "Ready to Dev")]),
+        issue(2, ago(4), vec![moved("h-3", ago(20), "Backlog", "Ready to Dev"), moved("h-4", ago(4), "Todo", "Ready to Dev")]),
+    ]);
+    let claims = Claims::default();
+    let connectors = on(&claims, vec![ready_to_dev("w1", ago(30))], "lin-e2-cooldown");
+
+    let (runs, error) = check(&connectors);
+    assert_eq!(error, None);
+    let on_issue = |issue: &str| runs.iter().filter(|run| run.subject == Subject::LinearIssue { issue: issue.into() }).count();
+    assert_eq!(on_issue("i-1"), 1, "5 minutes apart: one start");
+    assert_eq!(on_issue("i-2"), 2, "16 minutes apart: two starts");
+    assert_eq!(connectors.change_counts()["w1"].cooled, 1);
+    no_unlisted(&fake);
+}
+
+/// Five qualifying changes on ENG-`n` within the hour, between two workflows: into Ready to Dev
+/// (`w1`) and into In Progress (`w2`), each 15 minutes or more after its last start there.
+fn five_changes(n: u32, fifth: Value) -> Value {
+    issue(n, ago(10), vec![
+        moved("h-1", ago(50), "Backlog", "Ready to Dev"),
+        moved("h-2", ago(45), "Ready to Dev", "In Progress"),
+        moved("h-3", ago(30), "In Progress", "Ready to Dev"),
+        moved("h-4", ago(25), "Ready to Dev", "In Progress"),
+        fifth,
+    ])
+}
+
+/// E2 item 3: at most `ISSUE_CAP` change-trigger starts per issue per hour across the account's
+/// workflows: the fifth is skipped, counted, and logged once for the issue.
+#[test]
+fn a_fifth_change_on_one_issue_within_the_hour_is_capped_and_logged_once() {
+    let _api = slack::lock_api();
+    let _restore = RestoreLinear;
+    let fake = fake_with(vec![five_changes(46, moved("h-5", ago(10), "In Progress", "Ready to Dev"))]);
+    let claims = Claims::default();
+    let connectors = on(&claims, vec![into("w-cap-1", "Ready to Dev", ago(55)), into("w-cap-2", "In Progress", ago(55))], "lin-e2-cap");
+
+    let (runs, error) = check(&connectors);
+    assert_eq!(error, None);
+    assert_eq!(runs.len(), 4, "exactly four starts");
+    assert_eq!(connectors.change_counts()["w-cap-1"].capped, 1, "the fifth is capped");
+    assert_eq!(connectors.change_counts().get("w-cap-2").map_or(0, |counts| counts.capped), 0);
+    fake.lock().unwrap().issues = vec![five_changes(46, moved("h-5", ago(10), "In Progress", "Ready to Dev"))];
+    fake.lock().unwrap().issues[0]["history"]["nodes"].as_array_mut().unwrap().push(moved("h-6", Utc::now(), "Ready to Dev", "In Progress"));
+    let (runs, _) = check(&connectors);
+    assert_eq!(runs.len(), 0, "a sixth within the hour is capped too");
+    assert_eq!(connectors.change_counts()["w-cap-2"].capped, 1);
+    let lines: Vec<String> = cap_lines().into_iter().filter(|line| line.contains("i-46")).collect();
+    assert_eq!(lines.len(), 1, "one log line for the issue in the hour: {lines:?}");
+    assert!(lines[0].contains("w-cap-1") && !lines[0].contains("Export"), "{}", lines[0]);
+    no_unlisted(&fake);
+}
+
+/// E2 item 6: the guards run before the Ask step: a capped change asks no model.
+#[test]
+fn a_capped_change_asks_no_model() {
+    let _api = slack::lock_api();
+    let _restore = RestoreLinear;
+    let mut assigned = moved("h-5", ago(10), "Ready to Dev", "Ready to Dev");
+    assigned["fromState"] = Value::Null;
+    assigned["toState"] = Value::Null;
+    assigned["toAssignee"] = json!({ "id": "u-bia", "name": "Bia" });
+    let fake = fake_with(vec![five_changes(47, assigned)]);
+    let claims = Claims::default();
+    let ask = Ask {
+        model: "google/gemini-3.5-flash".into(),
+        instructions: "Classify.".into(),
+        questions: vec![Question { name: "agent".into(), ask: "Can a coding agent handle it?".into(), choices: vec!["yes".into(), "no".into()], stop_on: vec!["no".into()] }],
+    };
+    let asking = Connector {
+        ask: Some(ask),
+        trigger: Trigger::LinearAssigned { to: Assignee::Anyone, scope: LinearScope::default(), by: By::Anyone },
+        ..ready_to_dev("w-ask-3", ago(55))
+    };
+    let connectors = on(&claims, vec![into("w-ask-1", "Ready to Dev", ago(55)), into("w-ask-2", "In Progress", ago(55)), asking], "lin-e2-cap-ask");
+    claims.inner.write_key(VERCEL_KEY, "vck_testcap").unwrap();
+    let _reply = TestReply::set(r#"{"agent":"yes"}"#.into());
+    crate::vercel::take_test_inputs();
+
+    let (runs, error) = check(&connectors);
+    assert_eq!(error, None);
+    assert_eq!(runs.len(), 4);
+    assert_eq!(connectors.change_counts()["w-ask-3"].capped, 1);
+    assert_eq!(crate::vercel::take_test_inputs(), Vec::<String>::new(), "no model was asked");
+    no_unlisted(&fake);
+}
+
+/// E2 item 5: a store saved before the guards' counts reads them back as zeros.
+#[test]
+fn an_old_store_reads_the_guard_counts_as_zeros() {
+    let old = r#"{"change_counts":{"w1":{"skippedAway":2,"claimErrors":1,"released":0,"notStarted":1}},"connectors":[]}"#;
+    let store = serde_json::from_str::<Store>(old);
+    assert!(store.is_ok(), "an old store reads: {:?}", store.as_ref().err());
+    let counts = &store.unwrap().change_counts["w1"];
+    assert_eq!((counts.skipped_away, counts.claim_errors, counts.not_started), (2, 1, 1));
+    assert_eq!((counts.echoes, counts.cooled, counts.capped), (0, 0, 0));
 }
