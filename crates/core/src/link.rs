@@ -288,8 +288,7 @@ struct Syncer {
 /// Holds back a project's push after the hub refused it, by sync key, while its files to send
 /// stay the same. A push the hub takes ends the hold; changed files go at the next cycle. The
 /// project lists and pulls every cycle all the same.
-#[derive(Default)]
-struct PushBackoff(HashMap<String, Held>);
+struct PushBackoff(HashMap<String, Held>, fn() -> f64);
 
 struct Held {
     sending: u64,
@@ -302,7 +301,18 @@ fn share_key(share: &sync::PluginShare) -> String {
     format!("{} {}", sync::PLUGINS_KEY, share.claude_home.display())
 }
 
+impl Default for PushBackoff {
+    fn default() -> Self {
+        Self::with_draw(draw)
+    }
+}
+
 impl PushBackoff {
+    /// `draw` is the jitter source: a draw in `0.0..1.0` for each hold.
+    fn with_draw(draw: fn() -> f64) -> Self {
+        PushBackoff(HashMap::new(), draw)
+    }
+
     fn sync(&mut self, hub: &impl sync::Hub, state: &mut sync::State, checkout: &sync::Checkout, now: Instant) -> Result<sync::Synced, String> {
         let key = &checkout.project.key;
         let done = sync::sync_with(hub, state, checkout, SystemTime::now(), self.hold(key, now))?;
@@ -1658,9 +1668,13 @@ mod tests {
     }
 
     fn full_checkout(name: &str) -> (std::path::PathBuf, sync::Checkout, std::path::PathBuf) {
+        project_checkout("github.com/acme/app", name)
+    }
+
+    fn project_checkout(key: &str, name: &str) -> (std::path::PathBuf, sync::Checkout, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("pinned-link-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let project = sync::Project { key: "github.com/acme/app".into(), name: "app".into(), repo: "git@github.com:acme/app.git".into() };
+        let project = sync::Project { key: key.into(), name: "app".into(), repo: format!("git@github.com:{}.git", key.trim_start_matches("github.com/")) };
         let checkout = sync::Checkout { project, path: dir.join("app"), history: None, claude_home: Some(dir.join(".claude")) };
         let notes = sync::claude_dir(&dir.join(".claude"), &checkout.path).join("memory/notes.md");
         std::fs::create_dir_all(notes.parent().unwrap()).unwrap();
@@ -1672,7 +1686,7 @@ mod tests {
     /// Runs a sync cycle every `SYNC_EVERY` from `start`, calling `before` ahead of each, and
     /// returns the seconds at which a push reached the hub.
     fn pushed_at(hub: &FullHub, checkout: &sync::Checkout, cycles: u32, mut before: impl FnMut(u64)) -> Vec<u64> {
-        let (mut backoff, mut state) = (PushBackoff::default(), sync::State::default());
+        let (mut backoff, mut state) = (PushBackoff::with_draw(|| 0.5), sync::State::default());
         let start = Instant::now();
         let mut at = vec![];
         for cycle in 0..cycles {
@@ -1734,7 +1748,7 @@ mod tests {
         hub.room.set(false);
         append(&mac_history, &turn("mac", 2));
 
-        let (mut backoff, start, mut at) = (PushBackoff::default(), Instant::now(), vec![]);
+        let (mut backoff, start, mut at) = (PushBackoff::with_draw(|| 0.5), Instant::now(), vec![]);
         for cycle in 0..16 {
             let seconds = (SYNC_EVERY * cycle).as_secs();
             append(&mini_history, &turn("mini", 1000 + seconds));
@@ -1777,6 +1791,184 @@ mod tests {
             _ => {}
         });
         assert_eq!(at, [0, 20, 40, 60, 80]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A hub for the whole account: while `room` is false it refuses a push that grows what it
+    /// holds, across every project, the way the hub's limit does. `busy` refuses every push with an
+    /// error that is not the limit's. It counts the push calls it gets.
+    #[derive(Default)]
+    struct AccountHub {
+        files: std::cell::RefCell<std::collections::BTreeMap<(String, String), sync::File>>,
+        room: std::cell::Cell<bool>,
+        busy: std::cell::Cell<bool>,
+        pushes: std::cell::Cell<usize>,
+    }
+
+    impl sync::Hub for AccountHub {
+        fn list(&self, project: &str) -> Result<Vec<sync::Entry>, String> {
+            Ok(self.files.borrow().iter().filter(|((p, _), _)| p == project).map(|(_, f)| f.entry.clone()).collect())
+        }
+        fn push(&self, project: &str, files: Vec<sync::File>) -> Result<(), String> {
+            self.pushes.set(self.pushes.get() + 1);
+            if self.busy.get() {
+                return Err("the hub is restarting".into());
+            }
+            let key = |path: &str| (project.to_owned(), path.to_owned());
+            let replaced: u64 = files.iter().filter_map(|f| self.files.borrow().get(&key(&f.entry.path)).map(|old| old.entry.size)).sum();
+            let incoming: u64 = files.iter().map(|f| f.entry.size).sum();
+            if !self.room.get() && incoming > replaced {
+                return Err(format!("{}1024 MB; nothing is deleted, the push is refused", sync::LIMIT_REFUSAL));
+            }
+            for file in files {
+                let key = key(&file.entry.path);
+                if file.data.is_some() {
+                    self.files.borrow_mut().insert(key, file);
+                } else {
+                    self.files.borrow_mut().remove(&key);
+                }
+            }
+            Ok(())
+        }
+        fn pull(&self, project: &str, paths: Vec<String>) -> Result<Vec<sync::File>, String> {
+            Ok(paths.iter().filter_map(|p| self.files.borrow().get(&(project.to_owned(), p.clone())).cloned()).collect())
+        }
+        fn mark_executable(&self, _: &str, _: Vec<sync::ModeRepair>) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    /// Text whose length grows with `seconds`, so a file rewritten later is a bigger one on the hub.
+    fn grown(seconds: u64) -> String {
+        (0..seconds * 10 + 10).map(|i| format!("{:08x}", (i as u32).wrapping_mul(2654435761) ^ seconds as u32)).collect()
+    }
+
+    /// Runs one sync of each checkout every `SYNC_EVERY` for `cycles` cycles, calling `before` ahead
+    /// of each, and returns the push calls the hub took, as (second, calls) for each cycle that took any.
+    fn account_pushes(hub: &AccountHub, backoff: &mut PushBackoff, checkouts: &[&sync::Checkout], cycles: u32, mut before: impl FnMut(u64)) -> Vec<(u64, usize)> {
+        let (mut state, start) = (sync::State::default(), Instant::now());
+        let mut calls = vec![];
+        for cycle in 0..cycles {
+            let seconds = (SYNC_EVERY * cycle).as_secs();
+            before(seconds);
+            let pushes = hub.pushes.get();
+            for checkout in checkouts {
+                let _ = backoff.sync(hub, &mut state, checkout, start + SYNC_EVERY * cycle);
+            }
+            if hub.pushes.get() > pushes {
+                calls.push((seconds, hub.pushes.get() - pushes));
+            }
+        }
+        calls
+    }
+
+    #[test]
+    fn a_limit_refusal_holds_the_account_to_eight_push_calls_in_thirty_minutes_at_the_shortest_jitter() {
+        // The first hold is `PUSH_HOLD_MIN`, 20 s, and at the shortest jitter (draw 0.0) it is 0.75 of
+        // that: 15 s. Each refused probe doubles the step and the hold is 0.75 of that: 30, 60, 120,
+        // 240 s, then 600 s (640 s capped), 450 s at the shortest. A probe is the first cycle at or after
+        // the hold ends, and cycles come every 20 s, so the probes fall at 0, 20, 60, 120, 240, 480,
+        // 940 and 1400 s: eight in the 1800 s. The next would be at 1860 s.
+        let (dir, checkout, notes) = full_checkout("account-limit");
+        let hub = AccountHub::default();
+        let mut backoff = PushBackoff::with_draw(|| 0.0);
+        let calls = account_pushes(&hub, &mut backoff, &[&checkout], 90, |seconds| std::fs::write(&notes, grown(seconds)).unwrap());
+        assert_eq!(calls, [(0, 1), (20, 1), (60, 1), (120, 1), (240, 1), (480, 1), (940, 1), (1400, 1)]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_limit_refusal_holds_the_other_projects_of_the_account_too() {
+        let (dir, app, app_notes) = project_checkout("github.com/acme/app", "account-app");
+        let (other_dir, site, site_notes) = project_checkout("github.com/acme/site", "account-site");
+        let hub = AccountHub::default();
+        let mut backoff = PushBackoff::with_draw(|| 0.0);
+        let calls = account_pushes(&hub, &mut backoff, &[&app, &site], 90, |seconds| {
+            std::fs::write(&app_notes, grown(seconds)).unwrap();
+            std::fs::write(&site_notes, grown(seconds)).unwrap();
+        });
+        assert_eq!(calls, [(0, 1), (20, 1), (60, 1), (120, 1), (240, 1), (480, 1), (940, 1), (1400, 1)], "the site's push waits with the app's, one call per probe");
+        let _ = (std::fs::remove_dir_all(dir), std::fs::remove_dir_all(other_dir));
+    }
+
+    fn first_retry(draw: fn() -> f64, name: &str) -> u64 {
+        let (dir, checkout, notes) = full_checkout(name);
+        let hub = AccountHub::default();
+        let mut backoff = PushBackoff::with_draw(draw);
+        let calls = account_pushes(&hub, &mut backoff, &[&checkout], 3, |seconds| std::fs::write(&notes, grown(seconds)).unwrap());
+        let _ = std::fs::remove_dir_all(dir);
+        assert_eq!(calls[0], (0, 1), "the first push is refused");
+        calls[1].0
+    }
+
+    #[test]
+    fn a_limit_hold_varies_its_first_wait_by_the_jitter_either_way() {
+        // 20 s is `PUSH_HOLD_MIN`; `BACKOFF_JITTER` puts it at 15 s, 20 s or 25 s. The first probe is the
+        // first cycle at or after the hold: 20 s for 15 s or 20 s, 40 s for 25 s.
+        assert_eq!(first_retry(|| 0.0, "jitter-short"), 20);
+        assert_eq!(first_retry(|| 0.5, "jitter-middle"), 20);
+        assert_eq!(first_retry(|| 1.0, "jitter-long"), 40);
+    }
+
+    #[test]
+    fn a_push_that_only_deletes_goes_out_while_the_account_is_held() {
+        let (dir, checkout, notes) = full_checkout("held-deletes");
+        let old = notes.with_file_name("old.md");
+        let hub = AccountHub::default();
+        hub.room.set(true);
+        let mut backoff = PushBackoff::with_draw(|| 0.0);
+        let calls = account_pushes(&hub, &mut backoff, &[&checkout], 4, |seconds| match seconds {
+            0 => {
+                std::fs::write(&old, "old notes").unwrap();
+                std::fs::write(&notes, grown(0)).unwrap();
+            }
+            20 => {
+                hub.room.set(false);
+                std::fs::write(&notes, grown(20)).unwrap();
+            }
+            60 => std::fs::remove_file(&old).unwrap(),
+            _ => {}
+        });
+        // 0 s taken; 20 s refused; 40 s the probe is refused again, the hold now 30 s; 60 s is inside it,
+        // and the only thing sent is the deletion, which the hub takes because it grows nothing.
+        assert_eq!(calls, [(0, 1), (20, 1), (40, 1), (60, 1)], "at 60 s the deletion alone goes out, once");
+        assert!(!hub.files.borrow().contains_key(&("github.com/acme/app".to_owned(), "claude/memory/old.md".to_owned())), "the hub took the deletion");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn once_the_hub_has_room_the_next_probe_is_taken_and_syncing_resumes_every_cycle() {
+        let (dir, checkout, notes) = full_checkout("room-again");
+        let hub = AccountHub::default();
+        let mut backoff = PushBackoff::with_draw(|| 0.0);
+        let calls = account_pushes(&hub, &mut backoff, &[&checkout], 10, |seconds| {
+            if seconds == 100 {
+                hub.room.set(true);
+            }
+            std::fs::write(&notes, grown(seconds)).unwrap();
+        });
+        // Probes refused at 0, 20 and 60 s (holds of 15, 30 and 60 s); the hub has room from 100 s, so
+        // the probe at 120 s is taken, and every cycle after it sends the changed file at once.
+        assert_eq!(calls, [(0, 1), (20, 1), (60, 1), (120, 1), (140, 1), (160, 1), (180, 1)]);
+        assert_eq!(hub.files.borrow()[&("github.com/acme/app".to_owned(), "claude/memory/notes.md".to_owned())].entry.sha, sync::sha(grown(180).as_bytes()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_refusal_that_is_not_the_limit_holds_nothing_and_the_next_cycle_sends_again() {
+        let (dir, checkout, notes) = full_checkout("busy-hub");
+        let hub = AccountHub::default();
+        hub.busy.set(true);
+        let mut backoff = PushBackoff::with_draw(|| 0.0);
+        let mut state = sync::State::default();
+        let start = Instant::now();
+        let mut errors = vec![];
+        for cycle in 0..4 {
+            std::fs::write(&notes, grown(SYNC_EVERY.as_secs() * cycle as u64)).unwrap();
+            errors.push(backoff.sync(&hub, &mut state, &checkout, start + SYNC_EVERY * cycle).err());
+        }
+        assert_eq!(errors, vec![Some("the hub is restarting".to_owned()); 4], "each refusal is an error of the sync, as before");
+        assert_eq!(hub.pushes.get(), 4, "a refusal that is not the limit is not held: every cycle sends again");
         let _ = std::fs::remove_dir_all(dir);
     }
 
