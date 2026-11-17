@@ -94,6 +94,8 @@ const REMOTE_CHECK: Duration = Duration::from_secs(60);
 const HOLD_CLEAR: Duration = Duration::from_secs(5);
 /// An idle notice this soon after a submit may have been on its way before it: the submit still counts.
 const IDLE_NOTICE_GRACE: Duration = Duration::from_secs(10);
+/// How long a compaction's mark holds when no end comes for it: the tab then reads as it did before.
+const COMPACT_WAIT: Duration = Duration::from_secs(600);
 const NO_PROJECT_WORK: &str = "the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain";
 
 pub type Event = MachineEvent;
@@ -618,6 +620,12 @@ struct Tab {
 }
 
 impl Tab {
+    /// Whether claude is compacting: its PreCompact mark holds until PostCompact, the turn's end, or
+    /// the time COMPACT_WAIT lapses.
+    fn compacting(&self) -> bool {
+        self.compacting_since.is_some_and(|at| at.elapsed() < COMPACT_WAIT)
+    }
+
     /// What reopens the tab's conversation, once claude has reported one.
     /// A sign-in tab has no conversation to resume.
     fn saved(&self) -> Option<sessions::Saved> {
@@ -659,6 +667,7 @@ impl Tab {
     /// from the global orchestrator started.
     fn view(&self, id: &str, turns: &HashSet<PathBuf>, queued: &HashMap<String, u32>, work: &HashMap<String, crate::delegate::WorkCost>) -> TabView {
         let role = role_of(&self.env);
+        let compacting = self.compacting();
         TabView {
             id: id.to_owned(),
             cwd: self.cwd.display().to_string(),
@@ -666,12 +675,17 @@ impl Tab {
             program: self.program,
             bypass: self.bypass,
             running: self.live(),
-            status: self.status,
+            // A compaction is work: the tab reads busy, unless it waits on the user or failed.
+            status: match self.status {
+                Some(AgentStatus::NeedsInput | AgentStatus::Failed) => self.status,
+                _ if compacting => Some(AgentStatus::Working),
+                _ => self.status,
+            },
             title: self.title.clone(),
             message: self.message.clone(),
             resume_at: self.resume_at,
             held: self.held_at_limit,
-            compacting: false,
+            compacting,
             connector: self.env.iter().find(|(k, _)| k == CONNECTOR_ENV).map(|(_, v)| v.clone()),
             subject: session_of(&self.env).map(|(_, subject)| subject),
             opened: tab_number(id).into(),
@@ -4628,7 +4642,10 @@ impl Machine {
                     // After the event: the turn that just ended did not answer what the hook hands over.
                     return hooks::Answer { reply, sent: Some(Box::new(move |read| machine.handed(taken, read))) };
                 }
-                Message::Compacting { .. } => Ok(String::new()),
+                Message::Compacting { tab, compacting } => {
+                    machine.record_compacting(&tab, compacting);
+                    Ok(String::new())
+                }
                 Message::Usage { usage, account } => {
                     machine.record_usage(account.unwrap_or_else(accounts::default_account), usage);
                     Ok(String::new())
@@ -6532,6 +6549,24 @@ impl Machine {
         Some(turns)
     }
 
+    /// Marks the tab compacting from PreCompact and clears the mark at PostCompact. The mark lapses
+    /// on its own after COMPACT_WAIT, and a timer tells the clients then, as no other event may come.
+    fn record_compacting(&self, tab: &str, compacting: bool) {
+        if self.tab(tab, |t| t.compacting_since = compacting.then(Instant::now)).is_err() {
+            return;
+        }
+        self.emit_tabs();
+        if compacting {
+            let me = self.me.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(COMPACT_WAIT);
+                if let Some(machine) = me.upgrade() {
+                    machine.emit_tabs();
+                }
+            });
+        }
+    }
+
     fn record_status(&self, tab: &str, event: &AgentEvent) {
         // Claude says it waits for input a while after every finished turn too, which asks nothing.
         let was_done = self.tab(tab, |t| t.status == Some(AgentStatus::Done)).unwrap_or(false);
@@ -6568,6 +6603,10 @@ impl Machine {
             }
             if matches!(event.status, AgentStatus::Done | AgentStatus::Failed) {
                 t.turn_pending = None;
+            }
+            // A turn's start or end settles any compaction the hooks marked; a question does not.
+            if event.status != AgentStatus::NeedsInput {
+                t.compacting_since = None;
             }
             if matches!(event.status, AgentStatus::Working | AgentStatus::Failed) {
                 t.background_wait = None;
