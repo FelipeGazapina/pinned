@@ -12,8 +12,10 @@ use uuid::Uuid;
 
 /// The index that holds the rule.
 const INDEX: &str = "team_runs_one_live_per_bot";
-/// What a hub logs when it starts on a database where one bot has two live runs.
-const NOT_ENFORCED: &str = "pinned-server: one live run per bot: 1 bot has more than one live run; the rule is not enforced until they end";
+/// What a hub logs when it starts on a database where bot `workflow` of team `team` has two live runs.
+fn not_enforced(team: Uuid, workflow: Uuid) -> String {
+    format!("pinned-server: one live run per bot: 1 bot has more than one live run; the rule starts on the first start after they end; bots (team, workflow): ({team}, {workflow})")
+}
 /// The database `opens_the_database_the_boot_test_names` opens, when the boot test runs it.
 const CHILD_DATABASE: &str = "PINNED_ONE_LIVE_RUN_DATABASE";
 
@@ -46,6 +48,32 @@ fn the_database_refuses_a_second_live_run_of_one_bot() {
     assert_eq!(insert(&second), Ok(()), "once the first ended, the bot runs again");
 }
 
+/// How long a hub's statement waits on a lock before Postgres refuses it.
+const LOCK_LIMIT: Duration = Duration::from_secs(2);
+
+/// Whether a backend of `hub`'s database comes to wait on a lock within `LOCK_LIMIT`: the turn's
+/// write of a live run, held up by the other path's one until that commits.
+fn a_write_waits_on_a_lock(hub: &TestHub) -> bool {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        let deadline = Instant::now() + LOCK_LIMIT;
+        while Instant::now() < deadline {
+            let waiting: i64 = db
+                .query_one("select count(*) from pg_stat_activity where datname = current_database() and pid <> pg_backend_pid() and wait_event_type = 'Lock'", &[])
+                .await
+                .unwrap()
+                .get(0);
+            if waiting > 0 {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        false
+    })
+}
+
 #[test]
 fn a_live_run_written_outside_the_turn_makes_the_turns_event_wait() {
     let crew = Crew::new("one_live_race");
@@ -63,7 +91,7 @@ fn a_live_run_written_outside_the_turn_makes_the_turns_event_wait() {
     });
     std::thread::scope(|scope| {
         let ours = scope.spawn(|| crew.found(crew.labeled(&id, 1)));
-        std::thread::sleep(Duration::from_secs(1));
+        assert!(a_write_waits_on_a_lock(&crew.hub), "the turn's write of a live run waits on the other path's");
         crew.hub.runtime.block_on(other.batch_execute("commit")).unwrap();
         assert_eq!(ours.join().unwrap(), Ok(()));
     });
@@ -117,7 +145,7 @@ fn opens_the_database_the_boot_test_names() {
 fn a_hub_on_two_live_runs_of_one_bot_starts_and_sets_the_rule_once_one_ends() {
     let mut hub = TestHub::start("one_live_boot");
     let ann = person(&hub, "ann@example.test");
-    let (first, second, docs) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+    let (first, second, docs, triage) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
     // Rows an older hub left: two live runs of bot triage, and one of bot docs.
     admin_on(
         &hub.database,
@@ -125,7 +153,7 @@ fn a_hub_on_two_live_runs_of_one_bot_starts_and_sets_the_rule_once_one_ends() {
             "drop index if exists {INDEX};
              insert into teams (id, name, owner) values ('{t}', 'crew', '{t}');
              insert into team_runs (id, team, workflow, started_by, state) values
-               ('{first}', '{t}', 'triage', '{{}}', 'working'), ('{second}', '{t}', 'triage', '{{}}', 'waiting'), ('{docs}', '{t}', 'docs', '{{}}', 'working');",
+               ('{first}', '{t}', '{triage}', '{{}}', 'working'), ('{second}', '{t}', '{triage}', '{{}}', 'waiting'), ('{docs}', '{t}', 'docs', '{{}}', 'working');",
             t = ann.id
         ),
     );
@@ -134,7 +162,7 @@ fn a_hub_on_two_live_runs_of_one_bot_starts_and_sets_the_rule_once_one_ends() {
     assert!(!index_exists(&hub), "the rule is not set while two live runs of one bot clash");
     assert_eq!(states(&hub), before, "no run was ended or changed");
     let log = boot_log(&hub);
-    assert!(log.lines().any(|line| line == NOT_ENFORCED), "the start says so:\n{log}");
+    assert!(log.lines().any(|line| line == not_enforced(ann.id, triage)), "the start says so:\n{log}");
 
     admin_on(&hub.database, &format!("update team_runs set state = 'stopped', ended_at = now() where id = '{second}'"));
     hub.restart();
@@ -163,7 +191,7 @@ fn a_waiting_run_keeps_its_place_when_its_bot_has_a_live_run_the_turn_did_not_re
         db
     });
     crew.stop(&crew.live_of(&docs)[0]);
-    std::thread::sleep(Duration::from_secs(1));
+    assert!(a_write_waits_on_a_lock(&crew.hub), "the turn's write of a live run waits on the other path's");
     crew.hub.runtime.block_on(other.batch_execute("commit")).unwrap();
     // The team's next turn comes after the one docs' end took.
     assert_eq!(run_now(&docs)["state"], json!("working"), "docs runs again");

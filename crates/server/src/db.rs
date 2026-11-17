@@ -710,31 +710,57 @@ async fn one_live_run_per_bot(url: &str) {
         set_one_live_run(&client).await.map_err(|e| format!("Postgres refused it ({})", e.code().map_or("no code", |c| c.code())))
     };
     match set.await {
-        Ok(0) => {}
-        Ok(1) => eprintln!("pinned-server: one live run per bot: 1 bot has more than one live run; the rule is not enforced until they end"),
-        Ok(n) => eprintln!("pinned-server: one live run per bot: {n} bots have more than one live run; the rule is not enforced until they end"),
+        Ok(clashing) if clashing.is_empty() => {}
+        Ok(clashing) => eprintln!("pinned-server: {}", clashing_line(&clashing)),
         Err(why) => eprintln!("pinned-server: one live run per bot: the rule was not set: {why}; the next start tries again"),
     }
 }
 
-/// How many bots have more than one live run; when none, the index is set. A start that finds the
+/// How many bots of the start's log `clashing_line` names; the rest it counts.
+const CLASHING_NAMED: usize = 20;
+
+/// What a start logs when the bots `clashing` (team, workflow) have more than one live run: their
+/// count, and the ids of the first `CLASHING_NAMED`. A workflow id that is not a uuid is not shown.
+fn clashing_line(clashing: &[(Uuid, String)]) -> String {
+    let count = match clashing.len() {
+        1 => "1 bot has".to_owned(),
+        n => format!("{n} bots have"),
+    };
+    let named: Vec<String> = clashing
+        .iter()
+        .take(CLASHING_NAMED)
+        .map(|(team, workflow)| format!("({team}, {})", Uuid::parse_str(workflow).map_or_else(|_| "an id that is not a uuid".to_owned(), |w| w.to_string())))
+        .collect();
+    let more = match clashing.len().saturating_sub(CLASHING_NAMED) {
+        0 => String::new(),
+        n => format!(" and {n} more"),
+    };
+    format!(
+        "one live run per bot: {count} more than one live run; the rule starts on the first start after they end; bots (team, workflow): {}{more}",
+        named.join(", ")
+    )
+}
+
+/// The bots (team, workflow) that have more than one live run; when none, the index is set. A start that finds the
 /// index takes no lock. Otherwise the count and the index are one transaction holding `share row
 /// exclusive` on `team_runs` (it waits as long as it must, as a needed schema statement does): no
 /// run is written between the two, and a second hub starting meanwhile waits for it, then finds the
 /// index. That lock blocks writes of team runs, not reads, for one scan of the table and the sort
 /// of its live rows. Dropping `client` on an error rolls the transaction back.
-async fn set_one_live_run(client: &Client) -> Result<i64, tokio_postgres::Error> {
+async fn set_one_live_run(client: &Client) -> Result<Vec<(Uuid, String)>, tokio_postgres::Error> {
     const FOUND: &str = "select to_regclass($1::text) is not null";
     if client.query_one(FOUND, &[&ONE_LIVE_RUN_INDEX]).await?.get(0) {
-        return Ok(0);
+        return Ok(vec![]);
     }
     let live = crate::teams::db::LIVE;
     client.batch_execute("begin; set local lock_timeout = 0; lock table team_runs in share row exclusive mode").await?;
-    let clashing: i64 = client
-        .query_one(&format!("select count(*) from (select 1 from team_runs where state in {live} group by team, workflow having count(*) > 1) clashing"), &[])
+    let clashing: Vec<(Uuid, String)> = client
+        .query(&format!("select team, workflow from team_runs where state in {live} group by team, workflow having count(*) > 1 order by team, workflow"), &[])
         .await?
-        .get(0);
-    if clashing == 0 {
+        .iter()
+        .map(|r| (r.get(0), r.get(1)))
+        .collect();
+    if clashing.is_empty() {
         client.batch_execute(&format!("create unique index if not exists {ONE_LIVE_RUN_INDEX} on team_runs (team, workflow) where state in {live}")).await?;
     }
     client.batch_execute("commit").await?;
