@@ -8228,8 +8228,10 @@ fn another_accounts_agent_reaches_none_of_an_accounts_machines_connections_invit
         } }))
         .unwrap();
     let connector = workflow["id"].as_str().unwrap().to_owned();
+    agents_run_their_mcp(&ana.dir);
+    let anas_plain = plain_session(&mut ana, &site);
     assert_eq!(
-        act(&ana.dir, &ana.tab, "stage", json!({ "connector": connector, "issue": "uuid-1", "stage": "coding" })),
+        act_in_session(&ana.node.machine, &ana.dir, &anas_plain, "direct", None, "stage", json!({ "connector": connector, "issue": "uuid-1", "stage": "coding" })),
         Err("only the session that runs this workflow can do that".into()),
         "a session that runs no workflow reaches none of the account's"
     );
@@ -8272,13 +8274,16 @@ fn another_accounts_agent_reaches_none_of_an_accounts_machines_connections_invit
         assert_eq!(on(&bob, Some(ana.machine.as_str()), action, args), none(&ana.machine), "{action}");
     }
     assert_eq!(on(&bob, Some("ana-vps"), "update_self", json!({})), none("ana-vps"), "a confirm on another account's machine is refused before it waits");
+    agents_run_their_mcp(&bob.dir);
+    let bobs_site = bob.dir.join("site").display().to_string();
+    let bobs_plain = plain_session(&mut bob, &bobs_site);
     for (action, args) in [
         ("stage", json!({ "connector": connector, "issue": "uuid-1", "stage": "coding" })),
         ("slack_reply", json!({ "connector": connector, "channel": "C1", "thread": "1.2", "text": "mine now" })),
         ("linear_create", json!({ "connector": connector, "channel": "C1", "thread": "1.2", "title": "x", "description": "y" })),
         ("linear_take", json!({ "connector": connector, "channel": "C1", "thread": "1.2", "issue": "ENG-7" })),
     ] {
-        assert_eq!(act(&bob.dir, &bob.tab, action, args), Err("only the session that runs this workflow can do that".into()), "bob's session runs no workflow, so {action} reaches no connection");
+        assert_eq!(act_in_session(&bob.node.machine, &bob.dir, &bobs_plain, "direct", None, action, args), Err("only the session that runs this workflow can do that".into()), "bob's session runs no workflow, so {action} reaches no connection");
     }
     // A session of bob's that runs ana's workflow id still acts only on bob's own workflows and connections.
     let runs_anas = |bob: &mut Agent, subject: Subject| {
@@ -8289,7 +8294,6 @@ fn another_accounts_agent_reaches_none_of_an_accounts_machines_connections_invit
         });
         session
     };
-    agents_run_their_mcp(&bob.dir);
     let bobs_on_issue = runs_anas(&mut bob, issue("uuid-1"));
     let bobs_on_thread = runs_anas(&mut bob, Subject::SlackThread { channel: "C1".into(), thread: "1.2".into() });
     assert_eq!(act_in_session(&bob.node.machine, &bob.dir, &bobs_on_issue, "direct", None, "stage", json!({ "connector": connector, "issue": "uuid-1", "stage": "coding" })), Err("the workflow was deleted".into()));
@@ -12024,6 +12028,17 @@ fn act_in_session(machine: &Machine, dir: &Path, tab: &str, how: &str, named: Op
     mcp_answer(&std::fs::read_to_string(&out).unwrap())
 }
 
+/// Opens a session in folder `path` on `agent`'s machine that runs no workflow, and answers its tab
+/// once the hub sees it running.
+fn plain_session(agent: &mut Agent, path: &str) -> String {
+    let tab = agent.node.machine.open_tab(Some(path.to_owned()), false).unwrap();
+    agent.node.machine.start_claude(&tab, 80, 24).unwrap();
+    agent.client.wait("the plain session at the hub", |f| {
+        f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == tab.as_str() && t["running"] == true)
+    });
+    tab
+}
+
 /// How a test's `act` reaches the node.
 #[derive(Clone, Copy)]
 enum Via<'a> {
@@ -12058,11 +12073,7 @@ fn workflows_of(name: &str) -> Workflows {
     };
     let (a, b) = (save("A"), save("B"));
     agents_run_their_mcp(&ana.dir);
-    let plain = ana.node.machine.open_tab(Some(site), false).unwrap();
-    ana.node.machine.start_claude(&plain, 80, 24).unwrap();
-    ana.client.wait("the plain session at the hub", |f| {
-        f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == plain.as_str() && t["running"] == true)
-    });
+    let plain = plain_session(&mut ana, &site);
     Workflows { account: uuid::Uuid::parse_str(&account.id).unwrap(), hub, ana, plain, a, b }
 }
 
