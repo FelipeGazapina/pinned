@@ -1763,4 +1763,26 @@ mod tests {
         assert_eq!(at, [0, 20, 40, 60, 80]);
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    #[test]
+    fn a_user_action_sends_a_refused_project_again_at_once_instead_of_after_its_hold() {
+        let (dir, file, machine, shared, _frames) = stopped_sync_fixture("wake");
+        let app = dir.join("app");
+        std::fs::create_dir_all(app.join(".claude/skills")).unwrap();
+        for args in [&["init", "-q"][..], &["remote", "add", "origin", "git@github.com:acme/app.git"]] {
+            assert!(std::process::Command::new("git").arg("-C").arg(&app).args(args).status().unwrap().success());
+        }
+        std::fs::write(app.join(".claude/skills/skill.md"), "a skill").unwrap();
+        machine.open_project(app);
+        let hub = FullHub::default();
+        let mut syncer = Syncer { shared_projects: HashSet::from(["github.com/acme/app".to_owned()]), ..Syncer::default() };
+        syncer.cycle(&shared, &hub, &machine, &file);
+        assert_eq!(hub.pushes.get(), 1, "the hub refuses the first push");
+        syncer.cycle(&shared, &hub, &machine, &file);
+        assert_eq!(hub.pushes.get(), 1, "the refused push waits out its hold");
+        shared.sync_now.store(true, Ordering::SeqCst);
+        syncer.cycle(&shared, &hub, &machine, &file);
+        assert_eq!(hub.pushes.get(), 2, "a user action sends the refused push again at once");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
