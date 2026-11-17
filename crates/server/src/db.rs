@@ -231,7 +231,15 @@ alter table team_runs add column if not exists reserved_at timestamptz;
 -- A run's limit call the limits tick opened (`teams::calls::tick`): the only call that counts as
 -- its limit call (`teams::db::runs_at_limit`). A session's own ask never sets it.
 alter table team_calls add column if not exists opened_by_hub boolean not null default false;
+-- One fire per trigger event (`Db::claim_fire`): the row of the call that claimed the key, kept
+-- `FIRES_FOR` (`Db::expire_trigger_fires`).
+create table if not exists trigger_fires (account uuid not null references accounts on delete cascade,
+  workflow text not null, key text not null, at timestamptz not null default now(),
+  primary key (account, workflow, key));
+create index if not exists trigger_fires_at on trigger_fires (at);
 ";
+/// How long the hub keeps a trigger's claimed fire.
+const FIRES_FOR: &str = "interval '7 days'";
 /// How long the hub keeps an end that its machine never came back for.
 const HELD_FOR: &str = "interval '30 days'";
 /// The most held ends one hub-wide expiry run deletes.
@@ -1311,6 +1319,27 @@ impl Db {
                 ),
                 &[&limit],
             )
+            .await
+            .map_err(err)
+    }
+
+    /// Claims the account's one fire of `workflow` for the event `key`: true when this call stored
+    /// the claim, false when one is stored already, by this hub or another on the database.
+    pub async fn claim_fire(&self, account: Uuid, workflow: &str, key: &str) -> Result<bool, String> {
+        let stored = self
+            .client()
+            .await?
+            .execute("insert into trigger_fires (account, workflow, key) values ($1, $2, $3) on conflict do nothing", &[&account, &workflow, &key])
+            .await
+            .map_err(err)?;
+        Ok(stored == 1)
+    }
+
+    /// Deletes the claimed fires of any account older than `FIRES_FOR`, and returns how many.
+    pub async fn expire_trigger_fires(&self) -> Result<u64, String> {
+        self.client()
+            .await?
+            .execute(&format!("delete from trigger_fires where at <= now() - {FIRES_FOR}"), &[])
             .await
             .map_err(err)
     }
