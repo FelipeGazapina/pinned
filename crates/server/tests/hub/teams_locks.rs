@@ -822,19 +822,23 @@ fn a_turn_ends_after_its_second_busy_bot_read_and_keeps_every_row_in_line() {
         assert_eq!(reply["waiting"], json!(true), "a Run now waits behind the holder");
     }
     // Every bot row is held by another connection: each read of one waits 2 s, then is busy.
+    // The stop's own read of its bot's row waits out the lock first, before the turn.
     let held = Held::new(&crew.hub, "lock table team_bots in access exclusive mode");
-    let started = Instant::now();
     crew.stop(&crew.live_of(&holder)[0]);
     let mut waits = std::collections::BTreeSet::new();
+    let mut started = None;
     wait_for("the start after the end to take the team's turn and wait on a bot row", || {
+        if held.turn_held() {
+            started.get_or_insert_with(Instant::now);
+        }
         waits.extend(held.lock_waits());
-        !waits.is_empty()
+        started.is_some() && !waits.is_empty()
     });
     wait_for("the team's turn to end", || {
         waits.extend(held.lock_waits());
         !held.turn_held()
     });
-    let took = started.elapsed();
+    let took = started.unwrap().elapsed();
     held.release();
 
     assert_eq!(waits.len(), 2, "the turn read two bot rows busy, then ended: {waits:?}");
@@ -845,14 +849,13 @@ fn a_turn_ends_after_its_second_busy_bot_read_and_keeps_every_row_in_line() {
 
     // The rows start in their order, each when the one before it ends.
     crew.reaper_pass();
-    for (bot, next) in [(&x, Some(&y)), (&y, Some(&z)), (&z, None)] {
+    let line = [&x, &y, &z];
+    for (i, bot) in line.iter().enumerate() {
         wait_for("the next row in line to open its session", || opened(&crew, bot) == 1 && crew.waiting(bot) == 0);
-        for later in [&x, &y, &z].into_iter().filter(|b| *b != bot && opened(&crew, b) == 0) {
-            assert_eq!(crew.waiting(later), 1, "a later row still waits");
+        for later in &line[i + 1..] {
+            assert_eq!((crew.waiting(later), opened(&crew, later)), (1, 0), "a later row still waits");
         }
-        if next.is_some() {
-            crew.stop(&crew.live_of(bot)[0]);
-        }
+        crew.stop(&crew.live_of(bot)[0]);
     }
     assert_eq!(skip_rows(&crew), Vec::<Vec<Option<String>>>::new(), "nothing was counted as skipped");
 }

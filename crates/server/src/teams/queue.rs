@@ -445,6 +445,10 @@ async fn start_waiting(hub: &Arc<Hub>, team: &Arc<Account>, ended: &str) -> Resu
     decided
 }
 
+/// The busy bot reads after which a turn's takes end, everything left waiting, counted by nobody:
+/// each waited out a lock while the turn held the team.
+const BUSY_READS: u32 = 2;
+
 /// What `take_and_start` decided in the team's turn: whether it granted an event a place, and the
 /// reserved runs to start once the turn is over, each with the trigger's work to report as started.
 #[derive(Default)]
@@ -462,14 +466,17 @@ struct Taken {
 /// says nothing of any one row. The reads left per row are of bot rows only (the bot's own, and
 /// those of the bots its workflow calls). When one fails, busy or not, the row is not taken: it
 /// waits for the next turn, and so does every later row of its bot, which never starts ahead of
-/// it, while the rows of other bots go on. A failure that is not busy counts on the row; the
-/// `UNREAD_PASSES`th takes it, counted `StartFailed`. Only what the take is written with
+/// it, while the rows of other bots go on, up to the turn's `BUSY_READS`th busy read: the turn
+/// ends there, as each busy read waited out a lock while the turn held the team. A failure that
+/// is not busy counts on the row; the `UNREAD_PASSES`th takes it, counted `StartFailed`. Only what the take is written with
 /// (`turn.held`: its counts, its reservation and the row's failed reads) rolls back with a turn
 /// that fails after it, and the turn commits whatever this returns.
 async fn take_and_start(hub: &Arc<Hub>, turn: &Turn, team: &Arc<Account>, ended: &str, taken: &mut Taken) -> Result<(), String> {
     let mut team_wide: Option<Arc<TeamWorkflows>> = None;
     // The bots whose row did not read in this turn: none of their rows is taken in it.
     let mut unread: Vec<String> = vec![];
+    // How many bot rows read busy in this turn, each after a lock wait of its own.
+    let mut busy = 0;
     loop {
         if db::live_count_on(&turn.held, team.id).await? >= db::max_live_runs(&hub.db, team.id).await? {
             return Ok(());
@@ -493,6 +500,11 @@ async fn take_and_start(hub: &Arc<Hub>, turn: &Turn, team: &Arc<Account>, ended:
             Err(e) => {
                 unread.push(waiting.workflow.clone());
                 if e == crate::db::BUSY {
+                    busy += 1;
+                    if busy >= BUSY_READS {
+                        eprintln!("pinned-server: team {} bot {}: the bot's row is busy, as {BUSY_READS} were in this turn, so the turn ends and everything waiting stays in line", team.id, waiting.workflow);
+                        return Ok(());
+                    }
                     eprintln!("pinned-server: team {} bot {}: the bot's row is busy, so what waits for it stays in line", team.id, waiting.workflow);
                     continue;
                 }
