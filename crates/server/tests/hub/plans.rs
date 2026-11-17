@@ -41,15 +41,15 @@ fn plans_reach_the_accounts_clients_through_the_hub_and_never_another_account() 
     let mut bruno_client = signed_in_client(&url, &bruno_token);
 
     let (mut ana_node, ana_dir, ana_machine, captain, thread) = resumed_with_a_captain(&url, &ana_token, "ana@acme.dev", &mut ana_client, "ana-mac");
-    let bruno_dir = temp("plans-bruno-mac");
-    let (bruno_machine, bruno_machine_token) = account::register_machine(&url, &bruno_token, "bruno-mac", "linux").unwrap();
-    let bruno_creds = Credentials { hub: url.clone(), email: "bruno@acme.dev".into(), user_token: bruno_token.clone(), machine_id: bruno_machine.id.clone(), machine_token: bruno_machine_token };
-    let mut bruno_node = Node::start(&bruno_dir, bruno_creds);
+    // Bruno's machine, with a session of its own that acts on other machines through the hub.
+    let mut bruno = agent_of(&url, &bruno_token, "bruno@acme.dev", "bruno-mac");
     bruno_client.wait_machines(&[("bruno-mac", true)]);
 
     // The Captain writes its plan the way its MCP tool does: over its machine's socket, as its tab.
     let set = json!({ "kind": "project", "tab": captain, "tool": { "name": "plan_set", "title": "Ship the form", "lists": [{ "name": "Build", "steps": [{ "name": "Write" }, { "name": "Test" }] }] } });
     assert_eq!(ask_socket(&ana_dir, &set), json!({ "Ok": "p1 rev 1: Ship the form\nl1 Build: s1 pending, s2 pending" }));
+    let not_captain = json!({ "kind": "project", "tab": thread, "tool": set["tool"] });
+    assert_eq!(ask_socket(&ana_dir, &not_captain), json!({ "Err": "only a project's Captain keeps a plan" }), "a plain thread writes no plan");
     let glances = json!([{ "id": "p1", "title": "Ship the form", "state": "idle", "done": 0, "total": 2, "strips": ["pp"] }]);
     ana_client.wait("the Captain's glance", |f| {
         f["type"] == "event" && f["machine"] == ana_machine && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().is_some_and(|tabs| tabs.iter().any(|t| t["id"] == captain && t["plans"] == glances))
@@ -74,15 +74,19 @@ fn plans_reach_the_accounts_clients_through_the_hub_and_never_another_account() 
     // Another account on the same hub reaches none of it.
     let refused = Err(format!("this account has no machine {ana_machine}"));
     assert_eq!(bruno_client.call(&ana_machine, plan(&captain)), refused);
-    let own = bruno_client.call(&bruno_machine.id, plan(&captain));
+    let own = bruno_client.call(&bruno.machine, plan(&captain));
     assert!(own.as_ref().map_or(true, |plans| *plans == json!([])), "Bruno's own machine knows no plan of Ana's tab: {own:?}");
+    // Nor does a session on Bruno's machine that names Ana's machine.
+    let acted = act_on(&bruno.dir, &bruno.tab, &ana_machine, "plan", json!({ "tab": captain }));
+    assert!(acted.as_ref().is_err_and(|e| !e.contains("Ship the form")), "Bruno's session read Ana's plan: {acted:?}");
     let mut bruno_late = Client::connect(&url, &bruno_token);
     let hello = bruno_late.wait("Bruno's hello", |f| f["type"] == "hello");
     assert!(hello["tabs"].get(&ana_machine).is_none(), "{hello}");
     bruno_client.pump();
     bruno_late.pump();
-    let leaked: Vec<&Value> = bruno_client.frames.iter().chain(&bruno_late.frames).filter(|f| f["type"] != "reply" && (f.to_string().contains(&ana_machine) || f.to_string().contains("Ship the form"))).collect();
+    bruno.client.pump();
+    let leaked: Vec<&Value> = bruno_client.frames.iter().chain(&bruno_late.frames).chain(&bruno.client.frames).filter(|f| f["type"] != "reply" && (f.to_string().contains(&ana_machine) || f.to_string().contains("Ship the form"))).collect();
     assert!(leaked.is_empty(), "Bruno's sockets carried Ana's plan: {leaked:?}");
     ana_node.kill();
-    bruno_node.kill();
+    bruno.node.kill();
 }
