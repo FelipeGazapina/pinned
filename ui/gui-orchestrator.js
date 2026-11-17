@@ -119,9 +119,12 @@ function railHtml(facts) {
     const start = f.state === "none" && f.path;
     const label = f.captain ? `Open the Captain of ${f.name}` : start ? `Start a Captain for ${f.name} on ${f.machine.name}` : `${f.machine.name} is offline`;
     const data = [`data-captain-project="${esc(f.slug)}"`, `data-captain-machine="${esc(f.machine.id)}"`, f.captain && `data-captain-tab="${esc(f.captain)}"`, start && `data-captain-path="${esc(f.path)}"`].filter(Boolean).join(" ");
-    return `<button type="button" class="captain-row" data-state="${f.state}" ${data} title="${esc(label)}"${f.captain || start ? "" : " disabled"}>${captainMonoHtml(f.name)}<span class="text">
-      <span class="top"><span class="name">${esc(f.name)}</span><span class="state">${CAPTAIN_STATE_LABELS[f.state]}</span>${start ? `<span class="start">Start one</span>` : ""}</span>
-      <span class="sub">${esc(captainRailSub(f))}</span></span></button>`;
+    // A Captain that is here shows its card's state and word (gui-plan.js captainCard), the same as the Captains surface.
+    const captain = f.captain && f.state !== "offline" ? tabByKey(f.captain) : null;
+    const card = captain && isPlanCaptain(captain) ? captainCard(captain) : null;
+    return `<button type="button" class="captain-row" data-state="${card?.state ?? f.state}" ${data} title="${esc(label)}"${f.captain || start ? "" : " disabled"}>${captainMonoHtml(f.name)}<span class="text">
+      <span class="top"><span class="name">${esc(f.name)}</span><span class="state">${card?.word ?? CAPTAIN_STATE_LABELS[f.state]}</span>${start ? `<span class="start">Start one</span>` : ""}</span>
+      <span class="sub">${esc(captainRailSub(f))}</span>${card ? planRailStripHtml(captain) : ""}</span></button>`;
   });
   return `<div class="rail-head"><h2>Captains</h2><button type="button" class="all" data-rail-projects>All projects</button></div>${rows.join("") || `<p class="rail-empty">No projects on the account's machines yet.</p>`}`;
 }
