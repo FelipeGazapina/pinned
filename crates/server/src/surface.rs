@@ -8,6 +8,7 @@ use crate::hub::{Account, Hub};
 use pinned_core::surface::{self, ActAnswer, Action, ActorRole, AgentAct, AuditOutcome, Class, Confirmation, Decided, Decision, Parsed, Side};
 use pinned_core::connectors::{Connector, Placement, RunsOn};
 use pinned_core::schedule::{self, Actor};
+use pinned_core::taste;
 use pinned_core::wire::{Call, HubCall, RunStarted, ToClient};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -220,6 +221,16 @@ async fn end_turn(turn: Option<ExtendTurn>) {
     }
 }
 
+/// Refuses a call that changes a review setting, which only the user makes on the Way of working page, approved or
+/// not and whoever sends it. The user's own app calls the hub's SetTaste directly, so this is not in its way.
+pub fn refuse_review_setting(call: &HubCall) -> Result<(), String> {
+    match call {
+        HubCall::SetTaste { patch, .. } => taste::refuse_review_settings(patch.review_settings()),
+        HubCall::ResetTasteField { field, .. } => taste::refuse_review_settings(field.review_setting()),
+        _ => Ok(()),
+    }
+}
+
 /// The act as it may run, or why it may not, checked in the order the contract lists.
 async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act: &AgentAct) -> Result<Admitted, String> {
     if !caller.known {
@@ -239,6 +250,11 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
         return Err(format!("{}: {field}. The user enters it in the app.", surface::SECRET_REFUSAL));
     }
     let call = surface::parse(action, &surface::with_blank_asks(action, &act.args))?;
+    // Only the user changes a review setting, approved or not: an agent's change to one is refused here, before
+    // any confirmation is held. The user's own app calls the hub's SetTaste directly and is not an agent's act.
+    if let Parsed::Hub(hub_call) = &call {
+        refuse_review_setting(hub_call)?;
+    }
     // A call that acts through a workflow's Linear and Slack connections comes only from the
     // session that runs that workflow on that subject: the tab its machine names, which the node
     // does not yet vouch for.
@@ -544,6 +560,10 @@ async fn typed_args(hub: &Hub, account: &Account, key: Uuid, entered: &BTreeMap<
 /// Runs an approved confirmation with `args` for the session that asked, on the machine it named.
 async fn rerun(hub: &Arc<Hub>, account: &Arc<Account>, action: &'static Action, asked: &Confirmation, args: &Value) -> Result<Value, String> {
     let call = surface::parse(action, args)?;
+    // A confirmation held before the refusal of review settings changes nothing when approved now: it ends as failed.
+    if let Parsed::Hub(hub_call) = &call {
+        refuse_review_setting(hub_call)?;
+    }
     let target = match asked.target.as_deref() {
         Some(named) => crate::remote::resolve(hub, account, named).await?.0,
         None => asked.machine.clone(),

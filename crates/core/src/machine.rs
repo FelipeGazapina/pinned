@@ -3834,11 +3834,13 @@ impl Machine {
             }
             ProjectTool::TasteSet { scope, patch } => {
                 let scope = TasteScope::parse(&scope)?;
+                taste::refuse_review_settings(patch.review_settings())?;
                 let call = HubCall::SetTaste { scope: scope.clone(), patch: patch.clone() };
                 text_json(self.change_tastes(call, |tastes| tastes.set(&scope, patch))?.view(&scope))
             }
             ProjectTool::TasteReset { scope, field } => {
                 let scope = TasteScope::parse(&scope)?;
+                taste::refuse_review_settings(field.review_setting())?;
                 let call = HubCall::ResetTasteField { scope: scope.clone(), field };
                 let reset = |tastes: &mut Tastes| {
                     tastes.reset(&scope, field);
@@ -13114,6 +13116,60 @@ Have another model review a risky change before it goes ahead.";
         let captains = m.call(Call::OpenTasteChat { scope: TasteScope::Captains, path: None }).unwrap().as_str().unwrap().to_owned();
         assert_eq!(m.view(&captains).unwrap().cwd, m.scratch.display().to_string(), "a scope with no project opens without one");
         assert_eq!(m.call(Call::OpenTasteChat { scope: TasteScope::Captains, path: Some(dir.join("gone").display().to_string()) }), Err(format!("{} is not a folder on this machine", dir.join("gone").display())));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_taste_chat_never_changes_the_review_settings_only_the_user_does() {
+        let dir = temp("taste-chat-review");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let (sock, config) = (dir.join("pinned.sock"), dir.join("config"));
+        let claude = recording_claude(&dir);
+        let events = Arc::new(Mutex::new(vec![]));
+        let seen = events.clone();
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), sock: sock.clone(), ..launch() }, Some(config), None, move |e| {
+            seen.lock().unwrap().push(serde_json::to_value(e).unwrap())
+        });
+        m.listen(|_| Err("not the machine's".into())).unwrap();
+        let path = m.open_project(project.clone()).display().to_string();
+
+        let site = TasteScope::Project { repo: "github.com/acme/site".into() };
+        let chat = m.call(Call::OpenTasteChat { scope: site, path: Some(path) }).unwrap().as_str().unwrap().to_owned();
+        m.start_claude(&chat, 80, 24).unwrap();
+        let tool = |tab: &str, tool: &str| ask(&sock, &format!(r#"{{"kind":"project","tab":"{tab}","tool":{{{tool}}}}}"#));
+        let before = m.local_tastes();
+        let one = "review_diffs is changed only by the user, on the Way of working page; nothing changed";
+        let other = "second_opinion is changed only by the user, on the Way of working page; nothing changed";
+        let both = "review_diffs and second_opinion are changed only by the user, on the Way of working page; nothing changed";
+
+        assert_eq!(tool(&chat, r#""name":"taste_set","scope":"captains","patch":{"review_diffs":false}"#), Err(one.into()));
+        assert_eq!(tool(&chat, r#""name":"taste_set","scope":"captains","patch":{"second_opinion":true}"#), Err(other.into()));
+        assert_eq!(tool(&chat, r#""name":"taste_set","scope":"project:github.com/acme/site","patch":{"review_diffs":false}"#), Err(one.into()));
+        assert_eq!(tool(&chat, r#""name":"taste_set","scope":"captains","patch":{"parallel":2,"review_diffs":false}"#), Err(one.into()), "the allowed field in the same patch waits too");
+        assert_eq!(tool(&chat, r#""name":"taste_set","scope":"captains","patch":{"parallel":2,"review_diffs":false,"second_opinion":true}"#), Err(both.into()));
+        assert_eq!(tool(&chat, r#""name":"taste_reset","scope":"captains","field":"review_diffs""#), Err(one.into()));
+        assert_eq!(tool(&chat, r#""name":"taste_reset","scope":"project:github.com/acme/site","field":"second_opinion""#), Err(other.into()));
+        assert_eq!(m.local_tastes(), before, "a refused call changed the way of working");
+        assert_eq!(events.lock().unwrap().iter().filter(|e| e["kind"] == "tastes-changed").count(), 0, "a refused call emitted a change");
+
+        let got: Value = serde_json::from_str(&tool(&chat, r#""name":"taste_get","scope":"captains""#).unwrap()).unwrap();
+        assert_eq!((&got["effective"]["review_diffs"], &got["effective"]["second_opinion"]), (&json!(true), &json!(false)), "taste_get still shows both");
+        let set: Value = serde_json::from_str(&tool(&chat, r#""name":"taste_set","scope":"captains","patch":{"parallel":2}"#).unwrap()).unwrap();
+        assert_eq!(set["effective"]["parallel"], json!(2), "a field the agent may change still changes");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_way_of_working_page_still_changes_both_review_settings() {
+        let dir = temp("taste-page-review");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let site = TasteScope::Project { repo: "github.com/acme/site".into() };
+        let set = m.set_local_taste(&site, TastePatch { review_diffs: Some(false), second_opinion: Some(true), ..TastePatch::default() }).unwrap();
+        assert_eq!((set.resolve(&site).review_diffs, set.resolve(&site).second_opinion), (false, true));
+        let reset = m.reset_local_taste_field(&site, TasteField::ReviewDiffs).unwrap();
+        assert_eq!((reset.resolve(&site).review_diffs, reset.resolve(&site).second_opinion), (true, true), "a reset inherits the Captains' review setting");
         let _ = std::fs::remove_dir_all(dir);
     }
 

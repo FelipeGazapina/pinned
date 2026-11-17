@@ -1361,7 +1361,12 @@ async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: 
         // takes that only while this machine reports such a thread open.
         None if matches!(call, HubCall::SetTaste { .. } | HubCall::ResetTasteField { .. }) => {
             if account.tabs_of(&machine).is_some_and(|tabs| tabs.iter().any(|tab| tab.taste_chat)) {
-                hub.hub_call(&account, call).await
+                // An app from before the refusal still offers the review settings in its taste chat, and the hub
+                // deploys on its own, so the hub refuses a machine's forwarded change to one as it refuses an agent's.
+                match crate::surface::refuse_review_setting(&call) {
+                    Ok(()) => hub.hub_call(&account, call).await,
+                    Err(e) => Err(e),
+                }
             } else {
                 Err("only a machine with a Chat to adjust thread open may change the way of working".into())
             }
