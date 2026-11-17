@@ -46,8 +46,9 @@ fn limit_calls(tb: &mut TeamBox) -> Vec<Value> {
     calls_of(tb.team, &mut tb.owner.client).into_iter().filter(|c| c["situation"] == "on_limit").collect()
 }
 
+/// The run's `model_usd` as text, `null` while its box never reported one.
 fn model_usd(hub: &TestHub, run: Uuid) -> String {
-    super::teams_separation_fixes::sql_text(hub, &format!("select model_usd::text from team_runs where id = '{run}'"))
+    super::teams_separation_fixes::sql_text(hub, &format!("select coalesce(model_usd::text, 'null') from team_runs where id = '{run}'"))
 }
 
 #[test]
@@ -93,6 +94,46 @@ fn a_model_cost_at_the_cap_is_kept_and_calls_once() {
 }
 
 #[test]
+fn a_run_never_reported_has_no_model_cost_until_its_first_report() {
+    let hub = TestHub::start_with_team_policy("teams_model_cost_unmeasured", fast(), policy());
+    let mut tb = TeamBox::new(&hub);
+    bot(&hub, &tb, 5.0);
+    let run = run(&hub, &tb);
+    let unmeasured = listed(&mut tb, run);
+    assert_eq!((unmeasured.get("model_usd"), model_usd(&hub, run)), (None, "null".to_owned()), "no report, no model cost: {unmeasured}");
+    report(&hub, &tb.box_id, &tb.workflow, 0.0).unwrap();
+    let measured = listed(&mut tb, run);
+    assert_eq!(measured["model_usd"], json!(0.0), "a first report, even of nothing, is a measure: {measured}");
+}
+
+#[test]
+fn a_run_never_reported_reaches_its_limit_on_its_box_cost() {
+    let hub = TestHub::start_with_team_policy("teams_model_cost_unmeasured_limit", fast(), policy());
+    let mut tb = TeamBox::new(&hub);
+    bot(&hub, &tb, 0.5);
+    let run = run(&hub, &tb);
+    sql(&hub, &format!("update team_runs set cost_usd = 0.6 where id = '{run}'"));
+    wait_for("the limit call", || !limit_calls(&mut tb).is_empty());
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!((limit_calls(&mut tb).len(), model_usd(&hub, run)), (1, "null".to_owned()), "box cost alone, the model's never told");
+}
+
+#[test]
+fn a_runs_box_and_model_cost_each_under_its_limit_reach_it_together() {
+    let hub = TestHub::start_with_team_policy("teams_model_cost_sum", fast(), policy());
+    let mut tb = TeamBox::new(&hub);
+    bot(&hub, &tb, 0.5);
+    let run = run(&hub, &tb);
+    sql(&hub, &format!("update team_runs set cost_usd = 0.3 where id = '{run}'"));
+    std::thread::sleep(Duration::from_secs(2));
+    assert_eq!(limit_calls(&mut tb), Vec::<Value>::new(), "$0.30 of box is under the $0.50 limit");
+    report(&hub, &tb.box_id, &tb.workflow, 0.3).unwrap();
+    wait_for("the limit call", || !limit_calls(&mut tb).is_empty());
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(limit_calls(&mut tb).len(), 1, "$0.30 of box and $0.30 of model, $0.60 together, call once");
+}
+
+#[test]
 fn a_report_sent_twice_or_out_of_order_keeps_the_most_told() {
     let hub = TestHub::start_with_team_policy("teams_model_cost_max", fast(), policy());
     let mut tb = TeamBox::new(&hub);
@@ -122,20 +163,20 @@ fn only_the_box_that_runs_the_run_reports_its_model_cost() {
     // Team A's run names team B's box as its own: B's box is still no box of team A.
     sql(&hub, &format!("update team_runs set box = '{}' where id = '{run}'", other.machine));
     assert_eq!(report(&hub, &other.box_id, &tb.workflow, 4.0), refused, "another team's box the run names");
-    assert_eq!(model_usd(&hub, other_run), "0");
+    assert_eq!(model_usd(&hub, other_run), "null");
     // The run moved to another machine of the team: this box no longer runs it.
     sql(&hub, &format!("update team_runs set box = '{}' where id = '{run}'", Uuid::new_v4()));
     assert_eq!(report(&hub, &tb.box_id, &tb.workflow, 4.0), refused, "a box the run is not bound to");
-    assert_eq!(model_usd(&hub, run), "0", "nothing was stored");
-    assert_eq!(listed(&mut tb, run)["model_usd"], json!(0.0));
+    assert_eq!(model_usd(&hub, run), "null", "nothing was stored");
+    assert_eq!(listed(&mut tb, run).get("model_usd"), None);
     sql(&hub, &format!("update team_runs set box = '{}' where id = '{run}'", tb.machine));
     let out_of_range = Err("a model cost is a number of dollars, 0 to 10000".to_owned());
     assert_eq!(report(&hub, &tb.box_id, &tb.workflow, -1.0), out_of_range);
     assert_eq!(report(&hub, &tb.box_id, &tb.workflow, 10_000.01), out_of_range);
     assert_eq!(report(&hub, &tb.box_id, &tb.workflow, f64::MAX), out_of_range, "a total no later report could correct");
-    assert_eq!(model_usd(&hub, run), "0", "nothing was stored");
+    assert_eq!(model_usd(&hub, run), "null", "nothing was stored");
     assert_eq!(report(&hub, &tb.box_id, &tb.workflow, 0.5), Ok(Value::Null), "the box that runs it reports");
-    assert_eq!((model_usd(&hub, run), model_usd(&hub, other_run)), ("0.5".to_owned(), "0".to_owned()));
+    assert_eq!((model_usd(&hub, run), model_usd(&hub, other_run)), ("0.5".to_owned(), "null".to_owned()));
 }
 
 #[test]
@@ -151,7 +192,7 @@ fn a_node_that_reports_nothing_is_charged_box_cost_only_and_a_wait_costs_nothing
         working = listed(&mut tb, run);
         working["cost_usd"].as_f64().unwrap() >= 0.001
     });
-    assert_eq!(working["model_usd"], json!(0.0), "{working}");
+    assert_eq!(working.get("model_usd"), None, "never reported: {working}");
     assert!(working["cost_usd"].as_f64().unwrap() < 0.002, "box cost only: {working}");
 
     report(&hub, &tb.box_id, &tb.workflow, 0.25).unwrap();
