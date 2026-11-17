@@ -4086,10 +4086,26 @@ impl Machine {
         self.meter_rates_at(Instant::now())
     }
 
+    /// The price list as of `now`. A team box downloads it and holds it in memory only, never in
+    /// its config dir, whose file its sessions can write; a download that fails keeps the last
+    /// list it got, and is tried again at the next pass.
     fn meter_rates_at(&self, now: Instant) -> Arc<usage::RateTable> {
         let mut held = self.meter_rates.lock().unwrap();
         match &*held {
             Some((read, rates)) if now.saturating_duration_since(*read) < Duration::from_secs(3600) => rates.clone(),
+            _ if self.team_box.load(Ordering::Relaxed) => {
+                let list = self.list_rates.lock().unwrap().clone();
+                let rates = list();
+                match (rates.is_empty(), &*held) {
+                    (true, Some((_, last))) => last.clone(),
+                    (true, None) => Arc::new(rates),
+                    (false, _) => {
+                        let rates = Arc::new(rates);
+                        *held = Some((now, rates.clone()));
+                        rates
+                    }
+                }
+            }
             _ => {
                 let rates = Arc::new(usage::rates(self.rates_file.as_deref()));
                 *held = Some((now, rates.clone()));
@@ -14260,6 +14276,21 @@ Have another model review a risky change before it goes ahead.";
         m.report_run_costs(t0 + RUN_COST_EVERY);
         let cents = |usd: f64| ("wf-1".to_owned(), subject.clone(), usd);
         assert_eq!(*sent.lock().unwrap(), vec![cents(15.0), cents(1515.0)], "US$ 15 more for a million output tokens, whatever the box's file says");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_team_boxs_run_cost_keeps_its_last_price_list_when_a_download_fails() {
+        let RunCostBox { dir, m, sent, subject, transcript, .. } = run_costs_box("run-costs-download-fails");
+        let t0 = Instant::now();
+        m.report_run_costs(t0);
+        *m.list_rates.lock().unwrap() = Arc::new(usage::RateTable::new);
+        m.meter_rates_at(Instant::now() + Duration::from_secs(3601));
+        append(&transcript, &[run_spent("m2", "claude-sonnet-5-5", 20_000)]);
+        m.report_run_costs(t0 + RUN_COST_EVERY);
+        let cents = |usd: f64| ("wf-1".to_owned(), subject.clone(), usd);
+        assert_eq!(*sent.lock().unwrap(), vec![cents(15.0), cents(45.0)], "the list it last got, not none");
         let _ = std::fs::remove_dir_all(dir);
     }
 
