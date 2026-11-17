@@ -766,6 +766,29 @@ mod tests {
         (1..=count).rev().map(|k| moved_issue(k, &format!("2026-11-10T{k:02}:00:00.000Z"))).collect()
     }
 
+    /// Minute `k` after midnight UTC on 2026-11-10, when ENG-`k` is updated by `busy_fixture`. Hours would run out at 24.
+    fn minute_at(k: u32) -> String {
+        format!("2026-11-10T{:02}:{:02}:00.000Z", k / 60, k % 60)
+    }
+
+    /// Issues ENG-1 to ENG-`count`, newest updated first, each updated at its `minute_at` by one status move.
+    fn busy_fixture(count: u32) -> Vec<Value> {
+        (1..=count).rev().map(|k| moved_issue(k, &minute_at(k))).collect()
+    }
+
+    /// `answer`, with the page flags replaced by `false`: the stand-in never says a page has another one.
+    fn without_page_flags(answer: impl Fn(&Value) -> (u16, String) + Send + 'static) -> impl Fn(&Value) -> (u16, String) + Send + 'static {
+        move |request| {
+            let (status, body) = answer(request);
+            let Ok(mut reply) = serde_json::from_str::<Value>(&body) else { return (status, body) };
+            if let Some(info) = reply["data"]["issues"]["pageInfo"].as_object_mut() {
+                info.insert("hasPreviousPage".into(), json!(false));
+                info.insert("hasNextPage".into(), json!(false));
+            }
+            (status, reply.to_string())
+        }
+    }
+
     /// The change `fixture` makes to ENG-`k`: its one status move.
     fn moved(k: u32) -> Change {
         moved_at(k, &format!("2026-11-10T{k:02}:00:00.000Z"))
@@ -813,7 +836,7 @@ mod tests {
     /// the issues just before the `before` cursor, a cursor being an issue's identifier; with no `before` the
     /// read starts at the oldest update. A page holds its issues oldest first, with `endCursor` its newest one,
     /// which is the `before` of the next page. `hasPreviousPage` says the newer side has more issues.
-    fn linear_pages(issues: Vec<Value>) -> impl Fn(&Value) -> (u16, String) + Send + 'static {
+    fn linear_pages(issues: Vec<Value>, served: usize) -> impl Fn(&Value) -> (u16, String) + Send + 'static {
         move |request| {
             let bound = &request["variables"]["filter"]["updatedAt"];
             let live: Vec<&Value> = issues
@@ -840,7 +863,7 @@ mod tests {
                     None => return (200, json!({ "errors": [{ "message": "no such cursor" }] }).to_string()),
                 },
             };
-            let start = end.saturating_sub(asked.min(PAGE));
+            let start = end.saturating_sub(asked.min(served));
             let nodes: Vec<&Value> = live[start..end].iter().rev().copied().collect();
             let info = json!({
                 "hasPreviousPage": start > 0,
@@ -855,7 +878,7 @@ mod tests {
     fn a_read_stops_at_four_pages_and_names_the_newest_update_it_read() {
         let _api = crate::slack::lock_api();
         let _restore = RestoreLinear;
-        let (root, seen) = stand_in(linear_pages(fixture(12)));
+        let (root, seen) = stand_in(linear_pages(fixture(12), PAGE));
         set_api(Some(root));
         let read = block_on(changes("lin-cap", SINCE, None, &Scope::default())).unwrap();
         assert_eq!(seen.lock().unwrap().len(), 4, "the read asks for four pages and no more");
@@ -867,7 +890,7 @@ mod tests {
     fn the_read_from_the_watermark_takes_the_rest_and_no_change_is_missing() {
         let _api = crate::slack::lock_api();
         let _restore = RestoreLinear;
-        let (root, seen) = stand_in(linear_pages(fixture(12)));
+        let (root, seen) = stand_in(linear_pages(fixture(12), PAGE));
         set_api(Some(root));
         let first = block_on(changes("lin-union-1", SINCE, None, &Scope::default())).unwrap();
         let watermark = first.read_to.clone().expect("a capped read names its watermark");
@@ -880,10 +903,36 @@ mod tests {
     }
 
     #[test]
+    fn a_read_of_120_issues_in_pages_of_50_is_complete_though_no_page_flag_says_so() {
+        let _api = crate::slack::lock_api();
+        let _restore = RestoreLinear;
+        // Pages of 50, 50 and 20. Every page says there is no previous and no next page: only the page size says more follow.
+        let (root, seen) = stand_in(without_page_flags(linear_pages(busy_fixture(120), 50)));
+        set_api(Some(root));
+        let read = block_on(changes("lin-120", SINCE, None, &Scope::default())).unwrap();
+        assert_eq!(seen.lock().unwrap().len(), 3, "a full page asks for the next one: 50, then 50, then 20, which is short");
+        assert_eq!(read.read_to, None, "the short last page makes the read complete");
+        assert_eq!(read.changes.len(), 120, "the changes of all 120 issues are read");
+        assert_eq!(read.changes, (1..=120).map(|k| moved_at(k, &minute_at(k))).collect::<Vec<_>>(), "oldest first, none skipped");
+    }
+
+    #[test]
+    fn a_read_of_exactly_50_issues_asks_once_more_and_is_complete() {
+        let _api = crate::slack::lock_api();
+        let _restore = RestoreLinear;
+        let (root, seen) = stand_in(without_page_flags(linear_pages(busy_fixture(50), 50)));
+        set_api(Some(root));
+        let read = block_on(changes("lin-50", SINCE, None, &Scope::default())).unwrap();
+        assert_eq!(seen.lock().unwrap().len(), 2, "the first page is full, so the read asks again and gets an empty page");
+        assert_eq!(read.read_to, None, "an empty page after a full one makes the read complete");
+        assert_eq!(read.changes, (1..=50).map(|k| moved_at(k, &minute_at(k))).collect::<Vec<_>>());
+    }
+
+    #[test]
     fn a_read_that_ends_before_the_cap_names_no_watermark() {
         let _api = crate::slack::lock_api();
         let _restore = RestoreLinear;
-        let (root, seen) = stand_in(linear_pages(fixture(4)));
+        let (root, seen) = stand_in(linear_pages(fixture(4), PAGE));
         set_api(Some(root));
         let read = block_on(changes("lin-short", SINCE, None, &Scope::default())).unwrap();
         assert_eq!(seen.lock().unwrap().len(), 2, "the read stops when Linear says there is no next page");
@@ -898,7 +947,7 @@ mod tests {
         set_api(Some(root));
         assert_eq!(block_on(changes("lin-429", SINCE, None, &Scope::default())), Err("Linear answered 429".into()));
 
-        let pages = linear_pages(fixture(12));
+        let pages = linear_pages(fixture(12), PAGE);
         let (root, _) = stand_in(move |request| if request["variables"]["before"].is_null() { pages(request) } else { (500, "upstream text".into()) });
         set_api(Some(root));
         assert_eq!(block_on(changes("lin-500", SINCE, None, &Scope::default())), Err("Linear answered 500".into()), "a failed later page is an error, not a partial read");
@@ -912,7 +961,7 @@ mod tests {
     fn the_scope_and_the_watermark_go_into_the_filter() {
         let _api = crate::slack::lock_api();
         let _restore = RestoreLinear;
-        let (root, seen) = stand_in(linear_pages(fixture(2)));
+        let (root, seen) = stand_in(linear_pages(fixture(2), PAGE));
         set_api(Some(root));
         let scope = Scope { team: " ENG ".into(), project: "Exports".into() };
         block_on(changes("lin-scope", SINCE, None, &scope)).unwrap();
@@ -935,7 +984,7 @@ mod tests {
     fn a_bad_since_is_an_error_before_any_request() {
         let _api = crate::slack::lock_api();
         let _restore = RestoreLinear;
-        let (root, seen) = stand_in(linear_pages(fixture(2)));
+        let (root, seen) = stand_in(linear_pages(fixture(2), PAGE));
         set_api(Some(root));
         assert_eq!(
             block_on(changes("lin-since", "yesterday", None, &Scope::default())),
@@ -963,7 +1012,7 @@ mod tests {
         });
         let mut issues = vec![held];
         issues.extend(fixture(8));
-        let (root, seen) = stand_in(linear_pages(issues));
+        let (root, seen) = stand_in(linear_pages(issues, PAGE));
         set_api(Some(root));
         let first = block_on(changes("lin-held-1", SINCE, None, &Scope::default())).unwrap();
         assert_eq!(first.read_to.as_deref(), Some(WATERMARK), "the cap reads ENG-1 to ENG-8 and names their newest update");
@@ -994,7 +1043,7 @@ mod tests {
         // ENG-9 and ENG-8 are both updated at the watermark. The cap reads ENG-8 and leaves ENG-9 for the next read.
         let mut issues = vec![moved_issue(9, WATERMARK)];
         issues.extend(fixture(8));
-        let (root, seen) = stand_in(linear_pages(issues));
+        let (root, seen) = stand_in(linear_pages(issues, PAGE));
         set_api(Some(root));
         let first = block_on(changes("lin-tie-1", SINCE, None, &Scope::default())).unwrap();
         assert_eq!(first.read_to.as_deref(), Some(WATERMARK));
@@ -1017,7 +1066,7 @@ mod tests {
         // Ten issues share the watermark, more than the cap reads. Without the step past it the caller would read
         // the same watermark forever, so the caller's loop here is bounded: it fails rather than hangs.
         let issues: Vec<Value> = (1..=10).rev().map(|k| moved_issue(k, WATERMARK)).collect();
-        let (root, seen) = stand_in(linear_pages(issues));
+        let (root, seen) = stand_in(linear_pages(issues, PAGE));
         set_api(Some(root));
         let mut from = Some(WATERMARK.to_owned());
         let mut found = Vec::new();
