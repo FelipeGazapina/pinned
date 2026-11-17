@@ -14479,6 +14479,47 @@ Have another model review a risky change before it goes ahead.";
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// A team box whose first price download, of `list`, is held in flight while a pass runs,
+    /// then lets go: what the box sent during the download, and on the pass after it.
+    #[cfg(unix)]
+    fn passes_around_the_first_download(name: &str, list: fn() -> usage::RateTable) -> (Vec<(String, Subject, f64)>, Vec<(String, Subject, f64)>) {
+        let RunCostBox { dir, m, sent, .. } = run_costs_box(name);
+        let (started, on_start) = std::sync::mpsc::channel();
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        let gate = Mutex::new(gate);
+        *m.list_rates.lock().unwrap() = Arc::new(move || {
+            let _ = started.send(());
+            let _ = gate.lock().unwrap().recv();
+            list()
+        });
+        let download = { let m = m.clone(); std::thread::spawn(move || { m.meter_rates(); }) };
+        on_start.recv_timeout(Duration::from_secs(5)).expect("the download started");
+        m.report_run_costs(Instant::now());
+        let during = sent.lock().unwrap().clone();
+        drop(release);
+        download.join().unwrap();
+        m.report_run_costs(Instant::now());
+        let after = sent.lock().unwrap().clone();
+        let _ = std::fs::remove_dir_all(dir);
+        (during, after)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_team_boxs_pass_during_its_first_price_download_sends_nothing() {
+        let (during, after) = passes_around_the_first_download("run-costs-first-download-in-flight", || usage::parse_rates(&json!({ "claude-sonnet-5-5": { "input_cost_per_token": 0.000003, "output_cost_per_token": 0.000015 } })));
+        assert_eq!(during, vec![], "no list yet and none has failed: the pass waits for the download");
+        assert_eq!(after, vec![("wf-1".to_owned(), Subject::LinearIssue { issue: "ENG-7".into() }, 15.0)], "then the list's price, never the ceiling");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_team_boxs_pass_after_its_first_price_download_failed_takes_the_ceiling() {
+        let (during, after) = passes_around_the_first_download("run-costs-first-download-fails-later", usage::RateTable::new);
+        assert_eq!(during, vec![], "the download is still in flight");
+        assert_eq!(after, vec![("wf-1".to_owned(), Subject::LinearIssue { issue: "ENG-7".into() }, 150.0)], "once a try failed, 10 000 output tokens at the ceiling");
+    }
+
     #[test]
     #[cfg(unix)]
     fn a_team_boxs_failing_price_download_is_tried_at_most_once_a_minute() {
