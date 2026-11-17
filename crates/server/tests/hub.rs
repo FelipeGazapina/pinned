@@ -9136,16 +9136,23 @@ struct ExtendSetup {
 fn extend_setup(name: &str) -> ExtendSetup {
     let hub = TestHub::start_with_boxes(name, Signup::Open, fast());
     let url = hub.url.clone();
-    let (token, view) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
-    let mut ana = agent_of(&url, &token, "ana@acme.dev", "ana-mac");
-    hub.boxes.state.lock().unwrap().checkout = Some(("site".into(), SITE.into()));
-    ana.client.hub(json!({ "cmd": "connect_upstash", "key": BOX_KEY, "claude_token": CLAUDE_TOKEN })).unwrap();
-    ana.client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": { "box_budget_cents": 300 } })).unwrap();
-    box_mode(&mut ana.client, "session", "fresh");
-    let mut owner = Client::app(&url, &token);
-    owner.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    let (account, ana, owner) = extend_account(&hub, "ana@acme.dev", "ana-mac");
     let machine = open_extend_box(&ana);
-    ExtendSetup { hub, url, account: view.id.parse().unwrap(), ana, owner, machine }
+    ExtendSetup { hub, url, account, ana, owner, machine }
+}
+
+/// A new account `email` with Upstash connected and a Box budget of US$ 3.00: its id, its agent on
+/// `machine_name`, and its app unlocked.
+fn extend_account(hub: &TestHub, email: &str, machine_name: &str) -> (uuid::Uuid, Agent, Client) {
+    let (token, view) = account::signup(&hub.url, email, "correct horse").unwrap();
+    let mut agent = agent_of(&hub.url, &token, email, machine_name);
+    hub.boxes.state.lock().unwrap().checkout = Some(("site".into(), SITE.into()));
+    agent.client.hub(json!({ "cmd": "connect_upstash", "key": BOX_KEY, "claude_token": CLAUDE_TOKEN })).unwrap();
+    agent.client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": { "box_budget_cents": 300 } })).unwrap();
+    box_mode(&mut agent.client, "session", "fresh");
+    let mut owner = Client::app(&hub.url, &token);
+    owner.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    (view.id.parse().unwrap(), agent, owner)
 }
 
 /// Another box the agent opens at US$ 1.00: its machine.
@@ -9256,6 +9263,77 @@ fn concurrent_extend_box_asks_for_one_box_wait_only_as_far_as_the_box_budget_goe
     let refused = answers.iter().filter(|a| **a == Err(extend_waits("US$ 1.50"))).count();
     assert_eq!((pending, refused), (1, 7), "{answers:?}");
     assert_eq!(waiting_actions(&mut owner), ["extend_box"]);
+}
+
+const TOO_MANY_EXTENDS: &str = "too many box extends are waiting for the owner; answer some first";
+
+/// What waits for the owner is bounded for the account too, not only per box: once 10 extends of
+/// its boxes wait, an ask for any of its boxes is refused and does not wait, while another
+/// account's boxes are not touched. An answer, an ask older than a day or an amount not above
+/// zero makes room again.
+#[test]
+fn an_accounts_waiting_extend_box_asks_are_capped_across_its_boxes() {
+    let ExtendSetup { hub, ana, mut owner, machine, .. } = extend_setup("extend_account_cap");
+    let boxes = [machine.clone(), open_extend_box(&ana), open_extend_box(&ana)];
+    let mut asked = vec![];
+    for n in 0..10 {
+        let ask = extend_as(&ana.dir, &ana.tab, &boxes[n % 3], 0.1, None).unwrap();
+        assert_eq!(ask["outcome"], "pending", "ask {n} fits its box and the account: {ask}");
+        asked.push(ask);
+    }
+    assert_eq!(waiting_actions(&mut owner).len(), 10);
+    for machine in &boxes {
+        assert_eq!(extend_as(&ana.dir, &ana.tab, machine, 0.1, None), Err(TOO_MANY_EXTENDS.into()), "an ask for any box of the account is refused");
+    }
+    assert_eq!(waiting_actions(&mut owner).len(), 10, "no refused ask waits for the owner");
+    assert_eq!(refused_extends(&mut owner), 3);
+
+    let (_, bob, mut bobs_app) = extend_account(&hub, "bob@acme.dev", "bob-mac");
+    let bobs_box = open_extend_box(&bob);
+    assert_eq!(extend_as(&bob.dir, &bob.tab, &bobs_box, 0.1, None).unwrap()["outcome"], "pending", "another account's box is not touched");
+    assert_eq!(waiting_actions(&mut bobs_app).len(), 1);
+
+    owner.hub(json!({ "cmd": "decide_confirmation", "id": asked[0]["id"], "approve": false })).unwrap();
+    assert_eq!(extend_as(&ana.dir, &ana.tab, &boxes[1], 0.1, None).unwrap()["outcome"], "pending", "an answer makes room for one more");
+    assert_eq!(extend_as(&ana.dir, &ana.tab, &boxes[2], 0.1, None), Err(TOO_MANY_EXTENDS.into()), "and only one");
+
+    let id = asked[1]["id"].as_str().unwrap();
+    admin_on(&hub.database, &format!("update agent_confirmations set created_at = now() - interval '24 hours 1 minute' where id = '{id}'"));
+    assert_eq!(extend_as(&ana.dir, &ana.tab, &boxes[0], 0.1, None).unwrap()["outcome"], "pending", "an ask older than a day no longer counts");
+    let id = asked[2]["id"].as_str().unwrap();
+    admin_on(&hub.database, &format!("update agent_confirmations set args = jsonb_set(args, '{{extra_usd}}', '0') where id = '{id}'"));
+    assert_eq!(extend_as(&ana.dir, &ana.tab, &boxes[0], 0.1, None).unwrap()["outcome"], "pending", "an amount not above zero does not count");
+    assert_eq!(extend_as(&ana.dir, &ana.tab, &boxes[0], 0.1, None), Err(TOO_MANY_EXTENDS.into()));
+}
+
+/// Asks for different boxes of one account made at once, with one place left under the account's
+/// cap: each box's turn lets them in together, the account's lock lets exactly one wait.
+#[test]
+fn concurrent_extend_box_asks_for_different_boxes_of_one_account_fill_its_cap_exactly() {
+    let ExtendSetup { hub, account, ana, mut owner, machine, .. } = extend_setup("extend_account_race");
+    let boxes = [machine.clone(), open_extend_box(&ana), open_extend_box(&ana)];
+    for n in 0..9 {
+        assert_eq!(extend_as(&ana.dir, &ana.tab, &boxes[n % 3], 0.1, None).unwrap()["outcome"], "pending");
+    }
+    let answers: Vec<Result<Value, String>> = hub.runtime.block_on(async {
+        let account = hub.hub().account(account).await.unwrap();
+        let asks: Vec<_> = (0..9)
+            .map(|n| {
+                let (running, account, origin) = (hub.hub().clone(), account.clone(), ana.machine.clone());
+                let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": boxes[n % 3], "extra_usd": 0.1 } })).unwrap();
+                tokio::spawn(async move { pinned_server::surface::act(&running, &account, &origin, act).await })
+            })
+            .collect();
+        let mut answers = vec![];
+        for ask in asks {
+            answers.push(ask.await.unwrap());
+        }
+        answers
+    });
+    let pending = answers.iter().filter(|a| a.as_ref().is_ok_and(|a| a["outcome"] == "pending")).count();
+    let refused = answers.iter().filter(|a| **a == Err(TOO_MANY_EXTENDS.to_owned())).count();
+    assert_eq!((pending, refused), (1, 8), "{answers:?}");
+    assert_eq!(waiting_actions(&mut owner).len(), 10);
 }
 
 /// The advisory lock of box extends, held on a connection of the test's own as another hub's turn
