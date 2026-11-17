@@ -142,6 +142,15 @@ pub struct Watches {
     pub started: std::sync::atomic::AtomicBool,
 }
 
+/// A wake taken off a watch: what claude is told, and what it was made from.
+#[derive(Clone, Debug)]
+pub struct Wake {
+    url: String,
+    pub text: String,
+    seen: Snapshot,
+    pending: Vec<Change>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Watch {
     pub url: String,
@@ -186,16 +195,39 @@ impl Watches {
 
     /// The wake for a tab whose claude is free, taking it off the watch.
     pub fn take_wake(&self, tab: &str) -> Option<String> {
+        self.take_held_wake(tab).map(|wake| wake.text)
+    }
+
+    /// `take_wake`, with what `put_back` needs to leave the watch as it was.
+    pub fn take_held_wake(&self, tab: &str) -> Option<Wake> {
         let mut tabs = self.tabs.lock().unwrap();
         let list = tabs.get_mut(tab)?;
         let watch = list.iter_mut().find(|w| !w.pending.is_empty())?;
-        let text = message(watch.seen.as_ref()?, &watch.pending);
-        watch.pending.clear();
-        if !watch.seen.as_ref().is_some_and(|s| s.open) {
-            let url = watch.url.clone();
-            list.retain(|w| w.url != url);
+        let seen = watch.seen.clone()?;
+        let text = message(&seen, &watch.pending);
+        let wake = Wake { url: watch.url.clone(), text, seen, pending: std::mem::take(&mut watch.pending) };
+        if !wake.seen.open {
+            list.retain(|w| w.url != wake.url);
         }
-        Some(text)
+        Some(wake)
+    }
+
+    /// Gives back a wake that was taken and not typed, for the next read. A change a later read
+    /// found of the same kind replaces the one given back, as it replaces a pending one. An open
+    /// pull request is never taken off the watch, so one missing was unwatched meanwhile: its wake is dropped.
+    pub fn put_back(&self, tab: &str, wake: Wake) {
+        let mut tabs = self.tabs.lock().unwrap();
+        let list = tabs.entry(tab.to_owned()).or_default();
+        match list.iter_mut().find(|w| w.url == wake.url) {
+            Some(watch) => {
+                let mut pending = wake.pending;
+                pending.retain(|old| !watch.pending.iter().any(|c| std::mem::discriminant(c) == std::mem::discriminant(old)));
+                pending.append(&mut watch.pending);
+                watch.pending = pending;
+            }
+            None if !wake.seen.open => list.push(Watch { url: wake.url, seen: Some(wake.seen), pending: wake.pending }),
+            None => {}
+        }
     }
 
     pub fn forget(&self, keep: &[String]) {
@@ -251,5 +283,50 @@ mod tests {
         merged["state"] = "MERGED".into();
         watches.update("tab-1", url, snapshot(&merged));
         assert_eq!(watches.of("tab-1"), Vec::<String>::new(), "a merged pull request stops being watched");
+    }
+
+    #[test]
+    fn a_wake_put_back_is_taken_again_even_for_a_pull_request_that_closed() {
+        let watches = Watches::default();
+        let url = "https://github.com/o/r/pull/41";
+        let running = json!([{ "name": "build", "status": "IN_PROGRESS", "conclusion": "" }]);
+        let passed = json!([{ "name": "build", "status": "COMPLETED", "conclusion": "SUCCESS" }]);
+        watches.set("tab-1", url, true);
+        watches.update("tab-1", url, snapshot(&view(running, json!([]), "MERGEABLE")));
+        watches.update("tab-1", url, snapshot(&view(passed.clone(), json!([]), "MERGEABLE")));
+        let wake = watches.take_held_wake("tab-1").unwrap();
+        assert_eq!(watches.take_wake("tab-1"), None, "taken");
+        watches.put_back("tab-1", wake);
+        assert!(watches.take_wake("tab-1").unwrap().contains("- All 1 check passed on abc1234."));
+
+        // The pull request merged after its wake was taken: it still waits, and goes once.
+        let comments = json!([{ "author": { "login": "monalisa" }, "body": "Ship it", "createdAt": "2026-01-01T10:00:00Z" }]);
+        let mut merged = view(passed, comments, "MERGEABLE");
+        merged["state"] = "MERGED".into();
+        watches.update("tab-1", url, snapshot(&merged));
+        let wake = watches.take_held_wake("tab-1").unwrap();
+        assert_eq!(watches.of("tab-1"), Vec::<String>::new(), "a closed pull request is off the watch once taken");
+        watches.put_back("tab-1", wake);
+        assert_eq!(watches.of("tab-1"), [url]);
+        assert!(watches.take_wake("tab-1").unwrap().contains("monalisa"));
+        assert_eq!(watches.of("tab-1"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_wake_put_back_does_not_bring_back_a_pull_request_that_was_unwatched() {
+        let watches = Watches::default();
+        let url = "https://github.com/o/r/pull/41";
+        let running = json!([{ "name": "build", "status": "IN_PROGRESS", "conclusion": "" }]);
+        let passed = json!([{ "name": "build", "status": "COMPLETED", "conclusion": "SUCCESS" }]);
+        watches.set("tab-1", url, true);
+        watches.update("tab-1", url, snapshot(&view(running, json!([]), "MERGEABLE")));
+        watches.update("tab-1", url, snapshot(&view(passed, json!([]), "MERGEABLE")));
+        let wake = watches.take_held_wake("tab-1").unwrap();
+        assert_eq!(watches.of("tab-1"), [url], "an open pull request stays watched once its wake is taken");
+        // The person stopped watching it while the wake was being typed.
+        watches.set("tab-1", url, false);
+        watches.put_back("tab-1", wake);
+        assert_eq!(watches.of("tab-1"), Vec::<String>::new(), "not watched again");
+        assert_eq!(watches.take_wake("tab-1"), None, "no wake");
     }
 }

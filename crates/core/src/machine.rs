@@ -27,6 +27,12 @@ pub const OUTPUT_KEEP: usize = 256 * 1024;
 const RECORDS_PER_SEND: usize = 100;
 const RECORDS_RETRY: Duration = Duration::from_secs(60);
 const LIMIT_MARGIN_SECS: u64 = 5;
+/// How long a session that took the terminal must show no menu or dialog before its held prompts
+/// are typed, as `menu_watch::SETTLE` waits out a redraw.
+const HELD_SETTLE: Duration = Duration::from_millis(300);
+/// How long the usage-limit continue text sits before its Enter. Tests lengthen it so a menu shown
+/// in the gap is not raced on a loaded machine.
+const CONTINUE_ENTER_GAP: Duration = if cfg!(test) { Duration::from_millis(2000) } else { Duration::from_millis(300) };
 const UNWATCHED: (u16, u16) = (120, 32);
 /// How long input for a session waits for a start under way to give it a process.
 const START_WAIT: Duration = Duration::from_secs(5);
@@ -291,12 +297,53 @@ struct Screen {
     size: (u16, u16),
     /// Reads the screen while the session waits on a menu, to tell when the user answered it.
     watch: Option<crate::menu_watch::MenuWatch>,
+    /// Counts what changed the screen: bytes, a resize, a restart.
+    fed: u64,
+    /// What `blocker` read at `fed`, so a look with nothing new parses nothing.
+    read: Option<(u64, Option<Blocker>)>,
+}
+
+/// Why a prompt was not typed: the screen shows a menu or dialog, or the write failed.
+enum NotTyped {
+    Blocked(Blocker),
+    Failed(String),
+}
+
+const MENU_UP: &str = "Claude is waiting for an answer to its menu, so nothing was typed. Answer the menu, then send again.";
+const DIALOG_UP: &str = "Claude has a dialog open, so nothing was typed. Close it with Esc, then send again.";
+
+impl NotTyped {
+    /// The reason as the person who sent the prompt reads it.
+    fn for_person(self) -> String {
+        match self {
+            NotTyped::Blocked(Blocker::Menu) => MENU_UP.into(),
+            NotTyped::Blocked(Blocker::Dialog) => DIALOG_UP.into(),
+            NotTyped::Failed(error) => error,
+        }
+    }
+
+    /// The reason as an agent that prompted `tab` reads it.
+    fn for_agent(self, tab: &str) -> String {
+        match self {
+            NotTyped::Blocked(Blocker::Menu) => format!("{tab} is waiting for its user to answer a menu, so nothing was typed. Try again after the user answers it."),
+            NotTyped::Blocked(Blocker::Dialog) => format!("{tab} has a dialog open in its terminal, so nothing was typed. Try again later."),
+            NotTyped::Failed(error) => error,
+        }
+    }
+}
+
+/// What the session's screen shows in place of its prompt box, so typed text would land there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Blocker {
+    Menu,
+    Dialog,
 }
 
 impl Screen {
     fn restart(&mut self) -> u64 {
         self.kept.clear();
         self.watch = None;
+        self.fed += 1;
         self.session += 1;
         self.session
     }
@@ -310,6 +357,7 @@ impl Screen {
 
     fn resize(&mut self, rows: u16, cols: u16) {
         self.size = (rows, cols);
+        self.fed += 1;
         if let Some(watch) = self.watch.as_mut() {
             watch.resize(rows, cols);
         }
@@ -323,9 +371,34 @@ impl Screen {
             watch.feed(bytes, Instant::now());
         }
         keep_last(&mut self.kept, bytes, OUTPUT_KEEP);
+        self.fed += 1;
         for (_, sink) in &self.viewers {
             sink(bytes);
         }
+    }
+
+    /// The menu or dialog the screen shows, read from the kept bytes replayed into a terminal of the
+    /// session's size as `MenuWatch` reads them. Parsed again only once the screen changed.
+    fn blocker(&mut self) -> Option<Blocker> {
+        if let Some((fed, blocker)) = self.read {
+            if fed == self.fed {
+                return blocker;
+            }
+        }
+        let (rows, cols) = self.size;
+        let mut parser = vt100::Parser::new(rows.max(1), cols.max(1), 0);
+        parser.process(self.kept.make_contiguous());
+        let (_, width) = parser.screen().size();
+        let lines: Vec<String> = parser.screen().rows(0, width).collect();
+        let blocker = if crate::menu_watch::menu_top(&lines).is_some() {
+            Some(Blocker::Menu)
+        } else if crate::menu_watch::dialog_on(&lines) {
+            Some(Blocker::Dialog)
+        } else {
+            None
+        };
+        self.read = Some((self.fed, blocker));
+        blocker
     }
 
     /// Replays the screen to `sink`, then keeps it for live output. Holding the lock across both
@@ -1286,7 +1359,7 @@ impl Machine {
             Call::CancelSetupToken { account } => json(self.setup_tokens.cancel(&account)),
             Call::SwitchAccount { tab, account, cols, rows } => json(self.switch_account(&tab, &account, cols, rows)?),
             Call::Thread { tab, from, limit, before } => json(self.thread_page(&tab, from, limit, before)?),
-            Call::Prompt { tab, text } => json(self.type_prompt(&tab, &text)?),
+            Call::Prompt { tab, text } => json(self.type_prompt(&tab, &text).map_err(NotTyped::for_person)?),
             Call::Workspace { tab } => {
                 let cwd = self.tab(&tab, |t| t.cwd.clone())?;
                 json(workspace::Workspace { scratch: cwd == self.scratch, ..workspace::of(&cwd) })
@@ -2574,20 +2647,50 @@ impl Machine {
 
     /// Watches the session until it takes the terminal, then types the prompts held for it. The
     /// program says nothing when it does, so the poll asks the pty.
+    /// Held prompts wait until the screen has shown no menu or dialog for `HELD_SETTLE` since the
+    /// session took the terminal: a dialog at start can be what took it. Keys go at once.
     fn type_held_once_raw(&self, tab: &str, session: u64) {
         let (me, tab) = (self.me.clone(), tab.to_owned());
+        let mut clear_since: Option<Instant> = None;
         std::thread::spawn(move || loop {
             let Some(machine) = me.upgrade() else { return };
             let Ok(screen) = machine.tab(&tab, |t| t.screen.clone()) else { return };
             if screen.lock().unwrap().session != session {
                 return;
             }
-            let done = machine.tab(&tab, |t| match t.session.as_mut() {
+            // Some(whether prompts are held) once raw, None while cooked, the thread ends on Err.
+            let raw = machine.tab(&tab, |t| match t.session.as_mut() {
                 Some(s) if s.raw() => {
                     t.waking = false;
                     if !t.keys.is_empty() {
                         let _ = s.write(&std::mem::take(&mut t.keys));
                     }
+                    Ok(Some(!t.held.is_empty()))
+                }
+                Some(_) => Ok(None),
+                None => Err(()),
+            });
+            let held = match raw {
+                Ok(Ok(Some(held))) => held,
+                Ok(Ok(None)) => {
+                    clear_since = None;
+                    drop(machine);
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    continue;
+                }
+                _ => return,
+            };
+            if !held {
+                return;
+            }
+            // The screen lock is taken alone, with the tabs lock let go. Only Claude Code's screens are read.
+            let blocked = machine.blocker(&tab).is_some();
+            let since = *clear_since.get_or_insert_with(Instant::now);
+            if blocked {
+                clear_since = None;
+            } else if since.elapsed() >= HELD_SETTLE {
+                let wrote = machine.tab(&tab, |t| {
+                    let Some(s) = t.session.as_mut() else { return false };
                     let mut wrote = false;
                     for text in std::mem::take(&mut t.held) {
                         if s.write(&paste(&text)).is_ok() {
@@ -2595,20 +2698,16 @@ impl Machine {
                             wrote = true;
                         }
                     }
-                    (true, wrote)
+                    wrote
+                });
+                if wrote == Ok(true) {
+                    machine.arm_delegate_pass();
                 }
-                Some(_) => (false, false),
-                None => (true, false),
-            });
-            let (done, wrote) = done.unwrap_or((true, false));
-            if wrote {
-                machine.arm_delegate_pass();
-            }
-            if done {
                 return;
             }
             drop(machine);
-            std::thread::sleep(std::time::Duration::from_millis(10));
+            // A startup menu can stay up for good, so it is looked at less often than a clear screen.
+            std::thread::sleep(std::time::Duration::from_millis(if blocked { 100 } else { 10 }));
         });
     }
 
@@ -3543,7 +3642,7 @@ impl Machine {
         if let Call::Prompt { tab, text } = &call {
             self.may_prompt(caller, tab)?;
             // Typed text from another agent says who sent it, as enqueue's does.
-            return json(self.type_prompt(tab, &format!("[{}] {}", self.sender_of(caller), pinned_lines::guard(text)))?);
+            return json(self.type_prompt(tab, &format!("[{}] {}", self.sender_of(caller), pinned_lines::guard(text))).map_err(|e| e.for_agent(tab))?);
         }
         if matches!(call, Call::OpenGlobalOrchestrator) && !self.tab(caller, |t| global::is_global(&t.env)).unwrap_or(false) {
             return Err("open_global_orchestrator is for the global orchestrator's own session".into());
@@ -4042,11 +4141,8 @@ impl Machine {
             let delivery = match nudge {
                 skills::Nudge::NextStart => skills::Delivery::NextStart,
                 skills::Nudge::ReloadSkills => {
-                    let typed = self.tab(&tab, |t| {
-                        t.owes_reload = true;
-                        t.reload_if_idle()
-                    });
-                    if typed.unwrap_or(false) {
+                    let _ = self.tab(&tab, |t| t.owes_reload = true);
+                    if self.reload_unless_blocked(&tab) {
                         skills::Delivery::Reloaded
                     } else {
                         self.arm_delegate_pass();
@@ -4058,6 +4154,13 @@ impl Machine {
         }
         nudged.sort_by_key(|n| tab_number(&n.tab));
         nudged
+    }
+
+    /// Types the `/reload-skills` a tab owes, unless its screen shows a menu or dialog. The screen
+    /// is read before the tabs lock is taken, and only when a reload is owed.
+    fn reload_unless_blocked(&self, tab: &str) -> bool {
+        let owes = self.tab(tab, |t| t.owes_reload && t.notice_idle()).unwrap_or(false);
+        owes && self.blocker(tab).is_none() && self.tab(tab, Tab::reload_if_idle).unwrap_or(false)
     }
 
     fn wake_sync(&self) {
@@ -4160,8 +4263,21 @@ impl Machine {
 
     /// Types `text` as one prompt into the newest live tab whose environment holds every pair of
     /// `env`, such as the session answering a Slack thread. Answers whether one took it.
+    /// A delivery the screen's menu or dialog holds back waits in the tab's queue and is still
+    /// delivered: an answer of false sends the thread to another session.
     pub fn deliver(&self, env: &[(String, String)], text: &str) -> bool {
-        self.live_tab(env).is_some_and(|tab| self.type_prompt(&tab, text).is_ok())
+        let Some(tab) = self.live_tab(env) else { return false };
+        match self.type_prompt(&tab, text) {
+            Ok(()) => true,
+            Err(NotTyped::Blocked(_)) => {
+                let session = self.tab(&tab, |t| t.claude_session.clone()).ok().flatten();
+                self.delegates.queue_report(&tab, session, text.to_owned());
+                self.arm_delegate_pass();
+                self.emit_tabs();
+                true
+            }
+            Err(NotTyped::Failed(_)) => false,
+        }
     }
 
     fn live_tab(&self, env: &[(String, String)]) -> Option<TabId> {
@@ -4226,30 +4342,66 @@ impl Machine {
                 }
             }
             let free = self.tab(&tab, |t| t.live() && matches!(t.status, None | Some(AgentStatus::Done))).unwrap_or(false);
-            if free {
-                if let Some(text) = self.pr_watches.take_wake(&tab) {
-                    let _ = self.type_prompt(&tab, &text);
-                }
+            // Read before the wake is taken, so a menu or dialog leaves it for a later read.
+            if free && self.blocker(&tab).is_none() {
+                self.wake_tab(&tab);
             }
         }
+    }
+
+    /// Types the tab's pull request wake, if it has one. A wake that was not typed is put back.
+    fn wake_tab(&self, tab: &str) {
+        if let Some(wake) = self.pr_watches.take_held_wake(tab) {
+            if self.type_prompt(tab, &wake.text).is_err() {
+                self.pr_watches.put_back(tab, wake);
+            }
+        }
+    }
+
+    /// Which running session the tab's screen belongs to: it changes each time the tab starts one.
+    /// None for a tab that is gone. The screen lock is taken alone, after the tabs lock is let go.
+    fn screen_session(&self, tab: &str) -> Option<u64> {
+        let screen = self.tab(tab, |t| t.screen.clone()).ok()?;
+        let session = screen.lock().unwrap().session;
+        Some(session)
+    }
+
+    /// The menu or dialog the tab's screen shows, if any. The screen lock is taken alone, after the
+    /// tabs lock is let go, as the reader thread takes it.
+    /// Only Claude Code's screens are known: another provider's tab is never held back.
+    fn blocker(&self, tab: &str) -> Option<Blocker> {
+        let (screen, claude) = self.tab(tab, |t| (t.screen.clone(), t.account.provider == Provider::Claude)).ok()?;
+        if !claude {
+            return None;
+        }
+        let blocker = screen.lock().unwrap().blocker();
+        blocker
     }
 
     /// Types `text` into the tab's session as one prompt and submits it. A session that has not
     /// taken the terminal yet, as claude starting up, gets it once it does: typed earlier, the
     /// pty's cooked mode would echo it and turn the submitting \r into \n, and claude would never
     /// see a prompt.
-    fn type_prompt(&self, tab: &str, text: &str) -> Result<(), String> {
-        self.awake(tab)?;
+    /// Nothing is typed while the screen shows a menu or dialog, held prompts included.
+    fn type_prompt(&self, tab: &str, text: &str) -> Result<(), NotTyped> {
+        self.awake(tab).map_err(NotTyped::Failed)?;
+        // Read under the screen lock alone: held across the write, a paste larger than the pty's
+        // free input would block it, and the reader thread would wait on the lock for good.
+        let blocker = self.blocker(tab);
         let wrote = self.tab(tab, |t| match t.session.as_mut() {
             Some(s) if s.raw() => {
+                if let Some(blocker) = blocker {
+                    return Err(NotTyped::Blocked(blocker));
+                }
+                let failed = |e: std::io::Error| NotTyped::Failed(e.to_string());
                 if !t.keys.is_empty() {
-                    s.write(&std::mem::take(&mut t.keys)).map_err(|e| e.to_string())?;
+                    s.write(&std::mem::take(&mut t.keys)).map_err(failed)?;
                 }
                 for held in std::mem::take(&mut t.held) {
-                    s.write(&paste(&held)).map_err(|e| e.to_string())?;
+                    s.write(&paste(&held)).map_err(failed)?;
                     t.turn_pending = Some(Instant::now());
                 }
-                s.write(&paste(text)).map_err(|e| e.to_string())?;
+                s.write(&paste(text)).map_err(failed)?;
                 t.turn_pending = Some(Instant::now());
                 Ok(true)
             }
@@ -4262,8 +4414,8 @@ impl Machine {
                 t.held.push(text.to_owned());
                 Ok(false)
             }
-            None => Err(format!("tab {tab} has no running session")),
-        })??;
+            None => Err(NotTyped::Failed(format!("tab {tab} has no running session"))),
+        }).map_err(NotTyped::Failed)??;
         if wrote {
             self.arm_delegate_pass();
         }
@@ -5767,7 +5919,7 @@ impl Machine {
         let text = self.delegates.claim_task_notice(&caller, task)?;
         if let Err(error) = self.type_prompt(tab, &text) {
             self.delegates.release_notice(&[task.to_owned()]);
-            return Err(error);
+            return Err(error.for_person());
         }
         Ok(())
     }
@@ -5790,6 +5942,10 @@ impl Machine {
             }
             return;
         }
+        // A menu or dialog holds the news back: a claim made now would be released, and saved, again.
+        if self.blocker(tab).is_some() {
+            return;
+        }
         let Some((text, ids)) = self.delegates.claim_notice(tab) else { return };
         if self.write_notice(tab, &text) != Ok(true) {
             self.delegates.release_notice(&ids);
@@ -5803,7 +5959,11 @@ impl Machine {
 
     /// Writes `text` into a raw session. `Ok(false)` when the session has not taken the terminal,
     /// which leaves the notice unclaimed so a later idle can type it. Queuing it is not delivery.
+    /// Also `Ok(false)` while the screen shows a menu or dialog: the notice waits for it to close.
     fn write_notice(&self, tab: &str, text: &str) -> Result<bool, String> {
+        if self.blocker(tab).is_some() {
+            return Ok(false);
+        }
         self.tab(tab, |t| {
             if !t.notice_idle() {
                 return Ok(false);
@@ -5868,7 +6028,8 @@ impl Machine {
                 machine.end_finished_holds(Instant::now());
                 let tabs: Vec<String> = machine.tabs.lock().unwrap().keys().cloned().collect();
                 for tab in tabs {
-                    if !machine.tab(&tab, Tab::reload_if_idle).unwrap_or(false) {
+                    // The screen is read before the tabs lock is taken, and only when a reload is owed.
+                    if !machine.reload_unless_blocked(&tab) {
                         machine.maybe_deliver(&tab);
                     }
                 }
@@ -6480,6 +6641,15 @@ impl Machine {
                     return;
                 }
             }
+            // A menu or dialog on the screen holds the continue back until it closes.
+            while machine.blocker(&tab).is_some() {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                if machine.tab(&tab, |t| t.resume_at) != Ok(Some(at)) {
+                    return;
+                }
+            }
+            // The session the text goes to: the Enter must reach the same one, not a session that replaced it.
+            let session = machine.screen_session(&tab);
             let fired = machine.tab(&tab, |t| !t.held_at_limit && t.session.is_some() && t.resume_at == Some(at) && t.resume_at.take().is_some());
             if fired != Ok(true) {
                 return;
@@ -6487,7 +6657,17 @@ impl Machine {
             let type_into = |data: &str| machine.tab(&tab, |t| t.session.as_mut().map(|s| s.write(data.as_bytes())));
             let _ = type_into(sessions::CONTINUE_PROMPT);
             // Enter arrives separately, or the TUI takes it as part of a paste.
-            std::thread::sleep(std::time::Duration::from_millis(300));
+            std::thread::sleep(CONTINUE_ENTER_GAP);
+            // A menu or dialog that opened meanwhile would take the Enter: it waits for the screen too.
+            while machine.blocker(&tab).is_some() {
+                if machine.tab(&tab, |t| t.session.is_none()) != Ok(false) || machine.screen_session(&tab) != session {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            if machine.screen_session(&tab) != session {
+                return;
+            }
             let _ = type_into("\r");
             machine.save_sessions();
             machine.emit_tabs();
@@ -14065,6 +14245,486 @@ Have another model review a risky change before it goes ahead.";
         let run = m.delegates.get(&task).unwrap().run;
         assert_eq!((run.user_wait, run.paused), (None, answered - asked), "the clock runs again from the answer");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A permission menu as Claude Code draws it, and what erases it and draws the prompt box.
+    const MENU: &str = "\x1b[2J\x1b[H Bash command\r\n\r\n   cargo build\r\n\r\n Do you want to proceed?\r\n \u{276f} 1. Yes\r\n   2. Yes, and don't ask again for cargo build commands\r\n   3. No, and tell Claude what to do differently (esc)\r\n";
+    const ERASE: &str = "\x1b[2J\x1b[H\u{23fa} Done.\r\n\r\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\r\n\u{276f} \r\n\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\r\n  ? for shortcuts\r\n";
+
+    fn show(m: &Machine, tab: &str, bytes: &str) {
+        let screen = m.tab(tab, |t| t.screen.clone()).unwrap();
+        let mut screen = screen.lock().unwrap();
+        let session = screen.session;
+        screen.push(session, bytes.as_bytes());
+    }
+
+    #[test]
+    fn a_screen_is_read_again_only_once_it_changed() {
+        let mut screen = Screen::default();
+        screen.resize(24, 80);
+        let session = screen.session;
+        screen.push(session, MENU.as_bytes());
+        assert_eq!(screen.blocker(), Some(Blocker::Menu));
+        screen.kept.clear();
+        assert_eq!(screen.blocker(), Some(Blocker::Menu), "nothing new came in, so the answer stands unparsed");
+        screen.push(session, ERASE.as_bytes());
+        assert_eq!(screen.blocker(), None, "new bytes are read again");
+    }
+
+    #[test]
+    fn a_long_session_still_reads_its_menu() {
+        let mut screen = Screen::default();
+        screen.resize(24, 80);
+        let session = screen.session;
+        let filler: String = (0..12_000).map(|n| format!("\x1b[32mline {n} of the build output\x1b[0m\r\n")).collect();
+        assert!(filler.len() > OUTPUT_KEEP);
+        screen.push(session, filler.as_bytes());
+        assert_eq!(screen.blocker(), None);
+        screen.push(session, MENU.as_bytes());
+        assert_eq!(screen.blocker(), Some(Blocker::Menu), "the menu is read from the last 256 KiB");
+        screen.push(session, filler.as_bytes());
+        screen.push(session, ERASE.as_bytes());
+        assert_eq!(screen.blocker(), None, "the prompt box is back");
+    }
+
+    /// Claude Code's prompt box as it stands between turns.
+    fn prompt_box(above: &str, inside: &str) -> String {
+        let rule = "\u{2500}".repeat(60);
+        format!("\x1b[2J\x1b[H{above}\r\n\r\n{rule}\r\n{inside}\r\n{rule}\r\n  ? for shortcuts\r\n")
+    }
+
+    /// A dialog drawn under a ▔ rule in place of the prompt box, as /usage draws it.
+    fn dialog() -> String {
+        format!("\x1b[2J\x1b[H\u{23fa} Done.\r\n\r\n{}\r\n  Status   Config   Usage\r\n\r\n  Current session   9% used\r\n\r\n  Esc to cancel\r\n", "\u{2594}".repeat(60))
+    }
+
+    /// A restored session woken and holding the terminal, its screen still blank.
+    #[cfg(unix)]
+    fn woken(name: &str, sessions: &[&str]) -> (Arc<Machine>, PathBuf, PathBuf, Vec<TabId>) {
+        let (m, dir, claude, tabs) = restored_idle(name, sessions);
+        for tab in &tabs {
+            m.call(Call::Wake { tab: tab.clone(), cols: 80, rows: 24 }).unwrap();
+        }
+        for tab in &tabs {
+            wait_for("the terminal", || m.tab(tab, |t| t.session.as_ref().is_some_and(|s| s.raw())).unwrap());
+        }
+        (m, dir, claude, tabs)
+    }
+
+    fn pasted(text: &str) -> String {
+        format!("\x1b[200~{text}\x1b[201~\r")
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_prompt_is_not_typed_into_a_menu_and_goes_once_the_menu_is_gone() {
+        let (m, dir, claude, tabs) = woken("guard-menu", &["s1"]);
+        let tab = tabs[0].clone();
+        show(&m, &tab, MENU);
+        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "Run the tests.".into() }), Err(MENU_UP.into()));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(kept(&claude, "typed", &tab), "", "nothing reached the session");
+        show(&m, &tab, ERASE);
+        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "Run the tests.".into() }), Ok(json!(null)));
+        wait_for("the prompt", || kept(&claude, "typed", &tab).ends_with('\r'));
+        assert_eq!(kept(&claude, "typed", &tab), pasted("Run the tests."));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_decline_then_prompt_goes_through() {
+        let (m, dir, claude, tabs) = woken("guard-decline", &["s1"]);
+        let tab = tabs[0].clone();
+        show(&m, &tab, MENU);
+        show(&m, &tab, &prompt_box("\u{23fa} Bash(cargo build)\r\n  \u{23bf}  Interrupted \u{b7} What should Claude do instead?", "\u{276f} "));
+        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "Build it in release.".into() }), Ok(json!(null)));
+        wait_for("the prompt", || kept(&claude, "typed", &tab).ends_with('\r'));
+        assert_eq!(kept(&claude, "typed", &tab), pasted("Build it in release."));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_draft_and_the_idle_prompt_box_are_not_menus() {
+        let (m, dir, claude, tabs) = woken("guard-not-menus", &["s1"]);
+        let tab = tabs[0].clone();
+        let screens = [
+            prompt_box("\u{23fa} Done.", "\u{276f} 1. fix the bug"),
+            prompt_box("  Both are in Settings \u{203a} Archive and can be brought back.", "\u{276f}"),
+            prompt_box("\u{23fa} Bash(cargo build)\r\n  \u{23bf}  Running\u{2026}", "\u{276f} "),
+        ];
+        let mut want = String::new();
+        for (n, screen) in screens.iter().enumerate() {
+            show(&m, &tab, screen);
+            let text = format!("prompt {n}");
+            assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: text.clone() }), Ok(json!(null)), "screen {n}");
+            want += &pasted(&text);
+            wait_for("the prompt", || kept(&claude, "typed", &tab).len() >= want.len());
+        }
+        assert_eq!(kept(&claude, "typed", &tab), want);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_dialog_blocks_a_prompt() {
+        let (m, dir, claude, tabs) = woken("guard-dialog", &["s1"]);
+        let tab = tabs[0].clone();
+        show(&m, &tab, &dialog());
+        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "Run the tests.".into() }), Err(DIALOG_UP.into()));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(kept(&claude, "typed", &tab), "", "nothing reached the session");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_delivery_waits_in_the_queue_while_a_menu_is_up() {
+        let file = std::env::temp_dir().join(format!("pinned-guard-delivery-{}.bin", std::process::id()));
+        let m = machine();
+        let tab = running(&m, slack_env("c2", "1792400050.000200"), &format!("stty raw -echo; exec cat > '{}'", file.display()));
+        wait_for("the terminal", || m.tab(&tab, |t| t.session.as_ref().is_some_and(|s| s.raw())).unwrap());
+        show(&m, &tab, MENU);
+        let d = delivery("c2", "1792400050.000200", &["[Slack reply from ana in the thread]\nship it"]);
+        assert!(m.deliver(&d.env(), &d.text()), "a held delivery is still delivered, so the thread opens no other session");
+        assert_eq!(m.delegates.queued().get(&tab), Some(&1));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(std::fs::read(&file).unwrap_or_default(), b"", "nothing reached the session");
+        show(&m, &tab, ERASE);
+        m.tab(&tab, |t| t.status = Some(AgentStatus::Done)).unwrap();
+        m.maybe_deliver(&tab);
+        wait_for("the delivery", || std::fs::read(&file).is_ok_and(|b| b.ends_with(b"\r")));
+        std::thread::sleep(Duration::from_millis(1200));
+        let typed = String::from_utf8(std::fs::read(&file).unwrap()).unwrap();
+        assert_eq!(typed.matches("ship it").count(), 1, "typed once: {typed:?}");
+        assert!(typed.starts_with("\x1b[200~") && typed.ends_with("\x1b[201~\r"), "{typed:?}");
+        assert_eq!(m.delegates.queued().get(&tab), None);
+        let _ = std::fs::remove_file(file);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_agents_prompt_is_refused_with_its_own_reason() {
+        let (m, dir, claude, tabs) = woken("guard-agent", &["s1", "s2"]);
+        let (me, other) = (tabs[0].clone(), tabs[1].clone());
+        let prompt = || act_as(&m, &me, "prompt", json!({ "tab": other, "text": "Rebase on main." }));
+        show(&m, &other, MENU);
+        assert_eq!(prompt(), Err(format!("{other} is waiting for its user to answer a menu, so nothing was typed. Try again after the user answers it.")));
+        show(&m, &other, &dialog());
+        assert_eq!(prompt(), Err(format!("{other} has a dialog open in its terminal, so nothing was typed. Try again later.")));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(kept(&claude, "typed", &other), "", "nothing reached the session");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A picker the person opened and left open between turns, as /model draws one.
+    const PICKER: &str = "\x1b[2J\x1b[H Select model\r\n Switch between Claude models.\r\n\r\n \u{276f} 1. Default (recommended)  Opus\r\n   2. Sonnet\r\n   3. Haiku\r\n\r\n Enter to confirm \u{b7} Esc to exit\r\n";
+
+    #[test]
+    #[cfg(unix)]
+    fn news_waits_while_a_menu_is_up() {
+        let (m, dir, claude, tabs) = woken("guard-news", &["s1"]);
+        let tab = tabs[0].clone();
+        m.tab(&tab, |t| (t.status, t.turn_pending) = (Some(AgentStatus::Done), None)).unwrap();
+        show(&m, &tab, PICKER);
+        let session = m.tab(&tab, |t| t.claude_session.clone()).unwrap();
+        m.delegates.queue_report(&tab, session, "[pinned] Worker tab-9 finished".into());
+        let handoff = m.hand_to(&tab, "[Ana] Ship it.", "r-1", BusyPolicy::Queue, &m.sent.lock().unwrap()).unwrap();
+        assert!(matches!(handoff, Handoff::Queued { .. }), "an idle Captain behind a menu queues the message: {handoff:?}");
+        m.maybe_deliver(&tab);
+        std::thread::sleep(Duration::from_millis(1200));
+        assert_eq!(kept(&claude, "typed", &tab), "", "nothing reached the session");
+        assert!(m.delegates.has_news(&tab), "the news stays queued");
+        show(&m, &tab, ERASE);
+        m.maybe_deliver(&tab);
+        wait_for("the news", || kept(&claude, "typed", &tab).ends_with('\r'));
+        std::thread::sleep(Duration::from_millis(1200));
+        let typed = kept(&claude, "typed", &tab);
+        assert_eq!((typed.matches("\x1b[200~").count(), typed.matches("tab-9 finished").count(), typed.matches("Ship it.").count()), (1, 1, 1), "typed once: {typed:?}");
+        assert!(!m.delegates.has_news(&tab));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn news_for_a_turn_waiting_on_background_work_waits_while_a_menu_is_up() {
+        let (m, dir, claude, tabs) = woken("guard-background", &["s1"]);
+        let tab = tabs[0].clone();
+        m.tab(&tab, |t| {
+            t.status = Some(AgentStatus::Working);
+            t.turn_pending = None;
+            t.background_wait = Some(BackgroundWait { since: Instant::now(), shells_only: false, in_session: true, clear_since: None });
+        })
+        .unwrap();
+        show(&m, &tab, MENU);
+        let session = m.tab(&tab, |t| t.claude_session.clone()).unwrap();
+        m.delegates.queue_report(&tab, session, "[pinned] Worker tab-9 finished".into());
+        m.maybe_deliver(&tab);
+        std::thread::sleep(Duration::from_millis(1200));
+        assert_eq!(kept(&claude, "typed", &tab), "", "nothing reached the session");
+        assert!(m.delegates.has_news(&tab), "the news stays queued");
+        show(&m, &tab, ERASE);
+        m.maybe_deliver(&tab);
+        wait_for("the news", || kept(&claude, "typed", &tab).contains("tab-9 finished"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn held_prompts_wait_out_a_startup_menu() {
+        let (m, dir, claude, tabs) = restored_idle("guard-held", &["s1"]);
+        let tab = tabs[0].clone();
+        m.call(Call::Wake { tab: tab.clone(), cols: 80, rows: 24 }).unwrap();
+        assert_eq!(m.call(Call::Prompt { tab: tab.clone(), text: "Where were we?".into() }), Ok(json!(null)));
+        assert_eq!(m.tab(&tab, |t| t.held.clone()).unwrap(), ["Where were we?"], "held until the session takes the terminal");
+        show(&m, &tab, MENU);
+        wait_for("the terminal", || m.tab(&tab, |t| t.session.as_ref().is_some_and(|s| s.raw())).unwrap());
+        std::thread::sleep(Duration::from_millis(600));
+        assert_eq!(kept(&claude, "typed", &tab), "", "nothing is typed while the menu is up");
+        let erased = Instant::now();
+        show(&m, &tab, ERASE);
+        wait_for("the held prompt", || kept(&claude, "typed", &tab).ends_with('\r'));
+        assert!(erased.elapsed() >= Duration::from_millis(300), "typed only once the screen stayed clear for 300 ms: {:?}", erased.elapsed());
+        assert_eq!(kept(&claude, "typed", &tab), pasted("Where were we?"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_pull_request_update_waits_for_the_menu_and_is_not_lost() {
+        let (m, dir, claude, tabs) = {
+            let dir = temp("guard-pr");
+            let (app, config, bin) = (dir.join("app"), dir.join("config"), dir.join("bin"));
+            for d in [&app, &config, &bin] {
+                std::fs::create_dir_all(d).unwrap();
+            }
+            // gh here reads nothing, so the watch keeps the update it already has.
+            std::fs::write(bin.join("gh"), "#!/bin/sh\nexit 1\n").unwrap();
+            std::fs::set_permissions(bin.join("gh"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+            std::fs::write(config.join("sessions.json"), json!([{ "cwd": app, "session": "s1", "env": [] }]).to_string()).unwrap();
+            let claude = typed_claude(&dir);
+            let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
+            let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), path_env: Some(path), ..launch() }, Some(config), None, |_| {});
+            let tabs = m.restore_tabs();
+            (m, dir, claude, tabs)
+        };
+        let tab = tabs[0].clone();
+        m.call(Call::Wake { tab: tab.clone(), cols: 80, rows: 24 }).unwrap();
+        wait_for("the terminal", || m.tab(&tab, |t| t.session.as_ref().is_some_and(|s| s.raw())).unwrap());
+        m.tab(&tab, |t| (t.status, t.turn_pending) = (Some(AgentStatus::Done), None)).unwrap();
+        let url = "https://github.com/o/r/pull/41";
+        let view = |status: &str, conclusion: &str| json!({ "number": 41, "url": url, "state": "OPEN", "headRefOid": "abc1234def", "baseRefName": "main", "mergeable": "MERGEABLE",
+            "statusCheckRollup": [{ "name": "build", "status": status, "conclusion": conclusion }], "comments": [], "reviews": [] });
+        m.pr_watches.set(&tab, url, true);
+        m.pr_watches.update(&tab, url, crate::prwatch::snapshot(&view("IN_PROGRESS", "")));
+        m.pr_watches.update(&tab, url, crate::prwatch::snapshot(&view("COMPLETED", "SUCCESS")));
+        show(&m, &tab, MENU);
+        m.read_watches();
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(kept(&claude, "typed", &tab), "", "nothing reached the session");
+        show(&m, &tab, ERASE);
+        m.read_watches();
+        wait_for("the update", || kept(&claude, "typed", &tab).ends_with('\r'));
+        assert!(kept(&claude, "typed", &tab).contains("pull request #41"), "the update was kept for the read after the menu");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_continue_after_a_usage_limit_waits_while_a_menu_is_up() {
+        let (m, dir, claude, tabs) = woken("guard-limit", &["s1"]);
+        let tab = tabs[0].clone();
+        let at = unix_now() - LIMIT_MARGIN_SECS - 1;
+        m.tab(&tab, |t| (t.resume_at, t.held_at_limit) = (Some(at), false)).unwrap();
+        show(&m, &tab, MENU);
+        m.continue_when_limit_lifts(&tab);
+        std::thread::sleep(Duration::from_millis(1200));
+        assert_eq!(kept(&claude, "typed", &tab), "", "nothing reached the session");
+        assert_eq!(m.tab(&tab, |t| t.resume_at).unwrap(), Some(at), "the limit still waits to continue");
+        show(&m, &tab, ERASE);
+        // A menu that opens between the text and its Enter holds the Enter back.
+        wait_for("the continue text", || kept(&claude, "typed", &tab) == sessions::CONTINUE_PROMPT);
+        show(&m, &tab, MENU);
+        // The gap before the Enter is long under test, so the menu is up well before the screen is looked at.
+        std::thread::sleep(CONTINUE_ENTER_GAP + Duration::from_millis(1200));
+        assert_eq!(kept(&claude, "typed", &tab), sessions::CONTINUE_PROMPT, "no Enter reached the menu");
+        show(&m, &tab, ERASE);
+        wait_for("the Enter", || kept(&claude, "typed", &tab).ends_with('\r'));
+        assert_eq!(kept(&claude, "typed", &tab), format!("{}\r", sessions::CONTINUE_PROMPT));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_enter_of_a_usage_limit_continue_does_not_reach_a_session_that_replaced_its_own() {
+        let (m, dir, claude, tabs) = woken("guard-limit-replaced", &["s1"]);
+        let tab = tabs[0].clone();
+        let at = unix_now() - LIMIT_MARGIN_SECS - 1;
+        m.tab(&tab, |t| (t.resume_at, t.held_at_limit) = (Some(at), false)).unwrap();
+        m.continue_when_limit_lifts(&tab);
+        wait_for("the continue text", || kept(&claude, "typed", &tab) == sessions::CONTINUE_PROMPT);
+        // Another session takes the tab between the text and its Enter.
+        let replacement = dir.join("replacement.bin");
+        m.spawn(&tab, sh(&format!("stty raw -echo; echo ready; exec cat > '{}'", replacement.display())), pty::size(80, 24)).unwrap();
+        std::thread::sleep(CONTINUE_ENTER_GAP + Duration::from_millis(1200));
+        assert_eq!(read_pty(&replacement), "", "no Enter reached the new session");
+        assert_eq!(kept(&claude, "typed", &tab), sessions::CONTINUE_PROMPT, "nor the old one");
+        assert_eq!(m.tab(&tab, |t| t.resume_at).unwrap(), None, "the continue was spent");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// How many times `needle` was typed into the tab's session.
+    #[cfg(unix)]
+    fn typed_times(claude: &Path, tab: &str, needle: &str) -> usize {
+        kept(claude, "typed", tab).matches(needle).count()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_skills_change_types_no_reload_into_a_menu_and_types_it_once_the_menu_is_gone() {
+        let (m, dir, claude, tabs) = woken("guard-reload", &["s1"]);
+        let tab = tabs[0].clone();
+        m.tab(&tab, |t| (t.status, t.turn_pending) = (Some(AgentStatus::Done), None)).unwrap();
+        show(&m, &tab, PICKER);
+        let account = Account::builtin(Provider::Claude);
+        let nudged = m.skills_changed(&[personal_skills(&m, &account)]);
+        assert_eq!(nudged.iter().map(|n| n.nudge).collect::<Vec<_>>(), [skills::Delivery::AfterTurn], "an idle tab behind a menu reloads after it");
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(kept(&claude, "typed", &tab), "", "nothing reached the picker");
+        assert!(m.tab(&tab, |t| t.owes_reload).unwrap(), "the reload is still owed");
+        show(&m, &tab, ERASE);
+        wait_for("the reload", || kept(&claude, "typed", &tab).contains("/reload-skills"));
+        std::thread::sleep(Duration::from_millis(1200));
+        assert_eq!(typed_times(&claude, &tab, "/reload-skills"), 1, "typed once: {:?}", kept(&claude, "typed", &tab));
+        assert!(!m.tab(&tab, |t| t.owes_reload).unwrap());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_delegate_pass_leaves_an_owed_reload_while_a_menu_is_up() {
+        let (m, dir, claude, tabs) = woken("guard-reload-pass", &["s1"]);
+        let tab = tabs[0].clone();
+        m.tab(&tab, |t| (t.status, t.turn_pending, t.owes_reload) = (Some(AgentStatus::Done), None, true)).unwrap();
+        show(&m, &tab, PICKER);
+        m.arm_delegate_pass();
+        std::thread::sleep(Duration::from_millis(2300));
+        assert_eq!(kept(&claude, "typed", &tab), "", "two passes found the menu and typed nothing");
+        assert!(m.tab(&tab, |t| t.owes_reload).unwrap(), "the reload is still owed");
+        show(&m, &tab, ERASE);
+        wait_for("the reload", || kept(&claude, "typed", &tab).contains("/reload-skills"));
+        std::thread::sleep(Duration::from_millis(1200));
+        assert_eq!(typed_times(&claude, &tab, "/reload-skills"), 1, "typed once: {:?}", kept(&claude, "typed", &tab));
+        assert!(!m.tab(&tab, |t| t.owes_reload).unwrap());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_blocked_idle_tab_with_news_leaves_the_delegates_file_alone() {
+        let (m, dir, claude, tabs) = woken("guard-news-file", &["s1"]);
+        let tab = tabs[0].clone();
+        m.tab(&tab, |t| (t.status, t.turn_pending) = (Some(AgentStatus::Done), None)).unwrap();
+        show(&m, &tab, PICKER);
+        let session = m.tab(&tab, |t| t.claude_session.clone()).unwrap();
+        m.delegates.queue_report(&tab, session, "[pinned] Worker tab-9 finished".into());
+        let file = dir.join("config/tasks.json");
+        let (before, saved) = (std::fs::metadata(&file).unwrap().modified().unwrap(), std::fs::read_to_string(&file).unwrap());
+        m.arm_delegate_pass();
+        // Three passes run in this time, and the file is read often enough to catch a claim between its two writes.
+        let until = Instant::now() + Duration::from_millis(3300);
+        while Instant::now() < until {
+            assert!(!std::fs::read_to_string(&file).unwrap_or_default().contains("\"claimed\": true"), "the news was claimed while a menu was up");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(std::fs::metadata(&file).unwrap().modified().unwrap(), before, "the file was written again");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), saved);
+        assert!(m.delegates.has_news(&tab), "the news stays queued");
+        assert_eq!(kept(&claude, "typed", &tab), "", "nothing reached the session");
+        show(&m, &tab, ERASE);
+        wait_for("the news", || kept(&claude, "typed", &tab).contains("tab-9 finished"));
+        std::thread::sleep(Duration::from_millis(1200));
+        assert_eq!(typed_times(&claude, &tab, "tab-9 finished"), 1, "typed once: {:?}", kept(&claude, "typed", &tab));
+        assert!(!m.delegates.has_news(&tab));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_pull_request_wake_that_was_not_typed_is_kept_for_the_next_pass() {
+        let (m, dir, claude, tabs) = woken("guard-wake", &["s1"]);
+        let tab = tabs[0].clone();
+        m.tab(&tab, |t| (t.status, t.turn_pending) = (Some(AgentStatus::Done), None)).unwrap();
+        let url = "https://github.com/o/r/pull/41";
+        let view = |status: &str, conclusion: &str| json!({ "number": 41, "url": url, "state": "OPEN", "headRefOid": "abc1234def", "baseRefName": "main", "mergeable": "MERGEABLE",
+            "statusCheckRollup": [{ "name": "build", "status": status, "conclusion": conclusion }], "comments": [], "reviews": [] });
+        m.pr_watches.set(&tab, url, true);
+        m.pr_watches.update(&tab, url, crate::prwatch::snapshot(&view("IN_PROGRESS", "")));
+        m.pr_watches.update(&tab, url, crate::prwatch::snapshot(&view("COMPLETED", "SUCCESS")));
+        // The menu opened after the pass looked: the wake is taken, and typing it is refused.
+        show(&m, &tab, MENU);
+        m.wake_tab(&tab);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(kept(&claude, "typed", &tab), "", "nothing reached the session");
+        assert_eq!(m.pr_watches.of(&tab), [url], "the pull request is still watched");
+        assert!(m.pr_watches.tabs.lock().unwrap().get(&tab).is_some_and(|list| list.iter().any(|w| !w.pending.is_empty())), "the wake is kept for the next pass");
+        show(&m, &tab, ERASE);
+        m.wake_tab(&tab);
+        wait_for("the wake", || kept(&claude, "typed", &tab).ends_with('\r'));
+        assert_eq!(typed_times(&claude, &tab, "pull request #41"), 1);
+        m.wake_tab(&tab);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(typed_times(&claude, &tab, "pull request #41"), 1, "a wake typed is not typed again");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_codex_or_cursor_tab_is_never_held_back_by_a_screen_it_cannot_read() {
+        let (m, root, _) = reload_machine("guard-providers");
+        // Twenty ▔ and text, with no ─ rule under them: a dialog on a Claude Code screen.
+        let screen = format!("\x1b[2J\x1b[H{}\r\nsome text\r\n", "\u{2594}".repeat(20));
+        let claude = typing_tab(&m, Account::builtin(Provider::Claude), &root.join("claude.bin"));
+        show(&m, &claude, &screen);
+        assert_eq!(m.blocker(&claude), Some(Blocker::Dialog), "the same screen blocks Claude Code");
+        for provider in [Provider::Codex, Provider::Cursor] {
+            let file = root.join(format!("{provider:?}.bin"));
+            let tab = typing_tab(&m, Account::builtin(provider), &file);
+            show(&m, &tab, &screen);
+            assert_eq!(m.blocker(&tab), None, "{provider:?}");
+            assert!(m.type_prompt(&tab, "Run the tests.").is_ok(), "{provider:?}");
+            wait_for("the prompt", || read_pty(&file).contains("Run the tests."));
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_held_prompt_of_a_codex_or_cursor_tab_is_typed_though_its_screen_looks_like_a_dialog() {
+        let (m, root, _) = reload_machine("guard-held-providers");
+        let screen = format!("\x1b[2J\x1b[H{}\r\nsome text\r\n", "\u{2594}".repeat(20));
+        let hold = |tab: &str| {
+            let session = m.tab(tab, |t| {
+                t.held.push("Run the tests.".into());
+                t.screen.clone()
+            });
+            show(&m, tab, &screen);
+            let session = session.unwrap().lock().unwrap().session;
+            m.type_held_once_raw(tab, session);
+        };
+        let claude = typing_tab(&m, Account::builtin(Provider::Claude), &root.join("claude.bin"));
+        hold(&claude);
+        for provider in [Provider::Codex, Provider::Cursor] {
+            let file = root.join(format!("{provider:?}.bin"));
+            let tab = typing_tab(&m, Account::builtin(provider), &file);
+            hold(&tab);
+            wait_for("the held prompt", || read_pty(&file).contains("Run the tests."));
+            assert!(m.tab(&tab, |t| t.held.is_empty()).unwrap(), "{provider:?}");
+        }
+        assert_eq!(read_pty(&root.join("claude.bin")), "", "the same screen still holds Claude Code's prompt back");
+        assert_eq!(m.tab(&claude, |t| t.held.clone()).unwrap(), ["Run the tests."]);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
