@@ -696,15 +696,26 @@ pub struct PluginShare {
     pub dir: PathBuf,
 }
 
-/// How the hub's refusal of a push past the account's limit begins, from 0.18.5 on.
+/// How the hub's refusal of a push past a sync limit begins: an account's limit, from 0.18.5 on,
+/// or the space the whole hub has left, from 0.18.7 on. Released machines match this prefix alone.
+///
+/// A second contract: the text after the prefix up to the first ';' is the tail the app shows
+/// (`limit_notice`). A tail that ends in " MB" names the account's limit ("1024 MB"); any other
+/// tail ("the space the hub has left") says the hub is out of space.
 pub const LIMIT_REFUSAL: &str = "the account's synced projects would pass ";
 
-/// What the app shows while the hub's limit refuses a push. Sync resumes once a push is taken.
-pub const LIMIT_NOTICE: &str = "Sync stopped: your synced projects would pass 1024 MB. Nothing was lost; this machine keeps everything.";
+/// What the app shows while the hub is out of space for synced projects, or no refusal says more.
+pub const HUB_FULL_NOTICE: &str = "Sync paused: the hub is out of space for synced projects. Nothing was lost; this machine keeps everything.";
 
-/// What the app shows for the hub's latest limit refusal, `refusal`.
-pub fn limit_notice(_refusal: &str) -> String {
-    LIMIT_NOTICE.to_owned()
+/// What the app shows for the hub's latest limit refusal, `refusal`, while it holds. Sync resumes
+/// once a push is taken.
+pub fn limit_notice(refusal: &str) -> String {
+    let tail = refusal.strip_prefix(LIMIT_REFUSAL).and_then(|rest| rest.split(';').next()).unwrap_or("");
+    if tail.ends_with(" MB") {
+        format!("Sync stopped: your synced projects would pass {tail}. Nothing was lost; this machine keeps everything.")
+    } else {
+        HUB_FULL_NOTICE.to_owned()
+    }
 }
 
 /// The hub's refusal of a history whose `base` is no longer the hub's copy, from 0.18.7 on.

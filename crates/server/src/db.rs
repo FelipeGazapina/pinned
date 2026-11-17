@@ -3,6 +3,7 @@
 //! database keeps what users chose to share to improve the app, such as rated dictations.
 
 use crate::boxes::{BoxRow, BoxWork, Opener, Phase, Remains};
+use crate::sync_limits::SyncLimits;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use chacha20poly1305::aead::{Aead, AeadCore, KeyInit};
@@ -27,7 +28,7 @@ use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio_postgres::{Client, GenericClient, NoTls};
 use uuid::Uuid;
 
@@ -276,8 +277,11 @@ pub struct OpenedBox {
     pub machine: Option<String>,
 }
 const BOX_COLUMNS: &str = "id, account, machine, upstash, connector, subject, spec, size, phase, reason, extract(epoch from now() - created_at)::float8";
-/// Compressed bytes of synced project files one account may keep on the hub.
-const SYNC_QUOTA: i64 = 1 << 30;
+/// How often a push reads again what synced projects take and the database's size.
+const SYNC_READ_EVERY: Duration = Duration::from_secs(60);
+/// How long after the last read of what synced projects take a push about to be refused for the
+/// total reads it again.
+const SYNC_FRESH_READ_EVERY: Duration = Duration::from_secs(5);
 
 const CODE_ALPHABET: &[u8] = b"ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 const CODE_LEN: usize = 8;
@@ -292,6 +296,93 @@ pub struct Db {
     /// Opened on first use. The shared connection pipelines every caller's statements, so a
     /// transaction there would take in other callers' statements too.
     transactions: Arc<tokio::sync::Mutex<Option<Client>>>,
+    sync_space: Arc<SyncSpace>,
+}
+
+/// What synced projects may take on the hub, and what this hub counts they take.
+struct SyncSpace {
+    limits: SyncLimits,
+    /// The check of a growing push and its reservation happen under this one lock, so two pushes at
+    /// once cannot both take the last of the space. The count is this process's: the hub runs as
+    /// one process, and another on the same database would count only its own pushes between reads.
+    counted: tokio::sync::Mutex<Counted>,
+    /// Held for reading by a growing push while it writes; `Db::pause_sync_writes` holds it for a test.
+    writes: Arc<tokio::sync::RwLock<()>>,
+}
+
+/// Bytes, as `octet_length` counts the stored files.
+#[derive(Default)]
+struct Counted {
+    /// Every stored file at the last read; none until a read succeeds, and then nothing is refused for the total.
+    sum: Option<i64>,
+    /// When `sum` was last read, or a read of it failed.
+    sum_at: Option<Instant>,
+    /// What the pushes taken since that read added.
+    grown: i64,
+    /// What the pushes still writing their files reserved.
+    writing: i64,
+    /// `pg_database_size` at the last read.
+    db: Option<i64>,
+    /// When the sum and the database's size were last read together, or the read failed.
+    read_at: Option<Instant>,
+}
+
+impl SyncSpace {
+    fn new(limits: SyncLimits) -> Arc<SyncSpace> {
+        Arc::new(SyncSpace { limits, counted: Default::default(), writes: Default::default() })
+    }
+}
+
+impl Counted {
+    fn read_sum(&mut self, sum: i64, now: Instant) {
+        self.sum = Some(sum);
+        self.grown = 0;
+        self.sum_at = Some(now);
+    }
+
+    /// Whether `growth` more would pass the total, or the database is past its limit.
+    fn full(&self, limits: &SyncLimits, growth: i64) -> bool {
+        self.sum.is_some_and(|sum| sum + self.grown + self.writing + growth > limits.total) || self.db.is_some_and(|db| db > limits.db)
+    }
+
+    fn due(at: Option<Instant>, every: Duration, now: Instant) -> bool {
+        at.is_none_or(|at| now.saturating_duration_since(at) >= every)
+    }
+}
+
+/// The growth a push reserved while it writes its files. Dropped, it gives the reservation back,
+/// and counts it as grown if the push was `taken`.
+struct SyncReserved {
+    space: Arc<SyncSpace>,
+    growth: i64,
+    taken: bool,
+}
+
+impl Drop for SyncReserved {
+    fn drop(&mut self) {
+        let (growth, taken) = (self.growth, self.taken);
+        let settle = move |counted: &mut Counted| {
+            counted.writing -= growth;
+            if taken {
+                counted.grown += growth;
+            }
+        };
+        match self.space.counted.try_lock() {
+            Ok(mut counted) => settle(&mut counted),
+            Err(_) => {
+                let space = self.space.clone();
+                if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                    runtime.spawn(async move { settle(&mut *space.counted.lock().await) });
+                }
+            }
+        }
+    }
+}
+
+/// The refusal of a push that would grow synced projects past what the whole hub may keep, or of
+/// any growing push while the database is past its limit.
+fn hub_full() -> String {
+    format!("{}the space the hub has left; nothing is deleted, the push is refused", sync::LIMIT_REFUSAL)
 }
 
 /// The learning database. It holds no accounts, so its rows name the account only by id.
@@ -866,23 +957,92 @@ impl Db {
     pub async fn connect(url: &str, sealer: Sealer) -> Result<Db, String> {
         let connection = Connection::open(url, SCHEMA).await?;
         one_live_run_per_bot(url).await;
-        Ok(Db { sealer, connection, transactions: Arc::default() })
+        Ok(Db { sealer, connection, transactions: Arc::default(), sync_space: SyncSpace::new(SyncLimits::default()) })
     }
 
     /// Keeps synced projects within `limits`.
-    pub fn limit_sync(self, _limits: crate::sync_limits::SyncLimits) -> Db {
-        self
+    pub fn limit_sync(self, limits: SyncLimits) -> Db {
+        Db { sync_space: SyncSpace::new(limits), ..self }
     }
 
     /// Moves the times the sync space was last read `by` into the past, as if that long went by, for a test.
     #[doc(hidden)]
-    pub async fn age_sync_reads(&self, _by: Duration) {}
+    pub async fn age_sync_reads(&self, by: Duration) {
+        let counted = &mut *self.sync_space.counted.lock().await;
+        for at in [&mut counted.sum_at, &mut counted.read_at] {
+            *at = at.and_then(|at| at.checked_sub(by));
+        }
+    }
 
     /// Holds every growing push after its check and before its files are written, until the
     /// answer is dropped, for a test.
     #[doc(hidden)]
     pub async fn pause_sync_writes(&self) -> tokio::sync::OwnedRwLockWriteGuard<()> {
-        Arc::new(tokio::sync::RwLock::new(())).write_owned().await
+        self.sync_space.writes.clone().write_owned().await
+    }
+
+    async fn read_sync_sum(&self) -> Result<i64, String> {
+        let row = self.client().await?.query_one("select coalesce(sum(octet_length(data)), 0)::bigint from project_files", &[]).await.map_err(err)?;
+        Ok(row.get(0))
+    }
+
+    /// Reserves `growth` bytes for a push about to write its files, or refuses it with `hub_full`.
+    /// What synced projects take is read on the first push, again every `SYNC_READ_EVERY`, and
+    /// again before a refusal for the total once `SYNC_FRESH_READ_EVERY` passed since the last
+    /// read, so deletions that landed open the hub at once. A failed read refuses nothing.
+    async fn reserve_sync(&self, growth: i64) -> Result<SyncReserved, String> {
+        let space = &self.sync_space;
+        let mut counted = space.counted.lock().await;
+        let now = Instant::now();
+        if Counted::due(counted.read_at, SYNC_READ_EVERY, now) {
+            counted.read_at = Some(now);
+            let read = async {
+                let row = self.client().await?.query_one("select pg_database_size(current_database())", &[]).await.map_err(err)?;
+                Ok::<_, String>((self.read_sync_sum().await?, row.get::<_, i64>(0)))
+            };
+            match read.await {
+                Ok((sum, db)) => {
+                    counted.read_sum(sum, now);
+                    counted.db = Some(db);
+                }
+                Err(e) => eprintln!("pinned-server: could not read what synced projects take: {e}"),
+            }
+        }
+        if counted.full(&space.limits, growth) && Counted::due(counted.sum_at, SYNC_FRESH_READ_EVERY, now) {
+            counted.sum_at = Some(now);
+            match self.read_sync_sum().await {
+                Ok(sum) => counted.read_sum(sum, now),
+                Err(e) => eprintln!("pinned-server: could not read what synced projects take: {e}"),
+            }
+        }
+        if counted.full(&space.limits, growth) {
+            return Err(hub_full());
+        }
+        counted.writing += growth;
+        Ok(SyncReserved { space: space.clone(), growth, taken: false })
+    }
+
+    /// The census lines of what synced projects take (`sync_limits::census`).
+    pub async fn sync_census(&self) -> Vec<String> {
+        let read = async {
+            let client = self.client().await?;
+            let row = client
+                .query_one("select coalesce(sum(octet_length(data)), 0)::bigint, pg_database_size(current_database()) from project_files", &[])
+                .await
+                .map_err(err)?;
+            let top: Vec<(Uuid, i64)> = client
+                .query("select account, sum(octet_length(data))::bigint from project_files group by account order by 2 desc limit 3", &[])
+                .await
+                .map_err(err)?
+                .iter()
+                .map(|r| (r.get(0), r.get(1)))
+                .collect();
+            Ok::<_, String>((row.get(0), row.get(1), top))
+        };
+        match read.await {
+            Ok((total, db, top)) => crate::sync_limits::census(&self.sync_space.limits, total, db, &top),
+            Err(e) => vec![format!("pinned-server: census-sync could not read what synced projects take: {e}")],
+        }
     }
 
     pub(crate) async fn client(&self) -> Result<Arc<Client>, String> {
@@ -961,9 +1121,11 @@ impl Db {
             .collect())
     }
 
-    /// Keeps the files, unless they would take the account past its quota. A push that does not
-    /// grow the account is always kept, even past the quota, so deleting is a way out. Two pushes
-    /// at once may pass it by a batch, which is fine for a guard against filling the disk.
+    /// Keeps the files, unless they would take the account past its limit, when one is set, or
+    /// every account's synced projects past the hub's total, or the database is past its limit
+    /// (`reserve_sync`). A push that does not grow is always kept, even past every limit, so
+    /// deleting is a way out. Two pushes at once to one account may pass its limit by a batch,
+    /// which is fine for a guard against filling the disk; the total reserves each push's growth.
     ///
     /// A deletion that names the sha its sender `agreed` on is skipped when the hub holds another
     /// sha by then: another machine changed the file after the sender last saw it.
@@ -973,11 +1135,6 @@ impl Db {
     pub async fn sync_push(&self, account: Uuid, project: &str, mut files: Vec<PushedFile>) -> Result<(), String> {
         let client = self.client().await?;
         let paths: Vec<&str> = files.iter().map(|(e, _, _, _)| e.path.as_str()).collect();
-        let used: i64 = client
-            .query_one("select coalesce(sum(octet_length(data)), 0)::bigint from project_files where account = $1", &[&account])
-            .await
-            .map_err(err)?
-            .get(0);
         let stored: BTreeMap<String, (String, i64)> = client
             .query("select path, sha, octet_length(data)::bigint from project_files where account = $1 and project = $2 and path = any($3)", &[&account, &project, &paths])
             .await
@@ -997,13 +1154,34 @@ impl Db {
         let replacing: BTreeSet<&str> = files.iter().filter(|(e, _, agreed, _)| kept(&e.path, agreed)).map(|(e, _, _, _)| e.path.as_str()).collect();
         let replaced: i64 = stored.iter().filter(|(path, _)| replacing.contains(path.as_str())).map(|(_, (_, size))| size).sum();
         let incoming: i64 = files.iter().map(|(_, data, _, _)| data.len() as i64).sum();
-        if incoming > replaced && used - replaced + incoming > SYNC_QUOTA {
-            return Err(format!("{}{} MB; nothing is deleted, the push is refused", sync::LIMIT_REFUSAL, SYNC_QUOTA >> 20));
+        let growth = incoming - replaced;
+        if let Some(limit) = self.sync_space.limits.account.filter(|_| growth > 0) {
+            let used: i64 = client
+                .query_one("select coalesce(sum(octet_length(data)), 0)::bigint from project_files where account = $1", &[&account])
+                .await
+                .map_err(err)?
+                .get(0);
+            if used + growth > limit {
+                return Err(format!("{}{} MB; nothing is deleted, the push is refused", sync::LIMIT_REFUSAL, limit >> 20));
+            }
         }
+        let mut reserved = if growth > 0 { Some(self.reserve_sync(growth).await?) } else { None };
+        let _writing = match &reserved {
+            Some(_) => Some(self.sync_space.writes.read().await),
+            None => None,
+        };
         // A file with a base goes first, so another machine's push landing since the check above
         // refuses this push before any of its files is kept.
         files.sort_by_key(|(_, _, _, base)| base.is_none());
-        for (entry, data, agreed, base) in &files {
+        let written = Db::write_pushed(&client, account, project, &files).await;
+        if let Some(reserved) = reserved.as_mut() {
+            reserved.taken = written.is_ok();
+        }
+        written
+    }
+
+    async fn write_pushed(client: &Client, account: Uuid, project: &str, files: &[PushedFile]) -> Result<(), String> {
+        for (entry, data, agreed, base) in files {
             // `known` is false when the sender omitted the mode, so a stored true survives. A null column would be omitted on the way out, and a unix machine would never send the bit.
             let known = entry.executable.is_some();
             let bit = entry.executable.unwrap_or(false);

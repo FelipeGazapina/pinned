@@ -107,6 +107,9 @@ pub async fn start(config: Config) -> Result<Running, String> {
             for line in hub.census_accounts() {
                 eprintln!("{line}");
             }
+            for line in hub.db.sync_census().await {
+                eprintln!("{line}");
+            }
         }
     });
     let app = http::router(hub.clone(), config.ui, config.downloads, learning, config.access).into_make_service_with_connect_info::<SocketAddr>();

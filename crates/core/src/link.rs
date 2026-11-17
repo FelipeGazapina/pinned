@@ -283,6 +283,8 @@ struct Syncer {
     shared_projects: HashSet<String>,
     reported_old_hub: bool,
     backoff: PushBackoff,
+    /// The hub's latest refusal of a push at a sync limit, which the app's notice names.
+    refusal: Option<String>,
 }
 
 /// Holds back a project's push after the hub refused it, by sync key, while its files to send
@@ -367,7 +369,7 @@ impl Syncer {
             }
         }
         machine.hold_sync_state(false);
-        machine.hold_sync_limit(false);
+        machine.hold_sync_limit(None);
     }
 
     fn cycle(&mut self, shared: &Shared, hub: &impl sync::Hub, machine: &Machine, file: &Path) {
@@ -411,6 +413,7 @@ impl Syncer {
                     }
                     if let sync::Push::Refused { error, .. } = &done.push {
                         eprintln!("pinned: could not send {key}'s changes: {error}");
+                        self.refusal = Some(error.clone());
                     }
                 }
                 Err(e) => eprintln!("pinned: could not sync {key}: {e}"),
@@ -426,6 +429,7 @@ impl Syncer {
                     }
                     if let sync::Push::Refused { error, .. } = &done.push {
                         eprintln!("pinned: could not send the plugins' changes: {error}");
+                        self.refusal = Some(error.clone());
                     }
                 }
                 Err(e) if sync::old_hub(&e) => {
@@ -438,7 +442,10 @@ impl Syncer {
                 Err(e) => eprintln!("pinned: could not sync plugins: {e}"),
             }
         }
-        machine.hold_sync_limit(!self.backoff.0.is_empty());
+        if self.backoff.0.is_empty() {
+            self.refusal = None;
+        }
+        machine.hold_sync_limit((!self.backoff.0.is_empty()).then(|| self.refusal.clone().unwrap_or_default()));
         if let Err(e) = state.flush() {
             eprintln!("pinned: {e}");
         }
