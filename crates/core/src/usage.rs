@@ -807,6 +807,27 @@ mod tests {
     }
 
     #[test]
+    fn a_meter_keeps_the_most_each_line_of_one_message_reports_counted_once() {
+        // A message streamed in parts: its first line, written before it stopped, carries a
+        // partial output count, and a later line of the same message and request carries more.
+        let fixture = include_str!("../tests/fixtures/delegate/claude-background-agent.jsonl");
+        let lines: Vec<&str> = fixture.lines().collect();
+        let (partial, mut later): (Value, Value) = (serde_json::from_str(lines[1]).unwrap(), serde_json::from_str(lines[2]).unwrap());
+        assert_eq!((&partial["message"]["id"], &partial["message"]["stop_reason"], &partial["message"]["usage"]["output_tokens"]), (&later["message"]["id"], &Value::Null, &json!(5)));
+        later["message"]["usage"]["output_tokens"] = json!(412);
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("s.jsonl");
+        std::fs::write(&file, format!("{partial}\n")).unwrap();
+        let mut meter = Meter::default();
+        meter.advance(&file).unwrap();
+        let mut more = std::fs::OpenOptions::new().append(true).open(&file).unwrap();
+        std::io::Write::write_all(&mut more, format!("{later}\n{partial}\n").as_bytes()).unwrap();
+        meter.advance(&file).unwrap();
+        let used = meter.usage(&RateTable::new(), &PriceBook::default());
+        assert_eq!((used.tokens_in, used.tokens_out), (2 + 11_382 + 27_175, 412), "the larger output count, once; the input counts once");
+    }
+
+    #[test]
     fn a_meter_counts_the_subagents_and_keeps_the_total_across_a_new_session() {
         let dir = tempfile::tempdir().unwrap();
         let usage = |output: u64| json!({ "input_tokens": 0, "output_tokens": output });
