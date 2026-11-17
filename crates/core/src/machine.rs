@@ -13083,6 +13083,30 @@ Have another model review a risky change before it goes ahead.";
 
     #[test]
     #[cfg(unix)]
+    fn a_parked_first_start_quotes_its_screen_line_scrubbed_of_paths_and_tokens() {
+        let root = temp("starting-limit-scrub");
+        let line = " Use the docs server at /home/boxuser/pinned/app with sk-ant-oat01-ABCDEFGHIJKLMNOPQRSTUVWX?  1. Use it  2. Skip it  Enter to confirm · Esc to cancel";
+        let (claude, keys) = claude_on_screens(&root, &[line]);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), starting_limit: Duration::from_secs(2), ..launch() }, Some(root.join("config")), None, |_| {});
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        let task = delegate_from(&m, &app, "shared");
+        let tab = m.delegates.get(&task).unwrap().thread.unwrap().tab;
+        wait_for("the dialog on its screen", || m.screen_text(&tab).contains("Enter to confirm"));
+        wait_for("the start to fail", || m.delegates.get(&task).is_some_and(|t| t.state.terminal()));
+        let info = m.delegates.get(&task).unwrap();
+        let reason = info.error.clone().unwrap();
+        assert!(reason.starts_with("it did not start within 2 s; its screen shows: "), "{reason}");
+        for secret in ["/home", "boxuser", "sk-ant-oat01", "ABCDEFGHIJKLMNOP"] {
+            assert!(!reason.contains(secret), "{secret} leaked into {reason}");
+        }
+        assert_eq!(m.view(&tab).unwrap().message.as_deref(), Some(reason.as_str()), "the tab quotes the same reason");
+        assert!(!keys.exists(), "nothing was typed into a dialog pinned does not know");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn a_resumed_tab_at_its_prompt_and_a_worker_that_started_its_turn_outlive_the_starting_limit() {
         let root = temp("starting-limit-kept");
         let (claude, _) = claude_on_screens(&root, &["? for shortcuts"]);
