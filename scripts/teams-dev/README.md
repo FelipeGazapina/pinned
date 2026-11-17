@@ -22,6 +22,7 @@ scripts/teams-dev/dev.sh down     # stops only the processes it started
 | hub (`--ui ./ui --signup open --dev`, serves `ui/` and the pinned-server download) | http://127.0.0.1:8811 |
 | fake Upstash Box (`fake-box`) | http://127.0.0.1:8812 |
 | fake Slack (`fake-slack`, log in `$TEAMS_DEV_DIR/fake-slack.log.jsonl`, `GET /sink` lists the calls it got) | http://127.0.0.1:8813 |
+| fake GitHub (`pinned-server fake-github`, where the hub files reports) | http://127.0.0.1:8814 |
 | Postgres, empty, user `pinned`, database `pinned` | 127.0.0.1:5611 |
 
 Open http://127.0.0.1:8811 and sign in as `ana@example.test` (the team owner), `bruno@example.test`
@@ -30,9 +31,16 @@ which `urls` names. Add more seeding as a step in `STEPS` of `seed.mjs`; `dev.sh
 
 `TEAMS_DEV_DIR` (default a mktemp dir, recorded in `.dev/teams-dev.dir`) holds every file: database,
 logs, the hub key, each fake box's directory. `TEAMS_DEV_BIN=<pinned-server>` skips the cargo build;
-`TEAMS_DEV_HUB_PORT`, `_BOX_PORT`, `_SLACK_PORT` and `_PG_PORT` change the ports. The hub always
+`TEAMS_DEV_HUB_PORT`, `_BOX_PORT`, `_SLACK_PORT`, `_GITHUB_PORT` and `_PG_PORT` change the ports. The hub always
 starts with `--dev` and `PINNED_DEV_TIME_SCALE=${TEAMS_DEV_TIME_SCALE:-60}` (a box's idle and
-lifetime timers run 60 times faster), and sends every Slack call to the fake Slack.
+lifetime timers run 60 times faster), sends every Slack call to the fake Slack, and files every
+report on the fake GitHub.
+
+**Reports:** "report an issue" files on the fake GitHub: `dev.sh` points `PINNED_REPORTS_GITHUB_API`
+at it and gives the hub the placeholder token `fake-teams-dev`, which only the fake takes. Under
+`--dev` the hub refuses a reports API that is not on this machine, and has reporting off when none is
+set, so a dev hub never files on the real GitHub.
+Never set PINNED_REPORTS_GITHUB_TOKEN for a dev hub, box or test environment.
 
 **Slack:** a team or account connects Slack with the token `xoxb-dev-<anything>`; the fake answers
 it as the workspace "Pinned Dev". Any other token (say `xoxb-real-…`) gets `invalid_auth`, so a real
@@ -80,5 +88,5 @@ Tests: `node --test scripts/teams-dev/fake-box.test.mjs scripts/teams-dev/fake-s
 Safety rules: only `box_dev-…` keys work, and `UPSTASH_BOX_BASE_URL` always points at the fake, so no
 real Upstash, Slack or production hub is reached; accounts are `@example.test`; every child runs with
 its own HOME, TMPDIR and CLAUDE_CONFIG_DIR inside the dev dir and without `ANTHROPIC_*`,
-`CLAUDE_CODE_OAUTH_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`, `PINNED_OPENCODE_GO_KEY` or
-`UPSTASH_BOX_API_KEY`; passwords go only to `accounts.json`. Never point the stack at a real hub.
+`CLAUDE_CODE_OAUTH_TOKEN`, `GH_TOKEN`, `GITHUB_TOKEN`, `PINNED_OPENCODE_GO_KEY`,
+`UPSTASH_BOX_API_KEY` or a `PINNED_REPORTS_*` variable of the developer's; passwords go only to `accounts.json`. Never point the stack at a real hub.
