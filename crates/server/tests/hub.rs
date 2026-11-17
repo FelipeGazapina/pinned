@@ -11698,6 +11698,7 @@ mod teams_hardening;
 #[path = "hub/teams_lifecycle.rs"] mod teams_lifecycle;
 #[path = "hub/teams_flood.rs"] mod teams_flood;
 #[path = "hub/teams_admission.rs"] mod teams_admission;
+#[path = "hub/teams_model_cost.rs"] mod teams_model_cost;
 #[path = "hub/teams_backstop.rs"] mod teams_backstop;
 #[path = "hub/teams_guard_tests.rs"] mod teams_guard_tests;
 #[path = "hub/teams_calls_guards.rs"] mod teams_calls_guards;

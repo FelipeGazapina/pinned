@@ -370,8 +370,13 @@ pub struct Run {
     /// The member who took it over.
     #[serde(default)]
     pub controller: Option<String>,
+    /// Its box's cost and its model's (`model_usd`) together: what its `BotLimits::usd` caps.
     #[serde(default)]
     pub cost_usd: f64,
+    /// The model cost its box's node reported, included in `cost_usd`. 0 from a node that never
+    /// reports one, whose runs cost their box only.
+    #[serde(default)]
+    pub model_usd: f64,
     /// Seconds of work: from `started_at` to its end (or now), less `waiting_secs`. A run's
     /// `BotLimits::minutes` count these only.
     #[serde(default)]
@@ -596,6 +601,11 @@ pub enum TeamOp {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         step: Option<String>,
     },
+    /// From a team box's node only: what its session of `workflow` on `subject` has spent on its
+    /// model so far, in USD, a running total sent again at an interval. The hub keeps the most it
+    /// was told for the live run of that workflow and subject bound to this box, so a report lost
+    /// or sent twice never counts twice, and refuses a box that does not run it.
+    RunModelCost { workflow: String, subject: crate::agent::Subject, usd: f64 },
 }
 
 impl TeamOp {

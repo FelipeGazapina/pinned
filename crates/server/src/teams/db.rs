@@ -665,6 +665,7 @@ fn run_of(r: &Row) -> Run {
         state: RunState::parse(r.get(2)).unwrap_or(RunState::Failed),
         controller: r.get::<_, Option<Uuid>>(3).map(|c| c.to_string()),
         cost_usd: r.get(4),
+        model_usd: 0.0,
         active_secs: r.get::<_, i64>(5).max(0) as u64,
         started_at: r.get(6),
         ended_at: r.get(7),

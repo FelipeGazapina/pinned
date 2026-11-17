@@ -821,6 +821,13 @@ pub struct Machine {
     /// A thread is asking after the tasks this machine delegated elsewhere.
     checking_remotes: Arc<AtomicBool>,
     sending_records: AtomicBool,
+    /// Whether this node runs in a team's box (`team_call::TEAM_BOX_ENV`), whose workflow sessions
+    /// report their model cost to the hub (`report_run_costs`).
+    team_box: AtomicBool,
+    /// Each workflow session's model cost in a team's box, by tab, and when it was last sent.
+    run_costs: Mutex<HashMap<String, RunCost>>,
+    /// A thread is sending the hub its runs' model costs.
+    sending_run_costs: AtomicBool,
     /// After the hub refused records, when to offer them again.
     records_retry: Mutex<Option<Instant>>,
     threads_watched: AtomicBool,
@@ -1034,6 +1041,9 @@ impl Machine {
             delegate_pass_armed: AtomicBool::new(false),
             checking_remotes: Arc::default(),
             sending_records: AtomicBool::new(false),
+            team_box: AtomicBool::new(crate::team_call::in_team_box()),
+            run_costs: Mutex::default(),
+            sending_run_costs: AtomicBool::new(false),
             records_retry: Mutex::new(None),
             threads_watched: AtomicBool::new(false),
             rest_looked_for: AtomicBool::new(false),
@@ -3933,6 +3943,9 @@ impl Machine {
         let used: Vec<_> = moved.into_iter().map(|task| (task.clone(), meters[&task].usage(&rates, &book))).collect();
         self.delegates.meter(&used, self.launch.path_env.as_deref());
     }
+
+    /// Sends the hub the model cost so far of each workflow session in this team box.
+    fn report_run_costs(&self, _now: Instant) {}
 
     /// The price list, read again each hour.
     fn meter_rates(&self) -> Arc<usage::RateTable> {
@@ -7215,6 +7228,21 @@ fn save_file(cwd: &Path, path: &str, text: &str) -> Result<String, String> {
     }
     std::fs::write(&target, text).map_err(|e| format!("could not write {path}: {e}"))?;
     Ok(relative.to_string_lossy().into_owned())
+}
+
+
+/// How often a team box's workflow session tells the hub its model cost so far.
+const RUN_COST_EVERY: Duration = Duration::from_secs(15);
+
+/// A team box's workflow session's model cost (`Machine::report_run_costs`).
+#[derive(Default)]
+struct RunCost {
+    meter: usage::Meter,
+    /// The session's workflow and subject, which name its run to the hub.
+    work: Option<(String, crate::agent::Subject)>,
+    /// The session's transcript as last found, read once more when the session ends.
+    transcript: Option<PathBuf>,
+    sent: Option<Instant>,
 }
 
 #[cfg(test)]
@@ -13743,6 +13771,57 @@ Have another model review a risky change before it goes ahead.";
             drop(m);
             let _ = std::fs::remove_dir_all(root);
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_team_boxs_session_reports_its_model_cost_at_the_interval_until_it_ends() {
+        let dir = temp("run-costs");
+        let config = dir.join("config");
+        std::fs::create_dir_all(dir.join("app")).unwrap();
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(config.join("usage-model-rates.json"), "{}").unwrap();
+        std::fs::write(config.join("usage-prices.json"), r#"{"prices":{"claude-sonnet-5-5":{"input":3,"output":15}}}"#).unwrap();
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, thread_claude(&dir))]), ..launch() }, Some(config.clone()), None, |_| {});
+        m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
+        let sent = Arc::new(Mutex::new(vec![]));
+        let seen = sent.clone();
+        m.set_hub(Arc::new(move |call| {
+            if let HubCall::Team { team: None, op: crate::teams::TeamOp::RunModelCost { workflow, subject, usd } } = call {
+                seen.lock().unwrap().push((workflow, subject, (usd * 100.0).round()));
+            }
+            Ok(Value::Null)
+        }));
+        let subject = Subject::LinearIssue { issue: "ENG-7".into() };
+        let spec = RunSpec { folder: dir.join("app").display().to_string(), repo: None, args: vec![], env: session_env("wf-1", &subject), token: None, account: Some("work".into()), budget_usd: None };
+        let tab = m.run(&spec).unwrap();
+        let transcripts = config.join("accounts/work/projects/app");
+        std::fs::create_dir_all(&transcripts).unwrap();
+        let transcript = transcripts.join("s-child.jsonl");
+        let spent = |id: &str, output: u64| json!({ "type": "assistant", "requestId": id, "message": { "id": id, "model": "claude-sonnet-5-5", "content": [], "usage": { "input_tokens": 0, "output_tokens": output } } });
+        std::fs::write(&transcript, format!("{}\n", spent("m1", 10_000))).unwrap();
+        m.record_event(hook_event(&tab, "working", &transcript, Some("Fix ENG-7")));
+        let cents = |usd: f64| ("wf-1".to_owned(), subject.clone(), usd);
+        let t0 = Instant::now();
+
+        m.team_box.store(false, Ordering::SeqCst);
+        m.report_run_costs(t0);
+        assert_eq!(*sent.lock().unwrap(), vec![], "a node outside a team's box reports nothing");
+        m.team_box.store(true, Ordering::SeqCst);
+        m.report_run_costs(t0);
+        m.report_run_costs(t0 + RUN_COST_EVERY / 2);
+        assert_eq!(*sent.lock().unwrap(), vec![cents(15.0)], "the total, then nothing until the interval");
+        // A session waiting on a call spends no tokens: the next report tells the same total.
+        m.report_run_costs(t0 + RUN_COST_EVERY);
+        append(&transcript, &[spent("m2", 30_000)]);
+        m.report_run_costs(t0 + RUN_COST_EVERY * 2);
+        assert_eq!(*sent.lock().unwrap(), vec![cents(15.0), cents(15.0), cents(60.0)], "a running total, never a delta");
+        append(&transcript, &[spent("m3", 10_000)]);
+        m.close_tab(&tab);
+        m.report_run_costs(t0 + RUN_COST_EVERY * 2 + Duration::from_secs(1));
+        m.report_run_costs(t0 + RUN_COST_EVERY * 5);
+        assert_eq!(*sent.lock().unwrap(), vec![cents(15.0), cents(15.0), cents(60.0), cents(75.0)], "its last total once it ended, then nothing");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
