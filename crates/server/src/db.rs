@@ -764,6 +764,10 @@ impl Learning {
     }
 }
 
+/// A file a machine pushes: its entry, its stored bytes, the sha a deletion `agreed` on, and the
+/// `base` a history was merged with.
+pub type PushedFile = (sync::Entry, Vec<u8>, Option<String>, Option<String>);
+
 impl Db {
     pub async fn connect(url: &str, sealer: Sealer) -> Result<Db, String> {
         Ok(Db { sealer, connection: Connection::open(url, SCHEMA).await?, transactions: Arc::default() })
@@ -854,7 +858,7 @@ impl Db {
     ///
     /// A file that names the `base` it was merged with, empty for none, is refused with
     /// `sync::STALE_REFUSAL`, the whole push with it, when the hub holds another copy by then.
-    pub async fn sync_push(&self, account: Uuid, project: &str, mut files: Vec<(sync::Entry, Vec<u8>, Option<String>, Option<String>)>) -> Result<(), String> {
+    pub async fn sync_push(&self, account: Uuid, project: &str, mut files: Vec<PushedFile>) -> Result<(), String> {
         let client = self.client().await?;
         let paths: Vec<&str> = files.iter().map(|(e, _, _, _)| e.path.as_str()).collect();
         let used: i64 = client
