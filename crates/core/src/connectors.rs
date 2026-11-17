@@ -2094,8 +2094,8 @@ struct ChangePass {
     from: Option<Option<String>>,
     skipped: BTreeMap<String, u64>,
     claim_errors: BTreeMap<String, u64>,
-    /// The retries (`Store::change_retries`) this read reached, as (workflow, key): each leaves the
-    /// retries, unless it waits again in `deferred`.
+    /// The retries (`Store::change_retries`) this read finished, as (workflow, key): each leaves the
+    /// retries, unless it waits again in `deferred`. A retry whose claim answered an error stays.
     retried: Vec<(String, String)>,
     /// The changes this read left for the next check, as (workflow, key, change time).
     deferred: Vec<(String, String, String)>,
@@ -2754,12 +2754,10 @@ impl Connectors {
                 if !matches(&c.trigger, &change, Some(&viewer)) || (at <= since_or(&c.since, now) && !retry) {
                     continue;
                 }
-                if retry {
+                if retry && at <= floor {
                     pass.retried.push((c.id.clone(), key.clone()));
-                    if at <= floor {
-                        eprintln!("pinned: workflow {} gave up on {key}: it did not start within {} minutes of the change", c.id, CATCH_UP.as_secs() / 60);
-                        continue;
-                    }
+                    eprintln!("pinned: workflow {} gave up on {key}: it did not start within {} minutes of the change", c.id, CATCH_UP.as_secs() / 60);
+                    continue;
                 }
                 if at <= floor {
                     eprintln!("pinned: workflow {} skipped a Linear change on issue {}, {} minutes old: pinned was away", c.id, change.issue_id, (now - at).num_minutes());
@@ -2778,7 +2776,12 @@ impl Connectors {
                     pass.deferred.push((c.id.clone(), key.clone(), stamp(at)));
                     continue;
                 }
-                match self.claim_change(&c.id, &key, at) {
+                let claim = self.claim_change(&c.id, &key, at);
+                // A retry leaves the retries once its claim answers; a claim that errs keeps it.
+                if retry && claim.is_ok() {
+                    pass.retried.push((c.id.clone(), key.clone()));
+                }
+                match claim {
                     Ok(true) => match refused {
                         Some(refusal) => self.refuse(&c.id, &key, &change.issue_id, refusal, now),
                         // The guards keep its start once its run starts (`fire_started`).
