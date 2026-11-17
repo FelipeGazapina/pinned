@@ -217,11 +217,12 @@ function onPlanPush() {
 
 // ---- the Orchestrator's Captains: one card per Captain, the words and order from its plans and its own wait ----
 
-/** A Captain's card: its state, the word for it, and the plan the card leads with. The most urgent of its plans and its
- * own wait for the user decide the state. The rail's word is this word too. */
+/** A Captain's card: its state, the word for it, and the plan the card leads with. The most urgent of its own wait for
+ * the user, its own work and its plans decides the state. The rail's word is this word too. */
 function captainCard(t) {
   const plans = planGlances(t);
-  const state = threadState(t) === "needs" ? "needs_you" : (plans[0]?.state ?? "idle");
+  const own = threadState(t) === "needs" ? "needs_you" : threadState(t) === "working" ? "working" : null;
+  const state = [own, plans[0]?.state].filter(Boolean).sort((a, b) => PLAN_ORDER[a] - PLAN_ORDER[b])[0] ?? "idle";
   const lead = plans.find((g) => g.state === state) ?? plans[0] ?? null;
   const ends = plans.map((g) => g.finished_at).filter((at) => at != null);
   const word = state === "finished" && ends.length ? `Finished at ${planClock(Math.max(...ends))}` : PLAN_CARD_WORD[state];
