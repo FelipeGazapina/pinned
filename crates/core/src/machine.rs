@@ -17046,4 +17046,99 @@ Have another model review a risky change before it goes ahead.";
         m.quit();
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    /// The Claude session of `tab`, which keeps its plans by it.
+    fn session_of(m: &Machine, tab: &str) -> String {
+        m.tab(tab, |t| t.claude_session.clone()).unwrap().expect("the tab holds a session")
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_captain_keeps_its_plans_when_clear_rewind_or_a_fresh_start_give_it_a_new_session() {
+        let dir = temp("plans-swap");
+        let (m, sock, project, captain, _thread) = captain_and_thread(&dir);
+        let ask_as = |tool: Value| ask(&sock, &json!({ "kind": "project", "tab": captain, "tool": tool }).to_string());
+        let ship = json!({ "name": "plan_set", "title": "Ship the form", "lists": [{ "name": "Build", "steps": [{ "name": "Write" }, { "name": "Test" }] }] });
+        assert_eq!(ask_as(ship), Ok("p1 rev 1: Ship the form\nl1 Build: s1 pending, s2 pending".into()));
+        let saved = || std::fs::read_to_string(dir.join("config/plans.json")).unwrap();
+        let kept_only = |session: &str, gone: &str| {
+            assert_eq!(glances_on(&m, &captain)[0]["title"], "Ship the form", "the glance still shows the plan on {session}");
+            let plans = m.plans.lock().unwrap();
+            assert!(plans.get(session).is_some() && plans.get(gone).is_none());
+            assert!(saved().contains(session) && !saved().contains(gone), "{}", saved());
+        };
+
+        // /clear and /resume: the hook reports another session.
+        m.record_session(&captain, "cap-2".into(), None);
+        kept_only("cap-2", "cap-1");
+        assert_eq!(ask_as(json!({ "name": "plan_step", "step": "s1", "state": "done" })), Ok("p1 rev 2: Ship the form\nl1 Build: s1 done, s2 pending".into()));
+
+        // A rewind resumes a copy of the conversation under a new id.
+        let account = m.tab(&captain, |t| t.account.clone()).unwrap();
+        let projects = m.accounts.home(&account).join("projects").join("app");
+        std::fs::create_dir_all(&projects).unwrap();
+        let line = |kind: &str, uuid: &str, minute: u8| json!({ "type": kind, "uuid": uuid, "sessionId": "cap-2", "timestamp": format!("2026-11-09T10:0{minute}:00Z"), "message": { "role": kind, "content": "hi" } }).to_string();
+        std::fs::write(projects.join("cap-2.jsonl"), [line("user", "u1", 0), line("assistant", "a1", 1), line("user", "u2", 2), line("assistant", "a2", 3)].join("\n") + "\n").unwrap();
+        m.rewind(&captain, "u2", false, 80, 24).unwrap();
+        let rewound = session_of(&m, &captain);
+        assert_ne!(rewound, "cap-2");
+        kept_only(&rewound, "cap-2");
+
+        // A fresh start drops the session id until the hook reports the new one.
+        m.relaunch(&captain, 80, 24).unwrap();
+        assert_eq!(m.tab(&captain, |t| t.claude_session.clone()).unwrap(), None);
+        m.record_session(&captain, "cap-3".into(), Some(&project.display().to_string()));
+        kept_only("cap-3", &rewound);
+        assert_eq!(ask_as(json!({ "name": "plan_step", "step": "s2", "state": "done" })), Ok("p1 rev 3: Ship the form\nl1 Build: s1 done, s2 done".into()));
+        m.quit();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_captain_that_resumes_a_session_another_tab_holds_writes_no_plan_until_one_closes() {
+        let dir = temp("plans-held");
+        let (m, sock, project, holder, other) = captain_and_thread(&dir);
+        let path = m.tab(&holder, |t| t.cwd.display().to_string()).unwrap();
+        let third = m.open_tab(Some(path), false).unwrap();
+        for tab in [&other, &third] {
+            m.tab(tab, |t| t.env = role_env(Role::Orchestrator, &project)).unwrap();
+        }
+        m.tab(&other, |t| t.claude_session = Some("cap-b".into())).unwrap();
+        m.tab(&third, |t| t.claude_session = Some("cap-c".into())).unwrap();
+        let ask_as = |tab: &str, tool: Value| ask(&sock, &json!({ "kind": "project", "tab": tab, "tool": tool }).to_string());
+        let plan = |title: &str| json!({ "name": "plan_set", "new": true, "title": title, "lists": [{ "name": "Build", "steps": [{ "name": "Write" }] }] });
+        let titles = |tab: &str| m.call(Call::Plan { tab: tab.to_owned(), plan: None }).unwrap().as_array().unwrap().iter().map(|p| p["title"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        let held = Err("another open tab holds this session; close one to keep its plans".to_owned());
+        let saved = || std::fs::read_to_string(dir.join("config/plans.json")).unwrap();
+
+        // The resumed session has no plan yet, so the tab that resumed it brings its own.
+        assert!(ask_as(&other, plan("Fix login")).is_ok());
+        m.record_session(&other, "cap-1".into(), None);
+        assert_eq!(titles(&holder), ["Fix login"]);
+        assert_eq!(titles(&other), ["Fix login"], "reads still answer");
+        assert!(!saved().contains("cap-b"), "{}", saved());
+        for tab in [&holder, &other] {
+            assert_eq!(ask_as(tab, plan("Mine")), held);
+            assert_eq!(ask_as(tab, json!({ "name": "plan_step", "step": "s1", "state": "done" })), held);
+        }
+        assert_eq!(titles(&holder), ["Fix login"]);
+
+        // The resumed session has plans, so the tab that resumed it takes none over and adds none.
+        assert!(ask_as(&third, plan("Ship the form")).is_ok());
+        m.record_session(&third, "cap-1".into(), None);
+        assert_eq!(titles(&holder), ["Fix login"], "the holder lost no plan");
+        assert_eq!(titles(&third), ["Fix login"]);
+        assert!(m.plans.lock().unwrap().get("cap-c").is_none());
+        assert!(!saved().contains("cap-c") && !saved().contains("Ship the form"), "{}", saved());
+        assert_eq!(ask_as(&third, plan("Mine")), held);
+
+        m.close_tab(&other);
+        assert_eq!(ask_as(&holder, plan("Mine")), held, "a third tab still holds it");
+        m.close_tab(&third);
+        assert_eq!(titles(&holder), ["Fix login"], "closing a tab that shares the session keeps its plans");
+        assert_eq!(ask_as(&holder, json!({ "name": "plan_step", "step": "s1", "state": "done" })), Ok("p1 rev 2: Fix login\nl1 Build: s1 done".into()));
+        m.quit();
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
