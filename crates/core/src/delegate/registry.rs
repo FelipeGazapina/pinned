@@ -2576,6 +2576,27 @@ mod tests {
     }
 
     #[test]
+    fn a_task_priced_at_the_ceiling_still_counts_as_unknown_after_a_reload() {
+        let dir = std::env::temp_dir().join(format!("pinned-saved-ceiling-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("delegates.json");
+        let first = Delegates::load(Some(file.clone()));
+        let task = new_task(&first, "Fix");
+        {
+            let mut tasks = first.tasks.lock().unwrap();
+            let held = tasks.iter_mut().find(|t| t.id == task.id).unwrap();
+            held.usage.cost_usd = Some(7.5);
+            held.at_ceiling = true;
+        }
+        first.persist();
+        assert_eq!(first.work_cost_of_tab("tab-1").unknown, 1, "a known amount, priced in part at the ceiling");
+        let loaded = Delegates::load(Some(file));
+        let cost = loaded.work_cost_of_tab("tab-1");
+        assert_eq!((cost.unknown, cost.agents_usd), (1, 7.5), "the reload keeps it unknown, its amount kept");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_task_saved_by_an_older_pinned_with_a_line_break_in_its_title_is_typed_as_one_quoted_field() {
         let dir = std::env::temp_dir().join(format!("pinned-saved-title-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
