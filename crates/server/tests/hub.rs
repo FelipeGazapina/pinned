@@ -9037,7 +9037,7 @@ fn an_agents_extend_box_is_refused_when_it_asks_if_it_cannot_run_and_checked_aga
     assert_eq!(extend(&ana, 0.75).unwrap()["outcome"], "pending", "a denied extend no longer counts");
     let waiting = waiting_actions(&mut owner);
     assert_eq!(waiting, ["extend_box", "extend_box"], "{waiting:?}");
-    assert_eq!(extend(&ana, 0.5), ceiling, "it fits alone, and with the US$ 1.75 already waiting it passes the Box budget");
+    assert_eq!(extend(&ana, 0.5), Err(extend_waits("US$ 1.75")), "it fits alone, and with the US$ 1.75 already waiting it passes the Box budget");
     assert_eq!(waiting_actions(&mut owner).len(), 2, "the refused ask does not wait");
 
     assert_eq!(extend(&bob, 0.25), Err("this machine is no box".into()), "another account's box is no box of bob's");
@@ -9067,6 +9067,122 @@ fn an_agents_extend_box_is_refused_when_it_asks_if_it_cannot_run_and_checked_aga
     });
     assert_eq!(extend(&ana, 0.01), Err("this box is already ending".into()));
     assert_eq!(waiting_actions(&mut owner), Vec::<String>::new(), "no refused extend waits for the owner");
+}
+
+/// Ana's agent with a box it opened at US$ 1.00 under a Box budget of US$ 3.00, her app unlocked.
+struct ExtendSetup {
+    hub: TestHub,
+    url: String,
+    token: String,
+    ana: Agent,
+    owner: Client,
+    machine: String,
+}
+
+fn extend_setup(name: &str) -> ExtendSetup {
+    let hub = TestHub::start_with_boxes(name, Signup::Open, fast());
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &token, "ana@acme.dev", "ana-mac");
+    hub.boxes.state.lock().unwrap().checkout = Some(("site".into(), SITE.into()));
+    ana.client.hub(json!({ "cmd": "connect_upstash", "key": BOX_KEY, "claude_token": CLAUDE_TOKEN })).unwrap();
+    ana.client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": { "box_budget_cents": 300 } })).unwrap();
+    box_mode(&mut ana.client, "session", "fresh");
+    let mut owner = Client::app(&url, &token);
+    owner.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    let machine = open_extend_box(&ana);
+    ExtendSetup { hub, url, token, ana, owner, machine }
+}
+
+/// Another box the agent opens at US$ 1.00: its machine.
+fn open_extend_box(ana: &Agent) -> String {
+    let opened = act(&ana.dir, &ana.tab, "open_box", json!({ "repo": "acme/site", "size": "small", "budget_usd": 1.0 })).unwrap();
+    assert_eq!(opened["outcome"], "done", "{opened}");
+    opened["result"]["machine"].as_str().unwrap().to_owned()
+}
+
+fn extend_as(dir: &Path, tab: &str, machine: &str, extra: f64, request_id: Option<&str>) -> Result<Value, String> {
+    let mut tool = json!({ "name": "act", "action": "extend_box", "args": { "machine": machine, "extra_usd": extra } });
+    if let Some(id) = request_id {
+        tool["request_id"] = json!(id);
+    }
+    session_tool(dir, tab, tool)
+}
+
+fn refused_extends(owner: &mut Client) -> usize {
+    trail_of(owner).iter().filter(|(action, outcome, _, _)| action == "extend_box" && outcome == "refused").count()
+}
+
+const EXTEND_CEILING: &str = "a box may spend at most US$ 3.00; name less, or raise Box budget in Settings › Way of working";
+
+fn extend_waits(waiting: &str) -> String {
+    format!("a box may spend at most US$ 3.00, and {waiting} for this box already waits for your decision in the app; name less, or decide that one first")
+}
+
+/// A repeat of an extend_box the session already asked gets the answer of that ask, as every
+/// repeat does, and is not checked again: the box has changed since, by that very ask. Only the
+/// same session's repeat is one: another tab or another machine with the same request id asks anew.
+#[test]
+fn an_agents_repeated_extend_box_gets_its_first_answer_and_is_not_checked_again() {
+    let ExtendSetup { hub: _hub, url, token, mut ana, mut owner, machine } = extend_setup("extend_repeat");
+    let r1 = extend_as(&ana.dir, &ana.tab, &machine, 1.5, Some("r1")).unwrap();
+    assert_eq!(r1["outcome"], "pending", "{r1}");
+    let approved = owner.hub(json!({ "cmd": "decide_confirmation", "id": r1["id"], "approve": true })).unwrap();
+    assert_eq!((approved["outcome"].as_str(), approved["result"]["budget_usd"].as_f64()), (Some("done"), Some(2.5)), "{approved}");
+    let again = extend_as(&ana.dir, &ana.tab, &machine, 1.5, Some("r1"));
+    assert_eq!(again.as_ref().map(|a| (a["outcome"].clone(), a["earlier"].clone())), Ok((json!("repeat"), json!("approved"))), "the repeat hears the owner's yes: {again:?}");
+    assert_eq!(refused_extends(&mut owner), 0, "the repeat wrote no refusal");
+
+    let r2 = extend_as(&ana.dir, &ana.tab, &machine, 0.25, Some("r2")).unwrap();
+    assert_eq!(r2["outcome"], "pending", "{r2}");
+    assert_eq!(owner.hub(json!({ "cmd": "extend_box", "machine": machine, "extra_usd": 0.5 })).unwrap()["budget_usd"].as_f64(), Some(3.0), "the owner raises the box in the app meanwhile");
+    let again = extend_as(&ana.dir, &ana.tab, &machine, 0.25, Some("r2"));
+    assert_eq!(again.as_ref().map(|a| (a["outcome"].clone(), a["id"].clone())), Ok((json!("pending"), r2["id"].clone())), "the repeat of a waiting ask still waits, under the same id: {again:?}");
+    assert_eq!(refused_extends(&mut owner), 0, "the repeat wrote no refusal");
+
+    let other_tab = ana.node.machine.open_tab(Some(ana.dir.join("docs").display().to_string()), false).unwrap();
+    ana.client.wait("the second tab at the hub", |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == other_tab));
+    assert_eq!(extend_as(&ana.dir, &other_tab, &machine, 0.25, Some("r2")), Err(EXTEND_CEILING.into()), "another tab's ask with the same request id is checked");
+    let mini = agent_of(&url, &token, "ana@acme.dev", "ana-mini");
+    assert_eq!(extend_as(&mini.dir, &mini.tab, &machine, 0.25, Some("r2")), Err(EXTEND_CEILING.into()), "another machine's ask with the same request id is checked");
+    assert_eq!(waiting_actions(&mut owner), ["extend_box"], "only r2 waits");
+}
+
+/// What waits for the owner counts against a new ask only for the same box, only when above zero,
+/// and only while it was asked in the last day; an ask that fits alone but not with what waits is
+/// refused with a text that says so.
+#[test]
+fn an_agents_extend_box_counts_only_recent_positive_asks_of_the_same_box() {
+    let ExtendSetup { hub, ana, machine, .. } = extend_setup("extend_waiting");
+    let other = open_extend_box(&ana);
+    assert_eq!(extend_as(&ana.dir, &ana.tab, &other, 1.5, None).unwrap()["outcome"], "pending");
+    assert_eq!(extend_as(&ana.dir, &ana.tab, &machine, 1.5, None).unwrap()["outcome"], "pending", "what waits for another box of the account does not count");
+    assert_eq!(extend_as(&ana.dir, &ana.tab, &machine, 1.0, None), Err(extend_waits("US$ 1.50")), "it fits alone, not with what waits");
+    assert_eq!(extend_as(&ana.dir, &ana.tab, &machine, 2.5, None), Err(EXTEND_CEILING.into()), "what does not fit alone keeps its own text");
+
+    let age = |hours: &str| admin_on(&hub.database, &format!("update agent_confirmations set created_at = now() - interval '{hours}' where args->>'machine' = '{machine}' and decided_at is null"));
+    age("23 hours 59 minutes");
+    assert_eq!(extend_as(&ana.dir, &ana.tab, &machine, 1.0, None), Err(extend_waits("US$ 1.50")), "an ask of the last day still counts");
+    age("24 hours 1 minute");
+    assert_eq!(extend_as(&ana.dir, &ana.tab, &machine, 1.0, None).unwrap()["outcome"], "pending", "an ask older than a day no longer counts");
+
+    // An amount below zero, which no ask could leave, waits for this box: it makes no room.
+    admin_on(&hub.database, &format!("update agent_confirmations set args = jsonb_set(jsonb_set(args, '{{extra_usd}}', '-5'), '{{machine}}', '\"{machine}\"') where args->>'machine' = '{other}' and decided_at is null"));
+    assert_eq!(extend_as(&ana.dir, &ana.tab, &machine, 1.5, None), Err(extend_waits("US$ 1.00")), "an amount below zero does not make room");
+}
+
+/// Asks for one box that each fit alone, made at once: the first waits, every other one hears it waits.
+#[test]
+fn concurrent_extend_box_asks_for_one_box_wait_only_as_far_as_the_box_budget_goes() {
+    let ExtendSetup { hub: _hub, ana, mut owner, machine, .. } = extend_setup("extend_concurrent");
+    let answers: Vec<Result<Value, String>> = std::thread::scope(|scope| {
+        let asks: Vec<_> = (0..8).map(|_| scope.spawn(|| extend_as(&ana.dir, &ana.tab, &machine, 1.5, None))).collect();
+        asks.into_iter().map(|ask| ask.join().unwrap()).collect()
+    });
+    let pending = answers.iter().filter(|a| a.as_ref().is_ok_and(|a| a["outcome"] == "pending")).count();
+    let refused = answers.iter().filter(|a| **a == Err(extend_waits("US$ 1.50"))).count();
+    assert_eq!((pending, refused), (1, 7), "{answers:?}");
+    assert_eq!(waiting_actions(&mut owner), ["extend_box"]);
 }
 
 #[test]
