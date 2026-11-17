@@ -3,6 +3,7 @@
 //! with it.
 
 use crate::agent::AgentStatus;
+use crate::global_orchestrator::{waiting_kind, WaitingKind};
 use crate::thread;
 use crate::wire::TabView;
 use serde_json::{json, Value};
@@ -17,6 +18,10 @@ const READ_CHARS: usize = 80_000;
 
 /// What a tab's session is doing, in the words the tools use, and what it asks the user or why it failed.
 pub fn state_of(tab: &TabView) -> (&'static str, Option<String>) {
+    // The state the waiting list and the sessions list give too (`global_orchestrator::waiting_kind`).
+    if waiting_kind(tab) == Some(WaitingKind::StoppedOnError) {
+        return ("stopped_on_error", tab.stopped_on_error.clone());
+    }
     // A headless child works with no session of the tab's own.
     let headless = tab.headless && tab.status == Some(AgentStatus::Working);
     if !tab.running && !headless {
@@ -49,6 +54,7 @@ pub fn next_for(state: &str) -> &'static str {
         "working" => "it is working; read again in a while",
         "done" | "failed" | "idle" => "it may take a message now",
         "needs_permission" | "waiting_for_input" => "the user has to answer it in Pinned; tell them, then read again later",
+        "stopped_on_error" => "its last turn stopped on an error; the user can have it try again in Pinned, or send it a message; tell them, then read again later",
         "ended" | "stopped" => "the session ended; start a new one for more work",
         "offline" => "its machine is offline; try again later",
         "not_started" => "message it to start it",
@@ -111,7 +117,7 @@ pub fn read(tab: &TabView, page: Result<Value, String>, limit: usize) -> Value {
     let (state, question) = state_of(tab);
     let mut out = json!({ "state": state, "next": next_for(state), "title": tab.title });
     if let Some(said) = question {
-        out[if state == "failed" { "error" } else { "question" }] = json!(said);
+        out[if matches!(state, "failed" | "stopped_on_error") { "error" } else { "question" }] = json!(said);
     }
     match page {
         Ok(page) => out["conversation"] = conversation(&page, limit),

@@ -225,6 +225,7 @@ function needsYouItem(tab) {
   const view = tab.view;
   const item = (kind, extra = {}) => ({ tab, kind, title: threadTitle(tab), project: projectName(tab), machine: machineName(tab.machine), since: (view.updated ?? 0) * 1000 || null, ask: null, limit: null, ...extra });
   const waiting = waitingKindOf(view);
+  if (waiting === "stopped_on_error") return item("stopped", { error: view.stopped_on_error });
   if (waiting === "needs_input" || (waiting === "failed" && waitingLookOf(tab, waiting) === "approval")) {
     const ask = pendingAsk(tab) ?? { kind: "approval", text: null, command: String(view.ask_detail ?? "").trim() || null, choices: null, typed: false };
     return item(ask.kind, { ask });
