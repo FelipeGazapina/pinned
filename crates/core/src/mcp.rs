@@ -370,19 +370,7 @@ impl SessionFiles {
         if loads.is_empty() {
             return Ok(None);
         }
-        sweep_stale();
-        let mut builder = tempfile::Builder::new();
-        let prefix = format!("{DIR_PREFIX}{}-", std::process::id());
-        builder.prefix(&prefix);
-        #[cfg(unix)]
-        builder.permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700));
-        let dir = builder.tempdir()?;
-        let file = dir.path().join("servers.json");
-        let mut open = std::fs::OpenOptions::new();
-        open.write(true).create_new(true);
-        #[cfg(unix)]
-        std::os::unix::fs::OpenOptionsExt::mode(&mut open, 0o600);
-        std::io::Write::write_all(&mut open.open(&file)?, session_config(loads).to_string().as_bytes())?;
+        let (dir, file) = private_file("servers.json", session_config(loads).to_string().as_bytes())?;
         let servers = loads.iter().map(|l| (l.server.name.clone(), l.server.transport.clone())).collect();
         Ok(Some(SessionFiles { dir, file, servers }))
     }
@@ -415,6 +403,82 @@ impl SessionFiles {
             }
         }
         flags
+    }
+}
+
+/// Writes `bytes` as `name` in a fresh folder only this user opens, a file only this user reads.
+fn private_file(name: &str, bytes: &[u8]) -> std::io::Result<(tempfile::TempDir, PathBuf)> {
+    sweep_stale();
+    let mut builder = tempfile::Builder::new();
+    let prefix = format!("{DIR_PREFIX}{}-", std::process::id());
+    builder.prefix(&prefix);
+    #[cfg(unix)]
+    builder.permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700));
+    let dir = builder.tempdir()?;
+    let file = dir.path().join(name);
+    let mut open = std::fs::OpenOptions::new();
+    open.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut open, 0o600);
+    std::io::Write::write_all(&mut open.open(&file)?, bytes)?;
+    Ok((dir, file))
+}
+
+/// The project MCP servers a Claude Code session in `cwd` carries as approved, by name: those
+/// the person approved in `.claude/settings.local.json` at the project's main checkout (the root
+/// Claude Code files its approvals under, also for a worktree), less those declined there, that
+/// `cwd`'s own `.mcp.json` lists. Nothing else is read: no account's `.claude.json`, and not
+/// "all future", whose answer lists its names too. A file missing or unreadable carries none.
+pub fn carried_approvals(cwd: &Path) -> Vec<String> {
+    let listed = read_json(&cwd.join(".mcp.json")).unwrap_or(Value::Null);
+    let Some(listed) = listed["mcpServers"].as_object().filter(|servers| !servers.is_empty()) else { return vec![] };
+    let Some(root) = main_checkout(cwd) else { return vec![] };
+    let local = read_json(&root.join(".claude").join("settings.local.json")).unwrap_or(Value::Null);
+    let names = |key: &str| local[key].as_array().map(|names| names.iter().filter_map(Value::as_str).collect::<Vec<_>>()).unwrap_or_default();
+    let declined = names("disabledMcpjsonServers");
+    let mut carried: Vec<String> = vec![];
+    for name in names("enabledMcpjsonServers") {
+        if !declined.contains(&name) && listed.contains_key(name) && !carried.iter().any(|c| c == name) {
+            carried.push(name.to_owned());
+        }
+    }
+    carried
+}
+
+/// The main checkout of the repository `cwd` is in, as Claude Code finds it: the folder holding
+/// the git common dir, which a worktree shares with it.
+fn main_checkout(cwd: &Path) -> Option<PathBuf> {
+    let out = crate::process::command("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    let common = String::from_utf8(out.stdout).ok().filter(|_| out.status.success())?;
+    Path::new(common.trim_end_matches(['\n', '\r'])).parent().map(Path::to_owned)
+}
+
+/// A session's own Claude Code settings: the file it would have used, plus the project MCP
+/// servers it carries as approved. Kept and removed as `SessionFiles` are.
+pub struct SessionSettings {
+    _dir: tempfile::TempDir,
+    pub file: PathBuf,
+}
+
+impl SessionSettings {
+    /// Writes `base` with `enabledMcpjsonServers` set to `names`, every other key as it is, or
+    /// nothing when there are no names.
+    pub fn write(base: &Path, names: &[String]) -> std::io::Result<Option<SessionSettings>> {
+        if names.is_empty() {
+            return Ok(None);
+        }
+        let mut settings: Value = serde_json::from_slice(&std::fs::read(base)?)?;
+        let object = settings.as_object_mut().ok_or_else(|| std::io::Error::other(format!("{} is not a JSON object", base.display())))?;
+        object.insert("enabledMcpjsonServers".into(), json!(names));
+        let (dir, file) = private_file("claude-settings.json", &serde_json::to_vec_pretty(&settings)?)?;
+        Ok(Some(SessionSettings { _dir: dir, file }))
     }
 }
 

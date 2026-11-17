@@ -194,8 +194,33 @@ impl Launch {
         self.bins.get(&provider).cloned().unwrap_or_else(|| provider.spec().bin.into())
     }
 
+    /// The settings file every Claude Code session started with `env` loads. The global
+    /// orchestrator's own: no Bash, and its file tools held to its folders.
+    fn shared_settings(&self, env: &[(String, String)]) -> PathBuf {
+        if global::is_global(env) { self.settings.with_file_name(hooks::GLOBAL_SETTINGS) } else { self.settings.clone() }
+    }
+
+    /// The settings of its own an interactive Claude Code session in `cwd` loads: the shared ones
+    /// plus the project MCP servers the person approved, so their approval dialog does not show
+    /// again in a worktree or under an account that never trusted the main checkout. None when it
+    /// carries no name, and the session loads the shared file as before.
+    fn session_settings(&self, program: Program, account: &Account, cwd: &Path, args: &[String], env: &[(String, String)]) -> Option<mcp::SessionSettings> {
+        let interactive = !args.iter().any(|a| a == "-p" || a == "--print");
+        if program != Program::Agent || !account.provider.spec().harness || !interactive {
+            return None;
+        }
+        let names = mcp::carried_approvals(cwd);
+        match mcp::SessionSettings::write(&self.shared_settings(env), &names) {
+            Ok(settings) => settings,
+            Err(e) => {
+                eprintln!("pinned: a session in {} starts without its project's approved MCP servers: {e}", cwd.display());
+                None
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
-    fn command(&self, program: Program, account: &Account, tab: &str, cwd: &Path, bypass: bool, args: Vec<String>, env: &[(String, String)], plugin_dirs: &[PathBuf], mcp: Option<&mcp::SessionFiles>) -> CommandBuilder {
+    fn command(&self, program: Program, account: &Account, tab: &str, cwd: &Path, bypass: bool, args: Vec<String>, env: &[(String, String)], plugin_dirs: &[PathBuf], mcp: Option<&mcp::SessionFiles>, settings: Option<&mcp::SessionSettings>) -> CommandBuilder {
         let provider = account.provider;
         let spec = provider.spec();
         let mut cmd = CommandBuilder::new(self.bin(provider));
@@ -217,8 +242,7 @@ impl Launch {
                         cmd.args(configs);
                     }
                     cmd.arg("--settings");
-                    // The global orchestrator's own: no Bash, and its file tools held to its folders.
-                    cmd.arg(if global::is_global(env) { self.settings.with_file_name(hooks::GLOBAL_SETTINGS) } else { self.settings.clone() });
+                    cmd.arg(settings.map_or_else(|| self.shared_settings(env), |own| own.file.clone()));
                     cmd.arg("--plugin-dir");
                     cmd.arg(&self.plugin_dir);
                     for dir in plugin_dirs {
@@ -523,6 +547,9 @@ struct Tab {
     session: Option<pty::Session>,
     /// The running session's own MCP config, removed when the session ends or is replaced.
     mcp: Option<mcp::SessionFiles>,
+    /// The running session's own settings, carrying its project's approved MCP servers; removed
+    /// as `mcp` is.
+    own_settings: Option<mcp::SessionSettings>,
     starting: bool,
     /// When the running claude started, so a subagent an earlier claude left mid-step reads as stopped.
     started: Option<SystemTime>,
@@ -2314,12 +2341,13 @@ impl Machine {
         let env = [self.accounts.env(&account), env].concat();
         let plugin_dirs = self.shared_plugin_dirs(&account);
         let mcp = if program == Program::Agent { self.session_mcp(&account, &cwd) } else { None };
+        let own_settings = self.launch.session_settings(program, &account, &cwd, &args, &env);
         let first_run = program == Program::Agent && account.provider == Provider::Claude;
         if first_run {
             self.seed_first_run(&account, &cwd);
         }
-        let cmd = self.launch.command(program, &account, tab, &cwd, bypass, args, &env, &plugin_dirs, mcp.as_ref());
-        if let Err(error) = self.spawn_with(tab, cmd, pty::size(cols, rows), mcp) {
+        let cmd = self.launch.command(program, &account, tab, &cwd, bypass, args, &env, &plugin_dirs, mcp.as_ref(), own_settings.as_ref());
+        if let Err(error) = self.spawn_with(tab, cmd, pty::size(cols, rows), (mcp, own_settings)) {
             // The next start asks for the same again: with its arguments gone it would open a new
             // conversation in place of this one.
             let _ = self.tab(tab, |t| (t.starting, t.waking, t.launch, t.asleep) = (false, false, asked, slept));
@@ -2615,11 +2643,11 @@ impl Machine {
 
     #[cfg(test)]
     fn spawn(&self, tab: &str, cmd: CommandBuilder, size: PtySize) -> Result<(), String> {
-        self.spawn_with(tab, cmd, size, None)
+        self.spawn_with(tab, cmd, size, (None, None))
     }
 
-    /// `spawn`, keeping the session's own MCP config `mcp` until the session ends.
-    fn spawn_with(&self, tab: &str, cmd: CommandBuilder, size: PtySize, mcp: Option<mcp::SessionFiles>) -> Result<(), String> {
+    /// `spawn`, keeping the session's own MCP config and settings `own` until the session ends.
+    fn spawn_with(&self, tab: &str, cmd: CommandBuilder, size: PtySize, own: (Option<mcp::SessionFiles>, Option<mcp::SessionSettings>)) -> Result<(), String> {
         let (old, screen) = self.tab(tab, |t| (t.session.take(), t.screen.clone()))?;
         let session = {
             let mut screen = screen.lock().unwrap();
@@ -2643,7 +2671,7 @@ impl Machine {
         )?;
         self.tab(tab, |t| {
             t.session = Some(pty);
-            t.mcp = mcp;
+            (t.mcp, t.own_settings) = own;
             t.starting = false;
             t.started = Some(started);
             (t.status, t.title, t.message) = (None, None, None);
@@ -2704,7 +2732,7 @@ impl Machine {
             let mode = t.permission_mode.clone().filter(|mode| claude && t.mode_live && !t.bypass && !t.permission_unknown && matches!(mode.as_str(), "acceptEdits" | "auto" | "dontAsk" | "plan"));
             t.launch.extend(mode.into_iter().flat_map(|mode| ["--permission-mode".to_owned(), mode]));
             t.launch.extend(t.effort.clone().filter(|_| claude).into_iter().flat_map(|effort| ["--effort".to_owned(), effort]));
-            (t.asleep, t.mcp, t.started) = (true, None, None);
+            (t.asleep, t.mcp, t.own_settings, t.started) = (true, None, None, None);
             // The screen moves on before the tab is let go: the exit of the session dropped below
             // reaches no one, and a start that follows counts from here, so its output is its own.
             t.screen.lock().unwrap().session += 1;
@@ -6453,6 +6481,7 @@ impl Machine {
             program: Program::Agent,
             session: None,
             mcp: None,
+            own_settings: None,
             starting: false,
             started: None,
             launch,
@@ -6531,7 +6560,7 @@ impl Machine {
         let reason = stop_reason(task.and_then(|task| self.delegates.get(&task)).as_ref(), code);
         self.end_session(tab);
         let _ = self.tab(tab, |t| {
-            (t.session, t.background_wait, t.mcp) = (None, None, None);
+            (t.session, t.background_wait, t.mcp, t.own_settings) = (None, None, None, None);
             if !t.headless && matches!(t.status, Some(AgentStatus::Working | AgentStatus::NeedsInput)) {
                 (t.status, t.stopped) = (None, Some(reason));
             }
@@ -9431,7 +9460,7 @@ pub(crate) mod tests {
     fn claude_does_not_inherit_the_session_pinned_was_started_from() {
         std::env::set_var("CLAUDE_CODE_SESSION_ID", "outer-session");
         std::env::set_var("CLAUDECODE", "1");
-        let cmd = launch().command(Program::Agent, &Account::builtin(Provider::Claude), "tab-1", Path::new("/repo"), false, vec![], &[], &[], None);
+        let cmd = launch().command(Program::Agent, &Account::builtin(Provider::Claude), "tab-1", Path::new("/repo"), false, vec![], &[], &[], None, None);
         assert_eq!(cmd.get_env("CLAUDE_CODE_SESSION_ID"), None);
         assert_eq!(cmd.get_env("CLAUDECODE"), None);
         assert_eq!(cmd.get_env("PINNED_TAB").and_then(|v| v.to_str()), Some("tab-1"));
@@ -9443,7 +9472,7 @@ pub(crate) mod tests {
         let plugin = dir.join("toy@demo");
         std::fs::create_dir_all(plugin.join(".claude-plugin")).unwrap();
         std::fs::write(plugin.join(".claude-plugin/plugin.json"), r#"{"name":"toy"}"#).unwrap();
-        let cmd = launch().command(Program::Agent, &Account::builtin(Provider::Claude), "tab-1", Path::new("/repo"), false, vec![], &[], std::slice::from_ref(&plugin), None);
+        let cmd = launch().command(Program::Agent, &Account::builtin(Provider::Claude), "tab-1", Path::new("/repo"), false, vec![], &[], std::slice::from_ref(&plugin), None, None);
         let args: Vec<String> = cmd.get_argv().iter().map(|a| a.to_string_lossy().into_owned()).collect();
         let flags: Vec<_> = args.windows(2).filter(|w| w[0] == "--plugin-dir").map(|w| w[1].as_str()).collect();
         assert_eq!(flags, vec!["p", plugin.to_str().unwrap()]);
