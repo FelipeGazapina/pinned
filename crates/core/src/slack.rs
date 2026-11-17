@@ -410,12 +410,22 @@ impl Own {
 }
 
 /// A workflow that also reads posts from apps and integrations: its id, for the log, the
-/// account's own bots, which it never reads back, and whether it already handles a post, by ts:
-/// such a post takes no place under `APPS_PER_CHECK`.
+/// account's own bots, which it never reads back, whether it already handles a post, by ts: such
+/// a post takes no place under `APPS_PER_CHECK`, and `seen`, the ts of the newest app post an
+/// earlier check left out over the cap: no app post at or before it is taken again.
 pub struct Apps<'a> {
     pub workflow: &'a str,
     pub own: &'a Own,
     pub busy: &'a (dyn Fn(&str) -> bool + Sync),
+    pub seen: Option<&'a str>,
+}
+
+/// The app posts one history page gave a workflow, by ts, oldest first: those it took, and those
+/// it left out past `APPS_PER_CHECK`.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct AppPosts {
+    pub taken: Vec<String>,
+    pub skipped: Vec<String>,
 }
 
 /// What one history page gives a workflow: the messages it takes, oldest first, and the
@@ -464,9 +474,20 @@ fn skipped_line(workflow: &str, ts: &str) -> String {
     format!("pinned: workflow {workflow} skipped app post {ts} over the cap of {APPS_PER_CHECK} per check")
 }
 
-/// The lines `messages` logged for skipped app posts while a test ran, oldest first.
+#[cfg(not(test))]
+fn log_skipped(line: &str) {
+    eprintln!("{line}");
+}
+
+/// Under test, the lines `messages` logs for skipped app posts are also kept, oldest first.
 #[cfg(test)]
 static SKIPPED_LOG: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn log_skipped(line: &str) {
+    eprintln!("{line}");
+    SKIPPED_LOG.lock().unwrap().push(line.to_owned());
+}
 
 /// Takes the skipped lines logged since the last call.
 #[cfg(test)]
@@ -519,10 +540,12 @@ fn block_lines(block: &Value, lines: &mut Vec<String>) {
     }
 }
 
-/// The text of an app post as plain text: `text`, then each attachment's `pretext`, `title`,
-/// `text`, `fields` and blocks (its `fallback` only when it has nothing else), then the text of
-/// its blocks. Lines are joined by newlines, a line already given is not given twice, and the whole
-/// is clipped to `APP_TEXT_MAX`. Slack's markup is left as it is, as in a person's message.
+/// The text of an app post as plain text: the message's `text`; then, per attachment, its
+/// `pretext`, `title` and `text`, one `title: value` line per entry of its `fields` list, and the
+/// text of its own `blocks`, with its `fallback` only when all of those are empty; then the text
+/// of the message's `blocks`. Lines are joined by newlines, a line already given is not given
+/// twice, and the whole is clipped to `APP_TEXT_MAX`. Slack's markup is left as it is, as in a
+/// person's message.
 fn app_text(message: &Value) -> String {
     let mut lines: Vec<String> = vec![message["text"].as_str().unwrap_or_default().to_owned()];
     for attachment in message["attachments"].as_array().into_iter().flatten() {
@@ -565,26 +588,26 @@ fn app_post(message: &Value) -> Post {
 }
 
 /// The top-level messages people wrote in `channel` after `since`, oldest first, by author name.
-/// With `apps`, also the posts of apps and integrations (`select`), by the app's name, with no
-/// person looked up for them; each one past `APPS_PER_CHECK` is logged by its workflow and ts,
-/// and its ts is given second, for the check to handle it, so no check reads it again.
-pub async fn messages(token: &str, channel: &str, bot: &str, since: DateTime<Utc>, apps: Option<&Apps<'_>>) -> Result<(Vec<Post>, Vec<String>), String> {
+/// With `apps`, also the posts of apps and integrations (`select`) after its `seen`, by the app's
+/// name, with no person looked up for them; each one past `APPS_PER_CHECK` is logged by its
+/// workflow and ts. The app posts it took and left out are given second, by ts, for the check to
+/// move the workflow's `seen` once the ones it took started.
+pub async fn messages(token: &str, channel: &str, bot: &str, since: DateTime<Utc>, apps: Option<&Apps<'_>>) -> Result<(Vec<Post>, AppPosts), String> {
     let history = call(token, "conversations.history", &[("channel", channel), ("oldest", &ts(since)), ("limit", PAGE)]).await?;
     let none = Own::default();
-    let busy = |ts: &str| apps.is_some_and(|a| (a.busy)(ts));
+    let seen = |ts: &str| apps.and_then(|a| a.seen).and_then(micros).zip(micros(ts)).is_some_and(|(seen, at)| at <= seen);
+    let busy = |ts: &str| apps.is_some_and(|a| (a.busy)(ts)) || seen(ts);
     let Selected { taken, skipped } = select(&history["messages"], bot, apps.map_or(&none, |a| a.own), since, apps.is_some(), &busy);
     for ts in &skipped {
-        let line = skipped_line(apps.map_or("", |a| a.workflow), ts);
-        #[cfg(test)]
-        SKIPPED_LOG.lock().unwrap().push(line.clone());
-        eprintln!("{line}");
+        log_skipped(&skipped_line(apps.map_or("", |a| a.workflow), ts));
     }
     let (from_apps, people): (Vec<Value>, Vec<Value>) = taken.into_iter().partition(is_app_post);
     let people = Value::Array(people);
     let mut posts = posts(&people, &names(token, &people).await?);
     posts.extend(from_apps.iter().map(app_post));
     posts.sort_by_key(|p| micros(&p.ts));
-    Ok((posts, skipped))
+    let taken = from_apps.iter().filter_map(|m| m["ts"].as_str().map(str::to_owned)).collect();
+    Ok((posts, AppPosts { taken, skipped }))
 }
 
 /// Threads in a history page whose last reply came after `since`.

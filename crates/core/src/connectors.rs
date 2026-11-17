@@ -972,6 +972,14 @@ struct Store {
     /// this shape cannot read, so the old key is ignored and its mark dropped.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     box_released_at: BTreeMap<String, BTreeMap<String, u64>>,
+    /// Per workflow that reads app posts, by workflow id, the newest app post (`<channel id>:<ts>`)
+    /// a check left out over `slack::APPS_PER_CHECK`, set once every app post that check took
+    /// started (`Connectors::settle_apps`): the workflow takes no app post of that channel at or
+    /// before it again. One entry per workflow, dropped with the workflow (`prune_thread_bots`).
+    /// Kept in this machine's store, not synced: only the machine that checks the workflow reads
+    /// its channel.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    apps_seen: BTreeMap<String, String>,
     connectors: Vec<Connector>,
 }
 
@@ -1070,6 +1078,7 @@ impl Store {
         };
         self.slack_threads.retain(|key, _| tracked(key));
         self.box_released_at.retain(|workflow, _| connectors.iter().any(|c| c.id == *workflow));
+        self.apps_seen.retain(|workflow, _| connectors.iter().any(|c| c.id == *workflow));
         for keys in self.box_released_at.values_mut() {
             keys.retain(|_, at| box_release_is_live(Some(*at), now));
         }
@@ -1992,6 +2001,16 @@ pub struct Connectors {
     /// Admitted graph runs whose session has not opened, by connector and `subject_key`: a run
     /// that ends before one releases its place.
     holding: Mutex<std::collections::HashSet<(String, String)>>,
+    /// The app posts this check's scans took and left out, by workflow, until `settle_apps` moves
+    /// the workflow's `Store::apps_seen` past them.
+    apps_read: Mutex<Vec<AppsRead>>,
+}
+
+/// The app posts one scan of `workflow` took and left out of `channel` (by id).
+struct AppsRead {
+    workflow: String,
+    channel: String,
+    posts: slack::AppPosts,
 }
 
 /// What a box's end does to the subject of the run it failed.
@@ -2131,6 +2150,7 @@ impl Connectors {
             boot_failed: Mutex::new(std::collections::HashSet::new()),
             admission: std::sync::OnceLock::new(),
             holding: Mutex::new(std::collections::HashSet::new()),
+            apps_read: Mutex::new(vec![]),
         }
     }
 
@@ -2199,6 +2219,7 @@ impl Connectors {
     /// messages on. A failing connector doesn't hold up the others, but a rate limit skips the
     /// rest of that integration until the next check instead of hammering it.
     async fn poll(&self) -> (Vec<Work>, Option<String>) {
+        self.apps_read.lock().unwrap().clear();
         self.fill_bots().await;
         let now = Utc::now();
         // A manual workflow has no poller: it runs only when someone runs it now.
@@ -2256,6 +2277,11 @@ impl Connectors {
             if let Err(e) = self.start_graph(event).await {
                 errors.push(e);
             }
+        }
+        // A run of this check that no tab opened yet has not started.
+        let opening: Vec<String> = settled.work.iter().filter_map(|work| match work { Work::Run(run) => Some(subject_key(&run.subject)), _ => None }).collect();
+        if let Err(e) = self.settle_apps(&opening) {
+            errors.push(e);
         }
         for item in settled.inbox {
             self.enqueue(item);
@@ -2553,26 +2579,25 @@ impl Connectors {
                 let since = DateTime::parse_from_rfc3339(&c.since).map_or(now, Into::into);
                 let own = self.own_bots_for(*apps).await?;
                 let busy = |ts: &str| self.busy(&thread_key(&channel, ts));
-                let apps = own.as_ref().map(|own| slack::Apps { workflow: &c.id, own, busy: &busy });
-                let (mut messages, skipped) = slack::messages(&token, &channel, &bot.user_id, since, apps.as_ref()).await?;
+                let seen = self.apps_seen(&c.id, &channel);
+                let apps = own.as_ref().map(|own| slack::Apps { workflow: &c.id, own, busy: &busy, seen: seen.as_deref() });
+                let (mut messages, read) = slack::messages(&token, &channel, &bot.user_id, since, apps.as_ref()).await?;
+                self.read_apps(&c.id, &channel, read);
                 messages.retain(|m| !busy(&m.ts));
-                // An app post skipped over the cap is handled, as a stopped one is: no check reads it again.
-                let skipped = skipped.into_iter().map(|thread| Found::Stopped { channel: channel.clone(), thread, page: None });
                 if messages.is_empty() {
-                    return Ok(Some(skipped.collect()));
+                    return Ok(Some(vec![]));
                 }
                 let key = self.key(VERCEL_KEY).ok_or("the Vercel AI Gateway is not connected: connect it in pinned's Connectors settings")?;
                 let choices = decide.choices(&c.name)?;
                 let pages = self.pages(&token, c, decide).await?;
                 let channel_name = channel_name(name);
-                let skipped: Vec<Found> = skipped.collect();
                 // What the decision model reads of each message, framed as `decide_state` frames it.
                 let framed = self.framed(&c.id);
                 let outside = |value: &str| match framed && !value.trim().is_empty() {
                     true => crate::untrusted::frame(crate::untrusted::SLACK_THREAD, value),
                     false => value.to_owned(),
                 };
-                let mut found = skipped;
+                let mut found = vec![];
                 for message in messages {
                     let state = json!({ "channel": format!("#{}", outside(channel_name)), "author": outside(&message.author), "message": outside(&message.text) });
                     let chosen = vercel::choose(&key, decide.model.trim(), &decide.instructions, &choices, &state).await?;
@@ -2618,12 +2643,13 @@ impl Connectors {
         let since = DateTime::parse_from_rfc3339(&c.since).map_or(now, Into::into);
         let own = self.own_bots_for(matches!(c.trigger, Trigger::SlackMessage { apps: true, .. })).await?;
         let busy = |ts: &str| self.busy(&thread_key(&channel, ts));
-        let apps = own.as_ref().map(|own| slack::Apps { workflow: &c.id, own, busy: &busy });
-        let (mut messages, skipped) = slack::messages(&token, &channel, &bot.user_id, since, apps.as_ref()).await?;
+        let seen = self.apps_seen(&c.id, &channel);
+        let apps = own.as_ref().map(|own| slack::Apps { workflow: &c.id, own, busy: &busy, seen: seen.as_deref() });
+        let (mut messages, read) = slack::messages(&token, &channel, &bot.user_id, since, apps.as_ref()).await?;
+        self.read_apps(&c.id, &channel, read);
         messages.retain(|m| !busy(&m.ts));
         let channel_name = channel_name(name).to_owned();
-        // An app post skipped over the cap is handled, as a stopped one is: no check reads it again.
-        let mut found: Vec<Found> = skipped.into_iter().map(|thread| Found::Stopped { channel: channel.clone(), thread, page: None }).collect();
+        let mut found: Vec<Found> = vec![];
         for message in messages {
             let posts = opened_by(slack::thread(&token, &channel, &message.ts).await?, &message, apps.is_some());
             found.push(Found::Mention {
@@ -2655,6 +2681,42 @@ impl Connectors {
             return true;
         }
         self.runs.lock().unwrap().iter().any(|run| !matches!(run.status, Status::Failed { .. } | Status::Done) && subject_key(&run.subject) == key)
+    }
+
+    /// The ts of `workflow`'s `Store::apps_seen` in `channel`, if it has one there.
+    fn apps_seen(&self, workflow: &str, channel: &str) -> Option<String> {
+        let store = self.store.lock().unwrap();
+        store.apps_seen.get(workflow)?.strip_prefix(&thread_key(channel, "")).map(str::to_owned)
+    }
+
+    /// Keeps the app posts a scan of `workflow` took and left out of `channel`, for `settle_apps`.
+    fn read_apps(&self, workflow: &str, channel: &str, posts: slack::AppPosts) {
+        if !posts.skipped.is_empty() {
+            self.apps_read.lock().unwrap().push(AppsRead { workflow: workflow.to_owned(), channel: channel.to_owned(), posts });
+        }
+    }
+
+    /// Moves each workflow's `Store::apps_seen` to the newest app post its scan left out this
+    /// check, once every app post that scan took started: it is `busy`, and it is not among
+    /// `opening`, the subjects (`subject_key`) of runs no tab opened yet. A taken post that did not
+    /// start (a hub's team held it or keeps it waiting, or its open failed) leaves `apps_seen`
+    /// where it was, so the posts left out after it are read again at the next check.
+    fn settle_apps(&self, opening: &[String]) -> Result<(), String> {
+        let read = std::mem::take(&mut *self.apps_read.lock().unwrap());
+        let (started, waiting): (Vec<AppsRead>, Vec<AppsRead>) = read.into_iter().partition(|read| {
+            read.posts.taken.iter().map(|ts| thread_key(&read.channel, ts)).all(|key| !opening.contains(&key) && self.busy(&key))
+        });
+        self.apps_read.lock().unwrap().extend(waiting);
+        if started.is_empty() {
+            return Ok(());
+        }
+        let mut store = self.store.lock().unwrap();
+        for read in started {
+            if let Some(newest) = read.posts.skipped.last() {
+                store.apps_seen.insert(read.workflow, thread_key(&read.channel, newest));
+            }
+        }
+        self.save(&store)
     }
 
     /// The connector's followed threads by the bot that answers each: the one that claimed it,
@@ -3924,6 +3986,9 @@ impl Connectors {
             if let Err(e) = self.hand_over(work, open).await {
                 error.get_or_insert(e);
             }
+        }
+        if let Err(e) = self.settle_apps(&[]) {
+            error.get_or_insert(e);
         }
         if let Err(e) = self.drive_locked(open).await {
             error.get_or_insert(e);
