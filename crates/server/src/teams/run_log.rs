@@ -7,7 +7,9 @@
 //!
 //! Every line is plain text on one line: secrets hidden by `surface::mask_secrets`, then cut to
 //! `LINE_CHARS`. At most the last `LINES` lines answer a call. A run that is not the team's, a box
-//! that is not the team's and a malformed id are all refused as an unknown run.
+//! that is not the team's and a malformed id are all refused as an unknown run. A run that has
+//! ended loses its box, and with it its session, once the box is torn down: its run is still
+//! listed, so its log is refused as not kept rather than as an unknown run.
 
 use super::{calls, db, Scope};
 use crate::hub::Hub;
@@ -28,6 +30,8 @@ const READ_WAIT: Duration = Duration::from_secs(20);
 /// What every refusal says, so a run of another team, a box that is not the team's and an id
 /// that is no id cannot be told apart from a run that does not exist.
 const NO_SUCH_RUN: &str = "the team has no such run";
+/// What an ended run's log answers once its box is gone: nothing keeps the session after that.
+const NOT_KEPT: &str = "this run's log was not kept after it ended";
 
 /// The last 200 lines of the session in the run's box, oldest first; `[]` while the run has no
 /// box or its box has no session yet. Any member reads them, ended runs too while their box exists.
@@ -38,7 +42,8 @@ pub async fn run_log(hub: &Arc<Hub>, scope: &Scope, run: &str) -> Result<Vec<Run
     let Some(machine) = db::run_box(&hub.db, team.id, run_id).await? else { return Ok(vec![]) };
     let machine_id = Uuid::parse_str(&machine).map_err(|_| NO_SUCH_RUN)?;
     if hub.db.box_of(team.id, machine_id).await?.is_none() {
-        return Err(NO_SUCH_RUN.into());
+        // The box of an ended run is torn down with its session, so the run is listed but its log is gone.
+        return Err(if run.state.ended() { NOT_KEPT } else { NO_SUCH_RUN }.into());
     }
     let Some(tab) = calls::session_tab(team, &machine, &run.workflow) else { return Ok(vec![]) };
     let call = MachineCall::Thread { tab: tab.id, from: 0, limit: Some(LINES as u32), before: None };
