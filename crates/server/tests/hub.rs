@@ -4767,6 +4767,35 @@ fn a_box_that_claims_to_host_the_global_orchestrator_is_never_the_host() {
 }
 
 #[test]
+fn a_box_that_claims_to_host_is_not_counted_in_the_project_list() {
+    let hub = TestHub::start_with_boxes("box_overview", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let account = ana.id;
+    assert_eq!(hub.runtime.block_on(hub.hub().open(account, ana.box_run(issue("uuid-host")))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    let box_id = ana.box_machine();
+    let BoxAccount { client, token, .. } = ana;
+    let mut fleet = Fleet::paired(hub, "box_overview", token, client, &[("Box · ENG-7 Fix login", true), ("mac", true), ("mini", true)]);
+    // The box's own node answers that it hosts, next to the person's machine that really hosts.
+    fleet.set_host(&box_id, true);
+    let mini = fleet.mini_id.clone();
+
+    // The box's projects and tabs still belong in the list, but it never counts as the host.
+    let listed = fleet.mini.link.as_ref().unwrap().call_hub(HubCall::Overview);
+    assert!(
+        listed.as_ref().is_ok_and(|overview| overview["machines"].as_array().unwrap().iter().any(|m| m["id"] == json!(mini))),
+        "the person's machine hosts, so its project list is built and lists it, and the box is not a second host: {listed:?}"
+    );
+
+    fleet.set_host(&mini, false);
+    assert_eq!(
+        fleet.mini.link.as_ref().unwrap().call_hub(HubCall::Overview),
+        Err("no online machine hosts the global orchestrator: choose one in its settings".into()),
+        "with the person's machine off, the box must not take over as host of the project list"
+    );
+}
+
+#[test]
 fn a_plain_session_still_cannot_reach_the_hub() {
     let mut fleet = Fleet::start("relay_plain");
     let mini = fleet.mini_id.clone();
