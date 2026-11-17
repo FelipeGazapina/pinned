@@ -2638,6 +2638,44 @@ mod tests {
         );
     }
 
+    const SEPARATORS: [char; 2] = ['\u{2028}', '\u{2029}'];
+    const DIRECTION: [char; 12] = ['\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}', '\u{200E}', '\u{200F}', '\u{061C}'];
+    const INVISIBLE: [char; 5] = ['\u{200B}', '\u{200C}', '\u{200D}', '\u{2060}', '\u{FEFF}'];
+
+    #[test]
+    fn name_and_title_refuse_a_line_separator_a_direction_mark_or_an_invisible_character() {
+        let cases = SEPARATORS.iter().map(|c| (*c, "may not contain a line break or other control character"))
+            .chain(DIRECTION.iter().map(|c| (*c, "may not contain a character that changes the text's direction")))
+            .chain(INVISIBLE.iter().map(|c| (*c, "may not contain an invisible character")));
+        for (c, why) in cases {
+            let text = format!("Build{c}Now");
+            let mut p = CaptainPlans::default();
+            assert_set_refused(&mut p, json!({"lists": [{"name": text, "steps": []}]}), &format!("name {why}. Nothing changed."));
+            assert_set_refused(&mut p, json!({"lists": [{"name": "Build", "steps": [{"name": text}]}]}), &format!("name {why}. Nothing changed."));
+            assert_set_refused(&mut p, json!({"title": text, "lists": [{"name": "Build", "steps": []}]}), &format!("title {why}. Nothing changed."));
+            let mut failed = failed_s1();
+            assert_fix_refused(&mut failed, "s1", &[&text], &format!("name {why}. Nothing changed."));
+        }
+    }
+
+    #[test]
+    fn what_note_and_reason_refuse_a_line_separator_or_a_direction_mark_and_keep_a_newline() {
+        let cases = SEPARATORS.iter().map(|c| (*c, "may break lines only with a plain line break"))
+            .chain(DIRECTION.iter().map(|c| (*c, "may not contain a character that changes the text's direction")));
+        for (c, why) in cases {
+            let text = format!("line one\n{c}line two");
+            let mut p = CaptainPlans::default();
+            assert_set_refused(&mut p, json!({"lists": [{"name": "Build", "steps": [{"name": "A", "what": text}]}]}), &format!("what {why}. Nothing changed."));
+            let mut failed = failed_s1();
+            let before = bytes(&failed);
+            assert_eq!(report_note(&mut failed, "s1", "failed", &text, 3), Err(format!("note {why}. Nothing changed.")));
+            assert_eq!(close_on(&mut failed, "p1", &text, &[], 3), Err(format!("reason {why}. Nothing changed.")));
+            assert_eq!(bytes(&failed), before);
+        }
+        let mut failed = failed_s1();
+        assert!(close_on(&mut failed, "p1", "line one\nline two", &[], 3).is_ok());
+    }
+
     #[test]
     fn what_accepts_a_newline() {
         let mut p = CaptainPlans::default();
