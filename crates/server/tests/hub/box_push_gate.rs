@@ -363,3 +363,38 @@ fn a_box_act_still_in_flight_when_its_row_and_connection_go_is_still_refused() {
     let refused = format!("select count(*) from agent_actions where request_id = 'in-flight' and outcome = 'refused' and detail = '{}'", sql_quoted(NOT_SHARED));
     assert_eq!(count(&s.hub, &refused), 1);
 }
+
+/// A box's act that the gate refuses never joins the account's line of extends: while a person's
+/// machine's ask waits there, held behind another hub's lock of the account, the box's ask to
+/// extend another box is refused at once and opens no turn connection of its own.
+#[test]
+fn a_refused_box_act_takes_no_place_in_the_accounts_line_of_extends() {
+    let s = setup("boxgate_refused_no_line");
+    let (other, _) = account::register_machine(&s.hub.url, &s.token, "vps-2", "linux").unwrap();
+    admin_on(&s.hub.database, &format!(
+        "insert into boxes (id, account, machine, upstash, connector, subject, spec, size, phase) values ('box-2', '{}', '{}', 'box_456', 'c1', '{{\"issue\":\"i2\"}}', '{{\"folder\":\"/w\",\"args\":[]}}', 'small', 'running')",
+        s.account, other.id,
+    ));
+    let mut vps = reporting(&s, &s.box_token, &s.box_id, vec![tab("tab-1", "worker", json!({}))]);
+    let _mac = reporting(&s, &s.mac_token, &s.mac_id, vec![tab("tab-1", "worker", json!({}))]);
+    let id = uuid::Uuid::parse_str(&s.account).unwrap();
+    let waiting = || count(&s.hub, &format!("select count(*) from agent_confirmations where account = '{}' and action = 'extend_box' and decided_at is null", s.account));
+    let lock = ExtendLockHolder::take_account(&s.hub.database, id);
+
+    let account = s.hub.runtime.block_on(s.hub.hub().account(id)).unwrap();
+    let (running, origin) = (s.hub.hub().clone(), s.mac_id.clone());
+    let ask = serde_json::from_value(json!({ "tab": "tab-1", "action": "extend_box", "args": { "machine": s.box_id, "extra_usd": 1.0 }, "request_id": "m-1" })).unwrap();
+    let in_line = s.hub.runtime.spawn(async move { pinned_server::surface::act(&running, &account, &origin, false, ask).await });
+    wait_for("the mac's ask to wait for the account's lock", || lock.turns() == 1);
+    let before = (lock.turns(), waiting());
+
+    let started = Instant::now();
+    let refused = send_call(&mut vps, 1, act("tab-1", "extend_box", json!({ "machine": other.id, "extra_usd": 1.0 }), "x-1"));
+    assert_eq!(refused, Err(NOT_MACHINES.to_owned()));
+    assert!(started.elapsed() < Duration::from_millis(1000), "refused at once, not after a turn: {:?}", started.elapsed());
+    assert_eq!((lock.turns(), waiting()), before, "only the mac's ask holds a turn connection, and nothing more waits for the owner");
+
+    assert_eq!(s.hub.runtime.block_on(in_line).unwrap(), Err(pinned_core::wire::HUB_BUSY.to_owned()), "the mac's ask still waited its own turn");
+    lock.release();
+    assert_eq!(waiting(), 0);
+}
