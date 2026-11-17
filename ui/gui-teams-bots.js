@@ -599,7 +599,8 @@ function tbBotHtml(ui, team) {
   // A run just started may not be in the list yet.
   const running = tbRunning(latest) ? latest : ui.started && !runs.some((r) => r.id === ui.started.id) ? ui.started : null;
   const may = tbMayTurnOn(bot, { role: team.role, members, groups });
-  const needKeys = team.credential && !(team.credential.upstash && team.credential.claude);
+  // A held line means the team's settings could not be read: its keys may well be set.
+  const needKeys = !team.line_held && team.credential && !(team.credential.upstash && team.credential.claude);
 
   const runBtn = running
     ? tbRunLink(running.id, tbEsc(t.follow), "tb-btn follow")
@@ -987,7 +988,7 @@ function tbWizHtml(team) {
         ${s.trigger === "linear-label" ? `<label class="tb-sub-field" for="tb-label-in"><span>${tbEsc(w.labelField)}</span><input id="tb-label-in" type="text" data-tb-input="label" value="${tbEsc(s.label)}" placeholder="${tbEsc(w.labelPlaceholder)}" autocomplete="off"></label>` : ""}
         ${s.trigger === "slack-mention" ? `<label class="tb-sub-field" for="tb-channel-in"><span>${tbEsc(w.channelField)}</span><input id="tb-channel-in" type="text" data-tb-input="channel" value="${tbEsc(s.channel)}" placeholder="${tbEsc(w.channelPlaceholder)}" autocomplete="off"></label>` : ""}
         <p class="tb-fires" data-fires>${tbEsc(tbFires(s))}</p>
-        ${s.trigger === "slack-mention" && team.credential && !team.credential.slack ? `<p class="tb-note">${tbEsc(w.slackOff)}</p>` : ""}</div>
+        ${s.trigger === "slack-mention" && !team.line_held && team.credential && !team.credential.slack ? `<p class="tb-note">${tbEsc(w.slackOff)}</p>` : ""}</div>
       <button type="button" class="tb-check" role="checkbox" aria-checked="${s.once}" data-tb="once"><span class="tb-box" aria-hidden="true"></span><span class="tb-texts"><span class="tb-name">${tbEsc(w.once)}</span><span class="tb-about">${tbEsc(w.onceAbout)}</span></span></button>`;
   } else if (s.step === 3) {
     const options = tbOptions(s.data);

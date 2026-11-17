@@ -19,9 +19,14 @@ function app({ answers = {}, projects = [], pages = [], stored = null, raw = nul
   const events = [];
   const store = new Map(stored ? [["teams-current", JSON.stringify(stored)]] : raw ? [["teams-current", raw]] : []);
   const shown = [];
+  // Fake timers: each pending one by its id, with its wait in ms.
+  const timers = new Map();
+  let timerIds = 0;
   const context = {
     console,
     catalogNotReady,
+    setTimeout: (fn, ms) => (timers.set(++timerIds, { fn, ms }), timerIds),
+    clearTimeout: (id) => timers.delete(id),
     CustomEvent: class {
       constructor(type, init) {
         this.type = type;
@@ -33,6 +38,7 @@ function app({ answers = {}, projects = [], pages = [], stored = null, raw = nul
       getElementById: () => null,
       dispatchEvent: (e) => events.push(e),
       activeElement: null,
+      visibilityState: "visible",
     },
     SHELL_PAGES: Object.fromEntries(pages.map((p) => [p, {}])),
     pageView: { addEventListener: (type, fn) => (listeners[type] = fn), querySelector: () => null },
@@ -81,7 +87,7 @@ function app({ answers = {}, projects = [], pages = [], stored = null, raw = nul
     const el = { dataset: { tm, ...data }, disabled: false };
     listeners.click({ target: { closest: (sel) => (sel === "[data-tm]" ? el : null) } });
   };
-  return { context, run, frames, events, store, shown, page, listeners, click, show: (name) => (context.document.body.dataset.page = name, context.SHELL_PAGES[name].show()) };
+  return { context, run, frames, events, store, shown, page, listeners, click, timers, show: (name) => (context.document.body.dataset.page = name, context.SHELL_PAGES[name].show()) };
 }
 
 const created = (over = {}) => ({ ...ACME, ...over });
@@ -836,4 +842,72 @@ test("the Claude token field says where the token comes from, on step 3 and in C
   const wizard = await atStep3();
   wizard.click("connect", { cred: "claude" });
   assert.ok(text(wizard.page()).includes(CONNECT_TOKEN_SENTENCE), "the create wizard's step 3");
+});
+
+test("the team list keeps the line the hub holds for the team's owner, and only the owner's", async () => {
+  const held = { since: 1795359900, why: "settings_unread" };
+  const a = app({ answers: { list: [{ ...ACME, line_held: held }, { ...SOLO, line_held: held }] } });
+  await a.context.teamsList();
+  a.run("teamsSelect(teamsKnown[0])");
+  assert.deepEqual(here(a.context.teamsCurrent()), { id: "t1", name: "North Studio", role: "owner", credential: ACME.credential, me: "a1", line_held: held });
+  a.run("teamsSelect(teamsKnown[1])");
+  assert.deepEqual(here(a.context.teamsCurrent()), { id: "t2", name: "Side Gig", role: "member", credential: SOLO.credential, me: null }, "a member's team keeps none");
+  const b = app({ answers: { list: [ACME] } });
+  await b.context.teamsList();
+  b.run("teamsSelect(teamsKnown[0])");
+  assert.equal("line_held" in b.context.teamsCurrent(), false, "a team the hub holds nothing for has no line");
+});
+
+/** The waits of the pending fake timers, in ms. */
+const waits = (a) => [...a.timers.values()].map((t) => t.ms);
+/** Runs the one pending fake timer and lets what it started settle. */
+async function fire(a) {
+  assert.equal(a.timers.size, 1, "one timer pending");
+  const [[id, timer]] = [...a.timers];
+  a.timers.delete(id);
+  timer.fn();
+  for (let i = 0; i < 5; i++) await flush();
+}
+
+test("an owner's team list is read again on one timer, and the held line goes once the hub lets it go", async () => {
+  const held = { since: 1795359900, why: "settings_unread" };
+  let list = [{ ...ACME, line_held: held }, SOLO];
+  const a = app({ answers: { list: () => list }, body: { hub: "online" } });
+  const drawn = [];
+  a.context.tcNavDraw = () => drawn.push(here(a.context.teamsCurrent()));
+  await a.context.teamsList();
+  a.run("teamsSelect(teamsKnown[0])");
+  assert.deepEqual(here(a.context.teamsCurrent().line_held), held);
+  assert.deepEqual(waits(a), [30000], "every 30 s while an owned team's line is held");
+
+  list = [ACME, SOLO];
+  drawn.length = 0;
+  await fire(a);
+  assert.equal(a.frames.filter((f) => f.op.op === "list").length, 2, "the timer read the list again");
+  assert.equal("line_held" in a.context.teamsCurrent(), false, "the held line is gone");
+  assert.ok(drawn.length > 0 && drawn.every((t) => !("line_held" in t)), "the nav is drawn again, with no held line");
+  assert.deepEqual(waits(a), [120000], "every 2 min once nothing is held");
+
+  await a.context.teamsList();
+  await a.context.teamsList();
+  assert.deepEqual(waits(a), [120000], "reads by other ways never stack a second timer");
+
+  a.context.document.visibilityState = "hidden";
+  a.run("teamsPollArm()");
+  assert.deepEqual(waits(a), [], "no timer while the page is hidden");
+  a.context.document.visibilityState = "visible";
+  a.run("teamsPollArm()");
+  assert.deepEqual(waits(a), [120000]);
+  a.context.document.body.dataset.hub = "offline";
+  a.run("teamsPollArm()");
+  assert.deepEqual(waits(a), [], "no timer while the hub is not online");
+});
+
+test("a person who owns no team, or is offline, gets no timer", async () => {
+  const member = app({ answers: { list: [{ ...SOLO, line_held: { since: 1795359900, why: "settings_unread" } }] }, body: { hub: "online" } });
+  await member.context.teamsList();
+  assert.deepEqual(waits(member), [], "a member's list is not read on a timer");
+  const offline = app({ answers: { list: [ACME] } });
+  await offline.context.teamsList();
+  assert.deepEqual(waits(offline), [], "nothing while the hub is not online");
 });

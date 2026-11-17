@@ -44,10 +44,13 @@ function tcNavHtml(team, page) {
     .join("");
   const groups = tcStore.groups.map((g) => row("team-group", `<span class="label">@${esc(g.handle)}</span>`, { attrs: ` data-handle="${esc(g.handle)}"` })).join("");
   const me = tcMe();
+  // Drawn only for a reason this app knows; the time names its day when it is not today.
+  const held = me.owner && team.line_held?.why === "settings_unread" ? `<div class="tc-none" role="status" data-line-held>Bots are waiting: the team's settings could not be read since ${esc(tcWhen(team.line_held.since))}.</div>` : "";
   const calls = tcNavOpens("team-calls")
     ? `<button type="button" class="nav-row tc-row${page === "team-calls" ? " active" : ""}" data-tc-nav="team-calls"><span class="label">Calls</span><span class="count"${open ? "" : " hidden"} title="${open} waiting on you">${open || ""}</span></button>`
     : "";
   return `<div class="tc-team"><span class="tc-mark tc-team-mark" aria-hidden="true">${esc(tcInitials(team.name))}</span><span class="tc-team-name">${esc(team.name)}</span></div>
+    ${held}
     ${calls}
     <div class="tc-section"><div class="tc-head">Bots</div>${bots}${row("team-bot-new", `<span class="label">Create a bot</span>`, { attrs: ' data-create="true"' })}</div>
     <div class="tc-section"><div class="tc-head">Groups</div>${groups}</div>

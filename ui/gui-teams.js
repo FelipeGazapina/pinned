@@ -205,7 +205,9 @@ function teamCall(op, team = teamsNow?.id) {
 
 const teamView = (t) => {
   const role = t.role === "owner" ? "owner" : "member";
-  return { id: t.id, name: t.name, role, credential: t.credential ?? {}, me: typeof t.me === "string" && t.me ? t.me : role === "owner" && typeof t.owner === "string" && t.owner ? t.owner : null };
+  // The hub sends `line_held` to the owner only; a member's view never carries it.
+  const held = role === "owner" && t.line_held ? { line_held: t.line_held } : {};
+  return { id: t.id, name: t.name, role, credential: t.credential ?? {}, me: typeof t.me === "string" && t.me ? t.me : role === "owner" && typeof t.owner === "string" && t.owner ? t.owner : null, ...held };
 };
 
 function teamsRemember() {
@@ -238,8 +240,31 @@ async function teamsList() {
   }
   drawTeamsButton();
   drawTeamsWhere();
+  // No team event tells of a held line or its end: the nav shows what this read found.
+  if (typeof tcNavDraw === "function") tcNavDraw();
+  teamsPollArm();
   return teamsKnown;
 }
+
+/** How often an owner's list is read again while a team of theirs holds its line, and otherwise. */
+const TEAMS_HELD_POLL_MS = 30_000;
+const TEAMS_OWNER_POLL_MS = 120_000;
+let teamsPollTimer = null;
+
+/** Arms the one timer that reads the list again, for an owner, while the hub is online and the
+ * page is visible; clears it otherwise. */
+function teamsPollArm() {
+  if (teamsPollTimer !== null) clearTimeout(teamsPollTimer);
+  teamsPollTimer = null;
+  const owned = teamsKnown.filter((t) => t.role === "owner");
+  if (!owned.length || document.body?.dataset.hub !== "online" || document.visibilityState === "hidden") return;
+  const wait = owned.some((t) => t.line_held) ? TEAMS_HELD_POLL_MS : TEAMS_OWNER_POLL_MS;
+  teamsPollTimer = setTimeout(() => {
+    teamsPollTimer = null;
+    teamsList().catch(() => teamsPollArm());
+  }, wait);
+}
+document.addEventListener?.("visibilitychange", () => teamsPollArm());
 
 // ---- Where you work: the menu block and the menu button -----------------------------------------
 
@@ -314,7 +339,7 @@ if (teamsMenu) {
 }
 // The hub answers once the app is online: the saved team's name and keys are read then.
 if (typeof MutationObserver === "function" && document.body) {
-  new MutationObserver(() => document.body.dataset.hub === "online" && teamsList().catch(() => {})).observe(document.body, { attributeFilter: ["data-hub"] });
+  new MutationObserver(() => (document.body.dataset.hub === "online" ? teamsList().catch(() => {}) : teamsPollArm())).observe(document.body, { attributeFilter: ["data-hub"] });
 }
 
 // ---- Shared page pieces -------------------------------------------------------------------------
