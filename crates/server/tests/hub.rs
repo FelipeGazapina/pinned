@@ -9861,6 +9861,44 @@ fn an_extend_box_ask_answers_within_its_2_s_when_its_turn_lock_is_held() {
     assert!(waited >= Duration::from_millis(1700) && waited < Duration::from_millis(2600), "an ask waits about 2 s from its own start: {waited:?}");
 }
 
+/// A read the ask makes in its turn counts in its 2 s: the box's turn lock is held for 1.0 s, so the
+/// turn starts about 1 s late, and `agent_confirmations`, which the turn's first read (`asked_before`,
+/// of an ask with a request_id) reads, is held from 0.3 s for 4 s. That read starts at about 1.0 s
+/// and, with the session's own 2 s lock timeout from its start, would wait until about 3.0 s. The ask
+/// hears busy about 2 s after it started.
+#[test]
+fn an_extend_box_ask_answers_within_its_2_s_when_a_read_in_its_turn_is_held() {
+    let ExtendSetup { hub, account, ana, machine, .. } = extend_setup("extend_turn_read_held");
+    let lock = ExtendLockHolder::take(&hub.database, account, &[&machine]);
+    let account = hub.runtime.block_on(hub.hub().account(account)).unwrap();
+    let started = Instant::now();
+    // The turn lock is released 1.0 s after the ask started, so its turn starts, and its read with it, about 1 s late.
+    let holder = std::thread::spawn(move || {
+        std::thread::sleep((started + Duration::from_millis(1000)).saturating_duration_since(Instant::now()));
+        lock.release();
+    });
+    // The table is locked 0.3 s after the ask started, once the ask's reads before its turn are done and it waits on the turn lock.
+    let database = hub.database.clone();
+    let blocker = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let (client, connection) = tokio_postgres::connect(&format!("{}/{database}", postgres()), tokio_postgres::NoTls).await.unwrap();
+            tokio::spawn(connection);
+            tokio::time::sleep((started + Duration::from_millis(300)).saturating_duration_since(Instant::now())).await;
+            client.batch_execute("begin; lock table agent_confirmations in access exclusive mode").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(4000)).await;
+            client.batch_execute("rollback").await.unwrap();
+        });
+    });
+    let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "request_id": "r-read-held", "args": { "machine": machine, "extra_usd": 0.5 } })).unwrap();
+    let answer = hub.runtime.block_on(pinned_server::surface::act(hub.hub(), &account, &ana.machine, act));
+    let waited = started.elapsed();
+    blocker.join().unwrap();
+    holder.join().unwrap();
+    assert_eq!(answer, Err(pinned_core::wire::HUB_BUSY.to_owned()));
+    assert!(waited >= Duration::from_millis(1700) && waited < Duration::from_millis(2300), "an ask waits about 2 s from its own start, though its read in its turn started at 1 s: {waited:?}");
+}
+
 /// An ask whose turn connection cannot be opened did nothing: it hears the hub is busy, writes no
 /// refusal, and the same request id asks again once Postgres takes connections.
 #[test]
