@@ -57,6 +57,7 @@ function load({ bots = [], connectors = [], reply = () => ({}) } = {}) {
     save() {},
     listen() {},
     tilde: (path) => path,
+    accountsOf: async () => [],
     agentApproval: () => null,
     agentAsking: () => null,
     agentAskingHtml: () => "",
@@ -215,4 +216,49 @@ test("picking the second bot saves slackBot on the connector, not on the trigger
   assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))), { cmd: "slack_suggestions", bot: "UB2" });
   fire("input", { dataset: { bind: "slackBot" }, value: "", type: "select-one" });
   assert.equal(draft.slackBot, "");
+});
+
+const APPS_LABEL = "Also read posts from apps and integrations";
+const DECIDE = { model: "typesafe-ai/jev", instructions: "Sort", categories: [], fallback: null };
+/** A saved slack-message workflow as the hub keeps it: the legacy trigger and the graph's trigger node. */
+const alerts = (apps) => {
+  const trigger = { kind: "slack-message", channel: "alerts", decide: DECIDE, ...(apps === undefined ? {} : { apps }) };
+  const watch = { kind: "slack-message", channel: "alerts", ...(apps === undefined ? {} : { apps }) };
+  const graph = { nodes: [{ id: "trigger-1", name: "Trigger", position: [0, 0], type: "trigger", watch }, { id: "session-2", name: "Session", position: [1, 0], type: "session" }], edges: [{ from: "trigger-1", port: "out", to: "session-2" }] };
+  return workflow("Alerts", { id: "w1", trigger, graph, repo: "", model: "", account: "", team: "", label: "", instructions: "", columns: { picked: "", coding: "", review: "" } });
+};
+const checkbox = (on) => `<label class="toggle"><input type="checkbox" data-bind="trigger.apps"${on ? " checked" : ""}> ${APPS_LABEL}</label>`;
+
+test("the message trigger offers the apps option, off unless the workflow has it on", () => {
+  const { context } = load();
+  const fields = (c) => context.__steps["message-trigger"].fields(c);
+  assert.ok(fields(alerts()).includes(checkbox(false)), "an old workflow, stored without apps, shows it off");
+  assert.ok(fields(alerts(false)).includes(checkbox(false)));
+  assert.ok(fields(alerts(true)).includes(checkbox(true)));
+  assert.ok(!context.__steps["slack-trigger"].fields(workflow("A")).includes(APPS_LABEL), "a mention trigger has no such option");
+});
+
+test("a workflow saved with the apps option on comes back with it on", async () => {
+  const saved = [];
+  const { context, calls, byId, fire } = load({
+    bots: [SUPPORT],
+    reply: (call) => {
+      if (call.cmd !== "save_connector") return {};
+      saved.push(JSON.parse(JSON.stringify(call.connector)));
+      return call.connector;
+    },
+  });
+  const draft = alerts();
+  context.__setSettings({ linear: null, slack: SUPPORT, slack_bots: [SUPPORT], connectors: [draft], checked: null });
+  context.__actions["edit-connector"]({ closest: () => ({ dataset: { index: "0" } }) });
+  assert.ok(byId("settings-page").innerHTML.includes(checkbox(false)), "the editor opens with it off");
+  fire("input", { dataset: { bind: "trigger.apps" }, type: "checkbox", checked: true });
+  await context.__actions["save-connector"]();
+  const sent = saved.at(-1);
+  assert.equal(calls.at(-1).cmd, "save_connector");
+  assert.equal(sent.trigger.apps, true, "the saved trigger carries it");
+  assert.equal(sent.graph.nodes[0].watch.apps, true, "and so does the graph's trigger node");
+  context.__setSettings({ linear: null, slack: SUPPORT, slack_bots: [SUPPORT], connectors: [sent], checked: null });
+  context.__actions["edit-connector"]({ closest: () => ({ dataset: { index: "0" } }) });
+  assert.ok(byId("settings-page").innerHTML.includes(checkbox(true)), "reopened, it shows on");
 });

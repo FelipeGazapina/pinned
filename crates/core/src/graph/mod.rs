@@ -184,7 +184,7 @@ pub struct SessionSetup {
 pub enum Watch {
     LinearLabel { label: String },
     SlackMention { channel: String },
-    SlackMessage { channel: String },
+    SlackMessage { channel: String, apps: bool },
     /// Runs only when another graph `call`s it.
     Called,
     /// No poller: runs only when someone runs it now.

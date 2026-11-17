@@ -114,7 +114,7 @@ pub enum Trigger {
     SlackMention { channel: String },
     /// Every new message people start in this channel, by name or id, which a decision model sorts
     /// into one of `decide`'s categories. The workflow has no session of its own.
-    SlackMessage { channel: String, decide: Decide },
+    SlackMessage { channel: String, decide: Decide, apps: bool },
     /// A Slack thread a message workflow's category hands it, which its session answers as a
     /// mention's session would. It watches no channel of its own.
     Called,
@@ -2505,7 +2505,7 @@ impl Connectors {
                 Ok(Some(found))
             }
             Trigger::SlackMessage { channel: name, .. } if c.graph.is_some() => self.scan_graph_channel(c, name, now).await,
-            Trigger::SlackMessage { channel: name, decide } => {
+            Trigger::SlackMessage { channel: name, decide, .. } => {
                 let Some(bot) = self.scan_bot(c)? else { return Ok(None) };
                 let token = bot.token.clone();
                 let channel = self.channel_id(&bot, name).await?;
@@ -7206,7 +7206,7 @@ mod tests {
     fn a_run_now_refuses_a_workflow_with_no_session_of_its_own() {
         let called = Connector { id: "c3".into(), name: "Answer".into(), trigger: Trigger::Called, ..slack_connector() };
         let decide = Decide { model: "typesafe-ai/jev".into(), instructions: String::new(), categories: vec![], fallback: None };
-        let sorter = Connector { id: "c4".into(), name: "Sort".into(), trigger: Trigger::SlackMessage { channel: "#support".into(), decide }, ..slack_connector() };
+        let sorter = Connector { id: "c4".into(), name: "Sort".into(), trigger: Trigger::SlackMessage { channel: "#support".into(), decide, apps: false }, ..slack_connector() };
         let (connectors, dir) = stored("run-now-refused", vec![slack_connector(), called, sorter]);
         assert_eq!(connectors.run_now("c3", "you").map(drop), Err("workflow \"Answer\" answers only the Slack threads another workflow hands it, so Run now has no thread to give it".into()));
         assert_eq!(connectors.run_now("c4", "you").map(drop), Err("workflow \"Sort\" sorts new Slack messages into other workflows and has no session of its own, so Run now has nothing to start".into()));
@@ -7765,7 +7765,7 @@ mod tests {
         Connector {
             id: "c5".into(),
             name: "Support router".into(),
-            trigger: Trigger::SlackMessage { channel: "#support".into(), decide },
+            trigger: Trigger::SlackMessage { channel: "#support".into(), decide, apps: false },
             since: "2026-10-19T10:00:00+00:00".into(),
             ..slack_connector()
         }
@@ -8087,6 +8087,16 @@ mod tests {
     }
 
     #[test]
+    fn a_message_workflow_stored_without_apps_reads_apps_off() {
+        let old = r##"{ "kind": "slack-message", "channel": "#alerts", "decide": { "model": "m", "instructions": "", "categories": [] } }"##;
+        let trigger: Result<Trigger, _> = serde_json::from_str(old);
+        assert!(matches!(trigger, Ok(Trigger::SlackMessage { apps: false, .. })), "{trigger:?}");
+        let on = r##"{ "kind": "slack-message", "channel": "#alerts", "decide": { "model": "m", "instructions": "", "categories": [] }, "apps": true }"##;
+        let trigger: Result<Trigger, _> = serde_json::from_str(on);
+        assert!(matches!(trigger, Ok(Trigger::SlackMessage { apps: true, .. })), "{trigger:?}");
+    }
+
+    #[test]
     fn message_and_called_triggers_round_trip() {
         let message = serde_json::json!({
             "kind": "slack-message", "channel": "support",
@@ -8107,7 +8117,7 @@ mod tests {
             ],
             fallback: None,
         };
-        assert_eq!(trigger, Trigger::SlackMessage { channel: "support".into(), decide });
+        assert_eq!(trigger, Trigger::SlackMessage { channel: "support".into(), decide, apps: false });
         assert_eq!(
             serde_json::to_value(&trigger).unwrap()["decide"]["categories"][2],
             serde_json::json!({ "name": "ignore", "description": "Anything else", "workflow": null, "mention": null })
@@ -9979,9 +9989,10 @@ mod tests {
         connector.trigger = Trigger::SlackMessage {
             channel: "C0123ABCD".into(),
             decide: Decide { model: String::new(), instructions: String::new(), categories: vec![], fallback: None },
+            apps: false,
         };
         let mut graph = talks(&["one"]);
-        graph.nodes[0].kind = NodeKind::Trigger { watch: Watch::SlackMessage { channel: "C0123ABCD".into() } };
+        graph.nodes[0].kind = NodeKind::Trigger { watch: Watch::SlackMessage { channel: "C0123ABCD".into(), apps: false } };
         connector.graph = Some(graph);
         let (connectors, dir) = stored("channel-replies", vec![connector]);
         std::fs::write(dir.join("slack-key"), "xoxb-test").unwrap();
@@ -10333,10 +10344,11 @@ mod tests {
         connector.trigger = Trigger::SlackMessage {
             channel: "#support".into(),
             decide: Decide { model: String::new(), instructions: String::new(), categories: vec![], fallback: None },
+            apps: false,
         };
         connector.graph = Some(Graph {
             nodes: vec![
-                node("t", "Trigger", NodeKind::Trigger { watch: Watch::SlackMessage { channel: "#support".into() } }),
+                node("t", "Trigger", NodeKind::Trigger { watch: Watch::SlackMessage { channel: "#support".into(), apps: false } }),
                 node("route", "Route", NodeKind::Classify(classify)),
                 node("session", "Investigate", NodeKind::Session(SessionSetup::default())),
                 node("file-requested-issue", "file-requested-issue", file),
@@ -10945,7 +10957,7 @@ mod tests {
     fn forged_template_run() -> (Connector, runner::Run) {
         let mut connector = slack_connector();
         let nodes = vec![
-            node("t", "Trigger", NodeKind::Trigger { watch: Watch::SlackMessage { channel: "C0123ABCD".into() } }),
+            node("t", "Trigger", NodeKind::Trigger { watch: Watch::SlackMessage { channel: "C0123ABCD".into(), apps: false } }),
             node("open", "Open", NodeKind::Talk { prompt: "start".into() }),
             node("reply", "Reply", NodeKind::Reply { text: FORGED_TEMPLATE.into() }),
             node("type", "Type", NodeKind::Talk { prompt: FORGED_TEMPLATE.into() }),
@@ -11268,10 +11280,11 @@ mod tests {
         connector.trigger = Trigger::SlackMessage {
             channel: "C0123ABCD".into(),
             decide: Decide { model: "typesafe-ai/jev".into(), instructions: String::new(), categories: vec![], fallback: None },
+            apps: false,
         };
         connector.graph = Some(crate::graph::Graph {
             nodes: vec![
-                Node { id: NodeId("t".into()), name: "Trigger".into(), position: [0, 0], group_name: None, kind: NodeKind::Trigger { watch: Watch::SlackMessage { channel: "C0123ABCD".into() } } },
+                Node { id: NodeId("t".into()), name: "Trigger".into(), position: [0, 0], group_name: None, kind: NodeKind::Trigger { watch: Watch::SlackMessage { channel: "C0123ABCD".into(), apps: false } } },
                 Node { id: NodeId("p".into()), name: "Page".into(), position: [1, 0], group_name: None, kind: NodeKind::Page { group: "S0123ABCD".into() } },
             ],
             edges: vec![Edge { from: NodeId("t".into()), port: PortId("out".into()), to: NodeId("p".into()) }],

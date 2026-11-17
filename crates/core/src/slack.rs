@@ -374,6 +374,49 @@ fn from_people(messages: &Value, bot: &str, since: DateTime<Utc>) -> Vec<Value> 
     people
 }
 
+/// The most app posts one workflow takes at one check. A channel that is mostly app output can
+/// post hundreds a minute, and each post taken costs a classify call and may open a session.
+pub const APPS_PER_CHECK: usize = 10;
+/// The longest trigger text an app post gets, in characters. Slack lets one message hold 40,000,
+/// far more than a model needs to sort an alert; 4,000 keeps a title, the body and a stack
+/// summary and bounds what one post can cost.
+pub const APP_TEXT_MAX: usize = 4000;
+
+/// The account's own Slack bots, which a channel read never takes a post from: their user ids
+/// (`U…`) and their bot ids (`B…`).
+#[derive(Debug, Default, Clone)]
+pub struct Own {
+    pub users: std::collections::HashSet<String>,
+    pub bots: std::collections::HashSet<String>,
+}
+
+/// What one history page gives a workflow: the messages it takes, oldest first, and the
+/// timestamps of the app posts it left out past `APPS_PER_CHECK`.
+#[derive(Debug, Default)]
+pub struct Selected {
+    pub taken: Vec<Value>,
+    pub skipped: Vec<String>,
+}
+
+fn select(messages: &Value, bot: &str, _own: &Own, since: DateTime<Utc>, _apps: bool) -> Selected {
+    Selected { taken: from_people(messages, bot, since), skipped: vec![] }
+}
+
+/// The text of an app post.
+fn app_text(message: &Value) -> String {
+    message["text"].as_str().unwrap_or_default().to_owned()
+}
+
+/// The author an app post shows.
+fn app_author(message: &Value) -> String {
+    message["username"].as_str().unwrap_or("someone").to_owned()
+}
+
+/// What the log says of an app post a check left out.
+fn skipped_line(workflow: &str, ts: &str) -> String {
+    format!("{workflow} {ts}")
+}
+
 /// The top-level messages people wrote in `channel` after `since`, oldest first, by author name.
 pub async fn messages(token: &str, channel: &str, bot: &str, since: DateTime<Utc>) -> Result<Vec<Post>, String> {
     let history = call(token, "conversations.history", &[("channel", channel), ("oldest", &ts(since)), ("limit", PAGE)]).await?;
@@ -693,6 +736,131 @@ mod tests {
                 json!({ "ts": "1792400100.000300", "user": "U2", "text": "lunch?" }),
             ]
         );
+    }
+
+    fn own_bots() -> Own {
+        Own { users: ["UBOT".to_owned(), "UBOT2".to_owned()].into(), bots: ["B1".to_owned(), "B2".to_owned()].into() }
+    }
+
+    /// One history page of #alerts: a person, an integration, the account's own bots, and every
+    /// other kind of row Slack lists.
+    fn mixed_page() -> Value {
+        json!([
+            { "ts": "1792400190.000000", "subtype": "message_changed", "bot_id": "B9", "channel": "C1", "message": { "text": "edited" } },
+            { "ts": "1792400180.000000", "subtype": "thread_broadcast", "bot_id": "B9", "thread_ts": "1792400000.000000", "text": "also in the channel" },
+            { "ts": "1792400170.000000", "subtype": "channel_join", "bot_id": "B9", "user": "U9", "text": "<@U9> has joined the channel" },
+            { "ts": "1792400160.000000", "subtype": "bot_message", "bot_id": "B9", "thread_ts": "1792400000.000000", "username": "CI Bot", "text": "a reply in a thread" },
+            { "ts": "1792400150.000000", "subtype": "bot_message", "bot_id": "B2", "username": "pinned-ops", "text": "posted by the second pinned bot's bot id" },
+            { "ts": "1792400140.000000", "subtype": "bot_message", "bot_id": "B77", "user": "UBOT2", "text": "posted by the second pinned bot's user id" },
+            { "ts": "1792400130.000000", "user": "UBOT", "bot_id": "B1", "text": "posted by the default pinned bot" },
+            {
+                "ts": "1792400120.000000", "subtype": "bot_message", "bot_id": "B9", "username": "CI Bot", "text": "",
+                "attachments": [{ "title": "Deploy failed", "text": "api went red on 3 hosts", "fallback": "Deploy failed" }]
+            },
+            { "ts": "1792400110.000000", "user": "U1", "text": "can someone look at the footer?" },
+            { "ts": "1792390000.000000", "subtype": "bot_message", "bot_id": "B9", "username": "CI Bot", "text": "before the watermark" },
+        ])
+    }
+
+    fn ts_of(messages: &[Value]) -> Vec<&str> {
+        messages.iter().filter_map(|m| m["ts"].as_str()).collect()
+    }
+
+    #[test]
+    fn a_channel_read_without_apps_takes_only_what_people_started() {
+        let since = DateTime::from_timestamp(1792395000, 0).unwrap();
+        let selected = select(&mixed_page(), "UBOT", &own_bots(), since, false);
+        assert_eq!(ts_of(&selected.taken), ["1792400110.000000"]);
+        assert_eq!(selected.taken, from_people(&mixed_page(), "UBOT", since), "with apps off the page reads as it always did");
+        assert!(selected.skipped.is_empty());
+    }
+
+    #[test]
+    fn a_channel_read_with_apps_adds_integration_posts_and_nothing_else() {
+        let since = DateTime::from_timestamp(1792395000, 0).unwrap();
+        let selected = select(&mixed_page(), "UBOT", &own_bots(), since, true);
+        assert_eq!(
+            ts_of(&selected.taken),
+            ["1792400110.000000", "1792400120.000000"],
+            "the person's message and the integration's post; not the pinned bots, the thread reply, the join, the edit or the broadcast"
+        );
+        assert!(selected.skipped.is_empty());
+    }
+
+    #[test]
+    fn an_app_post_with_no_text_reads_from_its_attachments() {
+        let alert = json!({
+            "subtype": "bot_message", "bot_id": "B9", "username": "CI Bot", "text": "",
+            "attachments": [{
+                "pretext": "Pipeline #42", "title": "Deploy failed", "text": "api went red on 3 hosts",
+                "fields": [{ "title": "Region", "value": "eu-west", "short": true }], "fallback": "Deploy failed"
+            }]
+        });
+        assert_eq!(app_text(&alert), "Pipeline #42\nDeploy failed\napi went red on 3 hosts\nRegion: eu-west");
+        let only_fallback = json!({ "subtype": "bot_message", "attachments": [{ "fallback": "Build 7 passed" }] });
+        assert_eq!(app_text(&only_fallback), "Build 7 passed");
+    }
+
+    #[test]
+    fn an_app_post_with_no_text_reads_from_its_blocks() {
+        let notice = json!({
+            "subtype": "bot_message", "bot_id": "B9", "text": "",
+            "blocks": [
+                { "type": "header", "text": { "type": "plain_text", "text": "PR merged" } },
+                { "type": "section", "text": { "type": "mrkdwn", "text": "Ana merged *fix footer*" }, "fields": [{ "type": "mrkdwn", "text": "Branch: main" }] },
+                { "type": "context", "elements": [{ "type": "mrkdwn", "text": "repo web" }, { "type": "image", "alt_text": "avatar" }] },
+                { "type": "divider" },
+                { "type": "rich_text", "elements": [{ "type": "rich_text_section", "elements": [
+                    { "type": "text", "text": "see " }, { "type": "link", "url": "https://example.test/pr/1", "text": "the PR" }
+                ] }] }
+            ]
+        });
+        assert_eq!(app_text(&notice), "PR merged\nAna merged *fix footer*\nBranch: main\nrepo web\nsee the PR");
+    }
+
+    #[test]
+    fn text_that_blocks_and_attachments_repeat_is_given_once() {
+        let post = json!({
+            "subtype": "bot_message", "text": "Deploy failed",
+            "attachments": [{ "title": "Deploy failed", "text": "api went red" }],
+            "blocks": [{ "type": "section", "text": { "type": "mrkdwn", "text": "Deploy failed" } }]
+        });
+        assert_eq!(app_text(&post), "Deploy failed\napi went red");
+    }
+
+    #[test]
+    fn an_app_post_longer_than_the_clip_is_clipped() {
+        let post = json!({ "subtype": "bot_message", "text": "x".repeat(APP_TEXT_MAX + 500) });
+        let text = app_text(&post);
+        assert_eq!(text.chars().count(), APP_TEXT_MAX);
+        assert!(text.ends_with('…'));
+        assert_eq!(app_text(&json!({ "subtype": "bot_message", "text": "short" })), "short");
+    }
+
+    #[test]
+    fn an_app_post_is_by_the_app_not_by_a_person() {
+        assert_eq!(app_author(&json!({ "username": "CI Bot", "bot_profile": { "name": "Other" } })), "Other");
+        assert_eq!(app_author(&json!({ "username": "CI Bot" })), "CI Bot");
+        assert_eq!(app_author(&json!({ "bot_id": "B9" })), "an app");
+    }
+
+    #[test]
+    fn one_check_takes_at_most_the_cap_of_app_posts_and_every_message_from_people() {
+        let mut page: Vec<Value> = (0..15)
+            .map(|i| json!({ "ts": format!("17924001{:02}.000000", i), "subtype": "bot_message", "bot_id": "B9", "username": "CI Bot", "text": format!("alert {i}") }))
+            .collect();
+        page.extend((0..3).map(|i| json!({ "ts": format!("17924002{:02}.000000", i), "user": format!("U{i}"), "text": "person" })));
+        let since = DateTime::from_timestamp(1792395000, 0).unwrap();
+        let selected = select(&Value::Array(page), "UBOT", &own_bots(), since, true);
+        let apps = selected.taken.iter().filter(|m| m["bot_id"].is_string()).count();
+        let people = selected.taken.iter().filter(|m| m["user"].is_string()).count();
+        assert_eq!((apps, people), (APPS_PER_CHECK, 3));
+        assert_eq!(
+            selected.skipped,
+            ["1792400110.000000", "1792400111.000000", "1792400112.000000", "1792400113.000000", "1792400114.000000"],
+            "the newest app posts past the cap are skipped, by ts"
+        );
+        assert_eq!(skipped_line("wf1", "1792400114.000000"), "pinned: workflow wf1 skipped app post 1792400114.000000 over the cap of 10 per check");
     }
 
     #[test]

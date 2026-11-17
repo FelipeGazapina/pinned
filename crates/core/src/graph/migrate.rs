@@ -89,7 +89,7 @@ fn watch_of(trigger: &Trigger) -> Watch {
     match trigger {
         Trigger::LinearLabel { label } => Watch::LinearLabel { label: label.clone() },
         Trigger::SlackMention { channel } => Watch::SlackMention { channel: channel.clone() },
-        Trigger::SlackMessage { channel, .. } => Watch::SlackMessage { channel: channel.clone() },
+        Trigger::SlackMessage { channel, .. } => Watch::SlackMessage { channel: channel.clone(), apps: false },
         Trigger::Called => Watch::Called,
         Trigger::Manual => Watch::Manual,
         Trigger::LinearStatus { from, to, scope, by } => Watch::LinearStatus { from: from.clone(), to: to.clone(), scope: scope.clone(), by: by.clone() },
@@ -320,6 +320,23 @@ mod tests {
     }
 
     #[test]
+    fn a_graph_trigger_stored_without_apps_reads_apps_off() {
+        let old: Result<Watch, _> = serde_json::from_str(r##"{ "kind": "slack-message", "channel": "#alerts" }"##);
+        assert!(matches!(old, Ok(Watch::SlackMessage { apps: false, .. })), "{old:?}");
+        let on: Result<Watch, _> = serde_json::from_str(r##"{ "kind": "slack-message", "channel": "#alerts", "apps": true }"##);
+        assert!(matches!(on, Ok(Watch::SlackMessage { apps: true, .. })), "{on:?}");
+    }
+
+    #[test]
+    fn the_apps_option_goes_from_the_workflow_to_its_graph_and_back() {
+        let decide = Decide { model: "m".into(), instructions: String::new(), categories: vec![], fallback: None };
+        let connector = workflow(Trigger::SlackMessage { channel: "#alerts".into(), decide, apps: true }, None, "");
+        let graph = migrate(&connector);
+        assert_eq!(graph.nodes[0].kind, NodeKind::Trigger { watch: Watch::SlackMessage { channel: "#alerts".into(), apps: true } });
+        assert!(matches!(super::super::project::project(&graph).trigger, Trigger::SlackMessage { apps: true, .. }));
+    }
+
+    #[test]
     fn a_linear_label_with_a_picked_column_is_trigger_stage_session() {
 
         let connector = workflow(Trigger::LinearLabel { label: "claude".into() }, None, "Analyzing");
@@ -542,7 +559,7 @@ mod tests {
             ],
             fallback: None,
         };
-        let connector = workflow(Trigger::SlackMessage { channel: "#support".into(), decide: decide.clone() }, None, "Analyzing");
+        let connector = workflow(Trigger::SlackMessage { channel: "#support".into(), decide: decide.clone(), apps: false }, None, "Analyzing");
         let choices = vec![
             choice("error", "error", "a bug"),
             choice("doubt", "doubt", "a question"),
@@ -553,7 +570,7 @@ mod tests {
             migrate(&connector),
             Graph {
                 nodes: vec![
-                    node("trigger", "Trigger", at(0, 0), NodeKind::Trigger { watch: Watch::SlackMessage { channel: "#support".into() } }),
+                    node("trigger", "Trigger", at(0, 0), NodeKind::Trigger { watch: Watch::SlackMessage { channel: "#support".into(), apps: false } }),
                     node(
                         "decide",
                         "Decide",
@@ -589,7 +606,7 @@ mod tests {
         let mut with_fallback = decide;
         with_fallback.fallback = Some("doubt".into());
         with_fallback.categories[0].mention = Some("oncall".into());
-        let connector = workflow(Trigger::SlackMessage { channel: "#support".into(), decide: with_fallback }, None, "");
+        let connector = workflow(Trigger::SlackMessage { channel: "#support".into(), decide: with_fallback, apps: false }, None, "");
         round_trip(&connector);
         let graph = migrate(&connector);
         let NodeKind::Classify(classify) = &graph.node(&NodeId("decide".into())).unwrap().kind else { panic!("decide") };
