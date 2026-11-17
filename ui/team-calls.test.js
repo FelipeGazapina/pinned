@@ -725,3 +725,12 @@ test("the team's owner sees one line under the team while its waiting line is he
   const plain = page({ role: "owner", email: "ana.souza@north.example" }).eval("tcNavHtml(tcCurrent(), 'team-calls')");
   assert.ok(!plain.includes("data-line-held") && !text(plain).includes("Bots are waiting"), "nothing while the line is not held");
 });
+
+test("the held line names the day when it was held before today, and is drawn only for a reason it knows", () => {
+  const line = (html) => [...html.matchAll(/<div class="tc-none" role="status" data-line-held>([^<]*)<\/div>/g)].map((m) => text(m[1]));
+  const nav = (held) => page({ role: "owner", email: "ana.souza@north.example", held }).eval("tcNavHtml(tcCurrent(), 'team-calls')");
+  assert.deepEqual(line(nav({ since: at(14, 5) - 86400, why: "settings_unread" })), ["Bots are waiting: the team's settings could not be read since Nov 15, 2:05 PM."]);
+  assert.deepEqual(line(nav({ since: at(0, 0), why: "settings_unread" })), ["Bots are waiting: the team's settings could not be read since 12:00 AM."], "today's midnight is today");
+  const other = nav({ since: at(14, 5), why: "something_else" });
+  assert.ok(!other.includes("data-line-held") && !text(other).includes("Bots are waiting"), "no line for a reason it does not know");
+});
