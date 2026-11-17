@@ -331,9 +331,12 @@ impl<'a> ChildEnv<'a> {
         ChildEnv { strip, set }
     }
 
-    /// What a child of a process whose variables `parent` looks up removes and then sets.
+    /// What a child of a process whose variables `parent` looks up removes and then sets. A parent
+    /// that carries a Go key runs inside a Go session, so the gateway and models it carries are
+    /// that session's and no other kind's.
     fn changes(&self, parent: impl Fn(&str) -> Option<String>) -> (Vec<&'a str>, Vec<(String, String)>) {
-        let remove = INHERITED_SESSION_ENV.iter().chain(self.strip).copied().collect();
+        let go: &[&str] = if parent(crate::opencode_go::KEY_ENV).is_some() { &crate::opencode_go::SESSION_ENV } else { &[] };
+        let remove = INHERITED_SESSION_ENV.iter().chain(go).chain(self.strip).copied().collect();
         let facts = MACHINE_FACTS.iter().filter(|key| parent(key).as_deref() == Some("1")).map(|key| (key.to_string(), "1".to_owned()));
         (remove, facts.chain(self.set.iter().cloned()).collect())
     }
