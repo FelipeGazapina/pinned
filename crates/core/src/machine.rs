@@ -4400,19 +4400,7 @@ impl Machine {
     /// One share per Claude home. A test binary under `deps` shares only homes inside its config dir.
     pub fn plugin_shares(&self) -> Vec<sync::PluginShare> {
         let Some(config) = self.sync_file.as_ref().and_then(|file| file.parent()).map(Path::to_path_buf) else { return vec![] };
-        let dir = config.join("synced-plugins");
-        let mut homes = vec![home().join(".claude")];
-        for account in self.accounts.list() {
-            if account.provider == Provider::Claude {
-                homes.push(self.accounts.home(&account));
-            }
-        }
-        homes.sort();
-        homes.dedup();
-        if test_binary() {
-            homes.retain(|path| path.starts_with(&config));
-        }
-        homes.into_iter().map(|claude_home| sync::PluginShare { claude_home, dir: dir.clone() }).collect()
+        plugin_shares(&self.accounts, &config, test_binary())
     }
 
     fn places(&self) -> skills::Places {
@@ -7157,6 +7145,24 @@ fn test_binary() -> bool {
 
 pub(crate) fn home() -> PathBuf {
     PathBuf::from(std::env::var_os(HOME_ENV).unwrap_or_default())
+}
+
+/// One share per Claude home of `accounts`, pulled into `config`. `inside` keeps only the homes
+/// inside `config`.
+fn plugin_shares(accounts: &Accounts, config: &Path, inside: bool) -> Vec<sync::PluginShare> {
+    let dir = config.join("synced-plugins");
+    let mut homes = vec![home().join(".claude")];
+    for account in accounts.list() {
+        if account.provider == Provider::Claude {
+            homes.push(accounts.home(&account));
+        }
+    }
+    homes.sort();
+    homes.dedup();
+    if inside {
+        homes.retain(|path| path.starts_with(config));
+    }
+    homes.into_iter().map(|claude_home| sync::PluginShare { claude_home, dir: dir.clone() }).collect()
 }
 
 impl Machine {
@@ -10208,6 +10214,18 @@ pub(crate) mod tests {
         let mut parent: Vec<(&str, &str)> = own.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
         parent.push((crate::opencode_go::KEY_ENV, ""));
         assert_eq!(go_settings(&login_tab_env(&parent)), go_settings(&own));
+    }
+
+    #[test]
+    fn plugin_sync_shares_the_home_the_built_in_account_runs_on() {
+        let homes = |env: &[(&str, &str)]| {
+            let env: Vec<(String, String)> = env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+            let accounts = Accounts::load(None, "/Users/ana".into()).with_exported_homes(accounts::exported_homes(&env, None));
+            super::plugin_shares(&accounts, Path::new("/c"), false).into_iter().map(|share| (share.claude_home, share.dir)).collect::<Vec<_>>()
+        };
+        let share = |home: &str| (PathBuf::from(home), PathBuf::from("/c/synced-plugins"));
+        assert_eq!(homes(&[("CLAUDE_CONFIG_DIR", "/Users/ana/claude-own")]), [share("/Users/ana/claude-own")], "a kept exported home");
+        assert_eq!(homes(&[]), [share("/Users/ana/.claude")], "no exported home");
     }
 
     /// Writes a Go account and its key without validation, so a launch test stays offline.
