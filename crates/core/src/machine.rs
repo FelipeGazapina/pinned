@@ -10232,14 +10232,17 @@ pub(crate) mod tests {
 
     #[test]
     fn plugin_sync_shares_the_home_the_built_in_account_runs_on() {
+        // Absolute on every platform: on Windows `Path::is_absolute` needs a drive.
+        let ana = || PathBuf::from(if cfg!(windows) { r"C:\Users\ana" } else { "/Users/ana" });
         let homes = |env: &[(&str, &str)]| {
             let env: Vec<(String, String)> = env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-            let accounts = Accounts::load(None, "/Users/ana".into()).with_exported_homes(accounts::exported_homes(&env, None));
+            let accounts = Accounts::load(None, ana()).with_exported_homes(accounts::exported_homes(&env, None));
             super::plugin_shares(&accounts, Path::new("/c"), false).into_iter().map(|share| (share.claude_home, share.dir)).collect::<Vec<_>>()
         };
-        let share = |home: &str| (PathBuf::from(home), PathBuf::from("/c/synced-plugins"));
-        assert_eq!(homes(&[("CLAUDE_CONFIG_DIR", "/Users/ana/claude-own")]), [share("/Users/ana/claude-own")], "a kept exported home");
-        assert_eq!(homes(&[]), [share("/Users/ana/.claude")], "no exported home");
+        let share = |home: PathBuf| (home, Path::new("/c").join("synced-plugins"));
+        let claude_own = ana().join("claude-own").display().to_string();
+        assert_eq!(homes(&[("CLAUDE_CONFIG_DIR", claude_own.as_str())]), [share(ana().join("claude-own"))], "a kept exported home");
+        assert_eq!(homes(&[]), [share(ana().join(".claude"))], "no exported home");
     }
 
     /// Writes a Go account and its key without validation, so a launch test stays offline.

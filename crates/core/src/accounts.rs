@@ -599,31 +599,42 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// The user's home, absolute on every platform: on Windows `Path::is_absolute` needs a drive.
+    fn ana() -> PathBuf {
+        PathBuf::from(if cfg!(windows) { r"C:\Users\ana" } else { "/Users/ana" })
+    }
+
+    /// `name` in the user's home, as the shell would export it.
+    fn in_ana(name: &str) -> String {
+        ana().join(name).display().to_string()
+    }
+
     /// The environment of a shell the user started the node from, with the homes they exported.
     fn exported_in_own_shell(claude: &str, codex: &str) -> Vec<(String, String)> {
-        [("HOME", "/Users/ana"), ("PATH", "/usr/bin:/bin"), ("CLAUDE_CONFIG_DIR", claude), ("CODEX_HOME", codex)].into_iter().map(|(k, v)| (k.to_owned(), v.to_owned())).collect()
+        [("HOME", ana().display().to_string().as_str()), ("PATH", "/usr/bin:/bin"), ("CLAUDE_CONFIG_DIR", claude), ("CODEX_HOME", codex)].into_iter().map(|(k, v)| (k.to_owned(), v.to_owned())).collect()
     }
 
     #[test]
     fn a_home_the_user_exported_stays_the_built_in_accounts_home() {
         use crate::machine::tests::assert_starts_with_only;
         let dir = temp("exported");
-        let exported = exported_homes(&exported_in_own_shell("/Users/ana/claude-own", "/Users/ana/codex-own"), Some(&dir));
-        let accounts = Accounts::load(Some(&dir), "/Users/ana".into()).with_exported_homes(exported);
+        let (claude_own, codex_own) = (in_ana("claude-own"), in_ana("codex-own"));
+        let exported = exported_homes(&exported_in_own_shell(&claude_own, &codex_own), Some(&dir));
+        let accounts = Accounts::load(Some(&dir), ana()).with_exported_homes(exported);
         let work = accounts.add(Provider::Claude, "work", Auth::Login).unwrap();
         let side = accounts.add(Provider::Codex, "side", Auth::Login).unwrap();
         let (claude, codex) = (Account::builtin(Provider::Claude), Account::builtin(Provider::Codex));
         let pair = |k: &str, v: &str| (k.to_owned(), v.to_owned());
-        assert_eq!(accounts.home(&claude), PathBuf::from("/Users/ana/claude-own"));
-        assert_eq!(accounts.home(&codex), PathBuf::from("/Users/ana/codex-own"));
-        assert_eq!(accounts.exported_home(Provider::Claude), Some(Path::new("/Users/ana/claude-own")));
-        assert_eq!(accounts.home_env(&claude), Some(pair("CLAUDE_CONFIG_DIR", "/Users/ana/claude-own")));
-        assert_eq!(accounts.env(&claude), [pair("CLAUDE_CONFIG_DIR", "/Users/ana/claude-own"), pair("PINNED_ACCOUNT", "claude")]);
-        assert_eq!(accounts.env(&codex), [pair("CODEX_HOME", "/Users/ana/codex-own"), pair("PINNED_ACCOUNT", "codex")]);
-        assert_starts_with_only(&accounts.child_env(&claude), &[("CLAUDE_CONFIG_DIR", "/Users/ana/claude-own"), ("PINNED_ACCOUNT", "claude")]);
-        assert_starts_with_only(&accounts.child_env(&codex), &[("CODEX_HOME", "/Users/ana/codex-own"), ("PINNED_ACCOUNT", "codex")]);
+        assert_eq!(accounts.home(&claude), ana().join("claude-own"));
+        assert_eq!(accounts.home(&codex), ana().join("codex-own"));
+        assert_eq!(accounts.exported_home(Provider::Claude), Some(ana().join("claude-own").as_path()));
+        assert_eq!(accounts.home_env(&claude), Some(pair("CLAUDE_CONFIG_DIR", &claude_own)));
+        assert_eq!(accounts.env(&claude), [pair("CLAUDE_CONFIG_DIR", &claude_own), pair("PINNED_ACCOUNT", "claude")]);
+        assert_eq!(accounts.env(&codex), [pair("CODEX_HOME", &codex_own), pair("PINNED_ACCOUNT", "codex")]);
+        assert_starts_with_only(&accounts.child_env(&claude), &[("CLAUDE_CONFIG_DIR", claude_own.as_str()), ("PINNED_ACCOUNT", "claude")]);
+        assert_starts_with_only(&accounts.child_env(&codex), &[("CODEX_HOME", codex_own.as_str()), ("PINNED_ACCOUNT", "codex")]);
         // An added account runs on its own home, never the exported one.
-        let (work_home, side_home) = (format!("{}/accounts/work", dir.display()), format!("{}/accounts/side", dir.display()));
+        let (work_home, side_home) = (dir.join("accounts").join("work").display().to_string(), dir.join("accounts").join("side").display().to_string());
         assert_eq!(accounts.home(&work), PathBuf::from(&work_home));
         assert_eq!(accounts.env(&work), [pair("CLAUDE_CONFIG_DIR", &work_home), pair("PINNED_ACCOUNT", "work")]);
         assert_eq!(accounts.env(&side), [pair("CODEX_HOME", &side_home), pair("PINNED_ACCOUNT", "side")]);
@@ -635,29 +646,29 @@ mod tests {
     fn an_exported_home_beside_any_other_session_variable_is_dropped() {
         let mut checked = 0;
         for name in crate::machine::INHERITED_SESSION_ENV.into_iter().filter(|name| !["CLAUDE_CONFIG_DIR", "CODEX_HOME"].contains(name)) {
-            let mut env = exported_in_own_shell("/Users/ana/claude-own", "/Users/ana/codex-own");
+            let mut env = exported_in_own_shell(&in_ana("claude-own"), &in_ana("codex-own"));
             env.push((name.to_owned(), "1".to_owned()));
-            let accounts = Accounts::load(None, "/Users/ana".into()).with_exported_homes(exported_homes(&env, None));
-            assert_eq!(accounts.home(&Account::builtin(Provider::Claude)), PathBuf::from("/Users/ana/.claude"), "kept beside {name}");
-            assert_eq!(accounts.home(&Account::builtin(Provider::Codex)), PathBuf::from("/Users/ana/.codex"), "kept beside {name}");
+            let accounts = Accounts::load(None, ana()).with_exported_homes(exported_homes(&env, None));
+            assert_eq!(accounts.home(&Account::builtin(Provider::Claude)), ana().join(".claude"), "kept beside {name}");
+            assert_eq!(accounts.home(&Account::builtin(Provider::Codex)), ana().join(".codex"), "kept beside {name}");
             assert_eq!(accounts.env(&Account::builtin(Provider::Claude)), [("PINNED_ACCOUNT".to_owned(), "claude".to_owned())], "kept beside {name}");
             checked += 1;
         }
         assert_eq!(checked, 25);
         // The same home with nothing else is kept.
-        let accounts = Accounts::load(None, "/Users/ana".into()).with_exported_homes(exported_homes(&exported_in_own_shell("/Users/ana/claude-own", "/Users/ana/codex-own"), None));
-        assert_eq!(accounts.home(&Account::builtin(Provider::Claude)), PathBuf::from("/Users/ana/claude-own"));
+        let accounts = Accounts::load(None, ana()).with_exported_homes(exported_homes(&exported_in_own_shell(&in_ana("claude-own"), &in_ana("codex-own")), None));
+        assert_eq!(accounts.home(&Account::builtin(Provider::Claude)), ana().join("claude-own"));
     }
 
     #[test]
     fn a_relative_exported_home_is_dropped() {
         // The node resolves a relative home against its own cwd and each CLI against the project's.
         let homes = |claude: &str, codex: &str| {
-            let accounts = Accounts::load(None, "/Users/ana".into()).with_exported_homes(exported_homes(&exported_in_own_shell(claude, codex), None));
+            let accounts = Accounts::load(None, ana()).with_exported_homes(exported_homes(&exported_in_own_shell(claude, codex), None));
             (accounts.home(&Account::builtin(Provider::Claude)), accounts.home(&Account::builtin(Provider::Codex)))
         };
-        assert_eq!(homes(".claude-work", "codex-work"), (PathBuf::from("/Users/ana/.claude"), PathBuf::from("/Users/ana/.codex")));
-        assert_eq!(homes("/Users/ana/claude-own", "/Users/ana/codex-own"), (PathBuf::from("/Users/ana/claude-own"), PathBuf::from("/Users/ana/codex-own")));
+        assert_eq!(homes(".claude-work", "codex-work"), (ana().join(".claude"), ana().join(".codex")));
+        assert_eq!(homes(&in_ana("claude-own"), &in_ana("codex-own")), (ana().join("claude-own"), ana().join("codex-own")));
     }
 
     #[test]
@@ -687,9 +698,9 @@ mod tests {
         let side = accounts.add(Provider::Codex, "side", Auth::Login).unwrap();
         assert_starts_with_only(&accounts.child_env(&Account::builtin(Provider::Claude)), &[("PINNED_ACCOUNT", "claude")]);
         assert_starts_with_only(&accounts.child_env(&Account::builtin(Provider::Codex)), &[("PINNED_ACCOUNT", "codex")]);
-        let work_home = format!("{}/accounts/work", dir.display());
+        let work_home = dir.join("accounts").join("work").display().to_string();
         assert_starts_with_only(&accounts.child_env(&work), &[("CLAUDE_CONFIG_DIR", work_home.as_str()), ("PINNED_ACCOUNT", "work")]);
-        let side_home = format!("{}/accounts/side", dir.display());
+        let side_home = dir.join("accounts").join("side").display().to_string();
         assert_starts_with_only(&accounts.child_env(&side), &[("CODEX_HOME", side_home.as_str()), ("PINNED_ACCOUNT", "side")]);
         let _ = std::fs::remove_dir_all(dir);
     }
