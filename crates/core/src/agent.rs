@@ -195,6 +195,17 @@ pub const ISSUE_ENV: &str = "PINNED_ISSUE";
 /// Set on sessions a Slack connector started, so `pinned slack reply` knows the thread it answers.
 pub const SLACK_CHANNEL_ENV: &str = "PINNED_SLACK_CHANNEL";
 pub const SLACK_THREAD_ENV: &str = "PINNED_SLACK_THREAD";
+/// The variables that make a session the one running a workflow on a subject.
+pub const WORKFLOW_ENV: [&str; 4] = [CONNECTOR_ENV, ISSUE_ENV, SLACK_CHANNEL_ENV, SLACK_THREAD_ENV];
+
+/// `env` without the workflow and subject it names, when it names one: what a session that is
+/// not that workflow's own session, such as a fork of it, starts with.
+pub fn without_workflow(env: Vec<(String, String)>) -> Vec<(String, String)> {
+    if session_of(&env).is_none() {
+        return env;
+    }
+    env.into_iter().filter(|(key, _)| !WORKFLOW_ENV.contains(&key.as_str())).collect()
+}
 
 /// The connector interactive box sessions run under. The hub sees their tabs through it, and the
 /// app treats their first prompt as the user's own rather than automation's.
@@ -281,6 +292,19 @@ pub enum Subject {
 }
 
 impl Subject {
+    /// The subject as pinned keeps it: each field without the spaces around it.
+    pub fn normalized(&self) -> Subject {
+        match self {
+            Subject::LinearIssue { issue } => Subject::LinearIssue { issue: issue.trim().to_owned() },
+            Subject::SlackThread { channel, thread } => Subject::SlackThread { channel: channel.trim().to_owned(), thread: thread.trim().to_owned() },
+        }
+    }
+
+    /// Whether `self` and `other` name one subject, however each was spelled.
+    pub fn same(&self, other: &Subject) -> bool {
+        self.normalized() == other.normalized()
+    }
+
     /// The session's environment that names this subject.
     pub fn env(&self) -> Vec<(String, String)> {
         match self {

@@ -1533,7 +1533,7 @@ impl Account {
             .iter()
             .filter(|(id, _)| on(id))
             .flat_map(|(_, m)| m.tabs())
-            .any(|t| t.running && t.connector.as_deref() == Some(connector) && t.subject.as_ref() == Some(subject))
+            .any(|t| t.running && t.connector.as_deref() == Some(connector) && t.subject.as_ref().is_some_and(|s| s.same(subject)))
     }
 
     /// Whether the session in tab `tab` of the online `machine` itself runs the connector on `subject`.
@@ -1541,7 +1541,7 @@ impl Account {
         let live = self.live.lock().unwrap();
         live.machines
             .get(machine)
-            .is_some_and(|m| m.tabs().iter().any(|t| t.id == tab && t.running && t.connector.as_deref() == Some(connector) && t.subject.as_ref() == Some(subject)))
+            .is_some_and(|m| m.tabs().iter().any(|t| t.id == tab && t.running && t.connector.as_deref() == Some(connector) && t.subject.as_ref().is_some_and(|s| s.same(subject))))
     }
 
     /// Machines a workflow run may go to: online, never a box's, `preferred` first, then the most recently connected.

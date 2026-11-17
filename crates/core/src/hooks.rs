@@ -482,11 +482,12 @@ impl From<Reply> for Answer {
 /// Answers every line on the socket with `on_message`'s reply. Each connection gets its own
 /// thread, so a slow Linear call for one session doesn't hold up another session's hooks.
 pub fn listen(sock: PathBuf, on_message: impl Fn(Message) -> Reply + Send + Sync + 'static) -> std::io::Result<()> {
-    answer(sock, move |message| on_message(message).into())
+    answer(sock, move |message, _| on_message(message).into())
 }
 
-/// `listen`, with an `Answer` that learns whether its reply was sent.
-pub fn answer(sock: PathBuf, on_message: impl Fn(Message) -> Answer + Send + Sync + 'static) -> std::io::Result<()> {
+/// `listen`, with an `Answer` that learns whether its reply was sent. `on_message` also gets the
+/// process that connected, when the system tells it.
+pub fn answer(sock: PathBuf, on_message: impl Fn(Message, Option<u32>) -> Answer + Send + Sync + 'static) -> std::io::Result<()> {
     let _ = std::fs::remove_file(&sock);
     let listener = UnixListener::bind(&sock)?;
     let on_message = Arc::new(on_message);
@@ -495,9 +496,10 @@ pub fn answer(sock: PathBuf, on_message: impl Fn(Message) -> Answer + Send + Syn
             let on_message = on_message.clone();
             std::thread::spawn(move || {
                 let Ok(reader) = stream.try_clone() else { return };
+                let peer = crate::ipc::peer_pid(&stream);
                 for line in BufReader::new(reader).lines().map_while(Result::ok) {
                     let answer = match serde_json::from_str(&line) {
-                        Ok(message) => on_message(message),
+                        Ok(message) => on_message(message, peer),
                         Err(e) => Answer::from(Err(format!("bad message {line:?}: {e}"))),
                     };
                     let reply = serde_json::to_string(&answer.reply).unwrap();

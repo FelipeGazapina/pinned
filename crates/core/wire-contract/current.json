@@ -10750,6 +10750,13 @@
                   "string",
                   "null"
                 ]
+              },
+              "vouched": {
+                "description": "Whether the machine found the act to come from the agent of session `tab` itself (true),\nor from a process it could not tie to that session (false). Absent from a machine that does\nnot check.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -22763,6 +22770,13 @@
                   "string",
                   "null"
                 ]
+              },
+              "vouched": {
+                "description": "Whether the machine found the act to come from the agent of session `tab` itself (true),\nor from a process it could not tie to that session (false). Absent from a machine that does\nnot check.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -31903,6 +31917,13 @@
                   "string",
                   "null"
                 ]
+              },
+              "vouched": {
+                "description": "Whether the machine found the act to come from the agent of session `tab` itself (true),\nor from a process it could not tie to that session (false). Absent from a machine that does\nnot check.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -40766,6 +40787,13 @@
                 "description": "The machine a `Call` runs on, an id or a name; the session's own when absent.",
                 "type": [
                   "string",
+                  "null"
+                ]
+              },
+              "vouched": {
+                "description": "Whether the machine found the act to come from the agent of session `tab` itself (true),\nor from a process it could not tie to that session (false). Absent from a machine that does\nnot check.",
+                "type": [
+                  "boolean",
                   "null"
                 ]
               }

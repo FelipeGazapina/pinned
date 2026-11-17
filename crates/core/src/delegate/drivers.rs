@@ -700,6 +700,9 @@ pub fn spawn(
     }
     cmd.env_remove(crate::agent::TAB_ENV);
     cmd.env_remove(crate::agent::TASK_ENV);
+    for key in crate::agent::WORKFLOW_ENV {
+        cmd.env_remove(key);
+    }
     for (key, value) in spec.env {
         cmd.env(key, value);
     }

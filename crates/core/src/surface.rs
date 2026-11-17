@@ -616,6 +616,11 @@ pub struct AgentAct {
     /// The machine a `Call` runs on, an id or a name; the session's own when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine: Option<String>,
+    /// Whether the machine found the act to come from the agent of session `tab` itself (true),
+    /// or from a process it could not tie to that session (false). Absent from a machine that does
+    /// not check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vouched: Option<bool>,
 }
 
 /// What `act` came to.
@@ -1617,7 +1622,7 @@ mod tests {
     #[test]
     fn an_act_and_its_answers_keep_their_wire_shape() {
         let act: AgentAct = serde_json::from_value(json!({ "tab": "tab-1a-3", "action": "machines" })).unwrap();
-        assert_eq!(act, AgentAct { tab: "tab-1a-3".into(), action: "machines".into(), args: Value::Null, request_id: None, machine: None });
+        assert_eq!(act, AgentAct { tab: "tab-1a-3".into(), action: "machines".into(), args: Value::Null, request_id: None, machine: None, vouched: None });
         assert_eq!(serde_json::to_value(ActAnswer::Done { result: json!([1]) }).unwrap(), json!({ "outcome": "done", "result": [1] }));
         assert_eq!(serde_json::to_value(ActAnswer::Pending { id: "c1".into(), next: PENDING_NEXT.into() }).unwrap()["outcome"], "pending");
         assert_eq!(serde_json::to_value(ActAnswer::Repeat { earlier: AuditOutcome::Done, at: 5 }).unwrap(), json!({ "outcome": "repeat", "earlier": "done", "at": 5 }));

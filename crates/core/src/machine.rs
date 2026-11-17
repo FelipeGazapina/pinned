@@ -54,6 +54,8 @@ const THREAD_PAGE_MAX: usize = 5000;
 const PAGE_POLL: Duration = Duration::from_millis(1200);
 const LOCAL_VIEWER: &str = "local";
 const NOT_LINKED: &str = "this machine is not linked to a hub";
+/// Why an `act` that names another session than the one whose agent made it does not run.
+const NOT_ITSELF: &str = "this call names a session it does not come from";
 /// How long a session's Convex offer waits for the hub to hear of its new tab, and how often it asks.
 const CONVEX_OFFER_WAIT: Duration = Duration::from_secs(3);
 const CONVEX_OFFER_RETRY: Duration = Duration::from_millis(250);
@@ -197,7 +199,7 @@ impl Launch {
         let provider = account.provider;
         let spec = provider.spec();
         let mut cmd = CommandBuilder::new(self.bin(provider));
-        for key in INHERITED_SESSION_ENV {
+        for key in INHERITED_SESSION_ENV.into_iter().chain(crate::agent::WORKFLOW_ENV) {
             cmd.env_remove(key);
         }
         if account.auth == Auth::OpenCodeGo {
@@ -1638,7 +1640,8 @@ impl Machine {
     pub fn fork(&self, tab: &str, through: &str) -> Result<TabId, String> {
         let (cwd, account, env, bypass) = self.tab(tab, |t| (t.cwd.clone(), t.account.clone(), t.env.clone(), t.bypass))?;
         let new = self.fork_session(tab, thread::Cut::Through(through), true)?.ok_or("there is nothing to fork before this message")?;
-        let id = self.add_tab(cwd, account, vec!["--resume".into(), new.clone()], env, bypass, Some(new));
+        // The copy is a session of its own, not one of the workflow the original runs.
+        let id = self.add_tab(cwd, account, vec!["--resume".into(), new.clone()], crate::agent::without_workflow(env), bypass, Some(new));
         self.emit_tabs();
         Ok(id)
     }
@@ -3587,13 +3590,33 @@ impl Machine {
             ProjectTool::MemoryForget { id } => self.memories.forget(&self.project_of_tab(tab)?, id).map(|m| format!("Forgot #{} {}.", m.id, pinned_lines::quoted(&m.title, memory::MEMORY_TITLE_CHARS))),
             ProjectTool::Actions { search } => text_json(json!({ "actions": surface::listing(search.as_deref()) })),
             ProjectTool::Convex { ask } => self.convex(tab, ask),
-            ProjectTool::Act { action, args, request_id, machine } => {
-                let act = surface::AgentAct { tab: tab.to_owned(), action, args, request_id, machine };
-                match self.call_hub(HubCall::Act { act }) {
-                    Err(e) if e == NOT_LINKED => Err(format!("{NOT_LINKED}, which keeps the audit trail act writes")),
-                    answer => text_json(answer?),
-                }
-            }
+            // The socket's caller is vouched for in `listen`; from anywhere else, no session is.
+            ProjectTool::Act { action, args, request_id, machine } => self.send_act(surface::AgentAct { tab: tab.to_owned(), action, args, request_id, machine, vouched: Some(false) }),
+        }
+    }
+
+    fn send_act(&self, act: surface::AgentAct) -> Result<String, String> {
+        match self.call_hub(HubCall::Act { act }) {
+            Err(e) if e == NOT_LINKED => Err(format!("{NOT_LINKED}, which keeps the audit trail act writes")),
+            answer => text_json(answer?),
+        }
+    }
+
+    /// Whether a call that names tab `tab` and came from process `peer` comes from that session's
+    /// own agent: a session's agent starts its MCP server itself, so the server's parent is the
+    /// process the tab's pty runs. One another session's agent started is refused. One no
+    /// session's agent started itself, such as a process inside a session that inherited its
+    /// environment, is passed on not vouched for. None where the system does not tell the caller.
+    fn vouch(&self, tab: &str, peer: Option<u32>) -> Result<Option<bool>, String> {
+        if !crate::ipc::KNOWS_PEERS {
+            return Ok(None);
+        }
+        let Some(parent) = peer.and_then(crate::ipc::parent_of) else { return Ok(Some(false)) };
+        let tabs = self.tabs.lock().unwrap();
+        match tabs.iter().find(|(_, t)| t.session.as_ref().and_then(|s| s.pid()) == Some(parent)) {
+            Some((id, _)) if id == tab => Ok(Some(true)),
+            Some(_) => Err(NOT_ITSELF.into()),
+            None => Ok(Some(false)),
         }
     }
 
@@ -4609,7 +4632,7 @@ impl Machine {
     /// them; every other message, a connector session's callbacks and the reminders tools, goes to `other`.
     pub fn listen(&self, other: impl Fn(Message) -> Result<String, String> + Send + Sync + 'static) -> std::io::Result<()> {
         let me = self.me.clone();
-        hooks::answer(self.launch.sock.clone(), move |message| {
+        hooks::answer(self.launch.sock.clone(), move |message, peer| {
             let Some(machine) = me.upgrade() else { return hooks::Answer::from(Err("pinned is shutting down".to_owned())) };
             let reply = match message {
                 Message::Agent(event) => {
@@ -4639,6 +4662,9 @@ impl Machine {
                 Message::Capabilities { tab, task, search } => machine.capabilities(tab.as_deref(), task.as_deref(), &search),
                 Message::TaskReview { tab, task, id, verdict, note } => machine.task_review(tab, task, &id, &verdict, note),
                 Message::DelegationStats { days } => machine.delegation_stats(days),
+                Message::Project { tab, tool: ProjectTool::Act { action, args, request_id, machine: on } } => machine.vouch(&tab, peer).and_then(|vouched| {
+                    machine.send_act(surface::AgentAct { tab, action, args, request_id, machine: on, vouched })
+                }),
                 Message::Project { tab, tool } => machine.project_tool(&tab, tool),
                 Message::Guard { tab, tool, input } => machine.guard(&tab, &tool, &input),
                 message => other(message),
