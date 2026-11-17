@@ -262,24 +262,28 @@ struct Node {
     stderr: PathBuf,
 }
 
+/// The command a live node starts from: the same one `Node::spawn` runs, so a test can look at what the
+/// child will carry without starting it. It drops every session and login variable the test's own
+/// process holds, so the node never reaches a real Claude, GitHub or pinned login through them.
+fn node_command(program: &Path, config: &Path, extra: &[(&str, &str)]) -> Command {
+    let mut cmd = Command::new(program);
+    cmd.args(["node", "--config-dir", config.to_str().unwrap()])
+        .env("HOME", config)
+        .env("SHELL", shell(config))
+        .stdin(Stdio::null())
+        .process_group(0);
+    for (key, value) in extra {
+        cmd.env(key, value);
+    }
+    cmd
+}
+
 impl Node {
     fn spawn(dest: &Path, config: &Path, extra: &[(&str, &str)]) -> Node {
         let stderr_path = config.join("stderr");
         let stderr = std::fs::OpenOptions::new().create(true).append(true).open(&stderr_path).unwrap();
-        let mut cmd = Command::new(dest);
-        cmd.args(["node", "--config-dir", config.to_str().unwrap()])
-            .env("HOME", config)
-            .env("SHELL", shell(config))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::from(stderr))
-            .process_group(0);
-        for name in pinned_core::machine::session_variables() {
-            cmd.env_remove(name);
-        }
-        for (key, value) in extra {
-            cmd.env(key, value);
-        }
+        let mut cmd = node_command(dest, config, extra);
+        cmd.stdout(Stdio::null()).stderr(Stdio::from(stderr));
         Node { child: cmd.spawn().unwrap(), stderr: stderr_path }
     }
 
@@ -495,6 +499,35 @@ fn updating(live: &Live, script: &str, extra: &[(&str, &str)]) -> Node {
 #[test]
 fn a_live_test_in_a_real_home_stops_before_any_node_starts() {
     pinned_core::machine::assert_refused_in_a_real_home("a_restart_after_stage_puts_the_old_bytes_back_online");
+}
+
+/// A spawned live node must not inherit a session or login variable from the test's process. Looks at
+/// the built command, never at this process's environment: the home guard reads that once and other
+/// tests here run in parallel.
+#[test]
+fn a_spawned_live_node_carries_no_session_or_login_variable() {
+    let config = std::env::temp_dir().join(format!("pinned-live-scrub-{}", std::process::id()));
+    std::fs::create_dir_all(&config).unwrap();
+    let cmd = node_command(Path::new("/bin/true"), &config, &[]);
+    let envs: std::collections::HashMap<_, _> = cmd.get_envs().map(|(key, value)| (key.to_str().unwrap().to_string(), value.is_some())).collect();
+    let names = [
+        "PINNED_SOCK",
+        "PINNED_TAB",
+        "PINNED_TASK",
+        "PINNED_PROJECT",
+        "PINNED_ROLE",
+        "PINNED_ACCOUNT",
+        "PINNED_BOX",
+        "GH_TOKEN",
+        "GITHUB_TOKEN",
+        "CLAUDE_CONFIG_DIR",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+        "ANTHROPIC_API_KEY",
+    ];
+    for name in names {
+        assert_eq!(envs.get(name), Some(&false), "the node's command does not remove {name}");
+    }
+    let _ = std::fs::remove_dir_all(&config);
 }
 
 #[test]
