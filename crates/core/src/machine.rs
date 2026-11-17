@@ -45,7 +45,7 @@ const FIRST_RUN_WAIT: Duration = Duration::from_secs(60);
 /// Why a task the user cancelled from its card stopped.
 const CARD_CANCEL: &str = "cancelled from the card";
 /// How long a fresh session may start without reporting before its start fails.
-const STARTING_LIMIT: Duration = Duration::from_secs(10 * 60);
+pub const STARTING_LIMIT: Duration = Duration::from_secs(10 * 60);
 /// Claude logs a turn's duration only after its Stop hook returns, within a second in practice.
 const TURN_LOG_WAIT: (u32, Duration) = (25, Duration::from_millis(200));
 const THREAD_LOOK_EVERY: Duration = Duration::from_millis(40);
@@ -13041,6 +13041,80 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!((info.state.as_str(), info.error.as_deref()), ("failed", Some(reason)));
         let thread = m.view(&info.thread.unwrap().tab).unwrap();
         assert_eq!((thread.status, thread.message.as_deref()), (Some(AgentStatus::Failed), Some(reason)));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// What a hook reports from `tab`'s session `session`.
+    fn reported(tab: &str, status: AgentStatus, session: &str, message: Option<&str>, prompt: Option<&str>) -> AgentEvent {
+        AgentEvent { status, cwd: None, message: message.map(Into::into), tab: Some(tab.into()), session: Some(session.into()), title: None, resume_at: None, prompt: prompt.map(Into::into), snapshot: None, permission_mode: None, hook_feedback: false, reply: None }
+    }
+
+    const PARKED_SCREEN: &str = " Use the docs server this folder lists?  1. Use it  2. Skip it  Enter to confirm · Esc to cancel";
+
+    #[test]
+    #[cfg(unix)]
+    fn a_worker_parked_before_its_first_prompt_fails_at_the_starting_limit_though_a_notice_named_its_session() {
+        let root = temp("starting-limit-notice");
+        let (claude, keys) = claude_on_screens(&root, &[PARKED_SCREEN]);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), starting_limit: Duration::from_secs(2), ..launch() }, Some(root.join("config")), None, |_| {});
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        let task = delegate_from(&m, &app, "shared");
+        let tab = m.delegates.get(&task).unwrap().thread.unwrap().tab;
+        wait_for("the dialog on its screen", || m.screen_text(&tab).contains("Enter to confirm"));
+        // Claude Code names its session in a notice while the dialog waits; the brief was never submitted.
+        m.record_event(reported(&tab, AgentStatus::NeedsInput, "s-parked", Some("Claude needs your attention"), None));
+        wait_for("the start to fail", || m.delegates.get(&task).is_some_and(|t| t.state.terminal()));
+        let info = m.delegates.get(&task).unwrap();
+        let reason = "it did not start within 2 s; its screen shows: Use the docs server this folder lists?  1. Use it  2. Skip it  Enter to confirm · Esc to cancel";
+        assert_eq!((info.state.as_str(), info.error.as_deref()), ("failed", Some(reason)));
+        assert_eq!((m.view(&tab).unwrap().status, m.view(&tab).unwrap().message.as_deref()), (Some(AgentStatus::Failed), Some(reason)));
+        assert!(!keys.exists(), "nothing was typed into a dialog pinned does not know");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_resumed_tab_at_its_prompt_and_a_worker_that_started_its_turn_outlive_the_starting_limit() {
+        let root = temp("starting-limit-kept");
+        let (claude, _) = claude_on_screens(&root, &["? for shortcuts"]);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), starting_limit: Duration::from_secs(1), ..launch() }, Some(root.join("config")), None, |_| {});
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        let resumed = m.add_tab(app.clone(), Account::builtin(Provider::Claude), vec!["--resume".into(), "s-1".into()], vec![], false, Some("s-1".into()));
+        m.start_claude(&resumed, 120, 32).unwrap();
+        let task = delegate_from(&m, &app, "shared");
+        let worker = m.delegates.get(&task).unwrap().thread.unwrap().tab;
+        // The brief started its turn, which then asks for a permission past the limit.
+        m.record_event(reported(&worker, AgentStatus::Working, "s-2", None, Some("look")));
+        m.record_event(reported(&worker, AgentStatus::NeedsInput, "s-2", Some("Claude needs your permission to use Bash"), None));
+        std::thread::sleep(Duration::from_millis(2500));
+        assert_eq!((m.view(&resumed).unwrap().status, m.view(&resumed).unwrap().message), (None, None), "a resume at its prompt fires no hook until a turn");
+        assert_eq!(m.view(&worker).unwrap().status, Some(AgentStatus::NeedsInput), "a worker that started its turn");
+        assert!(!m.delegates.get(&task).unwrap().state.terminal(), "{:?}", m.delegates.get(&task).unwrap().error);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_worktree_made_after_the_node_started_is_trusted_in_the_home_claude_config_before_its_session_starts() {
+        let root = temp("worktree-trust-home");
+        let (claude, _) = claude_on_screens(&root, &["? for shortcuts"]);
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join(".claude.json"), r#"{"projects":{"/elsewhere":{"allowedTools":["Bash"]}}}"#).unwrap();
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), claude_home: Some(home.clone()), ..launch() }, Some(root.join("config")), None, |_| {});
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "first"]);
+        let task = delegate_from(&m, &repo, "worktree");
+        let worktree = m.delegates.get(&task).unwrap().cwd;
+        assert!(worktree.starts_with(dunce::canonicalize(&repo).unwrap().join(".claude/worktrees")), "{}", worktree.display());
+        let config = claude_config_at(&home.join(".claude.json"));
+        assert!(trusted(&config, &worktree), "{config}");
+        assert!(!trusted(&config, &repo), "the repository the user opened stays the user's call: {config}");
+        assert_eq!(config["projects"]["/elsewhere"], json!({"allowedTools": ["Bash"]}), "another folder stays as it was");
         let _ = std::fs::remove_dir_all(root);
     }
 

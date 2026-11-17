@@ -2294,9 +2294,23 @@ mod tests {
         }
         // Its max life and budget still bound it.
         assert_eq!(verdict(p.max_life, Seen::Starting { quiet: true }, &mut Timers::default(), start, &p, false), Some(End::Expired));
-        assert_eq!(ended_because(&End::NeverStarted), "the worker never started: its session stopped at a startup screen");
-        assert_eq!(box_end_error(&p, &End::NeverStarted).as_deref(), Some("Upstash Box: the worker never started: its session stopped at a startup screen"));
+        assert_eq!(ended_because(&End::NeverStarted), "the worker did not start its first turn");
+        assert_eq!(box_end_error(&p, &End::NeverStarted).as_deref(), Some("Upstash Box: the worker did not start its first turn within 12 min"));
         assert_eq!(release_for(&End::NeverStarted), BoxEndRelease::Once);
+        // The node's own start limit, which quotes the session's screen, ends it first.
+        assert_eq!(FIRST_TURN_WAIT, pinned_core::machine::STARTING_LIMIT + 2 * MIN);
+    }
+
+    #[test]
+    fn a_starting_worker_whose_box_goes_offline_keeps_the_offline_allowance() {
+        // A first-turn wait shorter than the offline allowance, so time spent offline would reach it first.
+        let p = Policy { first_turn: 4 * MIN, ..Policy::default() };
+        let (start, s) = (Instant::now(), Duration::from_secs);
+        let mut t = Timers::default();
+        assert_eq!(verdict(MIN, Seen::Starting { quiet: true }, &mut t, start, &p, false), None);
+        assert_eq!(verdict(MIN, Seen::Offline, &mut t, start + s(30), &p, false), None, "offline at 0:30");
+        assert_eq!(verdict(MIN, Seen::Offline, &mut t, start + p.first_turn + s(1), &p, false), None, "offline past the first-turn wait");
+        assert_eq!(verdict(MIN, Seen::Offline, &mut t, start + s(30) + p.offline, &p, false), Some(End::Offline), "it ends as offline");
     }
 
     #[test]
