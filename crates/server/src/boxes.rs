@@ -3610,8 +3610,19 @@ mod tests {
             run
         }
 
+        /// Runs git through the shim. A shim just written is busy while a child another test forked
+        /// still holds its write handle, until that child execs, so that error is tried again.
         fn git(&self, dir: &std::path::Path, args: &[&str]) -> String {
-            let ran = std::process::Command::new(self.bin.join("git")).arg("-C").arg(dir).args(args).env("HOME", &self.home).output().unwrap();
+            let mut tries = 0;
+            let ran = loop {
+                match std::process::Command::new(self.bin.join("git")).arg("-C").arg(dir).args(args).env("HOME", &self.home).output() {
+                    Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 50 => {
+                        tries += 1;
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    ran => break ran.unwrap(),
+                }
+            };
             assert!(ran.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&ran.stderr));
             String::from_utf8(ran.stdout).unwrap()
         }
