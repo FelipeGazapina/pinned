@@ -7,11 +7,11 @@
 //! removed meanwhile drops its event. Every event that starts no run is counted by why
 //! (`db::count_skipped`), and a bot's page shows the counts.
 
-use super::bots::{self, Start};
+use super::bots::{self, Start, TeamWorkflows};
 use super::{calls, db};
 use crate::hub::{Account, Hub};
 use pinned_core::agent::Subject;
-use pinned_core::connectors::{Admitted, Connectors, Delivery, Event, Placement, Replies, RunsOn, Trigger, TriggerInput};
+use pinned_core::connectors::{Admitted, Delivery, Event, Placement, Replies, RunsOn, Trigger, TriggerInput};
 use pinned_core::teams::{Run, RunState, SkipReason};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -23,6 +23,11 @@ use uuid::Uuid;
 pub const MOST_WAITING: i64 = 20;
 /// The most replies of a Slack thread kept with its waiting event: older ones are only counted.
 pub const MOST_REPLIES: usize = 20;
+/// How many of the team's turns a waiting row waits through when a read of its bot's row fails
+/// (`take_and_start`): the turn that is the `UNREAD_PASSES`th to fail drops it, counted
+/// `StartFailed`, so a row whose bot never reads does not wait forever. A busy read is not
+/// counted: it says nothing of the bot.
+pub const UNREAD_PASSES: i32 = 5;
 
 /// What `ask` did with a run.
 pub enum Asked {
@@ -132,16 +137,16 @@ impl Turn {
 /// Why an event of bot `workflow` would start no run now, if it would not: its workflow is gone,
 /// it is not a bot yet (a draft), it is off, or (for a trigger's event) it runs only by Run now.
 pub async fn skip_reason(hub: &Arc<Hub>, team: &Account, workflow: &str, by_trigger: bool) -> Result<Option<SkipReason>, String> {
-    skip_reason_in(hub, &*hub.connectors(team).await?, team, workflow, by_trigger).await
+    skip_reason_in(hub, &TeamWorkflows::read(hub, team).await?, workflow, by_trigger).await
 }
 
-/// `skip_reason` with the team's workflows as already read (`connectors`): what it reads itself
-/// is only the bot's own row.
-async fn skip_reason_in(hub: &Arc<Hub>, connectors: &Connectors, team: &Account, workflow: &str, by_trigger: bool) -> Result<Option<SkipReason>, String> {
-    let Some(stored) = connectors.get_settings().connectors.into_iter().find(|c| c.id == workflow) else {
+/// `skip_reason` with the team's workflows as already read (`team`): what it reads itself is only
+/// the bot's own row.
+async fn skip_reason_in(hub: &Arc<Hub>, team: &TeamWorkflows, workflow: &str, by_trigger: bool) -> Result<Option<SkipReason>, String> {
+    let Some(stored) = team.connectors().get_settings().connectors.into_iter().find(|c| c.id == workflow) else {
         return Ok(Some(SkipReason::BotRemoved));
     };
-    let Some(bot) = db::bot(&hub.db, team.id, workflow).await? else { return Ok(Some(SkipReason::Draft)) };
+    let Some(bot) = db::bot(&hub.db, team.team(), workflow).await? else { return Ok(Some(SkipReason::Draft)) };
     if !bot.on || !stored.enabled {
         return Ok(Some(SkipReason::Off));
     }
@@ -450,101 +455,125 @@ struct Taken {
 
 /// `start_waiting`'s takes, inside the team's turn: each waiting event or run that has a free
 /// place gets it reserved, and nothing outside pinned is called.
+///
+/// Every read on the shared connection comes before the take. A read of the whole team (its
+/// workflows, keys and settings: `hub.connectors`) is made once, before the turn's first take:
+/// when it fails, busy or not, this returns and every row still waits, counted by nobody, as it
+/// says nothing of any one row. The reads left per row are of bot rows only (the bot's own, and
+/// those of the bots its workflow calls). When one fails, busy or not, the row is not taken: it
+/// waits for the next turn, and so does every later row of its bot, which never starts ahead of
+/// it, while the rows of other bots go on. A failure that is not busy counts on the row; the
+/// `UNREAD_PASSES`th takes it, counted `StartFailed`. Only what the take is written with
+/// (`turn.held`: its counts, its reservation and the row's failed reads) rolls back with a turn
+/// that fails after it, and the turn commits whatever this returns.
 async fn take_and_start(hub: &Arc<Hub>, turn: &Turn, team: &Arc<Account>, ended: &str, taken: &mut Taken) -> Result<(), String> {
-    let mut team_wide: Option<Arc<Connectors>> = None;
+    let mut team_wide: Option<Arc<TeamWorkflows>> = None;
+    // The bots whose row did not read in this turn: none of their rows is taken in it.
+    let mut unread: Vec<String> = vec![];
     loop {
         if db::live_count_on(&turn.held, team.id).await? >= db::max_live_runs(&hub.db, team.id).await? {
             return Ok(());
         }
-        let Some(waiting) = db::next_waiting(&turn.held, team.id, ended).await? else { return Ok(()) };
+        let Some(waiting) = db::next_waiting(&turn.held, team.id, ended, &unread).await? else { return Ok(()) };
         let stored: Stored = match serde_json::from_value(waiting.start) {
             Ok(stored) => stored,
-            Err(e) => {
-                eprintln!("pinned-server: team {} bot {}: a waiting event was not readable and is dropped: {e}", team.id, waiting.workflow);
+            Err(_) => {
+                eprintln!("pinned-server: team {} bot {}: a waiting event was not readable and is dropped", team.id, waiting.workflow);
                 db::take_waiting(&turn.held, waiting.id).await?;
-                continue;
-            }
-        };
-        // Every read on the shared connection comes before the take. A read of the whole team
-        // (its workflows, keys and settings: `hub.connectors`) is made once, before the turn's
-        // first take: when it fails, busy or not, this returns and every row still waits, counted
-        // by nobody, as it says nothing of any one row. The reads left per row are of bot rows
-        // only (the bot's own, and those of the bots its workflow calls): a busy one returns
-        // before the row is taken, so it still waits; any other failed one is taken and counted
-        // `StartFailed`, so a row that never reads holds up no row behind it. Only what the take
-        // is written with (`turn.held`: its counts and its reservation) rolls back with a turn
-        // that fails after it, and the turn commits whatever this returns.
-        let connectors = match &team_wide {
-            Some(connectors) => connectors.clone(),
-            None => team_wide.insert(read_team(hub, team).await?).clone(),
-        };
-        if let Stored::Event { kind, event, .. } = stored {
-            let dropped = match skip_reason_in(hub, &connectors, team, &waiting.workflow, true).await {
-                Ok(None) => None,
-                Ok(Some(reason)) => {
-                    eprintln!("pinned-server: team {} bot {}: a waiting event is dropped: the bot is {}", team.id, waiting.workflow, reason.as_str());
-                    Some(reason)
-                }
-                Err(e) if e == crate::db::BUSY => return Err(e),
-                Err(e) => {
-                    eprintln!("pinned-server: team {} bot {}: a waiting event did not start and is dropped: {e}", team.id, waiting.workflow);
-                    Some(SkipReason::StartFailed)
-                }
-            };
-            if let Some(reason) = dropped {
-                db::take_waiting(&turn.held, waiting.id).await?;
-                db::count_skipped_on(&turn.held, team.id, &waiting.workflow, reason, 1).await?;
-                continue;
-            }
-            // Its place is held now and its row granted, in one transaction (the turn's): the
-            // team's poller claims it and runs it whole, from the start.
-            // A bot with a live run the turn did not read keeps its event in line, ungranted, for that run's end.
-            let Some(run) = reserve(turn, team, &waiting.workflow, format!("trigger:{kind}"), event.subject()).await? else { continue };
-            db::grant(&turn.held, waiting.id, Uuid::parse_str(&run.id).map_err(|e| e.to_string())?).await?;
-            taken.granted = true;
-            continue;
-        }
-        let Some(start) = stored.start(&waiting.workflow) else {
-            db::take_waiting(&turn.held, waiting.id).await?;
-            continue;
-        };
-        let by_trigger = matches!(start, Start::Trigger { .. });
-        let told = match &start {
-            Start::Trigger { work, .. } => Some(work.clone()),
-            Start::Member(_) => None,
-        };
-        // A busy read says nothing of the bot: the run still waits.
-        let read = match skip_reason_in(hub, &connectors, team, &waiting.workflow, by_trigger).await {
-            Ok(Some(reason)) => Err(reason),
-            Ok(None) => Ok(match bots::ready_in(hub, team, &connectors, &waiting.workflow).await {
-                Ok(()) => bots::work_of(&connectors, &waiting.workflow, start),
-                Err(e) if e == crate::db::BUSY => return Err(e),
-                Err(e) => Err(e),
-            }),
-            Err(e) if e == crate::db::BUSY => return Err(e),
-            Err(e) => Ok(Err(e)),
-        };
-        let (work, started_by) = match read {
-            Ok(Ok(reserved)) => reserved,
-            Err(reason) => {
-                db::take_waiting(&turn.held, waiting.id).await?;
-                eprintln!("pinned-server: team {} bot {}: a waiting event is dropped: the bot is {}", team.id, waiting.workflow, reason.as_str());
-                db::count_skipped_on(&turn.held, team.id, &waiting.workflow, reason, 1).await?;
-                continue;
-            }
-            Ok(Err(e)) => {
-                db::take_waiting(&turn.held, waiting.id).await?;
-                eprintln!("pinned-server: team {} bot {}: a waiting run did not start and is dropped: {e}", team.id, waiting.workflow);
                 db::count_skipped_on(&turn.held, team.id, &waiting.workflow, SkipReason::StartFailed, 1).await?;
                 continue;
             }
         };
-        // Taken from its line only once its place is held: a bot with a live run the turn did
-        // not read keeps it waiting for that run's end.
-        let Some(run) = reserve(turn, team, &waiting.workflow, started_by, &work.subject).await? else { continue };
-        db::take_waiting(&turn.held, waiting.id).await?;
-        taken.starts.push((Uuid::parse_str(&run.id).map_err(|e| e.to_string())?, work, told));
+        let team_wide = match &team_wide {
+            Some(team_wide) => team_wide.clone(),
+            None => team_wide.insert(Arc::new(read_team(hub, team).await?)).clone(),
+        };
+        let row = match row_of(hub, &team_wide, &waiting.workflow, stored).await {
+            Ok(row) => row,
+            Err(e) => {
+                unread.push(waiting.workflow.clone());
+                if e == crate::db::BUSY {
+                    eprintln!("pinned-server: team {} bot {}: the bot's row is busy, so what waits for it stays in line", team.id, waiting.workflow);
+                    continue;
+                }
+                let failed = db::unread_pass(&turn.held, waiting.id).await?;
+                if failed < UNREAD_PASSES {
+                    eprintln!("pinned-server: team {} bot {}: the bot's row could not be read ({failed} of {UNREAD_PASSES} tries), so what waits for it stays in line", team.id, waiting.workflow);
+                    continue;
+                }
+                eprintln!("pinned-server: team {} bot {}: the bot's row could not be read in {UNREAD_PASSES} tries, so a waiting event is dropped", team.id, waiting.workflow);
+                db::take_waiting(&turn.held, waiting.id).await?;
+                db::count_skipped_on(&turn.held, team.id, &waiting.workflow, SkipReason::StartFailed, 1).await?;
+                continue;
+            }
+        };
+        match row {
+            Row::Refused(reason) => {
+                eprintln!("pinned-server: team {} bot {}: a waiting event is dropped: the bot is {}", team.id, waiting.workflow, reason.as_str());
+                db::take_waiting(&turn.held, waiting.id).await?;
+                db::count_skipped_on(&turn.held, team.id, &waiting.workflow, reason, 1).await?;
+            }
+            Row::Failed(e) => {
+                eprintln!("pinned-server: team {} bot {}: a waiting run did not start and is dropped: {e}", team.id, waiting.workflow);
+                db::take_waiting(&turn.held, waiting.id).await?;
+                db::count_skipped_on(&turn.held, team.id, &waiting.workflow, SkipReason::StartFailed, 1).await?;
+            }
+            // Its place is held now and its row granted, in one transaction (the turn's): the
+            // team's poller claims it and runs it whole, from the start.
+            // A bot with a live run the turn did not read keeps its event in line, ungranted, for that run's end.
+            Row::Grant { kind, subject } => {
+                let Some(run) = reserve(turn, team, &waiting.workflow, format!("trigger:{kind}"), &subject).await? else { continue };
+                db::grant(&turn.held, waiting.id, Uuid::parse_str(&run.id).map_err(|e| e.to_string())?).await?;
+                taken.granted = true;
+            }
+            // Taken from its line only once its place is held: a bot with a live run the turn did
+            // not read keeps it waiting for that run's end.
+            Row::Start { work, started_by, told } => {
+                let Some(run) = reserve(turn, team, &waiting.workflow, started_by, &work.subject).await? else { continue };
+                db::take_waiting(&turn.held, waiting.id).await?;
+                taken.starts.push((Uuid::parse_str(&run.id).map_err(|e| e.to_string())?, work, told));
+            }
+        }
     }
+}
+
+/// What a waiting row does when its turn comes, as `row_of` decided it from its bot's row.
+enum Row {
+    /// Its bot would not run it: dropped, counted under why.
+    Refused(SkipReason),
+    /// Its run could not start: dropped, counted `StartFailed`.
+    Failed(String),
+    /// A trigger's event: granted its place, for its team's poller to claim.
+    Grant { kind: String, subject: Subject },
+    /// A member's or an older trigger's run, with the trigger's work to report as started.
+    Start { work: pinned_core::connectors::Run, started_by: String, told: Option<pinned_core::connectors::Run> },
+}
+
+/// What waiting row `stored` of bot `workflow` does when its turn comes, from the reads of its
+/// bot's row and, for a run, of those of the bots its workflow calls. A read that failed, busy or
+/// not, is `Err`: it says nothing of whether the row would run.
+async fn row_of(hub: &Arc<Hub>, team: &TeamWorkflows, workflow: &str, stored: Stored) -> Result<Row, String> {
+    if let Stored::Event { kind, event, .. } = stored {
+        return Ok(match skip_reason_in(hub, team, workflow, true).await? {
+            Some(reason) => Row::Refused(reason),
+            None => Row::Grant { kind, subject: event.subject().clone() },
+        });
+    }
+    let Some(start) = stored.start(workflow) else { return Ok(Row::Failed("a waiting event was not readable".into())) };
+    let told = match &start {
+        Start::Trigger { work, .. } => Some(work.clone()),
+        Start::Member(_) => None,
+    };
+    if let Some(reason) = skip_reason_in(hub, team, workflow, matches!(start, Start::Trigger { .. })).await? {
+        return Ok(Row::Refused(reason));
+    }
+    if let Err(e) = bots::ready_in(hub, team, workflow).await? {
+        return Ok(Row::Failed(e));
+    }
+    Ok(match bots::work_of(team.connectors(), workflow, start) {
+        Ok((work, started_by)) => Row::Start { work, started_by, told },
+        Err(e) => Row::Failed(e),
+    })
 }
 
 /// What a turn whose read of the whole team failed answers (`next` logs it): no row was taken.
@@ -552,8 +581,8 @@ const TEAM_UNREAD: &str = "the team's workflows or keys could not be read, so ev
 
 /// The team's workflows, keys and settings, read once for a turn's takes: busy as it is, or
 /// `TEAM_UNREAD` for any other failure, whose own text is never logged: it may quote a stored value.
-async fn read_team(hub: &Arc<Hub>, team: &Account) -> Result<Arc<Connectors>, String> {
-    hub.connectors(team).await.map_err(|e| if e == crate::db::BUSY { e } else { TEAM_UNREAD.to_owned() })
+async fn read_team(hub: &Arc<Hub>, team: &Account) -> Result<TeamWorkflows, String> {
+    TeamWorkflows::read(hub, team).await.map_err(|e| if e == crate::db::BUSY { e } else { TEAM_UNREAD.to_owned() })
 }
 
 #[cfg(test)]

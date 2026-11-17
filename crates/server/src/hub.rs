@@ -890,9 +890,10 @@ impl Hub {
                     if data.len() as u64 > sync::FILE_LIMIT {
                         return Err(format!("{} is bigger than a synced file may be", file.entry.path));
                     }
-                    // Only a deletion is compared with what the hub holds.
+                    // A deletion is compared with what the hub holds through `agreed`, a history through `base`.
                     let agreed = file.agreed.filter(|_| file.entry.sha.is_empty());
-                    kept.push((file.entry, data, agreed));
+                    let base = file.base.filter(|_| file.entry.path == sync::HISTORY && !file.entry.sha.is_empty());
+                    kept.push((file.entry, data, agreed, base));
                 }
                 return json(self.db.sync_push(account.id, &project, kept).await?);
             }
@@ -914,7 +915,7 @@ impl Hub {
                     .into_iter()
                     .map(|(entry, data)| {
                         let data = (!entry.sha.is_empty()).then(|| base64::engine::general_purpose::STANDARD.encode(data));
-                        sync::File { entry, data, agreed: None }
+                        sync::File { entry, data, agreed: None, base: None }
                     })
                     .collect();
                 return json(files);

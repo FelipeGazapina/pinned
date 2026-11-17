@@ -1441,17 +1441,18 @@ pub async fn enqueue(held: &Client, team: Uuid, workflow: &str, start: &serde_js
         .map_err(err)
 }
 
-/// The oldest waiting event, not granted yet, of a bot of the team that has no live run, `first`'s
-/// before any other bot's. Read on `held`, the connection of the team's turn.
-pub async fn next_waiting(held: &Client, team: Uuid, first: &str) -> Result<Option<Waiting>, String> {
+/// The oldest waiting event, not granted yet, of a bot of the team that has no live run and is not
+/// one of `passed`, `first`'s before any other bot's. Read on `held`, the connection of the team's turn.
+pub async fn next_waiting(held: &Client, team: Uuid, first: &str, passed: &[String]) -> Result<Option<Waiting>, String> {
     let row = held
         .query_opt(
             &format!(
                 "select id, workflow, start from team_run_queue q where team = $1 and granted_at is null
+                 and workflow <> all($3::text[])
                  and not exists (select 1 from team_runs r where r.team = q.team and r.workflow = q.workflow and r.state in {LIVE})
                  order by (workflow = $2) desc, id limit 1"
             ),
-            &[&team, &first],
+            &[&team, &first, &passed],
         )
         .await
         .map_err(err)?;
@@ -1547,6 +1548,13 @@ pub async fn claim(db: &Db, team: Uuid, id: i64) -> Result<Option<(serde_json::V
         .await
         .map_err(err)?;
     Ok(row.map(|r| (r.get(0), r.get(1))))
+}
+
+/// One more of the team's turns found waiting event `id`'s bot unreadable: answers how many have.
+/// Written on `held`, in the team's turn.
+pub async fn unread_pass(held: &Client, id: i64) -> Result<i32, String> {
+    let row = held.query_one("update team_run_queue set unread_passes = unread_passes + 1 where id = $1 returning unread_passes", &[&id]).await.map_err(err)?;
+    Ok(row.get(0))
 }
 
 /// Takes waiting event `id` out of its line. Written on `held`, the connection of the team's
