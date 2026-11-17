@@ -100,6 +100,8 @@ pub fn changes(before: &Snapshot, now: &Snapshot) -> Vec<Change> {
 }
 
 const LISTED: usize = 5;
+/// How many unheard comments of one pull request a wake lists: the newest. Older ones are counted.
+const REMARKS_SHOWN: usize = 10;
 const SNIPPET: usize = 160;
 
 /// What claude reads when it wakes, in T3's words for its own wake.
@@ -122,10 +124,14 @@ pub fn message(now: &Snapshot, changes: &[Change]) -> String {
             Change::ChecksPassed(n) => lines.push(format!("- All {n} {} passed{commit}.", if *n == 1 { "check" } else { "checks" })),
             Change::Remarks(remarks) => {
                 lines.push(format!("- {} new {}:", remarks.len(), if remarks.len() == 1 { "comment" } else { "comments" }));
-                listed(&mut lines, remarks.iter().map(|r| {
+                let cut = remarks.len().saturating_sub(REMARKS_SHOWN);
+                if cut > 0 {
+                    lines.push(format!("  {cut} earlier {} not shown", if cut == 1 { "comment" } else { "comments" }));
+                }
+                lines.extend(remarks.iter().skip(cut).map(|r| {
                     let said = if r.said.chars().count() > SNIPPET { format!("{}...", r.said.chars().take(SNIPPET - 3).collect::<String>()) } else { r.said.clone() };
                     format!("  - {}: {}", if r.author.is_empty() { "someone" } else { &r.author }, if said.is_empty() { "reviewed".to_owned() } else { format!("\"{said}\"") })
-                }).collect());
+                }));
             }
             Change::Conflicting => lines.push(format!("- The branch now conflicts with {}.", if now.base.is_empty() { "its base" } else { &now.base })),
         }
@@ -133,6 +139,30 @@ pub fn message(now: &Snapshot, changes: &[Change]) -> String {
     lines.push(String::new());
     lines.push("Look into each item and act on it as your task requires. Pinned keeps watching and wakes you on the next change, so end your turn when you are done.".into());
     lines.join("\n")
+}
+
+/// Adds a change claude hasn't heard yet. A newer check run replaces the one waiting. Comments do
+/// not: every unheard one stays, oldest first and once each, and `message` shows the newest.
+fn add_pending(pending: &mut Vec<Change>, change: Change) {
+    let Change::Remarks(fresh) = change else {
+        pending.retain(|c| std::mem::discriminant(c) != std::mem::discriminant(&change));
+        pending.push(change);
+        return;
+    };
+    let mut remarks = vec![];
+    pending.retain(|c| match c {
+        Change::Remarks(unheard) => {
+            remarks.extend(unheard.iter().cloned());
+            false
+        }
+        _ => true,
+    });
+    for remark in fresh {
+        if !remarks.iter().any(|r: &Remark| r.key == remark.key) {
+            remarks.push(remark);
+        }
+    }
+    pending.push(Change::Remarks(remarks));
 }
 
 /// Each tab's watched pull requests, by URL: the last read, and what claude hasn't heard yet.
@@ -181,9 +211,7 @@ impl Watches {
         let Some(watch) = list.iter_mut().find(|w| w.url == url) else { return };
         if let Some(before) = &watch.seen {
             for change in changes(before, &now) {
-                // A newer comment list or check run replaces the one claude hasn't heard yet.
-                watch.pending.retain(|c| std::mem::discriminant(c) != std::mem::discriminant(&change));
-                watch.pending.push(change);
+                add_pending(&mut watch.pending, change);
             }
         }
         let open = now.open;
@@ -213,7 +241,8 @@ impl Watches {
     }
 
     /// Gives back a wake that was taken and not typed, for the next read. A change a later read
-    /// found of the same kind replaces the one given back, as it replaces a pending one. An open
+    /// found of the same kind replaces the one given back, as it replaces a pending one, except
+    /// comments, which join the ones given back. An open
     /// pull request is never taken off the watch, so one missing was unwatched meanwhile: its wake is dropped.
     pub fn put_back(&self, tab: &str, wake: Wake) {
         let mut tabs = self.tabs.lock().unwrap();
@@ -221,8 +250,9 @@ impl Watches {
         match list.iter_mut().find(|w| w.url == wake.url) {
             Some(watch) => {
                 let mut pending = wake.pending;
-                pending.retain(|old| !watch.pending.iter().any(|c| std::mem::discriminant(c) == std::mem::discriminant(old)));
-                pending.append(&mut watch.pending);
+                for change in std::mem::take(&mut watch.pending) {
+                    add_pending(&mut pending, change);
+                }
                 watch.pending = pending;
             }
             None if !wake.seen.open => list.push(Watch { url: wake.url, seen: Some(wake.seen), pending: wake.pending }),
@@ -328,5 +358,91 @@ mod tests {
         watches.put_back("tab-1", wake);
         assert_eq!(watches.of("tab-1"), Vec::<String>::new(), "not watched again");
         assert_eq!(watches.take_wake("tab-1"), None, "no wake");
+    }
+
+    const URL: &str = "https://github.com/o/r/pull/41";
+
+    /// The first `n` comments of a pull request, `said 1`, `said 2` and so on, by `monalisa`.
+    fn said(n: usize) -> Value {
+        Value::Array((1..=n).map(|i| json!({ "author": { "login": "monalisa" }, "body": format!("said {i}"), "createdAt": format!("2026-01-01T10:{i:02}:00Z") })).collect())
+    }
+
+    /// A watch of the pull request that has read it with no comments yet.
+    fn watched() -> Watches {
+        let watches = Watches::default();
+        watches.set("tab-1", URL, true);
+        watches.update("tab-1", URL, snapshot(&view(json!([]), json!([]), "MERGEABLE")));
+        watches
+    }
+
+    #[test]
+    fn an_unheard_comment_is_kept_when_a_newer_one_arrives() {
+        let watches = watched();
+        watches.update("tab-1", URL, snapshot(&view(json!([]), said(1), "MERGEABLE")));
+        watches.update("tab-1", URL, snapshot(&view(json!([]), said(2), "MERGEABLE")));
+        let woken = watches.take_wake("tab-1").unwrap();
+        assert!(woken.contains("- 2 new comments:\n  - monalisa: \"said 1\"\n  - monalisa: \"said 2\"\n"), "both, oldest first: {woken}");
+        assert!(!woken.contains("not shown"), "{woken}");
+    }
+
+    #[test]
+    fn a_wake_lists_the_last_ten_unheard_comments_and_counts_the_earlier_ones() {
+        let watches = watched();
+        for n in 1..=13 {
+            watches.update("tab-1", URL, snapshot(&view(json!([]), said(n), "MERGEABLE")));
+        }
+        let woken = watches.take_wake("tab-1").unwrap();
+        let comments: Vec<&str> = woken.lines().filter(|line| line.starts_with("  - monalisa:")).collect();
+        let expected: Vec<String> = (4..=13).map(|i| format!("  - monalisa: \"said {i}\"")).collect();
+        assert_eq!(comments, expected, "the newest ten, oldest first: {woken}");
+        assert_eq!(woken.lines().filter(|line| line.contains("earlier")).collect::<Vec<_>>(), ["  3 earlier comments not shown"], "{woken}");
+        let counted = woken.lines().position(|line| line.contains("3 earlier comments not shown")).unwrap();
+        assert_eq!(woken.lines().nth(counted + 1), Some("  - monalisa: \"said 4\""), "the count comes before the ten");
+    }
+
+    #[test]
+    fn ten_unheard_comments_are_all_listed_and_one_cut_is_counted_in_the_singular() {
+        let watches = watched();
+        watches.update("tab-1", URL, snapshot(&view(json!([]), said(10), "MERGEABLE")));
+        let woken = watches.take_wake("tab-1").unwrap();
+        assert_eq!(woken.lines().filter(|line| line.starts_with("  - monalisa:")).count(), 10, "{woken}");
+        assert!(!woken.contains("not shown"), "{woken}");
+        let watches = watched();
+        watches.update("tab-1", URL, snapshot(&view(json!([]), said(11), "MERGEABLE")));
+        let woken = watches.take_wake("tab-1").unwrap();
+        assert!(woken.contains("  1 earlier comment not shown\n  - monalisa: \"said 2\"\n"), "{woken}");
+    }
+
+    #[test]
+    fn a_newer_check_run_still_replaces_the_one_waiting() {
+        let watches = Watches::default();
+        watches.set("tab-1", URL, true);
+        let running = json!([{ "name": "build", "status": "IN_PROGRESS", "conclusion": "" }, { "name": "lint", "status": "IN_PROGRESS", "conclusion": "" }]);
+        let build_failed = json!([{ "name": "build", "status": "COMPLETED", "conclusion": "FAILURE" }, { "name": "lint", "status": "IN_PROGRESS", "conclusion": "" }]);
+        let both_failed = json!([{ "name": "build", "status": "COMPLETED", "conclusion": "FAILURE" }, { "name": "lint", "status": "COMPLETED", "conclusion": "FAILURE" }]);
+        watches.update("tab-1", URL, snapshot(&view(running, json!([]), "MERGEABLE")));
+        watches.update("tab-1", URL, snapshot(&view(build_failed, said(1), "MERGEABLE")));
+        watches.update("tab-1", URL, snapshot(&view(both_failed, said(1), "MERGEABLE")));
+        let woken = watches.take_wake("tab-1").unwrap();
+        assert!(woken.contains("- Checks failed on abc1234:\n  - lint\n"), "{woken}");
+        assert!(!woken.contains("  - build"), "the later failure replaced the earlier one: {woken}");
+        assert_eq!(woken.matches("Checks failed").count(), 1, "{woken}");
+    }
+
+    #[test]
+    fn a_wake_put_back_keeps_its_comments_and_adds_the_newer_ones_once_each() {
+        let watches = watched();
+        watches.update("tab-1", URL, snapshot(&view(json!([]), said(1), "MERGEABLE")));
+        let wake = watches.take_held_wake("tab-1").unwrap();
+        watches.update("tab-1", URL, snapshot(&view(json!([]), said(2), "MERGEABLE")));
+        watches.put_back("tab-1", wake);
+        let woken = watches.take_wake("tab-1").unwrap();
+        assert!(woken.contains("- 2 new comments:\n  - monalisa: \"said 1\"\n  - monalisa: \"said 2\"\n"), "{woken}");
+
+        // The same comment in both lists counts once.
+        let remark = |i: usize| Remark { key: format!("monalisa@{i}"), author: "monalisa".into(), said: format!("said {i}") };
+        let mut pending = vec![Change::Remarks(vec![remark(1), remark(2)]), Change::Conflicting];
+        add_pending(&mut pending, Change::Remarks(vec![remark(2), remark(3)]));
+        assert_eq!(pending, vec![Change::Conflicting, Change::Remarks(vec![remark(1), remark(2), remark(3)])]);
     }
 }

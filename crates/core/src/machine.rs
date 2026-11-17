@@ -5921,6 +5921,7 @@ impl Machine {
             self.delegates.release_notice(&[task.to_owned()]);
             return Err(error.for_person());
         }
+        self.delegates.confirm_notice(&[task.to_owned()]);
         Ok(())
     }
 
@@ -5951,6 +5952,7 @@ impl Machine {
             self.delegates.release_notice(&ids);
             self.delegates.release_reports(tab);
         } else {
+            self.delegates.confirm_notice(&ids);
             let typed = self.delegates.drop_claimed_reports(tab);
             self.sent.lock().unwrap().typed(&typed);
             self.emit_tabs();
@@ -6445,7 +6447,8 @@ impl Machine {
         if !wants {
             return Default::default();
         }
-        let Some((text, _)) = self.delegates.claim_notice(tab) else { return Default::default() };
+        let Some((text, ids)) = self.delegates.claim_notice(tab) else { return Default::default() };
+        self.delegates.confirm_notice(&ids);
         let typed = self.delegates.drop_claimed_reports(tab);
         (text, typed)
     }
