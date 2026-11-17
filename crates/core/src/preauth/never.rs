@@ -229,6 +229,11 @@ fn secret(c: &[String]) -> Option<&'static str> {
     None
 }
 
+/// Whether a component right under a Claude home is its settings or hooks.
+fn settings_or_hooks(n: &str) -> bool {
+    n == "hooks" || (n.starts_with("settings") && n.ends_with(".json"))
+}
+
 /// Whether writing the path changes what the agent may do, or what runs on this machine.
 fn self_grant(c: &[String]) -> bool {
     let Some(last) = c.last() else { return false };
@@ -238,7 +243,8 @@ fn self_grant(c: &[String]) -> bool {
     for (i, s) in c.iter().enumerate() {
         let next = c.get(i + 1).map(String::as_str);
         match s.as_str() {
-            ".claude" if next.is_some_and(|n| n == "hooks" || (n.starts_with("settings") && n.ends_with(".json"))) => return true,
+            // `$CLAUDE_CONFIG_DIR` the scan could not resolve is a Claude home all the same.
+            ".claude" | "$claude_config_dir" | "${claude_config_dir}" if next.is_some_and(settings_or_hooks) => return true,
             ".husky" => return true,
             ".git" => {
                 let hooks_or_config = |n: Option<&str>| matches!(n, Some("config" | "hooks" | "config.worktree"));
@@ -340,6 +346,7 @@ struct Lexer<'h> {
     c: Vec<char>,
     i: usize,
     home: &'h str,
+    claude_home: Option<&'h str>,
     out: Vec<Segment>,
     next_id: usize,
     pending: Vec<Pending>,
@@ -349,8 +356,8 @@ fn blank(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\r')
 }
 
-fn lex(src: &str, home: &str) -> Vec<Segment> {
-    let mut lx = Lexer::new(src, home, 0);
+fn lex(src: &str, home: &str, claude_home: Option<&str>) -> Vec<Segment> {
+    let mut lx = Lexer::new(src, home, claude_home, 0);
     lx.list(0, false);
     lx.out
 }
@@ -360,8 +367,18 @@ fn is_fetch(seg: &Segment) -> bool {
 }
 
 impl<'h> Lexer<'h> {
-    fn new(src: &str, home: &'h str, next_id: usize) -> Self {
-        Lexer { c: src.chars().collect(), i: 0, home, out: vec![], next_id, pending: vec![] }
+    fn new(src: &str, home: &'h str, claude_home: Option<&'h str>, next_id: usize) -> Self {
+        Lexer { c: src.chars().collect(), i: 0, home, claude_home, out: vec![], next_id, pending: vec![] }
+    }
+
+    /// The value of a variable the lexer knows: `HOME`, and `CLAUDE_CONFIG_DIR` when the session's
+    /// Claude home is known.
+    fn known(&self, name: &str) -> Option<&'h str> {
+        match name {
+            "HOME" => Some(self.home),
+            "CLAUDE_CONFIG_DIR" => self.claude_home,
+            _ => None,
+        }
     }
 
     fn peek(&self) -> Option<char> {
@@ -480,7 +497,7 @@ impl<'h> Lexer<'h> {
             }
             if !p.quoted {
                 // An unquoted body runs its `$(...)` and backticks, and nothing else of it.
-                let mut sub = Lexer::new(&body, self.home, self.next_id);
+                let mut sub = Lexer::new(&body, self.home, self.claude_home, self.next_id);
                 let mut w = WordBuilder::default();
                 sub.dq(&mut w, d + 1, false);
                 self.next_id = sub.next_id;
@@ -755,8 +772,8 @@ impl<'h> Lexer<'h> {
                     }
                     name.push(c);
                 }
-                if name == "HOME" {
-                    w.push_str(self.home);
+                if let Some(value) = self.known(&name) {
+                    w.push_str(value);
                 } else {
                     w.var();
                     w.push_str(&format!("${{{name}}}"));
@@ -769,8 +786,8 @@ impl<'h> Lexer<'h> {
                     self.i += 1;
                     name.push(c);
                 }
-                if name == "HOME" {
-                    w.push_str(self.home);
+                if let Some(value) = self.known(&name) {
+                    w.push_str(value);
                 } else {
                     w.var();
                     w.push_str(&format!("${name}"));
@@ -866,7 +883,7 @@ impl<'h> Lexer<'h> {
                 c => inner.push(c),
             }
         }
-        let mut sub = Lexer::new(&inner, self.home, self.next_id);
+        let mut sub = Lexer::new(&inner, self.home, self.claude_home, self.next_id);
         sub.list(d + 1, false);
         self.next_id = sub.next_id;
         w.word.fetch |= sub.out.iter().any(is_fetch);
@@ -1029,6 +1046,8 @@ struct Scan<'c, 'a> {
     ctx: &'c AskCtx<'a>,
     work: PathBuf,
     scratch: Option<PathBuf>,
+    /// The session's Claude home, canonical.
+    claude: Option<PathBuf>,
     hits: Vec<NeverHit>,
     tagged: bool,
     pushed: bool,
@@ -1038,9 +1057,10 @@ const DEV_OK: &[&str] = &["/dev/null", "/dev/stdout", "/dev/stderr", "/dev/stdin
 
 impl<'c, 'a> Scan<'c, 'a> {
     fn new(ctx: &'c AskCtx<'a>) -> Self {
-        let mut scan = Scan { ctx, work: PathBuf::new(), scratch: None, hits: vec![], tagged: false, pushed: false };
+        let mut scan = Scan { ctx, work: PathBuf::new(), scratch: None, claude: None, hits: vec![], tagged: false, pushed: false };
         scan.work = walk(&scan.abs(ctx.worktree));
         scan.scratch = ctx.scratch.map(|s| walk(&scan.abs(s)));
+        scan.claude = ctx.claude_home.map(|c| walk(&scan.abs(c)));
         scan
     }
 
@@ -1157,7 +1177,8 @@ impl<'c, 'a> Scan<'c, 'a> {
             return;
         }
         self.production(line);
-        let segs = lex(line, &self.home());
+        let claude_home = self.ctx.claude_home.map(|c| c.to_string_lossy().into_owned());
+        let segs = lex(line, &self.home(), claude_home.as_deref());
         let mut frames = vec![Frame { cwd, fetched: false }];
         for seg in &segs {
             while frames.len() <= seg.depth {
@@ -1264,8 +1285,16 @@ impl<'c, 'a> Scan<'c, 'a> {
         self.write_check(text, text, resolved, unresolved);
     }
 
+    /// Whether `p` is the settings or hooks of the session's own Claude home, which has no `.claude`
+    /// component when pinned runs an added account.
+    fn claude_home_grant(&self, p: &Path) -> bool {
+        let Some(home) = &self.claude else { return false };
+        let (home, p) = (path_comps(home), path_comps(p));
+        p.starts_with(&home) && p.get(home.len()).is_some_and(|n| settings_or_hooks(n))
+    }
+
     fn write_check(&mut self, raw: &str, shown: &str, path: Option<PathBuf>, unresolved: bool) {
-        let grant = self_grant(&comps(raw)) || path.as_deref().is_some_and(|p| self_grant(&path_comps(p)));
+        let grant = self_grant(&comps(raw)) || path.as_deref().is_some_and(|p| self_grant(&path_comps(p)) || self.claude_home_grant(p));
         if grant {
             self.hit(NeverItem::SelfGrant, format!("writes {}", short(shown)));
         }

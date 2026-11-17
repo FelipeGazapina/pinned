@@ -47,6 +47,8 @@ pub struct HookEnv {
     /// `CLAUDE_PROJECT_DIR`: where the session started, which a `cd` does not move.
     pub project_dir: Option<PathBuf>,
     pub home: PathBuf,
+    /// `CLAUDE_CONFIG_DIR`, when absolute: the session's own Claude home.
+    pub claude_home: Option<PathBuf>,
 }
 
 impl HookEnv {
@@ -55,6 +57,7 @@ impl HookEnv {
             team_box: team_call::in_team_box(),
             project_dir: std::env::var("CLAUDE_PROJECT_DIR").ok().filter(|v| !v.is_empty()).map(PathBuf::from),
             home: crate::machine::home(),
+            claude_home: std::env::var_os("CLAUDE_CONFIG_DIR").map(PathBuf::from).filter(|p| p.is_absolute()),
         }
     }
 }
@@ -83,7 +86,7 @@ pub fn decide(payload: &str, env: &HookEnv, ask: impl FnOnce(Message) -> Result<
     let worktree = std::fs::canonicalize(&worktree).unwrap_or(worktree);
     let current_branch = repo_top(&cwd).and_then(|top| branch(&top));
     let default_branch = repo_top(&cwd).and_then(|top| default_branch(&top)).unwrap_or_else(|| "main".into());
-    let ctx = AskCtx { worktree: &worktree, scratch: None, home: &env.home, claude_home: None, cwd: &cwd, default_branch: &default_branch, current_branch: current_branch.as_deref() };
+    let ctx = AskCtx { worktree: &worktree, scratch: None, home: &env.home, claude_home: env.claude_home.as_deref(), cwd: &cwd, default_branch: &default_branch, current_branch: current_branch.as_deref() };
     let hit = never(&ctx, &tool_ask)?;
     let tool = hook["tool_name"].as_str()?;
     if hides_command(&step_text(tool, &tool_ask, input)) {
@@ -213,7 +216,7 @@ mod tests {
     use std::cell::RefCell;
 
     fn env(team_box: bool) -> HookEnv {
-        HookEnv { team_box, project_dir: Some(PathBuf::from("/work/site")), home: PathBuf::from("/home/box") }
+        HookEnv { team_box, project_dir: Some(PathBuf::from("/work/site")), home: PathBuf::from("/home/box"), claude_home: None }
     }
 
     fn payload(tool: &str, input: Value) -> String {
@@ -248,6 +251,23 @@ mod tests {
         assert_eq!(choices, ["Go ahead", "Don't"]);
         assert_eq!(question, "deploy: vercel deploy --prod --token vca_abc");
         assert_eq!(step, Some(step_hash("Bash", &json!({ "command": "vercel deploy --prod --token vca_abc" }))));
+    }
+
+    #[test]
+    fn the_sessions_claude_home_from_the_env_guards_its_settings() {
+        let write = payload("Write", json!({ "file_path": "/accounts/work/settings.json", "content": "{}" }));
+        let question = |claude_home: Option<&str>| {
+            let env = HookEnv { claude_home: claude_home.map(PathBuf::from), ..env(true) };
+            let seen = RefCell::new(None);
+            decide(&write, &env, |m| {
+                *seen.borrow_mut() = Some(m);
+                Ok(r#"{"id":"k1"}"#.to_owned())
+            });
+            let Some(Message::AskPeople { question, .. }) = seen.into_inner() else { panic!("no ask") };
+            question
+        };
+        assert!(question(Some("/accounts/work")).starts_with("self-grant: Write "));
+        assert!(question(None).starts_with("write outside the worktree: "));
     }
 
     #[test]
