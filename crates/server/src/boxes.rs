@@ -4951,10 +4951,14 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_scan_whose_scanner_is_missing_is_a_refusal_and_pushes_nothing() {
+        use std::os::unix::fs::PermissionsExt;
         let value = format!("plain-{SHAPELESS}");
         let run = RescueRun::new();
         run.commit_all(&[("notes.txt", &format!("{value}\n"))], "notes");
         let path = path_without_awk(&run);
+        // cat, the scan's first step, slowed: git has logged all before the scan finds no awk, as on a busy box.
+        std::fs::write(run.bin.join("cat"), "#!/bin/sh\nsleep 0.3\nexec /bin/cat \"$@\"\n").unwrap();
+        std::fs::set_permissions(run.bin.join("cat"), std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(run.rescue_with(&[("FAKE_API_TOKEN", &value), ("PATH", &path)]), "pinned-rescue: refused secret\npinned-rescue: done\n");
         assert_eq!(run.remote_branches(), "refs/heads/main\n");
         assert!(run.writes().iter().all(|w| !w.starts_with(PUSH)), "{:?}", run.writes());
