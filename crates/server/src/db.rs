@@ -2597,6 +2597,31 @@ mod tests {
         assert_eq!(needs("create index if not exists tasks_due on tasks (next_at) where enabled and next_at is not null"), Needs::Index("tasks_due"));
     }
 
+    /// Against the test Postgres (`PINNED_TEST_POSTGRES`, as the hub's tests use): a boot whose
+    /// column has no default skips `drop default`, so it takes no lock that waits on another
+    /// session's, and one whose column has a default runs it.
+    #[tokio::test]
+    async fn a_boot_drops_a_columns_default_only_when_it_has_one() {
+        let base = std::env::var("PINNED_TEST_POSTGRES").unwrap_or_else(|_| "postgres://pinned@127.0.0.1:5499".into());
+        let connect = || async {
+            let (client, connection) = tokio_postgres::connect(&format!("{base}/pinned"), NoTls).await.unwrap();
+            tokio::spawn(connection);
+            client
+        };
+        let (boot, other) = (connect().await, connect().await);
+        let schema = format!("no_default_{}", uuid::Uuid::new_v4().simple());
+        boot.batch_execute(&format!("create schema {schema}; set search_path to {schema}; set lock_timeout = 2000; create table team_runs (id int, model_usd double precision default 0)")).await.unwrap();
+        let drop = "alter table team_runs alter column model_usd drop default";
+        assert!(needed(&boot, &needs(drop)).await.unwrap(), "a default to drop");
+        create(&boot, drop).await.unwrap();
+        assert!(!needed(&boot, &needs(drop)).await.unwrap(), "no default left");
+        other.batch_execute(&format!("begin; lock table {schema}.team_runs in access share mode")).await.unwrap();
+        let skipped = create(&boot, drop).await;
+        other.batch_execute("rollback").await.unwrap();
+        boot.batch_execute(&format!("drop schema {schema} cascade")).await.unwrap();
+        assert!(skipped.is_ok(), "with no default the boot runs no statement that waits on the other session's lock: {skipped:?}");
+    }
+
     #[test]
     fn no_schema_statement_alters_a_table_in_more_than_one_clause() {
         // The boot checks each statement on its own (`needs`): a second clause after a comma
