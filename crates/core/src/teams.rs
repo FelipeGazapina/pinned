@@ -374,8 +374,8 @@ pub struct Run {
     /// the box's still shows the box's. Its `BotLimits::usd` caps this and `model_usd` together.
     #[serde(default)]
     pub cost_usd: f64,
-    /// The model cost its box's node reported, apart from `cost_usd`: 0 from a node that never
-    /// reports one. None from an older hub, which sends none.
+    /// The model cost its box's node reported, apart from `cost_usd`. None until the node first
+    /// reports one, and from an older hub, which sends none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_usd: Option<f64>,
     /// Seconds of work: from `started_at` to its end (or now), less `waiting_secs`. A run's

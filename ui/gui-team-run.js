@@ -21,7 +21,7 @@ function tcDuration(secs) {
 const tcLimitCall = (run) => (["working", "waiting", "taken_over"].includes(run.state) ? tcStore.calls.find((c) => c.run === run.id && tcOpen(c) && c.situation === "on_limit") ?? null : null);
 
 /** What the run has used, each on its own line: active time, waiting time (which no limit counts) and its cost, the box's
- * (`cost_usd`) and the model's (`model_usd`) apart. An older hub sends no `model_usd`: its line stays the box's alone. */
+ * (`cost_usd`) and the model's (`model_usd`) apart. No `model_usd` comes for a run its box never reported, nor from an older hub: its line stays the box's alone. */
 function tcRunFactsHtml(run) {
   const fact = (key, value, note = "") => `<p class="tc-fact"><span class="tc-fact-key">${key}:</span> <span class="tc-fact-value">${esc(value)}</span>${note ? ` <span class="tc-fact-note">(${esc(note)})</span>` : ""}</p>`;
   const usd = (n) => `US$ ${Number(n || 0).toFixed(2)}`;

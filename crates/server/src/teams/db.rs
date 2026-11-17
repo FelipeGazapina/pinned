@@ -673,7 +673,7 @@ fn run_of(r: &Row) -> Run {
         state: RunState::parse(r.get(2)).unwrap_or(RunState::Failed),
         controller: r.get::<_, Option<Uuid>>(3).map(|c| c.to_string()),
         cost_usd: r.get(4),
-        model_usd: Some(r.get(11)),
+        model_usd: r.get(11),
         active_secs: r.get::<_, i64>(5).max(0) as u64,
         started_at: r.get(6),
         ended_at: r.get(7),
@@ -1624,7 +1624,7 @@ pub async fn record_model_cost(db: &Db, team: Uuid, machine: &str, workflow: &st
         .client()
         .await?
         .execute(
-            &format!("update team_runs set model_usd = greatest(model_usd, $5) where team = $1 and box = $2 and workflow = $3 and subject = $4 and state in {LIVE}"),
+            &format!("update team_runs set model_usd = greatest(coalesce(model_usd, 0), $5) where team = $1 and box = $2 and workflow = $3 and subject = $4 and state in {LIVE}"),
             &[&team, &machine, &workflow, &json(subject)?, &usd],
         )
         .await
@@ -1656,10 +1656,10 @@ pub async fn runs_at_limit(db: &Db, most: &BotLimits) -> Result<Vec<AtLimit>, St
         .await?
         .query(
             &format!(
-                "select r.team, r.id, b.limits, coalesce((r.cost_usd + r.model_usd)::numeric >= {usd}, false), b.workflow
+                "select r.team, r.id, b.limits, coalesce((r.cost_usd + coalesce(r.model_usd, 0))::numeric >= {usd}, false), b.workflow
                  from team_runs r join team_bots b on b.team = r.team and b.workflow = r.workflow
                  where r.state in ('working', 'taken_over') and not r.reserved
-                   and ((r.cost_usd + r.model_usd)::numeric >= {usd}
+                   and ((r.cost_usd + coalesce(r.model_usd, 0))::numeric >= {usd}
                         or extract(epoch from now() - coalesce(r.opened_at, r.started_at))::bigint - r.waiting_secs >= {minutes} * 60)
                    and not exists (select 1 from team_calls c where c.run = r.id and c.situation = 'on_limit' and c.opened_by_hub)"
             ),
