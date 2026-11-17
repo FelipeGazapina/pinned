@@ -335,6 +335,20 @@ pub fn opening(file: &Path) -> Option<String> {
     })
 }
 
+/// The first line of the API or stream error a turn ended on, when `items` ends on that error, scrubbed of
+/// keys, paths and e-mail addresses and at most `ERROR_CHARS` characters. None when the last item is anything else.
+pub fn turn_error(items: &[Item]) -> Option<String> {
+    let Some(Item::Error { text, .. }) = items.last() else { return None };
+    let first = text.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or(STOPPED_ON_ERROR);
+    let clean = crate::reports::scrub(first, &crate::reports::Context::default()).unwrap_or_else(|_| STOPPED_ON_ERROR.to_owned());
+    Some(clip(&clean, ERROR_CHARS - 1))
+}
+
+/// The most characters of a turn's error line that a session shows, counting the cut-off mark.
+const ERROR_CHARS: usize = 200;
+/// What a session shows when its error line cannot be shown as it is.
+const STOPPED_ON_ERROR: &str = "The turn stopped on an API error.";
+
 /// The latest tool call among `items` that has no result yet, as its name and one-line summary:
 /// what a session blocked on a permission prompt or a question waits on.
 pub fn pending_tool(items: &[Item]) -> Option<(&str, &str)> {

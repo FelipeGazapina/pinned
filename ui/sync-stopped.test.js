@@ -162,3 +162,71 @@ test("a stopped machine's row carries the reason and a Start sync over button", 
 test("a syncing machine's row has no notice", () => {
   assert.doesNotMatch(entry(null), /sync-stopped|reset-sync/);
 });
+
+const limitNotice = "Sync stopped: your synced projects would pass 1024 MB. Nothing was lost; this machine keeps everything.";
+
+test("the sidebar shows the limit notice once and drops it when a push is taken", () => {
+  const syncAlert = { innerHTML: "", hidden: true };
+  const context = run(`${escFn}\n${fn(sidebarSrc, "renderSyncAlert")}`, {
+    account: { machine_id: "this-mac" },
+    machines: new Map([
+      ["local", { syncLimit: limitNotice }],
+      ["box", { view: { name: "box" }, syncLimit: limitNotice }],
+    ]),
+    syncAlert,
+    icon: (name) => `<i data-icon="${name}"></i>`,
+  });
+  context.renderSyncAlert();
+  assert.equal(syncAlert.innerHTML, `<i data-icon="circle-alert"></i><span>${limitNotice}</span>`);
+  assert.equal(syncAlert.innerHTML.split(limitNotice).length - 1, 1);
+  assert.equal(syncAlert.hidden, false);
+  context.machines.get("local").syncLimit = null;
+  context.machines.get("box").syncLimit = null;
+  context.renderSyncAlert();
+  assert.equal(syncAlert.innerHTML, "");
+  assert.equal(syncAlert.hidden, true);
+});
+
+test("a machine's limit answer becomes its notice and redraws", async () => {
+  const drawn = [];
+  const context = run(fn(mainSrc, "refreshSyncLimit"), {
+    machines: new Map([["box", { view: { name: "box" } }]]),
+    callOn: (machine, call) => (call.cmd === "sync_limit" ? Promise.resolve(limitNotice) : Promise.reject(new Error(call.cmd))),
+    render: () => drawn.push("render"),
+  });
+  await context.refreshSyncLimit("box");
+  assert.equal(context.machines.get("box").syncLimit, limitNotice);
+  assert.deepEqual(drawn, ["render"]);
+});
+
+test("a null limit answer clears the notice, and an old node keeps the last one", async () => {
+  const cleared = run(fn(mainSrc, "refreshSyncLimit"), {
+    machines: new Map([["box", { view: { name: "box" }, syncLimit: limitNotice }]]),
+    callOn: () => Promise.resolve(null),
+    render: () => {},
+  });
+  await cleared.refreshSyncLimit("box");
+  assert.equal(cleared.machines.get("box").syncLimit, null);
+  const kept = run(fn(mainSrc, "refreshSyncLimit"), {
+    machines: new Map([["box", { view: { name: "box" }, syncLimit: limitNotice }]]),
+    callOn: () => Promise.reject(new Error("unknown variant `sync_limit`")),
+    render: () => {},
+  });
+  await kept.refreshSyncLimit("box");
+  assert.equal(kept.machines.get("box").syncLimit, limitNotice);
+});
+
+test("the limit poll asks only the machines that are online", () => {
+  const asked = [];
+  const context = run(fn(mainSrc, "refreshSyncLimits"), {
+    LOCAL: "local",
+    machines: new Map([
+      ["local", { hubView: { id: "this-mac", online: true } }],
+      ["box", { view: { id: "box", online: true } }],
+      ["old", { view: { id: "old", online: false } }],
+    ]),
+    refreshSyncLimit: (machine) => asked.push(machine),
+  });
+  context.refreshSyncLimits();
+  assert.deepEqual(asked, ["local", "box"]);
+});

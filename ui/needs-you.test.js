@@ -106,6 +106,14 @@ test("an approval carries its command, Decline, Approve and Open; one whose menu
   assert.deepEqual([later.head, later.pre, later.buttons], ["Approval api · macbook", "psql -f orders.sql", ["open Open"]]);
 });
 
+test("a turn that stopped on an API error shows its error with Try again and Dismiss, and no answer box", () => {
+  const error = "API Error: Connection lost mid-response. The response above may be incomplete.";
+  const broke = tab("Port the grid", { status: "needs-input", interrupted: true, message: "Claude is waiting for your input", stopped_on_error: error, updated: S - 200 }, { machine: "book", project: "site" });
+  const run = page({ items: [item(broke, "stopped", { error })] });
+  const card = shown(run, `thread:${broke.key}`);
+  assert.deepEqual([card.head, card.name, card.line, card.typed, card.buttons], ["Stopped on error site · macbook", "Port the grid", error, null, ["continue Try again", "dismiss Dismiss"]]);
+});
+
 test("a question offers one button per option and the typed answer; a multi-step set only Open", () => {
   const hero = tab("Launch page hero", { status: "needs-input", updated: S - 540 }, { machine: "book", project: "site" });
   const set = tab("Pick the sizes", { status: "needs-input", updated: S - 60 });
