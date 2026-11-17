@@ -898,6 +898,7 @@ mod tests {
                 permission_mode: None,
                 cut_by_sleep: None,
                 spawned_by: None,
+                read_only: false,
             }
         };
         pinned_core::sessions::save(&dir.join("sessions.json"), &(1..=8).map(|n| saved(&format!("s{n}"))).collect::<Vec<_>>()).unwrap();

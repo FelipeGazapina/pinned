@@ -824,6 +824,7 @@ impl Tab {
             model: self.model.clone(),
             permission_mode: self.permission_mode.clone().filter(|_| !self.permission_unknown),
             spawned_by: None,
+            read_only: self.read_only,
         })
     }
 
@@ -4767,8 +4768,11 @@ impl Machine {
                 // The transcript is in its account's home: with that account gone, nothing can resume it.
                 let account = self.account_for(Some(&s.account), &s.cwd).ok()?;
                 let (launch, resume_at) = s.reopen(now, account.provider);
+                // A read-only worker resumes in the mode it started in, so its children stay read-only.
+                let read_only = s.read_only && account.provider == Provider::Claude;
+                let mode = if read_only { Some(crate::delegate::READ_ONLY_MODE.to_owned()) } else { s.permission_mode };
                 let id = self.add_tab(s.cwd, account, launch, s.env, s.bypass, Some(s.session));
-                let _ = self.tab(&id, |t| (t.interrupted, t.resume_at, t.held_at_limit, t.model, t.permission_mode, t.asleep, t.cut_by_sleep) = (s.interrupted, resume_at, s.held, s.model, s.permission_mode, !s.interrupted, s.cut_by_sleep));
+                let _ = self.tab(&id, |t| (t.interrupted, t.resume_at, t.held_at_limit, t.model, t.permission_mode, t.read_only, t.asleep, t.cut_by_sleep) = (s.interrupted, resume_at, s.held, s.model, mode, read_only, !s.interrupted, s.cut_by_sleep));
                 Some((id, s.spawned_by))
             })
             .collect();
@@ -11149,6 +11153,7 @@ echo '{"type":"result","result":"ok"}'
                 permission_mode: Some("plan".into()),
                 cut_by_sleep: None,
                 spawned_by: None,
+                read_only: false,
             }],
         )
         .unwrap();
