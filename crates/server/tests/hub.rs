@@ -6386,13 +6386,12 @@ fn box_home_with_work(name: &str) -> (PathBuf, PathBuf) {
     (remote, home)
 }
 
-/// What a rescue of `box_home_with_work`'s clone adds to its task's end, the repository taken as public.
-fn rescue_said(task: &str) -> String {
-    format!("Unpushed work was saved to branch wip/rescue/{task}. 1 uncommitted file was not rescued because the repository is public.")
-}
+/// What a box's end adds when GitHub did not confirm its repository private: here, with no GitHub
+/// token connected, no one asked it.
+const NOT_CONFIRMED_PRIVATE: &str = "Unpushed work on this box was not saved: the repository is not confirmed private.";
 
 #[test]
-fn a_worker_box_offline_past_the_grace_pushes_its_unpushed_work_to_a_rescue_branch_before_its_box_goes() {
+fn a_worker_box_offline_past_the_grace_whose_repository_is_not_confirmed_private_goes_with_nothing_pushed() {
     let hub = TestHub::start_with_boxes("rbox_rescue", Signup::Open, fast());
     let mut ana = BoxAccount::new(&hub);
     let mac_dir = temp("rbox-rescue-mac");
@@ -6407,18 +6406,16 @@ fn a_worker_box_offline_past_the_grace_pushes_its_unpushed_work_to_a_rescue_bran
 
     drop_box_node(&hub.boxes, &id);
     wait_for("the box to go", || hub.boxes.live().is_empty());
-    assert_eq!(box_ends(&hub.boxes), vec![format!("rescue {id}"), format!("delete {id}")], "one rescue, before the delete");
+    assert_eq!(box_ends(&hub.boxes), vec![format!("delete {id}")], "no rescue script reaches the box, only its delete");
     let status = task_status(&mac_dir, &captain, &task);
-    let said = format!("Upstash Box: its box went offline and did not come back within 1 s. {}", rescue_said(&task));
+    let said = format!("Upstash Box: its box went offline and did not come back within 1 s. {NOT_CONFIRMED_PRIVATE}");
     assert_eq!((status["workState"].as_str(), status["error"].as_str()), (Some("failed"), Some(said.as_str())), "{status}");
-    let branch = format!("refs/heads/wip/rescue/{task}");
-    assert_eq!(git_at(&remote, &remote, &["show", &format!("{branch}:notes.txt")]), "committed\n", "the branch holds the worker's commit, not its uncommitted change");
-    assert_eq!(git_at(&remote, &remote, &["log", "-1", "--format=%s", &branch]), "worker's commit\n");
+    assert_eq!(git_at(&remote, &remote, &["for-each-ref", "--format=%(refname)"]), "refs/heads/main\n", "nothing was pushed");
     wait_for("the row to go", || ana.rows(&hub) == 0);
 }
 
 #[test]
-fn a_worker_box_that_cannot_be_reached_for_its_rescue_still_goes_and_its_end_says_the_work_was_not_saved() {
+fn a_worker_box_whose_repository_is_not_confirmed_private_is_not_reached_for_a_rescue_and_goes() {
     let hub = TestHub::start_with_boxes("rbox_unreached", Signup::Open, fast());
     let mut ana = BoxAccount::new(&hub);
     let mac_dir = temp("rbox-unreached-mac");
@@ -6432,15 +6429,15 @@ fn a_worker_box_that_cannot_be_reached_for_its_rescue_still_goes_and_its_end_say
 
     drop_box_node(&hub.boxes, &id);
     wait_for("the box to go", || hub.boxes.live().is_empty());
-    assert_eq!(box_ends(&hub.boxes), vec![format!("rescue {id}"), format!("delete {id}")], "one try, then the delete");
+    assert_eq!(box_ends(&hub.boxes), vec![format!("delete {id}")], "no try, only the delete");
     let status = task_status(&mac_dir, &captain, &task);
-    let said = "Upstash Box: its box went offline and did not come back within 1 s. Unpushed work could not be saved: the box could not be reached.";
-    assert_eq!((status["workState"].as_str(), status["error"].as_str()), (Some("failed"), Some(said)), "{status}");
+    let said = format!("Upstash Box: its box went offline and did not come back within 1 s. {NOT_CONFIRMED_PRIVATE}");
+    assert_eq!((status["workState"].as_str(), status["error"].as_str()), (Some("failed"), Some(said.as_str())), "{status}");
     wait_for("the row to go", || ana.rows(&hub) == 0);
 }
 
 #[test]
-fn a_box_worker_whose_turn_ends_with_unpushed_work_has_it_saved_and_named_in_its_end() {
+fn a_box_worker_whose_turn_ends_with_unpushed_work_in_a_repository_not_confirmed_private_has_nothing_pushed_and_its_end_says_so() {
     let hub = TestHub::start_with_boxes("rbox_turn_rescue", Signup::Open, fast());
     let mut ana = BoxAccount::new(&hub);
     let mac_dir = temp("rbox-turn-rescue-mac");
@@ -6459,14 +6456,14 @@ fn a_box_worker_whose_turn_ends_with_unpushed_work_has_it_saved_and_named_in_its
     hook(&box_dir, json!({ "kind": "agent", "status": "working", "tab": child.id }));
     hook(&box_dir, json!({ "kind": "agent", "status": "done", "tab": child.id }));
     wait_for("the box to go once its task ended", || hub.boxes.live().is_empty());
-    assert_eq!(box_ends(&hub.boxes), vec![format!("rescue {id}"), format!("delete {id}")], "one rescue, before the delete");
+    assert_eq!(box_ends(&hub.boxes), vec![format!("delete {id}")], "no rescue script reaches the box, only its delete");
     let status = task_status(&mac_dir, &captain, &task);
-    assert_eq!((status["workState"].as_str(), status["summary"].as_str()), (Some("result_available"), Some(rescue_said(&task).as_str())), "{status}");
-    assert_eq!(git_at(&remote, &remote, &["show", &format!("refs/heads/wip/rescue/{task}:notes.txt")]), "committed\n");
+    assert_eq!((status["workState"].as_str(), status["summary"].as_str()), (Some("result_available"), Some(NOT_CONFIRMED_PRIVATE)), "{status}");
+    assert_eq!(git_at(&remote, &remote, &["for-each-ref", "--format=%(refname)"]), "refs/heads/main\n", "nothing was pushed");
 }
 
 #[test]
-fn a_cancelled_box_task_names_its_rescue_in_its_error() {
+fn a_cancelled_box_task_whose_repository_is_not_confirmed_private_says_so_in_its_error_and_pushes_nothing() {
     let hub = TestHub::start_with_boxes("rbox_cancel_rescue", Signup::Open, fast());
     let mut ana = BoxAccount::new(&hub);
     let mac_dir = temp("rbox-cancel-rescue-mac");
@@ -6481,30 +6478,28 @@ fn a_cancelled_box_task_names_its_rescue_in_its_error() {
 
     let cancelled = on_sock(&mac_dir, json!({ "kind": "task-cancel", "tab": captain, "id": task, "reason": "not now" })).unwrap();
     assert_eq!(cancelled["workState"], "cancelled", "{cancelled}");
-    let error = cancelled["error"].as_str().unwrap_or_default();
-    assert!(error.ends_with(&rescue_said(&task)), "the rescue's notice is in the cancelled task's error: {cancelled}");
+    assert_eq!(cancelled["error"].as_str(), Some(format!("not now. {NOT_CONFIRMED_PRIVATE}").as_str()), "the notice is in the cancelled task's error: {cancelled}");
     wait_for("the cancelled box to go", || hub.boxes.live().is_empty() && ana.rows(&hub) == 0);
-    assert_eq!(box_ends(&hub.boxes), vec![format!("rescue {id}"), format!("delete {id}")], "one rescue, before the delete");
-    assert_eq!(git_at(&remote, &remote, &["show", &format!("refs/heads/wip/rescue/{task}:notes.txt")]), "committed\n");
+    assert_eq!(box_ends(&hub.boxes), vec![format!("delete {id}")], "no rescue script reaches the box, only its delete");
+    assert_eq!(git_at(&remote, &remote, &["for-each-ref", "--format=%(refname)"]), "refs/heads/main\n", "nothing was pushed");
 }
 
 #[test]
-fn a_worker_box_is_not_deleted_while_its_rescue_runs() {
+fn a_worker_box_whose_repository_is_not_confirmed_private_has_no_rescue_to_wait_for_before_its_delete() {
     let hub = TestHub::start_with_boxes("rbox_rescue_held", Signup::Open, fast());
     let mut ana = BoxAccount::new(&hub);
     let mac_dir = temp("rbox-rescue-held-mac");
     let (_mac, _, captain) = mac_with_captain(&hub, &mut ana, &mac_dir);
     let (remote, home) = box_home_with_work("rbox-rescue-held");
     hub.boxes.state.lock().unwrap().rescue_home = Some(home);
-    let started = delegate_from(&mac_dir, &captain, json!({ "task": "Run the slow suite.", "title": "Slow suite", "target": { "box": true } })).unwrap();
-    let task = started["taskId"].as_str().unwrap().to_owned();
+    delegate_from(&mac_dir, &captain, json!({ "task": "Run the slow suite.", "title": "Slow suite", "target": { "box": true } })).unwrap();
     wait_for("the worker thread running on the box", || box_tabs(&hub.boxes).iter().any(|t| t.role == Some(Role::Worker) && t.running));
     ana.client.wait_machines(&[("mac", true), ("Box · Slow suite", true)]);
     let id = hub.boxes.live()[0].clone();
     let machine = ana.box_machine();
 
-    // The app removes the box's machine, whose end holds while its rescue runs; the reaper's passes
-    // meanwhile find the row ending and end it too.
+    // The app removes the box's machine. A rescue script would hold there, but none is sent: the
+    // delete comes at once.
     hub.boxes.state.lock().unwrap().rescue_held = true;
     let (url, token) = (hub.url.clone(), ana.token.clone());
     let removing = std::thread::spawn(move || {
@@ -6512,16 +6507,10 @@ fn a_worker_box_is_not_deleted_while_its_rescue_runs() {
         app.wait("hello", |f| f["type"] == "hello");
         app.hub(json!({ "cmd": "remove_machine", "id": machine }))
     });
-    wait_for("the rescue to start", || box_ends(&hub.boxes) == vec![format!("rescue {id}")]);
-    std::thread::sleep(Duration::from_millis(1000));
-    assert_eq!(box_ends(&hub.boxes), vec![format!("rescue {id}")], "no delete reaches the box while its rescue runs");
-    assert_eq!(hub.boxes.live(), vec![id.clone()]);
-
-    hub.boxes.state.lock().unwrap().rescue_held = false;
     removing.join().unwrap().unwrap();
     wait_for("the box to go", || hub.boxes.live().is_empty());
-    assert_eq!(box_ends(&hub.boxes), vec![format!("rescue {id}"), format!("delete {id}")], "the delete comes once the rescue returned");
-    assert_eq!(git_at(&remote, &remote, &["show", &format!("refs/heads/wip/rescue/{task}:notes.txt")]), "committed\n");
+    assert_eq!(box_ends(&hub.boxes), vec![format!("delete {id}")], "no rescue script reaches the box, only its delete");
+    assert_eq!(git_at(&remote, &remote, &["for-each-ref", "--format=%(refname)"]), "refs/heads/main\n", "nothing was pushed");
     wait_for("the row to go", || ana.rows(&hub) == 0);
 }
 
