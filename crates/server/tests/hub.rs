@@ -9465,6 +9465,22 @@ fn an_extend_box_ask_stored_as_its_box_ends_is_closed_and_refused() {
     assert_eq!(twin_runtime.block_on(ending).unwrap(), Ok(true));
 }
 
+/// A closed extend ask has its outcome from the moment it is closed: the sweep a restarted hub runs
+/// over decisions it left without one leaves it denied with the box's end, never failed.
+#[test]
+fn a_closed_extend_box_ask_stays_denied_with_the_boxs_end_after_a_hub_restart() {
+    let ExtendSetup { mut hub, ana, mut owner, machine, .. } = extend_setup("extend_closed_restart");
+    let asked = extend_as(&ana.dir, &ana.tab, &machine, 0.5, None).unwrap();
+    assert_eq!(asked["outcome"], "pending", "{asked}");
+    owner.hub(json!({ "cmd": "remove_machine", "id": machine })).unwrap();
+    let id = asked["id"].as_str().unwrap();
+    // Decided long enough ago for the sweep to look at it, were it still without an outcome.
+    admin_on(&hub.database, &format!("update agent_confirmations set decided_at = now() - interval '1 hour' where id = '{id}' and decided_at is not null"));
+    hub.restart();
+    let reads = format!("select count(*) from agent_confirmations where id = '{id}' and decided_at is not null and approved = false and outcome = '{BOX_ENDED}'");
+    assert_eq!(count_on(&hub.database, &reads), 1, "the ask is still denied with the box's end");
+}
+
 /// Asks for different boxes of one account made at once, with one place left under the account's
 /// cap: each box's turn lets them in together, the account's lock lets exactly one wait.
 #[test]
