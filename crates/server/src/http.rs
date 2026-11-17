@@ -1379,9 +1379,14 @@ async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: 
     account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
 }
 
-/// The log line for a machine's hub call the hub refused or failed.
-fn failed_call_line(machine: &str, _tab: Option<&str>, error: &str) -> String {
-    format!("pinned-server: machine {machine}'s hub call failed: {error}")
+/// The log line for a machine's hub call the hub refused or failed, with the tab the machine found
+/// it to come from. The machine chooses the tab's text, so one that is not a plain id is not
+/// written as it came.
+fn failed_call_line(machine: &str, tab: Option<&str>, error: &str) -> String {
+    let Some(tab) = tab else { return format!("pinned-server: machine {machine}'s hub call failed: {error}") };
+    let plain = !tab.is_empty() && tab.len() <= 64 && tab.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    let tab = if plain { tab } else { "(unreadable id)" };
+    format!("pinned-server: machine {machine}'s hub call from tab {tab} failed: {error}")
 }
 
 #[cfg(test)]
