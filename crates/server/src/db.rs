@@ -1851,19 +1851,31 @@ impl Db {
         Ok(self.client().await?.query_one(query, &[&account]).await.map_err(err)?.get(0))
     }
 
-    /// Closes the account's extend_box asks still waiting for the box on `machine`, which ended,
-    /// matched as `waiting_extends` matches them: each reads denied with `EXTEND_BOX_ENDED`, an
-    /// outcome the sweep of interrupted decisions leaves as it is. It runs after the box's move to
-    /// ending is committed, so an ask stored meanwhile is either closed here or finds the box ending
-    /// once stored, and closes itself. Answers the asks it closed.
+    /// Closes the account's extend_box asks still waiting for the box on `machine`, which ended. An
+    /// ask names its box as its args hold it, in any spelling `Uuid::parse_str` reads, so the asks
+    /// are matched by the id they parse to, as the turn count in `surface` matches them. Each reads
+    /// denied with `EXTEND_BOX_ENDED`, an outcome the sweep of interrupted decisions leaves as it is.
+    /// It runs after the box's move to ending is committed, so an ask stored meanwhile is either
+    /// closed here or finds the box ending once stored, and closes itself. Answers the asks it closed.
     pub async fn close_extends(&self, account: Uuid, machine: Uuid) -> Result<Vec<Uuid>, String> {
-        let rows = self
-            .client()
-            .await?
+        let client = self.client().await?;
+        let waiting = client
+            .query("select id, args->>'machine' from agent_confirmations where account = $1 and action = 'extend_box' and decided_at is null", &[&account])
+            .await
+            .map_err(err)?;
+        let ids: Vec<Uuid> = waiting
+            .iter()
+            .filter(|row| row.get::<_, Option<String>>(1).and_then(|named| Uuid::parse_str(&named).ok()) == Some(machine))
+            .map(|row| row.get(0))
+            .collect();
+        if ids.is_empty() {
+            return Ok(vec![]);
+        }
+        let rows = client
             .query(
                 "update agent_confirmations set decided_at = now(), approved = false, outcome = $3, result = 'null'::jsonb
-                 where account = $1 and action = 'extend_box' and decided_at is null and lower(args->>'machine') = $2::uuid::text returning id",
-                &[&account, &machine, &EXTEND_BOX_ENDED],
+                 where account = $1 and id = any($2) and decided_at is null returning id",
+                &[&account, &ids, &EXTEND_BOX_ENDED],
             )
             .await
             .map_err(err)?;
