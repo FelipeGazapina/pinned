@@ -54,6 +54,14 @@ const THREAD_PAGE_MAX: usize = 5000;
 const PAGE_POLL: Duration = Duration::from_millis(1200);
 const LOCAL_VIEWER: &str = "local";
 const NOT_LINKED: &str = "this machine is not linked to a hub";
+/// The line a refused workflow call leaves in the machine's log: the tab it names, the session it
+/// came from, and the process that made it. Nothing of what it asked.
+fn refused_line(named: Option<&str>, found: Option<&str>, pid: Option<u32>) -> String {
+    let from = found.map_or("outside every session".to_owned(), |tab| format!("the session in {tab}"));
+    let pid = pid.map_or("unknown".to_owned(), |pid| pid.to_string());
+    format!("pinned: refused a workflow call that names {} from {from} (pid {pid})", named.unwrap_or("no tab"))
+}
+
 /// Why an `act` that names another session than the one whose agent made it does not run.
 const NOT_ITSELF: &str = "this call names a session it does not come from";
 /// How long a session's Convex offer waits for the hub to hear of its new tab, and how often it asks.
@@ -3619,26 +3627,54 @@ impl Machine {
         }
     }
 
-    /// Whether a call that names tab `tab` and came from process `peer` comes from that session's
-    /// own agent: a session's agent starts its MCP server itself, so the server's parent is the
-    /// process the tab's pty runs. One another session's agent started is refused. One no
-    /// session's agent started itself, such as a process inside a session that inherited its
-    /// environment, is passed on not vouched for. None where the system does not tell the caller.
-    fn vouch(&self, tab: &str, peer: Option<crate::ipc::Peer>) -> Result<Option<bool>, String> {
+    /// Whether an act that names tab `tab` and came from process `peer` comes from that session:
+    /// from inside its agent's process tree (`session_of_process`). One from inside another
+    /// session is refused. One from outside every session, such as a process the session started
+    /// and left, is passed on not vouched for, and the hub refuses its workflow calls. None where
+    /// the system does not tell the caller.
+    fn vouch(&self, tab: &str, peer: Option<crate::ipc::Peer>, action: &str, args: &Value) -> Result<Option<bool>, String> {
         if !crate::ipc::KNOWS_PEERS {
             return Ok(None);
         }
-        let Some(parent) = peer.and_then(|p| crate::ipc::parent_of(p.pid)) else { return Ok(Some(false)) };
-        let tabs = self.tabs.lock().unwrap();
-        match tabs.iter().find(|(_, t)| t.session.as_ref().and_then(|s| s.pid()) == Some(parent)) {
-            Some((id, _)) if id == tab => Ok(Some(true)),
-            Some(_) => Err(NOT_ITSELF.into()),
-            None => Ok(Some(false)),
+        let pid = peer.map(|p| p.pid);
+        match self.session_of_process(peer) {
+            Some(found) if found == tab => Ok(Some(true)),
+            Some(found) => {
+                eprintln!("{}", refused_line(Some(tab), Some(&found), pid));
+                Err(NOT_ITSELF.into())
+            }
+            None => {
+                let work = surface::find(action).and_then(|a| surface::parse(a, args).ok());
+                if matches!(work, Some(surface::Parsed::Hub(call)) if call.work().is_some()) {
+                    eprintln!("{}", refused_line(Some(tab), None, pid));
+                }
+                Ok(Some(false))
+            }
         }
     }
 
-    fn vouch_callback(&self, _peer: Option<crate::ipc::Peer>) -> crate::agent::Vouch {
-        crate::agent::Vouch::Unchecked
+    /// The session a workflow session's callback on the socket came from, for the hub to check
+    /// against the workflow it names. Unchecked where the system does not tell the caller.
+    fn vouch_callback(&self, peer: Option<crate::ipc::Peer>) -> crate::agent::Vouch {
+        if !crate::ipc::KNOWS_PEERS {
+            return crate::agent::Vouch::Unchecked;
+        }
+        match self.session_of_process(peer) {
+            Some(tab) => crate::agent::Vouch::Tab(tab),
+            None => {
+                eprintln!("{}", refused_line(None, None, peer.map(|p| p.pid)));
+                crate::agent::Vouch::Outside
+            }
+        }
+    }
+
+    /// The tab whose session process `peer` belongs to: the nearest tab agent up its parents (a
+    /// session is its agent's whole process tree). None outside every session, and for a process
+    /// that is gone or whose pid a later process took since it connected.
+    fn session_of_process(&self, peer: Option<crate::ipc::Peer>) -> Option<TabId> {
+        let peer = peer?;
+        let agents: HashMap<u32, TabId> = self.tabs.lock().unwrap().iter().filter_map(|(id, t)| Some((t.session.as_ref()?.pid()?, id.clone()))).collect();
+        crate::ipc::nearest(peer, crate::ipc::process, |pid| agents.get(&pid).cloned())
     }
 
     /// A Convex tool's ask, which the hub answers for the project of the tab's checkout, by its
@@ -4693,7 +4729,7 @@ impl Machine {
                 Message::Capabilities { tab, task, search } => machine.capabilities(tab.as_deref(), task.as_deref(), &search),
                 Message::TaskReview { tab, task, id, verdict, note } => machine.task_review(tab, task, &id, &verdict, note),
                 Message::DelegationStats { days } => machine.delegation_stats(days),
-                Message::Project { tab, tool: ProjectTool::Act { action, args, request_id, machine: on } } => machine.vouch(&tab, peer).and_then(|vouched| {
+                Message::Project { tab, tool: ProjectTool::Act { action, args, request_id, machine: on } } => machine.vouch(&tab, peer, &action, &args).and_then(|vouched| {
                     machine.send_act(surface::AgentAct { tab, action, args, request_id, machine: on, vouched })
                 }),
                 Message::Project { tab, tool } => machine.project_tool(&tab, tool),
@@ -7879,11 +7915,9 @@ pub(crate) mod tests {
         assert_eq!(m.live_tab(&[]), None, "an empty environment matches no session");
     }
 
-    #[test]
-    fn a_fork_of_a_workflow_session_runs_no_workflow() {
+    /// A machine with a tab of environment `env` whose session has a message, and a fork of it.
+    fn forked(env: Vec<(String, String)>) -> (Arc<Machine>, TabId, TabId) {
         let m = machine();
-        let thread = Subject::SlackThread { channel: "C1".into(), thread: "1.2".into() };
-        let env = [session_env("c1", &thread), role_env(Role::Worker, Path::new("/repo"))].concat();
         let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], env, false, None);
         let account = m.tab(&tab, |t| t.account.clone()).unwrap();
         let projects = m.accounts.home(&account).join("projects").join("repo");
@@ -7891,8 +7925,15 @@ pub(crate) mod tests {
         let line = |kind: &str, uuid: &str| json!({ "type": kind, "uuid": uuid, "sessionId": "sess-wf", "timestamp": "2026-11-09T10:00:00Z", "message": { "role": kind, "content": "hi" } }).to_string();
         std::fs::write(projects.join("sess-wf.jsonl"), [line("user", "u1"), line("assistant", "a1")].join("\n") + "\n").unwrap();
         m.tab(&tab, |t| t.claude_session = Some("sess-wf".into())).unwrap();
-
         let copy = m.fork(&tab, "a1").unwrap();
+        let _ = std::fs::remove_file(projects.join("sess-wf.jsonl"));
+        (m, tab, copy)
+    }
+
+    #[test]
+    fn a_fork_of_a_workflow_session_runs_no_workflow() {
+        let thread = Subject::SlackThread { channel: "C1".into(), thread: "1.2".into() };
+        let (m, tab, copy) = forked([session_env("c1", &thread), role_env(Role::Worker, Path::new("/repo"))].concat());
         let view = m.view(&copy).unwrap();
         assert_eq!((view.connector, view.subject), (None, None), "the fork is no session of the workflow");
         let env = m.tab(&copy, |t| t.env.clone()).unwrap();
@@ -7902,7 +7943,30 @@ pub(crate) mod tests {
         assert_eq!(role_of(&env).map(|(role, _)| role), Some(Role::Worker), "the rest of its environment stays");
         let source = m.view(&tab).unwrap();
         assert_eq!((source.connector.as_deref(), source.subject), (Some("c1"), Some(thread)), "the workflow's own session keeps it");
-        let _ = std::fs::remove_file(projects.join("sess-wf.jsonl"));
+    }
+
+    #[test]
+    fn a_fork_of_a_workflow_run_by_hand_runs_no_workflow() {
+        let (m, tab, copy) = forked(vec![(CONNECTOR_ENV.into(), "c1".into())]);
+        assert_eq!(m.view(&copy).unwrap().connector, None, "the fork is no run of the workflow");
+        assert!(!m.tab(&copy, |t| t.env.clone()).unwrap().iter().any(|(k, _)| k == CONNECTOR_ENV));
+        assert_eq!(m.view(&tab).unwrap().connector.as_deref(), Some("c1"), "the run itself keeps it");
+    }
+
+    #[test]
+    fn a_fork_of_an_interactive_box_session_stays_a_session_of_the_box() {
+        let thread = Subject::SlackThread { channel: "C1".into(), thread: "1.2".into() };
+        let (m, tab, copy) = forked(session_env(crate::agent::INTERACTIVE_CONNECTOR, &thread));
+        let (view, source) = (m.view(&copy).unwrap(), m.view(&tab).unwrap());
+        assert_eq!((view.connector.as_deref(), view.subject.as_ref()), (Some(crate::agent::INTERACTIVE_CONNECTOR), Some(&thread)), "the hub keeps the box while the fork runs");
+        assert_eq!((source.connector, source.subject), (view.connector, view.subject));
+    }
+
+    #[test]
+    fn a_refused_workflow_call_leaves_one_line_of_what_named_what() {
+        assert_eq!(refused_line(Some("tab-1a-2"), Some("tab-1a-3"), Some(4242)), "pinned: refused a workflow call that names tab-1a-2 from the session in tab-1a-3 (pid 4242)");
+        assert_eq!(refused_line(Some("tab-1a-2"), None, Some(4242)), "pinned: refused a workflow call that names tab-1a-2 from outside every session (pid 4242)");
+        assert_eq!(refused_line(None, None, None), "pinned: refused a workflow call that names no tab from outside every session (pid unknown)");
     }
 
     /// The session is a real pty running cat with the terminal in raw mode, so the file holds

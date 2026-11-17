@@ -12172,8 +12172,9 @@ fn act_refuses_a_workflow_session_that_has_exited() {
             && [&on_issue, &on_thread].iter().all(|id| f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == id.as_str() && t["connector"] == w.a.as_str() && t["running"] == false))
     });
     let reached = (asked_of("slack.com:443"), asked_of("api.linear.app:443"));
-    assert_eq!(w.the_four(Via::Test, &on_issue, &w.a, "uuid-1")[..1], refused_all()[..1], "stage, from the session that ran A on the issue");
-    assert_eq!(w.the_four(Via::Test, &on_thread, &w.a, "uuid-1")[1..], refused_all()[1..], "the thread's calls, from the session that ran A on the thread");
+    // An exited session has no process left to act from: what names it comes from outside it.
+    assert_eq!(w.the_four(Via::Test, &on_issue, &w.a, "uuid-1")[..1], [Err(OUTSIDE.into())], "stage, naming the session that ran A on the issue");
+    assert_eq!(w.the_four(Via::Test, &on_thread, &w.a, "uuid-1")[1..], vec![Err(OUTSIDE.into()); 3], "the thread's calls, naming the session that ran A on the thread");
     assert_eq!((asked_of("slack.com:443"), asked_of("api.linear.app:443")), reached, "nothing left the hub");
 }
 

@@ -198,14 +198,20 @@ pub const SLACK_THREAD_ENV: &str = "PINNED_SLACK_THREAD";
 /// The variables that make a session the one running a workflow on a subject.
 pub const WORKFLOW_ENV: [&str; 4] = [CONNECTOR_ENV, ISSUE_ENV, SLACK_CHANNEL_ENV, SLACK_THREAD_ENV];
 
-/// `env` without the workflow and subject it names, when it names one: what a session that is
-/// not that workflow's own session, such as a fork of it, starts with.
+/// `env` without the workflow and subject it names, with a subject or without (a run started by
+/// hand): what a session that is not that workflow's own session, such as a fork of it, starts
+/// with. An interactive box session's environment stays whole: the hub keeps a box running while
+/// a session of it runs, and a fork is one the user works in.
 pub fn without_workflow(env: Vec<(String, String)>) -> Vec<(String, String)> {
-    if session_of(&env).is_none() {
+    if env.iter().any(|(key, value)| key == CONNECTOR_ENV && value == INTERACTIVE_CONNECTOR) {
         return env;
     }
     env.into_iter().filter(|(key, _)| !WORKFLOW_ENV.contains(&key.as_str())).collect()
 }
+
+/// What the hub answers a workflow session's callback that comes from outside every session on
+/// its machine.
+pub const OUTSIDE_EVERY_SESSION: &str = "this call comes from no session on this machine: run it from the workflow's session";
 
 /// The connector interactive box sessions run under. The hub sees their tabs through it, and the
 /// app treats their first prompt as the user's own rather than automation's.
@@ -534,6 +540,29 @@ pub enum Message {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn keys(env: &[(String, String)]) -> Vec<&str> {
+        env.iter().map(|(key, _)| key.as_str()).collect()
+    }
+
+    #[test]
+    fn a_session_outside_a_workflow_keeps_none_of_its_variables() {
+        let thread = Subject::SlackThread { channel: "C1".into(), thread: "1.2".into() };
+        let other = vec![(TAB_ENV.to_owned(), "tab-1".to_owned())];
+        assert_eq!(keys(&without_workflow([session_env("c1", &thread), other.clone()].concat())), [TAB_ENV], "a workflow on a subject");
+        let by_hand = vec![(CONNECTOR_ENV.to_owned(), "c1".to_owned()), (TAB_ENV.to_owned(), "tab-1".to_owned())];
+        assert_eq!(keys(&without_workflow(by_hand)), [TAB_ENV], "a workflow run by hand, with no subject");
+        for reserved in [DELEGATE_CONNECTOR, CAPTAIN_CONNECTOR] {
+            assert_eq!(keys(&without_workflow([session_env(reserved, &thread), other.clone()].concat())), [TAB_ENV], "{reserved}");
+        }
+    }
+
+    #[test]
+    fn an_interactive_box_session_keeps_its_connector_and_subject_outside_it() {
+        let thread = Subject::SlackThread { channel: "C1".into(), thread: "1.2".into() };
+        let env = [session_env(INTERACTIVE_CONNECTOR, &thread), vec![(TAB_ENV.to_owned(), "tab-1".to_owned())]].concat();
+        assert_eq!(without_workflow(env.clone()), env);
+    }
 
     const WINDOW: LimitWindow = LimitWindow {
         used_percentage: 23.5,

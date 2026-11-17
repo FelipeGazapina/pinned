@@ -616,9 +616,9 @@ pub struct AgentAct {
     /// The machine a `Call` runs on, an id or a name; the session's own when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub machine: Option<String>,
-    /// Whether the machine found the act to come from the agent of session `tab` itself (true),
-    /// or from a process it could not tie to that session (false). Absent from a machine that does
-    /// not check.
+    /// Whether the machine found the act to come from inside session `tab`, its agent or a process
+    /// in the agent's process tree (true), or from outside every session on it (false). Absent
+    /// from a machine that does not check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vouched: Option<bool>,
 }

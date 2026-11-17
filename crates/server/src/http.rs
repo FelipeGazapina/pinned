@@ -1332,14 +1332,20 @@ async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: 
         }
         return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
     }
-    let result = match run_work(&call) {
-        Some((connector, subject)) if account.working_on(&connector, &subject, |id| *id == machine) => hub.hub_call(&account, call).await,
-        Some(_) => Err("this machine runs no session of that workflow on that subject".into()),
+    // A workflow session's callback comes from the session that runs that workflow on that
+    // subject: the tab its machine found it to come from, or, from a machine that does not check,
+    // any of its sessions.
+    let result = match (run_work(&call), from.vouched, from.tab) {
+        (Some(_), Some(false), _) => Err(pinned_core::agent::OUTSIDE_EVERY_SESSION.into()),
+        (Some((connector, subject)), Some(true), Some(tab)) if account.runs_in_tab(&connector, &subject, &machine, &tab) => hub.hub_call(&account, call).await,
+        (Some(_), Some(true), _) => Err("only the session that runs this workflow can do that".into()),
+        (Some((connector, subject)), None, _) if account.working_on(&connector, &subject, |id| *id == machine) => hub.hub_call(&account, call).await,
+        (Some(_), None, _) => Err("this machine runs no session of that workflow on that subject".into()),
         // An app's first sign-in moves its own connectors and tastes in, which only an empty account
         // takes, every machine keeps its projects' files in step with the account's, and a Capitão
         // or the global orchestrator starts with the account's tastes, and a delegator reads how
         // the account's delegated tasks went.
-        None if matches!(
+        (None, ..) if matches!(
             call,
             HubCall::Import { .. }
                 | HubCall::ImportTastes { .. }
@@ -1357,14 +1363,14 @@ async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: 
         }
         // A thread opened with Chat to adjust changes the account's tastes, and the hub
         // takes that only while this machine reports such a thread open.
-        None if matches!(call, HubCall::SetTaste { .. } | HubCall::ResetTasteField { .. }) => {
+        (None, ..) if matches!(call, HubCall::SetTaste { .. } | HubCall::ResetTasteField { .. }) => {
             if account.tabs_of(&machine).is_some_and(|tabs| tabs.iter().any(|tab| tab.taste_chat)) {
                 hub.hub_call(&account, call).await
             } else {
                 Err("only a machine with a Chat to adjust thread open may change the way of working".into())
             }
         }
-        None => Err("a machine may only forward a workflow session's callbacks".into()),
+        (None, ..) => Err("a machine may only forward a workflow session's callbacks".into()),
     };
     if let Err(e) = &result {
         eprintln!("pinned-server: machine {machine}'s hub call failed: {e}");
