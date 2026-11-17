@@ -11221,13 +11221,61 @@ echo '{"type":"result","result":"ok"}'
         assert!(!lines.iter().any(|arg| arg == "--dangerously-skip-permissions"), "{lines:?}");
         assert_eq!(lines.iter().filter(|arg| *arg == "--permission-mode").count(), 1, "{lines:?}");
         let refused = tools_after(&lines, "--disallowedTools");
-        for tool in ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash", "mcp__pinned__memory_save", "mcp__pinned__delegate_task", "mcp__pinned__act"] {
+        for tool in ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash", "PowerShell", "mcp__pinned__memory_save", "mcp__pinned__delegate_task", "mcp__pinned__act"] {
             assert!(refused.iter().any(|t| t == tool), "{tool} is not refused: {lines:?}");
         }
         assert!(tools_after(&lines, "--allowedTools").iter().any(|t| t == "mcp__pinned__repo_read"), "{lines:?}");
         assert_eq!(m.tab(&opened, |t| (t.bypass, t.read_only, t.child_access())).unwrap(), (false, true, Access::ReadOnly));
         m.quit();
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_headless_read_only_childs_thread_resumes_read_only() {
+        use crate::delegate::Access;
+        let root = temp("headless-read-only");
+        let argv = root.join("argv");
+        let claude = root.join("claude");
+        std::fs::write(&claude, format!("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\nexec sleep 30\n", argv.display())).unwrap();
+        std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, None, Some(root.clone()), |_| {});
+        let account = Account::builtin(Provider::Claude);
+        let parent = m.add_tab(root.clone(), account.clone(), vec![], vec![], false, None);
+        let task = m.delegates.begin(crate::delegate::NewTask {
+            parent: crate::delegate::Parent::Tab(parent.clone()),
+            tool: None,
+            title: "Headless".into(),
+            account: account.id.clone(),
+            provider: Provider::Claude,
+            model: None,
+            cwd: root.clone(),
+            mode: crate::delegate::Mode::Async,
+            access: Access::ReadOnly,
+            isolated: false,
+            caller_key: format!("tab:{parent}"),
+            client_request_id: None,
+            role: None,
+        });
+        m.watch_thread(ThreadChild { from: &parent, origin: None, task: &task.id, title: "Headless", cwd: &root, made: None, model: None }, account);
+        let thread = m.delegates.get(&task.id).and_then(|t| t.thread).unwrap().tab;
+        m.delegates.apply(&task.id, crate::delegate::ChildEvent::Line(json!({"type":"system","subtype":"init","session_id":"read-session"}).to_string()), None);
+        m.delegates.apply(&task.id, crate::delegate::ChildEvent::Line(json!({"type":"result","result":"DONE"}).to_string()), None);
+        m.follow_headless_threads();
+        assert_eq!(m.tab(&thread, |t| (t.bypass, t.read_only, t.child_access())).unwrap(), (false, true, Access::ReadOnly));
+        m.start_claude(&thread, 80, 24).unwrap();
+        wait_for("thread argv", || std::fs::read(&argv).is_ok_and(|bytes| !bytes.is_empty()));
+        let lines: Vec<String> = String::from_utf8(std::fs::read(&argv).unwrap()).unwrap().lines().map(str::to_owned).collect();
+        let resumed = resumed_read_only("read-session");
+        assert!(lines.windows(resumed.len()).any(|flags| flags == resumed), "{lines:?}");
+        assert_eq!(lines.iter().filter(|arg| *arg == "--permission-mode").count(), 1, "{lines:?}");
+        m.quit();
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// `--resume session` followed by the flags a read-only Claude session starts with.
+    fn resumed_read_only(session: &str) -> Vec<String> {
+        ["--resume", session].map(str::to_owned).into_iter().chain(crate::delegate::claude_read_only_args()).collect()
     }
 
     #[test]
@@ -15175,6 +15223,101 @@ Have another model review a risky change before it goes ahead.";
         let args = started(&claude, &child);
         let resumed: Vec<String> = ["--resume", "s-child"].map(str::to_owned).into_iter().chain(read_only.iter().cloned()).collect();
         assert!(args.windows(resumed.len()).any(|flags| flags == resumed), "{args:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A Captain's read-only thread child on the `work` account, `asked` added to its call, whose
+    /// first start was read. Its hook reported session `s-child` in `mode` and a finished turn,
+    /// after the turns u1, a1, u2, a2 in its transcript.
+    #[cfg(unix)]
+    fn read_only_thread_child(name: &str, target: Value, mode: &str) -> (Arc<Machine>, PathBuf, String, PathBuf) {
+        let (m, dir, _captain, _task, child, transcript) = captain_with_thread_child_asking(name, json!({ "target": target, "interactionMode": "plan" }));
+        let claude = dir.join("claude");
+        let read_only = crate::delegate::claude_read_only_args();
+        let first = started(&claude, &child);
+        assert!(first.windows(read_only.len()).any(|flags| flags == read_only), "{first:?}");
+        let line = |kind: &str, uuid: &str, minute: u8| json!({ "type": kind, "uuid": uuid, "sessionId": "s-child", "timestamp": format!("2026-11-09T10:0{minute}:00Z"), "message": { "role": kind, "content": "hi" } });
+        append(&transcript, &[line("user", "u1", 0), line("assistant", "a1", 1), line("user", "u2", 2), line("assistant", "a2", 3)]);
+        m.record_event(AgentEvent { session: Some("s-child".into()), permission_mode: Some(mode.into()), ..hook(&child, AgentStatus::Working) });
+        m.record_event(AgentEvent { session: Some("s-child".into()), ..hook(&child, AgentStatus::Done) });
+        (m, dir, child, claude)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_rewound_read_only_worker_keeps_its_tools_refused() {
+        let (m, dir, child, claude) = read_only_thread_child("rewind-read-only", json!({ "providerInstanceId": "work" }), "dontAsk");
+        m.rewind(&child, "u2", false, 80, 24).unwrap();
+        let rewound = session_of(&m, &child);
+        assert_ne!(rewound, "s-child");
+        let args = started(&claude, &child);
+        let resumed = resumed_read_only(&rewound);
+        assert!(args.windows(resumed.len()).any(|flags| flags == resumed), "{args:?}");
+        assert_eq!(args.iter().filter(|arg| *arg == "--permission-mode").count(), 1, "{args:?}");
+        assert_eq!(m.tab(&child, |t| (t.read_only, t.child_access())).unwrap(), (true, crate::delegate::Access::ReadOnly));
+        m.quit();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_read_only_worker_woken_after_a_mode_change_keeps_its_tools_refused() {
+        // Shift+Tab moved the session out of the mode it started in.
+        let (m, dir, child, claude) = read_only_thread_child("rest-read-only-mode", json!({ "providerInstanceId": "work", "options": { "effort": "high" } }), "acceptEdits");
+        let pid = m.tab(&child, |t| t.session.as_ref().and_then(pty::Session::pid)).unwrap().unwrap() as i32;
+        m.rest_sessions(SystemTime::now() + REST_AFTER);
+        wait_for("the worker's session to end", || !alive(pid));
+
+        assert_eq!(m.call(Call::Prompt { tab: child.clone(), text: "One more thing.".into() }), Ok(json!(null)));
+        let args = started(&claude, &child);
+        let resumed = resumed_read_only("s-child");
+        assert!(args.windows(resumed.len()).any(|flags| flags == resumed), "{args:?}");
+        assert_eq!(args.iter().filter(|arg| *arg == "--permission-mode").count(), 1, "{args:?}");
+        assert!(args.windows(2).any(|w| w[0] == "--effort" && w[1] == "high"), "{args:?}");
+        m.quit();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_read_only_worker_restarted_before_its_session_id_keeps_its_tools_refused() {
+        let (m, dir, _captain, _task, child, _transcript) = captain_with_thread_child_asking("restart-read-only", json!({ "target": { "providerInstanceId": "work" }, "interactionMode": "plan" }));
+        let claude = dir.join("claude");
+        let read_only = crate::delegate::claude_read_only_args();
+        let _ = started(&claude, &child);
+        assert_eq!(m.tab(&child, |t| t.claude_session.clone()).unwrap(), None);
+        m.restart_claude(&child, 80, 24).unwrap();
+        let args = started(&claude, &child);
+        assert!(args.windows(read_only.len()).any(|flags| flags == read_only), "{args:?}");
+        assert_eq!(args.iter().filter(|arg| *arg == "--permission-mode").count(), 1, "{args:?}");
+        m.quit();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_forked_read_only_worker_stays_read_only() {
+        let (m, dir, child, claude) = read_only_thread_child("fork-read-only", json!({ "providerInstanceId": "work" }), "dontAsk");
+        let forked = m.fork(&child, "a1").unwrap();
+        assert_eq!(m.tab(&forked, |t| (t.bypass, t.read_only, t.child_access())).unwrap(), (false, true, crate::delegate::Access::ReadOnly));
+        let session = session_of(&m, &forked);
+        m.start_claude(&forked, 80, 24).unwrap();
+        let args = started(&claude, &forked);
+        let resumed = resumed_read_only(&session);
+        assert!(args.windows(resumed.len()).any(|flags| flags == resumed), "{args:?}");
+        m.quit();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_read_only_worker_cannot_switch_to_full_access() {
+        let (m, dir, child, _claude) = read_only_thread_child("bypass-read-only", json!({ "providerInstanceId": "work" }), "dontAsk");
+        let pid = m.tab(&child, |t| t.session.as_ref().and_then(pty::Session::pid)).unwrap().unwrap() as i32;
+        assert_eq!(m.call(Call::SetBypass { tab: child.clone(), on: true, cols: 80, rows: 24 }), Err("a read-only worker cannot switch to Full access".into()));
+        assert_eq!(m.tab(&child, |t| (t.bypass, t.read_only, t.child_access())).unwrap(), (false, true, crate::delegate::Access::ReadOnly));
+        assert!(alive(pid), "its session goes on");
+        m.quit();
         let _ = std::fs::remove_dir_all(dir);
     }
 
