@@ -7538,12 +7538,23 @@ fn an_agent_holding_what_its_machine_keeps_readable_cannot_approve_or_run_a_conf
 
 const BIN: &str = env!("CARGO_BIN_EXE_pinned-server");
 
-/// A node or login started by a test must never reach the real app's socket, tab or account.
+/// A node or login started by a test must never reach the real app's socket, tab or account, nor
+/// run its built-in accounts on a CLI home the developer exported.
 fn without_app_env(command: &mut std::process::Command) -> &mut std::process::Command {
-    for name in ["PINNED_SOCK", "PINNED_TAB", "PINNED_PROJECT", "PINNED_ROLE", "PINNED_ACCOUNT", "PINNED_TUTORIAL_HELPER"] {
+    for name in pinned_core::machine::INHERITED_SESSION_ENV {
         command.env_remove(name);
     }
     command
+}
+
+#[test]
+fn a_node_a_test_starts_inherits_no_session_variable_or_cli_home() {
+    let mut command = std::process::Command::new(BIN);
+    without_app_env(&mut command);
+    let envs: BTreeMap<String, Option<String>> = command.get_envs().map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned()))).collect();
+    for name in pinned_core::machine::INHERITED_SESSION_ENV.iter().chain(&["CLAUDE_CONFIG_DIR", "CODEX_HOME"]) {
+        assert_eq!(envs.get(*name), Some(&None), "{name} is not removed");
+    }
 }
 
 #[test]

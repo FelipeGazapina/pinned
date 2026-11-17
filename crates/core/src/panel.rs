@@ -1075,10 +1075,7 @@ pub fn guide(cwd: &Path, pr: &str, write: bool, store: &Path, claude: &Path, hea
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    for key in crate::machine::INHERITED_SESSION_ENV.iter().chain(headless.strip) {
-        command.env_remove(key);
-    }
-    command.envs(headless.env.iter().cloned());
+    headless.child_env().apply(&mut command);
     if let Some(path) = path {
         command.env("PATH", path);
     }
@@ -1339,6 +1336,7 @@ impl Shells {
         #[cfg(windows)]
         let mut cmd = portable_pty::CommandBuilder::new("powershell.exe");
         cmd.cwd(cwd);
+        crate::machine::ChildEnv::none().apply(&mut cmd);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         if let Some(path) = path {
