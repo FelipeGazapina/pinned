@@ -466,6 +466,9 @@ pub struct Waiting {
 pub enum WaitingKind {
     NeedsInput,
     Failed,
+    /// The turn ended on an API or stream error, and the session waits for a message to try again.
+    /// Its `message` is that error's first line, not a question.
+    StoppedOnError,
     /// An agent's action waits on the user's approval in the app. Only a node's `waiting` tool
     /// lists it, from `HubCall::Confirmations`; the hub's `Overview` never does.
     Confirm,
@@ -516,6 +519,7 @@ pub fn waiting_kind(tab: &TabView) -> Option<WaitingKind> {
     }
     match tab.status {
         Some(AgentStatus::Failed) => Some(WaitingKind::Failed),
+        Some(AgentStatus::NeedsInput) if tab.running && tab.stopped_on_error.is_some() => Some(WaitingKind::StoppedOnError),
         Some(AgentStatus::NeedsInput) if tab.running && tab.interrupted => Some(WaitingKind::NeedsInput),
         _ => None,
     }
@@ -620,12 +624,17 @@ pub fn overview_at(machines: &[MachineSnapshot], now: u64) -> Overview {
                 None => projects.push(OverviewProject { key, name: project.name.clone(), repo: project.repo.clone(), checkouts: vec![checkout] }),
             }
         }
-        // What waits on the user is the sessions in those two states, so the two lists never differ.
+        // What waits on the user is the sessions in those three states, so the two lists never differ.
         for tab in tabs.iter().filter(|t| !t.orchestrator_global) {
             let session = session(machine, tab, now);
+            // A worker whose error stopped it, and whose Captain started another attempt, is no longer listed.
+            if session.state == SessionState::StoppedOnError && superseded(tab, tabs) {
+                continue;
+            }
             let kind = match session.state {
                 SessionState::WaitingOnInput => Some(WaitingKind::NeedsInput),
                 SessionState::Error => Some(WaitingKind::Failed),
+                SessionState::StoppedOnError => Some(WaitingKind::StoppedOnError),
                 _ => None,
             };
             if let Some(kind) = kind {
@@ -677,6 +686,12 @@ fn reports_alive(version: &str) -> bool {
 /// started and has not reported yet. A worker in this state already reported to its parent.
 fn finished(tab: &TabView) -> bool {
     tab.status.is_some() && SessionState::of(tab) == SessionState::Idle
+}
+
+/// Whether `tab` is a worker that its Captain replaced: a later worker of the same Captain with the same
+/// title, a second attempt at the task. `tabs` are the machine's tabs.
+fn superseded(tab: &TabView, tabs: &[TabView]) -> bool {
+    tab.role == Some(Role::Worker) && tab.spawned_by.is_some() && tab.title.is_some() && tabs.iter().any(|later| later.role == Some(Role::Worker) && later.spawned_by == tab.spawned_by && later.title == tab.title && later.opened > tab.opened)
 }
 
 /// One session of the account, as the global orchestrator's `sessions` tool lists it.
@@ -743,6 +758,9 @@ pub enum SessionState {
     WaitingOnInput,
     /// It stopped on a failure, a usage limit included (`waiting_kind` is `failed`).
     Error,
+    /// Its last turn ended on an API or stream error, and a message tries it again (`waiting_kind` is
+    /// `stopped_on_error`). Its message is that error's first line.
+    StoppedOnError,
     /// Its session is not running. A message starts it again.
     Settled,
 }
@@ -751,6 +769,7 @@ impl SessionState {
     pub fn of(tab: &TabView) -> SessionState {
         match waiting_kind(tab) {
             Some(WaitingKind::Failed) => SessionState::Error,
+            Some(WaitingKind::StoppedOnError) => SessionState::StoppedOnError,
             Some(WaitingKind::NeedsInput | WaitingKind::Confirm) => SessionState::WaitingOnInput,
             None if !tab.running => SessionState::Settled,
             None if tab.status == Some(AgentStatus::Working) || tab.orchestrator_turn => SessionState::Running,
@@ -800,6 +819,7 @@ fn session(machine: &MachineSnapshot, tab: &TabView, now: u64) -> Session {
         pr: tab.pr.clone(),
         message: match state {
             SessionState::WaitingOnInput | SessionState::Error => tab.message.clone(),
+            SessionState::StoppedOnError => tab.stopped_on_error.clone(),
             _ => offer_of(tab, now).map(str::to_owned),
         },
         state,
@@ -1322,9 +1342,10 @@ mod tests {
             let expected = match case["waits"].as_str() {
                 Some("needs_input") => Some(SessionState::WaitingOnInput),
                 Some("failed") => Some(SessionState::Error),
+                Some("stopped_on_error") => Some(SessionState::StoppedOnError),
                 _ => None,
             };
-            assert_eq!(Some(state).filter(|s| matches!(s, SessionState::WaitingOnInput | SessionState::Error)), expected, "{}", case["case"]);
+            assert_eq!(Some(state).filter(|s| matches!(s, SessionState::WaitingOnInput | SessionState::Error | SessionState::StoppedOnError)), expected, "{}", case["case"]);
         }
     }
 

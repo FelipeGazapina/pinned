@@ -196,6 +196,10 @@ pub struct TabView {
     /// Why the tab's last process ended mid-turn, until a new turn or input starts it again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stopped: Option<String>,
+    /// The API or stream error the last turn ended on, its first line, while the session waits for
+    /// a message to try again. Read from the transcript once Claude Code went idle after the error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped_on_error: Option<String>,
     /// The questionnaire the session waits on the user to answer, which `Call::AnswerQuestions`
     /// answers. While it is open the tab reads as a question mid-turn, so an app that predates it
     /// still shows the tab waiting.
@@ -1857,6 +1861,7 @@ mod tests {
             asleep: false,
             headless: false,
             stopped: None,
+            stopped_on_error: None,
             questions: None,
             read_only: false,
         }

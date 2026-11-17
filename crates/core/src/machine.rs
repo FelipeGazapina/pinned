@@ -561,6 +561,8 @@ struct Tab {
     cut_by_sleep: Option<CutBySleep>,
     /// The last failure was an API error, which a sleep window found later may still claim.
     api_error: bool,
+    /// The API or stream error the turn ended on, read from the transcript when the session went idle after it.
+    stopped_on_error: Option<String>,
     /// The session doesn't continue by itself when its usage limit lifts.
     held_at_limit: bool,
     /// The model every start of this tab passes as `--model`, picked for its conversation alone.
@@ -695,6 +697,7 @@ impl Tab {
             asleep: self.asleep,
             headless: self.headless && self.session.is_none(),
             stopped: self.stopped.clone().filter(|_| !self.live()),
+            stopped_on_error: self.stopped_on_error.clone(),
             questions: None,
             read_only: self.child_access() == crate::delegate::Access::ReadOnly,
         }
@@ -5114,6 +5117,13 @@ impl Machine {
         Some(summary.to_owned()).filter(|summary| !summary.is_empty())
     }
 
+    /// The API or stream error the tab's transcript ends on, when the session went idle after one.
+    fn stopped_error(&self, tab: &str) -> Option<String> {
+        let file = self.transcript(tab).ok()?;
+        let page = thread::read(&file, thread::last_page(&file)).ok()?;
+        thread::turn_error(&page.items)
+    }
+
     /// Tells the machine that delegated each task running here for another machine what its
     /// worker waits on the user for, and that it waits on nothing once answered. Each change is
     /// sent until the hub passes it on, at most every `REMOTE_LOOK`.
@@ -6339,6 +6349,7 @@ impl Machine {
             resume_at: None,
             cut_by_sleep: None,
             api_error: false,
+            stopped_on_error: None,
             held_at_limit: false,
             model: None,
             made: None,
@@ -6531,6 +6542,7 @@ impl Machine {
         // Claude says it waits for input a while after every finished turn too, which asks nothing.
         let was_done = self.tab(tab, |t| t.status == Some(AgentStatus::Done)).unwrap_or(false);
         let detail = (event.status == AgentStatus::NeedsInput && !was_done).then(|| self.pending_ask(tab)).flatten();
+        let stopped = (event.status == AgentStatus::NeedsInput).then(|| self.stopped_error(tab)).flatten();
         let changed = self.tab(tab, |t| {
             let before = (t.interrupted, t.resume_at, t.held_at_limit, t.cut_by_sleep);
             let window = self.sleeps.lock().unwrap().window();
@@ -6571,6 +6583,7 @@ impl Machine {
                 t.question = None;
             }
             t.ask_detail = detail;
+            t.stopped_on_error = stopped;
             t.status = Some(event.status);
             // The turn that starts may end the shells an earlier one left, and its end says which still run.
             if event.status == AgentStatus::Working {
