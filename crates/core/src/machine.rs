@@ -14249,9 +14249,22 @@ Have another model review a risky change before it goes ahead.";
     #[test]
     #[cfg(unix)]
     fn a_team_boxs_run_cost_adds_what_its_delegated_workers_spent() {
+        delegated_run_costs("run-costs-delegated", None);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_team_boxs_run_cost_leaves_out_a_workers_box_cost() {
+        delegated_run_costs("run-costs-delegated-box", Some(0.05));
+    }
+
+    /// A team box's session whose worker, run on a box of `box_usd`, spends US$ 0.42 then 0.50:
+    /// the run's total is its model cost only, the worker's box cost never in it.
+    #[cfg(unix)]
+    fn delegated_run_costs(name: &str, box_usd: Option<f64>) {
         use crate::delegate::{NewTask, Parent};
         use crate::usage::TaskUsage;
-        let RunCostBox { dir, m, sent, subject, tab, .. } = run_costs_box("run-costs-delegated");
+        let RunCostBox { dir, m, sent, subject, tab, .. } = run_costs_box(name);
         let child = m
             .delegates
             .begin(NewTask {
@@ -14270,13 +14283,13 @@ Have another model review a risky change before it goes ahead.";
                 role: None,
             })
             .id;
-        let usage = |usd: f64| TaskUsage { tokens_in: 1000, tokens_out: 500, cost_usd: Some(usd), wall_ms: 60_000, box_usd: None, box_ms: None };
+        let usage = |usd: f64| TaskUsage { tokens_in: 1000, tokens_out: 500, cost_usd: Some(usd), wall_ms: 60_000, box_usd, box_ms: box_usd.map(|_| 60_000) };
         m.delegates.meter(&[(child.clone(), usage(0.42))], None);
         let t0 = Instant::now();
         m.report_run_costs(t0);
         m.delegates.meter(&[(child, usage(0.50))], None);
         m.report_run_costs(t0 + RUN_COST_EVERY);
-        assert_eq!(*sent.lock().unwrap(), vec![("wf-1".to_owned(), subject.clone(), 57.0), ("wf-1".to_owned(), subject, 65.0)], "0.15 its own session + its worker's 0.42, then 0.50: a total");
+        assert_eq!(*sent.lock().unwrap(), vec![("wf-1".to_owned(), subject.clone(), 57.0), ("wf-1".to_owned(), subject, 65.0)], "0.15 its own session + its worker's 0.42, then 0.50: a total, box cost {box_usd:?} left out");
         let _ = std::fs::remove_dir_all(dir);
     }
 
