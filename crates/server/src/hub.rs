@@ -21,6 +21,7 @@ use pinned_core::wire::{
 use pinned_core::surface::{self, Side, Unlocked};
 use serde::Serialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -171,15 +172,15 @@ pub(crate) fn too_old_for_run_now(account: &Account, machine: &str, subject: &Su
 pub const CENSUS_EVERY: Duration = Duration::from_secs(300);
 
 /// `census_accounts`' line for one account.
-fn account_census(id: Uuid, runs: usize, (store_bytes, runs_bytes, pending): (usize, usize, store_writes::Pending), (check_age_s, check_failing): (i64, bool)) -> String {
+fn account_census(id: Uuid, runs: usize, (store_bytes, runs_bytes, pending): (usize, usize, store_writes::Pending), (check_age_s, check_failing): (i64, bool), watching: bool) -> String {
     format!(
-        "pinned-server: census-account id={id} runs={runs} runs_bytes={runs_bytes} store_bytes={store_bytes} store_pending={} store_pending_bytes={} secrets_pending={} secrets_pending_bytes={} check_age_s={check_age_s} check_failing={}",
-        pending.store, pending.store_bytes, pending.secrets, pending.secrets_bytes, u8::from(check_failing)
+        "pinned-server: census-account id={id} runs={runs} runs_bytes={runs_bytes} store_bytes={store_bytes} store_pending={} store_pending_bytes={} secrets_pending={} secrets_pending_bytes={} check_age_s={check_age_s} check_failing={} watching={}",
+        pending.store, pending.store_bytes, pending.secrets, pending.secrets_bytes, u8::from(check_failing), u8::from(watching)
     )
 }
 
-/// What the hub's check log keeps of an account's previous check: when it ran, its error as
-/// `log_error` cuts it, and when that error began.
+/// What the hub's check log keeps of an account's previous check: when it ran, the fingerprint of
+/// its error, and when the failure that error belongs to began.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct CheckLog {
     at: Option<i64>,
@@ -190,32 +191,53 @@ struct CheckLog {
 /// A check that comes more than this many seconds after the one before it is late.
 const CHECK_LATE_AFTER_S: i64 = 120;
 
-/// The check log's lines for one new check of `account`, and what it keeps for the next one.
+/// The check log's lines for one new check of `account`, and what it keeps for the next one. An
+/// error's text stays out of the log: its line names the error's class, its part count and its
+/// fingerprint.
 fn log_check(prev: &CheckLog, account: Uuid, check: &pinned_core::connectors::Check, now: i64) -> (CheckLog, Vec<String>) {
     let who: String = account.to_string().chars().take(8).collect();
     let mut lines = vec![];
     if let Some(gap) = prev.at.map(|at| now - at).filter(|gap| *gap > CHECK_LATE_AFTER_S) {
         lines.push(format!("pinned-server: check-late account={who} gap_s={gap}"));
     }
-    let error = check.error.as_deref().map(log_error);
-    let mut next = CheckLog { at: Some(now), error: error.clone(), error_since: prev.error_since };
-    match (&prev.error, &error) {
-        (Some(was), Some(new)) if was == new => {}
-        (_, Some(new)) => {
-            lines.push(format!("pinned-server: check-error account={who} error={new}"));
-            next.error_since = now;
+    let error = check.error.as_deref();
+    let fp = error.map(error_fingerprint);
+    let mut next = CheckLog { at: Some(now), error: fp.clone(), error_since: prev.error_since };
+    match (&prev.error, error, &fp) {
+        (Some(was), _, Some(new)) if was == new => {}
+        (_, Some(error), Some(new)) => {
+            // A changed error belongs to the failure that is already on, so it does not restart the count.
+            if prev.error.is_none() {
+                next.error_since = now;
+            }
+            lines.push(format!("pinned-server: check-error account={who} class={} parts={} fp={new}", error_class(error), error.split("; ").count()));
         }
-        (Some(_), None) => lines.push(format!("pinned-server: check-ok account={who} after_s={}", now - prev.error_since)),
-        (None, None) => {}
+        (Some(_), _, None) => lines.push(format!("pinned-server: check-ok account={who} after_s={}", now - prev.error_since)),
+        _ => {}
     }
     (next, lines)
 }
 
-/// A check's error as the log prints it: cut before any `?`, where a query string may carry a token,
-/// on one line, and at most 200 characters.
-fn log_error(error: &str) -> String {
-    let before_query = error.split('?').next().unwrap_or_default();
-    before_query.chars().map(|c| if matches!(c, '\n' | '\r') { ' ' } else { c }).take(200).collect()
+/// The first 8 hex digits of an error's SHA-256. The same text has the same fingerprint, and the
+/// log keeps it in place of the text.
+fn error_fingerprint(error: &str) -> String {
+    Sha256::digest(error.as_bytes())[..4].iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// The class of a check's error, from the prefix of its first part (the parts are joined by "; "):
+/// the connector or the step that failed. A prefix that no class names is `other`.
+fn error_class(error: &str) -> &'static str {
+    const CLASSES: [(&str, &str); 7] = [
+        ("Slack", "slack"),
+        ("Linear", "linear"),
+        ("Vercel", "vercel"),
+        ("Upstash Box", "upstash"),
+        ("could not open a session", "session"),
+        ("workflow ", "workflow"),
+        ("could not read workflow runs", "runs"),
+    ];
+    let first = error.split("; ").next().unwrap_or_default();
+    CLASSES.iter().find(|(prefix, _)| first.starts_with(prefix)).map_or("other", |&(_, class)| class)
 }
 
 /// `account_census`' check fields: the last check's age in whole seconds at `now` (-1 when there is
@@ -231,10 +253,12 @@ fn census_lines(censuses: Vec<(Uuid, (usize, usize, store_writes::Pending))>, ac
     censuses
         .into_iter()
         .map(|(id, census)| {
-            let connectors = accounts.get(&id).and_then(|account| account.connectors.get());
+            let account = accounts.get(&id);
+            let connectors = account.and_then(|account| account.connectors.get());
             let runs = connectors.map_or(0, |connectors| connectors.census().runs);
             let check = check_census(connectors.and_then(|connectors| connectors.last_check()).as_ref(), now);
-            account_census(id, runs, census, check)
+            let watching = account.is_some_and(|account| account.watching.load(Ordering::SeqCst));
+            account_census(id, runs, census, check, watching)
         })
         .collect()
 }
@@ -2322,11 +2346,11 @@ mod tests {
         assert!(fields["recv_machine_reply_n"] >= 1 && fields["sync_pull_bytes"] >= 4096, "{line}");
         let pending = store_writes::Pending { store: 1, store_bytes: 1234, secrets: 0, secrets_bytes: 0 };
         let id = Uuid::from_u128(7);
-        let account = account_census(id, 3, (100, 200, pending), check_census(None, 42));
+        let account = account_census(id, 3, (100, 200, pending), check_census(None, 42), false);
         let fields = numeric_fields(&account, &format!("pinned-server: census-account id={id}"));
         assert_eq!(
             fields,
-            vec![("runs", 3), ("runs_bytes", 200), ("store_bytes", 100), ("store_pending", 1), ("store_pending_bytes", 1234), ("secrets_pending", 0), ("secrets_pending_bytes", 0), ("check_age_s", -1), ("check_failing", 0)]
+            vec![("runs", 3), ("runs_bytes", 200), ("store_bytes", 100), ("store_pending", 1), ("store_pending_bytes", 1234), ("secrets_pending", 0), ("secrets_pending_bytes", 0), ("check_age_s", -1), ("check_failing", 0), ("watching", 0)]
         );
     }
 
@@ -2337,10 +2361,10 @@ mod tests {
         let failed = check_at("1970-01-01T00:00:00+00:00", Some("Linear answered 500"));
         assert_eq!(check_census(Some(&failed), 42), (42, true));
         assert_eq!(check_census(None, 42), (-1, false));
-        let line = account_census(id, 3, (100, 200, pending()), check_census(Some(&failed), 42));
-        assert!(line.ends_with(" check_age_s=42 check_failing=1"), "{line}");
-        let line = account_census(id, 3, (100, 200, pending()), check_census(None, 42));
-        assert!(line.ends_with(" check_age_s=-1 check_failing=0"), "{line}");
+        let line = account_census(id, 3, (100, 200, pending()), check_census(Some(&failed), 42), true);
+        assert!(line.ends_with(" check_age_s=42 check_failing=1 watching=1"), "{line}");
+        let line = account_census(id, 3, (100, 200, pending()), check_census(None, 42), false);
+        assert!(line.ends_with(" check_age_s=-1 check_failing=0 watching=0"), "{line}");
     }
 
     /// A check that ran at `at`, which the log does not read, with `error`.
