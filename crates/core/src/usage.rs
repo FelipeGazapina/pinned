@@ -844,6 +844,19 @@ mod tests {
     }
 
     #[test]
+    fn the_ceiling_prices_input_cache_reads_and_cache_writes_besides_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("s.jsonl");
+        let usage = json!({ "input_tokens": 1_000_000, "cache_read_input_tokens": 2_000_000, "cache_creation_input_tokens": 3_000_000, "output_tokens": 1_000_000 });
+        std::fs::write(&file, format!("{}\n", assistant("m1", "r1", "s", "2026-11-09T10:00:00Z", "claude-unlisted-1", usage))).unwrap();
+        let mut meter = Meter::default();
+        meter.advance(&file).unwrap();
+        let (usd, _) = meter.priced(&table(), &PriceBook::default());
+        // Input and cache reads at US$ 30 per million, cache writes at twice that, output at 150.
+        assert_eq!((usd * 100.0).round(), (30.0 + 60.0 + 180.0 + 150.0) * 100.0);
+    }
+
+    #[test]
     fn a_meter_counts_the_subagents_and_keeps_the_total_across_a_new_session() {
         let dir = tempfile::tempdir().unwrap();
         let usage = |output: u64| json!({ "input_tokens": 0, "output_tokens": output });
