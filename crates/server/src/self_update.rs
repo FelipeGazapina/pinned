@@ -852,6 +852,7 @@ mod tests {
         use pinned_core::accounts::Provider;
         use pinned_core::machine::{Event, Launch};
         use pinned_core::wire::Call;
+        pinned_core::machine::refuse_real_home();
         let dir = std::env::temp_dir().join(format!("pinned-hand-over-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("app")).unwrap();

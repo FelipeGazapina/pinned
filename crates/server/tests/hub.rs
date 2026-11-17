@@ -99,6 +99,7 @@ impl TestHub {
 
     #[allow(clippy::too_many_arguments)]
     fn start_every(name: &str, signup: Signup, policy: Policy, with_learning: bool, access: pinned_server::http::Access, listen: &str, team_policy: pinned_core::teams::TeamPolicy, reports: Option<pinned_server::reports::Config>) -> TestHub {
+        pinned_core::machine::refuse_real_home();
         let _ = rustls::crypto::ring::default_provider().install_default();
         let database = format!("pinned_test_{name}_{}", std::process::id());
         admin(&format!("drop database if exists {database} with (force)"));
@@ -412,6 +413,7 @@ fn launched(dir: &Path) -> Arc<Machine> {
 
 /// A machine that tells `events` what it reports.
 fn launched_with(dir: &Path, events: impl Fn(MachineEvent) + Send + Sync + 'static) -> Arc<Machine> {
+    pinned_core::machine::refuse_real_home();
     let claude = dir.join("claude");
     std::fs::write(&claude, "#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && { echo '{\"loggedIn\":true}'; exit 0; }\nexec cat\n").unwrap();
     std::fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
@@ -7538,9 +7540,9 @@ fn an_agent_holding_what_its_machine_keeps_readable_cannot_approve_or_run_a_conf
 
 const BIN: &str = env!("CARGO_BIN_EXE_pinned-server");
 
-/// A node or login started by a test must never reach the real app's socket, tab or account.
+/// A node or login started by a test must never reach the real app's socket, tab or account, nor a Claude or GitHub login.
 fn without_app_env(command: &mut std::process::Command) -> &mut std::process::Command {
-    for name in ["PINNED_SOCK", "PINNED_TAB", "PINNED_PROJECT", "PINNED_ROLE", "PINNED_ACCOUNT", "PINNED_TUTORIAL_HELPER"] {
+    for name in ["PINNED_SOCK", "PINNED_TAB", "PINNED_PROJECT", "PINNED_ROLE", "PINNED_ACCOUNT", "PINNED_TUTORIAL_HELPER", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN", "GH_TOKEN"] {
         command.env_remove(name);
     }
     command

@@ -6900,8 +6900,21 @@ pub const REAL_HOME_VARIABLES: [&str; 6] = ["CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OA
 /// What marks `home` and the environment as a person's real Claude or pinned home, by name only: a
 /// kind of file, or a variable's name, never a value or a path. `exists` probes a path without
 /// opening it; `is_set` tells whether a variable is set, to any value.
-pub fn real_home_marks(_home: &Path, _xdg_config: Option<&Path>, _exists: impl Fn(&Path) -> bool, _is_set: impl Fn(&str) -> bool) -> Vec<&'static str> {
-    Vec::new()
+pub fn real_home_marks(home: &Path, xdg_config: Option<&Path>, exists: impl Fn(&Path) -> bool, is_set: impl Fn(&str) -> bool) -> Vec<&'static str> {
+    let mut marks = Vec::new();
+    // An empty HOME would probe the working directory instead.
+    let in_home = |file: &str| !home.as_os_str().is_empty() && exists(&home.join(file));
+    if in_home(".claude.json") {
+        marks.push("a Claude config file in HOME");
+    }
+    if in_home(".claude") {
+        marks.push("a Claude folder in HOME");
+    }
+    if in_home(".config/pinned/account.json") || in_home(".pinned/account.json") || xdg_config.is_some_and(|dir| exists(&dir.join("pinned/account.json"))) {
+        marks.push("a pinned account file in HOME");
+    }
+    marks.extend(REAL_HOME_VARIABLES.into_iter().filter(|name| is_set(name)));
+    marks
 }
 
 /// Stops a test process, once, before it reads or writes a real Claude or pinned home: one line to
@@ -6912,7 +6925,9 @@ pub fn refuse_real_home() {
         let xdg_config = std::env::var_os("XDG_CONFIG_HOME").filter(|dir| !dir.is_empty()).map(PathBuf::from);
         let marks = real_home_marks(&home(), xdg_config.as_deref(), |path| std::fs::symlink_metadata(path).is_ok(), |name| std::env::var_os(name).is_some());
         if let Some(line) = refusal(&marks) {
-            eprintln!("{line}");
+            // Straight to stderr: a test's captured output is lost when the process exits.
+            use std::io::Write;
+            let _ = writeln!(std::io::stderr(), "{line}");
             std::process::exit(2);
         }
     });
