@@ -860,6 +860,40 @@ test("the create wizard no longer promises a team chat", () => {
   assert.ok(!/chat/i.test(a.run("JSON.stringify(TEAMS_TEXT.nameHas)")));
 });
 
+test("the step list numbers steps 1-4 and leaves Done without a digit until it is reached", async () => {
+  const a = app();
+  a.show("team-create");
+  const html = a.page();
+  for (const n of [1, 2, 3, 4]) assert.match(html, new RegExp(`data-step="${n}"[\\s\\S]*?<span class="tm-num" aria-hidden="true">${n}</span>`), `step ${n} shows ${n}`);
+  const done = html.match(/data-step="5"[\s\S]*?<span class="tm-num"[^>]*>([^<]*)<\/span>/);
+  assert.ok(done, "the Done row is in the list");
+  assert.equal(done[1], "", "the Done marker has no digit before it is reached");
+  assert.match(html, /data-step="5"[\s\S]*?<span class="tm-num" role="img" aria-label="Not reached">/, "the Done marker is labelled Not reached");
+});
+
+test("the Done row in the step list shows a check mark at step 5", async () => {
+  let n = 0;
+  const a = await atStep3(ACME, { answers: { invite: () => ({ code: `C${++n}`, hint: "" }) } });
+  a.click("next");
+  await flush();
+  a.click("next");
+  await flush();
+  a.click("invite");
+  await flush();
+  a.click("next");
+  await flush();
+  assert.match(text(a.page()), /North Studio is ready/);
+  const done = a.page().match(/data-step="5"[\s\S]*?<span class="tm-num"[^>]*>([^<]*)<\/span>/);
+  assert.equal(done[1], "✓");
+  assert.match(a.page(), /data-step="5"[\s\S]*?<span class="tm-num" role="img" aria-label="Reached">/, "the Done marker is labelled Reached");
+});
+
+test("the join code field's placeholder is the four-group invite code shape", async () => {
+  const a = joinApp();
+  a.show("team-join");
+  assert.ok(a.page().includes('placeholder="ABCD-EFGH-JKMN-PQRS"'), "the code field shows the four-group shape");
+});
+
 // ---- Connect AI account: step 3 for the team the owner is in, opened from the team nav or the bot page ----
 
 const KEYS_OFF = { upstash: false, claude: false, github: false, slack: false };
