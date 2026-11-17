@@ -9560,8 +9560,8 @@ fn a_fourth_extend_box_ask_for_one_box_is_busy_at_once_while_three_wait() {
 /// A flood of asks for one box keeps an ask for another box of the same account waiting behind at
 /// most the 3 asks of the flooded box that are in this hub's lines; the rest are refused before
 /// they join the account's line. Many other acts wait for the owner, so each ask's check in its
-/// turn takes a while: one turn alone is measured first, and the other box's ask is answered
-/// within 4 such turns (3 ahead of it and its own), with room for the flood's load.
+/// turn takes a while (about 60 ms): one turn alone is measured first, and the other box's ask is
+/// answered within 4 such turns (3 ahead of it and its own), with room for the flood's load.
 #[test]
 fn a_flood_of_extend_box_asks_for_one_box_keeps_another_box_waiting_behind_at_most_three() {
     let ExtendSetup { hub, account, ana, machine, .. } = extend_setup("extend_flood_other");
@@ -9569,7 +9569,7 @@ fn a_flood_of_extend_box_asks_for_one_box_keeps_another_box_waiting_behind_at_mo
     let first = extend_as(&ana.dir, &ana.tab, &machine, 0.5, None).unwrap();
     assert_eq!(first["outcome"], "pending", "{first}");
     let id = first["id"].as_str().unwrap();
-    admin_on(&hub.database, &format!("insert into agent_confirmations (id, account, machine, tab, role, action, args) select gen_random_uuid(), account, machine, tab, role, 'open_box', args || jsonb_build_object('pad', repeat('x', 200)) from agent_confirmations, generate_series(1, 20000) where id = '{id}'"));
+    admin_on(&hub.database, &format!("insert into agent_confirmations (id, account, machine, tab, role, action, args) select gen_random_uuid(), account, machine, tab, role, 'open_box', args || jsonb_build_object('pad', repeat('x', 200)) from agent_confirmations, generate_series(1, 2000) where id = '{id}'"));
     let account = hub.runtime.block_on(hub.hub().account(account)).unwrap();
     let (alone, turn) = hub.runtime.block_on(timed_extend(&hub, &account, &ana, &machine, 1.75, None)).unwrap();
     assert_eq!(alone, Err(extend_waits("US$ 0.50")), "refused in its turn");
@@ -9594,7 +9594,10 @@ fn a_flood_of_extend_box_asks_for_one_box_keeps_another_box_waiting_behind_at_mo
     let answers: Vec<_> = flood.into_iter().flat_map(|ask| hub.runtime.block_on(ask).unwrap()).collect();
     assert!(answers.iter().all(|a| *a == Err(extend_waits("US$ 0.50")) || *a == Err(pinned_core::wire::HUB_BUSY.to_owned())), "every flooding ask is refused");
     assert_eq!(answer.as_ref().map(|a| a["outcome"].clone()), Ok(json!("pending")), "the other box's ask is checked and waits for the owner: {answer:?} after {waited:?}");
-    let bound = turn * 4 + Duration::from_millis(500);
+    // 4 turns, the 3 asks ahead of it and its own, and 1 s for the flood's load on the hub's shared
+    // connection, which every refused ask still reads before it is refused. Behind the whole flood,
+    // as when it joined the account's line before the box's, it waits about its 2 s.
+    let bound = turn * 4 + Duration::from_secs(1);
     assert!(waited < bound, "the other box's ask waits behind at most 3 asks of the flooded box: {waited:?}, one turn alone {turn:?}");
 }
 

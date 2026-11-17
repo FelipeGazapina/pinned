@@ -610,15 +610,17 @@ impl ExtendTurn {
         ExtendTurn::locked(hub, account, machine, lines, deadline, false).await
     }
 
-    /// An agent's ask's turn: the account's line, then the box's, which it does not join when
-    /// `MOST_ASKS_IN_BOX_LINE` are in it, then the box's lock and the account's on the same
+    /// An agent's ask's turn: a place in the box's line, refused at once when
+    /// `MOST_ASKS_IN_BOX_LINE` are in it, so a flood of one box never fills the account's line; then
+    /// the account's line, then the box's, then the box's lock and the account's on the same
     /// connection, so asks for different boxes of one account are counted one after another. Always
     /// account, then box in this hub's lines, and box, then account in Postgres: a decision takes
     /// only the box's, so no two turns wait on each other.
     pub async fn ask(hub: &Hub, account: Uuid, machine: Uuid) -> Result<ExtendTurn, String> {
         let deadline = tokio::time::Instant::now() + EXTEND_WAIT;
+        let in_box = Place::join((account, Some(machine)), MOST_ASKS_IN_BOX_LINE).ok_or(crate::db::BUSY)?;
         let of_account = Place::join((account, None), usize::MAX).ok_or(crate::db::BUSY)?.hold(deadline).await?;
-        let of_box = Place::join((account, Some(machine)), MOST_ASKS_IN_BOX_LINE).ok_or(crate::db::BUSY)?.hold(deadline).await?;
+        let of_box = in_box.hold(deadline).await?;
         ExtendTurn::locked(hub, account, machine, vec![of_account, of_box], deadline, true).await
     }
 
