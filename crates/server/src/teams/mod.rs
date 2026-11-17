@@ -14,6 +14,7 @@ pub mod membership;
 pub mod projects;
 pub mod queue;
 pub mod run_log;
+pub mod sessions;
 pub mod triggers;
 
 use crate::hub::{Account, Hub};
