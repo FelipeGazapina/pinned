@@ -11235,6 +11235,43 @@ while True:
         serde_json::from_str(&reply).unwrap()
     }
 
+    /// A workflow callback from a process outside every session is refused by the machine itself,
+    /// whatever listens behind it: the hub link, or a signed-out app's own connectors, which check
+    /// no session. The listener never sees it, so a hub that reads no vouch cannot take it either.
+    #[test]
+    #[cfg(unix)]
+    fn a_workflow_callback_from_outside_every_session_never_reaches_the_listener() {
+        if !crate::ipc::KNOWS_PEERS {
+            return;
+        }
+        let root = temp("callback-outside");
+        let sock = root.join("hook.sock");
+        let m = Machine::new(Launch { sock: sock.clone(), ..launch() }, None, Some(root.clone()), |_| {});
+        let reached = Arc::new(Mutex::new(Vec::new()));
+        let seen = reached.clone();
+        m.listen_vouched(move |message, vouch| {
+            seen.lock().unwrap().push(format!("{message:?} {vouch:?}"));
+            Ok("acted on the connections".into())
+        })
+        .unwrap();
+        let issue = Subject::LinearIssue { issue: "uuid-1".into() };
+        let (connector, channel, thread) = (|| "c1".to_owned(), || "C1".to_owned(), || "1.2".to_owned());
+        let callbacks = [
+            Message::Stage { connector: connector(), subject: issue.clone(), stage: crate::agent::Stage::Coding },
+            Message::SlackReply { connector: connector(), channel: channel(), thread: thread(), text: "on it".into() },
+            Message::LinearCreate { connector: connector(), channel: channel(), thread: thread(), title: "x".into(), description: "y".into(), assignee: String::new() },
+            Message::LinearTake { connector: connector(), channel: channel(), thread: thread(), issue: "ENG-7".into() },
+            Message::RunSet { connector: connector(), subject: issue, name: "title".into(), value: "x".into() },
+        ];
+        for callback in callbacks {
+            let line = serde_json::to_string(&callback).unwrap();
+            assert_eq!(ask(&sock, &line), Err(crate::agent::OUTSIDE_EVERY_SESSION.to_owned()), "{line}");
+        }
+        assert_eq!(*reached.lock().unwrap(), Vec::<String>::new(), "the listener saw a call from outside every session");
+        let _ = std::fs::remove_file(&sock);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     fn hook(tab: &str, status: AgentStatus) -> AgentEvent {
         AgentEvent { status, cwd: None, message: None, tab: Some(tab.into()), session: Some("s1".into()), title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false, reply: None }
     }
