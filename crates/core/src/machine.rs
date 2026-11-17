@@ -3627,13 +3627,18 @@ impl Machine {
             ProjectTool::PlanSet(_) | ProjectTool::PlanStep(_) | ProjectTool::PlanFix(_) | ProjectTool::PlanClose(_) => {
                 let session = self.captain_session(tab)?.ok_or("only a project's Captain keeps a plan")?;
                 let now = unix_millis();
-                self.plans.lock().unwrap().write(&session, |plans| match tool {
+                let written = self.plans.lock().unwrap().write(&session, |plans| match tool {
                     ProjectTool::PlanSet(call) => crate::plan::set(plans, call, now, &[], now),
                     ProjectTool::PlanStep(call) => crate::plan::step(plans, call, &[], now),
                     ProjectTool::PlanFix(call) => crate::plan::fix(plans, call, &[], now),
                     ProjectTool::PlanClose(call) => crate::plan::close(plans, call, &[], now),
                     _ => unreachable!("only plan tools reach here"),
-                })
+                });
+                // The Captain's glance rides on its tab, so the account's clients read it in the next tabs.
+                if written.is_ok() {
+                    self.emit_tabs();
+                }
+                written
             }
             ProjectTool::TellOrchestrator { text } => match self.tab(tab, |t| role_of(&t.env))? {
                 Some((Role::Orchestrator, project)) => text_json(self.report_up(tab, &project, text, vec![])?),
