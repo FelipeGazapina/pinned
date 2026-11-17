@@ -12540,6 +12540,8 @@ mod teams_hardening;
 mod reports;
 #[path = "hub/reports_poller.rs"]
 mod reports_poller;
+#[path = "hub/plans.rs"]
+mod plans;
 
 #[test]
 fn an_account_over_the_sync_limit_takes_a_push_that_does_not_grow_it_and_refuses_one_that_does() {
