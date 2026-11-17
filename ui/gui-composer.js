@@ -459,12 +459,32 @@ const planApprove = (menu) => {
 const visibleOf = (selector) => [...document.querySelectorAll(selector)].find((el) => el.getClientRects().length > 0);
 
 /** The note typed under a plan's options, or undefined when no field is open. A note belongs to the plan
- * menu it was typed under: once that menu has left the screen or changed, the note goes with it. */
+ * menu it was typed under: once that menu has left the screen or changed, the field closes, and the text
+ * it held is handed back by noteLeft. A frame without a menu while the tab answers is not that. */
 function approveNoteOf(tab) {
   const t = threadOf(tab);
   if (typeof t.approveNote !== "string") return undefined;
-  if (!sameMenu(t.approveNoteMenu, terminalMenu(tab))) clearApproveNote(t);
+  const menu = terminalMenu(tab);
+  if (!menu && tab.answering) return t.approveNote;
+  if (!sameMenu(t.approveNoteMenu, menu)) {
+    const left = t.approveNote.trim();
+    clearApproveNote(t);
+    if (left) noteLeft(tab, left);
+  }
   return t.approveNote;
+}
+
+/** A note typed in a field whose menu closed: it goes to the composer when that is empty, and is shown
+ * otherwise, so it never just vanishes. */
+function noteLeft(tab, text) {
+  if (tab === active && !prompt.value.trim()) {
+    prompt.value = text;
+    saveDraft(tab, text);
+    autosize();
+    showComposerNote("Claude's menu closed. Your note is back in the message box.", true);
+    return;
+  }
+  showComposerNote(`Claude's menu closed. Your note was not sent: ${text.slice(0, 60)}…`, true);
 }
 
 /** Drops the field's state: its note, the menu it was typed under, its error and the label it drew. */
@@ -482,6 +502,7 @@ function approveNoteField(tab) {
 /** Sets the live parts of every open note field: the typed text, Approve's label, whether Approve is on, and
  * the error. A render that leaves the markup as it was never touches the input, so focus and IME survive. */
 function syncApproveNote(tab) {
+  if (tab !== active) return;
   const t = threadOf(tab);
   const note = t.approveNote ?? "";
   const label = t.approveLabel ? `Approve: ${t.approveLabel}` : "Approve";
@@ -569,16 +590,16 @@ async function approveWithNote(tab, note) {
   t.approveError = null;
   const picked = chooseOption(tab, yes.n, yes.label);
   if (!picked) return moved();
+  // The note now lives in this call: the field is gone with the menu, so a redraw cannot take it.
+  clearApproveNote(t);
   try {
     await picked;
   } catch (e) {
     return keepNote(tab, text, e?.message ?? String(e));
   }
-  if (!(await until(() => !terminalMenu(tab), 4000))) {
-    tab.answered?.release();
-    return keepNote(tab, text, "Claude's menu didn't close");
-  }
-  clearApproveNote(t);
+  // A slow Enter (a remote machine) closes the menu late. The hold stays on until it has: releasing it
+  // would let a second Approve type arrows and Enter while the first is in transit.
+  if (!(await until(() => !terminalMenu(tab), ANSWERED_MS))) return keepNote(tab, text, "Claude's menu didn't close");
   await sendNote(tab, text);
   return true;
 }
@@ -587,11 +608,13 @@ async function approveWithNote(tab, note) {
  * unless it is a slash command, then the prompt. claude queues the prompt when it is busy, and the row says so. */
 async function sendNote(tab, text) {
   const t = threadOf(tab);
-  if (!(await closeClaudeDialog(tab))) return keepNote(tab, text, "Claude's dialog didn't close");
-  const compactFirst = !!compactOffer(tab) && !t.keepHistory && !/^\/compact\b/.test(text);
+  try {
+    if (!(await closeClaudeDialog(tab))) return keepNote(tab, text, "Claude's dialog didn't close");
+  } catch (e) {
+    return keepNote(tab, text, e?.message ?? String(e));
+  }
   const row = text.startsWith("/") ? null : raisePending(tab, t, text);
   try {
-    if (compactFirst) await callOn(tab.machine, { cmd: "prompt", tab: tab.view.id, text: "/compact" });
     await callOn(tab.machine, { cmd: "prompt", tab: tab.view.id, text });
     if (row) markSent(tab, row);
   } catch (e) {
@@ -631,7 +654,7 @@ function keepNote(tab, text, why) {
     showComposerNote(`${sentence} Your note is back in the message box.`, true);
     return false;
   }
-  showComposerNote(`${sentence} Your note was not sent.`, true);
+  showComposerNote(`${sentence} Your note was not sent: ${text.slice(0, 60)}…`, true);
   return false;
 }
 
