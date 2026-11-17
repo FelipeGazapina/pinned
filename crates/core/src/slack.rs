@@ -453,6 +453,16 @@ fn skipped_line(workflow: &str, ts: &str) -> String {
     format!("pinned: workflow {workflow} skipped app post {ts} over the cap of {APPS_PER_CHECK} per check")
 }
 
+/// The lines `messages` logged for skipped app posts while a test ran, oldest first.
+#[cfg(test)]
+static SKIPPED_LOG: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Takes the skipped lines logged since the last call.
+#[cfg(test)]
+pub(crate) fn take_skipped_log() -> Vec<String> {
+    std::mem::take(&mut *SKIPPED_LOG.lock().unwrap())
+}
+
 /// The text of every part of a rich text block, one line per section or list item.
 fn rich_lines(elements: &Value, lines: &mut Vec<String>) {
     fn inline(elements: &Value) -> String {
@@ -547,7 +557,10 @@ pub async fn messages(token: &str, channel: &str, bot: &str, since: DateTime<Utc
     let none = Own::default();
     let Selected { taken, skipped } = select(&history["messages"], bot, apps.map_or(&none, |a| a.own), since, apps.is_some());
     for ts in &skipped {
-        eprintln!("{}", skipped_line(apps.map_or("", |a| a.workflow), ts));
+        let line = skipped_line(apps.map_or("", |a| a.workflow), ts);
+        #[cfg(test)]
+        SKIPPED_LOG.lock().unwrap().push(line.clone());
+        eprintln!("{line}");
     }
     let (from_apps, people): (Vec<Value>, Vec<Value>) = taken.into_iter().partition(is_app_post);
     let people = Value::Array(people);

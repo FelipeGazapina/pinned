@@ -12419,6 +12419,54 @@ mod tests {
             let _ = std::fs::remove_dir_all(dir);
         }
 
+        /// #support with `n` CI Bot posts a second apart, each its own thread, all inside the
+        /// overlap a check reads again, oldest first by ts.
+        fn app_posts(now: DateTime<Utc>, n: i64) -> (Workspace, Vec<String>) {
+            let ts: Vec<String> = (0..n).map(|i| slack_ts(now - chrono::Duration::seconds(40 - i))).collect();
+            let history: Vec<Value> =
+                ts.iter().rev().enumerate().map(|(i, ts)| json!({ "ts": ts, "subtype": "bot_message", "bot_id": "B9", "username": "CI Bot", "text": format!("alert {i}") })).collect();
+            let threads: serde_json::Map<String, Value> = history.iter().map(|m| (m["ts"].as_str().unwrap().to_owned(), json!([m]))).collect();
+            (Workspace { history: Value::Array(history), threads: Value::Object(threads), ..workspace("xoxb-test-A", "TA", "UA", "CA1") }, ts)
+        }
+
+        fn threads_started(connectors: &Connectors) -> Vec<String> {
+            started_by(connectors).into_iter().map(|(thread, _)| thread).collect()
+        }
+
+        #[test]
+        fn app_posts_a_check_skips_over_the_cap_are_never_read_again() {
+            let _api = slack::lock_api();
+            let _restore = RestoreSlack;
+            let (a, ts) = app_posts(Utc::now(), 15);
+            let _seen = serve(vec![a, workspace("xoxb-test-B", "TB", "UB", "CB1")], vec![]);
+            let (connectors, dir) = two_bots("apps-skipped-once", vec![message_workflow(true)]);
+            slack::take_skipped_log();
+            assert_eq!(block_on(connectors.poll()).1, None);
+            assert_eq!(threads_started(&connectors), ts[..slack::APPS_PER_CHECK].to_vec(), "the oldest ten are taken");
+            let skipped = slack::take_skipped_log();
+            assert_eq!(skipped.len(), 5, "{skipped:?}");
+            assert!(ts[slack::APPS_PER_CHECK..].iter().zip(&skipped).all(|(ts, line)| line.contains(ts.as_str())), "{skipped:?}");
+            assert_eq!(block_on(connectors.poll()).1, None);
+            assert_eq!(threads_started(&connectors), ts[..slack::APPS_PER_CHECK].to_vec(), "the second check takes none of the fifteen");
+            assert_eq!(slack::take_skipped_log(), Vec::<String>::new(), "and logs none of them again");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        #[test]
+        fn app_posts_already_handled_take_no_place_under_the_cap() {
+            let _api = slack::lock_api();
+            let _restore = RestoreSlack;
+            let (a, ts) = app_posts(Utc::now(), 15);
+            let _seen = serve(vec![a, workspace("xoxb-test-B", "TB", "UB", "CB1")], vec![]);
+            let (connectors, dir) = two_bots("apps-handled-no-place", vec![message_workflow(true)]);
+            connectors.store.lock().unwrap().connectors[0].handled.extend(ts[..slack::APPS_PER_CHECK].iter().map(|ts| thread_key("CA1", ts)));
+            slack::take_skipped_log();
+            assert_eq!(block_on(connectors.poll()).1, None);
+            assert_eq!(threads_started(&connectors), ts[slack::APPS_PER_CHECK..].to_vec(), "the five new posts, though ten older ones are in the page");
+            assert_eq!(slack::take_skipped_log(), Vec::<String>::new());
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
         #[test]
         fn a_message_workflow_without_apps_starts_for_the_person_only_and_asks_nothing_more() {
             let _api = slack::lock_api();
