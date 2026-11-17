@@ -6893,6 +6893,36 @@ pub(crate) fn home() -> PathBuf {
     PathBuf::from(std::env::var_os(HOME_ENV).unwrap_or_default())
 }
 
+/// The variables a real Claude or pinned session sets. A test process that has one of them carries
+/// that session's login or socket.
+pub const REAL_HOME_VARIABLES: [&str; 6] = ["CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN", "GH_TOKEN", SOCK_ENV, TAB_ENV, TASK_ENV];
+
+/// What marks `home` and the environment as a person's real Claude or pinned home, by name only: a
+/// kind of file, or a variable's name, never a value or a path. `exists` probes a path without
+/// opening it; `is_set` tells whether a variable is set, to any value.
+pub fn real_home_marks(_home: &Path, _xdg_config: Option<&Path>, _exists: impl Fn(&Path) -> bool, _is_set: impl Fn(&str) -> bool) -> Vec<&'static str> {
+    Vec::new()
+}
+
+/// Stops a test process, once, before it reads or writes a real Claude or pinned home: one line to
+/// stderr naming what it found, then exit code 2.
+pub fn refuse_real_home() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let xdg_config = std::env::var_os("XDG_CONFIG_HOME").filter(|dir| !dir.is_empty()).map(PathBuf::from);
+        let marks = real_home_marks(&home(), xdg_config.as_deref(), |path| std::fs::symlink_metadata(path).is_ok(), |name| std::env::var_os(name).is_some());
+        if let Some(line) = refusal(&marks) {
+            eprintln!("{line}");
+            std::process::exit(2);
+        }
+    });
+}
+
+/// The one line a refused test process prints: the marks it found, by name.
+fn refusal(marks: &[&str]) -> Option<String> {
+    (!marks.is_empty()).then(|| format!("pinned tests refuse to run in a real home: found {}; run them with a temporary HOME and without these variables", marks.join(", ")))
+}
+
 impl Machine {
     /// Beside the price list, in the machine's settings folder.
     fn prices_file(&self) -> Option<PathBuf> {
@@ -16892,5 +16922,77 @@ Have another model review a risky change before it goes ahead.";
             )
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A home that looks like a real one, built under the temp dir and never in the process's HOME.
+    fn fake_home(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("pinned-fake-home-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn exists(path: &Path) -> bool {
+        std::fs::symlink_metadata(path).is_ok()
+    }
+
+    #[test]
+    fn a_home_with_claudes_files_is_refused_by_their_kind() {
+        let home = fake_home("claude");
+        std::fs::create_dir_all(home.join(".claude")).unwrap();
+        std::fs::write(home.join(".claude.json"), "{}").unwrap();
+        let marks = real_home_marks(&home, None, exists, |_| false);
+        assert_eq!(marks, ["a Claude config file in HOME", "a Claude folder in HOME"]);
+        let line = refusal(&marks).unwrap();
+        assert!(!line.contains(home.to_str().unwrap()), "the line names kinds, not the home: {line}");
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn an_empty_home_without_a_sessions_variables_is_not_refused() {
+        let home = fake_home("empty");
+        assert_eq!(real_home_marks(&home, Some(&home.join("xdg")), exists, |_| false), Vec::<&str>::new());
+        assert_eq!(refusal(&[]), None);
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn a_pinned_account_file_is_refused_wherever_pinned_keeps_one() {
+        for (place, xdg) in [(".config/pinned", false), (".pinned", false), ("xdg/pinned", true)] {
+            let home = fake_home("account");
+            std::fs::create_dir_all(home.join(place)).unwrap();
+            std::fs::write(home.join(place).join("account.json"), "{}").unwrap();
+            let xdg = xdg.then(|| home.join("xdg"));
+            assert_eq!(real_home_marks(&home, xdg.as_deref(), exists, |_| false), ["a pinned account file in HOME"], "{place}");
+            let _ = std::fs::remove_dir_all(home);
+        }
+    }
+
+    #[test]
+    fn each_sessions_variable_is_refused_by_its_name_and_never_its_value() {
+        let home = fake_home("variables");
+        for name in ["CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN", "GH_TOKEN", "PINNED_SOCK", "PINNED_TAB", "PINNED_TASK"] {
+            let env = HashMap::from([(name, "fake-value-xyz")]);
+            let marks = real_home_marks(&home, None, exists, |set| env.contains_key(set));
+            assert_eq!(marks, [name]);
+            let line = refusal(&marks).unwrap();
+            assert!(line.contains(name), "{line}");
+            for part in ["fake-value-xyz", "fake", "value", "xyz"] {
+                assert!(!line.contains(part), "the line shows part of the value: {line}");
+            }
+        }
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_config_and_a_dangling_claude_folder_are_refused_without_reading_them() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = fake_home("unreadable");
+        std::fs::write(home.join(".claude.json"), "{}").unwrap();
+        std::fs::set_permissions(home.join(".claude.json"), std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::os::unix::fs::symlink(home.join("gone"), home.join(".claude")).unwrap();
+        assert_eq!(real_home_marks(&home, None, exists, |_| false), ["a Claude config file in HOME", "a Claude folder in HOME"]);
+        let _ = std::fs::remove_dir_all(home);
     }
 }

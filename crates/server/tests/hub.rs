@@ -7547,6 +7547,57 @@ fn without_app_env(command: &mut std::process::Command) -> &mut std::process::Co
 }
 
 #[test]
+fn a_spawned_node_carries_no_claude_or_github_login() {
+    let logins = ["CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN", "GH_TOKEN", "PINNED_SOCK", "PINNED_TAB"];
+    let mut command = std::process::Command::new("env");
+    for name in logins {
+        command.env(name, "fake-value-xyz");
+    }
+    let spawned = without_app_env(&mut command).output().unwrap();
+    assert!(spawned.status.success());
+    let env = String::from_utf8_lossy(&spawned.stdout);
+    for name in logins {
+        assert!(!env.lines().any(|line| line.starts_with(&format!("{name}="))), "the node got {name}");
+    }
+}
+
+/// The guard on its own. `a_test_run_in_a_real_home_stops_at_once_with_one_line` runs it in a child.
+#[test]
+fn the_real_home_guard() {
+    pinned_core::machine::refuse_real_home();
+}
+
+#[test]
+fn a_test_run_in_a_real_home_stops_at_once_with_one_line() {
+    let guard = |home: &Path| {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args(["--exact", "the_real_home_guard"]).env("HOME", home).env_remove("XDG_CONFIG_HOME");
+        for name in pinned_core::machine::REAL_HOME_VARIABLES {
+            command.env_remove(name);
+        }
+        command
+    };
+    let real = temp("real-home");
+    std::fs::create_dir_all(real.join(".claude")).unwrap();
+    std::fs::write(real.join(".claude.json"), "{}").unwrap();
+    let refused = guard(&real).env("GH_TOKEN", "fake-value-xyz").output().unwrap();
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert_eq!(refused.status.code(), Some(2), "{stderr}");
+    assert_eq!(
+        stderr.lines().collect::<Vec<_>>(),
+        ["pinned tests refuse to run in a real home: found a Claude config file in HOME, a Claude folder in HOME, GH_TOKEN; run them with a temporary HOME and without these variables"]
+    );
+    assert!(!String::from_utf8_lossy(&refused.stdout).contains("test result"), "it stopped before any test ran");
+
+    let clean = temp("clean-home");
+    let started = guard(&clean).output().unwrap();
+    assert!(started.status.success(), "{}", String::from_utf8_lossy(&started.stderr));
+    assert!(String::from_utf8_lossy(&started.stdout).contains("1 passed"), "{}", String::from_utf8_lossy(&started.stdout));
+    let _ = std::fs::remove_dir_all(real);
+    let _ = std::fs::remove_dir_all(clean);
+}
+
+#[test]
 fn a_node_keeps_only_its_machine_token_and_ends_a_login_an_older_pinned_kept() {
     let hub = TestHub::start("node_login");
     let url = hub.url.clone();
