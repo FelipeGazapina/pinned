@@ -12366,6 +12366,12 @@ fn the_hub_takes_a_workflow_call_only_from_the_tab_its_machine_found_it_in() {
     let answers: Vec<Result<Value, String>> = on_tabs.iter().map(|(hub_call, own, _)| call(hub_call, Some(own), Some(true))).collect();
     let past = [vec![Ok(json!(NO_COLUMN)), Err(NO_GRAPH_RUN.into())], past_the_check().into_iter().map(|e| e.map(Value::String)).collect()].concat();
     assert_eq!(answers, past, "each from the tab that runs it");
+    // A frame with no verdict, as from a system that does not tell the socket's peer, is held
+    // only to the machine running that workflow on that subject, whichever tab it names or none.
+    let unchecked: Vec<Result<Value, String>> = on_tabs.iter().flat_map(|(hub_call, _, other)| [call(hub_call, Some(other), None), call(hub_call, None, None)]).collect();
+    assert_eq!(unchecked, past.iter().flat_map(|answer| [answer.clone(), answer.clone()]).collect::<Vec<_>>(), "no verdict, a wrong tab or none");
+    let elsewhere = json!({ "cmd": "stage", "connector": w.a, "issue": "uuid-2", "stage": "coding" });
+    assert_eq!(call(&elsewhere, Some("tab-1"), None), Err("this machine runs no session of that workflow on that subject".into()), "no verdict, a subject it runs nowhere");
 }
 
 /// What `pinned run set` gets from a session the hub takes but whose run has no graph.
