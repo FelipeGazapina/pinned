@@ -8278,7 +8278,7 @@ fn another_accounts_agent_reaches_none_of_an_accounts_machines_connections_invit
     };
     assert_eq!(bob_decides(&mut bob, "revoke_invite", json!({ "id": anas_invite })), format!("failed: this account has no unused invite {anas_invite}"));
     assert_eq!(bob_decides(&mut bob, "revoke_agent", json!({ "id": grant })), format!("failed: this account has no agent {grant}"));
-    assert_eq!(bob_decides(&mut bob, "extend_box", json!({ "machine": mini, "extra_usd": 5.0 })), "failed: this machine is no box");
+    assert_eq!(act(&bob.dir, &bob.tab, "extend_box", json!({ "machine": mini, "extra_usd": 5.0 })), Err("this machine is no box".into()), "refused when bob's agent asks, before anyone is asked to approve it");
     assert_eq!(act(&bob.dir, &bob.tab, "answer_box", json!({ "id": "q-ana", "allow": true })), Err(format!("answer_box is not open to agents: {ANSWER_BOX_CLOSED}")));
     let bobs_token = act(&bob.dir, &bob.tab, "set_box_claude_token", json!({ "name": "bloom" })).unwrap()["id"].clone();
     assert_eq!(approve(&mut bob.client, &bobs_token, json!({ "token": "sk-ant-oat01-bobsown" })), Err("connect Upstash Box first".into()), "bob's key goes to bob's own connection");
@@ -8975,22 +8975,20 @@ fn a_session_box_follows_only_its_setting_and_budget_and_only_its_owner_answers_
     assert_eq!(asked["outcome"], "pending", "an agent's extend waits for the owner: {asked}");
     let extended = decide(&mut owner, &asked);
     assert_eq!((extended["outcome"].as_str(), extended["result"]["budget_usd"].as_f64()), (Some("done"), Some(2.5)), "within the Box budget the owner's yes extends it: {extended}");
-    let asked = act(&ana.dir, &ana.tab, "extend_box", json!({ "machine": machine, "extra_usd": 1.0 })).unwrap();
     assert_eq!(
-        decide(&mut owner, &asked)["outcome"].as_str(),
-        Some("failed: a box may spend at most US$ 3.00; name less, or raise Box budget in Settings › Way of working"),
-        "past the Box budget it is refused"
+        act(&ana.dir, &ana.tab, "extend_box", json!({ "machine": machine, "extra_usd": 1.0 })),
+        Err("a box may spend at most US$ 3.00; name less, or raise Box budget in Settings › Way of working".into()),
+        "past the Box budget it is refused when the agent asks"
     );
-    let asked = act(&bob.dir, &bob.tab, "extend_box", json!({ "machine": machine, "extra_usd": 0.5 })).unwrap();
-    assert_eq!(decide(&mut bobs_app, &asked)["outcome"].as_str(), Some("failed: this machine is no box"));
+    assert_eq!(act(&bob.dir, &bob.tab, "extend_box", json!({ "machine": machine, "extra_usd": 0.5 })), Err("this machine is no box".into()));
     assert_eq!(bobs_app.hub(json!({ "cmd": "extend_box", "machine": machine, "extra_usd": 0.5 })), Err("this machine is no box".into()));
     let mut locked_app = Client::app(&url, &token);
     let extend = json!({ "cmd": "extend_box", "machine": machine, "extra_usd": 0.5 });
     assert_eq!(locked_app.hub(extend.clone()), Err(LOCKED.into()), "a locked app asks for the password before it extends");
     locked_app.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
     assert_eq!(locked_app.hub(extend).unwrap()["budget_usd"].as_f64(), Some(3.0), "once unlocked the app's own extend goes through");
-    // Only the agents' extends were ever confirmations, and the owner decided each: no open or answer became one.
-    for (app, expected) in [(&mut owner, 2), (&mut bobs_app, 1)] {
+    // Only the agents' extends that could run were ever confirmations, and the owner decided each: no open or answer became one.
+    for (app, expected) in [(&mut owner, 1), (&mut bobs_app, 0)] {
         let all = app.hub(json!({ "cmd": "confirmations" })).unwrap();
         assert!(all.as_array().unwrap().iter().all(|c| c["action"] == "extend_box" && c["decision"] == "approved"), "{all}");
         assert_eq!(all.as_array().unwrap().len(), expected, "exactly the extends this account's agents asked for: {all}");

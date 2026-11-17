@@ -106,6 +106,7 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
             Some((earlier, at)) => return json(ActAnswer::Repeat { earlier, at }),
         }
     }
+    let _asking_extend = if act.action == "extend_box" { Some(hub.boxes.asking_extend.lock().await) } else { None };
     let admitted = match admit(hub, account, origin, &caller, &act).await {
         Ok(admitted) => admitted,
         Err(refusal) => {
@@ -225,6 +226,13 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
     if surface::skips_prompts(&call) && !caller.bypass {
         return Err(format!("{name} would run a session that skips its permission prompts, and your own session asks for them"));
     }
+    // An extend that cannot run is refused now, with the text its run would give, so the owner is
+    // never asked for it. Its run after the approval checks again.
+    if let Parsed::Hub(HubCall::ExtendBox { machine, extra_usd }) = &call {
+        let machine = Uuid::parse_str(machine).map_err(|_| format!("this account has no machine {machine}"))?;
+        let waiting = waiting_extends(hub, account, caller, act, machine).await?;
+        crate::boxes::extended(hub, account, machine, *extra_usd, waiting).await?;
+    }
     if let Parsed::Hub(HubCall::SaveConnector { connector }) = &call {
         let connectors = hub.connectors(account).await?;
         // A save with no graph keeps the stored one, which then runs on the trigger this save sets.
@@ -256,6 +264,22 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
         return Err(format!("{name} starts work only on this session's own machine for now"));
     }
     Ok(Admitted { action, call, target, on_origin })
+}
+
+/// What the account's extends of the box behind `machine` that still wait for the owner add, all
+/// but the one this session already asked with this act's `request_id`, which a repeat answers.
+async fn waiting_extends(hub: &Hub, account: &Account, caller: &Caller, act: &AgentAct, machine: Uuid) -> Result<f64, String> {
+    let request_id = act.request_id.as_deref().filter(|id| !id.is_empty());
+    let repeat = |asked: &Confirmation| request_id.is_some() && asked.request_id.as_deref() == request_id && asked.tab == caller.tab && Uuid::parse_str(&asked.machine).ok() == Some(caller.machine);
+    Ok(hub
+        .db
+        .confirmations(account.id)
+        .await?
+        .iter()
+        .filter(|asked| asked.decision.is_none() && asked.action == "extend_box" && !repeat(asked))
+        .filter(|asked| asked.args["machine"].as_str().and_then(|m| Uuid::parse_str(m).ok()) == Some(machine))
+        .filter_map(|asked| asked.args["extra_usd"].as_f64())
+        .sum())
 }
 
 /// Runs the call as the app runs it: a `HubCall` through the hub's own path, a `Call` on its

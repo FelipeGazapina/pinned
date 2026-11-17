@@ -461,6 +461,22 @@ pub async fn box_budget(hub: &Hub, account: &Account, repo: Option<&str>, asked:
     tastes.resolve(&scope).limits().box_budget_usd(asked)
 }
 
+/// The account's box behind `machine` and its budget once `extra_usd` is added, or why it may not
+/// be: no box of the account's, a box already ending, or a total past the Box budget once `waiting`,
+/// what extends still waiting for the owner add, is counted too. An extend runs only after this.
+pub async fn extended(hub: &Hub, account: &Account, machine: Uuid, extra_usd: f64, waiting: f64) -> Result<(BoxRow, f64), String> {
+    if !(extra_usd > 0.0) {
+        return Err("name an amount above zero".into());
+    }
+    let row = hub.db.box_of(account.id, machine).await?.ok_or_else(|| "this machine is no box".to_owned())?;
+    if matches!(row.phase, Phase::Ending(_)) {
+        return Err("this box is already ending".into());
+    }
+    let total = row.spec.budget_usd.unwrap_or(0.0) + extra_usd;
+    box_budget(hub, account, row.spec.repo.as_deref(), Some(total + waiting)).await?;
+    Ok((row, total))
+}
+
 /// The task record of a box an agent opened through `act`, which ended for `why` at unix ms
 /// `ended`: the opener's task on its own machine, billed the box's life at the box rate.
 pub fn agent_box_record(row: &BoxRow, opener: &Opener, started: u64, ended: u64, why: &End) -> TaskRecord {
@@ -947,6 +963,9 @@ pub struct Boxes {
     swept: Mutex<HashMap<Uuid, Instant>>,
     /// Row id → why its last delete failed, for rows still `Ending`. Cleared once the delete works.
     stuck: Mutex<HashMap<String, StuckRecord>>,
+    /// Held by an agent's extend_box from its check until it waits for the owner, so two asks are
+    /// never both checked before either waits.
+    pub asking_extend: tokio::sync::Mutex<()>,
 }
 
 impl Boxes {
@@ -960,6 +979,7 @@ impl Boxes {
             cooling: Mutex::default(),
             swept: Mutex::default(),
             stuck: Mutex::default(),
+            asking_extend: tokio::sync::Mutex::default(),
         }
     }
 
@@ -1210,15 +1230,7 @@ impl Boxes {
 
     /// Adds `extra_usd` to the box behind `machine`'s budget.
     pub async fn extend_box(&self, hub: &Hub, account: &Arc<Account>, machine: Uuid, extra_usd: f64) -> Result<BoxStatus, String> {
-        if !(extra_usd > 0.0) {
-            return Err("name an amount above zero".into());
-        }
-        let row = hub.db.box_of(account.id, machine).await?.ok_or_else(|| "this machine is no box".to_owned())?;
-        if matches!(row.phase, Phase::Ending(_)) {
-            return Err("this box is already ending".into());
-        }
-        let total = row.spec.budget_usd.unwrap_or(0.0) + extra_usd;
-        box_budget(hub, account, row.spec.repo.as_deref(), Some(total)).await?;
+        let (row, total) = extended(hub, account, machine, extra_usd, 0.0).await?;
         hub.db.set_box_budget(account.id, &row.id, total).await?;
         self.box_status(hub, account, machine).await
     }
