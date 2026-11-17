@@ -949,6 +949,29 @@ fn a_won_change_read_again_where_its_claim_would_fail_fires_once_and_is_not_cool
     no_unlisted(&fake);
 }
 
+/// #346 E3 round 4 item 1: a retry whose claim answers an error stays in the retries, so a later
+/// check starts it.
+#[test]
+fn a_retry_whose_claim_errors_is_tried_again_on_a_later_check() {
+    let _api = slack::lock_api();
+    let _restore = RestoreLinear;
+    let at = ago(2);
+    let fake = fake_with(vec![issue(1, at, vec![moved("h-1", at, "Backlog", "Ready to Dev")])]);
+    let claims = Claims::default();
+    let connectors = on(&claims, vec![ready_to_dev("w1", ago(10))], "lin-e3-retry-claim");
+    let (runs, error) = check_answering(&connectors, Err("the machine refused the run".into()));
+    assert_eq!(runs.len(), 1, "the start was tried");
+    assert!(error.is_some());
+
+    claims.fail.lock().unwrap().push(true);
+    let (runs, error) = check(&connectors);
+    assert_eq!(runs.len(), 0, "the retry's claim errors");
+    assert!(error.is_some_and(|e| e.contains("could not claim")), "the claim error is reported");
+    let (runs, error) = check(&connectors);
+    assert_eq!((runs.len(), error), (1, None), "the next check starts the retry");
+    no_unlisted(&fake);
+}
+
 /// #346 E3: a graph run's move step (`perform_move_column`) keeps its move in the ledger, so the
 /// change it makes, read back, is pinned's own: it starts nothing and is counted as an echo.
 #[test]
