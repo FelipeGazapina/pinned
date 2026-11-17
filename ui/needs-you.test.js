@@ -275,3 +275,27 @@ test("while an answer is on its way the card's controls are disabled, and once s
   assert.match(html("missed"), /data-ny="approve"[\s\S]*Open the thread to answer it\./, "a refused answer keeps the controls and says why");
   assert.match(html(null), /<fieldset class="ny-fields">/);
 });
+
+test("an agent card says Asked by once, with no arguments, with a title-only action and with arguments", () => {
+  const base = { action: "pair_code", machine: "mini", machine_name: "mac-mini", role: "worker", title: "Tidy the README.", at: S - 45 };
+  const run = page({
+    agents: [
+      { ...base, id: "c4", args: {} },
+      { ...base, id: "c5", action: "extend_box", args: { machine: "box-1", extra_usd: 1.5 } },
+      { ...base, id: "c6", args: { code: "x" } },
+    ],
+  });
+  for (const key of ["agent:c4", "agent:c5", "agent:c6"]) {
+    const html = shown(run, key).html;
+    assert.equal(html.match(/Asked by/g)?.length ?? 0, 1, `${key} says Asked by once: ${html}`);
+  }
+});
+
+test("an approval, a question and a plan card draw the same markup as before", () => {
+  const card = (kind, extra) => ({ key: `thread:${kind}`, kind, title: "Tidy the README", where: "pinned · mac-mini", machine: "mini", since: 1794420480000, tab: null, limit: null, confirmation: null, ...extra });
+  const run = page({});
+  const html = (c) => run("needsYouCardHtml(args.card)", { card: c });
+  assert.equal(html(card("approval", { line: null, ask: { kind: "approval", text: null, command: "git push origin readme-tidy", choices: [approve, decline], typed: false } })), "<article class=\"ny-card\" data-key=\"thread:approval\" data-kind=\"approval\" aria-label=\"Approval: Tidy the README\"><div class=\"ny-head\"><span class=\"status-glyph\" data-glyph=\"needs\" style=\"--glyph-size: 10px\" aria-hidden=\"true\"></span><span class=\"ny-kind\">Approval</span><span class=\"ny-where\">pinned · mac-mini</span><span class=\"ticker ny-when\" data-since=\"1794420480000\"></span></div><div class=\"ny-name\">Tidy the README</div><pre>git push origin readme-tidy</pre><fieldset class=\"ny-fields\"><div class=\"ny-actions\"><button type=\"button\" class=\"ny-secondary\" data-ny=\"decline\">Decline</button><button type=\"button\" class=\"ny-primary\" data-ny=\"approve\">Approve</button><button type=\"button\" class=\"ny-link\" data-ny=\"open\">Open</button></div></fieldset></article>");
+  assert.equal(html(card("question", { line: "Which hero image?", ask: { kind: "question", text: "Which hero image?", command: null, typed: true, choices: [{ label: "The product screenshot", about: "Already in the repo", choice: { option: 1 } }] } })), "<article class=\"ny-card\" data-key=\"thread:question\" data-kind=\"question\" aria-label=\"Question: Tidy the README\"><div class=\"ny-head\"><span class=\"status-glyph\" data-glyph=\"needs\" style=\"--glyph-size: 10px\" aria-hidden=\"true\"></span><span class=\"ny-kind\">Question</span><span class=\"ny-where\">pinned · mac-mini</span><span class=\"ticker ny-when\" data-since=\"1794420480000\"></span></div><div class=\"ny-name\">Tidy the README</div><p class=\"ny-line\">Which hero image?</p><fieldset class=\"ny-fields\"><div class=\"ny-options\"><button type=\"button\" class=\"ny-option\" data-ny=\"option\" data-option=\"1\"><span class=\"ny-label\">The product screenshot</span><span class=\"ny-about\">Already in the repo</span></button><form class=\"ny-typed\" data-ny-form><input type=\"text\" name=\"answer\" placeholder=\"Type or dictate another answer\" aria-label=\"Type or dictate another answer\" autocomplete=\"off\" enterkeyhint=\"send\"><button type=\"submit\" class=\"ny-send\">Send</button></form></div></fieldset></article>");
+  assert.equal(html(card("plan", { line: null, ask: { kind: "plan", text: "1. Add a hello comment", command: null, choices: [{ label: "Yes, and use auto mode", about: null, choice: { option: 1 } }], typed: false } })), "<article class=\"ny-card\" data-key=\"thread:plan\" data-kind=\"plan\" aria-label=\"Plan: Tidy the README\"><div class=\"ny-head\"><span class=\"status-glyph\" data-glyph=\"needs\" style=\"--glyph-size: 10px\" aria-hidden=\"true\"></span><span class=\"ny-kind\">Plan</span><span class=\"ny-where\">pinned · mac-mini</span><span class=\"ticker ny-when\" data-since=\"1794420480000\"></span></div><div class=\"ny-name\">Tidy the README</div><fieldset class=\"ny-fields\"><div class=\"ny-actions\"><button type=\"button\" class=\"ny-primary\" data-ny=\"plan\">Approve plan</button><button type=\"button\" class=\"ny-link\" data-ny=\"open\">Open</button></div></fieldset></article>");
+});
