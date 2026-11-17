@@ -157,7 +157,7 @@ function page({ screen = PLAN, base = false } = {}) {
       decl(composer, "function raisePending"),
       decl(composer, "function dropPending"),
       ...(base ? [] : [
-        decl(composer, "function planApprove"),
+        line(composer, "const planApprove"),
         decl(composer, "function approveNoteField"),
         decl(composer, "function openApproveNote"),
         decl(composer, "function keepNote"),
@@ -271,9 +271,10 @@ test("the desktop plan card opens a note field with the typed text, and Approve 
   assert.doesNotMatch(w.ctx.approval.innerHTML, /type="submit"[^>]*\sdisabled/);
   assert.doesNotMatch(w.ctx.approval.innerHTML, /data-approve-note>/, "the open field replaces the button");
 
-  w.tab.thread.approveNote = "";
-  w.run("renderApproval(tab)");
-  assert.match(w.ctx.approval.innerHTML, /type="submit"[^>]*\sdisabled/);
+  const blank = page();
+  blank.tab.thread.approveNote = "";
+  blank.run("renderApproval(tab)");
+  assert.match(blank.ctx.approval.innerHTML, /type="submit"[^>]*\sdisabled/);
 });
 
 test("the phone plan sheet offers Approve with note as a row only when the menu has a Yes", () => {

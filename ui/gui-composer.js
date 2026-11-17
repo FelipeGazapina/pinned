@@ -448,6 +448,110 @@ async function answerWith(tab, text) {
   return true;
 }
 
+/** The option a plan's plain Approve picks: its first "Yes", as approvalChoices picks a permission's. */
+const planApprove = (menu) => (menuKind(menu) === "plan" ? menu.options.find((o) => /^Yes\b/.test(o.head)) : undefined);
+
+/** The line under a plan's options where its note is typed: Approve, disabled while the note is blank, and Cancel. */
+function approveNoteField(tab) {
+  const note = threadOf(tab).approveNote;
+  if (typeof note !== "string") return "";
+  return `<form class="approve-note" data-approve-note-form><input type="text" value="${esc(note)}" placeholder="Note for Claude, sent after approval" aria-label="Note sent after approval" autocomplete="off" enterkeyhint="send" data-approve-note-input><button type="submit" class="primary"${note.trim() ? "" : " disabled"}>Approve</button><button type="button" class="ghost" data-approve-note-cancel>Cancel</button></form>`;
+}
+
+/** Opens the note line under a plan's options, or closes it, and puts the cursor in it. */
+function openApproveNote(tab, open) {
+  threadOf(tab).approveNote = open ? "" : null;
+  renderComposer(tab);
+  if (open) setTimeout(() => document.querySelector("[data-approve-note-input]")?.focus());
+}
+
+/** The field's events, on the desktop card and on the phone's sheet alike: Approve with note opens the
+ * field, Cancel and Esc close it, typing keeps its text and sets whether Approve is on, and submitting
+ * (Enter, or Approve) approves with the note. Returns whether the event was the field's. */
+function approveNoteEvent(tab, e) {
+  const el = e.target;
+  if (e.type === "click" && el.closest?.("[data-approve-note]")) {
+    openApproveNote(tab, true);
+    return true;
+  }
+  if (e.type === "click" && el.closest?.("[data-approve-note-cancel]")) {
+    openApproveNote(tab, false);
+    return true;
+  }
+  if (e.type === "input" && el.matches?.("[data-approve-note-input]")) {
+    threadOf(tab).approveNote = el.value;
+    el.form.querySelector("[type=submit]").disabled = !el.value.trim();
+    return true;
+  }
+  if (e.type === "keydown" && e.key === "Escape" && el.matches?.("[data-approve-note-input]")) {
+    e.preventDefault();
+    openApproveNote(tab, false);
+    return true;
+  }
+  if (e.type === "submit" && el.matches?.("[data-approve-note-form]")) {
+    e.preventDefault();
+    return approveWithNote(tab, threadOf(tab).approveNote ?? "");
+  }
+  return false;
+}
+
+/** Approves claude's plan with a note: picks the plan's Yes as a tap on it would, then sends the note as
+ * the next message once claude's menu has closed. The note never goes into the menu, so it cannot pick
+ * "Tell Claude what to change". Returns whether the note went out. */
+async function approveWithNote(tab, note) {
+  const text = note.trim();
+  const menu = !tab.answering && terminalMenu(tab);
+  const yes = menu && planApprove(menu);
+  if (!yes || !text) return false;
+  const why = sendBlocked(tab);
+  if (why) {
+    showComposerNote(why, true);
+    return false;
+  }
+  const picked = chooseOption(tab, yes.n, yes.label);
+  if (!picked) return false;
+  await picked;
+  threadOf(tab).approveNote = null;
+  if (!(await until(() => !terminalMenu(tab), 4000))) {
+    keepNote(tab, text, "Claude's menu didn't close.");
+    return false;
+  }
+  await sendNote(tab, text);
+  return true;
+}
+
+/** Sends `text` as the user's next message the way send() does while claude works: a row in the thread
+ * at once, then the prompt. claude queues the prompt when it is busy, and the row says so. */
+async function sendNote(tab, text) {
+  const t = threadOf(tab);
+  if (!(await closeClaudeDialog(tab))) return keepNote(tab, text, "Claude's dialog didn't close.");
+  const row = raisePending(tab, t, text);
+  try {
+    await callOn(tab.machine, { cmd: "prompt", tab: tab.view.id, text });
+    markSent(tab, row);
+  } catch (e) {
+    if (row && LOST.test(String(e))) row.state = "unconfirmed";
+    else {
+      dropPending(tab, t, row);
+      keepNote(tab, text, String(e));
+    }
+  }
+  if (active === tab) renderThread();
+  setTimeout(() => fetchThread(tab), 300);
+}
+
+/** A note that did not go out returns to the composer when the composer is empty; otherwise the error says so. */
+function keepNote(tab, text, why) {
+  if (active === tab && !prompt.value.trim()) {
+    prompt.value = text;
+    saveDraft(tab, text);
+    autosize();
+    showComposerNote(`${why} Your note is back in the message box.`, true);
+    return;
+  }
+  showComposerNote(`${why} Your note was not sent.`, true);
+}
+
 /** claude's row of question tabs over a set of questions, "←  ☐ Color  ☒ Sizes  ✔ Submit  →":
  * each header, and whether it is answered. */
 const TAB_ROW = /^←\s+(.*?)\s+→\s*$/;
@@ -488,7 +592,7 @@ function renderApproval(tab) {
   const tabs = kind === "question" ? questionTabs(tab) : null;
   const t = threadOf(tab);
   const since = waitingKindOf(tab.view) === "needs_input" && tab.view.updated ? tab.view.updated * 1000 : null;
-  const key = JSON.stringify([tab.key, menu, tabs, t.picking ?? null, t.collapsed ?? null, since]);
+  const key = JSON.stringify([tab.key, menu, tabs, t.picking ?? null, t.collapsed ?? null, since, typeof t.approveNote === "string"]);
   if (approval.dataset.key === key) return;
   approval.dataset.key = key;
   const lines = menu.question.split("\n").filter((l) => !TAB_ROW.test(l));
@@ -499,9 +603,10 @@ function renderApproval(tab) {
   const label = kind === "plan" ? "Plan ready" : /command/i.test(lines[0]) ? "Command approval" : /file|edit/i.test(lines[0]) ? "File change approval" : "Permission approval";
   if (permission) return renderPermission(menu, lines, label, since);
   const options = menu.options.map((o) => `<button type="button" data-option="${o.n}" class="choice"${o.chosen ? " data-chosen" : ""}${o.n <= 9 ? ` data-key="${o.n}"` : ""}><span class="label">${esc(o.head)}</span>${o.more ? `<span class="about">${esc(o.more)}</span>` : ""}</button>`);
+  const note = planApprove(menu) && typeof t.approveNote !== "string" ? `<button type="button" class="outline" data-approve-note>Approve with note</button>` : "";
   approval.innerHTML = `${icon("circle-alert", "lead")}<div class="body"><p class="kind">${esc(label)}</p>
-      <p class="what">${esc(menu.question)}</p><div class="options choices">${options.join("")}</div></div>
-    <div class="actions"><button type="button" data-show-terminal class="outline">Terminal</button></div>`;
+      <p class="what">${esc(menu.question)}</p><div class="options choices">${options.join("")}</div>${approveNoteField(tab)}</div>
+    <div class="actions">${note}<button type="button" data-show-terminal class="outline">Terminal</button></div>`;
 }
 
 /** T3 Code's answers to a permission, each one the option of claude's menu that means it: Approve
@@ -615,6 +720,9 @@ approval.addEventListener("click", (e) => {
   }
   if (e.target.closest("[data-show-terminal]")) toggleDrawer(true);
 });
+
+// The plan's note field, on the card: approveNoteEvent takes what is its own.
+for (const type of ["click", "input", "keydown", "submit"]) approval.addEventListener(type, (e) => active && approveNoteEvent(active, e));
 
 // A question's options, and the plan's, take 1-9 while the prompt is empty, as T3 Code's do.
 window.addEventListener("keydown", (e) => {

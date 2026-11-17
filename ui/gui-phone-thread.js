@@ -390,10 +390,11 @@ function askSheetHtml(tab) {
   };
   const free = freeOption(menu);
   if (kind === "plan") {
+    const note = planApprove(menu) && typeof t.approveNote !== "string" ? row(`data-approve-note`, "Approve with note", "mic") : "";
     return `<div class="ask-head">${icon("list-checks", "lead")}<h2>Plan ready</h2>${count}</div>
       ${menu.question ? `<p class="ask-about">${esc(menu.question)}</p>` : ""}
-      <div class="ask-options">${menu.options.filter((o) => o !== free).map(options).join("")}</div>
-      <div class="ask-rows">${free ? row(`data-ask="type"`, "Refine it with a message", "mic") : ""}${row(`data-ask="new-thread"`, "Implement in a new thread")}${terminal}</div>`;
+      <div class="ask-options">${menu.options.filter((o) => o !== free).map(options).join("")}</div>${approveNoteField(tab)}
+      <div class="ask-rows">${free ? row(`data-ask="type"`, "Refine it with a message", "mic") : ""}${note}${row(`data-ask="new-thread"`, "Implement in a new thread")}${terminal}</div>`;
   }
   const tabs = questionTabs(tab);
   const review = tabs && tabs.at >= tabs.headers.length;
@@ -469,6 +470,8 @@ function syncPhoneAsk() {
     } });
     askSheet = { key, sheet };
     sheet.el.addEventListener("click", onAskClick);
+    // The plan's note field, in the sheet: approveNoteEvent takes what is its own.
+    for (const type of ["click", "input", "keydown", "submit"]) sheet.el.addEventListener(type, (e) => active && approveNoteEvent(active, e));
   }
   setHtml(askSheet.sheet.el.querySelector(".ask-body"), html);
 }
