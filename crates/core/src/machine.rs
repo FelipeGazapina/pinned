@@ -10956,6 +10956,85 @@ echo '{"type":"result","result":"ok"}'
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// Every argument of the child a `delegate_task` from `tab` starts, with the child's tab.
+    #[cfg(unix)]
+    fn child_of(m: &Machine, tab: &str, argv: &Path) -> (Vec<String>, TabId) {
+        let before: HashSet<TabId> = m.tabs.lock().unwrap().keys().cloned().collect();
+        let _ = argv_of(m, tab, argv);
+        let lines = String::from_utf8(std::fs::read(argv).unwrap()).unwrap().lines().map(str::to_owned).collect();
+        let child = m.tabs.lock().unwrap().keys().find(|id| !before.contains(*id)).cloned().expect("the child's tab");
+        (lines, child)
+    }
+
+    /// The comma-separated tools that follow `flag`.
+    fn tools_after(args: &[String], flag: &str) -> Vec<String> {
+        args.windows(2).filter(|w| w[0] == flag).flat_map(|w| w[1].split(',').map(str::to_owned)).collect()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_read_only_claude_worker_never_starts_in_plan_mode() {
+        let root = temp("read-only-worker");
+        let claude = claude_recording_argv(&root);
+        let argv = root.join("argv");
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, None, Some(root.clone()), |_| {});
+        let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], true, None);
+        m.record_event(AgentEvent { permission_mode: Some("plan".into()), ..done_event(&tab) });
+        let (lines, _) = child_of(&m, &tab, &argv);
+        let pair = |flag: &str, value: &str| lines.windows(2).any(|w| w[0] == flag && w[1] == value);
+        assert!(pair("--permission-mode", "dontAsk"), "{lines:?}");
+        assert!(!pair("--permission-mode", "plan"), "{lines:?}");
+        let refused = tools_after(&lines, "--disallowedTools");
+        for tool in ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash", "mcp__pinned__memory_save", "mcp__pinned__delegate_task", "mcp__pinned__act"] {
+            assert!(refused.iter().any(|t| t == tool), "{tool} is not refused: {lines:?}");
+        }
+        let allowed = tools_after(&lines, "--allowedTools");
+        for tool in ["mcp__pinned__memory_search", "mcp__pinned__task_status", "mcp__pinned__agents", "mcp__pinned__actions", "mcp__pinned__repo_read"] {
+            assert!(allowed.iter().any(|t| t == tool), "{tool} is not allowed: {lines:?}");
+            assert!(!refused.iter().any(|t| t == tool), "{tool} is refused: {lines:?}");
+        }
+        for (at, _) in lines.iter().enumerate().filter(|(_, arg)| *arg == "--allowedTools" || *arg == "--disallowedTools") {
+            assert!(lines.get(at + 2).is_some_and(|next| next.starts_with("--")), "an option ends each tool list, so none takes in the brief: {lines:?}");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_read_only_workers_child_is_still_read_only() {
+        use crate::delegate::Access;
+        let root = temp("read-only-grandchild");
+        let claude = claude_recording_argv(&root);
+        let argv = root.join("argv");
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, None, Some(root.clone()), |_| {});
+        let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], true, None);
+        m.record_event(AgentEvent { permission_mode: Some("plan".into()), ..done_event(&tab) });
+        let (_, worker) = child_of(&m, &tab, &argv);
+        assert_eq!(m.tab(&worker, |t| t.child_access()).unwrap(), Access::ReadOnly, "before any hook");
+        m.record_event(AgentEvent { permission_mode: Some("dontAsk".into()), ..done_event(&worker) });
+        assert_eq!(m.tab(&worker, |t| t.child_access()).unwrap(), Access::ReadOnly, "once its hook reports the mode it runs in");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn full_and_auto_claude_workers_keep_their_flags() {
+        let root = temp("full-auto-worker");
+        let claude = claude_recording_argv(&root);
+        let argv = root.join("argv");
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, None, Some(root.clone()), |_| {});
+        for (bypass, flags) in [(true, vec!["--dangerously-skip-permissions"]), (false, vec!["--permission-mode", "auto"])] {
+            let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], bypass, None);
+            m.record_event(AgentEvent { permission_mode: Some("default".into()), ..done_event(&tab) });
+            let (lines, _) = child_of(&m, &tab, &argv);
+            let mode = lines.windows(2).find(|w| w[0] == "--permission-mode").map(|w| w.to_vec()).unwrap_or_default();
+            let access: Vec<String> = lines.iter().filter(|arg| *arg == "--dangerously-skip-permissions").cloned().chain(mode).collect();
+            assert_eq!(access, flags, "{lines:?}");
+            assert!(!lines.iter().any(|arg| arg == "--disallowedTools" || arg == "--allowedTools"), "{lines:?}");
+        }
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// The access flags the child thread a `delegate_task` from `tab` starts with.
     #[cfg(unix)]
     fn argv_of(m: &Machine, tab: &str, argv: &Path) -> Vec<String> {

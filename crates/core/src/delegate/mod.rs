@@ -849,6 +849,30 @@ mod tests {
     }
 
     #[test]
+    fn a_read_only_headless_claude_worker_never_starts_in_plan_mode() {
+        let mut read_only = spec("do the thing", Access::ReadOnly);
+        read_only.mcp_config = Some(Path::new("/tmp/mcp.json"));
+        let args = driver_args(Provider::Claude, &read_only);
+        let pair = |flag: &str, value: &str| args.windows(2).any(|w| w[0] == flag && w[1] == value);
+        assert!(pair("--permission-mode", "dontAsk"), "{args:?}");
+        assert!(!pair("--permission-mode", "plan"), "{args:?}");
+        let tools = |flag: &str| args.windows(2).filter(|w| w[0] == flag).flat_map(|w| w[1].split(',').map(str::to_owned)).collect::<Vec<_>>();
+        let refused = tools("--disallowedTools");
+        for tool in ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash", "mcp__pinned__memory_save", "mcp__pinned__delegate_task", "mcp__pinned__act"] {
+            assert!(refused.iter().any(|t| t == tool), "{tool} is not refused: {args:?}");
+        }
+        let allowed = tools("--allowedTools");
+        for tool in ["mcp__pinned__memory_search", "mcp__pinned__task_status", "mcp__pinned__agents", "mcp__pinned__actions", "mcp__pinned__repo_read"] {
+            assert!(allowed.iter().any(|t| t == tool), "{tool} is not allowed: {args:?}");
+            assert!(!refused.iter().any(|t| t == tool), "{tool} is refused: {args:?}");
+        }
+        assert_eq!(args[args.len() - 2..], ["--mcp-config".to_owned(), "/tmp/mcp.json".to_owned()], "{args:?}");
+        for (at, _) in args.iter().enumerate().filter(|(_, arg)| *arg == "--allowedTools" || *arg == "--disallowedTools") {
+            assert!(args.get(at + 2).is_some_and(|next| next.starts_with("--")), "an option ends each tool list: {args:?}");
+        }
+    }
+
+    #[test]
     fn a_request_grants_tools() {
         let granted = parse_request(&json!({ "task": "look", "tools": ["Bash", " Grep ", "", 7] })).unwrap();
         assert_eq!(granted.tools, ["Bash", "Grep"]);
