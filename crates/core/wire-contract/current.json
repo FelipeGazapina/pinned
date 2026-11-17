@@ -63628,7 +63628,7 @@
             "default": 0.0
           },
           "model_usd": {
-            "description": "The model cost its box's node reported, apart from `cost_usd`: 0 from a node that never\nreports one. None from an older hub, which sends none.",
+            "description": "The model cost its box's node reported, apart from `cost_usd`. None until the node first\nreports one, and from an older hub, which sends none.",
             "type": [
               "number",
               "null"
@@ -63749,7 +63749,7 @@
             "default": 0.0
           },
           "model_usd": {
-            "description": "The model cost its box's node reported, apart from `cost_usd`: 0 from a node that never\nreports one. None from an older hub, which sends none.",
+            "description": "The model cost its box's node reported, apart from `cost_usd`. None until the node first\nreports one, and from an older hub, which sends none.",
             "type": [
               "number",
               "null"
@@ -68548,7 +68548,7 @@
                 "default": 0.0
               },
               "model_usd": {
-                "description": "The model cost its box's node reported, apart from `cost_usd`: 0 from a node that never\nreports one. None from an older hub, which sends none.",
+                "description": "The model cost its box's node reported, apart from `cost_usd`. None until the node first\nreports one, and from an older hub, which sends none.",
                 "type": [
                   "number",
                   "null"
@@ -73128,7 +73128,7 @@
                 "default": 0.0
               },
               "model_usd": {
-                "description": "The model cost its box's node reported, apart from `cost_usd`: 0 from a node that never\nreports one. None from an older hub, which sends none.",
+                "description": "The model cost its box's node reported, apart from `cost_usd`. None until the node first\nreports one, and from an older hub, which sends none.",
                 "type": [
                   "number",
                   "null"
