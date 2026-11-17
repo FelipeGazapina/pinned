@@ -975,7 +975,6 @@ impl Tab {
         self.stopped = None;
     }
 
-
     /// Types a local slash command. Unlike a prompt it leaves `turn_pending` alone: a local
     /// command fires no Stop hook, so nothing would ever clear it (probed on Claude Code 2.1.319).
     fn type_command(&mut self, command: &str) -> bool {
