@@ -224,6 +224,9 @@ alter table team_run_queue add column if not exists granted_at timestamptz;
 alter table team_run_queue add column if not exists run uuid;
 -- How many of the team's turns found a waiting row's bot unreadable (`teams::queue::UNREAD_PASSES`).
 alter table team_run_queue add column if not exists unread_passes integer not null default 0;
+-- Since when, and why, the team's waiting line is held (`teams::queue::take_and_start`): its owner sees it.
+alter table teams add column if not exists line_held_at timestamptz;
+alter table teams add column if not exists line_held_why text;
 alter table team_runs add column if not exists reserved_at timestamptz;
 -- A run's limit call the limits tick opened (`teams::calls::tick`): the only call that counts as
 -- its limit call (`teams::db::runs_at_limit`). A session's own ask never sets it.

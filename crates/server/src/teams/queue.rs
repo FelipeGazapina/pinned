@@ -12,7 +12,7 @@ use super::{calls, db};
 use crate::hub::{Account, Hub};
 use pinned_core::agent::Subject;
 use pinned_core::connectors::{Admitted, Delivery, Event, Placement, Replies, RunsOn, Trigger, TriggerInput};
-use pinned_core::teams::{Run, RunState, SkipReason};
+use pinned_core::teams::{HeldWhy, Run, RunState, SkipReason};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -493,7 +493,7 @@ async fn take_and_start(hub: &Arc<Hub>, turn: &Turn, team: &Arc<Account>, ended:
         };
         let team_wide = match &team_wide {
             Some(team_wide) => team_wide.clone(),
-            None => team_wide.insert(Arc::new(read_team(hub, team).await?)).clone(),
+            None => team_wide.insert(Arc::new(read_held(hub, turn, team).await?)).clone(),
         };
         let row = match row_of(hub, &team_wide, &waiting.workflow, stored).await {
             Ok(row) => row,
@@ -590,6 +590,22 @@ async fn row_of(hub: &Arc<Hub>, team: &TeamWorkflows, workflow: &str, stored: St
 
 /// What a turn whose read of the whole team failed answers (`next` logs it): no row was taken.
 const TEAM_UNREAD: &str = "the team's workflows or keys could not be read, so everything waiting stays in line";
+
+/// `read_team`, kept on the team for its owner (`db::hold_line`): a read that fails, not busy, holds
+/// its line since then, and the first that reads lets it go.
+async fn read_held(hub: &Arc<Hub>, turn: &Turn, team: &Account) -> Result<TeamWorkflows, String> {
+    match read_team(hub, team).await {
+        Ok(read) => {
+            db::line_read(&turn.held, team.id).await?;
+            Ok(read)
+        }
+        Err(e) if e == TEAM_UNREAD => {
+            db::hold_line(&turn.held, team.id, HeldWhy::SettingsUnread).await?;
+            Err(e)
+        }
+        Err(e) => Err(e),
+    }
+}
 
 /// The team's workflows, keys and settings, read once for a turn's takes: busy as it is, or
 /// `TEAM_UNREAD` for any other failure, whose own text is never logged: it may quote a stored value.
