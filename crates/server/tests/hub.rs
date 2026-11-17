@@ -4605,6 +4605,12 @@ impl Fleet {
         let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
         let mut client = Client::connect(&url, &token);
         client.wait("hello", |f| f["type"] == "hello");
+        Fleet::paired(hub, name, token, client, &[("mac", true), ("mini", true)])
+    }
+
+    /// `hub`'s account, signed in on `client`, with `mac` and `mini` paired and `online` the machines to wait for.
+    fn paired(hub: TestHub, name: &str, token: String, mut client: Client, online: &[(&str, bool)]) -> Fleet {
+        let url = hub.url.clone();
         let (mac_dir, mini_dir) = (temp(&format!("{name}-mac")), temp(&format!("{name}-mini")));
         let (mac_creds, mini_creds) = (pair(&url, &mut client, "mac", &mac_dir), pair(&url, &mut client, "mini", &mini_dir));
         let (mac_id, mini_id) = (mac_creds.machine_id.clone(), mini_creds.machine_id.clone());
@@ -4612,7 +4618,13 @@ impl Fleet {
         for dir in [&mac_dir, &mini_dir] {
             std::fs::write(dir.join("claude"), "#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && { echo '{\"loggedIn\":true}'; exit 0; }\nprintf '%s\\n' \"$@\" >> \"$0.$PINNED_TAB.args\"\nexec cat\n").unwrap();
         }
-        client.wait_machines(&[("mac", true), ("mini", true)]);
+        let mut online: Vec<(String, bool)> = online.iter().map(|(n, o)| (n.to_string(), *o)).collect();
+        online.sort();
+        wait_for("the fleet's machines to be online", || {
+            let mut listed = client.machines();
+            listed.sort();
+            listed == online
+        });
         mini.machine.listen(|_| Err("not in this test".into())).unwrap();
         client.call(&mini_id, json!({ "cmd": "set_global_orchestrator_settings", "settings": { "host": true } })).unwrap();
         let global = client.call(&mini_id, json!({ "cmd": "open_global_orchestrator" })).unwrap().as_str().unwrap().to_owned();
@@ -4722,6 +4734,35 @@ fn the_global_orchestrator_reaches_a_capitao_on_another_machine_and_hears_back()
     assert_eq!(
         fleet.mac.link.as_ref().unwrap().call_hub(report(&capitao, &fleet.site, "Done.")),
         Err("no online machine hosts the global orchestrator: choose one in its settings".into())
+    );
+}
+
+#[test]
+fn a_box_that_claims_to_host_the_global_orchestrator_is_never_the_host() {
+    let hub = TestHub::start_with_boxes("box_host", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let account = ana.id;
+    assert_eq!(hub.runtime.block_on(hub.hub().open(account, ana.box_run(issue("uuid-host")))), Ok(()));
+    ana.client.wait_machines(&[("Box · ENG-7 Fix login", true)]);
+    let box_id = ana.box_machine();
+    let BoxAccount { client, token, .. } = ana;
+    let mut fleet = Fleet::paired(hub, "box_host", token, client, &[("Box · ENG-7 Fix login", true), ("mac", true), ("mini", true)]);
+    // The box's own node answers that it hosts; the hub must not believe it.
+    fleet.set_host(&box_id, true);
+    let (mac, mac_dir) = (fleet.mac_id.clone(), fleet.mac_dir.clone());
+    let project = format!("{mac}:{}", fleet.site);
+
+    let sent = fleet.send_to_captain(&project, "Ship the form.", "r-1");
+    assert_eq!(sent.as_ref().map(|sent| sent["outcome"].clone()), Ok(json!("iniciado")), "the person's machine still hosts, so the box is not a second host");
+    let capitao = sent.unwrap()["tab"].as_str().unwrap().to_owned();
+    wait_launch(&mac_dir, &capitao, "[Orchestrator] Ship the form.");
+
+    let mini = fleet.mini_id.clone();
+    fleet.set_host(&mini, false);
+    assert_eq!(
+        fleet.send_to_captain(&project, "Ship it.", "r-2"),
+        Err("no online machine hosts the global orchestrator: choose one in its settings".into()),
+        "with the person's machine off, the box must not take over as host"
     );
 }
 
