@@ -526,7 +526,7 @@ pub const EXTEND_ACCOUNT_KEY: &str = "hashtext('pinned-extend-account:' || $1::u
 /// do not wait. `end` commits it; a turn dropped on an error closes its connection, which frees the lock.
 /// This hub's lines come first (`Place`), so the hub holds at most one such connection per account
 /// for asks, and one more per box for the owner's decisions.
-/// All waits together are bounded by `EXTEND_WAIT`: a turn not had by then (the lines, then the
+/// All waits before the turn is held share `EXTEND_WAIT`: a turn not had by then (the lines, then the
 /// advisory locks for what is left) is refused as `crate::db::BUSY`, as is a turn whose connection
 /// cannot be opened: nothing was done, so the same request asks again.
 pub struct ExtendTurn {
@@ -535,7 +535,8 @@ pub struct ExtendTurn {
     deadline: tokio::time::Instant,
 }
 
-/// How long an extend waits for its box's turn, as long as Postgres's lock timeout.
+/// How long an extend waits, from its own start, for every wait before its turn is held: its reads,
+/// its lines and its locks. The writes after the hold are bounded only by the database's own limits.
 const EXTEND_WAIT: Duration = Duration::from_secs(2);
 
 /// How many asks may be in a box's line at once on this hub, the one that holds it and those that
@@ -620,7 +621,8 @@ impl ExtendTurn {
     /// the account's line, then the box's, then the box's lock and the account's on the same
     /// connection, so asks for different boxes of one account are counted one after another. Always
     /// account, then box in this hub's lines, and box, then account in Postgres: a decision takes
-    /// only the box's, so no two turns wait on each other.
+    /// only the box's, so no two turns wait on each other. `deadline` is the 2 s from the start of the
+    /// ask that every wait before the hold shares.
     pub async fn ask(hub: &Hub, account: Uuid, machine: Uuid, deadline: tokio::time::Instant) -> Result<ExtendTurn, String> {
         let in_box = Place::join((account, Some(machine)), MOST_ASKS_IN_BOX_LINE).ok_or(crate::db::BUSY)?;
         let of_account = Place::join((account, None), usize::MAX).ok_or(crate::db::BUSY)?.hold(deadline).await?;
