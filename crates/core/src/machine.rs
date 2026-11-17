@@ -17177,4 +17177,22 @@ Have another model review a risky change before it goes ahead.";
         m.quit();
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_step_reported_as_it_stands_saves_nothing() {
+        let dir = temp("plans-same");
+        let (m, sock, _project, captain, _thread) = captain_and_thread(&dir);
+        let ask_as = |tool: Value| ask(&sock, &json!({ "kind": "project", "tab": captain, "tool": tool }).to_string());
+        assert!(ask_as(json!({ "name": "plan_set", "title": "Ship the form", "lists": [{ "name": "Build", "steps": [{ "name": "Write" }] }] })).is_ok());
+        assert_eq!(ask_as(json!({ "name": "plan_step", "step": "s1", "state": "running" })), Ok("p1 rev 2: Ship the form\nl1 Build: s1 running".into()));
+        let file = dir.join("config/plans.json");
+        let saved = || (std::fs::read(&file).unwrap(), std::fs::metadata(&file).unwrap().modified().unwrap(), std::os::unix::fs::MetadataExt::ino(&std::fs::metadata(&file).unwrap()));
+        let before = saved();
+        std::thread::sleep(Duration::from_millis(20));
+        assert_eq!(ask_as(json!({ "name": "plan_step", "step": "s1", "state": "running" })), Ok("p1 rev 2: Ship the form\nl1 Build: s1 running".into()));
+        assert_eq!(saved(), before, "the file was not written again");
+        m.quit();
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

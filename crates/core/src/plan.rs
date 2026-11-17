@@ -2904,6 +2904,29 @@ mod tests {
     }
 
     #[test]
+    fn a_step_reported_as_it_stands_changes_nothing() {
+        let mut p = CaptainPlans::default();
+        set_json(&mut p, json!({"lists": [{"name": "Build", "steps": [{"name": "Work"}]}]}), 1).unwrap();
+        report_note(&mut p, "s1", "running", "on it", 2).unwrap();
+        let before = bytes(&p);
+        assert_eq!(report_note(&mut p, "s1", "running", "on it", 3), Ok("p1 rev 2\nl1 Build: s1 running".into()));
+        assert_eq!(bytes(&p), before);
+        assert_eq!(report(&mut p, "s1", "running", &[], 4), Ok("p1 rev 3\nl1 Build: s1 running".into()), "a note dropped is a change");
+    }
+
+    #[test]
+    fn the_same_report_after_the_task_ends_still_wins_over_the_task() {
+        let mut p = linked("t1");
+        let reported = p.plans[0].lists[0].steps[0].reported;
+        let rev = p.plans[0].rev;
+        let mut f = ended("t1", Work::ResultAvailable, 2000);
+        f.review = Review::Accepted;
+        report(&mut p, "s1", &serde_json::to_value(reported).unwrap().as_str().unwrap().to_owned(), std::slice::from_ref(&f), 3000).unwrap();
+        assert_eq!(p.plans[0].rev, rev + 1);
+        assert_eq!(s1_under(&p, &[f]).state, reported);
+    }
+
+    #[test]
     fn a_report_from_before_the_task_ends_loses_to_the_task() {
         let mut p = CaptainPlans::default();
         set_json(
