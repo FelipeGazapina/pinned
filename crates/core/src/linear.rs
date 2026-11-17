@@ -327,8 +327,9 @@ static VIEWERS: std::sync::Mutex<BTreeMap<[u8; 32], String>> = std::sync::Mutex:
 /// of 50 issues at most. When the read stops at the cap, `read_to` is the newest `updatedAt` among the issues
 /// read, and the caller moves its watermark there. The next read is strictly after `read_to`, so an issue
 /// updated at exactly `read_to` that the cap left unread is not in it.
-pub async fn changes(key: &str, since: &str, scope: &Scope) -> Result<Changes, String> {
+pub async fn changes(key: &str, since: &str, from: Option<&str>, scope: &Scope) -> Result<Changes, String> {
     since_time(since)?;
+    let _ = from; // red: the issue cursor is not read yet
     let mut filter = json!({ "updatedAt": { "gt": since } });
     let team = scope.team.trim();
     if !team.is_empty() {
@@ -573,6 +574,7 @@ mod tests {
     }
 
     const SINCE: &str = "2026-11-09T18:00:00.000Z";
+    const WATERMARK: &str = "2026-11-10T08:00:00.000Z";
 
     fn person(id: &str, name: &str) -> Person {
         Person { id: id.into(), name: name.into() }
@@ -731,25 +733,29 @@ mod tests {
         (root, seen)
     }
 
+    /// ENG-`k` updated at `at`, whose one history entry is a status move made then: Todo to In Progress by Ana.
+    fn moved_issue(k: u32, at: &str) -> Value {
+        json!({
+            "id": format!("i-{k}"), "identifier": format!("ENG-{k}"), "title": "t", "description": null, "url": "u",
+            "updatedAt": at, "team": { "key": "ENG", "name": "Engineering" }, "project": null,
+            "history": { "nodes": [{ "id": format!("h-{k}"), "createdAt": at, "actor": { "id": "u-ana", "name": "Ana Souza" },
+                "fromState": { "name": "Todo" }, "toState": { "name": "In Progress" }, "fromAssignee": null, "toAssignee": null }] },
+        })
+    }
+
     /// Issues ENG-1 to ENG-`count`, newest updated first, as Linear sends them. ENG-k was updated at
     /// 2026-11-10 k:00 UTC by one status move, which is its only history entry.
     fn fixture(count: u32) -> Vec<Value> {
-        (1..=count)
-            .rev()
-            .map(|k| {
-                let at = format!("2026-11-10T{k:02}:00:00.000Z");
-                json!({
-                    "id": format!("i-{k}"), "identifier": format!("ENG-{k}"), "title": "t", "description": null, "url": "u",
-                    "updatedAt": at, "team": { "key": "ENG", "name": "Engineering" }, "project": null,
-                    "history": { "nodes": [{ "id": format!("h-{k}"), "createdAt": at, "actor": { "id": "u-ana", "name": "Ana Souza" },
-                        "fromState": { "name": "Todo" }, "toState": { "name": "In Progress" }, "fromAssignee": null, "toAssignee": null }] },
-                })
-            })
-            .collect()
+        (1..=count).rev().map(|k| moved_issue(k, &format!("2026-11-10T{k:02}:00:00.000Z"))).collect()
     }
 
     /// The change `fixture` makes to ENG-`k`: its one status move.
     fn moved(k: u32) -> Change {
+        moved_at(k, &format!("2026-11-10T{k:02}:00:00.000Z"))
+    }
+
+    /// The change `moved_issue(k, at)` holds.
+    fn moved_at(k: u32, at: &str) -> Change {
         Change {
             issue_id: format!("i-{k}"),
             identifier: format!("ENG-{k}"),
@@ -757,7 +763,7 @@ mod tests {
             description: None,
             url: "u".into(),
             history_id: format!("h-{k}"),
-            at: format!("2026-11-10T{k:02}:00:00.000Z"),
+            at: at.into(),
             actor: person("u-ana", "Ana Souza"),
             kind: ChangeKind::Status,
             from_state: Some("Todo".into()),
@@ -770,17 +776,40 @@ mod tests {
         }
     }
 
+    /// The changes of several reads, each once. A read from a watermark returns the issues at it again, so a
+    /// change is kept by its `history_id` and kind, the way a caller drops a repeat.
+    fn union(reads: Vec<Vec<Change>>) -> Vec<Change> {
+        let mut out: Vec<Change> = Vec::new();
+        for change in reads.into_iter().flatten() {
+            if !out.iter().any(|c| c.history_id == change.history_id && c.kind == change.kind) {
+                out.push(change);
+            }
+        }
+        out
+    }
+
     /// Two issues to a page, the most a stand-in page holds.
     const PAGE: usize = 2;
 
-    /// Linear's `issues` over `issues` (newest updated first), read as Relay pages. `last` with `before` reads
+    /// Linear's `issues` over `issues` (newest updated first), read as Relay pages. The `updatedAt` filter is `gte` or
+    /// `gt`, compared as text, which holds for the fixtures' UTC times with milliseconds. `last` with `before` reads
     /// the issues just before the `before` cursor, a cursor being an issue's identifier; with no `before` the
     /// read starts at the oldest update. A page holds its issues oldest first, with `endCursor` its newest one,
     /// which is the `before` of the next page. `hasPreviousPage` says the newer side has more issues.
     fn linear_pages(issues: Vec<Value>) -> impl Fn(&Value) -> (u16, String) + Send + 'static {
         move |request| {
-            let since = request["variables"]["filter"]["updatedAt"]["gt"].as_str().unwrap_or_default();
-            let live: Vec<&Value> = issues.iter().filter(|i| i["updatedAt"].as_str().unwrap_or_default() > since).collect();
+            let bound = &request["variables"]["filter"]["updatedAt"];
+            let live: Vec<&Value> = issues
+                .iter()
+                .filter(|i| {
+                    let at = i["updatedAt"].as_str().unwrap_or_default();
+                    match (bound["gte"].as_str(), bound["gt"].as_str()) {
+                        (Some(from), _) => at >= from,
+                        (None, Some(since)) => at > since,
+                        (None, None) => true,
+                    }
+                })
+                .collect();
             let asked = request["query"]
                 .as_str()
                 .and_then(|q| q.split("last: ").nth(1))
@@ -811,7 +840,7 @@ mod tests {
         let _restore = RestoreLinear;
         let (root, seen) = stand_in(linear_pages(fixture(12)));
         set_api(Some(root));
-        let read = block_on(changes("lin-cap", SINCE, &Scope::default())).unwrap();
+        let read = block_on(changes("lin-cap", SINCE, None, &Scope::default())).unwrap();
         assert_eq!(seen.lock().unwrap().len(), 4, "the read asks for four pages and no more");
         assert_eq!(read.read_to.as_deref(), Some("2026-11-10T08:00:00.000Z"), "the newest updatedAt read is the watermark");
         assert_eq!(read.changes, (1..=8).map(moved).collect::<Vec<_>>(), "the four oldest pages, oldest first");
@@ -823,13 +852,14 @@ mod tests {
         let _restore = RestoreLinear;
         let (root, seen) = stand_in(linear_pages(fixture(12)));
         set_api(Some(root));
-        let first = block_on(changes("lin-union-1", SINCE, &Scope::default())).unwrap();
+        let first = block_on(changes("lin-union-1", SINCE, None, &Scope::default())).unwrap();
         let watermark = first.read_to.clone().expect("a capped read names its watermark");
-        let second = block_on(changes("lin-union-2", &watermark, &Scope::default())).unwrap();
-        assert_eq!(second.read_to, None, "the two pages left fit under the cap");
-        assert_eq!(seen.lock().unwrap().len(), 6, "four requests for the capped read, then two");
-        let union: Vec<Change> = first.changes.into_iter().chain(second.changes).collect();
-        assert_eq!(union, (1..=12).map(moved).collect::<Vec<_>>(), "every change once, oldest first");
+        let second = block_on(changes("lin-union-2", SINCE, Some(&watermark), &Scope::default())).unwrap();
+        assert_eq!(second.read_to, None, "the three pages left fit under the cap");
+        assert_eq!(seen.lock().unwrap().len(), 7, "four requests for the capped read, then three");
+        let again: Vec<&str> = second.changes.iter().map(|c| c.identifier.as_str()).collect();
+        assert_eq!(again, ["ENG-8", "ENG-9", "ENG-10", "ENG-11", "ENG-12"], "ENG-8 is at the watermark, so it comes again");
+        assert_eq!(union(vec![first.changes, second.changes]), (1..=12).map(moved).collect::<Vec<_>>(), "every change once, oldest first");
     }
 
     #[test]
@@ -838,7 +868,7 @@ mod tests {
         let _restore = RestoreLinear;
         let (root, seen) = stand_in(linear_pages(fixture(4)));
         set_api(Some(root));
-        let read = block_on(changes("lin-short", SINCE, &Scope::default())).unwrap();
+        let read = block_on(changes("lin-short", SINCE, None, &Scope::default())).unwrap();
         assert_eq!(seen.lock().unwrap().len(), 2, "the read stops when Linear says there is no next page");
         assert_eq!(read.read_to, None);
     }
@@ -849,16 +879,16 @@ mod tests {
         let _restore = RestoreLinear;
         let (root, _) = stand_in(|_| (429, json!({ "errors": [{ "message": "slow down for Export 500s" } ] }).to_string()));
         set_api(Some(root));
-        assert_eq!(block_on(changes("lin-429", SINCE, &Scope::default())), Err("Linear answered 429".into()));
+        assert_eq!(block_on(changes("lin-429", SINCE, None, &Scope::default())), Err("Linear answered 429".into()));
 
         let pages = linear_pages(fixture(12));
         let (root, _) = stand_in(move |request| if request["variables"]["before"].is_null() { pages(request) } else { (500, "upstream text".into()) });
         set_api(Some(root));
-        assert_eq!(block_on(changes("lin-500", SINCE, &Scope::default())), Err("Linear answered 500".into()), "a failed later page is an error, not a partial read");
+        assert_eq!(block_on(changes("lin-500", SINCE, None, &Scope::default())), Err("Linear answered 500".into()), "a failed later page is an error, not a partial read");
 
         let (root, _) = stand_in(|_| (200, json!({ "errors": [{ "message": "invalid filter for Ana Souza" }] }).to_string()));
         set_api(Some(root));
-        assert_eq!(block_on(changes("lin-gql", SINCE, &Scope::default())), Err("Linear answered with a GraphQL error".into()));
+        assert_eq!(block_on(changes("lin-gql", SINCE, None, &Scope::default())), Err("Linear answered with a GraphQL error".into()));
     }
 
     #[test]
@@ -868,8 +898,9 @@ mod tests {
         let (root, seen) = stand_in(linear_pages(fixture(2)));
         set_api(Some(root));
         let scope = Scope { team: " ENG ".into(), project: "Exports".into() };
-        block_on(changes("lin-scope", SINCE, &scope)).unwrap();
-        block_on(changes("lin-scope", SINCE, &Scope::default())).unwrap();
+        block_on(changes("lin-scope", SINCE, None, &scope)).unwrap();
+        block_on(changes("lin-scope", SINCE, None, &Scope::default())).unwrap();
+        block_on(changes("lin-scope", SINCE, Some(WATERMARK), &Scope::default())).unwrap();
         let sent = seen.lock().unwrap().clone();
         assert_eq!(
             sent[0]["variables"]["filter"],
@@ -880,6 +911,7 @@ mod tests {
             })
         );
         assert_eq!(sent[1]["variables"]["filter"], json!({ "updatedAt": { "gt": SINCE } }), "an empty scope filters by time alone");
+        assert_eq!(sent[2]["variables"]["filter"], json!({ "updatedAt": { "gte": WATERMARK } }), "a read from a watermark takes the issues at it, too");
     }
 
     #[test]
@@ -889,10 +921,107 @@ mod tests {
         let (root, seen) = stand_in(linear_pages(fixture(2)));
         set_api(Some(root));
         assert_eq!(
-            block_on(changes("lin-since", "yesterday", &Scope::default())),
+            block_on(changes("lin-since", "yesterday", None, &Scope::default())),
             Err("bad time \"yesterday\": premature end of input".into())
         );
+        assert!(block_on(changes("lin-from", SINCE, Some("soon"), &Scope::default())).is_err(), "a bad watermark is an error too");
         assert_eq!(seen.lock().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn a_change_before_the_watermark_is_read_from_the_issue_that_holds_it() {
+        let _api = crate::slack::lock_api();
+        let _restore = RestoreLinear;
+        // ENG-9 is unread by the capped read: its last update, a label edit at 09:00, is after the watermark at 08:00.
+        // Its status move at 05:30 is before the watermark, so a read whose history floor is the watermark loses it.
+        let held = json!({
+            "id": "i-9", "identifier": "ENG-9", "title": "t", "description": null, "url": "u",
+            "updatedAt": "2026-11-10T09:00:00.000Z", "team": { "key": "ENG", "name": "Engineering" }, "project": null,
+            "history": { "nodes": [
+                { "id": "h-9", "createdAt": "2026-11-10T05:30:00.000Z", "actor": { "id": "u-ana", "name": "Ana Souza" },
+                  "fromState": { "name": "Todo" }, "toState": { "name": "In Progress" }, "fromAssignee": null, "toAssignee": null },
+                { "id": "h-9-label", "createdAt": "2026-11-10T09:00:00.000Z", "actor": { "id": "u-ana", "name": "Ana Souza" },
+                  "fromState": null, "toState": null, "fromAssignee": null, "toAssignee": null },
+            ] },
+        });
+        let mut issues = vec![held];
+        issues.extend(fixture(8));
+        let (root, seen) = stand_in(linear_pages(issues));
+        set_api(Some(root));
+        let first = block_on(changes("lin-held-1", SINCE, None, &Scope::default())).unwrap();
+        assert_eq!(first.read_to.as_deref(), Some(WATERMARK), "the cap reads ENG-1 to ENG-8 and names their newest update");
+        assert_eq!(first.changes, (1..=8).map(moved).collect::<Vec<_>>());
+
+        let second = block_on(changes("lin-held-2", SINCE, first.read_to.as_deref(), &Scope::default())).unwrap();
+        assert_eq!(second.read_to, None, "ENG-8 and ENG-9 fit under the cap");
+        let again: Vec<&str> = second.changes.iter().map(|c| c.history_id.as_str()).collect();
+        assert_eq!(again, ["h-8", "h-9"], "ENG-8 comes again at the watermark; ENG-9's status move is read though it is before it");
+        let status = &second.changes[1];
+        assert_eq!(status.identifier, "ENG-9");
+        assert_eq!(status.from_state.as_deref(), Some("Todo"));
+        assert_eq!(status.to_state.as_deref(), Some("In Progress"));
+        assert_eq!(status.actor, person("u-ana", "Ana Souza"));
+        assert_eq!(status.at, "2026-11-10T05:30:00.000Z");
+        assert_eq!(
+            union(vec![first.changes, second.changes]),
+            (1..=8).map(moved).chain([moved_at(9, "2026-11-10T05:30:00.000Z")]).collect::<Vec<_>>(),
+            "every change in the fixture, once, oldest first"
+        );
+        assert_eq!(seen.lock().unwrap().len(), 5, "four requests for the capped read, one for the next");
+    }
+
+    #[test]
+    fn an_issue_updated_at_the_watermark_is_read_by_the_next_read() {
+        let _api = crate::slack::lock_api();
+        let _restore = RestoreLinear;
+        // ENG-9 and ENG-8 are both updated at the watermark. The cap reads ENG-8 and leaves ENG-9 for the next read.
+        let mut issues = vec![moved_issue(9, WATERMARK)];
+        issues.extend(fixture(8));
+        let (root, seen) = stand_in(linear_pages(issues));
+        set_api(Some(root));
+        let first = block_on(changes("lin-tie-1", SINCE, None, &Scope::default())).unwrap();
+        assert_eq!(first.read_to.as_deref(), Some(WATERMARK));
+        assert_eq!(first.changes, (1..=8).map(moved).collect::<Vec<_>>());
+
+        let second = block_on(changes("lin-tie-2", SINCE, first.read_to.as_deref(), &Scope::default())).unwrap();
+        assert_eq!(second.read_to, None);
+        assert_eq!(
+            second.changes,
+            vec![moved(8), moved_at(9, WATERMARK)],
+            "ENG-9, updated at exactly the watermark and unread by the cap, is in the next read"
+        );
+        assert_eq!(seen.lock().unwrap().len(), 5, "four requests for the capped read, one for the next");
+    }
+
+    #[test]
+    fn a_watermark_that_more_issues_share_moves_one_millisecond_on() {
+        let _api = crate::slack::lock_api();
+        let _restore = RestoreLinear;
+        // Ten issues share the watermark, more than the cap reads. Without the step past it the caller would read
+        // the same watermark forever, so the caller's loop here is bounded: it fails rather than hangs.
+        let issues: Vec<Value> = (1..=10).rev().map(|k| moved_issue(k, WATERMARK)).collect();
+        let (root, seen) = stand_in(linear_pages(issues));
+        set_api(Some(root));
+        let mut from = Some(WATERMARK.to_owned());
+        let mut found = Vec::new();
+        let mut reads = 0;
+        while let Some(watermark) = from.take() {
+            reads += 1;
+            assert!(reads <= 3, "the reads must end; this one is read number {reads} from the same watermark");
+            let read = block_on(changes("lin-stall", SINCE, Some(&watermark), &Scope::default())).unwrap();
+            found.extend(read.changes);
+            from = read.read_to;
+            if reads == 1 {
+                assert_eq!(from.as_deref(), Some("2026-11-10T08:00:00.001Z"), "the first read steps one millisecond past the shared update");
+            }
+        }
+        assert_eq!(reads, 2, "the second read starts past the shared millisecond and finds nothing");
+        assert_eq!(
+            found,
+            (1..=8).map(|k| moved_at(k, WATERMARK)).collect::<Vec<_>>(),
+            "ENG-9 and ENG-10 share the millisecond beyond the cap: the one known skip"
+        );
+        assert_eq!(seen.lock().unwrap().len(), 5, "four requests for the capped read, one for the next");
     }
 
     #[test]
