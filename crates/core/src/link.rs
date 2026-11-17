@@ -351,7 +351,7 @@ impl Syncer {
             if shared.online() {
                 report_state(shared, machine);
                 if let Some(file) = file {
-                    self.cycle(shared, machine, file);
+                    self.cycle(shared, shared, machine, file);
                 }
             }
         }
@@ -363,7 +363,7 @@ impl Syncer {
         machine.hold_sync_state(false);
     }
 
-    fn cycle(&mut self, shared: &Shared, machine: &Machine, file: &Path) {
+    fn cycle(&mut self, shared: &Shared, hub: &impl sync::Hub, machine: &Machine, file: &Path) {
         if self.state.is_none() {
             match sync::State::load(file, &crate::machine::home().join(".claude")) {
                 Ok(loaded) => {
@@ -388,7 +388,7 @@ impl Syncer {
             if !self.shared_projects.contains(&key) && shared.call(HubCall::ShareProject { project: checkout.project.clone() }).is_ok() {
                 self.shared_projects.insert(key.clone());
             }
-            match self.backoff.sync(shared, state, &checkout, Instant::now()) {
+            match self.backoff.sync(hub, state, &checkout, Instant::now()) {
                 Ok(done) => {
                     machine.skills_changed(&skills::pulled_by_project_sync(&checkout, &done.pulled));
                     if !done.pushed.is_empty() || !done.pulled.is_empty() {
@@ -402,7 +402,7 @@ impl Syncer {
             }
         }
         for share in machine.plugin_shares() {
-            match self.backoff.sync_plugins(shared, state, &share, Instant::now()) {
+            match self.backoff.sync_plugins(hub, state, &share, Instant::now()) {
                 Ok(done) => {
                     self.reported_old_hub = false;
                     machine.skills_changed(&skills::pulled_by_plugin_sync(&share, &done.pulled));
@@ -850,13 +850,13 @@ mod tests {
         let (out, _frames) = channel::unbounded_channel();
         *shared.out.lock().unwrap() = Some(out);
         let mut syncer = Syncer::default();
-        syncer.cycle(&shared, &machine, &file);
+        syncer.cycle(&shared, &shared, &machine, &file);
         assert_eq!(std::fs::read(&file).unwrap(), b"", "a stopped sync leaves the file as it was");
         let why = format!("the sync state {} is corrupt (EOF while parsing a value at line 1 column 0)", file.display());
         assert_eq!(machine.call(Call::SyncStopped), Ok(Value::String(why)));
         assert_eq!(machine.call(Call::ResetSync), Ok(Value::Null));
         assert_eq!(machine.call(Call::SyncStopped), Ok(Value::Null));
-        syncer.cycle(&shared, &machine, &file);
+        syncer.cycle(&shared, &shared, &machine, &file);
         let saved: Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
         assert_eq!(saved, serde_json::json!({ "hashes": {}, "agreed": {}, "claude_homes": {} }));
         assert_eq!(std::fs::read(dir.join("sync.json.damaged")).unwrap(), b"");
@@ -881,10 +881,10 @@ mod tests {
     fn a_state_file_that_breaks_while_the_loop_holds_its_state_still_reads_as_syncing() {
         let (dir, file, machine, shared, _frames) = stopped_sync_fixture("held");
         let mut syncer = Syncer::default();
-        syncer.cycle(&shared, &machine, &file);
+        syncer.cycle(&shared, &shared, &machine, &file);
         std::fs::write(&file, b"").unwrap();
         assert_eq!(machine.call(Call::SyncStopped), Ok(Value::Null));
-        syncer.cycle(&shared, &machine, &file);
+        syncer.cycle(&shared, &shared, &machine, &file);
         assert_eq!(machine.call(Call::SyncStopped), Ok(Value::Null), "an idle cycle keeps the state it holds and doesn't rewrite the file");
         assert_eq!(std::fs::read(&file).unwrap(), b"");
         let _ = std::fs::remove_dir_all(dir);
@@ -894,7 +894,7 @@ mod tests {
     fn once_the_sync_loop_ends_the_state_file_decides_again() {
         let (dir, file, machine, shared, _frames) = stopped_sync_fixture("ended");
         let mut syncer = Syncer::default();
-        syncer.cycle(&shared, &machine, &file);
+        syncer.cycle(&shared, &shared, &machine, &file);
         std::fs::write(&file, b"").unwrap();
         let (_stop, stopped) = watch::channel(true);
         syncer.run(&shared, &machine, Some(&file), &stopped);
@@ -987,7 +987,7 @@ mod tests {
     fn a_state_file_restored_by_hand_reads_as_syncing_before_the_next_cycle() {
         let (dir, file, machine, shared, _frames) = stopped_sync_fixture("restored");
         std::fs::write(&file, b"").unwrap();
-        Syncer::default().cycle(&shared, &machine, &file);
+        Syncer::default().cycle(&shared, &shared, &machine, &file);
         assert!(matches!(machine.call(Call::SyncStopped), Ok(Value::String(_))));
         std::fs::write(&file, br#"{"hashes":{},"agreed":{},"claude_homes":{}}"#).unwrap();
         assert_eq!(machine.call(Call::SyncStopped), Ok(Value::Null));
