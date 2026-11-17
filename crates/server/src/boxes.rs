@@ -960,6 +960,13 @@ impl Rescue {
     }
 }
 
+/// Whether the row's box gets a rescue before it goes: a worker box whose task ran (its row reached
+/// `Running`), of a person's account. A team's boxes run its bots' workflow runs, whose work is the
+/// bot's own to push; a workflow's, a session's and a Captain's box run no delegated task.
+fn rescued_box(team: bool, row: &BoxRow) -> bool {
+    !team && row.phase == Phase::Running && matches!(row.work, BoxWork::Delegate { .. })
+}
+
 /// `id` when it may stand in a git branch name and a shell word as it is: ASCII letters, digits,
 /// `.`, `_` and `-`, starting with a letter or a digit, with no `..` and not ending in `.` or
 /// `.lock`. A task id (`task-1a2b3c4d`) and a repository's name are.
@@ -1868,10 +1875,9 @@ impl Boxes {
         end.usage = Some(Self::with_box_time(end.usage, row.size, ms));
     }
 
-    /// The rescue of a worker box whose task ran, locked, for a person's account: a team's boxes
-    /// run its bots' workflow runs, whose work is the bot's own to push. None for any other box.
+    /// The rescue of the row's box, locked, when `rescued` gives it one.
     async fn rescue_slot(&self, account: &Account, row: &BoxRow) -> Option<tokio::sync::OwnedMutexGuard<Option<Rescue>>> {
-        if account.team || row.phase != Phase::Running || !matches!(row.work, BoxWork::Delegate { .. }) {
+        if !rescued_box(account.team, row) {
             return None;
         }
         let slot = self.rescues.lock().unwrap().entry((row.account, row.id.clone())).or_default().clone();
@@ -3338,5 +3344,354 @@ mod tests {
         assert_eq!(NO_KEYS, "Upstash is not connected");
         assert_eq!(stuck_reason(&known, None), NO_KEYS);
         assert!(!NO_KEYS.contains("Claude"));
+    }
+
+    const TASK: &str = "task-1a2b3c4d";
+    const SITE: &str = "https://github.com/acme/site.git";
+
+    /// A worker row of `TASK` on `SITE` at `phase`, whose box Upstash knows as `box_1`.
+    fn worker_row(phase: Phase) -> BoxRow {
+        let origin = Origin {
+            machine: "m-mac".into(),
+            machine_name: "mac".into(),
+            tab: "tab-1".into(),
+            task: TASK.into(),
+            access: pinned_core::delegate::Access::Auto,
+            delegator: Delegator::default(),
+            limits: Default::default(),
+        };
+        let request = pinned_core::delegate::parse_request(&serde_json::json!({ "task": "Run it.", "title": "Slow" })).unwrap();
+        let work = BoxWork::Delegate { origin, request: Box::new(request), claude: None };
+        BoxRow { upstash: Some(BoxId("box_1".into())), spec: RunSpec { repo: Some(SITE.into()), ..spec_with(None) }, ..row_of(BoxSize::Small, phase, work, DELEGATE_CONNECTOR, ROW_ID) }
+    }
+
+    #[test]
+    fn only_a_persons_worker_box_whose_task_ran_gets_a_rescue() {
+        assert!(rescued_box(false, &worker_row(Phase::Running)));
+        assert!(!rescued_box(true, &worker_row(Phase::Running)), "a team's box is its bot's");
+        for phase in [Phase::Creating, Phase::Booting, Phase::Ending(End::Offline)] {
+            assert!(!rescued_box(false, &worker_row(phase.clone())), "{phase:?}: no task ran yet, or another end has it");
+        }
+        let captain = BoxWork::Captain { request_id: "r".into(), text: "t".into(), sender: "s".into(), busy: None };
+        for (work, connector) in [(BoxWork::Run, "nightly"), (BoxWork::Run, INTERACTIVE_CONNECTOR), (captain, CAPTAIN_CONNECTOR)] {
+            assert!(!rescued_box(false, &row_of(BoxSize::Small, Phase::Running, work, connector, ROW_ID)), "{connector}");
+        }
+    }
+
+    #[test]
+    fn the_rescue_script_holds_only_a_safe_repository_name_and_task_id() {
+        let script = rescue_script(SITE, TASK).unwrap();
+        assert!(script.contains("\ntask='task-1a2b3c4d'\n"), "{script}");
+        assert!(script.contains("cd \"$HOME/pinned/site\" "), "{script}");
+        assert!(!script.contains("{{"), "every part is filled");
+        assert_eq!(rescue_script("acme/site", TASK), Some(script.clone()), "an owner/repo names the same clone");
+        for task in ["task-1'; rm -rf ~; '", "$(id)", "`id`", "-f", ".hidden", "a..b", "x.lock", "x.", "a b", "a/b", "a\nb", "", "\u{e9}t\u{e9}"] {
+            assert_eq!(rescue_script(SITE, task), None, "{task:?}");
+        }
+        for repo in ["https://github.com/acme/si'te.git", "acme/$(id)", "acme/-x", "acme/a b"] {
+            assert_eq!(rescue_script(repo, TASK), None, "{repo:?}");
+        }
+        assert_eq!(rescue_script(SITE, &"t".repeat(101)), None, "an id past 100 characters");
+    }
+
+    #[test]
+    fn the_rescue_script_pushes_one_new_branch_with_no_force_and_commits_with_its_hooks() {
+        let script = rescue_script(SITE, TASK).unwrap();
+        let git: Vec<&str> = script.lines().map(str::trim).filter(|l| l.starts_with("git ") && !l.starts_with("git rev-") && !l.starts_with("git status") && !l.starts_with("git worktree")).collect();
+        assert_eq!(
+            git,
+            vec![
+                "git add -A >/dev/null 2>&1 || { answer 'failed add'; return 0; }",
+                "git commit -q -m \"rescue: unpushed work of task $task\" >/dev/null 2>&1 || { answer 'failed commit'; return 0; }",
+                "git ls-remote --exit-code --heads origin \"refs/heads/$ref\" >/dev/null 2>&1",
+                "git push -q origin \"HEAD:refs/heads/$ref\" >/dev/null 2>&1 || { answer 'failed push'; return 0; }",
+            ],
+            "what the script runs that changes or asks the remote"
+        );
+        for never in ["--force", " -f ", "+HEAD", "--no-verify", "commit -n", "--mirror", "--delete", ":refs/heads/main", "GH_TOKEN", "box.env"] {
+            assert!(!script.contains(never), "{never}");
+        }
+    }
+
+    #[test]
+    fn a_rescue_answer_is_read_only_from_its_own_lines_and_only_for_the_tasks_branches() {
+        let answer = |output: &str| rescued(&Exec { exit_code: 0, output: output.into(), error: "fatal: https://x-access-token:ghs_secret@github.com".into() }, TASK);
+        assert_eq!(answer("pinned-rescue: done\n"), Rescue::default());
+        assert_eq!(
+            answer("Enumerating objects\npinned-rescue: saved wip/rescue/task-1a2b3c4d\npinned-rescue: saved wip/rescue/task-1a2b3c4d-2\npinned-rescue: done\n"),
+            Rescue { saved: vec!["wip/rescue/task-1a2b3c4d".into(), "wip/rescue/task-1a2b3c4d-2".into()], failed: None }
+        );
+        assert_eq!(answer("pinned-rescue: failed push\npinned-rescue: done\n"), Rescue::failed("the push was refused"));
+        assert_eq!(answer("pinned-rescue: failed commit\npinned-rescue: done\n"), Rescue::failed("the rescue commit failed"));
+        assert_eq!(answer("pinned-rescue: failed name\npinned-rescue: done\n"), Rescue::failed("every rescue branch name of the task is taken"));
+        assert_eq!(answer("pinned-rescue: failed remote\npinned-rescue: done\n"), Rescue::failed("the clone's remote could not be reached"));
+        assert_eq!(answer("pinned-rescue: failed add\npinned-rescue: done\n"), Rescue::failed("git could not stage the changes"));
+        assert_eq!(answer("pinned-rescue: saved main\npinned-rescue: done\n"), Rescue::failed("the box named a branch that is not the task's"));
+        assert_eq!(answer("pinned-rescue: saved wip/rescue/task-1a2b3c4d-x\npinned-rescue: done\n"), Rescue::failed("the box named a branch that is not the task's"));
+        assert_eq!(answer("pinned-rescue: ghs_secret\npinned-rescue: done\n"), Rescue::failed("the box answered something unexpected"), "an unknown line is never quoted");
+        assert_eq!(answer("pinned-rescue: saved wip/rescue/task-1a2b3c4d\n"), Rescue { saved: vec!["wip/rescue/task-1a2b3c4d".into()], failed: Some("the rescue did not finish".into()) });
+        assert_eq!(answer(""), Rescue::failed("the rescue did not finish"));
+    }
+
+    #[test]
+    fn a_rescue_adds_one_sentence_to_the_tasks_end() {
+        let saved = |branches: &[&str]| Rescue { saved: branches.iter().map(|b| b.to_string()).collect(), failed: None };
+        assert_eq!(Rescue::default().notice(), None, "nothing to save says nothing");
+        assert_eq!(saved(&["wip/rescue/task-1"]).notice().as_deref(), Some("Unpushed work was saved to branch wip/rescue/task-1."));
+        assert_eq!(saved(&["wip/rescue/task-1", "wip/rescue/task-1-2"]).notice().as_deref(), Some("Unpushed work was saved to branches wip/rescue/task-1, wip/rescue/task-1-2."));
+        assert_eq!(Rescue::failed("the push was refused").notice().as_deref(), Some("Unpushed work could not be saved: the push was refused."));
+        assert_eq!(
+            Rescue { failed: Some("the push was refused".into()), ..saved(&["wip/rescue/task-1"]) }.notice().as_deref(),
+            Some("Unpushed work was saved to branch wip/rescue/task-1. Other unpushed work could not be saved: the push was refused.")
+        );
+
+        let notice = "Unpushed work was saved to branch wip/rescue/task-1.";
+        let ended = |state: &str, summary: Option<&str>, error: Option<&str>| {
+            let mut end = RemoteEnd { state: state.into(), summary: summary.map(str::to_owned), error: error.map(str::to_owned), usage: None };
+            add_rescue_notice(&mut end, notice);
+            (end.summary, end.error)
+        };
+        assert_eq!(ended("result_available", None, None), (Some(notice.into()), None));
+        assert_eq!(ended("result_available", Some("Suite green.\n"), None), (Some(format!("Suite green.\n\n{notice}")), None));
+        assert_eq!(ended("failed", None, Some("Upstash Box: it went offline")), (None, Some(format!("Upstash Box: it went offline. {notice}"))));
+        assert_eq!(ended("cancelled", None, Some("not now.")), (None, Some(format!("not now. {notice}"))));
+        let mut answer = serde_json::json!({ "workState": "cancelled", "error": "not now" });
+        add_rescue_notice_to_answer(&mut answer, notice);
+        assert_eq!(answer, serde_json::json!({ "workState": "cancelled", "error": format!("not now. {notice}") }));
+    }
+
+    /// A Box API whose exec answers each rescue script with `answer`, fails as an unreachable box
+    /// when it is None, or never answers when `hang`; it counts the scripts it ran.
+    struct Rescuing {
+        answer: Option<String>,
+        hang: bool,
+        scripts: Mutex<Vec<String>>,
+    }
+
+    impl BoxApi for Rescuing {
+        fn create<'a>(&'a self, _: &'a str, _: NewBox) -> BoxFuture<'a, Result<BoxId, String>> {
+            unreachable!()
+        }
+        fn list<'a>(&'a self, _: &'a str, _: &'a str) -> BoxFuture<'a, Result<Vec<Listed>, String>> {
+            unreachable!()
+        }
+        fn write<'a>(&'a self, _: &'a str, _: &'a BoxId, _: &'a str, _: String) -> BoxFuture<'a, Result<(), String>> {
+            unreachable!()
+        }
+        fn exec<'a>(&'a self, _: &'a str, _: &'a BoxId, script: String) -> BoxFuture<'a, Result<Exec, String>> {
+            Box::pin(async move {
+                self.scripts.lock().unwrap().push(script);
+                if self.hang {
+                    std::future::pending::<()>().await;
+                }
+                self.answer.clone().map(|output| Exec { exit_code: 0, output, error: String::new() }).ok_or_else(|| "Upstash Box: box_1 is not running".into())
+            })
+        }
+        fn delete<'a>(&'a self, _: &'a str, _: &'a BoxId) -> BoxFuture<'a, Result<(), String>> {
+            unreachable!()
+        }
+    }
+
+    fn rescuing(answer: Option<&str>, hang: bool) -> (Boxes, Arc<Rescuing>) {
+        let api = Arc::new(Rescuing { answer: answer.map(str::to_owned), hang, scripts: Mutex::default() });
+        (Boxes::new(api.clone(), Policy::default(), "https://hub.test"), api)
+    }
+
+    /// The row's rescue as `finish_told` runs it: its slot, then the rescue it holds.
+    async fn rescue_once(boxes: &Boxes, row: &BoxRow, key: Option<&str>) -> Rescue {
+        let slot = boxes.rescues.lock().unwrap().entry((row.account, row.id.clone())).or_default().clone();
+        boxes.rescue_in(slot.lock_owned().await, row, key).await
+    }
+
+    #[tokio::test]
+    async fn a_box_is_rescued_once_however_many_ends_ask() {
+        let (boxes, api) = rescuing(Some("pinned-rescue: saved wip/rescue/task-1a2b3c4d\npinned-rescue: done\n"), false);
+        let row = worker_row(Phase::Running);
+        let first = rescue_once(&boxes, &row, Some(KEY)).await;
+        assert_eq!(first.notice().as_deref(), Some("Unpushed work was saved to branch wip/rescue/task-1a2b3c4d."));
+        assert_eq!(rescue_once(&boxes, &row, Some(KEY)).await, first, "a second end gets the first answer");
+        assert_eq!(api.scripts.lock().unwrap().as_slice(), [rescue_script(SITE, TASK).unwrap()], "one script, the task's");
+    }
+
+    #[tokio::test]
+    async fn a_box_that_cannot_be_reached_or_has_no_key_is_not_rescued() {
+        let (boxes, api) = rescuing(None, false);
+        let row = worker_row(Phase::Running);
+        assert_eq!(boxes.run_rescue(&row, TASK, Some(KEY), RESCUE_WAIT).await, Rescue::failed("the box could not be reached"));
+        assert_eq!(boxes.run_rescue(&row, TASK, None, RESCUE_WAIT).await, Rescue::failed("Upstash Box is not connected"));
+        assert_eq!(boxes.run_rescue(&row, "task-1'; id; '", Some(KEY), RESCUE_WAIT).await, Rescue::failed("its repository or task id cannot name a branch safely"));
+        assert_eq!(api.scripts.lock().unwrap().len(), 1, "only the box with a key and safe ids was asked");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_rescue_that_does_not_answer_gives_up_at_its_bound() {
+        let (boxes, _) = rescuing(None, true);
+        let started = tokio::time::Instant::now();
+        let rescue = boxes.run_rescue(&worker_row(Phase::Running), TASK, Some(KEY), RESCUE_WAIT).await;
+        assert_eq!(rescue, Rescue::failed("it took longer than 1 min"));
+        assert_eq!(started.elapsed(), Duration::from_secs(60));
+        assert_eq!(RESCUE_WAIT, Duration::from_secs(60));
+    }
+
+    /// A box home whose `pinned/site` clones a bare remote, with `git` on PATH a shim that logs each
+    /// call's arguments before it runs the real git.
+    #[cfg(unix)]
+    struct RescueRun {
+        home: std::path::PathBuf,
+        clone: std::path::PathBuf,
+        remote: std::path::PathBuf,
+        bin: std::path::PathBuf,
+        _root: tempfile::TempDir,
+    }
+
+    #[cfg(unix)]
+    impl RescueRun {
+        fn new() -> RescueRun {
+            use std::os::unix::fs::PermissionsExt;
+            let root = tempfile::tempdir().unwrap();
+            let (home, remote, bin) = (root.path().join("home"), root.path().join("remote.git"), root.path().join("bin"));
+            let clone = home.join("pinned/site");
+            std::fs::create_dir_all(&bin).unwrap();
+            std::fs::create_dir_all(&home).unwrap();
+            std::fs::write(home.join(".gitconfig"), "[user]\n\tname = box\n\temail = box@example.test\n").unwrap();
+            let real = std::process::Command::new("sh").args(["-c", "command -v git"]).output().unwrap();
+            let real = String::from_utf8(real.stdout).unwrap().trim().to_owned();
+            std::fs::write(bin.join("git"), format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >>{}/git.log\nexec {real} \"$@\"\n", root.path().display())).unwrap();
+            std::fs::set_permissions(bin.join("git"), std::fs::Permissions::from_mode(0o755)).unwrap();
+            let run = RescueRun { home, clone, remote, bin, _root: root };
+            run.git(run.home.as_path(), &["init", "-q", "--bare", run.remote.to_str().unwrap()]);
+            run.git(run.home.as_path(), &["clone", "-q", run.remote.to_str().unwrap(), run.clone.to_str().unwrap()]);
+            std::fs::write(run.clone.join("notes.txt"), "started\n").unwrap();
+            run.git(&run.clone, &["add", "notes.txt"]);
+            run.git(&run.clone, &["commit", "-q", "-m", "start"]);
+            run.git(&run.clone, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+            let _ = std::fs::remove_file(run._root.path().join("git.log"));
+            run
+        }
+
+        fn git(&self, dir: &std::path::Path, args: &[&str]) -> String {
+            let ran = std::process::Command::new(self.bin.join("git")).arg("-C").arg(dir).args(args).env("HOME", &self.home).output().unwrap();
+            assert!(ran.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&ran.stderr));
+            String::from_utf8(ran.stdout).unwrap()
+        }
+
+        /// Runs the task's rescue script as the box's exec does, and answers what it printed.
+        fn rescue(&self) -> String {
+            let ran = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(rescue_script(SITE, TASK).unwrap())
+                .env_clear()
+                .env("HOME", &self.home)
+                .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
+                .output()
+                .unwrap();
+            assert!(ran.status.success());
+            String::from_utf8(ran.stdout).unwrap()
+        }
+
+        /// Each git call the script made that wrote: its commits and pushes, as their arguments.
+        fn writes(&self) -> Vec<String> {
+            let log = std::fs::read_to_string(self._root.path().join("git.log")).unwrap_or_default();
+            log.lines().filter(|l| l.starts_with("commit") || l.starts_with("push") || l.starts_with("add")).map(str::to_owned).collect()
+        }
+
+        fn branch(&self, name: &str, path: &str) -> String {
+            self.git(&self.remote, &["show", &format!("refs/heads/{name}:{path}")])
+        }
+
+        fn hook(&self, name: &str, body: &str) {
+            use std::os::unix::fs::PermissionsExt;
+            let hook = self.clone.join(".git/hooks").join(name);
+            std::fs::write(&hook, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_rescue_commits_a_changed_tree_and_pushes_it_to_the_tasks_new_branch_with_its_hooks() {
+        let run = RescueRun::new();
+        run.hook("pre-commit", &format!("touch {}/hooked", run.home.display()));
+        std::fs::write(run.clone.join("notes.txt"), "half done\n").unwrap();
+        std::fs::write(run.clone.join("new.txt"), "new\n").unwrap();
+        assert_eq!(run.rescue(), "pinned-rescue: saved wip/rescue/task-1a2b3c4d\npinned-rescue: done\n");
+        assert_eq!(
+            run.writes(),
+            ["add -A", "commit -q -m rescue: unpushed work of task task-1a2b3c4d", "push -q origin HEAD:refs/heads/wip/rescue/task-1a2b3c4d"],
+            "a plain commit and a plain push: no force, no --no-verify"
+        );
+        assert!(run.home.join("hooked").exists(), "the commit ran the pre-commit hook");
+        assert_eq!((run.branch("wip/rescue/task-1a2b3c4d", "notes.txt"), run.branch("wip/rescue/task-1a2b3c4d", "new.txt")), ("half done\n".into(), "new\n".into()));
+        assert_eq!(run.git(&run.remote, &["log", "-1", "--format=%s", "refs/heads/wip/rescue/task-1a2b3c4d"]), "rescue: unpushed work of task task-1a2b3c4d\n");
+        assert_eq!(run.branch("main", "notes.txt"), "started\n", "main is left as it was");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_hook_that_refuses_the_rescue_commit_is_not_skipped() {
+        let run = RescueRun::new();
+        run.hook("pre-commit", "exit 1");
+        std::fs::write(run.clone.join("notes.txt"), "half done\n").unwrap();
+        assert_eq!(run.rescue(), "pinned-rescue: failed commit\npinned-rescue: done\n");
+        assert!(run.writes().iter().all(|w| !w.starts_with("push")), "nothing was pushed: {:?}", run.writes());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_clean_pushed_clone_has_nothing_to_rescue_and_pushes_nothing() {
+        let run = RescueRun::new();
+        assert_eq!(run.rescue(), "pinned-rescue: done\n");
+        assert_eq!(run.writes(), Vec::<String>::new());
+        assert_eq!(run.git(&run.remote, &["for-each-ref", "--format=%(refname)"]), "refs/heads/main\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_commit_on_no_remote_branch_is_pushed_without_a_new_commit() {
+        let run = RescueRun::new();
+        std::fs::write(run.clone.join("notes.txt"), "committed\n").unwrap();
+        run.git(&run.clone, &["commit", "-q", "-am", "mine"]);
+        let _ = std::fs::remove_file(run._root.path().join("git.log"));
+        assert_eq!(run.rescue(), "pinned-rescue: saved wip/rescue/task-1a2b3c4d\npinned-rescue: done\n");
+        assert_eq!(run.writes(), ["push -q origin HEAD:refs/heads/wip/rescue/task-1a2b3c4d"]);
+        assert_eq!(run.git(&run.remote, &["log", "-1", "--format=%s", "refs/heads/wip/rescue/task-1a2b3c4d"]), "mine\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_taken_rescue_branch_is_left_as_it_is_and_the_next_number_is_used() {
+        let run = RescueRun::new();
+        run.git(&run.clone, &["push", "-q", "origin", "HEAD:refs/heads/wip/rescue/task-1a2b3c4d"]);
+        let taken = run.git(&run.remote, &["rev-parse", "refs/heads/wip/rescue/task-1a2b3c4d"]);
+        std::fs::write(run.clone.join("notes.txt"), "half done\n").unwrap();
+        let _ = std::fs::remove_file(run._root.path().join("git.log"));
+        assert_eq!(run.rescue(), "pinned-rescue: saved wip/rescue/task-1a2b3c4d-2\npinned-rescue: done\n");
+        assert_eq!(run.writes().last().map(String::as_str), Some("push -q origin HEAD:refs/heads/wip/rescue/task-1a2b3c4d-2"));
+        assert_eq!(run.git(&run.remote, &["rev-parse", "refs/heads/wip/rescue/task-1a2b3c4d"]), taken, "the taken branch did not move");
+        assert_eq!(run.branch("wip/rescue/task-1a2b3c4d-2", "notes.txt"), "half done\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn each_worktree_of_the_clone_with_work_gets_its_own_branch() {
+        let run = RescueRun::new();
+        let tree = run.clone.join(".claude/worktrees/pinned-1");
+        run.git(&run.clone, &["worktree", "add", "-q", "-b", "eng-7", tree.to_str().unwrap()]);
+        std::fs::write(run.clone.join("notes.txt"), "in the clone\n").unwrap();
+        std::fs::write(tree.join("notes.txt"), "in the worktree\n").unwrap();
+        assert_eq!(run.rescue(), "pinned-rescue: saved wip/rescue/task-1a2b3c4d\npinned-rescue: saved wip/rescue/task-1a2b3c4d-2\npinned-rescue: done\n");
+        assert_eq!(
+            (run.branch("wip/rescue/task-1a2b3c4d", "notes.txt"), run.branch("wip/rescue/task-1a2b3c4d-2", "notes.txt")),
+            ("in the clone\n".into(), "in the worktree\n".into())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_box_with_no_clone_of_the_tasks_repository_has_nothing_to_rescue() {
+        let run = RescueRun::new();
+        std::fs::rename(&run.clone, run.home.join("pinned/other")).unwrap();
+        assert_eq!(run.rescue(), "pinned-rescue: done\n");
+        assert_eq!(run.writes(), Vec::<String>::new());
     }
 }
