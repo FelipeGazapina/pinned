@@ -2736,6 +2736,10 @@ struct FakeState {
     /// Runs on the next booted node's machine thread, inside the call that opens its first tab and
     /// before that call answers the hub: what a session does as its first act.
     first_tab: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Each delete waits for a permit, which none is given: closing it lets every delete go on.
+    held_deletes: Option<Arc<tokio::sync::Semaphore>>,
+    /// How many deletes came to `held_deletes`.
+    deletes_held: usize,
 }
 
 /// Upstash's Box API in memory. Running the bootstrap starts a node from the account.json the hub
@@ -2873,6 +2877,14 @@ impl BoxApi for FakeBoxes {
     fn delete<'a>(&'a self, key: &'a str, id: &'a BoxId) -> BoxFuture<'a, Result<(), String>> {
         Box::pin(async move {
             Self::refuse(key)?;
+            let held = {
+                let mut state = self.state.lock().unwrap();
+                state.deletes_held += usize::from(state.held_deletes.is_some());
+                state.held_deletes.clone()
+            };
+            if let Some(held) = held {
+                let _ = held.acquire().await;
+            }
             let gone = self.state.lock().unwrap().boxes.remove(&id.0);
             tokio::task::spawn_blocking(move || drop(gone)).await.unwrap();
             Ok(())
@@ -9336,6 +9348,67 @@ fn waiting_extend_box_asks_for_ended_boxes_do_not_count_toward_the_accounts_cap(
     assert_eq!(waiting_actions(&mut owner).len(), 11, "the owner still sees every ask");
     let denied = owner.hub(json!({ "cmd": "decide_confirmation", "id": asked[0]["id"], "approve": false })).unwrap();
     assert_eq!(denied["outcome"], "denied", "and can answer one for a box that ended: {denied}");
+}
+
+/// What an extend ask still waiting for the owner reads as once its box ends.
+const BOX_ENDED: &str = "the box ended before the owner answered";
+
+/// The ids of the account's confirmations that wait.
+fn waiting_ids(client: &mut Client) -> Vec<Value> {
+    let all = client.hub(json!({ "cmd": "confirmations" })).unwrap();
+    all.as_array().unwrap().iter().filter(|c| c["decision"].is_null()).map(|c| c["id"].clone()).collect()
+}
+
+/// The decision and outcome of the account's confirmation `id`, as its app lists it.
+fn decided(client: &mut Client, id: &Value) -> (Value, Value) {
+    let all = client.hub(json!({ "cmd": "confirmations" })).unwrap();
+    let found = all.as_array().unwrap().iter().find(|c| c["id"] == *id).cloned().unwrap_or_else(|| panic!("no confirmation {id}: {all}"));
+    (found["decision"].clone(), found["outcome"].clone())
+}
+
+/// Ends the account's box on `machine` as removing its machine does, its Upstash delete held
+/// until the permit closes, so its row stays ending: the permit and the end, once the delete is held.
+fn end_box_held(hub: &TestHub, account: uuid::Uuid, machine: &str) -> (Arc<tokio::sync::Semaphore>, tokio::task::JoinHandle<Result<bool, String>>) {
+    let held = Arc::new(tokio::sync::Semaphore::new(0));
+    hub.boxes.state.lock().unwrap().held_deletes = Some(held.clone());
+    let (running, machine) = (hub.hub().clone(), machine.parse().unwrap());
+    let ending = hub.runtime.spawn(async move {
+        let account = running.account(account).await?;
+        running.boxes.end_for_machine(&running, &account, machine).await
+    });
+    wait_for("the box's delete", || hub.boxes.state.lock().unwrap().deletes_held > 0);
+    (held, ending)
+}
+
+/// A box that ends closes every extend ask for it still waiting for the owner: it reads denied with
+/// the box's end, leaves what waits, and its agent hears so. An ask for another box of the account,
+/// and another account's ask that names the same machine, still wait.
+#[test]
+fn a_box_that_ends_closes_the_extend_box_asks_that_wait_for_it() {
+    let ExtendSetup { hub, account, ana, mut owner, machine, .. } = extend_setup("extend_closed_ending");
+    let other = open_extend_box(&ana);
+    // The machine in capitals, as an agent may type it: it names the box all the same.
+    let asked = extend_as(&ana.dir, &ana.tab, &machine.to_uppercase(), 0.5, None).unwrap();
+    let kept = extend_as(&ana.dir, &ana.tab, &other, 0.5, None).unwrap();
+    assert_eq!((asked["outcome"].as_str(), kept["outcome"].as_str()), (Some("pending"), Some("pending")), "{asked} {kept}");
+    // Bob's agent cannot ask for ana's box, which is no box of his, so his ask that names its machine is written here.
+    let (bob_account, bob, mut bobs_app) = extend_account(&hub, "bob@acme.dev", "bob-mac");
+    admin_on(
+        &hub.database,
+        &format!(
+            "insert into agent_confirmations (id, account, machine, tab, role, action, args) values (gen_random_uuid(), '{bob_account}', '{}', '{}', 'session', 'extend_box', '{{\"machine\": \"{machine}\", \"extra_usd\": 0.5}}')",
+            bob.machine, bob.tab
+        ),
+    );
+    let (deleted, ending) = end_box_held(&hub, account, &machine);
+    assert_eq!(count_on(&hub.database, &format!("select count(*) from boxes where machine = '{machine}' and phase = 'ending'")), 1, "the box is ending, its row kept until Upstash deletes it");
+    assert_eq!(waiting_ids(&mut owner), [kept["id"].clone()], "only the ask for the box that runs still waits");
+    assert_eq!(decided(&mut owner, &asked["id"]), (json!("denied"), json!(BOX_ENDED)));
+    assert_eq!(waiting_actions(&mut bobs_app), ["extend_box"], "another account's ask is its own");
+    let told = notice_of(&ana, &asked["id"]);
+    assert!(told.contains(BOX_ENDED) && !told.contains("The user denied"), "the agent hears that the box ended: {told}");
+    deleted.close();
+    assert_eq!(hub.runtime.block_on(ending).unwrap(), Ok(true));
 }
 
 /// Asks for different boxes of one account made at once, with one place left under the account's
