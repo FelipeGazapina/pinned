@@ -65,19 +65,32 @@ impl PlanStore {
         }
     }
 
-    /// Writes a sibling file first and renames it over the last save, so a failed write keeps it.
+    /// Writes a sibling file only this user may read, flushes it to disk, and renames it over the
+    /// last save, so a failed or cut write keeps that one.
     fn save(&self) {
         let Some(file) = &self.file else { return };
         let saved = (|| {
+            use std::io::Write;
             if let Some(dir) = file.parent() {
                 std::fs::create_dir_all(dir)?;
             }
             let tmp = file.with_extension("json.tmp");
-            if let Err(e) = std::fs::write(&tmp, serde_json::to_vec(&self.by_session).expect("plans serialize")) {
+            let _ = std::fs::remove_file(&tmp);
+            let written = crate::private::file().create_new(true).open(&tmp).and_then(|mut f| {
+                f.write_all(&serde_json::to_vec(&self.by_session).expect("plans serialize"))?;
+                f.sync_all()
+            });
+            if let Err(e) = written {
                 let _ = std::fs::remove_file(&tmp);
                 return Err(e);
             }
-            std::fs::rename(&tmp, file)
+            std::fs::rename(&tmp, file)?;
+            // The rename itself lasts once the folder is flushed too.
+            #[cfg(unix)]
+            if let Some(dir) = file.parent() {
+                std::fs::File::open(dir)?.sync_all()?;
+            }
+            Ok(())
         })();
         if let Err(e) = saved {
             eprintln!("pinned: plans did not save: {e}");
