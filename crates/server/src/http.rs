@@ -1000,6 +1000,12 @@ fn client_frame(server: &Arc<Server>, account: &Arc<Account>, client: u64, text:
                 account.to_client(client, &ToClient::Reply(Reply::new(id, result)));
             });
         }
+        // A workflow session's callback is held to the session its machine found it in; a login
+        // holds no session, so it sends none.
+        Ok(ClientFrame::Hub { id, call }) if call.work().is_some() => {
+            eprintln!("pinned-server: client {client} of account {} was refused {}: {FROM_A_MACHINE_ONLY}", account.id, surface::cmd_of(&call));
+            account.to_client(client, &ToClient::Reply(Reply::new(id, Err(FROM_A_MACHINE_ONLY.to_owned()))));
+        }
         Ok(ClientFrame::Hub { id, call }) if account.needs_unlock(client, Side::Hub, &call) => locked(id),
         Ok(ClientFrame::Hub { id, call: HubCall::Unlock { password } }) => {
             let (server, account) = (server.clone(), account.clone());
@@ -1268,6 +1274,9 @@ async fn forward_team_box(hub: Arc<Hub>, account: Arc<Account>, machine: String,
     eprintln!("pinned-server: machine {machine} of team {} was refused: {refused}", account.id);
     account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, Err(refused))));
 }
+
+/// What a login gets for a workflow session's callback.
+const FROM_A_MACHINE_ONLY: &str = "only a workflow's session sends this, through its machine";
 
 /// The workflow and subject a workflow session's callback acts for (`HubCall::work`).
 pub(crate) fn run_work(call: &HubCall) -> Option<(String, Subject)> {
