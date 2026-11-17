@@ -341,6 +341,9 @@ pub struct Request {
     /// Whether the account's placement policy places this worker, over its rule for heavy work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub heavy: Option<bool>,
+    /// The step or list of the calling Captain's plan this task drives: a step id or a list id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_step: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -898,6 +901,7 @@ mod tests {
                 tools: vec![],
                 client_request_id: None,
                 heavy: None,
+                plan_step: None,
             }
         );
         let on = |target: Value| parse_request(&json!({"task": "x", "target": target})).map(|r| (r.target.machine, r.target.boxed));
@@ -958,6 +962,7 @@ mod tests {
                 tools: vec![],
                 client_request_id: None,
                 heavy: None,
+                plan_step: None,
             }
         );
         assert_eq!(

@@ -115,8 +115,24 @@ pub struct Step {
     /// The list task's rollup cost when this step turned running. The step's cost is the rise since then.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_at_start: Option<f64>,
+    /// How the task that drove this step ended, saved when it ended, so the step reads the same once the
+    /// registry drops the task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<Outcome>,
     #[serde(default)]
     pub fixes: Vec<Fix>,
+}
+
+/// The state, reason and cost a step read when its linked task ended.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Outcome {
+    pub state: State,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<f64>,
+    /// Unix milliseconds when the task ended.
+    pub at: u64,
 }
 
 /// A branch opened under a failed step. The latest one is the open one.
@@ -311,10 +327,84 @@ pub struct Linked {
     pub answer: String,
 }
 
-/// Links a new task to a step or a list. Stub: red until the link is built.
+/// Links the task `task` to a step or a list of the plans. A step that reads failed takes a retry instead: a
+/// fix of one step named for the task, which the task runs. Returns the id the task now drives.
 pub fn link(plans: &mut CaptainPlans, target: &str, task: &str, title: &str, facts: &[TaskFacts], now: u64) -> Result<Linked, String> {
-    let _ = (plans, target, task, title, facts, now);
-    Err("link is not built yet".into())
+    commit(plans, |plans| link_on(plans, target, task, title, facts, now))
+}
+
+fn link_on(plans: &mut CaptainPlans, target: &str, task: &str, title: &str, facts: &[TaskFacts], now: u64) -> Result<Linked, String> {
+    let pi = plans
+        .plans
+        .iter()
+        .position(|p| holds(p, target))
+        .ok_or_else(|| format!("no step or list {target} in any plan of this Captain. Nothing changed."))?;
+    let plan_id = plans.plans[pi].id.clone();
+    if plans.plans[pi].closed.is_some() {
+        return Err(format!("{plan_id} is closed, so its steps are frozen. Nothing changed."));
+    }
+    if let Some(j) = plans.plans[pi].lists.iter().position(|l| l.id == target) {
+        let plan = &mut plans.plans[pi];
+        let list = &mut plan.lists[j];
+        // The list's task starts its steps afresh: each cost is measured from the start of this task.
+        for s in list.steps.iter_mut().filter(|s| s.task.is_none()) {
+            s.outcome = None;
+            s.cost_at_start = None;
+        }
+        list.task = Some(task.to_owned());
+        plan.rev += 1;
+        settle_plan(plan, facts, now);
+        tidy(plans)?;
+        return Ok(Linked { id: target.to_owned(), answer: answer_of(plans, &plan_id, facts) });
+    }
+
+    let view = derive(&plans.plans[pi], facts);
+    let shown = every_step(&view).into_iter().find(|s| s.id == target);
+    if shown.is_some_and(|s| s.state == State::Failed) {
+        let shown = shown.unwrap();
+        if let Some(open) = shown.fixes.last().filter(|f| !f.steps.iter().all(|s| s.state == State::Done)) {
+            return Err(format!("{target} has an open fix {}; name one of its steps. Nothing changed.", open.id));
+        }
+        fix_on(plans, FixCall { step: target.to_owned(), steps: vec![NewStep { name: retry_name(title), what: None }] }, facts, now)?;
+        let fix = find_step(&plans.plans[pi].lists, target).and_then(|s| s.fixes.last()).expect("fix_on opened a fix");
+        let (fix_id, step_id) = (fix.id.clone(), fix.steps[0].id.clone());
+        let plan = &mut plans.plans[pi];
+        if let Some(retry) = find_step_mut(&mut plan.lists, &step_id) {
+            retry.task = Some(task.to_owned());
+        }
+        return Ok(Linked { id: step_id.clone(), answer: format!("Fix {fix_id} on {target} has steps {step_id}.\n{}", answer_of(plans, &plan_id, facts)) });
+    }
+
+    let plan = &mut plans.plans[pi];
+    if let Some(s) = find_step_mut(&mut plan.lists, target) {
+        s.task = Some(task.to_owned());
+        s.outcome = None;
+        s.cost_at_start = None;
+    }
+    plan.rev += 1;
+    settle_plan(plan, facts, now);
+    tidy(plans)?;
+    Ok(Linked { id: target.to_owned(), answer: answer_of(plans, &plan_id, facts) })
+}
+
+/// Whether the plan holds the list or step `id`, fix steps included.
+fn holds(plan: &Plan, id: &str) -> bool {
+    plan.lists.iter().any(|l| l.id == id) || find_step(&plan.lists, id).is_some()
+}
+
+/// The one step of a retry: "Retry: " and the task's title, cut to the step name limit.
+fn retry_name(title: &str) -> String {
+    let plain: String = title
+        .chars()
+        .filter(|c| !c.is_control() && !line_separator(*c) && !direction_mark(*c) && !invisible(*c))
+        .collect();
+    let room = MAX_NAME - "Retry: ".chars().count();
+    format!("Retry: {}", plain.trim().chars().take(room).collect::<String>().trim_end())
+}
+
+/// Every id a plan's lists and steps link to a task: the list's task and each step's own.
+pub fn linked_task_ids(plans: &CaptainPlans) -> Vec<String> {
+    plans.plans.iter().flat_map(linked_tasks).collect()
 }
 
 /// Closes a plan. Returns the answer text.
@@ -418,9 +508,9 @@ pub fn glance_list(plans: &CaptainPlans, facts: &[TaskFacts]) -> Vec<PlanGlance>
 
 // ---- writes: each works on a copy, kept only when nothing was refused ----
 
-fn commit<F>(plans: &mut CaptainPlans, write: F) -> Result<String, String>
+fn commit<T, F>(plans: &mut CaptainPlans, write: F) -> Result<T, String>
 where
-    F: FnOnce(&mut CaptainPlans) -> Result<String, String>,
+    F: FnOnce(&mut CaptainPlans) -> Result<T, String>,
 {
     let mut next = plans.clone();
     let answer = write(&mut next)?;
@@ -511,10 +601,7 @@ fn step_on(
         ));
     }
     if let Some(task) = holding_task(&plans.plans[pi], &call.step, facts) {
-        return Err(format!(
-            "{} follows task {task}, which has not ended. Wait for it, or cancel {task} first. Nothing changed.",
-            call.step
-        ));
+        return Err(format!("{task} runs this step. Wait for it, or cancel {task} first. Nothing changed."));
     }
     let plan = &mut plans.plans[pi];
     // The same report again changes nothing, unless being newer lets it win over a task that ended.
@@ -648,6 +735,8 @@ fn close_on(
     }
     let plan_id = plan.id.clone();
     let plan = &mut plans.plans[pi];
+    // Every linked task has ended, so each step keeps the state it reads now.
+    save_outcomes(plan, facts);
     plan.closed = Some(reason);
     plan.finished_at = Some(now);
     plan.rev += 1;
@@ -876,6 +965,7 @@ fn merge_steps(
                     note: o.note.clone(),
                     task: o.task.clone(),
                     cost_at_start: o.cost_at_start,
+                    outcome: o.outcome.clone(),
                     fixes: o.fixes.clone(),
                 }
             }
@@ -943,6 +1033,7 @@ fn new_step(id: String, name: String, what: String) -> Step {
         note: None,
         task: None,
         cost_at_start: None,
+        outcome: None,
         fixes: Vec::new(),
     }
 }
@@ -1061,12 +1152,13 @@ fn num(id: &str) -> u64 {
     id.get(1..).and_then(|s| s.parse().ok()).unwrap_or(0)
 }
 
-/// Records the start cost of each step that a list task has started, and sets or clears the finish time.
+/// Records the start cost of each step that a list task has started, saves the outcome of each step whose
+/// task has ended, and sets or clears the finish time.
 fn settle_plan(plan: &mut Plan, facts: &[TaskFacts], now: u64) -> bool {
+    let mut changed = save_outcomes(plan, facts);
     if plan.closed.is_some() {
-        return false;
+        return changed;
     }
-    let mut changed = false;
     for list in plan.lists.iter_mut() {
         let Some(f) = list.task.as_deref().and_then(|id| fact(facts, id)) else {
             continue;
@@ -1136,6 +1228,66 @@ fn ends_at(f: &TaskFacts) -> u64 {
     f.ended_at.unwrap_or(0)
 }
 
+/// The outcome saved on a step whose task the facts no longer hold. A report the Captain made after the task
+/// ended wins over it, as it wins over a task the facts do hold.
+fn saved(step: &Step, plain: Shown) -> Shown {
+    let Some(o) = &step.outcome else { return plain };
+    if step.reported_at > o.at {
+        return Shown { cost: o.cost, ..plain };
+    }
+    Shown {
+        state: o.state,
+        why: o.why.clone(),
+        cost: o.cost,
+    }
+}
+
+/// Saves on each step whose task has ended the state, reason and cost it reads. A step keeps the outcome it
+/// saved first. Returns true when a step saved one.
+fn save_outcomes(plan: &mut Plan, facts: &[TaskFacts]) -> bool {
+    let mut saves: Vec<(String, Outcome)> = Vec::new();
+    for list in &plan.lists {
+        let shown = list_shown(list, facts);
+        let list_task = list.task.as_deref().and_then(|id| fact(facts, id));
+        for (k, s) in list.steps.iter().enumerate() {
+            let driver = match s.task.as_deref() {
+                Some(id) => fact(facts, id),
+                None => list_task,
+            };
+            collect_outcome(s, shown[k].clone(), driver, facts, &mut saves);
+        }
+    }
+    let changed = !saves.is_empty();
+    for (id, outcome) in saves {
+        if let Some(s) = find_step_mut(&mut plan.lists, &id) {
+            s.outcome = Some(outcome);
+        }
+    }
+    changed
+}
+
+fn collect_outcome(step: &Step, shown: Shown, driver: Option<&TaskFacts>, facts: &[TaskFacts], saves: &mut Vec<(String, Outcome)>) {
+    if let Some(f) = driver.filter(|f| is_terminal(f)) {
+        if step.outcome.is_none() {
+            saves.push((
+                step.id.clone(),
+                Outcome {
+                    state: shown.state,
+                    why: shown.why,
+                    cost: shown.cost,
+                    at: ends_at(f),
+                },
+            ));
+        }
+    }
+    for fix in &step.fixes {
+        for x in &fix.steps {
+            let own = x.task.as_deref().and_then(|id| fact(facts, id));
+            collect_outcome(x, own_shown(x, facts), own, facts, saves);
+        }
+    }
+}
+
 /// A step that runs on its own task, or a step with no task, which reads what the Captain reported.
 fn own_shown(step: &Step, facts: &[TaskFacts]) -> Shown {
     let plain = Shown {
@@ -1144,7 +1296,7 @@ fn own_shown(step: &Step, facts: &[TaskFacts]) -> Shown {
         cost: None,
     };
     let Some(f) = step.task.as_deref().and_then(|id| fact(facts, id)) else {
-        return plain;
+        return saved(step, plain);
     };
     let cost = f.cost;
     if !is_terminal(f) {

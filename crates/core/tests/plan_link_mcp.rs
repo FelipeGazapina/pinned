@@ -90,7 +90,8 @@ esac"#,
             fixture.display(),
         ),
     );
-    let claude = script(&dir, "claude", "exit 0");
+    // A Claude Code that answers its sign-in check and then stays up as the Captain's session.
+    let claude = script(&dir, "claude", "if [ \"$1 $2\" = \"auth status\" ]; then echo '{\"loggedIn\":true,\"email\":\"ana@acme.dev\"}'; exit 0; fi\nexec sleep 30");
 
     // Two Captains, each on its own project, and no plan in either yet.
     let config = dir.join("config");
@@ -146,8 +147,9 @@ esac"#,
     );
 
     // A child that finishes: s1 reads done, and the captain is idle.
-    let first = body("delegate_task", json!({ "task": "DONE", "title": "Parser run", "planStep": "s1", "target": cursor, "mode": "wait", "timeoutMs": 15000 }));
-    assert_eq!((first["workState"].as_str(), first["planStep"].as_str()), (Some("result_available"), Some("s1")));
+    let first = body("delegate_task", json!({ "task": "DONE", "title": "Parser run", "planStep": "s1", "target": cursor, "mode": "async" }));
+    assert_eq!(first["planStep"], "s1");
+    wait_until("the finishing child never finished", || task_state(first["taskId"].as_str().unwrap()) == "result_available");
     assert_eq!(glance(&captain), json!([{ "id": "p1", "title": "Ship the form", "state": "idle", "done": 1, "total": 3, "strips": ["dpp"] }]));
 
     // A child that runs: s2 reads running, and a report on it is refused with the task's name.
@@ -167,8 +169,9 @@ esac"#,
     assert_eq!(task_state(&sleep_id), "working", "the replaced task keeps running in the registry");
 
     // A retry on the failed s2 opens one fix, and its success reads x.
-    let retry = body("delegate_task", json!({ "task": "DONE", "title": "Driver retry", "planStep": "s2", "target": cursor, "mode": "wait", "timeoutMs": 15000 }));
-    assert_eq!((retry["workState"].as_str(), retry["planStep"].as_str()), (Some("result_available"), Some("s4")));
+    let retry = body("delegate_task", json!({ "task": "DONE", "title": "Driver retry", "planStep": "s2", "target": cursor, "mode": "async" }));
+    assert_eq!(retry["planStep"], "s4");
+    wait_until("the retry never finished", || task_state(retry["taskId"].as_str().unwrap()) == "result_available");
     assert_eq!(glance(&captain), json!([{ "id": "p1", "title": "Ship the form", "state": "idle", "done": 2, "total": 3, "strips": ["dxp"] }]));
 
     // Refusals: a step no plan holds, a plain thread, and another Captain. Each starts no task.
