@@ -1,0 +1,184 @@
+<title>Pendências do Felipe</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&family=Space+Grotesk:wght@500;600&display=swap">
+<style>
+/* Uma coluna de decisões, agrupada por projeto; cada cartão traz contexto, perguntas e nota. */
+:root{
+  --bg:#f5f6f8; --surface:#ffffff; --fg:#1b1f27; --muted:#5d6574; --line:#dde1e8;
+  --accent:#2f5bd3; --accent-soft:#e7edfc; --ok:#1f7a4d; --ok-soft:#e3f3ea; --warn:#9a5b00; --warn-soft:#fbf0dc;
+  --display:"Space Grotesk",system-ui,sans-serif; --body:"IBM Plex Sans",system-ui,sans-serif; --mono:"IBM Plex Mono",ui-monospace,monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --bg:#12151b; --surface:#1a1e26; --fg:#e6e9ef; --muted:#9aa3b2; --line:#2b313d;
+  --accent:#7d9cff; --accent-soft:#222c46; --ok:#5fcf95; --ok-soft:#183126; --warn:#f0b35a; --warn-soft:#352a17; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --bg:#12151b; --surface:#1a1e26; --fg:#e6e9ef; --muted:#9aa3b2; --line:#2b313d;
+  --accent:#7d9cff; --accent-soft:#222c46; --ok:#5fcf95; --ok-soft:#183126; --warn:#f0b35a; --warn-soft:#352a17; color-scheme:dark}
+body{background:var(--bg);color:var(--fg);font-family:var(--body);font-size:15px;line-height:1.5}
+.wrap{max-width:860px;margin:0 auto;padding-block:28px 64px;padding-left:max(16px,env(safe-area-inset-left,0px));padding-right:max(16px,env(safe-area-inset-right,0px));display:flex;flex-direction:column;gap:28px}
+h1{font-family:var(--display);font-size:28px;margin:0;text-wrap:balance}
+h2{font-family:var(--display);font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin:0}
+.lede{color:var(--muted);margin:6px 0 0;max-width:65ch}
+.bar{position:sticky;top:env(safe-area-inset-top,0px);z-index:5;background:var(--bg);padding-block:10px;display:flex;align-items:center;gap:12px;border-bottom:1px solid var(--line)}
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:10;background:var(--bg)}
+.meter{flex:1;height:6px;border-radius:3px;background:var(--line);overflow:hidden}
+.meter i{display:block;height:100%;background:var(--ok);width:0;transition:width .3s}
+.count{font-family:var(--mono);font-size:13px;color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+.conn{font-family:var(--mono);font-size:12px;padding:2px 8px;border-radius:10px;background:var(--warn-soft);color:var(--warn);white-space:nowrap}
+.conn.on{background:var(--ok-soft);color:var(--ok)}
+section{display:flex;flex-direction:column;gap:14px}
+.card{background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:18px;display:flex;flex-direction:column;gap:12px;min-width:0}
+.card.done{border-color:color-mix(in srgb,var(--ok) 45%,var(--line))}
+.head{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap}
+.tag{font-family:var(--mono);font-size:12px;color:var(--accent);background:var(--accent-soft);padding:1px 7px;border-radius:4px}
+.card h3{font-size:17px;font-weight:600;margin:0;flex:1;min-width:0}
+.state{font-family:var(--mono);font-size:12px;color:var(--muted)}
+.card.done .state{color:var(--ok)}
+.ctx{margin:0;padding-left:18px;color:var(--fg);display:flex;flex-direction:column;gap:4px}
+.ctx li{max-width:70ch}
+.ctx code,.q code{font-family:var(--mono);font-size:13px;background:var(--bg);padding:0 4px;border-radius:3px}
+.rec{font-size:14px;color:var(--muted)}
+.rec b{color:var(--fg);font-weight:600}
+details{font-size:14px;color:var(--muted)}
+details summary{cursor:pointer;color:var(--accent)}
+details ul{padding-left:18px;margin:8px 0 0;display:flex;flex-direction:column;gap:4px}
+.q{display:flex;flex-direction:column;gap:8px;border-top:1px dashed var(--line);padding-top:12px}
+.q p{margin:0;font-weight:500}
+.opts{display:flex;flex-wrap:wrap;gap:8px}
+.opts label{display:flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:6px;padding:6px 10px;cursor:pointer;font-size:14px;background:var(--surface)}
+.opts input{accent-color:var(--accent);margin:0}
+.opts label:has(input:checked){border-color:var(--accent);background:var(--accent-soft)}
+.opts label:has(input:focus-visible){outline:2px solid var(--accent);outline-offset:2px}
+.clear{font:inherit;font-size:13px;color:var(--muted);background:none;border:1px dashed var(--line);border-radius:6px;padding:6px 10px;cursor:pointer}
+.clear:hover{color:var(--fg)}
+.clear:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.opts .r{font-family:var(--mono);font-size:11px;color:var(--ok)}
+textarea{width:100%;box-sizing:border-box;min-height:54px;resize:vertical;font:inherit;font-size:14px;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:8px}
+textarea:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+.info{font-size:13px;color:var(--muted);border-left:3px solid var(--line);padding-left:10px}
+a{color:var(--accent)}
+@media (prefers-reduced-motion: reduce){.meter i{transition:none}}
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>O que espera por você</h1>
+    <p class="lede">Atualizado em DD/MM/AAAA, primeira rodada. Marque uma opção em cada pergunta e, se quiser, escreva uma nota. Tudo é salvo na hora. Quando terminar, me diga "respondi" no chat que eu leio daqui e mando para os Capitães.</p>
+  </header>
+
+  <div class="bar" role="status">
+    <div class="meter" aria-hidden="true"><i id="meter"></i></div>
+    <span class="count" id="count">0 de 0 respondidas</span>
+    <span class="conn" id="conn">conectando…</span>
+  </div>
+
+  <div id="root"></div>
+</div>
+
+<script>
+// Rodadas anteriores: os itens já respondidos e enviados aos Capitães, com a mesma forma de ITEMS.
+const OLD_ITEMS = [];
+
+// A rodada aberta. Os dois itens abaixo são exemplos: troque-os pelos itens reais.
+const ITEMS = [
+ { group:"Projeto exemplo", id:"r1-merge", tag:"PR #123", title:"Merge da correção do login",
+   ctx:[
+    "O Capitão revisou o diff e a suíte passou.",
+    "Recomendo o merge porque a correção é pequena e tem teste."
+   ],
+   more:["Detalhe que pode ficar fechado: <code>caminho/do/arquivo.md</code>."],
+   qs:[{id:"merge", q:"Merge do PR #123?", opts:["Pode fazer o merge","Eu reviso antes","Ainda não"], rec:0}]},
+ { group:"Projeto exemplo", id:"r1-tela", tag:"conferência", title:"Conferir a tela depois do deploy",
+   ctx:["Nenhum agente entra no sistema, porque a tela pede login. Falta você olhar a tela."],
+   qs:[{id:"tela", q:"O que a tela mostra?", opts:["Está certa","Está diferente (explico na nota)","Ainda não olhei"]}]}
+];
+
+const root = document.getElementById("root");
+const state = {}; // chave -> {choice, note}
+let db = null;
+const key = (it,q) => it.id + "__" + q;
+const esc = s => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[c]));
+
+function render(){
+  const groups = [...new Set(ITEMS.map(i=>i.group))];
+  root.innerHTML = groups.map(g => `<section><h2>${esc(g)}</h2>${ITEMS.filter(i=>i.group===g).map(card).join("")}</section>`).join("");
+  if (OLD_ITEMS.length) root.insertAdjacentHTML("beforeend", `<details><summary>Rodadas anteriores: ${OLD_ITEMS.length} itens já respondidos e enviados aos Capitães</summary><ul id="oldlist"></ul></details>`);
+  root.style.cssText = "display:flex;flex-direction:column;gap:28px";
+  root.querySelectorAll("input[type=radio]").forEach(r => r.addEventListener("change", onPick));
+  root.querySelectorAll("textarea").forEach(t => t.addEventListener("input", onNote));
+  root.querySelectorAll("button.clear").forEach(b => b.addEventListener("click", onClear));
+  paint();
+}
+function card(it){
+  return `<article class="card" id="c-${it.id}">
+    <div class="head"><span class="tag">${esc(it.tag)}</span><h3>${esc(it.title)}</h3><span class="state" id="s-${it.id}"></span></div>
+    <ul class="ctx">${it.ctx.map(c=>`<li>${c}</li>`).join("")}</ul>
+    ${it.rec?`<div class="rec"><b>Recomendação do pinned:</b> ${esc(it.rec)}</div>`:""}
+    ${it.more?`<details><summary>Mais detalhes</summary><ul>${it.more.map(m=>`<li>${m}</li>`).join("")}</ul></details>`:""}
+    ${it.qs.map(q=>`<div class="q"><p>${esc(q.q)}</p><div class="opts" role="radiogroup">${q.opts.map((o,i)=>`<label><input type="radio" id="r-${it.id}-${q.id}-${i}" name="${key(it,q.id)}" value="${esc(o)}">${esc(o)}${q.rec===i?' <span class="r">recomendado</span>':""}</label>`).join("")}<button type="button" class="clear" data-k="${key(it,q.id)}">Limpar</button></div></div>`).join("")}
+    <textarea id="n-${it.id}" data-item="${it.id}" placeholder="Nota (opcional)"></textarea>
+  </article>`;
+}
+function paint(){
+  let total=0, done=0;
+  ITEMS.forEach(it=>{
+    let ok=0;
+    it.qs.forEach(q=>{ total++; const v=state[key(it,q.id)]; if(v&&v.choice){done++;ok++;
+      const el=[...document.getElementsByName(key(it,q.id))].find(r=>r.value===v.choice); if(el) el.checked=true; }});
+    const n=state[it.id+"__note"]; const ta=document.getElementById("n-"+it.id);
+    if(n && ta && document.activeElement!==ta) ta.value=n.note||"";
+    const c=document.getElementById("c-"+it.id); const s=document.getElementById("s-"+it.id);
+    const all=ok===it.qs.length; c.classList.toggle("done",all);
+    s.textContent = all ? "respondido" : (ok? `${ok}/${it.qs.length}` : "");
+  });
+  document.getElementById("count").textContent = `${done} de ${total} respondidas`;
+  document.getElementById("meter").style.width = (total? done/total*100:0)+"%";
+  const old=document.getElementById("oldlist");
+  if(old) old.innerHTML = OLD_ITEMS.map(it=>{
+    const a = it.qs.map(q=>(state[key(it,q.id)]||{}).choice).filter(Boolean).map(esc).join(" · ");
+    const n = (state[it.id+"__note"]||{}).note;
+    return `<li><b>${esc(it.title)}</b>: ${a||"sem opção marcada"}${n?` <i>Nota: ${esc(n)}</i>`:""}</li>`;
+  }).join("");
+}
+async function save(id, data){
+  state[id] = data;
+  paint();
+  if(!db) return;
+  try{ await db.doc("answers/"+id).set(data); }catch(e){ setConn(false,"não salvou, tente de novo"); }
+}
+function onPick(e){
+  const [item,q] = e.target.name.split("__");
+  const it = ITEMS.find(i=>i.id===item); const qq = it.qs.find(x=>x.id===q);
+  save(e.target.name, {item, title:it.title, question:qq.q, choice:e.target.value, at:new Date().toISOString()});
+}
+async function onClear(e){
+  const k=e.target.dataset.k;
+  document.getElementsByName(k).forEach(r=>r.checked=false);
+  delete state[k]; paint();
+  if(db){ try{ await db.doc("answers/"+k).delete(); }catch(err){ setConn(false,"não limpou, tente de novo"); } }
+}
+const timers={};
+function onNote(e){
+  const item=e.target.dataset.item; const v=e.target.value;
+  clearTimeout(timers[item]);
+  timers[item]=setTimeout(()=>save(item+"__note",{item, title:ITEMS.find(i=>i.id===item).title, note:v, at:new Date().toISOString()}),600);
+}
+function setConn(on,txt){ const c=document.getElementById("conn"); c.classList.toggle("on",on); c.textContent=txt; }
+function docsOf(snap){
+  const arr = Array.isArray(snap) ? snap : (snap && (snap.docs || snap.items || snap.documents)) || [];
+  return arr.map(d => ({ id: d.id || (d.ref && d.ref.id) || (d.path||"").split("/").pop(), data: typeof d.data==="function" ? d.data() : (d.data || d.value || d) }));
+}
+function load(snap){ docsOf(snap).forEach(d=>{ if(d.id && d.data) state[d.id]=d.data; }); paint(); }
+
+render();
+(async()=>{
+  try{
+    db = await window.claude?.use?.("db");
+    if(!db){ setConn(false,"sem conexão: respostas só nesta tela"); return; }
+    setConn(true,"salvando ao vivo");
+    const col = db.collection("answers");
+    try{ load(await col.get()); }catch(e){}
+    try{ col.onSnapshot(load); }catch(e){}
+  }catch(e){ setConn(false,"sem conexão: respostas só nesta tela"); }
+})();
+</script>
