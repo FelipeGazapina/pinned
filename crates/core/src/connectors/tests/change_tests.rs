@@ -949,6 +949,47 @@ fn a_won_change_read_again_where_its_claim_would_fail_fires_once_and_is_not_cool
     no_unlisted(&fake);
 }
 
+/// #346 E3 round 4: a retry is saved with the store, so an account reloaded from it keeps the
+/// retry and starts the change once.
+#[test]
+fn a_change_retry_survives_a_store_save_and_reload() {
+    let _api = slack::lock_api();
+    let _restore = RestoreLinear;
+    let at = ago(2);
+    let fake = fake_with(vec![issue(1, at, vec![moved("h-1", at, "Backlog", "Ready to Dev")])]);
+    let claims = Claims::default();
+    let connectors = on(&claims, vec![ready_to_dev("w1", ago(10))], "lin-e3-reload");
+    let (runs, error) = check_answering(&connectors, Err("the machine refused the run".into()));
+    assert_eq!(runs.len(), 1, "the start was tried");
+    assert!(error.is_some());
+
+    let reloaded = Connectors::new(claims.clone(), "/bin/pinned".into());
+    let retries = reloaded.store.lock().unwrap().change_retries.clone();
+    assert_eq!(retries.get("w1").map(|keys| keys.len()), Some(1), "the retry was saved");
+    let (runs, error) = check(&reloaded);
+    assert_eq!((runs.len(), error), (1, None), "the reloaded account starts it");
+    no_unlisted(&fake);
+}
+
+/// #346 E3 round 4: a retry whose change is older than the catch-up is dropped by the check that
+/// finds it, and never starts.
+#[test]
+fn a_retry_older_than_the_catch_up_is_dropped_and_never_starts() {
+    let _api = slack::lock_api();
+    let _restore = RestoreLinear;
+    let at = ago(65);
+    let fake = fake_with(vec![issue(1, at, vec![moved("h-1", at, "Backlog", "Ready to Dev")])]);
+    let claims = Claims::default();
+    let connectors = on(&claims, vec![ready_to_dev("w1", ago(30))], "lin-e3-expired");
+    connectors.store.lock().unwrap().change_retries.entry("w1".into()).or_default().insert("linear:i-1#h-1:state".into(), stamp(at));
+    let (runs, error) = check(&connectors);
+    assert_eq!((runs.len(), error), (0, None), "the retry is past the catch-up: it never starts");
+    assert!(connectors.store.lock().unwrap().change_retries.is_empty(), "and is dropped");
+    let (runs, error) = check(&connectors);
+    assert_eq!((runs.len(), error), (0, None), "later checks do not start it either");
+    no_unlisted(&fake);
+}
+
 /// #346 E3 round 4 item 4: a change a running graph run holds is given back by each check and
 /// counted once, not on every check; once the run ends, the change starts once.
 #[test]
