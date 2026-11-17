@@ -700,7 +700,7 @@ pub struct PluginShare {
 pub const LIMIT_REFUSAL: &str = "the account's synced projects would pass ";
 
 /// What the app shows while the hub's limit refuses a push. Sync resumes once a push is taken.
-pub const LIMIT_NOTICE: &str = "Sync stopped: your synced projects would pass 1024 MB. Delete old sessions to sync again.";
+pub const LIMIT_NOTICE: &str = "Sync stopped: your synced projects would pass 1024 MB. Nothing was lost; this machine keeps everything.";
 
 /// The hub's refusal of a history whose `base` is no longer the hub's copy, from 0.18.7 on.
 pub const STALE_REFUSAL: &str = "the hub's copy of the history changed since this machine merged it";

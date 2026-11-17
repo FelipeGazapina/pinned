@@ -1822,7 +1822,7 @@ mod tests {
         let mut syncer = Syncer { shared_projects: HashSet::from(["github.com/acme/app".to_owned()]), ..Syncer::default() };
         assert_eq!(machine.call(Call::SyncLimit), Ok(Value::Null), "nothing refused yet");
         syncer.cycle(&shared, &hub, &machine, &file);
-        let notice = "Sync stopped: your synced projects would pass 1024 MB. Delete old sessions to sync again.";
+        let notice = "Sync stopped: your synced projects would pass 1024 MB. Nothing was lost; this machine keeps everything.";
         assert_eq!(machine.call(Call::SyncLimit), Ok(Value::String(notice.into())), "the refused push shows the notice");
         syncer.cycle(&shared, &hub, &machine, &file);
         assert_eq!(machine.call(Call::SyncLimit), Ok(Value::String(notice.into())), "a held push keeps the notice");
@@ -1839,7 +1839,7 @@ mod tests {
         let hub = FullHub::default();
         let mut syncer = Syncer { shared_projects: HashSet::from(["github.com/acme/app".to_owned()]), ..Syncer::default() };
         syncer.cycle(&shared, &hub, &machine, &file);
-        assert_eq!(machine.call(Call::SyncLimit), Ok(Value::String("Sync stopped: your synced projects would pass 1024 MB. Delete old sessions to sync again.".into())));
+        assert_eq!(machine.call(Call::SyncLimit), Ok(Value::String("Sync stopped: your synced projects would pass 1024 MB. Nothing was lost; this machine keeps everything.".into())));
         std::fs::remove_dir_all(app.join(".git")).unwrap();
         syncer.cycle(&shared, &hub, &machine, &file);
         assert_eq!(machine.call(Call::SyncLimit), Ok(Value::Null), "a project no longer on the machine holds no notice");

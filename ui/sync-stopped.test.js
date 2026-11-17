@@ -163,7 +163,7 @@ test("a syncing machine's row has no notice", () => {
   assert.doesNotMatch(entry(null), /sync-stopped|reset-sync/);
 });
 
-const limitNotice = "Sync stopped: your synced projects would pass 1024 MB. Delete old sessions to sync again.";
+const limitNotice = "Sync stopped: your synced projects would pass 1024 MB. Nothing was lost; this machine keeps everything.";
 
 test("the sidebar shows the limit notice once and drops it when a push is taken", () => {
   const syncAlert = { innerHTML: "", hidden: true };
