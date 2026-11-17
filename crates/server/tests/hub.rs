@@ -11929,6 +11929,8 @@ fn over_the_sync_limit_a_stale_deletion_frees_nothing_and_agreed_on_a_file_is_ig
 struct Workflows {
     hub: TestHub,
     account: uuid::Uuid,
+    /// The account's login.
+    token: String,
     ana: Agent,
     plain: String,
     a: String,
@@ -11941,7 +11943,8 @@ struct Workflows {
 /// starts it one process lower, the way a `claude -p` the session runs starts its own from the
 /// same MCP config. A third word puts that tab id in the server's `PINNED_TAB`. The server reads
 /// its requests from the file `<request>` and its answers land in `<request>.out`. `sh` runs the
-/// shell script `<request>` instead, its output and errors landing in `<request>.out`.
+/// shell script `<request>` instead, its output and errors landing in `<request>.out`. `bg` runs
+/// that script as the agent's own child in the background while the agent reads on.
 fn agents_run_their_mcp(dir: &Path) {
     install(dir, "claude", &stand_in_agent());
 }
@@ -11956,7 +11959,7 @@ fn agents_run_their_mcp_through_a_launcher(dir: &Path) {
 
 fn stand_in_agent() -> String {
     format!(
-        "#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && {{ echo '{{\"loggedIn\":true}}'; exit 0; }}\nwhile read -r how req tab; do\n  case \"$how\" in\n    direct) PINNED_TAB=\"${{tab:-$PINNED_TAB}}\" {BIN} mcp < \"$req\" > \"$req.tmp\" ;;\n    nested) PINNED_TAB=\"${{tab:-$PINNED_TAB}}\" sh -c '\"$0\" mcp < \"$1\" > \"$1.tmp\"; true' {BIN} \"$req\" ;;\n    sh) sh \"$req\" > \"$req.tmp\" 2>&1 ;;\n  esac\n  mv \"$req.tmp\" \"$req.out\"\ndone\n"
+        "#!/bin/sh\n[ \"$1 $2\" = \"auth status\" ] && {{ echo '{{\"loggedIn\":true}}'; exit 0; }}\nwhile read -r how req tab; do\n  case \"$how\" in\n    direct) PINNED_TAB=\"${{tab:-$PINNED_TAB}}\" {BIN} mcp < \"$req\" > \"$req.tmp\" ;;\n    nested) PINNED_TAB=\"${{tab:-$PINNED_TAB}}\" sh -c '\"$0\" mcp < \"$1\" > \"$1.tmp\"; true' {BIN} \"$req\" ;;\n    sh) sh \"$req\" > \"$req.tmp\" 2>&1 ;;\n    bg) sh \"$req\" < /dev/null > /dev/null 2>&1 & continue ;;\n  esac\n  mv \"$req.tmp\" \"$req.out\"\ndone\n"
     )
 }
 
@@ -12096,7 +12099,7 @@ fn workflows_of(name: &str) -> Workflows {
     let (a, b) = (save("A"), save("B"));
     agents_run_their_mcp(&ana.dir);
     let plain = plain_session(&mut ana, &site);
-    Workflows { account: uuid::Uuid::parse_str(&account.id).unwrap(), hub, ana, plain, a, b }
+    Workflows { account: uuid::Uuid::parse_str(&account.id).unwrap(), token, hub, ana, plain, a, b }
 }
 
 impl Workflows {
@@ -12191,13 +12194,23 @@ fn act_refuses_a_tab_that_runs_nothing_on_a_machine_that_runs_the_workflow() {
     assert_eq!((asked_of("slack.com:443"), asked_of("api.linear.app:443")), reached, "nothing left the hub");
 }
 
+/// The thread's three CLI calls that act through a workflow's connections.
+const THREAD_CLI: [&str; 3] = ["slack reply on it", "linear create x y", "linear take ENG-7"];
+
 #[test]
 fn act_refuses_a_workflow_session_that_has_exited() {
     let mut w = workflows_of("act_exited_run");
     let on_issue = w.run(&w.a.clone(), issue("uuid-1"));
     let on_thread = w.run(&w.a.clone(), Subject::SlackThread { channel: "C1".into(), thread: "1.2".into() });
+    let (machine, dir) = (&w.ana.node.machine, &w.ana.dir);
+    // A process inside each session, its agent's own child, calls while the session runs, then
+    // again once it has exited.
+    let issue_calls = Lingering::start(machine, dir, &on_issue, &["stage coding"]);
+    let thread_calls = Lingering::start(machine, dir, &on_thread, &THREAD_CLI);
+    assert_eq!(issue_calls.before(), [Ok(NO_COLUMN.into())], "stage, from inside the session on the issue while it runs");
+    assert_eq!(thread_calls.before(), past_the_check(), "the thread's calls, from inside the session on the thread while it runs");
     for tab in [&on_issue, &on_thread] {
-        w.ana.node.machine.write_input(tab, b"\x04").unwrap();
+        machine.write_input(tab, b"\x04").unwrap();
     }
     w.ana.client.wait("both workflow sessions exited, their tabs still listed", |f| {
         f["type"] == "event"
@@ -12208,7 +12221,174 @@ fn act_refuses_a_workflow_session_that_has_exited() {
     // An exited session has no process left to act from: what names it comes from outside it.
     assert_eq!(w.the_four(Via::Test, &on_issue, &w.a, "uuid-1")[..1], [Err(OUTSIDE.into())], "stage, naming the session that ran A on the issue");
     assert_eq!(w.the_four(Via::Test, &on_thread, &w.a, "uuid-1")[1..], vec![Err(OUTSIDE.into()); 3], "the thread's calls, naming the session that ran A on the thread");
+    assert_eq!(issue_calls.after(), [Err(OUTSIDE.into())], "stage, from the same process once the session on the issue exited");
+    assert_eq!(thread_calls.after(), vec![Err(OUTSIDE.into()); 3], "the thread's calls, from the same process once the session on the thread exited");
+    // A machine that still finds a call in an exited session's tab: the hub refuses it too.
+    let thread = json!({ "channel": "C1", "thread": "1.2" });
+    let tabs = [reported_tab(&on_issue, Some(&w.a), json!({ "issue": "uuid-1" }), false), reported_tab(&on_thread, Some(&w.a), thread.clone(), false)];
+    let mut other = machine_reporting(&w.hub, w.account, &w.token, &tabs);
+    let stage = json!({ "cmd": "stage", "connector": w.a, "issue": "uuid-1", "stage": "coding" });
+    assert_eq!(call_found_in(&mut other, 1, stage, Some(&on_issue), Some(true)), Err(ONLY_ITS_SESSION.into()), "stage, found in the exited session on the issue");
+    for (n, call) in thread_calls_of(&w.a, &thread).into_iter().enumerate() {
+        assert_eq!(call_found_in(&mut other, 2 + n as u64, call, Some(&on_thread), Some(true)), Err(ONLY_ITS_SESSION.into()), "{n}: found in the exited session on the thread");
+    }
     assert_eq!((asked_of("slack.com:443"), asked_of("api.linear.app:443")), reached, "nothing left the hub");
+}
+
+/// A process the session of tab `tab` starts as its agent's own child, that runs `pinned <args>`
+/// for each of `calls` at once, then again when told to, outliving the session.
+struct Lingering {
+    at: PathBuf,
+    calls: usize,
+}
+
+impl Lingering {
+    fn start(machine: &Machine, dir: &Path, tab: &str, calls: &[&str]) -> Lingering {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let at = dir.join(format!("lingering-{}", NEXT.fetch_add(1, Ordering::Relaxed)));
+        let run = |phase: &str| calls.iter().enumerate().map(|(n, args)| format!("\"$PINNED\" {args} > \"$AT.{phase}.{n}\" 2>&1\n")).collect::<String>();
+        let script = format!(
+            "PINNED={BIN}\nAT={}\ntrap '' HUP\n{}touch \"$AT.ready\"\nwhile [ ! -e \"$AT.go\" ]; do sleep 0.05; done\n{}touch \"$AT.done\"\n",
+            at.display(),
+            run("before"),
+            run("after")
+        );
+        std::fs::write(&at, script).unwrap();
+        machine.write_input(tab, format!("bg {}\n", at.display()).as_bytes()).unwrap();
+        wait_for("the session's process to make its first calls", || Path::new(&format!("{}.ready", at.display())).exists());
+        Lingering { at, calls: calls.len() }
+    }
+
+    fn answers(&self, phase: &str) -> Vec<Result<String, String>> {
+        (0..self.calls).map(|n| cli_answer(&std::fs::read_to_string(format!("{}.{phase}.{n}", self.at.display())).unwrap())).collect()
+    }
+
+    fn before(&self) -> Vec<Result<String, String>> {
+        self.answers("before")
+    }
+
+    fn after(&self) -> Vec<Result<String, String>> {
+        std::fs::write(format!("{}.go", self.at.display()), "").unwrap();
+        wait_for("the process to make its calls again", || Path::new(&format!("{}.done", self.at.display())).exists());
+        self.answers("after")
+    }
+}
+
+/// A tab as a machine reports it: `connector` on `subject`, or a plain session.
+fn reported_tab(id: &str, connector: Option<&str>, subject: Value, running: bool) -> Value {
+    let mut tab = json!({ "id": id, "cwd": "/w", "bypass": false, "running": running, "status": null, "title": null, "message": null, "resume_at": null, "opened": 1 });
+    if let Some(connector) = connector {
+        tab["connector"] = json!(connector);
+        tab["subject"] = subject;
+    }
+    tab
+}
+
+/// A raw machine socket of `account`, whose login is `token`, once the hub has its `tabs`.
+fn machine_reporting(hub: &TestHub, account: uuid::Uuid, token: &str, tabs: &[Value]) -> WebSocket<MaybeTlsStream<TcpStream>> {
+    let (machine, machine_token) = account::register_machine(&hub.url, token, "raw", "linux").unwrap();
+    let (mut ws, _) = tungstenite::connect(format!("{}/ws/machine", hub.url.replace("http://", "ws://"))).unwrap();
+    if let MaybeTlsStream::Plain(stream) = ws.get_mut() {
+        stream.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+    }
+    ws.send(Message::text(json!({ "type": "auth", "token": machine_token, "name": "raw", "os": "linux", "version": "test" }).to_string())).unwrap();
+    read_machine(&mut ws, |frame| frame["type"] == "hello");
+    ws.send(Message::text(json!({ "type": "event", "event": { "kind": "tabs", "tabs": tabs } }).to_string())).unwrap();
+    let account = hub.runtime.block_on(hub.hub().account(account)).unwrap();
+    wait_for("the machine's tabs at the hub", || account.tabs_of(&machine.id).is_some_and(|t| t.len() == tabs.len()));
+    ws
+}
+
+/// Hub call `call` as a machine sends it, with what the machine found of where it came from, and
+/// the hub's answer.
+fn call_found_in(ws: &mut WebSocket<MaybeTlsStream<TcpStream>>, id: u64, call: Value, from_tab: Option<&str>, vouched: Option<bool>) -> Result<Value, String> {
+    let mut frame = json!({ "type": "call", "id": id, "call": call });
+    if let Some(tab) = from_tab {
+        frame["from_tab"] = json!(tab);
+    }
+    if let Some(vouched) = vouched {
+        frame["vouched"] = json!(vouched);
+    }
+    ws.send(Message::text(frame.to_string())).unwrap();
+    let reply = read_machine(ws, |frame| frame["type"] == "reply" && frame["id"] == id);
+    match reply.get("err") {
+        Some(err) => Err(err.as_str().unwrap().to_owned()),
+        None => Ok(reply["ok"].clone()),
+    }
+}
+
+/// The thread's three hub calls for workflow `connector` on Slack thread `thread`.
+fn thread_calls_of(connector: &str, thread: &Value) -> Vec<Value> {
+    let with = |extra: Value| {
+        let mut call = thread.clone();
+        call["connector"] = json!(connector);
+        call.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        call
+    };
+    vec![
+        with(json!({ "cmd": "slack_reply", "text": "on it" })),
+        with(json!({ "cmd": "linear_create", "title": "x", "description": "y" })),
+        with(json!({ "cmd": "linear_take", "issue": "ENG-7" })),
+    ]
+}
+
+#[test]
+fn the_hub_takes_a_workflow_call_only_from_the_tab_its_machine_found_it_in() {
+    let w = workflows_of("hub_found_in");
+    let thread = json!({ "channel": "C1", "thread": "1.2" });
+    let tabs = [
+        reported_tab("tab-1", Some(&w.a), json!({ "issue": "uuid-1" }), true),
+        reported_tab("tab-2", Some(&w.a), thread.clone(), true),
+        reported_tab("tab-3", None, Value::Null, true),
+    ];
+    let mut raw = machine_reporting(&w.hub, w.account, &w.token, &tabs);
+    let reached = (asked_of("slack.com:443"), asked_of("api.linear.app:443"));
+    let mut next = 0;
+    let mut call = |call: &Value, from_tab: Option<&str>, vouched: Option<bool>| {
+        next += 1;
+        call_found_in(&mut raw, next, call.clone(), from_tab, vouched)
+    };
+    let stage = json!({ "cmd": "stage", "connector": w.a, "issue": "uuid-1", "stage": "coding" });
+    let run_set = json!({ "cmd": "run_set", "connector": w.a, "issue": "uuid-1", "name": "title", "value": "x" });
+    let mut on_tabs: Vec<(Value, &str, &str)> = vec![(stage, "tab-1", "tab-2"), (run_set, "tab-1", "tab-2")];
+    on_tabs.extend(thread_calls_of(&w.a, &thread).into_iter().map(|c| (c, "tab-2", "tab-1")));
+    for (hub_call, own, other) in &on_tabs {
+        let cmd = hub_call["cmd"].as_str().unwrap();
+        assert_eq!(call(hub_call, Some(other), Some(true)), Err(ONLY_ITS_SESSION.into()), "{cmd}: vouched, from another workflow session's tab");
+        assert_eq!(call(hub_call, Some("tab-3"), Some(true)), Err(ONLY_ITS_SESSION.into()), "{cmd}: vouched, from a plain session's tab");
+        assert_eq!(call(hub_call, Some("tab-9"), Some(true)), Err(ONLY_ITS_SESSION.into()), "{cmd}: vouched, from a tab the machine has not");
+        assert_eq!(call(hub_call, None, Some(true)), Err(ONLY_ITS_SESSION.into()), "{cmd}: vouched, with no tab");
+        assert_eq!(call(hub_call, None, Some(false)), Err(OUTSIDE.into()), "{cmd}: found outside every session");
+        assert_eq!(call(hub_call, Some(own), Some(false)), Err(OUTSIDE.into()), "{cmd}: found outside every session, naming its own tab");
+    }
+    assert_eq!((asked_of("slack.com:443"), asked_of("api.linear.app:443")), reached, "nothing left the hub");
+    // From its own tab, each passes the check.
+    let answers: Vec<Result<Value, String>> = on_tabs.iter().map(|(hub_call, own, _)| call(hub_call, Some(own), Some(true))).collect();
+    let past = [vec![Ok(json!(NO_COLUMN)), Err(NO_GRAPH_RUN.into())], past_the_check().into_iter().map(|e| e.map(Value::String)).collect()].concat();
+    assert_eq!(answers, past, "each from the tab that runs it");
+}
+
+/// What `pinned run set` gets from a session the hub takes but whose run has no graph.
+const NO_GRAPH_RUN: &str = "this session was not started by a workflow run, so it has no run variables to set";
+
+#[test]
+fn run_set_acts_only_from_the_workflows_own_session() {
+    let mut w = workflows_of("run_set_session");
+    let on_issue = w.run(&w.a.clone(), issue("uuid-1"));
+    let (machine, dir) = (&w.ana.node.machine, &w.ana.dir);
+    // From outside every session: a process the workflow session started and left, and the test's own.
+    assert_eq!(cli_detached(machine, dir, &on_issue, "", "run set title x"), Err(OUTSIDE.into()), "from a detached process");
+    let set = agent::Message::RunSet { connector: w.a.clone(), subject: issue("uuid-1"), name: "title".into(), value: "x".into() };
+    let mut stream = std::os::unix::net::UnixStream::connect(dir.join("sock")).unwrap();
+    writeln!(stream, "{}", serde_json::to_string(&set).unwrap()).unwrap();
+    let mut reply = String::new();
+    std::io::BufRead::read_line(&mut std::io::BufReader::new(stream), &mut reply).unwrap();
+    assert_eq!(serde_json::from_str::<Result<String, String>>(&reply).unwrap(), Err(OUTSIDE.into()), "from no session's process");
+    // From a session that runs no workflow, with the workflow session's variables.
+    assert_eq!(w.cli(&w.plain, &on_issue_env(&w.a), "run set title x"), Err(ONLY_ITS_SESSION.into()), "from a session that runs no workflow");
+    assert_eq!(w.cli(&w.plain, &format!("{} PINNED_TAB={on_issue}", on_issue_env(&w.a)), "run set title x"), Err(ONLY_ITS_SESSION.into()), "from a session that runs no workflow, naming the workflow's");
+    // From the workflow's own session it passes the check; this run has no graph to keep the value.
+    assert_eq!(w.cli(&on_issue, "", "run set title x"), Err(NO_GRAPH_RUN.into()), "from the workflow's own session");
 }
 
 #[test]
