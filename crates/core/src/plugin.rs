@@ -10,6 +10,8 @@ const BRO: &str = include_str!("../../../plugin/skills/bro/SKILL.md");
 const UPSTASH_BOX: &str = include_str!("../../../plugin/skills/upstash-box/SKILL.md");
 const PROPOSTA: &str = include_str!("../../../plugin/skills/proposta-blueprint/SKILL.md");
 const PROPOSTA_TEMPLATE: &str = include_str!("../../../plugin/skills/proposta-blueprint/template.html");
+const PENDENCIAS: &str = include_str!("../../../plugin/skills/pendencias/SKILL.md");
+const PENDENCIAS_TEMPLATE: &str = include_str!("../../../plugin/skills/pendencias/template.html");
 
 /// Where `install` puts the helper, relative to the plugin directory.
 fn helper_path(dir: &Path) -> PathBuf {
@@ -26,6 +28,8 @@ pub fn install(dir: &Path) -> std::io::Result<PathBuf> {
         ("skills/upstash-box/SKILL.md", UPSTASH_BOX),
         ("skills/proposta-blueprint/SKILL.md", PROPOSTA),
         ("skills/proposta-blueprint/template.html", PROPOSTA_TEMPLATE),
+        ("skills/pendencias/SKILL.md", PENDENCIAS),
+        ("skills/pendencias/template.html", PENDENCIAS_TEMPLATE),
     ] {
         let file = dir.join(name);
         std::fs::create_dir_all(file.parent().unwrap())?;
