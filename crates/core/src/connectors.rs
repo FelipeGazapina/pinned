@@ -2595,6 +2595,15 @@ impl Connectors {
         let _ = self.save(&store);
     }
 
+    /// The fire `key` of `workflow` won its claim and its Ask step stopped the run: it is counted
+    /// as not started, and the claim is kept.
+    fn fire_stopped(&self, workflow: &str, key: &str) {
+        eprintln!("pinned: workflow {workflow} keeps its claim of {key}: its Ask step stopped the run");
+        let mut store = self.store.lock().unwrap();
+        store.change_counts.entry(workflow.to_owned()).or_default().not_started += 1;
+        let _ = self.save(&store);
+    }
+
     /// The won fire of the change run of `connector` on `subject` not yet handed over, if it is one.
     fn take_fire(&self, connector: &str, subject: &Subject) -> Option<String> {
         self.fire_runs.lock().unwrap().remove(&(connector.to_owned(), subject_key(subject)))
@@ -2819,7 +2828,11 @@ impl Connectors {
             Ok(Some((ask, answers))) => {
                 if stops(&ask, &answers).is_some() {
                     self.release(&connector, &subject).await;
-                    not_started();
+                    // Its model was asked: the claim stays, so a later read of the change does
+                    // not ask again.
+                    if let Some(key) = &fire {
+                        self.fire_stopped(&connector, key);
+                    }
                     self.keep_stopped(&connector, &subject)?;
                     return Ok(());
                 }
