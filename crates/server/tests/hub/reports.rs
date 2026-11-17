@@ -1419,29 +1419,29 @@ fn dev_status(hub: &DevHub) -> Value {
 }
 
 #[test]
-fn a_dev_hub_with_a_token_and_no_local_fake_has_reporting_off() {
-    let hub = DevHub::start("reports_dev_no_fake", &[("PINNED_REPORTS_GITHUB_TOKEN", "dummy-test-token")]);
+fn a_dev_hub_with_no_local_fake_has_reporting_off() {
+    let hub = DevHub::start("reports_dev_no_fake", &[]);
     assert_eq!(dev_status(&hub), json!({ "available": false }), "a dev hub never files on the real GitHub: {}", hub.said());
     let said = hub.said();
     assert!(said.contains("pinned-server: reporting is off under --dev: set PINNED_REPORTS_GITHUB_API to a local fake\n"), "{said}");
-    assert!(!said.contains("is ignored") && !said.contains("dummy-test-token"), "{said}");
+    assert!(!said.contains("is ignored"), "{said}");
 }
 
 #[test]
 fn a_dev_hub_refuses_a_reports_api_that_is_not_on_this_machine() {
     for (i, api) in ["https://api.example.test", "http://user:pw@127.0.0.1:9"].into_iter().enumerate() {
-        let hub = DevHub::start(&format!("reports_dev_remote_{i}"), &[("PINNED_REPORTS_GITHUB_TOKEN", "dummy-test-token"), ("PINNED_REPORTS_GITHUB_API", api)]);
+        let hub = DevHub::start(&format!("reports_dev_remote_{i}"), &[("PINNED_REPORTS_GITHUB_API", api)]);
         assert_eq!(dev_status(&hub), json!({ "available": false }), "{api}: {}", hub.said());
         let said = hub.said();
         assert!(said.contains("pinned-server: reporting is off under --dev: PINNED_REPORTS_GITHUB_API must be an http(s) address on this machine, with no user or password\n"), "{api}: {said}");
-        assert!(!said.contains("example.test") && !said.contains("user:pw") && !said.contains("dummy-test-token"), "a log line names the variable, never its value: {said}");
+        assert!(!said.contains("example.test") && !said.contains("user:pw"), "a log line names the variable, never its value: {said}");
     }
 }
 
 #[test]
 fn a_dev_hub_files_on_the_local_fake_its_override_names() {
     let fake = Fake::start();
-    let hub = DevHub::start("reports_dev_fake", &[("PINNED_REPORTS_GITHUB_TOKEN", "fake-dummy-test-token"), ("PINNED_REPORTS_GITHUB_API", &fake.github.url), ("PINNED_REPORTS_REPO", "acme/app")]);
+    let hub = DevHub::start("reports_dev_fake", &[("PINNED_REPORTS_GITHUB_API", &fake.github.url), ("PINNED_REPORTS_REPO", "acme/app")]);
     // Checked before any call that reaches GitHub: a hub that ignored the override would file on the real one.
     let said = hub.said();
     assert!(!said.contains("is ignored") && !said.contains("reporting is off"), "{said}");
@@ -1451,4 +1451,41 @@ fn a_dev_hub_files_on_the_local_fake_its_override_names() {
     assert_eq!(ask(&mut app, json!({ "op": "similar", "title": "Upload stops at 90%" })).unwrap(), json!([]));
     let searched: Vec<String> = fake.github.requests().iter().map(|r| format!("{} {}", r.method, r.path)).collect();
     assert_eq!(searched, ["GET /search/issues?q=upload+stops+repo%3Aacme%2Fapp+is%3Aissue+is%3Aopen+in%3Atitle%2Cbody&per_page=5"], "the search went to the local fake, in the override repository");
+}
+
+/// The token a `--dev` hub sends its local fake, whatever the environment says.
+const DEV_HUB_TOKEN: &str = "fake-dev-hub";
+
+#[test]
+fn a_dev_hub_with_a_local_fake_and_no_token_variable_files_there_with_its_own_fake_token() {
+    let fake = Fake::start();
+    let hub = DevHub::start("reports_dev_no_token", &[("PINNED_REPORTS_GITHUB_API", &fake.github.url)]);
+    let said = hub.said();
+    assert!(!said.contains("reporting is off") && !said.contains("is ignored") && !said.contains("is not set"), "{said}");
+    let token = account::signup(&hub.url, "ana@example.test", PASSWORD).unwrap().0;
+    let mut ana = Client::connect(&hub.url, &token);
+    assert_eq!(ask(&mut ana, json!({ "op": "status" })).unwrap(), json!({ "available": true, "left_today": 5 }), "{}", hub.said());
+    let sent = reviewed_send(&mut ana, problem("Crash on launch", "It closes."), json!({})).unwrap();
+    assert_eq!((sent["state"].clone(), sent["issue"].clone()), (json!({ "state": "open" }), json!(1)), "{sent}");
+    let posts: Vec<String> = fake.github.requests().into_iter().filter(|r| r.method == "POST").map(|r| r.path).collect();
+    assert_eq!(posts, ["/repos/FelipeGazapina/pinned/issues"], "filed on the local fake, under pinned's own name");
+    let tokens = fake.github.tokens();
+    assert!(!tokens.is_empty() && tokens.iter().all(|t| t == DEV_HUB_TOKEN), "{tokens:?}");
+}
+
+#[test]
+fn a_dev_hub_never_sends_the_token_variable_and_says_so_by_name_alone() {
+    let fake = Fake::start();
+    // The only test that sets this variable, to an invented value, to prove a --dev hub ignores it.
+    let hub = DevHub::start("reports_dev_token_ignored", &[("PINNED_REPORTS_GITHUB_TOKEN", "ghp_must-not-be-sent"), ("PINNED_REPORTS_GITHUB_API", &fake.github.url)]);
+    let token = account::signup(&hub.url, "ana@example.test", PASSWORD).unwrap().0;
+    let mut ana = Client::app(&hub.url, &token);
+    assert_eq!(ask(&mut ana, json!({ "op": "status" })).unwrap(), json!({ "available": true, "left_today": 5 }), "{}", hub.said());
+    let similar = ask(&mut ana, json!({ "op": "similar", "title": "Upload stops at 90%" }));
+    assert_eq!(fake.github.tokens(), [DEV_HUB_TOKEN], "the fake saw the built-in fake token, never the variable's value");
+    assert_eq!(similar, Ok(json!([])));
+    let said = hub.said();
+    assert!(said.contains("pinned-server: PINNED_REPORTS_GITHUB_TOKEN is ignored under --dev: a dev hub sends only its own fake token, to a local fake\n"), "{said}");
+    assert_eq!(said.matches("PINNED_REPORTS_GITHUB_TOKEN").count(), 1, "one warning: {said}");
+    assert!(!said.contains("ghp_must-not-be-sent") && !said.contains("must-not"), "{said}");
 }
