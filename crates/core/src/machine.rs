@@ -17102,6 +17102,80 @@ Have another model review a risky change before it goes ahead.";
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// Starts a worker under `parent`, as the Captain's machine starts one, with no cost reported yet.
+    #[cfg(unix)]
+    fn unmetered_worker(m: &Machine, dir: &Path, captain: &str, parent: &str) -> String {
+        use crate::delegate::{NewTask, Parent};
+        m.delegates
+            .begin(NewTask {
+                parent: Parent::Task(parent.to_owned()),
+                tool: None,
+                title: "Worker under the board check".into(),
+                account: "claude".into(),
+                provider: Provider::Claude,
+                model: Some("claude-haiku-5-5".into()),
+                cwd: dir.join("app"),
+                mode: crate::delegate::Mode::Async,
+                access: crate::delegate::Access::Auto,
+                isolated: false,
+                caller_key: format!("tab:{captain}"),
+                client_request_id: None,
+                role: None,
+            })
+            .id
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_step_costs_what_its_task_tree_is_known_to_cost_and_nothing_while_a_worker_is_unknown() {
+        use crate::usage::TaskUsage;
+        let (m, dir, captain, task, child, transcript) = captain_with_thread_child("plan-cost");
+        m.record_event(hook_event(&child, "working", &transcript, Some("Board check")));
+        m.tab(&captain, |t| t.claude_session = Some("cap-1".into())).unwrap();
+        let set = crate::plan::SetCall { lists: vec![crate::plan::ListInput { id: None, name: "Build".into(), steps: vec![crate::plan::StepInput { id: None, name: "Compare".into(), what: None }] }], ..Default::default() };
+        m.plans.lock().unwrap().write("cap-1", |plans| crate::plan::set(plans, set, 1, &[], 1)).unwrap();
+        let facts = m.plan_facts();
+        m.plans.lock().unwrap().write("cap-1", |plans| crate::plan::link(plans, "s1", &task, "Board check", &facts, 2)).unwrap();
+        let cost = || m.call(Call::Plan { tab: captain.clone(), plan: None }).unwrap()[0]["lists"][0]["steps"][0]["cost"].clone();
+        let usage = |usd: f64| TaskUsage { tokens_in: 1, tokens_out: 1, cost_usd: Some(usd), wall_ms: 1, box_usd: None, box_ms: None };
+
+        assert_eq!(cost(), json!(null), "the linked task has reported no cost: unknown, not zero");
+        m.delegates.meter(&[(task.clone(), usage(0.25))], None);
+        assert_eq!(cost(), json!(0.25), "every task in the tree is known");
+
+        let worker = unmetered_worker(&m, &dir, &captain, &task);
+        assert_eq!(cost(), json!(null), "the worker under the task has no cost yet, so the step's total is a floor and shows none");
+        m.delegates.meter(&[(worker, usage(0.5))], None);
+        assert_eq!(cost(), json!(0.75), "the known tree sums once the worker reports");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_step_keeps_no_cost_when_its_task_ended_with_an_unknown_worker_after_the_registry_drops_the_task() {
+        use crate::usage::TaskUsage;
+        let (m, dir, captain, task, child, transcript) = captain_with_thread_child("plan-cost-saved");
+        m.record_event(hook_event(&child, "working", &transcript, Some("Board check")));
+        m.tab(&captain, |t| t.claude_session = Some("cap-1".into())).unwrap();
+        let set = crate::plan::SetCall { lists: vec![crate::plan::ListInput { id: None, name: "Build".into(), steps: vec![crate::plan::StepInput { id: None, name: "Compare".into(), what: None }] }], ..Default::default() };
+        m.plans.lock().unwrap().write("cap-1", |plans| crate::plan::set(plans, set, 1, &[], 1)).unwrap();
+        let facts = m.plan_facts();
+        m.plans.lock().unwrap().write("cap-1", |plans| crate::plan::link(plans, "s1", &task, "Board check", &facts, 2)).unwrap();
+        let step = || m.call(Call::Plan { tab: captain.clone(), plan: None }).unwrap()[0]["lists"][0]["steps"][0].clone();
+        m.delegates.meter(&[(task.clone(), TaskUsage { tokens_in: 1, tokens_out: 1, cost_usd: Some(0.25), wall_ms: 1, box_usd: None, box_ms: None })], None);
+        let worker = unmetered_worker(&m, &dir, &captain, &task);
+
+        // The task waits on its worker until the worker ends, so the worker ends first.
+        m.delegates.settle_thread(&worker, Some("Found the gap.".into()), None, None, vec![], None);
+        m.delegates.settle_thread(&task, Some("Compared.".into()), None, None, vec![], None);
+        m.settle_plans();
+        assert_eq!((step()["state"].clone(), step()["cost"].clone()), (json!("done"), json!(null)), "the step saves no cost for a tree with an unknown worker");
+        m.delegates.discard(&task);
+        assert!(m.delegates.get(&task).is_none(), "the registry no longer holds the task");
+        assert_eq!((step()["state"].clone(), step()["cost"].clone()), (json!("done"), json!(null)), "the saved outcome keeps no cost, not zero");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// A machine on its socket with a Captain of Claude session `cap-1` and a plain thread of
     /// session `plain-1`, both in project `app` and saved to sessions.json.
     #[cfg(unix)]
