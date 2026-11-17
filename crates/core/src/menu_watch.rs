@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 /// several parts draws its next menu right after the first is answered.
 pub const SETTLE: Duration = Duration::from_millis(700);
 
-/// Rows above the menu's top that a refusal's "Interrupted" line may land on.
+/// Rows above the menu's top that a refusal's "⎿  Interrupted" line may land on.
 const ABOVE: usize = 4;
 
 pub struct MenuWatch {
@@ -48,7 +48,7 @@ impl MenuWatch {
             return false;
         }
         let from = self.top.unwrap_or(0).saturating_sub(ABOVE);
-        !self.lines().iter().skip(from).any(|line| line.contains("Interrupted"))
+        !self.lines().iter().skip(from).any(|line| line.contains("⎿  Interrupted"))
     }
 
     fn lines(&self) -> Vec<String> {
