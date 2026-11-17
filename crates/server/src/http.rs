@@ -1224,7 +1224,7 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
                     call => return forward(hub, account, machine, socket, id, call, CallerFound { tab: from_tab, vouched }).await,
                 };
                 if let Err(e) = &surfaced {
-                    hub.failed_call(failed_call_line(&machine, act_tab.as_deref().filter(|_| false), e));
+                    hub.failed_call(failed_call_line(&machine, act_tab.as_deref(), e));
                 }
                 account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, surfaced)));
             });
@@ -1259,7 +1259,7 @@ async fn forward_team_box(hub: Arc<Hub>, account: Arc<Account>, machine: String,
     );
     if !allowed {
         let refused = format!("a team's box may not send {}", surface::cmd_of(&call));
-        hub.failed_call(failed_call_line(&machine, None, &refused));
+        hub.failed_call(failed_call_line(&machine, from.tab.as_deref(), &refused));
         return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, Err(refused))));
     }
     // A run's callback is held to the run the hub bound to this machine (`team_runs.box`), never
@@ -1275,7 +1275,7 @@ async fn forward_team_box(hub: Arc<Hub>, account: Arc<Account>, machine: String,
         Ok(_) => "this box's run is not of that workflow on that subject".to_owned(),
         Err(e) => e,
     };
-    hub.failed_call(failed_call_line(&machine, None, &refused));
+    hub.failed_call(failed_call_line(&machine, from.tab.as_deref(), &refused));
     account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, Err(refused))));
 }
 
