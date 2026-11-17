@@ -194,6 +194,19 @@ impl Launch {
         self.bins.get(&provider).cloned().unwrap_or_else(|| provider.spec().bin.into())
     }
 
+    /// What a tab's session starts with: pinned's socket, its tab, the tutorial helper, then
+    /// `env`, its account's and its kind's.
+    pub(crate) fn child_env(&self, account: &Account, tab: &str, env: &[(String, String)]) -> ChildEnv<'static> {
+        let strip: &'static [&'static str] = if account.auth == Auth::OpenCodeGo { &crate::opencode_go::STRIP_ENV } else { &[] };
+        let mut set = vec![
+            (SOCK_ENV.to_owned(), self.sock.display().to_string()),
+            (TAB_ENV.to_owned(), tab.to_owned()),
+            (plugin::HELPER_ENV.to_owned(), self.tutorial_helper.display().to_string()),
+        ];
+        set.extend(env.iter().cloned());
+        ChildEnv::new(strip, set)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn command(&self, program: Program, account: &Account, tab: &str, cwd: &Path, bypass: bool, args: Vec<String>, env: &[(String, String)], plugin_dirs: &[PathBuf], mcp: Option<&mcp::SessionFiles>) -> CommandBuilder {
         let provider = account.provider;
@@ -286,6 +299,32 @@ pub(crate) const INHERITED_SESSION_ENV: [&str; 12] = [
 pub struct Headless<'a> {
     pub env: &'a [(String, String)],
     pub strip: &'a [&'a str],
+}
+
+impl Headless<'_> {
+    /// What the headless `claude -p` starts with: its account's env and nothing a parent left.
+    pub(crate) fn child_env(&self) -> ChildEnv<'_> {
+        ChildEnv::new(self.strip, self.env.to_vec())
+    }
+}
+
+/// What a session or agent process pinned starts changes in the environment it would inherit:
+/// every `INHERITED_SESSION_ENV` name and `strip` removed, then exactly `set`. A session starts
+/// only with what its kind sets, never with a role, project, tab or account the node was started with.
+pub(crate) struct ChildEnv<'a> {
+    pub(crate) strip: &'a [&'a str],
+    pub(crate) set: Vec<(String, String)>,
+}
+
+impl<'a> ChildEnv<'a> {
+    pub(crate) fn new(strip: &'a [&'a str], set: Vec<(String, String)>) -> ChildEnv<'a> {
+        ChildEnv { strip, set }
+    }
+
+    /// The environment a child of a process with `parent` gets.
+    pub(crate) fn of(&self, parent: &[(String, String)]) -> Vec<(String, String)> {
+        parent.to_vec()
+    }
 }
 
 /// Appends `bytes` to `kept` and keeps its last `limit` bytes. Room is made before the bytes go
@@ -1863,6 +1902,20 @@ impl Machine {
     fn headless_env(&self, tab: &str) -> Result<Vec<(String, String)>, String> {
         let account = self.tab(tab, |t| t.account.clone())?;
         Ok(self.accounts.env(&if account.provider == Provider::Claude { account } else { Account::builtin(Provider::Claude) }))
+    }
+
+    /// The env a tab's session runs with: its account's, then the tab's own.
+    fn launch_env(&self, account: &Account, env: Vec<(String, String)>) -> Vec<(String, String)> {
+        [self.accounts.env(account), env].concat()
+    }
+
+    /// What a headless delegate driver starts with: its account's env, pinned's socket and its task.
+    fn delegate_env(&self, account: &Account, task: &str) -> ChildEnv<'static> {
+        let mut env = self.accounts.env(account);
+        env.push((SOCK_ENV.to_owned(), self.launch.sock.display().to_string()));
+        env.push((TASK_ENV.to_owned(), task.to_owned()));
+        let strip: &'static [&'static str] = if account.auth == Auth::OpenCodeGo { &crate::opencode_go::STRIP_ENV } else { &[] };
+        ChildEnv::new(strip, env)
     }
 
     /// What a headless call must strip before it applies `headless_env`. A Go tab must not keep a
@@ -9435,6 +9488,122 @@ pub(crate) mod tests {
         assert_eq!(cmd.get_env("CLAUDE_CODE_SESSION_ID"), None);
         assert_eq!(cmd.get_env("CLAUDECODE"), None);
         assert_eq!(cmd.get_env("PINNED_TAB").and_then(|v| v.to_str()), Some("tab-1"));
+    }
+
+    /// Every variable that names who or what a session is, as a parent could leave it.
+    pub(crate) const SESSION_NAMES: [&str; 18] = [
+        "PINNED_ROLE",
+        "PINNED_PROJECT",
+        "PINNED_TAB",
+        "PINNED_TASK",
+        "PINNED_SOCK",
+        "PINNED_ACCOUNT",
+        "PINNED_BOX",
+        "PINNED_TEAM_BOX",
+        "PINNED_TUTORIAL_HELPER",
+        "PINNED_CONNECTOR",
+        "PINNED_ISSUE",
+        "PINNED_SLACK_CHANNEL",
+        "PINNED_SLACK_THREAD",
+        "PINNED_OPENCODE_GO_KEY",
+        "CLAUDE_CONFIG_DIR",
+        "CODEX_HOME",
+        "CLAUDECODE",
+        "CLAUDE_CODE_SESSION_ID",
+    ];
+
+    /// A parent that carries every session variable with a value no session is started with.
+    pub(crate) fn inherited() -> Vec<(String, String)> {
+        let mut env: Vec<(String, String)> = SESSION_NAMES.iter().map(|k| (k.to_string(), "inherited-xyz".to_owned())).collect();
+        env.push(("HOME".into(), "/home/ana".into()));
+        env
+    }
+
+    /// Asserts that a child of `inherited()` keeps none of its session values and gets exactly `expected` of them.
+    pub(crate) fn assert_starts_with_only(child: &ChildEnv, expected: &[(&str, &str)]) {
+        let env = child.of(&inherited());
+        let leftovers: Vec<_> = env.iter().filter(|(_, v)| v == "inherited-xyz").collect();
+        assert!(leftovers.is_empty(), "the child inherited {leftovers:?}");
+        let session: BTreeMap<&str, &str> = env.iter().filter(|(k, _)| SESSION_NAMES.contains(&k.as_str())).map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        assert_eq!(session, expected.iter().copied().collect::<BTreeMap<_, _>>());
+        assert!(env.contains(&("HOME".into(), "/home/ana".into())), "the child lost a variable no session sets: {env:?}");
+    }
+
+    #[test]
+    fn a_plain_thread_starts_only_with_what_its_kind_sets() {
+        let m = machine();
+        let account = Account::builtin(Provider::Claude);
+        let child = m.launch.child_env(&account, "tab-1", &m.launch_env(&account, vec![]));
+        assert_starts_with_only(&child, &[("PINNED_SOCK", "k"), ("PINNED_TAB", "tab-1"), ("PINNED_TUTORIAL_HELPER", "t"), ("PINNED_ACCOUNT", "claude")]);
+    }
+
+    #[test]
+    fn a_project_orchestrator_starts_only_with_what_its_kind_sets() {
+        let m = machine();
+        let account = Account::builtin(Provider::Claude);
+        let child = m.launch.child_env(&account, "tab-2", &m.launch_env(&account, role_env(Role::Orchestrator, Path::new("/work/app"))));
+        assert_starts_with_only(
+            &child,
+            &[("PINNED_SOCK", "k"), ("PINNED_TAB", "tab-2"), ("PINNED_TUTORIAL_HELPER", "t"), ("PINNED_ACCOUNT", "claude"), ("PINNED_ROLE", "orchestrator"), ("PINNED_PROJECT", "/work/app")],
+        );
+    }
+
+    #[test]
+    fn a_worker_starts_only_with_what_its_kind_sets() {
+        let m = machine();
+        let account = Account::builtin(Provider::Claude);
+        let child = m.launch.child_env(&account, "tab-3", &m.launch_env(&account, role_env(Role::Worker, Path::new("/work/app"))));
+        assert_starts_with_only(
+            &child,
+            &[("PINNED_SOCK", "k"), ("PINNED_TAB", "tab-3"), ("PINNED_TUTORIAL_HELPER", "t"), ("PINNED_ACCOUNT", "claude"), ("PINNED_ROLE", "worker"), ("PINNED_PROJECT", "/work/app")],
+        );
+    }
+
+    #[test]
+    fn the_global_orchestrator_starts_only_with_what_its_kind_sets() {
+        let m = machine();
+        let account = Account::builtin(Provider::Claude);
+        let child = m.launch.child_env(&account, "tab-4", &m.launch_env(&account, global::env()));
+        assert_starts_with_only(&child, &[("PINNED_SOCK", "k"), ("PINNED_TAB", "tab-4"), ("PINNED_TUTORIAL_HELPER", "t"), ("PINNED_ACCOUNT", "claude"), ("PINNED_ROLE", "global-orchestrator")]);
+    }
+
+    #[test]
+    fn a_connector_session_starts_only_with_what_its_kind_sets() {
+        let m = machine();
+        let account = Account::builtin(Provider::Codex);
+        let tab_env = vec![(CONNECTOR_ENV.to_owned(), "c1".to_owned()), (crate::agent::ISSUE_ENV.to_owned(), "uuid".to_owned()), (crate::agent::SLACK_THREAD_ENV.to_owned(), "1.2".to_owned())];
+        let child = m.launch.child_env(&account, "tab-5", &m.launch_env(&account, tab_env));
+        assert_starts_with_only(
+            &child,
+            &[("PINNED_SOCK", "k"), ("PINNED_TAB", "tab-5"), ("PINNED_TUTORIAL_HELPER", "t"), ("PINNED_ACCOUNT", "codex"), ("PINNED_CONNECTOR", "c1"), ("PINNED_ISSUE", "uuid"), ("PINNED_SLACK_THREAD", "1.2")],
+        );
+    }
+
+    #[test]
+    fn a_headless_delegate_starts_only_with_what_its_kind_sets() {
+        let m = machine();
+        assert_starts_with_only(&m.delegate_env(&Account::builtin(Provider::Cursor), "task-9"), &[("PINNED_ACCOUNT", "cursor"), ("PINNED_SOCK", "k"), ("PINNED_TASK", "task-9")]);
+    }
+
+    #[test]
+    fn a_headless_claude_beside_a_tab_starts_only_with_its_accounts_env() {
+        let m = machine();
+        let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Codex), vec![], role_env(Role::Worker, Path::new("/repo")), false, None);
+        let env = m.headless_env(&tab).unwrap();
+        let headless = Headless { env: &env, strip: m.headless_strip(&tab).unwrap() };
+        assert_starts_with_only(&headless.child_env(), &[("PINNED_ACCOUNT", "claude")]);
+    }
+
+    #[test]
+    fn a_probe_or_a_shell_starts_with_no_session_variable() {
+        assert_starts_with_only(&ChildEnv::new(&[], vec![]), &[]);
+    }
+
+    #[test]
+    fn a_box_fact_reaches_a_session_only_as_the_nodes_own_one() {
+        let parent = [("PINNED_BOX".to_owned(), "1".to_owned()), ("PINNED_TEAM_BOX".to_owned(), "1".to_owned()), ("PINNED_ROLE".to_owned(), "worker".to_owned())];
+        let env = ChildEnv::new(&[], vec![]).of(&parent);
+        assert_eq!(env, [("PINNED_BOX".to_owned(), "1".to_owned()), ("PINNED_TEAM_BOX".to_owned(), "1".to_owned())]);
     }
 
     #[test]

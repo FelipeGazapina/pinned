@@ -387,6 +387,11 @@ impl Accounts {
         env
     }
 
+    /// What any process of the account's CLI starts with: its env and nothing a parent left.
+    pub(crate) fn child_env(&self, account: &Account) -> crate::machine::ChildEnv<'static> {
+        crate::machine::ChildEnv::new(&[], self.env(account))
+    }
+
     /// Asks the account's CLI, at `bin`, who is signed in. A Go account is signed in while its key
     /// file holds a key. Its empty home would otherwise look signed out.
     pub fn status(&self, account: &Account, bin: &Path, path_env: Option<&str>) -> Status {
@@ -534,6 +539,22 @@ mod tests {
         assert_eq!(accounts.home(&accounts.get("codex").unwrap()), PathBuf::from("/Users/ana/.codex"));
         let mode = |a: &Account| std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(accounts.home(a)).unwrap().permissions()) & 0o777;
         assert_eq!((mode(&work), mode(&side)), (0o700, 0o700));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_default_account_session_starts_with_no_other_accounts_home() {
+        use crate::machine::tests::assert_starts_with_only;
+        let dir = temp("child-env");
+        let accounts = Accounts::load(Some(&dir), "/Users/ana".into());
+        let work = accounts.add(Provider::Claude, "work", Auth::Login).unwrap();
+        let side = accounts.add(Provider::Codex, "side", Auth::Login).unwrap();
+        assert_starts_with_only(&accounts.child_env(&Account::builtin(Provider::Claude)), &[("PINNED_ACCOUNT", "claude")]);
+        assert_starts_with_only(&accounts.child_env(&Account::builtin(Provider::Codex)), &[("PINNED_ACCOUNT", "codex")]);
+        let work_home = format!("{}/accounts/work", dir.display());
+        assert_starts_with_only(&accounts.child_env(&work), &[("CLAUDE_CONFIG_DIR", work_home.as_str()), ("PINNED_ACCOUNT", "work")]);
+        let side_home = format!("{}/accounts/side", dir.display());
+        assert_starts_with_only(&accounts.child_env(&side), &[("CODEX_HOME", side_home.as_str()), ("PINNED_ACCOUNT", "side")]);
         let _ = std::fs::remove_dir_all(dir);
     }
 
