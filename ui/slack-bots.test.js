@@ -262,3 +262,23 @@ test("a workflow saved with the apps option on comes back with it on", async () 
   context.__actions["edit-connector"]({ closest: () => ({ dataset: { index: "0" } }) });
   assert.ok(byId("settings-page").innerHTML.includes(checkbox(true)), "reopened, it shows on");
 });
+
+test("a workflow saved with the apps option off stores no apps field, in its trigger or its graph", async () => {
+  const saved = [];
+  const { context, fire } = load({
+    bots: [SUPPORT],
+    reply: (call) => {
+      if (call.cmd !== "save_connector") return {};
+      saved.push(JSON.parse(JSON.stringify(call.connector)));
+      return call.connector;
+    },
+  });
+  context.__setSettings({ linear: null, slack: SUPPORT, slack_bots: [SUPPORT], connectors: [alerts()], checked: null });
+  context.__actions["edit-connector"]({ closest: () => ({ dataset: { index: "0" } }) });
+  fire("input", { dataset: { bind: "trigger.apps" }, type: "checkbox", checked: true });
+  fire("input", { dataset: { bind: "trigger.apps" }, type: "checkbox", checked: false });
+  await context.__actions["save-connector"]();
+  const sent = saved.at(-1);
+  assert.ok(!("apps" in sent.trigger), JSON.stringify(sent.trigger));
+  assert.ok(!("apps" in sent.graph.nodes[0].watch), JSON.stringify(sent.graph.nodes[0].watch));
+});
