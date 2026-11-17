@@ -876,6 +876,8 @@ pub struct Machine {
     meters: Mutex<HashMap<String, usage::Meter>>,
     /// The price list the meters price with, and when it was read.
     meter_rates: Mutex<Option<(Instant, Arc<usage::RateTable>)>>,
+    /// Where a team box gets the price list: downloaded, held in memory only.
+    list_rates: Mutex<Arc<dyn Fn() -> usage::RateTable + Send + Sync>>,
     /// Whether the hub has seen this machine's own tastes since the link last connected, so the
     /// account can take them.
     tastes_shared: Arc<AtomicBool>,
@@ -1085,6 +1087,7 @@ impl Machine {
             orchestration_dir: dir.clone(),
             meters: Mutex::default(),
             meter_rates: Mutex::default(),
+            list_rates: Mutex::new(Arc::new(|| usage::rates(None))),
             tastes_shared: Arc::default(),
             mcp_loaded: Mutex::default(),
             mcp_waited: AtomicBool::new(false),
@@ -4080,12 +4083,16 @@ impl Machine {
 
     /// The price list, read again each hour.
     fn meter_rates(&self) -> Arc<usage::RateTable> {
+        self.meter_rates_at(Instant::now())
+    }
+
+    fn meter_rates_at(&self, now: Instant) -> Arc<usage::RateTable> {
         let mut held = self.meter_rates.lock().unwrap();
         match &*held {
-            Some((read, rates)) if read.elapsed() < Duration::from_secs(3600) => rates.clone(),
+            Some((read, rates)) if now.saturating_duration_since(*read) < Duration::from_secs(3600) => rates.clone(),
             _ => {
                 let rates = Arc::new(usage::rates(self.rates_file.as_deref()));
-                *held = Some((Instant::now(), rates.clone()));
+                *held = Some((now, rates.clone()));
                 rates
             }
         }
@@ -14145,6 +14152,7 @@ Have another model review a risky change before it goes ahead.";
         let transcript = transcripts.join("s-child.jsonl");
         std::fs::write(&transcript, format!("{}\n", run_spent("m1", "claude-sonnet-5-5", 10_000))).unwrap();
         m.record_event(hook_event(&tab, "working", &transcript, Some("Fix ENG-7")));
+        *m.list_rates.lock().unwrap() = Arc::new(|| usage::parse_rates(&json!({ "claude-sonnet-5-5": { "input_cost_per_token": 0.000003, "output_cost_per_token": 0.000015 } })));
         m.team_box.store(true, Ordering::SeqCst);
         RunCostBox { dir, config, m, sent, subject, tab, transcript }
     }
@@ -14237,6 +14245,21 @@ Have another model review a risky change before it goes ahead.";
         std::fs::write(config.join("usage-prices.json"), r#"{"prices":{"claude-sonnet-5-5":{"input":0,"output":0}}}"#).unwrap();
         m.report_run_costs(Instant::now());
         assert_eq!(*sent.lock().unwrap(), vec![("wf-1".to_owned(), subject, 15.0)], "a price file of 0 changes nothing");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_team_boxs_run_cost_keeps_the_list_price_when_its_session_zeroes_the_rates_file() {
+        let RunCostBox { dir, config, m, sent, subject, transcript, .. } = run_costs_box("run-costs-rates-file");
+        let t0 = Instant::now();
+        m.report_run_costs(t0);
+        std::fs::write(config.join("usage-model-rates.json"), r#"{"claude-sonnet-5-5":{"input_cost_per_token":0,"output_cost_per_token":0}}"#).unwrap();
+        m.meter_rates_at(Instant::now() + Duration::from_secs(3601));
+        append(&transcript, &[run_spent("m2", "claude-sonnet-5-5", 1_000_000)]);
+        m.report_run_costs(t0 + RUN_COST_EVERY);
+        let cents = |usd: f64| ("wf-1".to_owned(), subject.clone(), usd);
+        assert_eq!(*sent.lock().unwrap(), vec![cents(15.0), cents(1515.0)], "US$ 15 more for a million output tokens, whatever the box's file says");
         let _ = std::fs::remove_dir_all(dir);
     }
 
