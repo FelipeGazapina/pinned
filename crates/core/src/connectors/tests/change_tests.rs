@@ -949,6 +949,30 @@ fn a_won_change_read_again_where_its_claim_would_fail_fires_once_and_is_not_cool
     no_unlisted(&fake);
 }
 
+/// #346 E3 round 4 item 3: a retry pending when its workflow is turned off and on is dropped with
+/// the `since` reset, so the change from before the turn-on does not start.
+#[test]
+fn a_pending_retry_does_not_start_once_its_workflow_is_turned_off_and_on() {
+    let _api = slack::lock_api();
+    let _restore = RestoreLinear;
+    let at = ago(2);
+    let fake = fake_with(vec![issue(1, at, vec![moved("h-1", at, "Backlog", "Ready to Dev")])]);
+    let claims = Claims::default();
+    let connectors = on(&claims, vec![ready_to_dev("w1", ago(10))], "lin-e3-toggle");
+    let (runs, error) = check_answering(&connectors, Err("the machine refused the run".into()));
+    assert_eq!(runs.len(), 1, "the start was tried");
+    assert!(error.is_some());
+
+    let mut workflow = connectors.store.lock().unwrap().connectors[0].clone();
+    workflow.enabled = false;
+    connectors.save_connector(workflow.clone()).unwrap();
+    workflow.enabled = true;
+    connectors.save_connector(workflow).unwrap();
+    let (runs, error) = check(&connectors);
+    assert_eq!((runs.len(), error), (0, None), "the change from before the turn-on does not start");
+    no_unlisted(&fake);
+}
+
 /// #346 E3 round 4 item 2: an Ask step that stops a change's run has asked its model, so that
 /// start counts for the cooldown: a second move into Ready to Dev three minutes later is cooled
 /// and asks no model.
