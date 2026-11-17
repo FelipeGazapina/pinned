@@ -1771,6 +1771,12 @@ pub trait Storage: Send + Sync {
     /// Graph runs, kept beside the store and never sent to apps.
     fn load_runs(&self) -> Option<Vec<u8>>;
     fn save_runs(&self, bytes: &[u8]) -> Result<(), String>;
+    /// Claims one fire of `workflow` for the event `key`: true for the one call that claimed it,
+    /// false for every later call, from any process that shares the store. The default claims
+    /// every key, for a store no other process shares that keeps no claims.
+    fn claim_fire(&self, _workflow: &str, _key: &str) -> Result<bool, String> {
+        Ok(true)
+    }
 }
 
 pub struct FileStorage {
@@ -2135,6 +2141,11 @@ impl Connectors {
 
     fn key(&self, name: &str) -> Option<String> {
         self.storage.key(name)
+    }
+
+    /// `Storage::claim_fire`: whether this call is the one fire of `workflow` for the event `key`.
+    pub fn claim_fire(&self, workflow: &str, key: &str) -> Result<bool, String> {
+        self.storage.claim_fire(workflow, key)
     }
 
     /// Starts a session for everything new the enabled connectors match, and passes new thread
@@ -6130,6 +6141,16 @@ mod tests {
             // On Windows the stream's empty host file stays behind; it reads as no key.
             assert_eq!(storage.key("claude-oauth-token"), None);
             let _ = std::fs::remove_dir_all(&dir);
+        }
+        /// A trigger's key fires once per store: the second claim of it loses, other keys and other
+        /// workflows still win.
+        #[test]
+        fn a_trigger_key_is_claimed_once() {
+            let storage = FileStorage::new(temp_dir("fs-claims"));
+            assert_eq!(storage.claim_fire("wf-1", "linear:ISS-1#h-1"), Ok(true));
+            assert_eq!(storage.claim_fire("wf-1", "linear:ISS-1#h-1"), Ok(false), "the same key again loses");
+            assert_eq!(storage.claim_fire("wf-1", "linear:ISS-1#h-2"), Ok(true), "another key wins");
+            assert_eq!(storage.claim_fire("wf-2", "linear:ISS-1#h-1"), Ok(true), "another workflow's same key wins");
         }
     }
 

@@ -11730,6 +11730,7 @@ mod teams_hardening;
 #[path = "hub/teams_limits_fix.rs"] mod teams_limits_fix;
 #[path = "hub/teams_wire.rs"] mod teams_wire;
 #[path = "hub/teams_one_live_run.rs"] mod teams_one_live_run;
+#[path = "hub/trigger_fires.rs"] mod trigger_fires;
 #[path = "hub/reports.rs"]
 mod reports;
 #[path = "hub/reports_poller.rs"]
