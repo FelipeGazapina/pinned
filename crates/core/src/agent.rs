@@ -164,6 +164,14 @@ pub enum ProjectTool {
     },
     /// A Capitão's: tells the global orchestrator `text` now, mid-work.
     TellOrchestrator { text: String },
+    /// A Captain's: `plan::set`, a plan written or rewritten as lists of steps.
+    PlanSet(crate::plan::SetCall),
+    /// A Captain's: `plan::step`, a report on one step.
+    PlanStep(crate::plan::StepCall),
+    /// A Captain's: `plan::fix`, a fix branch under a failed step.
+    PlanFix(crate::plan::FixCall),
+    /// A Captain's: `plan::close`, a plan given up with a reason.
+    PlanClose(crate::plan::CloseCall),
     /// A taste chat's: `taste::ScopeView` of `scope`, as `TasteScope::parse` reads it.
     TasteGet { scope: String },
     /// A taste chat's: `Tastes::set` on the account's tastes, then `TasteGet`.

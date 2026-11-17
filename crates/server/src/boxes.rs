@@ -481,6 +481,203 @@ pub async fn box_budget(hub: &Hub, account: &Account, repo: Option<&str>, asked:
     tastes.resolve(&scope).limits().box_budget_usd(asked)
 }
 
+/// The account's box behind `machine` and its budget once `extra_usd` is added, or why it may not
+/// be: no box of the account's, a box already ending, or a total past the Box budget once `waiting`,
+/// what extends still waiting for the owner add, is counted too. An extend runs only after this.
+pub async fn extended(hub: &Hub, account: &Account, machine: Uuid, extra_usd: f64, waiting: f64) -> Result<(BoxRow, f64), String> {
+    let row = extend_of(hub, account, machine, extra_usd).await?;
+    let total = row.spec.budget_usd.unwrap_or(0.0) + extra_usd;
+    let repo = row.spec.repo.as_deref();
+    box_budget(hub, account, repo, Some(total)).await?;
+    if waiting > 0.0 {
+        if let Some(most) = box_budget(hub, account, repo, None).await?.filter(|most| total + waiting > most + 1e-9) {
+            return Err(format!("a box may spend at most US$ {most:.2}, and US$ {waiting:.2} for this box already waits for your decision in the app; name less, or decide that one first"));
+        }
+    }
+    Ok((row, total))
+}
+
+/// The account's box behind `machine`, or why no extend of `extra_usd` could be one: an amount
+/// not above zero, a machine that is no box of the account's, or a box already ending. It reads the
+/// box on the shared connection, so an ask refused here never takes a turn (`ExtendTurn`).
+pub async fn extend_of(hub: &Hub, account: &Account, machine: Uuid, extra_usd: f64) -> Result<BoxRow, String> {
+    if !(extra_usd > 0.0) {
+        return Err("name an amount above zero".into());
+    }
+    let row = hub.db.box_of(account.id, machine).await?.ok_or_else(|| "this machine is no box".to_owned())?;
+    if matches!(row.phase, Phase::Ending(_)) {
+        return Err("this box is already ending".into());
+    }
+    Ok(row)
+}
+
+/// The key of the advisory lock of one box's extends: the account and the box's machine, as two
+/// 32-bit keys. Every other advisory lock of the hub takes one 64-bit key, a key space Postgres
+/// keeps apart from this one, so no other lock ever shares it.
+pub const EXTEND_KEY: &str = "hashtext('pinned-extend-box:' || $1::uuid::text), hashtext($2::uuid::text)";
+
+/// The key of the advisory lock of all of one account's extend asks, in the same two-key space.
+pub const EXTEND_ACCOUNT_KEY: &str = "hashtext('pinned-extend-account:' || $1::uuid::text), hashtext(reverse($1::uuid::text))";
+
+/// One box's turn for its extends: a transaction on a connection of its own holding the box's
+/// `pg_advisory_xact_lock`. An agent's ask holds it from its check until it waits for the owner,
+/// and the owner's approval from marking it decided until its budget is set, so no ask is checked
+/// while another is in between, on this hub or another one on the database. Asks for other boxes
+/// do not wait. `end` commits it; a turn dropped on an error closes its connection, which frees the lock.
+/// This hub's lines come first (`Place`), so the hub holds at most one such connection per account
+/// for asks, and one more per box for the owner's decisions.
+/// All waits together are bounded by `EXTEND_WAIT`: a turn not had by then (the lines, then the
+/// advisory locks for what is left) is refused as `crate::db::BUSY`, as is a turn whose connection
+/// cannot be opened: nothing was done, so the same request asks again.
+pub struct ExtendTurn {
+    held: tokio_postgres::Client,
+    _lines: Vec<InLine>,
+    deadline: tokio::time::Instant,
+}
+
+/// How long an extend waits for its box's turn, as long as Postgres's lock timeout.
+const EXTEND_WAIT: Duration = Duration::from_secs(2);
+
+/// How many asks may be in a box's line at once on this hub, the one that holds it and those that
+/// wait. One more is refused as busy at once, so a stream of asks never keeps the owner's
+/// decision, which always joins, from its turn.
+const MOST_ASKS_IN_BOX_LINE: usize = 3;
+
+/// A line of this hub's extends: an account's asks, `(account, None)`, or one box's asks and
+/// decisions, `(account, Some(machine))`.
+type LineKey = (Uuid, Option<Uuid>);
+
+/// This hub's lines of extends, each with how many places it has, holding it or waiting for it.
+static LINES: std::sync::LazyLock<Mutex<HashMap<LineKey, (Arc<tokio::sync::Mutex<()>>, usize)>>> = std::sync::LazyLock::new(Mutex::default);
+
+/// A place in one of this hub's lines of extends. Dropping it, on whatever path an ask or a
+/// decision ends, an error or a dropped future too, gives the place up, and the line's last place
+/// forgets the line: no line outlives its asks.
+struct Place {
+    key: LineKey,
+    line: Arc<tokio::sync::Mutex<()>>,
+}
+
+/// A place that holds its line.
+struct InLine {
+    _held: tokio::sync::OwnedMutexGuard<()>,
+    _place: Place,
+}
+
+impl Place {
+    /// A place in line `key`, or None when it has `most` places already.
+    fn join(key: LineKey, most: usize) -> Option<Place> {
+        let mut lines = LINES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (line, places) = lines.entry(key).or_default();
+        if *places >= most {
+            return None;
+        }
+        *places += 1;
+        Some(Place { key, line: line.clone() })
+    }
+
+    /// Waits for the line until `deadline`, or is refused as busy.
+    async fn hold(self, deadline: tokio::time::Instant) -> Result<InLine, String> {
+        let held = tokio::time::timeout_at(deadline, self.line.clone().lock_owned()).await.map_err(|_| crate::db::BUSY.to_owned())?;
+        Ok(InLine { _held: held, _place: self })
+    }
+}
+
+impl Drop for Place {
+    fn drop(&mut self) {
+        let mut lines = LINES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((_, places)) = lines.get_mut(&self.key) {
+            *places -= 1;
+            if *places == 0 {
+                lines.remove(&self.key);
+            }
+        }
+    }
+}
+
+/// How many lines of extends this hub has now, for tests.
+#[cfg(test)]
+fn lines_in_use(account: Uuid) -> usize {
+    LINES.lock().unwrap().keys().filter(|(of, _)| *of == account).count()
+}
+
+impl ExtendTurn {
+    /// The owner's decision's turn: the box's line, however many are in it, then the box's lock.
+    pub async fn take(hub: &Hub, account: Uuid, machine: Uuid) -> Result<ExtendTurn, String> {
+        let deadline = tokio::time::Instant::now() + EXTEND_WAIT;
+        let place = Place::join((account, Some(machine)), usize::MAX).ok_or(crate::db::BUSY)?;
+        let lines = vec![place.hold(deadline).await?];
+        ExtendTurn::locked(hub, account, machine, lines, deadline, false).await
+    }
+
+    /// An agent's ask's turn: a place in the box's line, refused at once when
+    /// `MOST_ASKS_IN_BOX_LINE` are in it, so a flood of one box never fills the account's line; then
+    /// the account's line, then the box's, then the box's lock and the account's on the same
+    /// connection, so asks for different boxes of one account are counted one after another. Always
+    /// account, then box in this hub's lines, and box, then account in Postgres: a decision takes
+    /// only the box's, so no two turns wait on each other.
+    pub async fn ask(hub: &Hub, account: Uuid, machine: Uuid) -> Result<ExtendTurn, String> {
+        let deadline = tokio::time::Instant::now() + EXTEND_WAIT;
+        let in_box = Place::join((account, Some(machine)), MOST_ASKS_IN_BOX_LINE).ok_or(crate::db::BUSY)?;
+        let of_account = Place::join((account, None), usize::MAX).ok_or(crate::db::BUSY)?.hold(deadline).await?;
+        let of_box = in_box.hold(deadline).await?;
+        ExtendTurn::locked(hub, account, machine, vec![of_account, of_box], deadline, true).await
+    }
+
+    /// The turn's connection and transaction once its lines are held, and its locks.
+    async fn locked(hub: &Hub, account: Uuid, machine: Uuid, lines: Vec<InLine>, deadline: tokio::time::Instant, of_account: bool) -> Result<ExtendTurn, String> {
+        // Opening and beginning wait no longer than the turn: a Postgres that takes the connection and
+        // never answers would hold this hub's lines for its own timeouts, about 35 s.
+        let opened = tokio::time::timeout_at(deadline, async {
+            let held = hub.db.own_client().await.map_err(busy_turn)?;
+            held.batch_execute("begin").await.map_err(busy_turn)?;
+            Ok::<_, String>(held)
+        });
+        let held = opened.await.map_err(|_| busy_turn("Postgres did not answer within the turn's wait"))??;
+        let turn = ExtendTurn { held, _lines: lines, deadline };
+        turn.lock(&format!("select pg_advisory_xact_lock({EXTEND_KEY})"), &[&account, &machine]).await?;
+        if of_account {
+            turn.lock(&format!("select pg_advisory_xact_lock({EXTEND_ACCOUNT_KEY})"), &[&account]).await?;
+        }
+        Ok(turn)
+    }
+
+    /// Takes an advisory lock, waiting only for what is left of the deadline, whatever the session's lock timeout.
+    async fn lock(&self, sql: &str, params: &[&(dyn tokio_postgres::types::ToSql + Sync)]) -> Result<(), String> {
+        let left = self.deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis().max(1);
+        self.held.batch_execute(&format!("set local lock_timeout = {left}")).await.map_err(lost_turn)?;
+        self.held.execute(sql, params).await.map_err(lost_turn).map(drop)
+    }
+
+    /// Whether the turn still holds its locks: a connection that ended took them with it, and
+    /// another hub's ask may have been checked since, so the turn is refused as busy.
+    pub async fn held(&self) -> Result<(), String> {
+        self.held.batch_execute("select 1").await.map_err(busy_turn)
+    }
+
+    /// Frees the lock. What the turn guarded is already written, so a commit that fails only closes the connection.
+    pub async fn end(self) {
+        if let Err(e) = self.held.batch_execute("commit").await {
+            eprintln!("pinned-server: a box's extend turn ended by closing its connection: {e}");
+        }
+    }
+}
+
+/// A turn whose connection could not be opened or begun in time did nothing: it is refused as busy.
+fn busy_turn(e: impl std::fmt::Display) -> String {
+    eprintln!("pinned-server: a box's extend turn could not open or keep its connection: {e}");
+    crate::db::BUSY.to_owned()
+}
+
+/// A turn that waited for its lock past its deadline, or whose connection failed while it took
+/// it, did nothing either: busy, so the same request asks again.
+fn lost_turn(e: tokio_postgres::Error) -> String {
+    if crate::db::lock_refused(&e) {
+        return crate::db::BUSY.to_owned();
+    }
+    busy_turn(e)
+}
+
 /// The task record of a box an agent opened through `act`, which ended for `why` at unix ms
 /// `ended`: the opener's task on its own machine, billed the box's life at the box rate.
 pub fn agent_box_record(row: &BoxRow, opener: &Opener, started: u64, ended: u64, why: &End) -> TaskRecord {
@@ -1240,15 +1437,7 @@ impl Boxes {
 
     /// Adds `extra_usd` to the box behind `machine`'s budget.
     pub async fn extend_box(&self, hub: &Hub, account: &Arc<Account>, machine: Uuid, extra_usd: f64) -> Result<BoxStatus, String> {
-        if !(extra_usd > 0.0) {
-            return Err("name an amount above zero".into());
-        }
-        let row = hub.db.box_of(account.id, machine).await?.ok_or_else(|| "this machine is no box".to_owned())?;
-        if matches!(row.phase, Phase::Ending(_)) {
-            return Err("this box is already ending".into());
-        }
-        let total = row.spec.budget_usd.unwrap_or(0.0) + extra_usd;
-        box_budget(hub, account, row.spec.repo.as_deref(), Some(total)).await?;
+        let (row, total) = extended(hub, account, machine, extra_usd, 0.0).await?;
         hub.db.set_box_budget(account.id, &row.id, total).await?;
         self.box_status(hub, account, machine).await
     }
@@ -2509,6 +2698,35 @@ mod tests {
     /// reserves one: only the workflow kind owns a row, a box in another kind's permission `Fixed`
     /// is refused, and a box whose id one of them names ends by the normal timers. The stored rows
     /// stay in the file (a load and a save of a v0.18.1 store must lose nothing), and are never read.
+    /// Places in the lines of extends are given up on every path: held and ended, timed out, refused
+    /// for a full box line, or dropped while they wait. After a burst no line is left.
+    #[tokio::test]
+    async fn a_burst_of_extend_turns_leaves_no_line() {
+        let (account, machine) = (Uuid::new_v4(), Uuid::new_v4());
+        let soon = || tokio::time::Instant::now() + Duration::from_millis(100);
+        let held = Place::join((account, Some(machine)), MOST_ASKS_IN_BOX_LINE).unwrap().hold(soon()).await.unwrap();
+        let waiting: Vec<_> = (0..2)
+            .map(|_| {
+                let place = Place::join((account, Some(machine)), MOST_ASKS_IN_BOX_LINE).unwrap();
+                tokio::spawn(async move { place.hold(tokio::time::Instant::now() + Duration::from_secs(60)).await.map(drop) })
+            })
+            .collect();
+        tokio::task::yield_now().await;
+        assert!(Place::join((account, Some(machine)), MOST_ASKS_IN_BOX_LINE).is_none(), "a full box line refuses one more ask");
+        let decision = Place::join((account, Some(machine)), usize::MAX).expect("a decision always joins");
+        assert_eq!(decision.hold(soon()).await.err().as_deref(), Some(crate::db::BUSY), "it waits its turn, until its deadline");
+        let account_line = Place::join((account, None), usize::MAX).unwrap().hold(soon()).await.unwrap();
+        assert_eq!(lines_in_use(account), 2);
+        for ask in &waiting {
+            ask.abort();
+        }
+        for ask in waiting {
+            assert!(ask.await.unwrap_err().is_cancelled());
+        }
+        drop((held, account_line));
+        assert_eq!(lines_in_use(account), 0, "no line outlives its places");
+    }
+
     #[tokio::test]
     async fn a_store_loaded_with_a_fixed_row_for_a_session_worker_or_orchestrator_keeps_no_box_alive_and_reserves_none() {
         use pinned_core::connectors::{FileStorage, Storage};
