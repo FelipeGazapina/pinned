@@ -740,7 +740,7 @@ fn trigger_input(connectors: &[Connector], subject: &Subject) -> TriggerInput {
     match subject {
         Subject::LinearIssue { .. } => {
             let issue = issue();
-            TriggerInput::Issue { id: issue.id, identifier: issue.identifier, title: issue.title, description: issue.description, url: issue.url }
+            TriggerInput::Issue { id: issue.id, identifier: issue.identifier, title: issue.title, description: issue.description, url: issue.url, change: None }
         }
         Subject::SlackThread { channel, thread } => TriggerInput::Slack {
             channel: channel.clone(),

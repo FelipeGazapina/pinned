@@ -2111,7 +2111,7 @@ impl Storage for PgStorage {
     /// The one call of the store that waits on Postgres: the claim must be the database's, so
     /// two hubs on it see one winner. The hub's runtime has many threads, and this one hands its
     /// other tasks to them while it waits.
-    fn claim_fire(&self, workflow: &str, key: &str) -> Result<bool, String> {
+    fn claim_fire(&self, workflow: &str, key: &str, _claimer: &str, _retry: bool) -> Result<bool, String> {
         let Some(fires) = &self.0.fires else { return Err("no database to claim the fire in".into()) };
         let claim = async {
             tokio::time::timeout(CLAIM_WAIT, fires.db.claim_fire(fires.account, workflow, key))

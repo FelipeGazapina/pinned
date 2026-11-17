@@ -253,6 +253,7 @@ impl Crew {
             title: format!("Fix page {n}"),
             description: None,
             url: format!("https://linear.example.test/acme/issue/ENG-{n}"),
+            change: None,
         };
         Event::Graph { connector: id.to_owned(), subject: super::issue(&format!("eng-{n}")), input, at: "2026-11-16T10:00:00Z".into() }
     }

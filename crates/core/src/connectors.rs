@@ -22,6 +22,14 @@ use tokio::sync::Notify;
 use unicode_normalization::{char::is_combining_mark, UnicodeNormalization};
 
 const INTERVAL: Duration = Duration::from_secs(60);
+/// How far back a check takes a Linear change trigger's changes. A check whose workflow's `since`
+/// is older (pinned was away) reads from `now - CATCH_UP` and skips the rest, counted per workflow
+/// (`ChangeCounts::skipped_away`), so coming back fires no backlog.
+pub const CATCH_UP: Duration = Duration::from_secs(60 * 60);
+/// How long a claimed fire is kept: the hub's `trigger_fires` rows and a node's `fires.json`. A
+/// change older than `CATCH_UP` never fires, so its key is never claimed again once dropped.
+pub const FIRES_KEPT: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+const _: () = assert!(CATCH_UP.as_secs() < FIRES_KEPT.as_secs());
 const LINEAR_KEY: &str = "linear-key";
 const SLACK_KEY: &str = "slack-key";
 const SLACK_NOT_CONNECTED: &str = "Slack is not connected: connect it in pinned's Connectors settings";
@@ -1007,7 +1015,32 @@ struct Store {
     /// this shape cannot read, so the old key is ignored and its mark dropped.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     box_released_at: BTreeMap<String, BTreeMap<String, u64>>,
+    /// The issue cursor of a Linear changes read the page cap stopped (`linear::Changes::read_to`):
+    /// the next check reads from it. None once a read was complete.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    linear_changes_from: Option<String>,
+    /// What each Linear change workflow's checks did not fire, by workflow id.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    change_counts: BTreeMap<String, ChangeCounts>,
     connectors: Vec<Connector>,
+}
+
+/// What a Linear change workflow's checks did not fire. Each count only grows.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ChangeCounts {
+    /// Changes older than `CATCH_UP` a check skipped: pinned was away.
+    #[serde(default)]
+    pub skipped_away: u64,
+    /// Claims that answered an error: the check held its watermark and tries them again.
+    #[serde(default)]
+    pub claim_errors: u64,
+    /// Won claims given back because their start failed before anything happened.
+    #[serde(default)]
+    pub released: u64,
+    /// Won claims whose run did not start.
+    #[serde(default)]
+    pub not_started: u64,
 }
 
 impl Store {
@@ -1610,6 +1643,10 @@ pub enum TriggerInput {
         title: String,
         description: Option<String>,
         url: String,
+        /// The status or assignee change that fired a change trigger (`linear-status`,
+        /// `linear-assigned`). Older apps neither send nor read it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        change: Option<IssueChange>,
     },
     Slack {
         channel: String,
@@ -1626,6 +1663,25 @@ pub enum TriggerInput {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         request: Option<String>,
     },
+}
+
+/// What a Linear change trigger saw happen to its issue. Every name in it is written in Linear.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct IssueChange {
+    pub kind: IssueChangeKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    pub by: String,
+    pub at: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+#[serde(rename_all = "kebab-case")]
+pub enum IssueChangeKind {
+    Status,
+    Assignee,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -1722,6 +1778,7 @@ impl Found {
                 title: issue.title.clone(),
                 description: issue.description.clone(),
                 url: issue.url.clone(),
+                change: None,
             }),
             Found::Mention { channel, channel_name, mention, posts } => Some(TriggerInput::Slack {
                 channel: channel.clone(),
@@ -1735,6 +1792,15 @@ impl Found {
             Found::Replies { .. } | Found::Stopped { .. } | Found::Routed { .. } => None,
         }
     }
+}
+
+/// A claimer id no other `Connectors` has: the time, the process, a count and an address, hashed.
+fn new_claimer() -> String {
+    static COUNT: AtomicU64 = AtomicU64::new(0);
+    let local = 0u8;
+    let seed = format!("{:?}|{}|{}|{:p}", std::time::SystemTime::now(), std::process::id(), COUNT.fetch_add(1, Ordering::Relaxed), &local);
+    let digest: [u8; 32] = Sha256::digest(seed.as_bytes()).into();
+    digest[..16].iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn thread_key(channel: &str, thread: &str) -> String {
@@ -1815,8 +1881,14 @@ pub trait Storage: Send + Sync {
     /// Claims one fire of `workflow` for the event `key`: true for the one call that claimed it,
     /// false for every later call, from any process that shares the store. The default claims
     /// every key, for a store no other process shares that keeps no claims.
-    fn claim_fire(&self, _workflow: &str, _key: &str) -> Result<bool, String> {
+    /// `claimer` names the `Connectors` that claims. With `retry`, a key this claimer stored
+    /// already answers true: its earlier claim answered an error, but may have been stored.
+    fn claim_fire(&self, _workflow: &str, _key: &str, _claimer: &str, _retry: bool) -> Result<bool, String> {
         Ok(true)
+    }
+    /// Gives back `claimer`'s claim of `key`, whose run did not start, so it can be claimed again.
+    fn release_fire(&self, _workflow: &str, _key: &str, _claimer: &str) -> Result<(), String> {
+        Ok(())
     }
 }
 
@@ -1893,7 +1965,7 @@ impl Storage for FileStorage {
         replace_file(&self.dir, "runs.json", bytes)
     }
 
-    fn claim_fire(&self, workflow: &str, key: &str) -> Result<bool, String> {
+    fn claim_fire(&self, workflow: &str, key: &str, _claimer: &str, _retry: bool) -> Result<bool, String> {
         Ok(self.fired.lock().unwrap().insert((workflow.to_owned(), key.to_owned())))
     }
 }
@@ -1993,6 +2065,13 @@ pub struct Connectors {
     /// Admitted graph runs whose session has not opened, by connector and `subject_key`: a run
     /// that ends before one releases its place.
     holding: Mutex<std::collections::HashSet<(String, String)>>,
+    /// The id this `Connectors` claims fires under (`Storage::claim_fire`), new for each one.
+    claimer: String,
+    /// Fires, as `<workflow>\n<key>`, whose claim answered an error: the next claim of one is a retry.
+    unsure: Mutex<std::collections::HashSet<String>>,
+    /// The won fire of each Linear change run not yet handed over, by connector and `subject_key`:
+    /// its claim is given back when the run does not start.
+    fire_runs: Mutex<HashMap<(String, String), String>>,
 }
 
 /// What a box's end does to the subject of the run it failed.
@@ -2131,6 +2210,9 @@ impl Connectors {
             boot_failed: Mutex::new(std::collections::HashSet::new()),
             admission: std::sync::OnceLock::new(),
             holding: Mutex::new(std::collections::HashSet::new()),
+            claimer: new_claimer(),
+            unsure: Mutex::new(std::collections::HashSet::new()),
+            fire_runs: Mutex::new(HashMap::new()),
         }
     }
 
@@ -2192,7 +2274,25 @@ impl Connectors {
 
     /// `Storage::claim_fire`: whether this call is the one fire of `workflow` for the event `key`.
     pub fn claim_fire(&self, workflow: &str, key: &str) -> Result<bool, String> {
-        self.storage.claim_fire(workflow, key)
+        self.storage.claim_fire(workflow, key, &self.claimer, false)
+    }
+
+    /// `claim_fire` again after a claim that answered an error: a claim this `Connectors` stored
+    /// meanwhile answers true.
+    #[doc(hidden)]
+    pub fn claim_fire_retry(&self, workflow: &str, key: &str) -> Result<bool, String> {
+        self.storage.claim_fire(workflow, key, &self.claimer, true)
+    }
+
+    /// The id this `Connectors` claims fires under.
+    #[doc(hidden)]
+    pub fn claimer(&self) -> &str {
+        &self.claimer
+    }
+
+    /// What each Linear change workflow's checks did not fire, by workflow id.
+    pub fn change_counts(&self) -> BTreeMap<String, ChangeCounts> {
+        self.store.lock().unwrap().change_counts.clone()
     }
 
     /// Starts a session for everything new the enabled connectors match, and passes new thread
@@ -2932,6 +3032,12 @@ fn run(c: &Connector, issue: &linear::Issue, exe: &str) -> Run {
 
 /// A session on the Linear issue. On a hub's team (`team`) the issue's text goes into the prompt
 /// framed as data from outside pinned, where the builder puts it.
+/// `issue_run` for an issue a change trigger fired on, with the line that says what changed.
+fn issue_run_for(c: &Connector, issue: &linear::Issue, change: Option<&IssueChange>, exe: &str, team: bool) -> Run {
+    let _ = change;
+    issue_run(c, issue, exe, team)
+}
+
 fn issue_run(c: &Connector, issue: &linear::Issue, exe: &str, team: bool) -> Run {
     // The session's name reaches places other sessions read (a box's machine name), so on a
     // hub's team it holds nothing a person outside pinned wrote.
@@ -3713,9 +3819,9 @@ fn run_set_line(names: &[String], exe: &str) -> String {
 /// and no history, and the result equals `run` or `slack_run` plus `append_answers`.
 pub fn graph_opening(owner: &Connector, trigger: &TriggerInput, answers: &[ClassifyAnswers], talk: &str, history: Option<&str>, exe: &str, team: bool) -> Result<Run, String> {
     let mut opened = match trigger {
-        TriggerInput::Issue { id, identifier, title, description, url } => {
+        TriggerInput::Issue { id, identifier, title, description, url, change } => {
             let issue = linear::Issue { id: id.clone(), identifier: identifier.clone(), title: title.clone(), description: description.clone(), url: url.clone() };
-            issue_run(owner, &issue, exe, team)
+            issue_run_for(owner, &issue, change.as_ref(), exe, team)
         }
         TriggerInput::Slack { channel, channel_name, thread, posts, note, mentioned, .. } => {
             let posts: Vec<slack::Post> = posts.iter().map(|post| slack::Post { ts: post.ts.clone(), author: post.author.clone(), text: post.text.clone() }).collect();
@@ -6194,10 +6300,10 @@ mod tests {
         #[test]
         fn a_trigger_key_is_claimed_once() {
             let storage = FileStorage::new(temp_dir("fs-claims"));
-            assert_eq!(storage.claim_fire("wf-1", "linear:ISS-1#h-1"), Ok(true));
-            assert_eq!(storage.claim_fire("wf-1", "linear:ISS-1#h-1"), Ok(false), "the same key again loses");
-            assert_eq!(storage.claim_fire("wf-1", "linear:ISS-1#h-2"), Ok(true), "another key wins");
-            assert_eq!(storage.claim_fire("wf-2", "linear:ISS-1#h-1"), Ok(true), "another workflow's same key wins");
+            assert_eq!(storage.claim_fire("wf-1", "linear:ISS-1#h-1", "c", false), Ok(true));
+            assert_eq!(storage.claim_fire("wf-1", "linear:ISS-1#h-1", "c", false), Ok(false), "the same key again loses");
+            assert_eq!(storage.claim_fire("wf-1", "linear:ISS-1#h-2", "c", false), Ok(true), "another key wins");
+            assert_eq!(storage.claim_fire("wf-2", "linear:ISS-1#h-1", "c", false), Ok(true), "another workflow's same key wins");
         }
     }
 
@@ -7763,6 +7869,7 @@ mod tests {
             title: forging_issue().title,
             description: forging_issue().description,
             url: "https://linear.app/x/issue/ENG-7".into(),
+            change: None,
         };
         let graph = graph_opening(&linear_connector(), &trigger, &[], "", None, "/bin/pinned", false).unwrap();
         assert_eq!(graph.args, opened.args);
@@ -8959,7 +9066,7 @@ mod tests {
 
     fn issue_trigger() -> TriggerInput {
         let issue = issue();
-        TriggerInput::Issue { id: issue.id, identifier: issue.identifier, title: issue.title, description: issue.description, url: issue.url }
+        TriggerInput::Issue { id: issue.id, identifier: issue.identifier, title: issue.title, description: issue.description, url: issue.url, change: None }
     }
 
     fn slack_trigger(note: Option<String>) -> TriggerInput {
@@ -12511,4 +12618,6 @@ mod tests {
             assert_eq!(matches(trigger, change, *viewer), *expected, "row {i}: {trigger:?} on {change:?} for viewer {viewer:?}");
         }
     }
+
+    mod change_tests;
 }
