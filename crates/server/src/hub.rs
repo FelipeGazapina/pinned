@@ -1626,6 +1626,11 @@ impl Account {
         }
     }
 
+    /// What a worker's box shows: as `seen_any`.
+    pub fn seen_worker(&self, machine: &str) -> Seen {
+        self.seen_any(machine)
+    }
+
     /// Sends the call at once, so calls reach the machine in the order they came, and answers
     /// the machine's name and where its answer arrives, or None while it is offline.
     pub fn send_call(&self, machine: &str, call: Call) -> Option<Sent> {
@@ -2357,6 +2362,32 @@ mod tests {
             assert_eq!(reaped(&look, 4 * MIN, 4 * MIN), None, "{which}: exited 4 of 5 minutes");
             assert_eq!(reaped(&look, 6 * MIN, 6 * MIN), Some(boxes::End::Exited), "{which}: an open question does not keep an exited session's box");
         }
+    }
+
+    /// A box's account with one machine showing `tabs`.
+    fn box_with(tabs: Vec<serde_json::Value>) -> Account {
+        let account = Account { id: Uuid::nil(), email: String::new(), team: false, live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() };
+        let (out, _sent, _) = Outbox::new();
+        account.came_online("box", 1, "box".into(), true, "0.18.7".into(), out);
+        let tabs = tabs.into_iter().map(|tab| serde_json::from_value(tab).unwrap()).collect();
+        account.machine_event("box", 1, MachineEvent::Tabs { tabs });
+        account
+    }
+
+    #[test]
+    fn a_worker_box_whose_session_reported_no_conversation_is_starting() {
+        let tab = |id: &str, status: Option<AgentStatus>, session: Option<&str>, running: bool| {
+            serde_json::json!({ "id": id, "cwd": "/work/repo", "bypass": true, "running": running, "opened": 1, "status": status, "session": session, "connector": "delegate" })
+        };
+        assert_eq!(box_with(vec![tab("tab-1", None, None, true)]).seen_worker("box"), Seen::Starting { quiet: true }, "a session at a startup screen");
+        assert_eq!(box_with(vec![tab("tab-1", Some(AgentStatus::Working), None, true)]).seen_worker("box"), Seen::Starting { quiet: false }, "a tab that reads working with no turn reported");
+        assert_eq!(box_with(vec![tab("tab-1", Some(AgentStatus::Working), Some("s-1"), true)]).seen_worker("box"), Seen::Tab { running: true, quiet: false }, "a worker at work");
+        assert_eq!(box_with(vec![tab("tab-1", Some(AgentStatus::Done), Some("s-1"), true)]).seen_worker("box"), Seen::Tab { running: true, quiet: true }, "a worker done with its turn");
+        assert_eq!(box_with(vec![tab("tab-1", None, None, false)]).seen_worker("box"), Seen::Tab { running: false, quiet: true }, "an exited session ends as exited");
+        let two = box_with(vec![tab("tab-1", Some(AgentStatus::Done), Some("s-1"), true), tab("tab-2", None, None, true)]);
+        assert_eq!(two.seen_worker("box"), Seen::Tab { running: true, quiet: true }, "a started worker with a thread of its own still starting");
+        assert_eq!(box_with(vec![]).seen_worker("box"), Seen::NoTab);
+        assert_eq!(box_with(vec![]).seen_worker("elsewhere"), Seen::Offline);
     }
 
     #[test]

@@ -2886,6 +2886,7 @@ fn fast() -> Policy {
         done: Duration::from_secs(3600),
         exited: Duration::from_secs(3600),
         tab_gone: ms(400),
+        first_turn: Duration::from_secs(3600),
         offline: ms(1000),
         max_life: Duration::from_secs(3600),
         cooldown: Duration::from_secs(3600),

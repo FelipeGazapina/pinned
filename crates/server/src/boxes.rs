@@ -37,6 +37,11 @@ const NOT_CONNECTED_END: &str = "Upstash Box is not connected,";
 const NO_KEYS: &str = "Upstash is not connected";
 /// The longest reason the Usage page gets.
 const WHY_MAX: usize = 300;
+/// How long a worker box's session may run without starting its first turn, as when Claude Code
+/// waits on a startup screen no one answers, before the box ends and its task fails.
+pub const FIRST_TURN_WAIT: Duration = Duration::from_secs(4 * 60);
+/// Why a worker box ended whose session never started its first turn.
+const NEVER_STARTED: &str = "the worker never started: its session stopped at a startup screen";
 
 /// The shortest run of key characters after `box_` that is taken for a Box API key. A real key is
 /// a long random run, well past this; the words that start with `box_` in pinned's own names and
@@ -169,6 +174,8 @@ pub struct Policy {
     pub exited: Duration,
     /// With no tab for the run, which covers the time from the run to the node's first tabs.
     pub tab_gone: Duration,
+    /// With a worker's session running and no turn started yet.
+    pub first_turn: Duration,
     pub offline: Duration,
     /// From the row's creation, whatever the session does.
     pub max_life: Duration,
@@ -191,6 +198,7 @@ impl Default for Policy {
             done: minutes(2),
             exited: minutes(5),
             tab_gone: minutes(2),
+            first_turn: FIRST_TURN_WAIT,
             offline: minutes(10),
             max_life: minutes(4 * 60),
             cooldown: minutes(10),
@@ -301,6 +309,8 @@ pub enum End {
     /// Someone deleted the box outside pinned.
     Vanished,
     Disconnected,
+    /// The worker's session ran for `Policy::first_turn` without starting a turn.
+    NeverStarted,
     Failed(String),
 }
 
@@ -326,8 +336,16 @@ fn box_end_error(p: &Policy, why: &End) -> Option<String> {
         End::Done => return None,
         End::Failed(e) => format!("Upstash Box: {e}"),
         End::Offline => format!("Upstash Box: its box went offline and did not come back within {}", wait_span(p.offline)),
+        End::NeverStarted => format!("Upstash Box: {NEVER_STARTED}"),
         why => format!("Upstash Box: the box ended before its task did: {}", ended_because(why)),
     })
+}
+
+/// `error`, for a box that ended for `why`, with the last lines its worker's screen showed,
+/// `shown`, when that worker never started.
+fn quoting_screen(error: String, why: &End, shown: Option<&str>) -> String {
+    let _ = (why, shown);
+    error
 }
 
 /// Why a workflow run fails when its box ends for `why`. `Done` too: a run that already finished
@@ -359,6 +377,7 @@ fn ended_because(why: &End) -> String {
         End::Removed => "someone removed its machine".into(),
         End::Vanished => "it was deleted outside pinned".into(),
         End::Disconnected => "Upstash Box was disconnected".into(),
+        End::NeverStarted => NEVER_STARTED.into(),
         End::Failed(e) => e.clone(),
     }
 }
@@ -366,7 +385,7 @@ fn ended_because(why: &End) -> String {
 /// How long the hub waits on the delegating machine to take a box's end.
 const ORIGIN_WAIT: Duration = Duration::from_secs(30);
 
-const ENDS: [(End, &str); 9] = [
+const ENDS: [(End, &str); 10] = [
     (End::TabClosed, "tab-closed"),
     (End::Exited, "exited"),
     (End::Idle, "idle"),
@@ -376,6 +395,7 @@ const ENDS: [(End, &str); 9] = [
     (End::Removed, "removed"),
     (End::Vanished, "vanished"),
     (End::Disconnected, "disconnected"),
+    (End::NeverStarted, "never-started"),
 ];
 const FAILED: &str = "failed: ";
 
@@ -416,6 +436,9 @@ pub enum Seen {
     /// `quiet`: nothing holds the box, so the session is neither working nor waiting on an open
     /// questionnaire.
     Tab { running: bool, quiet: bool },
+    /// A worker box's session runs and none of its tabs has started a turn: no hook has reported
+    /// a conversation yet, as while Claude Code waits on a startup screen.
+    Starting { quiet: bool },
 }
 
 /// When each condition of a running row began, by the hub's clock. A restart resets them, and
@@ -467,6 +490,7 @@ pub fn agent_box_record(row: &BoxRow, opener: &Opener, started: u64, ended: u64,
     let box_ms = ended.saturating_sub(started);
     let (outcome, reason, limit) = match why {
         End::Failed(why) => (TaskOutcome::Failed, Some(why.clone()), None),
+        End::NeverStarted => (TaskOutcome::Failed, Some(NEVER_STARTED.to_owned()), None),
         End::Expired if over_budget(&row.spec, row.size, Duration::from_millis(box_ms)) => (TaskOutcome::Limit, None, Some("budget".to_owned())),
         End::Expired => (TaskOutcome::Limit, None, Some("time".to_owned())),
         End::Removed | End::Disconnected => (TaskOutcome::Cancelled, None, None),
@@ -543,6 +567,7 @@ pub(crate) fn verdict(age: Duration, seen: Seen, t: &mut Timers, now: Instant, p
         Seen::NoTab => (Some(false), Some(true), None, None),
         Seen::Tab { .. } if delegating => (Some(false), Some(false), Some(false), Some(false)),
         Seen::Tab { running, quiet } => (Some(false), Some(false), Some(!running), Some(quiet)),
+        Seen::Starting { quiet } => (Some(false), Some(false), Some(false), Some(quiet)),
     };
     let held = |since: &mut Option<Instant>, on: Option<bool>| match on {
         Some(false) => {
@@ -2231,6 +2256,49 @@ mod tests {
         assert_eq!(after(Seen::Tab { running: true, quiet: false }, 21 * MIN, MIN), None, "a working session never idles");
     }
 
+    #[test]
+    fn a_worker_that_never_starts_a_turn_ends_after_the_first_turn_wait_and_says_why() {
+        let p = Policy::default();
+        let start = Instant::now();
+        for (quiet, which) in [(true, "a session that reports nothing"), (false, "a tab that reads working with no turn")] {
+            let (stuck, mut t) = (Seen::Starting { quiet }, Timers::default());
+            assert_eq!(verdict(MIN, stuck, &mut t, start, &p, false), None, "{which}: its first look");
+            assert_eq!(verdict(MIN, stuck, &mut t, start + FIRST_TURN_WAIT - Duration::from_secs(1), &p, false), None, "{which}: short of the wait");
+            assert_eq!(verdict(MIN, stuck, &mut t, start + FIRST_TURN_WAIT, &p, false), Some(End::NeverStarted), "{which}: no first turn after the wait");
+        }
+        // A worker that started its turn is never ended for it, however long it then works or waits.
+        let mut t = Timers::default();
+        assert_eq!(verdict(MIN, Seen::Starting { quiet: true }, &mut t, start, &p, false), None);
+        for minute in [3, 5, 30, 3 * 60] {
+            assert_eq!(verdict(MIN, Seen::Tab { running: true, quiet: false }, &mut t, start + minute * MIN, &p, false), None, "a started worker at {minute} min");
+        }
+        // A box others delegate from waits on its workers, never on its own start.
+        let mut t = Timers::default();
+        for minute in [0, 5, 60] {
+            assert_eq!(verdict(MIN, Seen::Starting { quiet: true }, &mut t, start + minute * MIN, &p, true), None, "delegating at {minute} min");
+        }
+        // Its max life and budget still bound it.
+        assert_eq!(verdict(p.max_life, Seen::Starting { quiet: true }, &mut Timers::default(), start, &p, false), Some(End::Expired));
+        assert_eq!(ended_because(&End::NeverStarted), "the worker never started: its session stopped at a startup screen");
+        assert_eq!(box_end_error(&p, &End::NeverStarted).as_deref(), Some("Upstash Box: the worker never started: its session stopped at a startup screen"));
+        assert_eq!(release_for(&End::NeverStarted), BoxEndRelease::Once);
+    }
+
+    #[test]
+    fn a_worker_that_never_started_is_told_with_the_end_of_its_screen_and_no_folder_or_key() {
+        let p = Policy::default();
+        let error = box_end_error(&p, &End::NeverStarted).unwrap();
+        let shown = "/home/boxuser/pinned/app · ❯ No, exit · Yes, I trust this folder · Enter to confirm · Esc to cancel sk-ant-oat01-ABCDEFGHIJKLMNOPQRSTUVWX";
+        let told = quoting_screen(error.clone(), &End::NeverStarted, Some(shown));
+        assert!(told.starts_with(&format!("{error}; its screen shows: ")), "{told}");
+        assert!(told.contains("Yes, I trust this folder · Enter to confirm · Esc to cancel"), "{told}");
+        for hidden in ["/home", "boxuser", "sk-ant-oat01", "ABCDEFGHIJKLMNOP"] {
+            assert!(!told.contains(hidden), "{hidden} in {told}");
+        }
+        assert_eq!(quoting_screen(error.clone(), &End::NeverStarted, None), error, "no screen, no quote");
+        assert_eq!(quoting_screen("Upstash Box: it went offline".into(), &End::Offline, Some(shown)), "Upstash Box: it went offline", "only a worker that never started quotes it");
+    }
+
     fn spec_with(budget_usd: Option<f64>) -> RunSpec {
         RunSpec { folder: String::new(), repo: Some("https://github.com/o/r.git".into()), args: vec!["--name".into(), "r".into()], env: vec![], token: None, account: None, budget_usd }
     }
@@ -2640,6 +2708,7 @@ mod tests {
             Phase::Ending(End::Idle),
             Phase::Ending(End::TabClosed),
             Phase::Ending(End::Done),
+            Phase::Ending(End::NeverStarted),
             Phase::Ending(End::Failed("the bootstrap failed: curl: (22) 404".into())),
         ] {
             let (stored, reason) = phase.stored();
@@ -2757,7 +2826,12 @@ mod tests {
 
         /// Runs the script once and returns what the node it launched saw as `PINNED_BOX`, if it launched one.
         fn start(&self) -> Option<String> {
-            let script = start_script("fake-login", None);
+            self.start_for(None)
+        }
+
+        /// As `start`, for a box that clones `repo`.
+        fn start_for(&self, repo: Option<&str>) -> Option<String> {
+            let script = start_script("fake-login", repo);
             let script = script.replace("DIR=/workspace/home/.pinned", &format!("DIR={}", self.dir.display()));
             assert!(script.contains(&format!("DIR={}\n", self.dir.display())), "the script no longer sets DIR on its own line");
             let _ = std::fs::remove_file(self.dir.join("started"));
@@ -2830,6 +2904,39 @@ mod tests {
         assert_eq!(refused_for_an_hour(&access, "fixed-row").await, (false, 0, true), "the fixed box's node left");
         // The same refusals end a fresh box's node, so the check above can fail.
         assert_eq!(refused_for_an_hour(&access, "fresh-row").await, (true, 1, false), "a fresh box's node stayed");
+    }
+
+    /// The `node` on this machine's PATH, which writes Claude Code's config in the start script.
+    #[cfg(target_os = "linux")]
+    fn real_node() -> std::path::PathBuf {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        std::env::split_paths(&path).map(|dir| dir.join("node")).find(|node| node.is_file()).expect("these tests run the start script's config step with node, and no node is on PATH")
+    }
+
+    // The script launches the node with `setsid`, which macOS lacks; a box only ever runs on Linux.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_start_script_trusts_the_clone_and_each_worktree_under_it() {
+        let run = StartRun::new();
+        std::fs::remove_file(run.bin.join("node")).unwrap();
+        std::os::unix::fs::symlink(real_node(), run.bin.join("node")).unwrap();
+        std::fs::write(run.dir.join("account.json"), "{}").unwrap();
+        let clone = run.home.join("pinned/app");
+        let worktree = clone.join(".claude/worktrees/fix-login");
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(clone.join(".claude/worktrees/notes.txt"), "not a folder").unwrap();
+        std::fs::write(run.home.join(".claude.json"), r#"{"projects":{"/elsewhere":{"hasTrustDialogAccepted":false,"allowedTools":["Bash"]}}}"#).unwrap();
+        let _ = run.start_for(Some("acme/app"));
+        let config: serde_json::Value = serde_json::from_slice(&std::fs::read(run.home.join(".claude.json")).unwrap()).unwrap();
+        let trusted = |folder: &std::path::Path| config["projects"][folder.display().to_string()]["hasTrustDialogAccepted"] == true;
+        assert!(trusted(&run.home), "{config}");
+        assert!(trusted(&clone), "the clone: {config}");
+        assert!(trusted(&worktree), "a worktree under the clone, where a worker runs: {config}");
+        assert!(config["projects"].get(clone.join(".claude/worktrees/notes.txt").display().to_string()).is_none(), "a file is no folder: {config}");
+        assert_eq!(config["projects"]["/elsewhere"], serde_json::json!({"hasTrustDialogAccepted": false, "allowedTools": ["Bash"]}), "another folder stays as it was");
+        assert_eq!(config["hasCompletedOnboarding"], true);
+        let settings: serde_json::Value = serde_json::from_slice(&std::fs::read(run.home.join(".claude/settings.json")).unwrap()).unwrap();
+        assert_eq!(settings, serde_json::json!({"skipDangerousModePermissionPrompt": true}), "no permission beyond the bypass warning");
     }
 
     #[cfg(unix)]
