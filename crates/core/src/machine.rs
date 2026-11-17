@@ -14433,6 +14433,50 @@ Have another model review a risky change before it goes ahead.";
 
     #[test]
     #[cfg(unix)]
+    fn a_team_boxs_price_download_that_hangs_holds_no_lock_another_caller_needs() {
+        let RunCostBox { dir, m, .. } = run_costs_box("run-costs-download-hangs");
+        let (started, on_start) = std::sync::mpsc::channel();
+        let (release, gate) = std::sync::mpsc::channel::<()>();
+        // Dropping `release` lets every download waiting on `gate` go on.
+        let gate = Mutex::new(gate);
+        *m.list_rates.lock().unwrap() = Arc::new(move || {
+            let _ = started.send(());
+            let _ = gate.lock().unwrap().recv();
+            usage::RateTable::new()
+        });
+        let now = Instant::now();
+        let first = { let m = m.clone(); std::thread::spawn(move || m.meter_rates_at(now).len()) };
+        on_start.recv_timeout(Duration::from_secs(5)).expect("the download started");
+        let (answered, answer) = std::sync::mpsc::channel();
+        let second = { let m = m.clone(); std::thread::spawn(move || answered.send(m.meter_rates_at(now).len())) };
+        let waited = answer.recv_timeout(Duration::from_secs(2));
+        drop(release);
+        first.join().unwrap();
+        let _ = second.join();
+        assert_eq!(waited, Ok(0), "the second caller gets no list, so the ceiling, without waiting on the download");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_team_boxs_failing_price_download_is_tried_at_most_once_a_minute() {
+        let RunCostBox { dir, m, .. } = run_costs_box("run-costs-download-retry");
+        let tries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = tries.clone();
+        *m.list_rates.lock().unwrap() = Arc::new(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            usage::RateTable::new()
+        });
+        let t0 = Instant::now();
+        for at in [0, 1, 30, 59, 60, 61, 119, 120] {
+            m.meter_rates_at(t0 + Duration::from_secs(at));
+        }
+        assert_eq!(tries.load(Ordering::SeqCst), 3, "tried at 0 s, 60 s and 120 s");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn a_team_boxs_session_not_live_for_a_pass_keeps_its_earlier_total() {
         let RunCostBox { dir, m, sent, subject, tab, transcript, .. } = run_costs_box("run-costs-not-live");
         let t0 = Instant::now();
