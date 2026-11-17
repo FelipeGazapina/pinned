@@ -9388,6 +9388,13 @@ impl ExtendLockHolder {
     fn release(self) {
         self.runtime.block_on(self.held.batch_execute("commit")).unwrap();
     }
+
+    /// Ends the connection of a hub's turn once it waits on a lock held here, as a Postgres that
+    /// drops it does.
+    fn end_waiting_turn(&self) {
+        let sql = "select pg_terminate_backend(pid) from pg_stat_activity where datname = current_database() and pid <> pg_backend_pid() and pid <> $1 and query like '%pinned-extend-%' and wait_event_type = 'Lock'";
+        wait_for("a turn waiting on the lock", || !self.runtime.block_on(self.watcher.query(sql, &[&self.pid])).unwrap().is_empty());
+    }
 }
 
 /// `asks`, the extend_box args of ana's agent, sent at once as the hub takes them from her machine,
@@ -9735,6 +9742,24 @@ impl StallingPostgres {
     fn stall(&self, stalled: bool) {
         self.stalled.store(stalled, Ordering::SeqCst);
     }
+}
+
+/// An ask whose turn connection ends while it waits on the box's lock did nothing: it hears the
+/// hub is busy, writes no refusal, and the same request id asks again and waits for the owner.
+#[test]
+fn an_extend_box_ask_whose_turn_connection_ends_in_its_lock_is_busy_and_asked_again() {
+    let ExtendSetup { hub, account, ana, mut owner, machine, .. } = extend_setup("extend_turn_ended");
+    let lock = ExtendLockHolder::take(&hub.database, account, &[&machine]);
+    let account = hub.runtime.block_on(hub.hub().account(account)).unwrap();
+    let ask = timed_extend(&hub, &account, &ana, &machine, 0.5, Some("r-ended"));
+    lock.end_waiting_turn();
+    let (refused, _) = hub.runtime.block_on(ask).unwrap();
+    lock.release();
+    assert_eq!(refused, Err(pinned_core::wire::HUB_BUSY.to_owned()));
+    assert_eq!(refused_extends(&mut owner), 0, "the ask wrote no refusal");
+    let (again, _) = hub.runtime.block_on(timed_extend(&hub, &account, &ana, &machine, 0.5, Some("r-ended"))).unwrap();
+    assert_eq!(again.as_ref().map(|a| a["outcome"].clone()), Ok(json!("pending")), "the same request id asks again: {again:?}");
+    assert_eq!(waiting_actions(&mut owner), ["extend_box"]);
 }
 
 /// An ask whose turn connection Postgres takes and never answers did nothing: it hears the hub is
