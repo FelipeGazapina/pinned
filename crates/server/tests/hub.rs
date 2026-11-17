@@ -9369,10 +9369,15 @@ fn decided(client: &mut Client, id: &Value) -> (Value, Value) {
 /// Ends the account's box on `machine` as removing its machine does, its Upstash delete held
 /// until the permit closes, so its row stays ending: the permit and the end, once the delete is held.
 fn end_box_held(hub: &TestHub, account: uuid::Uuid, machine: &str) -> (Arc<tokio::sync::Semaphore>, tokio::task::JoinHandle<Result<bool, String>>) {
+    end_box_held_on(hub, &hub.runtime, hub.hub(), account, machine)
+}
+
+/// `end_box_held`, ended by the hub `running` on `runtime`: this hub, or its twin.
+fn end_box_held_on(hub: &TestHub, runtime: &tokio::runtime::Runtime, running: &Arc<pinned_server::hub::Hub>, account: uuid::Uuid, machine: &str) -> (Arc<tokio::sync::Semaphore>, tokio::task::JoinHandle<Result<bool, String>>) {
     let held = Arc::new(tokio::sync::Semaphore::new(0));
     hub.boxes.state.lock().unwrap().held_deletes = Some(held.clone());
-    let (running, machine) = (hub.hub().clone(), machine.parse().unwrap());
-    let ending = hub.runtime.spawn(async move {
+    let (running, machine) = (running.clone(), machine.parse().unwrap());
+    let ending = runtime.spawn(async move {
         let account = running.account(account).await?;
         running.boxes.end_for_machine(&running, &account, machine).await
     });
@@ -9424,6 +9429,40 @@ fn a_deleted_box_row_closes_the_extend_box_asks_that_wait_for_it() {
     wait_for("the reaper to delete the row", || count_on(&hub.database, &format!("select count(*) from boxes where machine = '{machine}'")) == 0);
     assert_eq!(waiting_ids(&mut owner), [kept["id"].clone()], "only the ask for the box that runs still waits");
     assert_eq!(decided(&mut owner, &asked["id"]), (json!("denied"), json!(BOX_ENDED)));
+}
+
+/// An ask stored as its box ends never waits. Checked while the box still ran, it is stored only
+/// after another hub moved the box to ending and closed its waiting asks: once stored it finds the
+/// box ending, and is closed and refused.
+#[test]
+fn an_extend_box_ask_stored_as_its_box_ends_is_closed_and_refused() {
+    let ExtendSetup { hub, account, ana, mut owner, machine, .. } = extend_setup("extend_closed_race");
+    // A row of the test's own under the key the ask is stored with, in a transaction left open: the
+    // ask's insert waits on it, after the ask's check, until it rolls back.
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let blocker = runtime.block_on(async {
+        let (client, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        client.batch_execute("begin").await.unwrap();
+        let (id, origin) = (uuid::Uuid::new_v4(), ana.machine.parse::<uuid::Uuid>().unwrap());
+        let insert = "insert into agent_confirmations (id, account, machine, tab, role, action, args, request_id) values ($1, $2, $3, $4, 'session', 'extend_box', '{}', 'r-race')";
+        client.execute(insert, &[&id, &account, &origin, &ana.tab]).await.unwrap();
+        client
+    });
+    let ask = {
+        let (dir, tab, machine) = (ana.dir.clone(), ana.tab.clone(), machine.clone());
+        std::thread::spawn(move || extend_as(&dir, &tab, &machine, 0.5, Some("r-race")))
+    };
+    let stored = "select count(*) from pg_stat_activity where wait_event_type = 'Lock' and query like 'insert into agent_confirmations%'";
+    wait_for("the ask's insert to wait", || count_on(&hub.database, stored) == 1);
+    // This hub's one connection waits on that insert, so its twin ends the box, as another replica would.
+    let (twin_runtime, twin) = hub.twin();
+    let (deleted, ending) = end_box_held_on(&hub, &twin_runtime, &twin.hub, account, &machine);
+    runtime.block_on(blocker.batch_execute("rollback")).unwrap();
+    assert_eq!(ask.join().unwrap(), Err("this box is already ending".into()), "stored after its box ended, the ask is refused");
+    assert_eq!(waiting_ids(&mut owner), Vec::<Value>::new(), "and does not wait");
+    deleted.close();
+    assert_eq!(twin_runtime.block_on(ending).unwrap(), Ok(true));
 }
 
 /// Asks for different boxes of one account made at once, with one place left under the account's
