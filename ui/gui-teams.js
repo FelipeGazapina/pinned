@@ -188,6 +188,9 @@ try {
   const kept = JSON.parse(load(TEAMS_KEY) ?? "null");
   if (kept && typeof kept.id === "string" && kept.id) teamsNow = { id: kept.id, name: String(kept.name ?? ""), role: kept.role === "owner" ? "owner" : "member", credential: kept.credential ?? {}, me: typeof kept.me === "string" && kept.me ? kept.me : null };
 } catch {}
+// A team remembered from the last run shows its home once, at the first list from the hub: until the hub answers,
+// boot still shows the personal thread, and only then can a page open over it.
+let teamsStartHome = teamsNow !== null;
 
 /** The team this viewer works in, `{id, name, role, credential, me}`, or null for the personal account.
  * `me` is the viewer's own account id. The wire's `Team` names only the owner's (`owner`), so `me` is set
@@ -214,14 +217,27 @@ function teamsRemember() {
   save(TEAMS_KEY, teamsNow ? JSON.stringify(teamsNow) : null);
 }
 
-/** Makes `team` (a Team of the list, or null for the personal account) the current one. */
-function teamsSelect(team) {
+/** A team page is open: a `team-*` page the shell knows (the Calls, bot, group, run, invites and create pages). */
+const teamPageShown = () => {
+  const page = document.body.dataset.page ?? "";
+  return page.startsWith("team-") && page in SHELL_PAGES;
+};
+
+/** Makes `team` (a Team of the list, or null for the personal account) the current one. A change of team sets the
+ * main area: a team opens its home, and the personal account closes a team page so the thread shows. A page that is
+ * not a team's is left as it is. `home: false` is for a caller that opens its own page right after. */
+function teamsSelect(team, { home = true } = {}) {
   const before = teamsNow?.id ?? null;
   teamsNow = team ? teamView(team) : null;
   teamsRemember();
   drawTeamsButton();
   drawTeamsWhere();
-  if ((teamsNow?.id ?? null) !== before) document.dispatchEvent(new CustomEvent("teams:changed", { detail: teamsNow }));
+  const now = teamsNow?.id ?? null;
+  if (now === before) return;
+  document.dispatchEvent(new CustomEvent("teams:changed", { detail: teamsNow }));
+  if (!home) return;
+  if (now) teamsOpenHome();
+  else if (teamPageShown()) closePage();
 }
 
 /** The teams the person belongs to. Also keeps the current team's name, role and keys up to date,
@@ -243,6 +259,10 @@ async function teamsList() {
   // No team event tells of a held line or its end: the nav shows what this read found.
   if (typeof tcNavDraw === "function") tcNavDraw();
   teamsPollArm();
+  if (teamsStartHome) {
+    teamsStartHome = false;
+    if (teamsNow) teamsOpenHome();
+  }
   return teamsKnown;
 }
 
@@ -635,7 +655,7 @@ function teamWizardCopy(i) {
 /** Makes the new team the one the person works in, then `then` runs. */
 function teamWizardFinish(then) {
   const team = teamWizard.team;
-  if (team) teamsSelect(team);
+  if (team) teamsSelect(team, { home: false });
   then();
 }
 
@@ -767,7 +787,7 @@ async function joinAttach(withProjects) {
   }
   teamJoining.busy = false;
   if (failed) return renderJoin();
-  teamsSelect(teamJoining.team);
+  teamsSelect(teamJoining.team, { home: false });
   teamsOpenHome();
 }
 
