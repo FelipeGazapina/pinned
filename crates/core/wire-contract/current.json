@@ -53199,6 +53199,13 @@
                   "null"
                 ]
               },
+              "by": {
+                "description": "Who runs the step, as a short label: the worker's thread title, else its model. None for a step the\nCaptain reports itself.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "fixes": {
                 "type": "array",
                 "items": {
@@ -53357,6 +53364,13 @@
                 "format": "double"
               },
               "task": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "by": {
+                "description": "Who runs the step, as a short label: the worker's thread title, else its model. None for a step the\nCaptain reports itself.",
                 "type": [
                   "string",
                   "null"
