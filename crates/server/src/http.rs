@@ -1212,6 +1212,10 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
                 // and a thread's workers on other machines, which `remote` stamps with this socket.
                 // Its sessions act as the user only through `surface`, which checks, audits and holds
                 // each act, and never decide a confirmation.
+                let act_tab = match &call {
+                    HubCall::Act { act } => Some(act.tab.clone()),
+                    _ => None,
+                };
                 let surfaced = match call {
                     call if team => return forward_team_box(hub, account, machine, socket, id, call, CallerFound { tab: from_tab, vouched }).await,
                     HubCall::Act { act } => crate::surface::act(&hub, &account, &machine, act).await,
@@ -1220,7 +1224,7 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
                     call => return forward(hub, account, machine, socket, id, call, CallerFound { tab: from_tab, vouched }).await,
                 };
                 if let Err(e) = &surfaced {
-                    eprintln!("pinned-server: machine {machine}'s agent act failed: {e}");
+                    hub.failed_call(failed_call_line(&machine, act_tab.as_deref().filter(|_| false), e));
                 }
                 account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, surfaced)));
             });
@@ -1255,7 +1259,7 @@ async fn forward_team_box(hub: Arc<Hub>, account: Arc<Account>, machine: String,
     );
     if !allowed {
         let refused = format!("a team's box may not send {}", surface::cmd_of(&call));
-        eprintln!("pinned-server: machine {machine} of team {} was refused: {refused}", account.id);
+        hub.failed_call(failed_call_line(&machine, None, &refused));
         return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, Err(refused))));
     }
     // A run's callback is held to the run the hub bound to this machine (`team_runs.box`), never
@@ -1271,7 +1275,7 @@ async fn forward_team_box(hub: Arc<Hub>, account: Arc<Account>, machine: String,
         Ok(_) => "this box's run is not of that workflow on that subject".to_owned(),
         Err(e) => e,
     };
-    eprintln!("pinned-server: machine {machine} of team {} was refused: {refused}", account.id);
+    hub.failed_call(failed_call_line(&machine, None, &refused));
     account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, Err(refused))));
 }
 
@@ -1383,7 +1387,7 @@ async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: 
         (None, ..) => Err("a machine may only forward a workflow session's callbacks".into()),
     };
     if let Err(e) = &result {
-        eprintln!("{}", failed_call_line(&machine, tab.as_deref(), e));
+        hub.failed_call(failed_call_line(&machine, tab.as_deref(), e));
     }
     account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
 }

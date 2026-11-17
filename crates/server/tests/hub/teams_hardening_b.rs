@@ -379,3 +379,17 @@ fn a_team_machine_with_no_live_run_bound_to_it_gets_every_session_callback_refus
     assert_eq!(super::teams_slack_notice::posts("xoxb-dev-vouch-three").len(), 0);
     assert_eq!(stored_runs(&hub, tb.team), before);
 }
+
+/// A team box's refused call is logged with the tab it came from.
+#[test]
+fn a_team_boxs_refused_call_is_logged_with_its_tab() {
+    let (hub, tb, _) = two_boxes("teams_b_box_refused_log", "xoxb-dev-vouch-four");
+    let idle = "6f1c0b1e-0000-4000-8000-0000000000dd";
+    let mut c = team_machine(&hub, tb.team, idle, "team-box-d-machine-token", &[(&tb.workflow, json!({ "issue": "team-1" }))]);
+    keep_failed_calls(&hub);
+    assert_eq!(call_found_in(&mut c, 1, callbacks(&tb.workflow, "team-1")[0].clone(), Some("tab-0"), Some(true)), Err(NO_RUN.into()));
+    let not_sent = "a team's box may not send overview";
+    assert_eq!(call_found_in(&mut c, 2, json!({ "cmd": "overview" }), Some("tab-0"), Some(true)), Err(not_sent.into()));
+    let line = |refused: &str| format!("pinned-server: machine {idle}'s hub call from tab tab-0 failed: {refused}");
+    assert_eq!(failed_calls(&hub), [line(NO_RUN), line(not_sent)]);
+}

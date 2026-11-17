@@ -12194,6 +12194,28 @@ fn act_refuses_a_tab_that_runs_nothing_on_a_machine_that_runs_the_workflow() {
     assert_eq!((asked_of("slack.com:443"), asked_of("api.linear.app:443")), reached, "nothing left the hub");
 }
 
+/// From now on, keeps the log line of every machine call `hub` refuses or fails.
+fn keep_failed_calls(hub: &TestHub) {
+    *hub.hub().failed_calls.lock().unwrap() = Some(vec![]);
+}
+
+/// The log lines `keep_failed_calls` kept so far.
+fn failed_calls(hub: &TestHub) -> Vec<String> {
+    hub.hub().failed_calls.lock().unwrap().clone().unwrap_or_default()
+}
+
+/// A workflow call refused through `act` is logged with the tab it came from.
+#[test]
+fn a_refused_act_is_logged_with_its_tab() {
+    let mut w = workflows_of("act_refused_log");
+    w.run(&w.a.clone(), issue("uuid-1"));
+    keep_failed_calls(&w.hub);
+    let refused = w.act(Via::Own, &w.plain, "stage", json!({ "connector": w.a, "issue": "uuid-1", "stage": "coding" }));
+    assert_eq!(refused, Err(ONLY_ITS_SESSION.into()));
+    let line = format!("pinned-server: machine {}'s hub call from tab {} failed: {ONLY_ITS_SESSION}", w.ana.machine, w.plain);
+    assert_eq!(failed_calls(&w.hub), [line]);
+}
+
 /// The thread's three CLI calls that act through a workflow's connections.
 const THREAD_CLI: [&str; 3] = ["slack reply on it", "linear create x y", "linear take ENG-7"];
 

@@ -225,6 +225,10 @@ pub struct Hub {
     /// sets it, to run a claim between the backstop's read and its end; it is taken on use.
     #[doc(hidden)]
     pub hold_backstop: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
+    /// While some, every machine call the hub refused or failed adds its log line here too. Only a
+    /// test sets it, to read which session a refusal names.
+    #[doc(hidden)]
+    pub failed_calls: Mutex<Option<Vec<String>>>,
     /// Every account's `PgStorage` state, for the census and the flush on stop.
     persisted: Mutex<HashMap<Uuid, Arc<Persisted>>>,
     /// Reporting an issue from the app: pinned's GitHub repository and what the hub keeps about it.
@@ -360,7 +364,7 @@ impl Hub {
         let public_url = public_url.trim_end_matches('/').to_owned();
         let boxes = Boxes::new(box_api, box_policy, &public_url);
         let reports = crate::reports::Reports::start(&db, reports).await;
-        Ok(Arc::new_cyclic(|me| Hub { me: me.clone(), db, public_url, signup, boxes, team_policy, team_join_fails: Mutex::default(), convex_http, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default(), unlocks: Mutex::default(), going_away: tokio::sync::watch::channel(false).0, held_expired: Mutex::default(), refuse_run_saves: Arc::default(), hold_backstop: Mutex::default(), persisted: Mutex::default(), reports, dev }))
+        Ok(Arc::new_cyclic(|me| Hub { me: me.clone(), db, public_url, signup, boxes, team_policy, team_join_fails: Mutex::default(), convex_http, accounts: Mutex::default(), sockets: AtomicU64::new(1), agent_locks: Mutex::default(), unlocks: Mutex::default(), going_away: tokio::sync::watch::channel(false).0, held_expired: Mutex::default(), refuse_run_saves: Arc::default(), hold_backstop: Mutex::default(), failed_calls: Mutex::default(), persisted: Mutex::default(), reports, dev }))
     }
 
     /// Tells every socket to close with a going away frame. The hub stops serving afterwards.
@@ -560,6 +564,14 @@ impl Hub {
         let team = crate::teams::db::is_team(&self.db, id).await?;
         let fresh = Arc::new(Account { id, email, team, live: Mutex::default(), connectors: OnceCell::new(), watching: AtomicBool::new(false), updates: Mutex::default(), projects: Mutex::default(), tastes: Default::default(), marks: Default::default(), task_records: Default::default(), repo_reads: Default::default() });
         Ok(self.accounts.lock().unwrap().entry(id).or_insert(fresh).clone())
+    }
+
+    /// Logs a machine call the hub refused or failed (`http::failed_call_line`).
+    pub(crate) fn failed_call(&self, line: String) {
+        eprintln!("{line}");
+        if let Some(kept) = self.failed_calls.lock().unwrap().as_mut() {
+            kept.push(line);
+        }
     }
 
     #[doc(hidden)]
