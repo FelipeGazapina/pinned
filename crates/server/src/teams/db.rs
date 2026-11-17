@@ -511,18 +511,24 @@ pub async fn set_run_subject(db: &Db, team: Uuid, run: Uuid, subject: &Subject) 
 
 /// Holds a place for run `run` of an admitted trigger's event on `subject`, before anything
 /// outside pinned hears of the event: the cap counts it, and its session's `open` takes it.
-/// Written on `held`, the connection of the team's turn, so it commits with the turn.
-pub async fn insert_reserved(held: &Client, team: Uuid, run: &Run, subject: &Subject) -> Result<(), String> {
+/// Written on `held`, the connection of the team's turn, so it commits with the turn. False, with
+/// nothing written and the turn still usable, when the bot has a live run the turn did not read:
+/// one another path wrote, which the database refuses as a second (`crate::db::ONE_LIVE_RUN`).
+pub async fn insert_reserved(held: &Client, team: Uuid, run: &Run, subject: &Subject) -> Result<bool, String> {
     let id = Uuid::parse_str(&run.id).map_err(|_| "a run's id is a uuid")?;
-    let started_by = serde_json::Value::String(run.started_by.clone());
-    held
+    let (started_by, subject) = (serde_json::Value::String(run.started_by.clone()), json(subject)?);
+    held.batch_execute("savepoint reserve").await.map_err(err)?;
+    let inserted = held
         .execute(
             "insert into team_runs (id, team, workflow, started_by, state, subject, reserved, reserved_at) values ($1, $2, $3, $4, 'working', $5, true, now())",
-            &[&id, &team, &run.workflow, &started_by, &json(subject)?],
+            &[&id, &team, &run.workflow, &started_by, &subject],
         )
-        .await
-        .map_err(err)
-        .map(drop)
+        .await;
+    match inserted {
+        Ok(_) => held.batch_execute("release savepoint reserve").await.map_err(err).map(|()| true),
+        Err(e) if crate::db::one_live_run_refused(&e) => held.batch_execute("rollback to savepoint reserve").await.map_err(err).map(|()| false),
+        Err(e) => Err(err(e)),
+    }
 }
 
 /// The live run of bot `workflow` that holds a place for `subject` and has opened no session yet.
@@ -655,7 +661,7 @@ const CALL_COLUMNS: &str = "c.id, c.run, r.workflow, c.situation, c.asked, c.que
      c.escalated_at is not null, c.answer, c.outcome, c.team, c.step_hash";
 
 /// The run states a run that has not ended is in.
-const LIVE: &str = "('working', 'waiting', 'taken_over')";
+pub(crate) const LIVE: &str = "('working', 'waiting', 'taken_over')";
 
 fn run_of(r: &Row) -> Run {
     Run {
