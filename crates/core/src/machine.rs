@@ -4057,8 +4057,8 @@ impl Machine {
         use crate::delegate::{Access, Caller, Claim, Mode, NewTask, Parent, Thread};
         let (home, global, ceiling) = self.tab(caller, |t| (history::project_of(&t.cwd), global::is_global(&t.env), t.child_access()))?;
         let (running, ruled, cwd, account, model, title, access) = self.tab(tab, |t| {
-            let plan = t.reads_only();
-            (t.live() || t.starting, matches!(role_of(&t.env), Some((Role::Orchestrator, _))) || global::is_global(&t.env) || taste::is_chat(&t.env), t.cwd.clone(), t.account.clone(), t.model.clone(), t.title.clone(), Access::derive(t.bypass, plan))
+            let reads_only = t.reads_only();
+            (t.live() || t.starting, matches!(role_of(&t.env), Some((Role::Orchestrator, _))) || global::is_global(&t.env) || taste::is_chat(&t.env), t.cwd.clone(), t.account.clone(), t.model.clone(), t.title.clone(), Access::derive(t.bypass, reads_only))
         })?;
         if running || self.thread_task(tab, false).is_some() {
             return self.start_claude(tab, cols, rows);
