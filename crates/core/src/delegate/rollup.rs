@@ -157,6 +157,7 @@ impl Delegates {
         ids.iter()
             .filter_map(|id| {
                 let task = tasks.iter().find(|task| &task.id == id)?;
+                let rolled = rollup_of(&tasks, vec![task]);
                 let work = match task.state {
                     WorkState::Working => crate::plan::Work::Working,
                     WorkState::WaitingForChildren => crate::plan::Work::WaitingForChildren,
@@ -175,7 +176,8 @@ impl Delegates {
                     waits_on_user: task.run.user_wait.is_some() || task.remote.as_ref().is_some_and(|remote| remote.waiting.is_some()),
                     review,
                     failure: task.limit.clone().or_else(|| task.error.clone()),
-                    cost: Some(rollup_of(&tasks, vec![task]).total_usd),
+                    // A worker whose cost is unknown leaves the total short, so the tree has no cost to show.
+                    cost: (rolled.unknown == 0).then_some(rolled.total_usd),
                     ended_at: task.ended,
                 })
             })

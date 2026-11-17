@@ -213,7 +213,7 @@ pub struct TaskFacts {
     pub review: Review,
     /// The limit or error that failed the task, shown as the step's reason.
     pub failure: Option<String>,
-    /// The task's rollup cost in dollars.
+    /// The task's rollup cost in dollars. None while a worker under the task has no known cost.
     pub cost: Option<f64>,
     /// Unix milliseconds when the task ended. None while it has not ended.
     pub ended_at: Option<u64>,
