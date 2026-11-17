@@ -3004,7 +3004,8 @@ impl Connectors {
             let fire = start.fire.map(|fire| (start.connector.clone(), fire));
             let event = Event::Graph { connector: start.connector, subject: start.subject, input: start.input, at: now.to_rfc3339() };
             match (self.start_graph(event).await, fire) {
-                // A team's Held or Waiting answer would count as a start here too; change triggers are inert on a team, so none gets here today.
+                // A team's Held or Waiting answer would count as a start here too; change triggers
+                // are inert on a team, so none gets here today.
                 (Ok(()), Some((workflow, fire))) => self.fire_started(&workflow, &fire),
                 (Ok(()), None) => {}
                 (Err(e), fire) => {
