@@ -3610,6 +3610,8 @@ mod tests {
         assert!(script.contains("\ntask='task-1a2b3c4d'\n"), "{script}");
         assert!(!script.contains("mode="), "one path, a confirmed private repository's: {script}");
         assert!(script.contains("\ngithub='acme/site'\npinned='/workspace/home/.pinned'\n"), "the checked repository and the folder of box.env");
+        assert_eq!(script.matches("\nssh=").count(), 1, "{script}");
+        assert!(script.contains("\nssh=''\n"), "origin over https alone: the ssh switch is the tests' alone");
         assert!(rescue_script("https://gitlab.com/acme/site.git", TASK).unwrap().contains("\ngithub=''\n"), "no repository on github.com to bind the push to");
         assert!(script.contains("cd \"$HOME/pinned/site\" "), "{script}");
         assert!(!script.contains("{{"), "every part is filled");
@@ -4072,11 +4074,11 @@ mod tests {
         }
 
         /// The task's rescue script as the hub fills it, but for the folder of `box.env`, which is
-        /// this run's.
+        /// this run's, and for taking origin over ssh, as this run's stand-in github.com serves it.
         fn script(&self) -> String {
             let pinned = self.pinned.to_str().unwrap();
             assert!(!pinned.contains('\''));
-            rescue_script_in(pinned, SITE, TASK).unwrap()
+            over_ssh(&rescue_script_in(pinned, SITE, TASK).unwrap())
         }
 
         /// Runs the rescue as `rescue_with`, and answers all it printed: its output and its errors.
@@ -4991,6 +4993,14 @@ mod tests {
             assert_eq!(run.remote_branches(), "refs/heads/main\n", "{change}");
             assert!(run.writes().iter().all(|w| !w.starts_with(PUSH)), "{change}: {:?}", run.writes());
         }
+    }
+
+    /// `script`, a rescue script the hub filled, taking origin over ssh as well as https: the tests'
+    /// switch, which the hub never sets.
+    #[cfg(unix)]
+    fn over_ssh(script: &str) -> String {
+        assert_eq!(script.matches("\nssh=''\n").count(), 1, "{script}");
+        script.replacen("\nssh=''\n", "\nssh=1\n", 1)
     }
 
     /// A PATH of this run's `bin` and a folder of links to every program in /usr/bin and /bin but awk.

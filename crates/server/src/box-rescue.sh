@@ -29,6 +29,9 @@ task='{{task}}'
 # box's `box.env` and the node's pid file.
 github='{{github}}'
 pinned='{{dir}}'
+# Empty as the hub sends it, so origin is taken only over https. Only the tests, whose stand-in
+# github.com is served over ssh, set it to 1, to take origin's ssh forms as well.
+ssh=''
 answer() { echo "pinned-rescue: $1"; }
 cd "$HOME/pinned/{{repo}}" 2>/dev/null && git rev-parse --git-dir >/dev/null 2>&1 || { answer done; exit 0; }
 top=$(pwd)
@@ -103,8 +106,8 @@ found() {
 # lowered nothing, and what it printed is not taken.
 checked=$(printf '%s' "$github" | tr 'A-Z' 'a-z') || checked=''
 # Whether origin, as git reads it in the tree it runs in, fetches from and pushes to the checked
-# repository alone: one URL, on github.com, over https or ssh, with no other user, and its push URL
-# that same one. git expands insteadOf and pushInsteadOf in what it reads, and reads a worktree's
+# repository alone: one URL, on github.com, over https (or ssh, under the tests alone), with no
+# other user, and its push URL that same one. git expands insteadOf and pushInsteadOf in what it reads, and reads a worktree's
 # own config in that worktree.
 bound() {
   [ -n "$checked" ] || return 1
@@ -114,8 +117,11 @@ bound() {
   [ "$(git remote get-url --push --all origin 2>/dev/null)" = "$url" ] || return 1
   url=$(printf '%s' "$url" | tr 'A-Z' 'a-z') || return 1
   case "$url" in
-    "https://github.com/$checked" | "https://github.com/$checked.git" | "git@github.com:$checked" | "git@github.com:$checked.git" | \
-      "ssh://git@github.com/$checked" | "ssh://git@github.com/$checked.git") return 0 ;;
+    "https://github.com/$checked" | "https://github.com/$checked.git") return 0 ;;
+  esac
+  [ "$ssh" = 1 ] || return 1
+  case "$url" in
+    "git@github.com:$checked" | "git@github.com:$checked.git" | "ssh://git@github.com/$checked" | "ssh://git@github.com/$checked.git") return 0 ;;
   esac
   return 1
 }
