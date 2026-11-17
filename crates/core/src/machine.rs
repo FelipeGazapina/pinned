@@ -10173,6 +10173,30 @@ pub(crate) mod tests {
         assert_eq!(go_settings(&ChildEnv::none().of(&parent)).get("ANTHROPIC_BASE_URL").map(String::as_str), Some("own-ANTHROPIC_BASE_URL"));
     }
 
+    /// What a login account's tab starts with when the node started with `parent`.
+    fn login_tab_env(parent: &[(&str, &str)]) -> Vec<(String, String)> {
+        let m = machine();
+        let parent: Vec<(String, String)> = parent.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let claude = Account::builtin(Provider::Claude);
+        m.launch.child_env(&claude, "tab-1", &m.launch_env(&claude, vec![])).of(&parent)
+    }
+
+    #[test]
+    fn a_login_session_started_beside_the_go_gateway_without_its_key_gets_neither_the_gateway_nor_its_token() {
+        // A wrapper that unset every PINNED_ variable still leaves the Go gateway and its key.
+        let base = crate::opencode_go::BASE_URL;
+        assert_eq!(go_settings(&login_tab_env(&[("ANTHROPIC_BASE_URL", base), ("ANTHROPIC_AUTH_TOKEN", "x")])), BTreeMap::new());
+        assert_eq!(go_settings(&login_tab_env(&[("ANTHROPIC_BASE_URL", &format!("{base}/")), ("ANTHROPIC_AUTH_TOKEN", "x")])), BTreeMap::new());
+        let local = [("PINNED_OPENCODE_GO_BASE", "http://127.0.0.1:8798"), ("ANTHROPIC_BASE_URL", "http://127.0.0.1:8798/"), ("ANTHROPIC_AUTH_TOKEN", "x")];
+        assert_eq!(go_settings(&login_tab_env(&local)), BTreeMap::new(), "the gateway override");
+    }
+
+    #[test]
+    fn a_login_session_keeps_the_users_own_proxy_and_token() {
+        let own = [("ANTHROPIC_BASE_URL", "https://example.invalid/anthropic"), ("ANTHROPIC_AUTH_TOKEN", "own-token")];
+        assert_eq!(go_settings(&login_tab_env(&own)), own.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<BTreeMap<_, _>>());
+    }
+
     /// Writes a Go account and its key without validation, so a launch test stays offline.
     #[cfg(unix)]
     fn write_go_account(root: &Path) {
