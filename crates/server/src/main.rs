@@ -151,6 +151,7 @@ fn hub(args: &[String]) -> Result<(), String> {
         access: pinned_server::http::Access { trusted_proxy, max_accounts, hashing: None },
         // A `--dev` hub files only on a local fake its override names, and reports nothing without one.
         reports: reports_config(dev_mode),
+        sync_limits: pinned_server::sync_limits::from_env(&|name| std::env::var(name).ok(), &mut |warning| eprintln!("pinned-server: {warning}")),
     };
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     runtime.block_on(async {

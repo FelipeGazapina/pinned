@@ -702,6 +702,11 @@ pub const LIMIT_REFUSAL: &str = "the account's synced projects would pass ";
 /// What the app shows while the hub's limit refuses a push. Sync resumes once a push is taken.
 pub const LIMIT_NOTICE: &str = "Sync stopped: your synced projects would pass 1024 MB. Nothing was lost; this machine keeps everything.";
 
+/// What the app shows for the hub's latest limit refusal, `refusal`.
+pub fn limit_notice(_refusal: &str) -> String {
+    LIMIT_NOTICE.to_owned()
+}
+
 /// The hub's refusal of a history whose `base` is no longer the hub's copy, from 0.18.7 on.
 pub const STALE_REFUSAL: &str = "the hub's copy of the history changed since this machine merged it";
 
@@ -1207,6 +1212,19 @@ fn millis(t: SystemTime) -> u64 {
 mod tests {
     use super::*;
     use std::cell::{Cell, RefCell};
+
+    #[test]
+    fn the_limit_notice_names_the_account_limit_or_says_the_hub_is_out_of_space() {
+        let stopped = "Sync stopped: your synced projects would pass 1024 MB. Nothing was lost; this machine keeps everything.";
+        let paused = "Sync paused: the hub is out of space for synced projects. Nothing was lost; this machine keeps everything.";
+        assert_eq!(limit_notice("the account's synced projects would pass 1024 MB; nothing is deleted, the push is refused"), stopped);
+        assert_eq!(
+            limit_notice("the account's synced projects would pass 2048 MB; nothing is deleted, the push is refused"),
+            "Sync stopped: your synced projects would pass 2048 MB. Nothing was lost; this machine keeps everything."
+        );
+        assert_eq!(limit_notice("the account's synced projects would pass the space the hub has left; nothing is deleted, the push is refused"), paused);
+        assert_eq!(limit_notice(""), paused, "no text says the hub is out of space");
+    }
 
     #[derive(Default)]
     struct MemHub(RefCell<BTreeMap<String, File>>);

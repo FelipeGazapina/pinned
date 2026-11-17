@@ -1630,6 +1630,8 @@ mod tests {
         room: std::cell::Cell<bool>,
         lists: std::cell::Cell<usize>,
         pushes: std::cell::Cell<usize>,
+        /// What the hub refuses a growing push with; the account's 1024 MB unless a test says.
+        refusal: std::cell::RefCell<Option<String>>,
     }
 
     impl sync::Hub for FullHub {
@@ -1642,7 +1644,8 @@ mod tests {
             let replaced: u64 = files.iter().filter_map(|f| self.files.borrow().get(&f.entry.path).map(|old| old.entry.size)).sum();
             let incoming: u64 = files.iter().map(|f| f.entry.size).sum();
             if !self.room.get() && incoming > replaced {
-                return Err("the account's synced projects would pass 1024 MB; nothing is deleted, the push is refused".into());
+                let account = "the account's synced projects would pass 1024 MB; nothing is deleted, the push is refused";
+                return Err(self.refusal.borrow().clone().unwrap_or_else(|| account.into()));
             }
             for file in files {
                 self.files.borrow_mut().insert(file.entry.path.clone(), file);
@@ -1830,6 +1833,18 @@ mod tests {
         shared.sync_now.store(true, Ordering::SeqCst);
         syncer.cycle(&shared, &hub, &machine, &file);
         assert_eq!(machine.call(Call::SyncLimit), Ok(Value::Null), "a push the hub takes clears it");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_push_the_full_hub_refuses_shows_that_the_hub_is_out_of_space() {
+        let (dir, file, machine, shared, _app) = refused_project("limit-hub-full");
+        let hub = FullHub::default();
+        *hub.refusal.borrow_mut() = Some("the account's synced projects would pass the space the hub has left; nothing is deleted, the push is refused".into());
+        let mut syncer = Syncer { shared_projects: HashSet::from(["github.com/acme/app".to_owned()]), ..Syncer::default() };
+        syncer.cycle(&shared, &hub, &machine, &file);
+        let paused = "Sync paused: the hub is out of space for synced projects. Nothing was lost; this machine keeps everything.";
+        assert_eq!(machine.call(Call::SyncLimit), Ok(Value::String(paused.into())));
         let _ = std::fs::remove_dir_all(dir);
     }
 

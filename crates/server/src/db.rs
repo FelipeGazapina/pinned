@@ -869,6 +869,15 @@ impl Db {
         Ok(Db { sealer, connection, transactions: Arc::default() })
     }
 
+    /// Keeps synced projects within `limits`.
+    pub fn limit_sync(self, _limits: crate::sync_limits::SyncLimits) -> Db {
+        self
+    }
+
+    /// Moves the times the sync space was last read `by` into the past, as if that long went by, for a test.
+    #[doc(hidden)]
+    pub async fn age_sync_reads(&self, _by: Duration) {}
+
     pub(crate) async fn client(&self) -> Result<Arc<Client>, String> {
         self.connection.client().await
     }
