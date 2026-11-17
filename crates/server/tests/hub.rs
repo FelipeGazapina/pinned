@@ -11777,6 +11777,30 @@ fn an_account_over_the_sync_limit_takes_a_push_that_does_not_grow_it_and_refuses
     assert_eq!(push(&mut ana, vec![file("claude/memory/later.md", "under the limit again")]), Ok(Value::Null), "9 sessions of 100 MiB leave room");
 }
 
+#[test]
+fn a_sync_refusal_says_nothing_is_deleted_and_keeps_the_prefix_released_nodes_match_on() {
+    let hub = TestHub::start("sync_refusal_text");
+    let url = hub.url.clone();
+    let (_, _, mut ana) = signed_in(&url, "ana@example.test");
+    let project = "github.com/acme/site";
+    let push = |client: &mut Client, files: Vec<Value>| client.hub(json!({ "cmd": "sync_push", "project": project, "files": files }));
+    // Thirteen sessions of 100 MiB, already past the 1024 MB the account may keep.
+    admin_on(
+        &hub.database,
+        &format!(
+            "insert into project_files (account, project, path, sha, modified, data) \
+             select a.id, '{project}', 'claude/big-' || n || '.jsonl', 'big' || n, 1, convert_to(repeat('x', 104857600), 'UTF8') \
+             from accounts a, generate_series(1, 13) n where a.email = 'ana@example.test'"
+        ),
+    );
+    let text = "one more note";
+    let grows = json!({ "path": "claude/memory/more.md", "sha": sha256_hex(text.as_bytes()), "modified": 1, "data": base64::engine::general_purpose::STANDARD.encode(gzip_bytes(text.as_bytes())) });
+    let refused = push(&mut ana, vec![grows]).unwrap_err();
+    // Released 0.18.6 nodes recognise this refusal by this literal prefix alone, so it must stay byte for byte.
+    assert!(refused.starts_with("the account's synced projects would pass "), "{refused}");
+    assert_eq!(refused, "the account's synced projects would pass 1024 MB; nothing is deleted, the push is refused");
+}
+
 /// Runs `then` right after the hub answers a list, so another machine's push lands between this
 /// machine's list and its push.
 struct ListThen<'a> {
