@@ -531,3 +531,13 @@ test("opening the note focuses the field on the visible surface, not a hidden co
   assert.equal(visible.focused, true);
   assert.equal(hidden.focused, false);
 });
+
+// The phone sheet is 390 px wide. The field's flex basis is 0, so the Approve label (up to 60% of the
+// row) and Cancel leave it about 47 px: a note reads as "e o" instead of "keep the old API". A basis
+// of 160 px sends the field to a row of its own, full width, with Approve and Cancel under it.
+test("on the phone the note field gets its own row, so Approve with a long label cannot squeeze it", () => {
+  const phoneCss = read("gui-phone-thread.css");
+  const field = /\.ask-sheet \.approve-note input \{([^}]*)\}/.exec(phoneCss)?.[1] ?? "";
+  const basis = Number(/flex:\s*1\s+1\s+(\d+)px/.exec(field)?.[1] ?? 0);
+  assert.ok(basis >= 160, `the field's flex basis is ${basis}px; it needs at least 160px to wrap`);
+});
