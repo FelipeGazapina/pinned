@@ -563,6 +563,8 @@ struct Tab {
     cut_by_sleep: Option<CutBySleep>,
     /// The last failure was an API error, which a sleep window found later may still claim.
     api_error: bool,
+    /// The API or stream error the turn ended on, read from the transcript when the session went idle after it.
+    stopped_on_error: Option<String>,
     /// The session doesn't continue by itself when its usage limit lifts.
     held_at_limit: bool,
     /// The model every start of this tab passes as `--model`, picked for its conversation alone.
@@ -719,6 +721,7 @@ impl Tab {
             asleep: self.asleep,
             headless: self.headless && self.session.is_none(),
             stopped: self.stopped.clone().filter(|_| !self.live()),
+            stopped_on_error: self.stopped_on_error.clone(),
             questions: None,
             read_only: self.child_access() == crate::delegate::Access::ReadOnly,
             plans,
@@ -813,6 +816,8 @@ pub struct Machine {
     sleeps: Mutex<sleep::Watch>,
     sync_file: Option<PathBuf>,
     sync_loop_holds_state: AtomicBool,
+    /// Set while the sync loop's last push was refused at the account's size limit, and no push has been taken since.
+    sync_limited: AtomicBool,
     projects: Mutex<Vec<projects::Project>>,
     projects_file: Option<PathBuf>,
     accounts: Accounts,
@@ -1038,6 +1043,7 @@ impl Machine {
             sleeps: Mutex::new(sleep::Watch::with_window(dir.as_ref().and_then(|d| sleep::load(&d.join("sleep.json"))))),
             sync_file: dir.as_ref().map(|d| d.join("sync.json")),
             sync_loop_holds_state: AtomicBool::new(false),
+            sync_limited: AtomicBool::new(false),
             projects: Mutex::new(projects),
             projects_file,
             accounts,
@@ -1248,6 +1254,7 @@ impl Machine {
             Call::SetFolder { tab, path } => json(self.set_folder(&tab, &path)?),
             Call::ListProjects => json(self.list_projects()),
             Call::SyncStopped => json(self.sync_stopped()),
+            Call::SyncLimit => json(self.sync_limit()),
             Call::State => json(self.state()),
             Call::ResetSync => {
                 if let Some(file) = &self.sync_file {
@@ -4158,6 +4165,14 @@ impl Machine {
         self.sync_loop_holds_state.store(held, Ordering::SeqCst);
     }
 
+    pub(crate) fn hold_sync_limit(&self, limited: bool) {
+        self.sync_limited.store(limited, Ordering::SeqCst);
+    }
+
+    fn sync_limit(&self) -> Option<String> {
+        self.sync_limited.load(Ordering::SeqCst).then(|| sync::LIMIT_NOTICE.to_owned())
+    }
+
     fn sync_stopped(&self) -> Option<String> {
         if self.sync_loop_holds_state.load(Ordering::SeqCst) {
             return None;
@@ -5193,6 +5208,13 @@ impl Machine {
         let page = thread::read(&file, thread::last_page(&file)).ok()?;
         let (_, summary) = thread::pending_tool(&page.items)?;
         Some(summary.to_owned()).filter(|summary| !summary.is_empty())
+    }
+
+    /// The API or stream error the tab's transcript ends on, when the session went idle after one.
+    fn stopped_error(&self, tab: &str) -> Option<String> {
+        let file = self.transcript(tab).ok()?;
+        let page = thread::read(&file, thread::last_page(&file)).ok()?;
+        thread::turn_error(&page.items)
     }
 
     /// Tells the machine that delegated each task running here for another machine what its
@@ -6420,6 +6442,7 @@ impl Machine {
             resume_at: None,
             cut_by_sleep: None,
             api_error: false,
+            stopped_on_error: None,
             held_at_limit: false,
             model: None,
             made: None,
@@ -6632,6 +6655,7 @@ impl Machine {
         // Claude says it waits for input a while after every finished turn too, which asks nothing.
         let was_done = self.tab(tab, |t| t.status == Some(AgentStatus::Done)).unwrap_or(false);
         let detail = (event.status == AgentStatus::NeedsInput && !was_done).then(|| self.pending_ask(tab)).flatten();
+        let stopped = (event.status == AgentStatus::NeedsInput).then(|| self.stopped_error(tab)).flatten();
         let changed = self.tab(tab, |t| {
             let before = (t.interrupted, t.resume_at, t.held_at_limit, t.cut_by_sleep);
             let window = self.sleeps.lock().unwrap().window();
@@ -6676,6 +6700,7 @@ impl Machine {
                 t.question = None;
             }
             t.ask_detail = detail;
+            t.stopped_on_error = stopped;
             t.status = Some(event.status);
             t.owes_turn &= event.status == AgentStatus::NeedsInput;
             // The turn that starts may end the shells an earlier one left, and its end says which still run.
@@ -8878,6 +8903,26 @@ pub(crate) mod tests {
     }
 
     const API_ERROR: &str = "API Error: Unable to connect to API (ECONNRESET)";
+
+    #[test]
+    fn a_turn_that_ends_on_an_api_error_then_idles_keeps_the_error_line_it_stopped_on() {
+        let root = temp("stopped-on-error");
+        let config = root.join("config");
+        std::fs::create_dir_all(config.join("accounts/work/projects/-app")).unwrap();
+        std::fs::write(config.join("accounts.json"), r#"[{"id": "work", "provider": "claude", "name": "Work"}]"#).unwrap();
+        let transcript = [
+            r#"{"type":"user","uuid":"u1","timestamp":"2026-10-29T10:00:00Z","message":{"content":"Port the grid."}}"#,
+            r#"{"type":"assistant","uuid":"a1","timestamp":"2026-10-29T10:01:00Z","isApiErrorMessage":true,"message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"API Error: The response stopped arriving.\nThe response above may be incomplete."}]}}"#,
+        ];
+        std::fs::write(config.join("accounts/work/projects/-app/s1.jsonl"), transcript.map(|l| l.to_owned() + "\n").concat()).unwrap();
+        let m = Machine::new(launch(), Some(config), None, |_| {});
+        let work = m.accounts.get("work").unwrap();
+        let tab = m.add_tab("/work/app".into(), work, vec![], vec![], false, Some("s1".into()));
+        m.record_status(&tab, &ended(&tab, AgentStatus::Working, None, None));
+        m.record_status(&tab, &ended(&tab, AgentStatus::NeedsInput, Some("Claude is waiting for your input"), None));
+        let view = serde_json::to_value(m.view(&tab).unwrap()).unwrap();
+        assert_eq!(view["stopped_on_error"], "API Error: The response stopped arriving.", "the first line of the error the transcript ends on");
+    }
 
     #[test]
     fn an_api_error_inside_the_sleep_window_is_cut_by_the_sleep() {

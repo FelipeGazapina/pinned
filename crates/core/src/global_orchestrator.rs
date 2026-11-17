@@ -466,6 +466,9 @@ pub struct Waiting {
 pub enum WaitingKind {
     NeedsInput,
     Failed,
+    /// The turn ended on an API or stream error, and the session waits for a message to try again.
+    /// Its `message` is that error's first line, not a question.
+    StoppedOnError,
     /// An agent's action waits on the user's approval in the app. Only a node's `waiting` tool
     /// lists it, from `HubCall::Confirmations`; the hub's `Overview` never does.
     Confirm,
@@ -516,6 +519,7 @@ pub fn waiting_kind(tab: &TabView) -> Option<WaitingKind> {
     }
     match tab.status {
         Some(AgentStatus::Failed) => Some(WaitingKind::Failed),
+        Some(AgentStatus::NeedsInput) if tab.running && tab.stopped_on_error.is_some() => Some(WaitingKind::StoppedOnError),
         Some(AgentStatus::NeedsInput) if tab.running && tab.interrupted => Some(WaitingKind::NeedsInput),
         _ => None,
     }
@@ -620,12 +624,17 @@ pub fn overview_at(machines: &[MachineSnapshot], now: u64) -> Overview {
                 None => projects.push(OverviewProject { key, name: project.name.clone(), repo: project.repo.clone(), checkouts: vec![checkout] }),
             }
         }
-        // What waits on the user is the sessions in those two states, so the two lists never differ.
+        // What waits on the user is the sessions in those three states, so the two lists never differ.
         for tab in tabs.iter().filter(|t| !t.orchestrator_global) {
             let session = session(machine, tab, now);
+            // A worker whose error stopped it, and whose Captain started another attempt, is no longer listed.
+            if session.state == SessionState::StoppedOnError && superseded(tab, tabs) {
+                continue;
+            }
             let kind = match session.state {
                 SessionState::WaitingOnInput => Some(WaitingKind::NeedsInput),
                 SessionState::Error => Some(WaitingKind::Failed),
+                SessionState::StoppedOnError => Some(WaitingKind::StoppedOnError),
                 _ => None,
             };
             if let Some(kind) = kind {
@@ -677,6 +686,12 @@ fn reports_alive(version: &str) -> bool {
 /// started and has not reported yet. A worker in this state already reported to its parent.
 fn finished(tab: &TabView) -> bool {
     tab.status.is_some() && SessionState::of(tab) == SessionState::Idle
+}
+
+/// Whether `tab` is a worker that its Captain replaced: a later worker of the same Captain with the same
+/// title, a second attempt at the task. `tabs` are the machine's tabs.
+fn superseded(tab: &TabView, tabs: &[TabView]) -> bool {
+    tab.role == Some(Role::Worker) && tab.spawned_by.is_some() && tab.title.is_some() && tabs.iter().any(|later| later.role == Some(Role::Worker) && later.spawned_by == tab.spawned_by && later.title == tab.title && later.opened > tab.opened)
 }
 
 /// One session of the account, as the global orchestrator's `sessions` tool lists it.
@@ -743,6 +758,9 @@ pub enum SessionState {
     WaitingOnInput,
     /// It stopped on a failure, a usage limit included (`waiting_kind` is `failed`).
     Error,
+    /// Its last turn ended on an API or stream error, and a message tries it again (`waiting_kind` is
+    /// `stopped_on_error`). Its message is that error's first line.
+    StoppedOnError,
     /// Its session is not running. A message starts it again.
     Settled,
 }
@@ -751,6 +769,7 @@ impl SessionState {
     pub fn of(tab: &TabView) -> SessionState {
         match waiting_kind(tab) {
             Some(WaitingKind::Failed) => SessionState::Error,
+            Some(WaitingKind::StoppedOnError) => SessionState::StoppedOnError,
             Some(WaitingKind::NeedsInput | WaitingKind::Confirm) => SessionState::WaitingOnInput,
             None if !tab.running => SessionState::Settled,
             None if tab.status == Some(AgentStatus::Working) || tab.orchestrator_turn => SessionState::Running,
@@ -800,6 +819,7 @@ fn session(machine: &MachineSnapshot, tab: &TabView, now: u64) -> Session {
         pr: tab.pr.clone(),
         message: match state {
             SessionState::WaitingOnInput | SessionState::Error => tab.message.clone(),
+            SessionState::StoppedOnError => tab.stopped_on_error.clone(),
             _ => offer_of(tab, now).map(str::to_owned),
         },
         state,
@@ -1322,10 +1342,54 @@ mod tests {
             let expected = match case["waits"].as_str() {
                 Some("needs_input") => Some(SessionState::WaitingOnInput),
                 Some("failed") => Some(SessionState::Error),
+                Some("stopped_on_error") => Some(SessionState::StoppedOnError),
                 _ => None,
             };
-            assert_eq!(Some(state).filter(|s| matches!(s, SessionState::WaitingOnInput | SessionState::Error)), expected, "{}", case["case"]);
+            assert_eq!(Some(state).filter(|s| matches!(s, SessionState::WaitingOnInput | SessionState::Error | SessionState::StoppedOnError)), expected, "{}", case["case"]);
         }
+    }
+
+    #[test]
+    fn a_turn_that_stopped_on_an_api_error_is_stopped_on_error_in_waiting_sessions_and_read_session() {
+        const ERROR: &str = "API Error: The response stopped arriving. The response above may be incomplete.";
+        let site = [project("/w/site", Some("github.com/o/site"))];
+        let mut stopped = serde_json::to_value(view("tab-s-1", "/w/site/.claude/worktrees/pinned-1", Some(Role::Worker), true, Some(AgentStatus::NeedsInput))).unwrap();
+        stopped.as_object_mut().unwrap().extend(serde_json::json!({ "interrupted": true, "title": "Port the grid", "message": "Claude is waiting for your input", "updated": 1794234244, "stopped_on_error": ERROR }).as_object().unwrap().clone());
+        let tabs = [serde_json::from_value::<TabView>(stopped).unwrap()];
+        let machines = [MachineSnapshot { id: "m-1", name: "MacBook", online: true, version: "0.18.7", projects: &site, tabs: &tabs, problem: None }];
+        let overview = overview(&machines);
+        let waiting = serde_json::to_value(&overview.waiting).unwrap();
+        assert_eq!(waiting[0]["kind"], "stopped_on_error", "waiting() lists it as stopped on an error, not as a question");
+        assert_eq!(waiting[0]["message"], ERROR, "with the error's first line");
+        assert_eq!(waiting[0].get("ask"), None, "an error asks nothing");
+        let listed = serde_json::to_value(overview.sessions.clone().unwrap()).unwrap();
+        assert_eq!((&listed[0]["state"], &listed[0]["message"]), (&serde_json::json!("stopped_on_error"), &serde_json::json!(ERROR)), "sessions() says the same state");
+        assert_eq!(crate::reading::state_of(&tabs[0]), ("stopped_on_error", Some(ERROR.to_owned())), "read_session() says the same state");
+    }
+
+    #[test]
+    fn a_worker_stopped_on_an_api_error_is_not_listed_once_its_captain_started_another_attempt() {
+        const ERROR: &str = "API Error: Connection lost mid-response. The response above may be incomplete.";
+        let site = [project("/w/site", Some("github.com/o/site"))];
+        let captain = view("tab-c-1", "/w/site", Some(Role::Orchestrator), true, Some(AgentStatus::Done));
+        let attempt = |id: &str, status: AgentStatus, stopped: Option<&str>| {
+            let mut json = serde_json::to_value(view(id, "/w/site/.claude/worktrees/pinned-1", Some(Role::Worker), true, Some(status))).unwrap();
+            json.as_object_mut().unwrap().extend(serde_json::json!({ "spawned_by": "tab-c-1", "title": "Fix the form", "interrupted": stopped.is_some(), "message": stopped.map(|_| "Claude is waiting for your input"), "stopped_on_error": stopped }).as_object().unwrap().clone());
+            serde_json::from_value::<TabView>(json).unwrap()
+        };
+        let first = attempt("tab-w-1", AgentStatus::NeedsInput, Some(ERROR));
+        let second = attempt("tab-w-2", AgentStatus::Working, None);
+        let replaced = [captain.clone(), first.clone(), second];
+        let machines = [MachineSnapshot { id: "m-1", name: "MacBook", online: true, version: "0.18.7", projects: &site, tabs: &replaced, problem: None }];
+        let board = overview(&machines);
+        assert_eq!(serde_json::to_value(&board.waiting).unwrap(), serde_json::json!([]), "the replaced attempt asks nothing");
+        let listed = serde_json::to_value(board.sessions.clone().unwrap()).unwrap();
+        let ids: Vec<&str> = listed.as_array().unwrap().iter().filter_map(|s| s["id"].as_str()).collect();
+        assert!(!ids.contains(&"tab-w-1"), "the replaced attempt is not listed at all: {ids:?}");
+        let alone = [captain, first];
+        let machines = [MachineSnapshot { id: "m-1", name: "MacBook", online: true, version: "0.18.7", projects: &site, tabs: &alone, problem: None }];
+        let solo = overview(&machines);
+        assert_eq!(serde_json::to_value(&solo.waiting).unwrap()[0]["kind"], "stopped_on_error", "with no newer attempt it is still listed");
     }
 
     #[test]
