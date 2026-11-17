@@ -9818,6 +9818,24 @@ pub(crate) mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn the_limits_probe_runs_on_the_built_in_accounts_home_and_inherits_no_session_variable() {
+        let root = tempfile::tempdir().unwrap();
+        let own = root.path().join("claude-own");
+        let probe = |name: &str, env: Vec<(String, String)>| {
+            let bin = env_recorder(root.path(), name);
+            let m = parent::with(env.clone(), || Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, bin.clone())]), ..launch() }, Some(root.path().join(name).with_extension("config")), Some("/repo".into()), |_| {}));
+            let _ = parent::with(env, || m.call(Call::UsageLimits));
+            bin
+        };
+        let exported = vec![("PATH".to_owned(), "/usr/bin:/bin".to_owned()), ("CLAUDE_CONFIG_DIR".to_owned(), own.display().to_string())];
+        assert_spawned_with_only(&probe("claude-exported", exported.clone()), &[("CLAUDE_CONFIG_DIR", own.to_str().unwrap())]);
+        let mut inherited = exported.clone();
+        inherited.push((ROLE_ENV.to_owned(), "inherited-xyz".to_owned()));
+        assert_spawned_with_only(&probe("claude-inherited", inherited), &[]);
+    }
+
+    #[test]
     fn a_plain_thread_starts_only_with_what_its_kind_sets() {
         let m = machine();
         let account = Account::builtin(Provider::Claude);
