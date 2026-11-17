@@ -62,6 +62,9 @@ function app({ answers = {}, team = OWNER_TEAM, email = "bruno@acme.dev", pages 
       context.SHELL_PAGES[name]?.show?.();
     },
     closePage: () => context.opened.push("closed"),
+    // The team's Connect AI account opener, a cross-file global: it records the page it was asked from.
+    connectOpened: [],
+    openTeamConnect: () => context.connectOpened.push(context.document.body.dataset.page),
     // The calls UI's run opener, a cross-file global.
     runsOpened: [],
     openTeamRun: (id) => {
@@ -967,4 +970,24 @@ test("every reason the hub counts a skipped event under has its own label", asyn
   assert.equal(new Set(rows.map((r) => r[1])).size, reasons.length, "no two reasons share a label");
   assert.deepEqual(rows.find((r) => r[0] === "replies_dropped"), ["replies_dropped", "Replies dropped (the run never started)", "8"]);
   assert.deepEqual(Object.keys(a.read("TB_TEXT.bot.skippedLabels")).sort(), [...reasons].sort(), "and the app labels no reason the hub lacks");
+});
+
+test("the bot page's needKeys note: the owner gets Connect AI account, which opens the connect step from this page", async () => {
+  const a = app({ team: { ...OWNER_TEAM, credential: { upstash: false, claude: false, github: false, slack: false } }, answers: botAnswers({ bots: [bot({ on: false })] }) });
+  await openBot(a);
+  const t = text(a.page());
+  assert.ok(t.includes("The team needs its Upstash key and Claude token before a bot can run."));
+  assert.ok(!a.page().includes("team's settings"), "no settings page is named");
+  assert.deepEqual(a.control("connect-ai"), { disabled: false });
+  await a.click("connect-ai");
+  assert.deepEqual(a.context.connectOpened, ["team-bot"]);
+});
+
+test("a member is asked to have the owner connect the team's AI account, by name, and gets no button", async () => {
+  const a = app({ team: { ...MEMBER_TEAM, credential: { upstash: false, claude: false, github: false, slack: false } }, answers: botAnswers({ bots: [bot({ on: false })] }) });
+  await openBot(a);
+  assert.equal(a.control("connect-ai"), null);
+  assert.ok(text(a.page()).includes("Ask Ana Prado to connect the team's AI account."));
+  assert.ok(!a.page().includes("team's settings"), "no settings page is named");
+  assert.deepEqual(a.context.connectOpened, []);
 });

@@ -49,7 +49,13 @@ function app({ answers = {}, projects = [], pages = [], stored = null, raw = nul
     navigator: { clipboard: { writeText: (t) => ((context.copied = t), Promise.resolve()) } },
     opened: [],
     closed: 0,
-    openPage: (name) => context.opened.push(name),
+    // The shell's openPage: records the page, makes it current and shows it.
+    openPage: (name) => {
+      context.opened.push(name);
+      context.document.body.dataset.page = name;
+      context.SHELL_PAGES[name]?.show?.();
+    },
+    shellPage: () => (context.document.body.dataset.page in context.SHELL_PAGES ? context.document.body.dataset.page : null),
     closePage: () => context.closed++,
     // The bots UI's opener of the Create a bot page, a cross-file global.
     openTeamBotNew: () => context.opened.push("team-bot-new"),
@@ -758,4 +764,69 @@ test("the create wizard no longer promises a team chat", () => {
   assert.ok(t.includes("Groups of people the bots call when they need a yes or an answer."), t);
   assert.ok(!/chat/i.test(t), "chat is not in 0.18.6");
   assert.ok(!/chat/i.test(a.run("JSON.stringify(TEAMS_TEXT.nameHas)")));
+});
+
+// ---- Connect AI account: step 3 for the team the owner is in, opened from the team nav or the bot page ----
+
+const KEYS_OFF = { upstash: false, claude: false, github: false, slack: false };
+const CONNECT_TOKEN_SENTENCE = "The token comes from the Claude account your terminal is signed in to. Sign in to the team's own Claude account first.";
+
+/** North Studio, as `role` and `credential` say, opened from `origin` (the page the owner is on) by Connect AI account. */
+async function atConnect(origin, { role = "owner", credential = KEYS_OFF } = {}) {
+  const team = { ...ACME, role, credential };
+  const a = app({ answers: { list: () => [team] }, stored: { id: "t1", name: "North Studio", role, credential }, pages: [origin, "team-calls"] });
+  await a.context.teamsList();
+  a.context.document.body.dataset.page = origin;
+  a.run("openTeamConnect()");
+  return a;
+}
+
+test("Connect AI account opens step 3 for the current team: its name and key state, and nothing sent but the list", async () => {
+  const a = await atConnect("team-calls", { credential: { ...KEYS_OFF, upstash: true } });
+  const t = text(a.page());
+  assert.match(t, /Connect AI account North Studio/);
+  assert.match(t, /The team has its own AI account/);
+  assert.match(t, /Upstash key Opens the boxes the bots work in Connected/);
+  assert.match(t, /Claude token for boxes Signs the bots in to Claude inside the box Connect now/);
+  assert.ok(!/Step \d of 4|Who works with you|Connect later/.test(t), "one step: no step list and no way on to the people step");
+  assert.deepEqual(a.frames.map((f) => f.op.op), ["list"]);
+});
+
+test("saving in Connect AI account sends the credential call with the team's id, and never a create, rename or invite", async () => {
+  const a = await atConnect("team-calls");
+  a.click("connect", { cred: "claude" });
+  const inputs = [{ dataset: { field: "name" }, value: "team" }, { dataset: { field: "token" }, value: "sk-ant-oat01-SECRET3" }];
+  a.listeners.submit({ preventDefault() {}, target: { closest: () => ({ dataset: { tm: "form", cred: "claude" }, querySelectorAll: () => inputs }) } });
+  await flush();
+  assert.deepEqual(a.frames.map((f) => f.op.op), ["list", "hub", "list"]);
+  assert.deepEqual(a.frames.find((f) => f.op.op === "hub"), { cmd: "team", team: "t1", op: { op: "hub", call: { cmd: "set_box_claude_token", name: "team", token: "sk-ant-oat01-SECRET3" } } });
+  assert.ok(!a.shown.some((h) => /SECRET3/.test(h)), "the token is never drawn");
+});
+
+test("Done and Back return to the page the owner came from, and create, rename or invite nothing", async () => {
+  const done = await atConnect("team-bot");
+  done.click("connect-done");
+  assert.equal(done.context.document.body.dataset.page, "team-bot");
+  assert.deepEqual(done.context.opened.at(-1), "team-bot");
+  const back = await atConnect("team-calls");
+  back.click("leave");
+  assert.deepEqual(back.context.opened.at(-1), "team-calls");
+  for (const a of [done, back]) assert.deepEqual(a.frames.map((f) => f.op.op).filter((op) => op !== "list"), [], "only the list is read");
+});
+
+test("a member cannot open Connect AI account: nothing opens and no call is sent", async () => {
+  const a = await atConnect("team-calls", { role: "member" });
+  assert.deepEqual(a.context.opened, []);
+  assert.deepEqual(a.frames.map((f) => f.op.op), ["list"]);
+});
+
+test("the Claude token field says where the token comes from, on step 3 and in Connect AI account", async () => {
+  const a = await atConnect("team-calls");
+  a.click("connect", { cred: "claude" });
+  assert.ok(text(a.page()).includes(CONNECT_TOKEN_SENTENCE), "the Claude token form");
+  a.click("connect", { cred: "upstash" });
+  assert.ok(text(a.page()).includes(CONNECT_TOKEN_SENTENCE), "the Claude token field of the Upstash form");
+  const wizard = await atStep3();
+  wizard.click("connect", { cred: "claude" });
+  assert.ok(text(wizard.page()).includes(CONNECT_TOKEN_SENTENCE), "the create wizard's step 3");
 });
