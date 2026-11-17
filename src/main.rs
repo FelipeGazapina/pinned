@@ -12,7 +12,7 @@ mod navigation;
 
 use background::{Background, Moment};
 use pinned_core::machine::{AppWindow, Launch, Machine, SelfUpdate};
-use pinned_core::wire::{Call, MachineEvent, TabId, UpdateStatus};
+use pinned_core::wire::{Call, MachineEvent, TabId, TabView, UpdateStatus};
 use pinned_core::taste::{TasteField, TastePatch, TasteScope, Tastes};
 use pinned_core::{agent, connectors, reminders, uploads};
 use std::path::PathBuf;
@@ -490,8 +490,9 @@ fn add_tray_or_go_without(app: &tauri::App) -> tauri::Result<()> {
 }
 
 /// A session's callback on a signed-out app: the workflow calls act through the app's own
-/// connectors, and every other callback needs the hub.
-fn signed_out(connectors: &connectors::Connectors, callback: agent::Message) -> Result<String, String> {
+/// connectors, and every other callback needs the hub. `tabs` are the machine's, and `vouch` what
+/// it found of the session the callback came from.
+fn signed_out(connectors: &connectors::Connectors, tabs: &[TabView], callback: agent::Message, vouch: &agent::Vouch) -> Result<String, String> {
     match callback {
         agent::Message::Stage { connector, subject, stage } => tauri::async_runtime::block_on(connectors.stage(&connector, &subject, stage)),
         agent::Message::SlackReply { connector, channel, thread, text } => {
@@ -653,9 +654,9 @@ fn main() {
                 | agent::Message::TaskCancel { .. }
                 | agent::Message::Capabilities { .. }
                 | agent::Message::Project { .. } => Err("the machine answers this itself".into()),
-                callback => match handle.state::<account::Account>().forward(callback, vouch) {
+                callback => match handle.state::<account::Account>().forward(callback, vouch.clone()) {
                     Ok(answer) => answer,
-                    Err(callback) => signed_out(&handle.state::<connectors::Connectors>(), callback),
+                    Err(callback) => signed_out(&handle.state::<connectors::Connectors>(), &handle.state::<Arc<Machine>>().tabs(), callback, &vouch),
                 },
             })?;
             let signed_in = app.state::<account::Account>().is_signed_in();
@@ -770,7 +771,62 @@ mod tests {
         let connectors = connectors::Connectors::new(connectors::FileStorage::new(dir.clone()), "pinned".into());
         let subject = agent::Subject::LinearIssue { issue: "uuid-1".into() };
         let run_set = agent::Message::RunSet { connector: "c1".into(), subject, name: "title".into(), value: "x".into() };
-        assert_eq!(signed_out(&connectors, run_set), Err(SIGNED_OUT.to_owned()));
+        assert_eq!(signed_out(&connectors, &[], run_set, &agent::Vouch::Tab("tab-1".into())), Err(SIGNED_OUT.to_owned()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A tab the machine reports, running workflow `connector` on `subject` when it names one.
+    fn tab(id: &str, connector: Option<&str>, subject: Option<agent::Subject>, running: bool) -> TabView {
+        let tab = serde_json::json!({ "id": id, "cwd": "/w", "bypass": false, "running": running, "status": null, "title": null, "message": null, "resume_at": null, "opened": 1 });
+        let mut tab: TabView = serde_json::from_value(tab).unwrap();
+        tab.connector = connector.map(str::to_owned);
+        tab.subject = subject;
+        tab
+    }
+
+    /// A signed-out app acts through its own connectors only for the session that runs that
+    /// workflow on that subject: never for another tab, a stopped one, or a session the machine
+    /// could not check.
+    #[test]
+    fn a_signed_out_app_acts_only_for_the_workflows_own_session() {
+        let dir = std::env::temp_dir().join(format!("pinned-signed-out-own-{}", std::process::id()));
+        let connectors = connectors::Connectors::new(connectors::FileStorage::new(dir.clone()), "pinned".into());
+        let run_now = agent::Subject::LinearIssue { issue: "run-now:1".into() };
+        let thread = agent::Subject::SlackThread { channel: "C1".into(), thread: "1.2".into() };
+        let tabs = [
+            tab("tab-1", Some("c1"), Some(run_now.clone()), true),
+            tab("tab-2", Some("c1"), Some(thread.clone()), true),
+            tab("tab-3", None, None, true),
+            tab("tab-4", Some("c2"), Some(run_now.clone()), true),
+            tab("tab-5", Some("c1"), Some(thread.clone()), false),
+        ];
+        let (channel, ts) = (|| "C1".to_owned(), || "1.2".to_owned());
+        let calls = || {
+            vec![
+                (agent::Message::Stage { connector: "c1".into(), subject: run_now.clone(), stage: agent::Stage::Coding }, "tab-1"),
+                (agent::Message::SlackReply { connector: "c1".into(), channel: channel(), thread: ts(), text: "on it".into() }, "tab-2"),
+                (
+                    agent::Message::LinearCreate { connector: "c1".into(), channel: channel(), thread: ts(), title: "x".into(), description: "y".into(), assignee: String::new() },
+                    "tab-2",
+                ),
+                (agent::Message::LinearTake { connector: "c1".into(), channel: channel(), thread: ts(), issue: "ENG-7".into() }, "tab-2"),
+            ]
+        };
+        for vouch in [agent::Vouch::Tab("tab-3".into()), agent::Vouch::Tab("tab-4".into()), agent::Vouch::Tab("tab-5".into()), agent::Vouch::Tab("tab-9".into()), agent::Vouch::Unchecked] {
+            for (call, _) in calls() {
+                let what = format!("{call:?} from {vouch:?}");
+                assert_eq!(signed_out(&connectors, &tabs, call, &vouch), Err(agent::ONLY_ITS_SESSION.to_owned()), "{what}");
+            }
+        }
+        // From its own tab each reaches the connectors, which answer without a key or a workflow.
+        let own: Vec<Result<String, String>> = calls().into_iter().map(|(call, own)| signed_out(&connectors, &tabs, call, &agent::Vouch::Tab(own.into()))).collect();
+        let past = vec![
+            Ok("Run now started this session, which has no Linear issue to move".to_owned()),
+            Err("the workflow was deleted".to_owned()),
+            Err("the workflow was deleted".to_owned()),
+            Err("Linear is not connected: connect it in pinned's Connectors settings".to_owned()),
+        ];
+        assert_eq!(own, past);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

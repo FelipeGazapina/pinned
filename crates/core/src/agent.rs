@@ -213,6 +213,10 @@ pub fn without_workflow(env: Vec<(String, String)>) -> Vec<(String, String)> {
 /// its machine.
 pub const OUTSIDE_EVERY_SESSION: &str = "this call comes from no session on this machine: run it from the workflow's session";
 
+/// What a workflow session's callback gets from a session that does not run that workflow on that
+/// subject.
+pub const ONLY_ITS_SESSION: &str = "only the session that runs this workflow can do that";
+
 /// The connector interactive box sessions run under. The hub sees their tabs through it, and the
 /// app treats their first prompt as the user's own rather than automation's.
 pub const INTERACTIVE_CONNECTOR: &str = "session";
