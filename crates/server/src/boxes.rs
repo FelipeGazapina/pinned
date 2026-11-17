@@ -515,6 +515,9 @@ pub async fn extend_of(hub: &Hub, account: &Account, machine: Uuid, extra_usd: f
 /// keeps apart from this one, so no other lock ever shares it.
 pub const EXTEND_KEY: &str = "hashtext('pinned-extend-box:' || $1::uuid::text), hashtext($2::uuid::text)";
 
+/// The key of the advisory lock of all of one account's extend asks, in the same two-key space.
+pub const EXTEND_ACCOUNT_KEY: &str = "hashtext('pinned-extend-account:' || $1::uuid::text), 0";
+
 /// One box's turn for its extends: a transaction on a connection of its own holding the box's
 /// `pg_advisory_xact_lock`. An agent's ask holds it from its check until it waits for the owner,
 /// and the owner's approval from marking it decided until its budget is set, so no ask is checked
@@ -526,6 +529,7 @@ pub const EXTEND_KEY: &str = "hashtext('pinned-extend-box:' || $1::uuid::text), 
 pub struct ExtendTurn {
     _line: tokio::sync::OwnedMutexGuard<()>,
     held: tokio_postgres::Client,
+    deadline: tokio::time::Instant,
 }
 
 /// How long an extend waits for its box's turn, as long as Postgres's lock timeout.
@@ -544,11 +548,25 @@ impl ExtendTurn {
         let deadline = tokio::time::Instant::now() + EXTEND_WAIT;
         let line = tokio::time::timeout_at(deadline, extend_line(account, machine).lock_owned()).await.map_err(|_| crate::db::BUSY.to_owned())?;
         let held = hub.db.own_client().await?;
-        // The advisory lock waits only for what is left of the deadline, whatever the session's lock timeout.
-        let left = deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis().max(1);
-        held.batch_execute(&format!("begin; set local lock_timeout = {left}")).await.map_err(crate::db::err)?;
-        held.execute(&format!("select pg_advisory_xact_lock({EXTEND_KEY})"), &[&account, &machine]).await.map_err(crate::db::err)?;
-        Ok(ExtendTurn { _line: line, held })
+        held.batch_execute("begin").await.map_err(crate::db::err)?;
+        let turn = ExtendTurn { _line: line, held, deadline };
+        turn.lock(&format!("select pg_advisory_xact_lock({EXTEND_KEY})"), &[&account, &machine]).await?;
+        Ok(turn)
+    }
+
+    /// The turn of all of the account's extend asks too, taken on the same connection after the
+    /// box's and within what is left of the same deadline, so asks for different boxes of one
+    /// account are counted one after another. Always box, then account: no two turns wait on each other.
+    pub async fn with_account(self, account: Uuid) -> Result<ExtendTurn, String> {
+        self.lock(&format!("select pg_advisory_xact_lock({EXTEND_ACCOUNT_KEY})"), &[&account]).await?;
+        Ok(self)
+    }
+
+    /// Takes an advisory lock, waiting only for what is left of the deadline, whatever the session's lock timeout.
+    async fn lock(&self, sql: &str, params: &[&(dyn tokio_postgres::types::ToSql + Sync)]) -> Result<(), String> {
+        let left = self.deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis().max(1);
+        self.held.batch_execute(&format!("set local lock_timeout = {left}")).await.map_err(crate::db::err)?;
+        self.held.execute(sql, params).await.map_err(crate::db::err).map(drop)
     }
 
     /// Frees the lock. What the turn guarded is already written, so a commit that fails only closes the connection.

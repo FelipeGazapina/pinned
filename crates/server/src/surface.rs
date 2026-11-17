@@ -251,16 +251,21 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
     // An extend that cannot run is refused now, with the text its run would give, so the owner is
     // never asked for it. Its run after the approval checks again. A repeat of an ask this session
     // made is answered as that ask, when it is held, and not checked again. The check and the hold
-    // happen in the box's turn, so two asks are never both checked before either waits.
+    // happen in the box's turn and then the account's, so two asks are never both checked before
+    // either waits, and the account never has more than `MAX_WAITING_EXTENDS_PER_ACCOUNT` waiting.
     let mut turn = None;
     if let Parsed::Hub(HubCall::ExtendBox { machine, extra_usd }) = &call {
         let machine = Uuid::parse_str(machine).map_err(|_| format!("this account has no machine {machine}"))?;
         // An ask that could be no extend is refused before it takes a turn and its connection.
         crate::boxes::extend_of(hub, account, machine, *extra_usd).await?;
-        let held = ExtendTurn::take(hub, account.id, machine).await?;
+        let held = ExtendTurn::take(hub, account.id, machine).await?.with_account(account.id).await?;
         if !asked_before(hub, account, caller, act).await? {
-            let waiting = waiting_extends(hub, account, machine).await?;
-            crate::boxes::extended(hub, account, machine, *extra_usd, waiting).await?;
+            let waiting = waiting_extends(hub, account).await?;
+            if waiting.len() >= MAX_WAITING_EXTENDS_PER_ACCOUNT {
+                return Err("too many box extends are waiting for the owner; answer some first".into());
+            }
+            let for_box = waiting.iter().filter(|(of, _)| *of == Some(machine)).map(|(_, usd)| usd).sum();
+            crate::boxes::extended(hub, account, machine, *extra_usd, for_box).await?;
         }
         turn = Some(held);
     }
@@ -307,9 +312,13 @@ async fn asked_before(hub: &Hub, account: &Account, caller: &Caller, act: &Agent
 /// no longer blocks them; its approval checks the box again, so it cannot pass the Box budget.
 const EXTENDS_COUNTED_FOR: Duration = Duration::from_secs(24 * 60 * 60);
 
-/// What the account's extends of the box behind `machine` that wait for the owner add: those
-/// asked within `EXTENDS_COUNTED_FOR`, each above zero.
-async fn waiting_extends(hub: &Hub, account: &Account, machine: Uuid) -> Result<f64, String> {
+/// How many extend asks of all of an account's boxes may wait for the owner at once, counted as
+/// `waiting_extends` counts them. One more is refused before it waits.
+const MAX_WAITING_EXTENDS_PER_ACCOUNT: usize = 10;
+
+/// The account's extends that wait for the owner, as the machine each is for and what it adds:
+/// those asked within `EXTENDS_COUNTED_FOR`, each above zero.
+async fn waiting_extends(hub: &Hub, account: &Account) -> Result<Vec<(Option<Uuid>, f64)>, String> {
     let since = (pinned_core::connectors::unix_millis() / 1000).saturating_sub(EXTENDS_COUNTED_FOR.as_secs()) as i64;
     Ok(hub
         .db
@@ -317,10 +326,9 @@ async fn waiting_extends(hub: &Hub, account: &Account, machine: Uuid) -> Result<
         .await?
         .iter()
         .filter(|asked| asked.decision.is_none() && asked.action == "extend_box" && asked.at > since)
-        .filter(|asked| asked.args["machine"].as_str().and_then(|m| Uuid::parse_str(m).ok()) == Some(machine))
-        .filter_map(|asked| asked.args["extra_usd"].as_f64())
-        .filter(|usd| *usd > 0.0)
-        .sum())
+        .filter_map(|asked| Some((asked.args["machine"].as_str().and_then(|m| Uuid::parse_str(m).ok()), asked.args["extra_usd"].as_f64()?)))
+        .filter(|(_, usd)| *usd > 0.0)
+        .collect())
 }
 
 /// Runs the call as the app runs it: a `HubCall` through the hub's own path, a `Call` on its
@@ -412,7 +420,9 @@ pub async fn decide(hub: &Arc<Hub>, account: &Arc<Account>, id: &str, approve: b
     let hide = |error: &str| surface::hide_entered(error, &entered);
     let key = Uuid::parse_str(id).map_err(|_| unknown())?;
     // An extend's decision is marked and its budget set in its box's turn, so no ask is checked in
-    // between, when the extend no longer waits and the box does not have it yet.
+    // between, when the extend no longer waits and the box does not have it yet. It needs no turn of
+    // the account's: a decision only takes an extend off what waits, never puts one back (an extend
+    // asks for nothing typed, so it is never reopened), so it cannot lift the account past its cap.
     let turn = match hub.db.confirmation(account.id, key).await?.map(|held| held.confirmation) {
         Some(asked) if asked.action == "extend_box" && asked.decision.is_none() => match asked.args["machine"].as_str().and_then(|m| Uuid::parse_str(m).ok()) {
             Some(machine) => Some(ExtendTurn::take(hub, account.id, machine).await?),
