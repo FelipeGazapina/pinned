@@ -10644,6 +10644,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// The box of the oldest app post's session ends after the check moved past the five it
+    /// left out, and frees the post: the next check opens it again, and none of the five.
+    #[test]
+    fn a_local_router_takes_again_an_app_post_a_box_end_frees() {
+        let _api = slack::lock_api();
+        let _restore = (RestoreSlack, RestoreVercelRoot);
+        let now = Utc::now();
+        let ts: Vec<String> = (0..15).map(|i| slack_ts(now - chrono::Duration::seconds(40 - i))).collect();
+        let posts: Vec<Value> = ts.iter().map(|ts| json!({ "ts": ts, "subtype": "bot_message", "bot_id": "B9", "username": "CI Bot", "text": format!("alert {ts}") })).collect();
+        let threads: serde_json::Map<String, Value> = posts.iter().map(|m| (m["ts"].as_str().unwrap().to_owned(), json!([m]))).collect();
+        let (connectors, dir, _, stop) = app_router("apps-router-box-end", json!({ "history": posts, "threads": threads }));
+        let opened = Mutex::new(Vec::<String>::new());
+        let open = |work: Work| {
+            if let Work::Run(Run { subject: Subject::SlackThread { thread, .. }, .. }) = &work {
+                opened.lock().unwrap().push(thread.clone());
+            }
+            placed(work)
+        };
+        assert_eq!(block_on(connectors.check_once(&open)).error, None);
+        assert_eq!(*opened.lock().unwrap(), ts[..slack::APPS_PER_CHECK].to_vec(), "the oldest ten are opened");
+        let subject = Subject::SlackThread { channel: "C0123ABCD".into(), thread: ts[0].clone() };
+        {
+            let mut store = connectors.store.lock().unwrap();
+            let owner = store.connectors.iter().find(|c| c.handled.contains(&subject_key(&subject))).map(|c| c.id.clone()).unwrap();
+            assert!(store.release_after_box_end(&owner, &subject, BoxEndRelease::Once, unix_millis()), "the box end frees the post");
+        }
+        assert_eq!(block_on(connectors.check_once(&open)).error, None);
+        stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut again = ts[..slack::APPS_PER_CHECK].to_vec();
+        again.push(ts[0].clone());
+        assert_eq!(*opened.lock().unwrap(), again, "the next check opens the freed post again, and none of the five left out");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// A router that reads app posts hands one to "Answer" (c6), which reads none itself: the
     /// run "Answer" opens has the post's text and its app's name only inside the frame.
     #[test]
@@ -12779,6 +12813,34 @@ mod tests {
             go.store(true, std::sync::atomic::Ordering::SeqCst);
             assert_eq!(block_on(connectors.poll()).1, None);
             assert_eq!(threads_started(&connectors), ts, "the next check takes the five newer posts");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+
+        /// The model gateway is down, so each run fails at its classify, before it claims its
+        /// post: the next check takes the same ten again, though the first left three newer out.
+        #[test]
+        fn app_posts_whose_runs_fail_before_claiming_are_taken_again() {
+            let _api = slack::lock_api();
+            let _restore = RestoreSlack;
+            let (a, ts) = app_posts(Utc::now(), 13);
+            let _seen = serve(vec![a, workspace("xoxb-test-B", "TB", "UB", "CB1")], vec![]);
+            let mut workflow = message_workflow(true);
+            let trigger = workflow.graph.as_ref().unwrap().nodes[0].clone();
+            workflow.graph = Some(Graph {
+                nodes: vec![trigger.clone(), node("ask", "Ask", NodeKind::Classify(kind_classify(None))), node("s", "Session", NodeKind::Session(SessionSetup::default()))],
+                edges: vec![edge(&trigger.id.0, "out", "ask"), edge("ask", "out", "s")],
+            });
+            let (connectors, dir) = two_bots("apps-fail-unclaimed", vec![workflow]);
+            block_on(connectors.check_once(&placed));
+            assert_eq!(threads_started(&connectors), ts[..slack::APPS_PER_CHECK].to_vec(), "the oldest ten are taken");
+            assert!(connectors.runs.lock().unwrap().iter().all(|run| matches!(run.status, Status::Failed { .. })), "each fails at its classify");
+            assert_eq!(connectors.store.lock().unwrap().connectors[0].handled, Vec::<String>::new(), "before it claims its post");
+            block_on(connectors.check_once(&placed));
+            let mut twice: Vec<String> = ts[..slack::APPS_PER_CHECK].iter().flat_map(|ts| [ts.clone(), ts.clone()]).collect();
+            twice.sort();
+            let mut started = threads_started(&connectors);
+            started.sort();
+            assert_eq!(started, twice, "the next check takes the same ten again, and none of the three left out");
             let _ = std::fs::remove_dir_all(dir);
         }
 
