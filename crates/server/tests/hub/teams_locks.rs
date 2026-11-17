@@ -777,7 +777,7 @@ fn a_waiting_event_whose_bot_read_is_busy_still_waits_and_starts_later() {
     wait_for("the start after the end to give up on the held table", || held.waiters() == 0);
     held.release();
 
-    assert!(crew.waiting(&pages) == 1 || opened(&crew, &pages) == 1, "the event still waits, or it started");
+    assert_eq!((crew.waiting(&pages), opened(&crew, &pages)), (1, 0), "the event still waits: its bot's read was busy, so it did not start");
     assert_eq!(crew.skipped(&pages), skipped, "nothing was counted as skipped");
     crew.reaper_pass();
     wait_for("the event to open its session", || opened(&crew, &pages) == 1 && crew.waiting(&pages) == 0);
