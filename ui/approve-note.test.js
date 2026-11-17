@@ -73,6 +73,8 @@ const PLAN_NO_YES = [
 const PLAN_OTHER = PLAN.map((l) => (l.includes("Keep the v1 route") ? " 1. Replace the whole router in one pass." : l));
 /** The screen once claude has taken the approval and works. */
 const WORKING = ["⏺ Working through the plan…", "", "> "];
+/** A permission menu: typed text declines it. */
+const PERMISSION = [RULE, " Bash command", "   git status", " Do you want to proceed?", " ❯ 1. Yes", "   2. No, and tell Claude what to do differently (esc)", "", " Esc to cancel · Tab to amend"];
 
 /** The page's real rules around one tab that waits on a plan menu, with the page's I/O stubbed.
  * `stuck` keeps the menu up after its Yes; `writeError` makes a write fail; `refuse` makes `prompt`
@@ -82,6 +84,7 @@ function page({ screen = PLAN, stuck = false, writeError = null, refuse = false,
   const log = [];
   const notes = [];
   const nodes = {};
+  const drafts = {};
   const tab = {
     key: "mini:t1",
     machine: "mini",
@@ -122,7 +125,9 @@ function page({ screen = PLAN, stuck = false, writeError = null, refuse = false,
     renderThread() {},
     fetchThread() {},
     autosize() {},
-    saveDraft() {},
+    drafts,
+    saveDraft: (t, text) => (drafts[t.key] = text),
+    hasDraft: (t) => !!drafts[t.key]?.trim(),
     showComposerNote: (text, error) => notes.push([text, !!error]),
     waitingKindOf: () => null,
     needsYouItems: () => [],
@@ -188,6 +193,7 @@ function page({ screen = PLAN, stuck = false, writeError = null, refuse = false,
       line(composer, "const writeTo"),
       decl(composer, "const arrowsTo"),
       decl(composer, "async function until"),
+      ...(composer.includes("async function untilStays") ? [decl(composer, "async function untilStays")] : []),
       decl(composer, "function redrawAsk"),
       line(composer, "const sameMenu"),
       line(composer, "const answeredKey"),
@@ -605,12 +611,37 @@ test("a late close sends the note once, after the close, and the hold is not rel
   assert.equal(w.tab.thread.approveNote, null);
 });
 
-test("a note whose menu changed goes back to an empty composer, not nowhere", () => {
+test("a note whose plan menu changed stays in the field, rebound to the new plan, never in the composer", () => {
   const w = page();
-  attach(w, "keep the old API");
+  const { error } = attach(w, "keep the old API");
   w.tab.term.show(PLAN_OTHER);
   w.tab.menu = w.run("terminalMenu(tab)");
+  assert.equal(w.run("approveNoteOf(tab)"), "keep the old API");
+  assert.equal(w.ctx.prompt.value, "", "Enter in the composer must not send the note into the new menu");
+  assert.equal(w.run("sameMenu(tab.thread.approveNoteMenu, terminalMenu(tab))"), true, "the field is bound to the new plan");
+  assert.equal(w.tab.thread.approveError, "Claude's menu changed. Check your note before you approve.");
+  w.run("renderApproval(tab)");
+  assert.equal(error.textContent, "Claude's menu changed. Check your note before you approve.");
+  assert.equal(w.run("approveNoteOf(tab)"), "keep the old API", "a second read keeps it");
+  assert.deepEqual(w.notes, []);
+});
+
+test("a note whose menu changed to a permission is never put in the composer, and is shown as not sent", () => {
+  const w = page();
+  attach(w, "keep the old API");
+  w.tab.term.show(PERMISSION);
+  w.tab.menu = w.run("terminalMenu(tab)");
   assert.equal(w.run("approveNoteOf(tab)"), null);
+  assert.equal(w.ctx.prompt.value, "", "Enter in the composer would decline the permission with the note");
+  assert.deepEqual(w.notes.at(-1), ["Claude's menu changed. Your note was not sent: keep the old API", true]);
+});
+
+test("a note whose menu closed, with an empty composer, goes back to the composer", () => {
+  const w = page();
+  attach(w, "keep the old API");
+  w.tab.term.show(WORKING);
+  w.tab.menu = null;
+  w.run("approveNoteOf(tab)");
   assert.equal(w.ctx.prompt.value, "keep the old API");
   assert.deepEqual(w.notes.at(-1), ["Claude's menu closed. Your note is back in the message box.", true]);
 });
@@ -675,4 +706,72 @@ test("keepNote on a tab in the background never paints into the open thread's fi
   w.run(`keepNote(tab, "background note", "boom")`);
   assert.equal(input.value, "the open thread's note");
   assert.equal(w.tab.thread.approveNote, "background note", "the background tab still keeps its note");
+});
+
+// Round 4.
+
+test("keepNote with a permission menu up says which note was not sent", () => {
+  const w = page({ screen: PERMISSION });
+  w.run(`keepNote(tab, "keep the old API", "boom")`);
+  assert.equal(w.ctx.prompt.value, "");
+  assert.deepEqual(w.notes.at(-1), ["boom. Your note was not sent: keep the old API", true]);
+});
+
+test("keepNote on a background tab saves the note to its empty draft and says nothing in the open thread", () => {
+  const w = page();
+  w.ctx.active = { key: "mini:other", thread: {} };
+  w.tab.term.show(WORKING);
+  w.tab.menu = null;
+  w.run(`keepNote(tab, "background note", "boom")`);
+  assert.equal(w.ctx.drafts["mini:t1"], "background note");
+  assert.deepEqual(w.notes, []);
+  assert.equal(w.ctx.prompt.value, "", "the open thread's composer is not touched");
+});
+
+test("keepNote on a background tab with a draft already there says which note was not sent", () => {
+  const w = page();
+  w.ctx.active = { key: "mini:other", thread: {} };
+  w.ctx.drafts["mini:t1"] = "an older draft";
+  w.tab.term.show(WORKING);
+  w.tab.menu = null;
+  w.run(`keepNote(tab, "background note", "boom")`);
+  assert.equal(w.ctx.drafts["mini:t1"], "an older draft");
+  assert.deepEqual(w.notes.at(-1), ["boom. Your note was not sent: background note", true]);
+});
+
+test("the ellipsis follows a note only when the note was cut", () => {
+  const w = page();
+  w.ctx.prompt.value = "my own draft";
+  w.tab.term.show(WORKING);
+  w.tab.menu = null;
+  w.run(`keepNote(tab, "short note", "boom")`);
+  assert.deepEqual(w.notes.at(-1), ["boom. Your note was not sent: short note", true]);
+  w.run(`keepNote(tab, ${JSON.stringify("y".repeat(60))}, "boom")`);
+  assert.deepEqual(w.notes.at(-1), [`boom. Your note was not sent: ${"y".repeat(60)}`, true], "exactly 60 characters is not cut");
+  w.run(`keepNote(tab, ${JSON.stringify("y".repeat(61))}, "boom")`);
+  assert.deepEqual(w.notes.at(-1), [`boom. Your note was not sent: ${"y".repeat(60)}…`, true]);
+  attach(w, "z".repeat(5));
+  w.tab.term.show(WORKING);
+  w.tab.menu = null;
+  w.run("approveNoteOf(tab)");
+  assert.deepEqual(w.notes.at(-1), ["Claude's menu closed. Your note was not sent: zzzzz", true]);
+});
+
+test("one frame without a menu while the menu is still coming down does not send the note into it", async () => {
+  const w = page({ stuck: true, clock: true });
+  attach(w, "keep the old API");
+  const sent = w.run(`approveWithNote(tab, "keep the old API")`);
+  await w.time.advance(100);
+  w.tab.term.show(WORKING);
+  await w.time.advance(50);
+  w.tab.term.show(PLAN);
+  await w.time.advance(500);
+  assert.deepEqual(w.log, [["write", "\r"]], "the blip did not close the menu, so nothing is sent");
+  w.tab.term.show(WORKING);
+  await w.time.advance(400);
+  assert.equal(await sent, true);
+  assert.deepEqual(w.log, [
+    ["write", "\r"],
+    ["prompt", "keep the old API"],
+  ]);
 });
