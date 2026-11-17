@@ -7147,16 +7147,12 @@ pub(crate) fn home() -> PathBuf {
     PathBuf::from(std::env::var_os(HOME_ENV).unwrap_or_default())
 }
 
-/// One share per Claude home of `accounts`, pulled into `config`. `inside` keeps only the homes
-/// inside `config`.
+/// One share per Claude home of `accounts`, pulled into `config`: the built-in account's is the
+/// one its sessions run on, an exported home when the node keeps one. `inside` keeps only the
+/// homes inside `config`.
 fn plugin_shares(accounts: &Accounts, config: &Path, inside: bool) -> Vec<sync::PluginShare> {
     let dir = config.join("synced-plugins");
-    let mut homes = vec![home().join(".claude")];
-    for account in accounts.list() {
-        if account.provider == Provider::Claude {
-            homes.push(accounts.home(&account));
-        }
-    }
+    let mut homes: Vec<PathBuf> = accounts.list().iter().filter(|account| account.provider == Provider::Claude).map(|account| accounts.home(account)).collect();
     homes.sort();
     homes.dedup();
     if inside {
