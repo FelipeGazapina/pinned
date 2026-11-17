@@ -9475,6 +9475,40 @@ fn an_extend_box_ask_stored_as_its_box_ends_is_closed_and_refused() {
     assert_eq!(twin_runtime.block_on(ending).unwrap(), Ok(true));
 }
 
+/// The race of `an_extend_box_ask_stored_as_its_box_ends_is_closed_and_refused`, where the only ask
+/// the box's end closes is the one stored as it ends: the owner's app still hears of the end.
+#[test]
+fn an_extend_box_ask_stored_as_its_box_ends_pushes_the_owners_list_though_it_closes_only_itself() {
+    let ExtendSetup { hub, account, ana, mut owner, machine, .. } = extend_setup("extend_closed_push");
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let blocker = runtime.block_on(async {
+        let (client, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        client.batch_execute("begin").await.unwrap();
+        let (id, origin) = (uuid::Uuid::new_v4(), ana.machine.parse::<uuid::Uuid>().unwrap());
+        let insert = "insert into agent_confirmations (id, account, machine, tab, role, action, args, request_id) values ($1, $2, $3, $4, 'session', 'extend_box', '{}', 'r-closed-push')";
+        client.execute(insert, &[&id, &account, &origin, &ana.tab]).await.unwrap();
+        client
+    });
+    // The owner's frames so far, read before the ask starts: what the ask and the end push comes after.
+    owner.hub(json!({ "cmd": "confirmations" })).unwrap();
+    let mark = owner.frames.len();
+    let ask = {
+        let (dir, tab, machine) = (ana.dir.clone(), ana.tab.clone(), machine.clone());
+        std::thread::spawn(move || extend_as(&dir, &tab, &machine, 0.5, Some("r-closed-push")))
+    };
+    let stored = "select count(*) from pg_stat_activity where wait_event_type = 'Lock' and query like 'insert into agent_confirmations%'";
+    wait_for("the ask's insert to wait", || count_on(&hub.database, stored) == 1);
+    let (twin_runtime, twin) = hub.twin();
+    let (deleted, ending) = end_box_held_on(&hub, &twin_runtime, &twin.hub, account, &machine);
+    runtime.block_on(blocker.batch_execute("rollback")).unwrap();
+    assert_eq!(ask.join().unwrap(), Err("this box is already ending".into()), "stored after its box ended, the ask is refused");
+    wait_frame(&mut owner, mark, "the owner's app to hear the box's end", |f| f["type"] == "confirmations");
+    assert_eq!(waiting_ids(&mut owner), Vec::<Value>::new(), "and nothing waits");
+    deleted.close();
+    assert_eq!(twin_runtime.block_on(ending).unwrap(), Ok(true));
+}
+
 /// A database error reading the ask's box, after the ask is stored, does not fail the act: the ask
 /// waits as any ask does, is audited as pending, and the owner's app hears of it.
 #[test]
