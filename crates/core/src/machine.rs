@@ -7795,6 +7795,32 @@ pub(crate) mod tests {
         assert_eq!(m.live_tab(&[]), None, "an empty environment matches no session");
     }
 
+    #[test]
+    fn a_fork_of_a_workflow_session_runs_no_workflow() {
+        let m = machine();
+        let thread = Subject::SlackThread { channel: "C1".into(), thread: "1.2".into() };
+        let env = [session_env("c1", &thread), role_env(Role::Worker, Path::new("/repo"))].concat();
+        let tab = m.add_tab("/repo".into(), Account::builtin(Provider::Claude), vec![], env, false, None);
+        let account = m.tab(&tab, |t| t.account.clone()).unwrap();
+        let projects = m.accounts.home(&account).join("projects").join("repo");
+        std::fs::create_dir_all(&projects).unwrap();
+        let line = |kind: &str, uuid: &str| json!({ "type": kind, "uuid": uuid, "sessionId": "sess-wf", "timestamp": "2026-11-09T10:00:00Z", "message": { "role": kind, "content": "hi" } }).to_string();
+        std::fs::write(projects.join("sess-wf.jsonl"), [line("user", "u1"), line("assistant", "a1")].join("\n") + "\n").unwrap();
+        m.tab(&tab, |t| t.claude_session = Some("sess-wf".into())).unwrap();
+
+        let copy = m.fork(&tab, "a1").unwrap();
+        let view = m.view(&copy).unwrap();
+        assert_eq!((view.connector, view.subject), (None, None), "the fork is no session of the workflow");
+        let env = m.tab(&copy, |t| t.env.clone()).unwrap();
+        for key in [CONNECTOR_ENV, crate::agent::SLACK_CHANNEL_ENV, crate::agent::SLACK_THREAD_ENV, crate::agent::ISSUE_ENV] {
+            assert!(!env.iter().any(|(k, _)| k == key), "{key} in {env:?}");
+        }
+        assert_eq!(role_of(&env).map(|(role, _)| role), Some(Role::Worker), "the rest of its environment stays");
+        let source = m.view(&tab).unwrap();
+        assert_eq!((source.connector.as_deref(), source.subject), (Some("c1"), Some(thread)), "the workflow's own session keeps it");
+        let _ = std::fs::remove_file(projects.join("sess-wf.jsonl"));
+    }
+
     /// The session is a real pty running cat with the terminal in raw mode, so the file holds
     /// exactly the bytes the session received.
     #[cfg(unix)]
