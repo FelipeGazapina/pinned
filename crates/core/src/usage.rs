@@ -733,6 +733,26 @@ mod tests {
     }
 
     #[test]
+    fn a_model_whose_input_or_output_rate_is_not_above_zero_is_unpriced_and_takes_the_ceiling() {
+        let rates = parse_rates(&json!({
+            "zero-model": { "input_cost_per_token": 0.0, "output_cost_per_token": 0.0 },
+            "free-output": { "input_cost_per_token": 3e-6, "output_cost_per_token": 0.0 },
+            "negative-input": { "input_cost_per_token": -3e-6, "output_cost_per_token": 15e-6 },
+        }));
+        for model in ["zero-model", "free-output", "negative-input"] {
+            assert_eq!(lookup(&rates, model), None, "{model}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("s.jsonl");
+        let usage = json!({ "input_tokens": 0, "output_tokens": 1_000_000 });
+        std::fs::write(&file, format!("{}\n", assistant("m1", "r1", "s", "2026-11-09T10:00:00Z", "negative-input", usage))).unwrap();
+        let mut meter = Meter::default();
+        meter.advance(&file).unwrap();
+        let (usd, unpriced) = meter.priced(&rates, &PriceBook::default());
+        assert_eq!(((usd * 100.0).round(), unpriced), (15_000.0, vec!["negative-input".to_owned()]), "a million output tokens at the ceiling's US$ 150");
+    }
+
+    #[test]
     fn a_meter_counts_the_subagents_and_keeps_the_total_across_a_new_session() {
         let dir = tempfile::tempdir().unwrap();
         let usage = |output: u64| json!({ "input_tokens": 0, "output_tokens": output });
