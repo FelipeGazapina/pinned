@@ -4081,9 +4081,15 @@ mod tests {
 
         /// Runs the rescue as `rescue_with`, and answers all it printed: its output and its errors.
         fn rescue_printed(&self, env: &[(&str, &str)]) -> (String, String) {
+            self.run_script(&self.script(), env)
+        }
+
+        /// Runs `script` in the box as the box's exec does, with `env` set as well, and answers all it
+        /// printed: its output and its errors.
+        fn run_script(&self, script: &str, env: &[(&str, &str)]) -> (String, String) {
             let ran = std::process::Command::new("sh")
                 .arg("-c")
-                .arg(self.script())
+                .arg(script)
                 .env_clear()
                 .env("HOME", &self.home)
                 .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
@@ -4662,6 +4668,21 @@ mod tests {
             run.git(&run.clone, &["remote", "set-url", "origin", url]);
             std::fs::write(run.clone.join("notes.txt"), "half done\n").unwrap();
             assert_eq!(run.rescue(), "pinned-rescue: saved wip/rescue/task-1a2b3c4d\npinned-rescue: done\n", "{url}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_hubs_rescue_script_refuses_an_origin_over_ssh() {
+        for url in ["git@github.com:acme/site.git", "git@github.com:acme/site", "ssh://git@github.com/acme/site.git", "ssh://git@github.com/acme/site"] {
+            let run = RescueRun::new();
+            run.git(&run.clone, &["remote", "set-url", "origin", url]);
+            std::fs::write(run.clone.join("notes.txt"), "half done\n").unwrap();
+            let script = rescue_script_in(run.pinned.to_str().unwrap(), SITE, TASK).unwrap();
+            assert_eq!(run.run_script(&script, &[]).0, "pinned-rescue: refused remote\npinned-rescue: done\n", "{url}");
+            assert!(run.writes().is_empty(), "{url}: {:?}", run.writes());
+            assert_eq!(run.remote_branches(), "refs/heads/main\n", "{url}");
+            assert_eq!(run.git(&run.clone, &["status", "--porcelain"]), " M notes.txt\n", "{url}: the change stays uncommitted");
         }
     }
 
