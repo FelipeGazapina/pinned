@@ -1611,6 +1611,41 @@ fn restore_var(name: &str, value: Option<String>) {
     }
 
     #[test]
+    fn the_plan_tools_and_planstep_name_the_limits_of_plan_rs() {
+        use crate::plan::{MAX_FIXES_PER_STEP, MAX_LISTS, MAX_NAME, MAX_NOTE, MAX_PLANS_UNFINISHED, MAX_REASON, MAX_STEPS_IN_ALL, MAX_STEPS_PER_FIX, MAX_STEPS_PER_LIST, MAX_TITLE, MAX_WHAT};
+        let listed = tool_definitions(true, false, Seat::Captain);
+        let tools = listed.as_array().unwrap();
+        let tool = |name: &str| tools.iter().find(|tool| tool["name"] == name).unwrap();
+        let about = |name: &str| tool(name)["description"].as_str().unwrap().to_owned();
+        let planstep = tool("delegate_task")["inputSchema"]["properties"]["planStep"]["description"].as_str().unwrap().to_owned();
+        let cases = [
+            ("plan_set", about("plan_set"), vec![
+                format!("{MAX_LISTS} lists"),
+                format!("{MAX_STEPS_PER_LIST} steps per list"),
+                format!("{MAX_STEPS_IN_ALL} steps in all"),
+                format!("up to {MAX_NAME} characters"),
+                format!("up to {MAX_WHAT}"),
+                format!("up to {MAX_TITLE}"),
+                format!("{MAX_PLANS_UNFINISHED} unfinished plans"),
+            ]),
+            ("plan_step", about("plan_step"), vec![format!("up to {MAX_NOTE} characters")]),
+            ("plan_fix", about("plan_fix"), vec![
+                format!("up to {MAX_STEPS_PER_FIX} steps"),
+                format!("at most {MAX_FIXES_PER_STEP} fixes per step"),
+                format!("up to {MAX_NAME} characters"),
+                format!("up to {MAX_WHAT}"),
+            ]),
+            ("plan_close", about("plan_close"), vec![format!("up to {MAX_REASON} characters")]),
+            ("delegate_task planStep", planstep, vec![format!("at most {MAX_FIXES_PER_STEP} fixes per step")]),
+        ];
+        for (name, text, limits) in cases {
+            for limit in limits {
+                assert!(text.contains(&limit), "{name} names `{limit}`: {text}");
+            }
+        }
+    }
+
+    #[test]
     fn the_mcp_server_hears_which_tab_and_role_runs_it() {
         let file = std::env::temp_dir().join(format!("pinned-mcp-config-{}.json", std::process::id()));
         write_mcp_config(&file, Path::new("/opt/pinned/bin/pinned"), true).unwrap();
