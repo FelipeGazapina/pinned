@@ -203,8 +203,38 @@ impl Trigger {
 }
 
 /// Whether a Linear change is one `trigger` fires on. `viewer` is the Linear user id of the account's key, if known.
-pub fn matches(_trigger: &Trigger, _change: &linear::Change, _viewer: Option<&str>) -> bool {
-    false
+pub fn matches(trigger: &Trigger, change: &linear::Change, viewer: Option<&str>) -> bool {
+    let named = |filter: &str, name: &str| filter.trim().is_empty() || filter.trim().eq_ignore_ascii_case(name.trim());
+    let state = |filter: &str, now: &Option<String>| filter.trim().is_empty() || now.as_deref().is_some_and(|s| named(filter, s));
+    let mine = |person: &linear::Person| viewer == Some(person.id.as_str());
+    let scoped = |scope: &LinearScope| {
+        (named(&scope.team, &change.team_key) || named(&scope.team, &change.team_name))
+            && (scope.project.trim().is_empty() || change.project.as_deref().is_some_and(|p| named(&scope.project, p)))
+    };
+    let assignee = |to: &Assignee| match to {
+        Assignee::Anyone => change.to_assignee.is_some(),
+        Assignee::Nobody => change.to_assignee.is_none(),
+        Assignee::Me => change.to_assignee.as_ref().is_some_and(mine),
+        Assignee::User { id, .. } => change.to_assignee.as_ref().is_some_and(|p| &p.id == id),
+    };
+    let actor = |by: &By| match by {
+        By::Anyone => true,
+        By::Me => mine(&change.actor),
+        By::NotMe => viewer.is_some() && !mine(&change.actor),
+    };
+    match trigger {
+        Trigger::LinearStatus { from, to, scope, by } => {
+            change.kind == linear::ChangeKind::Status
+                && state(from, &change.from_state)
+                && state(to, &change.to_state)
+                && scoped(scope)
+                && actor(by)
+        }
+        Trigger::LinearAssigned { to, scope, by } => {
+            change.kind == linear::ChangeKind::Assignee && assignee(to) && scoped(scope) && actor(by)
+        }
+        _ => false,
+    }
 }
 
 /// Refuses a schedule that runs once, and a cron or zone `schedule` can't read.
