@@ -5019,6 +5019,100 @@ mod tests {
         assert!(run.writes().iter().all(|w| !w.starts_with(PUSH)), "{:?}", run.writes());
     }
 
+    /// Makes this run's git shim run `body`, with git's arguments as `$*`, before it runs git.
+    #[cfg(unix)]
+    fn before_git(run: &RescueRun, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let shim = std::fs::read_to_string(run.bin.join("git")).unwrap();
+        let shim = shim.replacen("#!/bin/sh\n", &format!("#!/bin/sh\n{body}\n"), 1);
+        std::fs::write(run.bin.join("git"), shim).unwrap();
+        std::fs::set_permissions(run.bin.join("git"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// Makes `tr` on this run's PATH a stand-in that reads all, then runs `when` with what it read in
+    /// `$in`'s file and the real tr as `$real` and, unless that ended it, the real tr on it.
+    #[cfg(unix)]
+    fn tr_that(run: &RescueRun, when: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let input = run._root.path().join("tr.in");
+        let real = std::process::Command::new("sh").args(["-c", "command -v tr"]).output().unwrap();
+        let real = String::from_utf8(real.stdout).unwrap().trim().to_owned();
+        let body = format!("#!/bin/sh\nin={}\nreal={real}\ncat >\"$in\"\n{when}\nexec {real} \"$@\" <\"$in\"\n", input.display());
+        std::fs::write(run.bin.join("tr"), body).unwrap();
+        std::fs::set_permissions(run.bin.join("tr"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_name_scan_whose_tr_is_killed_mid_run_is_a_refusal_and_pushes_nothing() {
+        let run = RescueRun::new();
+        run.commit_all(&[(".env", "plain\n")], "env");
+        // Killed once it has read the names the scan looks at, before it answers.
+        tr_that(&run, "grep -q 'env' \"$in\" && kill -9 $$");
+        assert_eq!(run.rescue(), "pinned-rescue: refused secret\npinned-rescue: done\n");
+        assert_eq!(run.remote_branches(), "refs/heads/main\n");
+        assert!(run.writes().iter().all(|w| !w.starts_with(PUSH)), "{:?}", run.writes());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_name_scan_whose_tr_is_missing_is_a_refusal_and_pushes_nothing() {
+        let run = RescueRun::new();
+        run.commit_all(&[(".env", "plain\n")], "env");
+        // The scan's second tr is not found, as a missing program is: the first one has read all git
+        // logged when it finds no reader for what it writes. Every other tr, before the scans of the
+        // commit and after them, runs.
+        use std::os::unix::fs::PermissionsExt;
+        let (mark, gone) = (run._root.path().join("scanning"), run._root.path().join("gone/tr"));
+        let real = std::process::Command::new("sh").args(["-c", "command -v tr"]).output().unwrap();
+        let real = String::from_utf8(real.stdout).unwrap().trim().to_owned();
+        let tr = format!("#!/bin/sh\n[ \"$1\" = A-Z ] && [ -e {} ] && exec {} \"$@\"\nexec {real} \"$@\"\n", mark.display(), gone.display());
+        std::fs::write(run.bin.join("tr"), tr).unwrap();
+        std::fs::set_permissions(run.bin.join("tr"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        before_git(&run, &format!("case \"$*\" in *--format=*) ;; log\\ -p\\ *) touch {m} ;; ls-remote*) rm -f {m} ;; esac", m = mark.display()));
+        assert_eq!(run.rescue(), "pinned-rescue: refused secret\npinned-rescue: done\n");
+        assert_eq!(run.remote_branches(), "refs/heads/main\n");
+        assert!(run.writes().iter().all(|w| !w.starts_with(PUSH)), "{:?}", run.writes());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tr_that_prints_part_of_a_name_and_is_killed_never_lets_origin_pass() {
+        for (name, cut) in [("the clone's origin", "acme/site-evil"), ("the checked repository", "acme/site")] {
+            let run = RescueRun::new();
+            run.git(&run.home, &["init", "-q", "--bare", run._root.path().join("srv/acme/site-evil.git").to_str().unwrap()]);
+            run.git(&run.home, &["init", "-q", "--bare", run._root.path().join("srv/acme/s.git").to_str().unwrap()]);
+            // Killed after it printed the name cut short: `acme/site-evil` as `acme/site`, `acme/site` as `acme/s`.
+            let (origin, short) = if cut == "acme/site" { ("git@github.com:acme/s.git", "acme/s") } else { ("git@github.com:acme/site-evil.git", "acme/site") };
+            run.git(&run.clone, &["remote", "set-url", "origin", origin]);
+            tr_that(&run, &format!("if grep -q '{cut}' \"$in\"; then sed 's|{cut}.*|{short}|' \"$in\" | \"$real\" -d '\\n'; kill -9 $$; fi"));
+            std::fs::write(run.clone.join("notes.txt"), "half done\n").unwrap();
+            assert_eq!(run.rescue(), "pinned-rescue: refused remote\npinned-rescue: done\n", "{name}");
+            for repo in ["site.git", "site-evil.git", "s.git"] {
+                let refs = run.git(&run._root.path().join("srv/acme").join(repo), &["for-each-ref", "--format=%(refname)"]);
+                assert!(!refs.contains("wip/rescue"), "{name}: {repo} got nothing: {refs}");
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_staged_gitlink_check_whose_git_fails_commits_and_pushes_nothing() {
+        let run = RescueRun::new();
+        let nested = run.clone.join("vendor/lib");
+        std::fs::create_dir_all(&nested).unwrap();
+        run.git(&nested, &["init", "-q"]);
+        std::fs::write(nested.join("lib.rs"), "fn lib() {}\n").unwrap();
+        run.git(&nested, &["add", "lib.rs"]);
+        run.git(&nested, &["commit", "-q", "-m", "lib"]);
+        std::fs::write(run.clone.join("notes.txt"), "half done\n").unwrap();
+        // The listing of nested repositories and the check of what was staged both fail.
+        before_git(&run, "case \"$*\" in ls-files\\ *|diff\\ --cached\\ --raw*) exit 128 ;; esac");
+        assert_eq!(run.rescue(), "pinned-rescue: failed add\npinned-rescue: done\n");
+        assert_eq!(run.remote_branches(), "refs/heads/main\n");
+        assert!(run.writes().iter().all(|w| !w.starts_with(PUSH) && !git_command(w).starts_with("commit")), "{:?}", run.writes());
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_commit_holding_the_credential_the_clones_config_sends_is_refused() {
