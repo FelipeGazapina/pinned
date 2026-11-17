@@ -520,8 +520,8 @@ fn block_lines(block: &Value, lines: &mut Vec<String>) {
 }
 
 /// The text of an app post as plain text: `text`, then each attachment's `pretext`, `title`,
-/// `text` and `fields` (its `fallback` only when it has nothing else), then the text of its
-/// blocks. Lines are joined by newlines, a line already given is not given twice, and the whole
+/// `text`, `fields` and blocks (its `fallback` only when it has nothing else), then the text of
+/// its blocks. Lines are joined by newlines, a line already given is not given twice, and the whole
 /// is clipped to `APP_TEXT_MAX`. Slack's markup is left as it is, as in a person's message.
 fn app_text(message: &Value) -> String {
     let mut lines: Vec<String> = vec![message["text"].as_str().unwrap_or_default().to_owned()];
@@ -535,6 +535,9 @@ fn app_text(message: &Value) -> String {
                 (false, false) => format!("{title}: {value}"),
                 _ => format!("{title}{value}"),
             });
+        }
+        for block in attachment["blocks"].as_array().into_iter().flatten() {
+            block_lines(block, &mut lines);
         }
         if lines[from..].iter().all(|l| l.trim().is_empty()) {
             lines.extend(field("fallback"));
@@ -551,9 +554,10 @@ fn app_text(message: &Value) -> String {
     }
 }
 
-/// The app or bot an app post is by: its name, never a person looked up.
+/// The app or bot an app post is by: its name, never a person looked up, clipped as every name
+/// from outside pinned is (`pinned_lines::author`).
 fn app_author(message: &Value) -> String {
-    message["bot_profile"]["name"].as_str().or(message["username"].as_str()).filter(|n| !n.is_empty()).unwrap_or("an app").to_owned()
+    crate::pinned_lines::author(message["bot_profile"]["name"].as_str().or(message["username"].as_str()).filter(|n| !n.is_empty()).unwrap_or("an app"))
 }
 
 fn app_post(message: &Value) -> Post {
