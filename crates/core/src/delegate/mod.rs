@@ -80,7 +80,8 @@ pub fn child_model(parent: Provider, child: Provider, inherited: Option<String>,
 pub const READ_ONLY_REFUSED: [&str; 6] = ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash", "PowerShell"];
 
 /// The Claude mode a read-only session runs in. It never stops at a prompt, or at a plan to
-/// approve as plan mode does: what no rule allows is refused.
+/// approve as plan mode does: tools that never prompt (Read, Grep, Glob, TodoWrite, Agent) still
+/// run, and every tool that would prompt is refused.
 pub const READ_ONLY_MODE: &str = "dontAsk";
 
 /// Claude's flags for a read-only session: pinned's read tools allowed, every tool that writes or
