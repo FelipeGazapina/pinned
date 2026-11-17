@@ -2064,6 +2064,8 @@ struct Fire {
     key: String,
     at: DateTime<Utc>,
     change: linear::Change,
+    /// The change was waiting in `Store::change_retries` when this check read it.
+    retry: bool,
 }
 
 /// The won fire a Linear change's run or graph start carries until it starts: its claim key, its
@@ -2073,11 +2075,13 @@ struct ChangeFire {
     key: String,
     issue: String,
     at: DateTime<Utc>,
+    /// Waiting in `Store::change_retries` since an earlier check (see `Fire::retry`).
+    retry: bool,
 }
 
 impl Fire {
     fn carried(&self) -> ChangeFire {
-        ChangeFire { key: self.key.clone(), issue: self.change.issue_id.clone(), at: self.at }
+        ChangeFire { key: self.key.clone(), issue: self.change.issue_id.clone(), at: self.at, retry: self.retry }
     }
 }
 
@@ -2789,7 +2793,7 @@ impl Connectors {
                         // The guards keep its start once its run starts (`fire_started`).
                         None => {
                             pending.push((c.id.clone(), change.issue_id.clone(), at));
-                            pass.fires.push(Fire { workflow: c.id.clone(), key: key.clone(), at, change: change.clone() });
+                            pass.fires.push(Fire { workflow: c.id.clone(), key: key.clone(), at, change: change.clone(), retry });
                         }
                     },
                     // Another check of the account fired it.
@@ -2859,6 +2863,16 @@ impl Connectors {
         let released = self.storage.release_fire(workflow, key, &self.claimer);
         self.won.lock().unwrap().remove(&format!("{workflow}\n{key}"));
         let retried = fire.at > Utc::now() - chrono::Duration::from_std(CATCH_UP).expect("CATCH_UP fits");
+        let mut store = self.store.lock().unwrap();
+        // A retry waits already, so it was counted and logged when it first waited: a check that
+        // finds it held again (a graph run holds the issue) gives its claim back and changes nothing else.
+        let waiting = retried && fire.retry;
+        if retried {
+            store.change_retries.entry(workflow.to_owned()).or_default().insert(key.clone(), stamp(fire.at));
+        }
+        if waiting {
+            return;
+        }
         let then = match retried {
             true => format!("a later check tries it again until the change is {} minutes old", CATCH_UP.as_secs() / 60),
             false => "the change is too old to try again".to_owned(),
@@ -2866,10 +2880,6 @@ impl Connectors {
         match &released {
             Ok(()) => eprintln!("pinned: workflow {workflow} gave back its claim of {key}: its run did not start; {then}"),
             Err(e) => eprintln!("pinned: workflow {workflow} could not give back its claim of {key}: {e}"),
-        }
-        let mut store = self.store.lock().unwrap();
-        if retried {
-            store.change_retries.entry(workflow.to_owned()).or_default().insert(key.clone(), stamp(fire.at));
         }
         let counts = store.change_counts.entry(workflow.to_owned()).or_default();
         counts.not_started += 1;
