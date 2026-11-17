@@ -851,9 +851,12 @@ impl Db {
     ///
     /// A deletion that names the sha its sender `agreed` on is skipped when the hub holds another
     /// sha by then: another machine changed the file after the sender last saw it.
-    pub async fn sync_push(&self, account: Uuid, project: &str, files: Vec<(sync::Entry, Vec<u8>, Option<String>)>) -> Result<(), String> {
+    ///
+    /// A file that names the `base` it was merged with, empty for none, is refused with
+    /// `sync::STALE_REFUSAL`, the whole push with it, when the hub holds another copy by then.
+    pub async fn sync_push(&self, account: Uuid, project: &str, mut files: Vec<(sync::Entry, Vec<u8>, Option<String>, Option<String>)>) -> Result<(), String> {
         let client = self.client().await?;
-        let paths: Vec<&str> = files.iter().map(|(e, _, _)| e.path.as_str()).collect();
+        let paths: Vec<&str> = files.iter().map(|(e, _, _, _)| e.path.as_str()).collect();
         let used: i64 = client
             .query_one("select coalesce(sum(octet_length(data)), 0)::bigint from project_files where account = $1", &[&account])
             .await
@@ -866,31 +869,41 @@ impl Db {
             .iter()
             .map(|r| (r.get(0), (r.get(1), r.get(2))))
             .collect();
+        let held = |path: &str| stored.get(path).map_or("", |(sha, _)| sha.as_str());
+        if files.iter().any(|(e, _, _, base)| base.as_ref().is_some_and(|base| base != held(&e.path))) {
+            return Err(sync::STALE_REFUSAL.into());
+        }
         let kept = |path: &str, agreed: &Option<String>| match (agreed, stored.get(path)) {
             (Some(agreed), Some((sha, _))) => agreed == sha,
             _ => true,
         };
         // The paths this push replaces: a deletion skipped for its stale `agreed` replaces nothing.
-        let replacing: BTreeSet<&str> = files.iter().filter(|(e, _, agreed)| kept(&e.path, agreed)).map(|(e, _, _)| e.path.as_str()).collect();
+        let replacing: BTreeSet<&str> = files.iter().filter(|(e, _, agreed, _)| kept(&e.path, agreed)).map(|(e, _, _, _)| e.path.as_str()).collect();
         let replaced: i64 = stored.iter().filter(|(path, _)| replacing.contains(path.as_str())).map(|(_, (_, size))| size).sum();
-        let incoming: i64 = files.iter().map(|(_, data, _)| data.len() as i64).sum();
+        let incoming: i64 = files.iter().map(|(_, data, _, _)| data.len() as i64).sum();
         if incoming > replaced && used - replaced + incoming > SYNC_QUOTA {
             return Err(format!("{}{} MB; delete old sessions to sync more", sync::LIMIT_REFUSAL, SYNC_QUOTA >> 20));
         }
-        for (entry, data, agreed) in &files {
+        // A file with a base goes first, so another machine's push landing since the check above
+        // refuses this push before any of its files is kept.
+        files.sort_by_key(|(_, _, _, base)| base.is_none());
+        for (entry, data, agreed, base) in &files {
             // `known` is false when the sender omitted the mode, so a stored true survives. A null column would be omitted on the way out, and a unix machine would never send the bit.
             let known = entry.executable.is_some();
             let bit = entry.executable.unwrap_or(false);
-            client
+            let written = client
                 .execute(
                     "insert into project_files (account, project, path, sha, modified, data, executable) values ($1, $2, $3, $4, $5, $6, $7) \
                      on conflict (account, project, path) do update set sha = excluded.sha, modified = excluded.modified, data = excluded.data, \
                      executable = case when $8 then excluded.executable else project_files.executable end \
-                     where $9::text is null or project_files.sha = $9",
-                    &[&account, &project, &entry.path, &entry.sha, &(entry.modified as i64), data, &bit, &known, agreed],
+                     where ($9::text is null or project_files.sha = $9) and ($10::text is null or project_files.sha = $10)",
+                    &[&account, &project, &entry.path, &entry.sha, &(entry.modified as i64), data, &bit, &known, agreed, base],
                 )
                 .await
                 .map_err(err)?;
+            if base.is_some() && written == 0 {
+                return Err(sync::STALE_REFUSAL.into());
+            }
         }
         Ok(())
     }

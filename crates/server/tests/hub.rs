@@ -1135,7 +1135,7 @@ fn machines_share_a_projects_memory_through_the_hub_wherever_they_keep_it() {
     assert_eq!(pulled, vec!["claude/memory/MEMORY.md"]);
     assert_eq!(std::fs::read_to_string(memory(&on_mini)).unwrap(), "- deploys go through the VPS");
 
-    let outside = sync::File { entry: sync::Entry { path: "../.ssh/authorized_keys".into(), sha: "x".into(), modified: 1, size: 1, executable: None }, data: Some("eA==".into()), agreed: None };
+    let outside = sync::File { entry: sync::Entry { path: "../.ssh/authorized_keys".into(), sha: "x".into(), modified: 1, size: 1, executable: None }, data: Some("eA==".into()), agreed: None, base: None };
     assert_eq!(
         mac_link.call_hub(HubCall::SyncPush { project: project.key.clone(), files: vec![outside] }),
         Err("../.ssh/authorized_keys is not a file a project shares".into())
@@ -1209,7 +1209,7 @@ fn a_plugin_tree_is_stored_without_settings_env_or_claude_json() {
     pulled.sort();
     assert_eq!(pulled, stored);
     assert_eq!(std::fs::read_to_string(mini_home.join("synced-plugins/plugins/toy@demo/skills/greet/SKILL.md")).unwrap(), skill);
-    let secret = |path: &str| sync::File { entry: sync::Entry { path: path.into(), sha: "x".into(), modified: 1, size: 1, executable: None }, data: Some("eA==".into()), agreed: None };
+    let secret = |path: &str| sync::File { entry: sync::Entry { path: path.into(), sha: "x".into(), modified: 1, size: 1, executable: None }, data: Some("eA==".into()), agreed: None, base: None };
     for path in [
         "plugins/toy@demo/settings.json",
         "plugins/toy@demo/.claude.json",
@@ -1233,6 +1233,7 @@ fn a_plugin_tree_is_stored_without_settings_env_or_claude_json() {
         entry: sync::Entry { path: "plugins/toy@demo/skills/greet/blob.bin".into(), sha: "x".into(), modified: 1, size: raw.len() as u64, executable: None },
         data: Some(base64::engine::general_purpose::STANDARD.encode(&raw)),
         agreed: None,
+        base: None,
     };
     assert_eq!(
         mac_link.call_hub(HubCall::SyncPush { project: sync::PLUGINS_KEY.into(), files: vec![oversized] }),
@@ -1562,6 +1563,7 @@ fn plugin_hook(body: &[u8], modified: u64, executable: bool) -> sync::File {
         entry: sync::Entry { path: HOOK_PATH.into(), sha: sha256_hex(body), modified, size: packed.len() as u64, executable: Some(executable) },
         data: Some(base64::engine::general_purpose::STANDARD.encode(packed)),
         agreed: None,
+        base: None,
     }
 }
 

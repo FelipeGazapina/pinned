@@ -59,6 +59,12 @@ pub struct File {
     /// A sender that leaves it out has its deletion applied whatever the hub holds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agreed: Option<String>,
+    /// On a history sent to the hub, the sha of the hub's copy it holds every line of, empty when
+    /// the hub held none. The hub refuses it with `STALE_REFUSAL` once it holds another copy, and
+    /// the sender merges that copy in and sends again. A sender that leaves it out replaces
+    /// whatever the hub holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base: Option<String>,
 }
 
 /// Sets the executable bit on a file the hub already stores, without sending bytes.
@@ -384,33 +390,26 @@ fn exchange(
     let sending = fingerprint(push.iter().chain(&merge).collect::<BTreeSet<_>>().into_iter(), local);
     // A `hold` is the `sending` of a refused batch, so it never names an empty set of files.
     let held = hold == Some(sending);
-    // A history's own turns and both sides' turns merged, by path.
-    let mut merged: BTreeMap<String, (Vec<u8>, Vec<u8>)> = BTreeMap::new();
+    // The history to send once the other files are: with the sha of the hub's copy listed when
+    // only this machine changed it, with none when the hub's copy has to be merged in first.
+    let mut history: Option<(String, Option<String>)> = None;
     if held {
         push.clear();
         synced.push = Push::Held;
     } else {
-        for path in merge {
-            let theirs = hub.pull(key, vec![path.clone()])?.into_iter().next().and_then(|f| f.data).map(|d| unpack(&d)).transpose()?.unwrap_or_default();
-            let target = resolve(&path).ok_or("no history here")?;
-            let mine = std::fs::read(&target).unwrap_or_default();
-            let both = merge_history(&mine, &theirs);
-            merged.insert(path.clone(), (mine, both));
-            push.push(path);
+        if let Some(at) = push.iter().position(|path| sessions && path.as_str() == HISTORY && resolve(path).is_some_and(|f| f.is_file())) {
+            let listed = remote.get(HISTORY).map_or(String::new(), |e| e.sha.clone());
+            history = Some((push.remove(at), Some(listed)));
+        }
+        if let Some(path) = merge.pop() {
+            history = Some((path, None));
         }
     }
-    // Writes a merged history here once the hub took it, keeping any turn added since it was read.
-    let land = |path: &str| -> Result<(), String> {
-        let Some((mine, both)) = merged.get(path) else { return Ok(()) };
-        let target = resolve(path).ok_or("no history here")?;
-        let now = std::fs::read(&target).unwrap_or_default();
-        crate::fsx::replace(&target, &if now == *mine { both.clone() } else { merge_history(&now, both) }, None, None)
-    };
 
     // Deletions go first, in batches of their own: they never grow the account, so a hub at its
     // limit still takes them, and a refused addition never holds one back.
     let (deletions, additions): (Vec<String>, Vec<String>) =
-        push.into_iter().partition(|path| !merged.contains_key(path) && resolve(path).filter(|f| f.is_file()).is_none());
+        push.into_iter().partition(|path| resolve(path).filter(|f| f.is_file()).is_none());
     for group in [deletions, additions] {
         let mut batch: Vec<File> = vec![];
         let mut pending: Vec<(String, Option<String>)> = vec![];
@@ -419,7 +418,7 @@ fn exchange(
             if synced.push != Push::Done {
                 break;
             }
-            let file = match resolve(&path).filter(|f| f.is_file() || merged.contains_key(&path)) {
+            let file = match resolve(&path).filter(|f| f.is_file()) {
                 // A file with no baseline that is gone was never on the hub from here: it vanished
                 // between hashing and sending, and there is nothing of this machine's to delete.
                 None => match agreed.get(&path) {
@@ -428,16 +427,12 @@ fn exchange(
                         entry: Entry { path: path.clone(), sha: String::new(), modified: millis(now), size: 0, executable: None },
                         data: None,
                         agreed: Some(sha.clone()),
+                        base: None,
                     },
                 },
                 Some(target) => {
-                    let (sha, modified, bytes) = match merged.get(&path) {
-                        Some((_, both)) => (sha(both), millis(now), both.clone()),
-                        None => {
-                            let Some((sha, modified)) = state.hash(&target) else { continue };
-                            (sha, modified, std::fs::read(&target).map_err(|e| e.to_string())?)
-                        }
-                    };
+                    let Some((sha, modified)) = state.hash(&target) else { continue };
+                    let bytes = std::fs::read(&target).map_err(|e| e.to_string())?;
                     let data = pack(&bytes);
                     if data.len() as u64 > FILE_LIMIT {
                         continue;
@@ -452,6 +447,7 @@ fn exchange(
                         entry: Entry { path: path.clone(), sha, modified, size: data.len() as u64, executable: mode },
                         data: Some(base64::engine::general_purpose::STANDARD.encode(data)),
                         agreed: None,
+                        base: None,
                     }
                 }
             };
@@ -459,13 +455,16 @@ fn exchange(
             pending.push((file.entry.path.clone(), file.data.as_ref().map(|_| file.entry.sha.clone())));
             batch.push(file);
             if size >= BATCH {
-                send(hub, state, key, agreed_key, agreed, &mut synced, sending, std::mem::take(&mut batch), std::mem::take(&mut pending), &land)?;
+                send(hub, state, key, agreed_key, agreed, &mut synced, sending, std::mem::take(&mut batch), std::mem::take(&mut pending))?;
                 size = 0;
             }
         }
         if !batch.is_empty() && synced.push == Push::Done {
-            send(hub, state, key, agreed_key, agreed, &mut synced, sending, batch, pending, &land)?;
+            send(hub, state, key, agreed_key, agreed, &mut synced, sending, batch, pending)?;
         }
+    }
+    if let Some((path, listed)) = history.filter(|_| synced.push == Push::Done) {
+        send_history(hub, state, key, agreed_key, agreed, &mut synced, sending, &path, listed, resolve, now)?;
     }
 
     let mut wanted: Vec<String> = vec![];
@@ -514,8 +513,7 @@ fn exchange(
     Ok(synced)
 }
 
-/// Pushes one batch; once the hub has it, lands its merged histories here and takes its files as
-/// agreed. The hub's refusal at the account's limit is kept in `synced` for the caller instead of
+/// Pushes one batch; once the hub has it, takes its files as agreed. The hub's refusal at the account's limit is kept in `synced` for the caller instead of
 /// ending the sync, so the pull still happens; any other error (offline, a timeout, an older hub's
 /// refusal of the whole kind of file) ends it as before, with no hold.
 #[allow(clippy::too_many_arguments)]
@@ -529,13 +527,9 @@ fn send(
     sending: u64,
     batch: Vec<File>,
     pending: Vec<(String, Option<String>)>,
-    land: &dyn Fn(&str) -> Result<(), String>,
 ) -> Result<(), String> {
     match hub.push(key, batch) {
         Ok(()) => {
-            for (path, _) in &pending {
-                land(path)?;
-            }
             commit_agreed(state, agreed_key, agreed, &pending)?;
             synced.pushed.extend(pending.into_iter().map(|(path, _)| path));
             Ok(())
@@ -546,6 +540,77 @@ fn send(
         }
         Err(e) => Err(e),
     }
+}
+
+/// Sends the history on its own, naming the hub's copy it holds every line of: the copy `listed`
+/// when only this machine changed it, otherwise the hub's copy, pulled and merged in first. When
+/// another machine's history landed first, the hub refuses it, and it pulls the copy that landed,
+/// merges it in and sends again, `HISTORY_TRIES` times at most; past that the next sync merges
+/// again. A merged history is written here only once the hub took it.
+#[allow(clippy::too_many_arguments)]
+fn send_history(
+    hub: &impl Hub,
+    state: &mut State,
+    key: &str,
+    agreed_key: &str,
+    agreed: &mut BTreeMap<String, String>,
+    synced: &mut Synced,
+    sending: u64,
+    path: &str,
+    mut listed: Option<String>,
+    resolve: &dyn Fn(&str) -> Option<PathBuf>,
+    now: SystemTime,
+) -> Result<(), String> {
+    let target = resolve(path).ok_or("no history here")?;
+    for _ in 0..HISTORY_TRIES {
+        let mine = std::fs::read(&target).unwrap_or_default();
+        let (base, both) = match listed.take() {
+            Some(base) => (base, None),
+            None => {
+                let theirs = hub.pull(key, vec![path.to_owned()])?.into_iter().next();
+                let base = theirs.as_ref().map_or(String::new(), |f| f.entry.sha.clone());
+                let theirs = theirs.and_then(|f| f.data).map(|d| unpack(&d)).transpose()?.unwrap_or_default();
+                (base, Some(merge_history(&mine, &theirs)))
+            }
+        };
+        let (sent, modified) = match &both {
+            Some(both) => (both, millis(now)),
+            None => {
+                let Some((_, modified)) = state.hash(&target) else { return Ok(()) };
+                (&mine, modified)
+            }
+        };
+        let sha = sha(sent);
+        let data = pack(sent);
+        if data.len() as u64 > FILE_LIMIT {
+            return Ok(());
+        }
+        let file = File {
+            entry: Entry { path: path.to_owned(), sha: sha.clone(), modified, size: data.len() as u64, executable: None },
+            data: Some(base64::engine::general_purpose::STANDARD.encode(data)),
+            agreed: None,
+            base: Some(base),
+        };
+        match hub.push(key, vec![file]) {
+            Ok(()) => {
+                if let Some(both) = &both {
+                    // Keeps any turn added here since the history was read.
+                    let now = std::fs::read(&target).unwrap_or_default();
+                    crate::fsx::replace(&target, &if now == mine { both.clone() } else { merge_history(&now, both) }, None, None)?;
+                }
+                commit_agreed(state, agreed_key, agreed, &[(path.to_owned(), Some(sha))])?;
+                synced.pushed.push(path.to_owned());
+                return Ok(());
+            }
+            Err(error) if error.starts_with(STALE_REFUSAL) => continue,
+            Err(error) if error.starts_with(LIMIT_REFUSAL) => {
+                synced.push = Push::Refused { error, sending };
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 /// Names the files a sync has to send by their paths and their contents here.
@@ -633,6 +698,12 @@ pub struct PluginShare {
 
 /// How the hub's refusal of a push past the account's limit begins, from 0.18.5 on.
 pub const LIMIT_REFUSAL: &str = "the account's synced projects would pass ";
+
+/// The hub's refusal of a history whose `base` is no longer the hub's copy, from 0.18.7 on.
+pub const STALE_REFUSAL: &str = "the hub's copy of the history changed since this machine merged it";
+
+/// How many times one sync sends the history when other machines' pushes keep landing first.
+const HISTORY_TRIES: usize = 3;
 
 pub fn old_hub(err: &str) -> bool {
     err.contains("is not a file a project shares")
@@ -1721,7 +1792,7 @@ mod tests {
     fn a_skill_written_again_after_the_hub_lost_it_is_shared() {
         let root = root("rewritten-skill");
         let hub = MemHub::default();
-        let gone = File { entry: Entry { path: "user-skills/use-railway/SKILL.md".into(), sha: String::new(), modified: 1, size: 0, executable: None }, data: None, agreed: None };
+        let gone = File { entry: Entry { path: "user-skills/use-railway/SKILL.md".into(), sha: String::new(), modified: 1, size: 0, executable: None }, data: None, agreed: None, base: None };
         hub.push(PLUGINS_KEY, vec![gone]).unwrap();
         let mac = PluginShare { claude_home: root.join("mac/.claude"), dir: root.join("mac/synced-plugins") };
         let mini = PluginShare { claude_home: root.join("mini/.claude"), dir: root.join("mini/synced-plugins") };
@@ -1955,6 +2026,7 @@ mod tests {
             entry: Entry { path: HOOK.into(), sha: sha(bytes), modified, size: data.len() as u64, executable },
             data: Some(base64::engine::general_purpose::STANDARD.encode(data)),
             agreed: None,
+            base: None,
         }
     }
 
