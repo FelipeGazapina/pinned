@@ -9475,6 +9475,36 @@ fn an_extend_box_ask_stored_as_its_box_ends_is_closed_and_refused() {
     assert_eq!(twin_runtime.block_on(ending).unwrap(), Ok(true));
 }
 
+/// A database error reading the ask's box, after the ask is stored, does not fail the act: the ask
+/// waits as any ask does, is audited as pending, and the owner's app hears of it.
+#[test]
+fn an_extend_box_ask_whose_box_cannot_be_read_after_it_is_stored_still_waits() {
+    let ExtendSetup { hub, mut owner, ana, machine, .. } = extend_setup("extend_read_fails");
+    let mark = owner.frames.len();
+    // A trigger that renames a box column as the ask is stored, once: every read of the box after
+    // that fails, and the ask's own box read after its store is the first to need it.
+    admin_on(
+        &hub.database,
+        "create or replace function pinned_test_break_box_reads() returns trigger language plpgsql as $$ begin
+           if exists (select 1 from information_schema.columns where table_name = 'boxes' and column_name = 'reason') then
+             alter table boxes rename column reason to reason_test;
+           end if;
+           return null;
+         end $$;
+         create trigger pinned_test_break_box_reads after insert on agent_confirmations for each row execute function pinned_test_break_box_reads();",
+    );
+    let asked = extend_as(&ana.dir, &ana.tab, &machine, 0.5, Some("r-read-fails"));
+    admin_on(
+        &hub.database,
+        "drop trigger pinned_test_break_box_reads on agent_confirmations; drop function pinned_test_break_box_reads(); alter table boxes rename column reason_test to reason;",
+    );
+    let asked = asked.unwrap();
+    assert_eq!(asked["outcome"], "pending", "{asked}");
+    assert_eq!(waiting_ids(&mut owner), [asked["id"].clone()], "the ask waits");
+    assert_eq!(count_on(&hub.database, "select count(*) from agent_actions where request_id = 'r-read-fails' and outcome = 'pending'"), 1, "its pending row is written");
+    wait_frame(&mut owner, mark, "the owner's app to hear of the ask", |f| f["type"] == "confirmations" && f["items"].as_array().is_some_and(|items| items.iter().any(|c| c["id"] == asked["id"])));
+}
+
 /// A closed extend ask has its outcome from the moment it is closed: the sweep a restarted hub runs
 /// over decisions it left without one leaves it denied with the box's end, never failed.
 #[test]
