@@ -195,7 +195,9 @@ function teamCall(op, team = teamsNow?.id) {
 
 const teamView = (t) => {
   const role = t.role === "owner" ? "owner" : "member";
-  return { id: t.id, name: t.name, role, credential: t.credential ?? {}, me: typeof t.me === "string" && t.me ? t.me : role === "owner" && typeof t.owner === "string" && t.owner ? t.owner : null };
+  // The hub sends `line_held` to the owner only; a member's view never carries it.
+  const held = role === "owner" && t.line_held ? { line_held: t.line_held } : {};
+  return { id: t.id, name: t.name, role, credential: t.credential ?? {}, me: typeof t.me === "string" && t.me ? t.me : role === "owner" && typeof t.owner === "string" && t.owner ? t.owner : null, ...held };
 };
 
 function teamsRemember() {
