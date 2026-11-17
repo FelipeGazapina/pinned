@@ -1262,10 +1262,15 @@ impl<'c, 'a> Scan<'c, 'a> {
     }
 
     fn write_check(&mut self, raw: &str, shown: &str, path: Option<PathBuf>, unresolved: bool) {
-        if self_grant(&comps(raw)) || path.as_deref().is_some_and(|p| self_grant(&path_comps(p))) {
+        let grant = self_grant(&comps(raw)) || path.as_deref().is_some_and(|p| self_grant(&path_comps(p)));
+        if grant {
             self.hit(NeverItem::SelfGrant, format!("writes {}", short(shown)));
         }
-        if unresolved || path.as_deref().is_some_and(|p| self.outside(p)) {
+        // A self-grant is never approved ahead of time, and a write outside may be, so one in
+        // another checkout, such as the main one of this worktree, stops as a self-grant only.
+        // The account's own `~/.claude` stays a write outside, as the design's table has it.
+        let account_own = path.as_deref().is_some_and(|p| p.starts_with(self.ctx.home.join(".claude")));
+        if (unresolved || path.as_deref().is_some_and(|p| self.outside(p))) && (!grant || account_own) {
             self.hit(NeverItem::WriteOutside, format!("writes {}", short(shown)));
         }
     }
