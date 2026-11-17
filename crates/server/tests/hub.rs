@@ -8997,6 +8997,67 @@ fn a_session_box_follows_only_its_setting_and_budget_and_only_its_owner_answers_
     }
 }
 
+/// An agent's extend_box is checked against the box and the Box budget when it asks, counting the
+/// extends of that box still waiting for the owner, so the owner is never asked to approve one that
+/// cannot run. The owner's approval checks again, as the box may have changed in between.
+#[test]
+fn an_agents_extend_box_is_refused_when_it_asks_if_it_cannot_run_and_checked_again_when_approved() {
+    let hub = TestHub::start_with_boxes("extend_ask_check", Signup::Open, fast());
+    let url = hub.url.clone();
+    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let mut ana = agent_of(&url, &token, "ana@acme.dev", "ana-mac");
+    hub.boxes.state.lock().unwrap().checkout = Some(("site".into(), SITE.into()));
+    ana.client.hub(json!({ "cmd": "connect_upstash", "key": BOX_KEY, "claude_token": CLAUDE_TOKEN })).unwrap();
+    ana.client.hub(json!({ "cmd": "set_taste", "scope": { "kind": "captains" }, "patch": { "box_budget_cents": 300 } })).unwrap();
+    box_mode(&mut ana.client, "session", "fresh");
+    let mut owner = Client::app(&url, &token);
+    owner.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
+    let (bob_token, _) = account::signup(&url, "bob@acme.dev", "correct horse").unwrap();
+    let bob = agent_of(&url, &bob_token, "bob@acme.dev", "bob-mac");
+    let mut bobs_app = Client::app(&url, &bob_token);
+    let opened = act(&ana.dir, &ana.tab, "open_box", json!({ "repo": "acme/site", "size": "small", "budget_usd": 1.0 })).unwrap();
+    assert_eq!(opened["outcome"], "done", "{opened}");
+    let machine = opened["result"]["machine"].as_str().unwrap().to_owned();
+    let extend = |agent: &Agent, extra: f64| act(&agent.dir, &agent.tab, "extend_box", json!({ "machine": machine, "extra_usd": extra }));
+    let ceiling = Err("a box may spend at most US$ 3.00; name less, or raise Box budget in Settings › Way of working".to_owned());
+
+    assert_eq!(act(&ana.dir, &ana.tab, "extend_box", json!({ "machine": ana.machine, "extra_usd": 1.0 })), Err("this machine is no box".into()), "a machine that is no box is refused when the agent asks");
+    assert_eq!(act(&ana.dir, &ana.tab, "extend_box", json!({ "machine": "not-a-machine", "extra_usd": 1.0 })), Err("this account has no machine not-a-machine".into()));
+    assert_eq!(extend(&ana, 0.0), Err("name an amount above zero".into()));
+    assert_eq!(extend(&ana, 2.5), ceiling, "US$ 1.00 and 2.50 pass the Box budget of US$ 3.00, so the ask is refused at once");
+    assert_eq!(waiting_actions(&mut owner), Vec::<String>::new(), "no refused extend waits for the owner");
+
+    let first = extend(&ana, 1.0).unwrap();
+    assert_eq!(first["outcome"], "pending", "within the Box budget the ask waits for the owner: {first}");
+    let again = session_tool(&ana.dir, &ana.tab, json!({ "name": "act", "action": "extend_box", "args": { "machine": machine, "extra_usd": 0.75 }, "request_id": "r-extend" })).unwrap();
+    assert_eq!(again["outcome"], "pending", "{again}");
+    let repeat = session_tool(&ana.dir, &ana.tab, json!({ "name": "act", "action": "extend_box", "args": { "machine": machine, "extra_usd": 0.75 }, "request_id": "r-extend" })).unwrap();
+    assert_eq!((repeat["outcome"].as_str(), repeat["id"].as_str()), (Some("pending"), again["id"].as_str()), "a repeat of a waiting ask is not counted against itself: {repeat}");
+    owner.hub(json!({ "cmd": "decide_confirmation", "id": again["id"], "approve": false })).unwrap();
+    assert_eq!(extend(&ana, 0.75).unwrap()["outcome"], "pending", "a denied extend no longer counts");
+    let waiting = waiting_actions(&mut owner);
+    assert_eq!(waiting, ["extend_box", "extend_box"], "{waiting:?}");
+    assert_eq!(extend(&ana, 0.5), ceiling, "it fits alone, and with the US$ 1.75 already waiting it passes the Box budget");
+    assert_eq!(waiting_actions(&mut owner).len(), 2, "the refused ask does not wait");
+
+    assert_eq!(extend(&bob, 0.25), Err("this machine is no box".into()), "another account's box is no box of bob's");
+    assert_eq!(waiting_actions(&mut bobs_app), Vec::<String>::new(), "bob's refused ask does not wait");
+    assert_eq!(waiting_actions(&mut owner).len(), 2, "bob's ask touched nothing of ana's");
+
+    // The owner extends the box in the app meanwhile: the first ask no longer fits when approved.
+    assert_eq!(owner.hub(json!({ "cmd": "extend_box", "machine": machine, "extra_usd": 1.25 })).unwrap()["budget_usd"].as_f64(), Some(2.25));
+    let decide = |app: &mut Client, asked: &Value| app.hub(json!({ "cmd": "decide_confirmation", "id": asked["id"], "approve": true })).unwrap();
+    assert_eq!(
+        decide(&mut owner, &first)["outcome"].as_str(),
+        Some("failed: a box may spend at most US$ 3.00; name less, or raise Box budget in Settings › Way of working"),
+        "approval checks again"
+    );
+    let last = owner.hub(json!({ "cmd": "confirmations" })).unwrap().as_array().unwrap().iter().find(|c| c["decision"].is_null()).cloned().unwrap();
+    let done = decide(&mut owner, &last);
+    assert_eq!((done["outcome"].as_str(), done["result"]["budget_usd"].as_f64()), (Some("done"), Some(3.0)), "{done}");
+    assert_eq!(extend(&ana, 0.01), ceiling, "the box is at its Box budget");
+}
+
 #[test]
 fn a_worker_box_follows_only_its_access_setting_and_the_owner_answers_its_ask_on_a_locked_app() {
     let hub = TestHub::start_with_boxes("locked_box_worker", Signup::Open, fast());
