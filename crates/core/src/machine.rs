@@ -14318,6 +14318,30 @@ Have another model review a risky change before it goes ahead.";
 
     #[test]
     #[cfg(unix)]
+    fn a_team_boxs_worker_priced_at_the_ceiling_counts_as_unknown_in_its_work_cost() {
+        let RunCostBox { dir, m, sent, subject, tab, transcript, .. } = run_costs_box("run-costs-worker-ceiling-unknown");
+        let reply = delegate_task(&m, &tab, work(Some("claude-sonnet-5-5"), None));
+        let child = reply["tabId"].as_str().unwrap().to_owned();
+        let worker = transcript.with_file_name("s-worker.jsonl");
+        std::fs::write(&worker, format!("{}\n", run_spent("w1", "claude-sonnet-5-5", 200_000))).unwrap();
+        let payload = json!({ "session_id": "s-worker", "transcript_path": worker, "prompt": "Parser" });
+        m.record_event(AgentEvent { tab: Some(child), ..hooks::event_from(Some("working"), &payload.to_string()).unwrap() });
+        let seen = |m: &Machine| {
+            let cost = m.work_cost(&tab).unwrap();
+            (cost.unknown, (cost.agents_usd * 100.0).round())
+        };
+        m.meter_workers();
+        assert_eq!(seen(&m), (0, 300.0), "every model priced from the list: known");
+        append(&worker, &[run_spent("w2", "claude-unlisted-1", 50_000)]);
+        m.meter_workers();
+        assert_eq!(seen(&m), (1, 1_050.0), "a model priced at the ceiling: unknown, its US$ 7.50 kept beside the US$ 3.00");
+        m.report_run_costs(Instant::now());
+        assert_eq!(*sent.lock().unwrap(), vec![("wf-1".to_owned(), subject, 1_065.0)], "the run total keeps the ceiling's amount");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn a_team_boxs_run_cost_past_the_hubs_cap_is_sent_as_the_cap() {
         let RunCostBox { dir, m, sent, subject, transcript, .. } = run_costs_box("run-costs-cap");
         append(&transcript, &[run_spent("m2", "claude-sonnet-5-5", 700_000_000)]);
