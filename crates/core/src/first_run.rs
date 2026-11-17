@@ -1,6 +1,6 @@
-//! Claude Code's first-run screens: the theme picker, the login picker, the folder-trust prompt
-//! and the bypass-permissions warning. Each one holds a session in "starting" until someone
-//! answers it, and a session no one watches never gets answered.
+//! Claude Code's first-run screens: the theme picker, the login picker, the folder-trust prompt,
+//! the bypass-permissions warning and the project MCP approval dialog. Each one holds a session in
+//! "starting" until someone answers it, and a session no one watches never gets answered.
 //!
 //! Pinned prevents them by seeding the launching account's config before the session starts, and
 //! falls back to reading the session's screen when one shows anyway.
@@ -105,11 +105,14 @@ pub enum Screen {
 
 /// Words only each screen shows, as `flat` spells them, in Claude Code 2.1. The keys `answer`
 /// types follow that version's menus, where "No, exit" comes first.
-const SCREENS: [(Screen, &[&str]); 4] = [
+const SCREENS: [(Screen, &[&str]); 6] = [
     (Screen::Theme, &["choosethetextstylethatlooksbestwithyourterminal"]),
     (Screen::Login, &["selectloginmethod"]),
     (Screen::Trust, &["yesitrustthisfolder"]),
     (Screen::Bypass, &["bypasspermissionsmode", "yesiaccept"]),
+    // One new server, then several: the two titles.
+    (Screen::McpApproval, &["mcpserverfoundinthisproject"]),
+    (Screen::McpApproval, &["mcpserversfoundinthisproject"]),
 ];
 
 /// The banner of the session's own screen, "Claude Code v2.1.322", which follows every first-run
