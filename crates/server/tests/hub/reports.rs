@@ -1385,7 +1385,7 @@ impl DevHub {
         let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let listen = format!("127.0.0.1:{port}");
         let (db, ui, downloads, key) = (format!("{}/{database}", postgres()), dir.join("ui"), dir.join("downloads"), dir.join("hub.key"));
-        let mut command = std::process::Command::new(BIN);
+        let mut command = pinned_core::process::command(BIN);
         command.args(["hub", "--dev", "--db", &db, "--listen", &listen]).arg("--ui").arg(&ui).arg("--downloads").arg(&downloads).arg("--key-file").arg(&key);
         for name in ["PINNED_REPORTS_GITHUB_TOKEN", "PINNED_REPORTS_GITHUB_API", "PINNED_REPORTS_REPO", "PINNED_REPORTS_POLL_SECS", "PINNED_DEV_TIME_SCALE"] {
             command.env_remove(name);
