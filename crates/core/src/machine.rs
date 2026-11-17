@@ -367,6 +367,47 @@ impl<'a> ChildEnv<'a> {
     }
 }
 
+/// The environment the node started with, which decides the homes the built-in accounts keep. A
+/// test binary reads only the one a test gave it, so no test runs on the user's own homes.
+fn node_env() -> Vec<(String, String)> {
+    #[cfg(test)]
+    if let Some(env) = parent::env() {
+        return env;
+    }
+    if test_binary() {
+        return vec![];
+    }
+    std::env::vars_os().filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?))).collect()
+}
+
+/// The node environment a test hands the code it runs on this thread, in place of the process's.
+#[cfg(test)]
+pub(crate) mod parent {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static PARENT: RefCell<Option<Vec<(String, String)>>> = const { RefCell::new(None) };
+    }
+
+    /// Runs `f` as if the node had started with `env`.
+    pub(crate) fn with<R>(env: Vec<(String, String)>, f: impl FnOnce() -> R) -> R {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                PARENT.with(|parent| parent.borrow_mut().take());
+            }
+        }
+        PARENT.with(|parent| *parent.borrow_mut() = Some(env));
+        let _reset = Reset;
+        f()
+    }
+
+    /// The environment `with` gave this thread.
+    pub(crate) fn env() -> Option<Vec<(String, String)>> {
+        PARENT.with(|parent| parent.borrow().clone())
+    }
+}
+
 /// A process about to start, whose environment `ChildEnv` sets.
 pub(crate) trait ChildCommand {
     fn remove_var(&mut self, key: &str);
@@ -1124,6 +1165,8 @@ impl Machine {
         // Seeds taste.json from the old cost style, then moves the old worker cap into it.
         taste::migrate_worker_cap(dir.as_deref());
         let home = home();
+        let exported = accounts::exported_homes(&node_env(), dir.as_deref());
+        let accounts = Accounts::load(dir.as_deref(), home.clone()).with_claude_home(launch.claude_home.clone()).with_exported_homes(exported);
         // A test must never write the user's own claude config.
         let builtin_claude_config = match (&launch.claude_home, test_binary()) {
             (Some(claude_home), _) => claude_home.clone(),
@@ -1135,7 +1178,6 @@ impl Machine {
         let default_cwd = open
             .or_else(|| projects::recent(&projects).first().map(|p| p.path.clone()))
             .unwrap_or_else(|| home.clone());
-        let accounts = Accounts::load(dir.as_deref(), home.clone()).with_claude_home(launch.claude_home.clone());
         let machine = Arc::new_cyclic(|me| Machine {
             launch,
             default_cwd,
@@ -9584,6 +9626,38 @@ pub(crate) mod tests {
         let session: BTreeMap<&str, &str> = env.iter().filter(|(k, _)| SESSION_NAMES.contains(&k.as_str())).map(|(k, v)| (k.as_str(), v.as_str())).collect();
         assert_eq!(session, expected.iter().copied().collect::<BTreeMap<_, _>>());
         assert!(env.contains(&("HOME".into(), "/home/ana".into())), "the child lost a variable no session sets: {env:?}");
+    }
+
+    /// A machine in `root` whose node started with `env`.
+    fn machine_started_with(root: &Path, env: Vec<(String, String)>) -> Arc<Machine> {
+        parent::with(env, || Machine::new(launch(), Some(root.join("config")), Some("/repo".into()), |_| {}))
+    }
+
+    #[test]
+    fn a_home_the_user_exported_is_where_the_built_in_account_resumes_and_syncs() {
+        let root = tempfile::tempdir().unwrap();
+        let own = root.path().join("claude-own");
+        let shell = |extra: &[(&str, &str)]| -> Vec<(String, String)> {
+            [("PATH", "/usr/bin:/bin"), ("CLAUDE_CONFIG_DIR", own.to_str().unwrap())].iter().chain(extra).map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        };
+        let session = "6f1c2a9e-0000-4000-8000-000000000001";
+        let transcript = own.join("projects").join("-repo").join(format!("{session}.jsonl"));
+        std::fs::create_dir_all(transcript.parent().unwrap()).unwrap();
+        std::fs::write(&transcript, "{}\n").unwrap();
+        let account = Account::builtin(Provider::Claude);
+
+        let m = machine_started_with(root.path(), shell(&[]));
+        assert_eq!(m.accounts.home(&account), own, "the home a resume and sync read");
+        assert_eq!(m.find_transcript(&account, session), Some(transcript.clone()));
+        assert_eq!(m.claude_config(&account), own.join(".claude.json"));
+        let cmd = m.launch.command(Program::Agent, &account, "tab-1", Path::new("/repo"), false, vec![], &m.launch_env(&account, vec![]), &[], None);
+        assert_eq!(cmd.get_env("CLAUDE_CONFIG_DIR").and_then(|v| v.to_str()), own.to_str());
+
+        let m = machine_started_with(root.path(), shell(&[("PINNED_ROLE", "worker")]));
+        assert_eq!(m.accounts.home(&account), home().join(".claude"));
+        assert_eq!(m.find_transcript(&account, session), None);
+        let cmd = m.launch.command(Program::Agent, &account, "tab-1", Path::new("/repo"), false, vec![], &m.launch_env(&account, vec![]), &[], None);
+        assert_eq!(cmd.get_env("CLAUDE_CONFIG_DIR"), None);
     }
 
     #[test]
