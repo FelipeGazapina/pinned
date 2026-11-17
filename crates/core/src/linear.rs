@@ -1,4 +1,4 @@
-use chrono::{DateTime, FixedOffset};
+use chrono::{DateTime, FixedOffset, SecondsFormat, TimeDelta};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -298,9 +298,10 @@ pub struct Scope {
     pub project: String,
 }
 
-/// The changes one read found. `read_to` is set only when the read stopped at its page cap: the caller then
-/// moves its watermark to `read_to`, the newest `updatedAt` among the issues read. Every issue updated before
-/// `read_to` was read.
+/// The changes one read found. `read_to` is set only when the read stopped at its page cap: it is the newest
+/// `updatedAt` among the issues read, and every issue updated before it was read. When `read_to` is Some, the caller
+/// keeps its `since` and passes `read_to` as `from` to the next read. When it is None the read was complete, and the
+/// caller may move `since` on and drop `from`.
 #[derive(Debug, PartialEq)]
 pub struct Changes {
     pub changes: Vec<Change>,
@@ -323,14 +324,24 @@ const CHANGES: &str = "query($filter: IssueFilter, $before: String) {
 /// The API's answer to a `viewer` query, by a hash of the API key: the map holds no key.
 static VIEWERS: std::sync::Mutex<BTreeMap<[u8; 32], String>> = std::sync::Mutex::new(BTreeMap::new());
 
-/// The changes to issues in `scope` made after `since` (RFC 3339), read from the oldest update up, four pages
-/// of 50 issues at most. When the read stops at the cap, `read_to` is the newest `updatedAt` among the issues
-/// read, and the caller moves its watermark there. The next read is strictly after `read_to`, so an issue
-/// updated at exactly `read_to` that the cap left unread is not in it.
+/// The changes to issues in `scope`, read from the oldest update up, four pages of 50 issues at most. `since`
+/// (RFC 3339) is the history floor: a change counts when it was made after `since`, whichever issue it is on.
+/// `from` is the issue cursor. With None, the read takes the issues updated after `since`. With `Some(read_to)`
+/// it takes the issues updated at or after `read_to`, so a read that resumes a capped one reads the issues at its
+/// watermark again. Those come back with the same `history_id` and kind, so a caller drops a repeat by them.
+/// When the cap stops the read, `read_to` is the newest `updatedAt` among the issues read. If that is `from`
+/// itself, more issues than the cap share that millisecond and the read cannot get past it, so `read_to` is one
+/// millisecond later instead, and the caller's loop ends. The one known skip is a tie beyond the cap at a single
+/// millisecond: those issues are not read.
 pub async fn changes(key: &str, since: &str, from: Option<&str>, scope: &Scope) -> Result<Changes, String> {
     since_time(since)?;
-    let _ = from; // red: the issue cursor is not read yet
-    let mut filter = json!({ "updatedAt": { "gt": since } });
+    let mut filter = match from {
+        Some(from) => {
+            since_time(from)?;
+            json!({ "updatedAt": { "gte": from } })
+        }
+        None => json!({ "updatedAt": { "gt": since } }),
+    };
     let team = scope.team.trim();
     if !team.is_empty() {
         filter["team"] = json!({ "or": [{ "key": { "eqIgnoreCase": team } }, { "name": { "eqIgnoreCase": team } }] });
@@ -353,6 +364,12 @@ pub async fn changes(key: &str, since: &str, from: Option<&str>, scope: &Scope) 
         before = Some(page["endCursor"].as_str().ok_or("Linear sent a page with no cursor")?.to_owned());
     }
     let read_to = read_to.ok_or("Linear sent a full read with no issues")?;
+    let read_to = match from {
+        Some(from) if since_time(from)? == since_time(&read_to)? => {
+            (since_time(from)? + TimeDelta::milliseconds(1)).to_rfc3339_opts(SecondsFormat::Millis, true)
+        }
+        _ => read_to,
+    };
     Ok(Changes { changes, read_to: Some(read_to) })
 }
 
