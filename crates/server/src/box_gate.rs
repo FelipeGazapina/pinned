@@ -3,6 +3,7 @@
 //! shared files, so a box may only pull the account's files: the hub refuses every call of a box
 //! that would change what the account's other machines or clients read.
 
+use pinned_core::global_orchestrator::RelayTo;
 use pinned_core::wire::HubCall;
 
 /// The refusal a box's write gets. It starts with `sync::LIMIT_REFUSAL`, so a node that reads a
@@ -62,6 +63,10 @@ pub fn box_may_send(call: &HubCall) -> Result<(), String> {
         | HubCall::RecordTasks { .. }
         | HubCall::AutoArchive { .. }
         | HubCall::Team { .. } => Ok(()),
+        // A Capitão's report on its own work, and a worker it hands to another box, which is held
+        // to this gate as this box is.
+        HubCall::Relay { to: RelayTo::Orchestrator { .. }, .. } => Ok(()),
+        HubCall::Delegate { request, .. } if request.target.boxed.is_some() => Ok(()),
         // Writes: what the account's other machines load or run, and what its clients read.
         // The account's synced and shared files.
         HubCall::SyncPush { .. }
@@ -86,7 +91,7 @@ pub fn box_may_send(call: &HubCall) -> Result<(), String> {
         | HubCall::EnableMcpServer { .. }
         | HubCall::RemoveMcpServer { .. }
         | HubCall::ImportMcpServer { .. }
-        // Sessions on its other machines.
+        // Sessions on its other machines: a worker there, a Capitão's messages.
         | HubCall::Delegate { .. }
         | HubCall::Relay { .. }
         | HubCall::MarkSessions { .. }
@@ -167,5 +172,16 @@ mod tests {
         assert_eq!(box_may_send(&share), refused);
         assert_eq!(box_may_send(&call(serde_json::json!({ "cmd": "sync_list", "project": "pinned:plugins" }))), Ok(()));
         assert_eq!(box_may_send(&call(serde_json::json!({ "cmd": "sync_pull", "project": "pinned:plugins", "paths": ["user-skills/ship/SKILL.md"] }))), Ok(()));
+    }
+
+    #[test]
+    fn a_box_hands_a_worker_only_to_another_box() {
+        let delegate = |target: serde_json::Value| {
+            let request = serde_json::to_value(pinned_core::delegate::parse_request(&serde_json::json!({ "task": "Fix it.", "target": target })).unwrap()).unwrap();
+            call(serde_json::json!({ "cmd": "delegate", "tab": "tab-1", "task": "t1", "request": request, "access": "auto" }))
+        };
+        assert_eq!(box_may_send(&delegate(serde_json::json!({ "box": true }))), Ok(()));
+        let refused = Err("the account's synced projects would pass 0 MB from a box: a box only pulls the account's files".to_owned());
+        assert_eq!(box_may_send(&delegate(serde_json::json!({ "machine": "mac" }))), refused);
     }
 }
