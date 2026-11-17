@@ -1153,6 +1153,47 @@ mod tests {
         branch["properties"][field] = serde_json::json!({ "type": "string", "default": "" });
     }
 
+    /// A chain whose next link is optional.
+    #[derive(serde::Serialize, schemars::JsonSchema)]
+    struct Chain {
+        name: String,
+        next: Option<Box<Chain>>,
+    }
+
+    /// A tree whose branch is one of two shapes, one of them the tree again.
+    #[derive(serde::Serialize, schemars::JsonSchema)]
+    struct Tree {
+        branch: Branch,
+    }
+
+    // Only its schema is read.
+    #[allow(dead_code)]
+    #[derive(serde::Serialize, schemars::JsonSchema)]
+    #[serde(untagged)]
+    enum Branch {
+        Tree(Box<Tree>),
+        Leaf(String),
+    }
+
+    #[derive(serde::Serialize, schemars::JsonSchema)]
+    struct Holds {
+        chain: Chain,
+        tree: Tree,
+    }
+
+    #[test]
+    fn a_type_that_holds_itself_through_an_option_or_an_enum_branch_ends() {
+        let schema = schema_ser::<Holds>();
+        let tree = node(&schema, &schema);
+        let Node::Object(fields) = &tree else { panic!("{tree:?}") };
+        assert_eq!(fields.len(), 2);
+        let breaks = diff(
+            &contract("0.8.4", vec![], vec![("Holds", schema.clone())]),
+            &contract("0.13.0", vec![], vec![("Holds", schema)]),
+        );
+        assert_eq!(breaks, vec![]);
+    }
+
     #[test]
     fn removing_a_hub_call_variant_is_one_inbound_break() {
         let full = schema_de::<HubCall>();
