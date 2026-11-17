@@ -368,8 +368,10 @@ function teamWizardStepsHtml() {
       const shut = n > teamWizard.step;
       // Done is the last row and has no number: its marker is empty until the wizard reaches it, then a check.
       const last = n === TEAMS_TEXT.steps.length;
-      const mark = last ? (teamWizard.step >= n ? "✓" : "") : state === "done" ? "✓" : n;
-      return `<li><button type="button" class="tm-step ${state}" data-tm="go" data-step="${n}"${n === teamWizard.step ? ' aria-current="step"' : ""}${shut || teamWizard.busy ? " disabled" : ""}><span class="tm-num" aria-hidden="true">${mark}</span><span class="tm-texts"><span class="tm-name">${teamsEsc(s.name)}</span><span class="tm-about">${teamsEsc(teamWizardStepSub(n))}</span></span></button></li>`;
+      const reached = teamWizard.step >= n;
+      const mark = last ? (reached ? "✓" : "") : state === "done" ? "✓" : n;
+      const markAttrs = last ? `role="img" aria-label="${reached ? "Reached" : "Not reached"}"` : 'aria-hidden="true"';
+      return `<li><button type="button" class="tm-step ${state}" data-tm="go" data-step="${n}"${n === teamWizard.step ? ' aria-current="step"' : ""}${shut || teamWizard.busy ? " disabled" : ""}><span class="tm-num" ${markAttrs}>${mark}</span><span class="tm-texts"><span class="tm-name">${teamsEsc(s.name)}</span><span class="tm-about">${teamsEsc(teamWizardStepSub(n))}</span></span></button></li>`;
     })
     .join("");
 }
