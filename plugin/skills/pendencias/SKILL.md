@@ -1,13 +1,13 @@
 ---
 name: pendencias
-description: Como o Felipe quer receber perguntas. Tudo o que depende dele (decisão, aprovação, conferência, escolha) vai para a página "Pendências do Felipe", um Artifact com opções para marcar e um campo de nota, e a resposta no chat traz o link. Use quando ele perguntar "o que depende de mim", "o que está esperando por mim" ou "pendências", quando ele disser "respondi", e sempre que uma resposta do Orquestrador for terminar com uma ou mais perguntas para ele.
+description: Como o usuário quer receber perguntas. Tudo o que depende dele (decisão, aprovação, conferência, escolha) vai para a página "Pendências", um Artifact com opções para marcar e um campo de nota, e a resposta no chat traz o link. Use quando ele perguntar "o que depende de mim", "o que está esperando por mim" ou "pendências", quando ele disser "respondi", e sempre que uma resposta do Orquestrador for terminar com uma ou mais perguntas para ele.
 ---
 
-# Pendências: perguntas ao Felipe numa página
+# Pendências: perguntas ao usuário numa página
 
-O Felipe pediu isto em 2026-11-17: "sempre que houver algo pra eu responder, um artefato com os questionamentos". Ele responde na página, e não pergunta por pergunta no chat.
+O usuário quer receber numa página tudo o que ele precisa responder. Ele responde na página, e não pergunta por pergunta no chat.
 
-Esta skill é do Orquestrador. Um Capitão não publica esta página e não pergunta direto ao Felipe: ele põe as perguntas no relato ao Orquestrador, e o Orquestrador as leva para a página.
+Esta skill é do Orquestrador. Um Capitão não publica esta página e não pergunta direto ao usuário: ele põe as perguntas no relato ao Orquestrador, e o Orquestrador as leva para a página.
 
 ## Quando usar
 
@@ -20,7 +20,7 @@ Não use para o que você pode decidir sozinho. Decida, e conte a ele o que deci
 ## A página
 
 - É sempre a mesma página, no mesmo link. Nunca publique uma página nova para uma rodada nova.
-- Procure o link com `memory_search` ("página de pendências"). Se não houver, procure com `Artifact` (`action: "list"`) uma página chamada "Pendências do Felipe".
+- Procure o link com `memory_search` ("página de pendências"). Se não houver, procure com `Artifact` (`action: "list"`) uma página chamada "Pendências".
 - Só quando ela não existe: copie `template.html`, que está nesta pasta, para o seu scratchpad, preencha `ITEMS` e publique com `Artifact`, passando `capabilities: {"db": {}}`. Guarde o link com `memory_save` (título "Página de pendências").
 - A página usa a capacidade `db`. Cada resposta é salva na hora, na coleção `answers`.
 - O arquivo fica no scratchpad da sessão que publicou por último. Se você não tem o arquivo, leia a página com `Artifact` (`action: "read"` e a `url`) e edite o arquivo que essa leitura devolve. Publique com a mesma `url`, sem passar `capabilities`, para a `db` continuar valendo.
