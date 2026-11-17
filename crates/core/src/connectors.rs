@@ -1988,9 +1988,10 @@ pub struct Connectors {
     tab_facts: Mutex<HashMap<String, TabFacts>>,
     /// The Slack bots `fill_bots` already asked Slack about, so it asks once per bot.
     bots_filled: Mutex<std::collections::HashSet<String>>,
-    /// Who each Slack bot's token posts as, by the bot's user id: the user id and bot id (`B…`)
-    /// `auth.test` gives, which no store keeps, or None when Slack no longer takes the token.
-    /// Asked once per bot, the first time a workflow that reads app posts checks.
+    /// Who each Slack bot's token posts as, keyed by the bot's id in pinned (`slack::Bot::id`): the
+    /// user id and bot id (`B…`) `auth.test` gives, which no store keeps, or None when Slack no
+    /// longer takes the token. Asked once per bot, the first time a workflow that reads app posts
+    /// checks.
     bot_ids: Mutex<HashMap<String, Option<(String, String)>>>,
     /// Why runs failed when their box ended, for the next check to report on the workflows card.
     box_failures: Mutex<Vec<String>>,
@@ -3009,12 +3010,12 @@ fn run(c: &Connector, issue: &linear::Issue, exe: &str) -> Run {
     issue_run(c, issue, exe, false)
 }
 
-/// A session on the Linear issue. On a hub's team (`team`) the issue's text goes into the prompt
-/// framed as data from outside pinned, where the builder puts it.
-fn issue_run(c: &Connector, issue: &linear::Issue, exe: &str, team: bool) -> Run {
-    // The session's name reaches places other sessions read (a box's machine name), so on a
-    // hub's team it holds nothing a person outside pinned wrote.
-    let name = match team {
+/// A session on the Linear issue. Where `framed` (`Connectors::framed`) the issue's text goes into
+/// the prompt framed as data from outside pinned, where the builder puts it.
+fn issue_run(c: &Connector, issue: &linear::Issue, exe: &str, framed: bool) -> Run {
+    // The session's name reaches places other sessions read (a box's machine name), so where
+    // `framed` it holds nothing a person outside pinned wrote.
+    let name = match framed {
         true => issue.identifier.clone(),
         false => format!("{} {}", issue.identifier, issue.title),
     };
@@ -3047,7 +3048,7 @@ fn issue_run(c: &Connector, issue: &linear::Issue, exe: &str, team: bool) -> Run
         issue.description.as_deref().map(pinned_lines::guard).unwrap_or_else(|| "(no description)".to_owned()),
     );
     let subject = Subject::LinearIssue { issue: issue.id.clone() };
-    prompt += &format!("\n\nLinear issue {}", trigger_shown(&subject, &input, team));
+    prompt += &format!("\n\nLinear issue {}", trigger_shown(&subject, &input, framed));
     args.push(prompt);
     Run { cwd: c.folder.clone(), repo: c.repo(), args, connector: c.id.clone(), subject, mentioned: vec![], account: c.account(), runs_on: c.runs_on.clone(), input, reservation: None }
 }
@@ -3175,8 +3176,8 @@ fn slack_run(c: &Connector, channel: &str, channel_name: &str, thread: &str, pos
     thread_session(c, channel, channel_name, thread, posts, note, exe, false)
 }
 
-/// A session on the Slack thread, given its messages so far. `note` ends the prompt. On a hub's
-/// team (`team`) the thread goes into the prompt framed as data from outside pinned.
+/// A session on the Slack thread, given its messages so far. `note` ends the prompt. Where
+/// `framed` (`Connectors::framed`) the thread goes into the prompt framed as data from outside pinned.
 #[allow(clippy::too_many_arguments)]
 fn thread_session(
     c: &Connector,
@@ -3186,13 +3187,13 @@ fn thread_session(
     posts: &[slack::Post],
     note: Option<&str>,
     exe: &str,
-    team: bool,
+    framed: bool,
 ) -> Run {
     let opening = posts.first().and_then(|p| p.text.lines().next()).unwrap_or_default();
     let opening: String = opening.chars().take(TAB_NAME_CHARS).collect();
-    // On a hub's team, the session's name and the thread's header hold nothing a person outside
+    // Where `framed`, the session's name and the thread's header hold nothing a person outside
     // pinned wrote: the channel goes by its id, not the name its workspace gave it.
-    let (name, place) = match team {
+    let (name, place) = match framed {
         true => (format!("Slack thread {channel}"), format!("channel {channel}")),
         false => (format!("#{channel_name} {opening}"), format!("#{}", pinned_lines::flat(channel_name, pinned_lines::HEADER_CHARS))),
     };
@@ -3212,7 +3213,7 @@ fn thread_session(
     prompt += c.box_note();
     let input = transcript(posts);
     let subject = Subject::SlackThread { channel: channel.to_owned(), thread: thread.to_owned() };
-    prompt += &format!("\n\nSlack thread in {place}, oldest first:\n{}", trigger_shown(&subject, &input, team));
+    prompt += &format!("\n\nSlack thread in {place}, oldest first:\n{}", trigger_shown(&subject, &input, framed));
     prompt += note.unwrap_or_default();
     args.push(prompt);
     Run { cwd: c.folder.clone(), repo: c.repo(), args, connector: c.id.clone(), subject, mentioned: vec![], account: c.account(), runs_on: c.runs_on.clone(), input, reservation: None }
@@ -3224,10 +3225,6 @@ fn transcript(posts: &[slack::Post]) -> String {
     posts.iter().map(|p| format!("{}: {}", pinned_lines::author(&p.author), pinned_lines::guard(&p.text))).collect::<Vec<_>>().join("\n")
 }
 
-/// The header of a later message. Its 31 characters around an author `pinned_lines::author` cut to
-/// 49 characters (`AUTHOR_CHARS` and the "…") keep it within `pinned_lines::HEADER_CHARS` (80), so
-/// the guard escapes a forged copy of it in a post's text. It takes the author as the post has it
-/// and cleans it itself, so no caller can put a raw one in.
 /// The thread `slack::thread` read for `message`, a post a channel read just took. With `apps` its
 /// opening post reads as that read gave it: an app post's text is in its attachments and blocks,
 /// which `slack::thread` leaves out, so an alert with only those would open its run empty.
@@ -3238,6 +3235,10 @@ fn opened_by(mut posts: Vec<slack::Post>, message: &slack::Post, apps: bool) -> 
     posts
 }
 
+/// The header of a later message. Its 31 characters around an author `pinned_lines::author` cut to
+/// 49 characters (`AUTHOR_CHARS` and the "…") keep it within `pinned_lines::HEADER_CHARS` (80), so
+/// the guard escapes a forged copy of it in a post's text. It takes the author as the post has it
+/// and cleans it itself, so no caller can put a raw one in.
 fn reply_header(author: &str) -> String {
     format!("[Slack reply from {} in the thread]", pinned_lines::author(author))
 }
@@ -3290,12 +3291,12 @@ fn run_owns(runs: &[runner::Run], subject: &Subject) -> bool {
     runs.iter().any(|run| &run.subject == subject && !matches!(run.status, Status::Failed { .. }))
 }
 
-/// What a run's opening prompt shows of its trigger text `input`: on a hub's team (`team`) the
-/// Linear issue or the Slack thread framed as data from outside pinned. A Run now's input is
+/// What a run's opening prompt shows of its trigger text `input`: where `framed` the Linear issue
+/// or the Slack thread framed as data from outside pinned. A Run now's input is
 /// pinned's own and stays as it is.
-fn trigger_shown(subject: &Subject, input: &str, team: bool) -> String {
+fn trigger_shown(subject: &Subject, input: &str, framed: bool) -> String {
     let source = match subject {
-        _ if !team || is_run_now(subject) || input.trim().is_empty() => return input.to_owned(),
+        _ if !framed || is_run_now(subject) || input.trim().is_empty() => return input.to_owned(),
         Subject::LinearIssue { .. } => "a Linear issue",
         Subject::SlackThread { .. } => "a Slack thread",
     };
@@ -3448,16 +3449,16 @@ pub(crate) fn render_template(text: &str, run: &runner::Run) -> String {
     render_for(text, run, false)
 }
 
-/// `render_template` for text that goes to a session. On a hub's team (`team`) each trigger value
+/// `render_template` for text that goes to a session. Where `framed` each trigger value
 /// written outside pinned (the issue's or thread's text, the mention, the title, the channel's
 /// name) is filled in framed as data from outside pinned; the template's own text is not.
-fn render_for(text: &str, run: &runner::Run, team: bool) -> String {
+fn render_for(text: &str, run: &runner::Run, framed: bool) -> String {
     if !text.contains("{{") {
         return text.to_owned();
     }
     let mut trigger = serde_json::Map::new();
     if let Ok(input) = trigger_of(run) {
-        let outside = |value: String| match team && !value.trim().is_empty() {
+        let outside = |value: String| match framed && !value.trim().is_empty() {
             true => crate::untrusted::frame(trigger_source(&input), &value),
             false => value,
         };
@@ -3526,8 +3527,8 @@ fn lookup_path(data: &Value, path: &str) -> Option<String> {
     }
 }
 
-fn talk_text(run: &runner::Run, prompt: &str, seeded: bool, team: bool) -> String {
-    let prompt = render_for(prompt, run, team);
+fn talk_text(run: &runner::Run, prompt: &str, seeded: bool, framed: bool) -> String {
+    let prompt = render_for(prompt, run, framed);
     if !seeded {
         return prompt;
     }
@@ -3552,10 +3553,10 @@ fn ask_from(classify: &crate::graph::Classify) -> Ask {
     }
 }
 
-/// What a deciding classify shows its model of `trigger`. On a hub's team (`team`) each text
+/// What a deciding classify shows its model of `trigger`. Where `framed` each text
 /// written outside pinned is framed as data from outside pinned.
-fn decide_state(trigger: &TriggerInput, team: bool) -> Value {
-    let outside = |value: &str| match team && !value.trim().is_empty() {
+fn decide_state(trigger: &TriggerInput, framed: bool) -> Value {
+    let outside = |value: &str| match framed && !value.trim().is_empty() {
         true => crate::untrusted::frame(trigger_source(trigger), value),
         false => value.to_owned(),
     };
@@ -3571,9 +3572,9 @@ fn decide_state(trigger: &TriggerInput, team: bool) -> Value {
 }
 
 /// What a direct classify asks its model about: the trigger's text, then the thread before the
-/// request. On a hub's team (`team`) both are framed as data from outside pinned.
-fn classify_text(trigger: &TriggerInput, thread: Option<&str>, team: bool) -> String {
-    let outside = |value: String| match team && !value.trim().is_empty() {
+/// request. Where `framed` both are framed as data from outside pinned.
+fn classify_text(trigger: &TriggerInput, thread: Option<&str>, framed: bool) -> String {
+    let outside = |value: String| match framed && !value.trim().is_empty() {
         true => crate::untrusted::frame(trigger_source(trigger), &value),
         false => value,
     };
@@ -3747,7 +3748,7 @@ fn merge_session(owner: &Connector, setup: &SessionSetup) -> Result<Connector, S
 /// The session `Effect::Open` starts for `owner`: the trigger as today's builders read it, the
 /// router's note when another workflow handed the thread over, every direct classify's answers, the
 /// talk text, and the run's history when seeded.
-fn run_opening(run: &runner::Run, owner: &Connector, prompt: &str, seeded: bool, library: &runner::Library, names: &BTreeMap<String, String>, exe: &str, team: bool) -> Result<Run, String> {
+fn run_opening(run: &runner::Run, owner: &Connector, prompt: &str, seeded: bool, library: &runner::Library, names: &BTreeMap<String, String>, exe: &str, framed: bool) -> Result<Run, String> {
     let mut trigger = trigger_of(run)?;
     if owner.id != run.connector {
         if let Some(note) = route_note(run, library, names) {
@@ -3755,9 +3756,9 @@ fn run_opening(run: &runner::Run, owner: &Connector, prompt: &str, seeded: bool,
         }
     }
     // The session's own copy of the rendered text, guarded after `talk_text` took the history off it.
-    let talk = pinned_lines::guard(&talk_text(run, prompt, seeded, team));
+    let talk = pinned_lines::guard(&talk_text(run, prompt, seeded, framed));
     let history = seeded.then(|| runner::history(run));
-    let mut opened = graph_opening(owner, &trigger, &direct_answers(run, library), &talk, history.as_deref(), exe, team)?;
+    let mut opened = graph_opening(owner, &trigger, &direct_answers(run, library), &talk, history.as_deref(), exe, framed)?;
     let names = library.get(&run.connector).map(issue_vars).unwrap_or_default();
     if matches!(trigger, TriggerInput::Slack { .. }) && !names.is_empty() {
         if let Some(prompt) = opened.args.last_mut() {
@@ -3800,15 +3801,15 @@ fn run_set_line(names: &[String], exe: &str) -> String {
 /// The session today's builders would open for `owner`, plus the run's direct answers, the talk, and,
 /// when restarting a lost conversation, the history first. A migrated connector passes an empty talk
 /// and no history, and the result equals `run` or `slack_run` plus `append_answers`.
-pub fn graph_opening(owner: &Connector, trigger: &TriggerInput, answers: &[ClassifyAnswers], talk: &str, history: Option<&str>, exe: &str, team: bool) -> Result<Run, String> {
+pub fn graph_opening(owner: &Connector, trigger: &TriggerInput, answers: &[ClassifyAnswers], talk: &str, history: Option<&str>, exe: &str, framed: bool) -> Result<Run, String> {
     let mut opened = match trigger {
         TriggerInput::Issue { id, identifier, title, description, url } => {
             let issue = linear::Issue { id: id.clone(), identifier: identifier.clone(), title: title.clone(), description: description.clone(), url: url.clone() };
-            issue_run(owner, &issue, exe, team)
+            issue_run(owner, &issue, exe, framed)
         }
         TriggerInput::Slack { channel, channel_name, thread, posts, note, mentioned, .. } => {
             let posts: Vec<slack::Post> = posts.iter().map(|post| slack::Post { ts: post.ts.clone(), author: post.author.clone(), text: post.text.clone() }).collect();
-            let mut opened = thread_session(owner, channel, channel_name, thread, &posts, note.as_deref(), exe, team);
+            let mut opened = thread_session(owner, channel, channel_name, thread, &posts, note.as_deref(), exe, framed);
             opened.mentioned = mentioned.clone();
             opened
         }
@@ -3826,14 +3827,14 @@ pub fn graph_opening(owner: &Connector, trigger: &TriggerInput, answers: &[Class
             prompt.push_str(talk);
         }
     }
-    // On a hub's team the check reads the prompt the builder made. The history goes in front of
+    // Where `framed` the check reads the prompt the builder made. The history goes in front of
     // it after the check, framed: its JSON holds the trigger's text and what the run's steps
     // answered about it.
-    if team {
+    if framed {
         frame_trigger_text(&mut opened)?;
     }
     if let Some(history) = history.filter(|history| !history.is_empty()) {
-        let history = match team {
+        let history = match framed {
             true => crate::untrusted::frame("this run's record of its earlier steps", history),
             false => history.to_owned(),
         };
