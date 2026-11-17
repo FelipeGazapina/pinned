@@ -174,13 +174,25 @@ esac"#,
     wait_until("the retry never finished", || task_state(retry["taskId"].as_str().unwrap()) == "result_available");
     assert_eq!(glance(&captain), json!([{ "id": "p1", "title": "Ship the form", "state": "idle", "done": 2, "total": 3, "strips": ["dxp"] }]));
 
-    // Refusals: a step no plan holds, a plain thread, and another Captain. Each starts no task.
+    // Refusals: a step no plan holds, a plain thread, another Captain, and a closed plan. Each starts no task:
+    // the workers each tab delegated, counted by its work_cost, read the same before and after the call.
+    let delegated = || {
+        let counts = [&captain, &thread, &other_captain].map(|tab| {
+            std::env::set_var(TAB_ENV, tab);
+            body("work_cost", json!({}))["workers"].as_u64().unwrap()
+        });
+        std::env::set_var(TAB_ENV, &captain);
+        counts
+    };
     let refused = |tab: &str, step: &str| {
+        let before = delegated();
         std::env::set_var(TAB_ENV, tab);
         let answer = call("delegate_task", json!({ "task": "DONE", "planStep": step, "target": cursor, "mode": "async" }));
         std::env::set_var(TAB_ENV, &captain);
+        assert_eq!(delegated(), before, "a refused link starts no task: {answer:?}");
         answer
     };
+    assert_eq!(delegated(), [4, 0, 0], "the Captain started four tasks in this test, and the other tabs none");
     assert_eq!(refused(&captain, "s99"), Err("no step or list s99 in any plan of this Captain. Nothing changed.".to_string()));
     assert_eq!(refused(&thread, "s3"), Err("only a project's Captain keeps a plan. Nothing changed.".to_string()));
     assert_eq!(refused(&other_captain, "s3"), Err("no step or list s3 in any plan of this Captain. Nothing changed.".to_string()));
