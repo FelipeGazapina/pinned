@@ -2581,8 +2581,9 @@ impl Connectors {
                 let since = DateTime::parse_from_rfc3339(&c.since).map_or(now, Into::into);
                 let own = self.own_bots_for(*apps).await?;
                 let busy = |ts: &str| self.busy(&thread_key(&channel, ts));
+                let back = |ts: &str| self.came_back(&thread_key(&channel, ts));
                 let seen = self.apps_seen(&c.id, &channel);
-                let apps = own.as_ref().map(|own| slack::Apps { workflow: &c.id, own, busy: &busy, seen: seen.as_deref() });
+                let apps = own.as_ref().map(|own| slack::Apps { workflow: &c.id, own, busy: &busy, seen: seen.as_deref(), back: &back });
                 let (mut messages, read) = slack::messages(&token, &channel, &bot.user_id, since, apps.as_ref()).await?;
                 self.read_apps(&c.id, &channel, read);
                 messages.retain(|m| !busy(&m.ts));
@@ -2645,8 +2646,9 @@ impl Connectors {
         let since = DateTime::parse_from_rfc3339(&c.since).map_or(now, Into::into);
         let own = self.own_bots_for(matches!(c.trigger, Trigger::SlackMessage { apps: true, .. })).await?;
         let busy = |ts: &str| self.busy(&thread_key(&channel, ts));
+        let back = |ts: &str| self.came_back(&thread_key(&channel, ts));
         let seen = self.apps_seen(&c.id, &channel);
-        let apps = own.as_ref().map(|own| slack::Apps { workflow: &c.id, own, busy: &busy, seen: seen.as_deref() });
+        let apps = own.as_ref().map(|own| slack::Apps { workflow: &c.id, own, busy: &busy, seen: seen.as_deref(), back: &back });
         let (mut messages, read) = slack::messages(&token, &channel, &bot.user_id, since, apps.as_ref()).await?;
         self.read_apps(&c.id, &channel, read);
         messages.retain(|m| !busy(&m.ts));
@@ -2683,6 +2685,16 @@ impl Connectors {
             return true;
         }
         self.runs.lock().unwrap().iter().any(|run| !matches!(run.status, Status::Failed { .. } | Status::Done) && subject_key(&run.subject) == key)
+    }
+
+    /// Whether the thread `key` came back after a check took its post: the newest run on it
+    /// failed, or a box end freed it (`Store::box_released_at`). Unless `busy`, it is taken
+    /// again, at or before its workflow's `Store::apps_seen` too, as a person's post is.
+    fn came_back(&self, key: &str) -> bool {
+        if self.store.lock().unwrap().box_released_at.values().any(|keys| keys.contains_key(key)) {
+            return true;
+        }
+        self.runs.lock().unwrap().iter().rev().find(|run| subject_key(&run.subject) == key).is_some_and(|run| matches!(run.status, Status::Failed { .. }))
     }
 
     /// The ts of `workflow`'s `Store::apps_seen` in `channel`, if it has one there.

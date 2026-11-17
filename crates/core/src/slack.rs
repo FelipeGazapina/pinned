@@ -411,13 +411,15 @@ impl Own {
 
 /// A workflow that also reads posts from apps and integrations: its id, for the log, the
 /// account's own bots, which it never reads back, whether it already handles a post, by ts: such
-/// a post takes no place under `APPS_PER_CHECK`, and `seen`, the ts of the newest app post an
-/// earlier check left out over the cap: no app post at or before it is taken again.
+/// a post takes no place under `APPS_PER_CHECK`, `seen`, the ts of the newest app post an
+/// earlier check left out over the cap: no app post at or before it is taken again, and `back`,
+/// whether a post a check took came back unclaimed, by ts: it is taken again, `seen` or not.
 pub struct Apps<'a> {
     pub workflow: &'a str,
     pub own: &'a Own,
     pub busy: &'a (dyn Fn(&str) -> bool + Sync),
     pub seen: Option<&'a str>,
+    pub back: &'a (dyn Fn(&str) -> bool + Sync),
 }
 
 /// The app posts one history page gave a workflow, by ts, oldest first: those it took, and those
@@ -595,7 +597,7 @@ fn app_post(message: &Value) -> Post {
 pub async fn messages(token: &str, channel: &str, bot: &str, since: DateTime<Utc>, apps: Option<&Apps<'_>>) -> Result<(Vec<Post>, AppPosts), String> {
     let history = call(token, "conversations.history", &[("channel", channel), ("oldest", &ts(since)), ("limit", PAGE)]).await?;
     let none = Own::default();
-    let seen = |ts: &str| apps.and_then(|a| a.seen).and_then(micros).zip(micros(ts)).is_some_and(|(seen, at)| at <= seen);
+    let seen = |ts: &str| apps.and_then(|a| a.seen).and_then(micros).zip(micros(ts)).is_some_and(|(seen, at)| at <= seen) && !apps.is_some_and(|a| (a.back)(ts));
     let busy = |ts: &str| apps.is_some_and(|a| (a.busy)(ts)) || seen(ts);
     let Selected { taken, skipped } = select(&history["messages"], bot, apps.map_or(&none, |a| a.own), since, apps.is_some(), &busy);
     for ts in &skipped {
