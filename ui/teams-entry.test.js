@@ -759,3 +759,17 @@ test("the create wizard no longer promises a team chat", () => {
   assert.ok(!/chat/i.test(t), "chat is not in 0.18.6");
   assert.ok(!/chat/i.test(a.run("JSON.stringify(TEAMS_TEXT.nameHas)")));
 });
+
+test("the team list keeps the line the hub holds for the team's owner, and only the owner's", async () => {
+  const held = { since: 1795359900, why: "settings_unread" };
+  const a = app({ answers: { list: [{ ...ACME, line_held: held }, { ...SOLO, line_held: held }] } });
+  await a.context.teamsList();
+  a.run("teamsSelect(teamsKnown[0])");
+  assert.deepEqual(here(a.context.teamsCurrent()), { id: "t1", name: "North Studio", role: "owner", credential: ACME.credential, me: "a1", line_held: held });
+  a.run("teamsSelect(teamsKnown[1])");
+  assert.deepEqual(here(a.context.teamsCurrent()), { id: "t2", name: "Side Gig", role: "member", credential: SOLO.credential, me: null }, "a member's team keeps none");
+  const b = app({ answers: { list: [ACME] } });
+  await b.context.teamsList();
+  b.run("teamsSelect(teamsKnown[0])");
+  assert.equal("line_held" in b.context.teamsCurrent(), false, "a team the hub holds nothing for has no line");
+});

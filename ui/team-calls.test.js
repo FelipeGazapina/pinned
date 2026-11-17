@@ -63,7 +63,7 @@ function page(world = {}) {
     openTeamBotNew: () => ops.push({ botNew: true }),
     account: { email: world.email ?? "bruno.lima@north.example" },
     document: { addEventListener: (type, fn) => (listeners[type] ??= []).push(fn), body: { dataset: {} }, getElementById: () => ({ before() {} }), createElement: () => ({ remove() {}, setAttribute() {}, dataset: {}, querySelector: () => null, querySelectorAll: () => [] }) },
-    teamsCurrent: () => (world.team === null ? null : { id: "team-1", name: "North Studio", role: world.role ?? "member", credential: {} }),
+    teamsCurrent: () => (world.team === null ? null : { id: "team-1", name: "North Studio", role: world.role ?? "member", credential: {}, ...(world.held ? { line_held: world.held } : {}) }),
     teamCall: async (op) => {
       ops.push(op);
       const reply = world.reply?.(op);
@@ -713,4 +713,15 @@ test("the limit question and its choices reach the page as text", () => {
   const evil = `<img src=x onerror="window.pwned=1">`;
   const html = runPage({ state: "waiting" }, [LIMIT_CALL({ question: evil, choices: [evil, "Stop it"] })]).eval("tcRunPageHtml()");
   assert.ok(!html.includes("<img"), html);
+});
+
+test("the team's owner sees one line under the team while its waiting line is held; a member does not", () => {
+  const held = { since: at(14, 5), why: "settings_unread" };
+  const line = (html) => [...html.matchAll(/<div class="tc-none" role="status" data-line-held>([^<]*)<\/div>/g)].map((m) => text(m[1]));
+  const owner = page({ role: "owner", email: "ana.souza@north.example", held }).eval("tcNavHtml(tcCurrent(), 'team-calls')");
+  assert.deepEqual(line(owner), ["Bots are waiting: the team's settings could not be read since 14:05."]);
+  assert.ok(owner.indexOf("data-line-held") > owner.indexOf("tc-team-name") && owner.indexOf("data-line-held") < owner.indexOf(">Bots<"), "between the team's name and its bots");
+  assert.deepEqual(line(page({ held }).eval("tcNavHtml(tcCurrent(), 'team-calls')")), [], "a member does not see it");
+  const plain = page({ role: "owner", email: "ana.souza@north.example" }).eval("tcNavHtml(tcCurrent(), 'team-calls')");
+  assert.ok(!plain.includes("data-line-held") && !text(plain).includes("Bots are waiting"), "nothing while the line is not held");
 });
