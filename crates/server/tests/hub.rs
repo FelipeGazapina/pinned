@@ -9426,6 +9426,21 @@ fn a_box_that_ends_closes_the_extend_box_asks_that_wait_for_it() {
     assert_eq!(hub.runtime.block_on(ending).unwrap(), Ok(true));
 }
 
+/// A box's end writes its trail a denied row for the extend ask it closes, as the owner's decision
+/// writes one, so the agent's activity does not keep the ask pending last.
+#[test]
+fn a_box_that_ends_writes_a_denied_row_for_each_extend_ask_it_closes() {
+    let ExtendSetup { hub, account, ana, machine, .. } = extend_setup("extend_closed_trail");
+    let asked = extend_as(&ana.dir, &ana.tab, &machine, 0.5, Some("r-closed-trail")).unwrap();
+    assert_eq!(asked["outcome"], "pending", "{asked}");
+    let (deleted, ending) = end_box_held(&hub, account, &machine);
+    let last_denied = format!("select count(*) from (select outcome, detail from agent_actions where request_id = 'r-closed-trail' order by at desc limit 1) last where outcome = 'denied' and detail = '{BOX_ENDED}'");
+    wait_for("the closed ask's denied row", || count_on(&hub.database, &last_denied) == 1);
+    assert_eq!(count_on(&hub.database, "select count(*) from agent_actions where request_id = 'r-closed-trail'"), 2, "its pending row, then its denied one");
+    deleted.close();
+    assert_eq!(hub.runtime.block_on(ending).unwrap(), Ok(true));
+}
+
 /// Deleting a box's row closes the extend asks still waiting for its box, as the row a hub left
 /// ending before it closed them: the reaper deletes it, and its asks read as the box's end.
 #[test]
