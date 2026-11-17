@@ -11964,6 +11964,209 @@ while True:
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// Moves the tab's pending submit and typed mark `secs` into the past, as if that long went by.
+    fn backdate(m: &Machine, tab: &str, secs: u64) {
+        let ago = |at: Option<Instant>| at.map(|at| at - Duration::from_secs(secs));
+        m.tab(tab, |t| (t.turn_pending, t.typed_at) = (ago(t.turn_pending), ago(t.typed_at))).unwrap();
+    }
+
+    /// A message a Stop hook handed over continues the Capitão's turn, which no Working hook marks. A
+    /// line the user types into that turn, a local command too, leaves pinned's submit pending.
+    #[test]
+    #[cfg(unix)]
+    fn a_typed_line_during_pinneds_handed_over_turn_does_not_release_the_queue() {
+        let dir = temp("enqueue-steer");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let sock = dir.join("pinned.sock");
+        let file = dir.join("typed.bin");
+        let m = Machine::new(Launch { sock: sock.clone(), ..launch() }, Some(dir.join("config")), None, |_| {});
+        m.listen(|_| Err("not the machine's".into())).unwrap();
+        let path = project.display().to_string();
+        let tab = idle_captain(&m, &path, &file);
+        m.record_event(hook(&tab, AgentStatus::Working));
+        assert_eq!(enqueue(&m, &path, "Check the build.", "r-1"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })));
+        let done = serde_json::to_string(&Message::Agent(AgentEvent { hook_feedback: true, ..hook(&tab, AgentStatus::Done) })).unwrap();
+        assert_eq!(ask(&sock, &done), Ok("[Orchestrator] Check the build.".into()));
+
+        m.write_input(&tab, b"steer\r").unwrap();
+        m.write_input(&tab, b"/effort\r").unwrap();
+        backdate(&m, &tab, 11);
+        assert!(!m.tab(&tab, |t| t.notice_idle()).unwrap(), "the handed-over turn reads idle once the user typed into it");
+        assert_eq!(enqueue(&m, &path, "Then the footer.", "r-2"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(std::fs::read(&file).unwrap(), b"steer\r/effort\r", "a queued message was typed into the handed-over turn");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// The user types `line` into an idle Capitão and no hook comes: the queue waits for Done however
+    /// long that takes, and the message goes in after it.
+    #[cfg(unix)]
+    fn a_typed_line_holds_the_queue_until_done(name: &str, line: &[u8]) {
+        let dir = temp(name);
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let file = dir.join("typed.bin");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let path = project.display().to_string();
+        let tab = idle_captain(&m, &path, &file);
+
+        m.write_input(&tab, line).unwrap();
+        backdate(&m, &tab, 11);
+        assert!(!m.tab(&tab, |t| t.notice_idle()).unwrap(), "{line:?} reads idle with its turn not begun");
+        assert_eq!(enqueue(&m, &path, "Ship the form.", "r-1"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(std::fs::read(&file).unwrap(), line, "a queued message was typed after {line:?}");
+
+        m.record_event(hook(&tab, AgentStatus::Done));
+        let both = [line, b"\x1b[200~[Orchestrator] Ship the form.\x1b[201~\r"].concat();
+        assert_eq!(typed(&file, &both), both);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A prompt's UserPromptSubmit hook may wait on slow SessionStart hooks: only a built-in local
+    /// command is let go without one.
+    #[test]
+    #[cfg(unix)]
+    fn a_typed_prompt_that_is_not_a_local_command_waits_for_done() {
+        a_typed_line_holds_the_queue_until_done("enqueue-typed-prompt", b"Fix the footer.\r");
+    }
+
+    /// A skill or custom command may start a turn: a slash command not in `LOCAL_COMMANDS` waits for Done.
+    #[test]
+    #[cfg(unix)]
+    fn a_typed_unknown_slash_command_waits_for_done() {
+        a_typed_line_holds_the_queue_until_done("enqueue-typed-skill", b"/review\r");
+    }
+
+    /// No typed line, a local command included, lets the queue in while claude compacts.
+    #[test]
+    #[cfg(unix)]
+    fn a_typed_compact_holds_the_queue_while_compacting() {
+        for line in [&b"/compact\r"[..], b"/effort\r"] {
+            let dir = temp("enqueue-typed-compact");
+            let project = dir.join("site");
+            std::fs::create_dir_all(&project).unwrap();
+            let file = dir.join("typed.bin");
+            let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+            let path = project.display().to_string();
+            let tab = idle_captain(&m, &path, &file);
+
+            m.write_input(&tab, line).unwrap();
+            m.record_compacting(&tab, true);
+            backdate(&m, &tab, 11);
+            assert!(!m.tab(&tab, |t| t.notice_idle()).unwrap(), "{line:?} reads idle while compacting");
+            assert_eq!(enqueue(&m, &path, "Ship the form.", "r-1"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })));
+            std::thread::sleep(Duration::from_millis(300));
+            assert_eq!(std::fs::read(&file).unwrap(), line, "a queued message was typed into the compaction after {line:?}");
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    /// `/effort` sent from the app's composer is the user's local command as much as one typed in the terminal.
+    #[test]
+    #[cfg(unix)]
+    fn effort_sent_from_the_app_does_not_hold_the_captains_queue() {
+        let dir = temp("enqueue-app-effort");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let file = dir.join("typed.bin");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let path = project.display().to_string();
+        let tab = idle_captain(&m, &path, &file);
+
+        m.call(Call::Prompt { tab: tab.clone(), text: "/effort".into() }).unwrap();
+        let effort = b"\x1b[200~/effort\x1b[201~\r";
+        assert_eq!(typed(&file, effort), effort);
+        backdate(&m, &tab, 11);
+        assert!(m.tab(&tab, |t| t.notice_idle()).unwrap(), "/effort from the app still holds the Capitão");
+        assert_eq!(enqueue(&m, &path, "Ship the form.", "r-1"), Ok(json!({ "outcome": "entregue", "tab": tab })));
+        let both = b"\x1b[200~/effort\x1b[201~\r\x1b[200~[Orchestrator] Ship the form.\x1b[201~\r";
+        assert_eq!(typed(&file, both), both);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A typed mark older than pinned's own prompt belongs to no pending submit: the grace never lets pinned's go.
+    #[test]
+    #[cfg(unix)]
+    fn the_typed_mark_must_be_newer_than_pinneds_prompt() {
+        let dir = temp("enqueue-typed-order");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let file = dir.join("typed.bin");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let path = project.display().to_string();
+        let tab = idle_captain(&m, &path, &file);
+
+        assert_eq!(enqueue(&m, &path, "Ship the form.", "r-1"), Ok(json!({ "outcome": "entregue", "tab": tab })));
+        let first = b"\x1b[200~[Orchestrator] Ship the form.\x1b[201~\r";
+        assert_eq!(typed(&file, first), first);
+        m.write_input(&tab, b"/effort\r").unwrap();
+        let now = Instant::now();
+        m.tab(&tab, |t| (t.typed_at, t.turn_pending) = (Some(now - Duration::from_secs(12)), Some(now - Duration::from_secs(11)))).unwrap();
+        assert!(!m.tab(&tab, |t| t.notice_idle()).unwrap(), "an older typed mark let pinned's prompt go");
+        assert_eq!(enqueue(&m, &path, "Then the footer.", "r-2"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A question asked after a typed local command is no turn of its own: the command's grace still runs.
+    #[test]
+    #[cfg(unix)]
+    fn needs_input_keeps_the_typed_mark() {
+        let dir = temp("enqueue-typed-question");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let file = dir.join("typed.bin");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let path = project.display().to_string();
+        let tab = idle_captain(&m, &path, &file);
+
+        m.write_input(&tab, b"/effort\r").unwrap();
+        m.record_event(hook(&tab, AgentStatus::NeedsInput));
+        assert!(m.tab(&tab, |t| t.typed_at.is_some()).unwrap(), "a question cleared the typed mark");
+        backdate(&m, &tab, 11);
+        assert_eq!(enqueue(&m, &path, "Ship the form.", "r-1"), Ok(json!({ "outcome": "entregue", "tab": tab })));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_new_session_clears_the_typed_mark() {
+        let dir = temp("enqueue-typed-respawn");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let file = dir.join("typed.bin");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let path = project.display().to_string();
+        let tab = idle_captain(&m, &path, &file);
+
+        m.write_input(&tab, b"/effort\r").unwrap();
+        assert!(m.tab(&tab, |t| t.typed_at.is_some()).unwrap(), "a typed /effort left no mark");
+        m.spawn(&tab, sh("exec cat > /dev/null"), pty::size(80, 24)).unwrap();
+        assert_eq!(m.tab(&tab, |t| (t.turn_pending, t.typed_at)).unwrap(), (None, None));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// With no live session there is no prompt a local command ran in: the grace does not make the tab archivable.
+    #[test]
+    #[cfg(unix)]
+    fn a_session_gone_after_a_typed_submit_is_not_archivable_by_the_grace() {
+        let dir = temp("archive-typed");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let file = dir.join("typed.bin");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let path = project.display().to_string();
+        let tab = idle_captain(&m, &path, &file);
+
+        m.write_input(&tab, b"/effort\r").unwrap();
+        backdate(&m, &tab, 11);
+        let gone = m.tab(&tab, |t| t.session.take()).unwrap();
+        assert!(!m.tab(&tab, |t| t.idle_for_archive()).unwrap(), "a session gone 10 s after a typed submit reads archivable");
+        drop(gone);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     #[cfg(unix)]
     fn a_stop_hook_hands_over_a_queued_message_and_its_turn_is_the_next_one() {
