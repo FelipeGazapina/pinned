@@ -5,7 +5,7 @@
 //! never read or copied.
 
 use crate::accounts::AccountId;
-use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+use portable_pty::{native_pty_system, PtySize};
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
@@ -40,7 +40,7 @@ impl SetupTokens {
     /// exits. Past `wait`, or once cancelled, it kills the process it started, and only that one.
     pub fn run(&self, account: &str, bin: &Path, env: &[(String, String)], wait: Duration) -> Result<String, String> {
         let pair = native_pty_system().openpty(PtySize { rows: 50, cols: COLS, pixel_width: 0, pixel_height: 0 }).map_err(|e| e.to_string())?;
-        let mut cmd = CommandBuilder::new(bin);
+        let mut cmd = crate::process::pty_command(bin);
         cmd.arg("setup-token");
         cmd.cwd(std::env::temp_dir());
         child_env(env).apply(&mut cmd);

@@ -212,7 +212,7 @@ impl Launch {
     fn command(&self, program: Program, account: &Account, tab: &str, cwd: &Path, bypass: bool, args: Vec<String>, env: &[(String, String)], plugin_dirs: &[PathBuf], mcp: Option<&mcp::SessionFiles>) -> CommandBuilder {
         let provider = account.provider;
         let spec = provider.spec();
-        let mut cmd = CommandBuilder::new(self.bin(provider));
+        let mut cmd = crate::process::pty_command(self.bin(provider));
         match program {
             Program::Agent => {
                 if spec.harness {
@@ -355,7 +355,7 @@ impl<'a> ChildEnv<'a> {
 
     /// Applies the change to `cmd`, which would otherwise inherit pinned's own environment.
     pub(crate) fn apply(&self, cmd: &mut impl ChildCommand) {
-        let (remove, set) = self.changes(|key| std::env::var(key).ok());
+        let (remove, set) = self.changes(node_var);
         for key in remove {
             cmd.remove_var(key);
         }
@@ -383,9 +383,21 @@ fn node_env() -> Vec<(String, String)> {
     std::env::vars_os().filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?))).collect()
 }
 
-/// The node environment a test hands the code it runs on this thread, in place of the process's.
+/// The node's own variable `key`, which a child inherits unless `ChildEnv` changes it.
+fn node_var(key: &str) -> Option<String> {
+    #[cfg(test)]
+    if let Some(env) = parent::env() {
+        return env.into_iter().find(|(k, _)| k == key).map(|(_, value)| value);
+    }
+    std::env::var(key).ok()
+}
+
+/// The node environment a test hands the code it runs on this thread, in place of the process's:
+/// what decides the built-in accounts' homes, what `ChildEnv` looks up, and what every command
+/// `process::command` and `process::pty_command` build inherits.
 #[cfg(test)]
 pub(crate) mod parent {
+    use super::ChildCommand;
     use std::cell::RefCell;
 
     thread_local! {
@@ -408,6 +420,13 @@ pub(crate) mod parent {
     /// The environment `with` gave this thread.
     pub(crate) fn env() -> Option<Vec<(String, String)>> {
         PARENT.with(|parent| parent.borrow().clone())
+    }
+
+    /// Gives `cmd` what a child would inherit from the node `with` started.
+    pub(crate) fn inherit(cmd: &mut impl ChildCommand) {
+        for (key, value) in env().unwrap_or_default() {
+            cmd.set_var(&key, &value);
+        }
     }
 }
 
@@ -9633,6 +9652,124 @@ pub(crate) mod tests {
         let session: BTreeMap<&str, &str> = env.iter().filter(|(k, _)| SESSION_NAMES.contains(&k.as_str())).map(|(k, v)| (k.as_str(), v.as_str())).collect();
         assert_eq!(session, expected.iter().copied().collect::<BTreeMap<_, _>>());
         assert!(env.contains(&("HOME".into(), "/home/ana".into())), "the child lost a variable no session sets: {env:?}");
+    }
+
+    #[test]
+    fn the_session_variables_a_test_hands_a_child_are_every_one_pinned_drops() {
+        let names = |list: &[&str]| list.iter().map(|name| name.to_string()).collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(names(&SESSION_NAMES), names(&INHERITED_SESSION_ENV));
+    }
+
+    /// A node environment that carries every session variable with a value no session is started with.
+    fn every_session_variable() -> Vec<(String, String)> {
+        INHERITED_SESSION_ENV.iter().map(|name| (name.to_string(), "inherited-xyz".to_owned())).collect()
+    }
+
+    /// A program that writes the environment it started with beside itself, then exits.
+    #[cfg(unix)]
+    fn env_recorder(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, "#!/bin/sh\n/usr/bin/env > \"$0.env.part\"\n/bin/mv \"$0.env.part\" \"$0.env\"\n").unwrap();
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// Asserts that the command `env_recorder` ran as started with none of the node's session
+    /// values and exactly `expected` of the session variables.
+    #[cfg(unix)]
+    fn assert_spawned_with_only(recorder: &Path, expected: &[(&str, &str)]) {
+        let file = PathBuf::from(format!("{}.env", recorder.display()));
+        wait_for("the command to record its environment", || file.is_file());
+        let text = std::fs::read_to_string(&file).unwrap();
+        let env: Vec<(&str, &str)> = text.lines().filter_map(|line| line.split_once('=')).collect();
+        let leftovers: Vec<_> = env.iter().filter(|(_, v)| *v == "inherited-xyz").collect();
+        assert!(leftovers.is_empty(), "the command inherited {leftovers:?}");
+        let session: BTreeMap<&str, &str> = env.iter().filter(|(k, _)| INHERITED_SESSION_ENV.contains(k)).copied().collect();
+        assert_eq!(session, expected.iter().copied().collect::<BTreeMap<_, _>>());
+    }
+
+    #[test]
+    fn a_tab_command_starts_only_with_what_its_kind_sets() {
+        let m = machine();
+        let account = Account::builtin(Provider::Claude);
+        let cmd = parent::with(every_session_variable(), || m.launch.command(Program::Agent, &account, "tab-1", Path::new("/repo"), false, vec![], &m.launch_env(&account, vec![]), &[], None));
+        let session: BTreeMap<&str, &str> = INHERITED_SESSION_ENV.iter().filter_map(|name| Some((*name, cmd.get_env(name)?.to_str()?))).collect();
+        assert_eq!(session, BTreeMap::from([("PINNED_SOCK", "k"), ("PINNED_TAB", "tab-1"), ("PINNED_TUTORIAL_HELPER", "t"), ("PINNED_ACCOUNT", "claude")]));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_delegate_driver_starts_only_with_what_its_kind_sets() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = env_recorder(dir.path(), "driver");
+        let env = [("PINNED_ACCOUNT", "claude"), ("PINNED_SOCK", "k"), ("PINNED_TASK", "task-1")].map(|(k, v)| (k.to_owned(), v.to_owned()));
+        let spec = crate::delegate::ChildSpec { bin: &bin, argv: &[], cwd: dir.path(), env: &env, path: None, strip: &[] };
+        parent::with(every_session_variable(), || crate::delegate::spawn(spec, |_| {})).unwrap();
+        assert_spawned_with_only(&bin, &[("PINNED_ACCOUNT", "claude"), ("PINNED_SOCK", "k"), ("PINNED_TASK", "task-1")]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_title_run_starts_only_with_what_its_kind_sets() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = env_recorder(dir.path(), "claude");
+        let env = [("PINNED_ACCOUNT".to_owned(), "claude".to_owned())];
+        let headless = Headless { env: &env, strip: &[] };
+        let _ = parent::with(every_session_variable(), || crate::titles::regenerate(&bin, &headless, dir.path(), None, "", "a thread"));
+        assert_spawned_with_only(&bin, &[("PINNED_ACCOUNT", "claude")]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_review_guide_run_starts_only_with_what_its_kind_sets() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = env_recorder(dir.path(), "claude");
+        let gh = dir.path().join("gh");
+        let view = r#"{"number":1,"title":"t","body":"","baseRefName":"main","headRefOid":"abc","reviews":[]}"#;
+        std::fs::write(&gh, format!("#!/bin/sh\ncase \"$2\" in view) echo '{view}';; *) echo 'diff';; esac\n")).unwrap();
+        std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let env = [("PINNED_ACCOUNT".to_owned(), "claude".to_owned())];
+        let headless = Headless { env: &env, strip: &[] };
+        let path = dir.path().display().to_string();
+        let store = dir.path().join("guides");
+        parent::with(every_session_variable(), || crate::panel::guide(dir.path(), "https://github.com/acme/app/pull/1", true, &store, &bin, &headless, Some(&path))).unwrap();
+        assert_spawned_with_only(&bin, &[("PINNED_ACCOUNT", "claude")]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_commit_message_run_starts_only_with_what_its_kind_sets() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        std::fs::write(repo.join("a.txt"), "a\n").unwrap();
+        let bin = env_recorder(dir.path(), "claude");
+        let env = [("PINNED_ACCOUNT".to_owned(), "claude".to_owned())];
+        let headless = Headless { env: &env, strip: &[] };
+        parent::with(every_session_variable(), || crate::branches::run_step(&repo, &crate::branches::GitStep::Message { files: vec![] }, &bin, &headless, None)).unwrap();
+        assert_spawned_with_only(&bin, &[("PINNED_ACCOUNT", "claude")]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn an_account_status_probe_starts_only_with_what_its_kind_sets() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = env_recorder(dir.path(), "claude");
+        let accounts = Accounts::load(None, "/Users/ana".into());
+        parent::with(every_session_variable(), || accounts.status(&Account::builtin(Provider::Claude), &bin, None));
+        assert_spawned_with_only(&bin, &[("PINNED_ACCOUNT", "claude")]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_setup_token_run_starts_only_with_what_its_kind_sets() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = env_recorder(dir.path(), "claude");
+        let env = [("PINNED_ACCOUNT".to_owned(), "claude".to_owned())];
+        let tokens = crate::setup_token::SetupTokens::default();
+        let _ = parent::with(every_session_variable(), || tokens.run("claude", &bin, &env, Duration::from_secs(20)));
+        assert_spawned_with_only(&bin, &[("PINNED_ACCOUNT", "claude")]);
     }
 
     /// A machine in `root` whose node started with `env`.
