@@ -107,6 +107,19 @@ fn a_run_never_reported_has_no_model_cost_until_its_first_report() {
 }
 
 #[test]
+fn a_run_on_a_database_an_earlier_build_gave_a_zero_default_has_no_model_cost() {
+    let mut hub = TestHub::start_with_team_policy("teams_model_cost_old_default", fast(), policy());
+    // An earlier build of the model cost made the column `not null default 0`.
+    sql(&hub, "alter table team_runs alter column model_usd set default 0");
+    sql(&hub, "alter table team_runs alter column model_usd set not null");
+    hub.restart();
+    let tb = TeamBox::new(&hub);
+    bot(&hub, &tb, 5.0);
+    let run = run(&hub, &tb);
+    assert_eq!(model_usd(&hub, run), "null", "a new run is unmeasured, not 0");
+}
+
+#[test]
 fn a_run_never_reported_reaches_its_limit_on_its_box_cost() {
     let hub = TestHub::start_with_team_policy("teams_model_cost_unmeasured_limit", fast(), policy());
     let mut tb = TeamBox::new(&hub);
