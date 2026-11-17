@@ -504,6 +504,16 @@ fn step_on(
         ));
     }
     let plan = &mut plans.plans[pi];
+    // The same report again changes nothing, unless being newer lets it win over a task that ended.
+    if find_step(&plan.lists, &call.step).is_some_and(|s| s.reported == call.state && s.note == note) {
+        let mut again = plan.clone();
+        if let Some(s) = find_step_mut(&mut again.lists, &call.step) {
+            s.reported_at = now;
+        }
+        if derive(&again, facts) == derive(plan, facts) {
+            return Ok(answer_of(plans, &plan_id, facts));
+        }
+    }
     let Some(s) = find_step_mut(&mut plan.lists, &call.step) else {
         return Err(format!("no step {}. Nothing changed.", call.step));
     };
@@ -2096,7 +2106,8 @@ mod tests {
             4,
             "a call to p2 leaves the rev of p1 alone"
         );
-        report(&mut p, "s1", "done", &[], 8).unwrap();
+        // s1 is done already, and the same report again is no write.
+        report(&mut p, "s1", "running", &[], 8).unwrap();
         assert_eq!(plan_of(&p, "p1").rev, 5);
         assert_eq!(plan_of(&p, "p2").rev, 3);
     }

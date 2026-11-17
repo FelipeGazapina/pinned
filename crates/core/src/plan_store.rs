@@ -46,14 +46,19 @@ impl PlanStore {
         self.by_session.get(session)
     }
 
-    /// Runs `write` on the plans of `session` and saves them when it succeeds. A failed write keeps
-    /// the plans as they were, since the `plan` functions only commit what passes.
-    pub fn write(&mut self, session: &str, write: impl FnOnce(&mut CaptainPlans) -> Result<String, String>) -> Result<String, String> {
-        let mut plans = self.by_session.get(session).cloned().unwrap_or_default();
+    /// Runs `write` on the plans of `session` and saves them when it succeeds and changed them;
+    /// the answer says whether it did. A failed write keeps the plans as they were, since the
+    /// `plan` functions only commit what passes.
+    pub fn write(&mut self, session: &str, write: impl FnOnce(&mut CaptainPlans) -> Result<String, String>) -> Result<(String, bool), String> {
+        let before = self.by_session.get(session);
+        let mut plans = before.cloned().unwrap_or_default();
         let answer = write(&mut plans)?;
-        self.by_session.insert(session.to_owned(), plans);
-        self.save();
-        Ok(answer)
+        let changed = before != Some(&plans);
+        if changed {
+            self.by_session.insert(session.to_owned(), plans);
+            self.save();
+        }
+        Ok((answer, changed))
     }
 
     /// Gives `to` the plans of `from` unless it has its own, and drops them from `from` unless

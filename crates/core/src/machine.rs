@@ -3672,10 +3672,11 @@ impl Machine {
                     _ => unreachable!("only plan tools reach here"),
                 });
                 // The Captain's glance rides on its tab, so the account's clients read it in the next tabs.
-                if written.is_ok() {
+                let (answer, changed) = written?;
+                if changed {
                     self.emit_tabs();
                 }
-                written
+                Ok(answer)
             }
             ProjectTool::TellOrchestrator { text } => match self.tab(tab, |t| role_of(&t.env))? {
                 Some((Role::Orchestrator, project)) => text_json(self.report_up(tab, &project, text, vec![])?),
