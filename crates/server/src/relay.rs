@@ -94,7 +94,8 @@ async fn overview(hub: &Hub, account: &Account, from: Source<'_>) -> Result<Valu
     }))
     .await;
     if let Source::Machine(from) = from {
-        let settings = machines.iter().zip(&looks).filter_map(|(m, look)| Some((m.id.as_str(), m.name.as_str(), &look.as_ref()?.settings)));
+        // A box is never the host, so its settings do not count, though its projects and tabs still show.
+        let settings = machines.iter().zip(&looks).filter(|(m, _)| !account.dedicated(&m.id)).filter_map(|(m, look)| Some((m.id.as_str(), m.name.as_str(), &look.as_ref()?.settings)));
         let (host, host_name) = the_host(settings)?;
         if host != from {
             return Err(not_host(account, from, &host_name, "list the account's projects"));
