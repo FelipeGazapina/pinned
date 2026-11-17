@@ -98,6 +98,16 @@ pub type ViewerId = String;
 pub type Sink = Box<dyn Fn(&[u8]) + Send + Sync>;
 pub type Listener = Box<dyn Fn(&Event) + Send + Sync>;
 
+/// What a hook took from a tab's queue, held until its reply reached the hook or did not.
+struct Taken {
+    tab: TabId,
+    /// The tasks whose notices it took.
+    ids: Vec<String>,
+    claim: u64,
+    /// When a Stop hook's hand-over marked the turn as continuing.
+    pending: Option<Instant>,
+}
+
 fn merge_context(recall: &str, notices: &str) -> String {
     match (recall.is_empty(), notices.is_empty()) {
         (true, true) => String::new(),
@@ -4447,21 +4457,21 @@ impl Machine {
     /// them; every other message, a connector session's callbacks and the reminders tools, goes to `other`.
     pub fn listen(&self, other: impl Fn(Message) -> Result<String, String> + Send + Sync + 'static) -> std::io::Result<()> {
         let me = self.me.clone();
-        hooks::listen(self.launch.sock.clone(), move |message| {
-            let Some(machine) = me.upgrade() else { return Err("pinned is shutting down".into()) };
-            match message {
+        hooks::answer(self.launch.sock.clone(), move |message| {
+            let Some(machine) = me.upgrade() else { return hooks::Answer::from(Err("pinned is shutting down".to_owned())) };
+            let reply = match message {
                 Message::Agent(event) => {
-                    let (notices, typed) = if event.hook_feedback { machine.take_notices(&event) } else { Default::default() };
+                    let (notices, mut taken) = if event.hook_feedback { machine.take_notices(&event) } else { Default::default() };
                     machine.record_event(event.clone());
-                    // After the event: a Stop hook that hands a request over continues the turn, and
-                    // the turn that just ended did not answer it.
-                    machine.mark_typed(&typed);
-                    if !notices.is_empty() && event.status == AgentStatus::Done {
-                        if let Some(tab) = &event.tab {
-                            let _ = machine.tab(tab, |t| t.turn_pending = Some(Instant::now()));
-                        }
+                    // A Stop hook that hands news over continues the turn: nothing is typed over it.
+                    if let Some(taken) = taken.as_mut().filter(|_| event.status == AgentStatus::Done) {
+                        let at = Instant::now();
+                        taken.pending = machine.tab(&taken.tab, |t| t.turn_pending = Some(at)).ok().map(|_| at);
                     }
-                    Ok(merge_context(&machine.recall(&event), &notices))
+                    let reply = Ok(merge_context(&machine.recall(&event), &notices));
+                    let Some(taken) = taken else { return reply.into() };
+                    // After the event: the turn that just ended did not answer what the hook hands over.
+                    return hooks::Answer { reply, sent: Some(Box::new(move |read| machine.handed(taken, read))) };
                 }
                 Message::Usage { usage, account } => {
                     machine.record_usage(account.unwrap_or_else(accounts::default_account), usage);
@@ -4480,7 +4490,8 @@ impl Machine {
                 Message::Project { tab, tool } => machine.project_tool(&tab, tool),
                 Message::Guard { tab, tool, input } => machine.guard(&tab, &tool, &input),
                 message => other(message),
-            }
+            };
+            reply.into()
         })
     }
 
@@ -5790,12 +5801,12 @@ impl Machine {
             }
             return;
         }
-        let Some((text, ids)) = self.delegates.claim_notice(tab) else { return };
+        let Some((text, ids, claim)) = self.delegates.claim_news(tab) else { return };
         if self.write_notice(tab, &text) != Ok(true) {
             self.delegates.release_notice(&ids);
-            self.delegates.release_reports(tab);
+            self.delegates.release_claim(claim);
         } else {
-            let typed = self.delegates.drop_claimed_reports(tab);
+            let typed = self.delegates.confirm_claim(claim);
             self.sent.lock().unwrap().typed(&typed);
             self.emit_tabs();
         }
@@ -6277,16 +6288,38 @@ impl Machine {
         new
     }
 
-    /// The notices the hook adds to the session's context, and the orchestrator requests among them.
-    fn take_notices(&self, event: &AgentEvent) -> (String, Vec<String>) {
+    /// Claims the notices the hook adds to the session's context. They stay queued until
+    /// `handed` learns whether the hook read them.
+    fn take_notices(&self, event: &AgentEvent) -> (String, Option<Taken>) {
         let Some(tab) = event.tab.as_deref() else { return Default::default() };
         let wants = event.status == AgentStatus::Done || (event.status == AgentStatus::Working && event.prompt.is_some());
         if !wants {
             return Default::default();
         }
-        let Some((text, _)) = self.delegates.claim_notice(tab) else { return Default::default() };
-        let typed = self.delegates.drop_claimed_reports(tab);
-        (text, typed)
+        let Some((text, ids, claim)) = self.delegates.claim_news(tab) else { return Default::default() };
+        (text, Some(Taken { tab: tab.to_owned(), ids, claim, pending: None }))
+    }
+
+    /// Ends the claim `take_notices` made once the hook's reply was sent. Notices the hook read
+    /// leave the queue, and the orchestrator requests among them start the Capitão's next turn.
+    /// Those a hook that stopped waiting never read are queued again, and the turn they would
+    /// have continued is over, so the next idle pass types them.
+    fn handed(&self, taken: Taken, read: bool) {
+        if read {
+            let typed = self.delegates.confirm_claim(taken.claim);
+            self.mark_typed(&typed);
+            return;
+        }
+        self.delegates.release_notice(&taken.ids);
+        self.delegates.release_claim(taken.claim);
+        if let Some(at) = taken.pending {
+            let _ = self.tab(&taken.tab, |t| {
+                if t.turn_pending == Some(at) {
+                    t.turn_pending = None;
+                }
+            });
+        }
+        self.arm_delegate_pass();
     }
 
     fn stamp_parent_sessions(&self) {
@@ -10916,8 +10949,9 @@ while True:
         assert_eq!(ask(&sock, &serde_json::to_string(&Message::Agent(prompt)).unwrap()), Ok(String::new()), "the turn's prompt got the typed messages again");
         assert_eq!(enqueue(&m, &path, "Bump the version.", "r-5"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })));
         assert_eq!(enqueue(&m, &path, "Tag the release.", "r-6"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 2 })));
-        assert_eq!(ask(&sock, &stop), Ok("[Orchestrator] Bump the version.\n[Orchestrator] Tag the release.".into()));
-        assert_eq!(in_flight(), ["r-5", "r-6"]);
+        let answered = serde_json::to_string(&Message::Agent(AgentEvent { hook_feedback: true, reply: Some("Shipped.".into()), ..hook(&tab, AgentStatus::Done) })).unwrap();
+        assert_eq!(ask(&sock, &answered), Ok("[Orchestrator] Bump the version.\n[Orchestrator] Tag the release.".into()));
+        assert_eq!(in_flight(), ["r-5", "r-6"], "the turn r-1 to r-4 started ended, and the handed messages started the next");
         assert_eq!(ask(&sock, &stop), Ok(String::new()), "a later turn end handed a message over twice");
         assert_eq!(m.view(&tab).unwrap().queued, 0);
         assert_eq!(std::fs::read(&file).unwrap(), first, "a message was typed twice");
@@ -12696,8 +12730,9 @@ Have another model review a risky change before it goes ahead.";
         let tab = m.open_tab(None, false).unwrap();
         m.tab(&tab, |t| t.claude_session = Some("s-1".into())).unwrap();
         assert_eq!(notice_call(&m, &tab, None, "c-1"), Ok(json!(true)));
-        let (context, _) = m.take_notices(&turn_done(&tab, "s-1"));
+        let (context, taken) = m.take_notices(&turn_done(&tab, "s-1"));
         assert_eq!(context, "[pinned] The user approved your remove_machine request (c-1): done.");
+        m.handed(taken.unwrap(), true);
         assert_eq!(m.view(&tab).unwrap().queued, 0, "the notice was typed");
         assert_eq!(notice_call(&m, &tab, None, "c-1"), Ok(json!(true)), "the hub marks it notified on this answer");
         assert_eq!(m.view(&tab).unwrap().queued, 0, "a notice typed once queued again");

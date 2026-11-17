@@ -30,8 +30,8 @@ type Reply = Result<String, String>;
 /// goes on without it.
 const RECALL_WAIT: Duration = Duration::from_millis(300);
 
-/// How long a Stop hook waits for the machine's reply. The machine counts the queue it hands over
-/// there as delivered, and the turn ends without it when the hook stops waiting first.
+/// How long a Stop hook waits for the machine's reply. The turn ends without it when the hook
+/// stops waiting first, and the queue it would have handed over stays queued.
 const HAND_OVER_WAIT: Duration = Duration::from_secs(10);
 
 /// Claude Code settings layered onto the harnessed session via `--settings`, so the user's
@@ -465,9 +465,28 @@ pub(crate) fn ask(message: Message) -> Reply {
     serde_json::from_str::<Reply>(&reply).map_err(|e| format!("pinned sent a bad answer {reply:?}: {e}"))?
 }
 
+/// What `listen`'s handler answers to one line, and what it learns once the answer is sent.
+pub struct Answer {
+    pub reply: Reply,
+    /// Told whether the reply reached a reader that still waits for it. A hook that stopped
+    /// waiting has hung up, so what the reply hands over never reached its session.
+    pub sent: Option<Box<dyn FnOnce(bool) + Send>>,
+}
+
+impl From<Reply> for Answer {
+    fn from(reply: Reply) -> Self {
+        Answer { reply, sent: None }
+    }
+}
+
 /// Answers every line on the socket with `on_message`'s reply. Each connection gets its own
 /// thread, so a slow Linear call for one session doesn't hold up another session's hooks.
 pub fn listen(sock: PathBuf, on_message: impl Fn(Message) -> Reply + Send + Sync + 'static) -> std::io::Result<()> {
+    answer(sock, move |message| on_message(message).into())
+}
+
+/// `listen`, with an `Answer` that learns whether its reply was sent.
+pub fn answer(sock: PathBuf, on_message: impl Fn(Message) -> Answer + Send + Sync + 'static) -> std::io::Result<()> {
     let _ = std::fs::remove_file(&sock);
     let listener = UnixListener::bind(&sock)?;
     let on_message = Arc::new(on_message);
@@ -477,12 +496,18 @@ pub fn listen(sock: PathBuf, on_message: impl Fn(Message) -> Reply + Send + Sync
             std::thread::spawn(move || {
                 let Ok(reader) = stream.try_clone() else { return };
                 for line in BufReader::new(reader).lines().map_while(Result::ok) {
-                    let reply = match serde_json::from_str(&line) {
+                    let answer = match serde_json::from_str(&line) {
                         Ok(message) => on_message(message),
-                        Err(e) => Err(format!("bad message {line:?}: {e}")),
+                        Err(e) => Answer::from(Err(format!("bad message {line:?}: {e}"))),
                     };
-                    // Hook forwarders hang up without reading the reply.
-                    let _ = writeln!(stream, "{}", serde_json::to_string(&reply).unwrap());
+                    let reply = serde_json::to_string(&answer.reply).unwrap();
+                    // Hook forwarders hang up without reading the reply. The reader takes the reply
+                    // at its newline, so `sent` learns its fate before the reader can act on it.
+                    let reached = stream.write_all(reply.as_bytes()).is_ok();
+                    if let Some(sent) = answer.sent {
+                        sent(reached);
+                    }
+                    let _ = stream.write_all(b"\n");
                 }
             });
         }
