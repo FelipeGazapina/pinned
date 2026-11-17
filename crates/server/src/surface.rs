@@ -265,6 +265,15 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
     if action.starts_work && !on_origin {
         return Err(format!("{name} starts work only on this session's own machine for now"));
     }
+    // A box may only pull the account's files: its sessions' acts are held to `box_gate` as its
+    // own calls are, and on the account's other machines they only read.
+    if account.dedicated(origin) {
+        match &call {
+            Parsed::Hub(hub_call) => crate::box_gate::box_may_send(hub_call)?,
+            Parsed::Node(_) if !on_origin && action.class != Class::Read => return Err(crate::box_gate::BOX_REFUSAL.to_owned()),
+            Parsed::Node(_) => {}
+        }
+    }
     Ok(Admitted { action, call, target, on_origin })
 }
 

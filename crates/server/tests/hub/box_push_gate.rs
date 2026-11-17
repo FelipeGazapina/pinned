@@ -169,3 +169,24 @@ fn a_box_machines_refused_push_shows_no_limit_notice_to_the_accounts_apps() {
     assert_eq!(sync_limit_shown(&mut client, &mut vps, &s.box_id, 901), Ok(Value::Null), "the hub answers for a box");
     assert_eq!(sync_limit_shown(&mut client, &mut mac, &s.mac_id, 902), Ok(json!(NOTICE)), "a person's machine at the limit still says so");
 }
+
+#[test]
+fn a_box_sessions_act_may_not_share_a_project_either() {
+    let s = setup("boxgate_act");
+    let url = &s.hub.url;
+    let mut client = Client::connect(url, &s.token);
+    client.wait("hello", |f| f["type"] == "hello");
+    let tab = json!({ "id": "tab-1", "cwd": "/w/site", "bypass": false, "running": true, "status": "done", "title": "Fix login", "message": null, "resume_at": null, "opened": 1, "session": "conv-1", "role": "worker" });
+    let mut vps = MachineSock::connect(url, &s.box_token, "0.18.6");
+    let mut mac = MachineSock::connect(url, &s.mac_token, "0.18.6");
+    for node in [&mut vps, &mut mac] {
+        node.send(json!({ "type": "event", "event": { "kind": "tabs", "tabs": [tab.clone()] } }));
+    }
+    client.wait("the box's tabs", |f| f["type"] == "event" && f["machine"] == json!(s.box_id) && f.to_string().contains("conv-1"));
+    client.wait("the mac's tabs", |f| f["type"] == "event" && f["machine"] == json!(s.mac_id) && f.to_string().contains("conv-1"));
+    let act = json!({ "cmd": "act", "act": { "tab": "tab-1", "action": "share_project", "args": { "project": share()["project"] } } });
+
+    assert_eq!(send_call(&mut vps, 1, act.clone()), Err(REFUSED.to_owned()));
+    assert_eq!(count(&s.hub, &format!("select count(*) from shared_projects where account = '{}'", s.account)), 0);
+    assert_eq!(send_call(&mut mac, 1, act).unwrap()["outcome"], "done", "a person's machine's session shares as before");
+}
