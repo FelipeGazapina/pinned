@@ -2828,16 +2828,26 @@ impl Connectors {
         self.guards.lock().unwrap().wrote(issue, field, to, Utc::now());
     }
 
-    /// The fire `key` of `workflow` won its claim but its run did not start: the claim is given
-    /// back so a later check may fire it, and both are counted. A crash between the claim and
-    /// the start gives nothing back: the fire stays claimed and does not run (at most once).
-    fn fire_not_started(&self, workflow: &str, key: &str) {
+    /// The won fire of `workflow` whose run did not start: the claim is given back, and its change
+    /// goes to `Store::change_retries`, so a later check fires it again until the change is older
+    /// than `CATCH_UP`; both are counted. A crash between the claim and the start gives nothing
+    /// back: the fire stays claimed and does not run (at most once).
+    fn fire_not_started(&self, workflow: &str, fire: &ChangeFire) {
+        let key = &fire.key;
         let released = self.storage.release_fire(workflow, key, &self.claimer);
+        let retried = fire.at > Utc::now() - chrono::Duration::from_std(CATCH_UP).expect("CATCH_UP fits");
+        let then = match retried {
+            true => format!("a later check tries it again until the change is {} minutes old", CATCH_UP.as_secs() / 60),
+            false => "the change is too old to try again".to_owned(),
+        };
         match &released {
-            Ok(()) => eprintln!("pinned: workflow {workflow} gave back its claim of {key}: its run did not start"),
+            Ok(()) => eprintln!("pinned: workflow {workflow} gave back its claim of {key}: its run did not start; {then}"),
             Err(e) => eprintln!("pinned: workflow {workflow} could not give back its claim of {key}: {e}"),
         }
         let mut store = self.store.lock().unwrap();
+        if retried {
+            store.change_retries.entry(workflow.to_owned()).or_default().insert(key.clone(), stamp(fire.at));
+        }
         let counts = store.change_counts.entry(workflow.to_owned()).or_default();
         counts.not_started += 1;
         counts.released += u64::from(released.is_ok());
@@ -2909,7 +2919,7 @@ impl Connectors {
             }
         }
 
-        let mut unsaved: Vec<(String, String)> = vec![];
+        let mut unsaved: Vec<(String, ChangeFire)> = vec![];
         let (mut settled, fired, unstarted) = {
             let runs = self.runs.lock().unwrap().clone();
             let _filing = self.filing.lock().await;
@@ -2928,16 +2938,16 @@ impl Connectors {
                         store.undo_changes(undo);
                     }
                     let (starts, work) = std::mem::take(&mut fired);
-                    unsaved.extend(starts.into_iter().filter_map(|start| Some((start.connector, start.fire?.key))));
-                    unsaved.extend(work.into_iter().map(|(run, fire)| (run.connector, fire.key)));
+                    unsaved.extend(starts.into_iter().filter_map(|start| Some((start.connector, start.fire?))));
+                    unsaved.extend(work.into_iter().map(|(run, fire)| (run.connector, fire)));
                 }
             }
             (settled, fired, unstarted)
         };
         // Given back with no lock held: a hub's release waits on its database.
-        unsaved.extend(unstarted.into_iter().map(|fire| (fire.workflow, fire.key)));
-        for (workflow, key) in unsaved {
-            self.fire_not_started(&workflow, &key);
+        unsaved.extend(unstarted.into_iter().map(|fire| (fire.workflow.clone(), fire.carried())));
+        for (workflow, fire) in unsaved {
+            self.fire_not_started(&workflow, &fire);
         }
         let (fire_starts, fire_work) = fired;
         settled.starts.extend(fire_starts);
@@ -2953,7 +2963,7 @@ impl Connectors {
                 (Err(e), fire) => {
                     errors.push(e);
                     if let Some((workflow, fire)) = fire {
-                        self.fire_not_started(&workflow, &fire.key);
+                        self.fire_not_started(&workflow, &fire);
                     }
                 }
             }
@@ -3050,7 +3060,7 @@ impl Connectors {
         // A Linear change's run gives its won claim back when it does not start.
         let not_started = || {
             if let Some(fire) = &fire {
-                self.fire_not_started(&connector, &fire.key);
+                self.fire_not_started(&connector, fire);
             }
         };
         // A hub's team decides here, once, before the Ask step's model call and before Linear or
@@ -3084,7 +3094,7 @@ impl Connectors {
             if let Err(why) = frame_trigger_text(&mut run) {
                 self.release(&connector, &subject).await;
                 not_started();
-                return Err(self.unclaim(&connector, &subject, &folder, &why));
+                return Err(self.unclaim_fire(&connector, &subject, &folder, &why, fire.as_ref()));
             }
         }
         let consulted = if framed { untrusted_trigger(&run) } else { run.input.clone() };
@@ -3106,7 +3116,7 @@ impl Connectors {
             Err(why) => {
                 self.release(&connector, &subject).await;
                 not_started();
-                return Err(self.unclaim(&connector, &subject, &folder, &why));
+                return Err(self.unclaim_fire(&connector, &subject, &folder, &why, fire.as_ref()));
             }
         }
         let answer = open(Work::Run(run)).await;
@@ -3118,7 +3128,7 @@ impl Connectors {
         }
         if let Err(why) = answer.taken() {
             not_started();
-            return Err(self.unclaim(&connector, &subject, &folder, &why));
+            return Err(self.unclaim_fire(&connector, &subject, &folder, &why, fire.as_ref()));
         }
         if let Some(fire) = &fire {
             self.fire_started(&connector, fire);
@@ -3182,6 +3192,16 @@ impl Connectors {
     /// the subject only if no box end freed it in the last 30 days.
     pub fn box_boot_failed(&self, subject: &Subject) {
         self.boot_failed.lock().unwrap().insert(subject_key(subject));
+    }
+
+    /// `unclaim`, for a run that carries the won `fire` of a Linear change, which a later check
+    /// tries again (`fire_not_started`) rather than the next check finding the issue anew.
+    fn unclaim_fire(&self, connector: &str, subject: &Subject, folder: &Path, why: &str, fire: Option<&ChangeFire>) -> String {
+        let error = self.unclaim(connector, subject, folder, why);
+        match fire {
+            Some(_) => error.replacen("the next check tries again", &format!("a later check tries the change again until it is {} minutes old", CATCH_UP.as_secs() / 60), 1),
+            None => error,
+        }
     }
 
     fn unclaim(&self, connector: &str, subject: &Subject, folder: &Path, why: &str) -> String {
