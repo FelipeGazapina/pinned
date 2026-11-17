@@ -7547,6 +7547,16 @@ fn without_app_env(command: &mut std::process::Command) -> &mut std::process::Co
 }
 
 #[test]
+fn a_node_a_test_starts_inherits_no_session_variable_or_cli_home() {
+    let mut command = std::process::Command::new(BIN);
+    without_app_env(&mut command);
+    let envs: BTreeMap<String, Option<String>> = command.get_envs().map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned()))).collect();
+    for name in pinned_core::machine::INHERITED_SESSION_ENV.iter().chain(&["CLAUDE_CONFIG_DIR", "CODEX_HOME"]) {
+        assert_eq!(envs.get(*name), Some(&None), "{name} is not removed");
+    }
+}
+
+#[test]
 fn a_node_keeps_only_its_machine_token_and_ends_a_login_an_older_pinned_kept() {
     let hub = TestHub::start("node_login");
     let url = hub.url.clone();
