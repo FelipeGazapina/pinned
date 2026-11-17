@@ -432,6 +432,9 @@ pub struct Task {
     pub newest_text: Option<String>,
     pub mode: Mode,
     pub delivered: bool,
+    /// The notice was claimed but its text is not confirmed typed yet. Saved with `delivered`
+    /// cleared, so a crash in between leaves it pending at the next load.
+    pub claimed: bool,
     /// Unix seconds `delivered` was set, when it was set since this was recorded.
     pub delivered_at: Option<u64>,
     /// This task's folder is a worktree `new_worktree` made.

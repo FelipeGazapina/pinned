@@ -122,10 +122,10 @@ impl Delegates {
         let Some(file) = file else { return delegates };
         let Ok(bytes) = std::fs::read(&file) else { return delegates };
         let Ok(saved) = serde_json::from_slice::<SavedFile>(&bytes) else { return delegates };
-        *delegates.tasks.lock().unwrap() = saved.tasks.into_iter().map(SavedTask::into_task).collect();
         // A claim only lasts until its text is typed. One a crash cut short is typed again, which
-        // can show a person a report twice but never loses one.
-        let interrupted = saved.reports.iter().any(|report| report.claimed);
+        // can show a person a report or a task notice twice but never loses one.
+        let interrupted = saved.reports.iter().any(|report| report.claimed) || saved.tasks.iter().any(|task| task.claimed);
+        *delegates.tasks.lock().unwrap() = saved.tasks.into_iter().map(SavedTask::into_task).collect();
         *delegates.reports.lock().unwrap() = saved.reports.into_iter().map(|report| Report { claimed: false, ..report }).collect();
         *delegates.notices.lock().unwrap() = saved.notices;
         if delegates.adopt_restart() || interrupted {
@@ -1094,7 +1094,7 @@ impl Delegates {
         let mut lines: Vec<String> = ready.iter().map(|index| notice_line(&tasks[*index])).collect();
         let ids: Vec<String> = ready.iter().map(|index| tasks[*index].id.clone()).collect();
         for index in &ready {
-            tasks[*index].deliver();
+            tasks[*index].claim();
         }
         for index in pending {
             reports[index].claimed = true;
@@ -1133,7 +1133,7 @@ impl Delegates {
         if task.delivered {
             return Err(format!("{id} was already sent"));
         }
-        task.deliver();
+        task.claim();
         let line = notice_line(task);
         drop(tasks);
         self.persist();
@@ -1145,7 +1145,18 @@ impl Delegates {
         for task in tasks.iter_mut() {
             if ids.iter().any(|id| id == &task.id) {
                 task.delivered = false;
+                task.claimed = false;
             }
+        }
+        drop(tasks);
+        self.persist();
+    }
+
+    /// The text of these claimed notices was typed, so a restart does not offer them again.
+    pub fn confirm_notice(&self, ids: &[String]) {
+        let mut tasks = self.tasks.lock().unwrap();
+        for task in tasks.iter_mut().filter(|task| task.claimed && ids.iter().any(|id| id == &task.id)) {
+            task.claimed = false;
         }
         drop(tasks);
         self.persist();
@@ -1581,9 +1592,16 @@ pub struct Lineage {
 }
 
 impl Task {
+    /// Marks the notice taken, with its text typed by the caller's own means or not needed.
     fn deliver(&mut self) {
         self.delivered = true;
         self.delivered_at = Some(unix_millis() / 1000);
+    }
+
+    /// Marks the notice taken for typing. It stays claimed until `confirm_notice` says its text was typed.
+    fn claim(&mut self) {
+        self.deliver();
+        self.claimed = true;
     }
 
     fn note(&mut self, event: StreamEvent) -> Option<HeldExit> {
@@ -1967,6 +1985,7 @@ fn fresh(new: NewTask) -> Task {
         newest_text: None,
         mode: new.mode,
         delivered: false,
+        claimed: false,
         delivered_at: None,
         isolated: new.isolated,
         caller_key: new.caller_key,
@@ -2086,6 +2105,10 @@ struct SavedTask {
     mode: Mode,
     #[serde(default)]
     delivered: bool,
+    /// A claim whose text was not confirmed typed. `delivered` is saved cleared while it holds, so
+    /// the version before this field also offers the notice again.
+    #[serde(default)]
+    claimed: bool,
     #[serde(default)]
     delivered_at: Option<u64>,
     #[serde(default)]
@@ -2173,6 +2196,7 @@ fn end_after_restart(task: &mut Task) {
     });
     task.ended = Some(unix_millis());
     task.delivered = false;
+    task.claimed = false;
     task.held = None;
 }
 
@@ -2205,7 +2229,8 @@ impl SavedTask {
             error: task.error.clone(),
             conversation: task.conversation.clone(),
             mode: task.mode,
-            delivered: task.delivered,
+            delivered: task.delivered && !task.claimed,
+            claimed: task.claimed,
             delivered_at: task.delivered_at,
             isolated: task.isolated,
             caller_key: task.caller_key.clone(),
@@ -2257,7 +2282,8 @@ impl SavedTask {
             steps: vec![],
             newest_text: self.assistant,
             mode: self.mode,
-            delivered: self.delivered,
+            delivered: self.delivered && !self.claimed,
+            claimed: false,
             delivered_at: self.delivered_at,
             isolated: self.isolated,
             caller_key: self.caller_key,
@@ -2565,6 +2591,55 @@ mod tests {
         assert_eq!(loaded.claim_notice("tab-1").map(|(text, _)| text), Some("[Slack reply from ana in the thread]\nship it".into()));
         loaded.drop_claimed_reports("tab-1");
         assert!(!Delegates::load(Some(file)).has_news("tab-1"), "a typed report is gone for good");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A finished task of `tab-1` kept in `file`, the way a machine that ran it remotely records it.
+    fn finished_task_saved_in(file: &std::path::Path) -> (Delegates, String) {
+        let delegates = Delegates::load(Some(file.to_owned()));
+        let task = new_task(&delegates, "Fix");
+        delegates.set_remote(&task.id, RemoteTarget { machine: "m-mini".into(), name: "mini".into(), tab: None, looked: None, waiting: None });
+        let end = RemoteEnd { state: "result_available".into(), summary: Some("Green.".into()), error: None, usage: None };
+        assert_eq!(delegates.settle_remote(&task.id, "tab-1", "m-mini", &end), Some("tab-1".into()));
+        (delegates, task.id)
+    }
+
+    #[test]
+    fn a_task_notice_claimed_when_pinned_stopped_is_pending_again_at_the_next_load() {
+        let dir = std::env::temp_dir().join(format!("pinned-claimed-notice-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("delegates.json");
+        let (first, id) = finished_task_saved_in(&file);
+        let (text, ids) = first.claim_notice("tab-1").expect("the finished task is claimed");
+        assert_eq!(ids, vec![id.clone()]);
+        assert!(!first.has_news("tab-1"), "claimed, so not offered again while its text is being typed");
+        // Pinned stops here, before the text was confirmed typed.
+        let loaded = Delegates::load(Some(file.clone()));
+        assert!(loaded.has_news("tab-1"));
+        assert!(!loaded.get(&id).unwrap().delivered);
+        let (again, ids) = loaded.claim_notice("tab-1").expect("offered again");
+        assert_eq!(again, text, "the same text");
+        assert_eq!(ids, vec![id.clone()]);
+        // The text was typed this time.
+        loaded.confirm_notice(&ids);
+        let after = Delegates::load(Some(file.clone()));
+        assert!(!after.has_news("tab-1"), "a typed notice is not offered again");
+        assert!(after.get(&id).unwrap().delivered);
+        assert_eq!(after.claim_notice("tab-1"), None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_claimed_task_notice_is_saved_so_the_previous_version_offers_it_again() {
+        let dir = std::env::temp_dir().join(format!("pinned-claimed-notice-old-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("delegates.json");
+        let (first, id) = finished_task_saved_in(&file);
+        first.claim_notice("tab-1").unwrap();
+        let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        let task = saved["tasks"].as_array().unwrap().iter().find(|task| task["id"] == id.as_str()).unwrap();
+        assert_eq!(task["delivered"], false, "a reader that does not know `claimed` still sees it pending");
+        assert_eq!(task["claimed"], true);
         let _ = std::fs::remove_dir_all(dir);
     }
 
