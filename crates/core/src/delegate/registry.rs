@@ -331,14 +331,16 @@ impl Delegates {
         self.persist();
     }
 
-    /// Records what each working task used, and stops the ones past their budget.
-    pub fn meter(&self, used: &[(String, crate::usage::TaskUsage)], path: Option<&str>) {
+    /// Records what each working task used, those in `at_ceiling` priced in part at the ceiling
+    /// rate, and stops the ones past their budget.
+    pub fn meter(&self, used: &[(String, crate::usage::TaskUsage)], at_ceiling: &[String], path: Option<&str>) {
         let over: Vec<(String, String)> = {
             let mut tasks = self.tasks.lock().unwrap();
             used.iter()
                 .filter_map(|(id, usage)| {
                     let task = tasks.iter_mut().find(|task| &task.id == id && task.state == WorkState::Working)?;
                     task.usage = *usage;
+                    task.at_ceiling = at_ceiling.contains(id);
                     task.limits.over_budget(usage.cost_usd).map(|reason| (id.clone(), reason))
                 })
                 .collect()
@@ -2017,6 +2019,7 @@ fn fresh(new: NewTask) -> Task {
         remote_tab: None,
         limits: crate::taste::Limits::default(),
         usage: crate::usage::TaskUsage::default(),
+        at_ceiling: false,
         delegator: Delegator::default(),
         effort: None,
         limit: None,
@@ -2160,6 +2163,8 @@ struct SavedTask {
     /// A task saved before records existed has nothing worth sending, so it counts as sent.
     #[serde(default = "already_recorded")]
     recorded: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    at_ceiling: bool,
     /// The task's own session runs it in a thread, which a restart resumes.
     #[serde(default)]
     thread_runs: bool,
@@ -2264,6 +2269,7 @@ impl SavedTask {
             review: task.review.clone(),
             thread_tab: task.thread_tab.clone(),
             recorded: task.recorded,
+            at_ceiling: task.at_ceiling,
             thread_runs: task.thread.as_ref().is_some_and(|thread| thread.runs) || task.resuming,
             worker_session: task.worker_session.clone(),
             remote: task.remote.as_ref().map(|remote| SavedRemote { machine: remote.machine.clone(), name: remote.name.clone(), tab: remote.tab.clone() }),
@@ -2322,6 +2328,7 @@ impl SavedTask {
             review: self.review,
             thread_tab: self.thread_tab,
             recorded: self.recorded,
+            at_ceiling: self.at_ceiling,
             placement: self.placement,
         }
     }

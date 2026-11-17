@@ -3987,12 +3987,16 @@ impl Machine {
         let team_box = self.team_box.load(Ordering::Relaxed);
         let mut logged = self.worker_unpriced.lock().unwrap();
         logged.retain(|task, _| meters.contains_key(task));
+        let mut at_ceiling = vec![];
         let used: Vec<_> = moved
             .into_iter()
             .map(|task| {
                 let mut usage = meters[&task].usage(&rates, &book);
                 if team_box {
                     let (usd, unpriced) = meters[&task].priced(&rates, &book);
+                    if !unpriced.is_empty() {
+                        at_ceiling.push(task.clone());
+                    }
                     for model in unpriced {
                         if logged.entry(task.clone()).or_default().insert(model.clone()) {
                             eprintln!("pinned: worker {task}'s cost prices {model}, which has no price, at the ceiling rate");
@@ -4004,7 +4008,7 @@ impl Machine {
             })
             .collect();
         drop(logged);
-        self.delegates.meter(&used, self.launch.path_env.as_deref());
+        self.delegates.meter(&used, &at_ceiling, self.launch.path_env.as_deref());
     }
 
     /// Sends the hub the model cost so far of each workflow session in this team box
@@ -7724,9 +7728,9 @@ pub(crate) mod tests {
         };
         let usage = |cost: Option<f64>, tokens: (u64, u64), box_usd: Option<f64>| TaskUsage { tokens_in: tokens.0, tokens_out: tokens.1, cost_usd: cost, wall_ms: 60_000, box_usd, box_ms: box_usd.map(|_| 1_800_000) };
         let local = start(Parent::Tab(captain.clone()), "Local suite", Provider::Claude, "claude-sonnet-5-5");
-        m.delegates.meter(&[(local.clone(), usage(Some(0.42), (1000, 500), None))], None);
+        m.delegates.meter(&[(local.clone(), usage(Some(0.42), (1000, 500), None))], &[], None);
         let grandchild = start(Parent::Task(local.clone()), "Local helper", Provider::Claude, "claude-haiku-5-5");
-        m.delegates.meter(&[(grandchild.clone(), usage(Some(0.08), (200, 100), None))], None);
+        m.delegates.meter(&[(grandchild.clone(), usage(Some(0.08), (200, 100), None))], &[], None);
         let remote = start(Parent::Tab(captain.clone()), "Mini suite", Provider::Claude, "claude-opus-5-5");
         m.delegates.set_remote(&remote, RemoteTarget { machine: "m-mini".into(), name: "mini".into(), tab: None, looked: None, waiting: None });
         let end = |usage| RemoteEnd { state: "result_available".into(), summary: None, error: None, usage: Some(usage) };
@@ -14286,10 +14290,10 @@ Have another model review a risky change before it goes ahead.";
             })
             .id;
         let usage = |usd: f64| TaskUsage { tokens_in: 1000, tokens_out: 500, cost_usd: Some(usd), wall_ms: 60_000, box_usd, box_ms: box_usd.map(|_| 60_000) };
-        m.delegates.meter(&[(child.clone(), usage(0.42))], None);
+        m.delegates.meter(&[(child.clone(), usage(0.42))], &[], None);
         let t0 = Instant::now();
         m.report_run_costs(t0);
-        m.delegates.meter(&[(child, usage(0.50))], None);
+        m.delegates.meter(&[(child, usage(0.50))], &[], None);
         m.report_run_costs(t0 + RUN_COST_EVERY);
         assert_eq!(*sent.lock().unwrap(), vec![("wf-1".to_owned(), subject.clone(), 57.0), ("wf-1".to_owned(), subject, 65.0)], "0.15 its own session + its worker's 0.42, then 0.50: a total, box cost {box_usd:?} left out");
         let _ = std::fs::remove_dir_all(dir);
