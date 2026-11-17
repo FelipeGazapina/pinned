@@ -69,4 +69,13 @@ mod tests {
         assert!(std::fs::read_to_string(dir.join(".claude-plugin/plugin.json")).unwrap().contains("\"name\": \"pinned\""));
         std::fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn the_bundled_pendencias_skill_names_no_person() {
+        for (file, text) in [("plugin/skills/pendencias/SKILL.md", PENDENCIAS), ("plugin/skills/pendencias/template.html", PENDENCIAS_TEMPLATE)] {
+            assert!(!text.contains("Felipe"), "{file} names a person; it must say \"o usuário\"");
+        }
+        assert!(PENDENCIAS.contains("description: Como o usuário quer receber perguntas."));
+        assert!(PENDENCIAS_TEMPLATE.contains("<title>Pendências</title>"));
+    }
 }
