@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
+use crate::pinned_lines;
+
 pub const MAX_PLANS_UNFINISHED: usize = 6;
 pub const MAX_PLANS_FINISHED: usize = 10;
 pub const MAX_LISTS: usize = 8;
@@ -21,6 +23,8 @@ pub const MAX_TITLE: usize = 80;
 pub const MAX_NOTE: usize = 200;
 pub const MAX_REASON: usize = 200;
 pub const GLANCE_TEXT: usize = 32;
+/// The most characters a step's `by` shows, the ellipsis included.
+pub const BY_TEXT: usize = 40;
 
 /// The reason a step shows when its list's task ended with a result and the Captain never reported it.
 const DONE_WITH_LIST: &str = "Done with the list's task";
@@ -478,11 +482,7 @@ pub fn glance(plan: &Plan, facts: &[TaskFacts]) -> PlanGlance {
         state: captain_state(plan, &view),
         done: mains.iter().filter(|s| s.state == State::Done).count(),
         total: mains.len(),
-        now: view
-            .lists
-            .iter()
-            .find_map(|l| first_active(&l.steps))
-            .map(|s| clip(&s.name)),
+        now: first_now(&view.lists).map(|s| clip(&s.name)),
         finished_at: plan.finished_at,
         strips: view
             .lists
@@ -1455,9 +1455,16 @@ fn step_view(step: &Step, shown: Shown, facts: &[TaskFacts]) -> StepView {
         why,
         cost: shown.cost,
         task: step.task.clone(),
-        by: None,
+        by: by_of(step, facts),
         fixes,
     }
+}
+
+/// Who runs a step that a task is linked to, as its one-line label. None for a step with no task.
+fn by_of(step: &Step, facts: &[TaskFacts]) -> Option<String> {
+    let task = step.task.as_deref()?;
+    let by = facts.iter().find(|f| f.id == task)?.by.as_deref()?;
+    Some(pinned_lines::flat(by, BY_TEXT - 1)).filter(|s| !s.is_empty())
 }
 
 fn after_fixes(n: usize) -> String {
@@ -1512,14 +1519,23 @@ fn captain_state(plan: &Plan, view: &PlanView) -> CaptainState {
     }
 }
 
-/// The first step, in plan order, that is running or waiting. A fix comes right after the step it fixes.
-fn first_active(steps: &[StepView]) -> Option<&StepView> {
+/// The step the glance names as `now`: the first, in plan order, that waits for the user; else the first that
+/// runs. Both look at every list, fixes included.
+fn first_now(lists: &[ListView]) -> Option<&StepView> {
+    lists
+        .iter()
+        .find_map(|l| first_in(&l.steps, State::Waiting))
+        .or_else(|| lists.iter().find_map(|l| first_in(&l.steps, State::Running)))
+}
+
+/// The first step, in plan order, in state `want`. A fix comes right after the step it fixes.
+fn first_in(steps: &[StepView], want: State) -> Option<&StepView> {
     for s in steps {
-        if matches!(s.state, State::Running | State::Waiting) {
+        if s.state == want {
             return Some(s);
         }
         for f in &s.fixes {
-            if let Some(x) = first_active(&f.steps) {
+            if let Some(x) = first_in(&f.steps, want) {
                 return Some(x);
             }
         }
@@ -3396,7 +3412,7 @@ mod tests {
                 "state": "needs_you",
                 "done": 2,
                 "total": 6,
-                "now": "C",
+                "now": "D",
                 "strips": ["dxrwp", "f"]
             })
         );

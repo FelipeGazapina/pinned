@@ -3585,7 +3585,8 @@ impl Machine {
     /// What each task the Captains' plans link to reads now, for the plans to derive their states from.
     fn plan_facts(&self) -> Vec<crate::plan::TaskFacts> {
         let ids = self.plans.lock().unwrap().linked_tasks();
-        self.delegates.plan_facts(&ids)
+        let tab_titles: HashMap<String, String> = self.tabs.lock().unwrap().iter().filter_map(|(id, t)| Some((id.clone(), t.title.clone()?))).collect();
+        self.delegates.plan_facts(&ids, &tab_titles)
     }
 
     /// Settles the plans against the tasks they link to: what a task ended with is saved on its step, and
