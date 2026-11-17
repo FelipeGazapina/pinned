@@ -393,7 +393,8 @@ fn not_host(account: &Account, from: &str, host_name: &str, what: &str) -> Strin
 /// rather than caching, because a machine's settings also change in its own app, which the hub
 /// never sees.
 async fn host(hub: &Hub, account: &Account) -> Result<(MachineId, String), String> {
-    let online = account.online();
+    // A box is never the host, so it is not asked.
+    let online: Vec<_> = account.online().into_iter().filter(|(id, _)| !account.dedicated(id)).collect();
     let answers = join_all(online.iter().map(|(id, _)| hub.call_machine(account, id, Call::GlobalOrchestratorSettings, HOST_WAIT))).await;
     the_host(online.iter().zip(&answers).map(|((id, name), answer)| (id.as_str(), name.as_str(), answer)))
 }
