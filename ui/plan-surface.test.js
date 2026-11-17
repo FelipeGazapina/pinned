@@ -267,14 +267,15 @@ test("a resume that drops unfinished plans shows one line until it is dismissed"
   await flush();
   assert.ok(!h.html().includes("not carried over"), "no line while the session is the same");
 
+  // The resumed session numbers its plans from p1 again: the old p1 is gone, its id is not.
   tab.view.session = "s2";
-  tab.view.plans = [];
-  h.context.reply = () => [];
+  tab.view.plans = [glance({ id: "p1", title: "Tidy the README" })];
+  h.context.reply = () => [plan({ id: "p1", title: "Tidy the README", lists: [] })];
   h.push();
   await flush();
   assert.ok(
     h.html().includes("2 plans from before /resume were not carried over: Ship the signup form, Fix the export job."),
-    "the line names both dropped plans",
+    "the line names both dropped plans, the reused id included",
   );
 
   h.click("[data-dismiss-dropped]", {});
