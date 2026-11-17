@@ -4718,7 +4718,8 @@ impl Machine {
     }
 
     /// `listen`, telling `other` what the machine found of the session a workflow session's
-    /// callback came from (`Vouch::Unchecked` for every other message).
+    /// callback came from (`Vouch::Unchecked` for every other message). One from outside every
+    /// session is refused here and never reaches `other`.
     pub fn listen_vouched(&self, other: impl Fn(Message, crate::agent::Vouch) -> Result<String, String> + Send + Sync + 'static) -> std::io::Result<()> {
         let me = self.me.clone();
         hooks::answer(self.launch.sock.clone(), move |message, peer| {
@@ -4760,9 +4761,13 @@ impl Machine {
                 }),
                 Message::Project { tab, tool } => machine.project_tool(&tab, tool),
                 Message::Guard { tab, tool, input } => machine.guard(&tab, &tool, &input),
+                // Refused here, not left to what listens behind: a signed-out app's own connectors
+                // check no session, and an older hub reads no vouch.
                 message @ (Message::Stage { .. } | Message::SlackReply { .. } | Message::LinearCreate { .. } | Message::LinearTake { .. } | Message::RunSet { .. }) => {
-                    let vouch = machine.vouch_callback(peer);
-                    other(message, vouch)
+                    match machine.vouch_callback(peer) {
+                        crate::agent::Vouch::Outside => Err(crate::agent::OUTSIDE_EVERY_SESSION.into()),
+                        vouch => other(message, vouch),
+                    }
                 }
                 message => other(message, crate::agent::Vouch::Unchecked),
             };
