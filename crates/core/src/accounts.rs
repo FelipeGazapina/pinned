@@ -649,6 +649,17 @@ mod tests {
     }
 
     #[test]
+    fn a_relative_exported_home_is_dropped() {
+        // The node resolves a relative home against its own cwd and each CLI against the project's.
+        let homes = |claude: &str, codex: &str| {
+            let accounts = Accounts::load(None, "/Users/ana".into()).with_exported_homes(exported_homes(&exported_in_own_shell(claude, codex), None));
+            (accounts.home(&Account::builtin(Provider::Claude)), accounts.home(&Account::builtin(Provider::Codex)))
+        };
+        assert_eq!(homes(".claude-work", "codex-work"), (PathBuf::from("/Users/ana/.claude"), PathBuf::from("/Users/ana/.codex")));
+        assert_eq!(homes("/Users/ana/claude-own", "/Users/ana/codex-own"), (PathBuf::from("/Users/ana/claude-own"), PathBuf::from("/Users/ana/codex-own")));
+    }
+
+    #[test]
     fn an_exported_home_under_a_pinned_data_folders_accounts_is_dropped() {
         let own = temp("exported-own");
         let other = temp("exported-other");
