@@ -9519,6 +9519,85 @@ fn a_flood_of_extend_box_asks_for_one_box_never_starves_the_owners_decision() {
     assert_eq!((decided["outcome"].as_str(), decided["result"]["budget_usd"].as_f64()), (Some("done"), Some(1.5)), "the owner's decision got its turn: {decided}");
 }
 
+/// An extend_box ask of ana's agent for `machine`, run as the hub takes it from her machine on a
+/// task of its own: its answer and how long it took.
+fn timed_extend(hub: &TestHub, account: &Arc<pinned_server::hub::Account>, ana: &Agent, machine: &str, extra: f64, request_id: Option<&str>) -> tokio::task::JoinHandle<(Result<Value, String>, Duration)> {
+    let (running, account, origin) = (hub.hub().clone(), account.clone(), ana.machine.clone());
+    let mut act = json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": machine, "extra_usd": extra } });
+    if let Some(id) = request_id {
+        act["request_id"] = json!(id);
+    }
+    let act = serde_json::from_value(act).unwrap();
+    hub.runtime.spawn(async move {
+        let started = tokio::time::Instant::now();
+        let answer = pinned_server::surface::act(&running, &account, &origin, act).await;
+        (answer, started.elapsed())
+    })
+}
+
+/// A box's line takes at most 3 asks of this hub, counted from when they ask, not from when they
+/// reach the box: while 3 asks for one box wait, the first in the box's Postgres lock and the
+/// others in the account's line, a 4th ask for that box is refused as busy at once and writes no row.
+#[test]
+fn a_fourth_extend_box_ask_for_one_box_is_busy_at_once_while_three_wait() {
+    let ExtendSetup { hub, account, ana, mut owner, machine, .. } = extend_setup("extend_box_cap");
+    let lock = ExtendLockHolder::take_account(&hub.database, account);
+    let account = hub.runtime.block_on(hub.hub().account(account)).unwrap();
+    let waiting: Vec<_> = (0..3).map(|n| timed_extend(&hub, &account, &ana, &machine, 0.5, Some(&format!("r-wait-{n}")))).collect();
+    std::thread::sleep(Duration::from_millis(300));
+    let (fourth, waited) = hub.runtime.block_on(timed_extend(&hub, &account, &ana, &machine, 0.5, Some("r-fourth"))).unwrap();
+    assert_eq!(fourth, Err(pinned_core::wire::HUB_BUSY.to_owned()));
+    assert!(waited < Duration::from_millis(500), "the 4th ask is refused at once, not when its 2 s wait ends: {waited:?}");
+    for (n, ask) in waiting.into_iter().enumerate() {
+        assert_eq!(hub.runtime.block_on(ask).unwrap().0, Err(pinned_core::wire::HUB_BUSY.to_owned()), "ask {n} waits its 2 s");
+    }
+    lock.release();
+    let rows: Vec<_> = trail_of(&mut owner).into_iter().filter(|(action, ..)| action == "extend_box").collect();
+    assert_eq!(rows, vec![], "no busy ask wrote a row");
+    assert_eq!(waiting_actions(&mut owner), Vec::<String>::new(), "no busy ask waits for the owner");
+}
+
+/// A flood of asks for one box keeps an ask for another box of the same account waiting behind at
+/// most the 3 asks of the flooded box that are in this hub's lines; the rest are refused before
+/// they join the account's line. Many other acts wait for the owner, so each ask's check in its
+/// turn takes a while: one turn alone is measured first, and the other box's ask is answered
+/// within 4 such turns (3 ahead of it and its own), with room for the flood's load.
+#[test]
+fn a_flood_of_extend_box_asks_for_one_box_keeps_another_box_waiting_behind_at_most_three() {
+    let ExtendSetup { hub, account, ana, machine, .. } = extend_setup("extend_flood_other");
+    let other = open_extend_box(&ana);
+    let first = extend_as(&ana.dir, &ana.tab, &machine, 0.5, None).unwrap();
+    assert_eq!(first["outcome"], "pending", "{first}");
+    let id = first["id"].as_str().unwrap();
+    admin_on(&hub.database, &format!("insert into agent_confirmations (id, account, machine, tab, role, action, args) select gen_random_uuid(), account, machine, tab, role, 'open_box', args || jsonb_build_object('pad', repeat('x', 200)) from agent_confirmations, generate_series(1, 20000) where id = '{id}'"));
+    let account = hub.runtime.block_on(hub.hub().account(account)).unwrap();
+    let (alone, turn) = hub.runtime.block_on(timed_extend(&hub, &account, &ana, &machine, 1.75, None)).unwrap();
+    assert_eq!(alone, Err(extend_waits("US$ 0.50")), "refused in its turn");
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flood: Vec<_> = (0..200)
+        .map(|n| {
+            let (running, account, origin, stop) = (hub.hub().clone(), account.clone(), ana.machine.clone(), stop.clone());
+            let ask = json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": machine, "extra_usd": 1.75 } });
+            hub.runtime.spawn(async move {
+                tokio::time::sleep(Duration::from_millis(5 * n)).await;
+                let mut answers = vec![];
+                while !stop.load(Ordering::SeqCst) {
+                    answers.push(pinned_server::surface::act(&running, &account, &origin, serde_json::from_value(ask.clone()).unwrap()).await);
+                }
+                answers
+            })
+        })
+        .collect();
+    std::thread::sleep(Duration::from_millis(1500));
+    let (answer, waited) = hub.runtime.block_on(timed_extend(&hub, &account, &ana, &other, 0.5, None)).unwrap();
+    stop.store(true, Ordering::SeqCst);
+    let answers: Vec<_> = flood.into_iter().flat_map(|ask| hub.runtime.block_on(ask).unwrap()).collect();
+    assert!(answers.iter().all(|a| *a == Err(extend_waits("US$ 0.50")) || *a == Err(pinned_core::wire::HUB_BUSY.to_owned())), "every flooding ask is refused");
+    assert_eq!(answer.as_ref().map(|a| a["outcome"].clone()), Ok(json!("pending")), "the other box's ask is checked and waits for the owner: {answer:?} after {waited:?}");
+    let bound = turn * 4 + Duration::from_millis(500);
+    assert!(waited < bound, "the other box's ask waits behind at most 3 asks of the flooded box: {waited:?}, one turn alone {turn:?}");
+}
+
 /// An ask while the account already has 10 extends waiting is refused with the cap's text before it
 /// takes any turn: it opens no connection and does not wait, even while another hub holds the box's lock.
 #[test]
