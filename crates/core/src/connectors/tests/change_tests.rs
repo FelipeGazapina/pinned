@@ -1026,6 +1026,52 @@ fn a_change_held_by_a_running_graph_run_is_counted_once_and_starts_once_the_run_
     no_unlisted(&fake);
 }
 
+/// #346 E3 round 5: a change a running graph run holds keeps its retry on disk, so a pinned that
+/// quits during the hold and starts again still starts the change once the run ends.
+#[test]
+fn a_change_held_by_a_running_graph_run_survives_a_reload_and_starts_once_the_run_ends() {
+    let _api = slack::lock_api();
+    let _restore = RestoreLinear;
+    let first = ago(20);
+    let fake = fake_with(vec![issue(1, first, vec![moved("h-1", first, "Backlog", "Ready to Dev")])]);
+    let claims = Claims::default();
+    let mut workflow = ready_to_dev("w1", ago(30));
+    workflow.graph = Some(migrate(&workflow));
+    let connectors = on(&claims, vec![workflow], "lin-e5-reload-held");
+    let (_, error) = check(&connectors);
+    assert_eq!(error, None);
+    assert_eq!(connectors.graph_runs().len(), 1, "the first move starts its graph run, which holds the issue");
+
+    let second = Utc::now();
+    fake.lock().unwrap().issues = vec![issue(1, second, vec![moved("h-1", first, "Backlog", "Ready to Dev"), moved("h-2", second, "Todo", "Ready to Dev")])];
+    let (_, error) = check(&connectors);
+    assert_eq!(error, None);
+    // The watermark moves past a change after a minute of checks, so from here only its retry
+    // carries it.
+    connectors.store.lock().unwrap().connectors[0].since = stamp(second + chrono::Duration::seconds(1));
+    let (_, error) = check(&connectors);
+    assert_eq!(error, None);
+    assert_eq!(connectors.graph_runs().len(), 1, "held: nothing starts while the run holds the issue");
+
+    // pinned quits here, during the hold, and starts again: the run is still on record.
+    let reloaded = Connectors::new(claims.clone(), "/bin/pinned".into());
+    *reloaded.runs.lock().unwrap() = connectors.graph_runs();
+    let retries = reloaded.store.lock().unwrap().change_retries.clone();
+    assert_eq!(retries.get("w1").map(|keys| keys.len()), Some(1), "the held retry was saved");
+    let (_, error) = check(&reloaded);
+    assert_eq!(error, None);
+    assert_eq!(reloaded.graph_runs().len(), 1, "still held after the reload");
+
+    reloaded.runs.lock().unwrap()[0].status = Status::Done;
+    let (_, error) = check(&reloaded);
+    assert_eq!(error, None);
+    assert_eq!(reloaded.graph_runs().len(), 2, "the reloaded account starts the held change once the run ends");
+    let (_, error) = check(&reloaded);
+    assert_eq!(error, None);
+    assert_eq!(reloaded.graph_runs().len(), 2, "once");
+    no_unlisted(&fake);
+}
+
 /// #346 E3 round 4 item 3: a retry pending when its workflow is turned off and on is dropped with
 /// the `since` reset, so the change from before the turn-on does not start.
 #[test]
