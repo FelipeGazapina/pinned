@@ -3424,8 +3424,8 @@ mod tests {
     }
 
     #[test]
-    fn a_held_cycle_leaves_this_machines_unsent_change_alone() {
-        let root = root("held-keeps-change");
+    fn a_shrinking_cycle_leaves_this_machines_unsent_change_alone_for_the_whole_hold() {
+        let root = root("shrinking-keeps-change");
         let hub = QuotaHub::new(u64::MAX);
         let (mut mac, mut mini) = (Side::new(&root, "mac", "app"), Side::new(&root, "mini", "app"));
         put(&mac.claude("memory/MEMORY.md"), "both machines' notes");
@@ -3440,15 +3440,90 @@ mod tests {
         assert_eq!(sync(&hub, &mut mini.state, &mini.checkout, SystemTime::now()).unwrap().pushed, vec![memory("MEMORY")]);
         hub.limit.set(hub.used());
         let refused = sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap().push;
-        let Push::Refused { sending, .. } = refused else { panic!("the first cycle is refused, got {refused:?}") };
+        assert!(matches!(refused, Push::Refused { .. }), "the first cycle is refused, got {refused:?}");
         assert_eq!(std::fs::read_to_string(mac.claude("memory/MEMORY.md")).unwrap(), "mac's notes the hub never took");
-        hub.pushes.borrow_mut().clear();
 
-        let held = sync_with(&hub, &mut mac.state, &mac.checkout, SystemTime::now(), Some(sending)).unwrap();
-        assert_eq!((held.push, held.pushed, held.pulled), (Push::Held, vec![], vec![]));
-        assert_eq!(*hub.pushes.borrow(), Vec::<Vec<(String, bool)>>::new(), "a held cycle sends nothing");
-        assert_eq!(std::fs::read_to_string(mac.claude("memory/MEMORY.md")).unwrap(), "mac's notes the hub never took");
-        assert_eq!(mac.state.agreed[&agreed_key].get(&memory("MEMORY")), Some(&baseline), "the baseline stays under the hold");
+        for cycle in 0..3 {
+            hub.pushes.borrow_mut().clear();
+            let held = sync_shrinking(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap();
+            assert_eq!((held.push, held.pushed, held.pulled), (Push::Done, vec![], vec![]), "cycle {cycle} of the hold");
+            assert_eq!(*hub.pushes.borrow(), Vec::<Vec<(String, bool)>>::new(), "a shrinking cycle that has only growth to send sends nothing");
+            assert_eq!(std::fs::read_to_string(mac.claude("memory/MEMORY.md")).unwrap(), "mac's notes the hub never took", "mini's newer copy is not pulled over mac's unsent edit, cycle {cycle}");
+            assert_eq!(mac.state.agreed[&agreed_key].get(&memory("MEMORY")), Some(&baseline), "the baseline stays under the hold");
+        }
+
+        hub.limit.set(u64::MAX);
+        let taken = sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap();
+        assert_eq!((taken.push, taken.pushed), (Push::Done, vec![memory("big")]));
+        assert_eq!(std::fs::read_to_string(mac.claude("memory/MEMORY.md")).unwrap(), "mini's later notes", "once the push is taken the newer side wins, as on main");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_file_deleted_here_stays_gone_for_the_whole_hold() {
+        let root = root("deleted-for-the-hold");
+        let hub = QuotaHub::new(u64::MAX);
+        let (mut mac, mut mini) = (Side::new(&root, "mac", "app"), Side::new(&root, "mini", "app"));
+        put(&mac.claude("memory/f.md"), "first");
+        sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap();
+        sync(&hub, &mut mini.state, &mini.checkout, SystemTime::now()).unwrap();
+        let agreed_key = format!("github.com/acme/app {}", mac.checkout.path.display());
+        let baseline = mac.state.agreed[&agreed_key][&memory("f")].clone();
+        put(&mini.claude("memory/f.md"), "second, from mini");
+        assert_eq!(sync(&hub, &mut mini.state, &mini.checkout, SystemTime::now()).unwrap().pushed, vec![memory("f")]);
+        hub.limit.set(hub.used());
+        std::fs::remove_file(mac.claude("memory/f.md")).unwrap();
+        big(&mac);
+        let refused = sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap();
+        assert!(matches!(refused.push, Push::Refused { .. }), "the first cycle is refused");
+
+        for cycle in 0..3 {
+            let held = sync_shrinking(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap();
+            assert_eq!((held.push, held.pushed, held.pulled), (Push::Done, vec![], vec![]), "cycle {cycle} of the hold");
+            assert!(!mac.claude("memory/f.md").exists(), "mini's copy does not undo the deletion during the hold, cycle {cycle}");
+            assert_eq!(mac.state.agreed[&agreed_key].get(&memory("f")), Some(&baseline), "the baseline stays");
+        }
+
+        hub.limit.set(u64::MAX);
+        let taken = sync(&hub, &mut mac.state, &mac.checkout, SystemTime::now()).unwrap();
+        assert_eq!((taken.push, taken.pushed, taken.pulled), (Push::Done, vec![memory("big")], vec![memory("f")]));
+        assert_eq!(std::fs::read_to_string(mac.claude("memory/f.md")).unwrap(), "second, from mini", "once the push is taken the newer side wins, as on main");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_shrinking_plugin_sync_sends_only_what_does_not_grow_the_hub_and_keeps_an_unsent_edit() {
+        let root = root("shrinking-plugins");
+        let hub = MemHub::default();
+        let (mac_home, mini_home) = (root.join("mac"), root.join("mini"));
+        let mac = PluginShare { claude_home: mac_home.join(".claude"), dir: root.join("mac-synced") };
+        let mini = PluginShare { claude_home: mini_home.join(".claude"), dir: root.join("mini-synced") };
+        let skill = |home: &Path, name: &str| home.join(".claude/skills").join(name).join("SKILL.md");
+        let (mut mac_state, mut mini_state) = (State::default(), State::default());
+        put(&skill(&mac_home, "ship"), "ship, as both machines had it");
+        put(&skill(&mac_home, "tidy"), "tidy, a first version that is long enough to shrink");
+        sync_plugins(&hub, &mut mac_state, &mac, SystemTime::now()).unwrap();
+        sync_plugins(&hub, &mut mini_state, &mini, SystemTime::now()).unwrap();
+        put(&skill(&mini_home, "ship"), "ship, from mini");
+        assert_eq!(sync_plugins(&hub, &mut mini_state, &mini, SystemTime::now()).unwrap().pushed, vec!["user-skills/ship/SKILL.md"]);
+        put(&skill(&mac_home, "ship"), "ship, as mac wrote it, and longer than mini's copy");
+        age(&skill(&mac_home, "ship"), 60);
+        put(&skill(&mac_home, "tidy"), "tidy");
+        put(&skill(&mac_home, "new"), "a skill the hub has no copy of");
+
+        for cycle in 0..2 {
+            let held = sync_plugins_shrinking(&hub, &mut mac_state, &mac, SystemTime::now()).unwrap();
+            let sent: Vec<String> = if cycle == 0 { vec!["user-skills/tidy/SKILL.md".to_owned()] } else { vec![] };
+            assert_eq!((held.push, held.pushed, held.pulled), (Push::Done, sent, vec![]), "cycle {cycle} of the hold: only the shrunk skill goes, and nothing is pulled over the edit");
+            assert_eq!(std::fs::read_to_string(skill(&mac_home, "ship")).unwrap(), "ship, as mac wrote it, and longer than mini's copy", "cycle {cycle}");
+        }
+        let stored = texts(&hub);
+        assert_eq!(stored["user-skills/tidy/SKILL.md"], "tidy");
+        assert!(!stored.contains_key("user-skills/new/SKILL.md"), "a skill the hub has no copy of grows it, so it waits");
+
+        let taken = sync_plugins(&hub, &mut mac_state, &mac, SystemTime::now()).unwrap();
+        assert_eq!((taken.push, taken.pushed, taken.pulled), (Push::Done, vec!["user-skills/new/SKILL.md".to_owned()], vec!["user-skills/ship/SKILL.md".to_owned()]));
+        assert_eq!(std::fs::read_to_string(skill(&mac_home, "ship")).unwrap(), "ship, from mini", "once a push is taken the newer side wins, as on main");
         let _ = std::fs::remove_dir_all(root);
     }
 

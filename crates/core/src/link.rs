@@ -2057,4 +2057,93 @@ mod tests {
         assert_eq!(machine.call(Call::SyncLimit), Ok(Value::Null), "a project no longer on the machine holds no notice");
         let _ = std::fs::remove_dir_all(dir);
     }
+
+    /// A syncer whose hold is over: the next cycle is a probe.
+    fn probe_due(syncer: &mut Syncer) {
+        syncer.backoff.limit.as_mut().expect("a hold to end").until = Instant::now();
+    }
+
+    fn syncer_of(keys: &[&str]) -> Syncer {
+        Syncer { shared_projects: keys.iter().map(|key| (*key).to_owned()).collect(), backoff: PushBackoff::with_draw(|| 0.5), ..Syncer::default() }
+    }
+
+    /// A git checkout in `dir` with a remote, as a project the machine syncs.
+    fn init_project(dir: &Path, folder: &str, remote: &str) -> std::path::PathBuf {
+        let app = dir.join(folder);
+        std::fs::create_dir_all(app.join(".claude/skills")).unwrap();
+        for args in [&["init", "-q"][..], &["remote", "add", "origin", remote]] {
+            assert!(std::process::Command::new("git").arg("-C").arg(&app).args(args).status().unwrap().success());
+        }
+        app
+    }
+
+    #[test]
+    fn a_probe_with_nothing_to_send_ends_the_hold() {
+        let (dir, file, machine, shared, app) = refused_project("probe-nothing");
+        let hub = AccountHub::default();
+        let mut syncer = syncer_of(&["github.com/acme/app"]);
+        syncer.cycle(&shared, &hub, &machine, &file);
+        assert_eq!(hub.pushes.get(), 1, "the hub refuses the first push");
+        assert!(syncer.backoff.limited());
+        std::fs::remove_file(app.join(".claude/skills/skill.md")).unwrap();
+        probe_due(&mut syncer);
+        syncer.cycle(&shared, &hub, &machine, &file);
+        assert_eq!(hub.pushes.get(), 1, "the probe has nothing to send");
+        assert!(!syncer.backoff.limited(), "a probe cycle that finishes clean ends the hold, whether or not it sent anything");
+        assert_eq!(machine.call(Call::SyncLimit), Ok(Value::Null), "and the notice goes");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_clean_project_does_not_end_the_hold_while_another_is_refused() {
+        let (dir, file, machine, shared, _frames) = stopped_sync_fixture("clean-and-refused");
+        let site = init_project(&dir, "site", "git@github.com:acme/site.git");
+        machine.open_project(site.clone());
+        // The projects sync most recently opened first, and a second is the grain of that order.
+        std::thread::sleep(Duration::from_millis(1100));
+        let app = init_project(&dir, "app", "git@github.com:acme/app.git");
+        machine.open_project(app.clone());
+        assert_eq!(machine.checkouts().iter().map(|c| c.project.key.as_str()).collect::<Vec<_>>(), ["github.com/acme/app", "github.com/acme/site"]);
+        let hub = AccountHub::default();
+        let mut syncer = syncer_of(&["github.com/acme/app", "github.com/acme/site"]);
+        let on_hub = |project: &str| hub.files.borrow().get(&(project.to_owned(), "skills/skill.md".to_owned())).map(|f| f.entry.sha.clone());
+
+        hub.room.set(true);
+        std::fs::write(app.join(".claude/skills/skill.md"), grown(40)).unwrap();
+        syncer.cycle(&shared, &hub, &machine, &file);
+        assert_eq!(on_hub("github.com/acme/app"), Some(sync::sha(grown(40).as_bytes())), "the app's skill reached the hub");
+
+        hub.room.set(false);
+        std::fs::write(site.join(".claude/skills/skill.md"), grown(40)).unwrap();
+        syncer.cycle(&shared, &hub, &machine, &file);
+        assert_eq!(on_hub("github.com/acme/site"), None, "the hub refuses the site");
+        assert_eq!(syncer.backoff.limit.as_ref().map(|limit| limit.wait), Some(PUSH_HOLD_MIN));
+
+        std::fs::write(app.join(".claude/skills/skill.md"), "short").unwrap();
+        probe_due(&mut syncer);
+        syncer.cycle(&shared, &hub, &machine, &file);
+        assert_eq!(on_hub("github.com/acme/app"), Some(sync::sha(b"short")), "the app has something the hub takes in the same probe cycle");
+        assert_eq!(on_hub("github.com/acme/site"), None, "the site is refused again");
+        assert_eq!(syncer.backoff.limit.as_ref().map(|limit| limit.wait), Some(PUSH_HOLD_MIN * 2), "a project that synced fine before a refused one does not reset the doubling");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_hold_never_exceeds_ten_minutes_with_the_jitter_at_its_longest() {
+        let (dir, file, machine, shared, _app) = refused_project("hold-cap");
+        let hub = AccountHub::default();
+        let mut syncer = Syncer { backoff: PushBackoff::with_draw(|| 1.0), ..syncer_of(&["github.com/acme/app"]) };
+        let mut holds = vec![];
+        for cycle in 0..9 {
+            if cycle > 0 {
+                probe_due(&mut syncer);
+            }
+            syncer.cycle(&shared, &hub, &machine, &file);
+            let limit = syncer.backoff.limit.as_ref().expect("the hub keeps refusing");
+            holds.push(limit.until.saturating_duration_since(Instant::now()).as_secs());
+        }
+        assert_eq!(syncer.backoff.limit.as_ref().map(|limit| limit.wait), Some(PUSH_HOLD_MAX), "the steps reach the cap");
+        assert!(holds.iter().all(|seconds| *seconds <= PUSH_HOLD_MAX.as_secs()), "no hold is longer than {PUSH_HOLD_MAX:?}: {holds:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
