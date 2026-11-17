@@ -1384,7 +1384,8 @@ impl Store {
     }
 
     /// Moves the watermarks and the cursor a changes read covered, and adds its counts. Answers
-    /// what to put back when the store cannot save; None when the read covered nothing.
+    /// what to put back when the store cannot save; None when the read covered nothing and no retry
+    /// expired, so nothing changed to save or put back.
     fn apply_changes(&mut self, pass: &ChangePass) -> Option<ChangeUndo> {
         let undo = ChangeUndo {
             since: self.connectors.iter().filter(|c| pass.read.contains(&c.id)).map(|c| (c.id.clone(), c.since.clone())).collect(),
@@ -2856,8 +2857,10 @@ impl Connectors {
 
     /// The won fire of `workflow` whose run did not start: the claim is given back, and its change
     /// goes to `Store::change_retries`, so a later check fires it again until the change is older
-    /// than `CATCH_UP`; both are counted. A crash between the claim and the start gives nothing
-    /// back: the fire stays claimed and does not run (at most once).
+    /// than `CATCH_UP`. The change is counted as not started once, when its first fire does not
+    /// start: a retry that waits again or ends (too old, or stopped by its Ask step) is not counted
+    /// again. A crash between the claim and the start gives nothing back: the fire stays claimed
+    /// and does not run (at most once).
     fn fire_not_started(&self, workflow: &str, fire: &ChangeFire) {
         let key = &fire.key;
         let released = self.storage.release_fire(workflow, key, &self.claimer);
