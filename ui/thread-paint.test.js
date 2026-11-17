@@ -519,17 +519,19 @@ test("a compacting tab shows Compacting… on its live turn with no /compact pro
   await poll(tab, net);
   assert.doesNotMatch(threadView.innerHTML, /Compacting…/, "no mark, no shimmer");
   tab.view.compacting = true;
-  tab.thread.pending = [{ id: "pending:1", text: "keep going", at: Date.now(), state: "sending", sent: true }];
   sandbox.renderThread();
   assert.match(threadView.innerHTML, /<span class="shimmer">Compacting…<\/span>/, "the mark shows the shimmer, as /compact does");
   assert.doesNotMatch(threadView.innerHTML, /Working for/, "the compaction's turn does not read as a plain work fold");
+
+  tab.thread.pending = [{ id: "pending:1", text: "keep going", at: Date.now(), state: "sending", sent: true }];
+  sandbox.renderThread();
   const row = blocks(threadView.innerHTML, '<section class="pending-turn"')[0] ?? "";
   assert.match(textOf(row), /keep going\s*Queued · claude is busy/, "a message sent meanwhile waits in the queue");
 
-  tab.view.status = "done";
   tab.view.compacting = false;
   sandbox.renderThread();
-  assert.doesNotMatch(threadView.innerHTML, /Compacting…/, "the shimmer goes once the mark is cleared");
+  assert.doesNotMatch(threadView.innerHTML, /Compacting…/, "the shimmer goes once the mark is cleared, with the tab still busy");
+  assert.match(threadView.innerHTML, /Working for/, "the busy turn reads as it did");
 });
 
 test("a rewind that rewrites the last line in place repaints it", async () => {
