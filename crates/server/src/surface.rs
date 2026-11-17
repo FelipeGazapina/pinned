@@ -223,7 +223,8 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
     }
     let call = surface::parse(action, &surface::with_blank_asks(action, &act.args))?;
     // A call that acts through a workflow's Linear and Slack connections comes only from the
-    // session that runs that workflow on that subject.
+    // session that runs that workflow on that subject: the tab its machine names, which the node
+    // does not yet vouch for.
     if let Parsed::Hub(hub_call) = &call {
         if let Some((connector, subject)) = crate::http::run_work(hub_call) {
             if !account.runs_in_tab(&connector, &subject, origin, &caller.tab) {
