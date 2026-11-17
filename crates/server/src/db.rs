@@ -681,7 +681,62 @@ pub(crate) fn err(e: tokio_postgres::Error) -> String {
     if lock_refused(&e) {
         return BUSY.into();
     }
+    if one_live_run_refused(&e) {
+        return ONE_LIVE_RUN.into();
+    }
     e.to_string()
+}
+
+/// The index that holds, in Postgres too, the rule the team's turn keeps (`teams::queue`): a bot
+/// has at most one live run. A write of a second one, by any path, is refused.
+const ONE_LIVE_RUN_INDEX: &str = "team_runs_one_live_per_bot";
+/// What a write refused by `ONE_LIVE_RUN_INDEX` answers.
+pub const ONE_LIVE_RUN: &str = "this bot already has a live run; try again once it ends";
+
+/// Whether Postgres refused `e` for giving a bot a second live run (`ONE_LIVE_RUN_INDEX`).
+pub(crate) fn one_live_run_refused(e: &tokio_postgres::Error) -> bool {
+    e.code() == Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION) && e.as_db_error().and_then(|d| d.constraint()) == Some(ONE_LIVE_RUN_INDEX)
+}
+
+/// Sets `ONE_LIVE_RUN_INDEX` at the hub's start, unless it is there. A database where some bot
+/// already has more than one live run (left by an older hub) keeps them as they are: the index is
+/// not set, the start says so, and the next start tries again. No failure here stops the start:
+/// the team's turn still holds the rule, and the start logs that the index is not set.
+async fn one_live_run_per_bot(url: &str) {
+    let set = async {
+        let client = open(url).await.map_err(|_| "it could not connect".to_owned())?;
+        set_one_live_run(&client).await.map_err(|e| format!("Postgres refused it ({})", e.code().map_or("no code", |c| c.code())))
+    };
+    match set.await {
+        Ok(0) => {}
+        Ok(1) => eprintln!("pinned-server: one live run per bot: 1 bot has more than one live run; the rule is not enforced until they end"),
+        Ok(n) => eprintln!("pinned-server: one live run per bot: {n} bots have more than one live run; the rule is not enforced until they end"),
+        Err(why) => eprintln!("pinned-server: one live run per bot: the rule was not set: {why}; the next start tries again"),
+    }
+}
+
+/// How many bots have more than one live run; when none, the index is set. A start that finds the
+/// index takes no lock. Otherwise the count and the index are one transaction holding `share row
+/// exclusive` on `team_runs` (it waits as long as it must, as a needed schema statement does): no
+/// run is written between the two, and a second hub starting meanwhile waits for it, then finds the
+/// index. That lock blocks writes of team runs, not reads, for one scan of the table and the sort
+/// of its live rows. Dropping `client` on an error rolls the transaction back.
+async fn set_one_live_run(client: &Client) -> Result<i64, tokio_postgres::Error> {
+    const FOUND: &str = "select to_regclass($1::text) is not null";
+    if client.query_one(FOUND, &[&ONE_LIVE_RUN_INDEX]).await?.get(0) {
+        return Ok(0);
+    }
+    let live = crate::teams::db::LIVE;
+    client.batch_execute("begin; set local lock_timeout = 0; lock table team_runs in share row exclusive mode").await?;
+    let clashing: i64 = client
+        .query_one(&format!("select count(*) from (select 1 from team_runs where state in {live} group by team, workflow having count(*) > 1) clashing"), &[])
+        .await?
+        .get(0);
+    if clashing == 0 {
+        client.batch_execute(&format!("create unique index if not exists {ONE_LIVE_RUN_INDEX} on team_runs (team, workflow) where state in {live}")).await?;
+    }
+    client.batch_execute("commit").await?;
+    Ok(clashing)
 }
 
 /// The row, or what deleting its box takes when its run is in a shape this hub can't read.
@@ -766,7 +821,9 @@ impl Learning {
 
 impl Db {
     pub async fn connect(url: &str, sealer: Sealer) -> Result<Db, String> {
-        Ok(Db { sealer, connection: Connection::open(url, SCHEMA).await?, transactions: Arc::default() })
+        let connection = Connection::open(url, SCHEMA).await?;
+        one_live_run_per_bot(url).await;
+        Ok(Db { sealer, connection, transactions: Arc::default() })
     }
 
     pub(crate) async fn client(&self) -> Result<Arc<Client>, String> {
