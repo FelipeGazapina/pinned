@@ -1024,8 +1024,10 @@ fn client_frame(server: &Arc<Server>, account: &Arc<Account>, client: u64, text:
                 account.to_client(client, &ToClient::Reply(Reply::new(id, Ok(Value::Null))));
             }
             // A box backs off a push the hub refuses as it does at the account's size limit, which
-            // is no notice for the account's people: the hub answers that the box has none.
-            Call::SyncLimit if account.dedicated(&machine) => {
+            // is no notice for the account's people: the hub answers that the box has none. The box
+            // is asked about, not the connection this asks on, so its own live connection's flag
+            // (`Account::dedicated`) is the one `is_box` reads.
+            Call::SyncLimit if crate::box_gate::is_box(false, account, &machine) => {
                 account.to_client(client, &ToClient::Reply(Reply::new(id, Ok(Value::Null))));
             }
             Call::UpdateSelf if account.dedicated(&machine) => {
@@ -1214,7 +1216,7 @@ fn machine_frame(hub: &Arc<Hub>, account: &Arc<Account>, machine: &str, socket: 
                 // each act, and never decide a confirmation.
                 let surfaced = match call {
                     call if team => return forward_team_box(hub, account, machine, socket, boxed, id, call).await,
-                    HubCall::Act { act } => crate::surface::act(&hub, &account, &machine, act).await,
+                    HubCall::Act { act } => crate::surface::act(&hub, &account, &machine, boxed, act).await,
                     HubCall::Confirmations => hub.hub_call(&account, HubCall::Confirmations).await,
                     HubCall::DecideConfirmation { .. } => Err("only the account's owner decides, in the app".to_owned()),
                     call => return forward(hub, account, machine, socket, boxed, id, call).await,
@@ -1293,7 +1295,7 @@ pub(crate) fn run_work(call: &HubCall) -> Option<(String, Subject)> {
 /// A box may only pull the account's files (`box_gate`): it is held to that for the whole
 /// connection it signed in with as a box, even once its row is gone.
 async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: u64, boxed: bool, id: u64, call: HubCall) {
-    if boxed || account.dedicated(&machine) {
+    if crate::box_gate::is_box(boxed, &account, &machine) {
         if let Err(refused) = crate::box_gate::box_may_send(&call) {
             eprintln!("pinned-server: box machine {machine} of account {} was refused {}", account.id, surface::cmd_of(&call));
             return account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, Err(refused))));

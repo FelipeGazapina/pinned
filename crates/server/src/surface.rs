@@ -95,8 +95,9 @@ fn json<T: serde::Serialize>(value: T) -> Result<Value, String> {
 }
 
 /// Runs `act` for the session in tab `act.tab` of `origin`, a machine of `account`, or holds it
-/// for the user's approval. Every outcome but a repeat writes one audit row.
-pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: AgentAct) -> Result<Value, String> {
+/// for the user's approval. Every outcome but a repeat writes one audit row. `boxed`: whether the
+/// connection the act came on signed in as a box (`box_gate::is_box`).
+pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, boxed: bool, act: AgentAct) -> Result<Value, String> {
     let caller = Caller::of(account, origin, &act.tab)?;
     let request_id = act.request_id.as_deref().filter(|id| !id.is_empty());
     let trail = Trail { hub, account: account.id, machine: caller.machine, tab: &caller.tab, role: caller.role, action: &act.action, args: surface::summary(&act.args), request_id, task: Default::default() };
@@ -106,7 +107,7 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
             Some((earlier, at)) => return json(ActAnswer::Repeat { earlier, at }),
         }
     }
-    let admitted = match admit(hub, account, origin, &caller, &act).await {
+    let admitted = match admit(hub, account, origin, boxed, &caller, &act).await {
         Ok(admitted) => admitted,
         Err(refusal) => {
             let refusal = surface::mask_secrets(&refusal);
@@ -204,7 +205,7 @@ struct Admitted {
 }
 
 /// The act as it may run, or why it may not, checked in the order the contract lists.
-async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act: &AgentAct) -> Result<Admitted, String> {
+async fn admit(hub: &Hub, account: &Account, origin: &str, boxed: bool, caller: &Caller, act: &AgentAct) -> Result<Admitted, String> {
     if !caller.known {
         let name = account.name_of(origin).unwrap_or_else(|| origin.to_owned());
         return Err(format!("{name} runs no session {}", caller.tab));
@@ -267,12 +268,8 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
     }
     // A box may only pull the account's files: its sessions' acts are held to `box_gate` as its
     // own calls are, and on the account's other machines they only read.
-    if account.dedicated(origin) {
-        match &call {
-            Parsed::Hub(hub_call) => crate::box_gate::box_may_send(hub_call)?,
-            Parsed::Node(_) if !on_origin && action.class != Class::Read => return Err(crate::box_gate::BOX_REFUSAL.to_owned()),
-            Parsed::Node(_) => {}
-        }
+    if crate::box_gate::is_box(boxed, account, origin) {
+        crate::box_gate::box_may_act(origin, &call, on_origin, action.class == Class::Read)?;
     }
     Ok(Admitted { action, call, target, on_origin })
 }
