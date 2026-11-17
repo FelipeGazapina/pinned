@@ -11852,6 +11852,32 @@
                   "question",
                   "choices"
                 ]
+              },
+              {
+                "description": "From a team box's node only: what its session of `workflow` on `subject` has spent on its\nmodel so far, in USD, a running total sent again at an interval. The hub keeps the most it\nwas told for the live run of that workflow and subject bound to this box, so a report lost\nor sent twice never counts twice, and refuses a box that does not run it.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "run_model_cost"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  },
+                  "subject": {
+                    "$ref": "#/$defs/Subject"
+                  },
+                  "usd": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow",
+                  "subject",
+                  "usd"
+                ]
               }
             ]
           },
@@ -12222,6 +12248,41 @@
               "in_doubt",
               "on_limit",
               "on_failure"
+            ]
+          },
+          "Subject": {
+            "description": "What a connector's session works on, which its callbacks into pinned report against.\nUntagged, so a stage message from a Linear session reads `\"issue\": \"<id>\"` as it always has.",
+            "anyOf": [
+              {
+                "title": "LinearIssue",
+                "description": "Linear's id for the issue, which `pinned stage` moves.",
+                "type": "object",
+                "properties": {
+                  "issue": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "issue"
+                ]
+              },
+              {
+                "title": "SlackThread",
+                "description": "The Slack thread `pinned slack reply` answers in, and whose filed issue `pinned stage` moves.",
+                "type": "object",
+                "properties": {
+                  "channel": {
+                    "type": "string"
+                  },
+                  "thread": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "channel",
+                  "thread"
+                ]
+              }
             ]
           },
           "Target4": {
@@ -23837,6 +23898,32 @@
                   "situation",
                   "question"
                 ]
+              },
+              {
+                "description": "From a team box's node only: what its session of `workflow` on `subject` has spent on its\nmodel so far, in USD, a running total sent again at an interval. The hub keeps the most it\nwas told for the live run of that workflow and subject bound to this box, so a report lost\nor sent twice never counts twice, and refuses a box that does not run it.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "run_model_cost"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  },
+                  "subject": {
+                    "$ref": "#/$defs/Subject"
+                  },
+                  "usd": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow",
+                  "subject",
+                  "usd"
+                ]
               }
             ]
           },
@@ -24186,6 +24273,41 @@
               "in_doubt",
               "on_limit",
               "on_failure"
+            ]
+          },
+          "Subject": {
+            "description": "What a connector's session works on, which its callbacks into pinned report against.\nUntagged, so a stage message from a Linear session reads `\"issue\": \"<id>\"` as it always has.",
+            "anyOf": [
+              {
+                "title": "LinearIssue",
+                "description": "Linear's id for the issue, which `pinned stage` moves.",
+                "type": "object",
+                "properties": {
+                  "issue": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "issue"
+                ]
+              },
+              {
+                "title": "SlackThread",
+                "description": "The Slack thread `pinned slack reply` answers in, and whose filed issue `pinned stage` moves.",
+                "type": "object",
+                "properties": {
+                  "channel": {
+                    "type": "string"
+                  },
+                  "thread": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "channel",
+                  "thread"
+                ]
+              }
             ]
           },
           "Target4": {
@@ -33004,6 +33126,32 @@
                   "situation",
                   "question",
                   "choices"
+                ]
+              },
+              {
+                "description": "From a team box's node only: what its session of `workflow` on `subject` has spent on its\nmodel so far, in USD, a running total sent again at an interval. The hub keeps the most it\nwas told for the live run of that workflow and subject bound to this box, so a report lost\nor sent twice never counts twice, and refuses a box that does not run it.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "run_model_cost"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  },
+                  "subject": {
+                    "$ref": "#/$defs/Subject"
+                  },
+                  "usd": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow",
+                  "subject",
+                  "usd"
                 ]
               }
             ]
@@ -41841,6 +41989,32 @@
                   "op",
                   "situation",
                   "question"
+                ]
+              },
+              {
+                "description": "From a team box's node only: what its session of `workflow` on `subject` has spent on its\nmodel so far, in USD, a running total sent again at an interval. The hub keeps the most it\nwas told for the live run of that workflow and subject bound to this box, so a report lost\nor sent twice never counts twice, and refuses a box that does not run it.",
+                "type": "object",
+                "properties": {
+                  "op": {
+                    "type": "string",
+                    "const": "run_model_cost"
+                  },
+                  "workflow": {
+                    "type": "string"
+                  },
+                  "subject": {
+                    "$ref": "#/$defs/Subject"
+                  },
+                  "usd": {
+                    "type": "number",
+                    "format": "double"
+                  }
+                },
+                "required": [
+                  "op",
+                  "workflow",
+                  "subject",
+                  "usd"
                 ]
               }
             ]
@@ -61162,6 +61336,13 @@
             "default": null
           },
           "cost_usd": {
+            "description": "Its box's cost and its model's (`model_usd`) together: what its `BotLimits::usd` caps.",
+            "type": "number",
+            "format": "double",
+            "default": 0.0
+          },
+          "model_usd": {
+            "description": "The model cost its box's node reported, included in `cost_usd`. 0 from a node that never\nreports one, whose runs cost their box only.",
             "type": "number",
             "format": "double",
             "default": 0.0
@@ -61211,6 +61392,7 @@
           "state",
           "controller",
           "cost_usd",
+          "model_usd",
           "active_secs",
           "waiting_secs",
           "started_at",
@@ -61274,6 +61456,13 @@
             "default": null
           },
           "cost_usd": {
+            "description": "Its box's cost and its model's (`model_usd`) together: what its `BotLimits::usd` caps.",
+            "type": "number",
+            "format": "double",
+            "default": 0.0
+          },
+          "model_usd": {
+            "description": "The model cost its box's node reported, included in `cost_usd`. 0 from a node that never\nreports one, whose runs cost their box only.",
             "type": "number",
             "format": "double",
             "default": 0.0
@@ -65780,6 +65969,13 @@
                 "default": null
               },
               "cost_usd": {
+                "description": "Its box's cost and its model's (`model_usd`) together: what its `BotLimits::usd` caps.",
+                "type": "number",
+                "format": "double",
+                "default": 0.0
+              },
+              "model_usd": {
+                "description": "The model cost its box's node reported, included in `cost_usd`. 0 from a node that never\nreports one, whose runs cost their box only.",
                 "type": "number",
                 "format": "double",
                 "default": 0.0
@@ -65829,6 +66025,7 @@
               "state",
               "controller",
               "cost_usd",
+              "model_usd",
               "active_secs",
               "waiting_secs",
               "started_at",
@@ -70083,6 +70280,13 @@
                 "default": null
               },
               "cost_usd": {
+                "description": "Its box's cost and its model's (`model_usd`) together: what its `BotLimits::usd` caps.",
+                "type": "number",
+                "format": "double",
+                "default": 0.0
+              },
+              "model_usd": {
+                "description": "The model cost its box's node reported, included in `cost_usd`. 0 from a node that never\nreports one, whose runs cost their box only.",
                 "type": "number",
                 "format": "double",
                 "default": 0.0

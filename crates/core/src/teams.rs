@@ -751,11 +751,20 @@ mod tests {
         let run = json!({ "id": "r1", "workflow": "c1", "state": "taken_over", "controller": "a1", "cost_usd": 0.5, "active_secs": 60, "started_at": 1, "ended_at": null, "outcome": null, "started_by": "a1" });
         let event = json!({ "kind": "run_changed", "run": run });
         let parsed: TeamEvent = serde_json::from_value(event.clone()).unwrap();
-        // An older hub sends no `waiting_secs`: it reads as 0, and goes out with the run.
+        // An older hub sends no `waiting_secs` or `model_usd`: each reads as 0, and goes out with the run.
         let mut sent = event.clone();
         sent["run"]["waiting_secs"] = json!(0);
+        sent["run"]["model_usd"] = json!(0.0);
         assert_eq!(serde_json::to_value(parsed).unwrap(), sent);
         let parsed: TeamEvent = serde_json::from_value(sent.clone()).unwrap();
         assert_eq!(serde_json::to_value(parsed).unwrap(), sent);
+    }
+
+    #[test]
+    fn a_run_model_cost_report_reads_its_literal_json() {
+        let report = json!({ "op": "run_model_cost", "workflow": "c1", "subject": { "issue": "ENG-7" }, "usd": 0.4 });
+        let op: TeamOp = serde_json::from_value(report.clone()).unwrap();
+        assert!(matches!(&op, TeamOp::RunModelCost { workflow, subject: crate::agent::Subject::LinearIssue { issue }, usd } if workflow == "c1" && issue == "ENG-7" && *usd == 0.4));
+        assert_eq!(serde_json::to_value(&op).unwrap(), report);
     }
 }
