@@ -507,7 +507,8 @@ function renderSidebar() {
   for (const key of selected) if (!tabByKey(key)) selected.delete(key);
   noteReturns();
   const scope = projectGroups().find((g) => g.key === ui.project);
-  if (!scope && !projectListsPending()) ui.project = "";
+  // A render that drew without projects keeps the filter, to be checked by the render the loader sends.
+  if (!scope && !projectsWaiting && !projectListsPending()) ui.project = "";
   const where = scope ? projectWhere(PinnedProjects.sessionOn(scope.checkouts, machineDirectory())) : "";
   const trigger = `<span class="lead">Threads in</span>${projectNameMark(scope?.name ?? "All projects")}${where}${icon("chevron-down")}`;
   if (projectFilter.innerHTML !== trigger) projectFilter.innerHTML = trigger;
@@ -1951,9 +1952,16 @@ function projectListsPending() {
   return onlineMachines().some((id) => machines.get(id).projects === undefined);
 }
 
+/** Set when a render drew without projects: project-groups-load.js is a module, so it sets `PinnedProjects` after the classic scripts run. */
+let projectsWaiting = false;
 /** The sidebar's projects: `{ key, name, tab, tabs, checkouts }`. `tab` is the group's first thread, or null when the folder has none.
  * `grouping` defaults to the sidebar's Project grouping; account-wide views pass true, since a project there is its repo on every machine. */
 function projectGroups(grouping = !!sideSettings.grouping) {
+  if (!globalThis.PinnedProjects) {
+    projectsWaiting = true;
+    return [];
+  }
+  projectsWaiting = false;
   const threads = [];
   for (const tab of tabs) {
     if (isGlobalOrchestratorTab(tab)) continue;
@@ -1963,6 +1971,9 @@ function projectGroups(grouping = !!sideSettings.grouping) {
   const listed = Object.fromEntries([...machines].map(([id, machine]) => [id, machine.projects ?? []]));
   return sortedProjects(PinnedProjects.groupProjects({ threads, listed, grouping }), (g) => g.tabs);
 }
+document.addEventListener("projects:loaded", () => {
+  if (projectsWaiting && guiOn()) renderSidebar();
+});
 function projectNameMark(name) {
   const text = esc(name);
   return `<span class="label" title="${text}">${text}</span>`;

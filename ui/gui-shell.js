@@ -231,6 +231,7 @@ function openPicked(tab) {
 }
 const openProjectIn = (machine, path) => (machine === LOCAL ? openTab(LOCAL, path) : openRemote(machine, path, false)).catch((e) => tell(`Couldn't open a thread: ${esc(e)}`, 6000));
 function paletteProjects() {
+  if (!globalThis.PinnedProjects) return [];
   const seen = new Map(palette.projects.map((p) => [`${p.machine}:${p.path}`, p]));
   for (const tab of tabs) {
     const path = projectOfTab(tab);
