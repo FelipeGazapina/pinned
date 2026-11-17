@@ -778,6 +778,8 @@ pub enum Call {
     UpdateSelf,
     /// Why the machine stopped syncing projects and plugins, or `null` while it syncs.
     SyncStopped,
+    /// The notice the app shows while the account's size limit refuses a push, or `null` while sync works.
+    SyncLimit,
     /// `load::MachineState`: the machine's load and accounts now, which the hub asks for before it
     /// refuses a delegation on what the machine reported earlier.
     State,

@@ -1266,8 +1266,11 @@ const syncAlert = document.getElementById("sync-alert");
 syncAlert.onclick = (e) => e.target.closest("button") && openSettings("machines");
 
 function renderSyncAlert() {
-  const stopped = account ? [...machines.keys()].filter((id) => machines.get(id).syncStopped) : [];
-  const html = stopped.length ? `${icon("circle-alert")}<span>Sync stopped on ${esc(stopped.map(machineName).join(", "))}</span><button type="button">Review</button>` : "";
+  const limit = account ? [...machines.values()].map((m) => m.syncLimit).find(Boolean) : null;
+  const stopped = account && !limit ? [...machines.keys()].filter((id) => machines.get(id).syncStopped) : [];
+  const html = limit
+    ? `${icon("circle-alert")}<span>${esc(limit)}</span>`
+    : stopped.length ? `${icon("circle-alert")}<span>Sync stopped on ${esc(stopped.map(machineName).join(", "))}</span><button type="button">Review</button>` : "";
   if (syncAlert.innerHTML !== html) syncAlert.innerHTML = html;
   syncAlert.hidden = !html;
 }
