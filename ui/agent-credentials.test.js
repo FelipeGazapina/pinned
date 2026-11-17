@@ -71,6 +71,7 @@ function app({ answer, machines = [] } = {}) {
   const settingsPage = byId("settings-page");
   settingsPage.querySelector = (selector) => (selector === ".add-account" ? form : null);
   const context = {
+    visibleInterval: () => 0,
     console,
     addEventListener() {},
     load: () => null,

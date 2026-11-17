@@ -29,6 +29,7 @@ body[data-mode="gui"] #settings-page p { line-height: 1.55; }
 body[data-mode="gui"] #settings :is(.hint, .meta) { color: var(--g-muted); }
 body[data-mode="gui"] #settings code { padding: 1px 4px; border-radius: 4px; background: var(--g-hover); font: 12px var(--g-mono); color: var(--g-fg); }
 body[data-mode="gui"] #settings b { color: var(--g-fg); font-weight: 600; }
+body[data-mode="gui"] #settings #checked.stale { color: var(--g-warning-fg); }
 body[data-mode="gui"] #settings .error { color: var(--g-error); }
 
 body[data-mode="gui"] #settings :is(input:not([type="checkbox"]), select, textarea) { min-height: 32px; padding: 6px 10px; border: 1px solid var(--g-input);

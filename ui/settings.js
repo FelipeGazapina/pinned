@@ -168,8 +168,7 @@ function onHubSettings(latest) {
   }
   if (page !== "connectors") return;
   if (view.name === "list" || view.name === "pick") return redraw();
-  const line = document.getElementById("checked");
-  if (line) line.textContent = checkedText();
+  paintChecked();
 }
 
 function renderSettingsNav() {
@@ -916,7 +915,7 @@ function connectorsHtml() {
   return `${intro}
     ${settings.connectors.map(cardHtml).join("")}
     <button class="new-card" data-action="new-connector">＋ New workflow</button>
-    <p class="hint" id="checked">${esc(checkedText())}</p>`;
+    <p class="hint${checkedStale() ? " stale" : ""}" id="checked">${esc(checkedText())}</p>`;
 }
 
 function cardHtml(c, i) {
@@ -1686,8 +1685,33 @@ function checkedText() {
   const checked = settings.checked;
   if (!checked) return "Not checked yet. Connectors are checked every minute.";
   const at = new Date(checked.at).toLocaleTimeString(APP_LOCALE);
-  return checked.error ? `Last check at ${at} failed: ${checked.error}` : `Last checked at ${at}. Connectors are checked every minute.`;
+  const age = checkedStale() ? ` (${Math.floor((Date.now() - new Date(checked.at).getTime()) / 60000)} min ago)` : "";
+  return checked.error ? `Last check at ${at}${age} failed: ${checked.error}` : `Last checked at ${at}${age}. Connectors are checked every minute.`;
 }
+
+/** True when the last check is over three minutes old, so the line shows its age and reads as a warning. */
+const checkedStale = () => !!settings.checked && Date.now() - new Date(settings.checked.at).getTime() > 3 * 60000;
+
+/** Writes the checked line in place. Only this line changes: a form being edited is never rebuilt. */
+function paintChecked() {
+  const line = document.getElementById("checked");
+  if (!line) return;
+  line.textContent = checkedText();
+  line.classList.toggle("stale", checkedStale());
+}
+
+/** While the settings page stays open, the checked line follows the hub's check: one fetch a minute, and
+ * one at once when the window shows again (`visibleInterval`). */
+async function refreshChecked() {
+  if (!settingsOpen() || page !== "connectors") return;
+  try {
+    settings = await connectorCall("get_settings");
+  } catch (e) {
+    return console.warn("get_settings", e);
+  }
+  if (settingsOpen() && page === "connectors") paintChecked();
+}
+visibleInterval(refreshChecked, 60000);
 
 const trimmed = (s) => (s ?? "").trim();
 
@@ -2410,6 +2434,5 @@ document.getElementById("settings-back").onclick = toggleSettings;
 
 listen("connectors-checked", (payload) => {
   settings.checked = payload;
-  const line = document.getElementById("checked");
-  if (line) line.textContent = checkedText();
+  paintChecked();
 });

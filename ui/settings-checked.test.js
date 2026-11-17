@@ -85,11 +85,11 @@ test("the checked line shows its age when the last check is older than three min
   const at12 = minutesAgo(12);
   const quiet = world({ checked: { at: at2, error: null } });
   assert.equal(quiet.ctx.checkedText(), `Last checked at ${new Date(at2).toLocaleTimeString("en-US")}. Connectors are checked every minute.`);
-  assert.equal(quiet.ctx.checkedStale(), false);
+  assert.equal(vm.runInContext("checkedStale()", quiet.ctx), false);
 
   const old = world({ checked: { at: at12, error: null } });
   assert.equal(old.ctx.checkedText(), `Last checked at ${new Date(at12).toLocaleTimeString("en-US")} (12 min ago). Connectors are checked every minute.`);
-  assert.equal(old.ctx.checkedStale(), true);
+  assert.equal(vm.runInContext("checkedStale()", old.ctx), true);
 });
 
 test("an open settings page refetches get_settings when the window becomes visible", async () => {

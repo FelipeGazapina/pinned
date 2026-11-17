@@ -24,7 +24,7 @@ function listWorld(connectors) {
   };
   vm.createContext(context);
   // checkedText lives further down settings.js and is unrelated to the cards under test.
-  vm.runInContext(`${src.slice(start, end)};function checkedText() { return ""; };settings = { linear: {}, slack: null, connectors: ${JSON.stringify(connectors)}, checked: null };`, context);
+  vm.runInContext(`${src.slice(start, end)};function checkedText() { return ""; };function checkedStale() { return false; };settings = { linear: {}, slack: null, connectors: ${JSON.stringify(connectors)}, checked: null };`, context);
   return context;
 }
 

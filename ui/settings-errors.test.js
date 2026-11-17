@@ -41,6 +41,7 @@ function load({ bots = [], connectors = [], reply = () => ({}) } = {}) {
   const calls = [];
   const shown = [];
   const context = {
+    visibleInterval: () => 0,
     console: { error() {}, warn() {}, log() {} },
     flash: (text, actions, ms) => shown.push({ text, ms }),
     addEventListener() {},
