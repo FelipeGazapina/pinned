@@ -84,3 +84,48 @@ impl PlanStore {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("pinned-plan-store-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn ship(plans: &mut CaptainPlans) -> Result<String, String> {
+        let call = crate::plan::SetCall { title: Some("Ship the form".into()), lists: vec![crate::plan::ListInput { id: None, name: "Build".into(), steps: vec![crate::plan::StepInput { id: None, name: "Write".into(), what: None }] }], ..Default::default() };
+        crate::plan::set(plans, call, 1, &[], 1)
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn plans_are_saved_for_the_user_only() {
+        let dir = temp("mode");
+        let mut store = PlanStore::load(Some(&dir));
+        store.write("cap-1", ship).unwrap();
+        store.write("cap-2", ship).unwrap();
+        assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(dir.join(FILE)).unwrap().permissions()) & 0o777, 0o600);
+        assert!(PlanStore::load(Some(&dir)).get("cap-2").is_some());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_plans_file_that_does_not_parse_is_kept_aside_and_the_next_write_starts_a_new_one() {
+        let dir = temp("corrupt");
+        let corrupt = br#"{"cap-1":[{"id":"p1","title":"Ship the f"#;
+        std::fs::write(dir.join(FILE), corrupt).unwrap();
+        std::fs::write(dir.join(format!("{FILE}.bad")), b"an older one").unwrap();
+        let mut store = PlanStore::load(Some(&dir));
+        assert!(store.get("cap-1").is_none());
+        assert_eq!(std::fs::read(dir.join(format!("{FILE}.bad"))).unwrap(), corrupt, "the file is kept aside as it was");
+        assert!(!dir.join(FILE).exists());
+        store.write("cap-2", ship).unwrap();
+        assert!(PlanStore::load(Some(&dir)).get("cap-2").is_some());
+        assert_eq!(std::fs::read(dir.join(format!("{FILE}.bad"))).unwrap(), corrupt, "the write left it alone");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
