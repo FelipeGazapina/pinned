@@ -1672,12 +1672,12 @@ mod tests {
     }
 
     #[test]
-    fn a_refused_push_waits_twice_as_long_each_time_up_to_half_an_hour_while_the_project_lists_every_cycle() {
+    fn a_refused_push_waits_twice_as_long_each_time_up_to_ten_minutes_while_the_project_lists_every_cycle() {
         let (dir, checkout, _) = full_checkout("full-hub");
         let hub = FullHub::default();
-        let at = pushed_at(&hub, &checkout, 311, |_| {});
-        assert_eq!(at, [0, 20, 60, 140, 300, 620, 1260, 2540, 4340, 6140]);
-        assert_eq!(hub.lists.get(), 311, "the project still lists and pulls every cycle");
+        let at = pushed_at(&hub, &checkout, 400, |_| {});
+        assert_eq!(at, [0, 20, 60, 140, 300, 620, 1220, 1820, 2420, 3020, 3620, 4220, 4820, 5420, 6020, 6620, 7220, 7820]);
+        assert_eq!(hub.lists.get(), 400, "the project still lists and pulls every cycle");
         let _ = std::fs::remove_dir_all(dir);
     }
 
