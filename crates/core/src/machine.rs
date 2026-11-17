@@ -874,6 +874,8 @@ pub struct Machine {
     orchestration_dir: Option<PathBuf>,
     /// Each working worker thread's spend so far, by task, across every session it ran.
     meters: Mutex<HashMap<String, usage::Meter>>,
+    /// The models with no price a team box's worker used, by task, each logged once.
+    worker_unpriced: Mutex<HashMap<String, HashSet<String>>>,
     /// The price list the meters price with, and when it was read.
     meter_rates: Mutex<Option<(Instant, Arc<usage::RateTable>)>>,
     /// Where a team box gets the price list: downloaded, held in memory only.
@@ -1086,6 +1088,7 @@ impl Machine {
             memories,
             orchestration_dir: dir.clone(),
             meters: Mutex::default(),
+            worker_unpriced: Mutex::default(),
             meter_rates: Mutex::default(),
             list_rates: Mutex::new(Arc::new(|| usage::rates(None))),
             tastes_shared: Arc::default(),
@@ -3954,7 +3957,9 @@ impl Machine {
     /// Prices what each working worker thread's transcripts gained, its subagents' included,
     /// records it on its task, and stops the ones past their budget. The `meters` lock is held
     /// through the record, so the 1 s pass and a turn's end never write an older total over a newer
-    /// one. Cursor and Codex children run headless and are not metered.
+    /// one. Cursor and Codex children run headless and are not metered. In a team box, whose
+    /// runs' costs the team pays, a model with no price is left out of a worker's cost instead of
+    /// leaving all of it unknown, and named in the log once per worker.
     fn meter_workers(&self) {
         let threads: Vec<(String, String)> = self
             .tabs
@@ -3978,7 +3983,26 @@ impl Machine {
             return;
         }
         let (rates, book) = (self.meter_rates(), self.meter_book());
-        let used: Vec<_> = moved.into_iter().map(|task| (task.clone(), meters[&task].usage(&rates, &book))).collect();
+        let team_box = self.team_box.load(Ordering::Relaxed);
+        let mut logged = self.worker_unpriced.lock().unwrap();
+        logged.retain(|task, _| meters.contains_key(task));
+        let used: Vec<_> = moved
+            .into_iter()
+            .map(|task| {
+                let mut usage = meters[&task].usage(&rates, &book);
+                if team_box {
+                    let (usd, unpriced) = meters[&task].priced(&rates, &book);
+                    for model in unpriced {
+                        if logged.entry(task.clone()).or_default().insert(model.clone()) {
+                            eprintln!("pinned: worker {task}'s cost leaves out {model}, which has no price");
+                        }
+                    }
+                    usage.cost_usd = Some(usd);
+                }
+                (task, usage)
+            })
+            .collect();
+        drop(logged);
         self.delegates.meter(&used, self.launch.path_env.as_deref());
     }
 
