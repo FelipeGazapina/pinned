@@ -1386,15 +1386,24 @@ impl Store {
     /// Moves the watermarks and the cursor a changes read covered, and adds its counts. Answers
     /// what to put back when the store cannot save; None when the read covered nothing.
     fn apply_changes(&mut self, pass: &ChangePass) -> Option<ChangeUndo> {
-        if pass.read.is_empty() && pass.skipped.is_empty() && pass.claim_errors.is_empty() {
-            return None;
-        }
         let undo = ChangeUndo {
             since: self.connectors.iter().filter(|c| pass.read.contains(&c.id)).map(|c| (c.id.clone(), c.since.clone())).collect(),
             from: self.linear_changes_from.clone(),
             counts: self.change_counts.clone(),
             retries: self.change_retries.clone(),
         };
+        // A retry past the floor is never fired, its workflow's or not (one turned off, deleted).
+        // This runs on every check, one that read nothing too.
+        if let Some(floor) = pass.floor {
+            self.change_retries.retain(|_, keys| {
+                keys.retain(|_, at| DateTime::parse_from_rfc3339(at).is_ok_and(|at| at > floor));
+                !keys.is_empty()
+            });
+        }
+        if pass.read.is_empty() && pass.skipped.is_empty() && pass.claim_errors.is_empty() {
+            // Only the expired retries can have changed, and they are saved when one went.
+            return (self.change_retries != undo.retries).then_some(undo);
+        }
         for c in self.connectors.iter_mut().filter(|c| pass.read.contains(&c.id)) {
             // What came before the floor was skipped: the next read starts there at the oldest.
             if let Some(floor) = pass.floor {
@@ -1422,13 +1431,6 @@ impl Store {
         }
         for (workflow, key, at) in &pass.deferred {
             self.change_retries.entry(workflow.clone()).or_default().insert(key.clone(), at.clone());
-        }
-        // A retry past the floor is never fired, its workflow's or not (one turned off, deleted).
-        if let Some(floor) = pass.floor {
-            self.change_retries.retain(|_, keys| {
-                keys.retain(|_, at| DateTime::parse_from_rfc3339(at).is_ok_and(|at| at > floor));
-                !keys.is_empty()
-            });
         }
         Some(undo)
     }
@@ -6394,14 +6396,15 @@ impl Connectors {
         let had = store.connectors.iter().find(|c| !connector.id.is_empty() && c.id == connector.id).and_then(convex_step);
         save_checks(&store, &connector, graph.as_ref(), &store.convex, had.as_ref().map(|step| step.connection.as_str())).map_err(|refused| refused.error)?;
         settle_graph(&store, &mut connector, graph);
-        match store.connectors.iter_mut().find(|c| c.id == connector.id && !c.id.is_empty()) {
+        let reset = match store.connectors.iter_mut().find(|c| c.id == connector.id && !c.id.is_empty()) {
             Some(existing) => {
                 connector.since = existing.since.clone();
                 // A Linear change workflow turned on, or turned into one, drops what changed
                 // before: only what changes from now fires it.
                 let turned_on = connector.enabled && !existing.enabled;
                 let new_kind = std::mem::discriminant(&connector.trigger) != std::mem::discriminant(&existing.trigger);
-                if is_change(&connector.trigger) && (turned_on || new_kind) {
+                let reset = is_change(&connector.trigger) && (turned_on || new_kind);
+                if reset {
                     connector.since = chrono::Utc::now().to_rfc3339();
                 }
                 connector.handled = std::mem::take(&mut existing.handled);
@@ -6409,6 +6412,7 @@ impl Connectors {
                 connector.followed = std::mem::take(&mut existing.followed);
                 connector.paged = std::mem::take(&mut existing.paged);
                 *existing = connector.clone();
+                reset
             }
             None => {
                 // A new connector the app named itself (`is_uuid`) keeps its id, so the same save
@@ -6430,7 +6434,12 @@ impl Connectors {
                 connector.followed.clear();
                 connector.paged.clear();
                 store.connectors.push(connector.clone());
+                true
             }
+        };
+        // A reset `since` drops the workflow's change retries too: only what changes from now fires it.
+        if reset {
+            store.change_retries.remove(&connector.id);
         }
         self.save(&store)?;
         self.wake.notify_one();
@@ -6440,6 +6449,7 @@ impl Connectors {
     pub fn delete_connector(&self, id: &str) -> Result<(), String> {
         let mut store = self.store.lock().unwrap();
         store.connectors.retain(|c| c.id != id);
+        store.change_retries.remove(id);
         self.save(&store)
     }
 
