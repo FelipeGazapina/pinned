@@ -3125,9 +3125,10 @@ impl Connectors {
                 if stops(&ask, &answers).is_some() {
                     self.release(&connector, &subject).await;
                     // Its model was asked: the claim stays, so a later read of the change does
-                    // not ask again.
+                    // not ask again, and the model call is a start for the loop guards.
                     if let Some(fire) = &fire {
                         self.fire_stopped(&connector, &fire.key);
+                        self.fire_started(&connector, fire);
                     }
                     self.keep_stopped(&connector, &subject)?;
                     return Ok(());
