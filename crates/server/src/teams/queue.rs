@@ -468,9 +468,9 @@ struct Taken {
 /// waits for the next turn, and so does every later row of its bot, which never starts ahead of
 /// it, while the rows of other bots go on, up to the turn's `BUSY_READS`th busy read: the turn
 /// ends there, as each busy read waited out a lock while the turn held the team. A failure that
-/// is not busy counts on the row; the `UNREAD_PASSES`th takes it, counted `StartFailed`. Only what the take is written with
-/// (`turn.held`: its counts, its reservation and the row's failed reads) rolls back with a turn
-/// that fails after it, and the turn commits whatever this returns.
+/// is not busy counts on the row; the `UNREAD_PASSES`th takes it, counted `StartFailed`. Only
+/// what the take is written with (`turn.held`: its counts, its reservation and the row's failed
+/// reads) rolls back with a turn that fails after it, and the turn commits whatever this returns.
 async fn take_and_start(hub: &Arc<Hub>, turn: &Turn, team: &Arc<Account>, ended: &str, taken: &mut Taken) -> Result<(), String> {
     let mut team_wide: Option<Arc<TeamWorkflows>> = None;
     // The bots whose row did not read in this turn: none of their rows is taken in it.
