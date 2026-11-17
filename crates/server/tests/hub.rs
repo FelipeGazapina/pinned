@@ -12391,6 +12391,29 @@ fn run_set_acts_only_from_the_workflows_own_session() {
     assert_eq!(w.cli(&on_issue, "", "run set title x"), Err(NO_GRAPH_RUN.into()), "from the workflow's own session");
 }
 
+/// What a login gets for a workflow session's callback: only a machine passes one on.
+const FROM_A_MACHINE_ONLY: &str = "only a workflow's session sends this, through its machine";
+
+/// The app's login holds no session, so it sends none of a workflow session's callbacks, while
+/// the workflow's own session still does.
+#[test]
+fn a_login_sends_no_workflow_sessions_callback() {
+    let mut w = workflows_of("login_workflow_calls");
+    let on_issue = w.run(&w.a.clone(), issue("uuid-1"));
+    let on_thread = w.run(&w.a.clone(), Subject::SlackThread { channel: "C1".into(), thread: "1.2".into() });
+    let reached = (asked_of("slack.com:443"), asked_of("api.linear.app:443"));
+    let stage = json!({ "cmd": "stage", "connector": w.a, "issue": "uuid-1", "stage": "coding" });
+    let run_set = json!({ "cmd": "run_set", "connector": w.a, "issue": "uuid-1", "name": "title", "value": "x" });
+    let calls = [vec![stage, run_set], thread_calls_of(&w.a, &json!({ "channel": "C1", "thread": "1.2" }))].concat();
+    for call in calls {
+        assert_eq!(w.ana.client.hub(call.clone()), Err(FROM_A_MACHINE_ONLY.into()), "{}", call["cmd"]);
+    }
+    assert_eq!((asked_of("slack.com:443"), asked_of("api.linear.app:443")), reached, "nothing left the hub");
+    assert_eq!(w.cli(&on_issue, "", "stage coding"), Ok(NO_COLUMN.into()), "the workflow's own session: stage");
+    assert_eq!(w.cli(&on_issue, "", "run set title x"), Err(NO_GRAPH_RUN.into()), "the workflow's own session: run set");
+    assert_eq!(w.cli_four(&on_thread, "")[1..], past_the_check()[..], "the workflow's own session: the thread's calls");
+}
+
 #[test]
 fn act_lets_the_session_that_runs_a_workflow_act_for_its_subject() {
     let mut w = workflows_of("act_own_run");
