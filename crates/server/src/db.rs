@@ -230,6 +230,7 @@ alter table team_runs add column if not exists reserved_at timestamptz;
 -- until the box first reports, so a run never measured is told apart from one that spent nothing.
 alter table team_runs add column if not exists model_usd double precision;
 alter table team_runs alter column model_usd drop not null;
+alter table team_runs alter column model_usd drop default;
 -- A run's limit call the limits tick opened (`teams::calls::tick`): the only call that counts as
 -- its limit call (`teams::db::runs_at_limit`). A session's own ask never sets it.
 alter table team_calls add column if not exists opened_by_hub boolean not null default false;
