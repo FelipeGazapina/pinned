@@ -5,6 +5,11 @@
 use super::*;
 
 const REFUSED: &str = "the account's synced projects would pass 0 MB from a box: a box only pulls the account's files";
+const NOT_SHARED: &str = "a box may not change the account's shared projects";
+const NOT_WORKFLOWS: &str = "a box may not change the account's workflows";
+const NOT_SETTINGS: &str = "a box may not change the account's settings";
+const NOT_SESSIONS: &str = "a box may not change the account's sessions on its other machines";
+const NOT_MACHINES: &str = "a box may not change the account's machines";
 const NOTICE: &str = "Sync stopped: your synced projects would pass 1024 MB. Nothing was lost; this machine keeps everything.";
 const PROJECT: &str = "github.com/acme/site";
 
@@ -101,7 +106,7 @@ fn a_box_machine_may_only_pull_the_accounts_files() {
     assert_eq!(machine_result(url, &s.box_token, skill_push(b"from the box")), refused, "a skill or plugin file");
     assert_eq!(machine_result(url, &s.box_token, push(PROJECT, "claude/memory/notes.md", b"from the box")), refused, "a project's file");
     assert_eq!(machine_result(url, &s.box_token, mark()), refused, "an executable mark");
-    assert_eq!(machine_result(url, &s.box_token, share()), refused, "a project share");
+    assert_eq!(machine_result(url, &s.box_token, share()), Err(NOT_SHARED.to_owned()), "a project share");
     assert_eq!(machine_result(url, &s.box_token, json!({ "cmd": "sync_list", "project": sync::PLUGINS_KEY })), Ok(json!([])));
     assert_eq!(machine_result(url, &s.box_token, json!({ "cmd": "sync_pull", "project": sync::PLUGINS_KEY, "paths": [] })), Ok(json!([])));
 
@@ -126,7 +131,7 @@ fn a_box_whose_row_goes_while_it_is_connected_stays_a_box_until_it_reconnects() 
     assert_eq!(send_call(&mut node, 1, skill_push(b"from the box")), Err(REFUSED.to_owned()));
     admin_on(&s.hub.database, &format!("delete from boxes where machine = '{}'", s.box_id));
     assert_eq!(send_call(&mut node, 2, skill_push(b"from the box")), Err(REFUSED.to_owned()), "the connection it opened as a box");
-    assert_eq!(send_call(&mut node, 3, share()), Err(REFUSED.to_owned()));
+    assert_eq!(send_call(&mut node, 3, share()), Err(NOT_SHARED.to_owned()));
     assert_eq!(listed(url, &s.mac_token, sync::PLUGINS_KEY), Vec::<String>::new());
     drop(node);
     // Its next connection reads the boxes table again: with no row it is no box.
@@ -186,7 +191,175 @@ fn a_box_sessions_act_may_not_share_a_project_either() {
     client.wait("the mac's tabs", |f| f["type"] == "event" && f["machine"] == json!(s.mac_id) && f.to_string().contains("conv-1"));
     let act = json!({ "cmd": "act", "act": { "tab": "tab-1", "action": "share_project", "args": { "project": share()["project"] } } });
 
-    assert_eq!(send_call(&mut vps, 1, act.clone()), Err(REFUSED.to_owned()));
+    assert_eq!(send_call(&mut vps, 1, act.clone()), Err(NOT_SHARED.to_owned()));
     assert_eq!(count(&s.hub, &format!("select count(*) from shared_projects where account = '{}'", s.account)), 0);
     assert_eq!(send_call(&mut mac, 1, act).unwrap()["outcome"], "done", "a person's machine's session shares as before");
+}
+
+/// A tab as a node reports it, with `extra` fields on top.
+fn tab(id: &str, role: &str, extra: Value) -> Value {
+    let mut tab = json!({ "id": id, "cwd": "/w/site", "bypass": false, "running": true, "status": "done", "title": "Fix login", "message": null, "resume_at": null, "opened": 1, "session": format!("conv-{id}"), "role": role });
+    tab.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+    tab
+}
+
+/// A machine socket that reported `tabs`, once the hub holds them.
+fn reporting(s: &Setup, token: &str, machine: &str, tabs: Vec<Value>) -> MachineSock {
+    let mut node = MachineSock::connect(&s.hub.url, token, "0.18.6");
+    let reported = tabs.len();
+    node.send(json!({ "type": "event", "event": { "kind": "tabs", "tabs": tabs } }));
+    let account = s.hub.runtime.block_on(s.hub.hub().account(uuid::Uuid::parse_str(&s.account).unwrap())).unwrap();
+    wait_for("the hub to hold the machine's tabs", || account.tabs_of(machine).is_some_and(|tabs| tabs.len() == reported));
+    node
+}
+
+fn act(tab: &str, action: &str, args: Value, request_id: &str) -> Value {
+    json!({ "cmd": "act", "act": { "tab": tab, "action": action, "args": args, "request_id": request_id } })
+}
+
+fn sql_quoted(text: &str) -> String {
+    text.replace('\'', "''")
+}
+
+#[test]
+fn a_box_still_asks_to_extend_itself_and_only_the_owner_decides() {
+    let s = setup("boxgate_extend_ask");
+    let mut vps = reporting(&s, &s.box_token, &s.box_id, vec![tab("tab-1", "worker", json!({}))]);
+    let extend = |machine: &str, request_id: &str| act("tab-1", "extend_box", json!({ "machine": machine, "extra_usd": 1.0 }), request_id);
+    let waiting = |machine: &str| count(&s.hub, &format!("select count(*) from agent_confirmations where account = '{}' and action = 'extend_box' and decided_at is null and args->>'machine' = '{machine}'", s.account));
+
+    let asked = send_call(&mut vps, 1, extend(&s.box_id, "x-1")).unwrap();
+    assert_eq!(asked["outcome"], "pending", "the ask waits for the owner: {asked}");
+    assert_eq!(waiting(&s.box_id), 1);
+    assert_eq!(send_call(&mut vps, 2, extend(&s.mac_id, "x-2")), Err(NOT_MACHINES.to_owned()), "never for another machine");
+    assert_eq!(waiting(&s.mac_id), 0);
+    assert_eq!(
+        send_call(&mut vps, 3, json!({ "cmd": "decide_confirmation", "id": asked["id"], "approve": true })),
+        Err("only the account's owner decides, in the app".to_owned())
+    );
+    assert_eq!(send_call(&mut vps, 4, json!({ "cmd": "extend_box", "machine": s.box_id, "extra_usd": 1.0 })), Err(NOT_MACHINES.to_owned()), "its own call extends nothing");
+    assert_eq!(waiting(&s.box_id), 1);
+}
+
+#[test]
+fn a_refused_sync_push_reads_as_the_size_limit_and_every_other_refusal_says_what_a_box_may_not_change() {
+    let s = setup("boxgate_texts");
+    let url = &s.hub.url;
+    assert!(REFUSED.starts_with(sync::LIMIT_REFUSAL));
+    assert_eq!(machine_result(url, &s.box_token, skill_push(b"from the box")), Err(REFUSED.to_owned()));
+    assert_eq!(machine_result(url, &s.box_token, mark()), Err(REFUSED.to_owned()));
+
+    let calls = [
+        (share(), NOT_SHARED),
+        (json!({ "cmd": "delete_connector", "id": "c1" }), NOT_WORKFLOWS),
+        (json!({ "cmd": "run_workflow", "id": "c1" }), NOT_WORKFLOWS),
+        (json!({ "cmd": "connect_linear", "key": "lin_api_box" }), NOT_SETTINGS),
+        (json!({ "cmd": "disconnect_linear" }), NOT_SETTINGS),
+    ];
+    for (call, plain) in calls {
+        let refused = machine_result(url, &s.box_token, call.clone()).unwrap_err();
+        assert_eq!(refused, plain, "{call}");
+        assert!(!refused.starts_with(sync::LIMIT_REFUSAL), "{call}");
+    }
+
+    let mut vps = reporting(&s, &s.box_token, &s.box_id, vec![tab("tab-1", "worker", json!({}))]);
+    let acts = [
+        (act("tab-1", "share_project", json!({ "project": share()["project"] }), "a-1"), NOT_SHARED),
+        (act("tab-1", "delete_connector", json!({ "id": "c1" }), "a-2"), NOT_WORKFLOWS),
+        (act("tab-1", "disconnect_linear", json!({}), "a-3"), NOT_SETTINGS),
+        (act("tab-1", "rename_machine", json!({ "id": s.mac_id, "name": "renamed" }), "a-4"), NOT_MACHINES),
+    ];
+    for (id, (call, plain)) in acts.into_iter().enumerate() {
+        let refused = send_call(&mut vps, id as u64 + 1, call.clone()).unwrap_err();
+        assert_eq!(refused, plain, "{call}");
+        assert!(!refused.starts_with(sync::LIMIT_REFUSAL), "{call}");
+    }
+    assert_eq!(count(&s.hub, &format!("select count(*) from agent_confirmations where account = '{}'", s.account)), 0, "no refused act waits for the owner");
+}
+
+#[test]
+fn a_capitao_on_a_box_reports_to_the_orchestrator_and_hands_workers_only_to_boxes() {
+    let s = setup("boxgate_captain");
+    let url = &s.hub.url;
+    let mut client = Client::connect(url, &s.token);
+    client.wait("hello", |f| f["type"] == "hello");
+    let host = RawMachine::start(url, &s.mac_token, |call| match call["cmd"].as_str() {
+        Some("global_orchestrator_settings") => RawReply::Ok(json!({ "host": true })),
+        Some("orchestrator_report") => RawReply::Ok(json!({ "outcome": "iniciado", "tab": "tab-g" })),
+        _ => RawReply::Err("not in this test".into()),
+    });
+    let mut vps = reporting(&s, &s.box_token, &s.box_id, vec![tab("tab-c", "orchestrator", json!({}))]);
+    client.wait_machines(&[("vps", true), ("mac", true)]);
+
+    let report = json!({ "cmd": "relay", "request_id": "rep-1", "to": { "kind": "orchestrator", "report": {
+        "machine": "", "machine_name": "vps", "project": "site", "path": "/w/site", "tab": "tab-c", "text": "Done; should I open the pull request?", "answers": [] } } });
+    assert_eq!(send_call(&mut vps, 1, report), Ok(json!({ "outcome": "iniciado", "tab": "tab-g" })), "its report and its question reach the orchestrator");
+    assert_eq!(host.calls("orchestrator_report"), 1);
+    let to_captain = json!({ "cmd": "relay", "request_id": "r-2", "to": { "kind": "captain", "machine": s.mac_id, "path": "/w/site", "text": "Push it.", "sender": "Captain" } });
+    assert_eq!(send_call(&mut vps, 2, to_captain), Err(NOT_SESSIONS.to_owned()));
+
+    let delegate = |target: Value| {
+        let request = serde_json::to_value(pinned_core::delegate::parse_request(&json!({ "task": "Run the suite.", "target": target })).unwrap()).unwrap();
+        json!({ "cmd": "delegate", "tab": "tab-c", "task": "t1", "request": request, "access": "auto" })
+    };
+    assert_eq!(
+        send_call(&mut vps, 3, delegate(json!({ "box": true }))),
+        Err("Upstash Box is not connected: connect it in pinned's Connectors settings".to_owned()),
+        "a worker for a box goes on to the account's box connection"
+    );
+    assert_eq!(send_call(&mut vps, 4, delegate(json!({ "machine": "mac" }))), Err(NOT_SESSIONS.to_owned()));
+    assert_eq!(host.calls("delegate") + host.calls("start_claude"), 0);
+}
+
+#[test]
+fn a_box_run_still_replies_and_files_issues_under_the_run_vouch() {
+    let s = setup("boxgate_run_acts");
+    let run = tab("tab-r", "worker", json!({ "connector": "c1", "subject": { "channel": "C1", "thread": "1.2" } }));
+    let mut vps = reporting(&s, &s.box_token, &s.box_id, vec![run, tab("tab-o", "worker", json!({}))]);
+    // Past the gate each goes on to the account's workflow and connections, which this account lacks.
+    let acts = [
+        ("slack_reply", json!({ "connector": "c1", "channel": "C1", "thread": "1.2", "text": "On it." }), "the workflow was deleted"),
+        ("linear_create", json!({ "connector": "c1", "channel": "C1", "thread": "1.2", "title": "Fix login", "description": "From Slack." }), "the workflow was deleted"),
+        ("linear_take", json!({ "connector": "c1", "channel": "C1", "thread": "1.2", "issue": "ENG-7" }), "Linear is not connected: connect it in pinned's Connectors settings"),
+    ];
+    for (id, (action, args, past_the_gate)) in acts.into_iter().enumerate() {
+        let id = id as u64 * 2 + 1;
+        let ran = send_call(&mut vps, id, act("tab-r", action, args.clone(), &format!("r-{id}")));
+        assert_eq!(ran, Err(past_the_gate.to_owned()), "{action} from the run's own session");
+        let other = send_call(&mut vps, id + 1, act("tab-o", action, args, &format!("r-{}", id + 1)));
+        assert_eq!(other, Err("only the session that runs this workflow can do that".to_owned()), "{action} from another session");
+    }
+}
+
+#[test]
+fn a_box_act_still_in_flight_when_its_row_and_connection_go_is_still_refused() {
+    let s = setup("boxgate_act_in_flight");
+    let url = &s.hub.url;
+    let mut client = Client::connect(url, &s.token);
+    client.wait("hello", |f| f["type"] == "hello");
+    let mut vps = reporting(&s, &s.box_token, &s.box_id, vec![tab("tab-1", "worker", json!({}))]);
+    client.wait_machines(&[("vps", true), ("mac", false)]);
+
+    // The audit table is held, so the act waits after the hub read its session and before it is admitted.
+    let lock = s.hub.runtime.block_on(async {
+        let (lock, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), s.hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        lock.batch_execute("begin; lock table agent_actions in access exclusive mode").await.unwrap();
+        lock
+    });
+    admin_on(&s.hub.database, &format!("delete from boxes where machine = '{}'", s.box_id));
+    vps.send(json!({ "type": "call", "id": 1, "call": act("tab-1", "share_project", json!({ "project": share()["project"] }), "in-flight") }));
+    wait_for("the act to wait on the audit table", || {
+        count(&s.hub, "select count(*) from pg_stat_activity where wait_event_type = 'Lock' and query like 'select outcome%agent_actions%'") == 1
+    });
+    drop(vps);
+    // Read from the hub's own memory: its clients hear of it only once the table is free.
+    let account = s.hub.runtime.block_on(s.hub.hub().account(uuid::Uuid::parse_str(&s.account).unwrap())).unwrap();
+    wait_for("the box to be offline", || account.online().iter().all(|(id, _)| *id != s.box_id));
+    s.hub.runtime.block_on(lock.batch_execute("commit")).unwrap();
+
+    wait_for("the act's audit row", || count(&s.hub, "select count(*) from agent_actions where request_id = 'in-flight'") == 1);
+    assert_eq!(count(&s.hub, &format!("select count(*) from shared_projects where account = '{}'", s.account)), 0, "the act is held to the connection it came on");
+    let refused = format!("select count(*) from agent_actions where request_id = 'in-flight' and outcome = 'refused' and detail = '{}'", sql_quoted(NOT_SHARED));
+    assert_eq!(count(&s.hub, &refused), 1);
 }
