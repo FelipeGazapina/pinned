@@ -12268,6 +12268,11 @@ fn on_thread_env(connector: &str) -> String {
     format!("PINNED_CONNECTOR={connector} PINNED_SLACK_CHANNEL=C1 PINNED_SLACK_THREAD=1.2")
 }
 
+/// The environment that names workflow `connector` on issue uuid-1, for a CLI call.
+fn on_issue_env(connector: &str) -> String {
+    format!("PINNED_CONNECTOR={connector} PINNED_ISSUE=uuid-1")
+}
+
 #[test]
 fn act_takes_a_process_started_inside_the_workflow_session_as_that_session() {
     let mut w = workflows_of("act_nested");
@@ -12337,8 +12342,13 @@ fn a_session_whose_agent_runs_under_a_launcher_acts_as_itself() {
     assert_eq!(w.the_four(Via::Naming(&on_issue), &on_thread, &w.a, "uuid-1")[..1], [Err(NOT_ITSELF.into())], "and still only as itself");
 }
 
-/// Two accounts' nodes on one machine: a session of the second, pointed at the first node's
-/// socket with the first account's workflow session's variables, acts for none of its workflows.
+/// The environment of a process that takes itself for session `tab` of the node in `dir`, with
+/// `workflow` the workflow's own variables.
+fn taken_for(dir: &Path, tab: &str, workflow: &str) -> String {
+    format!("PINNED_SOCK={} PINNED_TAB={tab} {workflow}", dir.join("sock").display())
+}
+
+/// A process of another account's node on the same machine acts for none of an account's workflows.
 #[test]
 fn a_session_of_another_accounts_node_on_the_same_machine_cannot_act_for_a_workflow() {
     let mut w = workflows_of("act_other_node");
@@ -12349,11 +12359,9 @@ fn a_session_of_another_accounts_node_on_the_same_machine_cannot_act_for_a_workf
     agents_run_their_mcp(&bea.dir);
     let beas = bea.node.machine.open_tab(Some(bea.dir.join("site").display().to_string()), false).unwrap();
     bea.node.machine.start_claude(&beas, 80, 24).unwrap();
-    let anas_sock = w.ana.dir.join("sock");
     let reached = (asked_of("slack.com:443"), asked_of("api.linear.app:443"));
-    let pointed = |tab: &str, workflow: &str| format!("PINNED_SOCK={} PINNED_TAB={tab} {workflow}", anas_sock.display());
-    let as_issue = pointed(&on_issue, &format!("PINNED_CONNECTOR={} PINNED_ISSUE=uuid-1", w.a));
-    let as_thread = pointed(&on_thread, &on_thread_env(&w.a));
+    let as_issue = taken_for(&w.ana.dir, &on_issue, &on_issue_env(&w.a));
+    let as_thread = taken_for(&w.ana.dir, &on_thread, &on_thread_env(&w.a));
     let (machine, dir) = (&bea.node.machine, &bea.dir);
     assert_eq!(cli_in_session(machine, dir, &beas, &as_issue, "stage coding"), Err(OUTSIDE.into()), "the CLI: stage");
     for args in ["slack reply on it", "linear create x y", "linear take ENG-7"] {
