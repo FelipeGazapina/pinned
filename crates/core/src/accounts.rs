@@ -242,7 +242,7 @@ impl View {
 pub struct Accounts {
     dir: Option<PathBuf>,
     home: PathBuf,
-    /// Where the built-in Claude account's home is, instead of the environment's or `~/.claude`.
+    /// Where the built-in Claude account's home is, instead of the one the user exported or `~/.claude`.
     claude_home: Option<PathBuf>,
     /// The homes the user exported for the built-in accounts.
     exported: ExportedHomes,

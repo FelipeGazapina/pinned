@@ -148,8 +148,8 @@ pub struct Launch {
     /// start fails.
     pub starting_limit: Duration,
     /// The folder the built-in Claude account's sessions, transcripts and `.claude.json` live in,
-    /// instead of `$CLAUDE_CONFIG_DIR` or `~/.claude`. Only a test that runs a node in its own
-    /// process sets it.
+    /// instead of the home the user exported or `~/.claude`. Only a test that runs a node in its
+    /// own process sets it.
     pub claude_home: Option<PathBuf>,
 }
 
@@ -9616,7 +9616,7 @@ pub(crate) mod tests {
     }
 
     /// Every variable that names who or what a session is, as a parent could leave it.
-    pub(crate) const SESSION_NAMES: [&str; 18] = [
+    pub(crate) const SESSION_NAMES: [&str; 27] = [
         "PINNED_ROLE",
         "PINNED_PROJECT",
         "PINNED_TAB",
@@ -9634,7 +9634,16 @@ pub(crate) mod tests {
         "CLAUDE_CONFIG_DIR",
         "CODEX_HOME",
         "CLAUDECODE",
+        "CLAUDE_PID",
+        "CLAUDE_EFFORT",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CLAUDE_CODE_EXECPATH",
         "CLAUDE_CODE_SESSION_ID",
+        "CLAUDE_CODE_CHILD_SESSION",
+        "CLAUDE_CODE_SESSION_ATTENDED",
+        "CLAUDE_CODE_MESSAGING_SOCKET",
+        "CLAUDE_CODE_MESSAGING_TOKEN",
+        "CLAUDE_CODE_SSE_PORT",
     ];
 
     /// A parent that carries every session variable with a value no session is started with.
