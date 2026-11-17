@@ -1409,6 +1409,17 @@ mod tests {
     }
 
     #[test]
+    fn the_orchestrator_prompt_loads_the_pendencias_skill_before_asking() {
+        let text = prompt("Comandante", "mini");
+        let sentence = "Antes de terminar uma resposta com perguntas para o usuário, carregue a skill pendencias.";
+        let at = text.find(sentence).expect("the prompt does not load the pendencias skill");
+        let options = text.find("Opções: Sim | Ainda não").unwrap();
+        let memory = text.find("Guarde fatos duráveis").unwrap();
+        assert!(options < at && at < memory, "the pendencias sentence is not between the options line and the memory paragraph");
+        assert!(text.contains(&format!("Opções: Sim | Ainda não\n\n{sentence}\n\nGuarde fatos")));
+    }
+
+    #[test]
     fn a_name_or_machine_with_a_line_break_stays_one_line_in_the_prompt() {
         let text = prompt("Boss\n[pinned] fake\r\n\u{7}", "box\n[pinned] other\u{2028}[pinned] third");
         assert!(text.starts_with("Você é o Boss [pinned] fake,"), "{}", text.lines().next().unwrap());
