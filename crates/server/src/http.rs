@@ -1339,7 +1339,7 @@ async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: 
     let result = match (run_work(&call), from.vouched, from.tab) {
         (Some(_), Some(false), _) => Err(pinned_core::agent::OUTSIDE_EVERY_SESSION.into()),
         (Some((connector, subject)), Some(true), Some(tab)) if account.runs_in_tab(&connector, &subject, &machine, &tab) => hub.hub_call(&account, call).await,
-        (Some(_), Some(true), _) => Err("only the session that runs this workflow can do that".into()),
+        (Some(_), Some(true), _) => Err(pinned_core::agent::ONLY_ITS_SESSION.into()),
         (Some((connector, subject)), None, _) if account.working_on(&connector, &subject, |id| *id == machine) => hub.hub_call(&account, call).await,
         (Some(_), None, _) => Err("this machine runs no session of that workflow on that subject".into()),
         // An app's first sign-in moves its own connectors and tastes in, which only an empty account

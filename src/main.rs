@@ -493,6 +493,20 @@ fn add_tray_or_go_without(app: &tauri::App) -> tauri::Result<()> {
 /// connectors, and every other callback needs the hub. `tabs` are the machine's, and `vouch` what
 /// it found of the session the callback came from.
 fn signed_out(connectors: &connectors::Connectors, tabs: &[TabView], callback: agent::Message, vouch: &agent::Vouch) -> Result<String, String> {
+    let thread = |channel: &str, thread: &str| agent::Subject::SlackThread { channel: channel.to_owned(), thread: thread.to_owned() };
+    let (connector, subject) = match &callback {
+        agent::Message::Stage { connector, subject, .. } => (connector, subject.clone()),
+        agent::Message::SlackReply { connector, channel, thread: ts, .. }
+        | agent::Message::LinearCreate { connector, channel, thread: ts, .. }
+        | agent::Message::LinearTake { connector, channel, thread: ts, .. } => (connector, thread(channel, ts)),
+        _ => return Err(SIGNED_OUT.into()),
+    };
+    // As the hub holds it: the tab the machine found the call in runs that workflow on that subject.
+    let agent::Vouch::Tab(from) = vouch else { return Err(agent::ONLY_ITS_SESSION.into()) };
+    let runs = |t: &TabView| t.id == *from && t.running && t.connector.as_ref() == Some(connector) && t.subject.as_ref().is_some_and(|s| s.same(&subject));
+    if !tabs.iter().any(runs) {
+        return Err(agent::ONLY_ITS_SESSION.into());
+    }
     match callback {
         agent::Message::Stage { connector, subject, stage } => tauri::async_runtime::block_on(connectors.stage(&connector, &subject, stage)),
         agent::Message::SlackReply { connector, channel, thread, text } => {

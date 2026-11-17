@@ -232,7 +232,7 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
                 return Err(pinned_core::agent::OUTSIDE_EVERY_SESSION.into());
             }
             if !account.runs_in_tab(&connector, &subject, origin, &caller.tab) {
-                return Err("only the session that runs this workflow can do that".into());
+                return Err(pinned_core::agent::ONLY_ITS_SESSION.into());
             }
         }
     }
