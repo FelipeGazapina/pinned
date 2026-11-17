@@ -1302,6 +1302,10 @@ fn restore_var(name: &str, value: Option<String>) {
                 "mcp__pinned__taste_set",
                 "mcp__pinned__taste_reset",
                 "mcp__pinned__tell_orchestrator",
+                "mcp__pinned__plan_set",
+                "mcp__pinned__plan_step",
+                "mcp__pinned__plan_fix",
+                "mcp__pinned__plan_close",
                 "mcp__pinned__convex_tables",
                 "mcp__pinned__convex_data",
                 "mcp__pinned__convex_query",
@@ -1316,7 +1320,7 @@ fn restore_var(name: &str, value: Option<String>) {
         assert_eq!(ask("work_cost", serde_json::json!({"taskId": "task-7"}), Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"work_cost","taskId":"task-7"}}"#.into()));
         assert_eq!(ask("memory_forget", serde_json::json!({"id": 3}), Some("tab-2")), Ok(r#"{"kind":"project","tab":"tab-2","tool":{"name":"memory_forget","id":3}}"#.into()));
         assert_eq!(ask("memory_save", serde_json::json!({"title": "Deploys"}), Some("tab-2")), Err("memory_save: missing field `text`".into()));
-        assert_eq!(ask("delegate", serde_json::json!({ "task": "Fix it." }), Some("tab-2")), Err("delegate: unknown variant `delegate`, expected one of `agents`, `work_cost`, `memory_search`, `memory_save`, `memory_forget`, `projects`, `send_to_captain`, `read_captain`, `waiting`, `sessions`, `read_session`, `repo_overview`, `repo_read`, `repo_search`, `tell_orchestrator`, `taste_get`, `taste_set`, `taste_reset`, `actions`, `convex`, `act`".into()));
+        assert_eq!(ask("delegate", serde_json::json!({ "task": "Fix it." }), Some("tab-2")), Err("delegate: unknown variant `delegate`, expected one of `agents`, `work_cost`, `memory_search`, `memory_save`, `memory_forget`, `projects`, `send_to_captain`, `read_captain`, `waiting`, `sessions`, `read_session`, `repo_overview`, `repo_read`, `repo_search`, `tell_orchestrator`, `plan_set`, `plan_step`, `plan_fix`, `plan_close`, `taste_get`, `taste_set`, `taste_reset`, `actions`, `convex`, `act`".into()));
         assert_eq!(ask("agents", serde_json::json!({}), Some("")), Err("PINNED_TAB is not set: run this inside a pinned tab".into()));
         assert_eq!(
             ask("act", serde_json::json!({ "action": "rename_machine", "args": { "name": "Mini", "id": "m1" }, "request_id": "r-1" }), Some("tab-2")),
@@ -1439,7 +1443,7 @@ fn restore_var(name: &str, value: Option<String>) {
         assert!(!plain.contains(&"delegate".to_owned()), "delegate_task is the one delegation tool: {plain:?}");
         let empty_task = offered(None, Some(""));
         assert!(empty_task.contains(&"delegate_task".to_owned()), "{empty_task:?}");
-        assert_eq!(offered(Some("orchestrator"), None), [&plain[..], &["tell_orchestrator".to_owned()]].concat());
+        assert_eq!(offered(Some("orchestrator"), None), [&plain[..], &CAPTAIN_TOOLS.map(String::from)].concat());
         assert_eq!(offered(Some("worker"), None), plain, "a worker starts workers the way a plain thread does");
         let child = offered(None, Some("task-1"));
         assert!(!child.contains(&"delegate_task".to_owned()), "{child:?}");
@@ -1457,7 +1461,7 @@ fn restore_var(name: &str, value: Option<String>) {
         let today = [&reminders[..], &["orchestrator_capabilities", "delegate_task", "task_status", "task_cancel", "task_review", "delegation_stats", "agents", "work_cost"], &memory].concat();
         assert_eq!(offered(None, None), today, "a plain thread sees what it saw before the global orchestrator");
         assert_eq!(offered(Some("worker"), None), today);
-        assert_eq!(offered(Some("orchestrator"), None), [&today[..], &["tell_orchestrator"]].concat());
+        assert_eq!(offered(Some("orchestrator"), None), [&today[..], &CAPTAIN_TOOLS].concat());
         assert_eq!(offered(Some("global-orchestrator"), None), [&reminders[..], &["delegation_stats"], &memory, &["projects", "send_to_captain", "read_captain", "waiting", "sessions", "read_session", "repo_overview", "repo_read", "repo_search"]].concat());
         assert_eq!(offered(Some("taste-chat"), None), [&today[..], &["taste_get", "taste_set", "taste_reset"]].concat(), "only a taste chat may change the way of working");
         assert_eq!(offered(Some("taste-chat"), Some("task-1")), [&reminders[..], &["orchestrator_capabilities", "task_status", "task_cancel"], &memory].concat(), "a taste chat's delegated child can't");
@@ -1481,6 +1485,42 @@ fn restore_var(name: &str, value: Option<String>) {
             ask("repo_search", serde_json::json!({ "project": "github.com/o/r", "query": "Call::", "max": 500 })),
             Ok(r#"{"kind":"project","tab":"tab-9","tool":{"name":"repo_search","project":"github.com/o/r","query":"Call::","regex":false,"case":false,"max":500}}"#.into())
         );
+    }
+
+    /// What a Captain is offered on top of what a plain thread is.
+    const CAPTAIN_TOOLS: [&str; 5] = ["tell_orchestrator", "plan_set", "plan_step", "plan_fix", "plan_close"];
+
+    #[test]
+    #[cfg(unix)]
+    fn only_a_captain_is_offered_the_plan_tools_and_plan_set_reaches_the_machine_as_one_line() {
+        let plan_tools = ["plan_set", "plan_step", "plan_fix", "plan_close"];
+        let captain = offered(Some("orchestrator"), None);
+        assert!(plan_tools.iter().all(|tool| captain.iter().any(|name| name == tool)), "{captain:?}");
+        for (role, task) in [(None, None), (Some("worker"), None), (Some("global-orchestrator"), None), (Some("taste-chat"), None), (Some("orchestrator"), Some("task-1"))] {
+            let names = offered(role, task);
+            assert!(!names.iter().any(|name| name.starts_with("plan_")), "{role:?} with task {task:?} is offered {names:?}");
+        }
+        let listed = tool_definitions(true, false, Seat::Captain);
+        let about = |name: &str| listed.as_array().unwrap().iter().find(|tool| tool["name"] == name).unwrap()["description"].as_str().unwrap().to_owned();
+        let set = about("plan_set");
+        for limit in ["8 lists", "20 steps", "120 steps", "6 unfinished plans", "60", "300", "80"] {
+            assert!(set.contains(limit), "plan_set names the limit {limit}: {set}");
+        }
+        assert!(about("plan_step").contains("200"), "{}", about("plan_step"));
+        let fix = about("plan_fix");
+        assert!(fix.contains("6 steps") && fix.contains("3 fixes"), "{fix}");
+        assert!(about("plan_close").contains("200"), "{}", about("plan_close"));
+
+        let call = json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": { "name": "plan_set", "arguments": { "title": "Ship the form", "lists": [{ "name": "Build", "steps": [{ "name": "Write" }, { "name": "Test" }] }] } } });
+        let answer = "p1 rev 1: Ship the form\nl1 Build: s1 pending, s2 pending";
+        let (replies, heard) = over_socket(None, std::slice::from_ref(&call), vec![Ok(answer.into())]);
+        assert_eq!(heard, [r#"{"kind":"project","tab":"tab-1","tool":{"name":"plan_set","plan":null,"new":false,"title":"Ship the form","lists":[{"id":null,"name":"Build","steps":[{"id":null,"name":"Write","what":null},{"id":null,"name":"Test","what":null}]}]}}"#]);
+        assert_eq!(replies[0]["result"], json!({ "content": [{ "type": "text", "text": answer }], "isError": false }));
+        let ask = |name, args| project_request(name, &args, Some("tab-9".into())).map(|m| serde_json::to_string(&m).unwrap());
+        assert_eq!(ask("plan_step", json!({ "step": "s2", "state": "failed", "note": "The suite is red." })), Ok(r#"{"kind":"project","tab":"tab-9","tool":{"name":"plan_step","step":"s2","state":"failed","note":"The suite is red."}}"#.into()));
+        assert_eq!(ask("plan_fix", json!({ "step": "s2", "steps": [{ "name": "Fix the test" }] })), Ok(r#"{"kind":"project","tab":"tab-9","tool":{"name":"plan_fix","step":"s2","steps":[{"name":"Fix the test","what":null}]}}"#.into()));
+        assert_eq!(ask("plan_close", json!({ "plan": "p1", "reason": "The user dropped it." })), Ok(r#"{"kind":"project","tab":"tab-9","tool":{"name":"plan_close","plan":"p1","reason":"The user dropped it."}}"#.into()));
+        assert_eq!(ask("plan_step", json!({ "step": "s2", "state": "late" })), Err("plan_step: unknown variant `late`, expected one of `pending`, `running`, `waiting`, `done`, `failed`".into()));
     }
 
     #[test]

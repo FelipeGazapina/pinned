@@ -208,6 +208,10 @@ pub struct TabView {
     /// press left the mode unknown until a hook reports it. An older node never sends it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub read_only: bool,
+    /// A Captain's plans as the Orchestrator panel glances at them. The full plans are read with
+    /// `Call::Plan`.
+    #[serde(default)]
+    pub plans: Vec<crate::plan::PlanGlance>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
@@ -486,6 +490,13 @@ pub enum Call {
         limit: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         before: Option<u64>,
+    },
+    /// `Vec<plan::PlanView>`: every plan the Captain of `tab` keeps, or only `plan`. Empty for a
+    /// tab that is not a Captain or keeps no such plan.
+    Plan {
+        tab: TabId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        plan: Option<String>,
     },
     /// `null`. Types `text` into the session as one prompt and submits it.
     Prompt { tab: TabId, text: String },
@@ -1863,6 +1874,7 @@ mod tests {
             stopped: None,
             questions: None,
             read_only: false,
+            plans: vec![],
         }
     }
 
@@ -1914,6 +1926,26 @@ mod tests {
         let older = serde_json::to_value(tab_view()).unwrap();
         assert!(older.get("questions").is_none(), "a tab with no questions sends none: {older}");
         assert_eq!(serde_json::from_value::<TabView>(older).unwrap().questions, None, "an older machine's tab reads with no questions");
+    }
+
+    #[test]
+    fn a_captains_tab_carries_its_plan_glances_and_an_older_tab_reads_without_them() {
+        use crate::plan::{CaptainState, PlanGlance};
+        let older = serde_json::to_value(tab_view()).unwrap();
+        assert!(older.get("plans").is_none(), "a tab with no plans sends none: {older}");
+        assert_eq!(serde_json::from_value::<TabView>(older).unwrap().plans, vec![], "an older machine's tab reads with no plans");
+        let glance = PlanGlance { id: "p1".into(), title: "Ship the form".into(), state: CaptainState::Working, done: 1, total: 3, now: Some("Test".into()), finished_at: None, strips: vec!["dr".into(), "p".into()] };
+        let captain = TabView { role: Some(Role::Orchestrator), plans: vec![glance], ..tab_view() };
+        let sent = serde_json::to_value(&captain).unwrap();
+        assert_eq!(sent["plans"], json!([{ "id": "p1", "title": "Ship the form", "state": "working", "done": 1, "total": 3, "now": "Test", "strips": ["dr", "p"] }]));
+        assert_eq!(serde_json::from_value::<TabView>(sent).unwrap(), captain);
+    }
+
+    #[test]
+    fn a_plan_call_names_its_tab_and_one_plan_only_when_it_wants_one() {
+        assert_eq!(serde_json::from_value::<Call>(json!({ "cmd": "plan", "tab": "tab-1" })).unwrap(), Call::Plan { tab: "tab-1".into(), plan: None });
+        round_trip(Call::Plan { tab: "tab-1".into(), plan: None }, json!({ "cmd": "plan", "tab": "tab-1" }));
+        round_trip(Call::Plan { tab: "tab-1".into(), plan: Some("p2".into()) }, json!({ "cmd": "plan", "tab": "tab-1", "plan": "p2" }));
     }
 
     #[test]

@@ -718,6 +718,7 @@ impl Tab {
             stopped: self.stopped.clone().filter(|_| !self.live()),
             questions: None,
             read_only: self.child_access() == crate::delegate::Access::ReadOnly,
+            plans: vec![],
         }
     }
 
@@ -887,6 +888,8 @@ pub struct Machine {
     turns: global::Turns,
     /// The questionnaires agents put to the user here. Takes no other lock while held.
     questions: Mutex<crate::questions::Questions>,
+    /// Every Captain session's plans, by its Claude session id.
+    plans: Mutex<crate::plan_store::PlanStore>,
     events: Box<dyn Fn(Event) + Send + Sync>,
     /// Arcs, so `emit` can call them without holding the lock a listener might subscribe under.
     listeners: Mutex<Vec<(u64, Arc<Listener>)>>,
@@ -1079,6 +1082,7 @@ impl Machine {
             turns: sent.turns(),
             sent: Mutex::new(sent),
             questions: Mutex::new(crate::questions::Questions::load(dir.as_deref())),
+            plans: Mutex::new(crate::plan_store::PlanStore::load(dir.as_deref())),
             events: Box::new(events),
             listeners: Mutex::new(vec![]),
             next_listener: AtomicU64::new(1),
@@ -1390,6 +1394,7 @@ impl Machine {
             Call::CancelSetupToken { account } => json(self.setup_tokens.cancel(&account)),
             Call::SwitchAccount { tab, account, cols, rows } => json(self.switch_account(&tab, &account, cols, rows)?),
             Call::Thread { tab, from, limit, before } => json(self.thread_page(&tab, from, limit, before)?),
+            Call::Plan { .. } => Err("plans are not built yet".into()),
             Call::Prompt { tab, text } => json(self.type_prompt(&tab, &text).map_err(NotTyped::for_person)?),
             Call::Workspace { tab } => {
                 let cwd = self.tab(&tab, |t| t.cwd.clone())?;
@@ -3593,6 +3598,7 @@ impl Machine {
                 };
                 text_json(self.change_tastes(call, reset)?.view(&scope))
             }
+            ProjectTool::PlanSet(_) | ProjectTool::PlanStep(_) | ProjectTool::PlanFix(_) | ProjectTool::PlanClose(_) => Err("plan tools are not built yet".into()),
             ProjectTool::TellOrchestrator { text } => match self.tab(tab, |t| role_of(&t.env))? {
                 Some((Role::Orchestrator, project)) => text_json(self.report_up(tab, &project, text, vec![])?),
                 _ => Err("only a project's Capitão reports to the global orchestrator".into()),
@@ -16846,6 +16852,106 @@ Have another model review a risky change before it goes ahead.";
                 ])
             )
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A machine on its socket with a Captain of Claude session `cap-1` and a plain thread of
+    /// session `plain-1`, both in project `app` and saved to sessions.json.
+    #[cfg(unix)]
+    fn captain_and_thread(dir: &Path) -> (Arc<Machine>, PathBuf, PathBuf, String, String) {
+        let sock = dir.join("pinned.sock");
+        let project = dir.join("app");
+        std::fs::create_dir_all(&project).unwrap();
+        let m = Machine::new(Launch { sock: sock.clone(), bins: BTreeMap::from([(Provider::Claude, thread_claude(dir))]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        m.listen(|_| Err("not the machine's".into())).unwrap();
+        let path = m.open_project(project.clone()).display().to_string();
+        let captain = m.open_orchestrator(&path).unwrap();
+        let thread = m.open_tab(Some(path), false).unwrap();
+        m.tab(&captain, |t| t.claude_session = Some("cap-1".into())).unwrap();
+        m.tab(&thread, |t| t.claude_session = Some("plain-1".into())).unwrap();
+        m.save_sessions();
+        (m, sock, project, captain, thread)
+    }
+
+    /// The plan glances `m` shows on `tab`, as a client reads them.
+    fn glances_on(m: &Machine, tab: &str) -> Value {
+        serde_json::to_value(&m.tabs().into_iter().find(|t| t.id == tab).unwrap().plans).unwrap()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_captains_plans_show_on_its_tab_come_back_with_its_resumed_session_and_go_with_it() {
+        let dir = temp("plans-kept");
+        let (m, sock, _project, captain, thread) = captain_and_thread(&dir);
+        // The Captain writes the way its MCP tools do: over the socket, as its tab.
+        let ask_as = |tab: &str, tool: Value| ask(&sock, &json!({ "kind": "project", "tab": tab, "tool": tool }).to_string());
+        let ship = json!({ "name": "plan_set", "title": "Ship the form", "lists": [{ "name": "Build", "steps": [{ "name": "Write" }, { "name": "Test" }] }, { "name": "Docs", "steps": [{ "name": "Guide" }] }] });
+        assert_eq!(ask_as(&captain, ship), Ok("p1 rev 1: Ship the form\nl1 Build: s1 pending, s2 pending\nl2 Docs: s3 pending".into()));
+        assert_eq!(ask_as(&captain, json!({ "name": "plan_step", "step": "s1", "state": "done" })), Ok("p1 rev 2: Ship the form\nl1 Build: s1 done, s2 pending\nl2 Docs: s3 pending".into()));
+        assert_eq!(ask_as(&captain, json!({ "name": "plan_step", "step": "s2", "state": "running" })), Ok("p1 rev 3: Ship the form\nl1 Build: s1 done, s2 running\nl2 Docs: s3 pending".into()));
+        let login = json!({ "name": "plan_set", "new": true, "title": "Fix login", "lists": [{ "name": "Fix", "steps": [{ "name": "Find" }] }] });
+        assert_eq!(ask_as(&captain, login), Ok("p2 rev 1: Fix login\nl3 Fix: s4 pending".into()));
+        let glances = json!([
+            { "id": "p1", "title": "Ship the form", "state": "working", "done": 1, "total": 3, "now": "Test", "strips": ["dr", "p"] },
+            { "id": "p2", "title": "Fix login", "state": "idle", "done": 0, "total": 1, "strips": ["p"] },
+        ]);
+        assert_eq!(glances_on(&m, &captain), glances);
+        assert_eq!(glances_on(&m, &thread), json!([]), "a plain thread shows no plan");
+
+        let ids = |answer: Value| answer.as_array().unwrap().iter().map(|p| p["id"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        assert_eq!(ids(m.call(Call::Plan { tab: captain.clone(), plan: None }).unwrap()), ["p1", "p2"]);
+        let login = m.call(Call::Plan { tab: captain.clone(), plan: Some("p2".into()) }).unwrap();
+        assert_eq!(ids(login.clone()), ["p2"]);
+        assert_eq!(login[0]["lists"][0]["steps"][0], json!({ "id": "s4", "name": "Find", "what": "", "state": "pending", "why": null, "cost": null, "task": null, "fixes": [] }));
+        assert_eq!(m.call(Call::Plan { tab: captain.clone(), plan: Some("p9".into()) }), Ok(json!([])), "a plan the Captain no longer keeps reads as none");
+        assert_eq!(m.call(Call::Plan { tab: thread.clone(), plan: None }), Ok(json!([])), "a plain thread keeps no plan");
+
+        // A session that no tab holds after the restart is gone, and so are its plans.
+        let orphan = crate::plan::SetCall { title: Some("Old".into()), lists: vec![crate::plan::ListInput { id: None, name: "Old".into(), steps: vec![crate::plan::StepInput { id: None, name: "Gone".into(), what: None }] }], ..Default::default() };
+        m.plans.lock().unwrap().write("gone-1", |plans| crate::plan::set(plans, orphan, 1, &[], 1)).unwrap();
+        let saved = || std::fs::read_to_string(dir.join("config/plans.json")).unwrap();
+        assert!(saved().contains("gone-1"), "{}", saved());
+        m.quit();
+
+        let again = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, dir.join("claude"))]), ..launch() }, Some(dir.join("config")), None, |_| {});
+        again.restore_tabs();
+        let resumed = again.tabs().into_iter().find(|t| t.session.as_deref() == Some("cap-1")).unwrap().id;
+        assert_eq!(glances_on(&again, &resumed), glances, "the resumed Captain has its plans back");
+        assert_eq!(ids(again.call(Call::Plan { tab: resumed.clone(), plan: None }).unwrap()), ["p1", "p2"]);
+        assert!(again.plans.lock().unwrap().get("gone-1").is_none());
+        assert!(saved().contains("cap-1") && !saved().contains("gone-1"), "{}", saved());
+
+        again.close_tab(&resumed);
+        assert!(again.plans.lock().unwrap().get("cap-1").is_none(), "the Captain's session went with its tab");
+        assert!(!saved().contains("cap-1"), "{}", saved());
+        again.quit();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_plan_tool_forged_by_a_tab_that_is_not_a_captain_is_refused_and_stores_nothing() {
+        let dir = temp("plans-forged");
+        let (m, sock, project, captain, thread) = captain_and_thread(&dir);
+        let tools = [
+            json!({ "name": "plan_set", "title": "Not mine", "lists": [{ "name": "Build", "steps": [{ "name": "Write" }] }] }),
+            json!({ "name": "plan_step", "step": "s1", "state": "done" }),
+            json!({ "name": "plan_fix", "step": "s1", "steps": [{ "name": "Again" }] }),
+            json!({ "name": "plan_close", "plan": "p1", "reason": "Not mine." }),
+        ];
+        let refused = Err("only a project's Captain keeps a plan".to_owned());
+        for tool in &tools {
+            assert_eq!(ask(&sock, &json!({ "kind": "project", "tab": thread, "tool": tool }).to_string()), refused, "a plain thread: {tool}");
+        }
+        m.tab(&thread, |t| t.env = role_env(Role::Worker, &project)).unwrap();
+        for tool in &tools {
+            assert_eq!(ask(&sock, &json!({ "kind": "project", "tab": thread, "tool": tool }).to_string()), refused, "a worker: {tool}");
+        }
+        assert!(m.plans.lock().unwrap().get("plain-1").is_none());
+        assert!(!dir.join("config/plans.json").exists(), "nothing was written");
+        assert!(m.tabs().iter().all(|t| t.plans.is_empty()));
+        assert_eq!(ask(&sock, &json!({ "kind": "project", "tab": captain, "tool": tools[0] }).to_string()), Ok("p1 rev 1: Not mine\nl1 Build: s1 pending".into()), "the Captain itself may");
+        m.quit();
         let _ = std::fs::remove_dir_all(dir);
     }
 }

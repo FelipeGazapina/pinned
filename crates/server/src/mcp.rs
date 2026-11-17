@@ -765,6 +765,7 @@ mod tests {
             stopped: None,
             questions: None,
             read_only: false,
+            plans: vec![],
         }
     }
 

@@ -26,7 +26,7 @@ pub const GLANCE_TEXT: usize = 32;
 const DONE_WITH_LIST: &str = "Done with the list's task";
 
 /// The state a step has, as the Captain reported it or as a task derives it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum State {
     Pending,
@@ -37,7 +37,7 @@ pub enum State {
 }
 
 /// The state of one Captain's plan as a whole, which the Orchestrator panel sorts by.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CaptainState {
     NeedsYou,
@@ -127,7 +127,7 @@ pub struct Fix {
 }
 
 /// The `set` arguments. Ids are optional and match existing lists and steps of the plan.
-#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SetCall {
     #[serde(default)]
     pub plan: Option<String>,
@@ -139,7 +139,7 @@ pub struct SetCall {
     pub lists: Vec<ListInput>,
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ListInput {
     #[serde(default)]
     pub id: Option<String>,
@@ -148,7 +148,7 @@ pub struct ListInput {
     pub steps: Vec<StepInput>,
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct StepInput {
     #[serde(default)]
     pub id: Option<String>,
@@ -158,7 +158,7 @@ pub struct StepInput {
 }
 
 /// The `step` arguments: a report on one step.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct StepCall {
     pub step: String,
     pub state: State,
@@ -167,13 +167,13 @@ pub struct StepCall {
 }
 
 /// The `fix` arguments: a new branch under a failed step.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FixCall {
     pub step: String,
     pub steps: Vec<NewStep>,
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct NewStep {
     pub name: String,
     #[serde(default)]
@@ -181,7 +181,7 @@ pub struct NewStep {
 }
 
 /// The `close` arguments. The plan is named by its id.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CloseCall {
     pub plan: String,
     pub reason: String,
@@ -220,7 +220,7 @@ pub enum Review {
 }
 
 /// One plan as a client reads it, with states and costs derived from the linked tasks.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct PlanView {
     pub id: String,
     pub rev: u64,
@@ -231,7 +231,7 @@ pub struct PlanView {
     pub lists: Vec<ListView>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct ListView {
     pub id: String,
     pub name: String,
@@ -239,7 +239,7 @@ pub struct ListView {
     pub steps: Vec<StepView>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct StepView {
     pub id: String,
     pub name: String,
@@ -252,14 +252,14 @@ pub struct StepView {
     pub fixes: Vec<FixView>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct FixView {
     pub id: String,
     pub steps: Vec<StepView>,
 }
 
 /// The small shape the Orchestrator panel shows for one plan: one dots string per list.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PlanGlance {
     pub id: String,
     pub title: String,
