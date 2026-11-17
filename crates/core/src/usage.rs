@@ -21,6 +21,10 @@ static FAILED_AT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mute
 /// dearest listed is US$ 27.50 / 137.50 per million). Cache reads and writes take the input rate.
 pub const CEILING_INPUT_USD: f64 = 30e-6;
 pub const CEILING_OUTPUT_USD: f64 = 150e-6;
+/// What a fast-mode row costs over its standard price when the list gives its model no fast tier.
+/// A deliberate over-estimate until the provider's figure is sourced; a team box's row priced
+/// this way costs at least the ceiling rate and shows as the ceiling does.
+pub const FAST_MULTIPLE: f64 = 6.0;
 /// A transcript last written this long before the window opens can't hold a line inside it.
 const MTIME_SLACK: u64 = 36 * 3600;
 /// Bare family names span generations, and `<synthetic>` lines were never billed.
@@ -693,6 +697,29 @@ mod tests {
         assert_eq!((twice.tokens_in, twice.tokens_out, twice.cost_usd), (22_000, 4000, None), "a model with no price leaves the cost unknown");
         let priced = PriceBook { prices: HashMap::from([("glm-5.3".to_owned(), Price { input: 1.0, output: 2.0, cache_read: Some(0.1), cache_write: None })]), ..PriceBook::default() };
         assert!((meter.usage(&table(), &priced).cost_usd.unwrap() - 0.066).abs() < 1e-9, "the user's own price counts");
+    }
+
+    #[test]
+    fn a_fast_row_with_no_fast_tier_costs_the_multiple_at_least_the_ceiling_and_counts_as_unpriced() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("s.jsonl");
+        let fast = json!({ "input_tokens": 0, "output_tokens": 1_000_000, "speed": "fast" });
+        let lines = [
+            assistant("m1", "r1", "s", "2026-11-09T10:00:00Z", "claude-opus-5-5", fast.clone()),
+            assistant("m2", "r2", "s", "2026-11-09T10:00:01Z", "claude-haiku-5", fast.clone()),
+            assistant("m3", "r3", "s", "2026-11-09T10:00:02Z", "dear-model", fast),
+        ];
+        std::fs::write(&file, lines.join("\n") + "\n").unwrap();
+        let mut meter = Meter::default();
+        meter.advance(&file).unwrap();
+        let mut rates = table();
+        rates.extend(parse_rates(&json!({ "dear-model": { "input_cost_per_token": 10e-6, "output_cost_per_token": 50e-6 } })));
+        let (usd, unpriced) = meter.priced(&rates, &PriceBook::default());
+        // Opus's listed fast tier: US$ 50. Haiku: 5 x FAST_MULTIPLE is under the ceiling's 150, so 150.
+        // The dear model: 50 x FAST_MULTIPLE, over the ceiling.
+        let expected = 50.0 + 150.0_f64.max(5.0 * FAST_MULTIPLE) + (50.0 * FAST_MULTIPLE).max(150.0);
+        assert!((usd - expected).abs() < 1e-6, "expected {expected}, got {usd}");
+        assert_eq!(unpriced, ["claude-haiku-5", "dear-model"], "a fast row priced by the multiple shows as the ceiling does");
     }
 
     #[test]
