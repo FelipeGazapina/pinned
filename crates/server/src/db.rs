@@ -675,7 +675,7 @@ async fn needed(client: &Client, needs: &Needs<'_>) -> Result<bool, tokio_postgr
 }
 
 /// Whether Postgres refused `e` for waiting on a lock past `LOCK_LIMIT`.
-fn lock_refused(e: &tokio_postgres::Error) -> bool {
+pub(crate) fn lock_refused(e: &tokio_postgres::Error) -> bool {
     e.code() == Some(&tokio_postgres::error::SqlState::LOCK_NOT_AVAILABLE)
 }
 

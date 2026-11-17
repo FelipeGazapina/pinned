@@ -645,8 +645,8 @@ impl ExtendTurn {
     /// Takes an advisory lock, waiting only for what is left of the deadline, whatever the session's lock timeout.
     async fn lock(&self, sql: &str, params: &[&(dyn tokio_postgres::types::ToSql + Sync)]) -> Result<(), String> {
         let left = self.deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis().max(1);
-        self.held.batch_execute(&format!("set local lock_timeout = {left}")).await.map_err(crate::db::err)?;
-        self.held.execute(sql, params).await.map_err(crate::db::err).map(drop)
+        self.held.batch_execute(&format!("set local lock_timeout = {left}")).await.map_err(lost_turn)?;
+        self.held.execute(sql, params).await.map_err(lost_turn).map(drop)
     }
 
     /// Frees the lock. What the turn guarded is already written, so a commit that fails only closes the connection.
@@ -659,8 +659,17 @@ impl ExtendTurn {
 
 /// A turn whose connection could not be opened or begun in time did nothing: it is refused as busy.
 fn busy_turn(e: impl std::fmt::Display) -> String {
-    eprintln!("pinned-server: a box's extend turn could not open its connection: {e}");
+    eprintln!("pinned-server: a box's extend turn could not open or keep its connection: {e}");
     crate::db::BUSY.to_owned()
+}
+
+/// A turn that waited for its lock past its deadline, or whose connection failed while it took
+/// it, did nothing either: busy, so the same request asks again.
+fn lost_turn(e: tokio_postgres::Error) -> String {
+    if crate::db::lock_refused(&e) {
+        return crate::db::BUSY.to_owned();
+    }
+    busy_turn(e)
 }
 
 /// The task record of a box an agent opened through `act`, which ended for `why` at unix ms
