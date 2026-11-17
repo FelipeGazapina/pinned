@@ -339,6 +339,16 @@ async function until(test, ms = 1500) {
   return true;
 }
 
+/** Waits until `test` holds on two reads at least 100 ms apart, so one frame without a menu while claude
+ * redraws does not count as the menu being gone. False after `ms`. */
+async function untilStays(test, ms) {
+  for (const end = Date.now() + ms; ; ) {
+    if (!(await until(test, Math.max(0, end - Date.now())))) return false;
+    await new Promise((r) => setTimeout(r, 100));
+    if (test()) return true;
+  }
+}
+
 /** Redraws what shows `tab`'s ask once it changed: the composer only when `tab` is the open thread,
  * since an ask answered from elsewhere must leave the open thread's draft and card alone. */
 function redrawAsk(tab) {
@@ -469,14 +479,27 @@ function approveNoteOf(tab) {
   if (!sameMenu(t.approveNoteMenu, menu)) {
     const left = t.approveNote.trim();
     clearApproveNote(t);
-    if (left) noteLeft(tab, left);
+    if (left) noteLeft(tab, left, menu);
   }
   return t.approveNote;
 }
 
-/** A note typed in a field whose menu closed: it goes to the composer when that is empty, and is shown
- * otherwise, so it never just vanishes. */
-function noteLeft(tab, text) {
+/** The first 60 characters of `text`, with an ellipsis when it was cut. */
+const noteExcerpt = (text) => (text.length > 60 ? `${text.slice(0, 60)}…` : text);
+
+/** A note typed in a field whose menu left or changed. When the menu now up is another plan, the note stays in
+ * the field, bound to it. Under any other menu it is shown and never put in the composer, where Enter would
+ * answer that menu with it. With no menu up it goes back to an empty composer, and is shown otherwise. */
+function noteLeft(tab, text, menu) {
+  const t = threadOf(tab);
+  if (menu && menuKind(menu) === "plan") {
+    Object.assign(t, { approveNote: text, approveNoteMenu: menu, approveError: "Claude's menu changed. Check your note before you approve." });
+    return;
+  }
+  if (menu) {
+    showComposerNote(`Claude's menu changed. Your note was not sent: ${noteExcerpt(text)}`, true);
+    return;
+  }
   if (tab === active && !prompt.value.trim()) {
     prompt.value = text;
     saveDraft(tab, text);
@@ -484,7 +507,7 @@ function noteLeft(tab, text) {
     showComposerNote("Claude's menu closed. Your note is back in the message box.", true);
     return;
   }
-  showComposerNote(`Claude's menu closed. Your note was not sent: ${text.slice(0, 60)}…`, true);
+  showComposerNote(`Claude's menu closed. Your note was not sent: ${noteExcerpt(text)}`, true);
 }
 
 /** Drops the field's state: its note, the menu it was typed under, its error and the label it drew. */
@@ -599,7 +622,7 @@ async function approveWithNote(tab, note) {
   }
   // A slow Enter (a remote machine) closes the menu late. The hold stays on until it has: releasing it
   // would let a second Approve type arrows and Enter while the first is in transit.
-  if (!(await until(() => !terminalMenu(tab), ANSWERED_MS))) return keepNote(tab, text, "Claude's menu didn't close");
+  if (!(await untilStays(() => !terminalMenu(tab), ANSWERED_MS))) return keepNote(tab, text, "Claude's menu didn't close");
   await sendNote(tab, text);
   return true;
 }
@@ -644,7 +667,7 @@ function keepNote(tab, text, why) {
     return false;
   }
   if (menu) {
-    showComposerNote(`${sentence} Your note was not sent.`, true);
+    showComposerNote(`${sentence} Your note was not sent: ${noteExcerpt(text)}`, true);
     return false;
   }
   if (tab === active && !prompt.value.trim()) {
@@ -654,7 +677,11 @@ function keepNote(tab, text, why) {
     showComposerNote(`${sentence} Your note is back in the message box.`, true);
     return false;
   }
-  showComposerNote(`${sentence} Your note was not sent: ${text.slice(0, 60)}…`, true);
+  if (tab !== active && !hasDraft(tab)) {
+    saveDraft(tab, text);
+    return false;
+  }
+  showComposerNote(`${sentence} Your note was not sent: ${noteExcerpt(text)}`, true);
   return false;
 }
 

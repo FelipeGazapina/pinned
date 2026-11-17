@@ -193,7 +193,7 @@ function page({ screen = PLAN, stuck = false, writeError = null, refuse = false,
       line(composer, "const writeTo"),
       decl(composer, "const arrowsTo"),
       decl(composer, "async function until"),
-      ...(composer.includes("async function untilStays") ? [decl(composer, "async function untilStays")] : []),
+      decl(composer, "async function untilStays"),
       decl(composer, "function redrawAsk"),
       line(composer, "const sameMenu"),
       line(composer, "const answeredKey"),
@@ -214,6 +214,7 @@ function page({ screen = PLAN, stuck = false, writeError = null, refuse = false,
       decl(composer, "const planApprove"),
       line(composer, "const visibleOf"),
       decl(composer, "function approveNoteOf"),
+      line(composer, "const noteExcerpt"),
       decl(composer, "function noteLeft"),
       decl(composer, "function clearApproveNote"),
       decl(composer, "function approveNoteField"),
@@ -512,14 +513,17 @@ test("a write the hub refuses leaves the note in the field with the reason, and 
   assert.match(String(w.tab.thread.approveError), /lost the connection/);
 });
 
-test("the note goes with the plan menu it was typed under: the next plan opens with its button, not the old note", () => {
+test("the note goes with the plan menu it was typed under: the next plan opens its field with the note and a warning", () => {
   const w = page();
-  attach(w, "stale note");
+  const { error } = attach(w, "stale note");
   w.tab.term.show(PLAN_OTHER);
   w.tab.menu = w.run("terminalMenu(tab)");
   w.run("renderApproval(tab)");
-  assert.doesNotMatch(w.ctx.approval.innerHTML, /class="approve-note"/);
-  assert.match(w.ctx.approval.innerHTML, /data-approve-note>Approve with note</);
+  assert.match(w.ctx.approval.innerHTML, /class="approve-note"/);
+  assert.doesNotMatch(w.ctx.approval.innerHTML, /data-approve-note>Approve with note</);
+  assert.equal(w.tab.thread.approveNote, "stale note");
+  assert.equal(error.textContent, "Claude's menu changed. Check your note before you approve.");
+  assert.equal(w.ctx.prompt.value, "");
 });
 
 test("a note whose menu left the screen is gone when the same plan comes back", () => {
