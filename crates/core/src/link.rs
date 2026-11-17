@@ -342,7 +342,7 @@ impl Syncer {
                 if *stopped.borrow() || stopped.has_changed().is_err() {
                     break 'run;
                 }
-                if shared.sync_now.swap(false, Ordering::SeqCst) {
+                if shared.sync_now.load(Ordering::SeqCst) && shared.online() {
                     break;
                 }
                 std::thread::park_timeout(left);
@@ -350,8 +350,9 @@ impl Syncer {
             wait = SYNC_EVERY;
             if shared.online() {
                 report_state(shared, machine);
-                if let Some(file) = file {
-                    self.cycle(shared, shared, machine, file);
+                match file {
+                    Some(file) => self.cycle(shared, shared, machine, file),
+                    None => shared.sync_now.store(false, Ordering::SeqCst),
                 }
             }
         }
@@ -364,6 +365,10 @@ impl Syncer {
     }
 
     fn cycle(&mut self, shared: &Shared, hub: &impl sync::Hub, machine: &Machine, file: &Path) {
+        // A user action ends every hold, so the refused pushes go out in this cycle.
+        if shared.sync_now.swap(false, Ordering::SeqCst) {
+            self.backoff.0.clear();
+        }
         if self.state.is_none() {
             match sync::State::load(file, &crate::machine::home().join(".claude")) {
                 Ok(loaded) => {
