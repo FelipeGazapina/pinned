@@ -14493,6 +14493,17 @@ Have another model review a risky change before it goes ahead.";
 
     #[test]
     #[cfg(unix)]
+    fn a_team_boxs_default_price_list_reads_no_file_from_its_config_dir() {
+        let RunCostBox { dir, config, m, sent, subject, .. } = run_costs_box("run-costs-default-list");
+        std::fs::write(config.join("usage-model-rates.json"), r#"{"claude-sonnet-5-5":{"input_cost_per_token":0,"output_cost_per_token":0}}"#).unwrap();
+        *m.list_rates.lock().unwrap() = team_box_rates(|| None);
+        m.report_run_costs(Instant::now());
+        assert_eq!(*sent.lock().unwrap(), vec![("wf-1".to_owned(), subject, 150.0)], "10 000 output tokens at the ceiling, not the file's 0");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn a_team_boxs_session_not_live_for_a_pass_keeps_its_earlier_total() {
         let RunCostBox { dir, m, sent, subject, tab, transcript, .. } = run_costs_box("run-costs-not-live");
         let t0 = Instant::now();
