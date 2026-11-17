@@ -12062,7 +12062,7 @@ while True:
         let opened = enqueue(&m, &path, "Ship the form.", "r-1").unwrap();
         let tab = opened["tab"].as_str().unwrap().to_owned();
         assert_eq!(opened, json!({ "outcome": "iniciado", "tab": tab }), "the project had no Capitão");
-        assert_eq!(started(&claude, &tab), [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "[Orchestrator] Ship the form.", "--append-system-prompt", &capitao]);
+        assert_eq!(started(&claude, &tab), [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--dangerously-skip-permissions", "[Orchestrator] Ship the form.", "--append-system-prompt", &capitao]);
         assert_eq!(enqueue(&m, &path, "Then the footer.", "r-2"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })), "the message it started on was not taken yet");
 
         let api = dir.join("api");
@@ -12072,7 +12072,7 @@ while True:
         m.start_claude(&fresh, 80, 24).unwrap();
         started(&claude, &fresh);
         assert_eq!(enqueue(&m, &api_path, "- Fix the README.", "r-3"), Ok(json!({ "outcome": "iniciado", "tab": fresh })));
-        assert_eq!(started(&claude, &fresh)[7..9], ["[Orchestrator] - Fix the README.", "--append-system-prompt"]);
+        assert_eq!(started(&claude, &fresh)[8..10], ["[Orchestrator] - Fix the README.", "--append-system-prompt"]);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -12145,7 +12145,7 @@ while True:
         let send = format!(r#""name":"send_to_captain","project":"{path}","message":"Ship the form.","request_id":"r-1""#);
         let sent: Value = serde_json::from_str(&tool(&global, &send).unwrap()).unwrap();
         assert_eq!(sent["outcome"], json!("iniciado"));
-        assert_eq!(started(&claude, sent["tab"].as_str().unwrap())[7], "[Orchestrator] Ship the form.");
+        assert_eq!(started(&claude, sent["tab"].as_str().unwrap())[8], "[Orchestrator] Ship the form.");
         let elsewhere = r#""name":"send_to_captain","project":"github.com/o/elsewhere","message":"x","request_id":"r-2""#;
         assert_eq!(tool(&global, elsewhere), Err("github.com/o/elsewhere is not a project on this machine, and the hub can't list the other machines' projects (this machine is not linked to a hub): name it as <machine id>:<path>".into()));
         assert_eq!(tool(&global, r#""name":"agents""#), Err("the global orchestrator does no project work: hand it to the project's Capitão with send_to_captain".into()));
@@ -12192,7 +12192,7 @@ while True:
 
         m.set_hub_id("m-mini".into(), "mini".into());
         let here = m.send_to_captain(&mine, None, "Ship it.", "r-5").unwrap();
-        assert_eq!(started(&claude, here.tab())[7], "[Orchestrator] Ship it.");
+        assert_eq!(started(&claude, here.tab())[8], "[Orchestrator] Ship it.");
         assert_eq!(relayed.lock().unwrap().len(), 3, "a project named by this machine's id went to the hub");
 
         let checkout = |machine: &str, name: &str, online: bool| json!({ "machine": machine, "machine_name": name, "online": online, "path": "/w/site", "captain": "livre" });
@@ -12259,7 +12259,7 @@ while True:
         let global = first["tab"].as_str().unwrap().to_owned();
         assert_eq!(first, json!({ "outcome": "iniciado", "tab": global }));
         let folder = dir.join("config/home/.pinned/orquestrador").display().to_string();
-        assert_eq!(started(&claude, &global), [&folder, "global-orchestrator", "", "--settings", hooks::GLOBAL_SETTINGS, "--plugin-dir", "p", "[pinned] Capitão site (MacBook) [m1 tab-1a-3]: Done: PR #12 is open.", "--append-system-prompt", &format!("{}\n\n{}", global::prompt("Orchestrator", &crate::account::hostname()), taste::Taste::default().brief())]);
+        assert_eq!(started(&claude, &global), [&folder, "global-orchestrator", "", "--settings", hooks::GLOBAL_SETTINGS, "--plugin-dir", "p", "--dangerously-skip-permissions", "[pinned] Capitão site (MacBook) [m1 tab-1a-3]: Done: PR #12 is open.", "--append-system-prompt", &format!("{}\n\n{}", global::prompt("Orchestrator", &crate::account::hostname()), taste::Taste::default().brief())]);
         assert_eq!(call(), Ok(first), "a repeated report answers the first outcome");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -12312,14 +12312,14 @@ while True:
         let sent: Value = serde_json::from_str(&tool(&format!(r#""name":"send_to_captain","project":"{path}","message":"Ship the form.","request_id":"r-1""#)).unwrap()).unwrap();
         let capitao = sent["tab"].as_str().unwrap().to_owned();
         assert_eq!(sent, json!({ "outcome": "iniciado", "tab": capitao }));
-        assert_eq!(started(&claude, &capitao)[7], "[Orchestrator] Ship the form.");
+        assert_eq!(started(&claude, &capitao)[8], "[Orchestrator] Ship the form.");
         assert_eq!(overview(), projects("trabalhando", &capitao), "the message started its turn before any hook said so");
 
         said(&dir, "s1", "The form validates now. PR #12 is open.");
         let done = serde_json::to_string(&Message::Agent(AgentEvent { hook_feedback: true, ..hook(&capitao, AgentStatus::Done) })).unwrap();
         ask(&sock, &done).unwrap();
         let report = format!("[pinned] Capitão site ({host}) [m-mini {capitao}]: The form validates now. PR #12 is open.");
-        assert_eq!(started(&claude, &global_tab)[7..], [report, "--append-system-prompt".into(), format!("{}\n\n{}", global::prompt("Orchestrator", &host), taste::Taste::default().brief())], "the report started the global orchestrator");
+        assert_eq!(started(&claude, &global_tab)[8..], [report, "--append-system-prompt".into(), format!("{}\n\n{}", global::prompt("Orchestrator", &host), taste::Taste::default().brief())], "the report started the global orchestrator");
         assert_eq!(m.sent.lock().unwrap().find("r-1").map(|s| s.progress), Some(Progress::Answered));
 
         assert_eq!(overview(), projects("livre", &capitao));
@@ -12980,7 +12980,7 @@ while True:
         m.start_claude(&tab, 80, 24).unwrap();
         let args = started(&claude, &tab);
         let prompt = format!("{}\n\n{}\n\n{}\n\n{}\n\n{}", crate::device::AGENT_PROMPT, Role::Orchestrator.prompt(), taste::Taste::default().brief(), taste::Taste::default().limits().hint(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
-        assert_eq!(args, [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--append-system-prompt", &prompt]);
+        assert_eq!(args, [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--dangerously-skip-permissions", "--append-system-prompt", &prompt]);
         assert_eq!(m.view(&tab).unwrap().role, Some(Role::Orchestrator));
         let review = project.join(".claude/worktrees/pinned-1/src").display().to_string();
         m.record_event(AgentEvent { status: AgentStatus::Working, cwd: Some(review), message: None, tab: Some(tab.clone()), session: Some("s1".into()), title: None, resume_at: None, prompt: None, snapshot: None, permission_mode: None, hook_feedback: false, reply: None });
@@ -13022,7 +13022,7 @@ Review each worker's diff before you accept its work.
 Deploys go through the VPS.";
         let cap = "pinned enforces these delegation limits on delegate_task: at most 4 workers at once, models up to the mid tier, effort up to max, 480 minutes per worker, US$ 2.00 per worker. A call past them is refused, and a worker past its time or budget is stopped; if a limit blocks you, tell the user to raise it in Settings › Way of working rather than working around it. The tier covers the model each worker runs on, not the models it picks for its own subagents.";
         let capitao = format!("{}\n\n{site_brief}\n\n{cap}\n\n{}", Role::Orchestrator.prompt(), global::captain_prompt("Orchestrator", global::ReportPolicy::Auto));
-        assert_eq!(started(&claude, &tab), [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--append-system-prompt", &capitao]);
+        assert_eq!(started(&claude, &tab), [&path, "orchestrator", &path, "--settings", "s", "--plugin-dir", "p", "--dangerously-skip-permissions", "--append-system-prompt", &capitao]);
         assert_eq!(asked.load(Ordering::SeqCst), 1, "the Capitão's start asked the hub once");
         let kept: Value = serde_json::from_slice(&std::fs::read(config.join("taste.json")).unwrap()).unwrap();
         assert_eq!(kept["projects"], account["projects"], "the hub's answer is kept for when it can't answer");
@@ -14926,12 +14926,11 @@ Have another model review a risky change before it goes ahead.";
                 "s",
                 "--plugin-dir",
                 "p",
+                "--dangerously-skip-permissions",
                 "--name",
                 "JSON output",
                 "--effort",
                 "high",
-                "--permission-mode",
-                "auto",
                 "JSON output\n\nAdd a --json flag to the CLI.",
                 "--model",
                 "claude-sonnet-5-5",
@@ -14985,7 +14984,7 @@ Have another model review a risky change before it goes ahead.";
         m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
         let path = m.open_project(project).display().to_string();
         let captain = m.open_orchestrator(&path).unwrap();
-        let reply = delegate_task(&m, &captain, json!({ "task": "Compare the screens with the boards.", "title": "Board check", "target": target }));
+        let reply = delegate_task(&m, &captain, json!({ "task": "Compare the screens with the boards.", "title": "Board check", "target": target, "runtimeMode": "auto" }));
         let (task, child) = (reply["taskId"].as_str().unwrap().to_owned(), reply["tabId"].as_str().unwrap().to_owned());
         let transcripts = config.join("accounts/work/projects/app");
         std::fs::create_dir_all(&transcripts).unwrap();
@@ -15957,7 +15956,7 @@ Have another model review a risky change before it goes ahead.";
         let opened = enqueue(&m, &path, "Ship the form.", "r-1").unwrap();
         let tab = opened["tab"].as_str().unwrap().to_owned();
         let args = started(&claude, &tab);
-        assert_eq!(args[7..9], ["[Head pinned office] Ship the form.", "--append-system-prompt"]);
+        assert_eq!(args[8..10], ["[Head pinned office] Ship the form.", "--append-system-prompt"]);
         let prompt = args.last().unwrap();
         assert!(prompt.contains("\"[Head pinned office] \""), "{prompt}");
         assert!(!prompt.lines().any(|line| line.trim_start().to_ascii_lowercase().starts_with("[pinned]")), "{prompt}");
