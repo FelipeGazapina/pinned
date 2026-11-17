@@ -1781,11 +1781,13 @@ pub trait Storage: Send + Sync {
 
 pub struct FileStorage {
     dir: PathBuf,
+    /// The (workflow, key) fires this process claimed. No other process reads the folder's store.
+    fired: Mutex<BTreeSet<(String, String)>>,
 }
 
 impl FileStorage {
     pub fn new(dir: PathBuf) -> Self {
-        Self { dir }
+        Self { dir, fired: Mutex::default() }
     }
 }
 
@@ -1848,6 +1850,10 @@ impl Storage for FileStorage {
 
     fn save_runs(&self, bytes: &[u8]) -> Result<(), String> {
         replace_file(&self.dir, "runs.json", bytes)
+    }
+
+    fn claim_fire(&self, workflow: &str, key: &str) -> Result<bool, String> {
+        Ok(self.fired.lock().unwrap().insert((workflow.to_owned(), key.to_owned())))
     }
 }
 
