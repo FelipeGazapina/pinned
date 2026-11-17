@@ -9392,8 +9392,17 @@ impl ExtendLockHolder {
     /// Ends the connection of a hub's turn once it waits on a lock held here, as a Postgres that
     /// drops it does.
     fn end_waiting_turn(&self) {
-        let sql = "select pg_terminate_backend(pid) from pg_stat_activity where datname = current_database() and pid <> pg_backend_pid() and pid <> $1 and query like '%pinned-extend-%' and wait_event_type = 'Lock'";
-        wait_for("a turn waiting on the lock", || !self.runtime.block_on(self.watcher.query(sql, &[&self.pid])).unwrap().is_empty());
+        self.end_turn_where("wait_event_type = 'Lock'");
+    }
+
+    /// Ends the connection of a hub's turn once it holds its locks and waits for the hub's next statement.
+    fn end_holding_turn(&self) {
+        self.end_turn_where("state = 'idle in transaction'");
+    }
+
+    fn end_turn_where(&self, condition: &str) {
+        let sql = format!("select pg_terminate_backend(pid) from pg_stat_activity where datname = current_database() and pid <> pg_backend_pid() and pid <> $1 and query like '%pinned-extend-%' and {condition}");
+        wait_for("a turn to end", || !self.runtime.block_on(self.watcher.query(&sql, &[&self.pid])).unwrap().is_empty());
     }
 }
 
@@ -9760,6 +9769,31 @@ fn an_extend_box_ask_whose_turn_connection_ends_in_its_lock_is_busy_and_asked_ag
     let (again, _) = hub.runtime.block_on(timed_extend(&hub, &account, &ana, &machine, 0.5, Some("r-ended"))).unwrap();
     assert_eq!(again.as_ref().map(|a| a["outcome"].clone()), Ok(json!("pending")), "the same request id asks again: {again:?}");
     assert_eq!(waiting_actions(&mut owner), ["extend_box"]);
+}
+
+/// An ask whose turn connection ends while its check runs lost the locks that kept another hub's
+/// asks out, so it does not wait for the owner: it hears the hub is busy, writes no row, and the
+/// same request id asks again. Many other acts wait for the owner, so the check takes a while.
+#[test]
+fn an_extend_box_ask_whose_turn_connection_ends_in_its_check_is_busy_and_does_not_wait() {
+    let ExtendSetup { hub, account, ana, machine, .. } = extend_setup("extend_turn_lost");
+    let first = extend_as(&ana.dir, &ana.tab, &machine, 0.25, None).unwrap();
+    let id = first["id"].as_str().unwrap();
+    admin_on(&hub.database, &format!("insert into agent_confirmations (id, account, machine, tab, role, action, args) select gen_random_uuid(), account, machine, tab, role, 'open_box', args || jsonb_build_object('pad', repeat('x', 200)) from agent_confirmations, generate_series(1, 20000) where id = '{id}'"));
+    let watcher = ExtendLockHolder::take(&hub.database, account, &[]);
+    let account = hub.runtime.block_on(hub.hub().account(account)).unwrap();
+    let ask = timed_extend(&hub, &account, &ana, &machine, 0.5, Some("r-lost"));
+    watcher.end_holding_turn();
+    let (refused, _) = hub.runtime.block_on(ask).unwrap();
+    watcher.release();
+    assert_eq!(refused, Err(pinned_core::wire::HUB_BUSY.to_owned()));
+    let rows = "select count(*) from agent_actions where action = 'extend_box' and request_id = 'r-lost'";
+    assert_eq!(count_on(&hub.database, rows), 0, "the busy ask wrote no row");
+    let held = "select count(*) from agent_confirmations where action = 'extend_box' and decided_at is null";
+    assert_eq!(count_on(&hub.database, held), 1, "only the first ask waits for the owner");
+    let (again, _) = hub.runtime.block_on(timed_extend(&hub, &account, &ana, &machine, 0.5, Some("r-lost"))).unwrap();
+    assert_eq!(again.as_ref().map(|a| a["outcome"].clone()), Ok(json!("pending")), "the same request id asks again: {again:?}");
+    assert_eq!(count_on(&hub.database, held), 2);
 }
 
 /// An ask whose turn connection Postgres takes and never answers did nothing: it hears the hub is
