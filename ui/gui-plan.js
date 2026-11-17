@@ -158,15 +158,19 @@ function planDetectDropped(t) {
   if (changed) savePanel(t);
 }
 
-/** A new plan id opens the surface once, on the viewed Captain, with its panel closed. */
+/** A new plan id opens the surface once, on the viewed Captain, with its panel closed. The opened ids belong to one
+ * session: a resume restarts plan ids at p1, so a session change starts the list over and only that session's ids stay. */
 function planAutoOpen(t) {
   const p = panelOf(t);
-  const opened = p.autoOpened ?? [];
+  const session = t.view.session ?? null;
+  const opened = p.autoOpened?.session === session ? p.autoOpened.ids : [];
   const fresh = (t.view.plans ?? []).filter((g) => !g.finished_at && !opened.includes(g.id));
-  if (!fresh.length) return;
-  p.autoOpened = [...opened, ...fresh.map((g) => g.id)];
-  savePanel(t);
-  if (p.open) return;
+  const next = { session, ids: [...opened, ...fresh.map((g) => g.id)] };
+  if (JSON.stringify(next) !== JSON.stringify(p.autoOpened)) {
+    p.autoOpened = next;
+    savePanel(t);
+  }
+  if (!fresh.length || p.open) return;
   addSurface(t, p.surfaces.find((x) => x.kind === "plan") ?? { id: "plan", kind: "plan", title: "Plan" });
 }
 
