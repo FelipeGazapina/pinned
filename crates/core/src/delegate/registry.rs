@@ -2565,6 +2565,20 @@ mod tests {
     }
 
     #[test]
+    fn ending_one_claim_leaves_another_claims_reports_alone() {
+        let delegates = Delegates::default();
+        delegates.queue_request("tab-1", None, "[Orchestrator] Ship the form.".into(), "r-1".into());
+        let (_, _, hook) = delegates.claim_news("tab-1").unwrap();
+        delegates.queue_request("tab-1", None, "[Orchestrator] Then the footer.".into(), "r-2".into());
+        let (text, _, typed) = delegates.claim_news("tab-1").unwrap();
+        assert_eq!(text, "[Orchestrator] Then the footer.");
+        delegates.release_claim(hook);
+        assert_eq!(delegates.claim_notice("tab-1").map(|(text, _)| text), Some("[Orchestrator] Ship the form.".into()), "putting one claim back put back another's");
+        assert_eq!(delegates.confirm_claim(typed), ["r-2"], "confirming one claim dropped another's");
+        assert_eq!(delegates.queued(), HashMap::from([("tab-1".to_owned(), 1)]));
+    }
+
+    #[test]
     fn a_remote_tab_id_with_a_line_break_is_one_line_in_the_end_notice() {
         let delegates = Delegates::default();
         let task = new_task(&delegates, "Fix");
