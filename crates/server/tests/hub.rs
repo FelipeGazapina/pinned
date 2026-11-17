@@ -9054,6 +9054,17 @@ fn an_agents_extend_box_is_refused_when_it_asks_if_it_cannot_run_and_checked_aga
     let done = decide(&mut owner, &last);
     assert_eq!((done["outcome"].as_str(), done["result"]["budget_usd"].as_f64()), (Some("done"), Some(3.0)), "{done}");
     assert_eq!(extend(&ana, 0.01), ceiling, "the box is at its Box budget");
+
+    // The box starts to end: an ask for it is refused at once too.
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let (client, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        let machine: uuid::Uuid = machine.parse().unwrap();
+        assert_eq!(client.execute("update boxes set phase = 'ending', reason = 'done' where machine = $1", &[&machine]).await.unwrap(), 1);
+    });
+    assert_eq!(extend(&ana, 0.01), Err("this box is already ending".into()));
+    assert_eq!(waiting_actions(&mut owner), Vec::<String>::new(), "no refused extend waits for the owner");
 }
 
 #[test]
