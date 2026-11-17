@@ -520,7 +520,7 @@ pub fn still_open(row: Option<BoxRow>) -> Result<BoxRow, String> {
 /// their sessions. A failure is only logged: the row's delete closes them first.
 async fn close_extends(hub: &Hub, account: &Arc<Account>, machine: Uuid) {
     match hub.db.close_extends(account.id, machine).await {
-        Ok(closed) => crate::surface::closed_extends(hub, account, closed).await,
+        Ok(closed) => crate::surface::closed_extends(hub, account, closed, None).await,
         Err(e) => eprintln!("pinned-server: could not close the extend asks of the box on machine {machine}: {e}"),
     }
 }
@@ -1827,7 +1827,7 @@ impl Boxes {
         self.delete_box(key, row).await?;
         // Before the row goes, on every try, so no row is deleted with an ask still waiting for its box.
         let closed = hub.db.close_extends(account.id, row.machine).await.map_err(Failed::Row)?;
-        crate::surface::closed_extends(hub, account, closed).await;
+        crate::surface::closed_extends(hub, account, closed, None).await;
         if hub.db.delete_box(row.account, &row.id).await.map_err(Failed::Row)? == 0 {
             eprintln!("pinned-server: delete_box of row {} matched no row", row.id);
         }

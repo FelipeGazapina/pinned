@@ -355,14 +355,15 @@ async fn ended_extend(hub: &Hub, account: &Arc<Account>, machine: Uuid, id: Uuid
     let Err(ended) = crate::boxes::still_open(hub.db.box_of(account.id, machine).await?) else { return Ok(None) };
     let closed = hub.db.close_extends(account.id, machine).await?;
     hub.db.notified(account.id, id).await?;
-    closed_extends(hub, account, closed.into_iter().filter(|closed| *closed != id).collect()).await;
+    closed_extends(hub, account, closed, Some(id)).await;
     Ok(Some(ended))
 }
 
 /// Tells the account's apps what waits now that a box's end closed the extend asks `closed`, and
-/// each asking session that its box ended. A session no tab runs gets its notice once its machine
-/// connects (`deliver_notices`).
-pub async fn closed_extends(hub: &Hub, account: &Arc<Account>, closed: Vec<Uuid>) {
+/// each asking session that its box ended. `asked` is the ask the act that found the end answers
+/// itself: its refusal is the act's, so it gets no notice, though the apps hear of the end all the
+/// same. A session no tab runs gets its notice once its machine connects (`deliver_notices`).
+pub async fn closed_extends(hub: &Hub, account: &Arc<Account>, closed: Vec<Uuid>, asked: Option<Uuid>) {
     if closed.is_empty() {
         return;
     }
@@ -370,7 +371,7 @@ pub async fn closed_extends(hub: &Hub, account: &Arc<Account>, closed: Vec<Uuid>
     let Some(hub) = hub.arc() else { return };
     let account = account.clone();
     tokio::spawn(async move {
-        for id in closed {
+        for id in closed.into_iter().filter(|id| Some(*id) != asked) {
             let told = match hub.db.confirmation(account.id, id).await {
                 Ok(Some(held)) => notify(&hub, &account, &held).await.map(drop),
                 Ok(None) => Ok(()),
