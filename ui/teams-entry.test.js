@@ -162,7 +162,7 @@ test("switching from a team to the personal account closes an open team page and
   assert.equal(a.context.teamsCurrent(), null);
   assert.equal(a.context.closed, 1);
   assert.deepEqual(a.context.opened, [], "the personal account opens no page of its own");
-  assert.equal(a.context.document.body.dataset.page, "", "the thread is what shows");
+  assert.equal(a.context.document.body.dataset.page, undefined, "no page is set, so the thread is what shows");
 
   a.run("teamsSelect(teamsKnown[0])");
   a.context.opened.length = 0;
