@@ -596,4 +596,36 @@ mod tests {
         assert!(matches!(&message, Message::Usage { account: Some(a), .. } if a == "work"));
         assert_eq!(serde_json::to_string(&message).unwrap(), line);
     }
+
+    /// The sentences both roles end their prompt with.
+    const SHARED_LINES: [&str; 2] = [
+        r#"Never reply with only "ok": reply once your answer is final, and say what you did or found."#,
+        "Name a task or a file instead of pasting its contents.",
+    ];
+
+    /// The sentences only the Capitão ends its prompt with, after the shared ones.
+    const CAPTAIN_LINES: [&str; 3] = [
+        "Before starting a piece of work, gather your questions for the user and ask the most blocking one first.",
+        "When the user skips a question, the skip holds for that task only.",
+        "When the user corrects the same thing a second time (check with memory_search), propose a test or a repo rule that stops it happening again.",
+    ];
+
+    #[test]
+    fn the_captain_prompt_carries_the_phase_one_lines() {
+        let prompt = Role::Orchestrator.prompt();
+        for line in SHARED_LINES.into_iter().chain(CAPTAIN_LINES) {
+            assert!(prompt.contains(line), "the captain prompt lacks: {line}");
+        }
+    }
+
+    #[test]
+    fn the_worker_prompt_carries_the_shared_lines_only() {
+        let prompt = Role::Worker.prompt();
+        for line in SHARED_LINES {
+            assert!(prompt.contains(line), "the worker prompt lacks: {line}");
+        }
+        for line in CAPTAIN_LINES {
+            assert!(!prompt.contains(line), "the worker prompt has a captain-only line: {line}");
+        }
+    }
 }
