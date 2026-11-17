@@ -5,3 +5,4 @@
 13:42:25 | step3 build update_live --no-run done | exit=0 | wall=0s | err=none | disk: 25G free, 19% used | mem: avail=209498MB
 13:43:38 | step3 build pinned-server bin | exit=0 | wall=68s | err=none | disk: 22G free, 27% used | mem: avail=209734MB
 13:47:57 | test1 a_binary_that_exits_before_it_is_ready_is_replaced_by_the_old_one HANG killed 240s; node pgid 7123 killed; node config dir removed by cleanup glob before log read | exit=137 | wall=240s | err=has been running for over 60 seconds | disk: 22G free, 28% used | mem: avail=208887MB
+13:52:06 | test2 a_binary_that_hangs_before_it_is_ready_is_replaced_by_the_old_one HANG killed 240s; node pgid 8127 killed; stderr read before cleanup | exit=137 | wall=240s | err=has been running for over 60 seconds | disk: 22G free, 28% used | mem: avail=209462MB
