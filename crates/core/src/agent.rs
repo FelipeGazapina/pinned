@@ -552,6 +552,13 @@ mod tests {
         assert_eq!(keys(&without_workflow([session_env("c1", &thread), other.clone()].concat())), [TAB_ENV], "a workflow on a subject");
         let by_hand = vec![(CONNECTOR_ENV.to_owned(), "c1".to_owned()), (TAB_ENV.to_owned(), "tab-1".to_owned())];
         assert_eq!(keys(&without_workflow(by_hand)), [TAB_ENV], "a workflow run by hand, with no subject");
+    }
+
+    #[test]
+    fn a_fork_of_a_worker_or_captain_session_is_a_plain_thread_by_design() {
+        // By design: a fork of a worker or Captain session drops its connector and subject.
+        let thread = Subject::SlackThread { channel: "C1".into(), thread: "1.2".into() };
+        let other = vec![(TAB_ENV.to_owned(), "tab-1".to_owned())];
         for reserved in [DELEGATE_CONNECTOR, CAPTAIN_CONNECTOR] {
             assert_eq!(keys(&without_workflow([session_env(reserved, &thread), other.clone()].concat())), [TAB_ENV], "{reserved}");
         }
