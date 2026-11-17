@@ -9236,6 +9236,139 @@ fn concurrent_extend_box_asks_for_one_box_wait_only_as_far_as_the_box_budget_goe
     assert_eq!(waiting_actions(&mut owner), ["extend_box"]);
 }
 
+/// The advisory lock of box extends, held on a connection of the test's own as another hub's turn
+/// holds it, and a second connection that counts the connections a hub's turns hold.
+struct ExtendLockHolder {
+    runtime: tokio::runtime::Runtime,
+    held: tokio_postgres::Client,
+    watcher: tokio_postgres::Client,
+    pid: i32,
+}
+
+impl ExtendLockHolder {
+    fn take(database: &str, account: uuid::Uuid, machines: &[&str]) -> ExtendLockHolder {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let (held, watcher, pid) = runtime.block_on(async {
+            let connect = || async {
+                let (client, connection) = tokio_postgres::connect(&format!("{}/{database}", postgres()), tokio_postgres::NoTls).await.unwrap();
+                tokio::spawn(connection);
+                client
+            };
+            let (held, watcher) = (connect().await, connect().await);
+            held.batch_execute("begin").await.unwrap();
+            for machine in machines {
+                let machine: uuid::Uuid = machine.parse().unwrap();
+                held.execute(&format!("select pg_advisory_xact_lock({})", pinned_server::boxes::EXTEND_KEY), &[&account, &machine]).await.unwrap();
+            }
+            let pid: i32 = held.query_one("select pg_backend_pid()", &[]).await.unwrap().get(0);
+            (held, watcher, pid)
+        });
+        ExtendLockHolder { runtime, held, watcher, pid }
+    }
+
+    /// The connections of the hub's that ran a box's extend lock and are open now.
+    fn turns(&self) -> i64 {
+        let sql = "select count(*) from pg_stat_activity where datname = current_database() and pid <> pg_backend_pid() and pid <> $1 and query like '%pinned-extend-box%'";
+        self.runtime.block_on(self.watcher.query_one(sql, &[&self.pid])).unwrap().get(0)
+    }
+
+    fn release(self) {
+        self.runtime.block_on(self.held.batch_execute("commit")).unwrap();
+    }
+}
+
+/// `asks`, the extend_box args of ana's agent, sent at once as the hub takes them from her machine,
+/// each on a task of its own: their answers, and the most turn connections open at one time meanwhile.
+fn extends_watched(hub: &TestHub, account: uuid::Uuid, ana: &Agent, asks: &[Value], lock: &ExtendLockHolder) -> (Vec<Result<Value, String>>, i64) {
+    let account = hub.runtime.block_on(hub.hub().account(account)).unwrap();
+    let running: Vec<_> = asks
+        .iter()
+        .map(|ask| {
+            let (running, account, origin) = (hub.hub().clone(), account.clone(), ana.machine.clone());
+            let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "args": ask })).unwrap();
+            hub.runtime.spawn(async move { pinned_server::surface::act(&running, &account, &origin, act).await })
+        })
+        .collect();
+    let mut most = 0;
+    while !running.iter().all(|ask| ask.is_finished()) {
+        most = most.max(lock.turns());
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let answers = running.into_iter().map(|ask| hub.runtime.block_on(ask).unwrap()).collect();
+    (answers, most)
+}
+
+/// An ask that could be no extend, an amount not above zero or a machine that is no box, is refused
+/// with its own text before it takes a turn: it opens no connection, even while another hub holds the box's lock.
+#[test]
+fn an_agents_extend_box_that_could_be_none_is_refused_before_it_opens_a_connection() {
+    let ExtendSetup { hub, account, ana, mut owner, machine, .. } = extend_setup("extend_no_turn");
+    let lock = ExtendLockHolder::take(&hub.database, account, &[&machine, &ana.machine]);
+    let asks = [json!({ "machine": ana.machine, "extra_usd": 1.0 }), json!({ "machine": machine, "extra_usd": 0.0 }), json!({ "machine": machine, "extra_usd": -1.0 })];
+    let (answers, turns) = extends_watched(&hub, account, &ana, &asks, &lock);
+    let refusals = [Err("this machine is no box".to_owned()), Err("name an amount above zero".to_owned()), Err("name an amount above zero".to_owned())];
+    assert_eq!(answers, refusals);
+    assert_eq!(turns, 0, "no refused ask opened a turn connection");
+    lock.release();
+    assert_eq!(refused_extends(&mut owner), 3);
+}
+
+/// Asks for one box made at once while another hub holds its lock: this hub opens one turn
+/// connection for that box at a time, the others wait in its line, and every one hears the hub is busy.
+#[test]
+fn concurrent_extend_box_asks_for_one_box_hold_one_connection_at_a_time() {
+    let ExtendSetup { hub, account, ana, mut owner, machine, .. } = extend_setup("extend_one_line");
+    let lock = ExtendLockHolder::take(&hub.database, account, &[&machine]);
+    let asks = vec![json!({ "machine": machine, "extra_usd": 0.5 }); 6];
+    let started = Instant::now();
+    let (answers, turns) = extends_watched(&hub, account, &ana, &asks, &lock);
+    assert_eq!(answers, vec![Err(pinned_core::wire::HUB_BUSY.to_owned()); 6]);
+    assert!(started.elapsed() < Duration::from_secs(4), "every ask is refused when its 2 s wait ends: {:?}", started.elapsed());
+    assert_eq!(turns, 1, "one turn connection waits on the lock, the other asks wait in the hub's line");
+    lock.release();
+    assert_eq!(waiting_actions(&mut owner), Vec::<String>::new(), "no busy ask waits for the owner");
+}
+
+/// An ask refused because the box's turn was busy did nothing: it writes no refusal, and the same
+/// request id asks again and is checked and held.
+#[test]
+fn a_busy_extend_box_ask_is_asked_again_with_its_request_id() {
+    let ExtendSetup { hub, account, ana, mut owner, machine, .. } = extend_setup("extend_busy_retry");
+    let lock = ExtendLockHolder::take(&hub.database, account, &[&machine]);
+    assert_eq!(extend_as(&ana.dir, &ana.tab, &machine, 0.5, Some("r-busy")), Err(pinned_core::wire::HUB_BUSY.into()));
+    lock.release();
+    let again = extend_as(&ana.dir, &ana.tab, &machine, 0.5, Some("r-busy")).unwrap();
+    assert_eq!(again["outcome"], "pending", "the retry is checked and waits for the owner: {again}");
+    assert_eq!(waiting_actions(&mut owner), ["extend_box"]);
+    assert_eq!(refused_extends(&mut owner), 0, "the busy ask wrote no refusal");
+}
+
+/// The box's turn is Postgres's advisory lock, shared by every hub on the database: while another
+/// connection holds it, an agent's ask and the owner's decision on an extend both wait about 2 s and
+/// hear the hub is busy, and the extend still waits undecided. Once it is free both go through.
+#[test]
+fn an_extend_box_ask_and_its_decision_wait_on_the_boxs_postgres_lock() {
+    let ExtendSetup { hub, account, ana, mut owner, machine, .. } = extend_setup("extend_pg_lock");
+    let first = extend_as(&ana.dir, &ana.tab, &machine, 0.5, None).unwrap();
+    assert_eq!(first["outcome"], "pending", "{first}");
+    let decide = |owner: &mut Client| owner.hub(json!({ "cmd": "decide_confirmation", "id": first["id"], "approve": true }));
+    let lock = ExtendLockHolder::take(&hub.database, account, &[&machine]);
+    let started = Instant::now();
+    assert_eq!(extend_as(&ana.dir, &ana.tab, &machine, 0.5, None), Err(pinned_core::wire::HUB_BUSY.into()), "the ask waits on the lock");
+    let asked = started.elapsed();
+    let started = Instant::now();
+    assert_eq!(decide(&mut owner), Err(pinned_core::wire::HUB_BUSY.into()), "the decision waits on the lock");
+    let decided = started.elapsed();
+    for waited in [asked, decided] {
+        assert!(waited >= Duration::from_millis(1500) && waited < Duration::from_secs(4), "about 2 s: {waited:?}");
+    }
+    assert_eq!(waiting_actions(&mut owner), ["extend_box"], "the extend still waits undecided");
+    lock.release();
+    assert_eq!(extend_as(&ana.dir, &ana.tab, &machine, 0.5, None).unwrap()["outcome"], "pending");
+    let done = decide(&mut owner).unwrap();
+    assert_eq!((done["outcome"].as_str(), done["result"]["budget_usd"].as_f64()), (Some("done"), Some(1.5)), "{done}");
+}
+
 #[test]
 fn a_worker_box_follows_only_its_access_setting_and_the_owner_answers_its_ask_on_a_locked_app() {
     let hub = TestHub::start_with_boxes("locked_box_worker", Signup::Open, fast());

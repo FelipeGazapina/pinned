@@ -465,10 +465,7 @@ pub async fn box_budget(hub: &Hub, account: &Account, repo: Option<&str>, asked:
 /// be: no box of the account's, a box already ending, or a total past the Box budget once `waiting`,
 /// what extends still waiting for the owner add, is counted too. An extend runs only after this.
 pub async fn extended(hub: &Hub, account: &Account, machine: Uuid, extra_usd: f64, waiting: f64) -> Result<(BoxRow, f64), String> {
-    if !(extra_usd > 0.0) {
-        return Err("name an amount above zero".into());
-    }
-    let row = hub.db.box_of(account.id, machine).await?.ok_or_else(|| "this machine is no box".to_owned())?;
+    let row = extend_of(hub, account, machine, extra_usd).await?;
     if matches!(row.phase, Phase::Ending(_)) {
         return Err("this box is already ending".into());
     }
@@ -483,26 +480,55 @@ pub async fn extended(hub: &Hub, account: &Account, machine: Uuid, extra_usd: f6
     Ok((row, total))
 }
 
+/// The account's box behind `machine`, or why no extend of `extra_usd` could be one: an amount
+/// not above zero, or a machine that is no box of the account's. It reads the box on the shared
+/// connection, so an ask refused here never takes a turn (`ExtendTurn`).
+pub async fn extend_of(hub: &Hub, account: &Account, machine: Uuid, extra_usd: f64) -> Result<BoxRow, String> {
+    if !(extra_usd > 0.0) {
+        return Err("name an amount above zero".into());
+    }
+    hub.db.box_of(account.id, machine).await?.ok_or_else(|| "this machine is no box".to_owned())
+}
+
 /// The key of the advisory lock of one box's extends: the account and the box's machine, as two
 /// 32-bit keys. Every other advisory lock of the hub takes one 64-bit key, a key space Postgres
 /// keeps apart from this one, so no other lock ever shares it.
-const EXTEND_KEY: &str = "hashtext('pinned-extend-box:' || $1::uuid::text), hashtext($2::uuid::text)";
+pub const EXTEND_KEY: &str = "hashtext('pinned-extend-box:' || $1::uuid::text), hashtext($2::uuid::text)";
 
 /// One box's turn for its extends: a transaction on a connection of its own holding the box's
 /// `pg_advisory_xact_lock`. An agent's ask holds it from its check until it waits for the owner,
 /// and the owner's approval from marking it decided until its budget is set, so no ask is checked
 /// while another is in between, on this hub or another one on the database. Asks for other boxes
 /// do not wait. `end` commits it; a turn dropped on an error closes its connection, which frees the lock.
+/// This hub's line of the box comes first, so the hub holds at most one such connection per box.
+/// Both waits together are bounded by `EXTEND_WAIT`: a turn not had by then (the line, then the
+/// advisory lock for what is left) is refused as `crate::db::BUSY`.
 pub struct ExtendTurn {
+    _line: tokio::sync::OwnedMutexGuard<()>,
     held: tokio_postgres::Client,
+}
+
+/// How long an extend waits for its box's turn, as long as Postgres's lock timeout.
+const EXTEND_WAIT: Duration = Duration::from_secs(2);
+
+/// This hub's line of one box's extends. A line nobody holds or waits for is dropped as another is taken.
+fn extend_line(account: Uuid, machine: Uuid) -> Arc<tokio::sync::Mutex<()>> {
+    static LINES: std::sync::LazyLock<Mutex<HashMap<(Uuid, Uuid), Arc<tokio::sync::Mutex<()>>>>> = std::sync::LazyLock::new(Mutex::default);
+    let mut lines = LINES.lock().unwrap();
+    lines.retain(|_, line| Arc::strong_count(line) > 1);
+    lines.entry((account, machine)).or_default().clone()
 }
 
 impl ExtendTurn {
     pub async fn take(hub: &Hub, account: Uuid, machine: Uuid) -> Result<ExtendTurn, String> {
+        let deadline = tokio::time::Instant::now() + EXTEND_WAIT;
+        let line = tokio::time::timeout_at(deadline, extend_line(account, machine).lock_owned()).await.map_err(|_| crate::db::BUSY.to_owned())?;
         let held = hub.db.own_client().await?;
-        held.batch_execute("begin").await.map_err(crate::db::err)?;
+        // The advisory lock waits only for what is left of the deadline, whatever the session's lock timeout.
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis().max(1);
+        held.batch_execute(&format!("begin; set local lock_timeout = {left}")).await.map_err(crate::db::err)?;
         held.execute(&format!("select pg_advisory_xact_lock({EXTEND_KEY})"), &[&account, &machine]).await.map_err(crate::db::err)?;
-        Ok(ExtendTurn { held })
+        Ok(ExtendTurn { _line: line, held })
     }
 
     /// Frees the lock. What the turn guarded is already written, so a commit that fails only closes the connection.

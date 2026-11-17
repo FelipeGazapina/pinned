@@ -95,7 +95,7 @@ fn json<T: serde::Serialize>(value: T) -> Result<Value, String> {
 }
 
 /// Runs `act` for the session in tab `act.tab` of `origin`, a machine of `account`, or holds it
-/// for the user's approval. Every outcome but a repeat writes one audit row.
+/// for the user's approval. Every outcome but a repeat or a busy refusal writes one audit row.
 pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: AgentAct) -> Result<Value, String> {
     let caller = Caller::of(account, origin, &act.tab)?;
     let request_id = act.request_id.as_deref().filter(|id| !id.is_empty());
@@ -108,6 +108,8 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
     }
     let mut admitted = match admit(hub, account, origin, &caller, &act).await {
         Ok(admitted) => admitted,
+        // Refused for a busy lock, nothing was done: no row, so the same request_id asks again.
+        Err(busy) if busy == crate::db::BUSY => return Err(busy),
         Err(refusal) => {
             let refusal = surface::mask_secrets(&refusal);
             trail.write(AuditOutcome::Refused, &refusal).await?;
@@ -253,6 +255,8 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
     let mut turn = None;
     if let Parsed::Hub(HubCall::ExtendBox { machine, extra_usd }) = &call {
         let machine = Uuid::parse_str(machine).map_err(|_| format!("this account has no machine {machine}"))?;
+        // An ask that could be no extend is refused before it takes a turn and its connection.
+        crate::boxes::extend_of(hub, account, machine, *extra_usd).await?;
         let held = ExtendTurn::take(hub, account.id, machine).await?;
         if !asked_before(hub, account, caller, act).await? {
             let waiting = waiting_extends(hub, account, machine).await?;
