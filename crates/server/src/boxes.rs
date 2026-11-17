@@ -4294,6 +4294,20 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn an_origin_moved_after_the_first_check_is_checked_again_right_before_the_push() {
+        let run = RescueRun::new();
+        let other = run._root.path().join("elsewhere.git");
+        run.git(&run.home, &["init", "-q", "--bare", other.to_str().unwrap()]);
+        run.hook("pre-commit", &format!("git config remote.origin.pushurl {}", other.display()));
+        std::fs::write(run.clone.join("notes.txt"), "half done\n").unwrap();
+        assert_eq!(run.rescue(), "pinned-rescue: refused remote\npinned-rescue: done\n");
+        assert_eq!(run.remote_branches(), "refs/heads/main\n");
+        assert_eq!(run.git(&other, &["for-each-ref", "--format=%(refname)"]), "", "the other repository got nothing");
+        assert_eq!(run.git(&run.clone, &["status", "--porcelain"]), "M  notes.txt\n", "the rescue commit is undone, its change kept staged");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn a_box_with_no_clone_of_the_tasks_repository_has_nothing_to_rescue() {
         let run = RescueRun::new();
         std::fs::rename(&run.clone, run.home.join("pinned/other")).unwrap();

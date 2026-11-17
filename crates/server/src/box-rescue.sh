@@ -1,6 +1,8 @@
 # Saves a worker's unpushed work before the hub deletes its box. The hub runs it only for a
-# repository GitHub confirmed private, and it saves only while the clone's origin fetches from and
-# pushes to that one repository alone: else it answers that and does nothing more.
+# repository GitHub confirmed private, and it saves only while the clone's origin, in the clone and in
+# each worktree of it, fetches from and pushes to that one repository alone: else it answers that and
+# does nothing more. It fetches and pushes from the clone itself, and checks origin there again
+# right before each push.
 # In the clone and in each worktree of it with uncommitted changes, it unstages everything, then
 # adds its tracked changes and the new files git does not ignore, except any whose path has a part
 # named like a secret (environment files, keys and certificates, credential and token stores,
@@ -97,22 +99,35 @@ found() {
     { for (v in value) if (index($0, v)) { hit = 1; exit } }
     END { if (unread) exit 2; exit !hit }'
 }
-# Origin's one URL, when it pushes to that URL alone, so what the scan takes as origin's is where the
-# push goes; else empty, and nothing is pushed. git expands insteadOf and pushInsteadOf in what it reads.
-origin=$(git remote get-url --all origin 2>/dev/null)
-case "$origin" in *'
-'*) origin='' ;; esac
-[ "$(git remote get-url --push --all origin 2>/dev/null)" = "$origin" ] || origin=''
-# Only while origin is the checked repository alone: one URL, on github.com, over https or ssh, with
-# no other user. Else nothing is committed or pushed.
-url=$(printf '%s' "$origin" | tr 'A-Z' 'a-z')
 checked=$(printf '%s' "$github" | tr 'A-Z' 'a-z')
-case "$url" in
-  "https://github.com/$checked" | "https://github.com/$checked.git" | "git@github.com:$checked" | "git@github.com:$checked.git" | \
-    "ssh://git@github.com/$checked" | "ssh://git@github.com/$checked.git") ;;
-  *) origin='' ;;
-esac
-[ -n "$checked" ] && [ -n "$origin" ] || { answer 'refused remote'; answer done; exit 0; }
+# Whether origin, as git reads it in the tree it runs in, fetches from and pushes to the checked
+# repository alone: one URL, on github.com, over https or ssh, with no other user, and its push URL
+# that same one. git expands insteadOf and pushInsteadOf in what it reads, and reads a worktree's
+# own config in that worktree.
+bound() {
+  [ -n "$checked" ] || return 1
+  url=$(git remote get-url --all origin 2>/dev/null) || return 1
+  case "$url" in *'
+'*) return 1 ;; esac
+  [ "$(git remote get-url --push --all origin 2>/dev/null)" = "$url" ] || return 1
+  case "$(printf '%s' "$url" | tr 'A-Z' 'a-z')" in
+    "https://github.com/$checked" | "https://github.com/$checked.git" | "git@github.com:$checked" | "git@github.com:$checked.git" | \
+      "ssh://git@github.com/$checked" | "ssh://git@github.com/$checked.git") return 0 ;;
+  esac
+  return 1
+}
+# Only while origin is the checked repository alone in the clone and in each worktree of it that is
+# there. Else nothing is committed or pushed.
+origin=1
+bound || origin=''
+while IFS= read -r tree; do
+  [ -n "$tree" ] && cd "$tree" 2>/dev/null || continue
+  bound || origin=''
+done <<EOF
+$trees
+EOF
+cd "$top" 2>/dev/null || origin=''
+[ -n "$origin" ] || { answer 'refused remote'; answer done; exit 0; }
 n=1
 # Empty until origin was fetched, then 0 when that worked.
 fetched=''
@@ -242,6 +257,8 @@ send() {
   case "$sent" in *" $2 "*) return 0 ;; esac
   case "$refused" in *" $1 "*) return 0 ;; esac
   sent="$sent$2 "
+  # From the clone itself, whatever tree $2 came from: a worktree's own config moves no fetch or push.
+  cd "$top" 2>/dev/null || { answer 'failed remote'; return 0; }
   [ -n "$(git rev-list -n 1 "$2" --not --remotes=origin 2>/dev/null)" ] || return 0
   # Once, before the first scan, when origin pushes where it fetches from: its branches as they are
   # now, so a stale one hides nothing, and its tags.
@@ -285,6 +302,8 @@ EOF
   lfs=''
   git log -p --cc --text --no-color --no-ext-diff --no-textconv --format= "$2" --not --remotes=origin 2>/dev/null |
     grep -q '^[-+]version https://git-lfs\.github\.com/spec/' && lfs=1
+  # Origin checked again where the push runs, right before it.
+  bound || { undo "$2"; answer 'refused remote'; return 0; }
   # Git LFS's pre-push hook still runs, and uploads nothing.
   GIT_LFS_SKIP_PUSH=1 git -c push.recurseSubmodules=no -c push.followTags=false push -q origin "$2:refs/heads/$ref" >/dev/null 2>&1 || { answer 'failed push'; return 0; }
   n=$((n + 1))
