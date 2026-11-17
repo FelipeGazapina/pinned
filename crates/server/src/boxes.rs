@@ -938,11 +938,13 @@ pub struct Rescue {
     pub saved: Vec<String>,
     /// Why some work could not be saved, as the end notice words it.
     pub failed: Option<String>,
+    /// How many new files whose names may hold a secret the saved branches left out.
+    pub left_out: usize,
 }
 
 impl Rescue {
     fn failed(why: impl Into<String>) -> Rescue {
-        Rescue { saved: Vec::new(), failed: Some(why.into()) }
+        Rescue { failed: Some(why.into()), ..Rescue::default() }
     }
 
     /// The sentence the task's end notice adds, or None when there was nothing to save.
@@ -952,6 +954,11 @@ impl Rescue {
             [one] => Some(format!("Unpushed work was saved to branch {one}.")),
             many => Some(format!("Unpushed work was saved to branches {}.", many.join(", "))),
         };
+        let saved = saved.map(|saved| match self.left_out {
+            0 => saved,
+            1 => format!("{saved} It left out 1 new file whose name may hold a secret."),
+            n => format!("{saved} It left out {n} new files whose names may hold secrets."),
+        });
         match (saved, &self.failed) {
             (Some(saved), Some(why)) => Some(format!("{saved} Other unpushed work could not be saved: {why}.")),
             (None, Some(why)) => Some(format!("Unpushed work could not be saved: {why}.")),
@@ -995,7 +1002,8 @@ fn is_rescue_branch(branch: &str, task: &str) -> bool {
 }
 
 /// What the rescue script's answer says for task `task`. Only its own lines are read, a branch only
-/// when it is one of the task's, and an answer without its closing `done` did not finish.
+/// when it is one of the task's, and an answer without its closing `done` did not finish. A saved
+/// branch's line may end in how many files it left out, ` (left out <n> files that may hold secrets)`.
 fn rescued(exec: &Exec, task: &str) -> Rescue {
     let mut rescue = Rescue::default();
     let mut done = false;
@@ -1006,8 +1014,10 @@ fn rescued(exec: &Exec, task: &str) -> Rescue {
                 continue;
             }
             said => match said.strip_prefix("saved ") {
-                Some(branch) if is_rescue_branch(branch, task) => {
+                Some(said) if is_rescue_branch(left_out(said).0, task) => {
+                    let (branch, left) = left_out(said);
                     rescue.saved.push(branch.to_owned());
+                    rescue.left_out += left;
                     continue;
                 }
                 Some(_) => "the box named a branch that is not the task's",
@@ -1027,6 +1037,15 @@ fn rescued(exec: &Exec, task: &str) -> Rescue {
         rescue.failed.get_or_insert_with(|| "the rescue did not finish".to_owned());
     }
     rescue
+}
+
+/// A saved line's branch, and how many files it says it left out: none when it says nothing of it.
+fn left_out(said: &str) -> (&str, usize) {
+    let counted = said.strip_suffix(" files that may hold secrets)").and_then(|said| said.rsplit_once(" (left out "));
+    match counted {
+        Some((branch, n)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => (branch, n.parse().unwrap_or(0)),
+        _ => (said, 0),
+    }
 }
 
 /// `text` with `notice` after it as a sentence of its own.
@@ -1927,7 +1946,7 @@ impl Boxes {
             (_, None) => Rescue::failed("the box could not be reached"),
         };
         if !rescue.saved.is_empty() {
-            eprintln!("pinned-server: saved the unpushed work of box {} to {}", row.id, rescue.saved.join(", "));
+            eprintln!("pinned-server: saved the unpushed work of box {} to {}, leaving out {} files that may hold secrets", row.id, rescue.saved.join(", "), rescue.left_out);
         }
         if let Some(why) = &rescue.failed {
             eprintln!("pinned-server: could not save the unpushed work of box {}: {why}", row.id);
@@ -3348,6 +3367,12 @@ mod tests {
 
     const TASK: &str = "task-1a2b3c4d";
     const SITE: &str = "https://github.com/acme/site.git";
+    /// The rescue's add of new files, as git gets it: the whole tree but each name that may hold a secret, and each folder named so.
+    #[cfg(unix)]
+    const ADD_SAFE: &str = "add -- . :(exclude,icase,glob)**/.env* :(exclude,icase,glob)**/.env*/** :(exclude,icase,glob)**/*.pem :(exclude,icase,glob)**/*.pem/** \
+        :(exclude,icase,glob)**/*.key :(exclude,icase,glob)**/*.key/** :(exclude,icase,glob)**/*credential* :(exclude,icase,glob)**/*credential*/** \
+        :(exclude,icase,glob)**/*secret* :(exclude,icase,glob)**/*secret*/** :(exclude,icase,glob)**/*token* :(exclude,icase,glob)**/*token*/** \
+        :(exclude,icase,glob)**/id_rsa* :(exclude,icase,glob)**/id_rsa*/** :(exclude,icase,glob)**/*.p12 :(exclude,icase,glob)**/*.p12/**";
 
     /// A worker row of `TASK` on `SITE` at `phase`, whose box Upstash knows as `box_1`.
     fn worker_row(phase: Phase) -> BoxRow {
@@ -3401,14 +3426,16 @@ mod tests {
         assert_eq!(
             git,
             vec![
-                "git add -A >/dev/null 2>&1 || { answer 'failed add'; return 0; }",
+                "git \"$@\"",
+                "git add -u >/dev/null 2>&1 || { answer 'failed add'; return 0; }",
                 "git commit -q -m \"rescue: unpushed work of task $task\" >/dev/null 2>&1 || { answer 'failed commit'; return 0; }",
                 "git ls-remote --exit-code --heads origin \"refs/heads/$ref\" >/dev/null 2>&1",
                 "git push -q origin \"HEAD:refs/heads/$ref\" >/dev/null 2>&1 || { answer 'failed push'; return 0; }",
             ],
             "what the script runs that changes or asks the remote"
         );
-        for never in ["--force", " -f ", "+HEAD", "--no-verify", "commit -n", "--mirror", "--delete", ":refs/heads/main", "GH_TOKEN", "box.env"] {
+        assert!(script.contains("    safe add >/dev/null 2>&1 || { answer 'failed add'; return 0; }\n"), "new files are added only through the secret names' exclusion");
+        for never in ["add -A", "add --all", "add .", "--force", " -f ", "+HEAD", "--no-verify", "commit -n", "--mirror", "--delete", ":refs/heads/main", "GH_TOKEN", "box.env"] {
             assert!(!script.contains(never), "{never}");
         }
     }
@@ -3419,8 +3446,14 @@ mod tests {
         assert_eq!(answer("pinned-rescue: done\n"), Rescue::default());
         assert_eq!(
             answer("Enumerating objects\npinned-rescue: saved wip/rescue/task-1a2b3c4d\npinned-rescue: saved wip/rescue/task-1a2b3c4d-2\npinned-rescue: done\n"),
-            Rescue { saved: vec!["wip/rescue/task-1a2b3c4d".into(), "wip/rescue/task-1a2b3c4d-2".into()], failed: None }
+            Rescue { saved: vec!["wip/rescue/task-1a2b3c4d".into(), "wip/rescue/task-1a2b3c4d-2".into()], ..Rescue::default() }
         );
+        assert_eq!(
+            answer("pinned-rescue: saved wip/rescue/task-1a2b3c4d (left out 2 files that may hold secrets)\npinned-rescue: saved wip/rescue/task-1a2b3c4d-2 (left out 1 files that may hold secrets)\npinned-rescue: done\n"),
+            Rescue { saved: vec!["wip/rescue/task-1a2b3c4d".into(), "wip/rescue/task-1a2b3c4d-2".into()], left_out: 3, ..Rescue::default() }
+        );
+        assert_eq!(answer("pinned-rescue: saved main (left out 2 files that may hold secrets)\npinned-rescue: done\n"), Rescue::failed("the box named a branch that is not the task's"));
+        assert_eq!(answer("pinned-rescue: saved wip/rescue/task-1a2b3c4d (left out x files that may hold secrets)\npinned-rescue: done\n"), Rescue::failed("the box named a branch that is not the task's"));
         assert_eq!(answer("pinned-rescue: failed push\npinned-rescue: done\n"), Rescue::failed("the push was refused"));
         assert_eq!(answer("pinned-rescue: failed commit\npinned-rescue: done\n"), Rescue::failed("the rescue commit failed"));
         assert_eq!(answer("pinned-rescue: failed name\npinned-rescue: done\n"), Rescue::failed("every rescue branch name of the task is taken"));
@@ -3429,13 +3462,13 @@ mod tests {
         assert_eq!(answer("pinned-rescue: saved main\npinned-rescue: done\n"), Rescue::failed("the box named a branch that is not the task's"));
         assert_eq!(answer("pinned-rescue: saved wip/rescue/task-1a2b3c4d-x\npinned-rescue: done\n"), Rescue::failed("the box named a branch that is not the task's"));
         assert_eq!(answer("pinned-rescue: ghs_secret\npinned-rescue: done\n"), Rescue::failed("the box answered something unexpected"), "an unknown line is never quoted");
-        assert_eq!(answer("pinned-rescue: saved wip/rescue/task-1a2b3c4d\n"), Rescue { saved: vec!["wip/rescue/task-1a2b3c4d".into()], failed: Some("the rescue did not finish".into()) });
+        assert_eq!(answer("pinned-rescue: saved wip/rescue/task-1a2b3c4d\n"), Rescue { saved: vec!["wip/rescue/task-1a2b3c4d".into()], failed: Some("the rescue did not finish".into()), left_out: 0 });
         assert_eq!(answer(""), Rescue::failed("the rescue did not finish"));
     }
 
     #[test]
     fn a_rescue_adds_one_sentence_to_the_tasks_end() {
-        let saved = |branches: &[&str]| Rescue { saved: branches.iter().map(|b| b.to_string()).collect(), failed: None };
+        let saved = |branches: &[&str]| Rescue { saved: branches.iter().map(|b| b.to_string()).collect(), ..Rescue::default() };
         assert_eq!(Rescue::default().notice(), None, "nothing to save says nothing");
         assert_eq!(saved(&["wip/rescue/task-1"]).notice().as_deref(), Some("Unpushed work was saved to branch wip/rescue/task-1."));
         assert_eq!(saved(&["wip/rescue/task-1", "wip/rescue/task-1-2"]).notice().as_deref(), Some("Unpushed work was saved to branches wip/rescue/task-1, wip/rescue/task-1-2."));
@@ -3443,6 +3476,14 @@ mod tests {
         assert_eq!(
             Rescue { failed: Some("the push was refused".into()), ..saved(&["wip/rescue/task-1"]) }.notice().as_deref(),
             Some("Unpushed work was saved to branch wip/rescue/task-1. Other unpushed work could not be saved: the push was refused.")
+        );
+        assert_eq!(
+            Rescue { left_out: 1, ..saved(&["wip/rescue/task-1"]) }.notice().as_deref(),
+            Some("Unpushed work was saved to branch wip/rescue/task-1. It left out 1 new file whose name may hold a secret.")
+        );
+        assert_eq!(
+            Rescue { left_out: 3, ..saved(&["wip/rescue/task-1", "wip/rescue/task-1-2"]) }.notice().as_deref(),
+            Some("Unpushed work was saved to branches wip/rescue/task-1, wip/rescue/task-1-2. It left out 3 new files whose names may hold secrets.")
         );
 
         let notice = "Unpushed work was saved to branch wip/rescue/task-1.";
@@ -3617,7 +3658,7 @@ mod tests {
         assert_eq!(run.rescue(), "pinned-rescue: saved wip/rescue/task-1a2b3c4d\npinned-rescue: done\n");
         assert_eq!(
             run.writes(),
-            ["add -A", "commit -q -m rescue: unpushed work of task task-1a2b3c4d", "push -q origin HEAD:refs/heads/wip/rescue/task-1a2b3c4d"],
+            ["add -u", ADD_SAFE, "commit -q -m rescue: unpushed work of task task-1a2b3c4d", "push -q origin HEAD:refs/heads/wip/rescue/task-1a2b3c4d"],
             "a plain commit and a plain push: no force, no --no-verify"
         );
         assert!(run.home.join("hooked").exists(), "the commit ran the pre-commit hook");
