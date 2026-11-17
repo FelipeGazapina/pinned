@@ -39,7 +39,8 @@ function openSheet({ label, content, tone = null, className = "", onClose = null
     onClose?.();
   };
   const onKey = (e) => {
-    if (e.key === "Escape") {
+    // Esc in a sheet's note field closes the field (approveNoteEvent), not the sheet.
+    if (e.key === "Escape" && !e.target.closest?.(".approve-note")) {
       e.preventDefault();
       e.stopPropagation();
       return close();

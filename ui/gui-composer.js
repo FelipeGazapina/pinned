@@ -339,6 +339,16 @@ async function until(test, ms = 1500) {
   return true;
 }
 
+/** Waits until `test` holds on two reads at least 100 ms apart, so one frame without a menu while claude
+ * redraws does not count as the menu being gone. False after `ms`. */
+async function untilStays(test, ms) {
+  for (const end = Date.now() + ms; ; ) {
+    if (!(await until(test, Math.max(0, end - Date.now())))) return false;
+    await new Promise((r) => setTimeout(r, 100));
+    if (test()) return true;
+  }
+}
+
 /** Redraws what shows `tab`'s ask once it changed: the composer only when `tab` is the open thread,
  * since an ask answered from elsewhere must leave the open thread's draft and card alone. */
 function redrawAsk(tab) {
@@ -448,6 +458,233 @@ async function answerWith(tab, text) {
   return true;
 }
 
+/** A plan's Approve picks the highlighted option when it is a "Yes", as a tap on it would, else the first "Yes". */
+const planApprove = (menu) => {
+  if (menuKind(menu) !== "plan") return undefined;
+  const highlighted = menu.options.find((o) => o.chosen);
+  return highlighted && /^Yes\b/.test(highlighted.head) ? highlighted : menu.options.find((o) => /^Yes\b/.test(o.head));
+};
+
+/** The first of `selector`'s elements that is drawn: a phone's sheet, not the card hidden under it. */
+const visibleOf = (selector) => [...document.querySelectorAll(selector)].find((el) => el.getClientRects().length > 0);
+
+/** The note typed under a plan's options, or undefined when no field is open. A note belongs to the plan
+ * menu it was typed under: once that menu has left the screen or changed, the field closes, and the text
+ * it held is handed back by noteLeft. A frame without a menu while the tab answers is not that. */
+function approveNoteOf(tab) {
+  const t = threadOf(tab);
+  if (typeof t.approveNote !== "string") return undefined;
+  const menu = terminalMenu(tab);
+  if (!menu && tab.answering) return t.approveNote;
+  if (!sameMenu(t.approveNoteMenu, menu)) {
+    const left = t.approveNote.trim();
+    clearApproveNote(t);
+    if (left) noteLeft(tab, left, menu);
+  }
+  return t.approveNote;
+}
+
+/** The first 60 characters of `text`, with an ellipsis when it was cut. */
+const noteExcerpt = (text) => (text.length > 60 ? `${text.slice(0, 60)}…` : text);
+
+/** A note typed in a field whose menu left or changed. When the menu now up is another plan, the note stays in
+ * the field, bound to it. Under any other menu it is shown and never put in the composer, where Enter would
+ * answer that menu with it. With no menu up it goes back to an empty composer, and is shown otherwise. */
+function noteLeft(tab, text, menu) {
+  const t = threadOf(tab);
+  if (menu && menuKind(menu) === "plan") {
+    Object.assign(t, { approveNote: text, approveNoteMenu: menu, approveError: "Claude's menu changed. Check your note before you approve." });
+    return;
+  }
+  if (menu) {
+    showComposerNote(`Claude's menu changed. Your note was not sent: ${noteExcerpt(text)}`, true);
+    return;
+  }
+  if (tab === active && !prompt.value.trim()) {
+    prompt.value = text;
+    saveDraft(tab, text);
+    autosize();
+    showComposerNote("Claude's menu closed. Your note is back in the message box.", true);
+    return;
+  }
+  showComposerNote(`Claude's menu closed. Your note was not sent: ${noteExcerpt(text)}`, true);
+}
+
+/** Drops the field's state: its note, the menu it was typed under, its error and the label it drew. */
+function clearApproveNote(t) {
+  Object.assign(t, { approveNote: null, approveNoteMenu: null, approveError: null, approveLabel: null });
+}
+
+/** The field's markup. It depends only on whether the field is open: the text, Approve's label and whether
+ * Approve is on, and the error, are set on the live elements by syncApproveNote. */
+function approveNoteField(tab) {
+  if (typeof approveNoteOf(tab) !== "string") return "";
+  return `<div class="approve-note"><input type="text" placeholder="Note for Claude, sent after approval" aria-label="Note sent after approval" autocomplete="off" enterkeyhint="send" data-approve-note-input><button type="button" class="primary" data-approve-note-send></button><button type="button" class="ghost" data-approve-note-cancel>Cancel</button><p class="approve-note-error" role="alert" data-approve-note-error hidden></p></div>`;
+}
+
+/** Sets the live parts of every open note field: the typed text, Approve's label, whether Approve is on, and
+ * the error. A render that leaves the markup as it was never touches the input, so focus and IME survive. */
+function syncApproveNote(tab) {
+  if (tab !== active) return;
+  const t = threadOf(tab);
+  const note = t.approveNote ?? "";
+  const label = t.approveLabel ? `Approve: ${t.approveLabel}` : "Approve";
+  for (const field of document.querySelectorAll(".approve-note")) {
+    const input = field.querySelector("[data-approve-note-input]");
+    const send = field.querySelector("[data-approve-note-send]");
+    const error = field.querySelector("[data-approve-note-error]");
+    if (input && input.value !== note) input.value = note;
+    if (send) Object.assign(send, { disabled: !note.trim() || !t.approveLabel, textContent: label, title: label });
+    if (error) Object.assign(error, { textContent: t.approveError ?? "", hidden: !t.approveError });
+  }
+}
+
+/** Takes Approve's label from the plan on screen, then draws the open fields. */
+function drawApproveNote(tab) {
+  const menu = terminalMenu(tab);
+  threadOf(tab).approveLabel = (menu && planApprove(menu)?.head) || null;
+  syncApproveNote(tab);
+}
+
+/** Opens the note line under a plan's options, or closes it: the cursor goes into the field, or back on Approve with note. */
+function openApproveNote(tab, open) {
+  const t = threadOf(tab);
+  if (open) Object.assign(t, { approveNote: "", approveNoteMenu: terminalMenu(tab), approveError: null });
+  else clearApproveNote(t);
+  renderComposer(tab);
+  if (open) drawApproveNote(tab);
+  setTimeout(() => visibleOf(open ? "[data-approve-note-input]" : "[data-approve-note]")?.focus());
+}
+
+/** The field's events, on the desktop card and on the phone's sheet alike. Enter and Approve send the note,
+ * Esc and Cancel close the field, and typing keeps its text. Returns the send's promise when it sends. */
+function approveNoteEvent(tab, e) {
+  const el = e.target;
+  if (e.type === "click" && el.closest?.("[data-approve-note]")) {
+    openApproveNote(tab, true);
+    return true;
+  }
+  if (e.type === "click" && el.closest?.("[data-approve-note-cancel]")) {
+    openApproveNote(tab, false);
+    return true;
+  }
+  if (e.type === "click" && el.closest?.("[data-approve-note-send]")) return approveWithNote(tab, threadOf(tab).approveNote ?? "");
+  if (e.type === "input" && el.matches?.("[data-approve-note-input]")) {
+    const t = threadOf(tab);
+    t.approveNote = el.value;
+    t.approveError = null;
+    syncApproveNote(tab);
+    return true;
+  }
+  if (e.type === "keydown" && el.matches?.("[data-approve-note-input]")) {
+    if (e.key === "Escape") {
+      e.preventDefault();
+      openApproveNote(tab, false);
+      return true;
+    }
+    // Enter during an IME composition is the IME's; a plain Enter here does not reach the prompt.
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
+      e.preventDefault();
+      return approveWithNote(tab, threadOf(tab).approveNote ?? "");
+    }
+  }
+  return false;
+}
+
+/** Approves claude's plan with a note: types the plan's Approve option as a tap on it would, then sends the
+ * note as the next message once claude's menu has closed. The note never goes into the menu, so it cannot
+ * pick "Tell Claude what to change". A note that does not go out stays where it can be sent again. */
+async function approveWithNote(tab, note) {
+  const t = threadOf(tab);
+  const text = note.trim();
+  if (!text || tab.answering) return false;
+  const menu = terminalMenu(tab);
+  const yes = menu && planApprove(menu);
+  if (!yes) return keepNote(tab, text, "Claude's menu is gone");
+  const why = sendBlocked(tab);
+  if (why) return keepNote(tab, text, why);
+  // The choice Approve shows is the one it types: a choice that moved since the field drew types nothing.
+  const moved = () => {
+    Object.assign(t, { approveLabel: yes.head, approveError: "Claude's menu changed. Check the choice, then Approve." });
+    syncApproveNote(tab);
+    return false;
+  };
+  if (t.approveLabel !== yes.head) return moved();
+  t.approveError = null;
+  const picked = chooseOption(tab, yes.n, yes.label);
+  if (!picked) return moved();
+  // The note now lives in this call: the field is gone with the menu, so a redraw cannot take it.
+  clearApproveNote(t);
+  try {
+    await picked;
+  } catch (e) {
+    return keepNote(tab, text, e?.message ?? String(e));
+  }
+  // A slow Enter (a remote machine) closes the menu late. The hold stays on until it has: releasing it
+  // would let a second Approve type arrows and Enter while the first is in transit.
+  if (!(await untilStays(() => !terminalMenu(tab), ANSWERED_MS))) return keepNote(tab, text, "Claude's menu didn't close");
+  await sendNote(tab, text);
+  return true;
+}
+
+/** Sends `text` as the user's next message the way send() does while claude works: a row in the thread at once
+ * unless it is a slash command, then the prompt. claude queues the prompt when it is busy, and the row says so. */
+async function sendNote(tab, text) {
+  const t = threadOf(tab);
+  try {
+    if (!(await closeClaudeDialog(tab))) return keepNote(tab, text, "Claude's dialog didn't close");
+  } catch (e) {
+    return keepNote(tab, text, e?.message ?? String(e));
+  }
+  const row = text.startsWith("/") ? null : raisePending(tab, t, text);
+  try {
+    await callOn(tab.machine, { cmd: "prompt", tab: tab.view.id, text });
+    if (row) markSent(tab, row);
+  } catch (e) {
+    const msg = e?.message ?? String(e);
+    if (LOST.test(msg)) {
+      if (row) row.state = "unconfirmed";
+      else showComposerNote(msg, true);
+    } else {
+      dropPending(tab, t, row);
+      keepNote(tab, text, msg);
+    }
+  }
+  if (active === tab) renderThread();
+  setTimeout(() => fetchThread(tab), 300);
+}
+
+/** A note that did not go out. While a plan's menu is up it stays in the field, with the reason, so Enter
+ * there cannot send it into the menu. Otherwise it goes back to an empty composer, or says it was not sent. */
+function keepNote(tab, text, why) {
+  const t = threadOf(tab);
+  const menu = terminalMenu(tab);
+  const sentence = /[.!?]$/.test(why) ? why : `${why}.`;
+  if (menu && menuKind(menu) === "plan") {
+    Object.assign(t, { approveNote: text, approveNoteMenu: menu, approveError: `${sentence} Your note is still here.` });
+    if (tab === active) redrawAsk(tab);
+    drawApproveNote(tab);
+    return false;
+  }
+  if (menu) {
+    showComposerNote(`${sentence} Your note was not sent: ${noteExcerpt(text)}`, true);
+    return false;
+  }
+  if (tab === active && !prompt.value.trim()) {
+    prompt.value = text;
+    saveDraft(tab, text);
+    autosize();
+    showComposerNote(`${sentence} Your note is back in the message box.`, true);
+    return false;
+  }
+  if (tab !== active && !hasDraft(tab)) {
+    saveDraft(tab, text);
+    return false;
+  }
+  showComposerNote(`${sentence} Your note was not sent: ${noteExcerpt(text)}`, true);
+  return false;
+}
+
 /** claude's row of question tabs over a set of questions, "←  ☐ Color  ☒ Sizes  ✔ Submit  →":
  * each header, and whether it is answered. */
 const TAB_ROW = /^←\s+(.*?)\s+→\s*$/;
@@ -483,13 +720,16 @@ const ticked = (o) => /^\[✔\]/.test(o.head) || /\s✔$/.test(o.head);
 function renderApproval(tab) {
   const menu = !tab?.answering && tab?.menu;
   approval.hidden = !menu;
-  if (!menu) return (approval.dataset.key = "");
+  if (!menu) {
+    if (tab) approveNoteOf(tab);
+    return (approval.dataset.key = "");
+  }
   const kind = menuKind(menu);
   const tabs = kind === "question" ? questionTabs(tab) : null;
   const t = threadOf(tab);
   const since = waitingKindOf(tab.view) === "needs_input" && tab.view.updated ? tab.view.updated * 1000 : null;
-  const key = JSON.stringify([tab.key, menu, tabs, t.picking ?? null, t.collapsed ?? null, since]);
-  if (approval.dataset.key === key) return;
+  const key = JSON.stringify([tab.key, menu, tabs, t.picking ?? null, t.collapsed ?? null, since, typeof approveNoteOf(tab) === "string"]);
+  if (approval.dataset.key === key) return drawApproveNote(tab);
   approval.dataset.key = key;
   const lines = menu.question.split("\n").filter((l) => !TAB_ROW.test(l));
   const permission = kind === "approval";
@@ -499,9 +739,11 @@ function renderApproval(tab) {
   const label = kind === "plan" ? "Plan ready" : /command/i.test(lines[0]) ? "Command approval" : /file|edit/i.test(lines[0]) ? "File change approval" : "Permission approval";
   if (permission) return renderPermission(menu, lines, label, since);
   const options = menu.options.map((o) => `<button type="button" data-option="${o.n}" class="choice"${o.chosen ? " data-chosen" : ""}${o.n <= 9 ? ` data-key="${o.n}"` : ""}><span class="label">${esc(o.head)}</span>${o.more ? `<span class="about">${esc(o.more)}</span>` : ""}</button>`);
+  const note = planApprove(menu) && typeof approveNoteOf(tab) !== "string" ? `<button type="button" class="outline" data-approve-note>Approve with note</button>` : "";
   approval.innerHTML = `${icon("circle-alert", "lead")}<div class="body"><p class="kind">${esc(label)}</p>
-      <p class="what">${esc(menu.question)}</p><div class="options choices">${options.join("")}</div></div>
-    <div class="actions"><button type="button" data-show-terminal class="outline">Terminal</button></div>`;
+      <p class="what">${esc(menu.question)}</p><div class="options choices">${options.join("")}</div>${approveNoteField(tab)}</div>
+    <div class="actions">${note}<button type="button" data-show-terminal class="outline">Terminal</button></div>`;
+  drawApproveNote(tab);
 }
 
 /** T3 Code's answers to a permission, each one the option of claude's menu that means it: Approve
@@ -615,6 +857,9 @@ approval.addEventListener("click", (e) => {
   }
   if (e.target.closest("[data-show-terminal]")) toggleDrawer(true);
 });
+
+// The plan's note field, on the card: approveNoteEvent takes what is its own.
+for (const type of ["click", "input", "keydown"]) approval.addEventListener(type, (e) => active && approveNoteEvent(active, e));
 
 // A question's options, and the plan's, take 1-9 while the prompt is empty, as T3 Code's do.
 window.addEventListener("keydown", (e) => {
