@@ -1628,13 +1628,13 @@ impl Account {
     }
 
     /// What a worker's box shows: `Starting` while a session runs and no tab has reported a
-    /// conversation, as while Claude Code waits on a startup screen; else as `seen_any`.
+    /// conversation; else as `seen_any`.
     pub fn seen_worker(&self, machine: &str) -> Seen {
         let live = self.live.lock().unwrap();
         let Some(m) = live.machines.get(machine) else { return Seen::Offline };
         match m.tabs() {
             [] => Seen::NoTab,
-            tabs if tabs.iter().any(|t| t.running) && tabs.iter().all(|t| t.session.is_none()) => Seen::Starting { quiet: !tabs.iter().any(holds_box) },
+            tabs if tabs.iter().any(|t| t.running) && tabs.iter().all(|t| t.session.is_none()) => Seen::Starting,
             tabs => Seen::Tab { running: tabs.iter().any(|t| t.running), quiet: !tabs.iter().any(holds_box) },
         }
     }
@@ -2387,8 +2387,8 @@ mod tests {
         let tab = |id: &str, status: Option<AgentStatus>, session: Option<&str>, running: bool| {
             serde_json::json!({ "id": id, "cwd": "/work/repo", "bypass": true, "running": running, "opened": 1, "status": status, "session": session, "connector": "delegate" })
         };
-        assert_eq!(box_with(vec![tab("tab-1", None, None, true)]).seen_worker("box"), Seen::Starting { quiet: true }, "a session at a startup screen");
-        assert_eq!(box_with(vec![tab("tab-1", Some(AgentStatus::Working), None, true)]).seen_worker("box"), Seen::Starting { quiet: false }, "a tab that reads working with no turn reported");
+        assert_eq!(box_with(vec![tab("tab-1", None, None, true)]).seen_worker("box"), Seen::Starting, "a session that reported no conversation");
+        assert_eq!(box_with(vec![tab("tab-1", Some(AgentStatus::Working), None, true)]).seen_worker("box"), Seen::Starting, "a tab that reads working with no turn reported");
         assert_eq!(box_with(vec![tab("tab-1", Some(AgentStatus::Working), Some("s-1"), true)]).seen_worker("box"), Seen::Tab { running: true, quiet: false }, "a worker at work");
         assert_eq!(box_with(vec![tab("tab-1", Some(AgentStatus::Done), Some("s-1"), true)]).seen_worker("box"), Seen::Tab { running: true, quiet: true }, "a worker done with its turn");
         assert_eq!(box_with(vec![tab("tab-1", None, None, false)]).seen_worker("box"), Seen::Tab { running: false, quiet: true }, "an exited session ends as exited");

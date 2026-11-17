@@ -579,6 +579,10 @@ struct Tab {
     task: Option<String>,
     /// Working tree and prompt as the running turn began, to diff against when it ends.
     turn: Option<(String, Option<String>)>,
+    /// The running session started a new conversation on a prompt in its arguments, and no hook
+    /// has reported a turn since: a notice alone, as one Claude Code sends while a dialog waits,
+    /// does not mean the prompt reached the session.
+    owes_turn: bool,
     status: Option<AgentStatus>,
     updated: Option<u64>,
     title: Option<String>,
@@ -2215,6 +2219,7 @@ impl Machine {
                 t.tally = Tally::default();
             }
             let mut args = std::mem::take(&mut t.launch);
+            t.owes_turn = t.claude_session.is_none() && !args.is_empty();
             let asked = args.clone();
             t.bare = t.claude_session.as_deref().is_some_and(|session| args == crate::delegate::resume_args(t.account.provider, session));
             t.mode_live = args.iter().any(|a| a == "--permission-mode");
@@ -2319,7 +2324,7 @@ impl Machine {
                 if screen.lock().unwrap().session != session {
                     return;
                 }
-                let Ok(Some((cwd, bypass))) = machine.tab(&tab, |t| (t.status.is_none() && t.session.is_some()).then(|| (t.cwd.clone(), t.bypass))) else { return };
+                let Ok(Some((cwd, bypass))) = machine.tab(&tab, |t| (t.session.is_some() && (t.status.is_none() || t.owes_turn)).then(|| (t.cwd.clone(), t.bypass))) else { return };
                 let Some(found) = crate::first_run::showing(&machine.screen_text(&tab)) else { continue };
                 if answered.contains(&found) {
                     continue;
@@ -2340,10 +2345,11 @@ impl Machine {
                     Err(reason) => return machine.end_start(&tab, reason),
                 }
             }
-            // A fresh start that never reported, at its limit. A resume at its prompt fires no hook
-            // until a turn, but has its conversation's id.
+            // A fresh start that never reported, or whose first prompt never started a turn, at its
+            // limit. A resume at its prompt fires no hook until a turn, but has its conversation's id.
             let Some(machine) = me.upgrade() else { return };
-            if screen.lock().unwrap().session != session || !machine.tab(&tab, |t| t.status.is_none() && t.session.is_some() && t.claude_session.is_none()).unwrap_or(false) {
+            let unstarted = |t: &mut Tab| t.session.is_some() && ((t.status.is_none() && t.claude_session.is_none()) || t.owes_turn);
+            if screen.lock().unwrap().session != session || !machine.tab(&tab, unstarted).unwrap_or(false) {
                 return;
             }
             let shown = crate::setup_token::last_line(machine.screen_text(&tab).as_bytes());
@@ -6346,6 +6352,7 @@ impl Machine {
             origin: None,
             task: None,
             turn: None,
+            owes_turn: false,
             status: None,
             updated: None,
             title: None,
@@ -6572,6 +6579,7 @@ impl Machine {
             }
             t.ask_detail = detail;
             t.status = Some(event.status);
+            t.owes_turn &= event.status == AgentStatus::NeedsInput;
             // The turn that starts may end the shells an earlier one left, and its end says which still run.
             if event.status == AgentStatus::Working {
                 t.shells_left = false;

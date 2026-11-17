@@ -144,36 +144,6 @@ pub fn answer(screen: Screen, folder: &Path, made: bool, bypass: bool) -> Result
     }
 }
 
-/// How many of its screen's last lines a session that has not started keeps, for the hub to quote
-/// should it never start.
-const START_LINES: usize = 4;
-
-/// The last lines of `lines`, a session's screen, that hold any letter or digit, as one line
-/// without folders or keys.
-pub fn start_screen(lines: &[String]) -> Option<String> {
-    let shown: Vec<&str> = lines.iter().map(|line| line.trim()).filter(|line| line.chars().any(char::is_alphanumeric)).collect();
-    let last = &shown[shown.len().saturating_sub(START_LINES)..];
-    (!last.is_empty()).then(|| scrub(&last.join(" · ")))
-}
-
-/// The longest quote of a screen, in characters.
-const SCRUB_CHARS: usize = 300;
-
-/// `text` with every folder and anything shaped like a key left out, at most `SCRUB_CHARS` long.
-/// A word that starts at the root and names a folder under it, as `/workspace/home/app`, is a
-/// folder too; a one-part word such as `/login` is a command.
-pub fn scrub(text: &str) -> String {
-    let rooted: Vec<String> = text
-        .split(' ')
-        .map(|word| {
-            let bare = word.trim_start_matches(['(', '[', '"', '\'', '`']);
-            if bare.starts_with('/') && bare[1..].contains('/') { "[folder]".to_owned() } else { word.to_owned() }
-        })
-        .collect();
-    let clean = crate::reports::scrub(&rooted.join(" "), &crate::reports::Context::default()).unwrap_or_default();
-    clean.chars().take(SCRUB_CHARS).collect::<String>().trim_end().to_owned()
-}
-
 /// The screen's letters and digits, lowercased, with terminal commands removed. Claude's TUI
 /// places each word with a cursor command, so a sentence is not contiguous in the pty bytes.
 pub fn flat(screen: &str) -> String {
@@ -215,35 +185,6 @@ pub fn flat(screen: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_start_screen_keeps_its_last_lines_without_folders_or_keys() {
-        let screen: Vec<String> = [
-            "────────────────────────────",
-            " Accessing workspace:",
-            "",
-            " /home/boxuser/pinned/app/.claude/worktrees/fix",
-            " Quick safety check: is this a project you trust? ~/pinned/app",
-            " Security guide (C:\\Users\\me\\app) GH sk-ant-oat01-ABCDEFGHIJKLMNOPQRSTUVWX",
-            " ❯ No, exit",
-            "   Yes, I trust this folder",
-            "",
-            " Enter to confirm · Esc to cancel",
-            "   ",
-        ]
-        .map(String::from)
-        .to_vec();
-        let shown = start_screen(&screen).unwrap();
-        assert!(shown.ends_with("❯ No, exit · Yes, I trust this folder · Enter to confirm · Esc to cancel"), "{shown}");
-        assert!(shown.starts_with("Security guide"), "the last four lines with words: {shown}");
-        for hidden in ["/home", "boxuser", "~/", "Users", "sk-ant", "ABCDEFGHIJKLMNOP"] {
-            assert!(!scrub(&screen.join("\n")).contains(hidden), "{hidden} in {}", scrub(&screen.join("\n")));
-            assert!(!shown.contains(hidden), "{hidden} in {shown}");
-        }
-        assert_eq!(scrub("Not logged in · Run /login"), "Not logged in · Run /login", "a command is no folder");
-        assert!(scrub(&"a".repeat(1000)).chars().count() <= 300, "a quote stays short");
-        assert_eq!(start_screen(&["", "──────"].map(String::from)), None, "nothing to quote");
-    }
 
     fn temp(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("pinned-first-run-{name}-{}", std::process::id()));

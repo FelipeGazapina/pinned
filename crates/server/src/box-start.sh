@@ -9,8 +9,7 @@ grep -qs "$DIR/bin" "$HOME/.profile" || echo "export PATH=\"$DIR/bin:\$PATH\"" >
 export PATH="$DIR/bin:$PATH"
 # Interactive claude stops at the theme picker, the folder-trust dialog and, for a workflow that
 # bypasses permissions, the bypass warning, unless these are set. Trusting a parent covers plain
-# folders but not a git repository, so the run's clone gets its own entry, and so does each
-# worktree under its .claude/worktrees, where a worker's session runs.
+# folders but not a git repository, so the run's clone gets its own entry.
 node -e '
 const fs = require("fs"), os = require("os"), file = os.homedir() + "/.claude.json";
 const read = (f) => { try { return JSON.parse(fs.readFileSync(f, "utf8")); } catch { return {}; } };
@@ -22,8 +21,7 @@ c.hasCompletedOnboarding = true;
 c.theme = c.theme || "dark";
 c.projects = c.projects || {};
 const clones = {{clones}}.map((name) => os.homedir() + "/pinned/" + name);
-const worktrees = (clone) => { try { return fs.readdirSync(clone + "/.claude/worktrees", { withFileTypes: true }).filter((e) => e.isDirectory()).map((e) => clone + "/.claude/worktrees/" + e.name); } catch { return []; } };
-for (const p of ["/workspace/home", "/home/boxuser", os.homedir(), ...clones, ...clones.flatMap(worktrees)]) c.projects[p] = { ...c.projects[p], hasTrustDialogAccepted: true };
+for (const p of ["/workspace/home", "/home/boxuser", os.homedir(), ...clones]) c.projects[p] = { ...c.projects[p], hasTrustDialogAccepted: true };
 fs.writeFileSync(file, JSON.stringify(c, null, 2));
 '
 set -a
