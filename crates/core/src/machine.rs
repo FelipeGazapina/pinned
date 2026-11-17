@@ -3972,6 +3972,12 @@ impl Machine {
             .collect();
         let mut meters = self.meters.lock().unwrap();
         meters.retain(|task, _| threads.iter().any(|(working, _)| working == task));
+        if threads.is_empty() {
+            return;
+        }
+        // While a team box's first price download is in flight the pass reads nothing, so the
+        // next one prices what it would have read.
+        let Some(rates) = self.meter_rates() else { return };
         let mut moved = vec![];
         for (task, tab) in threads {
             let Some(file) = self.transcript_of(&tab).ok().flatten() else { continue };
@@ -3983,7 +3989,7 @@ impl Machine {
         if moved.is_empty() {
             return;
         }
-        let (rates, book) = (self.meter_rates(), self.meter_book());
+        let book = self.meter_book();
         let team_box = self.team_box.load(Ordering::Relaxed);
         let mut logged = self.worker_unpriced.lock().unwrap();
         logged.retain(|task, _| meters.contains_key(task));
@@ -4018,7 +4024,8 @@ impl Machine {
     /// sent twice never counts twice. A tab keeps its meter until it closes, so a session that
     /// stops and goes on adds to what it spent before. A model with no price is priced at the
     /// ceiling rate (`usage::Meter::priced`), and named in the log once per tab. A session that
-    /// spent nothing is not reported.
+    /// spent nothing is not reported. While the box holds no price list and its first download is in
+    /// flight, a pass sends nothing (`meter_rates_at`).
     /// Waits on the hub: the 1 s pass calls it on a thread of its own (`send_run_costs`).
     fn report_run_costs(&self, now: Instant) {
         if !self.team_box.load(Ordering::Relaxed) {
@@ -4027,14 +4034,17 @@ impl Machine {
         let tabs: Vec<(String, (String, crate::agent::Subject), bool)> =
             self.tabs.lock().unwrap().iter().filter_map(|(id, t)| Some((id.clone(), session_of(&t.env)?, t.live()))).collect();
         let known: HashSet<String> = self.run_costs.lock().unwrap().keys().cloned().collect();
+        if known.is_empty() && !tabs.iter().any(|(_, _, live)| *live) {
+            return;
+        }
+        let Some(rates) = self.meter_rates() else { return };
+        let book = self.meter_book();
         let found: Vec<Option<PathBuf>> = tabs.iter().map(|(tab, _, live)| if *live || known.contains(tab) { self.transcript_of(tab).ok().flatten() } else { None }).collect();
-        let mut prices = None;
         let mut due = vec![];
         {
             let mut costs = self.run_costs.lock().unwrap();
-            let mut total = |tab: &str, cost: &mut RunCost| {
-                let (rates, book) = prices.get_or_insert_with(|| (self.meter_rates(), self.meter_book()));
-                let (own, unpriced) = cost.meter.priced(rates, book);
+            let total = |tab: &str, cost: &mut RunCost| {
+                let (own, unpriced) = cost.meter.priced(&rates, &book);
                 for model in unpriced {
                     if cost.unpriced.insert(model.clone()) {
                         eprintln!("pinned: a run's model cost prices {model}, which has no listed price, at the ceiling rate or more");
@@ -4113,41 +4123,45 @@ impl Machine {
         }
     }
 
-    /// The price list, read again each hour.
-    fn meter_rates(&self) -> Arc<usage::RateTable> {
+    /// The price list, read again each hour; none while a pass must wait (`meter_rates_at`).
+    fn meter_rates(&self) -> Option<Arc<usage::RateTable>> {
         self.meter_rates_at(Instant::now())
     }
 
     /// The price list as of `now`. A team box downloads it and holds it in memory only, never in
     /// its config dir, whose file its sessions can write. It downloads with no lock held, at most
     /// once every `LIST_RETRY`; while a download runs or after one failed, it prices with the last
-    /// list it got, or with none, which prices every model at the ceiling rate.
-    fn meter_rates_at(&self, now: Instant) -> Arc<usage::RateTable> {
+    /// list it got, or with none, which prices every model at the ceiling rate. While it has got no
+    /// list yet, no try has failed and the first is in flight, for `FIRST_LIST_WAIT` at most, it
+    /// answers none, and the pass waits for the next.
+    fn meter_rates_at(&self, now: Instant) -> Option<Arc<usage::RateTable>> {
         let (list, last) = {
             let mut rates = self.meter_rates.lock().unwrap();
             match &rates.held {
-                Some((read, held)) if now.saturating_duration_since(*read) < Duration::from_secs(3600) => return held.clone(),
+                Some((read, held)) if now.saturating_duration_since(*read) < Duration::from_secs(3600) => return Some(held.clone()),
                 _ if self.team_box.load(Ordering::Relaxed) => {}
                 _ => {
                     let held = Arc::new(usage::rates(self.rates_file.as_deref()));
                     rates.held = Some((now, held.clone()));
-                    return held;
+                    return Some(held);
                 }
             }
             let last = rates.held.as_ref().map_or_else(Arc::default, |(_, held)| held.clone());
-            if rates.tried.is_some_and(|at| now.saturating_duration_since(at) < LIST_RETRY) {
-                return last;
+            if let Some(tried) = rates.tried.filter(|at| now.saturating_duration_since(*at) < LIST_RETRY) {
+                let first_in_flight = rates.held.is_none() && !rates.failed && now.saturating_duration_since(tried) < FIRST_LIST_WAIT;
+                return (!first_in_flight).then_some(last);
             }
             rates.tried = Some(now);
             (self.list_rates.lock().unwrap().clone(), last)
         };
         let got = list();
         if got.is_empty() {
-            return last;
+            self.meter_rates.lock().unwrap().failed = true;
+            return Some(last);
         }
         let got = Arc::new(got);
         self.meter_rates.lock().unwrap().held = Some((now, got.clone()));
-        got
+        Some(got)
     }
 
     /// What the thread in `tab` cost: its own session and every worker it delegated, theirs in turn included.
@@ -7481,6 +7495,10 @@ fn team_box_rates(download: fn() -> Option<Vec<u8>>) -> Arc<dyn Fn() -> usage::R
 /// How long a team box waits after it tried to download the price list before it tries again.
 const LIST_RETRY: Duration = Duration::from_secs(60);
 
+/// How long a team box with no price list waits on its first download before it prices at the
+/// ceiling rate: the download's own timeout.
+const FIRST_LIST_WAIT: Duration = Duration::from_secs(10);
+
 /// The price list a machine's meters price with (`Machine::meter_rates_at`).
 #[derive(Default)]
 struct MeterRates {
@@ -7488,6 +7506,8 @@ struct MeterRates {
     held: Option<(Instant, Arc<usage::RateTable>)>,
     /// When a team box last began to download it.
     tried: Option<Instant>,
+    /// A team box's download has failed.
+    failed: bool,
 }
 
 /// A team box's workflow session's model cost (`Machine::report_run_costs`).
@@ -14467,15 +14487,17 @@ Have another model review a risky change before it goes ahead.";
             usage::RateTable::new()
         });
         let now = Instant::now();
-        let first = { let m = m.clone(); std::thread::spawn(move || m.meter_rates_at(now).len()) };
+        let first = { let m = m.clone(); std::thread::spawn(move || m.meter_rates_at(now).map(|rates| rates.len())) };
         on_start.recv_timeout(Duration::from_secs(5)).expect("the download started");
         let (answered, answer) = std::sync::mpsc::channel();
-        let second = { let m = m.clone(); std::thread::spawn(move || answered.send(m.meter_rates_at(now).len())) };
+        let second = { let m = m.clone(); std::thread::spawn(move || answered.send(m.meter_rates_at(now).map(|rates| rates.len()))) };
         let waited = answer.recv_timeout(Duration::from_secs(2));
+        let late = m.meter_rates_at(now + FIRST_LIST_WAIT + Duration::from_secs(1)).map(|rates| rates.len());
         drop(release);
         first.join().unwrap();
         let _ = second.join();
-        assert_eq!(waited, Ok(0), "the second caller gets no list, so the ceiling, without waiting on the download");
+        assert_eq!(waited, Ok(None), "the second caller is told to wait for its next pass, without waiting on the download");
+        assert_eq!(late, Some(0), "past the download's timeout it gets no list, so the ceiling");
         let _ = std::fs::remove_dir_all(dir);
     }
 
