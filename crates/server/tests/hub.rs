@@ -1163,6 +1163,7 @@ fn an_agents_act_with_a_review_setting_changes_nothing_and_an_allowed_field_alon
     assert_eq!(held["outcome"], "pending", "an allowed field still goes to the owner: {held}");
     assert_eq!(asks(&mut ana.client).as_array().unwrap().iter().map(|c| c["action"].clone()).collect::<Vec<_>>(), [json!("set_taste")], "one ask, for the allowed field");
     assert_eq!(stored(&mut ana.client), json!({}), "nothing changes before the owner approves");
+    ana.client.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
     assert_eq!(ana.client.hub(json!({ "cmd": "decide_confirmation", "id": held["id"], "approve": true })).unwrap()["outcome"], "done");
     assert_eq!(stored(&mut ana.client), json!({ "github.com/acme/site": { "parallel": 2 } }), "the approved allowed field lands, and no review setting did");
 }
