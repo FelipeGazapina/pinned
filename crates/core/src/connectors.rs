@@ -2871,6 +2871,9 @@ impl Connectors {
             store.change_retries.entry(workflow.to_owned()).or_default().insert(key.clone(), stamp(fire.at));
         }
         if waiting {
+            if let Err(e) = &released {
+                eprintln!("pinned: workflow {workflow} could not give back its claim of {key}: {e}");
+            }
             // The retry goes back to disk: `apply_changes` saved the store without it.
             let _ = self.save(&store);
             return;
