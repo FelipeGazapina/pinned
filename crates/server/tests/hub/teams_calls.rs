@@ -55,6 +55,8 @@ pub(super) struct TeamBox {
     /// The box node's folder, where its socket is.
     pub(super) dir: PathBuf,
     pub(super) tab: String,
+    /// The run that holds the box until `run` replaces it.
+    holding: Uuid,
 }
 
 impl TeamBox {
@@ -91,10 +93,8 @@ impl TeamBox {
             input: String::new(),
         };
         // A team's box opens only for a run of its bot: the bot is turned on and its trigger fires.
-        // Its run and bot rows are cleared again, as each test writes the ones it needs.
         owner.client.hub(json!({ "cmd": "team", "team": team.to_string(), "op": { "op": "turn_bot_on", "workflow": workflow, "on": true } })).unwrap();
         hub.runtime.block_on(teams::triggers::fired(hub.hub(), team, Work::Run(run))).unwrap();
-        sql(hub, &format!("delete from team_runs where team = '{team}'; delete from team_bots where team = '{team}'"));
         let row = hub.runtime.block_on(hub.hub().db.boxes(team)).unwrap().into_iter().next().unwrap().unwrap();
         let (machine, box_id) = (row.machine.to_string(), row.upstash.unwrap().0);
         let dir = hub.boxes.root.join(&box_id);
@@ -105,7 +105,18 @@ impl TeamBox {
             !tab.is_empty()
         });
         on_node(hub, &box_id, |node| node.machine.listen(|_| Err("unexpected".into())).unwrap());
-        TeamBox { owner, team, workflow, machine, box_id, dir, tab }
+        // Its run and bot rows are cleared again, as each test writes the ones it needs. In the same
+        // statement a holding run takes the box's place, with no box yet, so no tick ends the box
+        // before `run` replaces it. It is written only once the session is up, which claims a run
+        // with no box, so `ask` still finds no run until a test starts one.
+        let holding = Uuid::new_v4();
+        sql(hub, &format!(
+            "delete from team_runs where team = '{team}'; delete from team_bots where team = '{team}';
+             insert into team_runs (id, team, workflow, started_by, state, subject)
+               select '{holding}', account, connector, to_jsonb('{}'::text), 'working', subject from boxes where account = '{team}'",
+            owner.id
+        ));
+        TeamBox { owner, team, workflow, machine, box_id, dir, tab, holding }
     }
 
     /// A member of the team, in the groups `groups`.
@@ -148,6 +159,8 @@ impl TeamBox {
             started_by: self.owner.id.to_string(),
         };
         hub.runtime.block_on(teams::db::insert_run(&hub.hub().db, self.team, &run, Some(&self.machine))).unwrap();
+        // The box is held by this run from its insert, so the holding run can go.
+        sql(hub, &format!("delete from team_runs where id = '{}'", self.holding));
         id
     }
 

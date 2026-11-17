@@ -2888,6 +2888,7 @@ fn fast() -> Policy {
         done: Duration::from_secs(3600),
         exited: Duration::from_secs(3600),
         tab_gone: ms(400),
+        first_turn: Duration::from_secs(3600),
         offline: ms(1000),
         max_life: Duration::from_secs(3600),
         cooldown: Duration::from_secs(3600),
@@ -6312,6 +6313,27 @@ fn a_worker_box_offline_past_the_grace_ends_and_fails_its_task_with_that_reason(
         (status["workState"].as_str(), status["error"].as_str()),
         (Some("failed"), Some("Upstash Box: its box went offline and did not come back within 1 s")),
         "not \"the box did not connect\": {status}"
+    );
+    wait_for("the row to go", || ana.rows(&hub) == 0);
+}
+
+#[test]
+fn a_worker_box_whose_session_never_starts_a_turn_ends_and_fails_its_task_with_that_reason() {
+    let hub = TestHub::start_with_boxes("rbox_first_turn", Signup::Open, Policy { first_turn: Duration::from_secs(2), ..fast() });
+    let mut ana = BoxAccount::new(&hub);
+    let mac_dir = temp("rbox-first-turn-mac");
+    let (_mac, _, captain) = mac_with_captain(&hub, &mut ana, &mac_dir);
+    let started = delegate_from(&mac_dir, &captain, json!({ "task": "Run the slow suite.", "title": "Slow suite", "target": { "box": true } })).unwrap();
+    let task = started["taskId"].as_str().unwrap().to_owned();
+    // The box's session runs and reports no turn, as one parked on a screen no one answers.
+    wait_for("the worker thread running on the box", || box_tabs(&hub.boxes).iter().any(|t| t.role == Some(Role::Worker) && t.running && t.session.is_none()));
+
+    wait_for("the box to go", || hub.boxes.live().is_empty());
+    let status = task_status(&mac_dir, &captain, &task);
+    assert_eq!(
+        (status["workState"].as_str(), status["error"].as_str()),
+        (Some("failed"), Some("Upstash Box: the worker did not start its first turn within 2 s")),
+        "{status}"
     );
     wait_for("the row to go", || ana.rows(&hub) == 0);
 }
