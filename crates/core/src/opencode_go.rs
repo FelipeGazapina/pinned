@@ -12,6 +12,8 @@ use std::time::Duration;
 /// Set on a Go session so the statusline can ask Go for usage. Never a login account.
 pub const KEY_ENV: &str = "PINNED_OPENCODE_GO_KEY";
 pub const BASE_URL: &str = "https://opencode.ai/inference/go/anthropic";
+/// Points a Go session at another gateway, a test's or a local proxy's.
+pub const BASE_ENV: &str = "PINNED_OPENCODE_GO_BASE";
 pub const MODELS_URL: &str = "https://opencode.ai/inference/go/v1/models";
 pub const USAGE_URL: &str = "https://opencode.ai/zen/go/v1/usage";
 pub const DEFAULT_OPUS_MODEL: &str = "kimi-k3";
@@ -109,7 +111,7 @@ pub const SESSION_ENV: [&str; 6] = [
 pub fn env(key: &str) -> Vec<(String, String)> {
     let key = key.trim().to_owned();
     let values = [
-        gateway_from(std::env::var("PINNED_OPENCODE_GO_BASE").ok().as_deref()),
+        gateway_from(std::env::var(BASE_ENV).ok().as_deref()),
         key.clone(),
         DEFAULT_OPUS_MODEL.into(),
         DEFAULT_SONNET_MODEL.into(),
@@ -119,7 +121,8 @@ pub fn env(key: &str) -> Vec<(String, String)> {
     std::iter::once((KEY_ENV.to_owned(), key)).chain(SESSION_ENV.iter().map(|name| name.to_string()).zip(values)).collect()
 }
 
-fn gateway_from(value: Option<&str>) -> String {
+/// The gateway a Go session gets when `BASE_ENV` is `value`.
+pub fn gateway_from(value: Option<&str>) -> String {
     value.and_then(allowed_override).unwrap_or_else(|| BASE_URL.to_owned())
 }
 
