@@ -250,6 +250,10 @@ const TB_IDEA_STEPS = {
 const tbEsc = (v) => (typeof esc === "function" ? esc(v) : String(v ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`));
 const tbErrorText = (e) => String(e?.message ?? e ?? TB_TEXT.noHub);
 const tbCall = (op) => teamCall(op);
+/** Reads the team's lists again after a change to a bot: the sidebar draws its bots and their dots from them. */
+const tbListsChanged = () => {
+  if (typeof tcRefresh === "function") tcRefresh();
+};
 const tbTeam = () => teamsCurrent();
 const tbDocument = () => (typeof document !== "undefined" ? document : null);
 const tbShown = () => (typeof shellPage === "function" ? shellPage() : null);
@@ -712,7 +716,7 @@ const TB_BOT_ACTS = {
     }
     ui.busy = "";
     ui.confirm = false;
-    if (typeof tcRefresh === "function") tcRefresh();
+    tbListsChanged();
     tbOpenHome();
   },
   async toggle() {
@@ -724,6 +728,7 @@ const TB_BOT_ACTS = {
     try {
       await tbCall({ op: "turn_bot_on", workflow: ui.id, on });
       if (!on) ui.started = null;
+      tbListsChanged();
     } catch (e) {
       ui.error = tbErrorText(e);
     }
@@ -1058,6 +1063,7 @@ async function tbWizCreate() {
     s.saved = { ...save.bot, workflow: s.workflow };
     s.step = 5;
     s.on = false;
+    tbListsChanged();
   } catch (e) {
     s.error = TB_TEXT.wiz.saveFailed(tbErrorText(e));
   }
@@ -1127,6 +1133,7 @@ const TB_WIZ_ACTS = {
     try {
       await tbCall({ op: "turn_bot_on", workflow: s.workflow, on: true });
       s.on = true;
+      tbListsChanged();
     } catch (e) {
       s.error = TB_TEXT.wiz.turnFailed(tbErrorText(e));
     }
