@@ -24775,6 +24775,10 @@
                 "description": "The session waits out its usage limit without continuing by itself when it lifts.",
                 "type": "boolean"
               },
+              "compacting": {
+                "description": "Claude Code is compacting the session's context. The tab reads busy meanwhile.",
+                "type": "boolean"
+              },
               "connector": {
                 "type": [
                   "string",
@@ -33814,6 +33818,10 @@
               },
               "held": {
                 "description": "The session waits out its usage limit without continuing by itself when it lifts.",
+                "type": "boolean"
+              },
+              "compacting": {
+                "description": "Claude Code is compacting the session's context. The tab reads busy meanwhile.",
                 "type": "boolean"
               },
               "connector": {
@@ -57708,6 +57716,10 @@
             "description": "The session waits out its usage limit without continuing by itself when it lifts.",
             "type": "boolean"
           },
+          "compacting": {
+            "description": "Claude Code is compacting the session's context. The tab reads busy meanwhile.",
+            "type": "boolean"
+          },
           "connector": {
             "type": [
               "string",
@@ -58257,6 +58269,10 @@
           },
           "held": {
             "description": "The session waits out its usage limit without continuing by itself when it lifts.",
+            "type": "boolean"
+          },
+          "compacting": {
+            "description": "Claude Code is compacting the session's context. The tab reads busy meanwhile.",
             "type": "boolean"
           },
           "connector": {
@@ -62025,6 +62041,10 @@
               },
               "held": {
                 "description": "The session waits out its usage limit without continuing by itself when it lifts.",
+                "type": "boolean"
+              },
+              "compacting": {
+                "description": "Claude Code is compacting the session's context. The tab reads busy meanwhile.",
                 "type": "boolean"
               },
               "connector": {
@@ -66447,6 +66467,10 @@
               },
               "held": {
                 "description": "The session waits out its usage limit without continuing by itself when it lifts.",
+                "type": "boolean"
+              },
+              "compacting": {
+                "description": "Claude Code is compacting the session's context. The tab reads busy meanwhile.",
                 "type": "boolean"
               },
               "connector": {

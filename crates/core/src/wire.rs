@@ -111,6 +111,9 @@ pub struct TabView {
     /// The session waits out its usage limit without continuing by itself when it lifts.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub held: bool,
+    /// Claude Code is compacting the session's context. The tab reads busy meanwhile.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub compacting: bool,
     pub connector: Option<String>,
     /// What the connector's session works on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1831,6 +1834,7 @@ mod tests {
             message: Some("Claude needs your permission to use Bash".into()),
             resume_at: None,
             held: false,
+            compacting: false,
             connector: Some("c1".into()),
             subject: Some(Subject::LinearIssue { issue: "uuid".into() }),
             opened: 3,
