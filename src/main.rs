@@ -489,6 +489,25 @@ fn add_tray_or_go_without(app: &tauri::App) -> tauri::Result<()> {
     }
 }
 
+/// A session's callback on a signed-out app: the workflow calls act through the app's own
+/// connectors, and every other callback needs the hub.
+fn signed_out(connectors: &connectors::Connectors, callback: agent::Message) -> Result<String, String> {
+    match callback {
+        agent::Message::Stage { connector, subject, stage } => tauri::async_runtime::block_on(connectors.stage(&connector, &subject, stage)),
+        agent::Message::SlackReply { connector, channel, thread, text } => {
+            tauri::async_runtime::block_on(connectors.slack_reply(&connector, &channel, &thread, &text))
+        }
+        agent::Message::LinearCreate { connector, channel, thread, title, description, assignee } => {
+            tauri::async_runtime::block_on(connectors.linear_create(&connector, &channel, &thread, &title, &description, &assignee))
+        }
+        agent::Message::LinearTake { connector, channel, thread, issue } => tauri::async_runtime::block_on(connectors.linear_take(&connector, &channel, &thread, &issue)),
+        _ => Err(SIGNED_OUT.into()),
+    }
+}
+
+/// What a signed-out app answers a callback only the hub takes, such as `pinned run set`.
+const SIGNED_OUT: &str = "this needs the app signed in to pinned's hub";
+
 fn main() {
     // GTK's native Wayland backend can't keep a window above others, on every workspace, or where
     // the app puts it, all of which the panel needs. XWayland can, so run there unless the user
@@ -636,19 +655,7 @@ fn main() {
                 | agent::Message::Project { .. } => Err("the machine answers this itself".into()),
                 callback => match handle.state::<account::Account>().forward(callback, vouch) {
                     Ok(answer) => answer,
-                    Err(agent::Message::Stage { connector, subject, stage }) => tauri::async_runtime::block_on(
-                        handle.state::<connectors::Connectors>().stage(&connector, &subject, stage),
-                    ),
-                    Err(agent::Message::SlackReply { connector, channel, thread, text }) => tauri::async_runtime::block_on(
-                        handle.state::<connectors::Connectors>().slack_reply(&connector, &channel, &thread, &text),
-                    ),
-                    Err(agent::Message::LinearCreate { connector, channel, thread, title, description, assignee }) => tauri::async_runtime::block_on(
-                        handle.state::<connectors::Connectors>().linear_create(&connector, &channel, &thread, &title, &description, &assignee),
-                    ),
-                    Err(agent::Message::LinearTake { connector, channel, thread, issue }) => tauri::async_runtime::block_on(
-                        handle.state::<connectors::Connectors>().linear_take(&connector, &channel, &thread, &issue),
-                    ),
-                    Err(_) => unreachable!("forward hands back only the callback it was given"),
+                    Err(callback) => signed_out(&handle.state::<connectors::Connectors>(), callback),
                 },
             })?;
             let signed_in = app.state::<account::Account>().is_signed_in();
@@ -750,4 +757,20 @@ fn pin_above_fullscreen(window: &WebviewWindow) -> tauri::Result<()> {
     panel.set_hides_on_deactivate(false);
     panel.order_front_regardless();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A callback only the hub takes is refused on a signed-out app, not a crash of the socket's thread.
+    #[test]
+    fn a_signed_out_app_refuses_a_callback_only_the_hub_takes() {
+        let dir = std::env::temp_dir().join(format!("pinned-signed-out-{}", std::process::id()));
+        let connectors = connectors::Connectors::new(connectors::FileStorage::new(dir.clone()), "pinned".into());
+        let subject = agent::Subject::LinearIssue { issue: "uuid-1".into() };
+        let run_set = agent::Message::RunSet { connector: "c1".into(), subject, name: "title".into(), value: "x".into() };
+        assert_eq!(signed_out(&connectors, run_set), Err(SIGNED_OUT.to_owned()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
