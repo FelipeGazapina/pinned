@@ -310,22 +310,31 @@ pub struct Changes {
 
 const CHANGES_PAGES: usize = 4;
 
+/// The issues in a page of a changes read. A read is complete when a page holds fewer than this many, not when
+/// Linear's page flags say so: the flags for the older pages of `last` are not checked against the live API, and a
+/// read that trusted the wrong flag would stop at its first page and skip the rest. A full page asks for the next one.
+const CHANGES_PAGE: usize = 50;
+
 /// `last` with `before` reads from the oldest update forward: Linear sends each page oldest first, and the
 /// `endCursor` of a page, its newest issue, is the `before` of the page after it.
-const CHANGES: &str = "query($filter: IssueFilter, $before: String) {
-  issues(last: 50, before: $before, orderBy: updatedAt, filter: $filter) {
-    nodes { id identifier title description url updatedAt team { key name } project { name }
-      history(first: 20) { nodes { id createdAt actor { id name } fromState { name } toState { name }
-        fromAssignee { id name } toAssignee { id name } } } }
-    pageInfo { hasPreviousPage endCursor }
-  }
-}";
+fn changes_query(page: usize) -> String {
+    format!(
+        "query($filter: IssueFilter, $before: String) {{
+  issues(last: {page}, before: $before, orderBy: updatedAt, filter: $filter) {{
+    nodes {{ id identifier title description url updatedAt team {{ key name }} project {{ name }}
+      history(first: 20) {{ nodes {{ id createdAt actor {{ id name }} fromState {{ name }} toState {{ name }}
+        fromAssignee {{ id name }} toAssignee {{ id name }} }} }} }}
+    pageInfo {{ endCursor }}
+  }}
+}}"
+    )
+}
 
 /// The API's answer to a `viewer` query, by a hash of the API key: the map holds no key.
 static VIEWERS: std::sync::Mutex<BTreeMap<[u8; 32], String>> = std::sync::Mutex::new(BTreeMap::new());
 
-/// The changes to issues in `scope`, read from the oldest update up, four pages of 50 issues at most. `since`
-/// (RFC 3339) is the history floor: a change counts when it was made after `since`, whichever issue it is on.
+/// The changes to issues in `scope`, read from the oldest update up, four pages of `CHANGES_PAGE` issues at most.
+/// `since` (RFC 3339) is the history floor: a change counts when it was made after `since`, whichever issue it is on.
 /// `from` is the issue cursor. With None, the read takes the issues updated after `since`. With `Some(read_to)`
 /// it takes the issues updated at or after `read_to`, so a read that resumes a capped one reads the issues at its
 /// watermark again. Those come back with the same `history_id` and kind, so a caller drops a repeat by them.
@@ -334,6 +343,12 @@ static VIEWERS: std::sync::Mutex<BTreeMap<[u8; 32], String>> = std::sync::Mutex:
 /// millisecond later instead, and the caller's loop ends. The one known skip is a tie beyond the cap at a single
 /// millisecond: those issues are not read.
 pub async fn changes(key: &str, since: &str, from: Option<&str>, scope: &Scope) -> Result<Changes, String> {
+    read_changes(key, since, from, scope, CHANGES_PAGE).await
+}
+
+/// `changes` with `page` issues to a page. The tests read with a small page, so the four-page cap is reached with a
+/// few issues.
+async fn read_changes(key: &str, since: &str, from: Option<&str>, scope: &Scope, page: usize) -> Result<Changes, String> {
     since_time(since)?;
     let mut filter = match from {
         Some(from) => {
@@ -353,15 +368,17 @@ pub async fn changes(key: &str, since: &str, from: Option<&str>, scope: &Scope) 
     let mut changes = Vec::new();
     let mut read_to = None;
     let mut before: Option<String> = None;
+    let query = changes_query(page);
     for _ in 0..CHANGES_PAGES {
-        let data = strict_query(key, CHANGES, json!({ "filter": filter.clone(), "before": before })).await?;
+        let data = strict_query(key, &query, json!({ "filter": filter.clone(), "before": before })).await?;
+        let issues = nodes(&data["issues"]).count();
         changes.extend(changes_in(&data, since)?);
         read_to = later_update(&data, read_to);
-        let page = &data["issues"]["pageInfo"];
-        if page["hasPreviousPage"].as_bool() != Some(true) {
+        if issues < page {
             return Ok(Changes { changes, read_to: None });
         }
-        before = Some(page["endCursor"].as_str().ok_or("Linear sent a page with no cursor")?.to_owned());
+        let end = data["issues"]["pageInfo"]["endCursor"].as_str().ok_or("Linear sent a page with no cursor")?;
+        before = Some(end.to_owned());
     }
     let read_to = read_to.ok_or("Linear sent a full read with no issues")?;
     let read_to = match from {
@@ -880,7 +897,7 @@ mod tests {
         let _restore = RestoreLinear;
         let (root, seen) = stand_in(linear_pages(fixture(12), PAGE));
         set_api(Some(root));
-        let read = block_on(changes("lin-cap", SINCE, None, &Scope::default())).unwrap();
+        let read = block_on(read_changes("lin-cap", SINCE, None, &Scope::default(), PAGE)).unwrap();
         assert_eq!(seen.lock().unwrap().len(), 4, "the read asks for four pages and no more");
         assert_eq!(read.read_to.as_deref(), Some("2026-11-10T08:00:00.000Z"), "the newest updatedAt read is the watermark");
         assert_eq!(read.changes, (1..=8).map(moved).collect::<Vec<_>>(), "the four oldest pages, oldest first");
@@ -892,9 +909,9 @@ mod tests {
         let _restore = RestoreLinear;
         let (root, seen) = stand_in(linear_pages(fixture(12), PAGE));
         set_api(Some(root));
-        let first = block_on(changes("lin-union-1", SINCE, None, &Scope::default())).unwrap();
+        let first = block_on(read_changes("lin-union-1", SINCE, None, &Scope::default(), PAGE)).unwrap();
         let watermark = first.read_to.clone().expect("a capped read names its watermark");
-        let second = block_on(changes("lin-union-2", SINCE, Some(&watermark), &Scope::default())).unwrap();
+        let second = block_on(read_changes("lin-union-2", SINCE, Some(&watermark), &Scope::default(), PAGE)).unwrap();
         assert_eq!(second.read_to, None, "the three pages left fit under the cap");
         assert_eq!(seen.lock().unwrap().len(), 7, "four requests for the capped read, then three");
         let again: Vec<&str> = second.changes.iter().map(|c| c.identifier.as_str()).collect();
@@ -934,8 +951,8 @@ mod tests {
         let _restore = RestoreLinear;
         let (root, seen) = stand_in(linear_pages(fixture(4), PAGE));
         set_api(Some(root));
-        let read = block_on(changes("lin-short", SINCE, None, &Scope::default())).unwrap();
-        assert_eq!(seen.lock().unwrap().len(), 2, "the read stops when Linear says there is no next page");
+        let read = block_on(read_changes("lin-short", SINCE, None, &Scope::default(), PAGE)).unwrap();
+        assert_eq!(seen.lock().unwrap().len(), 3, "a full page asks for the next one, and the third page is empty, so the read is complete");
         assert_eq!(read.read_to, None);
     }
 
@@ -945,16 +962,16 @@ mod tests {
         let _restore = RestoreLinear;
         let (root, _) = stand_in(|_| (429, json!({ "errors": [{ "message": "slow down for Export 500s" } ] }).to_string()));
         set_api(Some(root));
-        assert_eq!(block_on(changes("lin-429", SINCE, None, &Scope::default())), Err("Linear answered 429".into()));
+        assert_eq!(block_on(read_changes("lin-429", SINCE, None, &Scope::default(), PAGE)), Err("Linear answered 429".into()));
 
         let pages = linear_pages(fixture(12), PAGE);
         let (root, _) = stand_in(move |request| if request["variables"]["before"].is_null() { pages(request) } else { (500, "upstream text".into()) });
         set_api(Some(root));
-        assert_eq!(block_on(changes("lin-500", SINCE, None, &Scope::default())), Err("Linear answered 500".into()), "a failed later page is an error, not a partial read");
+        assert_eq!(block_on(read_changes("lin-500", SINCE, None, &Scope::default(), PAGE)), Err("Linear answered 500".into()), "a failed later page is an error, not a partial read");
 
         let (root, _) = stand_in(|_| (200, json!({ "errors": [{ "message": "invalid filter for Ana Souza" }] }).to_string()));
         set_api(Some(root));
-        assert_eq!(block_on(changes("lin-gql", SINCE, None, &Scope::default())), Err("Linear answered with a GraphQL error".into()));
+        assert_eq!(block_on(read_changes("lin-gql", SINCE, None, &Scope::default(), PAGE)), Err("Linear answered with a GraphQL error".into()));
     }
 
     #[test]
@@ -964,9 +981,10 @@ mod tests {
         let (root, seen) = stand_in(linear_pages(fixture(2), PAGE));
         set_api(Some(root));
         let scope = Scope { team: " ENG ".into(), project: "Exports".into() };
-        block_on(changes("lin-scope", SINCE, None, &scope)).unwrap();
-        block_on(changes("lin-scope", SINCE, None, &Scope::default())).unwrap();
-        block_on(changes("lin-scope", SINCE, Some(WATERMARK), &Scope::default())).unwrap();
+        block_on(read_changes("lin-scope", SINCE, None, &scope, PAGE)).unwrap();
+        block_on(read_changes("lin-scope", SINCE, None, &Scope::default(), PAGE)).unwrap();
+        block_on(read_changes("lin-scope", SINCE, Some(WATERMARK), &Scope::default(), PAGE)).unwrap();
+        // Each read here is two requests, a full page of two issues and then an empty one, so the reads' first requests are 0, 2 and 4.
         let sent = seen.lock().unwrap().clone();
         assert_eq!(
             sent[0]["variables"]["filter"],
@@ -976,8 +994,8 @@ mod tests {
                 "project": { "name": { "eqIgnoreCase": "Exports" } },
             })
         );
-        assert_eq!(sent[1]["variables"]["filter"], json!({ "updatedAt": { "gt": SINCE } }), "an empty scope filters by time alone");
-        assert_eq!(sent[2]["variables"]["filter"], json!({ "updatedAt": { "gte": WATERMARK } }), "a read from a watermark takes the issues at it, too");
+        assert_eq!(sent[2]["variables"]["filter"], json!({ "updatedAt": { "gt": SINCE } }), "an empty scope filters by time alone");
+        assert_eq!(sent[4]["variables"]["filter"], json!({ "updatedAt": { "gte": WATERMARK } }), "a read from a watermark takes the issues at it, too");
     }
 
     #[test]
@@ -987,10 +1005,10 @@ mod tests {
         let (root, seen) = stand_in(linear_pages(fixture(2), PAGE));
         set_api(Some(root));
         assert_eq!(
-            block_on(changes("lin-since", "yesterday", None, &Scope::default())),
+            block_on(read_changes("lin-since", "yesterday", None, &Scope::default(), PAGE)),
             Err("bad time \"yesterday\": premature end of input".into())
         );
-        assert!(block_on(changes("lin-from", SINCE, Some("soon"), &Scope::default())).is_err(), "a bad watermark is an error too");
+        assert!(block_on(read_changes("lin-from", SINCE, Some("soon"), &Scope::default(), PAGE)).is_err(), "a bad watermark is an error too");
         assert_eq!(seen.lock().unwrap().len(), 0);
     }
 
@@ -1014,11 +1032,11 @@ mod tests {
         issues.extend(fixture(8));
         let (root, seen) = stand_in(linear_pages(issues, PAGE));
         set_api(Some(root));
-        let first = block_on(changes("lin-held-1", SINCE, None, &Scope::default())).unwrap();
+        let first = block_on(read_changes("lin-held-1", SINCE, None, &Scope::default(), PAGE)).unwrap();
         assert_eq!(first.read_to.as_deref(), Some(WATERMARK), "the cap reads ENG-1 to ENG-8 and names their newest update");
         assert_eq!(first.changes, (1..=8).map(moved).collect::<Vec<_>>());
 
-        let second = block_on(changes("lin-held-2", SINCE, first.read_to.as_deref(), &Scope::default())).unwrap();
+        let second = block_on(read_changes("lin-held-2", SINCE, first.read_to.as_deref(), &Scope::default(), PAGE)).unwrap();
         assert_eq!(second.read_to, None, "ENG-8 and ENG-9 fit under the cap");
         let again: Vec<&str> = second.changes.iter().map(|c| c.history_id.as_str()).collect();
         assert_eq!(again, ["h-8", "h-9"], "ENG-8 comes again at the watermark; ENG-9's status move is read though it is before it");
@@ -1033,7 +1051,7 @@ mod tests {
             (1..=8).map(moved).chain([moved_at(9, "2026-11-10T05:30:00.000Z")]).collect::<Vec<_>>(),
             "every change in the fixture, once, oldest first"
         );
-        assert_eq!(seen.lock().unwrap().len(), 5, "four requests for the capped read, one for the next");
+        assert_eq!(seen.lock().unwrap().len(), 6, "four requests for the capped read, then two for the next: a full page, then an empty one");
     }
 
     #[test]
@@ -1045,18 +1063,18 @@ mod tests {
         issues.extend(fixture(8));
         let (root, seen) = stand_in(linear_pages(issues, PAGE));
         set_api(Some(root));
-        let first = block_on(changes("lin-tie-1", SINCE, None, &Scope::default())).unwrap();
+        let first = block_on(read_changes("lin-tie-1", SINCE, None, &Scope::default(), PAGE)).unwrap();
         assert_eq!(first.read_to.as_deref(), Some(WATERMARK));
         assert_eq!(first.changes, (1..=8).map(moved).collect::<Vec<_>>());
 
-        let second = block_on(changes("lin-tie-2", SINCE, first.read_to.as_deref(), &Scope::default())).unwrap();
+        let second = block_on(read_changes("lin-tie-2", SINCE, first.read_to.as_deref(), &Scope::default(), PAGE)).unwrap();
         assert_eq!(second.read_to, None);
         assert_eq!(
             second.changes,
             vec![moved(8), moved_at(9, WATERMARK)],
             "ENG-9, updated at exactly the watermark and unread by the cap, is in the next read"
         );
-        assert_eq!(seen.lock().unwrap().len(), 5, "four requests for the capped read, one for the next");
+        assert_eq!(seen.lock().unwrap().len(), 6, "four requests for the capped read, then two for the next: a full page, then an empty one");
     }
 
     #[test]
@@ -1074,7 +1092,7 @@ mod tests {
         while let Some(watermark) = from.take() {
             reads += 1;
             assert!(reads <= 3, "the reads must end; this one is read number {reads} from the same watermark");
-            let read = block_on(changes("lin-stall", SINCE, Some(&watermark), &Scope::default())).unwrap();
+            let read = block_on(read_changes("lin-stall", SINCE, Some(&watermark), &Scope::default(), PAGE)).unwrap();
             found.extend(read.changes);
             from = read.read_to;
             if reads == 1 {
