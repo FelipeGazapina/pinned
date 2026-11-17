@@ -77,7 +77,7 @@ pub fn child_model(parent: Provider, child: Provider, inherited: Option<String>,
 }
 
 /// The tools a read-only Claude session is refused outright, besides pinned's own that act.
-pub const READ_ONLY_REFUSED: [&str; 5] = ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"];
+pub const READ_ONLY_REFUSED: [&str; 6] = ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash", "PowerShell"];
 
 /// The Claude mode a read-only session runs in. It never stops at a prompt, or at a plan to
 /// approve as plan mode does: what no rule allows is refused.
@@ -867,7 +867,7 @@ mod tests {
         assert!(!pair("--permission-mode", "plan"), "{args:?}");
         let tools = |flag: &str| args.windows(2).filter(|w| w[0] == flag).flat_map(|w| w[1].split(',').map(str::to_owned)).collect::<Vec<_>>();
         let refused = tools("--disallowedTools");
-        for tool in ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash", "mcp__pinned__memory_save", "mcp__pinned__delegate_task", "mcp__pinned__act"] {
+        for tool in ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash", "PowerShell", "mcp__pinned__memory_save", "mcp__pinned__delegate_task", "mcp__pinned__act"] {
             assert!(refused.iter().any(|t| t == tool), "{tool} is not refused: {args:?}");
         }
         let allowed = tools("--allowedTools");

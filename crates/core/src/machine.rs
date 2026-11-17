@@ -11007,7 +11007,7 @@ echo '{"type":"result","result":"ok"}'
         assert!(pair("--permission-mode", "dontAsk"), "{lines:?}");
         assert!(!pair("--permission-mode", "plan"), "{lines:?}");
         let refused = tools_after(&lines, "--disallowedTools");
-        for tool in ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash", "mcp__pinned__memory_save", "mcp__pinned__delegate_task", "mcp__pinned__act"] {
+        for tool in ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash", "PowerShell", "mcp__pinned__memory_save", "mcp__pinned__delegate_task", "mcp__pinned__act"] {
             assert!(refused.iter().any(|t| t == tool), "{tool} is not refused: {lines:?}");
         }
         let allowed = tools_after(&lines, "--allowedTools");
