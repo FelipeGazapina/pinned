@@ -10482,6 +10482,23 @@ mod tests {
         assert!(!prompt.replace(&framed, "").contains(PLANTED), "the planted line is only inside the frame: {prompt}");
     }
 
+    /// The run a router hands an app post to reads the post as the router did, its attachments
+    /// included, though the post's own `text` is empty.
+    #[test]
+    fn a_routed_app_post_whose_text_is_in_its_attachments_opens_its_run_with_that_text() {
+        let _api = slack::lock_api();
+        let _restore = (RestoreSlack, RestoreVercelRoot);
+        let ts = slack_ts(Utc::now() - chrono::Duration::seconds(60));
+        let post = json!({
+            "ts": ts, "subtype": "bot_message", "bot_id": "B9", "username": "CI Bot", "text": "",
+            "attachments": [{ "title": "Deploy failed", "text": "api went red on 3 hosts", "fallback": "Deploy failed" }]
+        });
+        let (work, _) = route_an_app_post("apps-router-attachments", post);
+        let runs = opened_runs(&work);
+        assert_eq!(runs.len(), 1, "{} works", work.len());
+        assert!(runs[0].input.contains("CI Bot") && runs[0].input.contains("Deploy failed\napi went red on 3 hosts"), "{}", runs[0].input);
+    }
+
     /// The "Route Slack messages" shape: a classify on the message, whose bug branch opens a
     /// session and whose ticket-request branch files a Linear issue in Bloom and replies with it.
     fn ticket_router() -> Connector {
