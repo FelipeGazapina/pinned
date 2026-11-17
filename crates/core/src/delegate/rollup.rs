@@ -179,6 +179,7 @@ impl Delegates {
                     // A worker whose cost is unknown leaves the total short, so the tree has no cost to show.
                     cost: (rolled.unknown == 0).then_some(rolled.total_usd),
                     ended_at: task.ended,
+                    by: None,
                 })
             })
             .collect()
