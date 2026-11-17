@@ -120,23 +120,110 @@ pub enum Trigger {
     Called,
     /// No poller: the workflow runs only when someone runs it now.
     Manual,
+    /// A Linear issue moves from status `from` to status `to`, each named ignoring case. Empty is
+    /// any status.
+    LinearStatus {
+        #[serde(default)]
+        from: String,
+        #[serde(default)]
+        to: String,
+        #[serde(default)]
+        scope: LinearScope,
+        #[serde(default)]
+        by: By,
+    },
+    /// A Linear issue is assigned to `to`, or unassigned when `to` is `Assignee::Nobody`.
+    LinearAssigned {
+        to: Assignee,
+        #[serde(default)]
+        scope: LinearScope,
+        #[serde(default)]
+        by: By,
+    },
+    /// The times `schedule` gives in `tz`, an IANA zone. Only a cron saves: a one-time run is a Task.
+    Schedule { schedule: schedule::Schedule, tz: String },
 }
+
+/// The Linear team and project a change must be in, each by name or key ignoring case. Empty is any.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, schemars::JsonSchema)]
+pub struct LinearScope {
+    #[serde(default)]
+    pub team: String,
+    #[serde(default)]
+    pub project: String,
+}
+
+/// Who an issue must be assigned to.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, schemars::JsonSchema)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum Assignee {
+    Anyone,
+    /// The Linear user the account's key belongs to.
+    Me,
+    /// Matched on `id`; `name` is for display.
+    User { id: String, name: String },
+    /// The issue was unassigned.
+    Nobody,
+}
+
+/// Who must have made the change.
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, schemars::JsonSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum By {
+    #[default]
+    Anyone,
+    /// The Linear user the account's key belongs to.
+    Me,
+    NotMe,
+}
+
+/// What a save says to a schedule trigger that runs once.
+pub const SCHEDULE_ONCE: &str = "a scheduled workflow repeats: use a Task for a one-time run";
 
 impl Trigger {
     fn integration(&self) -> &'static str {
         match self {
-            Trigger::LinearLabel { .. } => "Linear",
+            Trigger::LinearLabel { .. } | Trigger::LinearStatus { .. } | Trigger::LinearAssigned { .. } => "Linear",
             Trigger::SlackMention { .. } | Trigger::SlackMessage { .. } | Trigger::Called => "Slack",
-            Trigger::Manual => "pinned",
+            Trigger::Manual | Trigger::Schedule { .. } => "pinned",
         }
     }
 
     fn answers_threads(&self) -> bool {
         match self {
             Trigger::SlackMention { .. } | Trigger::Called => true,
-            Trigger::LinearLabel { .. } | Trigger::SlackMessage { .. } | Trigger::Manual => false,
+            Trigger::LinearLabel { .. }
+            | Trigger::SlackMessage { .. }
+            | Trigger::Manual
+            | Trigger::LinearStatus { .. }
+            | Trigger::LinearAssigned { .. }
+            | Trigger::Schedule { .. } => false,
         }
     }
+}
+
+/// Refuses a schedule that runs once, and a cron or zone `schedule` can't read.
+fn check_schedule(schedule: &schedule::Schedule, tz: &str) -> Result<(), String> {
+    if matches!(schedule, schedule::Schedule::Once { .. }) {
+        return Err(SCHEDULE_ONCE.into());
+    }
+    schedule::validate(schedule, tz)
+}
+
+/// The save check of every trigger the workflow has: its graph's when it has one, else its own.
+pub fn check_triggers(connector: &Connector, graph: Option<&Graph>) -> Result<(), String> {
+    let Some(graph) = graph else {
+        return match &connector.trigger {
+            Trigger::Schedule { schedule, tz } => check_schedule(schedule, tz),
+            _ => Ok(()),
+        };
+    };
+    for node in &graph.nodes {
+        if let NodeKind::Trigger { watch: Watch::Schedule { schedule, tz } } = &node.kind {
+            check_schedule(schedule, tz)?;
+        }
+    }
+    Ok(())
 }
 
 /// How a message workflow sorts each message, and where each category sends it.
@@ -745,7 +832,7 @@ impl Connector {
     fn advance(&mut self, watermark: DateTime<Utc>, opening: bool) -> bool {
         let watched = match self.trigger {
             Trigger::SlackMention { .. } | Trigger::SlackMessage { .. } => true,
-            Trigger::LinearLabel { .. } | Trigger::Called | Trigger::Manual => false,
+            Trigger::LinearLabel { .. } | Trigger::Called | Trigger::Manual | Trigger::LinearStatus { .. } | Trigger::LinearAssigned { .. } | Trigger::Schedule { .. } => false,
         };
         let behind = DateTime::parse_from_rfc3339(&self.since).map_or(true, |since| since < watermark);
         if !watched || !behind || opening {
@@ -2335,7 +2422,9 @@ impl Connectors {
         let watched = match &c.trigger {
             Trigger::SlackMention { channel } => Some(channel.as_str()),
             Trigger::Called => None,
-            Trigger::LinearLabel { .. } | Trigger::SlackMessage { .. } | Trigger::Manual => return Err("the workflow no longer answers Slack threads".into()),
+            Trigger::LinearLabel { .. } | Trigger::SlackMessage { .. } | Trigger::Manual | Trigger::LinearStatus { .. } | Trigger::LinearAssigned { .. } | Trigger::Schedule { .. } => {
+                return Err("the workflow no longer answers Slack threads".into())
+            }
         };
         let bot = self.thread_bot(Some(&d.connector), &d.channel, &d.thread)?;
         let token = bot.token.clone();
@@ -2444,7 +2533,8 @@ impl Connectors {
                 Ok(Some(self.follow_ups(&bot, c, None, now).await?))
             }
             // No poller watches it: it runs only when someone runs it now.
-            Trigger::Manual => Ok(Some(vec![])),
+            // These find no events at the check.
+            Trigger::Manual | Trigger::LinearStatus { .. } | Trigger::LinearAssigned { .. } | Trigger::Schedule { .. } => Ok(Some(vec![])),
         }
     }
 
@@ -2682,7 +2772,7 @@ impl Connectors {
             let Some(c) = store.connectors.iter().find(|c| c.id == workflow) else { return Ok(false) };
             let channel = match &c.trigger {
                 Trigger::SlackMention { channel } | Trigger::SlackMessage { channel, .. } => channel.clone(),
-                Trigger::LinearLabel { .. } | Trigger::Called | Trigger::Manual => return Ok(false),
+                Trigger::LinearLabel { .. } | Trigger::Called | Trigger::Manual | Trigger::LinearStatus { .. } | Trigger::LinearAssigned { .. } | Trigger::Schedule { .. } => return Ok(false),
             };
             if channel_name(&channel).is_empty() {
                 return Ok(false);
@@ -5662,7 +5752,7 @@ impl Connectors {
             Trigger::Called => {
                 return Err(format!("workflow {:?} answers only the Slack threads another workflow hands it, so Run now has no thread to give it", workflow.name))
             }
-            Trigger::LinearLabel { .. } | Trigger::SlackMention { .. } | Trigger::Manual => {}
+            Trigger::LinearLabel { .. } | Trigger::SlackMention { .. } | Trigger::Manual | Trigger::LinearStatus { .. } | Trigger::LinearAssigned { .. } | Trigger::Schedule { .. } => {}
         }
         let (owner, setup, proof) = manual_start(&self.library(), &self.names(), id)?;
         let mut owner = merge_session(&self.store.lock().unwrap().connector(&owner).cloned()?, &setup).map_err(|e| format!("the workflow's session step can't run: {e}"))?;
@@ -5721,6 +5811,7 @@ fn save_checks(store: &Store, connector: &Connector, graph: Option<&Graph>, conn
     if connector.model.trim().starts_with('-') {
         return Err(refused("model")("the workflow's model may not start with -, which claude could read as an option".into()));
     }
+    check_triggers(connector, graph).map_err(refused("trigger"))?;
     let Some(graph) = graph else { return Ok(()) };
     let called = |id: &str| call_target(store, connector.id.as_str(), graph, id);
     graph.validate(&called).map_err(refused("graph"))?;
@@ -8027,7 +8118,8 @@ mod tests {
             serde_json::to_value(&want).unwrap(),
             json!({ "kind": "linear-status", "from": "", "to": "Ready to Dev", "scope": { "team": "", "project": "" }, "by": "anyone" })
         );
-        let NodeKind::Trigger { watch } = &migrate(&status).trigger().kind else { unreachable!() };
+        let graph = migrate(&status);
+        let NodeKind::Trigger { watch } = &graph.trigger().kind else { unreachable!() };
         assert_eq!(*watch, Watch::LinearStatus { from: String::new(), to: "Ready to Dev".into(), scope: LinearScope::default(), by: By::Anyone });
 
         let scoped = json!({ "kind": "linear-status", "from": "Todo", "to": "Done", "scope": { "team": "ENG", "project": "Hub" }, "by": "not-me" });
@@ -8044,7 +8136,8 @@ mod tests {
         let scheduled = connector_with(cron.clone());
         round_trips(&scheduled, &want);
         assert_eq!(serde_json::to_value(&want).unwrap(), cron);
-        let NodeKind::Trigger { watch } = &migrate(&scheduled).trigger().kind else { unreachable!() };
+        let graph = migrate(&scheduled);
+        let NodeKind::Trigger { watch } = &graph.trigger().kind else { unreachable!() };
         assert_eq!(*watch, Watch::Schedule { schedule: schedule::Schedule::Cron { expr: "0 9 * * 1-5".into() }, tz: "America/Sao_Paulo".into() });
     }
 
