@@ -6319,6 +6319,7 @@ impl Machine {
         };
         crate::load::MachineState {
             load: crate::load::sample(&home()),
+            pressure: None,
             accounts: listed.iter().filter_map(crate::load::AccountState::of).collect(),
             sessions,
             workers: working.max(worker_tabs),

@@ -24,9 +24,6 @@ pub struct Load {
     /// Memory that a new process can take without swapping: free, inactive and cached.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mem_available_mb: Option<u64>,
-    /// How the OS rates memory pressure. None where the OS gives no reading (Linux, boxes).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pressure: Option<Pressure>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disk_total_mb: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -64,6 +61,9 @@ pub struct AccountState {
 pub struct MachineState {
     #[serde(default)]
     pub load: Load,
+    /// How the OS rates memory pressure. None where the OS gives no reading (Linux, boxes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pressure: Option<Pressure>,
     #[serde(default)]
     pub accounts: Vec<AccountState>,
     /// Sessions running now, of any role.
@@ -181,7 +181,7 @@ pub fn sample(disk: &std::path::Path) -> Load {
     let cpus = std::thread::available_parallelism().ok().and_then(|n| u32::try_from(n.get()).ok());
     let (mem_total_mb, mem_available_mb) = memory();
     let (disk_total_mb, disk_free_mb) = disk_of(disk);
-    Load { cpus, cpu_percent: cpus.and_then(|cpus| load_average().map(|load| percent_of(load, cpus))), mem_total_mb, mem_available_mb, pressure: None, disk_total_mb, disk_free_mb }
+    Load { cpus, cpu_percent: cpus.and_then(|cpus| load_average().map(|load| percent_of(load, cpus))), mem_total_mb, mem_available_mb, disk_total_mb, disk_free_mb }
 }
 
 #[cfg(unix)]
@@ -316,21 +316,21 @@ mod tests {
 
     #[test]
     fn a_load_without_pressure_reads_back_as_none() {
-        let load: Load = serde_json::from_value(json!({ "cpus": 8, "mem_available_mb": 1318 })).unwrap();
-        assert_eq!(load.pressure, None);
+        let state: MachineState = serde_json::from_value(json!({ "load": { "cpus": 8, "mem_available_mb": 1318 } })).unwrap();
+        assert_eq!(state.pressure, None);
     }
 
     #[test]
     fn a_load_with_no_pressure_has_no_pressure_key() {
-        assert_eq!(serde_json::to_value(Load::default()).unwrap(), json!({}));
+        assert_eq!(serde_json::to_value(MachineState::default()).unwrap().get("pressure"), None);
     }
 
     #[test]
     fn pressure_round_trips_as_snake_case() {
-        let load = Load { pressure: Some(Pressure::Warn), ..Default::default() };
-        let wire = serde_json::to_value(&load).unwrap();
+        let state = MachineState { pressure: Some(Pressure::Warn), ..Default::default() };
+        let wire = serde_json::to_value(&state).unwrap();
         assert_eq!(wire["pressure"], json!("warn"));
-        assert_eq!(serde_json::from_value::<Load>(wire).unwrap(), load);
+        assert_eq!(serde_json::from_value::<MachineState>(wire).unwrap(), state);
     }
 
     #[test]

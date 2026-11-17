@@ -270,7 +270,8 @@ mod tests {
 
     fn state(workers: u32, cpu: u32, disk_gb: u64) -> MachineState {
         MachineState {
-            load: Load { cpus: Some(8), cpu_percent: Some(cpu), mem_total_mb: Some(16_384), mem_available_mb: Some(8_192), pressure: None, disk_total_mb: Some(500_000), disk_free_mb: Some(disk_gb * 1024) },
+            load: Load { cpus: Some(8), cpu_percent: Some(cpu), mem_total_mb: Some(16_384), mem_available_mb: Some(8_192), disk_total_mb: Some(500_000), disk_free_mb: Some(disk_gb * 1024) },
+            pressure: None,
             accounts: vec![AccountState { id: "claude".into(), driver_kind: "claude".into(), can_run_child_task: true, limited: false, models: vec![] }],
             sessions: workers,
             workers,
