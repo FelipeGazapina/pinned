@@ -552,6 +552,8 @@ struct Tab {
     bypass: bool,
     /// Claude Code's id for the conversation in progress, known once a hook reports it.
     claude_session: Option<String>,
+    /// The session a fresh start left, whose plans go to the next session a hook reports.
+    left_session: Option<String>,
     /// `claude_session`'s transcript as read so far, which starts over whenever the session changes.
     tally: Tally,
     last_found_transcript: Option<PathBuf>,
@@ -1623,10 +1625,16 @@ impl Machine {
             history::restore(&cwd, &tree)?;
         }
         // Before the first prompt there is nothing to resume, so claude starts a new conversation.
-        self.tab(tab, |t| {
+        let old = self.tab(tab, |t| {
             t.launch = new.iter().flat_map(|id| ["--resume".to_owned(), id.clone()]).collect();
-            t.claude_session = new.clone();
+            match &new {
+                Some(_) => std::mem::replace(&mut t.claude_session, new.clone()),
+                None => None,
+            }
         })?;
+        if let Some(new) = &new {
+            self.carry_plans(tab, old, new);
+        }
         self.relaunch(tab, cols, rows)
     }
 
@@ -2256,7 +2264,7 @@ impl Machine {
             }
             // Without launch arguments this is a fresh conversation, not the one recorded before.
             if t.launch.is_empty() {
-                t.claude_session = None;
+                t.left_session = t.claude_session.take().or(t.left_session.take());
                 t.tally = Tally::default();
             }
             let mut args = std::mem::take(&mut t.launch);
@@ -2880,7 +2888,7 @@ impl Machine {
             let closed = tabs.remove(tab);
             let owned: Vec<PathBuf> = tabs.values().filter_map(|t| t.made.clone()).collect();
             // A session no other tab holds is gone, and its plans with it.
-            let gone = closed.as_ref().and_then(|t| t.claude_session.clone()).filter(|s| !tabs.values().any(|t| t.claude_session.as_ref() == Some(s)));
+            let gone = closed.as_ref().and_then(|t| t.claude_session.clone().or(t.left_session.clone())).filter(|s| !tabs.values().any(|t| t.claude_session.as_ref() == Some(s)));
             (closed, owned, tabs.is_empty(), gone)
         };
         if let Some(session) = gone {
@@ -3560,6 +3568,27 @@ impl Machine {
         })
     }
 
+    /// Moves the plans `tab` kept under the session `old` to `new`, the session it holds now. A tab
+    /// that resumed a session with plans of its own takes none over and adds none; its old ones go.
+    /// A session another tab still holds keeps its plans there too.
+    fn carry_plans(&self, tab: &str, old: Option<String>, new: &str) {
+        let Some(old) = old.filter(|old| old != new) else { return };
+        let still_held = self.tabs.lock().unwrap().iter().any(|(id, t)| id != tab && t.claude_session.as_deref() == Some(old.as_str()));
+        if self.plans.lock().unwrap().carry(&old, new, still_held) {
+            self.emit_tabs();
+        }
+    }
+
+    /// Refuses a plan write while another open tab holds `session`: both would write the same
+    /// plans, each without the other's.
+    fn sole_holder(&self, session: &str) -> Result<(), String> {
+        let holders = self.tabs.lock().unwrap().values().filter(|t| t.claude_session.as_deref() == Some(session)).count();
+        if holders > 1 {
+            return Err("another open tab holds this session; close one to keep its plans".into());
+        }
+        Ok(())
+    }
+
     fn project_tool(&self, tab: &str, tool: ProjectTool) -> Result<String, String> {
         let global = self.tab(tab, |t| global::is_global(&t.env))?;
         let only_global = || if global { Ok(()) } else { Err("only the global orchestrator has this tool".to_owned()) };
@@ -3633,6 +3662,7 @@ impl Machine {
             }
             ProjectTool::PlanSet(_) | ProjectTool::PlanStep(_) | ProjectTool::PlanFix(_) | ProjectTool::PlanClose(_) => {
                 let session = self.captain_session(tab)?.ok_or("only a project's Captain keeps a plan")?;
+                self.sole_holder(&session)?;
                 let now = unix_millis();
                 let written = self.plans.lock().unwrap().write(&session, |plans| match tool {
                     ProjectTool::PlanSet(call) => crate::plan::set(plans, call, now, &[], now),
@@ -6436,6 +6466,7 @@ impl Machine {
             env,
             bypass,
             claude_session,
+            left_session: None,
             tally: Tally::default(),
             last_found_transcript: None,
             interrupted: false,
@@ -6530,10 +6561,12 @@ impl Machine {
     /// Hooks report the session on every event, since /clear or /resume inside claude swaps it.
     /// True when the session is new to the tab.
     fn record_session(&self, tab: &str, session: String, reported_cwd: Option<&str>) -> bool {
-        let Ok((new, changed, task)) = self.tab(tab, |t| {
+        let Ok((new, changed, task, old)) = self.tab(tab, |t| {
             let new = t.claude_session.as_ref() != Some(&session);
+            let mut old = None;
             if new {
                 t.tally = Tally::default();
+                old = t.claude_session.take().or(t.left_session.take());
             }
             let mut changed = new;
             // An orchestrator steps into its workers' worktrees to review them, and stays in the project.
@@ -6543,10 +6576,13 @@ impl Machine {
                 changed = true;
             }
             t.claude_session = Some(session.clone());
-            (new, changed, t.task.clone())
+            (new, changed, t.task.clone(), old)
         }) else {
             return false;
         };
+        if new {
+            self.carry_plans(tab, old, &session);
+        }
         if let Some(task) = task {
             self.delegates.set_worker_session(&task, &session);
         }

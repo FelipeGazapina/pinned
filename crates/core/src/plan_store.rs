@@ -35,6 +35,21 @@ impl PlanStore {
         Ok(answer)
     }
 
+    /// Gives `to` the plans of `from` unless it has its own, and drops them from `from` unless
+    /// `keep` asks for both. True when any session's plans changed.
+    pub fn carry(&mut self, from: &str, to: &str, keep: bool) -> bool {
+        let plans = if keep { self.by_session.get(from).cloned() } else { self.by_session.remove(from) };
+        let Some(plans) = plans else { return false };
+        let taken = !self.by_session.contains_key(to);
+        if taken {
+            self.by_session.insert(to.to_owned(), plans);
+        }
+        if taken || !keep {
+            self.save();
+        }
+        taken || !keep
+    }
+
     pub fn drop_session(&mut self, session: &str) {
         if self.by_session.remove(session).is_some() {
             self.save();
