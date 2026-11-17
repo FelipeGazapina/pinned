@@ -151,10 +151,12 @@
 #approval .choices .about { font-size: 11px; color: var(--g-muted); }
 #approval .choices .choice[data-key]::after { content: attr(data-key); position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
   min-width: 18px; height: 18px; padding: 0 4px; border-radius: 4px; border: 1px solid var(--g-input); font: 10px/16px var(--g-mono); text-align: center; color: var(--g-muted); }
-#approval .approve-note { display: flex; align-items: center; gap: 6px; margin-top: 8px; }
+#approval .approve-note { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
 #approval .approve-note input { flex: 1; min-width: 0; height: 32px; padding: 0 10px; border: 1px solid rgb(var(--g-ink-rgb) / 0.16); border-radius: 8px; background: rgb(var(--g-ink-rgb) / 0.04); color: var(--g-fg); font: inherit; font-size: 13px; outline: 0; }
 #approval .approve-note input:focus { border-color: var(--g-primary); }
 #approval .approve-note button[disabled] { opacity: 0.45; cursor: default; }
+#approval .approve-note [data-approve-note-send] { flex: 0 1 auto; max-width: 60%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#approval .approve-note .approve-note-error { flex-basis: 100%; margin: 0; font-size: 12px; color: var(--g-error); }
 #approval .actions .icon { width: 24px; height: 24px; }
 #approval .actions .icon .i { width: 14px; height: 14px; }
 

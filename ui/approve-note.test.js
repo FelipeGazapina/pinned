@@ -134,7 +134,7 @@ function page({ screen = PLAN, stuck = false, writeError = null, refuse = false 
       if (call.cmd === "write_input") {
         log.push(["write", call.data]);
         if (writeError) throw new Error(writeError);
-        if (call.data === "\r" && !stuck) tab.term.show(WORKING);
+        if (call.data.endsWith("\r") && !stuck) tab.term.show(WORKING);
         return null;
       }
       log.push(["prompt", call.text]);
@@ -178,8 +178,13 @@ function page({ screen = PLAN, stuck = false, writeError = null, refuse = false 
       decl(composer, "function markSent"),
       decl(composer, "function raisePending"),
       decl(composer, "function dropPending"),
-      line(composer, "const planApprove"),
+      decl(composer, "const planApprove"),
+      line(composer, "const visibleOf"),
+      decl(composer, "function approveNoteOf"),
+      decl(composer, "function clearApproveNote"),
       decl(composer, "function approveNoteField"),
+      decl(composer, "function syncApproveNote"),
+      decl(composer, "function drawApproveNote"),
       decl(composer, "function openApproveNote"),
       decl(composer, "function keepNote"),
       decl(composer, "async function sendNote"),
@@ -209,6 +214,10 @@ const keydown = (input, key) => ({ type: "keydown", key, target: input, preventD
 const enter = (input) => keydown(input, "Enter");
 const tick = () => new Promise((r) => setTimeout(r, 5));
 
+/** Sets the note the way opening the field does: the text, and the plan menu it was typed under. */
+function typed(w, note) {
+  Object.assign(w.tab.thread, { approveNote: note, approveNoteMenu: w.run("terminalMenu(tab)") });
+}
 /** Opens the plan's note field with `note` typed in it, the way the card draws it: the live input,
  * the Approve button and the error line are the page's own elements, which the page sets. */
 function attach(w, note = "") {
@@ -225,7 +234,7 @@ function attach(w, note = "") {
   w.nodes["[data-approve-note-input]"] = [input];
   w.nodes["[data-approve-note-send]"] = [send];
   w.nodes["[data-approve-note-error]"] = [error];
-  w.tab.thread.approveNote = note;
+  typed(w, note);
   w.run("renderApproval(tab)");
   return { input, send, error };
 }
@@ -261,7 +270,7 @@ test("the note never picks Tell Claude what to change and never reaches the menu
 
 test("the note field is a div, not a form: a form inside the composer's form is dropped by the parser", () => {
   const w = page();
-  w.tab.thread.approveNote = "";
+  typed(w, "");
   const open = w.run("approveNoteField(tab)");
   assert.doesNotMatch(open, /<form/i);
   assert.match(open, /class="approve-note"/);
@@ -290,7 +299,7 @@ test("an empty note cannot be submitted, typing blank disables Approve, and Esc 
   await fire(w, { type: "input", target: blank.input });
   assert.equal(blank.send.disabled, true, "Approve is disabled while the field is blank");
 
-  w.tab.thread.approveNote = "half a note";
+  typed(w, "half a note");
   const esc = escEvent(element("[data-approve-note-input]"));
   fire(w, esc);
   assert.equal(w.tab.thread.approveNote, null, "Esc closes the field");
@@ -322,18 +331,18 @@ test("the desktop plan card opens a note field with the typed text, and Approve 
 
 test("the sheet's markup does not depend on the typed note: a keystroke never rebuilds the field", () => {
   const w = page();
-  w.tab.thread.approveNote = "keep";
+  typed(w, "keep");
   const first = w.run("askSheetHtml(tab)");
-  w.tab.thread.approveNote = "keep the old API, and more";
+  typed(w, "keep the old API, and more");
   assert.equal(w.run("askSheetHtml(tab)"), first);
-  w.tab.thread.approveNote = " ";
+  typed(w, " ");
   assert.equal(w.run("askSheetHtml(tab)"), first, "a blank note does not change the markup either");
 });
 
 test("the typed text and the disabled Approve are set on the live field, not in its markup", () => {
   const w = page();
   const { input, send } = attach(w, "");
-  w.tab.thread.approveNote = "keep the old API";
+  typed(w, "keep the old API");
   w.run("renderApproval(tab)");
   assert.equal(input.value, "keep the old API");
   assert.equal(send.disabled, false);
@@ -503,7 +512,7 @@ test("a note that starts with / is sent as send() sends it: no pending row", asy
 test("Esc closes the note field and puts the focus back on Approve with note", async () => {
   const w = page();
   const { input } = attach(w, "keep the old API");
-  const button = { focused: false, focus() { this.focused = true; } };
+  const button = { focused: false, focus() { this.focused = true; }, getClientRects: () => [{}] };
   w.nodes["[data-approve-note]"] = [button];
   fire(w, escEvent(input));
   await tick();

@@ -166,9 +166,11 @@
   .ask-sheet .ask-row { display: flex; align-items: center; min-height: 48px; padding: 0 4px; border: 0; border-top: 1px solid rgb(var(--g-ink-rgb) / 0.08); border-radius: 0;
     background: transparent; color: var(--g-fg); font: inherit; font-size: 15px; text-align: left; }
   .ask-sheet .ask-row.quiet { color: var(--g-side-muted); }
-  .ask-sheet .approve-note { display: flex; align-items: center; gap: 8px; padding: 10px 0 4px; }
+  .ask-sheet .approve-note { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 0 4px; }
   .ask-sheet .approve-note input { flex: 1; min-width: 0; height: 44px; padding: 0 12px; border: 1px solid rgb(var(--g-ink-rgb) / 0.18); border-radius: 12px; background: transparent; color: var(--g-fg); font: inherit; font-size: 16px; outline: 0; }
   .ask-sheet .approve-note button { flex: none; height: 44px; padding: 0 14px; border: 0; border-radius: 12px; background: transparent; font: inherit; font-size: 16px; font-weight: 600; }
+  .ask-sheet .approve-note [data-approve-note-send] { flex: 0 1 auto; max-width: 60%; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ask-sheet .approve-note .approve-note-error { flex-basis: 100%; margin: 0; padding: 0 4px; font-size: 13px; color: var(--g-error); }
   .ask-sheet .approve-note .primary { background: var(--g-primary); color: var(--g-on-primary); }
   .ask-sheet .approve-note .ghost { color: var(--g-muted); }
   .ask-sheet .approve-note button[disabled] { opacity: 0.45; }
