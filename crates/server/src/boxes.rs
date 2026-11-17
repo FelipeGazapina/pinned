@@ -3628,6 +3628,55 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn the_rescue_leaves_out_every_new_file_whose_name_may_hold_a_secret_and_says_only_how_many() {
+        let run = RescueRun::new();
+        std::fs::create_dir_all(run.clone.join("src")).unwrap();
+        std::fs::write(run.clone.join(".env"), "TOKEN=invented\n").unwrap();
+        std::fs::write(run.clone.join("src/new.rs"), "fn new() {}\n").unwrap();
+        assert_eq!(run.rescue(), "pinned-rescue: saved wip/rescue/task-1a2b3c4d (left out 1 files that may hold secrets)\npinned-rescue: done\n");
+        assert_eq!(run.git(&run.remote, &["ls-tree", "-r", "--name-only", "refs/heads/wip/rescue/task-1a2b3c4d"]), "notes.txt\nsrc/new.rs\n");
+        assert_eq!(run.branch("wip/rescue/task-1a2b3c4d", "src/new.rs"), "fn new() {}\n");
+        assert!(run.clone.join(".env").exists(), "the file left out stays in the box");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_rescue_keeps_tracked_changes_and_leaves_out_each_secret_name_in_any_case_and_folder() {
+        let run = RescueRun::new();
+        std::fs::write(run.clone.join(".gitignore"), "build/\n").unwrap();
+        run.git(&run.clone, &["add", ".gitignore"]);
+        run.git(&run.clone, &["commit", "-q", "-m", "ignore"]);
+        run.git(&run.clone, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+        std::fs::write(run.clone.join("notes.txt"), "half done\n").unwrap();
+        let secrets = [
+            ".env.local", "config/.ENV", "server.pem", "certs/Site.PEM", "deploy.key", "aws_credentials", "Credentials.json", "MySecret.txt", "secrets/db.txt",
+            "github_token", "API_TOKEN.txt", "id_rsa", "keys/id_rsa.pub", "store.p12", "STORE.P12",
+        ];
+        for (n, path) in secrets.iter().enumerate() {
+            let path = run.clone.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, format!("invented-{n}\n")).unwrap();
+        }
+        std::fs::create_dir_all(run.clone.join("build")).unwrap();
+        std::fs::write(run.clone.join("build/out.txt"), "built\n").unwrap();
+        std::fs::write(run.clone.join("keyboard.rs"), "keys\n").unwrap();
+        assert_eq!(run.rescue(), "pinned-rescue: saved wip/rescue/task-1a2b3c4d (left out 15 files that may hold secrets)\npinned-rescue: done\n");
+        assert_eq!(run.git(&run.remote, &["ls-tree", "-r", "--name-only", "refs/heads/wip/rescue/task-1a2b3c4d"]), ".gitignore\nkeyboard.rs\nnotes.txt\n");
+        assert_eq!(run.branch("wip/rescue/task-1a2b3c4d", "notes.txt"), "half done\n", "a tracked change is saved");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tree_whose_only_new_files_may_hold_secrets_has_nothing_to_rescue() {
+        let run = RescueRun::new();
+        std::fs::write(run.clone.join(".env"), "TOKEN=invented\n").unwrap();
+        assert_eq!(run.rescue(), "pinned-rescue: done\n");
+        assert!(run.writes().iter().all(|w| !w.starts_with("commit") && !w.starts_with("push")), "no commit and no push: {:?}", run.writes());
+        assert_eq!(run.git(&run.remote, &["for-each-ref", "--format=%(refname)"]), "refs/heads/main\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn a_hook_that_refuses_the_rescue_commit_is_not_skipped() {
         let run = RescueRun::new();
         run.hook("pre-commit", "exit 1");
