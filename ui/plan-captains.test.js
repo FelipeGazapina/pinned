@@ -75,6 +75,7 @@ function harness(extra = {}) {
     active: null,
     tabs,
     waiting: [],
+    working: [],
     facts: [],
     panelOf: (tab) => tab.panel,
     savePanel: () => log.saved++,
@@ -95,7 +96,7 @@ function harness(extra = {}) {
     openDelegated: async (task) => log.opened.push(task),
     activate: (tab) => log.activated.push(tab.key),
     tabByKey: (key) => tabs.find((t) => t.key === key) ?? null,
-    threadState: (tab) => (context.waiting.includes(tab.view.id) ? "needs" : "idle"),
+    threadState: (tab) => (context.waiting.includes(tab.view.id) ? "needs" : context.working.includes(tab.view.id) ? "working" : "idle"),
     captainFacts: () => context.facts,
     projectName: (tab) => tab.view.name,
     machineName: (id) => `Machine ${id}`,
@@ -154,6 +155,69 @@ test("a Captain's own wait makes its card Needs you even when its plans only run
   openCaptains(h, O);
   assert.ok(h.html().includes('data-cstate="needs_you"'), "the card is in the needs-you state");
   assert.ok(h.html().includes('data-tone="needs_you">Needs you</span>'), "and reads Needs you");
+});
+
+/** The facts the rail reads for one Captain tab; the card's state decides the row when the Captain is here. */
+const railFact = (slug, name, tab, state = "idle") => ({ slug, name, machine: { id: "m1", name: "Machine m1" }, path: "/x", captain: tab.key, state, workers: 0, working: 0, needs: [], reported: null, seen: null });
+
+test("a Captain with no plan whose thread is working reads Working on its card and rail row, under No plan running", () => {
+  const h = harness({ working: ["tab-v"] });
+  h.run(railSrc);
+  const O = globalTab();
+  const V = captain("tab-v", { name: "Vesper" });
+  h.tabs.push(V);
+  h.context.facts = [railFact("vesper", "Vesper", V)];
+  const rail = h.run("railHtml(facts)");
+  openCaptains(h, O);
+  const html = h.html();
+  assert.equal(/<span class="pl-count">([^<]*)<\/span>/.exec(html)?.[1], "1 working", "the header counts it as 1 working");
+  const rest = html.indexOf("No plan running");
+  assert.ok(rest >= 0 && html.indexOf("Vesper", rest) > rest, "Vesper sits under No plan running");
+  assert.match(html.slice(rest), /<span class="pl-word" data-tone="working">Working<\/span>/, "its card word is Working");
+  assert.match(rail, /data-captain-tab="m1:tab-v"[\s\S]*?<span class="state">Working<\/span>/, "its rail row reads Working");
+});
+
+test("a Captain whose only plan is finished reads Working while its thread works, not Finished at", () => {
+  const h = harness({ working: ["tab-r"] });
+  h.run(railSrc);
+  const O = globalTab();
+  const R = captain("tab-r", { name: "Rowan", plans: [glance({ id: "p1", state: "finished", finished_at: 1763000100000, done: 3, total: 3, strips: ["ddd"] })] });
+  h.tabs.push(R);
+  h.context.facts = [railFact("rowan", "Rowan", R, "working")];
+  const rail = h.run("railHtml(facts)");
+  openCaptains(h, O);
+  const html = h.html();
+  assert.equal(/data-card="m1:tab-r"[\s\S]*?<span class="pl-word"[^>]*>([^<]*)<\/span>/.exec(html)?.[1], "Working", "the card reads Working");
+  assert.equal(/data-captain-tab="m1:tab-r"[\s\S]*?<span class="state">([^<]*)<\/span>/.exec(rail)?.[1], "Working", "the rail row reads Working");
+});
+
+test("a Captain with no plan whose thread is idle still reads Idle on its card and rail row", () => {
+  const h = harness();
+  h.run(railSrc);
+  const O = globalTab();
+  const I = captain("tab-i", { name: "Ivy" });
+  h.tabs.push(I);
+  h.context.facts = [railFact("ivy", "Ivy", I)];
+  const rail = h.run("railHtml(facts)");
+  openCaptains(h, O);
+  const html = h.html();
+  assert.equal(/<span class="pl-count">([^<]*)<\/span>/.exec(html)?.[1], "1 idle", "the header counts it as 1 idle");
+  assert.match(html.slice(html.indexOf("No plan running")), /<span class="pl-word" data-tone="idle">Idle<\/span>/, "its card word is Idle");
+  assert.match(rail, /data-captain-tab="m1:tab-i"[\s\S]*?<span class="state">Idle<\/span>/, "its rail row reads Idle");
+});
+
+test("a Captain with a fixing plan reads Fixing while its thread works: the plan is more urgent", () => {
+  const h = harness({ working: ["tab-x"] });
+  h.run(railSrc);
+  const O = globalTab();
+  const X = captain("tab-x", { name: "Xeno", plans: [glance({ id: "p1", state: "fixing" })] });
+  h.tabs.push(X);
+  h.context.facts = [railFact("xeno", "Xeno", X, "working")];
+  const rail = h.run("railHtml(facts)");
+  openCaptains(h, O);
+  const html = h.html();
+  assert.equal(/data-card="m1:tab-x"[\s\S]*?<span class="pl-word"[^>]*>([^<]*)<\/span>/.exec(html)?.[1], "Fixing", "the card reads Fixing");
+  assert.equal(/data-captain-tab="m1:tab-x"[\s\S]*?<span class="state">([^<]*)<\/span>/.exec(rail)?.[1], "Fixing", "the rail row reads Fixing");
 });
 
 test("folded cards send no plan call; unfolding one sends one for its tab; an unchanged glance none, a changed glance one", async () => {
