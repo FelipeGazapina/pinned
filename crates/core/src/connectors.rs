@@ -2104,7 +2104,9 @@ struct ChangePass {
     /// The retries (`Store::change_retries`) this read finished, as (workflow, key): each leaves the
     /// retries, unless it waits again in `deferred`. A retry whose claim answered an error stays.
     retried: Vec<(String, String)>,
-    /// The changes this read left for the next check, as (workflow, key, change time).
+    /// The changes this read left for the next check, as (workflow, key, change time). They go to
+    /// `Store::change_retries` with the retries, so the next check reads each as a retry: a change
+    /// left here is not counted as not started, not even when its next start fails.
     deferred: Vec<(String, String, String)>,
     errors: Vec<String>,
 }
