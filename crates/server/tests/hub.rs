@@ -9341,6 +9341,9 @@ fn waiting_extend_box_asks_for_ended_boxes_do_not_count_toward_the_accounts_cap(
         asked.push(ask);
     }
     assert_eq!(extend_as(&ana.dir, &ana.tab, &live, 0.1, None), Err(TOO_MANY_EXTENDS.into()), "10 asks for live boxes fill the cap");
+    // Moved to ending as an earlier hub left it, with its asks still waiting: Upstash holds its
+    // delete, so the reaper never deletes the row, which would close them.
+    hub.boxes.state.lock().unwrap().held_deletes = Some(Arc::new(tokio::sync::Semaphore::new(0)));
     admin_on(&hub.database, &format!("update boxes set phase = 'ending', reason = 'done' where machine = '{ending}'"));
     admin_on(&hub.database, &format!("delete from boxes where machine = '{gone}'"));
     let admitted = extend_as(&ana.dir, &ana.tab, &live, 0.1, None).unwrap();
