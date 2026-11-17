@@ -930,6 +930,7 @@ fn a_won_change_read_again_where_its_claim_would_fail_fires_once_and_is_not_cool
         started += runs.len();
     }
     assert_eq!(started, 1, "one run in all");
-    assert_eq!(connectors.change_counts()["w1"].cooled, 0, "its own fire is not taken for a second start");
+    assert_eq!(connectors.change_counts().get("w1").map_or(0, |counts| counts.cooled), 0, "its own fire is not taken for a second start");
+    assert_eq!(claims.calls.lock().unwrap().len(), 1, "a won key is claimed once");
     no_unlisted(&fake);
 }

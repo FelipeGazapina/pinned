@@ -2424,6 +2424,10 @@ pub struct Connectors {
     claimer: String,
     /// Fires, as `<workflow>\n<key>`, whose claim answered an error: the next claim of one is a retry.
     unsure: Mutex<std::collections::HashSet<String>>,
+    /// Fires, as `<workflow>\n<key>`, this `Connectors` won and has not given back, with their
+    /// change's time: a read of one again claims nothing, so it is never in doubt and never fires
+    /// again. Dropped once the change is past the catch-up floor, where no read fires it.
+    won: Mutex<HashMap<String, DateTime<Utc>>>,
     /// The loop guards of this account's Linear change triggers.
     guards: Mutex<Guards>,
 }
@@ -2566,6 +2570,7 @@ impl Connectors {
             holding: Mutex::new(std::collections::HashSet::new()),
             claimer: new_claimer(),
             unsure: Mutex::new(std::collections::HashSet::new()),
+            won: Mutex::new(HashMap::new()),
             guards: Mutex::new(Guards::default()),
         }
     }
@@ -2649,16 +2654,27 @@ impl Connectors {
         self.store.lock().unwrap().change_counts.clone()
     }
 
-    /// Claims one fire of `workflow` for `key`, as a retry when this `Connectors`' last claim of
-    /// it answered an error (that insert may still have been stored).
-    fn claim_change(&self, workflow: &str, key: &str) -> Result<bool, String> {
+    /// Claims one fire of `workflow` for `key`, the change made at `at`, as a retry when this
+    /// `Connectors`' last claim of it answered an error (that insert may still have been stored).
+    /// A fire this `Connectors` already won answers false and claims nothing: its claim cannot
+    /// answer an error that would make the next claim a retry, which finds its own row and fires
+    /// it again.
+    fn claim_change(&self, workflow: &str, key: &str, at: DateTime<Utc>) -> Result<bool, String> {
         let id = format!("{workflow}\n{key}");
+        if self.won.lock().unwrap().contains_key(&id) {
+            return Ok(false);
+        }
         let retry = self.unsure.lock().unwrap().contains(&id);
         let claimed = self.storage.claim_fire(workflow, key, &self.claimer, retry);
         let mut unsure = self.unsure.lock().unwrap();
         match claimed {
             Err(_) => unsure.insert(id),
-            Ok(_) => unsure.remove(&id),
+            Ok(won) => {
+                if won {
+                    self.won.lock().unwrap().insert(id.clone(), at);
+                }
+                unsure.remove(&id)
+            }
         };
         claimed
     }
@@ -2672,6 +2688,7 @@ impl Connectors {
     async fn read_changes(&self, workflows: &[Connector], now: DateTime<Utc>) -> ChangePass {
         let floor = now - chrono::Duration::from_std(CATCH_UP).expect("CATCH_UP fits");
         let mut pass = ChangePass { floor: Some(floor), ..ChangePass::default() };
+        self.won.lock().unwrap().retain(|_, at| *at > floor);
         let Some(key) = self.key(LINEAR_KEY) else { return pass };
         let retries = self.store.lock().unwrap().change_retries.clone();
         let retrying = |workflow: &str, key: &str| retries.get(workflow).is_some_and(|keys| keys.contains_key(key));
@@ -2761,7 +2778,7 @@ impl Connectors {
                     pass.deferred.push((c.id.clone(), key.clone(), stamp(at)));
                     continue;
                 }
-                match self.claim_change(&c.id, &key) {
+                match self.claim_change(&c.id, &key, at) {
                     Ok(true) => match refused {
                         Some(refusal) => self.refuse(&c.id, &key, &change.issue_id, refusal, now),
                         // The guards keep its start once its run starts (`fire_started`).
@@ -2835,6 +2852,7 @@ impl Connectors {
     fn fire_not_started(&self, workflow: &str, fire: &ChangeFire) {
         let key = &fire.key;
         let released = self.storage.release_fire(workflow, key, &self.claimer);
+        self.won.lock().unwrap().remove(&format!("{workflow}\n{key}"));
         let retried = fire.at > Utc::now() - chrono::Duration::from_std(CATCH_UP).expect("CATCH_UP fits");
         let then = match retried {
             true => format!("a later check tries it again until the change is {} minutes old", CATCH_UP.as_secs() / 60),
