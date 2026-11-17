@@ -962,3 +962,53 @@ fn a_team_whose_keys_cant_be_opened_keeps_its_whole_line_waiting() {
     wait_for("Pages's Run now to open its session", || opened(&crew, &x) == 1 && crew.waiting(&x) == 0);
     assert_eq!(skip_rows(&crew), Vec::<Vec<Option<String>>>::new(), "nothing was counted as skipped");
 }
+
+// ---- the owner sees a held line ----
+
+/// The team as `who`'s team list shows it: its `line_held`, or the list's error.
+fn line_held(crew: &Crew, who: &Arc<pinned_server::hub::Account>) -> Result<Value, String> {
+    let list = crew.call(who, TeamOp::List)?;
+    Ok(list.as_array().unwrap().iter().find(|t| t["id"] == crew.team.to_string()).unwrap()["line_held"].clone())
+}
+
+#[test]
+fn a_team_whose_keys_cant_be_opened_shows_its_owner_the_held_line_until_they_read_again() {
+    let mut crew = Crew::new("tl_team_held_line");
+    let (holder, x) = (crew.on_bot("Docs"), crew.on_bot("Pages"));
+    admin_on(&crew.hub.database, &format!("update teams set max_live_runs = 1 where id = '{}'", crew.team));
+    assert_eq!(crew.found(crew.labeled(&holder, 9)), Ok(()));
+    let reply = crew.call(&crew.bob, TeamOp::RunNow { workflow: x.clone() }).unwrap();
+    assert_eq!(reply["waiting"], json!(true), "bob's Run now waits behind the holder");
+    assert_eq!(line_held(&crew, &crew.ana), Ok(Value::Null), "nothing is held");
+    // The hub starts again while the team stores nothing, so it reads the team's keys only when
+    // it first needs them; by then a key is stored that its key file can't open.
+    let addr = crew.hub.stop();
+    let team = crew.team;
+    admin_on(&crew.hub.database, &format!(
+        "create table kept_keys as select store, secrets from accounts where id = '{team}';
+         update accounts set store = '{{}}', secrets = '{{}}' where id = '{team}'"
+    ));
+    crew.hub.serve(&addr);
+    admin_on(&crew.hub.database, &format!(
+        "update accounts a set store = k.store, secrets = k.secrets || jsonb_build_object('unopenable', '{UNOPENABLE}') from kept_keys k where a.id = '{team}';
+         update teams set max_live_runs = 2 where id = '{team}'"
+    ));
+    let before = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    crew.reaper_pass();
+
+    wait_for("the owner to see the held line", || line_held(&crew, &crew.ana).is_ok_and(|held| held != Value::Null));
+    let held = line_held(&crew, &crew.ana).unwrap();
+    assert_eq!(held["why"], json!("settings_unread"), "the owner sees why, as a fixed class");
+    let since = held["since"].as_i64().unwrap();
+    let after = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+    assert!(before - 1 <= since && since <= after + 1, "held since the pass that could not read the team: {since} not in {before}..={after}");
+    assert_eq!(held.as_object().unwrap().len(), 2, "only the time and the class: {held}");
+    assert_eq!(line_held(&crew, &crew.bob), Ok(Value::Null), "a member is not shown it");
+    assert_eq!(crew.waiting(&x), 1, "bob's Run now still waits");
+
+    // The key is put right: the next pass reads the team, lets the line go, and starts what waits.
+    admin_on(&crew.hub.database, &format!("update accounts set secrets = secrets - 'unopenable' where id = '{team}'"));
+    crew.reaper_pass();
+    wait_for("bob's Run now to open its session", || opened(&crew, &x) == 1);
+    assert_eq!(line_held(&crew, &crew.ana), Ok(Value::Null), "the held line is gone");
+}
