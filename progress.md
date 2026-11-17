@@ -3,3 +3,4 @@
 13:39:47 | step2 env.sh written, opening check ok (HOME=work/home, no PINNED/CLAUDE/GH_TOKEN names), cargo 1.100.0 | exit=0 | wall=1s | err=none | disk: 29G free, 5% used | mem: avail=209773MB
 13:40:05 | step3 postgres 15.20 initdb+pinned db, port 5499 started | exit=0 | wall=25s | err=none | disk: 29G free, 5% used | mem: avail=210939MB
 13:42:25 | step3 build update_live --no-run done | exit=0 | wall=0s | err=none | disk: 25G free, 19% used | mem: avail=209498MB
+13:43:38 | step3 build pinned-server bin | exit=0 | wall=68s | err=none | disk: 22G free, 27% used | mem: avail=209734MB
