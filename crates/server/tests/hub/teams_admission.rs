@@ -6,7 +6,7 @@
 
 use super::teams_slack_notice::{seen, slack_standin};
 use super::*;
-use pinned_core::connectors::Event;
+use pinned_core::connectors::{Admitted, Event};
 use pinned_core::teams::{Bot, BotLimits, CallRules, TeamOp, TeamPolicy};
 use pinned_server::hub::Account;
 use pinned_server::teams;
@@ -447,6 +447,110 @@ fn the_21st_waiting_event_drops_the_oldest_and_neither_reaches_outside_pinned() 
     for n in 2..=22 {
         assert_eq!(crew.outside(n), none(), "ENG-{n}, ENG-2 the dropped one");
     }
+}
+
+impl Crew {
+    /// What the team's admission answers `event` of a Linear label bot, as its poller asks it.
+    fn admit(&self, event: Event) -> Result<Admitted, String> {
+        let hub = self.hub.hub().clone();
+        let team = self.team;
+        self.hub.runtime.block_on(async move { teams::queue::admit(&hub, &hub.account(team).await?, "linear_label", event).await })
+    }
+
+    /// How many events wait in bot `id`'s line for issue `ENG-n`, granted or not.
+    fn waiting_on(&self, id: &str, n: u32) -> i64 {
+        let subject = serde_json::to_value(super::issue(&format!("eng-{n}"))).unwrap();
+        self.hub.runtime.block_on(async {
+            let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), self.hub.database), tokio_postgres::NoTls).await.unwrap();
+            tokio::spawn(connection);
+            db.query_one("select count(*) from team_run_queue where team = $1 and workflow = $2 and start->'event'->'subject' = $3", &[&self.team, &id, &subject]).await.unwrap().get::<_, i64>(0)
+        })
+    }
+}
+
+/// A machine re-reads a post it could not confirm: the same event, admitted again while it waits
+/// behind the bot's live run, waits in its line once.
+#[test]
+fn teams_the_same_event_waits_in_line_once() {
+    let crew = Crew::new("ta_same_once");
+    let pages = crew.on_bot("Pages");
+    assert_eq!(crew.found(crew.labeled(&pages, 9)), Ok(()));
+    assert_eq!(crew.live_of(&pages).len(), 1, "ENG-9's run keeps the bot busy");
+    assert_eq!(crew.admit(crew.labeled(&pages, 1)), Ok(Admitted::Waiting));
+    assert_eq!(crew.admit(crew.labeled(&pages, 1)), Ok(Admitted::Waiting), "read again, it still waits");
+    assert_eq!(crew.waiting_on(&pages, 1), 1, "the bot's line holds ENG-1 once");
+    assert_eq!(crew.waiting(&pages), 1);
+    assert_eq!(crew.skipped(&pages), Value::Null, "nothing counted as skipped");
+    assert_eq!(crew.outside(1), none());
+}
+
+/// Guard: an event on another subject still waits behind the one already in line.
+#[test]
+fn teams_a_different_subject_still_waits_behind_it() {
+    let crew = Crew::new("ta_other_subject");
+    let pages = crew.on_bot("Pages");
+    assert_eq!(crew.found(crew.labeled(&pages, 9)), Ok(()));
+    assert_eq!(crew.admit(crew.labeled(&pages, 1)), Ok(Admitted::Waiting));
+    assert_eq!(crew.admit(crew.labeled(&pages, 2)), Ok(Admitted::Waiting));
+    assert_eq!((crew.waiting_on(&pages, 1), crew.waiting_on(&pages, 2)), (1, 1), "each issue waits once");
+    assert_eq!(crew.waiting(&pages), 2, "the bot's line holds both");
+}
+
+/// The same event read again while its subject's run is reserved (its place held, its session not
+/// open) is held: no second run starts and nothing waits in the bot's line.
+#[test]
+fn teams_a_reserved_subject_is_not_admitted_twice() {
+    let crew = Crew::new("ta_reserved_twice");
+    let pages = crew.on_bot("Pages");
+    let Ok(Admitted::Reserved(run)) = crew.admit(crew.labeled(&pages, 1)) else { panic!("ENG-1 gets the free place") };
+    assert_eq!(crew.admit(crew.labeled(&pages, 1)), Ok(Admitted::Held), "read again, it is held");
+    assert_eq!(crew.live_of(&pages), vec![run], "only the first reservation lives");
+    assert_eq!(crew.waiting(&pages), 0, "nothing waits in the bot's line");
+    assert_eq!(crew.skipped(&pages), Value::Null);
+
+    // Two reads of ENG-2 that both find no run before the team's turn, held meanwhile by another
+    // hub (for less than a turn's wait): the first one in the turn reserves the place, the second
+    // finds that run and is held.
+    let docs = crew.on_bot("Docs");
+    let other = crew.hub.runtime.block_on(async {
+        let (db, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), crew.hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        db.execute(&format!("select pg_advisory_lock({})", teams::queue::TURN_KEY), &[&crew.team]).await.unwrap();
+        db
+    });
+    let answers = std::thread::scope(|scope| {
+        let reads = [scope.spawn(|| crew.admit(crew.labeled(&docs, 2))), scope.spawn(|| crew.admit(crew.labeled(&docs, 2)))];
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(reads.iter().all(|r| !r.is_finished()), "both reads wait for the team's turn");
+        crew.hub.runtime.block_on(other.execute(&format!("select pg_advisory_unlock({})", teams::queue::TURN_KEY), &[&crew.team])).unwrap();
+        reads.map(|r| r.join().unwrap())
+    });
+    assert_eq!(answers.iter().filter(|a| matches!(a, Ok(Admitted::Reserved(_)))).count(), 1, "{answers:?}");
+    assert!(answers.contains(&Ok(Admitted::Held)), "the second read is held: {answers:?}");
+    assert_eq!(crew.live_of(&docs).len(), 1, "one run of ENG-2 lives");
+    assert_eq!(crew.waiting(&docs), 0, "nothing waits behind ENG-2's own run");
+    assert_eq!(crew.skipped(&docs), Value::Null);
+}
+
+/// The line keeps an event once only while it waits: claimed, run and ended, the same issue read
+/// again is a new event.
+#[test]
+fn teams_an_event_whose_run_ended_is_admitted_again() {
+    let crew = Crew::new("ta_again_after");
+    let pages = crew.on_bot("Pages");
+    assert_eq!(crew.found(crew.labeled(&pages, 9)), Ok(()));
+    assert_eq!(crew.admit(crew.labeled(&pages, 1)), Ok(Admitted::Waiting));
+    let busy = crew.live_of(&pages);
+    crew.stop(&busy[0]);
+    wait_for("ENG-1's claim and its run", || {
+        crew.waiting(&pages) == 0 && crew.live_of(&pages).len() == 1 && crew.outside(1) == vec!["model".to_owned(), "linear move".to_owned()]
+    });
+    let ran = crew.live_of(&pages);
+    crew.stop(&ran[0]);
+    wait_for("ENG-1's run to end", || crew.live_of(&pages).is_empty());
+    assert!(matches!(crew.admit(crew.labeled(&pages, 1)), Ok(Admitted::Reserved(_))), "read again after its run ended, it gets a place of its own");
+    assert_eq!(crew.live_of(&pages).len(), 1);
+    assert_eq!(crew.waiting(&pages), 0);
 }
 
 #[test]
