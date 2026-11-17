@@ -9073,7 +9073,6 @@ fn an_agents_extend_box_is_refused_when_it_asks_if_it_cannot_run_and_checked_aga
 struct ExtendSetup {
     hub: TestHub,
     url: String,
-    token: String,
     ana: Agent,
     owner: Client,
     machine: String,
@@ -9091,7 +9090,7 @@ fn extend_setup(name: &str) -> ExtendSetup {
     let mut owner = Client::app(&url, &token);
     owner.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
     let machine = open_extend_box(&ana);
-    ExtendSetup { hub, url, token, ana, owner, machine }
+    ExtendSetup { hub, url, ana, owner, machine }
 }
 
 /// Another box the agent opens at US$ 1.00: its machine.
@@ -9124,7 +9123,7 @@ fn extend_waits(waiting: &str) -> String {
 /// same session's repeat is one: another tab or another machine with the same request id asks anew.
 #[test]
 fn an_agents_repeated_extend_box_gets_its_first_answer_and_is_not_checked_again() {
-    let ExtendSetup { hub: _hub, url, token, mut ana, mut owner, machine } = extend_setup("extend_repeat");
+    let ExtendSetup { hub: _hub, url, mut ana, mut owner, machine, .. } = extend_setup("extend_repeat");
     let r1 = extend_as(&ana.dir, &ana.tab, &machine, 1.5, Some("r1")).unwrap();
     assert_eq!(r1["outcome"], "pending", "{r1}");
     let approved = owner.hub(json!({ "cmd": "decide_confirmation", "id": r1["id"], "approve": true })).unwrap();
@@ -9143,8 +9142,15 @@ fn an_agents_repeated_extend_box_gets_its_first_answer_and_is_not_checked_again(
     let other_tab = ana.node.machine.open_tab(Some(ana.dir.join("docs").display().to_string()), false).unwrap();
     ana.client.wait("the second tab at the hub", |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == other_tab));
     assert_eq!(extend_as(&ana.dir, &other_tab, &machine, 0.25, Some("r2")), Err(EXTEND_CEILING.into()), "another tab's ask with the same request id is checked");
-    let mini = agent_of(&url, &token, "ana@acme.dev", "ana-mini");
-    assert_eq!(extend_as(&mini.dir, &mini.tab, &machine, 0.25, Some("r2")), Err(EXTEND_CEILING.into()), "another machine's ask with the same request id is checked");
+    let code = ana.client.hub(json!({ "cmd": "pair_code" })).unwrap()["code"].as_str().unwrap().to_owned();
+    let mini_dir = node_dir("surface-ana-mini");
+    account::pair(&url, &code, "ana-mini", "macos").unwrap().save(&mini_dir).unwrap();
+    let mini = Node::start(&mini_dir, Credentials::load(&mini_dir).unwrap());
+    mini.machine.listen(|_| Err("unexpected".into())).unwrap();
+    std::fs::create_dir_all(mini_dir.join("site")).unwrap();
+    let mini_tab = mini.machine.open_tab(Some(mini_dir.join("site").display().to_string()), false).unwrap();
+    ana.client.wait("the other machine's tab at the hub", |f| f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == mini_tab));
+    assert_eq!(extend_as(&mini_dir, &mini_tab, &machine, 0.25, Some("r2")), Err(EXTEND_CEILING.into()), "another machine's ask with the same request id is checked");
     assert_eq!(waiting_actions(&mut owner), ["extend_box"], "only r2 waits");
 }
 

@@ -1690,6 +1690,17 @@ impl Db {
         Ok((row.get(0), false))
     }
 
+    /// The id of the confirmation the session in `tab` on `machine` asked with `action` and `request_id`, if it asked one.
+    pub async fn asked_confirmation(&self, account: Uuid, machine: Uuid, tab: &str, action: &str, request_id: &str) -> Result<Option<Uuid>, String> {
+        let row = self
+            .client()
+            .await?
+            .query_opt("select id from agent_confirmations where account = $1 and machine = $2 and tab = $3 and action = $4 and request_id = $5", &[&account, &machine, &tab, &action, &request_id])
+            .await
+            .map_err(err)?;
+        Ok(row.map(|r| r.get(0)))
+    }
+
     /// The account's confirmation `id`.
     pub async fn confirmation(&self, account: Uuid, id: Uuid) -> Result<Option<Held>, String> {
         let query = format!("select {CONFIRMATION_COLUMNS} from agent_confirmations c left join machines m on m.id = c.machine and m.account = c.account where c.account = $1 and c.id = $2");

@@ -2,7 +2,7 @@
 //! against the manifest, run as the account that owns the session's machine, written to the audit
 //! trail, and a `confirm` action waits for the user's approval in the app.
 
-use crate::boxes::Opener;
+use crate::boxes::{ExtendTurn, Opener};
 use crate::db::{Audit, Held};
 use crate::hub::{Account, Hub};
 use pinned_core::surface::{self, ActAnswer, Action, ActorRole, AgentAct, AuditOutcome, Class, Confirmation, Decided, Decision, Parsed, Side};
@@ -106,8 +106,7 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
             Some((earlier, at)) => return json(ActAnswer::Repeat { earlier, at }),
         }
     }
-    let _asking_extend = if act.action == "extend_box" { Some(hub.boxes.asking_extend.lock().await) } else { None };
-    let admitted = match admit(hub, account, origin, &caller, &act).await {
+    let mut admitted = match admit(hub, account, origin, &caller, &act).await {
         Ok(admitted) => admitted,
         Err(refusal) => {
             let refusal = surface::mask_secrets(&refusal);
@@ -115,6 +114,7 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
             return Err(refusal);
         }
     };
+    let turn = admitted.turn.take();
     // A schedule act whose task cannot be read is refused here, before anything runs.
     let why = match schedule_needs_ok(hub, account, &admitted.call).await {
         Ok(why) => why,
@@ -163,6 +163,7 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
             outcome: None,
         };
         let (id, held) = hub.db.hold_confirmation(account.id, caller.machine, caller.session.as_deref(), &asked).await?;
+        end_turn(turn).await;
         if !held {
             let earlier = hub.db.confirmation(account.id, id).await?.map(|held| held.confirmation);
             if let Some(Confirmation { decision: Some(decision), decided_at, .. }) = earlier {
@@ -182,6 +183,7 @@ pub async fn act(hub: &Arc<Hub>, account: &Arc<Account>, origin: &str, act: Agen
     } else {
         run(hub, account, &caller.tab, caller.actor(), admitted.call, &admitted.target, admitted.on_origin).await
     };
+    end_turn(turn).await;
     match ran {
         Ok(result) => {
             let widened = note_task(&trail, act.action.as_str(), &act.args, &result, widened);
@@ -202,6 +204,14 @@ struct Admitted {
     call: Parsed,
     target: String,
     on_origin: bool,
+    /// An extend's box turn, held until the extend waits for the owner or has run.
+    turn: Option<ExtendTurn>,
+}
+
+async fn end_turn(turn: Option<ExtendTurn>) {
+    if let Some(turn) = turn {
+        turn.end().await;
+    }
 }
 
 /// The act as it may run, or why it may not, checked in the order the contract lists.
@@ -227,11 +237,18 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
         return Err(format!("{name} would run a session that skips its permission prompts, and your own session asks for them"));
     }
     // An extend that cannot run is refused now, with the text its run would give, so the owner is
-    // never asked for it. Its run after the approval checks again.
+    // never asked for it. Its run after the approval checks again. A repeat of an ask this session
+    // made is answered as that ask, when it is held, and not checked again. The check and the hold
+    // happen in the box's turn, so two asks are never both checked before either waits.
+    let mut turn = None;
     if let Parsed::Hub(HubCall::ExtendBox { machine, extra_usd }) = &call {
         let machine = Uuid::parse_str(machine).map_err(|_| format!("this account has no machine {machine}"))?;
-        let waiting = waiting_extends(hub, account, caller, act, machine).await?;
-        crate::boxes::extended(hub, account, machine, *extra_usd, waiting).await?;
+        let held = ExtendTurn::take(hub, account.id, machine).await?;
+        if !asked_before(hub, account, caller, act).await? {
+            let waiting = waiting_extends(hub, account, machine).await?;
+            crate::boxes::extended(hub, account, machine, *extra_usd, waiting).await?;
+        }
+        turn = Some(held);
     }
     if let Parsed::Hub(HubCall::SaveConnector { connector }) = &call {
         let connectors = hub.connectors(account).await?;
@@ -263,22 +280,32 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
     if action.starts_work && !on_origin {
         return Err(format!("{name} starts work only on this session's own machine for now"));
     }
-    Ok(Admitted { action, call, target, on_origin })
+    Ok(Admitted { action, call, target, on_origin, turn })
 }
 
-/// What the account's extends of the box behind `machine` that still wait for the owner add, all
-/// but the one this session already asked with this act's `request_id`, which a repeat answers.
-async fn waiting_extends(hub: &Hub, account: &Account, caller: &Caller, act: &AgentAct, machine: Uuid) -> Result<f64, String> {
-    let request_id = act.request_id.as_deref().filter(|id| !id.is_empty());
-    let repeat = |asked: &Confirmation| request_id.is_some() && asked.request_id.as_deref() == request_id && asked.tab == caller.tab && Uuid::parse_str(&asked.machine).ok() == Some(caller.machine);
+/// Whether the session already asked this act with its `request_id`, so the hold answers it.
+async fn asked_before(hub: &Hub, account: &Account, caller: &Caller, act: &AgentAct) -> Result<bool, String> {
+    let Some(request_id) = act.request_id.as_deref().filter(|id| !id.is_empty()) else { return Ok(false) };
+    Ok(hub.db.asked_confirmation(account.id, caller.machine, &caller.tab, &act.action, request_id).await?.is_some())
+}
+
+/// How long an extend that waits for the owner counts against new asks for its box. An older one
+/// no longer blocks them; its approval checks the box again, so it cannot pass the Box budget.
+const EXTENDS_COUNTED_FOR: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// What the account's extends of the box behind `machine` that wait for the owner add: those
+/// asked within `EXTENDS_COUNTED_FOR`, each above zero.
+async fn waiting_extends(hub: &Hub, account: &Account, machine: Uuid) -> Result<f64, String> {
+    let since = (pinned_core::connectors::unix_millis() / 1000).saturating_sub(EXTENDS_COUNTED_FOR.as_secs()) as i64;
     Ok(hub
         .db
         .confirmations(account.id)
         .await?
         .iter()
-        .filter(|asked| asked.decision.is_none() && asked.action == "extend_box" && !repeat(asked))
+        .filter(|asked| asked.decision.is_none() && asked.action == "extend_box" && asked.at > since)
         .filter(|asked| asked.args["machine"].as_str().and_then(|m| Uuid::parse_str(m).ok()) == Some(machine))
         .filter_map(|asked| asked.args["extra_usd"].as_f64())
+        .filter(|usd| *usd > 0.0)
         .sum())
 }
 
@@ -370,6 +397,15 @@ pub async fn decide(hub: &Arc<Hub>, account: &Arc<Account>, id: &str, approve: b
     let unknown = || format!("no confirmation {id} waits");
     let hide = |error: &str| surface::hide_entered(error, &entered);
     let key = Uuid::parse_str(id).map_err(|_| unknown())?;
+    // An extend's decision is marked and its budget set in its box's turn, so no ask is checked in
+    // between, when the extend no longer waits and the box does not have it yet.
+    let turn = match hub.db.confirmation(account.id, key).await?.map(|held| held.confirmation) {
+        Some(asked) if asked.action == "extend_box" && asked.decision.is_none() => match asked.args["machine"].as_str().and_then(|m| Uuid::parse_str(m).ok()) {
+            Some(machine) => Some(ExtendTurn::take(hub, account.id, machine).await?),
+            None => None,
+        },
+        _ => None,
+    };
     let typed = if approve { typed_args(hub, account, key, &entered).await.map_err(|e| hide(&e))? } else { None };
     let held = hub.db.decide_confirmation(account.id, key, approve).await?.ok_or_else(unknown)?;
     let asked = &held.confirmation;
@@ -393,6 +429,7 @@ pub async fn decide(hub: &Arc<Hub>, account: &Arc<Account>, id: &str, approve: b
             Err(e) => (Decision::Approved, format!("failed: {}", hide(&e)), Value::Null),
         },
     };
+    end_turn(turn).await;
     note_task(&trail, &asked.action, &asked.args, &result, String::new());
     if decision == Decision::Approved {
         match outcome.strip_prefix("failed: ") {

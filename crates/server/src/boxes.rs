@@ -473,8 +473,44 @@ pub async fn extended(hub: &Hub, account: &Account, machine: Uuid, extra_usd: f6
         return Err("this box is already ending".into());
     }
     let total = row.spec.budget_usd.unwrap_or(0.0) + extra_usd;
-    box_budget(hub, account, row.spec.repo.as_deref(), Some(total + waiting)).await?;
+    let repo = row.spec.repo.as_deref();
+    box_budget(hub, account, repo, Some(total)).await?;
+    if waiting > 0.0 {
+        if let Some(most) = box_budget(hub, account, repo, None).await?.filter(|most| total + waiting > most + 1e-9) {
+            return Err(format!("a box may spend at most US$ {most:.2}, and US$ {waiting:.2} for this box already waits for your decision in the app; name less, or decide that one first"));
+        }
+    }
     Ok((row, total))
+}
+
+/// The key of the advisory lock of one box's extends: the account and the box's machine, as two
+/// 32-bit keys. Every other advisory lock of the hub takes one 64-bit key, a key space Postgres
+/// keeps apart from this one, so no other lock ever shares it.
+const EXTEND_KEY: &str = "hashtext('pinned-extend-box:' || $1::uuid::text), hashtext($2::uuid::text)";
+
+/// One box's turn for its extends: a transaction on a connection of its own holding the box's
+/// `pg_advisory_xact_lock`. An agent's ask holds it from its check until it waits for the owner,
+/// and the owner's approval from marking it decided until its budget is set, so no ask is checked
+/// while another is in between, on this hub or another one on the database. Asks for other boxes
+/// do not wait. `end` commits it; a turn dropped on an error closes its connection, which frees the lock.
+pub struct ExtendTurn {
+    held: tokio_postgres::Client,
+}
+
+impl ExtendTurn {
+    pub async fn take(hub: &Hub, account: Uuid, machine: Uuid) -> Result<ExtendTurn, String> {
+        let held = hub.db.own_client().await?;
+        held.batch_execute("begin").await.map_err(crate::db::err)?;
+        held.execute(&format!("select pg_advisory_xact_lock({EXTEND_KEY})"), &[&account, &machine]).await.map_err(crate::db::err)?;
+        Ok(ExtendTurn { held })
+    }
+
+    /// Frees the lock. What the turn guarded is already written, so a commit that fails only closes the connection.
+    pub async fn end(self) {
+        if let Err(e) = self.held.batch_execute("commit").await {
+            eprintln!("pinned-server: a box's extend turn ended by closing its connection: {e}");
+        }
+    }
 }
 
 /// The task record of a box an agent opened through `act`, which ended for `why` at unix ms
@@ -963,9 +999,6 @@ pub struct Boxes {
     swept: Mutex<HashMap<Uuid, Instant>>,
     /// Row id → why its last delete failed, for rows still `Ending`. Cleared once the delete works.
     stuck: Mutex<HashMap<String, StuckRecord>>,
-    /// Held by an agent's extend_box from its check until it waits for the owner, so two asks are
-    /// never both checked before either waits.
-    pub asking_extend: tokio::sync::Mutex<()>,
 }
 
 impl Boxes {
@@ -979,7 +1012,6 @@ impl Boxes {
             cooling: Mutex::default(),
             swept: Mutex::default(),
             stuck: Mutex::default(),
-            asking_extend: tokio::sync::Mutex::default(),
         }
     }
 
