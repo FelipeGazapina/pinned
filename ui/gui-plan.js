@@ -135,7 +135,8 @@ function planRerender() {
 }
 
 /** A resume (`carry_plans`) drops a tab's old plans without a word on the wire. The surface keeps the last glance it
- * drew per thread, so a session change that takes an unfinished plan away shows one line until it is dismissed. */
+ * drew per thread, so a session change that takes an unfinished plan away shows one line until it is dismissed.
+ * A resumed session numbers its plans from p1 again, so a plan counts as the same only with its id and title. */
 function planDetectDropped(t) {
   const p = panelOf(t);
   const session = t.view.session ?? null;
@@ -143,7 +144,7 @@ function planDetectDropped(t) {
   const seen = p.seen;
   let changed = false;
   if (seen && seen.session !== session) {
-    const gone = seen.plans.filter((g) => !unfinished.some((u) => u.id === g.id));
+    const gone = seen.plans.filter((g) => !unfinished.some((u) => u.id === g.id && u.title === g.title));
     if (gone.length) {
       p.dropped = gone.map((g) => g.title);
       changed = true;
