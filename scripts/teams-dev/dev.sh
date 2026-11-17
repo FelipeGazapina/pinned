@@ -127,6 +127,8 @@ scrub_env() {
   for name in $(env | cut -d= -f1 | grep '^ANTHROPIC_' || true); do unset "$name"; done
   unset CLAUDE_CODE_OAUTH_TOKEN GH_TOKEN GITHUB_TOKEN PINNED_OPENCODE_GO_KEY UPSTASH_BOX_API_KEY
   unset PINNED_REPORTS_GITHUB_TOKEN PINNED_REPORTS_GITHUB_API PINNED_REPORTS_REPO PINNED_REPORTS_POLL_SECS
+  # Every call the stack makes stays on this machine: no proxy variable carries one elsewhere.
+  unset http_proxy HTTP_PROXY https_proxy HTTPS_PROXY all_proxy ALL_PROXY
   mkdir -p "$DIR/home/.claude" "$DIR/tmp"
   export HOME="$DIR/home" TMPDIR="$DIR/tmp" CLAUDE_CONFIG_DIR="$DIR/home/.claude" TEAMS_DEV_DIR="$DIR" TEAMS_DEV_HUB="$HUB"
   # Boxes are the fake's, always: a key in the developer's shell never reaches a real Upstash.
