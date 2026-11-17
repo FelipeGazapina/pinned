@@ -9475,6 +9475,34 @@ fn an_extend_box_ask_stored_as_its_box_ends_is_closed_and_refused() {
     assert_eq!(twin_runtime.block_on(ending).unwrap(), Ok(true));
 }
 
+/// An approved extend whose box moves to ending before its budget is written does not write the
+/// budget: the approval reads as the box already ending, and the box keeps the budget it had.
+#[test]
+fn an_approved_extend_whose_box_ends_before_its_budget_is_written_does_not_write_it() {
+    let ExtendSetup { hub, ana, mut owner, machine, .. } = extend_setup("extend_budget_ending");
+    let asked = extend_as(&ana.dir, &ana.tab, &machine, 0.5, None).unwrap();
+    let id = asked["id"].as_str().unwrap().to_owned();
+    // The box's row locked by the test, so the approval's budget write waits on it while the box moves to ending.
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let blocker = runtime.block_on(async {
+        let (client, connection) = tokio_postgres::connect(&format!("{}/{}", postgres(), hub.database), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        client.batch_execute(&format!("begin; select 1 from boxes where machine = '{machine}' for update")).await.unwrap();
+        client
+    });
+    let approving = std::thread::spawn(move || {
+        let answer = owner.hub(json!({ "cmd": "decide_confirmation", "id": id, "approve": true }));
+        (owner, answer)
+    });
+    let writing = "select count(*) from pg_stat_activity where wait_event_type = 'Lock' and query like 'update boxes set spec%'";
+    wait_for("the budget write to wait on the box's row", || count_on(&hub.database, writing) == 1);
+    runtime.block_on(blocker.batch_execute(&format!("update boxes set phase = 'ending', reason = 'done' where machine = '{machine}'; commit;"))).unwrap();
+    let (mut owner, answer) = approving.join().unwrap();
+    answer.unwrap();
+    assert_eq!(decided(&mut owner, &asked["id"]).1, json!("failed: this box is already ending"), "the approval reads as the box already ending");
+    assert_eq!(count_on(&hub.database, &format!("select count(*) from boxes where machine = '{machine}' and (spec->>'budget_usd')::float8 = 1.5")), 0, "the budget is not written");
+}
+
 /// The race of `an_extend_box_ask_stored_as_its_box_ends_is_closed_and_refused`, where the only ask
 /// the box's end closes is the one stored as it ends: the owner's app still hears of the end.
 #[test]
