@@ -12,6 +12,9 @@ const TEAM_PAGES = ["team-create", "team-join", "team-invites"];
 const TEAM_INVITES_MAX = 20;
 const TEAM_HUES = ["#f0a35e", "#5fd4b8", "#c7a6ff", "#6ea8ff", "#f08aa8", "#e3cf6a"];
 
+/** Next to every Claude token field: whose account the token is from. */
+const CLAUDE_SOURCE = "The token comes from the Claude account your terminal is signed in to. Sign in to the team's own Claude account first.";
+
 const TEAMS_TEXT = {
   where: "Where you work",
   justMe: "Just me",
@@ -77,8 +80,8 @@ const TEAMS_TEXT = {
   keptNote: "You paste the key in a form here in pinned. It is kept with the team and is never shown again.",
   noRush: "No rush: you can connect later. Until then you can set up bots and groups, but no bot runs.",
   form: {
-    upstash: { title: "Connect the Upstash key", fields: [{ id: "key", label: "Upstash Box key", placeholder: "box_…" }, { id: "claude_token", label: "Claude token", placeholder: "sk-ant-oat01-…" }], about: "Create the Box API key in the Box tab of the Upstash console. The Claude token comes from claude setup-token." },
-    claude: { title: "Connect the Claude token for boxes", fields: [{ id: "name", label: "Name", placeholder: "team", plain: true, value: "team" }, { id: "token", label: "Claude token", placeholder: "sk-ant-oat01-…" }], about: "Run claude setup-token in a terminal and paste what it prints. Connect the Upstash key first." },
+    upstash: { title: "Connect the Upstash key", fields: [{ id: "key", label: "Upstash Box key", placeholder: "box_…" }, { id: "claude_token", label: "Claude token", placeholder: "sk-ant-oat01-…", note: CLAUDE_SOURCE }], about: "Create the Box API key in the Box tab of the Upstash console. The Claude token comes from claude setup-token." },
+    claude: { title: "Connect the Claude token for boxes", fields: [{ id: "name", label: "Name", placeholder: "team", plain: true, value: "team" }, { id: "token", label: "Claude token", placeholder: "sk-ant-oat01-…", note: CLAUDE_SOURCE }], about: "Run claude setup-token in a terminal and paste what it prints. Connect the Upstash key first." },
     github: { title: "Connect the GitHub token", fields: [{ id: "token", label: "GitHub token", placeholder: "ghp_…" }], about: "A token that can read the repositories the bots clone." },
   },
   save: "Connect",
@@ -138,6 +141,13 @@ const TEAMS_TEXT = {
   ],
   joinWith: (n) => (n === 0 ? "Join the team" : n === 1 ? "Join with 1 project" : `Join with ${n} projects`),
   joinWithout: "Continue without any",
+
+  connectTitle: "Connect AI account",
+  connectWho: "Team",
+  connectAbout: "The keys the team's bots run with. Only the owner connects them.",
+  connectSide: "Only this team's keys change. The team's name, projects and people stay as they are.",
+  connectDone: "Done",
+  connectDoneHint: "Back to where you were",
 };
 
 const teamsEsc = (v) => (typeof esc === "function" ? esc(v) : String(v ?? "").replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`));
@@ -364,6 +374,8 @@ function resetWizard(own = teamsOwnProjects()) {
     inviteBusy: false,
     inviteError: "",
     copied: "",
+    connect: false,
+    origin: "",
   });
 }
 // The projects are read when the page opens: the catalog is not ready while this script loads.
@@ -412,7 +424,7 @@ function teamWizardCredHtml() {
 function teamWizardFormHtml(cred) {
   const f = TEAMS_TEXT.form[cred];
   const fields = f.fields
-    .map((x) => `<label class="tm-field"><span>${teamsEsc(x.label)}</span><input data-field="${x.id}" type="${x.plain ? "text" : "password"}" autocomplete="off" spellcheck="false" placeholder="${teamsEsc(x.placeholder)}"${x.value ? ` value="${teamsEsc(x.value)}"` : ""}>${x.plain ? "" : `<span class="tm-field-note">${teamsEsc(TEAMS_TEXT.keyAccess)}</span>`}</label>`)
+    .map((x) => `<label class="tm-field"><span>${teamsEsc(x.label)}</span><input data-field="${x.id}" type="${x.plain ? "text" : "password"}" autocomplete="off" spellcheck="false" placeholder="${teamsEsc(x.placeholder)}"${x.value ? ` value="${teamsEsc(x.value)}"` : ""}>${x.plain ? "" : `<span class="tm-field-note">${teamsEsc(TEAMS_TEXT.keyAccess)}</span>`}${x.note ? `<span class="tm-field-note">${teamsEsc(x.note)}</span>` : ""}</label>`)
     .join("");
   return `<form class="tm-form" data-tm="form" data-cred="${cred}" autocomplete="off">
     <h3>${f.title}</h3>${fields}<p class="tm-note">${teamsEsc(f.about)}</p>${tmError(teamWizard.formError)}
@@ -433,7 +445,7 @@ function teamWizardBodyHtml() {
   const t = TEAMS_TEXT;
   const team = teamsEsc(teamWizardTeamName());
   const step = teamWizard.step;
-  const kicker = step <= 4 ? `<p class="tm-kicker">${t.stepOf(step)}</p>` : "";
+  const kicker = step <= 4 && !teamWizard.connect ? `<p class="tm-kicker">${t.stepOf(step)}</p>` : "";
   if (step === 1) {
     return `${kicker}<h2>${t.nameTitle}</h2>
       <label class="tm-field big"><span>${t.nameLabel}</span><input id="tm-team-name" type="text" value="${teamsEsc(teamWizard.name)}" placeholder="${t.namePlaceholder}" autocomplete="off" spellcheck="false"></label>
@@ -464,6 +476,7 @@ function teamWizardBodyHtml() {
 function teamWizardNavHtml() {
   const t = TEAMS_TEXT;
   const step = teamWizard.step;
+  if (teamWizard.connect) return `<div class="tm-actions">${tmButton('data-tm="connect-done"', t.connectDone, "primary")}<span class="tm-hint">${t.connectDoneHint}</span></div>`;
   if (step > 4) return "";
   const label = step === 3 && teamWizardOwner() && connectedCount() < t.creds.length ? t.connectLater : t.next[step - 1];
   return `${tmError(teamWizard.error)}<div class="tm-actions">${tmButton('data-tm="next"', teamWizard.busy ? t.working : label, "primary", teamWizard.busy)}<span class="tm-hint">${t.nextHints[step - 1]}</span></div>`;
@@ -472,24 +485,38 @@ function teamWizardNavHtml() {
 function teamWizardTopHtml() {
   const t = TEAMS_TEXT;
   const step = teamWizard.step;
+  if (teamWizard.connect) return `<div class="tm-top">${tmButton('data-tm="leave"', `‹ ${t.back}`)}</div>`;
   const left = step === 1 ? tmButton('data-tm="leave"', `‹ ${t.backToAccount}`) : tmButton('data-tm="prev"', `‹ ${t.back}`, "secondary", teamWizard.busy);
   const right = step <= 4 ? tmButton('data-tm="leave"', t.cancel, "quiet") : "";
   return `<div class="tm-top">${left}<span class="tm-grow"></span>${right}</div>`;
 }
 
-function renderCreate() {
+function teamWizardAsideHtml() {
   const t = TEAMS_TEXT;
+  if (teamWizard.connect) {
+    const team = teamsEsc(teamWizardTeamName());
+    return `<aside class="tm-aside" aria-label="${t.connectTitle}">
+        <div class="tm-who">${teamsAvatar(teamWizardTeamName(), "big")}<span class="tm-texts"><span class="tm-name">${team}</span><span class="tm-about">${t.connectWho}</span></span></div>
+        <div class="tm-intro"><h1>${t.connectTitle}</h1><p>${t.connectAbout}</p></div>
+        <p class="tm-side-note">${t.connectSide}</p>
+      </aside>`;
+  }
   const person = teamsPerson();
-  const keep = document.getElementById("tm-team-name");
-  const focused = keep && document.activeElement === keep;
-  setPage(
-    `${headHtml(t.createTitle)}<div class="page-body"><div class="tm-wiz">
-      <aside class="tm-aside" aria-label="${t.stepsLabel}">
+  return `<aside class="tm-aside" aria-label="${t.stepsLabel}">
         <div class="tm-who">${teamsAvatar(person, "big", TEAM_HUES[0])}<span class="tm-texts"><span class="tm-name">${teamsEsc(person)}</span><span class="tm-about">personal account</span></span></div>
         <div class="tm-intro"><h1>${t.createTitle}</h1><p>${t.createAbout}</p></div>
         <ol class="tm-steps">${teamWizardStepsHtml()}</ol>
         <p class="tm-side-note">${t.sideNote}</p>
-      </aside>
+      </aside>`;
+}
+
+function renderCreate() {
+  const t = TEAMS_TEXT;
+  const keep = document.getElementById("tm-team-name");
+  const focused = keep && document.activeElement === keep;
+  setPage(
+    `${headHtml(teamWizard.connect ? t.connectTitle : t.createTitle)}<div class="page-body"><div class="tm-wiz">
+      ${teamWizardAsideHtml()}
       <section class="tm-main">${teamWizardTopHtml()}<div class="tm-col">${teamWizardBodyHtml()}${teamWizardNavHtml()}</div></section>
     </div></div>`,
   );
@@ -612,9 +639,30 @@ function teamWizardFinish(then) {
   then();
 }
 
+/** Set by Connect AI account just before the create page opens, read once by that page. */
+let teamConnectAsk = null;
+
+/** Connect AI account: opens step 3 for the current team, owner only, and remembers the page it was asked from. */
+function openTeamConnect() {
+  if (teamsNow?.role !== "owner") return;
+  teamConnectAsk = { origin: (typeof shellPage === "function" && shellPage()) || "" };
+  openPage("team-create");
+}
+
 function showTeamCreate() {
+  const ask = teamConnectAsk;
+  teamConnectAsk = null;
   resetWizard();
+  if (ask && teamsNow?.role === "owner") Object.assign(teamWizard, { step: 3, team: { ...teamsNow }, connect: true, origin: ask.origin });
   renderCreate();
+}
+
+/** Leaves Connect AI account for the page it was asked from. Nothing is created, renamed or invited. */
+function leaveConnect() {
+  const origin = teamWizard.origin;
+  teamWizard.connect = false;
+  if (origin) openPage(origin);
+  else closePage();
 }
 
 // ---- Join a team --------------------------------------------------------------------------------
@@ -848,7 +896,7 @@ pageView.addEventListener("click", (e) => {
   if (!el || el.disabled) return;
   const page = document.body.dataset.page;
   const act = el.dataset.tm;
-  if (act === "leave") return closePage();
+  if (act === "leave") return page === "team-create" && teamWizard.connect ? leaveConnect() : closePage();
   if (act === "form" || act === "join-form") return;
   if (page === "team-invites") {
     if (act === "invite-make") makeInvite();
@@ -877,6 +925,7 @@ pageView.addEventListener("click", (e) => {
     teamWizard.error = "";
     renderCreate();
   } else if (act === "next") teamWizardNext();
+  else if (act === "connect-done") leaveConnect();
   else if (act === "toggle") {
     teamWizard.on[el.dataset.key] = !teamWizard.on[el.dataset.key];
     renderCreate();
