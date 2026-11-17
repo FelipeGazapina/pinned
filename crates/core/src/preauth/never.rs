@@ -23,6 +23,9 @@ pub struct AskCtx<'a> {
     /// The session's scratch dir. Writes there are fine.
     pub scratch: Option<&'a Path>,
     pub home: &'a Path,
+    /// The session's Claude home, `CLAUDE_CONFIG_DIR`, when it is known. pinned runs an added
+    /// account with its own, which has no `.claude` component.
+    pub claude_home: Option<&'a Path>,
     /// The tool call's cwd.
     pub cwd: &'a Path,
     /// `main` usually.
@@ -1744,6 +1747,8 @@ mod tests {
         scratch: PathBuf,
         home: PathBuf,
         elsewhere: PathBuf,
+        /// The session's Claude home, as pinned gives an added account.
+        claude: PathBuf,
     }
 
     /// A worktree with a project in it, a scratch dir, a home with an ssh key, and a folder outside all three.
@@ -1751,21 +1756,22 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let base = std::fs::canonicalize(tmp.path()).unwrap();
         let (work, scratch, home, elsewhere) = (base.join("work"), base.join("scratch"), base.join("home"), base.join("elsewhere"));
-        for d in [work.join("crates/core/src"), work.join("node_modules/.bin"), scratch.clone(), home.join(".ssh"), home.join(".config/pinned/uploads"), elsewhere.clone()] {
+        let claude = home.join("cfg/accounts/work");
+        for d in [work.join("crates/core/src"), work.join("node_modules/.bin"), scratch.clone(), home.join(".ssh"), home.join(".config/pinned/uploads"), elsewhere.clone(), claude.clone()] {
             std::fs::create_dir_all(d).unwrap();
         }
         std::fs::write(home.join(".ssh/id_ed25519"), "key").unwrap();
         std::fs::write(work.join("node_modules/.bin/playwright"), "").unwrap();
-        Fx { _tmp: tmp, work, scratch, home, elsewhere }
+        Fx { _tmp: tmp, work, scratch, home, elsewhere, claude }
     }
 
     fn sub(f: &Fx, s: &str) -> String {
         let show = |p: &Path| p.display().to_string();
-        s.replace("{work}", &show(&f.work)).replace("{scratch}", &show(&f.scratch)).replace("{home}", &show(&f.home)).replace("{elsewhere}", &show(&f.elsewhere))
+        s.replace("{work}", &show(&f.work)).replace("{scratch}", &show(&f.scratch)).replace("{home}", &show(&f.home)).replace("{elsewhere}", &show(&f.elsewhere)).replace("{claude}", &show(&f.claude))
     }
 
     fn ctx<'a>(f: &'a Fx, branch: Option<&'a str>) -> AskCtx<'a> {
-        AskCtx { worktree: &f.work, scratch: Some(&f.scratch), home: &f.home, cwd: &f.work, default_branch: "main", current_branch: branch }
+        AskCtx { worktree: &f.work, scratch: Some(&f.scratch), home: &f.home, claude_home: Some(&f.claude), cwd: &f.work, default_branch: "main", current_branch: branch }
     }
 
     fn item(f: &Fx, branch: Option<&str>, ask: &Ask) -> Option<NeverItem> {
@@ -1991,6 +1997,7 @@ mod tests {
             ("cat ~/.config/gh/hosts.yml", Some(Secrets)),
             ("cat ~/.claude/.credentials.json", Some(Secrets)),
             ("cat {home}/.config/pinned/accounts/a/login.json", Some(Secrets)),
+            ("cat {home}/.config/pinned/accounts/work/.credentials.json", Some(Secrets)),
             ("cat .env", Some(Secrets)),
             ("cat .env.local", Some(Secrets)),
             ("cat cert.pem", Some(Secrets)),
@@ -2072,6 +2079,9 @@ mod tests {
             ("rsync -a x /tmp/y", Some(WriteOutside)),
             ("echo x > ~/.claude/settings.json", Some(SelfGrant)),
             ("echo x > ~/.claude/skills/a/SKILL.md", Some(WriteOutside)),
+            ("echo x > {claude}/skills/x/SKILL.md", Some(WriteOutside)),
+            ("echo x > {claude}/projects/p/x.jsonl", Some(WriteOutside)),
+            ("echo x > \"$CLAUDE_CONFIG_DIR/skills/x/SKILL.md\"", Some(WriteOutside)),
             ("echo hi > /dev/null", None),
             ("ls 2>/dev/null", None),
             ("ls 2>&1 | head", None),
@@ -2112,6 +2122,14 @@ mod tests {
             ("tee ~/.claude/hooks/x.sh", Some(SelfGrant)),
             ("echo x > {home}/.claude/settings.json", Some(SelfGrant)),
             ("cd ~/.claude && echo x > settings.json", Some(SelfGrant)),
+            // The session's own Claude home, `CLAUDE_CONFIG_DIR`, which has no `.claude` component
+            // when pinned runs an added account.
+            ("echo x > \"$CLAUDE_CONFIG_DIR/settings.json\"", Some(SelfGrant)),
+            ("echo x > ${CLAUDE_CONFIG_DIR}/settings.local.json", Some(SelfGrant)),
+            ("cd \"$CLAUDE_CONFIG_DIR\" && tee hooks/x.sh", Some(SelfGrant)),
+            ("echo x > {claude}/settings.json", Some(SelfGrant)),
+            ("tee {claude}/hooks/x.sh", Some(SelfGrant)),
+            ("cd {claude} && echo x > settings.local.json", Some(SelfGrant)),
             ("echo {} > {elsewhere}/.mcp.json", Some(SelfGrant)),
             ("git config core.hooksPath x", Some(SelfGrant)),
             ("git config core.fsmonitor 'x'", Some(SelfGrant)),
@@ -2124,6 +2142,26 @@ mod tests {
             ("echo x > .claude/skills/a/SKILL.md", None),
             ("echo x > .claude/worktrees/a/b.rs", None),
         ]);
+    }
+
+    #[test]
+    fn self_grant_with_no_claude_home() {
+        // A session whose Claude home is unknown: `$CLAUDE_CONFIG_DIR` before settings or hooks is
+        // a self-grant still.
+        let f = fx();
+        let unknown = AskCtx { claude_home: None, ..ctx(&f, FOO) };
+        let rows = [
+            ("echo x > \"$CLAUDE_CONFIG_DIR/settings.json\"", Some(SelfGrant)),
+            ("echo x > ${CLAUDE_CONFIG_DIR}/settings.local.json", Some(SelfGrant)),
+            ("tee $CLAUDE_CONFIG_DIR/hooks/x.sh", Some(SelfGrant)),
+            ("echo x > $CLAUDE_CONFIG_DIR/skills/x/SKILL.md", Some(WriteOutside)),
+            ("echo x > {claude}/settings.json", Some(WriteOutside)),
+        ];
+        let bad: Vec<String> = rows.iter().filter_map(|(line, want)| {
+            let got = never(&unknown, &Ask::Bash { command: &sub(&f, line) }).map(|h| h.item);
+            (got != *want).then(|| format!("{line:?} (no Claude home): wanted {want:?}, got {got:?}"))
+        }).collect();
+        assert!(bad.is_empty(), "\n{}", bad.join("\n"));
     }
 
     #[test]
@@ -2300,6 +2338,11 @@ mod tests {
             ("~/.claude/hooks/x.sh", Some(SelfGrant)),
             ("{home}/.claude/settings.json", Some(SelfGrant)),
             ("~/.claude/skills/a/SKILL.md", Some(WriteOutside)),
+            ("{claude}/settings.json", Some(SelfGrant)),
+            ("{claude}/settings.local.json", Some(SelfGrant)),
+            ("{claude}/hooks/x.sh", Some(SelfGrant)),
+            ("{claude}/skills/x/SKILL.md", Some(WriteOutside)),
+            ("{claude}/projects/p/x.jsonl", Some(WriteOutside)),
             ("~/.ssh/config", Some(Secrets)),
             ("~/.aws/credentials", Some(Secrets)),
             (".env", Some(Secrets)),
@@ -2312,6 +2355,7 @@ mod tests {
             (".env.local", Some(Secrets)),
             ("~/.config/gh/hosts.yml", Some(Secrets)),
             ("~/.claude/.credentials.json", Some(Secrets)),
+            ("{home}/.config/pinned/accounts/work/.credentials.json", Some(Secrets)),
             ("cert.pem", Some(Secrets)),
             ("~/.netrc", Some(Secrets)),
             ("README.md", None),
