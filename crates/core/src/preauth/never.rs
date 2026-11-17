@@ -209,7 +209,8 @@ fn secret(c: &[String]) -> Option<&'static str> {
             ".ssh" | ".aws" | ".gnupg" | ".kube" | ".netrc" | ".git-credentials" | ".pypirc" | "keychains" => return Some("credentials"),
             ".config" if matches!(next, Some("gh" | "gcloud")) => return Some("credentials"),
             ".config" | "application support" if next == Some("pinned") && c.get(i + 2).map(String::as_str) != Some("uploads") => return Some("pinned's config"),
-            ".claude" if next.is_some_and(|n| n.starts_with(".credentials")) => return Some("credentials"),
+            // `$CLAUDE_CONFIG_DIR` the scan could not resolve is a Claude home all the same.
+            ".claude" | "$claude_config_dir" | "${claude_config_dir}" if next.is_some_and(|n| n.starts_with(".credentials")) => return Some("credentials"),
             ".docker" if next == Some("config.json") => return Some("credentials"),
             "proc" if c.get(i + 2).map(String::as_str) == Some("environ") => return Some("the environment"),
             _ => {}
@@ -1148,7 +1149,7 @@ impl<'c, 'a> Scan<'c, 'a> {
     }
 
     fn secret_path(&mut self, text: &str, resolved: Option<&Path>) {
-        let found = secret(&comps(text)).or_else(|| resolved.and_then(|p| secret(&path_comps(p))));
+        let found = secret(&comps(text)).or_else(|| resolved.and_then(|p| secret(&path_comps(p)).or_else(|| self.claude_home_secret(p))));
         if let Some(what) = found {
             self.hit(NeverItem::Secrets, format!("reads {what}: {}", short(text)));
         }
@@ -1257,7 +1258,7 @@ impl<'c, 'a> Scan<'c, 'a> {
             }
             if w.var_at.is_none() && w.glob_at.is_none() && !t.starts_with('-') {
                 if let Some(p) = self.resolve(cwd, t) {
-                    if let Some(what) = secret(&path_comps(&p)) {
+                    if let Some(what) = secret(&path_comps(&p)).or_else(|| self.claude_home_secret(&p)) {
                         self.hit(NeverItem::Secrets, format!("reads {what}: {}", short(t)));
                         return;
                     }
@@ -1291,6 +1292,13 @@ impl<'c, 'a> Scan<'c, 'a> {
         let Some(home) = &self.claude else { return false };
         let (home, p) = (path_comps(home), path_comps(p));
         p.starts_with(&home) && p.get(home.len()).is_some_and(|n| settings_or_hooks(n))
+    }
+
+    /// Whether `p` is a credentials file right under the session's own Claude home.
+    fn claude_home_secret(&self, p: &Path) -> Option<&'static str> {
+        let Some(home) = &self.claude else { return None };
+        let (home, p) = (path_comps(home), path_comps(p));
+        (p.starts_with(&home) && p.get(home.len()).is_some_and(|n| n.starts_with(".credentials"))).then_some("credentials")
     }
 
     fn write_check(&mut self, raw: &str, shown: &str, path: Option<PathBuf>, unresolved: bool) {
