@@ -2871,6 +2871,8 @@ impl Connectors {
             store.change_retries.entry(workflow.to_owned()).or_default().insert(key.clone(), stamp(fire.at));
         }
         if waiting {
+            // The retry goes back to disk: `apply_changes` saved the store without it.
+            let _ = self.save(&store);
             return;
         }
         let then = match retried {
