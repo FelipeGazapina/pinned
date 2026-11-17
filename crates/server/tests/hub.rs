@@ -9073,6 +9073,7 @@ fn an_agents_extend_box_is_refused_when_it_asks_if_it_cannot_run_and_checked_aga
 struct ExtendSetup {
     hub: TestHub,
     url: String,
+    account: uuid::Uuid,
     ana: Agent,
     owner: Client,
     machine: String,
@@ -9081,7 +9082,7 @@ struct ExtendSetup {
 fn extend_setup(name: &str) -> ExtendSetup {
     let hub = TestHub::start_with_boxes(name, Signup::Open, fast());
     let url = hub.url.clone();
-    let (token, _) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
+    let (token, view) = account::signup(&url, "ana@acme.dev", "correct horse").unwrap();
     let mut ana = agent_of(&url, &token, "ana@acme.dev", "ana-mac");
     hub.boxes.state.lock().unwrap().checkout = Some(("site".into(), SITE.into()));
     ana.client.hub(json!({ "cmd": "connect_upstash", "key": BOX_KEY, "claude_token": CLAUDE_TOKEN })).unwrap();
@@ -9090,7 +9091,7 @@ fn extend_setup(name: &str) -> ExtendSetup {
     let mut owner = Client::app(&url, &token);
     owner.hub(json!({ "cmd": "unlock", "password": "correct horse" })).unwrap();
     let machine = open_extend_box(&ana);
-    ExtendSetup { hub, url, ana, owner, machine }
+    ExtendSetup { hub, url, account: view.id.parse().unwrap(), ana, owner, machine }
 }
 
 /// Another box the agent opens at US$ 1.00: its machine.
@@ -9180,10 +9181,22 @@ fn an_agents_extend_box_counts_only_recent_positive_asks_of_the_same_box() {
 /// Asks for one box that each fit alone, made at once: the first waits, every other one hears it waits.
 #[test]
 fn concurrent_extend_box_asks_for_one_box_wait_only_as_far_as_the_box_budget_goes() {
-    let ExtendSetup { hub: _hub, ana, mut owner, machine, .. } = extend_setup("extend_concurrent");
-    let answers: Vec<Result<Value, String>> = std::thread::scope(|scope| {
-        let asks: Vec<_> = (0..8).map(|_| scope.spawn(|| extend_as(&ana.dir, &ana.tab, &machine, 1.5, None))).collect();
-        asks.into_iter().map(|ask| ask.join().unwrap()).collect()
+    let ExtendSetup { hub, account, ana, mut owner, machine, .. } = extend_setup("extend_concurrent");
+    // Eight acts at once, as the hub takes them from the agent's machine, each on a task of its own.
+    let answers: Vec<Result<Value, String>> = hub.runtime.block_on(async {
+        let account = hub.hub().account(account).await.unwrap();
+        let asks: Vec<_> = (0..8)
+            .map(|_| {
+                let (running, account, origin) = (hub.hub().clone(), account.clone(), ana.machine.clone());
+                let act = serde_json::from_value(json!({ "tab": ana.tab, "action": "extend_box", "args": { "machine": machine, "extra_usd": 1.5 } })).unwrap();
+                tokio::spawn(async move { pinned_server::surface::act(&running, &account, &origin, act).await })
+            })
+            .collect();
+        let mut answers = vec![];
+        for ask in asks {
+            answers.push(ask.await.unwrap());
+        }
+        answers
     });
     let pending = answers.iter().filter(|a| a.as_ref().is_ok_and(|a| a["outcome"] == "pending")).count();
     let refused = answers.iter().filter(|a| **a == Err(extend_waits("US$ 1.50"))).count();
