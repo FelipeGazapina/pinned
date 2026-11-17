@@ -281,15 +281,16 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
             return Err(TOO_MANY_EXTENDS.into());
         }
         let held = ExtendTurn::ask(hub, account.id, machine, deadline).await?;
-        if !asked_before(hub, account, caller, act).await? {
-            let waiting = waiting_extends(hub, account).await?;
-            let live = hub.db.live_boxes(account.id).await?;
+        // The reads before the turn is held share the ask's wait too: one that has not answered by its deadline is busy.
+        if !tokio::time::timeout_at(deadline, asked_before(hub, account, caller, act)).await.map_err(|_| crate::db::BUSY.to_owned())?? {
+            let waiting = tokio::time::timeout_at(deadline, waiting_extends(hub, account)).await.map_err(|_| crate::db::BUSY.to_owned())??;
+            let live = tokio::time::timeout_at(deadline, hub.db.live_boxes(account.id)).await.map_err(|_| crate::db::BUSY.to_owned())??;
             if waiting.iter().filter(|(of, _, _)| of.is_some_and(|of| live.contains(&of))).count() >= MAX_WAITING_EXTENDS_PER_ACCOUNT {
                 return Err(TOO_MANY_EXTENDS.into());
             }
             let since = (pinned_core::connectors::unix_millis() / 1000).saturating_sub(EXTENDS_COUNTED_FOR.as_secs()) as i64;
             let for_box = waiting.iter().filter(|(of, _, at)| *of == Some(machine) && *at > since).map(|(_, usd, _)| usd).sum();
-            crate::boxes::extended(hub, account, machine, *extra_usd, for_box).await?;
+            tokio::time::timeout_at(deadline, crate::boxes::extended(hub, account, machine, *extra_usd, for_box)).await.map_err(|_| crate::db::BUSY.to_owned())??;
         }
         turn = Some(held);
     }
