@@ -1,7 +1,6 @@
 //! A new title for a conversation from a short `claude -p`, as T3 Code regenerates thread titles.
 
 use std::path::Path;
-use std::process::Stdio;
 
 /// T3 Code's regenerate prompt, its editorial rules unchanged.
 const RULES: &str = "Determine the title in this order:
@@ -52,24 +51,9 @@ const THREAD_CHARS: usize = 8000;
 
 /// Runs `claude` without tools, hooks or a saved session, since only its answer matters.
 pub fn regenerate(claude: &Path, headless: &crate::machine::Headless<'_>, cwd: &Path, path: Option<&str>, previous: &str, thread: &str) -> Result<String, String> {
-    let mut command = crate::process::command(claude);
-    command
-        .args(["-p", "--no-session-persistence", "--model", "haiku", "--tools", "", "--settings", r#"{"disableAllHooks":true}"#])
-        .arg(prompt(previous, thread))
-        .current_dir(cwd)
-        .stdin(Stdio::null());
-    for key in crate::machine::INHERITED_SESSION_ENV.iter().chain(headless.strip) {
-        command.env_remove(key);
-    }
-    command.envs(headless.env.iter().cloned());
-    if let Some(path) = path {
-        command.env("PATH", path);
-    }
-    let out = command.output().map_err(|e| format!("couldn't run claude: {e}"))?;
-    if !out.status.success() {
-        return Err(format!("claude: {}", String::from_utf8_lossy(&out.stderr).trim()));
-    }
-    title_of(&String::from_utf8_lossy(&out.stdout)).ok_or_else(|| "claude gave no title".to_owned())
+    let args = ["--no-session-persistence", "--model", "haiku", "--tools", "", "--settings", r#"{"disableAllHooks":true}"#];
+    let answer = headless.run(claude, cwd, path, &args, &prompt(previous, thread), crate::machine::HEADLESS_WAIT)?;
+    title_of(&answer).ok_or_else(|| "claude gave no title".to_owned())
 }
 
 /// The title from claude's answer: the JSON it was asked for, or else its first line.
