@@ -2,7 +2,8 @@
 # `commits`, the mode of every repository the hub has not confirmed private: it pushes only the
 # commits the worker made and never adds, commits or touches the index or a work tree. The answer
 # counts the files with uncommitted changes, which stay unsaved, and never names them.
-# `full`, only for a repository the hub confirmed private: in the clone and in each worktree of it
+# `full`, only for a repository the hub confirmed private, and only while the clone's origin pushes
+# to that one repository alone (else it runs as `commits`): in the clone and in each worktree of it
 # with uncommitted changes, it unstages everything, then adds its tracked changes and the new files
 # git does not ignore, except any whose path has a part named like a secret (environment files, keys
 # and certificates, credential and token stores, package and cloud logins, infrastructure state,
@@ -10,14 +11,21 @@
 # nested repository, and commits them. The answer counts the files it left out and never names them.
 # Then, in both modes, it pushes each worktree's HEAD and every local branch that has commits on no
 # remote branch, each to the new branch wip/rescue/<task>, or <task>-2 and on while that name is
-# taken. Before each push it reads what that push would add over the remote, commits and messages,
-# and when that holds a value of one of its own secret-named environment variables or a token's
-# shape it pushes nothing of that branch, undoes its own rescue commit there and answers only that
-# it refused. It pushes with the credentials the clone keeps, never forces and never skips a hook.
+# taken. Before the first push it fetches origin, pruning, and before each push it reads what that
+# push would add over origin's branches, commits and messages, and when that holds a value of a
+# secret-named variable of its own, of the box's `box.env` or of the node's environment, or a token's
+# shape, or adds or changes a file whose name may hold a secret, it pushes nothing of that branch,
+# undoes its own rescue commit there and answers only that it refused. It pushes with the
+# credentials the clone keeps, never forces, never skips a hook, and never pushes a submodule or a
+# tag the clone's settings would add.
 # The hub reads only the `pinned-rescue:` lines: git's own output, which may name paths, stays here.
 export GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0 LC_ALL=C
 task='{{task}}'
 mode='{{mode}}'
+# The github.com repository, `owner/name`, whose visibility the hub checked, and the folder of the
+# box's `box.env` and the node's pid file.
+github='{{github}}'
+pinned='{{dir}}'
 [ "$mode" = full ] || mode=commits
 answer() { echo "pinned-rescue: $1"; }
 cd "$HOME/pinned/{{repo}}" 2>/dev/null && git rev-parse --git-dir >/dev/null 2>&1 || { answer done; exit 0; }
@@ -27,11 +35,39 @@ common=$(cd "$(git rev-parse --git-common-dir 2>/dev/null)" 2>/dev/null && pwd) 
 values=$(mktemp "$common/pinned-rescue.XXXXXX" 2>/dev/null) || { answer 'failed scan'; answer done; exit 0; }
 diff=$(mktemp "$common/pinned-rescue.XXXXXX" 2>/dev/null) || { rm -f "$values"; answer 'failed scan'; answer done; exit 0; }
 trap 'rm -f "$values" "$diff"' EXIT
-# Each line of 12 characters or more of a value of this process's variables named like a secret, read
-# inside awk, so no value is ever on a command line.
+# Each line of 12 characters or more of a value of a variable named like a secret: of this process's
+# own, read inside awk, so no value is ever on a command line.
 awk 'BEGIN { for (k in ENVIRON) if (toupper(k) ~ /TOKEN|KEY|SECRET|PASSWORD|PASS|AUTH|CREDENTIAL|COOKIE/) { n = split(ENVIRON[k], part, "\n"); for (i = 1; i <= n; i++) if (length(part[i]) >= 12) print part[i] } }' >"$values" 2>/dev/null || { answer 'failed scan'; answer done; exit 0; }
+# The same of `NAME=value` lines on its input, with no quotes around and with them, as box.env and
+# the node's environment hold them: read as text, never run. A line with no name goes on the value
+# before it.
+assigned() {
+  awk 'function keep(v) { if (length(v) >= 12) print v }
+    { line = $0; sub(/\r$/, "", line) }
+    line ~ /^(export[ \t]+)?[A-Za-z_][A-Za-z0-9_]*=/ { sub(/^export[ \t]+/, "", line); i = index(line, "="); named = toupper(substr(line, 1, i - 1)) ~ /TOKEN|KEY|SECRET|PASSWORD|PASS|AUTH|CREDENTIAL|COOKIE/; line = substr(line, i + 1) }
+    named { keep(line); q = sprintf("%c", 39); v = line; gsub(q "\\\\" q q, q, v); gsub("^[" q "\"]|[" q "\"]$", "", v); keep(v) }' >>"$values" 2>/dev/null
+}
+# box.env, which start.sh loads into the node's environment but no exec of the hub runs with.
+[ -f "$pinned/box.env" ] && { assigned <"$pinned/box.env" || { answer 'failed scan'; answer done; exit 0; }; }
+# The node's environment, when its pid file names a running pinned-server this user may read.
+node=$(cat "$pinned/node.pid" 2>/dev/null)
+case "$node" in '' | *[!0-9]*) node='' ;; esac
+[ -n "$node" ] && grep -qs pinned-server "/proc/$node/cmdline" && [ -r "/proc/$node/environ" ] && tr '\000' '\n' <"/proc/$node/environ" | assigned
+# `full` only while origin pushes to the checked repository alone: one push URL, on github.com,
+# over https or ssh, with no other user. git expands insteadOf and pushInsteadOf in what it reads.
+if [ "$mode" = full ]; then
+  url=$(git remote get-url --push --all origin 2>/dev/null | tr 'A-Z' 'a-z')
+  checked=$(printf '%s' "$github" | tr 'A-Z' 'a-z')
+  case "$url" in
+    "https://github.com/$checked" | "https://github.com/$checked.git" | "git@github.com:$checked" | "git@github.com:$checked.git" | \
+      "ssh://git@github.com/$checked" | "ssh://git@github.com/$checked.git") [ -n "$checked" ] || mode=commits ;;
+    *) mode=commits ;;
+  esac
+fi
 n=1
 uncommitted=0
+# Empty until origin was fetched, then 0 when that worked.
+fetched=''
 # The rescue commits this run made, as `<commit> <files it left out>` lines.
 made=''
 # The commits handled already, and the branches whose push was refused.
@@ -84,18 +120,35 @@ commit() {
     return 0
   fi
   git diff --cached --quiet 2>/dev/null && return 0
+  # A hook may stage more than this added: a commit whose tree is not this one is undone, never sent.
+  staged=$(git write-tree 2>/dev/null) || { answer 'failed add'; return 0; }
   git commit -q -m "rescue: unpushed work of task $task" >/dev/null 2>&1 || { answer 'failed commit'; return 0; }
+  if [ "$(git rev-parse -q --verify 'HEAD^{tree}' 2>/dev/null)" != "$staged" ]; then
+    sent="$sent$(git rev-parse -q --verify HEAD 2>/dev/null) "
+    git reset -q HEAD~1 >/dev/null 2>&1
+    answer 'failed commit'
+    return 0
+  fi
   made="$made$(git rev-parse HEAD) $(changed)
 "
 }
-# Whether what commit $1 adds over every remote branch, commits and messages, may hold a secret: a
-# value of this process's secret-named variables, or a token's shape. A failure to read it is a yes.
+# Whether what commit $1 adds over origin's branches, commits and messages, may hold a secret: a
+# value of a secret-named variable, a token's shape, or a file added or changed whose name may hold
+# a secret, by the names `safe` leaves out. A failure to read it is a yes.
 leaks() {
-  git log -p --cc --text --no-color --no-ext-diff --no-textconv "$1" --not --remotes >"$diff" 2>/dev/null || return 0
+  git log -p --cc --text --no-color --no-ext-diff --no-textconv "$1" --not --remotes=origin >"$diff" 2>/dev/null || return 0
   grep -q -F -f "$values" "$diff"
   [ $? -eq 1 ] || return 0
-  grep -q -E -e 'sk-[A-Za-z0-9_]{20}' -e 'sk-(ant|proj)-[A-Za-z0-9_-]{20}' -e 'gh[pousr]_[A-Za-z0-9_]{30}' -e 'github_pat_' \
-    -e 'xox[abposr]-' -e 'box_[A-Za-z0-9_]{16}' -e 'AKIA[0-9A-Z]{16}' -e '-----BEGIN[A-Z0-9 ]*PRIVATE KEY' "$diff"
+  grep -q -E -e 'sk-[A-Za-z0-9_-]{20}' -e 'sk_live_[A-Za-z0-9]{10}' -e 'gh[pousr]_[A-Za-z0-9_]{30}' -e 'github_pat_' \
+    -e 'xox[abposr]-' -e 'xapp-[A-Za-z0-9-]{10}' -e 'glpat-[A-Za-z0-9_-]{20}' -e 'AIza[A-Za-z0-9_-]{30}' -e 'box_[A-Za-z0-9_]{16}' \
+    -e 'A(KI|SI)A[0-9A-Z]{16}' -e 'eyJ[A-Za-z0-9_-]*\.eyJ[A-Za-z0-9_-]*\.' -e '://[^/:@[:space:]]+:[^/@[:space:]]+@' \
+    -e '-----BEGIN[A-Z0-9 ]*PRIVATE KEY' "$diff"
+  [ $? -eq 1 ] || return 0
+  git log -z --format= --name-only --no-renames --diff-filter=d --cc "$1" --not --remotes=origin >"$diff" 2>/dev/null || return 0
+  tr '\000\n' '\n\000' <"$diff" | tr 'A-Z' 'a-z' | grep -q -E \
+    -e '(^|/)(\.env[^/]*|[^/]*\.env|env\.local|[^/]*\.(pem|key|p12|pfx|jks|keystore|tfstate|tfvars)|id_[^/]*)(/|$)' \
+    -e '(^|/)(\.npmrc|\.netrc|\.pgpass|\.htpasswd|\.dockercfg|[^/]*kubeconfig[^/]*|\.mcp\.json|\.claude|\.?tokens?)(/|$)' \
+    -e '(^|/)([^/]*secrets?|[^/]*credentials?)([._-][^/]*)?(/|$)' -e '(^|/)[^/]*tokens?([._-][^/]*)?$'
   [ $? -eq 1 ] || return 0
   return 1
 }
@@ -114,7 +167,11 @@ send() {
   case "$sent" in *" $2 "*) return 0 ;; esac
   case "$refused" in *" $1 "*) return 0 ;; esac
   sent="$sent$2 "
-  [ -n "$(git rev-list -n 1 "$2" --not --remotes 2>/dev/null)" ] || return 0
+  [ -n "$(git rev-list -n 1 "$2" --not --remotes=origin 2>/dev/null)" ] || return 0
+  # Once, before the first scan: origin's branches as they are now, so a stale one hides nothing.
+  [ -n "$fetched" ] || { git fetch -q --prune --no-recurse-submodules origin >/dev/null 2>&1; fetched=$?; }
+  [ "$fetched" -eq 0 ] || { answer 'failed remote'; return 0; }
+  [ -n "$(git rev-list -n 1 "$2" --not --remotes=origin 2>/dev/null)" ] || return 0
   leaks "$2"
   hit=$?
   : >"$diff"
@@ -135,7 +192,7 @@ send() {
     esac
     [ "$n" -le 20 ] || { answer 'failed name'; return 0; }
   done
-  git push -q origin "$2:refs/heads/$ref" >/dev/null 2>&1 || { answer 'failed push'; return 0; }
+  git -c push.recurseSubmodules=no -c push.followTags=false push -q origin "$2:refs/heads/$ref" >/dev/null 2>&1 || { answer 'failed push'; return 0; }
   n=$((n + 1))
   left=$(printf '%s' "$made" | sed -n "s/^$2 //p")
   if [ "${left:-0}" -gt 0 ]; then answer "saved $ref (left out $left files that may hold secrets)"; else answer "saved $ref"; fi
