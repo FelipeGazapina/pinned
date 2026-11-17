@@ -9399,6 +9399,10 @@ fn a_box_that_ends_closes_the_extend_box_asks_that_wait_for_it() {
     let asked = extend_as(&ana.dir, &ana.tab, &machine.to_uppercase(), 0.5, None).unwrap();
     let kept = extend_as(&ana.dir, &ana.tab, &other, 0.5, None).unwrap();
     assert_eq!((asked["outcome"].as_str(), kept["outcome"].as_str()), (Some("pending"), Some("pending")), "{asked} {kept}");
+    // The same box spelled as `Uuid::parse_str` reads it: without hyphens, in braces, as a urn, and in capitals without hyphens.
+    let spellings = [machine.replace('-', ""), format!("{{{machine}}}"), format!("urn:uuid:{machine}"), machine.replace('-', "").to_uppercase()];
+    let spelled: Vec<Value> = spellings.iter().map(|spelling| extend_as(&ana.dir, &ana.tab, spelling, 0.1, None).unwrap()).collect();
+    assert!(spelled.iter().all(|ask| ask["outcome"] == "pending"), "{spelled:?}");
     // Bob's agent cannot ask for ana's box, which is no box of his, so his ask that names its machine is written here.
     let (bob_account, bob, mut bobs_app) = extend_account(&hub, "bob@acme.dev", "bob-mac");
     admin_on(
@@ -9412,6 +9416,9 @@ fn a_box_that_ends_closes_the_extend_box_asks_that_wait_for_it() {
     assert_eq!(count_on(&hub.database, &format!("select count(*) from boxes where machine = '{machine}' and phase = 'ending'")), 1, "the box is ending, its row kept until Upstash deletes it");
     assert_eq!(waiting_ids(&mut owner), [kept["id"].clone()], "only the ask for the box that runs still waits");
     assert_eq!(decided(&mut owner, &asked["id"]), (json!("denied"), json!(BOX_ENDED)));
+    for ask in &spelled {
+        assert_eq!(decided(&mut owner, &ask["id"]), (json!("denied"), json!(BOX_ENDED)), "{ask}");
+    }
     assert_eq!(waiting_actions(&mut bobs_app), ["extend_box"], "another account's ask is its own");
     let told = notice_of(&ana, &asked["id"]);
     assert!(told.contains(BOX_ENDED) && !told.contains("The user denied"), "the agent hears that the box ended: {told}");
