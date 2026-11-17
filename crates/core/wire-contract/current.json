@@ -8063,6 +8063,93 @@
                 "required": [
                   "kind"
                 ]
+              },
+              {
+                "description": "A Linear issue moves from status `from` to status `to`, each named ignoring case. Empty is\nany status.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-status"
+                  },
+                  "from": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "from",
+                  "to",
+                  "scope",
+                  "by"
+                ]
+              },
+              {
+                "description": "A Linear issue is assigned to `to`, or unassigned when `to` is `Assignee::Nobody`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-assigned"
+                  },
+                  "to": {
+                    "$ref": "#/$defs/Assignee"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "to",
+                  "scope",
+                  "by"
+                ]
+              },
+              {
+                "description": "The times `schedule` gives in `tz`, an IANA zone. Only a cron saves: a one-time run is a Task.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "schedule"
+                  },
+                  "schedule": {
+                    "$ref": "#/$defs/Schedule"
+                  },
+                  "tz": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "schedule",
+                  "tz"
+                ]
               }
             ]
           },
@@ -8130,6 +8217,143 @@
               "description",
               "workflow",
               "mention"
+            ]
+          },
+          "LinearScope": {
+            "description": "The Linear team and project a change must be in, each by name or key ignoring case. Empty is any.",
+            "type": "object",
+            "properties": {
+              "team": {
+                "type": "string",
+                "default": ""
+              },
+              "project": {
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "team",
+              "project"
+            ]
+          },
+          "By": {
+            "description": "Who must have made the change.",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "anyone",
+                  "not-me"
+                ]
+              },
+              {
+                "description": "The Linear user the account's key belongs to.",
+                "type": "string",
+                "const": "me"
+              }
+            ]
+          },
+          "Assignee": {
+            "description": "Who an issue must be assigned to.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "anyone"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "The Linear user the account's key belongs to.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "me"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Matched on `id`; `name` is for display.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "user"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "name"
+                ]
+              },
+              {
+                "description": "The issue was unassigned.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "nobody"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Schedule": {
+            "oneOf": [
+              {
+                "description": "A wall-clock date and time in the task's zone: `2026-11-13T09:00`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "once"
+                  },
+                  "at": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "at"
+                ]
+              },
+              {
+                "description": "Five-field cron, evaluated in the task's zone.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "cron"
+                  },
+                  "expr": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "expr"
+                ]
+              }
             ]
           },
           "Effort2": {
@@ -8755,6 +8979,93 @@
                 "required": [
                   "kind"
                 ]
+              },
+              {
+                "description": "`Trigger::LinearStatus`: empty `from` or `to` is any status.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-status"
+                  },
+                  "from": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "from",
+                  "to",
+                  "scope",
+                  "by"
+                ]
+              },
+              {
+                "description": "`Trigger::LinearAssigned`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-assigned"
+                  },
+                  "to": {
+                    "$ref": "#/$defs/Assignee"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "to",
+                  "scope",
+                  "by"
+                ]
+              },
+              {
+                "description": "`Trigger::Schedule`: a cron in `tz`, an IANA zone.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "schedule"
+                  },
+                  "schedule": {
+                    "$ref": "#/$defs/Schedule"
+                  },
+                  "tz": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "schedule",
+                  "tz"
+                ]
               }
             ]
           },
@@ -9191,44 +9502,6 @@
               "updated_at",
               "next_at",
               "last_run"
-            ]
-          },
-          "Schedule": {
-            "oneOf": [
-              {
-                "description": "A wall-clock date and time in the task's zone: `2026-11-13T09:00`.",
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "once"
-                  },
-                  "at": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "kind",
-                  "at"
-                ]
-              },
-              {
-                "description": "Five-field cron, evaluated in the task's zone.",
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "cron"
-                  },
-                  "expr": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "kind",
-                  "expr"
-                ]
-              }
             ]
           },
           "Target3": {
@@ -20159,6 +20432,87 @@
                 "required": [
                   "kind"
                 ]
+              },
+              {
+                "description": "A Linear issue moves from status `from` to status `to`, each named ignoring case. Empty is\nany status.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-status"
+                  },
+                  "from": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "A Linear issue is assigned to `to`, or unassigned when `to` is `Assignee::Nobody`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-assigned"
+                  },
+                  "to": {
+                    "$ref": "#/$defs/Assignee"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "to"
+                ]
+              },
+              {
+                "description": "The times `schedule` gives in `tz`, an IANA zone. Only a cron saves: a one-time run is a Task.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "schedule"
+                  },
+                  "schedule": {
+                    "$ref": "#/$defs/Schedule"
+                  },
+                  "tz": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "schedule",
+                  "tz"
+                ]
               }
             ]
           },
@@ -20223,6 +20577,139 @@
             "required": [
               "name",
               "description"
+            ]
+          },
+          "LinearScope": {
+            "description": "The Linear team and project a change must be in, each by name or key ignoring case. Empty is any.",
+            "type": "object",
+            "properties": {
+              "team": {
+                "type": "string",
+                "default": ""
+              },
+              "project": {
+                "type": "string",
+                "default": ""
+              }
+            }
+          },
+          "By": {
+            "description": "Who must have made the change.",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "anyone",
+                  "not-me"
+                ]
+              },
+              {
+                "description": "The Linear user the account's key belongs to.",
+                "type": "string",
+                "const": "me"
+              }
+            ]
+          },
+          "Assignee": {
+            "description": "Who an issue must be assigned to.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "anyone"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "The Linear user the account's key belongs to.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "me"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Matched on `id`; `name` is for display.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "user"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "name"
+                ]
+              },
+              {
+                "description": "The issue was unassigned.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "nobody"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Schedule": {
+            "oneOf": [
+              {
+                "description": "A wall-clock date and time in the task's zone: `2026-11-13T09:00`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "once"
+                  },
+                  "at": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "at"
+                ]
+              },
+              {
+                "description": "Five-field cron, evaluated in the task's zone.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "cron"
+                  },
+                  "expr": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "expr"
+                ]
+              }
             ]
           },
           "Effort2": {
@@ -20835,6 +21322,87 @@
                 "required": [
                   "kind"
                 ]
+              },
+              {
+                "description": "`Trigger::LinearStatus`: empty `from` or `to` is any status.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-status"
+                  },
+                  "from": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "`Trigger::LinearAssigned`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-assigned"
+                  },
+                  "to": {
+                    "$ref": "#/$defs/Assignee"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "to"
+                ]
+              },
+              {
+                "description": "`Trigger::Schedule`: a cron in `tz`, an IANA zone.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "schedule"
+                  },
+                  "schedule": {
+                    "$ref": "#/$defs/Schedule"
+                  },
+                  "tz": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "schedule",
+                  "tz"
+                ]
               }
             ]
           },
@@ -21250,44 +21818,6 @@
               "created_by",
               "created_at",
               "updated_at"
-            ]
-          },
-          "Schedule": {
-            "oneOf": [
-              {
-                "description": "A wall-clock date and time in the task's zone: `2026-11-13T09:00`.",
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "once"
-                  },
-                  "at": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "kind",
-                  "at"
-                ]
-              },
-              {
-                "description": "Five-field cron, evaluated in the task's zone.",
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "cron"
-                  },
-                  "expr": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "kind",
-                  "expr"
-                ]
-              }
             ]
           },
           "Target3": {
@@ -28517,6 +29047,93 @@
                 "required": [
                   "kind"
                 ]
+              },
+              {
+                "description": "A Linear issue moves from status `from` to status `to`, each named ignoring case. Empty is\nany status.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-status"
+                  },
+                  "from": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "from",
+                  "to",
+                  "scope",
+                  "by"
+                ]
+              },
+              {
+                "description": "A Linear issue is assigned to `to`, or unassigned when `to` is `Assignee::Nobody`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-assigned"
+                  },
+                  "to": {
+                    "$ref": "#/$defs/Assignee"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "to",
+                  "scope",
+                  "by"
+                ]
+              },
+              {
+                "description": "The times `schedule` gives in `tz`, an IANA zone. Only a cron saves: a one-time run is a Task.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "schedule"
+                  },
+                  "schedule": {
+                    "$ref": "#/$defs/Schedule"
+                  },
+                  "tz": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "schedule",
+                  "tz"
+                ]
               }
             ]
           },
@@ -28584,6 +29201,143 @@
               "description",
               "workflow",
               "mention"
+            ]
+          },
+          "LinearScope": {
+            "description": "The Linear team and project a change must be in, each by name or key ignoring case. Empty is any.",
+            "type": "object",
+            "properties": {
+              "team": {
+                "type": "string",
+                "default": ""
+              },
+              "project": {
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "team",
+              "project"
+            ]
+          },
+          "By": {
+            "description": "Who must have made the change.",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "anyone",
+                  "not-me"
+                ]
+              },
+              {
+                "description": "The Linear user the account's key belongs to.",
+                "type": "string",
+                "const": "me"
+              }
+            ]
+          },
+          "Assignee": {
+            "description": "Who an issue must be assigned to.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "anyone"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "The Linear user the account's key belongs to.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "me"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Matched on `id`; `name` is for display.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "user"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "name"
+                ]
+              },
+              {
+                "description": "The issue was unassigned.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "nobody"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Schedule": {
+            "oneOf": [
+              {
+                "description": "A wall-clock date and time in the task's zone: `2026-11-13T09:00`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "once"
+                  },
+                  "at": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "at"
+                ]
+              },
+              {
+                "description": "Five-field cron, evaluated in the task's zone.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "cron"
+                  },
+                  "expr": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "expr"
+                ]
+              }
             ]
           },
           "Effort": {
@@ -29218,6 +29972,93 @@
                 "required": [
                   "kind"
                 ]
+              },
+              {
+                "description": "`Trigger::LinearStatus`: empty `from` or `to` is any status.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-status"
+                  },
+                  "from": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "from",
+                  "to",
+                  "scope",
+                  "by"
+                ]
+              },
+              {
+                "description": "`Trigger::LinearAssigned`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-assigned"
+                  },
+                  "to": {
+                    "$ref": "#/$defs/Assignee"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "to",
+                  "scope",
+                  "by"
+                ]
+              },
+              {
+                "description": "`Trigger::Schedule`: a cron in `tz`, an IANA zone.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "schedule"
+                  },
+                  "schedule": {
+                    "$ref": "#/$defs/Schedule"
+                  },
+                  "tz": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "schedule",
+                  "tz"
+                ]
               }
             ]
           },
@@ -29654,44 +30495,6 @@
               "updated_at",
               "next_at",
               "last_run"
-            ]
-          },
-          "Schedule": {
-            "oneOf": [
-              {
-                "description": "A wall-clock date and time in the task's zone: `2026-11-13T09:00`.",
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "once"
-                  },
-                  "at": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "kind",
-                  "at"
-                ]
-              },
-              {
-                "description": "Five-field cron, evaluated in the task's zone.",
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "cron"
-                  },
-                  "expr": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "kind",
-                  "expr"
-                ]
-              }
             ]
           },
           "Target": {
@@ -37481,6 +38284,87 @@
                 "required": [
                   "kind"
                 ]
+              },
+              {
+                "description": "A Linear issue moves from status `from` to status `to`, each named ignoring case. Empty is\nany status.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-status"
+                  },
+                  "from": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "A Linear issue is assigned to `to`, or unassigned when `to` is `Assignee::Nobody`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-assigned"
+                  },
+                  "to": {
+                    "$ref": "#/$defs/Assignee"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "to"
+                ]
+              },
+              {
+                "description": "The times `schedule` gives in `tz`, an IANA zone. Only a cron saves: a one-time run is a Task.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "schedule"
+                  },
+                  "schedule": {
+                    "$ref": "#/$defs/Schedule"
+                  },
+                  "tz": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "schedule",
+                  "tz"
+                ]
               }
             ]
           },
@@ -37545,6 +38429,139 @@
             "required": [
               "name",
               "description"
+            ]
+          },
+          "LinearScope": {
+            "description": "The Linear team and project a change must be in, each by name or key ignoring case. Empty is any.",
+            "type": "object",
+            "properties": {
+              "team": {
+                "type": "string",
+                "default": ""
+              },
+              "project": {
+                "type": "string",
+                "default": ""
+              }
+            }
+          },
+          "By": {
+            "description": "Who must have made the change.",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "anyone",
+                  "not-me"
+                ]
+              },
+              {
+                "description": "The Linear user the account's key belongs to.",
+                "type": "string",
+                "const": "me"
+              }
+            ]
+          },
+          "Assignee": {
+            "description": "Who an issue must be assigned to.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "anyone"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "The Linear user the account's key belongs to.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "me"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Matched on `id`; `name` is for display.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "user"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "name"
+                ]
+              },
+              {
+                "description": "The issue was unassigned.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "nobody"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Schedule": {
+            "oneOf": [
+              {
+                "description": "A wall-clock date and time in the task's zone: `2026-11-13T09:00`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "once"
+                  },
+                  "at": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "at"
+                ]
+              },
+              {
+                "description": "Five-field cron, evaluated in the task's zone.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "cron"
+                  },
+                  "expr": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "expr"
+                ]
+              }
             ]
           },
           "Effort": {
@@ -38166,6 +39183,87 @@
                 "required": [
                   "kind"
                 ]
+              },
+              {
+                "description": "`Trigger::LinearStatus`: empty `from` or `to` is any status.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-status"
+                  },
+                  "from": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "`Trigger::LinearAssigned`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-assigned"
+                  },
+                  "to": {
+                    "$ref": "#/$defs/Assignee"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "to"
+                ]
+              },
+              {
+                "description": "`Trigger::Schedule`: a cron in `tz`, an IANA zone.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "schedule"
+                  },
+                  "schedule": {
+                    "$ref": "#/$defs/Schedule"
+                  },
+                  "tz": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "schedule",
+                  "tz"
+                ]
               }
             ]
           },
@@ -38581,44 +39679,6 @@
               "created_by",
               "created_at",
               "updated_at"
-            ]
-          },
-          "Schedule": {
-            "oneOf": [
-              {
-                "description": "A wall-clock date and time in the task's zone: `2026-11-13T09:00`.",
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "once"
-                  },
-                  "at": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "kind",
-                  "at"
-                ]
-              },
-              {
-                "description": "Five-field cron, evaluated in the task's zone.",
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "cron"
-                  },
-                  "expr": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "kind",
-                  "expr"
-                ]
-              }
             ]
           },
           "Target": {
@@ -43982,6 +45042,93 @@
                 "required": [
                   "kind"
                 ]
+              },
+              {
+                "description": "A Linear issue moves from status `from` to status `to`, each named ignoring case. Empty is\nany status.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-status"
+                  },
+                  "from": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "from",
+                  "to",
+                  "scope",
+                  "by"
+                ]
+              },
+              {
+                "description": "A Linear issue is assigned to `to`, or unassigned when `to` is `Assignee::Nobody`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-assigned"
+                  },
+                  "to": {
+                    "$ref": "#/$defs/Assignee"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "to",
+                  "scope",
+                  "by"
+                ]
+              },
+              {
+                "description": "The times `schedule` gives in `tz`, an IANA zone. Only a cron saves: a one-time run is a Task.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "schedule"
+                  },
+                  "schedule": {
+                    "$ref": "#/$defs/Schedule"
+                  },
+                  "tz": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "schedule",
+                  "tz"
+                ]
               }
             ]
           },
@@ -44049,6 +45196,143 @@
               "description",
               "workflow",
               "mention"
+            ]
+          },
+          "LinearScope": {
+            "description": "The Linear team and project a change must be in, each by name or key ignoring case. Empty is any.",
+            "type": "object",
+            "properties": {
+              "team": {
+                "type": "string",
+                "default": ""
+              },
+              "project": {
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "team",
+              "project"
+            ]
+          },
+          "By": {
+            "description": "Who must have made the change.",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "anyone",
+                  "not-me"
+                ]
+              },
+              {
+                "description": "The Linear user the account's key belongs to.",
+                "type": "string",
+                "const": "me"
+              }
+            ]
+          },
+          "Assignee": {
+            "description": "Who an issue must be assigned to.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "anyone"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "The Linear user the account's key belongs to.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "me"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Matched on `id`; `name` is for display.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "user"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "name"
+                ]
+              },
+              {
+                "description": "The issue was unassigned.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "nobody"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Schedule": {
+            "oneOf": [
+              {
+                "description": "A wall-clock date and time in the task's zone: `2026-11-13T09:00`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "once"
+                  },
+                  "at": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "at"
+                ]
+              },
+              {
+                "description": "Five-field cron, evaluated in the task's zone.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "cron"
+                  },
+                  "expr": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "expr"
+                ]
+              }
             ]
           },
           "Effort": {
@@ -44683,6 +45967,93 @@
                 "required": [
                   "kind"
                 ]
+              },
+              {
+                "description": "`Trigger::LinearStatus`: empty `from` or `to` is any status.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-status"
+                  },
+                  "from": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "from",
+                  "to",
+                  "scope",
+                  "by"
+                ]
+              },
+              {
+                "description": "`Trigger::LinearAssigned`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-assigned"
+                  },
+                  "to": {
+                    "$ref": "#/$defs/Assignee"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "to",
+                  "scope",
+                  "by"
+                ]
+              },
+              {
+                "description": "`Trigger::Schedule`: a cron in `tz`, an IANA zone.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "schedule"
+                  },
+                  "schedule": {
+                    "$ref": "#/$defs/Schedule"
+                  },
+                  "tz": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "schedule",
+                  "tz"
+                ]
               }
             ]
           },
@@ -45228,6 +46599,87 @@
                 "required": [
                   "kind"
                 ]
+              },
+              {
+                "description": "A Linear issue moves from status `from` to status `to`, each named ignoring case. Empty is\nany status.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-status"
+                  },
+                  "from": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "A Linear issue is assigned to `to`, or unassigned when `to` is `Assignee::Nobody`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-assigned"
+                  },
+                  "to": {
+                    "$ref": "#/$defs/Assignee"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "to"
+                ]
+              },
+              {
+                "description": "The times `schedule` gives in `tz`, an IANA zone. Only a cron saves: a one-time run is a Task.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "schedule"
+                  },
+                  "schedule": {
+                    "$ref": "#/$defs/Schedule"
+                  },
+                  "tz": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "schedule",
+                  "tz"
+                ]
               }
             ]
           },
@@ -45292,6 +46744,139 @@
             "required": [
               "name",
               "description"
+            ]
+          },
+          "LinearScope": {
+            "description": "The Linear team and project a change must be in, each by name or key ignoring case. Empty is any.",
+            "type": "object",
+            "properties": {
+              "team": {
+                "type": "string",
+                "default": ""
+              },
+              "project": {
+                "type": "string",
+                "default": ""
+              }
+            }
+          },
+          "By": {
+            "description": "Who must have made the change.",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "anyone",
+                  "not-me"
+                ]
+              },
+              {
+                "description": "The Linear user the account's key belongs to.",
+                "type": "string",
+                "const": "me"
+              }
+            ]
+          },
+          "Assignee": {
+            "description": "Who an issue must be assigned to.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "anyone"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "The Linear user the account's key belongs to.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "me"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Matched on `id`; `name` is for display.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "user"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "name"
+                ]
+              },
+              {
+                "description": "The issue was unassigned.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "nobody"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Schedule": {
+            "oneOf": [
+              {
+                "description": "A wall-clock date and time in the task's zone: `2026-11-13T09:00`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "once"
+                  },
+                  "at": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "at"
+                ]
+              },
+              {
+                "description": "Five-field cron, evaluated in the task's zone.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "cron"
+                  },
+                  "expr": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "expr"
+                ]
+              }
             ]
           },
           "Effort": {
@@ -45912,6 +47497,87 @@
                 },
                 "required": [
                   "kind"
+                ]
+              },
+              {
+                "description": "`Trigger::LinearStatus`: empty `from` or `to` is any status.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-status"
+                  },
+                  "from": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "`Trigger::LinearAssigned`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-assigned"
+                  },
+                  "to": {
+                    "$ref": "#/$defs/Assignee"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "to"
+                ]
+              },
+              {
+                "description": "`Trigger::Schedule`: a cron in `tz`, an IANA zone.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "schedule"
+                  },
+                  "schedule": {
+                    "$ref": "#/$defs/Schedule"
+                  },
+                  "tz": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "schedule",
+                  "tz"
                 ]
               }
             ]
@@ -52830,6 +54496,93 @@
                 "required": [
                   "kind"
                 ]
+              },
+              {
+                "description": "A Linear issue moves from status `from` to status `to`, each named ignoring case. Empty is\nany status.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-status"
+                  },
+                  "from": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "from",
+                  "to",
+                  "scope",
+                  "by"
+                ]
+              },
+              {
+                "description": "A Linear issue is assigned to `to`, or unassigned when `to` is `Assignee::Nobody`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-assigned"
+                  },
+                  "to": {
+                    "$ref": "#/$defs/Assignee"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "to",
+                  "scope",
+                  "by"
+                ]
+              },
+              {
+                "description": "The times `schedule` gives in `tz`, an IANA zone. Only a cron saves: a one-time run is a Task.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "schedule"
+                  },
+                  "schedule": {
+                    "$ref": "#/$defs/Schedule"
+                  },
+                  "tz": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "schedule",
+                  "tz"
+                ]
               }
             ]
           },
@@ -52897,6 +54650,143 @@
               "description",
               "workflow",
               "mention"
+            ]
+          },
+          "LinearScope": {
+            "description": "The Linear team and project a change must be in, each by name or key ignoring case. Empty is any.",
+            "type": "object",
+            "properties": {
+              "team": {
+                "type": "string",
+                "default": ""
+              },
+              "project": {
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "team",
+              "project"
+            ]
+          },
+          "By": {
+            "description": "Who must have made the change.",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "anyone",
+                  "not-me"
+                ]
+              },
+              {
+                "description": "The Linear user the account's key belongs to.",
+                "type": "string",
+                "const": "me"
+              }
+            ]
+          },
+          "Assignee": {
+            "description": "Who an issue must be assigned to.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "anyone"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "The Linear user the account's key belongs to.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "me"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Matched on `id`; `name` is for display.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "user"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "name"
+                ]
+              },
+              {
+                "description": "The issue was unassigned.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "nobody"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Schedule": {
+            "oneOf": [
+              {
+                "description": "A wall-clock date and time in the task's zone: `2026-11-13T09:00`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "once"
+                  },
+                  "at": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "at"
+                ]
+              },
+              {
+                "description": "Five-field cron, evaluated in the task's zone.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "cron"
+                  },
+                  "expr": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "expr"
+                ]
+              }
             ]
           },
           "Effort": {
@@ -53530,6 +55420,93 @@
                 },
                 "required": [
                   "kind"
+                ]
+              },
+              {
+                "description": "`Trigger::LinearStatus`: empty `from` or `to` is any status.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-status"
+                  },
+                  "from": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "from",
+                  "to",
+                  "scope",
+                  "by"
+                ]
+              },
+              {
+                "description": "`Trigger::LinearAssigned`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-assigned"
+                  },
+                  "to": {
+                    "$ref": "#/$defs/Assignee"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "to",
+                  "scope",
+                  "by"
+                ]
+              },
+              {
+                "description": "`Trigger::Schedule`: a cron in `tz`, an IANA zone.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "schedule"
+                  },
+                  "schedule": {
+                    "$ref": "#/$defs/Schedule"
+                  },
+                  "tz": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "schedule",
+                  "tz"
                 ]
               }
             ]
@@ -54333,44 +56310,6 @@
               "last_run"
             ]
           },
-          "Schedule": {
-            "oneOf": [
-              {
-                "description": "A wall-clock date and time in the task's zone: `2026-11-13T09:00`.",
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "once"
-                  },
-                  "at": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "kind",
-                  "at"
-                ]
-              },
-              {
-                "description": "Five-field cron, evaluated in the task's zone.",
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "cron"
-                  },
-                  "expr": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "kind",
-                  "expr"
-                ]
-              }
-            ]
-          },
           "Target": {
             "oneOf": [
               {
@@ -55125,6 +57064,87 @@
                 "required": [
                   "kind"
                 ]
+              },
+              {
+                "description": "A Linear issue moves from status `from` to status `to`, each named ignoring case. Empty is\nany status.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-status"
+                  },
+                  "from": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "A Linear issue is assigned to `to`, or unassigned when `to` is `Assignee::Nobody`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-assigned"
+                  },
+                  "to": {
+                    "$ref": "#/$defs/Assignee"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "to"
+                ]
+              },
+              {
+                "description": "The times `schedule` gives in `tz`, an IANA zone. Only a cron saves: a one-time run is a Task.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "schedule"
+                  },
+                  "schedule": {
+                    "$ref": "#/$defs/Schedule"
+                  },
+                  "tz": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "schedule",
+                  "tz"
+                ]
               }
             ]
           },
@@ -55189,6 +57209,139 @@
             "required": [
               "name",
               "description"
+            ]
+          },
+          "LinearScope": {
+            "description": "The Linear team and project a change must be in, each by name or key ignoring case. Empty is any.",
+            "type": "object",
+            "properties": {
+              "team": {
+                "type": "string",
+                "default": ""
+              },
+              "project": {
+                "type": "string",
+                "default": ""
+              }
+            }
+          },
+          "By": {
+            "description": "Who must have made the change.",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "anyone",
+                  "not-me"
+                ]
+              },
+              {
+                "description": "The Linear user the account's key belongs to.",
+                "type": "string",
+                "const": "me"
+              }
+            ]
+          },
+          "Assignee": {
+            "description": "Who an issue must be assigned to.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "anyone"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "The Linear user the account's key belongs to.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "me"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Matched on `id`; `name` is for display.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "user"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "name"
+                ]
+              },
+              {
+                "description": "The issue was unassigned.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "nobody"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Schedule": {
+            "oneOf": [
+              {
+                "description": "A wall-clock date and time in the task's zone: `2026-11-13T09:00`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "once"
+                  },
+                  "at": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "at"
+                ]
+              },
+              {
+                "description": "Five-field cron, evaluated in the task's zone.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "cron"
+                  },
+                  "expr": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "expr"
+                ]
+              }
             ]
           },
           "Effort": {
@@ -55809,6 +57962,87 @@
                 },
                 "required": [
                   "kind"
+                ]
+              },
+              {
+                "description": "`Trigger::LinearStatus`: empty `from` or `to` is any status.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-status"
+                  },
+                  "from": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "`Trigger::LinearAssigned`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-assigned"
+                  },
+                  "to": {
+                    "$ref": "#/$defs/Assignee"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "to"
+                ]
+              },
+              {
+                "description": "`Trigger::Schedule`: a cron in `tz`, an IANA zone.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "schedule"
+                  },
+                  "schedule": {
+                    "$ref": "#/$defs/Schedule"
+                  },
+                  "tz": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "schedule",
+                  "tz"
                 ]
               }
             ]
@@ -56569,44 +58803,6 @@
               "created_by",
               "created_at",
               "updated_at"
-            ]
-          },
-          "Schedule": {
-            "oneOf": [
-              {
-                "description": "A wall-clock date and time in the task's zone: `2026-11-13T09:00`.",
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "once"
-                  },
-                  "at": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "kind",
-                  "at"
-                ]
-              },
-              {
-                "description": "Five-field cron, evaluated in the task's zone.",
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "cron"
-                  },
-                  "expr": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "kind",
-                  "expr"
-                ]
-              }
             ]
           },
           "Target": {
@@ -63469,6 +65665,93 @@
                 "required": [
                   "kind"
                 ]
+              },
+              {
+                "description": "A Linear issue moves from status `from` to status `to`, each named ignoring case. Empty is\nany status.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-status"
+                  },
+                  "from": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "from",
+                  "to",
+                  "scope",
+                  "by"
+                ]
+              },
+              {
+                "description": "A Linear issue is assigned to `to`, or unassigned when `to` is `Assignee::Nobody`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-assigned"
+                  },
+                  "to": {
+                    "$ref": "#/$defs/Assignee"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "to",
+                  "scope",
+                  "by"
+                ]
+              },
+              {
+                "description": "The times `schedule` gives in `tz`, an IANA zone. Only a cron saves: a one-time run is a Task.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "schedule"
+                  },
+                  "schedule": {
+                    "$ref": "#/$defs/Schedule"
+                  },
+                  "tz": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "schedule",
+                  "tz"
+                ]
               }
             ]
           },
@@ -63536,6 +65819,143 @@
               "description",
               "workflow",
               "mention"
+            ]
+          },
+          "LinearScope": {
+            "description": "The Linear team and project a change must be in, each by name or key ignoring case. Empty is any.",
+            "type": "object",
+            "properties": {
+              "team": {
+                "type": "string",
+                "default": ""
+              },
+              "project": {
+                "type": "string",
+                "default": ""
+              }
+            },
+            "required": [
+              "team",
+              "project"
+            ]
+          },
+          "By": {
+            "description": "Who must have made the change.",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "anyone",
+                  "not-me"
+                ]
+              },
+              {
+                "description": "The Linear user the account's key belongs to.",
+                "type": "string",
+                "const": "me"
+              }
+            ]
+          },
+          "Assignee": {
+            "description": "Who an issue must be assigned to.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "anyone"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "The Linear user the account's key belongs to.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "me"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Matched on `id`; `name` is for display.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "user"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "name"
+                ]
+              },
+              {
+                "description": "The issue was unassigned.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "nobody"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Schedule": {
+            "oneOf": [
+              {
+                "description": "A wall-clock date and time in the task's zone: `2026-11-13T09:00`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "once"
+                  },
+                  "at": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "at"
+                ]
+              },
+              {
+                "description": "Five-field cron, evaluated in the task's zone.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "cron"
+                  },
+                  "expr": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "expr"
+                ]
+              }
             ]
           },
           "Effort": {
@@ -64169,6 +66589,93 @@
                 },
                 "required": [
                   "kind"
+                ]
+              },
+              {
+                "description": "`Trigger::LinearStatus`: empty `from` or `to` is any status.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-status"
+                  },
+                  "from": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "from",
+                  "to",
+                  "scope",
+                  "by"
+                ]
+              },
+              {
+                "description": "`Trigger::LinearAssigned`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-assigned"
+                  },
+                  "to": {
+                    "$ref": "#/$defs/Assignee"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "to",
+                  "scope",
+                  "by"
+                ]
+              },
+              {
+                "description": "`Trigger::Schedule`: a cron in `tz`, an IANA zone.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "schedule"
+                  },
+                  "schedule": {
+                    "$ref": "#/$defs/Schedule"
+                  },
+                  "tz": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "schedule",
+                  "tz"
                 ]
               }
             ]
@@ -64935,44 +67442,6 @@
               "updated_at",
               "next_at",
               "last_run"
-            ]
-          },
-          "Schedule": {
-            "oneOf": [
-              {
-                "description": "A wall-clock date and time in the task's zone: `2026-11-13T09:00`.",
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "once"
-                  },
-                  "at": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "kind",
-                  "at"
-                ]
-              },
-              {
-                "description": "Five-field cron, evaluated in the task's zone.",
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "cron"
-                  },
-                  "expr": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "kind",
-                  "expr"
-                ]
-              }
             ]
           },
           "Target": {
@@ -67851,6 +70320,87 @@
                 "required": [
                   "kind"
                 ]
+              },
+              {
+                "description": "A Linear issue moves from status `from` to status `to`, each named ignoring case. Empty is\nany status.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-status"
+                  },
+                  "from": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "A Linear issue is assigned to `to`, or unassigned when `to` is `Assignee::Nobody`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-assigned"
+                  },
+                  "to": {
+                    "$ref": "#/$defs/Assignee"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "to"
+                ]
+              },
+              {
+                "description": "The times `schedule` gives in `tz`, an IANA zone. Only a cron saves: a one-time run is a Task.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "schedule"
+                  },
+                  "schedule": {
+                    "$ref": "#/$defs/Schedule"
+                  },
+                  "tz": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "schedule",
+                  "tz"
+                ]
               }
             ]
           },
@@ -67915,6 +70465,139 @@
             "required": [
               "name",
               "description"
+            ]
+          },
+          "LinearScope": {
+            "description": "The Linear team and project a change must be in, each by name or key ignoring case. Empty is any.",
+            "type": "object",
+            "properties": {
+              "team": {
+                "type": "string",
+                "default": ""
+              },
+              "project": {
+                "type": "string",
+                "default": ""
+              }
+            }
+          },
+          "By": {
+            "description": "Who must have made the change.",
+            "oneOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "anyone",
+                  "not-me"
+                ]
+              },
+              {
+                "description": "The Linear user the account's key belongs to.",
+                "type": "string",
+                "const": "me"
+              }
+            ]
+          },
+          "Assignee": {
+            "description": "Who an issue must be assigned to.",
+            "oneOf": [
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "anyone"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "The Linear user the account's key belongs to.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "me"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Matched on `id`; `name` is for display.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "user"
+                  },
+                  "id": {
+                    "type": "string"
+                  },
+                  "name": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "id",
+                  "name"
+                ]
+              },
+              {
+                "description": "The issue was unassigned.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "nobody"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              }
+            ]
+          },
+          "Schedule": {
+            "oneOf": [
+              {
+                "description": "A wall-clock date and time in the task's zone: `2026-11-13T09:00`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "once"
+                  },
+                  "at": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "at"
+                ]
+              },
+              {
+                "description": "Five-field cron, evaluated in the task's zone.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "cron"
+                  },
+                  "expr": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "expr"
+                ]
+              }
             ]
           },
           "Effort": {
@@ -68535,6 +71218,87 @@
                 },
                 "required": [
                   "kind"
+                ]
+              },
+              {
+                "description": "`Trigger::LinearStatus`: empty `from` or `to` is any status.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-status"
+                  },
+                  "from": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "to": {
+                    "type": "string",
+                    "default": ""
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "`Trigger::LinearAssigned`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "linear-assigned"
+                  },
+                  "to": {
+                    "$ref": "#/$defs/Assignee"
+                  },
+                  "scope": {
+                    "$ref": "#/$defs/LinearScope",
+                    "default": {
+                      "team": "",
+                      "project": ""
+                    }
+                  },
+                  "by": {
+                    "$ref": "#/$defs/By",
+                    "default": "anyone"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "to"
+                ]
+              },
+              {
+                "description": "`Trigger::Schedule`: a cron in `tz`, an IANA zone.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "const": "schedule"
+                  },
+                  "schedule": {
+                    "$ref": "#/$defs/Schedule"
+                  },
+                  "tz": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "schedule",
+                  "tz"
                 ]
               }
             ]
@@ -69260,44 +72024,6 @@
               "created_by",
               "created_at",
               "updated_at"
-            ]
-          },
-          "Schedule": {
-            "oneOf": [
-              {
-                "description": "A wall-clock date and time in the task's zone: `2026-11-13T09:00`.",
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "once"
-                  },
-                  "at": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "kind",
-                  "at"
-                ]
-              },
-              {
-                "description": "Five-field cron, evaluated in the task's zone.",
-                "type": "object",
-                "properties": {
-                  "kind": {
-                    "type": "string",
-                    "const": "cron"
-                  },
-                  "expr": {
-                    "type": "string"
-                  }
-                },
-                "required": [
-                  "kind",
-                  "expr"
-                ]
-              }
             ]
           },
           "Target": {
