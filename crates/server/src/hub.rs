@@ -187,15 +187,47 @@ struct CheckLog {
     error_since: i64,
 }
 
+/// A check that comes more than this many seconds after the one before it is late.
+const CHECK_LATE_AFTER_S: i64 = 120;
+
 /// The check log's lines for one new check of `account`, and what it keeps for the next one.
-fn log_check(prev: &CheckLog, _account: Uuid, _check: &pinned_core::connectors::Check, _now: i64) -> (CheckLog, Vec<String>) {
-    (prev.clone(), vec![])
+fn log_check(prev: &CheckLog, account: Uuid, check: &pinned_core::connectors::Check, now: i64) -> (CheckLog, Vec<String>) {
+    let who: String = account.to_string().chars().take(8).collect();
+    let mut lines = vec![];
+    if let Some(gap) = prev.at.map(|at| now - at).filter(|gap| *gap > CHECK_LATE_AFTER_S) {
+        lines.push(format!("pinned-server: check-late account={who} gap_s={gap}"));
+    }
+    let error = check.error.as_deref().map(log_error);
+    let mut next = CheckLog { at: Some(now), error: error.clone(), error_since: prev.error_since };
+    match (&prev.error, &error) {
+        (Some(was), Some(new)) if was == new => {}
+        (_, Some(new)) => {
+            lines.push(format!("pinned-server: check-error account={who} error={new}"));
+            next.error_since = now;
+        }
+        (Some(_), None) => lines.push(format!("pinned-server: check-ok account={who} after_s={}", now - prev.error_since)),
+        (None, None) => {}
+    }
+    (next, lines)
+}
+
+/// A check's error as the log prints it: cut before any `?`, where a query string may carry a token,
+/// on one line, and at most 200 characters.
+fn log_error(error: &str) -> String {
+    let before_query = error.split('?').next().unwrap_or_default();
+    before_query.chars().map(|c| if matches!(c, '\n' | '\r') { ' ' } else { c }).take(200).collect()
 }
 
 /// `account_census`' check fields: the last check's age in whole seconds at `now` (-1 when there is
 /// none), and whether it failed.
-fn check_census(_check: Option<&pinned_core::connectors::Check>, _now: i64) -> (i64, bool) {
-    (0, false)
+fn check_census(check: Option<&pinned_core::connectors::Check>, now: i64) -> (i64, bool) {
+    let age = check.and_then(|check| chrono::DateTime::parse_from_rfc3339(&check.at).ok()).map_or(-1, |at| now - at.timestamp());
+    (age, check.is_some_and(|check| check.error.is_some()))
+}
+
+/// The current time in whole seconds since the Unix epoch.
+fn unix_secs_now() -> i64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
 }
 
 /// The resident set size, in KiB, from the text of `/proc/self/status`.
@@ -504,11 +536,14 @@ impl Hub {
         persisted.sort_by_key(|(id, _)| *id);
         // The accounts' lock is let go before any account's own locks are taken.
         let accounts: HashMap<Uuid, Arc<Account>> = self.accounts.lock().unwrap().clone();
+        let now = unix_secs_now();
         persisted
             .iter()
             .map(|(id, p)| {
-                let runs = accounts.get(id).and_then(|account| account.connectors.get()).map_or(0, |connectors| connectors.census().runs);
-                account_census(*id, runs, p.census(), (-1, false))
+                let connectors = accounts.get(id).and_then(|account| account.connectors.get());
+                let runs = connectors.map_or(0, |connectors| connectors.census().runs);
+                let check = check_census(connectors.and_then(|connectors| connectors.last_check()).as_ref(), now);
+                account_census(*id, runs, p.census(), check)
             })
             .collect()
     }
@@ -633,7 +668,15 @@ impl Hub {
                 let hub = hub.clone();
                 async move { hub.open_found(id, work).await }
             };
-            let on_check = |_: &pinned_core::connectors::Check| {
+            let log = Mutex::new(CheckLog::default());
+            let on_check = move |check: &pinned_core::connectors::Check| {
+                let mut state = log.lock().unwrap();
+                let (next, lines) = log_check(&state, id, check, unix_secs_now());
+                *state = next;
+                drop(state);
+                for line in lines {
+                    eprintln!("{line}");
+                }
                 let (hub, account) = checked.clone();
                 tokio::spawn(async move { hub.push_settings(&account).await });
             };
