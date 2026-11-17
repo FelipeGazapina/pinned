@@ -1,7 +1,7 @@
 #!/bin/sh
 # From an empty directory to a running stack and back: up, status, the seeded users, a box opened and
-# ended, Slack through the hub to the fake, down, reset. One line per step, `ok <n> <what>` or
-# `FAIL <n> <what>: <why>`; exits 1 on any FAIL.
+# ended, Slack through the hub to the fake, reports through the hub to the fake GitHub, down, reset.
+# One line per step, `ok <n> <what>` or `FAIL <n> <what>: <why>`; exits 1 on any FAIL.
 #
 #   TEAMS_DEV_BIN=target/debug/pinned-server [TEAMS_DEV_DIR=<fresh dir>] sh scripts/teams-dev/e2e-empty.sh
 #
@@ -20,7 +20,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 : "${TEAMS_DEV_BIN:?set TEAMS_DEV_BIN to a built pinned-server}"
 export TEAMS_DEV_BIN
 DIR=$(realpath -m "$E2E_DIR")
-HUB_PORT=${TEAMS_DEV_HUB_PORT:-8811} BOX_PORT=${TEAMS_DEV_BOX_PORT:-8812} SLACK_PORT=${TEAMS_DEV_SLACK_PORT:-8813} PG_PORT=${TEAMS_DEV_PG_PORT:-5611}
+HUB_PORT=${TEAMS_DEV_HUB_PORT:-8811} BOX_PORT=${TEAMS_DEV_BOX_PORT:-8812} SLACK_PORT=${TEAMS_DEV_SLACK_PORT:-8813} PG_PORT=${TEAMS_DEV_PG_PORT:-5611} GITHUB_PORT=${TEAMS_DEV_GITHUB_PORT:-8814}
 for d in /usr/lib/postgresql/*/bin; do [ -x "$d/psql" ] && PATH=$d:$PATH; done
 failed=0
 # Subshells: an assignment before a function call can outlive the call, and would put the dir in this script's own environment.
@@ -46,7 +46,7 @@ stack_pids() {
   done
 }
 ports_free() {
-  for port in $HUB_PORT $BOX_PORT $SLACK_PORT $PG_PORT; do
+  for port in $HUB_PORT $BOX_PORT $SLACK_PORT $PG_PORT $GITHUB_PORT; do
     ss -ltn 2>/dev/null | awk '{print $4}' | grep -q ":$port\$" && return 1
   done
   return 0
@@ -59,7 +59,7 @@ if out=$(dev up 2>&1); then
 else bad 1 "dev.sh up" "$(echo "$out" | tail -3)"; fi
 
 # 2
-if out=$(dev status 2>&1) && [ "$(echo "$out" | grep -c '^up ')" -eq 4 ]; then ok 2 "status: hub, fake box, fake slack and postgres are up"; else bad 2 "status" "$out"; fi
+if out=$(dev status 2>&1) && [ "$(echo "$out" | grep -c '^up ')" -eq 5 ]; then ok 2 "status: hub, fake box, fake slack, fake github and postgres are up"; else bad 2 "status" "$out"; fi
 
 # 3
 if out=$(steps signin 2>&1); then ok 3 "the three seeded users sign in: $(echo "$out" | sed 's/^signed in //' | tr '\n' ' ')"; else bad 3 "sign in" "$out"; fi
@@ -84,16 +84,20 @@ else bad 4 "open a box" "$(echo "$out" | tail -2)"; fi
 if out=$(steps slack 2>&1); then ok 5 "Slack through the hub reaches the fake ($(echo "$out" | head -1 | sed 's/^the fake Slack saw //')); a non-dev token is refused"; else bad 5 "Slack through the hub" "$out"; fi
 
 # 6
-dev down >/dev/null 2>&1
-left=$(stack_pids | tr '\n' ';')
-if [ -z "$left" ] && ports_free; then ok 6 "down: no process carries the stack dir and ports $HUB_PORT-$SLACK_PORT and $PG_PORT are free"; else bad 6 "down" "processes: ${left:-none}; ports in use: $(ss -ltn | awk '{print $4}' | grep -E ":($HUB_PORT|$BOX_PORT|$SLACK_PORT|$PG_PORT)\$" | tr '\n' ' ')"; fi
+if grep -q "reporting is off\|PINNED_REPORTS_[A-Z_]* is ignored" "$DIR/hub.log"; then bad 6 "reports" "hub.log says reporting is off or an override is ignored"
+elif out=$(steps reports 2>&1); then ok 6 "$out"; else bad 6 "reports through the hub" "$out"; fi
 
 # 7
+dev down >/dev/null 2>&1
+left=$(stack_pids | tr '\n' ';')
+if [ -z "$left" ] && ports_free; then ok 7 "down: no process carries the stack dir and ports $HUB_PORT-$SLACK_PORT, $GITHUB_PORT and $PG_PORT are free"; else bad 7 "down" "processes: ${left:-none}; ports in use: $(ss -ltn | awk '{print $4}' | grep -E ":($HUB_PORT|$BOX_PORT|$SLACK_PORT|$PG_PORT|$GITHUB_PORT)\$" | tr '\n' ' ')"; fi
+
+# 8
 if out=$(dev reset 2>&1); then
   rows=$(psql -h 127.0.0.1 -p "$PG_PORT" -U pinned -d pinned -Atc 'select count(*) from accounts' 2>&1)
   held=$(psql -h 127.0.0.1 -p "$PG_PORT" -U pinned -d pinned -Atc 'select (select count(*) from boxes) + (select count(*) from machines)' 2>&1)
-  if [ "$rows" = 3 ] && [ "$held" = 0 ] && ! ls "$DIR/boxes"/* >/dev/null 2>&1 && out=$(steps empty "$OLD" 2>&1); then ok 7 "reset: only the three seeded accounts, no box, no Slack"; else bad 7 "reset" "accounts=$rows boxes+machines=$held $out"; fi
-else bad 7 "reset" "$(echo "$out" | tail -3)"; fi
+  if [ "$rows" = 3 ] && [ "$held" = 0 ] && ! ls "$DIR/boxes"/* >/dev/null 2>&1 && out=$(steps empty "$OLD" 2>&1); then ok 8 "reset: only the three seeded accounts, no box, no Slack"; else bad 8 "reset" "accounts=$rows boxes+machines=$held $out"; fi
+else bad 8 "reset" "$(echo "$out" | tail -3)"; fi
 
 dev down >/dev/null 2>&1
 rm -rf "$OLDDIR"

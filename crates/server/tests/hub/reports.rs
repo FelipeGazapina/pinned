@@ -1362,3 +1362,179 @@ fn a_send_whose_draft_another_transaction_is_writing_is_refused_after_a_short_wa
     assert_eq!((sent["id"].clone(), sent["state"].clone(), sent["issue"].clone()), (json!(id), json!({ "state": "open" }), json!(1)), "{sent}");
     assert_eq!(left_today(&mut ana), json!(4));
 }
+
+/// `pinned-server hub --dev`, started the way the dev stack starts it, with `vars` set and every reports variable
+/// not in `vars` taken out. Dropping it stops the hub and drops its database.
+struct DevHub {
+    child: std::process::Child,
+    url: String,
+    dir: PathBuf,
+    database: String,
+}
+
+impl DevHub {
+    fn start(name: &str, vars: &[(&str, &str)]) -> DevHub {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let database = format!("pinned_test_{name}_{}", std::process::id());
+        admin(&format!("drop database if exists {database} with (force)"));
+        admin(&format!("create database {database}"));
+        let dir = temp(&format!("hub-{name}"));
+        for sub in ["ui", "downloads"] {
+            std::fs::create_dir_all(dir.join(sub)).unwrap();
+        }
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let listen = format!("127.0.0.1:{port}");
+        let (db, ui, downloads, key) = (format!("{}/{database}", postgres()), dir.join("ui"), dir.join("downloads"), dir.join("hub.key"));
+        let mut command = pinned_core::process::command(BIN);
+        command.args(["hub", "--dev", "--db", &db, "--listen", &listen]).arg("--ui").arg(&ui).arg("--downloads").arg(&downloads).arg("--key-file").arg(&key);
+        for name in ["PINNED_REPORTS_GITHUB_TOKEN", "PINNED_REPORTS_GITHUB_API", "PINNED_REPORTS_REPO", "PINNED_REPORTS_POLL_SECS", "PINNED_DEV_TIME_SCALE", "no_proxy", "NO_PROXY"] {
+            command.env_remove(name);
+        }
+        command.env("UPSTASH_BOX_BASE_URL", "http://127.0.0.1:9").env("PINNED_SLACK_API_BASE", "http://127.0.0.1:9").env("HOME", &dir).envs(vars.iter().copied());
+        let child = without_app_env(&mut command).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::fs::File::create(dir.join("stderr")).unwrap()).spawn().unwrap();
+        let hub = DevHub { child, url: format!("http://{listen}"), dir, database };
+        wait_long("the dev hub to listen", Duration::from_secs(30), || TcpStream::connect(&listen).is_ok());
+        hub
+    }
+
+    /// What the hub wrote to stderr so far.
+    fn said(&self) -> String {
+        std::fs::read_to_string(self.dir.join("stderr")).unwrap_or_default()
+    }
+}
+
+impl Drop for DevHub {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        admin(&format!("drop database if exists {} with (force)", self.database));
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// The reports status a signed-in app sees on `hub`.
+fn dev_status(hub: &DevHub) -> Value {
+    let token = account::signup(&hub.url, "ana@example.test", PASSWORD).unwrap().0;
+    ask(&mut Client::app(&hub.url, &token), json!({ "op": "status" })).unwrap()
+}
+
+#[test]
+fn a_dev_hub_with_no_local_fake_has_reporting_off() {
+    let hub = DevHub::start("reports_dev_no_fake", &[]);
+    assert_eq!(dev_status(&hub), json!({ "available": false }), "a dev hub never files on the real GitHub: {}", hub.said());
+    let said = hub.said();
+    assert!(said.contains("pinned-server: reporting is off under --dev: set PINNED_REPORTS_GITHUB_API to a local fake\n"), "{said}");
+    assert!(!said.contains("is ignored") && !said.contains("PINNED_REPORTS_GITHUB_TOKEN"), "a dev hub never asks for the token: {said}");
+}
+
+#[test]
+fn a_dev_hub_refuses_a_reports_api_that_is_not_on_this_machine() {
+    for (i, api) in ["https://api.example.test", "http://user:pw@127.0.0.1:9"].into_iter().enumerate() {
+        let hub = DevHub::start(&format!("reports_dev_remote_{i}"), &[("PINNED_REPORTS_GITHUB_API", api)]);
+        assert_eq!(dev_status(&hub), json!({ "available": false }), "{api}: {}", hub.said());
+        let said = hub.said();
+        assert!(said.contains("pinned-server: reporting is off under --dev: PINNED_REPORTS_GITHUB_API must be an http(s) address on this machine, with no user or password\n"), "{api}: {said}");
+        assert!(!said.contains("example.test") && !said.contains("user:pw"), "a log line names the variable, never its value: {said}");
+    }
+}
+
+#[test]
+fn a_dev_hub_files_on_the_local_fake_its_override_names() {
+    let fake = Fake::start();
+    let hub = DevHub::start("reports_dev_fake", &[("PINNED_REPORTS_GITHUB_API", &fake.github.url), ("PINNED_REPORTS_REPO", "acme/app")]);
+    // Checked before any call that reaches GitHub: a hub that ignored the override would file on the real one.
+    let said = hub.said();
+    assert!(!said.contains("is ignored") && !said.contains("reporting is off"), "{said}");
+    let token = account::signup(&hub.url, "ana@example.test", PASSWORD).unwrap().0;
+    let mut app = Client::app(&hub.url, &token);
+    assert_eq!(ask(&mut app, json!({ "op": "status" })).unwrap(), json!({ "available": true, "left_today": 5 }));
+    assert_eq!(ask(&mut app, json!({ "op": "similar", "title": "Upload stops at 90%" })).unwrap(), json!([]));
+    let searched: Vec<String> = fake.github.requests().iter().map(|r| format!("{} {}", r.method, r.path)).collect();
+    assert_eq!(searched, ["GET /search/issues?q=upload+stops+repo%3Aacme%2Fapp+is%3Aissue+is%3Aopen+in%3Atitle%2Cbody&per_page=5"], "the search went to the local fake, in the override repository");
+}
+
+/// The token a `--dev` hub sends its local fake, whatever the environment says.
+const DEV_HUB_TOKEN: &str = "fake-dev-hub";
+
+#[test]
+fn a_dev_hub_with_a_local_fake_and_no_token_variable_files_there_with_its_own_fake_token() {
+    let fake = Fake::start();
+    let hub = DevHub::start("reports_dev_no_token", &[("PINNED_REPORTS_GITHUB_API", &fake.github.url)]);
+    let said = hub.said();
+    assert!(!said.contains("reporting is off") && !said.contains("is ignored") && !said.contains("is not set"), "{said}");
+    let token = account::signup(&hub.url, "ana@example.test", PASSWORD).unwrap().0;
+    let mut ana = Client::connect(&hub.url, &token);
+    assert_eq!(ask(&mut ana, json!({ "op": "status" })).unwrap(), json!({ "available": true, "left_today": 5 }), "{}", hub.said());
+    let sent = reviewed_send(&mut ana, problem("Crash on launch", "It closes."), json!({})).unwrap();
+    assert_eq!((sent["state"].clone(), sent["issue"].clone()), (json!({ "state": "open" }), json!(1)), "{sent}");
+    let posts: Vec<String> = fake.github.requests().into_iter().filter(|r| r.method == "POST").map(|r| r.path).collect();
+    assert_eq!(posts, ["/repos/FelipeGazapina/pinned/issues"], "filed on the local fake, under pinned's own name");
+    let tokens = fake.github.tokens();
+    assert!(!tokens.is_empty() && tokens.iter().all(|t| t == DEV_HUB_TOKEN), "{tokens:?}");
+}
+
+#[test]
+fn a_dev_hub_never_sends_the_token_variable_and_says_so_by_name_alone() {
+    let fake = Fake::start();
+    // The only test that sets this variable, to an invented value, to prove a --dev hub ignores it.
+    let hub = DevHub::start("reports_dev_token_ignored", &[("PINNED_REPORTS_GITHUB_TOKEN", "ghp_must-not-be-sent"), ("PINNED_REPORTS_GITHUB_API", &fake.github.url)]);
+    // Checked before any call that reaches GitHub: a hub that read the variable would search with it first.
+    let said = hub.said();
+    assert!(said.contains("pinned-server: PINNED_REPORTS_GITHUB_TOKEN is ignored under --dev: a dev hub sends only its own fake token, to a local fake\n"), "{said}");
+    let token = account::signup(&hub.url, "ana@example.test", PASSWORD).unwrap().0;
+    let mut ana = Client::app(&hub.url, &token);
+    assert_eq!(ask(&mut ana, json!({ "op": "status" })).unwrap(), json!({ "available": true, "left_today": 5 }), "{}", hub.said());
+    let similar = ask(&mut ana, json!({ "op": "similar", "title": "Upload stops at 90%" }));
+    assert_eq!(fake.github.tokens(), [DEV_HUB_TOKEN], "the fake saw the built-in fake token, never the variable's value");
+    assert_eq!(similar, Ok(json!([])));
+    let said = hub.said();
+    assert!(said.contains("pinned-server: PINNED_REPORTS_GITHUB_TOKEN is ignored under --dev: a dev hub sends only its own fake token, to a local fake\n"), "{said}");
+    assert_eq!(said.matches("PINNED_REPORTS_GITHUB_TOKEN").count(), 1, "one warning: {said}");
+    assert!(!said.contains("ghp_must-not-be-sent") && !said.contains("must-not"), "{said}");
+}
+
+/// A proxy on this machine that counts each connection and closes it at once: its address, and the count.
+fn counting_proxy() -> (String, Arc<AtomicU64>) {
+    let proxy = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", proxy.local_addr().unwrap());
+    let reached = Arc::new(AtomicU64::new(0));
+    let counted = reached.clone();
+    std::thread::spawn(move || {
+        for stream in proxy.incoming() {
+            counted.fetch_add(1, Ordering::SeqCst);
+            drop(stream);
+        }
+    });
+    (url, reached)
+}
+
+#[test]
+fn a_dev_hub_sends_its_reports_calls_to_the_local_fake_past_any_proxy_variable() {
+    let fake = Fake::start();
+    let (proxy_url, reached) = counting_proxy();
+    let vars = [("PINNED_REPORTS_GITHUB_API", fake.github.url.as_str()), ("http_proxy", &proxy_url), ("HTTP_PROXY", &proxy_url), ("all_proxy", &proxy_url)];
+    let hub = DevHub::start("reports_dev_proxy", &vars);
+    let token = account::signup(&hub.url, "ana@example.test", PASSWORD).unwrap().0;
+    let similar = ask(&mut Client::app(&hub.url, &token), json!({ "op": "similar", "title": "Upload stops at 90%" }));
+    assert_eq!(reached.load(Ordering::SeqCst), 0, "the proxy saw no connection: {}", hub.said());
+    assert_eq!(fake.github.tokens(), [DEV_HUB_TOKEN], "the search reached the local fake");
+    assert_eq!(similar, Ok(json!([])));
+}
+
+#[test]
+fn a_dev_hub_with_the_token_variable_and_no_local_fake_has_reporting_off_and_calls_nothing() {
+    // Any call, to the real GitHub too, would have to pass this proxy.
+    let (proxy_url, reached) = counting_proxy();
+    let mut vars = vec![("PINNED_REPORTS_GITHUB_TOKEN", "ghp_invented-for-this-test")];
+    for name in ["http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "all_proxy", "ALL_PROXY"] {
+        vars.push((name, &proxy_url));
+    }
+    let hub = DevHub::start("reports_dev_token_no_fake", &vars);
+    let said = hub.said();
+    assert!(said.contains("pinned-server: PINNED_REPORTS_GITHUB_TOKEN is ignored under --dev: a dev hub sends only its own fake token, to a local fake\n"), "{said}");
+    assert!(said.contains("pinned-server: reporting is off under --dev: set PINNED_REPORTS_GITHUB_API to a local fake\n"), "{said}");
+    assert_eq!(dev_status(&hub), json!({ "available": false }), "{}", hub.said());
+    assert_eq!(reached.load(Ordering::SeqCst), 0, "no call left the hub: {}", hub.said());
+    let said = hub.said();
+    assert!(!said.contains("ghp_invented") && !said.contains("invented-for-this-test"), "{said}");
+}

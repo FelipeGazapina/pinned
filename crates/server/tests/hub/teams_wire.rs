@@ -178,11 +178,7 @@ fn a_new_workflow_keeps_only_a_fresh_uuid_its_app_made() {
     assert_eq!(team_op(&mut ana, &first, save_bot(&fresh)), Ok(json!({ "workflow": fresh })));
 
     // Another team's workflow id, once its store is written, is no new id for this team.
-    let deadline = Instant::now() + WAIT;
-    while db_text(&hub.database, &format!("select count(*)::text from accounts where id = '{first}' and store::text like '%{fresh}%'")) != vec!["1"] {
-        assert!(Instant::now() < deadline, "the first team's store is written");
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    wait_for("the first team's store is written", || db_text(&hub.database, &format!("select count(*)::text from accounts where id = '{first}' and store::text like '%{fresh}%'")) == vec!["1"]);
     assert_eq!(team_op(&mut ana, &second, save_bot(&fresh)), Err(format!("this team has no workflow {fresh}")));
     // Not a uuid in its lowercase hyphenated form: unknown, as before.
     for odd in [fresh.to_uppercase(), fresh.replace('-', ""), "c1790000000000".to_owned()] {
