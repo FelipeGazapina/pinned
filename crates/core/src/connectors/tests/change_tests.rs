@@ -949,6 +949,42 @@ fn a_won_change_read_again_where_its_claim_would_fail_fires_once_and_is_not_cool
     no_unlisted(&fake);
 }
 
+/// #346 E3 round 4 item 4: a change a running graph run holds is given back by each check and
+/// counted once, not on every check; once the run ends, the change starts once.
+#[test]
+fn a_change_held_by_a_running_graph_run_is_counted_once_and_starts_once_the_run_ends() {
+    let _api = slack::lock_api();
+    let _restore = RestoreLinear;
+    let first = ago(20);
+    let fake = fake_with(vec![issue(1, first, vec![moved("h-1", first, "Backlog", "Ready to Dev")])]);
+    let claims = Claims::default();
+    let mut workflow = ready_to_dev("w1", ago(30));
+    workflow.graph = Some(migrate(&workflow));
+    let connectors = on(&claims, vec![workflow], "lin-e3-held");
+    let (_, error) = check(&connectors);
+    assert_eq!(error, None);
+    assert_eq!(connectors.graph_runs().len(), 1, "the first move starts its graph run, which holds the issue");
+
+    let second = Utc::now();
+    fake.lock().unwrap().issues = vec![issue(1, second, vec![moved("h-1", first, "Backlog", "Ready to Dev"), moved("h-2", second, "Todo", "Ready to Dev")])];
+    for _ in 0..3 {
+        let (_, error) = check(&connectors);
+        assert_eq!(error, None);
+    }
+    let counts = connectors.change_counts()["w1"].clone();
+    assert_eq!((counts.not_started, counts.released), (1, 1), "held: counted once, however many checks");
+    assert_eq!(connectors.graph_runs().len(), 1, "nothing starts while the run holds the issue");
+
+    connectors.runs.lock().unwrap()[0].status = Status::Done;
+    let (_, error) = check(&connectors);
+    assert_eq!(error, None);
+    assert_eq!(connectors.graph_runs().len(), 2, "the held change starts once the run ends");
+    let (_, error) = check(&connectors);
+    assert_eq!(error, None);
+    assert_eq!(connectors.graph_runs().len(), 2, "once");
+    no_unlisted(&fake);
+}
+
 /// #346 E3 round 4 item 3: a retry pending when its workflow is turned off and on is dropped with
 /// the `since` reset, so the change from before the turn-on does not start.
 #[test]
