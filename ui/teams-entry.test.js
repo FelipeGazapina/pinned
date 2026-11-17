@@ -774,9 +774,9 @@ const CONNECT_TOKEN_SENTENCE = "The token comes from the Claude account your ter
 /** North Studio, as `role` and `credential` say, opened from `origin` (the page the owner is on) by Connect AI account. */
 async function atConnect(origin, { role = "owner", credential = KEYS_OFF } = {}) {
   const team = { ...ACME, role, credential };
-  const a = app({ answers: { list: () => [team] }, stored: { id: "t1", name: "North Studio", role, credential }, pages: [origin, "team-calls"] });
+  const a = app({ answers: { list: () => [team] }, stored: { id: "t1", name: "North Studio", role, credential }, pages: origin ? [origin, "team-calls"] : ["team-calls"] });
   await a.context.teamsList();
-  a.context.document.body.dataset.page = origin;
+  a.context.document.body.dataset.page = origin ?? "";
   a.run("openTeamConnect()");
   return a;
 }
@@ -784,7 +784,7 @@ async function atConnect(origin, { role = "owner", credential = KEYS_OFF } = {})
 test("Connect AI account opens step 3 for the current team: its name and key state, and nothing sent but the list", async () => {
   const a = await atConnect("team-calls", { credential: { ...KEYS_OFF, upstash: true } });
   const t = text(a.page());
-  assert.match(t, /Connect AI account North Studio/);
+  assert.match(t, /North Studio Team Connect AI account/);
   assert.match(t, /The team has its own AI account/);
   assert.match(t, /Upstash key Opens the boxes the bots work in Connected/);
   assert.match(t, /Claude token for boxes Signs the bots in to Claude inside the box Connect now/);
@@ -812,6 +812,13 @@ test("Done and Back return to the page the owner came from, and create, rename o
   back.click("leave");
   assert.deepEqual(back.context.opened.at(-1), "team-calls");
   for (const a of [done, back]) assert.deepEqual(a.frames.map((f) => f.op.op).filter((op) => op !== "list"), [], "only the list is read");
+});
+
+test("asked from outside the shell's pages, Done closes the page as Back to my account does", async () => {
+  const a = await atConnect(null);
+  a.click("connect-done");
+  assert.equal(a.context.closed, 1);
+  assert.deepEqual(a.context.opened, ["team-create"], "nothing else is opened");
 });
 
 test("a member cannot open Connect AI account: nothing opens and no call is sent", async () => {

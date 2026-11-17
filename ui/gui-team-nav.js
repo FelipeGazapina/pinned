@@ -52,6 +52,7 @@ function tcNavHtml(team, page) {
     <div class="tc-section"><div class="tc-head">Bots</div>${bots}${row("team-bot-new", `<span class="label">Create a bot</span>`, { attrs: ' data-create="true"' })}</div>
     <div class="tc-section"><div class="tc-head">Groups</div>${groups}</div>
     ${me.owner && tcNavOpens("team-invites") ? `<div class="tc-section"><div class="tc-head">People</div>${row("team-invites", `<span class="label">Invite people</span>`)}</div>` : ""}
+    ${me.owner ? `<div class="tc-section"><div class="tc-head">AI account</div><button type="button" class="nav-row tc-row" data-tc-nav="team-connect"><span class="label">Connect AI account</span></button></div>` : ""}
     <div class="tc-section tc-projects"><div class="tc-head">Projects</div>${tcStore.projects.map(tcProjectHtml).join("") || `<div class="tc-none">${tcStore.loaded ? "No projects in the team yet." : "Loading…"}</div>`}</div>
     <div class="tc-me"><span class="tc-mark tc-person" style="--tc-hue:${tcHue(me.account || me.name)}" aria-hidden="true">${esc(tcInitials(me.name))}</span><span class="tc-me-name">${esc(me.name)}</span></div>`;
 }
@@ -88,6 +89,7 @@ function tcNavDraw() {
 /** Opens the page a row names: a bot or a group through `openTeamBot(workflow)` / `openTeamGroup(handle)`. */
 function tcNavOpen(button) {
   const key = button.dataset.tcNav;
+  if (key === "team-connect") return openTeamConnect();
   if (!tcNavOpens(key)) return;
   if (key === "team-bot" && button.dataset.workflow) openTeamBot(button.dataset.workflow);
   else if (key === "team-group" && button.dataset.handle) openTeamGroup(button.dataset.handle);
