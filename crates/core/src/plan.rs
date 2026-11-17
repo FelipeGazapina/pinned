@@ -26,7 +26,7 @@ pub const GLANCE_TEXT: usize = 32;
 const DONE_WITH_LIST: &str = "Done with the list's task";
 
 /// The state a step has, as the Captain reported it or as a task derives it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum State {
     Pending,
@@ -37,7 +37,7 @@ pub enum State {
 }
 
 /// The state of one Captain's plan as a whole, which the Orchestrator panel sorts by.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CaptainState {
     NeedsYou,
@@ -127,7 +127,7 @@ pub struct Fix {
 }
 
 /// The `set` arguments. Ids are optional and match existing lists and steps of the plan.
-#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SetCall {
     #[serde(default)]
     pub plan: Option<String>,
@@ -139,7 +139,7 @@ pub struct SetCall {
     pub lists: Vec<ListInput>,
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct ListInput {
     #[serde(default)]
     pub id: Option<String>,
@@ -148,7 +148,7 @@ pub struct ListInput {
     pub steps: Vec<StepInput>,
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct StepInput {
     #[serde(default)]
     pub id: Option<String>,
@@ -158,7 +158,7 @@ pub struct StepInput {
 }
 
 /// The `step` arguments: a report on one step.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct StepCall {
     pub step: String,
     pub state: State,
@@ -167,13 +167,13 @@ pub struct StepCall {
 }
 
 /// The `fix` arguments: a new branch under a failed step.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FixCall {
     pub step: String,
     pub steps: Vec<NewStep>,
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct NewStep {
     pub name: String,
     #[serde(default)]
@@ -181,7 +181,7 @@ pub struct NewStep {
 }
 
 /// The `close` arguments. The plan is named by its id.
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CloseCall {
     pub plan: String,
     pub reason: String,
@@ -220,7 +220,7 @@ pub enum Review {
 }
 
 /// One plan as a client reads it, with states and costs derived from the linked tasks.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct PlanView {
     pub id: String,
     pub rev: u64,
@@ -231,7 +231,7 @@ pub struct PlanView {
     pub lists: Vec<ListView>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct ListView {
     pub id: String,
     pub name: String,
@@ -239,7 +239,7 @@ pub struct ListView {
     pub steps: Vec<StepView>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct StepView {
     pub id: String,
     pub name: String,
@@ -252,14 +252,14 @@ pub struct StepView {
     pub fixes: Vec<FixView>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, schemars::JsonSchema)]
 pub struct FixView {
     pub id: String,
     pub steps: Vec<StepView>,
 }
 
 /// The small shape the Orchestrator panel shows for one plan: one dots string per list.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct PlanGlance {
     pub id: String,
     pub title: String,
@@ -504,6 +504,16 @@ fn step_on(
         ));
     }
     let plan = &mut plans.plans[pi];
+    // The same report again changes nothing, unless being newer lets it win over a task that ended.
+    if find_step(&plan.lists, &call.step).is_some_and(|s| s.reported == call.state && s.note == note) {
+        let mut again = plan.clone();
+        if let Some(s) = find_step_mut(&mut again.lists, &call.step) {
+            s.reported_at = now;
+        }
+        if derive(&again, facts) == derive(plan, facts) {
+            return Ok(answer_of(plans, &plan_id, facts));
+        }
+    }
     let Some(s) = find_step_mut(&mut plan.lists, &call.step) else {
         return Err(format!("no step {}. Nothing changed.", call.step));
     };
@@ -1528,12 +1538,34 @@ fn clean_id(id: &Option<String>) -> Option<String> {
         .map(String::from)
 }
 
-/// A name or title: one line, no control characters, counted in characters after trimming.
+/// U+2028 and U+2029 break a line where `char::is_control` sees none.
+fn line_separator(c: char) -> bool {
+    matches!(c, '\u{2028}' | '\u{2029}')
+}
+
+/// Embeddings, overrides, isolates and marks that make text read in another order than it is stored.
+fn direction_mark(c: char) -> bool {
+    matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' | '\u{061C}')
+}
+
+/// Characters that show nothing, so two names that read the same can differ.
+fn invisible(c: char) -> bool {
+    matches!(c, '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}')
+}
+
+/// A name or title: one line, no control, direction or invisible characters, counted in
+/// characters after trimming.
 fn one_line(field: &str, raw: &str, max: usize, required: bool) -> Result<String, String> {
-    if raw.chars().any(char::is_control) {
+    if raw.chars().any(|c| c.is_control() || line_separator(c)) {
         return Err(format!(
             "{field} may not contain a line break or other control character. Nothing changed."
         ));
+    }
+    if raw.chars().any(direction_mark) {
+        return Err(format!("{field} may not contain a character that changes the text's direction. Nothing changed."));
+    }
+    if raw.chars().any(invisible) {
+        return Err(format!("{field} may not contain an invisible character. Nothing changed."));
     }
     let text = raw.trim();
     if text.is_empty() && required {
@@ -1547,12 +1579,19 @@ fn one_line(field: &str, raw: &str, max: usize, required: bool) -> Result<String
     Ok(text.to_string())
 }
 
-/// Free text (what, note, reason): line breaks allowed, other control characters not, counted after trimming.
+/// Free text (what, note, reason): `\n` line breaks allowed, other control characters, line
+/// separators and direction marks not, counted after trimming.
 fn text_field(field: &str, raw: &str, max: usize) -> Result<String, String> {
     if raw.chars().any(|c| c.is_control() && c != '\n') {
         return Err(format!(
             "{field} may hold line breaks but no other control character. Nothing changed."
         ));
+    }
+    if raw.chars().any(line_separator) {
+        return Err(format!("{field} may break lines only with a plain line break. Nothing changed."));
+    }
+    if raw.chars().any(direction_mark) {
+        return Err(format!("{field} may not contain a character that changes the text's direction. Nothing changed."));
     }
     let text = raw.trim();
     if text.chars().count() > max {
@@ -2067,7 +2106,8 @@ mod tests {
             4,
             "a call to p2 leaves the rev of p1 alone"
         );
-        report(&mut p, "s1", "done", &[], 8).unwrap();
+        // s1 is done already, and the same report again is no write.
+        report(&mut p, "s1", "running", &[], 8).unwrap();
         assert_eq!(plan_of(&p, "p1").rev, 5);
         assert_eq!(plan_of(&p, "p2").rev, 3);
     }
@@ -2638,6 +2678,44 @@ mod tests {
         );
     }
 
+    const SEPARATORS: [char; 2] = ['\u{2028}', '\u{2029}'];
+    const DIRECTION: [char; 12] = ['\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}', '\u{202E}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}', '\u{200E}', '\u{200F}', '\u{061C}'];
+    const INVISIBLE: [char; 5] = ['\u{200B}', '\u{200C}', '\u{200D}', '\u{2060}', '\u{FEFF}'];
+
+    #[test]
+    fn name_and_title_refuse_a_line_separator_a_direction_mark_or_an_invisible_character() {
+        let cases = SEPARATORS.iter().map(|c| (*c, "may not contain a line break or other control character"))
+            .chain(DIRECTION.iter().map(|c| (*c, "may not contain a character that changes the text's direction")))
+            .chain(INVISIBLE.iter().map(|c| (*c, "may not contain an invisible character")));
+        for (c, why) in cases {
+            let text = format!("Build{c}Now");
+            let mut p = CaptainPlans::default();
+            assert_set_refused(&mut p, json!({"lists": [{"name": text, "steps": []}]}), &format!("name {why}. Nothing changed."));
+            assert_set_refused(&mut p, json!({"lists": [{"name": "Build", "steps": [{"name": text}]}]}), &format!("name {why}. Nothing changed."));
+            assert_set_refused(&mut p, json!({"title": text, "lists": [{"name": "Build", "steps": []}]}), &format!("title {why}. Nothing changed."));
+            let mut failed = failed_s1();
+            assert_fix_refused(&mut failed, "s1", &[&text], &format!("name {why}. Nothing changed."));
+        }
+    }
+
+    #[test]
+    fn what_note_and_reason_refuse_a_line_separator_or_a_direction_mark_and_keep_a_newline() {
+        let cases = SEPARATORS.iter().map(|c| (*c, "may break lines only with a plain line break"))
+            .chain(DIRECTION.iter().map(|c| (*c, "may not contain a character that changes the text's direction")));
+        for (c, why) in cases {
+            let text = format!("line one\n{c}line two");
+            let mut p = CaptainPlans::default();
+            assert_set_refused(&mut p, json!({"lists": [{"name": "Build", "steps": [{"name": "A", "what": text}]}]}), &format!("what {why}. Nothing changed."));
+            let mut failed = failed_s1();
+            let before = bytes(&failed);
+            assert_eq!(report_note(&mut failed, "s1", "failed", &text, 3), Err(format!("note {why}. Nothing changed.")));
+            assert_eq!(close_on(&mut failed, "p1", &text, &[], 3), Err(format!("reason {why}. Nothing changed.")));
+            assert_eq!(bytes(&failed), before);
+        }
+        let mut failed = failed_s1();
+        assert!(close_on(&mut failed, "p1", "line one\nline two", &[], 3).is_ok());
+    }
+
     #[test]
     fn what_accepts_a_newline() {
         let mut p = CaptainPlans::default();
@@ -2834,6 +2912,29 @@ mod tests {
         let mut f = ended("t1", Work::ResultAvailable, 2000);
         f.review = Review::Accepted;
         assert_eq!(s1_under(&p, &[f]).state, State::Running);
+    }
+
+    #[test]
+    fn a_step_reported_as_it_stands_changes_nothing() {
+        let mut p = CaptainPlans::default();
+        set_json(&mut p, json!({"lists": [{"name": "Build", "steps": [{"name": "Work"}]}]}), 1).unwrap();
+        report_note(&mut p, "s1", "running", "on it", 2).unwrap();
+        let before = bytes(&p);
+        assert_eq!(report_note(&mut p, "s1", "running", "on it", 3), Ok("p1 rev 2\nl1 Build: s1 running".into()));
+        assert_eq!(bytes(&p), before);
+        assert_eq!(report(&mut p, "s1", "running", &[], 4), Ok("p1 rev 3\nl1 Build: s1 running".into()), "a note dropped is a change");
+    }
+
+    #[test]
+    fn the_same_report_after_the_task_ends_still_wins_over_the_task() {
+        let mut p = linked("t1");
+        let reported = p.plans[0].lists[0].steps[0].reported;
+        let rev = p.plans[0].rev;
+        let mut f = ended("t1", Work::ResultAvailable, 2000);
+        f.review = Review::Accepted;
+        report(&mut p, "s1", &serde_json::to_value(reported).unwrap().as_str().unwrap().to_owned(), std::slice::from_ref(&f), 3000).unwrap();
+        assert_eq!(p.plans[0].rev, rev + 1);
+        assert_eq!(s1_under(&p, &[f]).state, reported);
     }
 
     #[test]

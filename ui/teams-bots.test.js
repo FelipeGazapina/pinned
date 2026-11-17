@@ -62,6 +62,9 @@ function app({ answers = {}, team = OWNER_TEAM, email = "bruno@acme.dev", pages 
       context.SHELL_PAGES[name]?.show?.();
     },
     closePage: () => context.opened.push("closed"),
+    // The team's Connect AI account opener, a cross-file global: it records the page it was asked from.
+    connectOpened: [],
+    openTeamConnect: () => context.connectOpened.push(context.document.body.dataset.page),
     // The calls UI's run opener, a cross-file global.
     runsOpened: [],
     openTeamRun: (id) => {
@@ -184,7 +187,7 @@ test("the wizard reads the team's people, groups and projects when it opens", as
   assert.deepEqual(a.control("next"), { disabled: true }, "nothing chosen yet");
 });
 
-test("an idea fills its fixed steps, the plan says nothing was understood, and the trigger chooser offers Manual, Linear and Slack only", async () => {
+test("an idea fills its fixed steps, the plan says nothing was understood, and the trigger chooser offers Manual and Slack only", async () => {
   const a = app({ answers: wizardAnswers() });
   await a.open("team-bot-new");
   await a.click("idea", { idea: "publish" });
@@ -195,33 +198,26 @@ test("an idea fills its fixed steps, the plan says nothing was understood, and t
   assert.ok(t.includes("Nothing was worked out from your words"));
   const steps = [...a.page().matchAll(/data-tb-input="step" data-i="(\d)" value="([^"]*)"/g)].map((m) => m[2]);
   assert.deepEqual(steps, ["Take what entered the project since the last publish.", "Run all the tests.", "Stop and call a person before publishing.", "Publish to the test environment and tell whoever made the changes the result."]);
-  assert.match(t, /What starts it Only when someone runs it A Linear issue gets a label Someone mentions it in a Slack channel Nothing starts it but Run now, on its page\./);
+  assert.match(t, /What starts it Only when someone runs it Someone mentions it in a Slack channel Nothing starts it but Run now, on its page\./);
+  assert.ok(!/Linear/.test(t), "a team keeps no Linear key, so no Linear trigger is offered");
   const pills = [...a.page().matchAll(/class="tb-pill" role="radio" data-tb="trigger" data-kind="([a-z-]+)" aria-checked="(true|false)"/g)].map((m) => [m[1], m[2]]);
-  assert.deepEqual(pills, [["manual", "true"], ["linear-label", "false"], ["slack-mention", "false"]]);
+  assert.deepEqual(pills, [["manual", "true"], ["slack-mention", "false"]]);
   assert.ok(!/schedule|every weekday|GitHub|routing|decide|Not available yet/i.test(t), "no scheduled, GitHub-event or routing trigger is offered");
   assert.ok(t.includes("Run once, then discard"));
 });
 
-test("a Linear or Slack trigger asks for its label or channel, says what fires the bot and that events while it is off are lost, and is saved as that trigger", async () => {
+test("a Slack trigger asks for its channel, says what fires the bot and that events while it is off are lost, and is saved as that trigger", async () => {
   const a = app({ answers: wizardAnswers(saving()) });
   await a.open("team-bot-new");
   await a.click("idea", { idea: "review" });
   await a.click("next");
-  await a.click("trigger", { kind: "linear-label" });
-  assert.deepEqual(a.control("next"), { disabled: true }, "a Linear trigger needs its label");
-  assert.ok(a.page().includes('data-tb-input="label"'));
-  await a.input("label", "bot-review");
-  await a.click("trigger", { kind: "linear-label" });
-  assert.deepEqual(a.control("next"), { disabled: false });
   await a.click("trigger", { kind: "slack-mention" });
   assert.ok(a.page().includes('data-tb-input="channel"') && !a.page().includes('data-tb-input="label"'));
   assert.deepEqual(a.control("next"), { disabled: true }, "a Slack trigger needs its channel");
   await a.input("channel", "#releases");
-  await a.click("trigger", { kind: "linear-label" });
-  const t = text(a.page());
-  assert.ok(t.includes("A run starts for each new Linear issue that gets the label “bot-review”. Events that arrive while the bot is off are not picked up later."), t);
   await a.click("trigger", { kind: "slack-mention" });
-  assert.ok(text(a.page()).includes("A run starts each time someone mentions the bot in #releases. Events that arrive while the bot is off are not picked up later."));
+  const t = text(a.page());
+  assert.ok(t.includes("A run starts each time someone mentions the bot in #releases. Events that arrive while the bot is off are not picked up later."), t);
   assert.ok(text(a.page()).includes("The team's Slack is not connected yet, so this starts nothing until the owner connects it."), "OWNER_TEAM has no Slack");
   await a.click("next");
   await a.click("next");
@@ -233,22 +229,75 @@ test("a Linear or Slack trigger asks for its label or channel, says what fires t
   assert.deepEqual(saved.connector.graph.nodes[0], { id: "trigger-1", name: "Trigger", position: [0, 0], type: "trigger", watch: { kind: "slack-mention", channel: "#releases" } });
 });
 
-test("a team whose Slack is connected is not warned, and a Linear trigger is saved with its label", async () => {
+test("a team whose Slack is connected is not warned, and a Slack trigger is saved with its channel", async () => {
   const a = app({ team: { ...OWNER_TEAM, credential: { ...OWNER_TEAM.credential, slack: true } }, answers: wizardAnswers(saving()) });
   await a.open("team-bot-new");
   await a.click("idea", { idea: "weekly" });
   await a.click("next");
   await a.click("trigger", { kind: "slack-mention" });
   assert.ok(!text(a.page()).includes("Slack is not connected"));
-  await a.click("trigger", { kind: "linear-label" });
-  await a.input("label", "  weekly  ");
+  await a.input("channel", "  #weekly  ");
   await a.click("next");
   await a.click("next");
   await a.click("project", { key: "github.com/acme/site" });
   a.frames.length = 0;
   await a.click("next");
   const saved = a.frames.find((f) => f.op === "save_bot");
-  assert.deepEqual(saved.connector.trigger, { kind: "linear-label", label: "weekly" });
+  assert.deepEqual(saved.connector.trigger, { kind: "slack-mention", channel: "#weekly" });
+});
+
+test("a Slack-mention bot is saved with exactly this save_bot, and a Linear label is never sent", async () => {
+  const a = app({ answers: wizardAnswers(saving()) });
+  await a.open("team-bot-new");
+  await a.click("idea", { idea: "weekly" });
+  await a.click("next");
+  await a.click("trigger", { kind: "slack-mention" });
+  await a.input("channel", "#releases");
+  await a.click("next");
+  await a.click("next");
+  await a.click("project", { key: "github.com/acme/site" });
+  a.frames.length = 0;
+  await a.click("next");
+  const id = a.frames[0].bot.workflow;
+  assert.match(id, UUID);
+  const steps =["Read what each person finished this week, by project.", "Write a short summary of each project.", "Give the summary as the result of the run."];
+  assert.deepEqual(a.frames, [
+    {
+      op: "save_bot",
+      bot: { workflow: id, name: "Weekly summary", owner: null, calls: { before_irreversible: { kind: "owner" }, in_doubt: { kind: "owner" }, on_limit: { kind: "owner" }, on_failure: { kind: "owner" } }, limits: { usd: 5, minutes: 30 }, on: false, on_by: null, once: false },
+      connector: {
+        id,
+        name: "Weekly summary",
+        enabled: false,
+        trigger: { kind: "slack-mention", channel: "#releases" },
+        folder: "",
+        repo: "github.com/acme/site",
+        model: "opus",
+        effort: "high",
+        permissionMode: "auto",
+        worktree: false,
+        proof: false,
+        instructions: "",
+        graph: {
+          nodes: [
+            { id: "trigger-1", name: "Trigger", position: [0, 0], type: "trigger", watch: { kind: "slack-mention", channel: "#releases" } },
+            { id: "session-1", name: "Run session", position: [230, 0], type: "session", prompt: steps.map((s, i) => `${i + 1}. ${s}`).join("\n"), folder: "", repo: "github.com/acme/site", model: "", effort: "", permission: "", account: "", worktree: false, instructions: "" },
+          ],
+          edges: [{ from: "trigger-1", port: "out", to: "session-1" }],
+        },
+      },
+    },
+  ]);
+});
+
+test("a bot made before this change still says when its Linear label starts it, and a Run now bot says nothing of a label", async () => {
+  const a = app({ answers: { ...botAnswers({ runs: [], calls: [] }), "hub:get_settings": { connectors: [workflow({ trigger: { kind: "linear-label", label: "weekly" } })] } } });
+  await openBot(a);
+  assert.ok(text(a.page()).includes("when a Linear issue gets “weekly”"), text(a.page()));
+  const b = app({ answers: botAnswers({ runs: [], calls: [] }) });
+  await openBot(b);
+  assert.ok(!text(b.page()).includes("pinned-run-now-only"), "the legacy Run now label is never shown");
+  assert.ok(text(b.page()).includes("Run now"), "a Run now bot still reads as Run now");
 });
 
 test("a routing trigger is never offered; if the hub refuses one anyway, its words are shown as sent", async () => {
@@ -261,7 +310,7 @@ test("a routing trigger is never offered; if the hub refuses one anyway, its wor
   await a.click("next");
   assert.ok(text(a.page()).includes(`Could not create the bot: ${refusal}`), text(a.page()));
   assert.deepEqual(a.control("next"), { disabled: false }, "the person can try again");
-  assert.equal(a.read("TB_TEXT.wiz.triggers.map((x) => x.kind).join()"), "manual,linear-label,slack-mention");
+  assert.equal(a.read("TB_TEXT.wiz.triggers.map((x) => x.kind).join()"), "manual,slack-mention");
 });
 
 test("a description of the person's own becomes one editable step, not a plan", async () => {
@@ -275,7 +324,8 @@ test("a description of the person's own becomes one editable step, not a plan", 
   assert.ok(!t.includes("Nothing was worked out"), "no claim of having understood anything");
   assert.deepEqual([...a.page().matchAll(/data-tb-input="step" data-i="(\d)" value="([^"]*)"/g)].map((m) => m[2]), ["whenever a PR is open, check that it has tests"]);
   assert.ok(a.page().includes('data-tb-input="name" value="whenever a PR is open, check"'));
-  assert.match(text(a.page()), /What starts it Only when someone runs it A Linear issue gets a label Someone mentions it in a Slack channel/);
+  assert.match(text(a.page()), /What starts it Only when someone runs it Someone mentions it in a Slack channel/);
+  assert.ok(!/Linear/.test(text(a.page())), "no Linear trigger in the plan step either");
   await a.click("add-step");
   await a.input("step", "Say so in the PR.", { i: "1" });
   await a.click("remove-step", { i: "0" });
@@ -967,4 +1017,49 @@ test("every reason the hub counts a skipped event under has its own label", asyn
   assert.equal(new Set(rows.map((r) => r[1])).size, reasons.length, "no two reasons share a label");
   assert.deepEqual(rows.find((r) => r[0] === "replies_dropped"), ["replies_dropped", "Replies dropped (the run never started)", "8"]);
   assert.deepEqual(Object.keys(a.read("TB_TEXT.bot.skippedLabels")).sort(), [...reasons].sort(), "and the app labels no reason the hub lacks");
+});
+
+test("the bot page's needKeys note: the owner gets Connect AI account, which opens the connect step from this page", async () => {
+  const a = app({ team: { ...OWNER_TEAM, credential: { upstash: false, claude: false, github: false, slack: false } }, answers: botAnswers({ bots: [bot({ on: false })] }) });
+  await openBot(a);
+  const t = text(a.page());
+  assert.ok(t.includes("The team needs its Upstash key and Claude token before a bot can run."));
+  assert.ok(!t.includes("team's settings"), "no settings page is named");
+  assert.deepEqual(a.control("connect-ai"), { disabled: false });
+  await a.click("connect-ai");
+  assert.deepEqual(a.context.connectOpened, ["team-bot"]);
+});
+
+test("a member is asked to have the owner connect the team's AI account, by name, and gets no button", async () => {
+  const a = app({ team: { ...MEMBER_TEAM, credential: { upstash: false, claude: false, github: false, slack: false } }, answers: botAnswers({ bots: [bot({ on: false })] }) });
+  await openBot(a);
+  assert.equal(a.control("connect-ai"), null);
+  assert.ok(text(a.page()).includes("Ask Ana Prado to connect the team's AI account."));
+  assert.ok(!text(a.page()).includes("team's settings"), "no settings page is named");
+  assert.deepEqual(a.context.connectOpened, []);
+});
+
+test("while the team's line is held, the key notes are not shown: the read failed, the keys may be there", async () => {
+  const none = { upstash: false, claude: false, github: false, slack: false };
+  const held = { ...OWNER_TEAM, credential: none, line_held: { since: 1795359900, why: "settings_unread" } };
+  const needKeys = "The team needs its Upstash key and Claude token before a bot can run.";
+  const slackOff = "The team's Slack is not connected yet, so this starts nothing until the owner connects it.";
+
+  const page = app({ team: held, answers: botAnswers({ bots: [bot({ on: false })] }) });
+  await openBot(page);
+  assert.ok(!text(page.page()).includes(needKeys), "no key note on an off bot while held");
+  const plain = app({ team: { ...OWNER_TEAM, credential: none }, answers: botAnswers({ bots: [bot({ on: false })] }) });
+  await openBot(plain);
+  assert.ok(text(plain.page()).includes(needKeys), "the key note while not held and the keys are missing");
+
+  const wizard = async (team) => {
+    const a = app({ team, answers: wizardAnswers(saving()) });
+    await a.open("team-bot-new");
+    await a.click("idea", { idea: "weekly" });
+    await a.click("next");
+    await a.click("trigger", { kind: "slack-mention" });
+    return text(a.page());
+  };
+  assert.ok(!(await wizard(held)).includes(slackOff), "no Slack note while held");
+  assert.ok((await wizard({ ...OWNER_TEAM, credential: none })).includes(slackOff), "the Slack note while not held and Slack is missing");
 });

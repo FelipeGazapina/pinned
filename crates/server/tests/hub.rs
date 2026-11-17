@@ -12682,10 +12682,13 @@ mod teams_hardening;
 #[path = "hub/teams_limits_fix.rs"] mod teams_limits_fix;
 #[path = "hub/teams_wire.rs"] mod teams_wire;
 #[path = "hub/teams_one_live_run.rs"] mod teams_one_live_run;
+#[path = "hub/trigger_fires.rs"] mod trigger_fires;
 #[path = "hub/reports.rs"]
 mod reports;
 #[path = "hub/reports_poller.rs"]
 mod reports_poller;
+#[path = "hub/plans.rs"]
+mod plans;
 
 #[test]
 fn an_account_over_the_sync_limit_takes_a_push_that_does_not_grow_it_and_refuses_one_that_does() {
@@ -12709,7 +12712,7 @@ fn an_account_over_the_sync_limit_takes_a_push_that_does_not_grow_it_and_refuses
              from accounts a, generate_series(1, 13) n where a.email = 'ana@example.test'"
         ),
     );
-    let refused = Err("the account's synced projects would pass 1024 MB; delete old sessions to sync more".to_owned());
+    let refused = Err("the account's synced projects would pass 1024 MB; nothing is deleted, the push is refused".to_owned());
     let sha_of = |client: &mut Client, path: &str| {
         let listed = client.hub(json!({ "cmd": "sync_list", "project": project })).unwrap();
         listed.as_array().unwrap().iter().find(|e| e["path"] == path).map(|e| e["sha"].as_str().unwrap().to_owned())
@@ -12727,6 +12730,30 @@ fn an_account_over_the_sync_limit_takes_a_push_that_does_not_grow_it_and_refuses
     assert_eq!(sha_of(&mut ana, "claude/memory/more.md"), Some(sha256_hex(b"one more note")));
     assert_eq!(push(&mut ana, vec![tombstone("claude/big-3.jsonl"), tombstone("claude/big-4.jsonl")]), Ok(Value::Null));
     assert_eq!(push(&mut ana, vec![file("claude/memory/later.md", "under the limit again")]), Ok(Value::Null), "9 sessions of 100 MiB leave room");
+}
+
+#[test]
+fn a_sync_refusal_says_nothing_is_deleted_and_keeps_the_prefix_released_nodes_match_on() {
+    let hub = TestHub::start("sync_refusal_text");
+    let url = hub.url.clone();
+    let (_, _, mut ana) = signed_in(&url, "ana@example.test");
+    let project = "github.com/acme/site";
+    let push = |client: &mut Client, files: Vec<Value>| client.hub(json!({ "cmd": "sync_push", "project": project, "files": files }));
+    // Thirteen sessions of 100 MiB, already past the 1024 MB the account may keep.
+    admin_on(
+        &hub.database,
+        &format!(
+            "insert into project_files (account, project, path, sha, modified, data) \
+             select a.id, '{project}', 'claude/big-' || n || '.jsonl', 'big' || n, 1, convert_to(repeat('x', 104857600), 'UTF8') \
+             from accounts a, generate_series(1, 13) n where a.email = 'ana@example.test'"
+        ),
+    );
+    let text = "one more note";
+    let grows = json!({ "path": "claude/memory/more.md", "sha": sha256_hex(text.as_bytes()), "modified": 1, "data": base64::engine::general_purpose::STANDARD.encode(gzip_bytes(text.as_bytes())) });
+    let refused = push(&mut ana, vec![grows]).unwrap_err();
+    // Released 0.18.6 nodes recognise this refusal by this literal prefix alone, so it must stay byte for byte.
+    assert!(refused.starts_with("the account's synced projects would pass "), "{refused}");
+    assert_eq!(refused, "the account's synced projects would pass 1024 MB; nothing is deleted, the push is refused");
 }
 
 /// Runs `then` right after the hub answers a list, so another machine's push lands between this
@@ -12860,7 +12887,7 @@ fn over_the_sync_limit_a_stale_deletion_frees_nothing_and_agreed_on_a_file_is_ig
     );
     let stale = json!({ "path": "claude/big-1.jsonl", "sha": "", "modified": 2, "agreed": "big0" });
     let refused = push(&mut ana, vec![stale, file("claude/memory/more.md", "one more note")]);
-    assert_eq!(refused, Err("the account's synced projects would pass 1024 MB; delete old sessions to sync more".to_owned()), "the skipped deletion frees nothing");
+    assert_eq!(refused, Err("the account's synced projects would pass 1024 MB; nothing is deleted, the push is refused".to_owned()), "the skipped deletion frees nothing");
     assert_eq!(sha_of(&mut ana, "claude/big-1.jsonl"), Some("big1".to_owned()));
     assert_eq!(sha_of(&mut ana, "claude/memory/more.md"), None);
     let current = json!({ "path": "claude/big-1.jsonl", "sha": "", "modified": 2, "agreed": "big1" });
