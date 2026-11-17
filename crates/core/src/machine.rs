@@ -773,6 +773,9 @@ struct Tab {
     seen: Option<SystemTime>,
     /// When the latest submit went in. Cleared by Done, Failed, and a new session.
     turn_pending: Option<Instant>,
+    /// When the user last submitted what they typed. A local command such as `/effort` starts no
+    /// turn and fires no hook. Cleared by any hook but a question, and by a new session.
+    typed_at: Option<Instant>,
     /// When Claude Code's PreCompact hook last marked the session compacting.
     compacting_since: Option<Instant>,
     /// Set while a worker's turn has ended with background work it started still pending: Claude
@@ -904,7 +907,7 @@ impl Tab {
         if self.session.is_some() {
             return self.notice_idle();
         }
-        self.status != Some(AgentStatus::Working) && !self.interrupted && self.turn_pending.is_none() && self.draft.empty()
+        self.status != Some(AgentStatus::Working) && !self.interrupted && !self.submit_pending() && self.draft.empty()
     }
 
     /// The session sits at its prompt with nothing typed, held or pending.
@@ -924,8 +927,18 @@ impl Tab {
         self.bare && self.status.is_none() && self.session.as_ref().is_some_and(pty::Session::untouched)
     }
 
+    /// A submit waits for its turn, unless it is one the user typed into Claude Code that no hook
+    /// answered within `IDLE_NOTICE_GRACE`: that was a local command, and no Stop hook would end it.
+    fn submit_pending(&self) -> bool {
+        self.turn_pending.is_some_and(|at| {
+            // No submit went in after the user's own: the pending one is theirs.
+            let typed = self.typed_at.is_some_and(|typed| typed >= at);
+            !(typed && self.account.provider == Provider::Claude && at.elapsed() >= IDLE_NOTICE_GRACE)
+        })
+    }
+
     fn notice_idle(&self) -> bool {
-        if self.session.is_none() || self.turn_pending.is_some() || !self.draft.empty() {
+        if self.session.is_none() || self.submit_pending() || !self.draft.empty() {
             return false;
         }
         if self.account.provider == Provider::Cursor {
@@ -942,7 +955,8 @@ impl Tab {
     }
 
     fn note_submit(&mut self) {
-        self.turn_pending = Some(Instant::now());
+        let now = Instant::now();
+        (self.turn_pending, self.typed_at) = (Some(now), Some(now));
         self.stopped = None;
     }
 
@@ -2834,7 +2848,7 @@ impl Machine {
             t.started = Some(started);
             (t.status, t.title, t.message) = (None, None, None);
             (t.headless, t.stopped) = (false, None);
-            t.turn_pending = None;
+            (t.turn_pending, t.typed_at) = (None, None);
             t.shells_left = false;
             t.draft = Draft::default();
         })?;
@@ -6663,6 +6677,7 @@ impl Machine {
             keys: vec![],
             seen: None,
             turn_pending: None,
+            typed_at: None,
             compacting_since: None,
             background_wait: None,
             draft: Draft::default(),
@@ -6895,6 +6910,10 @@ impl Machine {
             }
             if matches!(event.status, AgentStatus::Done | AgentStatus::Failed) {
                 t.turn_pending = None;
+            }
+            // A turn started or ended since the user's submit: it was no local command.
+            if event.status != AgentStatus::NeedsInput {
+                t.typed_at = None;
             }
             // A turn's start or end settles any compaction the hooks marked; a question does not.
             if event.status != AgentStatus::NeedsInput {
