@@ -8224,8 +8224,11 @@ fn another_accounts_agent_reaches_none_of_an_accounts_machines_connections_invit
         } }))
         .unwrap();
     let connector = workflow["id"].as_str().unwrap().to_owned();
-    let staged = act(&ana.dir, &ana.tab, "stage", json!({ "connector": connector, "issue": "uuid-1", "stage": "coding" })).unwrap();
-    assert_eq!(staged["result"], "this workflow has no column for that stage, so the issue stays where it is", "a session that runs no workflow reaches the account's own");
+    assert_eq!(
+        act(&ana.dir, &ana.tab, "stage", json!({ "connector": connector, "issue": "uuid-1", "stage": "coding" })),
+        Err("only the session that runs this workflow can do that".into()),
+        "a session that runs no workflow reaches none of the account's"
+    );
 
     let client_id = register_agent(&url, &http);
     let request = authorize(&url, &http, &client_id, &pkce().1, "st-a");
@@ -8265,10 +8268,14 @@ fn another_accounts_agent_reaches_none_of_an_accounts_machines_connections_invit
         assert_eq!(on(&bob, Some(ana.machine.as_str()), action, args), none(&ana.machine), "{action}");
     }
     assert_eq!(on(&bob, Some("ana-vps"), "update_self", json!({})), none("ana-vps"), "a confirm on another account's machine is refused before it waits");
-    assert_eq!(act(&bob.dir, &bob.tab, "stage", json!({ "connector": connector, "issue": "uuid-1", "stage": "coding" })), Err("the workflow was deleted".into()));
-    assert_eq!(act(&bob.dir, &bob.tab, "slack_reply", json!({ "connector": connector, "channel": "C1", "thread": "1.2", "text": "mine now" })), Err("the workflow was deleted".into()));
-    assert_eq!(act(&bob.dir, &bob.tab, "linear_create", json!({ "connector": connector, "channel": "C1", "thread": "1.2", "title": "x", "description": "y" })), Err("the workflow was deleted".into()));
-    assert_eq!(act(&bob.dir, &bob.tab, "linear_take", json!({ "connector": connector, "channel": "C1", "thread": "1.2", "issue": "ENG-7" })), Err("Linear is not connected: connect it in pinned's Connectors settings".into()), "bob's act runs on his own connections");
+    for (action, args) in [
+        ("stage", json!({ "connector": connector, "issue": "uuid-1", "stage": "coding" })),
+        ("slack_reply", json!({ "connector": connector, "channel": "C1", "thread": "1.2", "text": "mine now" })),
+        ("linear_create", json!({ "connector": connector, "channel": "C1", "thread": "1.2", "title": "x", "description": "y" })),
+        ("linear_take", json!({ "connector": connector, "channel": "C1", "thread": "1.2", "issue": "ENG-7" })),
+    ] {
+        assert_eq!(act(&bob.dir, &bob.tab, action, args), Err("only the session that runs this workflow can do that".into()), "bob's session runs no workflow, so {action} reaches no connection");
+    }
     assert_eq!(act(&bob.dir, &bob.tab, "box_status", json!({ "machine": mini })), Err("this machine is no box".into()));
     assert_eq!(act(&bob.dir, &bob.tab, "invites", json!({})).unwrap()["result"]["pending"], json!([]));
     assert_eq!(act(&bob.dir, &bob.tab, "external_agents", json!({})).unwrap()["result"]["agents"], json!([]));
@@ -8738,8 +8745,14 @@ fn a_single_bot_slack_import_becomes_the_default_bot_and_replies_still_use_its_k
     holds_none_of(&[key.clone()], "ana's settings", &settings.to_string());
     assert!(connections(&mut bob.client).get("slack_bots").is_none(), "bob has no bot");
 
+    let thread = Subject::SlackThread { channel: "C1".into(), thread: "1.2".into() };
+    let run = Run { cwd: ana.dir.join("site"), repo: None, args: vec![], connector: "c1".into(), subject: thread, mentioned: vec![], account: None, runs_on: RunsOn::Machine(ana.machine.clone()), input: String::new(), reservation: None };
+    let session = ana.node.machine.run(&run.spec()).unwrap();
+    ana.client.wait("the workflow's session at the hub", |f| {
+        f["type"] == "event" && f["event"]["kind"] == "tabs" && f["event"]["tabs"].as_array().unwrap().iter().any(|t| t["id"] == session.as_str() && t["connector"] == "c1" && t["running"] == true)
+    });
     let reached = asked_of("slack.com:443");
-    let reply = act(&ana.dir, &ana.tab, "slack_reply", json!({ "connector": "c1", "channel": "C1", "thread": "1.2", "text": "on it" })).unwrap_err();
+    let reply = act(&ana.dir, &session, "slack_reply", json!({ "connector": "c1", "channel": "C1", "thread": "1.2", "text": "on it" })).unwrap_err();
     assert!(reply.starts_with("Slack unreachable"), "the reply goes out with the default bot's key: {reply}");
     assert_eq!(asked_of("slack.com:443"), reached + 1);
     holds_none_of(&[key], "the reply's error", &reply);
