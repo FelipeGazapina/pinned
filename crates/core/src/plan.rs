@@ -1,9 +1,12 @@
 //! The Captain's plans: lists of steps, the limits on them, and the states that follow the tasks they link to.
 //!
 //! Pure code. Nothing here reads or writes files, talks to the hub, or looks up a task. Callers pass the task
-//! facts they know. A call changes the plans only when it succeeds.
+//! facts they know. A call changes the plans only when it succeeds: each write works on a copy and keeps it
+//! only when nothing was refused.
 
 use serde::{Deserialize, Serialize};
+use std::cmp::Ordering;
+use std::collections::HashMap;
 
 pub const MAX_PLANS_UNFINISHED: usize = 6;
 pub const MAX_PLANS_FINISHED: usize = 10;
@@ -18,6 +21,9 @@ pub const MAX_TITLE: usize = 80;
 pub const MAX_NOTE: usize = 200;
 pub const MAX_REASON: usize = 200;
 pub const GLANCE_TEXT: usize = 32;
+
+/// The reason a step shows when its list's task ended with a result and the Captain never reported it.
+const DONE_WITH_LIST: &str = "Done with the list's task";
 
 /// The state a step has, as the Captain reported it or as a task derives it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -267,56 +273,64 @@ pub struct PlanGlance {
     pub strips: Vec<String>,
 }
 
-// Scaffold for the red commit: every entry point compiles and does nothing yet.
-
 /// Applies a `set` call. Returns the answer text.
 pub fn set(
-    _plans: &mut CaptainPlans,
-    _call: SetCall,
-    _asked_at: u64,
-    _facts: &[TaskFacts],
-    _now: u64,
+    plans: &mut CaptainPlans,
+    call: SetCall,
+    asked_at: u64,
+    facts: &[TaskFacts],
+    now: u64,
 ) -> Result<String, String> {
-    Ok(String::new())
+    commit(plans, |plans| set_on(plans, call, asked_at, facts, now))
 }
 
 /// Applies a report on one step. Returns the answer text.
 pub fn step(
-    _plans: &mut CaptainPlans,
-    _call: StepCall,
-    _facts: &[TaskFacts],
-    _now: u64,
+    plans: &mut CaptainPlans,
+    call: StepCall,
+    facts: &[TaskFacts],
+    now: u64,
 ) -> Result<String, String> {
-    Ok(String::new())
+    commit(plans, |plans| step_on(plans, call, facts, now))
 }
 
 /// Opens a fix branch under a failed step. Returns the answer text.
 pub fn fix(
-    _plans: &mut CaptainPlans,
-    _call: FixCall,
-    _facts: &[TaskFacts],
-    _now: u64,
+    plans: &mut CaptainPlans,
+    call: FixCall,
+    facts: &[TaskFacts],
+    now: u64,
 ) -> Result<String, String> {
-    Ok(String::new())
+    commit(plans, |plans| fix_on(plans, call, facts, now))
 }
 
 /// Closes a plan. Returns the answer text.
 pub fn close(
-    _plans: &mut CaptainPlans,
-    _call: CloseCall,
-    _facts: &[TaskFacts],
-    _now: u64,
+    plans: &mut CaptainPlans,
+    call: CloseCall,
+    facts: &[TaskFacts],
+    now: u64,
 ) -> Result<String, String> {
-    Ok(String::new())
+    commit(plans, |plans| close_on(plans, call, facts, now))
 }
 
 /// Records what the facts show (start costs, finish times) in every plan. Returns true when a plan changed.
-pub fn settle(_plans: &mut CaptainPlans, _facts: &[TaskFacts], _now: u64) -> bool {
-    false
+pub fn settle(plans: &mut CaptainPlans, facts: &[TaskFacts], now: u64) -> bool {
+    let mut changed = false;
+    for plan in plans.plans.iter_mut() {
+        if settle_plan(plan, facts, now) {
+            plan.rev += 1;
+            changed = true;
+        }
+    }
+    if changed {
+        order(plans);
+    }
+    changed
 }
 
 /// The plan with every state and cost derived from the facts.
-pub fn derive(plan: &Plan, _facts: &[TaskFacts]) -> PlanView {
+pub fn derive(plan: &Plan, facts: &[TaskFacts]) -> PlanView {
     PlanView {
         id: plan.id.clone(),
         rev: plan.rev,
@@ -324,27 +338,1234 @@ pub fn derive(plan: &Plan, _facts: &[TaskFacts]) -> PlanView {
         asked_at: plan.asked_at,
         finished_at: plan.finished_at,
         closed: plan.closed.clone(),
-        lists: Vec::new(),
+        lists: plan
+            .lists
+            .iter()
+            .map(|l| {
+                let shown = list_shown(l, facts);
+                ListView {
+                    id: l.id.clone(),
+                    name: l.name.clone(),
+                    task: l.task.clone(),
+                    steps: l
+                        .steps
+                        .iter()
+                        .zip(shown)
+                        .map(|(s, sh)| step_view(s, sh, facts))
+                        .collect(),
+                }
+            })
+            .collect(),
     }
 }
 
 /// The glance of one plan.
-pub fn glance(plan: &Plan, _facts: &[TaskFacts]) -> PlanGlance {
+pub fn glance(plan: &Plan, facts: &[TaskFacts]) -> PlanGlance {
+    let view = derive(plan, facts);
+    let mains: Vec<&StepView> = view.lists.iter().flat_map(|l| l.steps.iter()).collect();
     PlanGlance {
         id: plan.id.clone(),
-        title: String::new(),
-        state: CaptainState::Idle,
-        done: 0,
-        total: 0,
-        now: None,
-        finished_at: None,
-        strips: Vec::new(),
+        title: clip(&plan.title),
+        state: captain_state(plan, &view),
+        done: mains.iter().filter(|s| s.state == State::Done).count(),
+        total: mains.len(),
+        now: view
+            .lists
+            .iter()
+            .find_map(|l| first_active(&l.steps))
+            .map(|s| clip(&s.name)),
+        finished_at: plan.finished_at,
+        strips: view
+            .lists
+            .iter()
+            .map(|l| l.steps.iter().map(dot).collect::<String>())
+            .collect(),
     }
 }
 
-/// The glance list the Orchestrator panel shows: every unfinished plan, plus the latest finished or closed one.
-pub fn glance_list(_plans: &CaptainPlans, _facts: &[TaskFacts]) -> Vec<PlanGlance> {
-    Vec::new()
+/// The glance list the Orchestrator panel shows: every unfinished plan, plus the latest finished or closed one
+/// with no strips.
+pub fn glance_list(plans: &CaptainPlans, facts: &[TaskFacts]) -> Vec<PlanGlance> {
+    let mut out = Vec::new();
+    let mut latest_finished = true;
+    for plan in &plans.plans {
+        let g = glance(plan, facts);
+        if plan.finished_at.is_none() {
+            out.push(g);
+        } else if latest_finished {
+            out.push(PlanGlance {
+                strips: Vec::new(),
+                ..g
+            });
+            latest_finished = false;
+        }
+    }
+    out
+}
+
+// ---- writes: each works on a copy, kept only when nothing was refused ----
+
+fn commit<F>(plans: &mut CaptainPlans, write: F) -> Result<String, String>
+where
+    F: FnOnce(&mut CaptainPlans) -> Result<String, String>,
+{
+    let mut next = plans.clone();
+    let answer = write(&mut next)?;
+    *plans = next;
+    Ok(answer)
+}
+
+enum Target {
+    New,
+    Existing(usize),
+}
+
+fn set_on(
+    plans: &mut CaptainPlans,
+    call: SetCall,
+    asked_at: u64,
+    facts: &[TaskFacts],
+    now: u64,
+) -> Result<String, String> {
+    let title = call
+        .title
+        .as_deref()
+        .map(|t| one_line("title", t, MAX_TITLE, false))
+        .transpose()?;
+    let inputs = call
+        .lists
+        .iter()
+        .map(list_in)
+        .collect::<Result<Vec<_>, _>>()?;
+    let pi = match pick(plans, call.plan.as_deref(), call.new)? {
+        Target::New => {
+            plans.next.plan += 1;
+            let id = format!("p{}", plans.next.plan);
+            plans.plans.push(Plan {
+                id,
+                rev: 0,
+                title: String::new(),
+                asked_at,
+                finished_at: None,
+                closed: None,
+                lists: Vec::new(),
+            });
+            plans.plans.len() - 1
+        }
+        Target::Existing(i) => i,
+    };
+    let plan_id = plans.plans[pi].id.clone();
+    let old = plans.plans[pi].lists.clone();
+    let foreign = foreign_ids(plans, &plan_id);
+    let (lists, kept) = merge_lists(&old, &inputs, &mut plans.next, &plan_id, &foreign)?;
+    check_limits(&lists)?;
+
+    let plan = &mut plans.plans[pi];
+    plan.lists = lists;
+    if let Some(t) = title {
+        plan.title = t;
+    }
+    plan.rev += 1;
+    settle_plan(plan, facts, now);
+    tidy(plans)?;
+
+    let mut text = answer_of(plans, &plan_id, facts);
+    if !kept.is_empty() {
+        let word = if kept.len() == 1 { "step" } else { "steps" };
+        text.push_str(&format!(
+            "\nkept {} started {} you left out: {}.",
+            kept.len(),
+            word,
+            kept.join(", ")
+        ));
+    }
+    Ok(text)
+}
+
+fn step_on(
+    plans: &mut CaptainPlans,
+    call: StepCall,
+    facts: &[TaskFacts],
+    now: u64,
+) -> Result<String, String> {
+    let note = note_field(call.note.as_deref())?;
+    let pi = plan_with_step(plans, &call.step)
+        .ok_or_else(|| format!("no step {}. Nothing changed.", call.step))?;
+    let plan_id = plans.plans[pi].id.clone();
+    if plans.plans[pi].closed.is_some() {
+        return Err(format!(
+            "{plan_id} is closed, so its steps are frozen. Nothing changed."
+        ));
+    }
+    if let Some(task) = holding_task(&plans.plans[pi], &call.step, facts) {
+        return Err(format!(
+            "{} follows task {task}, which has not ended. Wait for it, or cancel {task} first. Nothing changed.",
+            call.step
+        ));
+    }
+    let plan = &mut plans.plans[pi];
+    let Some(s) = find_step_mut(&mut plan.lists, &call.step) else {
+        return Err(format!("no step {}. Nothing changed.", call.step));
+    };
+    s.reported = call.state;
+    s.reported_at = now;
+    s.note = note;
+    plan.rev += 1;
+    settle_plan(plan, facts, now);
+    tidy(plans)?;
+    Ok(answer_of(plans, &plan_id, facts))
+}
+
+fn fix_on(
+    plans: &mut CaptainPlans,
+    call: FixCall,
+    facts: &[TaskFacts],
+    now: u64,
+) -> Result<String, String> {
+    let pi = plan_with_step(plans, &call.step)
+        .ok_or_else(|| format!("no step {}. Nothing changed.", call.step))?;
+    let plan_id = plans.plans[pi].id.clone();
+    if plans.plans[pi].closed.is_some() {
+        return Err(format!(
+            "{plan_id} is closed, so its steps are frozen. Nothing changed."
+        ));
+    }
+    let view = derive(&plans.plans[pi], facts);
+    let state = every_step(&view)
+        .into_iter()
+        .find(|s| s.id == call.step)
+        .map_or(State::Pending, |s| s.state);
+    if state != State::Failed {
+        return Err(format!(
+            "{} is not failed (it reads {}), so it cannot get a fix. Nothing changed.",
+            call.step,
+            state_name(state)
+        ));
+    }
+    if call.steps.is_empty() {
+        return Err("a fix needs at least one step. Nothing changed.".into());
+    }
+    if call.steps.len() > MAX_STEPS_PER_FIX {
+        return Err(format!(
+            "limit: {MAX_STEPS_PER_FIX} steps per fix. Nothing changed."
+        ));
+    }
+    let mut news = Vec::new();
+    for s in &call.steps {
+        news.push(StepIn {
+            id: None,
+            name: one_line("name", &s.name, MAX_NAME, true)?,
+            what: text_field("what", s.what.as_deref().unwrap_or(""), MAX_WHAT)?,
+        });
+    }
+
+    let plan = &mut plans.plans[pi];
+    if count_all(&plan.lists) + news.len() > MAX_STEPS_IN_ALL {
+        return Err(format!(
+            "limit: {MAX_STEPS_IN_ALL} steps in all, fixes included. Nothing changed."
+        ));
+    }
+    let Some(s) = find_step_mut(&mut plan.lists, &call.step) else {
+        return Err(format!("no step {}. Nothing changed.", call.step));
+    };
+    if s.fixes.len() >= MAX_FIXES_PER_STEP {
+        return Err(format!(
+            "limit: {MAX_FIXES_PER_STEP} fixes per step. Nothing changed."
+        ));
+    }
+    plans.next.fix += 1;
+    let fix_id = format!("f{}", plans.next.fix);
+    let mut steps = Vec::new();
+    for n in news {
+        plans.next.step += 1;
+        steps.push(new_step(format!("s{}", plans.next.step), n.name, n.what));
+    }
+    let ids: Vec<String> = steps.iter().map(|s| s.id.clone()).collect();
+    s.fixes.push(Fix {
+        id: fix_id.clone(),
+        steps,
+    });
+    plan.rev += 1;
+    settle_plan(plan, facts, now);
+    tidy(plans)?;
+    Ok(format!(
+        "Fix {fix_id} on {} has steps {}.\n{}",
+        call.step,
+        ids.join(", "),
+        answer_of(plans, &plan_id, facts)
+    ))
+}
+
+fn close_on(
+    plans: &mut CaptainPlans,
+    call: CloseCall,
+    facts: &[TaskFacts],
+    now: u64,
+) -> Result<String, String> {
+    let reason = text_field("reason", &call.reason, MAX_REASON)?;
+    if reason.is_empty() {
+        return Err("reason is empty. Nothing changed.".into());
+    }
+    let pi = plans
+        .plans
+        .iter()
+        .position(|p| p.id == call.plan)
+        .ok_or_else(|| format!("no plan {}. Nothing changed.", call.plan))?;
+    let plan = &plans.plans[pi];
+    if plan.closed.is_some() {
+        return Err(format!("{} is already closed. Nothing changed.", plan.id));
+    }
+    for task in linked_tasks(plan) {
+        if unfinished(&task, facts).is_some() {
+            return Err(format!(
+                "cannot close {} yet: cancel {task} first, or wait for it. Nothing changed.",
+                plan.id
+            ));
+        }
+    }
+    let plan_id = plan.id.clone();
+    let plan = &mut plans.plans[pi];
+    plan.closed = Some(reason);
+    plan.finished_at = Some(now);
+    plan.rev += 1;
+    tidy(plans)?;
+    Ok(format!(
+        "Closed {plan_id}.\n{}",
+        answer_of(plans, &plan_id, facts)
+    ))
+}
+
+/// Which plan a `set` writes to. Refused when the call names two plans or a closed one.
+fn pick(plans: &CaptainPlans, plan: Option<&str>, new: bool) -> Result<Target, String> {
+    match (plan, new) {
+        (Some(_), true) => Err("give plan or new, not both. Nothing changed.".into()),
+        (Some(id), false) => {
+            let i = plans
+                .plans
+                .iter()
+                .position(|p| p.id == id)
+                .ok_or_else(|| format!("no plan {id}. Nothing changed."))?;
+            if plans.plans[i].closed.is_some() {
+                return Err(format!("{id} is closed. Nothing changed."));
+            }
+            Ok(Target::Existing(i))
+        }
+        (None, true) => Ok(Target::New),
+        (None, false) => {
+            let open: Vec<&Plan> = plans
+                .plans
+                .iter()
+                .filter(|p| p.finished_at.is_none())
+                .collect();
+            match open.as_slice() {
+                [] => Ok(Target::New),
+                [only] => Ok(Target::Existing(
+                    plans
+                        .plans
+                        .iter()
+                        .position(|p| p.id == only.id)
+                        .unwrap_or(0),
+                )),
+                many => {
+                    let names: Vec<String> = many
+                        .iter()
+                        .map(|p| {
+                            format!(
+                                "{} ({})",
+                                p.id,
+                                if p.title.is_empty() {
+                                    "no title"
+                                } else {
+                                    p.title.as_str()
+                                }
+                            )
+                        })
+                        .collect();
+                    Err(format!(
+                        "say which plan: {}. Nothing changed.",
+                        names.join(", ")
+                    ))
+                }
+            }
+        }
+    }
+}
+
+/// Merges the call's lists into the plan's lists. Lists match by id, else by exact name. Started lists and steps
+/// the call leaves out are kept. Returns the new lists and the ids of the kept steps.
+fn merge_lists(
+    old: &[List],
+    inputs: &[ListIn],
+    next: &mut Counters,
+    plan_id: &str,
+    foreign: &HashMap<String, String>,
+) -> Result<(Vec<List>, Vec<String>), String> {
+    let own = own_steps(old);
+    let mut taken = vec![false; old.len()];
+    let mut matched: Vec<Option<usize>> = vec![None; inputs.len()];
+    for (i, inp) in inputs.iter().enumerate() {
+        let Some(id) = &inp.id else { continue };
+        let Some(j) = old.iter().position(|l| &l.id == id) else {
+            return Err(foreign_refusal(foreign, id)
+                .unwrap_or_else(|| format!("no list {id} in plan {plan_id}. Nothing changed.")));
+        };
+        if taken[j] {
+            return Err(format!("{id} is listed twice. Nothing changed."));
+        }
+        taken[j] = true;
+        matched[i] = Some(j);
+    }
+    for (i, inp) in inputs.iter().enumerate() {
+        if inp.id.is_none() {
+            if let Some(j) = (0..old.len()).find(|&j| !taken[j] && old[j].name == inp.name) {
+                taken[j] = true;
+                matched[i] = Some(j);
+            }
+        }
+    }
+
+    let mut lists: Vec<(String, List)> = Vec::new();
+    let mut order_ids: Vec<String> = Vec::new();
+    let mut kept_steps: Vec<String> = Vec::new();
+    for (i, inp) in inputs.iter().enumerate() {
+        let base = matched[i].map(|j| &old[j]);
+        let id = match base {
+            Some(l) => l.id.clone(),
+            None => {
+                next.list += 1;
+                format!("l{}", next.list)
+            }
+        };
+        let (steps, kept) = merge_steps(
+            base.map_or(&[][..], |l| l.steps.as_slice()),
+            &inp.steps,
+            &id,
+            next,
+            &own,
+            foreign,
+        )?;
+        kept_steps.extend(kept);
+        order_ids.push(id.clone());
+        let task = base.and_then(|l| l.task.clone());
+        lists.push((
+            id.clone(),
+            List {
+                id,
+                name: inp.name.clone(),
+                task,
+                steps,
+            },
+        ));
+    }
+
+    let old_ids: Vec<String> = old.iter().map(|l| l.id.clone()).collect();
+    let mut kept_lists: Vec<String> = Vec::new();
+    for (j, l) in old.iter().enumerate() {
+        if taken[j] {
+            continue;
+        }
+        let (steps, kept) = merge_steps(&l.steps, &[], &l.id, next, &own, foreign)?;
+        if l.task.is_none() && steps.is_empty() {
+            continue;
+        }
+        kept_steps.extend(kept);
+        kept_lists.push(l.id.clone());
+        lists.push((
+            l.id.clone(),
+            List {
+                id: l.id.clone(),
+                name: l.name.clone(),
+                task: l.task.clone(),
+                steps,
+            },
+        ));
+    }
+    place_kept(&mut order_ids, &old_ids, &kept_lists);
+
+    let mut pool: HashMap<String, List> = lists.into_iter().collect();
+    let merged: Vec<List> = order_ids.iter().filter_map(|id| pool.remove(id)).collect();
+    kept_steps.sort_by_key(|id| num(id));
+    Ok((merged, kept_steps))
+}
+
+/// Merges one list's steps. Steps match by id within this list, else by exact name. A started step the call
+/// leaves out is kept; a pending one goes. Returns the steps and the ids of the kept ones.
+fn merge_steps(
+    old: &[Step],
+    inputs: &[StepIn],
+    list_id: &str,
+    next: &mut Counters,
+    own: &HashMap<String, Option<String>>,
+    foreign: &HashMap<String, String>,
+) -> Result<(Vec<Step>, Vec<String>), String> {
+    let mut taken = vec![false; old.len()];
+    let mut matched: Vec<Option<usize>> = vec![None; inputs.len()];
+    for (i, inp) in inputs.iter().enumerate() {
+        let Some(id) = &inp.id else { continue };
+        match own.get(id) {
+            Some(None) => {
+                return Err(format!(
+                    "{id} is a fix step, not a list step. Nothing changed."
+                ))
+            }
+            Some(Some(owner)) if owner.as_str() != list_id => {
+                return Err(format!(
+                    "{id} is in list {owner}, not in this list. Nothing changed."
+                ));
+            }
+            Some(Some(_)) => {}
+            None => {
+                return Err(foreign_refusal(foreign, id).unwrap_or_else(|| {
+                    format!("no step {id} in list {list_id}. Nothing changed.")
+                }));
+            }
+        }
+        let Some(j) = old.iter().position(|s| &s.id == id) else {
+            return Err(format!("no step {id} in list {list_id}. Nothing changed."));
+        };
+        if taken[j] {
+            return Err(format!("{id} is listed twice. Nothing changed."));
+        }
+        taken[j] = true;
+        matched[i] = Some(j);
+    }
+    for (i, inp) in inputs.iter().enumerate() {
+        if inp.id.is_none() {
+            if let Some(j) = (0..old.len()).find(|&j| !taken[j] && old[j].name == inp.name) {
+                taken[j] = true;
+                matched[i] = Some(j);
+            }
+        }
+    }
+
+    let mut ids: Vec<String> = Vec::new();
+    let mut pool: HashMap<String, Step> = HashMap::new();
+    for (i, inp) in inputs.iter().enumerate() {
+        let step = match matched[i] {
+            Some(j) => {
+                let o = &old[j];
+                Step {
+                    id: o.id.clone(),
+                    name: inp.name.clone(),
+                    what: inp.what.clone(),
+                    reported: o.reported,
+                    reported_at: o.reported_at,
+                    note: o.note.clone(),
+                    task: o.task.clone(),
+                    cost_at_start: o.cost_at_start,
+                    fixes: o.fixes.clone(),
+                }
+            }
+            None => {
+                next.step += 1;
+                new_step(
+                    format!("s{}", next.step),
+                    inp.name.clone(),
+                    inp.what.clone(),
+                )
+            }
+        };
+        ids.push(step.id.clone());
+        pool.insert(step.id.clone(), step);
+    }
+    let mut kept: Vec<String> = Vec::new();
+    for (j, o) in old.iter().enumerate() {
+        if !taken[j] && started(o) {
+            kept.push(o.id.clone());
+            pool.insert(o.id.clone(), o.clone());
+        }
+    }
+    let old_ids: Vec<String> = old.iter().map(|s| s.id.clone()).collect();
+    place_kept(&mut ids, &old_ids, &kept);
+    kept.sort_by_key(|id| num(id));
+    let steps: Vec<Step> = ids.iter().filter_map(|id| pool.remove(id)).collect();
+    Ok((steps, kept))
+}
+
+/// Puts each kept id back into `order` after the nearest earlier old id that is still in `order`.
+fn place_kept(order: &mut Vec<String>, old_ids: &[String], kept: &[String]) {
+    for (i, id) in old_ids.iter().enumerate() {
+        if !kept.contains(id) {
+            continue;
+        }
+        let mut pos = 0;
+        for j in (0..i).rev() {
+            if let Some(p) = order.iter().position(|x| x == &old_ids[j]) {
+                pos = p + 1;
+                break;
+            }
+        }
+        while pos < order.len() {
+            match old_ids.iter().position(|x| x == &order[pos]) {
+                Some(k) if k < i && kept.contains(&order[pos]) => pos += 1,
+                _ => break,
+            }
+        }
+        order.insert(pos, id.clone());
+    }
+}
+
+/// A step the Captain has started or that a task drives: it is kept when a call leaves it out.
+fn started(s: &Step) -> bool {
+    s.reported != State::Pending || s.task.is_some() || !s.fixes.is_empty()
+}
+
+fn new_step(id: String, name: String, what: String) -> Step {
+    Step {
+        id,
+        name,
+        what,
+        reported: State::Pending,
+        reported_at: 0,
+        note: None,
+        task: None,
+        cost_at_start: None,
+        fixes: Vec::new(),
+    }
+}
+
+/// The step ids that belong to this plan, with the list each main step is in. Fix steps map to None.
+fn own_steps(lists: &[List]) -> HashMap<String, Option<String>> {
+    fn add(s: &Step, list: Option<&str>, out: &mut HashMap<String, Option<String>>) {
+        out.insert(s.id.clone(), list.map(String::from));
+        for f in &s.fixes {
+            for x in &f.steps {
+                add(x, None, out);
+            }
+        }
+    }
+    let mut out = HashMap::new();
+    for l in lists {
+        for s in &l.steps {
+            add(s, Some(&l.id), &mut out);
+        }
+    }
+    out
+}
+
+/// The ids of every list and step (fix steps included) of the other plans, with the plan that holds each.
+fn foreign_ids(plans: &CaptainPlans, plan_id: &str) -> HashMap<String, String> {
+    fn add(steps: &[Step], plan: &str, out: &mut HashMap<String, String>) {
+        for s in steps {
+            out.insert(s.id.clone(), plan.to_string());
+            for f in &s.fixes {
+                add(&f.steps, plan, out);
+            }
+        }
+    }
+    let mut out = HashMap::new();
+    for p in plans.plans.iter().filter(|p| p.id != plan_id) {
+        for l in &p.lists {
+            out.insert(l.id.clone(), p.id.clone());
+            add(&l.steps, &p.id, &mut out);
+        }
+    }
+    out
+}
+
+fn foreign_refusal(foreign: &HashMap<String, String>, id: &str) -> Option<String> {
+    foreign
+        .get(id)
+        .map(|p| format!("{id} is in plan {p}. Nothing changed."))
+}
+
+fn check_limits(lists: &[List]) -> Result<(), String> {
+    if lists.len() > MAX_LISTS {
+        return Err(format!(
+            "limit: {MAX_LISTS} lists per plan. Nothing changed."
+        ));
+    }
+    if lists.iter().any(|l| l.steps.len() > MAX_STEPS_PER_LIST) {
+        return Err(format!(
+            "limit: {MAX_STEPS_PER_LIST} steps per list. Nothing changed."
+        ));
+    }
+    if count_all(lists) > MAX_STEPS_IN_ALL {
+        return Err(format!(
+            "limit: {MAX_STEPS_IN_ALL} steps in all, fixes included. Nothing changed."
+        ));
+    }
+    Ok(())
+}
+
+/// Counts main steps and fix steps, at any depth.
+fn count_all(lists: &[List]) -> usize {
+    fn count(steps: &[Step]) -> usize {
+        steps
+            .iter()
+            .map(|s| 1 + s.fixes.iter().map(|f| count(&f.steps)).sum::<usize>())
+            .sum()
+    }
+    lists.iter().map(|l| count(&l.steps)).sum()
+}
+
+/// Keeps the store within its bounds: finished plans newest first, at most ten; unfinished at most six.
+fn tidy(plans: &mut CaptainPlans) -> Result<(), String> {
+    order(plans);
+    let mut finished_seen = 0;
+    plans.plans.retain(|p| {
+        if p.finished_at.is_none() {
+            return true;
+        }
+        finished_seen += 1;
+        finished_seen <= MAX_PLANS_FINISHED
+    });
+    if plans
+        .plans
+        .iter()
+        .filter(|p| p.finished_at.is_none())
+        .count()
+        > MAX_PLANS_UNFINISHED
+    {
+        return Err(format!("limit: {MAX_PLANS_UNFINISHED} unfinished plans. Finish or close one first. Nothing changed."));
+    }
+    Ok(())
+}
+
+/// Unfinished plans first, oldest first; then finished and closed plans, newest first.
+fn order(plans: &mut CaptainPlans) {
+    plans
+        .plans
+        .sort_by(|a, b| match (a.finished_at, b.finished_at) {
+            (None, None) => num(&a.id).cmp(&num(&b.id)),
+            (Some(x), Some(y)) => y.cmp(&x).then(num(&b.id).cmp(&num(&a.id))),
+            (None, Some(_)) => Ordering::Less,
+            (Some(_), None) => Ordering::Greater,
+        });
+}
+
+fn num(id: &str) -> u64 {
+    id.get(1..).and_then(|s| s.parse().ok()).unwrap_or(0)
+}
+
+/// Records the start cost of each step that a list task has started, and sets or clears the finish time.
+fn settle_plan(plan: &mut Plan, facts: &[TaskFacts], now: u64) -> bool {
+    if plan.closed.is_some() {
+        return false;
+    }
+    let mut changed = false;
+    for list in plan.lists.iter_mut() {
+        let Some(f) = list.task.as_deref().and_then(|id| fact(facts, id)) else {
+            continue;
+        };
+        if is_terminal(f) {
+            continue;
+        }
+        let (Some(k), Some(cost)) = (first_open(list), f.cost) else {
+            continue;
+        };
+        let s = &mut list.steps[k];
+        if s.cost_at_start.is_none() {
+            s.cost_at_start = Some(cost);
+            changed = true;
+        }
+    }
+    let done = all_main_done(plan, facts);
+    match (done, plan.finished_at) {
+        (true, None) => {
+            plan.finished_at = Some(now);
+            changed = true;
+        }
+        (false, Some(_)) => {
+            plan.finished_at = None;
+            changed = true;
+        }
+        _ => {}
+    }
+    changed
+}
+
+fn all_main_done(plan: &Plan, facts: &[TaskFacts]) -> bool {
+    let view = derive(plan, facts);
+    let mains: Vec<&StepView> = view.lists.iter().flat_map(|l| l.steps.iter()).collect();
+    !mains.is_empty() && mains.iter().all(|s| s.state == State::Done)
+}
+
+// ---- derive ----
+
+/// A step's state, reason and cost before fixes are applied.
+#[derive(Clone, Debug)]
+struct Shown {
+    state: State,
+    why: Option<String>,
+    cost: Option<f64>,
+}
+
+fn fact<'a>(facts: &'a [TaskFacts], id: &str) -> Option<&'a TaskFacts> {
+    facts.iter().find(|f| f.id == id)
+}
+
+fn is_terminal(f: &TaskFacts) -> bool {
+    matches!(
+        f.work,
+        Work::ResultAvailable | Work::Failed | Work::Cancelled
+    )
+}
+
+/// The task id, if the facts say it has not ended.
+fn unfinished(id: &str, facts: &[TaskFacts]) -> Option<String> {
+    fact(facts, id)
+        .filter(|f| !is_terminal(f))
+        .map(|_| id.to_string())
+}
+
+fn ends_at(f: &TaskFacts) -> u64 {
+    f.ended_at.unwrap_or(0)
+}
+
+/// A step that runs on its own task, or a step with no task, which reads what the Captain reported.
+fn own_shown(step: &Step, facts: &[TaskFacts]) -> Shown {
+    let plain = Shown {
+        state: step.reported,
+        why: None,
+        cost: None,
+    };
+    let Some(f) = step.task.as_deref().and_then(|id| fact(facts, id)) else {
+        return plain;
+    };
+    let cost = f.cost;
+    if !is_terminal(f) {
+        let state = if f.waits_on_user {
+            State::Waiting
+        } else {
+            State::Running
+        };
+        return Shown {
+            state,
+            why: None,
+            cost,
+        };
+    }
+    if step.reported_at > ends_at(f) {
+        return Shown { cost, ..plain };
+    }
+    match f.work {
+        Work::ResultAvailable if f.review == Review::Redone => Shown {
+            state: State::Failed,
+            why: Some("Redone".into()),
+            cost,
+        },
+        Work::ResultAvailable => Shown {
+            state: State::Done,
+            why: None,
+            cost,
+        },
+        Work::Failed => Shown {
+            state: State::Failed,
+            why: f.failure.clone(),
+            cost,
+        },
+        // The only terminal work left is a cancelled task.
+        _ => Shown {
+            state: State::Failed,
+            why: Some("Cancelled".into()),
+            cost,
+        },
+    }
+}
+
+/// The first step of a list with no task of its own that is not done: the one a list task drives.
+fn first_open(list: &List) -> Option<usize> {
+    list.steps
+        .iter()
+        .position(|s| s.task.is_none() && s.reported != State::Done)
+}
+
+/// Every step of a list, as the list's task drives it. A step with its own task follows that task instead.
+fn list_shown(list: &List, facts: &[TaskFacts]) -> Vec<Shown> {
+    let lf = list.task.as_deref().and_then(|id| fact(facts, id));
+    let open = first_open(list);
+    list.steps
+        .iter()
+        .enumerate()
+        .map(|(k, s)| {
+            let Some(f) = lf.filter(|_| s.task.is_none()) else {
+                return own_shown(s, facts);
+            };
+            let running = Some(k) == open;
+            let cost = match (is_terminal(f) || running, s.cost_at_start, f.cost) {
+                (true, Some(a), Some(b)) => Some(b - a),
+                _ => None,
+            };
+            let plain = Shown {
+                state: s.reported,
+                why: None,
+                cost,
+            };
+            if !is_terminal(f) {
+                if !running {
+                    return plain;
+                }
+                let state = if f.waits_on_user {
+                    State::Waiting
+                } else {
+                    State::Running
+                };
+                return Shown {
+                    state,
+                    why: None,
+                    cost,
+                };
+            }
+            if s.reported_at > ends_at(f) {
+                return plain;
+            }
+            match f.work {
+                Work::ResultAvailable if s.reported == State::Done => Shown {
+                    state: State::Done,
+                    why: None,
+                    cost,
+                },
+                Work::ResultAvailable if f.review == Review::Redone => Shown {
+                    state: State::Failed,
+                    why: Some("Redone".into()),
+                    cost,
+                },
+                Work::ResultAvailable => Shown {
+                    state: State::Done,
+                    why: Some(DONE_WITH_LIST.into()),
+                    cost,
+                },
+                _ if running => {
+                    let why = match f.work {
+                        Work::Failed => f.failure.clone(),
+                        _ => Some("Cancelled".into()),
+                    };
+                    Shown {
+                        state: State::Failed,
+                        why,
+                        cost,
+                    }
+                }
+                _ => plain,
+            }
+        })
+        .collect()
+}
+
+fn step_view(step: &Step, shown: Shown, facts: &[TaskFacts]) -> StepView {
+    let fixes: Vec<FixView> = step
+        .fixes
+        .iter()
+        .map(|f| FixView {
+            id: f.id.clone(),
+            steps: f
+                .steps
+                .iter()
+                .map(|s| step_view(s, own_shown(s, facts), facts))
+                .collect(),
+        })
+        .collect();
+    let mut state = shown.state;
+    let mut why = shown.why;
+    if state == State::Failed {
+        if let Some(last) = fixes.last() {
+            if !last.steps.is_empty() && last.steps.iter().all(|s| s.state == State::Done) {
+                state = State::Done;
+                why = Some(after_fixes(fixes.len()));
+            }
+        }
+    }
+    StepView {
+        id: step.id.clone(),
+        name: step.name.clone(),
+        what: step.what.clone(),
+        state,
+        why,
+        cost: shown.cost,
+        task: step.task.clone(),
+        fixes,
+    }
+}
+
+fn after_fixes(n: usize) -> String {
+    if n == 1 {
+        "after one fix".into()
+    } else {
+        format!("after {n} fixes")
+    }
+}
+
+/// The task that holds a step back from a report: its own link, or its list's task while the step is the one
+/// the list's task drives. None when the step is free to be reported.
+fn holding_task(plan: &Plan, step_id: &str, facts: &[TaskFacts]) -> Option<String> {
+    for list in &plan.lists {
+        if let Some(k) = list.steps.iter().position(|s| s.id == step_id) {
+            let s = &list.steps[k];
+            if let Some(t) = s.task.as_deref() {
+                return unfinished(t, facts);
+            }
+            if first_open(list) == Some(k) {
+                return list.task.as_deref().and_then(|t| unfinished(t, facts));
+            }
+            return None;
+        }
+    }
+    find_step(&plan.lists, step_id)?
+        .task
+        .as_deref()
+        .and_then(|t| unfinished(t, facts))
+}
+
+fn captain_state(plan: &Plan, view: &PlanView) -> CaptainState {
+    if plan.closed.is_some() {
+        return CaptainState::Closed;
+    }
+    if plan.finished_at.is_some() {
+        return CaptainState::Finished;
+    }
+    let all = every_step(view);
+    if all.iter().any(|s| s.state == State::Waiting) {
+        CaptainState::NeedsYou
+    } else if view
+        .lists
+        .iter()
+        .any(|l| l.steps.iter().any(|s| s.state == State::Failed))
+    {
+        CaptainState::Fixing
+    } else if all.iter().any(|s| s.state == State::Running) {
+        CaptainState::Working
+    } else {
+        CaptainState::Idle
+    }
+}
+
+/// The first step, in plan order, that is running or waiting. A fix comes right after the step it fixes.
+fn first_active(steps: &[StepView]) -> Option<&StepView> {
+    for s in steps {
+        if matches!(s.state, State::Running | State::Waiting) {
+            return Some(s);
+        }
+        for f in &s.fixes {
+            if let Some(x) = first_active(&f.steps) {
+                return Some(x);
+            }
+        }
+    }
+    None
+}
+
+fn every_step(view: &PlanView) -> Vec<&StepView> {
+    fn walk<'a>(steps: &'a [StepView], out: &mut Vec<&'a StepView>) {
+        for s in steps {
+            out.push(s);
+            for f in &s.fixes {
+                walk(&f.steps, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for l in &view.lists {
+        walk(&l.steps, &mut out);
+    }
+    out
+}
+
+/// One dot per main step: d done, x done after a fix, r running, f failed, w waiting, p pending.
+fn dot(s: &StepView) -> char {
+    match s.state {
+        State::Done if s.why.as_deref().is_some_and(|w| w.starts_with("after ")) => 'x',
+        State::Done => 'd',
+        State::Running => 'r',
+        State::Failed => 'f',
+        State::Waiting => 'w',
+        State::Pending => 'p',
+    }
+}
+
+fn clip(text: &str) -> String {
+    text.chars().take(GLANCE_TEXT).collect()
+}
+
+fn state_name(state: State) -> &'static str {
+    match state {
+        State::Pending => "pending",
+        State::Running => "running",
+        State::Waiting => "waiting",
+        State::Done => "done",
+        State::Failed => "failed",
+    }
+}
+
+/// The plan's text, headed with its id: one line per list, then one per fix.
+fn answer_of(plans: &CaptainPlans, plan_id: &str, facts: &[TaskFacts]) -> String {
+    let Some(plan) = plans.plans.iter().find(|p| p.id == plan_id) else {
+        return String::new();
+    };
+    let view = derive(plan, facts);
+    let mut lines = vec![if plan.title.is_empty() {
+        format!("{} rev {}", plan.id, plan.rev)
+    } else {
+        format!("{} rev {}: {}", plan.id, plan.rev, plan.title)
+    }];
+    for l in &view.lists {
+        let body: Vec<String> = l.steps.iter().map(word).collect();
+        if body.is_empty() {
+            lines.push(format!("{} {}:", l.id, l.name));
+        } else {
+            lines.push(format!("{} {}: {}", l.id, l.name, body.join(", ")));
+        }
+    }
+    fn fixes(steps: &[StepView], lines: &mut Vec<String>) {
+        for s in steps {
+            for f in &s.fixes {
+                let body: Vec<String> = f.steps.iter().map(word).collect();
+                lines.push(format!("{} on {}: {}", f.id, s.id, body.join(", ")));
+                fixes(&f.steps, lines);
+            }
+        }
+    }
+    for l in &view.lists {
+        fixes(&l.steps, &mut lines);
+    }
+    lines.join("\n")
+}
+
+fn word(s: &StepView) -> String {
+    match &s.why {
+        Some(w) => format!("{} {} ({w})", s.id, state_name(s.state)),
+        None => format!("{} {}", s.id, state_name(s.state)),
+    }
+}
+
+fn linked_tasks(plan: &Plan) -> Vec<String> {
+    fn walk(steps: &[Step], out: &mut Vec<String>) {
+        for s in steps {
+            out.extend(s.task.clone());
+            for f in &s.fixes {
+                walk(&f.steps, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for l in &plan.lists {
+        out.extend(l.task.clone());
+        walk(&l.steps, &mut out);
+    }
+    out
+}
+
+fn plan_with_step(plans: &CaptainPlans, step_id: &str) -> Option<usize> {
+    plans
+        .plans
+        .iter()
+        .position(|p| find_step(&p.lists, step_id).is_some())
+}
+
+fn find_step<'a>(lists: &'a [List], id: &str) -> Option<&'a Step> {
+    fn within<'a>(s: &'a Step, id: &str) -> Option<&'a Step> {
+        if s.id == id {
+            return Some(s);
+        }
+        s.fixes
+            .iter()
+            .flat_map(|f| f.steps.iter())
+            .find_map(|x| within(x, id))
+    }
+    lists
+        .iter()
+        .flat_map(|l| l.steps.iter())
+        .find_map(|s| within(s, id))
+}
+
+fn find_step_mut<'a>(lists: &'a mut [List], id: &str) -> Option<&'a mut Step> {
+    fn within<'a>(s: &'a mut Step, id: &str) -> Option<&'a mut Step> {
+        if s.id == id {
+            return Some(s);
+        }
+        for f in s.fixes.iter_mut() {
+            for x in f.steps.iter_mut() {
+                if let Some(found) = within(x, id) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+    for l in lists.iter_mut() {
+        for s in l.steps.iter_mut() {
+            if let Some(found) = within(s, id) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+/// A `set` list after its text is checked. `id` is trimmed; a blank id counts as none.
+struct ListIn {
+    id: Option<String>,
+    name: String,
+    steps: Vec<StepIn>,
+}
+
+struct StepIn {
+    id: Option<String>,
+    name: String,
+    what: String,
+}
+
+fn list_in(l: &ListInput) -> Result<ListIn, String> {
+    Ok(ListIn {
+        id: clean_id(&l.id),
+        name: one_line("name", &l.name, MAX_NAME, true)?,
+        steps: l.steps.iter().map(step_in).collect::<Result<_, _>>()?,
+    })
+}
+
+fn step_in(s: &StepInput) -> Result<StepIn, String> {
+    Ok(StepIn {
+        id: clean_id(&s.id),
+        name: one_line("name", &s.name, MAX_NAME, true)?,
+        what: text_field("what", s.what.as_deref().unwrap_or(""), MAX_WHAT)?,
+    })
+}
+
+fn clean_id(id: &Option<String>) -> Option<String> {
+    id.as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
+/// A name or title: one line, no control characters, counted in characters after trimming.
+fn one_line(field: &str, raw: &str, max: usize, required: bool) -> Result<String, String> {
+    if raw.chars().any(char::is_control) {
+        return Err(format!(
+            "{field} may not contain a line break or other control character. Nothing changed."
+        ));
+    }
+    let text = raw.trim();
+    if text.is_empty() && required {
+        return Err(format!("{field} is empty. Nothing changed."));
+    }
+    if text.chars().count() > max {
+        return Err(format!(
+            "limit: {max} characters for {field}. Nothing changed."
+        ));
+    }
+    Ok(text.to_string())
+}
+
+/// Free text (what, note, reason): line breaks allowed, other control characters not, counted after trimming.
+fn text_field(field: &str, raw: &str, max: usize) -> Result<String, String> {
+    if raw.chars().any(|c| c.is_control() && c != '\n') {
+        return Err(format!(
+            "{field} may hold line breaks but no other control character. Nothing changed."
+        ));
+    }
+    let text = raw.trim();
+    if text.chars().count() > max {
+        return Err(format!(
+            "limit: {max} characters for {field}. Nothing changed."
+        ));
+    }
+    Ok(text.to_string())
+}
+
+fn note_field(raw: Option<&str>) -> Result<Option<String>, String> {
+    let text = text_field("note", raw.unwrap_or(""), MAX_NOTE)?;
+    Ok(if text.is_empty() { None } else { Some(text) })
 }
 
 #[cfg(test)]
