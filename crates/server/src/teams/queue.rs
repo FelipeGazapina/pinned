@@ -179,18 +179,26 @@ async fn ask_in_turn(hub: &Arc<Hub>, turn: &Turn, team: &Arc<Account>, workflow:
     let waiting = db::waiting_count(&hub.db, team.id, workflow).await?;
     let busy = !db::live_runs_of(&hub.db, team.id, workflow).await?.is_empty();
     let full = db::live_count(&hub.db, team.id).await? >= db::max_live_runs(&hub.db, team.id).await?;
-    if waiting > 0 || busy || full {
-        let stored = serde_json::to_value(Stored::of(&start)).map_err(|e| e.to_string())?;
-        let dropped = db::enqueue(&turn.held, team.id, workflow, &stored, MOST_WAITING).await?;
-        if dropped > 0 {
-            eprintln!("pinned-server: team {} bot {workflow}: its line is full, so its oldest waiting event was dropped", team.id);
-            db::count_skipped_on(&turn.held, team.id, workflow, SkipReason::QueueFull, dropped).await?;
+    let stored = serde_json::to_value(Stored::of(&start)).map_err(|e| e.to_string())?;
+    if waiting == 0 && !busy && !full {
+        let (work, started_by) = bots::work_of(&*hub.connectors(team).await?, workflow, start)?;
+        if let Some(run) = reserve(turn, team, workflow, started_by, &work.subject).await? {
+            return Ok(Ok((run, work)));
         }
-        return Ok(Err((waiting + 1).min(MOST_WAITING)));
     }
-    let (work, started_by) = bots::work_of(&*hub.connectors(team).await?, workflow, start)?;
-    let run = reserve(turn, team, workflow, started_by, &work.subject).await?;
-    Ok(Ok((run, work)))
+    wait_in_line(turn, team, workflow, &stored).await?;
+    Ok(Err((waiting + 1).min(MOST_WAITING)))
+}
+
+/// Puts `stored` at the end of bot `workflow`'s line, in the team's turn: one past `MOST_WAITING`
+/// drops the oldest, counted on the bot.
+async fn wait_in_line(turn: &Turn, team: &Arc<Account>, workflow: &str, stored: &serde_json::Value) -> Result<(), String> {
+    let dropped = db::enqueue(&turn.held, team.id, workflow, stored, MOST_WAITING).await?;
+    if dropped > 0 {
+        eprintln!("pinned-server: team {} bot {workflow}: its line is full, so its oldest waiting event was dropped", team.id);
+        db::count_skipped_on(&turn.held, team.id, workflow, SkipReason::QueueFull, dropped).await?;
+    }
+    Ok(())
 }
 
 /// Decides, once and before anything outside pinned happens for it, what trigger `kind`'s event
@@ -224,22 +232,21 @@ async fn decide(hub: &Arc<Hub>, turn: &Turn, team: &Arc<Account>, kind: &str, ev
     let waiting = db::waiting_count(&hub.db, team.id, &workflow).await?;
     let busy = !db::live_runs_of(&hub.db, team.id, &workflow).await?.is_empty();
     let full = db::live_count(&hub.db, team.id).await? >= db::max_live_runs(&hub.db, team.id).await?;
-    if waiting > 0 || busy || full {
-        let stored = serde_json::to_value(Stored::Event { kind: kind.to_owned(), event, replies: vec![], earlier: 0 }).map_err(|e| e.to_string())?;
-        let dropped = db::enqueue(&turn.held, team.id, &workflow, &stored, MOST_WAITING).await?;
-        if dropped > 0 {
-            eprintln!("pinned-server: team {} bot {workflow}: its line is full, so its oldest waiting event was dropped", team.id);
-            db::count_skipped_on(&turn.held, team.id, &workflow, SkipReason::QueueFull, dropped).await?;
+    if waiting == 0 && !busy && !full {
+        if let Some(run) = reserve(turn, team, &workflow, format!("trigger:{kind}"), event.subject()).await? {
+            return Ok(Admitted::Reserved(run.id));
         }
-        return Ok(Admitted::Waiting);
     }
-    let run = reserve(turn, team, &workflow, format!("trigger:{kind}"), event.subject()).await?;
-    Ok(Admitted::Reserved(run.id))
+    let stored = serde_json::to_value(Stored::Event { kind: kind.to_owned(), event, replies: vec![], earlier: 0 }).map_err(|e| e.to_string())?;
+    wait_in_line(turn, team, &workflow, &stored).await?;
+    Ok(Admitted::Waiting)
 }
 
 /// Holds a place for a run of bot `workflow` on `subject` in the team's turn: a live run with no
-/// session yet, which the team's cap counts. Answers the run.
-async fn reserve(turn: &Turn, team: &Arc<Account>, workflow: &str, started_by: String, subject: &Subject) -> Result<Run, String> {
+/// session yet, which the team's cap counts. Answers the run, or None when the bot has a live run
+/// the turn did not read (one written outside it, which the database refuses as a second): its
+/// event waits as for a busy bot.
+async fn reserve(turn: &Turn, team: &Arc<Account>, workflow: &str, started_by: String, subject: &Subject) -> Result<Option<Run>, String> {
     let run = Run {
         id: Uuid::new_v4().to_string(),
         workflow: workflow.to_owned(),
@@ -253,8 +260,7 @@ async fn reserve(turn: &Turn, team: &Arc<Account>, workflow: &str, started_by: S
         outcome: None,
         started_by,
     };
-    db::insert_reserved(&turn.held, team.id, &run, subject).await?;
-    Ok(run)
+    Ok(db::insert_reserved(&turn.held, team.id, &run, subject).await?.then_some(run))
 }
 
 /// New replies of a Slack thread: kept with the thread's waiting event, the newest
@@ -515,14 +521,17 @@ async fn take_and_start(hub: &Arc<Hub>, turn: &Turn, team: &Arc<Account>, ended:
             }
             // Its place is held now and its row granted, in one transaction (the turn's): the
             // team's poller claims it and runs it whole, from the start.
+            // A bot with a live run the turn did not read keeps its event in line, ungranted, for that run's end.
             Row::Grant { kind, subject } => {
-                let run = reserve(turn, team, &waiting.workflow, format!("trigger:{kind}"), &subject).await?;
+                let Some(run) = reserve(turn, team, &waiting.workflow, format!("trigger:{kind}"), &subject).await? else { continue };
                 db::grant(&turn.held, waiting.id, Uuid::parse_str(&run.id).map_err(|e| e.to_string())?).await?;
                 taken.granted = true;
             }
+            // Taken from its line only once its place is held: a bot with a live run the turn did
+            // not read keeps it waiting for that run's end.
             Row::Start { work, started_by, told } => {
+                let Some(run) = reserve(turn, team, &waiting.workflow, started_by, &work.subject).await? else { continue };
                 db::take_waiting(&turn.held, waiting.id).await?;
-                let run = reserve(turn, team, &waiting.workflow, started_by, &work.subject).await?;
                 taken.starts.push((Uuid::parse_str(&run.id).map_err(|e| e.to_string())?, work, told));
             }
         }

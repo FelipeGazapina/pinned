@@ -172,11 +172,14 @@ fn a_box_that_boots_for_an_ended_run_opens_no_session_for_it() {
     // The claim itself: a live run of the team takes the box, an ended one and another team's run do not.
     let db = &crew.hub.hub().db;
     let (live, ended, subject) = (run_row(&id), run_row(&id), issue("eng-1"));
-    for (row, subject) in [(&live, issue("eng-live")), (&ended, subject.clone())] {
+    // The ended run ends before the live one is written: a bot has one live run at a time.
+    for (row, subject) in [(&ended, subject.clone()), (&live, issue("eng-live"))] {
         crew.hub.runtime.block_on(teams::db::insert_run(db, crew.team, row, None)).unwrap();
         crew.hub.runtime.block_on(teams::db::set_run_subject(db, crew.team, Uuid::parse_str(&row.id).unwrap(), &subject)).unwrap();
+        if row.id == ended.id {
+            crew.hub.runtime.block_on(teams::db::set_run_state(db, crew.team, Uuid::parse_str(&ended.id).unwrap(), RunState::Stopped, None, Some("stopped"))).unwrap();
+        }
     }
-    crew.hub.runtime.block_on(teams::db::set_run_state(db, crew.team, Uuid::parse_str(&ended.id).unwrap(), RunState::Stopped, None, Some("stopped"))).unwrap();
     let claim = |account: Uuid, subject: &Subject| crew.hub.runtime.block_on(teams::db::claim_run_box(db, account, &id, subject, "machine-1")).unwrap();
     assert!(!claim(crew.team, &subject), "a run that ended takes no box");
     assert!(!claim(crew.ana.id, &issue("eng-live")), "another account's claim finds no run");

@@ -1509,3 +1509,30 @@ fn a_message_router_is_refused_as_a_teams_bot_at_save_and_turn_on() {
     assert_eq!(crew.call(&crew.ana, TeamOp::TurnBotOn { workflow: router, on: true }).map(drop), refused, "turning it on");
     assert_eq!(reached("ta_rtr_refused"), Vec::<String>::new());
 }
+
+#[test]
+fn a_team_save_refuses_a_one_time_schedule_and_an_unknown_zone() {
+    let crew = Crew::new("ta_sched_refused");
+    let workflow = |trigger: Value| {
+        json!({
+            "name": "Morning", "enabled": false, "trigger": trigger,
+            "folder": crew.folder, "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false,
+            "instructions": "", "machine": { "kind": "upstash-box", "size": "small" },
+        })
+    };
+    let once = json!({ "kind": "schedule", "schedule": { "kind": "once", "at": "2026-12-01T09:00" }, "tz": "America/Sao_Paulo" });
+    assert_eq!(
+        save_team_workflow(&crew.hub, &crew.bob, crew.team, workflow(once)).map(drop),
+        Err("a scheduled workflow repeats: use a Task for a one-time run".to_owned())
+    );
+    let mars = json!({ "kind": "schedule", "schedule": { "kind": "cron", "expr": "0 9 * * *" }, "tz": "Mars/Base" });
+    assert_eq!(
+        save_team_workflow(&crew.hub, &crew.bob, crew.team, workflow(mars)).map(drop),
+        Err("unknown time zone \"Mars/Base\": use an IANA name such as America/Sao_Paulo".to_owned())
+    );
+    assert!(team_workflows(&crew.hub, crew.team).is_empty(), "nothing refused was stored");
+    let cron = json!({ "kind": "schedule", "schedule": { "kind": "cron", "expr": "0 9 * * 1-5" }, "tz": "America/Sao_Paulo" });
+    let saved = save_team_workflow(&crew.hub, &crew.bob, crew.team, workflow(cron.clone())).unwrap();
+    let stored = team_workflows(&crew.hub, crew.team);
+    assert_eq!(stored.iter().map(|c| (c["id"].as_str().unwrap(), c["trigger"].clone())).collect::<Vec<_>>(), vec![(saved.as_str(), cron)]);
+}

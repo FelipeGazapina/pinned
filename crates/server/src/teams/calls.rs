@@ -870,7 +870,8 @@ pub async fn box_failed(hub: &Hub, account: &Account, machine: Uuid, workflow: &
 /// - `End::TabClosed` that went away mid-turn, or whose turn the hub cannot tell → Failed.
 /// - `End::Exited` or `Idle` mid-turn, or whose turn the hub cannot tell → Failed.
 /// - `End::Removed` (someone removed its box) or `Disconnected` (the team's Upstash Box) → Stopped.
-/// - `End::Expired` (max life or budget), `Offline`, `Vanished` (deleted outside pinned), `Failed` → Failed.
+/// - `End::Expired` (max life or budget), `Offline`, `Vanished` (deleted outside pinned),
+///   `NeverStarted` (its session did not start its first turn), `Failed` → Failed.
 fn ended_by_box(why: &End, turn: LastTurn) -> (RunState, String) {
     const FINISHED: &str = "its session finished";
     match (why, turn) {
@@ -885,6 +886,7 @@ fn ended_by_box(why: &End, turn: LastTurn) -> (RunState, String) {
         (End::Expired, _) => (RunState::Failed, "its box ran out of time or budget".into()),
         (End::Offline, _) => (RunState::Failed, "its box went offline".into()),
         (End::Vanished, _) => (RunState::Failed, "its box was deleted outside pinned".into()),
+        (End::NeverStarted, _) => (RunState::Failed, "its session did not start its first turn".into()),
         (End::Failed(e), _) => (RunState::Failed, format!("its box failed: {e}")),
     }
 }
