@@ -18,9 +18,13 @@ static FAILED_AT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mute
 /// What a team box prices a model the price list has no price for at, in USD per token, every
 /// model while it has no list at all, so its runs' spend limits fire early rather than never:
 /// US$ 30 input and US$ 150 output per million, above every Claude rate in LiteLLM's list (the
-/// dearest listed is US$ 27.50 / 137.50 per million). Cache reads and writes take the input rate.
+/// dearest listed is US$ 27.50 / 137.50 per million). Cache reads take the input rate, cache
+/// writes `ONE_HOUR_WRITE` times it.
 pub const CEILING_INPUT_USD: f64 = 30e-6;
 pub const CEILING_OUTPUT_USD: f64 = 150e-6;
+/// What a 1-hour cache write costs, in times the input rate; a 5-minute write takes the list's
+/// cache write rate.
+const ONE_HOUR_WRITE: f64 = 2.0;
 /// What a fast-mode row costs over its standard price when the list gives its model no fast tier.
 /// A deliberate over-estimate until the provider's figure is sourced; a team box's row priced
 /// this way costs at least the ceiling rate and shows as the ceiling does.
@@ -50,6 +54,9 @@ pub struct Row {
     pub cached: u64,
     pub cache_write: u64,
     pub output: u64,
+    /// Of `cache_write`, the 1-hour writes.
+    #[serde(skip)]
+    cache_write_1h: u64,
     /// In USD, per token type; `None` for a model the price list doesn't know.
     pub cost: Option<Cost>,
     /// What fast mode added to `cost`.
@@ -130,7 +137,27 @@ struct Tokens {
     cache_creation_input_tokens: u64,
     #[serde(default)]
     output_tokens: u64,
+    cache_creation: Option<CacheCreation>,
     speed: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CacheCreation {
+    ephemeral_5m_input_tokens: Option<u64>,
+    #[serde(default)]
+    ephemeral_1h_input_tokens: u64,
+}
+
+impl Tokens {
+    /// Input, cache reads, 5-minute cache writes, 1-hour cache writes and output. A line with no
+    /// split of its cache writes counts them all as 5-minute, one whose split falls short of its
+    /// total counts the rest so.
+    fn counts(&self) -> [u64; 5] {
+        let split = self.cache_creation.as_ref();
+        let hour = split.map_or(0, |c| c.ephemeral_1h_input_tokens);
+        let five = split.and_then(|c| c.ephemeral_5m_input_tokens).unwrap_or(0).max(self.cache_creation_input_tokens.saturating_sub(hour));
+        [self.input_tokens, self.cache_read_input_tokens, five, hour, self.output_tokens]
+    }
 }
 
 /// Every transcript under each of `projects` with a line at or after `since`, summed per quarter hour,
@@ -146,7 +173,7 @@ pub fn read(projects: &[PathBuf], since: u64, rates: &RateTable, book: &PriceBoo
     files.sort();
     let mut seen = HashSet::new();
     let mut sessions: HashMap<String, u32> = HashMap::new();
-    let mut sums: HashMap<(u64, String, u32, Speed), [u64; 4]> = HashMap::new();
+    let mut sums: HashMap<(u64, String, u32, Speed), [u64; 5]> = HashMap::new();
     for file in files {
         let Ok(f) = std::fs::File::open(&file) else { continue };
         for line in BufReader::new(f).lines().map_while(Result::ok) {
@@ -165,15 +192,15 @@ pub fn read(projects: &[PathBuf], since: u64, rates: &RateTable, book: &PriceBoo
             let speed = if tokens.speed.as_deref() == Some("fast") { Speed::Fast } else { Speed::Standard };
             let model = targets.get(model.as_str()).map_or(model, |&target| target.to_owned());
             let sum = sums.entry((at - at % SLICE, model, session, speed)).or_default();
-            for (total, n) in sum.iter_mut().zip([tokens.input_tokens, tokens.cache_read_input_tokens, tokens.cache_creation_input_tokens, tokens.output_tokens]) {
+            for (total, n) in sum.iter_mut().zip(tokens.counts()) {
                 *total += n;
             }
         }
     }
     let mut rows: Vec<Row> = sums
         .into_iter()
-        .map(|((at, model, session, speed), [input, cached, cache_write, output])| {
-            let mut row = Row { at, model, session, speed, input, cached, cache_write, output, cost: None, premium: 0.0, savings: 0.0 };
+        .map(|((at, model, session, speed), [input, cached, five, hour, output])| {
+            let mut row = Row { at, model, session, speed, input, cached, cache_write: five + hour, output, cache_write_1h: hour, cost: None, premium: 0.0, savings: 0.0 };
             price(&mut row, rates, &book.prices);
             row
         })
@@ -205,7 +232,7 @@ pub struct TaskUsage {
 pub struct Meter {
     offsets: HashMap<PathBuf, u64>,
     seen: HashSet<(Option<String>, Option<String>)>,
-    sums: HashMap<(String, Speed), [u64; 4]>,
+    sums: HashMap<(String, Speed), [u64; 5]>,
 }
 
 impl Meter {
@@ -241,7 +268,7 @@ impl Meter {
             }
             let speed = if tokens.speed.as_deref() == Some("fast") { Speed::Fast } else { Speed::Standard };
             let sum = self.sums.entry((model, speed)).or_default();
-            for (total, n) in sum.iter_mut().zip([tokens.input_tokens, tokens.cache_read_input_tokens, tokens.cache_creation_input_tokens, tokens.output_tokens]) {
+            for (total, n) in sum.iter_mut().zip(tokens.counts()) {
                 *total += n;
             }
         }
@@ -274,7 +301,7 @@ impl Meter {
     pub fn priced(&self, rates: &RateTable, book: &PriceBook) -> (f64, Vec<String>) {
         let (mut usd, mut unpriced) = (0.0, vec![]);
         for (row, by_multiple) in self.priced_rows(rates, book) {
-            let ceiling = (row.input + row.cached + row.cache_write) as f64 * CEILING_INPUT_USD + row.output as f64 * CEILING_OUTPUT_USD;
+            let ceiling = (row.input + row.cached) as f64 * CEILING_INPUT_USD + row.cache_write as f64 * ONE_HOUR_WRITE * CEILING_INPUT_USD + row.output as f64 * CEILING_OUTPUT_USD;
             match row.cost {
                 Some(c) if !by_multiple => usd += c.input + c.cache_read + c.cache_write + c.output,
                 cost => {
@@ -292,9 +319,9 @@ impl Meter {
     /// whether it was priced by `FAST_MULTIPLE`.
     fn priced_rows<'a>(&'a self, rates: &'a RateTable, book: &'a PriceBook) -> impl Iterator<Item = (Row, bool)> + 'a {
         let targets = book.targets();
-        self.sums.iter().map(move |((model, speed), [input, cached, cache_write, output])| {
+        self.sums.iter().map(move |((model, speed), &[input, cached, five, hour, output])| {
             let model = targets.get(model.as_str()).map_or(model.clone(), |&target| target.to_owned());
-            let mut row = Row { at: 0, model, session: 0, speed: *speed, input: *input, cached: *cached, cache_write: *cache_write, output: *output, cost: None, premium: 0.0, savings: 0.0 };
+            let mut row = Row { at: 0, model, session: 0, speed: *speed, input, cached, cache_write: five + hour, output, cache_write_1h: hour, cost: None, premium: 0.0, savings: 0.0 };
             let by_multiple = price(&mut row, rates, &book.prices);
             (row, by_multiple)
         })
@@ -395,7 +422,7 @@ fn price(row: &mut Row, table: &RateTable, prices: &HashMap<String, Price>) -> b
     let cost = |r: Rates| Cost {
         input: row.input as f64 * r.input,
         cache_read: row.cached as f64 * r.cache_read,
-        cache_write: row.cache_write as f64 * r.cache_write,
+        cache_write: (row.cache_write - row.cache_write_1h) as f64 * r.cache_write + row.cache_write_1h as f64 * ONE_HOUR_WRITE * r.input,
         output: row.output as f64 * r.output,
     };
     let total = |c: Cost| c.input + c.cache_read + c.cache_write + c.output;
@@ -854,7 +881,7 @@ mod tests {
     fn prices_fast_mode_and_leaves_unknown_models_unpriced() {
         let rates = table();
         let priced = |model: &str, speed| {
-            let mut row = Row { at: 0, model: model.into(), session: 0, speed, input: 1_000_000, cached: 0, cache_write: 0, output: 0, cost: None, premium: 0.0, savings: 0.0 };
+            let mut row = Row { at: 0, model: model.into(), session: 0, speed, input: 1_000_000, cached: 0, cache_write: 0, output: 0, cache_write_1h: 0, cost: None, premium: 0.0, savings: 0.0 };
             price(&mut row, &rates, &HashMap::from([("opus".to_owned(), Price { input: 2.0, output: 10.0, cache_read: None, cache_write: Some(4.0) })]));
             row
         };
