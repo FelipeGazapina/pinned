@@ -651,6 +651,8 @@ enum Needs<'a> {
     Index(&'a str),
     /// `alter table <table> alter column <column> drop not null`: the column's being nullable.
     Nullable(&'a str, &'a str),
+    /// `alter table <table> alter column <column> drop default`: the column's having no default.
+    NoDefault(&'a str, &'a str),
 }
 
 fn needs(statement: &str) -> Needs<'_> {
@@ -659,6 +661,7 @@ fn needs(statement: &str) -> Needs<'_> {
     match words[..] {
         ["create", "index", "if", "not", "exists", index, ..] => Needs::Index(index),
         ["alter", "table", table, "alter", "column", column, "drop", "not", "null"] => Needs::Nullable(table, column),
+        ["alter", "table", table, "alter", "column", column, "drop", "default"] => Needs::NoDefault(table, column),
         ["alter", "table", table, ..] if words[3..].starts_with(&ADD) => {
             Needs::Columns(table, words.windows(ADD.len() + 1).filter(|w| w[..ADD.len()] == ADD).map(|w| w[ADD.len()].trim_end_matches(',')).collect())
         }
@@ -677,6 +680,7 @@ async fn needed(client: &Client, needs: &Needs<'_>) -> Result<bool, tokio_postgr
         }
         Needs::Index(index) => client.query_one("select to_regclass($1::text) is null", &[index]).await?.get(0),
         Needs::Nullable(table, column) => client.query_one(&format!("select coalesce(bool_or(attnotnull), true) {COLUMN} and attname::text = $2::text"), &[table, column]).await?.get(0),
+        Needs::NoDefault(table, column) => client.query_one(&format!("select coalesce(bool_or(atthasdef), true) {COLUMN} and attname::text = $2::text"), &[table, column]).await?.get(0),
     })
 }
 
@@ -2589,6 +2593,7 @@ mod tests {
             Needs::Columns("team_calls", vec!["step_hash", "released_at"])
         );
         assert_eq!(needs("alter table invites alter column expires_at drop not null"), Needs::Nullable("invites", "expires_at"));
+        assert_eq!(needs("alter table team_runs alter column model_usd drop default"), Needs::NoDefault("team_runs", "model_usd"));
         assert_eq!(needs("create index if not exists tasks_due on tasks (next_at) where enabled and next_at is not null"), Needs::Index("tasks_due"));
     }
 
