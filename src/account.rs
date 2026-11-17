@@ -62,9 +62,11 @@ impl Account {
         Ok((creds.hub.clone(), creds.user_token.clone()))
     }
 
-    pub fn forward(&self, message: pinned_core::agent::Message) -> Result<Result<String, String>, pinned_core::agent::Message> {
+    /// Passes a connector session's callback to the hub, with what the machine found of the
+    /// session it came from, or hands it back when signed out.
+    pub fn forward(&self, message: pinned_core::agent::Message, vouch: pinned_core::agent::Vouch) -> Result<Result<String, String>, pinned_core::agent::Message> {
         match self.signed_in.read().unwrap().as_ref() {
-            Some(signed_in) => Ok(signed_in.link.forward(message)),
+            Some(signed_in) => Ok(signed_in.link.forward_from(message, vouch)),
             None => Err(message),
         }
     }

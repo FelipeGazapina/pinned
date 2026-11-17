@@ -10752,7 +10752,7 @@
                 ]
               },
               "vouched": {
-                "description": "Whether the machine found the act to come from the agent of session `tab` itself (true),\nor from a process it could not tie to that session (false). Absent from a machine that does\nnot check.",
+                "description": "Whether the machine found the act to come from inside session `tab`, its agent or a process\nin the agent's process tree (true), or from outside every session on it (false). Absent\nfrom a machine that does not check.",
                 "type": [
                   "boolean",
                   "null"
@@ -22772,7 +22772,7 @@
                 ]
               },
               "vouched": {
-                "description": "Whether the machine found the act to come from the agent of session `tab` itself (true),\nor from a process it could not tie to that session (false). Absent from a machine that does\nnot check.",
+                "description": "Whether the machine found the act to come from inside session `tab`, its agent or a process\nin the agent's process tree (true), or from outside every session on it (false). Absent\nfrom a machine that does not check.",
                 "type": [
                   "boolean",
                   "null"
@@ -24460,6 +24460,20 @@
               },
               "call": {
                 "$ref": "#/$defs/HubCall"
+              },
+              "from_tab": {
+                "description": "The tab whose session the machine found a workflow session's callback to come from:\nthe nearest session up the calling process's parents.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "vouched": {
+                "description": "Whether the machine found the callback to come from inside a session (true, with\n`from_tab`) or from outside every session on it (false). Absent from a machine that does\nnot check, and for every other call.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -31923,7 +31937,7 @@
                 ]
               },
               "vouched": {
-                "description": "Whether the machine found the act to come from the agent of session `tab` itself (true),\nor from a process it could not tie to that session (false). Absent from a machine that does\nnot check.",
+                "description": "Whether the machine found the act to come from inside session `tab`, its agent or a process\nin the agent's process tree (true), or from outside every session on it (false). Absent\nfrom a machine that does not check.",
                 "type": [
                   "boolean",
                   "null"
@@ -33507,6 +33521,20 @@
               },
               "call": {
                 "$ref": "#/$defs/HubCall"
+              },
+              "from_tab": {
+                "description": "The tab whose session the machine found a workflow session's callback to come from:\nthe nearest session up the calling process's parents.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "vouched": {
+                "description": "Whether the machine found the callback to come from inside a session (true, with\n`from_tab`) or from outside every session on it (false). Absent from a machine that does\nnot check, and for every other call.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -40799,7 +40827,7 @@
                 ]
               },
               "vouched": {
-                "description": "Whether the machine found the act to come from the agent of session `tab` itself (true),\nor from a process it could not tie to that session (false). Absent from a machine that does\nnot check.",
+                "description": "Whether the machine found the act to come from inside session `tab`, its agent or a process\nin the agent's process tree (true), or from outside every session on it (false). Absent\nfrom a machine that does not check.",
                 "type": [
                   "boolean",
                   "null"

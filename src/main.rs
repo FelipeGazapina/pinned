@@ -623,7 +623,7 @@ fn main() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             add_tray_or_go_without(app)?;
             let handle = app.handle().clone();
-            machine.listen(move |message| match message {
+            machine.listen_vouched(move |message, vouch| match message {
                 agent::Message::Remind { message, when } => handle.state::<reminders::Reminders>().add(message, &when),
                 agent::Message::ListReminders => Ok(handle.state::<reminders::Reminders>().list()),
                 agent::Message::CancelReminder { id } => handle.state::<reminders::Reminders>().cancel(id),
@@ -634,7 +634,7 @@ fn main() {
                 | agent::Message::TaskCancel { .. }
                 | agent::Message::Capabilities { .. }
                 | agent::Message::Project { .. } => Err("the machine answers this itself".into()),
-                callback => match handle.state::<account::Account>().forward(callback) {
+                callback => match handle.state::<account::Account>().forward(callback, vouch) {
                     Ok(answer) => answer,
                     Err(agent::Message::Stage { connector, subject, stage }) => tauri::async_runtime::block_on(
                         handle.state::<connectors::Connectors>().stage(&connector, &subject, stage),
