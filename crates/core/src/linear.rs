@@ -321,8 +321,8 @@ const CHANGES: &str = "query($filter: IssueFilter, $after: String) {
 static VIEWERS: std::sync::Mutex<BTreeMap<[u8; 32], String>> = std::sync::Mutex::new(BTreeMap::new());
 
 /// The changes to issues in `scope` made after `since` (RFC 3339), read up to four pages of 50 issues.
-/// Issues are read newest update first; when the four pages end with more to read, `oldest` is the
-/// oldest `updatedAt` read, and every issue updated after it was among those read.
+/// When the four pages end with more to read, `oldest` is the oldest `updatedAt` read. That is a safe
+/// watermark only if Linear sends issues newest update first, so that every issue updated after it was read.
 pub async fn changes(key: &str, since: &str, scope: &Scope) -> Result<Changes, String> {
     since_time(since)?;
     let mut filter = json!({ "updatedAt": { "gt": since } });
