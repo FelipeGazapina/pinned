@@ -245,20 +245,42 @@ impl Meter {
 
     /// The tokens so far, priced with `rates` and the user's `book`. `wall_ms` and `box_usd` are the caller's.
     pub fn usage(&self, rates: &RateTable, book: &PriceBook) -> TaskUsage {
-        let targets = book.targets();
         let mut usage = TaskUsage { cost_usd: Some(0.0), ..TaskUsage::default() };
-        for ((model, speed), [input, cached, cache_write, output]) in &self.sums {
-            usage.tokens_in += input + cached + cache_write;
-            usage.tokens_out += output;
-            let model = targets.get(model.as_str()).map_or(model.clone(), |&target| target.to_owned());
-            let mut row = Row { at: 0, model, session: 0, speed: *speed, input: *input, cached: *cached, cache_write: *cache_write, output: *output, cost: None, premium: 0.0, savings: 0.0 };
-            price(&mut row, rates, &book.prices);
+        for row in self.priced_rows(rates, book) {
+            usage.tokens_in += row.input + row.cached + row.cache_write;
+            usage.tokens_out += row.output;
             usage.cost_usd = match (usage.cost_usd, row.cost) {
                 (Some(sum), Some(c)) => Some(sum + c.input + c.cache_read + c.cache_write + c.output),
                 _ => None,
             };
         }
         usage
+    }
+
+    /// What `usage` prices, except that a model with no price is left out instead of leaving the
+    /// whole cost unknown: the cost of the models priced, and the models left out.
+    pub fn priced(&self, rates: &RateTable, book: &PriceBook) -> (f64, Vec<String>) {
+        let (mut usd, mut unpriced) = (0.0, vec![]);
+        for row in self.priced_rows(rates, book) {
+            match row.cost {
+                Some(c) => usd += c.input + c.cache_read + c.cache_write + c.output,
+                None => unpriced.push(row.model),
+            }
+        }
+        unpriced.sort();
+        unpriced.dedup();
+        (usd, unpriced)
+    }
+
+    /// One row per model and speed, a mapped model as the one `book` maps it to, priced.
+    fn priced_rows<'a>(&'a self, rates: &'a RateTable, book: &'a PriceBook) -> impl Iterator<Item = Row> + 'a {
+        let targets = book.targets();
+        self.sums.iter().map(move |((model, speed), [input, cached, cache_write, output])| {
+            let model = targets.get(model.as_str()).map_or(model.clone(), |&target| target.to_owned());
+            let mut row = Row { at: 0, model, session: 0, speed: *speed, input: *input, cached: *cached, cache_write: *cache_write, output: *output, cost: None, premium: 0.0, savings: 0.0 };
+            price(&mut row, rates, &book.prices);
+            row
+        })
     }
 }
 

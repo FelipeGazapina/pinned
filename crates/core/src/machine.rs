@@ -3939,27 +3939,45 @@ impl Machine {
         if moved.is_empty() {
             return;
         }
-        let (rates, book) = (self.meter_rates(), usage::PriceBook::load(self.prices_file().as_deref()));
+        let (rates, book) = (self.meter_rates(), self.meter_book());
         let used: Vec<_> = moved.into_iter().map(|task| (task.clone(), meters[&task].usage(&rates, &book))).collect();
         self.delegates.meter(&used, self.launch.path_env.as_deref());
     }
 
     /// Sends the hub the model cost so far of each workflow session in this team box
-    /// (`TeamOp::RunModelCost`): its running total, at most every `RUN_COST_EVERY` while the
-    /// session runs, and once more when it ends, then nothing. A total, never a delta, so a report
-    /// lost or sent twice never counts twice. A session that spent no tokens is not reported.
+    /// (`TeamOp::RunModelCost`): its running total, its own session's and the workers it
+    /// delegated, at most every `RUN_COST_EVERY` while the session runs, once when it stops, and
+    /// once more when its tab closes, then nothing. A total, never a delta, so a report lost or
+    /// sent twice never counts twice. A tab keeps its meter until it closes, so a session that
+    /// stops and goes on adds to what it spent before. A model with no price is left out of the
+    /// total, and named in the log once per tab. A session that spent nothing is not reported.
     /// Waits on the hub: the 1 s pass calls it on a thread of its own (`send_run_costs`).
     fn report_run_costs(&self, now: Instant) {
         if !self.team_box.load(Ordering::Relaxed) {
             return;
         }
-        let live: Vec<(String, (String, crate::agent::Subject))> =
-            self.tabs.lock().unwrap().iter().filter(|(_, t)| t.live()).filter_map(|(id, t)| Some((id.clone(), session_of(&t.env)?))).collect();
-        let found: Vec<Option<PathBuf>> = live.iter().map(|(tab, _)| self.transcript_of(tab).ok().flatten()).collect();
+        let tabs: Vec<(String, (String, crate::agent::Subject), bool)> =
+            self.tabs.lock().unwrap().iter().filter_map(|(id, t)| Some((id.clone(), session_of(&t.env)?, t.live()))).collect();
+        let known: HashSet<String> = self.run_costs.lock().unwrap().keys().cloned().collect();
+        let found: Vec<Option<PathBuf>> = tabs.iter().map(|(tab, _, live)| if *live || known.contains(tab) { self.transcript_of(tab).ok().flatten() } else { None }).collect();
+        let mut prices = None;
         let mut due = vec![];
         {
             let mut costs = self.run_costs.lock().unwrap();
-            for ((tab, work), file) in live.iter().zip(found) {
+            let mut total = |tab: &str, cost: &mut RunCost| {
+                let (rates, book) = prices.get_or_insert_with(|| (self.meter_rates(), self.meter_book()));
+                let (own, unpriced) = cost.meter.priced(rates, book);
+                for model in unpriced {
+                    if cost.unpriced.insert(model.clone()) {
+                        eprintln!("pinned: a run's model cost leaves out {model}, which has no price");
+                    }
+                }
+                own + self.delegates.work_cost_of_tab(tab).agents_usd
+            };
+            for ((tab, work, live), file) in tabs.iter().zip(found) {
+                if !live && !costs.contains_key(tab) {
+                    continue;
+                }
                 let cost = costs.entry(tab.clone()).or_default();
                 cost.work = Some(work.clone());
                 if file.is_some() {
@@ -3968,28 +3986,34 @@ impl Machine {
                 if let Some(file) = &cost.transcript {
                     let _ = cost.meter.advance(file);
                 }
-                if !cost.meter.is_empty() && cost.sent.map_or(true, |sent| now >= sent + RUN_COST_EVERY) {
-                    cost.sent = Some(now);
-                    due.push((work.clone(), cost.meter.clone()));
+                let send = match live {
+                    true => {
+                        cost.stopped = false;
+                        cost.sent.map_or(true, |sent| now >= sent + RUN_COST_EVERY)
+                    }
+                    false => !std::mem::replace(&mut cost.stopped, true),
+                };
+                if send {
+                    let usd = total(tab, cost);
+                    if usd > 0.0 || !cost.meter.is_empty() {
+                        cost.sent = Some(now);
+                        due.push((work.clone(), usd));
+                    }
                 }
             }
-            let ended: Vec<String> = costs.keys().filter(|tab| !live.iter().any(|(id, _)| id == *tab)).cloned().collect();
-            for tab in ended {
+            let closed: Vec<String> = costs.keys().filter(|tab| !tabs.iter().any(|(id, ..)| id == *tab)).cloned().collect();
+            for tab in closed {
                 let Some(mut cost) = costs.remove(&tab) else { continue };
                 if let Some(file) = &cost.transcript {
                     let _ = cost.meter.advance(file);
                 }
-                if let (Some(work), false) = (cost.work, cost.meter.is_empty()) {
-                    due.push((work, cost.meter));
+                let usd = total(&tab, &mut cost);
+                if let (Some(work), true) = (cost.work.take(), usd > 0.0 || !cost.meter.is_empty()) {
+                    due.push((work, usd));
                 }
             }
         }
-        if due.is_empty() {
-            return;
-        }
-        let (rates, book) = (self.meter_rates(), usage::PriceBook::load(self.prices_file().as_deref()));
-        for ((workflow, subject), meter) in due {
-            let Some(usd) = meter.usage(&rates, &book).cost_usd else { continue };
+        for ((workflow, subject), usd) in due {
             let op = crate::teams::TeamOp::RunModelCost { workflow, subject, usd };
             if let Err(e) = self.call_hub(HubCall::Team { team: None, op }) {
                 eprintln!("pinned: the hub did not take a run's model cost: {e}");
@@ -4008,6 +4032,15 @@ impl Machine {
             machine.report_run_costs(Instant::now());
             machine.sending_run_costs.store(false, Ordering::SeqCst);
         });
+    }
+
+    /// The prices a meter adds to the list: the user's, but none in a team box, whose sessions
+    /// can write its config dir and so its price file, and whose runs' costs the team pays.
+    fn meter_book(&self) -> usage::PriceBook {
+        match self.team_box.load(Ordering::Relaxed) {
+            true => usage::PriceBook::default(),
+            false => usage::PriceBook::load(self.prices_file().as_deref()),
+        }
     }
 
     /// The price list, read again each hour.
@@ -7307,6 +7340,10 @@ struct RunCost {
     /// The session's transcript as last found, read once more when the session ends.
     transcript: Option<PathBuf>,
     sent: Option<Instant>,
+    /// Its tab stopped being live and its total was sent for that.
+    stopped: bool,
+    /// The models left out of its total for having no price, each logged once.
+    unpriced: HashSet<String>,
 }
 
 #[cfg(test)]
@@ -13837,15 +13874,27 @@ Have another model review a risky change before it goes ahead.";
         }
     }
 
-    #[test]
+    /// A team box's node (`run_costs_box`) whose hub keeps each `RunModelCost` it is sent, in cents.
     #[cfg(unix)]
-    fn a_team_boxs_session_reports_its_model_cost_at_the_interval_until_it_ends() {
-        let dir = temp("run-costs");
+    struct RunCostBox {
+        dir: PathBuf,
+        config: PathBuf,
+        m: Arc<Machine>,
+        sent: Arc<Mutex<Vec<(String, Subject, f64)>>>,
+        subject: Subject,
+        tab: String,
+        transcript: PathBuf,
+    }
+
+    /// A team box running a session of workflow `wf-1` on ENG-7, whose transcript holds a message
+    /// of 10 000 output tokens of claude-sonnet-5-5 (US$ 0.15 at the list's US$ 15 per million).
+    #[cfg(unix)]
+    fn run_costs_box(name: &str) -> RunCostBox {
+        let dir = temp(name);
         let config = dir.join("config");
         std::fs::create_dir_all(dir.join("app")).unwrap();
         std::fs::create_dir_all(&config).unwrap();
-        std::fs::write(config.join("usage-model-rates.json"), "{}").unwrap();
-        std::fs::write(config.join("usage-prices.json"), r#"{"prices":{"claude-sonnet-5-5":{"input":3,"output":15}}}"#).unwrap();
+        std::fs::write(config.join("usage-model-rates.json"), r#"{"claude-sonnet-5-5":{"input_cost_per_token":0.000003,"output_cost_per_token":0.000015}}"#).unwrap();
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, thread_claude(&dir))]), ..launch() }, Some(config.clone()), None, |_| {});
         m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
         let sent = Arc::new(Mutex::new(vec![]));
@@ -13862,9 +13911,23 @@ Have another model review a risky change before it goes ahead.";
         let transcripts = config.join("accounts/work/projects/app");
         std::fs::create_dir_all(&transcripts).unwrap();
         let transcript = transcripts.join("s-child.jsonl");
-        let spent = |id: &str, output: u64| json!({ "type": "assistant", "requestId": id, "message": { "id": id, "model": "claude-sonnet-5-5", "content": [], "usage": { "input_tokens": 0, "output_tokens": output } } });
-        std::fs::write(&transcript, format!("{}\n", spent("m1", 10_000))).unwrap();
+        std::fs::write(&transcript, format!("{}\n", run_spent("m1", "claude-sonnet-5-5", 10_000))).unwrap();
         m.record_event(hook_event(&tab, "working", &transcript, Some("Fix ENG-7")));
+        m.team_box.store(true, Ordering::SeqCst);
+        RunCostBox { dir, config, m, sent, subject, tab, transcript }
+    }
+
+    /// An assistant message of `output` tokens of `model`, as a transcript line.
+    #[cfg(unix)]
+    fn run_spent(id: &str, model: &str, output: u64) -> Value {
+        json!({ "type": "assistant", "requestId": id, "message": { "id": id, "model": model, "content": [], "usage": { "input_tokens": 0, "output_tokens": output } } })
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_team_boxs_session_reports_its_model_cost_at_the_interval_until_it_ends() {
+        let RunCostBox { dir, m, sent, subject, tab, transcript, .. } = run_costs_box("run-costs");
+        let spent = |id: &str, output: u64| run_spent(id, "claude-sonnet-5-5", output);
         let cents = |usd: f64| ("wf-1".to_owned(), subject.clone(), usd);
         let t0 = Instant::now();
 
@@ -13885,6 +13948,85 @@ Have another model review a risky change before it goes ahead.";
         m.report_run_costs(t0 + RUN_COST_EVERY * 2 + Duration::from_secs(1));
         m.report_run_costs(t0 + RUN_COST_EVERY * 5);
         assert_eq!(*sent.lock().unwrap(), vec![cents(15.0), cents(15.0), cents(60.0), cents(75.0)], "its last total once it ended, then nothing");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_team_boxs_run_cost_leaves_out_a_model_with_no_price_and_sends_what_is_priced() {
+        let RunCostBox { dir, m, sent, subject, transcript, .. } = run_costs_box("run-costs-unpriced");
+        append(&transcript, &[run_spent("m2", "claude-unlisted-1", 50_000)]);
+        let t0 = Instant::now();
+        m.report_run_costs(t0);
+        append(&transcript, &[run_spent("m3", "claude-sonnet-5-5", 20_000)]);
+        m.report_run_costs(t0 + RUN_COST_EVERY);
+        assert_eq!(*sent.lock().unwrap(), vec![("wf-1".to_owned(), subject.clone(), 15.0), ("wf-1".to_owned(), subject, 45.0)], "the priced part, the unpriced model left out");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_team_boxs_run_cost_adds_what_its_delegated_workers_spent() {
+        use crate::delegate::{NewTask, Parent};
+        use crate::usage::TaskUsage;
+        let RunCostBox { dir, m, sent, subject, tab, .. } = run_costs_box("run-costs-delegated");
+        let child = m
+            .delegates
+            .begin(NewTask {
+                parent: Parent::Tab(tab.clone()),
+                tool: None,
+                title: "Run the suite".into(),
+                account: "claude".into(),
+                provider: Provider::Claude,
+                model: Some("claude-sonnet-5-5".into()),
+                cwd: dir.clone(),
+                mode: crate::delegate::Mode::Async,
+                access: crate::delegate::Access::Auto,
+                isolated: false,
+                caller_key: format!("tab:{tab}"),
+                client_request_id: None,
+                role: None,
+            })
+            .id;
+        let usage = |usd: f64| TaskUsage { tokens_in: 1000, tokens_out: 500, cost_usd: Some(usd), wall_ms: 60_000, box_usd: None, box_ms: None };
+        m.delegates.meter(&[(child.clone(), usage(0.42))], None);
+        let t0 = Instant::now();
+        m.report_run_costs(t0);
+        m.delegates.meter(&[(child, usage(0.50))], None);
+        m.report_run_costs(t0 + RUN_COST_EVERY);
+        assert_eq!(*sent.lock().unwrap(), vec![("wf-1".to_owned(), subject.clone(), 57.0), ("wf-1".to_owned(), subject, 65.0)], "0.15 its own session + its worker's 0.42, then 0.50: a total");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_team_boxs_run_cost_takes_the_list_price_not_the_boxs_price_file() {
+        let RunCostBox { dir, config, m, sent, subject, .. } = run_costs_box("run-costs-price-file");
+        std::fs::write(config.join("usage-prices.json"), r#"{"prices":{"claude-sonnet-5-5":{"input":0,"output":0}}}"#).unwrap();
+        m.report_run_costs(Instant::now());
+        assert_eq!(*sent.lock().unwrap(), vec![("wf-1".to_owned(), subject, 15.0)], "a price file of 0 changes nothing");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_team_boxs_session_not_live_for_a_pass_keeps_its_earlier_total() {
+        let RunCostBox { dir, m, sent, subject, tab, transcript, .. } = run_costs_box("run-costs-not-live");
+        let t0 = Instant::now();
+        m.report_run_costs(t0);
+        let session = m.tab(&tab, |t| t.session.take()).unwrap();
+        assert!(session.is_some());
+        // The transcript moves on to a new file while the tab is not live: the meter keeps the first.
+        let next = transcript.with_file_name("s-next.jsonl");
+        std::fs::write(&next, format!("{}\n", run_spent("m2", "claude-sonnet-5-5", 20_000))).unwrap();
+        m.report_run_costs(t0 + Duration::from_secs(1));
+        m.report_run_costs(t0 + Duration::from_secs(2));
+        m.tab(&tab, |t| t.session = session).unwrap();
+        let payload = json!({ "session_id": "s-next", "transcript_path": next });
+        m.record_event(AgentEvent { tab: Some(tab.clone()), ..hooks::event_from(Some("working"), &payload.to_string()).unwrap() });
+        m.report_run_costs(t0 + RUN_COST_EVERY * 2);
+        let cents = |usd: f64| ("wf-1".to_owned(), subject.clone(), usd);
+        assert_eq!(*sent.lock().unwrap(), vec![cents(15.0), cents(15.0), cents(45.0)], "its last total once when it stopped, then its earlier total and the new file's");
         let _ = std::fs::remove_dir_all(dir);
     }
 
