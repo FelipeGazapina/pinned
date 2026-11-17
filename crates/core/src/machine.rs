@@ -3958,8 +3958,9 @@ impl Machine {
     /// records it on its task, and stops the ones past their budget. The `meters` lock is held
     /// through the record, so the 1 s pass and a turn's end never write an older total over a newer
     /// one. Cursor and Codex children run headless and are not metered. In a team box, whose
-    /// runs' costs the team pays, a model with no price is left out of a worker's cost instead of
-    /// leaving all of it unknown, and named in the log once per worker.
+    /// runs' costs the team pays, a model with no price is priced at the ceiling rate
+    /// (`usage::Meter::priced`) instead of leaving all of a worker's cost unknown, and named in
+    /// the log once per worker.
     fn meter_workers(&self) {
         let threads: Vec<(String, String)> = self
             .tabs
@@ -3994,7 +3995,7 @@ impl Machine {
                     let (usd, unpriced) = meters[&task].priced(&rates, &book);
                     for model in unpriced {
                         if logged.entry(task.clone()).or_default().insert(model.clone()) {
-                            eprintln!("pinned: worker {task}'s cost leaves out {model}, which has no price");
+                            eprintln!("pinned: worker {task}'s cost prices {model}, which has no price, at the ceiling rate");
                         }
                     }
                     usage.cost_usd = Some(usd);
@@ -4011,8 +4012,9 @@ impl Machine {
     /// delegated, at most every `RUN_COST_EVERY` while the session runs, once when it stops, and
     /// once more when its tab closes, then nothing. A total, never a delta, so a report lost or
     /// sent twice never counts twice. A tab keeps its meter until it closes, so a session that
-    /// stops and goes on adds to what it spent before. A model with no price is left out of the
-    /// total, and named in the log once per tab. A session that spent nothing is not reported.
+    /// stops and goes on adds to what it spent before. A model with no price is priced at the
+    /// ceiling rate (`usage::Meter::priced`), and named in the log once per tab. A session that
+    /// spent nothing is not reported.
     /// Waits on the hub: the 1 s pass calls it on a thread of its own (`send_run_costs`).
     fn report_run_costs(&self, now: Instant) {
         if !self.team_box.load(Ordering::Relaxed) {
@@ -4031,7 +4033,7 @@ impl Machine {
                 let (own, unpriced) = cost.meter.priced(rates, book);
                 for model in unpriced {
                     if cost.unpriced.insert(model.clone()) {
-                        eprintln!("pinned: a run's model cost leaves out {model}, which has no price");
+                        eprintln!("pinned: a run's model cost prices {model}, which has no price, at the ceiling rate");
                     }
                 }
                 own + self.delegates.work_cost_of_tab(tab).agents_usd
@@ -7473,7 +7475,7 @@ struct RunCost {
     sent: Option<Instant>,
     /// Its tab stopped being live and its total was sent for that.
     stopped: bool,
-    /// The models left out of its total for having no price, each logged once.
+    /// The models priced at the ceiling rate for having no price, each logged once.
     unpriced: HashSet<String>,
 }
 
@@ -14235,14 +14237,14 @@ Have another model review a risky change before it goes ahead.";
 
     #[test]
     #[cfg(unix)]
-    fn a_team_boxs_run_cost_leaves_out_a_model_with_no_price_and_sends_what_is_priced() {
+    fn a_team_boxs_run_cost_prices_a_model_with_no_price_at_the_ceiling_beside_what_is_priced() {
         let RunCostBox { dir, m, sent, subject, transcript, .. } = run_costs_box("run-costs-unpriced");
         append(&transcript, &[run_spent("m2", "claude-unlisted-1", 50_000)]);
         let t0 = Instant::now();
         m.report_run_costs(t0);
         append(&transcript, &[run_spent("m3", "claude-sonnet-5-5", 20_000)]);
         m.report_run_costs(t0 + RUN_COST_EVERY);
-        assert_eq!(*sent.lock().unwrap(), vec![("wf-1".to_owned(), subject.clone(), 15.0), ("wf-1".to_owned(), subject, 45.0)], "the priced part, the unpriced model left out");
+        assert_eq!(*sent.lock().unwrap(), vec![("wf-1".to_owned(), subject.clone(), 765.0), ("wf-1".to_owned(), subject, 795.0)], "the priced part, and the unpriced model's 50 000 tokens at the ceiling's US$ 150 per million");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -14295,7 +14297,7 @@ Have another model review a risky change before it goes ahead.";
 
     #[test]
     #[cfg(unix)]
-    fn a_team_boxs_run_cost_keeps_a_workers_priced_spend_when_it_uses_a_model_with_no_price() {
+    fn a_team_boxs_run_cost_prices_a_workers_model_with_no_price_at_the_ceiling() {
         let RunCostBox { dir, m, sent, subject, tab, transcript, .. } = run_costs_box("run-costs-worker-unpriced");
         let reply = delegate_task(&m, &tab, work(Some("claude-sonnet-5-5"), None));
         let child = reply["tabId"].as_str().unwrap().to_owned();
@@ -14310,7 +14312,7 @@ Have another model review a risky change before it goes ahead.";
         m.meter_workers();
         m.report_run_costs(t0 + RUN_COST_EVERY);
         let cents = |usd: f64| ("wf-1".to_owned(), subject.clone(), usd);
-        assert_eq!(*sent.lock().unwrap(), vec![cents(315.0), cents(315.0)], "the worker's US$ 3.00 and its parent's 0.15, the unpriced model left out");
+        assert_eq!(*sent.lock().unwrap(), vec![cents(315.0), cents(1_065.0)], "the worker's US$ 3.00 and its parent's 0.15, then the unpriced model's 50 000 tokens at the ceiling's US$ 7.50");
         let _ = std::fs::remove_dir_all(dir);
     }
 

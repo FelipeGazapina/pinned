@@ -15,6 +15,13 @@ const SLICE: u64 = 15 * 60;
 /// After a failed download of the price list, the next waits this long, so an offline machine doesn't wait out the timeout on every call.
 const RETRY_AFTER: Duration = Duration::from_secs(60);
 static FAILED_AT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+/// What a team box prices a model the price list has no price for at, in USD per token, every
+/// model while it has no list at all, so its runs' spend limits fire early rather than never:
+/// US$ 30 input and US$ 150 output per million, the dearest Claude rate in LiteLLM's list,
+/// `claude-opus-4-6` in fast mode (6 times its US$ 5 / 25). Claude Opus 4.1, 4 and 3 list
+/// US$ 15 / 75, and Claude Fable 5.1 US$ 10 / 50. Cache reads and writes take the input rate.
+pub const CEILING_INPUT_USD: f64 = 30e-6;
+pub const CEILING_OUTPUT_USD: f64 = 150e-6;
 /// A transcript last written this long before the window opens can't hold a line inside it.
 const MTIME_SLACK: u64 = 36 * 3600;
 /// Bare family names span generations, and `<synthetic>` lines were never billed.
@@ -257,14 +264,18 @@ impl Meter {
         usage
     }
 
-    /// What `usage` prices, except that a model with no price is left out instead of leaving the
-    /// whole cost unknown: the cost of the models priced, and the models left out.
+    /// What `usage` prices, as a team box prices it: a model with no price, at the ceiling rate
+    /// (`CEILING_INPUT_USD`, `CEILING_OUTPUT_USD`) instead of leaving the whole cost unknown. The
+    /// cost, and the models priced at the ceiling.
     pub fn priced(&self, rates: &RateTable, book: &PriceBook) -> (f64, Vec<String>) {
         let (mut usd, mut unpriced) = (0.0, vec![]);
         for row in self.priced_rows(rates, book) {
             match row.cost {
                 Some(c) => usd += c.input + c.cache_read + c.cache_write + c.output,
-                None => unpriced.push(row.model),
+                None => {
+                    usd += (row.input + row.cached + row.cache_write) as f64 * CEILING_INPUT_USD + row.output as f64 * CEILING_OUTPUT_USD;
+                    unpriced.push(row.model);
+                }
             }
         }
         unpriced.sort();
