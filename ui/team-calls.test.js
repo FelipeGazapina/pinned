@@ -719,7 +719,7 @@ test("the team's owner sees one line under the team while its waiting line is he
   const held = { since: at(14, 5), why: "settings_unread" };
   const line = (html) => [...html.matchAll(/<div class="tc-none" role="status" data-line-held>([^<]*)<\/div>/g)].map((m) => text(m[1]));
   const owner = page({ role: "owner", email: "ana.souza@north.example", held }).eval("tcNavHtml(tcCurrent(), 'team-calls')");
-  assert.deepEqual(line(owner), ["Bots are waiting: the team's settings could not be read since 14:05."]);
+  assert.deepEqual(line(owner), ["Bots are waiting: the team's settings could not be read since 2:05 PM."]);
   assert.ok(owner.indexOf("data-line-held") > owner.indexOf("tc-team-name") && owner.indexOf("data-line-held") < owner.indexOf(">Bots<"), "between the team's name and its bots");
   assert.deepEqual(line(page({ held }).eval("tcNavHtml(tcCurrent(), 'team-calls')")), [], "a member does not see it");
   const plain = page({ role: "owner", email: "ana.souza@north.example" }).eval("tcNavHtml(tcCurrent(), 'team-calls')");
