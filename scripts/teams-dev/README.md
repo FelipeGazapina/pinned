@@ -37,9 +37,9 @@ lifetime timers run 60 times faster), sends every Slack call to the fake Slack, 
 report on the fake GitHub.
 
 **Reports:** "report an issue" files on the fake GitHub: `dev.sh` points `PINNED_REPORTS_GITHUB_API`
-at it and gives the hub the placeholder token `fake-teams-dev`, which only the fake takes. Under
-`--dev` the hub refuses a reports API that is not on this machine, and has reporting off when none is
-set, so a dev hub never files on the real GitHub.
+at it, and the hub sends the fake its own built-in `fake-` token. Under `--dev` the hub never reads
+the reports token variable, refuses a reports API that is not on this machine, and has reporting off
+when none is set, so a dev hub never files on the real GitHub.
 Never set PINNED_REPORTS_GITHUB_TOKEN for a dev hub, box or test environment.
 
 **Slack:** a team or account connects Slack with the token `xoxb-dev-<anything>`; the fake answers

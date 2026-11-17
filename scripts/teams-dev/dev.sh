@@ -16,7 +16,8 @@
 # TEAMS_DEV_HUB_PORT 8811, TEAMS_DEV_BOX_PORT 8812, TEAMS_DEV_SLACK_PORT 8813, TEAMS_DEV_PG_PORT 5611,
 # TEAMS_DEV_GITHUB_PORT 8814.
 # The hub always starts with --dev and PINNED_DEV_TIME_SCALE=${TEAMS_DEV_TIME_SCALE:-60}, and files
-# reports only on the fake GitHub (`pinned-server fake-github`), with a fake- token only it accepts.
+# reports only on the fake GitHub (`pinned-server fake-github`). No reports token is ever set: a --dev
+# hub sends the fake its own built-in fake- token.
 # The stack refuses (exit 2) a dir that is, or is inside, a real pinned home: ~/.pinned,
 # ~/.config/pinned, the desktop app's data folder, /workspace/home, or the home folder or / itself.
 set -eu
@@ -175,9 +176,9 @@ up() {
   wait_for "curl -s -o /dev/null $GITHUB/" "the fake GitHub"
 
   export PINNED_DEV_TIME_SCALE=${TEAMS_DEV_TIME_SCALE:-60}
-  # Reports go to the fake GitHub only. The token is a placeholder the fake takes and GitHub never would;
-  # the hub refuses, under --dev, any reports API that is not on this machine.
-  export PINNED_REPORTS_GITHUB_API="$GITHUB" PINNED_REPORTS_GITHUB_TOKEN=fake-teams-dev
+  # Reports go to the fake GitHub only: under --dev the hub refuses any reports API that is not on this
+  # machine, and sends no token but its own built-in fake one.
+  export PINNED_REPORTS_GITHUB_API="$GITHUB"
   "$SERVER" hub --db "postgres://pinned@127.0.0.1:$PG_PORT/pinned" --listen "127.0.0.1:$HUB_PORT" --ui "$REPO/ui" \
     --downloads "$DIR/downloads" --key-file "$DIR/hub.key" --public-url "$HUB" --signup open --dev >"$DIR/hub.log" 2>&1 &
   echo $! >"$DIR/hub.pid"
