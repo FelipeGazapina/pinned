@@ -76,8 +76,9 @@ const WORKING = ["⏺ Working through the plan…", "", "> "];
 
 /** The page's real rules around one tab that waits on a plan menu, with the page's I/O stubbed.
  * `stuck` keeps the menu up after its Yes; `writeError` makes a write fail; `refuse` makes `prompt`
- * fail, after showing `refuse` as the screen when it is an array. */
-function page({ screen = PLAN, stuck = false, writeError = null, refuse = false } = {}) {
+ * fail, after showing `refuse` as the screen when it is an array. `clock` runs the page on a fake clock
+ * that only `advance(ms)` moves; `offer` is the tokens the Compact pill offers while no menu is up. */
+function page({ screen = PLAN, stuck = false, writeError = null, refuse = false, clock = false, offer = null } = {}) {
   const log = [];
   const notes = [];
   const nodes = {};
@@ -128,7 +129,7 @@ function page({ screen = PLAN, stuck = false, writeError = null, refuse = false 
     phoneSvg: (name) => `<svg data-svg="${name}"></svg>`,
     icon: () => "",
     expandChips: (_tab, text) => text,
-    compactOffer: () => null,
+    compactOffer: (t) => (offer && !t.menu ? offer : null),
     durationLabel: () => "",
     callOn: async (machine, call) => {
       if (call.cmd === "write_input") {
@@ -145,6 +146,32 @@ function page({ screen = PLAN, stuck = false, writeError = null, refuse = false 
       return null;
     },
   };
+  const time = { t: 0, timers: [] };
+  const flush = async () => {
+    for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+  };
+  time.advance = async (ms) => {
+    const end = time.t + ms;
+    for (;;) {
+      await flush();
+      const live = time.timers.filter((x) => !x.off).sort((a, b) => a.at - b.at);
+      if (!live.length || live[0].at > end) break;
+      time.timers.splice(time.timers.indexOf(live[0]), 1);
+      time.t = Math.max(time.t, live[0].at);
+      live[0].fn();
+    }
+    time.t = end;
+    await flush();
+  };
+  if (clock) {
+    context.Date = { now: () => time.t };
+    context.setTimeout = (fn, ms = 0) => {
+      const timer = { at: time.t + ms, fn, off: false };
+      time.timers.push(timer);
+      return timer;
+    };
+    context.clearTimeout = (timer) => timer && (timer.off = true);
+  }
   vm.createContext(context);
   vm.runInContext(
     [
@@ -197,7 +224,7 @@ function page({ screen = PLAN, stuck = false, writeError = null, refuse = false 
     context,
   );
   tab.menu = vm.runInContext("terminalMenu(tab)", context);
-  return { tab, log, notes, nodes, ctx: context, run: (code) => vm.runInContext(code, context) };
+  return { tab, log, notes, nodes, time, ctx: context, run: (code) => vm.runInContext(code, context) };
 }
 
 /** Fires `event` through the field's handler, as the card and the sheet do. */
@@ -442,13 +469,15 @@ test("a choice that changed since the field drew types nothing and keeps the not
 });
 
 test("when the menu does not close in time the note stays in the field, with the reason", async () => {
-  const w = page({ stuck: true });
+  const w = page({ stuck: true, clock: true });
   attach(w, "keep the old API");
-  await w.run(`approveWithNote(tab, "keep the old API")`);
+  const sent = w.run(`approveWithNote(tab, "keep the old API")`);
+  await w.time.advance(16000);
+  await sent;
   assert.deepEqual(w.log, [["write", "\r"]]);
   assert.equal(w.ctx.prompt.value, "", "the note is not put into the composer");
   assert.equal(w.tab.thread.approveNote, "keep the old API");
-  assert.match(String(w.tab.thread.approveError), /didn't close/);
+  assert.equal(w.tab.thread.approveError, "Claude's menu didn't close. Your note is still here.");
 });
 
 test("a prompt refused while a menu is up keeps the note in the field, never in the composer", async () => {
@@ -540,4 +569,109 @@ test("on the phone the note field gets its own row, so Approve with a long label
   const field = /\.ask-sheet \.approve-note input \{([^}]*)\}/.exec(phoneCss)?.[1] ?? "";
   const basis = Number(/flex:\s*1\s+1\s+(\d+)px/.exec(field)?.[1] ?? 0);
   assert.ok(basis >= 160, `the field's flex basis is ${basis}px; it needs at least 160px to wrap`);
+});
+
+// Round 3: two silent note losses, and what the review found around them.
+
+test("Approve with note never sends /compact: the offer was hidden while the plan was up", async () => {
+  const w = page({ offer: 250000 });
+  attach(w, "keep the old API");
+  await fire(w, enter(element("[data-approve-note-input]")));
+  assert.deepEqual(w.log, [
+    ["write", "\r"],
+    ["prompt", "keep the old API"],
+  ]);
+});
+
+test("a late close sends the note once, after the close, and the hold is not released early", async () => {
+  const w = page({ stuck: true, clock: true });
+  attach(w, "keep the old API");
+  const sent = w.run(`approveWithNote(tab, "keep the old API")`);
+  await w.time.advance(6000);
+  assert.deepEqual(w.log, [["write", "\r"]], "nothing else is typed or sent while the menu is up");
+  assert.equal(w.tab.answering, true, "the 4 s mark did not release the hold");
+  assert.ok(w.tab.answered, "the hold is still on");
+  assert.equal(await w.run(`approveWithNote(tab, "a second note")`), false);
+  assert.deepEqual(w.log, [["write", "\r"]], "a second Approve during the wait types nothing");
+  w.tab.term.show(WORKING);
+  await w.time.advance(200);
+  assert.equal(await sent, true);
+  assert.deepEqual(w.log, [
+    ["write", "\r"],
+    ["prompt", "keep the old API"],
+  ]);
+  assert.equal(w.ctx.prompt.value, "", "the note went out, it is not also in the composer");
+  assert.equal(w.tab.thread.approveNote, null);
+});
+
+test("a note whose menu changed goes back to an empty composer, not nowhere", () => {
+  const w = page();
+  attach(w, "keep the old API");
+  w.tab.term.show(PLAN_OTHER);
+  w.tab.menu = w.run("terminalMenu(tab)");
+  assert.equal(w.run("approveNoteOf(tab)"), null);
+  assert.equal(w.ctx.prompt.value, "keep the old API");
+  assert.deepEqual(w.notes.at(-1), ["Claude's menu closed. Your note is back in the message box.", true]);
+});
+
+test("a note whose menu left, with something already in the composer, is shown as not sent", () => {
+  const w = page();
+  attach(w, "x".repeat(80));
+  w.ctx.prompt.value = "my own draft";
+  w.tab.term.show(WORKING);
+  w.tab.menu = null;
+  w.run("approveNoteOf(tab)");
+  assert.equal(w.ctx.prompt.value, "my own draft", "the composer is not overwritten");
+  assert.deepEqual(w.notes.at(-1), [`Claude's menu closed. Your note was not sent: ${"x".repeat(60)}…`, true]);
+});
+
+test("one frame without a menu while the tab is answering does not clear the note", () => {
+  const w = page();
+  attach(w, "keep the old API");
+  w.tab.answering = true;
+  w.tab.term.show(WORKING);
+  assert.equal(w.run("approveNoteOf(tab)"), "keep the old API");
+  assert.equal(w.ctx.prompt.value, "");
+  assert.deepEqual(w.notes, []);
+});
+
+test("a failed note with something in the composer says which note was not sent", async () => {
+  const w = page({ refuse: true });
+  attach(w, "keep the old API");
+  w.ctx.prompt.value = "my own draft";
+  await w.run(`approveWithNote(tab, "keep the old API")`);
+  assert.equal(w.ctx.prompt.value, "my own draft");
+  assert.match(w.notes.at(-1)[0], /Your note was not sent: keep the old API/);
+});
+
+test("a dialog that cannot be closed goes through keepNote, never an unhandled rejection", async () => {
+  const w = page();
+  attach(w, "keep the old API");
+  w.ctx.closeClaudeDialog = async () => {
+    throw new Error("dialog write failed");
+  };
+  await assert.doesNotReject(() => w.run(`approveWithNote(tab, "keep the old API")`));
+  assert.equal(w.ctx.prompt.value, "keep the old API");
+  assert.match(w.notes.at(-1)[0], /dialog write failed/);
+});
+
+test("Enter during an IME composition sends nothing, by isComposing and by keyCode 229", async () => {
+  const w = page();
+  const { input } = attach(w, "keep the old API");
+  for (const extra of [{ isComposing: true }, { keyCode: 229 }]) {
+    const pressed = { ...enter(input), ...extra };
+    assert.equal(await fire(w, pressed), false);
+    assert.equal(pressed.defaultPrevented, undefined);
+  }
+  assert.deepEqual(w.log, []);
+});
+
+test("keepNote on a tab in the background never paints into the open thread's field", () => {
+  const w = page();
+  const { input } = attach(w, "background note");
+  input.value = "the open thread's note";
+  w.ctx.active = { key: "mini:other", thread: {} };
+  w.run(`keepNote(tab, "background note", "boom")`);
+  assert.equal(input.value, "the open thread's note");
+  assert.equal(w.tab.thread.approveNote, "background note", "the background tab still keeps its note");
 });
