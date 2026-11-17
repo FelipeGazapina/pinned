@@ -269,7 +269,8 @@ async fn admit(hub: &Hub, account: &Account, origin: &str, caller: &Caller, act:
         let held = ExtendTurn::ask(hub, account.id, machine).await?;
         if !asked_before(hub, account, caller, act).await? {
             let waiting = waiting_extends(hub, account).await?;
-            if waiting.len() >= MAX_WAITING_EXTENDS_PER_ACCOUNT {
+            let live = hub.db.live_boxes(account.id).await?;
+            if waiting.iter().filter(|(of, _, _)| of.is_some_and(|of| live.contains(&of))).count() >= MAX_WAITING_EXTENDS_PER_ACCOUNT {
                 return Err(TOO_MANY_EXTENDS.into());
             }
             let since = (pinned_core::connectors::unix_millis() / 1000).saturating_sub(EXTENDS_COUNTED_FOR.as_secs()) as i64;
@@ -323,7 +324,8 @@ async fn asked_before(hub: &Hub, account: &Account, caller: &Caller, act: &Agent
 const EXTENDS_COUNTED_FOR: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// How many extend asks of all of an account's boxes may wait for the owner at once, counted as
-/// `waiting_extends` counts them. One more is refused before it waits.
+/// `waiting_extends` counts them. One more is refused before it waits. An ask for a box that has
+/// ended, ending or gone, can never extend anything and does not count; the owner still sees it.
 const MAX_WAITING_EXTENDS_PER_ACCOUNT: usize = 10;
 
 const TOO_MANY_EXTENDS: &str = "too many box extends are waiting for the owner; answer some first";

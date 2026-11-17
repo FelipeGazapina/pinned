@@ -1376,6 +1376,12 @@ impl Db {
         Ok(rows.iter().map(box_row).collect())
     }
 
+    /// The machines of the account's boxes that have not ended: each is creating, booting or running.
+    pub async fn live_boxes(&self, account: Uuid) -> Result<Vec<Uuid>, String> {
+        let rows = self.client().await?.query("select machine from boxes where account = $1 and phase in ('creating', 'booting', 'running')", &[&account]).await.map_err(err)?;
+        Ok(rows.iter().map(|row| row.get(0)).collect())
+    }
+
     pub async fn box_of(&self, account: Uuid, machine: Uuid) -> Result<Option<BoxRow>, String> {
         let row = self.client().await?.query_opt(&format!("select {BOX_COLUMNS} from boxes where account = $1 and machine = $2"), &[&account, &machine]).await.map_err(err)?;
         row.as_ref().map(|r| readable(box_row(r))).transpose()
@@ -1802,11 +1808,14 @@ impl Db {
         Ok(self.client().await?.query(&query, &[&account]).await.map_err(err)?.iter().map(|r| held(r).confirmation).collect())
     }
 
-    /// How many of the account's extend_box confirmations wait, each adding an amount above zero,
-    /// read without listing them.
+    /// How many of the account's extend_box confirmations wait, each adding an amount above zero to
+    /// a box that has not ended, read without listing them. It never counts more than the turn's
+    /// count does: an ask that names its box other than as the box's id reads is left to that one.
     pub async fn waiting_extends(&self, account: Uuid) -> Result<i64, String> {
         let query = "select count(*) from agent_confirmations where account = $1 and decided_at is null and action = 'extend_box'
-                       and case when jsonb_typeof(args->'extra_usd') = 'number' then (args->>'extra_usd')::float8 > 0 else false end";
+                       and case when jsonb_typeof(args->'extra_usd') = 'number' then (args->>'extra_usd')::float8 > 0 else false end
+                       and exists (select 1 from boxes where boxes.account = $1 and boxes.machine::text = lower(agent_confirmations.args->>'machine')
+                                   and boxes.phase in ('creating', 'booting', 'running'))";
         Ok(self.client().await?.query_one(query, &[&account]).await.map_err(err)?.get(0))
     }
 
