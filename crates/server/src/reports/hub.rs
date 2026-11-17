@@ -21,6 +21,8 @@ const WINDOW_SECS: i64 = 24 * 60 * 60;
 const DEFAULT_API: &str = "https://api.github.com";
 /// The variable the token is read from. Logs name it, never its value.
 pub const TOKEN_VARIABLE: &str = "PINNED_REPORTS_GITHUB_TOKEN";
+/// The token a `--dev` hub sends its local fake. It is not a secret: only the fake takes a `fake-` token.
+const DEV_TOKEN: &str = "fake-dev-hub";
 const REPO_VARIABLE: &str = "PINNED_REPORTS_REPO";
 const API_VARIABLE: &str = "PINNED_REPORTS_GITHUB_API";
 const POLL_VARIABLE: &str = "PINNED_REPORTS_POLL_SECS";
@@ -104,13 +106,14 @@ impl std::fmt::Debug for Config {
 }
 
 impl Config {
-    /// The configuration `env` asks for, or None when reporting is not available. The token is
-    /// `PINNED_REPORTS_GITHUB_TOKEN`; without it there is no reporting. Outside `dev` the repository is pinned's own
-    /// and the API GitHub's, and `PINNED_REPORTS_GITHUB_API` and `PINNED_REPORTS_REPO` are ignored, each with one
-    /// warning that names it, never its value. A dev hub never talks to the real GitHub: under `dev`, reporting is
-    /// available only when `PINNED_REPORTS_GITHUB_API` is an http(s) address on this machine, with no user or
-    /// password, in a debug build. Then `PINNED_REPORTS_REPO` is the repository when it is `owner/name`, else pinned's
-    /// own name, filed against that local API. A `dev` override that is refused, or no override at all, turns
+    /// The configuration `env` asks for, or None when reporting is not available. Outside `dev` the token is
+    /// `PINNED_REPORTS_GITHUB_TOKEN`, and without it there is no reporting; the repository is pinned's own and the
+    /// API GitHub's, and `PINNED_REPORTS_GITHUB_API` and `PINNED_REPORTS_REPO` are ignored, each with one warning
+    /// that names it, never its value. A dev hub never talks to the real GitHub and never reads
+    /// `PINNED_REPORTS_GITHUB_TOKEN`: when it is set, one warning names it. Under `dev`, reporting is available only
+    /// when `PINNED_REPORTS_GITHUB_API` is an http(s) address on this machine, with no user or password, in a debug
+    /// build; the hub then sends that local API its own `fake-` token. `PINNED_REPORTS_REPO` is the repository when
+    /// it is `owner/name`, else pinned's own name. A `dev` override that is refused, or no override at all, turns
     /// reporting off with a warning, and never falls back to the real API or repository.
     pub fn from_env(dev: bool, env: &dyn Fn(&str) -> Option<String>) -> Option<Config> {
         Config::from_env_warning(dev, env, &mut |line| eprintln!("pinned-server: {line}"))
@@ -124,10 +127,13 @@ impl Config {
     /// `from_env_warning`, with whether this is a debug build given.
     fn resolve(dev: bool, debug: bool, env: &dyn Fn(&str) -> Option<String>, warn: &mut dyn FnMut(&str)) -> Option<Config> {
         let given = |name: &str| env(name).map(|v| v.trim().to_owned()).filter(|v| !v.is_empty());
-        let token = given(TOKEN_VARIABLE)?;
+        if dev && env(TOKEN_VARIABLE).is_some() {
+            warn(&format!("{TOKEN_VARIABLE} is ignored under --dev: a dev hub sends only its own fake token, to a local fake"));
+        }
         let (api_given, repo_given) = (given(API_VARIABLE), given(REPO_VARIABLE));
-        let poll = poll_every(dev, env);
         if !dev {
+            let token = given(TOKEN_VARIABLE)?;
+            let poll = poll_every(dev, env);
             for (name, value) in [(API_VARIABLE, &api_given), (REPO_VARIABLE, &repo_given)] {
                 if value.is_some() {
                     warn(&format!("{name} is ignored: it counts only under --dev in a debug build"));
@@ -170,7 +176,7 @@ impl Config {
             off(warn, &format!("set {API_VARIABLE} to a local fake"));
             return None;
         };
-        Some(Config { api, repo, token, timeout: pinned_core::github::CALL_TIMEOUT, poll })
+        Some(Config { api, repo, token: DEV_TOKEN.to_owned(), timeout: pinned_core::github::CALL_TIMEOUT, poll: poll_every(dev, env) })
     }
 }
 
@@ -1063,7 +1069,7 @@ mod tests {
     #[test]
     fn under_dev_only_a_loopback_api_turns_reporting_on() {
         let vars = [(TOKEN_VARIABLE, "fake-1"), (REPO_VARIABLE, "acme/app"), (API_VARIABLE, "http://127.0.0.1:4010")];
-        assert_eq!(Config::from_env(true, &env(&vars)), Some(Config { api: "http://127.0.0.1:4010".into(), repo: "acme/app".into(), token: "fake-1".into(), timeout: pinned_core::github::CALL_TIMEOUT, poll: POLL_DEFAULT }));
+        assert_eq!(Config::from_env(true, &env(&vars)), Some(Config { api: "http://127.0.0.1:4010".into(), repo: "acme/app".into(), token: "fake-dev-hub".into(), timeout: pinned_core::github::CALL_TIMEOUT, poll: POLL_DEFAULT }));
         for api in ["https://evil.example.test", "http://127.0.0.1.example.test:9", "http://169.254.169.254", "ftp://127.0.0.1", "not a url", "http://user:pw@127.0.0.1:9", "http://user@localhost:9", "http://127.0.0.1@evil.example.test"] {
             assert_eq!(Config::from_env(true, &env(&[(TOKEN_VARIABLE, "t"), (API_VARIABLE, api)])), None, "{api}");
         }
@@ -1092,6 +1098,7 @@ mod tests {
     const REPO_NEEDS_API: &str = "reporting is off under --dev: PINNED_REPORTS_REPO counts only with an accepted PINNED_REPORTS_GITHUB_API";
     const NOT_A_REPO: &str = "reporting is off under --dev: PINNED_REPORTS_REPO is not owner/name";
     const NO_FAKE: &str = "reporting is off under --dev: set PINNED_REPORTS_GITHUB_API to a local fake";
+    const TOKEN_IGNORED: &str = "PINNED_REPORTS_GITHUB_TOKEN is ignored under --dev: a dev hub sends only its own fake token, to a local fake";
 
     fn pair(config: &Option<Config>) -> Option<(&str, &str)> {
         config.as_ref().map(|c| (c.api.as_str(), c.repo.as_str()))
@@ -1121,18 +1128,18 @@ mod tests {
     #[test]
     fn under_dev_a_refused_override_turns_reporting_off_and_warns_by_name_alone() {
         for api in ["https://api.example.test", "http://user:pw@127.0.0.1:4010", "http://127.0.0.1@evil.example.test"] {
-            let (config, lines) = warned(true, &[TOKEN, (API_VARIABLE, api)]);
+            let (config, lines) = warned(true, &[(API_VARIABLE, api)]);
             assert_eq!((config, lines), (None, vec![REFUSED_API.to_owned()]), "{api}");
-            let (config, lines) = warned(true, &[TOKEN, REPO, (API_VARIABLE, api)]);
+            let (config, lines) = warned(true, &[REPO, (API_VARIABLE, api)]);
             assert_eq!((config, lines), (None, vec![REFUSED_API.to_owned(), REPO_NEEDS_API.to_owned()]), "{api}");
             assert!(!REFUSED_API.contains(api) && !REPO_NEEDS_API.contains("octo-labs"), "a warning never carries a value");
         }
-        let (config, lines) = warned(true, &[TOKEN, REPO]);
+        let (config, lines) = warned(true, &[REPO]);
         assert_eq!((config, lines), (None, vec![REPO_NEEDS_API.to_owned()]), "the repository alone never counts");
-        let (config, lines) = warned(true, &[TOKEN, FAKE, ("PINNED_REPORTS_REPO", "../x")]);
+        let (config, lines) = warned(true, &[FAKE, ("PINNED_REPORTS_REPO", "../x")]);
         assert_eq!((config, lines), (None, vec![NOT_A_REPO.to_owned()]));
         // A good API does not count in a release build.
-        let (config, lines) = warned_in(true, false, &[TOKEN, REPO, FAKE]);
+        let (config, lines) = warned_in(true, false, &[REPO, FAKE]);
         assert_eq!(config, None);
         assert_eq!(lines, ["reporting is off under --dev: PINNED_REPORTS_GITHUB_API counts only in a debug build", REPO_NEEDS_API]);
     }
@@ -1141,16 +1148,30 @@ mod tests {
     fn under_dev_with_no_override_reporting_is_off_even_with_a_token() {
         for debug in [true, false] {
             let (config, lines) = warned_in(true, debug, &[TOKEN]);
-            assert_eq!((config, lines), (None, vec![NO_FAKE.to_owned()]));
+            assert_eq!((config, lines), (None, vec![TOKEN_IGNORED.to_owned(), NO_FAKE.to_owned()]));
+            assert_eq!(warned_in(true, debug, &[]), (None, vec![NO_FAKE.to_owned()]), "under --dev the token never counts, set or not");
         }
-        assert_eq!(warned(true, &[]), (None, vec![]), "without a token there is nothing to say");
+    }
+
+    #[test]
+    fn under_dev_the_token_from_the_environment_is_never_part_of_the_config() {
+        for vars in [&[REPO, FAKE][..], &[TOKEN, REPO, FAKE], &[(TOKEN_VARIABLE, "fake-from-the-environment"), FAKE], &[(TOKEN_VARIABLE, "  "), FAKE]] {
+            let (config, lines) = warned(true, vars);
+            let config = config.unwrap();
+            assert_eq!((config.api.as_str(), config.token.as_str()), ("http://127.0.0.1:4010", "fake-dev-hub"), "{vars:?}");
+            let named = vars.iter().any(|(name, _)| *name == TOKEN_VARIABLE);
+            assert_eq!(lines, if named { vec![TOKEN_IGNORED.to_owned()] } else { vec![] }, "{vars:?}");
+            assert!(lines.iter().all(|line| !line.contains("real-looking") && !line.contains("from-the-environment")), "a warning never carries the value");
+        }
+        let (config, _) = warned(false, &[TOKEN, FAKE]);
+        assert_eq!(config.map(|c| (c.api, c.token)), Some((DEFAULT_API.to_owned(), "real-looking-token".to_owned())), "a release hub reads the token as before");
     }
 
     #[test]
     fn under_dev_a_loopback_api_files_in_the_override_repository_or_pinneds_name() {
-        let (config, lines) = warned(true, &[TOKEN, REPO, FAKE]);
+        let (config, lines) = warned(true, &[REPO, FAKE]);
         assert_eq!((pair(&config), lines), (Some(("http://127.0.0.1:4010", "octo-labs/tracker")), vec![]));
-        let (config, lines) = warned(true, &[TOKEN, FAKE]);
+        let (config, lines) = warned(true, &[FAKE]);
         assert_eq!((pair(&config), lines), (Some(("http://127.0.0.1:4010", "FelipeGazapina/pinned")), vec![]), "the fixed name, against a local API");
     }
 
