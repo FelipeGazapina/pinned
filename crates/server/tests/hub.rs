@@ -9307,6 +9307,28 @@ fn an_accounts_waiting_extend_box_asks_are_capped_across_its_boxes() {
     assert_eq!(extend_as(&ana.dir, &ana.tab, &boxes[0], 0.1, None), Err(TOO_MANY_EXTENDS.into()));
 }
 
+/// An ask for a box that has ended can never extend anything, so it no longer counts toward the
+/// account's cap of 10, whether its box is ending or gone; the owner still sees it and can answer it.
+#[test]
+fn waiting_extend_box_asks_for_ended_boxes_do_not_count_toward_the_accounts_cap() {
+    let ExtendSetup { hub, ana, mut owner, machine, .. } = extend_setup("extend_cap_ended");
+    let (ending, gone, live) = (machine.clone(), open_extend_box(&ana), open_extend_box(&ana));
+    let mut asked = vec![];
+    for n in 0..10 {
+        let ask = extend_as(&ana.dir, &ana.tab, if n % 2 == 0 { &ending } else { &gone }, 0.1, None).unwrap();
+        assert_eq!(ask["outcome"], "pending", "ask {n}: {ask}");
+        asked.push(ask);
+    }
+    assert_eq!(extend_as(&ana.dir, &ana.tab, &live, 0.1, None), Err(TOO_MANY_EXTENDS.into()), "10 asks for live boxes fill the cap");
+    admin_on(&hub.database, &format!("update boxes set phase = 'ending', reason = 'done' where machine = '{ending}'"));
+    admin_on(&hub.database, &format!("delete from boxes where machine = '{gone}'"));
+    let admitted = extend_as(&ana.dir, &ana.tab, &live, 0.1, None).unwrap();
+    assert_eq!(admitted["outcome"], "pending", "asks for boxes that ended make room: {admitted}");
+    assert_eq!(waiting_actions(&mut owner).len(), 11, "the owner still sees every ask");
+    let denied = owner.hub(json!({ "cmd": "decide_confirmation", "id": asked[0]["id"], "approve": false })).unwrap();
+    assert_eq!(denied["outcome"], "denied", "and can answer one for a box that ended: {denied}");
+}
+
 /// Asks for different boxes of one account made at once, with one place left under the account's
 /// cap: each box's turn lets them in together, the account's lock lets exactly one wait.
 #[test]
