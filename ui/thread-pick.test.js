@@ -182,3 +182,78 @@ test("a Captain report whose tab is still open opens that tab", async () => {
   assert.equal(page.active.key, "box:tab-old-1");
   assert.deepEqual(page.told, []);
 });
+
+/** The palette's views (gui-shell.js's PALETTE_VIEWS), with the shell's helpers as stubs: `team` is the
+ * team the page reads as current, or null for the personal account. `renderPalette` records the
+ * new-thread placeholder an open palette would show. */
+function paletteOf(team) {
+  const context = {
+    console,
+    teamsNow: team,
+    tabs: [{ key: "local:tab-1" }],
+    active: null,
+    palette: { linked: null, search: null, projects: [] },
+    RECENT_THREADS: 8,
+    normalize: (s) => String(s).trim().toLowerCase(),
+    actionItems: () => [{ title: "Open settings" }],
+    searchThreads() {},
+    machineDirectory: () => ({}),
+    paletteProjects: () => [],
+    projectRowIcon: () => "",
+    projectSubHtml: () => "",
+    settingsSearchItems: () => [],
+    latestUserAt: () => 1,
+    threadItem: (tab) => ({ title: `Thread ${tab.key}` }),
+    linkedThreadItems: () => [],
+    filterGroups: (groups) => groups,
+    isScratch: () => false,
+    esc: (s) => s,
+    onlineMachines: () => [],
+    projectOfTab: () => "",
+    newThreadIn() {},
+    openProjectIn() {},
+    newThreadWithoutProject() {},
+    PinnedProjects: {},
+    paletteOpen: () => true,
+    renderPalette() {
+      context.shownPlaceholder = newThreadPlaceholder(context.PALETTE_VIEWS);
+    },
+  };
+  vm.createContext(context);
+  vm.runInContext(`${between(shell, "const PALETTE_VIEWS = {", "const submitButton")}\nglobalThis.PALETTE_VIEWS = PALETTE_VIEWS;`, context);
+  return context;
+}
+
+/** The new-thread palette's placeholder, whether its view names it as text or as a function of the query. */
+const newThreadPlaceholder = (views) => {
+  const spec = views["new-thread-in"].placeholder;
+  return typeof spec === "function" ? spec("") : spec;
+};
+
+const TEAM = { id: "t1", name: "North Studio" };
+
+test("⌘N's new-thread palette says it starts a personal thread while a team is current, and reads as before with none", () => {
+  assert.equal(newThreadPlaceholder(paletteOf(TEAM).PALETTE_VIEWS), "New personal thread...");
+  assert.equal(newThreadPlaceholder(paletteOf(null).PALETTE_VIEWS), "Search...");
+});
+
+test("⌘K's thread groups sit under Personal while a team is current, and keep their labels with none", () => {
+  const labels = (team) => paletteOf(team).PALETTE_VIEWS.root.groups("").map((g) => g.label);
+  assert.deepEqual(labels(TEAM), ["Actions", "Personal · Recent Threads"]);
+  assert.deepEqual(labels(null), ["Actions", "Recent Threads"]);
+  const searched = (team) => paletteOf(team).PALETTE_VIEWS.root.groups("thread").map((g) => g.label);
+  assert.deepEqual(searched(TEAM), ["Actions", "Projects", "Settings", "Personal · Threads"]);
+  assert.deepEqual(searched(null), ["Actions", "Projects", "Settings", "Threads"]);
+});
+
+test("teams:changed repaints an open palette: to no team the new-thread label reads as before", () => {
+  const context = paletteOf(TEAM);
+  const at = shell.indexOf('document.addEventListener("teams:changed"');
+  assert.ok(at >= 0, "the palette listens to teams:changed");
+  vm.runInContext(`document = { addEventListener: (type, fn) => (onTeams = fn) };\n${shell.slice(at, shell.indexOf("\n", at))}`, context);
+  context.onTeams();
+  assert.equal(context.shownPlaceholder, "New personal thread...");
+  context.teamsNow = null;
+  context.onTeams();
+  assert.equal(context.shownPlaceholder, "Search...");
+});

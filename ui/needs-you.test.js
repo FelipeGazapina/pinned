@@ -7,6 +7,7 @@ const read = (name) => readFileSync(new URL(`./${name}`, import.meta.url), "utf8
 const chat = read("global-chat.js");
 const model = read("redesign-model.js");
 const agentSurface = read("agent-surface.js");
+const needsYou = read("gui-needs-you.js");
 const decl = (src, start) => {
   const from = src.indexOf(start);
   assert.ok(from >= 0, `missing ${start}`);
@@ -274,4 +275,37 @@ test("while an answer is on its way the card's controls are disabled, and once s
   assert.match(html("sent"), /Answered\. The thread goes on\./);
   assert.match(html("missed"), /data-ny="approve"[\s\S]*Open the thread to answer it\./, "a refused answer keeps the controls and says why");
   assert.match(html(null), /<fieldset class="ny-fields">/);
+});
+
+/** The heading's title, evaluated with `teamsNow` as the team the page reads. */
+function titleOf(team) {
+  const context = { teamsNow: team };
+  vm.createContext(context);
+  vm.runInContext([line(needsYou, "const needsYouTeamCurrent"), line(needsYou, "const needsYouTitle")].join("\n"), context);
+  return () => vm.runInContext("needsYouTitle()", context);
+}
+
+test("the Needs you heading says Personal while a team is current, and reads as before with none", () => {
+  assert.equal(titleOf({ id: "t1", name: "North Studio" })(), "Needs you · Personal");
+  assert.equal(titleOf(null)(), "Needs you");
+});
+
+test("teams:changed repaints the open Needs you headings, and to no team they read as before", () => {
+  const heads = [{ textContent: "Needs you" }, { textContent: "Needs you" }];
+  const context = {
+    teamsNow: { id: "t1", name: "North Studio" },
+    needsYouLive: {},
+    pageView: { querySelectorAll: () => heads },
+    document: { addEventListener: (type, fn) => (context.onTeams = fn) },
+  };
+  vm.createContext(context);
+  vm.runInContext(
+    [line(needsYou, "const needsYouTeamCurrent"), line(needsYou, "const needsYouTitle"), decl(needsYou, "function paintNeedsYouTitle"), line(needsYou, 'document.addEventListener("teams:changed"')].join("\n"),
+    context,
+  );
+  context.onTeams();
+  assert.deepEqual(heads.map((h) => h.textContent), ["Needs you · Personal", "Needs you · Personal"]);
+  context.teamsNow = null;
+  context.onTeams();
+  assert.deepEqual(heads.map((h) => h.textContent), ["Needs you", "Needs you"]);
 });
