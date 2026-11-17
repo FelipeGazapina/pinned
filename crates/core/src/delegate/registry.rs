@@ -2617,8 +2617,9 @@ mod tests {
         let loaded = Delegates::load(Some(file.clone()));
         assert!(loaded.has_news("tab-1"));
         assert_eq!(loaded.queued().get("tab-1"), Some(&1));
-        assert_eq!(loaded.claim_notice("tab-1").map(|(text, _)| text), Some("[Slack reply from ana in the thread]\nship it".into()));
-        loaded.drop_claimed_reports("tab-1");
+        let (text, _, claim) = loaded.claim_news("tab-1").expect("offered again");
+        assert_eq!(text, "[Slack reply from ana in the thread]\nship it");
+        loaded.confirm_claim(claim);
         assert!(!Delegates::load(Some(file)).has_news("tab-1"), "a typed report is gone for good");
         let _ = std::fs::remove_dir_all(dir);
     }
