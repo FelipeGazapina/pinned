@@ -12,6 +12,8 @@ struct Fake {
     /// The status the changes read answers; 0 is 200.
     status: u16,
     seen: Vec<Value>,
+    /// The issue of each `issueUpdate`, oldest first.
+    updated: Vec<String>,
     unlisted: Vec<String>,
 }
 
@@ -55,6 +57,8 @@ fn serve_linear(fake: Arc<Mutex<Fake>>) {
                 let states = json!([{ "id": "s-todo", "name": "Todo" }, { "id": "s-progress", "name": "In Progress" }]);
                 (200, json!({ "data": { "issue": { "identifier": "ENG-1", "team": { "name": "Engineering", "states": { "nodes": states } } } } }))
             } else if query.contains("issueUpdate(") {
+                let issue = body["variables"]["id"].as_str().unwrap_or_default().to_owned();
+                fake.updated.push(issue);
                 (200, json!({ "data": { "issueUpdate": { "success": true } } }))
             } else {
                 fake.unlisted.push(query.chars().take(80).collect());
@@ -215,6 +219,11 @@ fn fake_with(issues: Vec<Value>) -> Arc<Mutex<Fake>> {
     let fake = Arc::new(Mutex::new(Fake { issues, ..Fake::default() }));
     serve_linear(fake.clone());
     fake
+}
+
+/// How many `issueUpdate`s moved `issue`.
+fn updates(fake: &Arc<Mutex<Fake>>, issue: &str) -> usize {
+    fake.lock().unwrap().updated.iter().filter(|updated| *updated == issue).count()
 }
 
 fn no_unlisted(fake: &Arc<Mutex<Fake>>) {
@@ -673,6 +682,7 @@ fn pinneds_own_move_starts_nothing_and_the_same_move_by_someone_else_starts_one_
     started.sort();
     assert_eq!(started, ["i-2", "i-3"], "the echo starts nothing; the others start one run each");
     assert_eq!(connectors.change_counts()["w1"].echoes, 1);
+    assert_eq!((updates(&fake, "i-1"), updates(&fake, "i-2"), updates(&fake, "i-3")), (1, 1, 2), "the refused echo moves nothing in Linear");
     let (runs, error) = check(&connectors);
     assert_eq!((runs.len(), error), (0, None), "the next check, which reads the echo again, starts none");
     assert_eq!(connectors.change_counts()["w1"].echoes, 1, "and counts it once");
@@ -691,7 +701,8 @@ fn a_second_move_within_the_cooldown_starts_nothing_and_after_it_starts_again() 
         issue(2, ago(4), vec![moved("h-3", ago(20), "Backlog", "Ready to Dev"), moved("h-4", ago(4), "Todo", "Ready to Dev")]),
     ]);
     let claims = Claims::default();
-    let connectors = on(&claims, vec![ready_to_dev("w1", ago(30))], "lin-e2-cooldown");
+    let workflow = Connector { columns: Columns { picked: "In Progress".into(), ..Columns::default() }, ..ready_to_dev("w1", ago(30)) };
+    let connectors = on(&claims, vec![workflow], "lin-e2-cooldown");
 
     let (runs, error) = check(&connectors);
     assert_eq!(error, None);
@@ -703,6 +714,7 @@ fn a_second_move_within_the_cooldown_starts_nothing_and_after_it_starts_again() 
     assert_eq!(error, None);
     assert_eq!((on_issue(&later, "i-1"), on_issue(&later, "i-2")), (0, 1), "and the second start on the next check");
     assert_eq!(connectors.change_counts()["w1"].cooled, 1);
+    assert_eq!((updates(&fake, "i-1"), updates(&fake, "i-2")), (1, 2), "one move in Linear a start: the cooled change moves nothing");
     no_unlisted(&fake);
 }
 
@@ -740,6 +752,7 @@ fn a_fifth_change_on_one_issue_within_the_hour_is_capped_and_logged_once() {
     fake.lock().unwrap().issues[0]["history"]["nodes"].as_array_mut().unwrap().push(moved("h-6", Utc::now(), "Ready to Dev", "In Progress"));
     let (runs, _) = check(&connectors);
     assert_eq!(runs.len(), 0, "a sixth within the hour is capped too");
+    assert_eq!(fake.lock().unwrap().updated, Vec::<String>::new(), "a capped change moves nothing in Linear");
     assert_eq!(connectors.change_counts()["w-cap-2"].capped, 1);
     let lines: Vec<String> = cap_lines().into_iter().filter(|line| line.contains("i-46")).collect();
     assert_eq!(lines.len(), 1, "one log line for the issue in the hour: {lines:?}");
@@ -780,6 +793,7 @@ fn a_capped_change_asks_no_model() {
     assert_eq!((runs.len(), later.len()), (2, 2));
     assert_eq!(connectors.change_counts()["w-ask-3"].capped, 1);
     assert_eq!(crate::vercel::take_test_inputs(), Vec::<String>::new(), "no model was asked");
+    assert_eq!(fake.lock().unwrap().updated, Vec::<String>::new(), "and nothing moved in Linear");
     no_unlisted(&fake);
 }
 
@@ -932,5 +946,30 @@ fn a_won_change_read_again_where_its_claim_would_fail_fires_once_and_is_not_cool
     assert_eq!(started, 1, "one run in all");
     assert_eq!(connectors.change_counts().get("w1").map_or(0, |counts| counts.cooled), 0, "its own fire is not taken for a second start");
     assert_eq!(claims.calls.lock().unwrap().len(), 1, "a won key is claimed once");
+    no_unlisted(&fake);
+}
+
+/// #346 E3: a graph run's move step (`perform_move_column`) keeps its move in the ledger, so the
+/// change it makes, read back, is pinned's own: it starts nothing and is counted as an echo.
+#[test]
+fn a_move_step_keeps_its_move_so_the_change_it_makes_starts_nothing() {
+    let _api = slack::lock_api();
+    let _restore = RestoreLinear;
+    let fake = fake_with(vec![]);
+    let claims = Claims::default();
+    let workflow = into("w1", "In Progress", ago(10));
+    let connectors = on(&claims, vec![workflow.clone()], "lin-e3-move-step");
+    let mut lib = runner::Library::new();
+    lib.insert("w1".into(), migrate(&workflow));
+    let mut run = runner::start(&lib, "w1", Subject::LinearIssue { issue: "i-1".into() }, json!({}), "2026-01-01T00:00:00Z");
+    assert_eq!(block_on(connectors.perform_move_column(&mut run, "w1", "In Progress")), Ok(Supplied::Done));
+    assert_eq!(updates(&fake, "i-1"), 1, "the move step moved the issue");
+    let now = Utc::now();
+    fake.lock().unwrap().issues = vec![issue(1, now, vec![moved("h-1", now, "Todo", "In Progress")])];
+
+    let (runs, error) = check(&connectors);
+    assert_eq!((runs.len(), error), (0, None), "the move step's own move starts nothing");
+    assert_eq!(connectors.change_counts()["w1"].echoes, 1);
+    assert_eq!(updates(&fake, "i-1"), 1, "and moves nothing again");
     no_unlisted(&fake);
 }
