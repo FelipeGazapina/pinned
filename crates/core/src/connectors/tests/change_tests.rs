@@ -910,3 +910,26 @@ fn a_change_whose_run_did_not_start_starts_once_on_a_later_check() {
     assert!(error.contains("a later check tries the change again until it is 60 minutes old"), "{error}");
     no_unlisted(&fake);
 }
+
+/// #346 E3 item 2: a change fires; the next check reads it again in its overlap, where a claim
+/// would answer an error; a third check reads it again. A key this process won is never in doubt:
+/// one run in all, and no `cooled` count for it.
+#[test]
+fn a_won_change_read_again_where_its_claim_would_fail_fires_once_and_is_not_cooled() {
+    let _api = slack::lock_api();
+    let _restore = RestoreLinear;
+    let at = Utc::now() - chrono::Duration::seconds(10);
+    let fake = fake_with(vec![issue(1, at, vec![moved("h-1", at, "Backlog", "Ready to Dev")])]);
+    let claims = Claims::default();
+    *claims.fail.lock().unwrap() = vec![false, true];
+    let connectors = on(&claims, vec![ready_to_dev("w1", ago(10))], "lin-e3-won");
+
+    let mut started = 0;
+    for _ in 0..3 {
+        let (runs, _) = check(&connectors);
+        started += runs.len();
+    }
+    assert_eq!(started, 1, "one run in all");
+    assert_eq!(connectors.change_counts()["w1"].cooled, 0, "its own fire is not taken for a second start");
+    no_unlisted(&fake);
+}
