@@ -1335,6 +1335,7 @@ async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: 
     // A workflow session's callback comes from the session that runs that workflow on that
     // subject: the tab its machine found it to come from, or, from a machine that does not check,
     // any of its sessions.
+    let tab = from.tab.clone();
     let result = match (run_work(&call), from.vouched, from.tab) {
         (Some(_), Some(false), _) => Err(pinned_core::agent::OUTSIDE_EVERY_SESSION.into()),
         (Some((connector, subject)), Some(true), Some(tab)) if account.runs_in_tab(&connector, &subject, &machine, &tab) => hub.hub_call(&account, call).await,
@@ -1373,16 +1374,32 @@ async fn forward(hub: Arc<Hub>, account: Arc<Account>, machine: String, socket: 
         (None, ..) => Err("a machine may only forward a workflow session's callbacks".into()),
     };
     if let Err(e) = &result {
-        eprintln!("pinned-server: machine {machine}'s hub call failed: {e}");
+        eprintln!("{}", failed_call_line(&machine, tab.as_deref(), e));
     }
     account.to_machine(&machine, socket, &ToMachine::Reply(Reply::new(id, result)));
 }
 
+/// The log line for a machine's hub call the hub refused or failed.
+fn failed_call_line(machine: &str, _tab: Option<&str>, error: &str) -> String {
+    format!("pinned-server: machine {machine}'s hub call failed: {error}")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{address_class, client_address, Limiter, TrustedProxy, ROUTES};
+    use super::{address_class, client_address, failed_call_line, Limiter, TrustedProxy, ROUTES};
     use axum::http::HeaderMap;
     use std::net::SocketAddr;
+
+    /// A refused workflow call from a session names the tab it came from, so the log tells which
+    /// session tried; a tab id that is not one is not written as it came.
+    #[test]
+    fn a_refused_call_from_a_session_logs_its_tab() {
+        let refused = "only the session that runs this workflow can do that";
+        assert_eq!(failed_call_line("m-1", Some("tab-7"), refused), format!("pinned-server: machine m-1's hub call from tab tab-7 failed: {refused}"));
+        assert_eq!(failed_call_line("m-1", None, refused), format!("pinned-server: machine m-1's hub call failed: {refused}"));
+        let forged = failed_call_line("m-1", Some("tab-7\npinned-server: forged"), refused);
+        assert_eq!(forged, format!("pinned-server: machine m-1's hub call from tab (unreadable id) failed: {refused}"));
+    }
 
     fn headers(pairs: &[(&'static str, &str)]) -> HeaderMap {
         pairs.iter().map(|(name, value)| (axum::http::HeaderName::from_static(name), value.parse().unwrap())).collect()
