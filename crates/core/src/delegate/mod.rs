@@ -76,6 +76,22 @@ pub fn child_model(parent: Provider, child: Provider, inherited: Option<String>,
     inherited.filter(|model| !model.is_empty())
 }
 
+/// The tools a read-only Claude session is refused outright, besides pinned's own that act.
+pub const READ_ONLY_REFUSED: [&str; 5] = ["Write", "Edit", "MultiEdit", "NotebookEdit", "Bash"];
+
+/// The Claude mode a read-only session runs in. It never stops at a prompt, or at a plan to
+/// approve as plan mode does: what no rule allows is refused.
+pub const READ_ONLY_MODE: &str = "dontAsk";
+
+/// Claude's flags for a read-only session: pinned's read tools allowed, every tool that writes or
+/// runs and pinned's tools that act refused, in `READ_ONLY_MODE`. The mode comes last, so neither
+/// tool list takes in an argument that follows.
+pub fn claude_read_only_args() -> Vec<String> {
+    let (reads, acting) = crate::reminders::read_and_acting_permissions();
+    let refused: Vec<String> = READ_ONLY_REFUSED.map(String::from).into_iter().chain(acting).collect();
+    vec!["--allowedTools".into(), reads.join(","), "--disallowedTools".into(), refused.join(","), "--permission-mode".into(), READ_ONLY_MODE.into()]
+}
+
 /// What the child is allowed to do. Never wider than the parent tab: plan narrows a bypassed
 /// parent to read-only, and a parent that asks before acting does not hand the child a bypass.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -743,18 +759,11 @@ mod tests {
                 "auto",
             ],
         );
-        same(
-            driver_args(Provider::Claude, &spec("do the thing", Access::ReadOnly)),
-            &[
-                "-p",
-                "do the thing",
-                "--output-format",
-                "stream-json",
-                "--verbose",
-                "--permission-mode",
-                "plan",
-            ],
-        );
+        let read_only = claude_read_only_args();
+        let mut expect = vec!["-p", "do the thing", "--output-format", "stream-json", "--verbose"];
+        expect.extend(read_only.iter().map(String::as_str));
+        same(driver_args(Provider::Claude, &spec("do the thing", Access::ReadOnly)), &expect);
+        assert_eq!(read_only[read_only.len() - 2..], ["--permission-mode", "dontAsk"]);
 
         let mut codex = spec("do the thing", Access::Auto);
         codex.model = Some("gpt-5");

@@ -785,6 +785,9 @@ struct Tab {
     permission_mode: Option<String>,
     /// Shift+Tab changed the mode and no hook has reported the new one. A child stays read-only.
     permission_unknown: bool,
+    /// The tab is a read-only worker: claude runs in `READ_ONLY_MODE` with every tool that writes or
+    /// runs refused. While it stays in that mode, its children are read-only too.
+    read_only: bool,
     /// Shared with the session's reader thread, which never takes the tabs lock. Never lock it
     /// while holding the tabs lock: a sink may call back into the machine.
     screen: Arc<Mutex<Screen>>,
@@ -827,10 +830,19 @@ impl Tab {
     /// What a child of this tab may do. Shift+Tab leaves the mode unknown until a hook reports it,
     /// and an unknown mode is read-only.
     fn child_access(&self) -> crate::delegate::Access {
-        if self.permission_unknown || self.permission_mode.as_deref() == Some("plan") {
+        if self.permission_unknown || self.reads_only() {
             crate::delegate::Access::ReadOnly
         } else {
             crate::delegate::Access::derive(self.bypass, false)
+        }
+    }
+
+    /// The session's mode reads only: plan, or the mode a read-only worker runs in.
+    fn reads_only(&self) -> bool {
+        match self.permission_mode.as_deref() {
+            Some("plan") => true,
+            Some(mode) => self.read_only && mode == crate::delegate::READ_ONLY_MODE,
+            None => false,
         }
     }
 
@@ -2888,7 +2900,12 @@ impl Machine {
             // A resume starts in the default mode and at the default effort, and this session may have left both.
             let claude = t.account.provider == Provider::Claude;
             let mode = t.permission_mode.clone().filter(|mode| claude && t.mode_live && !t.bypass && !t.permission_unknown && matches!(mode.as_str(), "acceptEdits" | "auto" | "dontAsk" | "plan"));
-            t.launch.extend(mode.into_iter().flat_map(|mode| ["--permission-mode".to_owned(), mode]));
+            // A read-only worker resumes with the same tools refused as when it started.
+            if t.read_only && mode.as_deref() == Some(crate::delegate::READ_ONLY_MODE) {
+                t.launch.extend(crate::delegate::claude_read_only_args());
+            } else {
+                t.launch.extend(mode.into_iter().flat_map(|mode| ["--permission-mode".to_owned(), mode]));
+            }
             t.launch.extend(t.effort.clone().filter(|_| claude).into_iter().flat_map(|effort| ["--effort".to_owned(), effort]));
             (t.asleep, t.mcp, t.started) = (true, None, None);
             // The screen moves on before the tab is let go: the exit of the session dropped below
@@ -4039,7 +4056,7 @@ impl Machine {
         use crate::delegate::{Access, Caller, Claim, Mode, NewTask, Parent, Thread};
         let (home, global, ceiling) = self.tab(caller, |t| (history::project_of(&t.cwd), global::is_global(&t.env), t.child_access()))?;
         let (running, ruled, cwd, account, model, title, access) = self.tab(tab, |t| {
-            let plan = t.permission_mode.as_deref() == Some("plan");
+            let plan = t.reads_only();
             (t.live() || t.starting, matches!(role_of(&t.env), Some((Role::Orchestrator, _))) || global::is_global(&t.env) || taste::is_chat(&t.env), t.cwd.clone(), t.account.clone(), t.model.clone(), t.title.clone(), Access::derive(t.bypass, plan))
         })?;
         if running || self.thread_task(tab, false).is_some() {
@@ -5948,14 +5965,14 @@ impl Machine {
         match access {
             Access::Full => {}
             Access::Auto => launch.extend(["--permission-mode".to_owned(), "auto".to_owned()]),
-            Access::ReadOnly => launch.extend(["--permission-mode".to_owned(), "plan".to_owned()]),
+            Access::ReadOnly => launch.extend(crate::delegate::claude_read_only_args()),
         }
         launch.push(prompt);
         let id = self.add_child_tab(&child, account, launch, access == Access::Full);
         let _ = self.tab(&id, |t| {
             t.made = child.made.clone();
             if access == Access::ReadOnly {
-                t.permission_mode = Some("plan".into());
+                (t.permission_mode, t.read_only) = (Some(crate::delegate::READ_ONLY_MODE.into()), true);
             }
         });
         self.delegates.link_thread(child.task, crate::delegate::Thread { tab: id.clone(), runs: true });
@@ -6536,15 +6553,15 @@ impl Machine {
         let account = self.accounts.get(&info.account).ok_or_else(|| format!("no account {} on this machine", info.account))?;
         let bypass = info.access == Access::Full;
         let mut launch = crate::delegate::resume_args(info.provider, &info.conversation);
-        let plan = info.access == Access::ReadOnly && info.provider == Provider::Claude;
-        if plan {
-            launch.extend(["--permission-mode".to_owned(), "plan".to_owned()]);
+        let read_only = info.access == Access::ReadOnly && info.provider == Provider::Claude;
+        if read_only {
+            launch.extend(crate::delegate::claude_read_only_args());
         }
         let session = (info.provider == Provider::Claude).then(|| info.conversation.clone());
         let id = self.add_tab(info.cwd.clone(), account, launch, vec![], bypass, session);
         let _ = self.tab(&id, |t| t.spawned_by = Some(tab.to_owned()));
-        if plan {
-            let _ = self.tab(&id, |t| t.permission_mode = Some("plan".into()));
+        if read_only {
+            let _ = self.tab(&id, |t| (t.permission_mode, t.read_only) = (Some(crate::delegate::READ_ONLY_MODE.into()), true));
         }
         if info.isolated {
             let _ = self.tab(&id, |t| t.made = Some(info.cwd));
@@ -6669,6 +6686,7 @@ impl Machine {
             owes_reload: false,
             permission_mode: None,
             permission_unknown: false,
+            read_only: false,
             screen: Arc::default(),
         };
         self.tabs.lock().unwrap().insert(id.clone(), tab);
@@ -10952,7 +10970,7 @@ echo '{"type":"result","result":"ok"}'
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, None, Some(root.clone()), |_| {});
         let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], true, None);
         m.record_event(AgentEvent { permission_mode: Some("plan".into()), ..done_event(&tab) });
-        assert_eq!(argv_of(&m, &tab, &argv), ["--permission-mode", "plan"]);
+        assert_eq!(argv_of(&m, &tab, &argv), ["--permission-mode", "dontAsk"]);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -11071,11 +11089,11 @@ echo '{"type":"result","result":"ok"}'
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, None, Some(root.clone()), |_| {});
         let tab = m.add_tab(root.clone(), Account::builtin(Provider::Claude), vec![], vec![], true, None);
         let full = ["--dangerously-skip-permissions"].map(str::to_owned).to_vec();
-        let plan = ["--permission-mode", "plan"].map(str::to_owned).to_vec();
+        let read_only = ["--permission-mode", "dontAsk"].map(str::to_owned).to_vec();
         m.record_event(AgentEvent { permission_mode: Some("default".into()), ..done_event(&tab) });
         assert_eq!(argv_of(&m, &tab, &argv), full);
         m.write_input(&tab, b"\x1b[Z").unwrap();
-        assert_eq!(argv_of(&m, &tab, &argv), plan);
+        assert_eq!(argv_of(&m, &tab, &argv), read_only);
         m.record_event(AgentEvent { permission_mode: Some("default".into()), ..done_event(&tab) });
         assert_eq!(argv_of(&m, &tab, &argv), full);
         let _ = std::fs::remove_dir_all(root);
@@ -11136,7 +11154,7 @@ echo '{"type":"result","result":"ok"}'
         .unwrap();
         let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), ..launch() }, Some(root.clone()), Some(repo), |_| {});
         let tab = m.restore_tabs().pop().expect("the plan session restored");
-        assert_eq!(argv_of(&m, &tab, &argv), ["--permission-mode", "plan"]);
+        assert_eq!(argv_of(&m, &tab, &argv), ["--permission-mode", "dontAsk"]);
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -11202,9 +11220,10 @@ exec sleep 30
 
         let (lines, (bypass, mode)) = open(Provider::Claude, true, crate::delegate::Access::ReadOnly, "plan-session");
         assert!(!bypass, "a read-only thread copied the parent's bypass");
-        assert_eq!(mode.as_deref(), Some("plan"));
+        assert_eq!(mode.as_deref(), Some("dontAsk"));
         assert!(pair(&lines, "--resume", "plan-session"), "{lines:?}");
-        assert!(pair(&lines, "--permission-mode", "plan"), "{lines:?}");
+        assert!(pair(&lines, "--permission-mode", "dontAsk"), "{lines:?}");
+        assert!(pair(&lines, "--disallowedTools", &crate::delegate::claude_read_only_args()[3]), "{lines:?}");
         assert!(!lines.iter().any(|arg| arg == "--dangerously-skip-permissions"), "{lines:?}");
 
         let (lines, (bypass, mode)) = open(Provider::Claude, false, crate::delegate::Access::Full, "full-session");
@@ -15010,6 +15029,12 @@ Have another model review a risky change before it goes ahead.";
 
     #[cfg(unix)]
     fn captain_with_thread_child_on(name: &str, target: Value) -> (Arc<Machine>, PathBuf, String, String, String, PathBuf) {
+        captain_with_thread_child_asking(name, json!({ "target": target }))
+    }
+
+    /// A Captain with a worker thread its `delegate_task` started, with `asked` added to the call.
+    #[cfg(unix)]
+    fn captain_with_thread_child_asking(name: &str, asked: Value) -> (Arc<Machine>, PathBuf, String, String, String, PathBuf) {
         let dir = temp(name);
         let project = dir.join("app");
         std::fs::create_dir_all(&project).unwrap();
@@ -15019,7 +15044,9 @@ Have another model review a risky change before it goes ahead.";
         m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
         let path = m.open_project(project).display().to_string();
         let captain = m.open_orchestrator(&path).unwrap();
-        let reply = delegate_task(&m, &captain, json!({ "task": "Compare the screens with the boards.", "title": "Board check", "target": target }));
+        let mut call = json!({ "task": "Compare the screens with the boards.", "title": "Board check" });
+        call.as_object_mut().unwrap().extend(asked.as_object().unwrap().clone());
+        let reply = delegate_task(&m, &captain, call);
         let (task, child) = (reply["taskId"].as_str().unwrap().to_owned(), reply["tabId"].as_str().unwrap().to_owned());
         let transcripts = config.join("accounts/work/projects/app");
         std::fs::create_dir_all(&transcripts).unwrap();
@@ -15053,6 +15080,29 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!(m.call(Call::Prompt { tab: child.clone(), text: "One more thing.".into() }), Ok(json!(null)));
         let args = started(&claude, &child);
         assert!(args.windows(6).any(|flags| flags == ["--resume", "s-child", "--permission-mode", "auto", "--effort", "high"]), "{args:?}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_read_only_worker_resumes_with_its_tools_still_refused() {
+        let (m, dir, _captain, task, child, transcript) = captain_with_thread_child_asking("thread-rest-read-only", json!({ "target": { "providerInstanceId": "work" }, "interactionMode": "plan" }));
+        let claude = dir.join("claude");
+        let read_only = crate::delegate::claude_read_only_args();
+        let first = started(&claude, &child);
+        assert!(first.windows(read_only.len()).any(|flags| flags == read_only), "{first:?}");
+        let pid = m.tab(&child, |t| t.session.as_ref().and_then(pty::Session::pid)).unwrap().unwrap() as i32;
+        append(&transcript, &[json!({ "type": "assistant", "message": { "role": "assistant", "content": [{ "type": "text", "text": "Matches the boards." }] } })]);
+        m.record_event(AgentEvent { session: Some("s-child".into()), permission_mode: Some("dontAsk".into()), ..hook(&child, AgentStatus::Working) });
+        m.record_event(AgentEvent { session: Some("s-child".into()), ..hook(&child, AgentStatus::Done) });
+        assert!(m.delegates.get(&task).unwrap().state.terminal());
+        m.rest_sessions(SystemTime::now() + REST_AFTER);
+        wait_for("the worker's session to end", || !alive(pid));
+
+        assert_eq!(m.call(Call::Prompt { tab: child.clone(), text: "One more thing.".into() }), Ok(json!(null)));
+        let args = started(&claude, &child);
+        let resumed: Vec<String> = ["--resume", "s-child"].map(str::to_owned).into_iter().chain(read_only.iter().cloned()).collect();
+        assert!(args.windows(resumed.len()).any(|flags| flags == resumed), "{args:?}");
         let _ = std::fs::remove_dir_all(dir);
     }
 
