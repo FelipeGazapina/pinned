@@ -3943,7 +3943,22 @@ mod tests {
         remote: std::path::PathBuf,
         bin: std::path::PathBuf,
         pinned: std::path::PathBuf,
+        /// The node the pid file in `pinned` names: a process with `pinned-server` in its line.
+        node: std::process::Child,
         _root: tempfile::TempDir,
+    }
+
+    /// A process named `name` that waits on its input, with `env` its whole environment.
+    #[cfg(unix)]
+    fn waiting(name: &str, env: &[(&str, &str)]) -> std::process::Child {
+        std::process::Command::new("sh").args(["-c", "read x", name]).env_clear().envs(env.iter().copied()).stdin(std::process::Stdio::piped()).spawn().unwrap()
+    }
+
+    #[cfg(unix)]
+    impl Drop for RescueRun {
+        fn drop(&mut self) {
+            let _ = (self.node.kill(), self.node.wait());
+        }
     }
 
     #[cfg(unix)]
@@ -3958,12 +3973,21 @@ mod tests {
             std::fs::write(home.join(".gitconfig"), "[user]\n\tname = box\n\temail = box@example.test\n[protocol \"file\"]\n\tallow = always\n").unwrap();
             let real = std::process::Command::new("sh").args(["-c", "command -v git"]).output().unwrap();
             let real = String::from_utf8(real.stdout).unwrap().trim().to_owned();
-            std::fs::write(bin.join("git"), format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >>{}/git.log\nexec {real} \"$@\"\n", root.path().display())).unwrap();
+            // While a test has put the values a rescue looks for in `needles`, each git call the script
+            // makes lists every file under HOME and the script's TMPDIR that holds one in `found`.
+            let shim = format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >>{root}/git.log\n[ -f {root}/needles ] && grep -rlF -f {root}/needles {home} {root}/tmp >>{root}/found 2>/dev/null\nexec {real} \"$@\"\n",
+                root = root.path().display(),
+                home = home.display()
+            );
+            std::fs::write(bin.join("git"), shim).unwrap();
             std::fs::set_permissions(bin.join("git"), std::fs::Permissions::from_mode(0o755)).unwrap();
             // ssh as git calls it, `ssh git@github.com "git-upload-pack 'acme/site.git'"`, run here.
             std::fs::write(bin.join("ssh"), format!("#!/bin/sh\nfor a; do last=$a; done\ncd {}/srv && exec sh -c \"$(printf '%s' \"$last\" | sed \"s|'/|'|\")\"\n", root.path().display())).unwrap();
             std::fs::set_permissions(bin.join("ssh"), std::fs::Permissions::from_mode(0o755)).unwrap();
-            let run = RescueRun { home, clone, remote, bin, pinned, _root: root };
+            let node = waiting("pinned-server", &[]);
+            std::fs::write(pinned.join("node.pid"), node.id().to_string()).unwrap();
+            let run = RescueRun { home, clone, remote, bin, pinned, node, _root: root };
             run.git(run.home.as_path(), &["init", "-q", "--bare", run.remote.to_str().unwrap()]);
             run.git(run.home.as_path(), &["clone", "-q", "git@github.com:acme/site.git", run.clone.to_str().unwrap()]);
             std::fs::write(run.clone.join("notes.txt"), "started\n").unwrap();
@@ -3972,6 +3996,13 @@ mod tests {
             run.git(&run.clone, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
             let _ = std::fs::remove_file(run._root.path().join("git.log"));
             run
+        }
+
+        /// Makes `node` the node the pid file names, in place of the one before it.
+        fn set_node(&mut self, node: std::process::Child) {
+            let _ = (self.node.kill(), self.node.wait());
+            std::fs::write(self.pinned.join("node.pid"), node.id().to_string()).unwrap();
+            self.node = node;
         }
 
         /// Runs git through the shim. A shim just written is busy while a child another test forked
@@ -4641,5 +4672,259 @@ mod tests {
         assert_eq!(run.writes(), [format!("{PUSH} {}:refs/heads/wip/rescue/task-1a2b3c4d", head.trim())]);
         assert_eq!(run.git(&lib, &["for-each-ref", "--format=%(refname) %(objectname)"]), format!("refs/heads/main {lib_main}"), "the submodule's remote is as it was");
         assert_eq!(run.remote_branches(), "refs/heads/main\nrefs/heads/wip/rescue/task-1a2b3c4d\n", "no tag");
+    }
+
+    /// Every file under `dirs` whose bytes hold one of `values`, as its path.
+    #[cfg(unix)]
+    fn files_holding(dirs: &[&std::path::Path], values: &[&str]) -> Vec<String> {
+        let mut held = Vec::new();
+        let mut left: Vec<std::path::PathBuf> = dirs.iter().map(|d| d.to_path_buf()).collect();
+        while let Some(dir) = left.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                let kind = std::fs::symlink_metadata(&path).unwrap().file_type();
+                if kind.is_dir() {
+                    left.push(path);
+                } else if kind.is_file() {
+                    let bytes = std::fs::read(&path).unwrap_or_default();
+                    if values.iter().any(|v| bytes.windows(v.len()).any(|w| w == v.as_bytes())) {
+                        held.push(path.display().to_string());
+                    }
+                }
+            }
+        }
+        held
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_rescue_keeps_every_value_it_looks_for_in_memory_alone() {
+        let mut run = RescueRun::new();
+        let (own, boxed, quoted, node) = (format!("own-{SHAPELESS}"), format!("box-{SHAPELESS}"), format!("it's-{SHAPELESS}"), format!("node-{SHAPELESS}"));
+        let box_env = run.pinned.join("box.env");
+        std::fs::write(&box_env, format!("export FAKE_DEPLOY_KEY=\"{boxed}\"\nFAKE_SECRET='it'\\''s-{SHAPELESS}'\nPINNED_BOX=1\n")).unwrap();
+        run.set_node(waiting("pinned-server", &[("FAKE_NODE_TOKEN", &node)]));
+        // The value is in the history alone: one commit adds it, the next takes it out again.
+        run.commit_all(&[("notes.txt", &format!("{node}\n"))], "notes");
+        run.commit_all(&[("notes.txt", "started\n")], "back");
+        let root = run._root.path().to_path_buf();
+        let tmp = root.join("tmp");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let values = [own.as_str(), boxed.as_str(), quoted.as_str(), node.as_str()];
+        std::fs::write(root.join("needles"), format!("{}\n", values.join("\n"))).unwrap();
+        let (out, err) = run.rescue_printed(RescueMode::Commits, &[("FAKE_OWN_TOKEN", &own), ("TMPDIR", tmp.to_str().unwrap())]);
+        std::fs::remove_file(root.join("needles")).unwrap();
+        assert_eq!(out, "pinned-rescue: refused secret\npinned-rescue: done\n");
+        for value in values {
+            assert!(!out.contains(value) && !err.contains(value), "no value on the script's output: {err}");
+        }
+        let box_env = box_env.display().to_string();
+        let found = std::fs::read_to_string(root.join("found")).unwrap();
+        assert!(found.lines().any(|l| l == box_env), "the needles were looked for while the script ran: {found}");
+        assert_eq!(found.lines().filter(|l| *l != box_env).collect::<Vec<_>>(), Vec::<&str>::new(), "no file held a value while git ran");
+        assert_eq!(files_holding(&[&run.home, &tmp], &values), [box_env], "no file holds a value after the run but box.env itself");
+        let log = std::fs::read_to_string(root.join("git.log")).unwrap();
+        assert!(values.iter().all(|v| !log.contains(v)), "no value on a git command line: {log}");
+        let rescue = rescued(&Exec { exit_code: 0, output: out.clone(), error: err.clone() }, TASK);
+        assert_eq!(rescue, Rescue::failed("it may hold a secret, so it was not pushed"));
+        let hub = format!("{rescue:?} {:?}", rescue.notice());
+        assert!(values.iter().all(|v| !hub.contains(v)), "{hub}");
+    }
+
+    #[test]
+    fn the_rescue_script_writes_no_file_and_names_its_value_sources_only_in_its_awk_loader() {
+        assert!(!RESCUE.contains("mktemp"), "no temp file");
+        let lines: Vec<&str> = RESCUE.lines().collect();
+        let start = lines.iter().position(|l| *l == "found() {").expect("the loader `found`");
+        let end = start + lines[start..].iter().position(|l| *l == "}").unwrap();
+        for (n, line) in lines.iter().enumerate().filter(|(_, l)| !l.trim_start().starts_with('#')) {
+            for source in ["box.env", "environ", "ENVIRON"] {
+                assert!(!line.contains(source) || (start < n && n < end), "line {}, outside the loader: {line}", n + 1);
+            }
+            for (at, _) in line.match_indices('>') {
+                let to = &line[at + 1..];
+                assert!(to.starts_with("/dev/null") || to.starts_with('&') || to.starts_with('='), "line {}, a redirect to a file: {line}", n + 1);
+            }
+        }
+        let loader = lines[start..=end].join("\n");
+        assert!(loader.contains("awk "), "{loader}");
+        for word in ["print", "system(", "| getline", "|getline", "fflush"] {
+            assert!(!loader.contains(word), "the loader writes nothing out and runs nothing: {word}");
+        }
+        assert!(!loader.contains("source ") && !loader.contains(". \"$") && !loader.contains("eval"), "the loader runs no value source");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_value_source_that_cannot_be_read_refuses_the_whole_rescue_and_pushes_nothing() {
+        let gone = || {
+            let mut done = std::process::Command::new("true").spawn().unwrap();
+            done.wait().unwrap();
+            done
+        };
+        // A node whose environment no other process of its user may read: one that made itself undumpable.
+        let undumpable = || {
+            let prctl = if std::env::consts::ARCH == "x86_64" { 157 } else { 167 };
+            let mut node = std::process::Command::new("perl")
+                .args(["-e", &format!("syscall({prctl}, 4, 0, 0, 0, 0) == 0 or die; <STDIN>"), "pinned-server"])
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            let environ = format!("/proc/{}/environ", node.id());
+            for _ in 0..500 {
+                if std::fs::read(&environ).is_err() {
+                    return node;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let _ = node.kill();
+            panic!("the node stayed readable");
+        };
+        let cases: [(&str, &dyn Fn(&mut RescueRun)); 6] = [
+            ("box.env that cannot be read", &|run| {
+                use std::os::unix::fs::PermissionsExt;
+                let env = run.pinned.join("box.env");
+                std::fs::write(&env, "PINNED_BOX=1\n").unwrap();
+                std::fs::set_permissions(&env, std::fs::Permissions::from_mode(0o000)).unwrap();
+            }),
+            ("no pid file", &|run| std::fs::remove_file(run.pinned.join("node.pid")).unwrap()),
+            ("a pid file that holds no pid", &|run| std::fs::write(run.pinned.join("node.pid"), "12x\n").unwrap()),
+            ("a pid that is not the node", &|run| run.set_node(waiting("not-the-node", &[]))),
+            ("a pid that runs no process", &|run| run.set_node(gone())),
+            ("a node whose environment cannot be read", &|run| run.set_node(undumpable())),
+        ];
+        for (case, make) in cases {
+            for mode in [RescueMode::Commits, RescueMode::Full] {
+                let mut run = RescueRun::new();
+                make(&mut run);
+                run.commit_all(&[("src/a.rs", "fn a() {}\n")], "work");
+                std::fs::write(run.clone.join("notes.txt"), "half done\n").unwrap();
+                let head = run.git(&run.clone, &["rev-parse", "HEAD"]);
+                assert_eq!(run.rescue_in(mode), "pinned-rescue: refused secret\npinned-rescue: done\n", "{case}, {mode:?}");
+                assert_eq!(run.remote_branches(), "refs/heads/main\n", "{case}, {mode:?}");
+                assert_eq!(run.git(&run.clone, &["rev-parse", "HEAD"]), head, "{case}, {mode:?}: no rescue commit stays");
+                assert_eq!(std::fs::read_to_string(run.clone.join("notes.txt")).unwrap(), "half done\n", "{case}, {mode:?}");
+                assert!(run.writes().iter().all(|w| !w.starts_with(PUSH)), "{case}, {mode:?}: {:?}", run.writes());
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_public_repository_rescue_pushes_only_history_that_descends_from_origin() {
+        let refused = "pinned-rescue: refused history 1\npinned-rescue: done\n";
+        let saved = "pinned-rescue: saved wip/rescue/task-1a2b3c4d\npinned-rescue: done\n";
+        let from_another_remote = |run: &RescueRun| {
+            let other = run._root.path().join("other.git");
+            run.git(&run.home, &["init", "-q", "--bare", other.to_str().unwrap()]);
+            run.git(&run.clone, &["remote", "add", "other", other.to_str().unwrap()]);
+            run.git(&run.clone, &["checkout", "-q", "-b", "theirs"]);
+            run.commit_all(&[("theirs.txt", "theirs\n")], "theirs");
+            run.git(&run.clone, &["push", "-q", "other", "theirs"]);
+            run.git(&run.clone, &["checkout", "-q", "main"]);
+            run.git(&run.clone, &["branch", "-q", "-D", "theirs"]);
+            run.git(&run.clone, &["fetch", "-q", "other"]);
+            run.git(&run.clone, &["checkout", "-q", "-b", "mine", "other/theirs"]);
+            run.commit_all(&[("notes.txt", "mine\n")], "mine");
+        };
+        let orphan = |run: &RescueRun| {
+            run.git(&run.clone, &["checkout", "-q", "--orphan", "solo"]);
+            run.commit_all(&[("solo.txt", "solo\n")], "solo");
+        };
+        let cases: [(&str, &dyn Fn(&RescueRun)); 4] = [
+            ("a commit fetched from another remote", &from_another_remote),
+            ("a root commit", &orphan),
+            ("a tag origin does not have", &|run| {
+                run.commit_all(&[("notes.txt", "mine\n")], "mine");
+                run.git(&run.clone, &["tag", "v9"]);
+            }),
+            ("a stash on the work", &|run| {
+                run.commit_all(&[("notes.txt", "mine\n")], "mine");
+                std::fs::write(run.clone.join("notes.txt"), "more\n").unwrap();
+                run.git(&run.clone, &["stash", "-q"]);
+            }),
+        ];
+        for (case, make) in cases {
+            let run = RescueRun::new();
+            make(&run);
+            assert_eq!(run.rescue_in(RescueMode::Commits), refused, "{case}");
+            assert_eq!(run.remote_branches(), "refs/heads/main\n", "{case}");
+            assert!(run.writes().iter().all(|w| !w.starts_with(PUSH)), "{case}: {:?}", run.writes());
+            let run = RescueRun::new();
+            make(&run);
+            assert_eq!(run.rescue_in(RescueMode::Full), saved, "{case}: full mode pushes it as before");
+        }
+
+        let run = RescueRun::new();
+        run.git(&run.clone, &["checkout", "-q", "-b", "work"]);
+        run.commit_all(&[("notes.txt", "mine\n")], "mine");
+        run.git(&run.clone, &["checkout", "-q", "main"]);
+        orphan(&run);
+        run.git(&run.clone, &["checkout", "-q", "main"]);
+        assert_eq!(
+            run.rescue_in(RescueMode::Commits),
+            "pinned-rescue: saved wip/rescue/task-1a2b3c4d\npinned-rescue: refused history 1\npinned-rescue: done\n",
+            "a worker's branch is saved beside the one refused"
+        );
+        assert_eq!(run.branch("wip/rescue/task-1a2b3c4d", "notes.txt"), "mine\n");
+
+        let run = RescueRun::new();
+        run.commit_all(&[("notes.txt", "mine\n")], "mine");
+        run.git(&run.clone, &["tag", "-a", "-m", "tagged", "v1"]);
+        run.git(&run.clone, &["push", "-q", "origin", "refs/tags/v1"]);
+        assert_eq!(run.rescue_in(RescueMode::Commits), saved, "a tag origin has is origin's history");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_rescue_answer_counts_the_branches_refused_for_their_history() {
+        let answer = |output: &str| rescued(&Exec { exit_code: 0, output: output.into(), error: String::new() }, TASK);
+        assert_eq!(
+            answer("pinned-rescue: refused history 1\npinned-rescue: done\n"),
+            Rescue::failed("1 branch holds history that does not come from its repository, so it was not pushed")
+        );
+        assert_eq!(
+            answer("pinned-rescue: saved wip/rescue/task-1a2b3c4d\npinned-rescue: refused history 3\npinned-rescue: done\n").notice().as_deref(),
+            Some("Unpushed work was saved to branch wip/rescue/task-1a2b3c4d. Other unpushed work could not be saved: 3 branches hold history that does not come from its repository, so they were not pushed.")
+        );
+        assert_eq!(answer("pinned-rescue: refused history x\npinned-rescue: done\n"), Rescue::failed("the box answered something unexpected"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_clone_that_pushes_elsewhere_than_it_fetches_from_pushes_nothing() {
+        let other = |run: &RescueRun| {
+            let other = run._root.path().join("other.git");
+            run.git(&run.home, &["init", "-q", "--bare", other.to_str().unwrap()]);
+            other.to_str().unwrap().to_owned()
+        };
+        let changes: [(&str, &dyn Fn(&RescueRun) -> String); 3] = [
+            ("a push URL", &|run| {
+                let other = other(run);
+                run.git(&run.clone, &["config", "remote.origin.pushurl", &other]);
+                other
+            }),
+            ("a pushInsteadOf", &|run| {
+                let other = other(run);
+                run.git(&run.clone, &["config", &format!("url.{other}.pushInsteadOf"), "git@github.com:acme/site.git"]);
+                other
+            }),
+            ("a second URL", &|run| {
+                let other = other(run);
+                run.git(&run.clone, &["config", "--add", "remote.origin.url", &other]);
+                other
+            }),
+        ];
+        for (change, make) in changes {
+            for mode in [RescueMode::Commits, RescueMode::Full] {
+                let run = RescueRun::new();
+                let other = make(&run);
+                run.commit_all(&[("notes.txt", "mine\n")], "mine");
+                assert_eq!(run.rescue_in(mode), "pinned-rescue: failed remote\npinned-rescue: done\n", "{change}, {mode:?}");
+                assert_eq!(run.git(std::path::Path::new(&other), &["for-each-ref", "--format=%(refname)"]), "", "{change}, {mode:?}: the other repository got nothing");
+                assert_eq!(run.remote_branches(), "refs/heads/main\n", "{change}, {mode:?}");
+                assert!(run.writes().iter().all(|w| !w.starts_with(PUSH)), "{change}, {mode:?}: {:?}", run.writes());
+            }
+        }
     }
 }
