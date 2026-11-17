@@ -14301,6 +14301,16 @@ Have another model review a risky change before it goes ahead.";
 
     #[test]
     #[cfg(unix)]
+    fn a_team_boxs_run_cost_past_the_hubs_cap_is_sent_as_the_cap() {
+        let RunCostBox { dir, m, sent, subject, transcript, .. } = run_costs_box("run-costs-cap");
+        append(&transcript, &[run_spent("m2", "claude-sonnet-5-5", 700_000_000)]);
+        m.report_run_costs(Instant::now());
+        assert_eq!(*sent.lock().unwrap(), vec![("wf-1".to_owned(), subject, 1_000_000.0)], "US$ 10 500.15 spent, sent as the hub's most, US$ 10 000");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn a_team_boxs_run_cost_takes_the_list_price_not_the_boxs_price_file() {
         let RunCostBox { dir, config, m, sent, subject, .. } = run_costs_box("run-costs-price-file");
         std::fs::write(config.join("usage-prices.json"), r#"{"prices":{"claude-sonnet-5-5":{"input":0,"output":0}}}"#).unwrap();
