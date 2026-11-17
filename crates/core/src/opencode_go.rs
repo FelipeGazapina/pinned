@@ -95,18 +95,28 @@ pub fn models() -> Vec<ModelChoice> {
         .collect()
 }
 
+/// What a Go session sets besides `KEY_ENV`, in the order `env` sets them.
+pub const SESSION_ENV: [&str; 6] = [
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_SMALL_FAST_MODEL",
+];
+
 /// What a Go session adds after pinned has stripped a parent shell's Anthropic variables.
 pub fn env(key: &str) -> Vec<(String, String)> {
     let key = key.trim().to_owned();
-    vec![
-        (KEY_ENV.to_owned(), key.clone()),
-        ("ANTHROPIC_BASE_URL".into(), gateway_from(std::env::var("PINNED_OPENCODE_GO_BASE").ok().as_deref())),
-        ("ANTHROPIC_AUTH_TOKEN".into(), key),
-        ("ANTHROPIC_DEFAULT_OPUS_MODEL".into(), DEFAULT_OPUS_MODEL.into()),
-        ("ANTHROPIC_DEFAULT_SONNET_MODEL".into(), DEFAULT_SONNET_MODEL.into()),
-        ("ANTHROPIC_DEFAULT_HAIKU_MODEL".into(), DEFAULT_HAIKU_MODEL.into()),
-        ("ANTHROPIC_SMALL_FAST_MODEL".into(), SMALL_FAST_MODEL.into()),
-    ]
+    let values = [
+        gateway_from(std::env::var("PINNED_OPENCODE_GO_BASE").ok().as_deref()),
+        key.clone(),
+        DEFAULT_OPUS_MODEL.into(),
+        DEFAULT_SONNET_MODEL.into(),
+        DEFAULT_HAIKU_MODEL.into(),
+        SMALL_FAST_MODEL.into(),
+    ];
+    std::iter::once((KEY_ENV.to_owned(), key)).chain(SESSION_ENV.iter().map(|name| name.to_string()).zip(values)).collect()
 }
 
 fn gateway_from(value: Option<&str>) -> String {

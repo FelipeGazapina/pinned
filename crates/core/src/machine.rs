@@ -9961,6 +9961,69 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    /// A node started inside an OpenCode Go session: its key and every variable its kind sets,
+    /// beside every session variable.
+    fn inside_a_go_session() -> Vec<(String, String)> {
+        let mut env = inherited();
+        env.extend(crate::opencode_go::SESSION_ENV.iter().map(|name| (name.to_string(), "inherited-xyz".to_owned())));
+        env
+    }
+
+    /// The Go settings in `env`, by name.
+    fn go_settings(env: &[(String, String)]) -> BTreeMap<String, String> {
+        env.iter().filter(|(key, _)| crate::opencode_go::SESSION_ENV.contains(&key.as_str())).cloned().collect()
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_login_account_started_inside_a_go_session_gets_none_of_its_settings() {
+        let root = temp("go-inside-login");
+        write_go_account(&root);
+        let m = accounts_machine(&root);
+        let parent = inside_a_go_session();
+        let claude = Account::builtin(Provider::Claude);
+        let tab = m.launch.child_env(&claude, "tab-1", &m.launch_env(&claude, vec![]));
+        assert_eq!(go_settings(&tab.of(&parent)), BTreeMap::new(), "a login account's tab");
+        assert_eq!(go_settings(&m.accounts.child_env(&claude).of(&parent)), BTreeMap::new(), "the status probe");
+        assert_eq!(go_settings(&ChildEnv::none().of(&parent)), BTreeMap::new(), "the limits probe");
+        assert_eq!(go_settings(&crate::setup_token::child_env(&m.accounts.env(&claude)).of(&parent)), BTreeMap::new(), "setup-token");
+        assert_eq!(go_settings(&m.delegate_env(&claude, "task-1").of(&parent)), BTreeMap::new(), "a delegate driver");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_go_session_started_inside_a_go_session_gets_exactly_its_own_settings() {
+        let root = temp("go-inside-go");
+        write_go_account(&root);
+        let m = accounts_machine(&root);
+        let go = m.accounts.get("go").unwrap();
+        let tab = m.launch.child_env(&go, "tab-1", &m.launch_env(&go, vec![]));
+        let env = tab.of(&inside_a_go_session());
+        let expected = [
+            ("ANTHROPIC_BASE_URL", "https://opencode.ai/inference/go/anthropic"),
+            ("ANTHROPIC_AUTH_TOKEN", "oc_sk_test"),
+            ("ANTHROPIC_DEFAULT_OPUS_MODEL", "kimi-k3"),
+            ("ANTHROPIC_DEFAULT_SONNET_MODEL", "minimax-m3"),
+            ("ANTHROPIC_DEFAULT_HAIKU_MODEL", "claude-haiku-5-5"),
+            ("ANTHROPIC_SMALL_FAST_MODEL", "claude-haiku-5-5"),
+        ];
+        assert_eq!(go_settings(&env), expected.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<BTreeMap<_, _>>());
+        assert!(env.contains(&("PINNED_OPENCODE_GO_KEY".into(), "oc_sk_test".into())));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn without_a_go_key_a_login_session_keeps_the_anthropic_settings_the_user_exported() {
+        // A proxy or model the user set in their own shell is theirs: only a Go key marks them as a Go session's.
+        let m = machine();
+        let parent: Vec<(String, String)> = crate::opencode_go::SESSION_ENV.iter().map(|name| (name.to_string(), format!("own-{name}"))).collect();
+        let claude = Account::builtin(Provider::Claude);
+        let tab = m.launch.child_env(&claude, "tab-1", &m.launch_env(&claude, vec![]));
+        assert_eq!(go_settings(&tab.of(&parent)), go_settings(&parent));
+        assert_eq!(go_settings(&ChildEnv::none().of(&parent)).get("ANTHROPIC_BASE_URL").map(String::as_str), Some("own-ANTHROPIC_BASE_URL"));
+    }
+
     /// Writes a Go account and its key without validation, so a launch test stays offline.
     #[cfg(unix)]
     fn write_go_account(root: &Path) {
