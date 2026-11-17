@@ -2352,8 +2352,13 @@ impl Machine {
             if screen.lock().unwrap().session != session || !machine.tab(&tab, unstarted).unwrap_or(false) {
                 return;
             }
+            // The screen is scrubbed before it is quoted; a line that does not scrub is not quoted.
             let shown = crate::setup_token::last_line(machine.screen_text(&tab).as_bytes());
-            machine.end_start(&tab, format!("it did not start within {}; its screen shows: {shown}", wait_text(limit)));
+            let reason = match crate::reports::scrub(&shown, &crate::reports::Context::default()) {
+                Ok(shown) => format!("it did not start within {}; its screen shows: {shown}", wait_text(limit)),
+                Err(_) => format!("it did not start within {}", wait_text(limit)),
+            };
+            machine.end_start(&tab, reason);
         });
     }
 
@@ -13096,7 +13101,7 @@ Have another model review a risky change before it goes ahead.";
         wait_for("the start to fail", || m.delegates.get(&task).is_some_and(|t| t.state.terminal()));
         let info = m.delegates.get(&task).unwrap();
         let reason = info.error.clone().unwrap();
-        assert!(reason.starts_with("it did not start within 2 s; its screen shows: "), "{reason}");
+        assert_eq!(reason, "it did not start within 2 s; its screen shows: Use the docs server at [folder] with [hidden]?  1. Use it  2. Skip it  Enter to confirm · Esc to cancel");
         for secret in ["/home", "boxuser", "sk-ant-oat01", "ABCDEFGHIJKLMNOP"] {
             assert!(!reason.contains(secret), "{secret} leaked into {reason}");
         }
