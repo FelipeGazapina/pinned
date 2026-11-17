@@ -13,8 +13,11 @@
 # stack writes; every child runs with HOME, TMPDIR and CLAUDE_CONFIG_DIR inside it and with the
 # developer's tokens unset. TEAMS_DEV_BIN=<pinned-server> skips the cargo build; the binary must be a
 # debug build (check-bin.sh asks it, and exits 2 for anything else). Ports:
-# TEAMS_DEV_HUB_PORT 8811, TEAMS_DEV_BOX_PORT 8812, TEAMS_DEV_SLACK_PORT 8813, TEAMS_DEV_PG_PORT 5611.
-# The hub always starts with --dev and PINNED_DEV_TIME_SCALE=${TEAMS_DEV_TIME_SCALE:-60}.
+# TEAMS_DEV_HUB_PORT 8811, TEAMS_DEV_BOX_PORT 8812, TEAMS_DEV_SLACK_PORT 8813, TEAMS_DEV_PG_PORT 5611,
+# TEAMS_DEV_GITHUB_PORT 8814.
+# The hub always starts with --dev and PINNED_DEV_TIME_SCALE=${TEAMS_DEV_TIME_SCALE:-60}, and files
+# reports only on the fake GitHub (`pinned-server fake-github`). No reports token is ever set: a --dev
+# hub sends the fake its own built-in fake- token.
 # The stack refuses (exit 2) a dir that is, or is inside, a real pinned home: ~/.pinned,
 # ~/.config/pinned, the desktop app's data folder, /workspace/home, or the home folder or / itself.
 set -eu
@@ -33,6 +36,8 @@ HUB_PORT=${TEAMS_DEV_HUB_PORT:-8811}
 BOX_PORT=${TEAMS_DEV_BOX_PORT:-8812}
 SLACK_PORT=${TEAMS_DEV_SLACK_PORT:-8813}
 PG_PORT=${TEAMS_DEV_PG_PORT:-5611}
+GITHUB_PORT=${TEAMS_DEV_GITHUB_PORT:-8814}
+GITHUB=http://127.0.0.1:$GITHUB_PORT
 HUB=http://127.0.0.1:$HUB_PORT
 BOX=http://127.0.0.1:$BOX_PORT
 RECORD=$REPO/.dev/teams-dev.dir
@@ -97,7 +102,7 @@ alive() {
   tr '\0' '\n' 2>/dev/null <"/proc/$pid/environ" | grep -qx "TEAMS_DEV_DIR=$DIR"
 }
 
-# Own pid files only: the stack's (hub.pid, fake-box.pid, fake-slack.pid) and its box nodes' node.pid.
+# Own pid files only: the stack's (hub.pid, fake-box.pid, fake-slack.pid, fake-github.pid) and its box nodes' node.pid.
 pid_files() {
   ls "$DIR"/*.pid "$DIR"/boxes/*/home/.pinned/node.pid 2>/dev/null || true
 }
@@ -121,6 +126,9 @@ stop_all() {
 scrub_env() {
   for name in $(env | cut -d= -f1 | grep '^ANTHROPIC_' || true); do unset "$name"; done
   unset CLAUDE_CODE_OAUTH_TOKEN GH_TOKEN GITHUB_TOKEN PINNED_OPENCODE_GO_KEY UPSTASH_BOX_API_KEY
+  unset PINNED_REPORTS_GITHUB_TOKEN PINNED_REPORTS_GITHUB_API PINNED_REPORTS_REPO PINNED_REPORTS_POLL_SECS
+  # Every call the stack makes stays on this machine: no proxy variable carries one elsewhere.
+  unset http_proxy HTTP_PROXY https_proxy HTTPS_PROXY all_proxy ALL_PROXY
   mkdir -p "$DIR/home/.claude" "$DIR/tmp"
   export HOME="$DIR/home" TMPDIR="$DIR/tmp" CLAUDE_CONFIG_DIR="$DIR/home/.claude" TEAMS_DEV_DIR="$DIR" TEAMS_DEV_HUB="$HUB"
   # Boxes are the fake's, always: a key in the developer's shell never reaches a real Upstash.
@@ -131,7 +139,7 @@ up() {
   if alive "$DIR/hub.pid"; then echo "the stack is already up (dir $DIR)"; urls; return 0; fi
   stop_all
   # Free ports are the caller's to pick: say which one is taken rather than start half a stack.
-  for port in $HUB_PORT $BOX_PORT $SLACK_PORT $PG_PORT; do
+  for port in $HUB_PORT $BOX_PORT $SLACK_PORT $PG_PORT $GITHUB_PORT; do
     if ss -ltn 2>/dev/null | awk '{print $4}' | grep -q ":$port\$"; then echo "port $port is in use: set TEAMS_DEV_*_PORT" >&2; exit 1; fi
   done
   if [ -n "${TEAMS_DEV_BIN:-}" ]; then SERVER=$TEAMS_DEV_BIN
@@ -165,7 +173,14 @@ up() {
   echo $! >"$DIR/fake-slack.pid"
   wait_for "curl -s -o /dev/null http://127.0.0.1:$SLACK_PORT/" "the fake Slack"
 
+  "$SERVER" fake-github --listen "127.0.0.1:$GITHUB_PORT" >"$DIR/fake-github.log" 2>&1 &
+  echo $! >"$DIR/fake-github.pid"
+  wait_for "curl -s -o /dev/null $GITHUB/" "the fake GitHub"
+
   export PINNED_DEV_TIME_SCALE=${TEAMS_DEV_TIME_SCALE:-60}
+  # Reports go to the fake GitHub only: under --dev the hub refuses any reports API that is not on this
+  # machine, and sends no token but its own built-in fake one.
+  export PINNED_REPORTS_GITHUB_API="$GITHUB"
   "$SERVER" hub --db "postgres://pinned@127.0.0.1:$PG_PORT/pinned" --listen "127.0.0.1:$HUB_PORT" --ui "$REPO/ui" \
     --downloads "$DIR/downloads" --key-file "$DIR/hub.key" --public-url "$HUB" --signup open --dev >"$DIR/hub.log" 2>&1 &
   echo $! >"$DIR/hub.pid"
@@ -186,6 +201,7 @@ status() {
   component "hub        $HUB" "$DIR/hub.pid" "curl -fs $HUB/"
   component "fake box   $BOX" "$DIR/fake-box.pid" "curl -fs -H 'X-Box-Api-Key: box_dev-probe' $BOX/v2/box"
   component "fake slack http://127.0.0.1:$SLACK_PORT" "$DIR/fake-slack.pid" "curl -s -o /dev/null http://127.0.0.1:$SLACK_PORT/"
+  component "fake github $GITHUB" "$DIR/fake-github.pid" "curl -s -o /dev/null $GITHUB/"
   if pg_isready -q -h 127.0.0.1 -p "$PG_PORT"; then echo "up    postgres   127.0.0.1:$PG_PORT"; else echo "down  postgres   127.0.0.1:$PG_PORT"; down=1; fi
   echo "dir   $DIR"
   [ -z "$down" ]
@@ -195,6 +211,7 @@ urls() {
   echo "hub        $HUB   (sign in with a user below)"
   echo "fake box   $BOX   (keys: box_dev-<anything>)"
   echo "fake slack http://127.0.0.1:$SLACK_PORT   (a team or account connects Slack with xoxb-dev-<anything>)"
+  echo "fake github $GITHUB   (the hub files reports here)"
   echo "users      (passwords: $DIR/accounts.json, mode 600)"
   if [ -f "$DIR/accounts.json" ]; then node -e 'for (const e of Object.keys(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")))) console.log("  " + e)' "$DIR/accounts.json"; fi
 }

@@ -83,6 +83,21 @@ pub fn menu_top(lines: &[String]) -> Option<usize> {
     read_menu(&lines, None)
 }
 
+/// Whether a dialog is up on a screen of `lines`: the lines under the last rule of at least twenty
+/// ▔, with no rule of at least twenty ─ under it (claude's prompt box) and something written, read
+/// by the rules of `dialogOn` in ui/terminal-menu.js. Claude Code draws these for /usage, /status,
+/// /mcp and the like in place of its prompt.
+pub fn dialog_on(lines: &[String]) -> bool {
+    let long = |line: &str, c: char| line.chars().collect::<Vec<_>>().windows(20).any(|w| w.iter().all(|&x| x == c));
+    let Some(rule) = lines.iter().rposition(|line| long(line, '▔')) else { return false };
+    let body = &lines[rule + 1..];
+    let prompt_rule = |line: &str| {
+        let text = line.trim();
+        text.chars().count() >= 20 && text.chars().all(|c| c == '─')
+    };
+    !body.iter().any(|line| prompt_rule(line)) && body.iter().any(|line| !line.trim().is_empty())
+}
+
 fn read_menu(lines: &[Vec<char>], preview_row: Option<usize>) -> Option<usize> {
     let preview = preview_row.is_some();
     let blank = |chars: &[char]| chars.iter().all(|c| c.is_whitespace());
@@ -239,6 +254,23 @@ mod tests {
         assert_eq!(menu_top(&screen(&idle)), None, "an idle prompt box is no menu");
         let running = ["⏺ Bash(cargo build)", "  ⎿  Running…", "", rule.as_str(), "❯ ", rule.as_str(), "  ⏵⏵ accept edits on (shift+tab to cycle)"];
         assert_eq!(menu_top(&screen(&running)), None, "a running turn is no menu");
+    }
+
+    /// The shape `dialogOn` in ui/terminal-menu.js reads: Claude Code's /usage, /status or /mcp
+    /// drawn under a ▔ rule in place of the prompt box.
+    #[test]
+    fn dialogs_are_read_as_the_ui_reads_them() {
+        let top = "▔".repeat(100);
+        let rule = "─".repeat(100);
+        let usage = ["⏺ Done.", "", top.as_str(), "  Status   Config   Usage", "", "  Current session", "  ████▌                                              9% used", "", "  Esc to cancel", "", ""];
+        assert!(dialog_on(&screen(&usage)));
+        assert_eq!(menu_top(&screen(&usage)), None, "a dialog is no menu");
+        let shown = ["  ⎿  a file with a ▔ rule", top.as_str(), "  some output", "", rule.as_str(), "❯ ", rule.as_str(), "  ⏵⏵ accept edits on (shift+tab to cycle)"];
+        assert!(!dialog_on(&screen(&shown)), "a ▔ rule with the prompt box under it is only output");
+        assert!(!dialog_on(&screen(&["⏺ Done.", top.as_str(), "", "   "])), "a rule with nothing under it is no dialog");
+        let short = "▔".repeat(19);
+        assert!(!dialog_on(&screen(&[short.as_str(), "  Status"])), "a rule under twenty ▔ is no dialog");
+        assert!(!dialog_on(&screen(&["⏺ Done.", "", rule.as_str(), "❯", rule.as_str()])), "an idle prompt box is no dialog");
     }
 
     #[test]
