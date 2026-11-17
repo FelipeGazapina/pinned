@@ -42,6 +42,7 @@ struct Hub {
 
 impl Hub {
     fn start(name: &str) -> Hub {
+        pinned_core::machine::refuse_real_home();
         let _ = rustls::crypto::ring::default_provider().install_default();
         let database = format!("pinned_live_{name}_{}", std::process::id());
         admin("pinned", &format!("drop database if exists {database} with (force)"));
@@ -273,6 +274,9 @@ impl Node {
             .stdout(Stdio::null())
             .stderr(Stdio::from(stderr))
             .process_group(0);
+        for name in pinned_core::machine::session_variables() {
+            cmd.env_remove(name);
+        }
         for (key, value) in extra {
             cmd.env(key, value);
         }

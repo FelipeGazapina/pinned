@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 pub const SOCK_ENV: &str = "PINNED_SOCK";
 pub const TAB_ENV: &str = "PINNED_TAB";
 pub const TASK_ENV: &str = "PINNED_TASK";
+/// Tells a node it runs in a worker box.
+pub const BOX_ENV: &str = "PINNED_BOX";
 
 /// Set on a project's orchestrator and its workers, with the project in `PROJECT_ENV`, since a
 /// worker runs in a worktree whose folder is not the project's.

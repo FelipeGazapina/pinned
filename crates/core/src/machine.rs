@@ -989,6 +989,9 @@ impl Machine {
     /// A machine that keeps its sessions, projects and history in `dir`, or nothing without one,
     /// and opens new tabs on `open`, else the most recent project. Everything it reports goes to `events`.
     pub fn new(launch: Launch, dir: Option<PathBuf>, open: Option<PathBuf>, events: impl Fn(Event) + Send + Sync + 'static) -> Arc<Machine> {
+        // A machine's built-in Claude account is the home's Claude folder: this crate's tests stop here in a real home.
+        #[cfg(test)]
+        refuse_real_home();
         let projects_file = dir.as_ref().map(|d| d.join("projects.json"));
         let mut projects = dir
             .as_ref()
@@ -6893,9 +6896,24 @@ pub(crate) fn home() -> PathBuf {
     PathBuf::from(std::env::var_os(HOME_ENV).unwrap_or_default())
 }
 
-/// The variables a real Claude or pinned session sets. A test process that has one of them carries
-/// that session's login or socket.
-pub const REAL_HOME_VARIABLES: [&str; 6] = ["CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN", "GH_TOKEN", SOCK_ENV, TAB_ENV, TASK_ENV];
+/// The variables a real Claude or pinned session, or a person's shell, sets. A test process that
+/// has one of them carries that session's login, key or socket.
+pub const REAL_HOME_VARIABLES: [&str; 11] = [
+    "CLAUDE_CONFIG_DIR",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CODEX_HOME",
+    crate::opencode_go::KEY_ENV,
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    SOCK_ENV,
+    TAB_ENV,
+    TASK_ENV,
+];
+
+/// The desktop app's bundle identifier: the name of its folder in the config and data dirs.
+const APP_ID: &str = "dev.personal-harness.pinned";
 
 /// The mark of a test process whose home is unset or empty.
 #[cfg(unix)]
@@ -6903,27 +6921,48 @@ const NO_HOME: &str = "HOME is empty or unset";
 #[cfg(windows)]
 const NO_HOME: &str = "USERPROFILE is empty or unset";
 
-/// What a process a test starts must not inherit.
+/// What a process a test starts must not inherit: every login variable, and every variable a
+/// pinned session, workflow, team call or box sets.
 pub fn session_variables() -> impl Iterator<Item = &'static str> {
-    ["PINNED_SOCK", "PINNED_TAB", "PINNED_PROJECT", "PINNED_ROLE", "PINNED_ACCOUNT", "PINNED_TUTORIAL_HELPER", "CLAUDE_CONFIG_DIR", "CLAUDE_CODE_OAUTH_TOKEN", "GH_TOKEN"].into_iter()
+    use crate::agent::{BOX_ENV, CONNECTOR_ENV, ISSUE_ENV, PROJECT_ENV, ROLE_ENV, SLACK_CHANNEL_ENV, SLACK_THREAD_ENV};
+    let session = [PROJECT_ENV, ROLE_ENV, crate::accounts::ACCOUNT_ENV, crate::plugin::HELPER_ENV, CONNECTOR_ENV, ISSUE_ENV, SLACK_CHANNEL_ENV, SLACK_THREAD_ENV, crate::team_call::TEAM_BOX_ENV, BOX_ENV];
+    REAL_HOME_VARIABLES.into_iter().chain(session)
 }
 
 /// What marks `home` and the environment as a person's real Claude or pinned home, by name only: a
 /// kind of file, or a variable's name, never a value or a path. `exists` probes a path without
 /// opening it; `is_set` tells whether a variable is set, to any value.
 pub fn real_home_marks(home: Option<&Path>, xdg_config: Option<&Path>, exists: impl Fn(&Path) -> bool, is_set: impl Fn(&str) -> bool) -> Vec<&'static str> {
-    let home = home.unwrap_or(Path::new(""));
     let mut marks = Vec::new();
-    // An empty HOME would probe the working directory instead.
-    let in_home = |file: &str| !home.as_os_str().is_empty() && exists(&home.join(file));
-    if in_home(".claude.json") {
-        marks.push("a Claude config file in HOME");
-    }
-    if in_home(".claude") {
-        marks.push("a Claude folder in HOME");
-    }
-    if in_home(".config/pinned/account.json") || in_home(".pinned/account.json") || xdg_config.is_some_and(|dir| exists(&dir.join("pinned/account.json"))) {
-        marks.push("a pinned account file in HOME");
+    // Without a home, `claude` and `codex` use the one in the system's user record, and an empty
+    // one would probe the working directory: nothing under it is probed.
+    match home.filter(|home| !home.as_os_str().is_empty()) {
+        None => marks.push(NO_HOME),
+        Some(home) => {
+            // An empty XDG_CONFIG_HOME reads as unset, which `<home>/.config` already covers.
+            let xdg = xdg_config.filter(|dir| !dir.as_os_str().is_empty());
+            let in_home = |file: &str| exists(&home.join(file));
+            // In `<home>/.config`, and in XDG_CONFIG_HOME when it is set elsewhere.
+            let in_config = |file: &str| in_home(&format!(".config/{file}")) || xdg.is_some_and(|dir| exists(&dir.join(file)));
+            if in_home(".claude.json") {
+                marks.push("a Claude config file in HOME");
+            }
+            if in_home(".claude") {
+                marks.push("a Claude folder in HOME");
+            }
+            if in_config("pinned/account.json") || in_home(".pinned/account.json") {
+                marks.push("a pinned account file in HOME");
+            }
+            if in_config("pinned/accounts") {
+                marks.push("a pinned accounts folder in HOME");
+            }
+            if in_config(APP_ID) || in_home(&format!("Library/Application Support/{APP_ID}")) || in_home(&format!("AppData/Roaming/{APP_ID}")) {
+                marks.push("a pinned app folder in HOME");
+            }
+            if in_config("gh/hosts.yml") || in_home("AppData/Roaming/GitHub CLI/hosts.yml") {
+                marks.push("a GitHub CLI login file in HOME");
+            }
+        }
     }
     marks.extend(REAL_HOME_VARIABLES.into_iter().filter(|name| is_set(name)));
     marks
@@ -6935,7 +6974,7 @@ pub fn refuse_real_home() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         let home = std::env::var_os(HOME_ENV).map(PathBuf::from);
-        let xdg_config = std::env::var_os("XDG_CONFIG_HOME").filter(|dir| !dir.is_empty()).map(PathBuf::from);
+        let xdg_config = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
         let marks = real_home_marks(home.as_deref(), xdg_config.as_deref(), |path| std::fs::symlink_metadata(path).is_ok(), |name| std::env::var_os(name).is_some());
         if let Some(line) = refusal(&marks) {
             // Straight to stderr: a test's captured output is lost when the process exits.
