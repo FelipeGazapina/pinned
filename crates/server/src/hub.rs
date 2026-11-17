@@ -1626,9 +1626,16 @@ impl Account {
         }
     }
 
-    /// What a worker's box shows: as `seen_any`.
+    /// What a worker's box shows: `Starting` while a session runs and no tab has reported a
+    /// conversation, as while Claude Code waits on a startup screen; else as `seen_any`.
     pub fn seen_worker(&self, machine: &str) -> Seen {
-        self.seen_any(machine)
+        let live = self.live.lock().unwrap();
+        let Some(m) = live.machines.get(machine) else { return Seen::Offline };
+        match m.tabs() {
+            [] => Seen::NoTab,
+            tabs if tabs.iter().any(|t| t.running) && tabs.iter().all(|t| t.session.is_none()) => Seen::Starting { quiet: !tabs.iter().any(holds_box) },
+            tabs => Seen::Tab { running: tabs.iter().any(|t| t.running), quiet: !tabs.iter().any(holds_box) },
+        }
     }
 
     /// Sends the call at once, so calls reach the machine in the order they came, and answers

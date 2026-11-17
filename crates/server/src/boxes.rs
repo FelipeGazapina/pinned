@@ -344,8 +344,10 @@ fn box_end_error(p: &Policy, why: &End) -> Option<String> {
 /// `error`, for a box that ended for `why`, with the last lines its worker's screen showed,
 /// `shown`, when that worker never started.
 fn quoting_screen(error: String, why: &End, shown: Option<&str>) -> String {
-    let _ = (why, shown);
-    error
+    match (why, shown) {
+        (End::NeverStarted, Some(shown)) => format!("{error}; its screen shows: {}", pinned_core::first_run::scrub(shown)),
+        _ => error,
+    }
 }
 
 /// Why a workflow run fails when its box ends for `why`. `Done` too: a run that already finished
@@ -449,6 +451,8 @@ pub(crate) struct Timers {
     exited_since: Option<Instant>,
     gone_since: Option<Instant>,
     offline_since: Option<Instant>,
+    /// A worker's session ran with no turn started.
+    starting_since: Option<Instant>,
     /// The session reported its pull request opened.
     done: bool,
 }
@@ -567,7 +571,14 @@ pub(crate) fn verdict(age: Duration, seen: Seen, t: &mut Timers, now: Instant, p
         Seen::NoTab => (Some(false), Some(true), None, None),
         Seen::Tab { .. } if delegating => (Some(false), Some(false), Some(false), Some(false)),
         Seen::Tab { running, quiet } => (Some(false), Some(false), Some(!running), Some(quiet)),
+        Seen::Starting { .. } if delegating => (Some(false), Some(false), Some(false), Some(false)),
         Seen::Starting { quiet } => (Some(false), Some(false), Some(false), Some(quiet)),
+    };
+    // A box others delegate from waits on its workers, never on its own start.
+    let starting = match seen {
+        Seen::Offline => None,
+        Seen::Starting { .. } => Some(!delegating),
+        _ => Some(false),
     };
     let held = |since: &mut Option<Instant>, on: Option<bool>| match on {
         Some(false) => {
@@ -582,6 +593,7 @@ pub(crate) fn verdict(age: Duration, seen: Seen, t: &mut Timers, now: Instant, p
         (held(&mut t.offline_since, offline).is_some_and(|h| h >= p.offline), End::Offline),
         (held(&mut t.gone_since, gone).is_some_and(|h| h >= p.tab_gone), End::TabClosed),
         (held(&mut t.exited_since, exited).is_some_and(|h| h >= p.exited), End::Exited),
+        (held(&mut t.starting_since, starting).is_some_and(|h| h >= p.first_turn), End::NeverStarted),
         (t.done && quiet.is_some_and(|h| h >= p.done), End::Done),
         (quiet.is_some_and(|h| h >= p.idle), End::Idle),
     ];
@@ -1670,6 +1682,8 @@ impl Boxes {
     async fn tell_origin(&self, hub: &Hub, account: &Account, row: &BoxRow, why: &End) {
         let BoxWork::Delegate { origin, .. } = &row.work else { return };
         let Some(error) = self.box_end_error(why) else { return };
+        // The hub holds no screen of a box's tab: only an attached app gets one, from the machine.
+        let error = quoting_screen(error, why, None);
         let mut end = RemoteEnd { state: "failed".into(), summary: None, error: Some(error), usage: None };
         self.add_end_box_usage(hub, account, row, &mut end).await;
         let ended = Call::RemoteEnded { from: row.machine.to_string(), tab: origin.tab.clone(), task: origin.task.clone(), end: end.clone() };
@@ -1920,6 +1934,7 @@ impl Boxes {
                         // A worker's or a Captain's box holds that one thread and the threads it starts.
                         let seen = match row.work {
                             BoxWork::Run => account.seen(&machine, &row.connector, &row.subject),
+                            BoxWork::Delegate { .. } => account.seen_worker(&machine),
                             _ => account.seen_any(&machine),
                         };
                         let mut timers = self.timers.lock().unwrap();

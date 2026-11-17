@@ -156,9 +156,22 @@ pub fn start_screen(lines: &[String]) -> Option<String> {
     (!last.is_empty()).then(|| scrub(&last.join(" · ")))
 }
 
-/// `text` with every folder and anything shaped like a key left out.
+/// The longest quote of a screen, in characters.
+const SCRUB_CHARS: usize = 300;
+
+/// `text` with every folder and anything shaped like a key left out, at most `SCRUB_CHARS` long.
+/// A word that starts at the root and names a folder under it, as `/workspace/home/app`, is a
+/// folder too; a one-part word such as `/login` is a command.
 pub fn scrub(text: &str) -> String {
-    text.to_owned()
+    let rooted: Vec<String> = text
+        .split(' ')
+        .map(|word| {
+            let bare = word.trim_start_matches(['(', '[', '"', '\'', '`']);
+            if bare.starts_with('/') && bare[1..].contains('/') { "[folder]".to_owned() } else { word.to_owned() }
+        })
+        .collect();
+    let clean = crate::reports::scrub(&rooted.join(" "), &crate::reports::Context::default()).unwrap_or_default();
+    clean.chars().take(SCRUB_CHARS).collect::<String>().trim_end().to_owned()
 }
 
 /// The screen's letters and digits, lowercased, with terminal commands removed. Claude's TUI
