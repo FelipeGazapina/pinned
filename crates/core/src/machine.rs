@@ -876,8 +876,8 @@ pub struct Machine {
     meters: Mutex<HashMap<String, usage::Meter>>,
     /// The models with no price a team box's worker used, by task, each logged once.
     worker_unpriced: Mutex<HashMap<String, HashSet<String>>>,
-    /// The price list the meters price with, and when it was read.
-    meter_rates: Mutex<Option<(Instant, Arc<usage::RateTable>)>>,
+    /// The price list the meters price with, and when it was read and last tried.
+    meter_rates: Mutex<MeterRates>,
     /// Where a team box gets the price list: downloaded, held in memory only.
     list_rates: Mutex<Arc<dyn Fn() -> usage::RateTable + Send + Sync>>,
     /// Whether the hub has seen this machine's own tastes since the link last connected, so the
@@ -4119,31 +4119,35 @@ impl Machine {
     }
 
     /// The price list as of `now`. A team box downloads it and holds it in memory only, never in
-    /// its config dir, whose file its sessions can write; a download that fails keeps the last
-    /// list it got, and is tried again at the next pass.
+    /// its config dir, whose file its sessions can write. It downloads with no lock held, at most
+    /// once every `LIST_RETRY`; while a download runs or after one failed, it prices with the last
+    /// list it got, or with none, which prices every model at the ceiling rate.
     fn meter_rates_at(&self, now: Instant) -> Arc<usage::RateTable> {
-        let mut held = self.meter_rates.lock().unwrap();
-        match &*held {
-            Some((read, rates)) if now.saturating_duration_since(*read) < Duration::from_secs(3600) => rates.clone(),
-            _ if self.team_box.load(Ordering::Relaxed) => {
-                let list = self.list_rates.lock().unwrap().clone();
-                let rates = list();
-                match (rates.is_empty(), &*held) {
-                    (true, Some((_, last))) => last.clone(),
-                    (true, None) => Arc::new(rates),
-                    (false, _) => {
-                        let rates = Arc::new(rates);
-                        *held = Some((now, rates.clone()));
-                        rates
-                    }
+        let (list, last) = {
+            let mut rates = self.meter_rates.lock().unwrap();
+            match &rates.held {
+                Some((read, held)) if now.saturating_duration_since(*read) < Duration::from_secs(3600) => return held.clone(),
+                _ if self.team_box.load(Ordering::Relaxed) => {}
+                _ => {
+                    let held = Arc::new(usage::rates(self.rates_file.as_deref()));
+                    rates.held = Some((now, held.clone()));
+                    return held;
                 }
             }
-            _ => {
-                let rates = Arc::new(usage::rates(self.rates_file.as_deref()));
-                *held = Some((now, rates.clone()));
-                rates
+            let last = rates.held.as_ref().map_or_else(Arc::default, |(_, held)| held.clone());
+            if rates.tried.is_some_and(|at| now.saturating_duration_since(at) < LIST_RETRY) {
+                return last;
             }
+            rates.tried = Some(now);
+            (self.list_rates.lock().unwrap().clone(), last)
+        };
+        let got = list();
+        if got.is_empty() {
+            return last;
         }
+        let got = Arc::new(got);
+        self.meter_rates.lock().unwrap().held = Some((now, got.clone()));
+        got
     }
 
     /// What the thread in `tab` cost: its own session and every worker it delegated, theirs in turn included.
@@ -7467,6 +7471,18 @@ fn save_file(cwd: &Path, path: &str, text: &str) -> Result<String, String> {
 
 /// How often a team box's workflow session tells the hub its model cost so far.
 const RUN_COST_EVERY: Duration = Duration::from_secs(15);
+
+/// How long a team box waits after it tried to download the price list before it tries again.
+const LIST_RETRY: Duration = Duration::from_secs(60);
+
+/// The price list a machine's meters price with (`Machine::meter_rates_at`).
+#[derive(Default)]
+struct MeterRates {
+    /// The list, and when it was read.
+    held: Option<(Instant, Arc<usage::RateTable>)>,
+    /// When a team box last began to download it.
+    tried: Option<Instant>,
+}
 
 /// A team box's workflow session's model cost (`Machine::report_run_costs`).
 #[derive(Default)]
