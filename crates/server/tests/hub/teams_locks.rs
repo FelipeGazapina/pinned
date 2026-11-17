@@ -716,10 +716,154 @@ fn a_run_opened_on_another_box_while_its_tries_failed_ends_its_own_box() {
     assert_eq!(opened(&crew, &pages), 1);
 }
 
-// ---- a waiting row that can never start leaves the line ----
+// ---- a bot row that does not read keeps its waiting row, for a bounded number of passes ----
+
+/// Bot `bot`'s row no longer reads, on every read: a row only SQL could write, whose limits are
+/// not numbers. `readable` puts it right.
+fn unreadable(crew: &Crew, bot: &str) {
+    admin_on(&crew.hub.database, &format!("update team_bots set limits = '{{\"usd\":1,\"minutes\":\"x\"}}' where team = '{}' and workflow = '{bot}'", crew.team));
+}
+
+fn readable(crew: &Crew, bot: &str) {
+    admin_on(&crew.hub.database, &format!("update team_bots set limits = '{{\"usd\":1,\"minutes\":5}}' where team = '{}' and workflow = '{bot}'", crew.team));
+}
+
+/// For each row waiting in bot `bot`'s line, oldest first, how many passes failed to read its bot.
+fn unread_passes(crew: &Crew, bot: &str) -> Vec<i64> {
+    let rows = super::teams_calls::rows(&crew.hub, &format!("select unread_passes::text from team_run_queue where team = '{}' and workflow = '{bot}' order by id", crew.team));
+    rows.iter().map(|r| r[0].as_deref().unwrap().parse().unwrap()).collect()
+}
+
+/// Bot `bot`'s row reads once, then its second read fails with an error that is not a lock wait,
+/// then it reads again. `bot_reads_again` puts the table back.
+fn bot_read_fails_second(crew: &Crew, bot: &str) {
+    bot_read_refused(crew, bot, "= 2", "XX000");
+}
+
+/// The reads of bot `bot`'s row whose number is `when` fail with Postgres error `code`: `team_bots`
+/// is swapped for a view whose filter counts the reads of that row (`bot_reads`).
+fn bot_read_refused(crew: &Crew, bot: &str, when: &str, code: &str) {
+    admin_on(
+        &crew.hub.database,
+        &format!(
+            "create sequence bot_reads;
+             create function bot_read(w text) returns boolean language plpgsql cost 10000 as $$
+               begin
+                 if w = '{bot}' and nextval('bot_reads') {when} then
+                   raise exception 'the row is unreadable' using errcode = '{code}';
+                 end if;
+                 return true;
+               end $$;
+             alter table team_bots rename to team_bots_t;
+             create view team_bots as select * from team_bots_t where bot_read(workflow)"
+        ),
+    );
+}
 
 #[test]
-fn a_waiting_run_whose_bot_never_reads_is_dropped_and_the_next_one_starts() {
+fn a_waiting_run_whose_bot_read_is_busy_holds_up_no_other_bots_run() {
+    let crew = Crew::new("tl_wait_busy_other");
+    let (holder, x, z) = (crew.on_bot("Docs"), crew.on_bot("Pages"), crew.on_bot("Notes"));
+    admin_on(&crew.hub.database, &format!("update teams set max_live_runs = 1 where id = '{}'", crew.team));
+    assert_eq!(crew.found(crew.labeled(&holder, 9)), Ok(()));
+    for bot in [&x, &z] {
+        let reply = crew.call(&crew.bob, TeamOp::RunNow { workflow: bot.clone() }).unwrap();
+        assert_eq!(reply["waiting"], json!(true), "a Run now waits behind the holder");
+    }
+    // Every read of Pages's row is refused as a lock wait that timed out.
+    bot_read_refused(&crew, &x, ">= 1", "55P03");
+    crew.stop(&crew.live_of(&holder)[0]);
+
+    wait_for("Notes's waiting run to open its session", || opened(&crew, &z) == 1);
+    assert_eq!(crew.waiting(&x), 1, "Pages's run still waits");
+    assert_eq!(unread_passes(&crew, &x), vec![0], "a busy read is not counted against the row");
+    bot_reads_again(&crew);
+    assert_eq!(skip_rows(&crew), Vec::<Vec<Option<String>>>::new(), "nothing was counted as skipped");
+    crew.stop(&crew.live_of(&z)[0]);
+    wait_for("Pages's run to open its session", || opened(&crew, &x) == 1 && crew.waiting(&x) == 0);
+}
+
+#[test]
+fn a_waiting_run_whose_bot_read_fails_once_still_waits_and_starts_on_the_next_pass() {
+    let crew = Crew::new("tl_wait_read_once");
+    let (holder, x, z) = (crew.on_bot("Docs"), crew.on_bot("Pages"), crew.on_bot("Notes"));
+    admin_on(&crew.hub.database, &format!("update teams set max_live_runs = 1 where id = '{}'", crew.team));
+    assert_eq!(crew.found(crew.labeled(&holder, 9)), Ok(()));
+    for bot in [&x, &z] {
+        let reply = crew.call(&crew.bob, TeamOp::RunNow { workflow: bot.clone() }).unwrap();
+        assert_eq!(reply["waiting"], json!(true), "a Run now waits behind the holder");
+    }
+    unreadable(&crew, &x);
+    crew.stop(&crew.live_of(&holder)[0]);
+
+    wait_for("Notes's waiting run to open its session", || opened(&crew, &z) == 1);
+    assert_eq!(crew.waiting(&x), 1, "Pages's run still waits");
+    assert_eq!(skip_rows(&crew), Vec::<Vec<Option<String>>>::new(), "nothing was counted as skipped");
+    assert_eq!(unread_passes(&crew, &x), vec![1], "one pass failed to read Pages");
+
+    readable(&crew, &x);
+    crew.stop(&crew.live_of(&z)[0]);
+    wait_for("Pages's run to open its session", || opened(&crew, &x) == 1 && crew.waiting(&x) == 0);
+    assert_eq!(crew.skipped(&x), Value::Null, "nothing was counted as skipped");
+}
+
+#[test]
+fn a_waiting_event_whose_bot_read_fails_once_still_waits_and_starts_on_the_next_pass() {
+    let crew = Crew::new("tl_event_read_once");
+    let (holder, x, z) = (crew.on_bot("Docs"), crew.on_bot("Pages"), crew.on_bot("Notes"));
+    admin_on(&crew.hub.database, &format!("update teams set max_live_runs = 1 where id = '{}'", crew.team));
+    assert_eq!(crew.found(crew.labeled(&holder, 9)), Ok(()));
+    assert_eq!(crew.found(crew.labeled(&x, 1)), Ok(()));
+    assert_eq!(crew.waiting(&x), 1, "Pages's trigger event waits behind the holder");
+    let reply = crew.call(&crew.bob, TeamOp::RunNow { workflow: z.clone() }).unwrap();
+    assert_eq!(reply["waiting"], json!(true), "Notes's Run now waits behind Pages's event");
+    unreadable(&crew, &x);
+    crew.stop(&crew.live_of(&holder)[0]);
+
+    wait_for("Notes's waiting run to open its session", || opened(&crew, &z) == 1);
+    assert_eq!(crew.waiting(&x), 1, "Pages's event still waits");
+    assert_eq!(opened(&crew, &x), 0, "Pages's event did not start");
+    assert_eq!(skip_rows(&crew), Vec::<Vec<Option<String>>>::new(), "nothing was counted as skipped");
+    assert_eq!(unread_passes(&crew, &x), vec![1], "one pass failed to read Pages");
+
+    readable(&crew, &x);
+    crew.stop(&crew.live_of(&z)[0]);
+    wait_for("Pages's event to open its session", || opened(&crew, &x) == 1 && crew.waiting(&x) == 0);
+    assert_eq!(crew.skipped(&x), Value::Null, "nothing was counted as skipped");
+}
+
+#[test]
+fn a_waiting_run_whose_ready_read_fails_once_keeps_its_place_ahead_of_its_bots_next_run() {
+    let crew = Crew::new("tl_wait_ready_once");
+    let (holder, x) = (crew.on_bot("Docs"), crew.on_bot("Pages"));
+    admin_on(&crew.hub.database, &format!("update teams set max_live_runs = 1 where id = '{}'", crew.team));
+    assert_eq!(crew.found(crew.labeled(&holder, 9)), Ok(()));
+    for (who, place) in [(&crew.bob, 1), (&crew.ana, 2)] {
+        let reply = crew.call(who, TeamOp::RunNow { workflow: x.clone() }).unwrap();
+        assert_eq!((reply["waiting"].clone(), reply["place"].clone()), (json!(true), json!(place)), "a Run now waits behind the holder");
+    }
+    // The skip check reads Pages's row; `bots::ready`'s own read of it, next, fails; any later
+    // read of it reads.
+    bot_read_fails_second(&crew, &x);
+    crew.stop(&crew.live_of(&holder)[0]);
+    wait_for("the start after the end to read Pages's row twice", || bot_reads(&crew) >= 2);
+    std::thread::sleep(Duration::from_millis(500));
+
+    assert_eq!(crew.waiting(&x), 2, "both of Pages's runs still wait");
+    assert_eq!(crew.live_of(&x), Vec::<String>::new(), "ana's run did not start ahead of bob's");
+    assert_eq!(unread_passes(&crew, &x), vec![1, 0], "one pass failed to read Pages for bob's run");
+    bot_reads_again(&crew);
+    assert_eq!(skip_rows(&crew), Vec::<Vec<Option<String>>>::new(), "nothing was counted as skipped");
+
+    crew.reaper_pass();
+    wait_for("bob's run to open its session", || opened(&crew, &x) == 1 && crew.waiting(&x) == 1);
+    let runs = crew.call(&crew.bob, TeamOp::Runs).unwrap();
+    let started: Vec<Value> = runs.as_array().unwrap().iter().filter(|r| r["workflow"] == x.as_str()).map(|r| r["started_by"].clone()).collect();
+    assert_eq!(started, vec![json!(crew.bob.id.to_string())], "bob's run started first");
+}
+
+#[test]
+fn a_waiting_run_whose_bot_never_reads_waits_five_passes_then_is_dropped_and_the_next_one_starts() {
     let crew = Crew::new("tl_wait_unreadable");
     let (holder, x, z) = (crew.on_bot("Docs"), crew.on_bot("Pages"), crew.on_bot("Notes"));
     admin_on(&crew.hub.database, &format!("update teams set max_live_runs = 1 where id = '{}'", crew.team));
@@ -728,37 +872,73 @@ fn a_waiting_run_whose_bot_never_reads_is_dropped_and_the_next_one_starts() {
         let reply = crew.call(&crew.bob, TeamOp::RunNow { workflow: bot.clone() }).unwrap();
         assert_eq!(reply["waiting"], json!(true), "a Run now waits behind the holder");
     }
-    // A row only SQL could write: X's limits no longer read, on every pass.
-    admin_on(&crew.hub.database, &format!("update team_bots set limits = '{{\"usd\":1,\"minutes\":\"x\"}}' where team = '{}' and workflow = '{x}'", crew.team));
+    unreadable(&crew, &x);
     crew.stop(&crew.live_of(&holder)[0]);
-    crew.reaper_pass();
 
     wait_for("Notes's waiting run to open its session", || opened(&crew, &z) == 1);
-    assert_eq!(crew.waiting(&x), 0, "X's run left the line");
-    admin_on(&crew.hub.database, &format!("update team_bots set limits = '{{\"usd\":1,\"minutes\":5}}' where team = '{}' and workflow = '{x}'", crew.team));
-    assert_eq!(crew.skipped(&x), json!([{ "reason": "start_failed", "count": 1 }]), "X's dropped run is counted once");
+    assert_eq!(crew.waiting(&x), 1, "Pages's run still waits after one pass");
+    crew.stop(&crew.live_of(&z)[0]);
+    wait_for("a second pass to fail to read Pages", || unread_passes(&crew, &x) == vec![2]);
+    for pass in 3..5 {
+        crew.reaper_pass();
+        wait_for("one more pass to fail to read Pages", || unread_passes(&crew, &x) == vec![pass]);
+    }
+    assert_eq!(crew.waiting(&x), 1, "Pages's run still waits after four passes");
+    assert_eq!(skip_rows(&crew), Vec::<Vec<Option<String>>>::new(), "nothing was counted as skipped");
+    crew.reaper_pass();
+    wait_for("Pages's run to leave the line on the fifth pass", || crew.waiting(&x) == 0);
+    crew.reaper_pass();
+    readable(&crew, &x);
+    assert_eq!(crew.skipped(&x), json!([{ "reason": "start_failed", "count": 1 }]), "Pages's dropped run is counted once");
+    assert_eq!(opened(&crew, &x), 0, "Pages's run never started");
 }
 
 #[test]
-fn a_waiting_event_whose_bot_never_reads_is_dropped_and_the_next_one_starts() {
+fn a_waiting_event_whose_bot_never_reads_waits_five_passes_then_is_dropped_and_the_next_one_starts() {
     let crew = Crew::new("tl_event_unreadable");
     let (holder, x, z) = (crew.on_bot("Docs"), crew.on_bot("Pages"), crew.on_bot("Notes"));
     admin_on(&crew.hub.database, &format!("update teams set max_live_runs = 1 where id = '{}'", crew.team));
     assert_eq!(crew.found(crew.labeled(&holder, 9)), Ok(()));
     assert_eq!(crew.found(crew.labeled(&x, 1)), Ok(()));
-    assert_eq!(crew.waiting(&x), 1, "X's trigger event waits behind the holder");
+    assert_eq!(crew.waiting(&x), 1, "Pages's trigger event waits behind the holder");
     let reply = crew.call(&crew.bob, TeamOp::RunNow { workflow: z.clone() }).unwrap();
-    assert_eq!(reply["waiting"], json!(true), "Notes's Run now waits behind X's event");
-    // A row only SQL could write: X's limits no longer read, on every pass.
-    admin_on(&crew.hub.database, &format!("update team_bots set limits = '{{\"usd\":1,\"minutes\":\"x\"}}' where team = '{}' and workflow = '{x}'", crew.team));
+    assert_eq!(reply["waiting"], json!(true), "Notes's Run now waits behind Pages's event");
+    unreadable(&crew, &x);
     crew.stop(&crew.live_of(&holder)[0]);
-    crew.reaper_pass();
 
     wait_for("Notes's waiting run to open its session", || opened(&crew, &z) == 1);
-    assert_eq!(crew.waiting(&x), 0, "X's event left the line");
-    assert_eq!(opened(&crew, &x), 0, "X's event never started");
-    admin_on(&crew.hub.database, &format!("update team_bots set limits = '{{\"usd\":1,\"minutes\":5}}' where team = '{}' and workflow = '{x}'", crew.team));
-    assert_eq!(crew.skipped(&x), json!([{ "reason": "start_failed", "count": 1 }]), "X's dropped event is counted once");
+    assert_eq!(crew.waiting(&x), 1, "Pages's event still waits after one pass");
+    crew.stop(&crew.live_of(&z)[0]);
+    wait_for("a second pass to fail to read Pages", || unread_passes(&crew, &x) == vec![2]);
+    for pass in 3..5 {
+        crew.reaper_pass();
+        wait_for("one more pass to fail to read Pages", || unread_passes(&crew, &x) == vec![pass]);
+    }
+    assert_eq!(crew.waiting(&x), 1, "Pages's event still waits after four passes");
+    assert_eq!(skip_rows(&crew), Vec::<Vec<Option<String>>>::new(), "nothing was counted as skipped");
+    crew.reaper_pass();
+    wait_for("Pages's event to leave the line on the fifth pass", || crew.waiting(&x) == 0);
+    crew.reaper_pass();
+    readable(&crew, &x);
+    assert_eq!(crew.skipped(&x), json!([{ "reason": "start_failed", "count": 1 }]), "Pages's dropped event is counted once");
+    assert_eq!(opened(&crew, &x), 0, "Pages's event never started");
+}
+
+#[test]
+fn a_waiting_row_that_does_not_parse_is_dropped_and_counted() {
+    let crew = Crew::new("tl_wait_unparsable");
+    let (holder, x) = (crew.on_bot("Docs"), crew.on_bot("Pages"));
+    admin_on(&crew.hub.database, &format!("update teams set max_live_runs = 1 where id = '{}'", crew.team));
+    assert_eq!(crew.found(crew.labeled(&holder, 9)), Ok(()));
+    let reply = crew.call(&crew.bob, TeamOp::RunNow { workflow: x.clone() }).unwrap();
+    assert_eq!(reply["waiting"], json!(true), "bob's Run now waits behind the holder");
+    // A row only SQL could write: what it starts with is of no kind the hub knows.
+    admin_on(&crew.hub.database, &format!("update team_run_queue set start = '{{\"by\":\"nobody\"}}' where team = '{}' and workflow = '{x}'", crew.team));
+    crew.stop(&crew.live_of(&holder)[0]);
+
+    wait_for("the unparsable row to leave the line", || crew.waiting(&x) == 0);
+    assert_eq!(crew.skipped(&x), json!([{ "reason": "start_failed", "count": 1 }]), "the dropped row is counted once");
+    assert_eq!(opened(&crew, &x), 0, "nothing of Pages started");
 }
 
 #[test]

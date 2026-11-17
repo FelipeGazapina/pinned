@@ -7781,6 +7781,13 @@
                   "string",
                   "null"
                 ]
+              },
+              "base": {
+                "description": "On a history sent to the hub, the sha of the hub's copy it holds every line of, empty when\nthe hub held none. The hub refuses it with `STALE_REFUSAL` once it holds another copy, and\nthe sender merges that copy in and sends again. A sender that leaves it out replaces\nwhatever the hub holds.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -19886,6 +19893,13 @@
                   "string",
                   "null"
                 ]
+              },
+              "base": {
+                "description": "On a history sent to the hub, the sha of the hub's copy it holds every line of, empty when\nthe hub held none. The hub refuses it with `STALE_REFUSAL` once it holds another copy, and\nthe sender merges that copy in and sends again. A sender that leaves it out replaces\nwhatever the hub holds.",
+                "type": [
+                  "string",
+                  "null"
+                ]
               }
             },
             "required": [
@@ -24747,6 +24761,10 @@
                 "description": "The session waits out its usage limit without continuing by itself when it lifts.",
                 "type": "boolean"
               },
+              "compacting": {
+                "description": "Claude Code is compacting the session's context. The tab reads busy meanwhile.",
+                "type": "boolean"
+              },
               "connector": {
                 "type": [
                   "string",
@@ -28220,6 +28238,13 @@
               },
               "agreed": {
                 "description": "On a deleted file sent to the hub, the sha its sender last agreed on with the hub. The hub\nkeeps a file whose sha changed since, another machine's newer copy, instead of deleting it.\nA sender that leaves it out has its deletion applied whatever the hub holds.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "base": {
+                "description": "On a history sent to the hub, the sha of the hub's copy it holds every line of, empty when\nthe hub held none. The hub refuses it with `STALE_REFUSAL` once it holds another copy, and\nthe sender merges that copy in and sends again. A sender that leaves it out replaces\nwhatever the hub holds.",
                 "type": [
                   "string",
                   "null"
@@ -33781,6 +33806,10 @@
                 "description": "The session waits out its usage limit without continuing by itself when it lifts.",
                 "type": "boolean"
               },
+              "compacting": {
+                "description": "Claude Code is compacting the session's context. The tab reads busy meanwhile.",
+                "type": "boolean"
+              },
               "connector": {
                 "type": [
                   "string",
@@ -37196,6 +37225,13 @@
               },
               "agreed": {
                 "description": "On a deleted file sent to the hub, the sha its sender last agreed on with the hub. The hub\nkeeps a file whose sha changed since, another machine's newer copy, instead of deleting it.\nA sender that leaves it out has its deletion applied whatever the hub holds.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "base": {
+                "description": "On a history sent to the hub, the sha of the hub's copy it holds every line of, empty when\nthe hub held none. The hub refuses it with `STALE_REFUSAL` once it holds another copy, and\nthe sender merges that copy in and sends again. A sender that leaves it out replaces\nwhatever the hub holds.",
                 "type": [
                   "string",
                   "null"
@@ -57496,6 +57532,13 @@
               "string",
               "null"
             ]
+          },
+          "base": {
+            "description": "On a history sent to the hub, the sha of the hub's copy it holds every line of, empty when\nthe hub held none. The hub refuses it with `STALE_REFUSAL` once it holds another copy, and\nthe sender merges that copy in and sends again. A sender that leaves it out replaces\nwhatever the hub holds.",
+            "type": [
+              "string",
+              "null"
+            ]
           }
         },
         "required": [
@@ -57546,6 +57589,13 @@
           },
           "agreed": {
             "description": "On a deleted file sent to the hub, the sha its sender last agreed on with the hub. The hub\nkeeps a file whose sha changed since, another machine's newer copy, instead of deleting it.\nA sender that leaves it out has its deletion applied whatever the hub holds.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "base": {
+            "description": "On a history sent to the hub, the sha of the hub's copy it holds every line of, empty when\nthe hub held none. The hub refuses it with `STALE_REFUSAL` once it holds another copy, and\nthe sender merges that copy in and sends again. A sender that leaves it out replaces\nwhatever the hub holds.",
             "type": [
               "string",
               "null"
@@ -57670,6 +57720,10 @@
           },
           "held": {
             "description": "The session waits out its usage limit without continuing by itself when it lifts.",
+            "type": "boolean"
+          },
+          "compacting": {
+            "description": "Claude Code is compacting the session's context. The tab reads busy meanwhile.",
             "type": "boolean"
           },
           "connector": {
@@ -58228,6 +58282,10 @@
           },
           "held": {
             "description": "The session waits out its usage limit without continuing by itself when it lifts.",
+            "type": "boolean"
+          },
+          "compacting": {
+            "description": "Claude Code is compacting the session's context. The tab reads busy meanwhile.",
             "type": "boolean"
           },
           "connector": {
@@ -62003,6 +62061,10 @@
               },
               "held": {
                 "description": "The session waits out its usage limit without continuing by itself when it lifts.",
+                "type": "boolean"
+              },
+              "compacting": {
+                "description": "Claude Code is compacting the session's context. The tab reads busy meanwhile.",
                 "type": "boolean"
               },
               "connector": {
@@ -66432,6 +66494,10 @@
               },
               "held": {
                 "description": "The session waits out its usage limit without continuing by itself when it lifts.",
+                "type": "boolean"
+              },
+              "compacting": {
+                "description": "Claude Code is compacting the session's context. The tab reads busy meanwhile.",
                 "type": "boolean"
               },
               "connector": {

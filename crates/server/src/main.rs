@@ -149,8 +149,8 @@ fn hub(args: &[String]) -> Result<(), String> {
         convex_http: std::sync::Arc::new(pinned_core::convex::client::Reqwest),
         learning_db: args.flags.get("learning-db").cloned(),
         access: pinned_server::http::Access { trusted_proxy, max_accounts, hashing: None },
-        // The repository and API overrides of reports stay off on every hub, `--dev` included.
-        reports: reports_config(false),
+        // A `--dev` hub files only on a local fake its override names, and reports nothing without one.
+        reports: reports_config(dev_mode),
     };
     let runtime = tokio::runtime::Runtime::new().map_err(|e| e.to_string())?;
     runtime.block_on(async {
@@ -179,11 +179,16 @@ fn hub(args: &[String]) -> Result<(), String> {
     })
 }
 
-/// Where reports are filed, from the environment (`PINNED_REPORTS_GITHUB_TOKEN` and, under `--dev`, a local fake API and repository).
+/// Where reports are filed, from the environment: `PINNED_REPORTS_GITHUB_TOKEN` on a release hub, a local fake API
+/// and repository under `--dev`.
 fn reports_config(dev: bool) -> Option<pinned_server::reports::Config> {
     let config = pinned_server::reports::Config::from_env(dev, &|name| std::env::var(name).ok());
     if config.is_none() {
-        // With a token set, `from_env` has already said under `--dev` why reporting is off.
+        // Under `--dev`, `from_env` has already said why reporting is off, and the token is never read.
+        if dev {
+            eprintln!("pinned-server: reporting an issue from the app is not available");
+            return None;
+        }
         match std::env::var(pinned_server::reports::TOKEN_VARIABLE).map(|v| v.trim().is_empty()) {
             Ok(false) => eprintln!("pinned-server: reporting an issue from the app is not available"),
             _ => eprintln!("pinned-server: reporting an issue from the app is not available: {} is not set", pinned_server::reports::TOKEN_VARIABLE),

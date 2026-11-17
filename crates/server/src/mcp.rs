@@ -736,6 +736,7 @@ mod tests {
             message: message.map(str::to_owned),
             resume_at: None,
             held: false,
+            compacting: false,
             connector: None,
             subject: None,
             opened: 1,

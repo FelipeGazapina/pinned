@@ -1100,7 +1100,8 @@ function turnHtml(tab, turn, change, live, first, t, latest, workers = "") {
   const steps = workHtml(turn.steps, work, cwd, t, live, change);
   let fold = "";
   if (live) {
-    const compacting = /^\/compact\b/.test(turn.user?.text ?? "") && !turn.dividers.some((d) => d.kind === "compaction");
+    // The hooks' mark covers every compaction; a /compact prompt covers its own until the divider shows.
+    const compacting = tab.view.compacting || (/^\/compact\b/.test(turn.user?.text ?? "") && !turn.dividers.some((d) => d.kind === "compaction"));
     const active = turn.steps.slice(turn.steps.findLastIndex((s) => s.kind === "text") + 1).filter((s) => (s.kind === "tool" || s.kind === "thinking") && !shown.includes(s));
     const label = compacting ? `<span class="shimmer">Compacting…</span>` : `Working for <span class="ticker" data-since="${turn.start || Date.now()}">${ticking(turn.start ? clockMs() - turn.start : 0)}</span>`;
     fold = `<details class="work live" data-turn="${esc(turn.id)}"${t.open.has(turn.id) ? " open" : ""}>
@@ -1256,7 +1257,7 @@ function renderThread() {
   const first = Math.max(0, turns.length - limit);
   const shown = turns.slice(first);
   const place = sub ? `${tab.key}:${sub.tool}` : tab.key;
-  const content = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, t.start, !!t.fetchingOlder, t.olderError, t.resets, !!t.history, [...t.open], limit, t.agentsKey, t.sendErrors ?? null, phaseOf(tab), resume, boxKey(box), convex && [convex.repo, convex.deployment], globalLane(tab) ? globalLaneKey() : null, workersKey(tab), workerViewKey(tab), panelTurn(tab), waiting.rows.map((p) => [p.id, p.state, p.sent, p.text]), waiting.busy, waiting.stale]);
+  const content = JSON.stringify([place, tab.view.cwd, t.loaded, t.error, t.session, working, t.items.length, t.start, !!t.fetchingOlder, t.olderError, t.resets, !!t.history, [...t.open], limit, t.agentsKey, t.sendErrors ?? null, phaseOf(tab), !!tab.view.compacting, resume, boxKey(box), convex && [convex.repo, convex.deployment], globalLane(tab) ? globalLaneKey() : null, workersKey(tab), workerViewKey(tab), panelTurn(tab), waiting.rows.map((p) => [p.id, p.state, p.sent, p.text]), waiting.busy, waiting.stale]);
   // A render that brings nothing new keeps the drawn turns while they cover the screen, so a menu
   // open in them survives; heights measured since the last draw would otherwise shift the window.
   if (threadView.dataset.key && threadView.dataset.content === content && !windowStale()) return renderComposer(tab);

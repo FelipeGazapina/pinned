@@ -890,9 +890,10 @@ impl Hub {
                     if data.len() as u64 > sync::FILE_LIMIT {
                         return Err(format!("{} is bigger than a synced file may be", file.entry.path));
                     }
-                    // Only a deletion is compared with what the hub holds.
+                    // A deletion is compared with what the hub holds through `agreed`, a history through `base`.
                     let agreed = file.agreed.filter(|_| file.entry.sha.is_empty());
-                    kept.push((file.entry, data, agreed));
+                    let base = file.base.filter(|_| file.entry.path == sync::HISTORY && !file.entry.sha.is_empty());
+                    kept.push((file.entry, data, agreed, base));
                 }
                 return json(self.db.sync_push(account.id, &project, kept).await?);
             }
@@ -914,7 +915,7 @@ impl Hub {
                     .into_iter()
                     .map(|(entry, data)| {
                         let data = (!entry.sha.is_empty()).then(|| base64::engine::general_purpose::STANDARD.encode(data));
-                        sync::File { entry, data, agreed: None }
+                        sync::File { entry, data, agreed: None, base: None }
                     })
                     .collect();
                 return json(files);
@@ -1533,6 +1534,14 @@ impl Account {
             .filter(|(id, _)| on(id))
             .flat_map(|(_, m)| m.tabs())
             .any(|t| t.running && t.connector.as_deref() == Some(connector) && t.subject.as_ref() == Some(subject))
+    }
+
+    /// Whether the session in tab `tab` of the online `machine` itself runs the connector on `subject`.
+    pub fn runs_in_tab(&self, connector: &str, subject: &Subject, machine: &str, tab: &str) -> bool {
+        let live = self.live.lock().unwrap();
+        live.machines
+            .get(machine)
+            .is_some_and(|m| m.tabs().iter().any(|t| t.id == tab && t.running && t.connector.as_deref() == Some(connector) && t.subject.as_ref() == Some(subject)))
     }
 
     /// Machines a workflow run may go to: online, never a box's, `preferred` first, then the most recently connected.

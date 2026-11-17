@@ -8854,6 +8854,7 @@ mod tests {
             message: None,
             resume_at: None,
             held: false,
+            compacting: false,
             connector: Some("c1".into()),
             subject: Some(Subject::LinearIssue { issue: "uuid".into() }),
             opened: 1,
