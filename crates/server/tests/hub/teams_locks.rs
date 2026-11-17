@@ -448,7 +448,8 @@ fn a_waiting_run_now_whose_bot_read_is_busy_still_waits_and_starts_later() {
     wait_for("the start after the end to give up on the held table", || held.waiters() == 0);
     held.release();
 
-    assert!(crew.waiting(&pages) == 1 || crew.boxes_created() > boxes, "bob's Run now still waits, or its box start was tried");
+    // A busy read returns before the run is taken, so the run still waits and no box start was tried.
+    assert_eq!((crew.waiting(&pages), crew.boxes_created()), (1, boxes), "bob's Run now still waits, and no box start was tried");
     assert_eq!(crew.skipped(&pages), skipped, "nothing was counted as skipped");
     crew.reaper_pass();
     wait_for("bob's Run now to open its session", || opened(&crew, &pages) == 1 && crew.waiting(&pages) == 0);
