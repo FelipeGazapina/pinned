@@ -8770,6 +8770,26 @@ pub(crate) mod tests {
     const API_ERROR: &str = "API Error: Unable to connect to API (ECONNRESET)";
 
     #[test]
+    fn a_turn_that_ends_on_an_api_error_then_idles_keeps_the_error_line_it_stopped_on() {
+        let root = temp("stopped-on-error");
+        let config = root.join("config");
+        std::fs::create_dir_all(config.join("accounts/work/projects/-app")).unwrap();
+        std::fs::write(config.join("accounts.json"), r#"[{"id": "work", "provider": "claude", "name": "Work"}]"#).unwrap();
+        let transcript = [
+            r#"{"type":"user","uuid":"u1","timestamp":"2026-10-29T10:00:00Z","message":{"content":"Port the grid."}}"#,
+            r#"{"type":"assistant","uuid":"a1","timestamp":"2026-10-29T10:01:00Z","isApiErrorMessage":true,"message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"API Error: The response stopped arriving.\nThe response above may be incomplete."}]}}"#,
+        ];
+        std::fs::write(config.join("accounts/work/projects/-app/s1.jsonl"), transcript.map(|l| l.to_owned() + "\n").concat()).unwrap();
+        let m = Machine::new(launch(), Some(config), None, |_| {});
+        let work = m.accounts.get("work").unwrap();
+        let tab = m.add_tab("/work/app".into(), work, vec![], vec![], false, Some("s1".into()));
+        m.record_status(&tab, &ended(&tab, AgentStatus::Working, None, None));
+        m.record_status(&tab, &ended(&tab, AgentStatus::NeedsInput, Some("Claude is waiting for your input"), None));
+        let view = serde_json::to_value(m.view(&tab).unwrap()).unwrap();
+        assert_eq!(view["stopped_on_error"], "API Error: The response stopped arriving.", "the first line of the error the transcript ends on");
+    }
+
+    #[test]
     fn an_api_error_inside_the_sleep_window_is_cut_by_the_sleep() {
         let m = machine();
         let tab = m.open_tab(None, false).unwrap();

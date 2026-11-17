@@ -363,6 +363,14 @@ test("needsYouItems lists what waits on the user, newest first, with each kind, 
   ]);
 });
 
+test("a turn that stopped on an API error is a Stopped card with its error, not a question", () => {
+  const error = "API Error: Connection lost mid-response. The response above may be incomplete.";
+  const broke = tab("Port the grid", { ...waiting, message: "Claude is waiting for your input", stopped_on_error: error, updated: S - 200 }, { project: "site", machine: "book" });
+  const p = page({ tabs: [broke] });
+  const items = p.run("needsYouItems().map(({ tab, ask, ...i }) => ({ ...i, ask: ask && ask.kind }))");
+  assert.deepEqual(JSON.parse(JSON.stringify(items)), [{ kind: "stopped", title: "Port the grid", project: "site", machine: "macbook", since: (S - 200) * 1000, limit: null, error, ask: null }]);
+});
+
 test("needsYouItem turns a failed turn cut by a sleep into a Stopped card with the span of the sleep and, for a Captain, its running delegated tasks", () => {
   const two = (n) => String(n).padStart(2, "0");
   const clock = (unix) => `${two(new Date(unix * 1000).getHours())}:${two(new Date(unix * 1000).getMinutes())}`;

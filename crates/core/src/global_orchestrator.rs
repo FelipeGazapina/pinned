@@ -1329,6 +1329,49 @@ mod tests {
     }
 
     #[test]
+    fn a_turn_that_stopped_on_an_api_error_is_stopped_on_error_in_waiting_sessions_and_read_session() {
+        const ERROR: &str = "API Error: The response stopped arriving. The response above may be incomplete.";
+        let site = [project("/w/site", Some("github.com/o/site"))];
+        let mut stopped = serde_json::to_value(view("tab-s-1", "/w/site/.claude/worktrees/pinned-1", Some(Role::Worker), true, Some(AgentStatus::NeedsInput))).unwrap();
+        stopped.as_object_mut().unwrap().extend(serde_json::json!({ "interrupted": true, "title": "Port the grid", "message": "Claude is waiting for your input", "updated": 1794234244, "stopped_on_error": ERROR }).as_object().unwrap().clone());
+        let tabs = [serde_json::from_value::<TabView>(stopped).unwrap()];
+        let machines = [MachineSnapshot { id: "m-1", name: "MacBook", online: true, version: "0.18.7", projects: &site, tabs: &tabs, problem: None }];
+        let overview = overview(&machines);
+        let waiting = serde_json::to_value(&overview.waiting).unwrap();
+        assert_eq!(waiting[0]["kind"], "stopped_on_error", "waiting() lists it as stopped on an error, not as a question");
+        assert_eq!(waiting[0]["message"], ERROR, "with the error's first line");
+        assert_eq!(waiting[0].get("ask"), None, "an error asks nothing");
+        let listed = serde_json::to_value(overview.sessions.clone().unwrap()).unwrap();
+        assert_eq!((&listed[0]["state"], &listed[0]["message"]), (&serde_json::json!("stopped_on_error"), &serde_json::json!(ERROR)), "sessions() says the same state");
+        assert_eq!(crate::reading::state_of(&tabs[0]), ("stopped_on_error", Some(ERROR.to_owned())), "read_session() says the same state");
+    }
+
+    #[test]
+    fn a_worker_stopped_on_an_api_error_is_not_listed_once_its_captain_started_another_attempt() {
+        const ERROR: &str = "API Error: Connection lost mid-response. The response above may be incomplete.";
+        let site = [project("/w/site", Some("github.com/o/site"))];
+        let captain = view("tab-c-1", "/w/site", Some(Role::Orchestrator), true, Some(AgentStatus::Done));
+        let attempt = |id: &str, status: AgentStatus, stopped: Option<&str>| {
+            let mut json = serde_json::to_value(view(id, "/w/site/.claude/worktrees/pinned-1", Some(Role::Worker), true, Some(status))).unwrap();
+            json.as_object_mut().unwrap().extend(serde_json::json!({ "spawned_by": "tab-c-1", "title": "Fix the form", "interrupted": stopped.is_some(), "message": stopped.map(|_| "Claude is waiting for your input"), "stopped_on_error": stopped }).as_object().unwrap().clone());
+            serde_json::from_value::<TabView>(json).unwrap()
+        };
+        let first = attempt("tab-w-1", AgentStatus::NeedsInput, Some(ERROR));
+        let second = attempt("tab-w-2", AgentStatus::Working, None);
+        let replaced = [captain.clone(), first.clone(), second];
+        let machines = [MachineSnapshot { id: "m-1", name: "MacBook", online: true, version: "0.18.7", projects: &site, tabs: &replaced, problem: None }];
+        let board = overview(&machines);
+        assert_eq!(serde_json::to_value(&board.waiting).unwrap(), serde_json::json!([]), "the replaced attempt asks nothing");
+        let listed = serde_json::to_value(board.sessions.clone().unwrap()).unwrap();
+        let ids: Vec<&str> = listed.as_array().unwrap().iter().filter_map(|s| s["id"].as_str()).collect();
+        assert!(!ids.contains(&"tab-w-1"), "the replaced attempt is not listed at all: {ids:?}");
+        let alone = [captain, first];
+        let machines = [MachineSnapshot { id: "m-1", name: "MacBook", online: true, version: "0.18.7", projects: &site, tabs: &alone, problem: None }];
+        let solo = overview(&machines);
+        assert_eq!(serde_json::to_value(&solo.waiting).unwrap()[0]["kind"], "stopped_on_error", "with no newer attempt it is still listed");
+    }
+
+    #[test]
     fn the_capitao_hears_how_its_turn_goes_back_to_the_orchestrator_under_each_policy() {
         assert_eq!(captain_prompt("Almirante", ReportPolicy::Auto), "A message that starts with \"[Almirante] \" comes from the global orchestrator, the user's chat above every project. Do that work as you would the user's. Mid-work, use tell_orchestrator for a question it must answer or news it must hear now. Your last reply of such a turn goes back to it by itself, so end that turn with what you did, what is left and what needs the user.");
         assert!(captain_prompt("Almirante", ReportPolicy::ToolOnly).ends_with("Nothing goes back to it by itself: when you finish its request, report with tell_orchestrator."));
