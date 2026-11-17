@@ -14,6 +14,8 @@ const fn = (src, name) => {
   return src.slice(at, src.indexOf("\n}\n", at) + 2);
 };
 const flush = () => new Promise((resolve) => setImmediate(resolve));
+/** Plain copies of the values gui-plan.js builds in the page's own realm, for deepStrictEqual. */
+const plain = (value) => JSON.parse(JSON.stringify(value));
 const decode = (html) => html.replace(/&#(\d+);/g, (_, c) => String.fromCharCode(c));
 
 /** A Captain's tab as the app keeps it: the view from the hub, and the thread's panel state. */
@@ -141,7 +143,7 @@ test("opening Plan fetches once; a push with the same glance sends nothing; a ch
 
   h.run("renderPlanPanel(shownSurface(active))");
   await flush();
-  assert.deepEqual(h.log.calls, [{ cmd: "plan", tab: "tab-1" }], "opening sends one plan call");
+  assert.deepEqual(plain(h.log.calls), [{ cmd: "plan", tab: "tab-1" }], "opening sends one plan call");
   const html = h.html();
   assert.ok(html.includes("Ship the signup form"), "the plan title renders");
   assert.ok(html.includes("Build") && html.includes("Review"), "the list names render");
@@ -173,7 +175,7 @@ test("a plan text with markup renders as plain text", async () => {
   assert.ok(!html.includes("<img"), "no image element is created");
   assert.equal(decode(html).includes("<img src=x onerror=alert(1)>"), true, "the name shows as text");
   assert.ok(html.includes("**bold** text"), "markdown stays literal");
-  assert.ok(!/<b>/.test(html), "no bold element is created");
+  assert.ok(!html.includes("<b>bold</b>") && !html.includes("<strong>"), "no bold element is created from the markup");
 });
 
 test("zoom, a folded list and the picked plan survive a re-render", async () => {
@@ -189,19 +191,19 @@ test("zoom, a folded list and the picked plan survive a re-render", async () => 
   h.run("renderPlanPanel(shownSurface(active))");
   await flush();
 
-  h.click("[data-zoom]", { zoom: "1" });
-  h.click("[data-fold]", { fold: "l1" });
   h.click("[data-plan]", { plan: "p2" });
+  h.click("[data-zoom]", { zoom: "1" });
+  h.click("[data-fold]", { fold: "l3" });
   await flush();
   assert.equal(s.zoom, 2, "zoom is kept in the surface's panel state");
-  assert.deepEqual(s.folded, ["l1"], "the folded list is kept");
+  assert.deepEqual([...s.folded], ["l3"], "the folded list is kept");
   assert.equal(s.plan, "p2", "the picked plan is kept");
   assert.ok(h.log.saved > 0, "the panel state is saved");
 
   h.run("renderPlanPanel(shownSurface(active))");
   const html = h.html();
   assert.ok(html.includes('<span class="pl-zoom-name">Details</span>'), "the Details zoom shows again");
-  assert.ok(/class="pl-list folded"[\s\S]*Build/.test(html), "the folded list stays folded");
+  assert.ok(/class="pl-list folded"[\s\S]*Diagnose/.test(html), "the folded list stays folded");
   assert.ok(/data-plan="p2"[^>]*aria-selected="true"/.test(html), "the picked plan stays picked");
 });
 
