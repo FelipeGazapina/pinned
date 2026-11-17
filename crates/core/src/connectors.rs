@@ -984,6 +984,33 @@ impl Store {
         self.connectors.iter().any(|c| c.handled.iter().any(|h| h == key))
     }
 
+    /// Whether posts from apps and integrations can reach `workflow`: it reads them, or a workflow
+    /// that reads them hands it threads (a category, or a graph's call), however many hands away.
+    fn reads_apps(&self, workflow: &str) -> bool {
+        let hands_to = |c: &Connector| -> Vec<String> {
+            let mut to: Vec<String> = match &c.trigger {
+                Trigger::SlackMessage { decide, .. } => decide.categories.iter().filter_map(|category| category.workflow.clone()).collect(),
+                _ => vec![],
+            };
+            to.extend(c.graph.iter().flat_map(|graph| graph.nodes.iter()).filter_map(|node| match &node.kind {
+                NodeKind::Call { workflow } => Some(workflow.clone()),
+                _ => None,
+            }));
+            to
+        };
+        let mut reached: Vec<String> = self.connectors.iter().filter(|c| matches!(c.trigger, Trigger::SlackMessage { apps: true, .. })).map(|c| c.id.clone()).collect();
+        let mut at = 0;
+        while let Some(id) = reached.get(at).cloned() {
+            at += 1;
+            for next in self.connectors.iter().filter(|c| c.id == id).flat_map(hands_to) {
+                if !reached.contains(&next) {
+                    reached.push(next);
+                }
+            }
+        }
+        reached.iter().any(|id| id == workflow)
+    }
+
     /// The default Slack bot: the first of `slack_bots`, or the one account of a store from before
     /// several bots.
     fn default_bot(&self) -> Option<slack::Bot> {
@@ -1157,6 +1184,8 @@ impl Store {
             settled.needs_save |= connector.advance(watermark, opening);
         }
         for (id, found) in found {
+            // Framed as data from outside pinned on a hub's team, and wherever app posts reach.
+            let framed = team || self.reads_apps(&id);
             if let Found::Issue(issue) = &found {
                 if self.working_on(&issue.id).is_some_and(|(owner, _)| owner.id != id) {
                     continue;
@@ -1183,7 +1212,7 @@ impl Store {
             match found {
                 Found::Issue(issue) => {
                     if connector.claim(key) {
-                        settled.work.push(Work::Run(issue_run(connector, &issue, exe, team)));
+                        settled.work.push(Work::Run(issue_run(connector, &issue, exe, framed)));
                         settled.needs_save = true;
                     }
                 }
@@ -1192,7 +1221,7 @@ impl Store {
                     let cursor = posts.last().map_or_else(|| mention.thread.clone(), |p| p.ts.clone());
                     connector.followed.insert(key.clone(), Followed { cursor, seen: None, replied: false });
                     let note = mention_note(&mention, now);
-                    let run = thread_session(connector, &channel, &channel_name, &mention.thread, &posts, note, exe, team);
+                    let run = thread_session(connector, &channel, &channel_name, &mention.thread, &posts, note, exe, framed);
                     settled.work.push(Work::Run(Run { mentioned: vec![mention.ts], ..run }));
                     self.record_thread_bot(&key, &bot);
                     settled.needs_save = true;
@@ -1238,10 +1267,11 @@ impl Store {
                         settled.needs_save = true;
                         continue;
                     }
+                    let framed = framed || self.reads_apps(&workflow);
                     let Some(target) = self.claim_thread(&workflow, &key) else { continue };
                     let cursor = posts.last().map_or_else(|| thread.clone(), |p| p.ts.clone());
                     target.followed.insert(key.clone(), Followed { cursor, seen: None, replied: false });
-                    let run = thread_session(target, &channel, &channel_name, &thread, &posts, Some(&note), exe, team);
+                    let run = thread_session(target, &channel, &channel_name, &thread, &posts, Some(&note), exe, framed);
                     settled.work.push(Work::Run(Run { mentioned: vec![thread.clone()], ..run }));
                     self.record_thread_bot(&key, &bot);
                     settled.pages.extend(self.page(&id, channel, thread, page, now, false));
@@ -2277,7 +2307,7 @@ impl Connectors {
                         Replies::Dropped => return self.keep_stopped(&d.connector, &Subject::SlackThread { channel: d.channel.clone(), thread: d.thread.clone() }),
                     }
                 }
-                d.messages = self.shown_replies(d.messages);
+                d.messages = self.shown_replies(self.framed(&d.connector), d.messages);
                 let cursor = if open(Work::Delivery(d.clone())).await.taken().is_ok() {
                     d.cursor.clone()
                 } else {
@@ -2324,17 +2354,17 @@ impl Connectors {
             self.release(&connector, &subject).await;
             return self.keep_stopped(&connector, &subject);
         }
-        // On a hub's team, the issue's or thread's text reaches the Ask step's model and the
-        // session framed as data from outside pinned; a run whose prompt cannot hold it framed
-        // opens no session.
-        let team = self.admission.get().is_some();
-        if team {
+        // On a hub's team, and wherever app posts reach (`framed`), the issue's or thread's text
+        // reaches the Ask step's model and the session framed as data from outside pinned; a run
+        // whose prompt cannot hold it framed opens no session.
+        let framed = self.framed(&connector);
+        if framed {
             if let Err(why) = frame_trigger_text(&mut run) {
                 self.release(&connector, &subject).await;
                 return Err(self.unclaim(&connector, &subject, &folder, &why));
             }
         }
-        let consulted = if team { untrusted_trigger(&run) } else { run.input.clone() };
+        let consulted = if framed { untrusted_trigger(&run) } else { run.input.clone() };
         match self.consult(&connector, &consulted).await {
             Ok(None) => {}
             Ok(Some((ask, answers))) => {
@@ -2463,13 +2493,13 @@ impl Connectors {
         let posts = slack::thread(&token, &d.channel, &d.thread).await?;
         let newest = posts.last().map_or_else(|| d.cursor.clone(), |p| p.ts.clone());
         let note = c.created.get(&thread_key(&d.channel, &d.thread)).map(filed_note);
-        let team = self.admission.get().is_some();
-        let mut run = thread_session(&c, &d.channel, &name, &d.thread, &posts, note.as_deref(), &self.exe, team);
+        let framed = self.framed(&c.id);
+        let mut run = thread_session(&c, &d.channel, &name, &d.thread, &posts, note.as_deref(), &self.exe, framed);
         run.mentioned = d.mentioned.clone();
-        if team {
+        if framed {
             frame_trigger_text(&mut run)?;
         }
-        let consulted = if team { untrusted_trigger(&run) } else { run.input.clone() };
+        let consulted = if framed { untrusted_trigger(&run) } else { run.input.clone() };
         // The thread already passed the step, so a stop answer does not end this new session.
         if let Some((ask, answers)) = self.consult(&run.connector, &consulted).await? {
             append_answers(&mut run, &ask, &answers);
@@ -2531,9 +2561,15 @@ impl Connectors {
                 let choices = decide.choices(&c.name)?;
                 let pages = self.pages(&token, c, decide).await?;
                 let channel_name = channel_name(name);
+                // What the decision model reads of each message, framed as `decide_state` frames it.
+                let framed = self.framed(&c.id);
+                let outside = |value: &str| match framed && !value.trim().is_empty() {
+                    true => crate::untrusted::frame(crate::untrusted::SLACK_THREAD, value),
+                    false => value.to_owned(),
+                };
                 let mut found = vec![];
                 for message in messages {
-                    let state = json!({ "channel": format!("#{channel_name}"), "author": message.author, "message": message.text });
+                    let state = json!({ "channel": format!("#{}", outside(channel_name)), "author": outside(&message.author), "message": outside(&message.text) });
                     let chosen = vercel::choose(&key, decide.model.trim(), &decide.instructions, &choices, &state).await?;
                     let pick = decide.pick(&chosen);
                     let Some(chosen) = pick.category() else {
@@ -3243,7 +3279,7 @@ fn trigger_of(run: &runner::Run) -> Result<TriggerInput, String> {
 fn trigger_source(input: &TriggerInput) -> &'static str {
     match input {
         TriggerInput::Issue { .. } => "a Linear issue",
-        TriggerInput::Slack { .. } => "a Slack thread",
+        TriggerInput::Slack { .. } => crate::untrusted::SLACK_THREAD,
     }
 }
 
@@ -4152,21 +4188,32 @@ impl Connectors {
         }
     }
 
-    /// Every reply enters the graph inbox here, once, so it is framed once on a hub's team.
+    /// Every reply enters the graph inbox here, once, so it is framed once where it is framed
+    /// (`framed`, by the workflow of the run that owns the thread).
     fn enqueue(&self, mut item: GraphInbox) {
+        let subject = Subject::SlackThread { channel: item.channel.clone(), thread: item.thread.clone() };
+        let owner = self.runs.lock().unwrap().iter().rev().find(|run| run.subject == subject).map(|run| run.connector.clone());
+        let framed = self.admission.get().is_some() || owner.is_some_and(|owner| self.framed(&owner));
         let mut inbox = self.inbox.lock().unwrap();
         if inbox.iter().any(|have| have.channel == item.channel && have.thread == item.thread && have.cursor == item.cursor) {
             return;
         }
-        item.messages = self.shown_replies(item.messages);
+        item.messages = self.shown_replies(framed, item.messages);
         inbox.push(item);
     }
 
-    /// The thread's new replies (`reply_block`s) as its live run's session gets them: on a hub's
-    /// team each framed as data from outside pinned, the author's name in its header included. A
-    /// person's connectors hand them as they are.
-    fn shown_replies(&self, messages: Vec<String>) -> Vec<String> {
-        match self.admission.get().is_some() {
+    /// Whether text from outside pinned reaches `workflow`'s models and sessions framed as data
+    /// (`untrusted::frame`): on a hub's team, and wherever posts from apps and integrations, which
+    /// anyone in the workspace can set up, reach (`Store::reads_apps`).
+    fn framed(&self, workflow: &str) -> bool {
+        self.admission.get().is_some() || self.store.lock().unwrap().reads_apps(workflow)
+    }
+
+    /// The thread's new replies (`reply_block`s) as its live run's session gets them: where
+    /// `framed`, each framed as data from outside pinned, the author's name in its header included.
+    /// Elsewhere a person's connectors hand them as they are.
+    fn shown_replies(&self, framed: bool, messages: Vec<String>) -> Vec<String> {
+        match framed {
             true => messages.iter().map(|message| crate::untrusted::frame(crate::untrusted::SLACK_REPLY, message)).collect(),
             false => messages,
         }
@@ -4439,9 +4486,9 @@ impl Connectors {
                 Err(why) => return Err(why),
             }
         }
-        let team = self.admission.get().is_some();
-        // On a team `graph_opening` makes sure of the trigger's frame.
-        let spec = graph_opening(&owner_c, &trigger, &direct_answers(run, &self.library()), text, Some(&runner::history(run)), &self.exe, team)?;
+        let framed = self.framed(&run.connector);
+        // Where framed `graph_opening` makes sure of the trigger's frame.
+        let spec = graph_opening(&owner_c, &trigger, &direct_answers(run, &self.library()), text, Some(&runner::history(run)), &self.exe, framed)?;
         let answer = open(Work::Run(Run { reservation: run.reservation.clone(), ..spec })).await;
         if answer.consumed() {
             return self.keep_stopped(owner, &run.subject);
@@ -4509,7 +4556,7 @@ impl Connectors {
                     }
                 };
                 let trigger = trigger_of(run)?;
-                Ok(Supplied::Classified(self.classify(&classify, &trigger, thread_context(&trigger).as_deref()).await?))
+                Ok(Supplied::Classified(self.classify(&classify, &trigger, thread_context(&trigger).as_deref(), self.framed(&run.connector)).await?))
             }
             Effect::Page { connector, group } => {
                 let Subject::SlackThread { channel, thread } = &run.subject else {
@@ -4552,13 +4599,12 @@ impl Connectors {
 
     /// Asks the classify's model about `trigger`. `thread` is the thread so far, which a later
     /// mention is sorted against without being part of the message.
-    async fn classify(&self, classify: &crate::graph::Classify, trigger: &TriggerInput, thread: Option<&str>) -> Result<Answers, String> {
+    async fn classify(&self, classify: &crate::graph::Classify, trigger: &TriggerInput, thread: Option<&str>, framed: bool) -> Result<Answers, String> {
         let key = self.key(VERCEL_KEY).ok_or_else(|| "Vercel AI Gateway is not connected: connect it in pinned's Connectors settings".to_owned())?;
-        // On a hub's team the trigger's text reaches the model framed as data from outside pinned.
-        let team = self.admission.get().is_some();
+        // Where `framed` (`Connectors::framed`) the trigger's text reaches the model framed as data from outside pinned.
         match &classify.gate {
             Gate::Direct => {
-                let text = classify_text(trigger, thread, team);
+                let text = classify_text(trigger, thread, framed);
                 Ok(Answers { answers: vercel::ask(&key, &ask_from(classify), &text).await?, chosen: None })
             }
             Gate::Decide { .. } => {
@@ -4569,9 +4615,9 @@ impl Connectors {
                     .find(|question| question.name == name)
                     .ok_or_else(|| format!("the classify branches on {name:?}, which is not one of its questions"))?;
                 let choices: Vec<(&str, &str)> = question.choices.iter().map(|choice| (choice.label.as_str(), choice.description.as_str())).collect();
-                let mut state = decide_state(trigger, team);
+                let mut state = decide_state(trigger, framed);
                 if let Some(thread) = thread {
-                    state["thread"] = json!(match team {
+                    state["thread"] = json!(match framed {
                         true => crate::untrusted::frame(trigger_source(trigger), thread),
                         false => thread.to_owned(),
                     });
@@ -4655,7 +4701,7 @@ impl Connectors {
         }
         let input = TriggerInput::Slack { channel, channel_name, thread, posts: item.posts.clone(), note: None, mentioned: item.mentioned.clone(), request: None };
         let context = post_lines(&posts);
-        let answers = self.classify(&classify, &input, Some(&context)).await?;
+        let answers = self.classify(&classify, &input, Some(&context), self.framed(&run.connector)).await?;
         let port = runner::classify_port(library, &run.connector, &node, &classify, &answers);
         // A branch that files an issue after a session step walks it in the thread's live
         // session, which then gets the mention typed with the step's prompt.
@@ -4724,9 +4770,9 @@ impl Connectors {
             owner_c.proof = true;
         }
         let inbox = self.take_inbox(&run.subject);
-        let team = self.admission.get().is_some();
-        // On a team `graph_opening` makes sure of the trigger's frame, before a seeded session's history.
-        let opened = run_opening(run, &owner_c, prompt, seeded, library, &self.names(), &self.exe, team);
+        let framed = self.framed(&run.connector);
+        // Where framed `graph_opening` makes sure of the trigger's frame, before a seeded session's history.
+        let opened = run_opening(run, &owner_c, prompt, seeded, library, &self.names(), &self.exe, framed);
         let spec = match opened {
             Ok(mut spec) => {
                 let waiting = inbox_text(&inbox);
@@ -4782,7 +4828,7 @@ impl Connectors {
         spec.args.pop();
         spec.args.extend(["--resume".into(), claude.to_owned()]);
         let inbox = self.take_inbox(&run.subject);
-        let text = render_for(text, run, self.admission.get().is_some());
+        let text = render_for(text, run, self.framed(&run.connector));
         let answer = open(Work::Run(Run { reservation: run.reservation.clone(), ..spec })).await;
         if answer.consumed() {
             self.restore_inbox(inbox);
@@ -4937,7 +4983,7 @@ impl Connectors {
     {
         // `later` is the thread's replies as `reply_block` built them: already guarded, and typed as
         // built. Rendering it here would fill a `{{...}}` someone posted in after its guard.
-        let typed = join_text(&pinned_lines::guard(&render_for(text, run, self.admission.get().is_some())), later);
+        let typed = join_text(&pinned_lines::guard(&render_for(text, run, self.framed(&run.connector))), later);
         let text = render_template(&join_text(text, later), run);
         if text.is_empty() || runner::already_sent(run, &text) {
             return Ok(());
