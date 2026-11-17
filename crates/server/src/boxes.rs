@@ -602,9 +602,14 @@ fn lines_in_use(account: Uuid) -> usize {
 }
 
 impl ExtendTurn {
+    /// When a turn's wait ends, for a call that starts now: `EXTEND_WAIT` from its own start.
+    pub fn deadline() -> tokio::time::Instant {
+        tokio::time::Instant::now() + EXTEND_WAIT
+    }
+
     /// The owner's decision's turn: the box's line, however many are in it, then the box's lock.
     pub async fn take(hub: &Hub, account: Uuid, machine: Uuid) -> Result<ExtendTurn, String> {
-        let deadline = tokio::time::Instant::now() + EXTEND_WAIT;
+        let deadline = ExtendTurn::deadline();
         let place = Place::join((account, Some(machine)), usize::MAX).ok_or(crate::db::BUSY)?;
         let lines = vec![place.hold(deadline).await?];
         ExtendTurn::locked(hub, account, machine, lines, deadline, false).await
@@ -616,8 +621,7 @@ impl ExtendTurn {
     /// connection, so asks for different boxes of one account are counted one after another. Always
     /// account, then box in this hub's lines, and box, then account in Postgres: a decision takes
     /// only the box's, so no two turns wait on each other.
-    pub async fn ask(hub: &Hub, account: Uuid, machine: Uuid) -> Result<ExtendTurn, String> {
-        let deadline = tokio::time::Instant::now() + EXTEND_WAIT;
+    pub async fn ask(hub: &Hub, account: Uuid, machine: Uuid, deadline: tokio::time::Instant) -> Result<ExtendTurn, String> {
         let in_box = Place::join((account, Some(machine)), MOST_ASKS_IN_BOX_LINE).ok_or(crate::db::BUSY)?;
         let of_account = Place::join((account, None), usize::MAX).ok_or(crate::db::BUSY)?.hold(deadline).await?;
         let of_box = in_box.hold(deadline).await?;
@@ -644,9 +648,14 @@ impl ExtendTurn {
 
     /// Takes an advisory lock, waiting only for what is left of the deadline, whatever the session's lock timeout.
     async fn lock(&self, sql: &str, params: &[&(dyn tokio_postgres::types::ToSql + Sync)]) -> Result<(), String> {
-        let left = self.deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis().max(1);
-        self.held.batch_execute(&format!("set local lock_timeout = {left}")).await.map_err(lost_turn)?;
-        self.held.execute(sql, params).await.map_err(lost_turn).map(drop)
+        // The round trips around the lock count in the wait too, not only Postgres's own lock timeout.
+        tokio::time::timeout_at(self.deadline, async {
+            let left = self.deadline.saturating_duration_since(tokio::time::Instant::now()).as_millis().max(1);
+            self.held.batch_execute(&format!("set local lock_timeout = {left}")).await.map_err(lost_turn)?;
+            self.held.execute(sql, params).await.map_err(lost_turn).map(drop)
+        })
+        .await
+        .map_err(|_| crate::db::BUSY.to_owned())?
     }
 
     /// Whether the turn still holds its locks: a connection that ended took them with it, and
