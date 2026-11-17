@@ -266,6 +266,7 @@ impl ExportedHomes {
 /// node started from inside a session that dropped only part of them would otherwise hand that
 /// session's account home to the built-in account. Never one under the `accounts` folder of a
 /// pinned data folder, `own_dir` or one that keeps `accounts.json`, which is an added account's.
+/// Never a relative one, which the node and each CLI would resolve against different folders.
 pub fn exported_homes(env: &[(String, String)], own_dir: Option<&Path>) -> ExportedHomes {
     let homes: Vec<&str> = Provider::ALL.into_iter().map(|p| p.spec().home_env).filter(|name| !name.is_empty()).collect();
     let session = crate::machine::INHERITED_SESSION_ENV.iter().filter(|name| !homes.contains(name));
@@ -275,7 +276,7 @@ pub fn exported_homes(env: &[(String, String)], own_dir: Option<&Path>) -> Expor
     let data_dir = |dir: &Path| own_dir == Some(dir) || dir.join(FILE).is_file();
     let added = |home: &Path| home.ancestors().any(|a| a.file_name().is_some_and(|name| name == "accounts") && a.parent().is_some_and(data_dir));
     let exported = Provider::ALL.into_iter().filter(|p| !p.spec().home_env.is_empty()).filter_map(|p| {
-        let home = env.iter().find(|(key, _)| key == p.spec().home_env).map(|(_, value)| PathBuf::from(value)).filter(|home| !home.as_os_str().is_empty())?;
+        let home = env.iter().find(|(key, _)| key == p.spec().home_env).map(|(_, value)| PathBuf::from(value)).filter(|home| home.is_absolute())?;
         (!added(&home)).then_some((p, home))
     });
     ExportedHomes(exported.collect())
