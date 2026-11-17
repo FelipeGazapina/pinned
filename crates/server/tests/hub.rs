@@ -2734,6 +2734,13 @@ struct FakeState {
     /// Runs on the next booted node's machine thread, inside the call that opens its first tab and
     /// before that call answers the hub: what a session does as its first act.
     first_tab: Option<Arc<dyn Fn() + Send + Sync>>,
+    /// Each rescue script and each delete the hub sent a box, in order, as `rescue <id>` and `delete <id>`.
+    ends: Vec<String>,
+    /// The home a rescue script runs in, whose `pinned/<repo>` is the worker's clone. Without it the
+    /// script runs in an empty home, as in a box whose worker cloned nothing.
+    rescue_home: Option<PathBuf>,
+    /// A rescue script fails as a box that cannot be reached does.
+    rescue_unreachable: bool,
 }
 
 /// Upstash's Box API in memory. Running the bootstrap starts a node from the account.json the hub
@@ -2811,6 +2818,21 @@ impl FakeBoxes {
         }
         Ok(Exec { exit_code: 0, output: "booted\n".into(), error: String::new() })
     }
+
+    /// Runs a rescue script with `sh` as the box would, in `rescue_home`, while the box is there.
+    async fn rescue(&self, id: &BoxId, script: String) -> Result<Exec, String> {
+        let home = {
+            let mut state = self.state.lock().unwrap();
+            state.ends.push(format!("rescue {}", id.0));
+            if !state.boxes.contains_key(&id.0) || state.rescue_unreachable {
+                return Err("Upstash Box could not reach the box".into());
+            }
+            state.rescue_home.clone().unwrap_or_else(|| self.root.join(format!("{}-home", id.0)))
+        };
+        std::fs::create_dir_all(&home).unwrap();
+        let ran = tokio::task::spawn_blocking(move || std::process::Command::new("sh").arg("-c").arg(&script).env("HOME", &home).output().unwrap()).await.unwrap();
+        Ok(Exec { exit_code: ran.status.code().unwrap_or(-1), output: String::from_utf8_lossy(&ran.stdout).into(), error: String::from_utf8_lossy(&ran.stderr).into() })
+    }
 }
 
 impl BoxApi for FakeBoxes {
@@ -2858,6 +2880,9 @@ impl BoxApi for FakeBoxes {
             if let Some(gate) = gate {
                 gate.notified().await;
             }
+            if script.contains("pinned-rescue") {
+                return self.rescue(id, script).await;
+            }
             if !script.contains("start.sh") {
                 return Ok(Exec { exit_code: 0, output: String::new(), error: String::new() });
             }
@@ -2871,7 +2896,11 @@ impl BoxApi for FakeBoxes {
     fn delete<'a>(&'a self, key: &'a str, id: &'a BoxId) -> BoxFuture<'a, Result<(), String>> {
         Box::pin(async move {
             Self::refuse(key)?;
-            let gone = self.state.lock().unwrap().boxes.remove(&id.0);
+            let gone = {
+                let mut state = self.state.lock().unwrap();
+                state.ends.push(format!("delete {}", id.0));
+                state.boxes.remove(&id.0)
+            };
             tokio::task::spawn_blocking(move || drop(gone)).await.unwrap();
             Ok(())
         })
@@ -6312,6 +6341,113 @@ fn a_worker_box_offline_past_the_grace_ends_and_fails_its_task_with_that_reason(
         "not \"the box did not connect\": {status}"
     );
     wait_for("the row to go", || ana.rows(&hub) == 0);
+}
+
+/// What the hub asked of its boxes at their ends so far, oldest first. A delete repeated at once
+/// counts once: deleting a box that is gone is a no-op a second end may send.
+fn box_ends(boxes: &FakeBoxes) -> Vec<String> {
+    let mut ends = boxes.state.lock().unwrap().ends.clone();
+    ends.dedup_by(|a, b| a == b && a.starts_with("delete "));
+    ends
+}
+
+/// `git -C dir args` with `home` as HOME, as the box runs it; panics unless it succeeds, and answers its output.
+fn git_at(home: &Path, dir: &Path, args: &[&str]) -> String {
+    let ran = std::process::Command::new("git").arg("-C").arg(dir).args(args).env("HOME", home).output().unwrap();
+    assert!(ran.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&ran.stderr));
+    String::from_utf8(ran.stdout).unwrap()
+}
+
+/// A bare remote, and a box home whose `pinned/site` clones it, as the worker's clone of SITE: one
+/// commit pushed to main, then `notes.txt` changed and not committed, as a worker leaves its tree
+/// when it stops mid-work. The home's git config names the box's git user, as `start.sh` sets it.
+fn box_home_with_work(name: &str) -> (PathBuf, PathBuf) {
+    let (remote, home) = (temp(&format!("{name}-remote")), temp(&format!("{name}-home")));
+    let clone = home.join("pinned/site");
+    std::fs::write(home.join(".gitconfig"), "[user]\n\tname = box\n\temail = box@example.test\n").unwrap();
+    git_at(&home, &remote, &["init", "-q", "--bare"]);
+    git_at(&home, &home, &["clone", "-q", remote.to_str().unwrap(), clone.to_str().unwrap()]);
+    std::fs::write(clone.join("notes.txt"), "started\n").unwrap();
+    git_at(&home, &clone, &["add", "notes.txt"]);
+    git_at(&home, &clone, &["commit", "-q", "-m", "start"]);
+    git_at(&home, &clone, &["push", "-q", "origin", "HEAD:refs/heads/main"]);
+    std::fs::write(clone.join("notes.txt"), "half done\n").unwrap();
+    (remote, home)
+}
+
+#[test]
+fn a_worker_box_offline_past_the_grace_pushes_its_unpushed_work_to_a_rescue_branch_before_its_box_goes() {
+    let hub = TestHub::start_with_boxes("rbox_rescue", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let mac_dir = temp("rbox-rescue-mac");
+    let (_mac, _, captain) = mac_with_captain(&hub, &mut ana, &mac_dir);
+    let (remote, home) = box_home_with_work("rbox-rescue");
+    hub.boxes.state.lock().unwrap().rescue_home = Some(home);
+    let started = delegate_from(&mac_dir, &captain, json!({ "task": "Run the slow suite.", "title": "Slow suite", "target": { "box": true } })).unwrap();
+    let task = started["taskId"].as_str().unwrap().to_owned();
+    wait_for("the worker thread running on the box", || box_tabs(&hub.boxes).iter().any(|t| t.role == Some(Role::Worker) && t.running));
+    ana.client.wait_machines(&[("mac", true), ("Box · Slow suite", true)]);
+    let id = hub.boxes.live()[0].clone();
+
+    drop_box_node(&hub.boxes, &id);
+    wait_for("the box to go", || hub.boxes.live().is_empty());
+    assert_eq!(box_ends(&hub.boxes), vec![format!("rescue {id}"), format!("delete {id}")], "one rescue, before the delete");
+    let status = task_status(&mac_dir, &captain, &task);
+    let said = format!("Upstash Box: its box went offline and did not come back within 1 s. Unpushed work was saved to branch wip/rescue/{task}.");
+    assert_eq!((status["workState"].as_str(), status["error"].as_str()), (Some("failed"), Some(said.as_str())), "{status}");
+    let branch = format!("refs/heads/wip/rescue/{task}");
+    assert_eq!(git_at(&remote, &remote, &["show", &format!("{branch}:notes.txt")]), "half done\n", "the branch holds the change");
+    assert_eq!(git_at(&remote, &remote, &["log", "-1", "--format=%s", &branch]), format!("rescue: unpushed work of task {task}\n"));
+    wait_for("the row to go", || ana.rows(&hub) == 0);
+}
+
+#[test]
+fn a_worker_box_that_cannot_be_reached_for_its_rescue_still_goes_and_its_end_says_the_work_was_not_saved() {
+    let hub = TestHub::start_with_boxes("rbox_unreached", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let mac_dir = temp("rbox-unreached-mac");
+    let (_mac, _, captain) = mac_with_captain(&hub, &mut ana, &mac_dir);
+    hub.boxes.state.lock().unwrap().rescue_unreachable = true;
+    let started = delegate_from(&mac_dir, &captain, json!({ "task": "Run the slow suite.", "title": "Slow suite", "target": { "box": true } })).unwrap();
+    let task = started["taskId"].as_str().unwrap().to_owned();
+    wait_for("the worker thread running on the box", || box_tabs(&hub.boxes).iter().any(|t| t.role == Some(Role::Worker) && t.running));
+    ana.client.wait_machines(&[("mac", true), ("Box · Slow suite", true)]);
+    let id = hub.boxes.live()[0].clone();
+
+    drop_box_node(&hub.boxes, &id);
+    wait_for("the box to go", || hub.boxes.live().is_empty());
+    assert_eq!(box_ends(&hub.boxes), vec![format!("rescue {id}"), format!("delete {id}")], "one try, then the delete");
+    let status = task_status(&mac_dir, &captain, &task);
+    let said = "Upstash Box: its box went offline and did not come back within 1 s. Unpushed work could not be saved: the box could not be reached.";
+    assert_eq!((status["workState"].as_str(), status["error"].as_str()), (Some("failed"), Some(said)), "{status}");
+    wait_for("the row to go", || ana.rows(&hub) == 0);
+}
+
+#[test]
+fn a_box_worker_whose_turn_ends_with_unpushed_work_has_it_saved_and_named_in_its_end() {
+    let hub = TestHub::start_with_boxes("rbox_turn_rescue", Signup::Open, fast());
+    let mut ana = BoxAccount::new(&hub);
+    let mac_dir = temp("rbox-turn-rescue-mac");
+    let (_mac, _, captain) = mac_with_captain(&hub, &mut ana, &mac_dir);
+    let (remote, home) = box_home_with_work("rbox-turn-rescue");
+    hub.boxes.state.lock().unwrap().rescue_home = Some(home);
+    let started = delegate_from(&mac_dir, &captain, json!({ "task": "Run the slow suite.", "title": "Slow suite", "target": { "box": true } })).unwrap();
+    let task = started["taskId"].as_str().unwrap().to_owned();
+    wait_for("the worker thread running on the box", || box_tabs(&hub.boxes).iter().any(|t| t.role == Some(Role::Worker) && t.running));
+    let child = box_tabs(&hub.boxes).into_iter().find(|t| t.role == Some(Role::Worker)).unwrap();
+    let id = hub.boxes.live()[0].clone();
+
+    // The worker ends its turn while its suite still runs, with its change neither committed nor pushed.
+    let box_dir = hub.boxes.root.join(&id);
+    hub.boxes.with_node(|node| node.machine.listen(|_| Err("not in this test".into())).unwrap());
+    hook(&box_dir, json!({ "kind": "agent", "status": "working", "tab": child.id }));
+    hook(&box_dir, json!({ "kind": "agent", "status": "done", "tab": child.id }));
+    wait_for("the box to go once its task ended", || hub.boxes.live().is_empty());
+    assert_eq!(box_ends(&hub.boxes), vec![format!("rescue {id}"), format!("delete {id}")], "one rescue, before the delete");
+    let status = task_status(&mac_dir, &captain, &task);
+    let said = format!("Unpushed work was saved to branch wip/rescue/{task}.");
+    assert_eq!((status["workState"].as_str(), status["summary"].as_str()), (Some("result_available"), Some(said.as_str())), "{status}");
+    assert_eq!(git_at(&remote, &remote, &["show", &format!("refs/heads/wip/rescue/{task}:notes.txt")]), "half done\n");
 }
 
 /// A raw machine paired to `ana`'s account, which asks the hub for what a node's thread asks.
