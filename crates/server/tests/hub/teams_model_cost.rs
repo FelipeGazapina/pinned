@@ -78,6 +78,21 @@ fn a_runs_reported_model_cost_counts_toward_its_limit_and_calls_once() {
 }
 
 #[test]
+fn a_model_cost_at_the_cap_is_kept_and_calls_once() {
+    let hub = TestHub::start_with_team_policy("teams_model_cost_cap", fast(), policy());
+    let mut tb = TeamBox::new(&hub);
+    bot(&hub, &tb, 5.0);
+    let run = run(&hub, &tb);
+    // A node whose total passed the cap sends the cap (`MAX_RUN_MODEL_USD`), each pass.
+    assert_eq!(report(&hub, &tb.box_id, &tb.workflow, 10_000.0), Ok(Value::Null), "exactly the cap is taken");
+    assert_eq!(model_usd(&hub, run), "10000");
+    wait_for("the limit call", || !limit_calls(&mut tb).is_empty());
+    assert_eq!(report(&hub, &tb.box_id, &tb.workflow, 10_000.0), Ok(Value::Null));
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!((model_usd(&hub, run), limit_calls(&mut tb).len()), ("10000".to_owned(), 1), "one limit call at the cap");
+}
+
+#[test]
 fn a_report_sent_twice_or_out_of_order_keeps_the_most_told() {
     let hub = TestHub::start_with_team_policy("teams_model_cost_max", fast(), policy());
     let mut tb = TeamBox::new(&hub);

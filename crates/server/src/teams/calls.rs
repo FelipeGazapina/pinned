@@ -558,8 +558,7 @@ fn life_limit(secs: u64) -> String {
     }
 }
 
-/// The most a run's model cost may be reported as, in USD.
-pub const MAX_RUN_MODEL_USD: f64 = 10_000.0;
+pub use pinned_core::teams::MAX_RUN_MODEL_USD;
 
 /// Keeps what a team box's node reports its workflow session on `subject` has spent on its model
 /// so far, a running total, on that run (`db::record_model_cost`). Only the box the hub bound the

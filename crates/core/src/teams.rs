@@ -609,6 +609,10 @@ pub enum TeamOp {
     RunModelCost { workflow: String, subject: crate::agent::Subject, usd: f64 },
 }
 
+/// The most a run's model cost may be reported as, in USD (`TeamOp::RunModelCost`): the hub
+/// refuses more, and a node sends a larger total as this.
+pub const MAX_RUN_MODEL_USD: f64 = 10_000.0;
+
 impl TeamOp {
     /// The personal call inside `Hub`, as the hub reads it.
     /// Only a JSON object: serde reads a tagged enum from an array as well (`["disconnect_upstash"]`),

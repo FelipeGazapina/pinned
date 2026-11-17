@@ -4076,6 +4076,8 @@ impl Machine {
             }
         }
         for ((workflow, subject), usd) in due {
+            // The hub refuses a total past its cap, which would leave the run's cost where it was.
+            let usd = usd.min(crate::teams::MAX_RUN_MODEL_USD);
             let op = crate::teams::TeamOp::RunModelCost { workflow, subject, usd };
             if let Err(e) = self.call_hub(HubCall::Team { team: None, op }) {
                 eprintln!("pinned: the hub did not take a run's model cost: {e}");
