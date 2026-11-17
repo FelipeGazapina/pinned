@@ -671,17 +671,22 @@ fn unread_passes(crew: &Crew, bot: &str) -> Vec<i64> {
 }
 
 /// Bot `bot`'s row reads once, then its second read fails with an error that is not a lock wait,
-/// then it reads again: `team_bots` is swapped for a view whose filter counts the reads of that
-/// row (`bot_reads`). `bot_reads_again` puts the table back.
+/// then it reads again. `bot_reads_again` puts the table back.
 fn bot_read_fails_second(crew: &Crew, bot: &str) {
+    bot_read_refused(crew, bot, "= 2", "XX000");
+}
+
+/// The reads of bot `bot`'s row whose number is `when` fail with Postgres error `code`: `team_bots`
+/// is swapped for a view whose filter counts the reads of that row (`bot_reads`).
+fn bot_read_refused(crew: &Crew, bot: &str, when: &str, code: &str) {
     admin_on(
         &crew.hub.database,
         &format!(
             "create sequence bot_reads;
              create function bot_read(w text) returns boolean language plpgsql cost 10000 as $$
                begin
-                 if w = '{bot}' and nextval('bot_reads') = 2 then
-                   raise exception 'the row is unreadable' using errcode = 'XX000';
+                 if w = '{bot}' and nextval('bot_reads') {when} then
+                   raise exception 'the row is unreadable' using errcode = '{code}';
                  end if;
                  return true;
                end $$;
@@ -689,6 +694,29 @@ fn bot_read_fails_second(crew: &Crew, bot: &str) {
              create view team_bots as select * from team_bots_t where bot_read(workflow)"
         ),
     );
+}
+
+#[test]
+fn a_waiting_run_whose_bot_read_is_busy_holds_up_no_other_bots_run() {
+    let crew = Crew::new("tl_wait_busy_other");
+    let (holder, x, z) = (crew.on_bot("Docs"), crew.on_bot("Pages"), crew.on_bot("Notes"));
+    admin_on(&crew.hub.database, &format!("update teams set max_live_runs = 1 where id = '{}'", crew.team));
+    assert_eq!(crew.found(crew.labeled(&holder, 9)), Ok(()));
+    for bot in [&x, &z] {
+        let reply = crew.call(&crew.bob, TeamOp::RunNow { workflow: bot.clone() }).unwrap();
+        assert_eq!(reply["waiting"], json!(true), "a Run now waits behind the holder");
+    }
+    // Every read of Pages's row is refused as a lock wait that timed out.
+    bot_read_refused(&crew, &x, ">= 1", "55P03");
+    crew.stop(&crew.live_of(&holder)[0]);
+
+    wait_for("Notes's waiting run to open its session", || opened(&crew, &z) == 1);
+    assert_eq!(crew.waiting(&x), 1, "Pages's run still waits");
+    assert_eq!(unread_passes(&crew, &x), vec![0], "a busy read is not counted against the row");
+    bot_reads_again(&crew);
+    assert_eq!(skip_rows(&crew), Vec::<Vec<Option<String>>>::new(), "nothing was counted as skipped");
+    crew.stop(&crew.live_of(&z)[0]);
+    wait_for("Pages's run to open its session", || opened(&crew, &x) == 1 && crew.waiting(&x) == 0);
 }
 
 #[test]
