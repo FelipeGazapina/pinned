@@ -42,14 +42,21 @@ pub const MORE_THAN_ONE_SESSION: &str =
 pub const SORTS_AT_THE_CHECK: &str =
     "a team bot can't use a routing trigger yet: edit its steps in the workflow editor first";
 
-/// Refuses a workflow whose trigger is not one a bot can have yet ("scheduled and GitHub-event bots
-/// are not available yet"). Linear, Slack and manual triggers are fine, and today they are the only kinds.
-/// The matches name every kind on purpose: a schedule or GitHub-event trigger added later does not
+/// Refuses a workflow whose trigger is not one a bot can have yet ("GitHub-event bots are not
+/// available yet"). Linear, Slack, manual and schedule triggers are fine, and today they are the
+/// only kinds. The matches name every kind on purpose: a GitHub-event trigger added later does not
 /// compile until it is refused here. Refuses a graph that holds more than one session or talk step,
 /// with those of the team's `workflows` it calls (`MORE_THAN_ONE_SESSION`).
 fn available(workflow: &Connector, workflows: &[Connector]) -> Result<(), String> {
     match &workflow.trigger {
-        Trigger::LinearLabel { .. } | Trigger::SlackMention { .. } | Trigger::SlackMessage { .. } | Trigger::Called | Trigger::Manual => {}
+        Trigger::LinearLabel { .. }
+        | Trigger::SlackMention { .. }
+        | Trigger::SlackMessage { .. }
+        | Trigger::Called
+        | Trigger::Manual
+        | Trigger::LinearStatus { .. }
+        | Trigger::LinearAssigned { .. }
+        | Trigger::Schedule { .. } => {}
     }
     if workflow.sorts_messages_at_the_check() {
         return Err(SORTS_AT_THE_CHECK.into());
@@ -60,7 +67,14 @@ fn available(workflow: &Connector, workflows: &[Connector]) -> Result<(), String
     });
     for watch in triggers {
         match watch {
-            Watch::LinearLabel { .. } | Watch::SlackMention { .. } | Watch::SlackMessage { .. } | Watch::Called | Watch::Manual => {}
+            Watch::LinearLabel { .. }
+            | Watch::SlackMention { .. }
+            | Watch::SlackMessage { .. }
+            | Watch::Called
+            | Watch::Manual
+            | Watch::LinearStatus { .. }
+            | Watch::LinearAssigned { .. }
+            | Watch::Schedule { .. } => {}
         }
     }
     let library: Library = workflows.iter().map(|c| (c.id.clone(), c.graph.clone().unwrap_or_else(|| migrate(c)))).collect();
@@ -454,7 +468,6 @@ pub async fn ready_in(hub: &Arc<Hub>, team: &TeamWorkflows, workflow_id: &str) -
         Err(e) => return Ok(Err(e)),
     };
     let bot = db::bot(&hub.db, team.team, workflow_id).await?;
-    let callees = callees_read(hub, team.team, workflow, workflows).await?;
     if !bot.as_ref().is_some_and(|b| b.on) || !workflow.enabled {
         return Ok(Err(IS_A_DRAFT.into()));
     }
@@ -462,6 +475,8 @@ pub async fn ready_in(hub: &Arc<Hub>, team: &TeamWorkflows, workflow_id: &str) -
     if !bot.is_some_and(|b| b.limits.usd.is_finite() && b.limits.usd > 0.0 && b.limits.minutes > 0) {
         return Ok(Err(NO_LIMIT.into()));
     }
+    // Read only once the bot's own refusals are decided: a callee read that fails never hides them.
+    let callees = callees_read(hub, team.team, workflow, workflows).await?;
     if let Err(e) = available(workflow, workflows).and(callees) {
         return Ok(Err(e));
     }

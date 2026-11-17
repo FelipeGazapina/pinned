@@ -56,12 +56,13 @@ function speechTextOf(text) {
 
 /** Why a thread waits on the user, as the orchestrator's `waiting()` counts it
  * (`global_orchestrator::waiting_kind`): `needs_input` for a question or an approval pending
- * mid-turn, and `failed` for a failure. A finished turn that ended asking something blocks nobody;
- * that is `offerOf`. The global orchestrator's own tab never waits.
- * `crates/core/src/waiting_cases.json` holds the cases both follow. */
+ * mid-turn, `failed` for a failure, and `stopped_on_error` for a turn that ended on an API error.
+ * A finished turn that ended asking something blocks nobody; that is `offerOf`. The global
+ * orchestrator's own tab never waits. `crates/core/src/waiting_cases.json` holds the cases both follow. */
 function waitingKindOf(view) {
   if (!view || view.orchestrator_global) return null;
   if (view.status === "failed") return "failed";
+  if (view.status === "needs-input" && view.running && view.stopped_on_error) return "stopped_on_error";
   if (view.status === "needs-input" && view.running && view.interrupted) return "needs_input";
   return null;
 }

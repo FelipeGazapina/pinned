@@ -40,6 +40,22 @@ impl Held {
         self.runtime.block_on(db.query_one("select count(*) from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'", &[])).unwrap().get(0)
     }
 
+    /// The statements of the hub's database that wait on a lock now, each as its server process
+    /// and start time: one statement that waits stays one entry however often it is seen.
+    pub(super) fn lock_waits(&self) -> Vec<String> {
+        let db = self.db.as_ref().unwrap();
+        self.runtime.block_on(db.batch_execute("select pg_stat_clear_snapshot()")).unwrap();
+        let rows = self.runtime.block_on(db.query("select pid::text || '@' || query_start::text from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'", &[])).unwrap();
+        rows.iter().map(|r| r.get(0)).collect()
+    }
+
+    /// Whether a team's turn (`queue::TURN_KEY`, an advisory lock) is held on the hub's database now.
+    pub(super) fn turn_held(&self) -> bool {
+        let db = self.db.as_ref().unwrap();
+        let held: i64 = self.runtime.block_on(db.query_one("select count(*) from pg_locks where locktype = 'advisory' and granted and database = (select oid from pg_database where datname = current_database())", &[])).unwrap().get(0);
+        held > 0
+    }
+
     /// Runs `statements` in the transaction and commits it, as another hub that wins a race does.
     pub(super) fn commit(mut self, statements: &str) {
         let db = self.db.take().unwrap();
@@ -448,7 +464,8 @@ fn a_waiting_run_now_whose_bot_read_is_busy_still_waits_and_starts_later() {
     wait_for("the start after the end to give up on the held table", || held.waiters() == 0);
     held.release();
 
-    assert!(crew.waiting(&pages) == 1 || crew.boxes_created() > boxes, "bob's Run now still waits, or its box start was tried");
+    // A busy read returns before the run is taken, so the run still waits and no box start was tried.
+    assert_eq!((crew.waiting(&pages), crew.boxes_created()), (1, boxes), "bob's Run now still waits, and no box start was tried");
     assert_eq!(crew.skipped(&pages), skipped, "nothing was counted as skipped");
     crew.reaper_pass();
     wait_for("bob's Run now to open its session", || opened(&crew, &pages) == 1 && crew.waiting(&pages) == 0);
@@ -777,10 +794,140 @@ fn a_waiting_run_whose_bot_read_is_busy_holds_up_no_other_bots_run() {
     wait_for("Notes's waiting run to open its session", || opened(&crew, &z) == 1);
     assert_eq!(crew.waiting(&x), 1, "Pages's run still waits");
     assert_eq!(unread_passes(&crew, &x), vec![0], "a busy read is not counted against the row");
+    // A place is free again, and six passes each read Pages's row busy: more passes than one
+    // that counted would take to drop the row.
+    crew.stop(&crew.live_of(&z)[0]);
+    wait_for("the start after Notes's end to read Pages's row", || bot_reads(&crew) >= 2);
+    for _ in 0..6 {
+        let reads = bot_reads(&crew);
+        crew.reaper_pass();
+        wait_for("one more pass to read Pages's row", || bot_reads(&crew) > reads);
+    }
+    assert_eq!((crew.waiting(&x), opened(&crew, &x)), (1, 0), "Pages's run still waits after six busy passes");
+    assert_eq!(unread_passes(&crew, &x), vec![0], "no busy read is counted against the row");
     bot_reads_again(&crew);
     assert_eq!(skip_rows(&crew), Vec::<Vec<Option<String>>>::new(), "nothing was counted as skipped");
-    crew.stop(&crew.live_of(&z)[0]);
+    crew.reaper_pass();
     wait_for("Pages's run to open its session", || opened(&crew, &x) == 1 && crew.waiting(&x) == 0);
+}
+
+#[test]
+fn a_turn_ends_after_its_second_busy_bot_read_and_keeps_every_row_in_line() {
+    let crew = Crew::new("tl_wait_busy_bots");
+    let (holder, x, y, z) = (crew.on_bot("Docs"), crew.on_bot("Pages"), crew.on_bot("Notes"), crew.on_bot("Specs"));
+    admin_on(&crew.hub.database, &format!("update teams set max_live_runs = 1 where id = '{}'", crew.team));
+    assert_eq!(crew.found(crew.labeled(&holder, 9)), Ok(()));
+    for bot in [&x, &y, &z] {
+        let reply = crew.call(&crew.bob, TeamOp::RunNow { workflow: bot.clone() }).unwrap();
+        assert_eq!(reply["waiting"], json!(true), "a Run now waits behind the holder");
+    }
+    // Every bot row is held by another connection: each read of one waits 2 s, then is busy.
+    // The stop's own read of its bot's row waits out the lock first, before the turn.
+    let held = Held::new(&crew.hub, "lock table team_bots in access exclusive mode");
+    crew.stop(&crew.live_of(&holder)[0]);
+    let mut waits = std::collections::BTreeSet::new();
+    let mut started = None;
+    wait_for("the start after the end to take the team's turn and wait on a bot row", || {
+        if held.turn_held() {
+            started.get_or_insert_with(Instant::now);
+        }
+        waits.extend(held.lock_waits());
+        started.is_some() && !waits.is_empty()
+    });
+    wait_for("the team's turn to end", || {
+        waits.extend(held.lock_waits());
+        !held.turn_held()
+    });
+    let took = started.unwrap().elapsed();
+    held.release();
+
+    assert_eq!(waits.len(), 2, "the turn read two bot rows busy, then ended: {waits:?}");
+    assert!(took < Duration::from_millis(5000), "the turn held the team for {took:?}, not two lock waits");
+    assert_eq!([crew.waiting(&x), crew.waiting(&y), crew.waiting(&z)], [1, 1, 1], "every row still waits");
+    assert_eq!([unread_passes(&crew, &x), unread_passes(&crew, &y), unread_passes(&crew, &z)], [vec![0], vec![0], vec![0]], "no busy read is counted");
+    assert_eq!(skip_rows(&crew), Vec::<Vec<Option<String>>>::new(), "nothing was counted as skipped");
+
+    // The rows start in their order, each when the one before it ends.
+    crew.reaper_pass();
+    let line = [&x, &y, &z];
+    for (i, bot) in line.iter().enumerate() {
+        wait_for("the next row in line to open its session", || opened(&crew, bot) == 1 && crew.waiting(bot) == 0);
+        for later in &line[i + 1..] {
+            assert_eq!((crew.waiting(later), opened(&crew, later)), (1, 0), "a later row still waits");
+        }
+        crew.stop(&crew.live_of(bot)[0]);
+    }
+    assert_eq!(skip_rows(&crew), Vec::<Vec<Option<String>>>::new(), "nothing was counted as skipped");
+}
+
+/// A called bot `name` with one session step; bob saved it and ana turned it on.
+fn called_bot(crew: &Crew, name: &str) -> String {
+    let watch = json!({ "kind": "called" });
+    let id = save_team_workflow(&crew.hub, &crew.bob, crew.team, json!({
+        "name": name, "enabled": false, "trigger": watch,
+        "folder": crew.folder, "model": "", "effort": "high", "permissionMode": "acceptEdits", "worktree": false,
+        "instructions": "", "machine": { "kind": "upstash-box", "size": "small" },
+        "graph": {
+            "nodes": [
+                { "id": "t", "name": "Trigger", "position": [0, 0], "type": "trigger", "watch": watch },
+                { "id": "s", "name": "Fix", "position": [1, 0], "type": "session", "prompt": "Fix." },
+            ],
+            "edges": [{ "from": "t", "port": "out", "to": "s" }],
+        },
+    }))
+    .unwrap();
+    let bot = pinned_core::teams::Bot { workflow: id.clone(), name: String::new(), owner: None, calls: Default::default(), limits: pinned_core::teams::BotLimits { usd: 5.0, minutes: 30 }, on: false, on_by: None, once: false, off_note: None, skipped: vec![] };
+    crew.call(&crew.bob, TeamOp::SaveBot { bot, connector: None }).unwrap();
+    crew.call(&crew.ana, TeamOp::TurnBotOn { workflow: id.clone(), on: true }).unwrap();
+    id
+}
+
+/// A bot `name` whose workflow calls bot `callee`; bob saved it and ana turned it on.
+fn calling_bot(crew: &Crew, name: &str, callee: &str) -> String {
+    crew.graph_of(name, vec![json!({ "type": "call", "workflow": callee })])
+}
+
+/// Bot `bot` has no limit to run with: a row only SQL could write, as Run now refuses one.
+fn no_limit(crew: &Crew, bot: &str) {
+    admin_on(&crew.hub.database, &format!("update team_bots set limits = '{{\"usd\":0,\"minutes\":30}}' where team = '{}' and workflow = '{bot}'", crew.team));
+}
+
+#[test]
+fn a_draft_or_no_limit_bot_whose_callee_read_fails_hears_its_own_refusal() {
+    let crew = Crew::new("tl_refusal_callee_unread");
+    let callee = called_bot(&crew, "Notes");
+    let (drafted, unlimited) = (calling_bot(&crew, "Pages", &callee), calling_bot(&crew, "Specs", &callee));
+    crew.call(&crew.ana, TeamOp::TurnBotOn { workflow: drafted.clone(), on: false }).unwrap();
+    no_limit(&crew, &unlimited);
+    // Every read of the callee's row fails, with an error that is not a lock wait.
+    bot_read_refused(&crew, &callee, ">= 1", "XX000");
+
+    let draft = crew.call(&crew.bob, TeamOp::RunNow { workflow: drafted.clone() });
+    assert_eq!(draft, Err("this bot is a draft: it has to be turned on before it can run".to_owned()), "the draft bot's Run now");
+    let unlimited_reply = crew.call(&crew.bob, TeamOp::RunNow { workflow: unlimited.clone() });
+    assert_eq!(unlimited_reply, Err("this bot has no limit to run with: the team's owner sets one".to_owned()), "the no-limit bot's Run now");
+    bot_reads_again(&crew);
+    assert_eq!((opened(&crew, &drafted), opened(&crew, &unlimited)), (0, 0), "nothing started");
+}
+
+#[test]
+fn a_waiting_run_of_a_no_limit_bot_whose_callee_read_fails_is_refused_not_counted() {
+    let crew = Crew::new("tl_wait_no_limit_callee");
+    let (holder, callee) = (crew.on_bot("Docs"), called_bot(&crew, "Notes"));
+    let x = calling_bot(&crew, "Pages", &callee);
+    admin_on(&crew.hub.database, &format!("update teams set max_live_runs = 1 where id = '{}'", crew.team));
+    assert_eq!(crew.found(crew.labeled(&holder, 9)), Ok(()));
+    let reply = crew.call(&crew.bob, TeamOp::RunNow { workflow: x.clone() }).unwrap();
+    assert_eq!(reply["waiting"], json!(true), "bob's Run now waits behind the holder");
+    no_limit(&crew, &x);
+    bot_read_refused(&crew, &callee, ">= 1", "XX000");
+    crew.stop(&crew.live_of(&holder)[0]);
+
+    wait_for("the turn to decide on Pages's row", || crew.waiting(&x) == 0 || unread_passes(&crew, &x) == vec![1]);
+    assert_eq!(unread_passes(&crew, &x), Vec::<i64>::new(), "the row is refused, not counted as a failed read");
+    assert_eq!(skip_rows(&crew), vec![vec![Some(x.clone()), Some("start_failed".to_owned()), Some("1".to_owned())]], "the refused row is counted once");
+    bot_reads_again(&crew);
+    assert_eq!(opened(&crew, &x), 0, "Pages's run never started");
 }
 
 #[test]
@@ -847,7 +994,7 @@ fn a_waiting_run_whose_ready_read_fails_once_keeps_its_place_ahead_of_its_bots_n
     bot_read_fails_second(&crew, &x);
     crew.stop(&crew.live_of(&holder)[0]);
     wait_for("the start after the end to read Pages's row twice", || bot_reads(&crew) >= 2);
-    std::thread::sleep(Duration::from_millis(500));
+    wait_for("the pass to count its failed read of Pages on bob's run", || unread_passes(&crew, &x) == vec![1, 0]);
 
     assert_eq!(crew.waiting(&x), 2, "both of Pages's runs still wait");
     assert_eq!(crew.live_of(&x), Vec::<String>::new(), "ana's run did not start ahead of bob's");

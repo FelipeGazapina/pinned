@@ -45,7 +45,7 @@ const FIRST_RUN_WAIT: Duration = Duration::from_secs(60);
 /// Why a task the user cancelled from its card stopped.
 const CARD_CANCEL: &str = "cancelled from the card";
 /// How long a fresh session may start without reporting before its start fails.
-const STARTING_LIMIT: Duration = Duration::from_secs(10 * 60);
+pub const STARTING_LIMIT: Duration = Duration::from_secs(10 * 60);
 /// Claude logs a turn's duration only after its Stop hook returns, within a second in practice.
 const TURN_LOG_WAIT: (u32, Duration) = (25, Duration::from_millis(200));
 const THREAD_LOOK_EVERY: Duration = Duration::from_millis(40);
@@ -573,6 +573,8 @@ struct Tab {
     cut_by_sleep: Option<CutBySleep>,
     /// The last failure was an API error, which a sleep window found later may still claim.
     api_error: bool,
+    /// The API or stream error the turn ended on, read from the transcript when the session went idle after it.
+    stopped_on_error: Option<String>,
     /// The session doesn't continue by itself when its usage limit lifts.
     held_at_limit: bool,
     /// The model every start of this tab passes as `--model`, picked for its conversation alone.
@@ -591,6 +593,10 @@ struct Tab {
     task: Option<String>,
     /// Working tree and prompt as the running turn began, to diff against when it ends.
     turn: Option<(String, Option<String>)>,
+    /// The running session started a new conversation on a prompt in its arguments, and no hook
+    /// has reported a turn since: a notice alone, as one Claude Code sends while a dialog waits,
+    /// does not mean the prompt reached the session.
+    owes_turn: bool,
     status: Option<AgentStatus>,
     updated: Option<u64>,
     title: Option<String>,
@@ -722,6 +728,7 @@ impl Tab {
             asleep: self.asleep,
             headless: self.headless && self.session.is_none(),
             stopped: self.stopped.clone().filter(|_| !self.live()),
+            stopped_on_error: self.stopped_on_error.clone(),
             questions: None,
             read_only: self.child_access() == crate::delegate::Access::ReadOnly,
         }
@@ -815,6 +822,8 @@ pub struct Machine {
     sleeps: Mutex<sleep::Watch>,
     sync_file: Option<PathBuf>,
     sync_loop_holds_state: AtomicBool,
+    /// Set while the sync loop's last push was refused at the account's size limit, and no push has been taken since.
+    sync_limited: AtomicBool,
     projects: Mutex<Vec<projects::Project>>,
     projects_file: Option<PathBuf>,
     accounts: Accounts,
@@ -1038,6 +1047,7 @@ impl Machine {
             sleeps: Mutex::new(sleep::Watch::with_window(dir.as_ref().and_then(|d| sleep::load(&d.join("sleep.json"))))),
             sync_file: dir.as_ref().map(|d| d.join("sync.json")),
             sync_loop_holds_state: AtomicBool::new(false),
+            sync_limited: AtomicBool::new(false),
             projects: Mutex::new(projects),
             projects_file,
             accounts,
@@ -1247,6 +1257,7 @@ impl Machine {
             Call::SetFolder { tab, path } => json(self.set_folder(&tab, &path)?),
             Call::ListProjects => json(self.list_projects()),
             Call::SyncStopped => json(self.sync_stopped()),
+            Call::SyncLimit => json(self.sync_limit()),
             Call::State => json(self.state()),
             Call::ResetSync => {
                 if let Some(file) = &self.sync_file {
@@ -2243,6 +2254,7 @@ impl Machine {
                 t.tally = Tally::default();
             }
             let mut args = std::mem::take(&mut t.launch);
+            t.owes_turn = t.claude_session.is_none() && !args.is_empty();
             let asked = args.clone();
             t.bare = t.claude_session.as_deref().is_some_and(|session| args == crate::delegate::resume_args(t.account.provider, session));
             t.mode_live = args.iter().any(|a| a == "--permission-mode");
@@ -2347,7 +2359,7 @@ impl Machine {
                 if screen.lock().unwrap().session != session {
                     return;
                 }
-                let Ok(Some((cwd, bypass))) = machine.tab(&tab, |t| (t.status.is_none() && t.session.is_some()).then(|| (t.cwd.clone(), t.bypass))) else { return };
+                let Ok(Some((cwd, bypass))) = machine.tab(&tab, |t| (t.session.is_some() && (t.status.is_none() || t.owes_turn)).then(|| (t.cwd.clone(), t.bypass))) else { return };
                 let Some(found) = crate::first_run::showing(&machine.screen_text(&tab)) else { continue };
                 if answered.contains(&found) {
                     continue;
@@ -2368,14 +2380,20 @@ impl Machine {
                     Err(reason) => return machine.end_start(&tab, reason),
                 }
             }
-            // A fresh start that never reported, at its limit. A resume at its prompt fires no hook
-            // until a turn, but has its conversation's id.
+            // A fresh start that never reported, or whose first prompt never started a turn, at its
+            // limit. A resume at its prompt fires no hook until a turn, but has its conversation's id.
             let Some(machine) = me.upgrade() else { return };
-            if screen.lock().unwrap().session != session || !machine.tab(&tab, |t| t.status.is_none() && t.session.is_some() && t.claude_session.is_none()).unwrap_or(false) {
+            let unstarted = |t: &mut Tab| t.session.is_some() && ((t.status.is_none() && t.claude_session.is_none()) || t.owes_turn);
+            if screen.lock().unwrap().session != session || !machine.tab(&tab, unstarted).unwrap_or(false) {
                 return;
             }
+            // The screen is scrubbed before it is quoted; a line that does not scrub is not quoted.
             let shown = crate::setup_token::last_line(machine.screen_text(&tab).as_bytes());
-            machine.end_start(&tab, format!("it did not start within {}; its screen shows: {shown}", wait_text(limit)));
+            let reason = match crate::reports::scrub(&shown, &crate::reports::Context::default()) {
+                Ok(shown) => format!("it did not start within {}; its screen shows: {shown}", wait_text(limit)),
+                Err(_) => format!("it did not start within {}", wait_text(limit)),
+            };
+            machine.end_start(&tab, reason);
         });
     }
 
@@ -4163,6 +4181,14 @@ impl Machine {
         self.sync_loop_holds_state.store(held, Ordering::SeqCst);
     }
 
+    pub(crate) fn hold_sync_limit(&self, limited: bool) {
+        self.sync_limited.store(limited, Ordering::SeqCst);
+    }
+
+    fn sync_limit(&self) -> Option<String> {
+        self.sync_limited.load(Ordering::SeqCst).then(|| sync::LIMIT_NOTICE.to_owned())
+    }
+
     fn sync_stopped(&self) -> Option<String> {
         if self.sync_loop_holds_state.load(Ordering::SeqCst) {
             return None;
@@ -5209,6 +5235,13 @@ impl Machine {
         let page = thread::read(&file, thread::last_page(&file)).ok()?;
         let (_, summary) = thread::pending_tool(&page.items)?;
         Some(summary.to_owned()).filter(|summary| !summary.is_empty())
+    }
+
+    /// The API or stream error the tab's transcript ends on, when the session went idle after one.
+    fn stopped_error(&self, tab: &str) -> Option<String> {
+        let file = self.transcript(tab).ok()?;
+        let page = thread::read(&file, thread::last_page(&file)).ok()?;
+        thread::turn_error(&page.items)
     }
 
     /// Tells the machine that delegated each task running here for another machine what its
@@ -6436,6 +6469,7 @@ impl Machine {
             resume_at: None,
             cut_by_sleep: None,
             api_error: false,
+            stopped_on_error: None,
             held_at_limit: false,
             model: None,
             made: None,
@@ -6443,6 +6477,7 @@ impl Machine {
             origin: None,
             task: None,
             turn: None,
+            owes_turn: false,
             status: None,
             updated: None,
             title: None,
@@ -6647,6 +6682,7 @@ impl Machine {
         // Claude says it waits for input a while after every finished turn too, which asks nothing.
         let was_done = self.tab(tab, |t| t.status == Some(AgentStatus::Done)).unwrap_or(false);
         let detail = (event.status == AgentStatus::NeedsInput && !was_done).then(|| self.pending_ask(tab)).flatten();
+        let stopped = (event.status == AgentStatus::NeedsInput).then(|| self.stopped_error(tab)).flatten();
         let changed = self.tab(tab, |t| {
             let before = (t.interrupted, t.resume_at, t.held_at_limit, t.cut_by_sleep);
             let window = self.sleeps.lock().unwrap().window();
@@ -6691,7 +6727,9 @@ impl Machine {
                 t.question = None;
             }
             t.ask_detail = detail;
+            t.stopped_on_error = stopped;
             t.status = Some(event.status);
+            t.owes_turn &= event.status == AgentStatus::NeedsInput;
             // The turn that starts may end the shells an earlier one left, and its end says which still run.
             if event.status == AgentStatus::Working {
                 t.shells_left = false;
@@ -8942,6 +8980,26 @@ pub(crate) mod tests {
     }
 
     const API_ERROR: &str = "API Error: Unable to connect to API (ECONNRESET)";
+
+    #[test]
+    fn a_turn_that_ends_on_an_api_error_then_idles_keeps_the_error_line_it_stopped_on() {
+        let root = temp("stopped-on-error");
+        let config = root.join("config");
+        std::fs::create_dir_all(config.join("accounts/work/projects/-app")).unwrap();
+        std::fs::write(config.join("accounts.json"), r#"[{"id": "work", "provider": "claude", "name": "Work"}]"#).unwrap();
+        let transcript = [
+            r#"{"type":"user","uuid":"u1","timestamp":"2026-10-29T10:00:00Z","message":{"content":"Port the grid."}}"#,
+            r#"{"type":"assistant","uuid":"a1","timestamp":"2026-10-29T10:01:00Z","isApiErrorMessage":true,"message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"API Error: The response stopped arriving.\nThe response above may be incomplete."}]}}"#,
+        ];
+        std::fs::write(config.join("accounts/work/projects/-app/s1.jsonl"), transcript.map(|l| l.to_owned() + "\n").concat()).unwrap();
+        let m = Machine::new(launch(), Some(config), None, |_| {});
+        let work = m.accounts.get("work").unwrap();
+        let tab = m.add_tab("/work/app".into(), work, vec![], vec![], false, Some("s1".into()));
+        m.record_status(&tab, &ended(&tab, AgentStatus::Working, None, None));
+        m.record_status(&tab, &ended(&tab, AgentStatus::NeedsInput, Some("Claude is waiting for your input"), None));
+        let view = serde_json::to_value(m.view(&tab).unwrap()).unwrap();
+        assert_eq!(view["stopped_on_error"], "API Error: The response stopped arriving.", "the first line of the error the transcript ends on");
+    }
 
     #[test]
     fn an_api_error_inside_the_sleep_window_is_cut_by_the_sleep() {
@@ -13247,6 +13305,104 @@ Have another model review a risky change before it goes ahead.";
         assert_eq!((info.state.as_str(), info.error.as_deref()), ("failed", Some(reason)));
         let thread = m.view(&info.thread.unwrap().tab).unwrap();
         assert_eq!((thread.status, thread.message.as_deref()), (Some(AgentStatus::Failed), Some(reason)));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// What a hook reports from `tab`'s session `session`.
+    fn reported(tab: &str, status: AgentStatus, session: &str, message: Option<&str>, prompt: Option<&str>) -> AgentEvent {
+        AgentEvent { status, cwd: None, message: message.map(Into::into), tab: Some(tab.into()), session: Some(session.into()), title: None, resume_at: None, prompt: prompt.map(Into::into), snapshot: None, permission_mode: None, hook_feedback: false, reply: None }
+    }
+
+    const PARKED_SCREEN: &str = " Use the docs server this folder lists?  1. Use it  2. Skip it  Enter to confirm · Esc to cancel";
+
+    #[test]
+    #[cfg(unix)]
+    fn a_worker_parked_before_its_first_prompt_fails_at_the_starting_limit_though_a_notice_named_its_session() {
+        let root = temp("starting-limit-notice");
+        let (claude, keys) = claude_on_screens(&root, &[PARKED_SCREEN]);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), starting_limit: Duration::from_secs(2), ..launch() }, Some(root.join("config")), None, |_| {});
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        let task = delegate_from(&m, &app, "shared");
+        let tab = m.delegates.get(&task).unwrap().thread.unwrap().tab;
+        wait_for("the dialog on its screen", || m.screen_text(&tab).contains("Enter to confirm"));
+        // Claude Code names its session in a notice while the dialog waits; the brief was never submitted.
+        m.record_event(reported(&tab, AgentStatus::NeedsInput, "s-parked", Some("Claude needs your attention"), None));
+        wait_for("the start to fail", || m.delegates.get(&task).is_some_and(|t| t.state.terminal()));
+        let info = m.delegates.get(&task).unwrap();
+        let reason = "it did not start within 2 s; its screen shows: Use the docs server this folder lists?  1. Use it  2. Skip it  Enter to confirm · Esc to cancel";
+        assert_eq!((info.state.as_str(), info.error.as_deref()), ("failed", Some(reason)));
+        assert_eq!((m.view(&tab).unwrap().status, m.view(&tab).unwrap().message.as_deref()), (Some(AgentStatus::Failed), Some(reason)));
+        assert!(!keys.exists(), "nothing was typed into a dialog pinned does not know");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_parked_first_start_quotes_its_screen_line_scrubbed_of_paths_and_tokens() {
+        let root = temp("starting-limit-scrub");
+        let line = " Use the docs server at /home/boxuser/pinned/app with sk-ant-oat01-ABCDEFGHIJKLMNOPQRSTUVWX?  1. Use it  2. Skip it  Enter to confirm · Esc to cancel";
+        let (claude, keys) = claude_on_screens(&root, &[line]);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), starting_limit: Duration::from_secs(2), ..launch() }, Some(root.join("config")), None, |_| {});
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        let task = delegate_from(&m, &app, "shared");
+        let tab = m.delegates.get(&task).unwrap().thread.unwrap().tab;
+        wait_for("the dialog on its screen", || m.screen_text(&tab).contains("Enter to confirm"));
+        wait_for("the start to fail", || m.delegates.get(&task).is_some_and(|t| t.state.terminal()));
+        let info = m.delegates.get(&task).unwrap();
+        let reason = info.error.clone().unwrap();
+        assert_eq!(reason, "it did not start within 2 s; its screen shows: Use the docs server at [folder] with [hidden]?  1. Use it  2. Skip it  Enter to confirm · Esc to cancel");
+        for secret in ["/home", "boxuser", "sk-ant-oat01", "ABCDEFGHIJKLMNOP"] {
+            assert!(!reason.contains(secret), "{secret} leaked into {reason}");
+        }
+        assert_eq!(m.view(&tab).unwrap().message.as_deref(), Some(reason.as_str()), "the tab quotes the same reason");
+        assert!(!keys.exists(), "nothing was typed into a dialog pinned does not know");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_resumed_tab_at_its_prompt_and_a_worker_that_started_its_turn_outlive_the_starting_limit() {
+        let root = temp("starting-limit-kept");
+        let (claude, _) = claude_on_screens(&root, &["? for shortcuts"]);
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), starting_limit: Duration::from_secs(1), ..launch() }, Some(root.join("config")), None, |_| {});
+        let app = root.join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        let resumed = m.add_tab(app.clone(), Account::builtin(Provider::Claude), vec!["--resume".into(), "s-1".into()], vec![], false, Some("s-1".into()));
+        m.start_claude(&resumed, 120, 32).unwrap();
+        let task = delegate_from(&m, &app, "shared");
+        let worker = m.delegates.get(&task).unwrap().thread.unwrap().tab;
+        // The brief started its turn, which then asks for a permission past the limit.
+        m.record_event(reported(&worker, AgentStatus::Working, "s-2", None, Some("look")));
+        m.record_event(reported(&worker, AgentStatus::NeedsInput, "s-2", Some("Claude needs your permission to use Bash"), None));
+        std::thread::sleep(Duration::from_millis(2500));
+        assert_eq!((m.view(&resumed).unwrap().status, m.view(&resumed).unwrap().message), (None, None), "a resume at its prompt fires no hook until a turn");
+        assert_eq!(m.view(&worker).unwrap().status, Some(AgentStatus::NeedsInput), "a worker that started its turn");
+        assert!(!m.delegates.get(&task).unwrap().state.terminal(), "{:?}", m.delegates.get(&task).unwrap().error);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_worktree_made_after_the_node_started_is_trusted_in_the_home_claude_config_before_its_session_starts() {
+        let root = temp("worktree-trust-home");
+        let (claude, _) = claude_on_screens(&root, &["? for shortcuts"]);
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::write(home.join(".claude.json"), r#"{"projects":{"/elsewhere":{"allowedTools":["Bash"]}}}"#).unwrap();
+        let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude)]), claude_home: Some(home.clone()), ..launch() }, Some(root.join("config")), None, |_| {});
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(&repo, &["-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "--allow-empty", "-m", "first"]);
+        let task = delegate_from(&m, &repo, "worktree");
+        let worktree = m.delegates.get(&task).unwrap().cwd;
+        assert!(worktree.starts_with(dunce::canonicalize(&repo).unwrap().join(".claude/worktrees")), "{}", worktree.display());
+        let config = claude_config_at(&home.join(".claude.json"));
+        assert!(trusted(&config, &worktree), "{config}");
+        assert!(!trusted(&config, &repo), "the repository the user opened stays the user's call: {config}");
+        assert_eq!(config["projects"]["/elsewhere"], json!({"allowedTools": ["Bash"]}), "another folder stays as it was");
         let _ = std::fs::remove_dir_all(root);
     }
 
