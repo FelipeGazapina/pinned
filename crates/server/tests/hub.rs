@@ -6259,7 +6259,7 @@ fn a_box_the_hub_ends_fails_its_task_on_the_machine_that_delegated_it() {
     let status = task_status(&mac_dir, &captain, &task);
     assert_eq!(
         (status["workState"].as_str(), status["error"].as_str()),
-        (Some("failed"), Some("Upstash Box: the box ended before its task did: someone removed its machine")),
+        (Some("failed"), Some(format!("Upstash Box: the box ended before its task did: someone removed its machine. {NOT_CONFIRMED_PRIVATE}").as_str())),
         "{status}"
     );
 }
@@ -6325,7 +6325,7 @@ fn a_worker_box_whose_link_blinks_is_offline_not_booting_and_keeps_its_task() {
     drop_box_node(&hub.boxes, &id);
     wait_for("the hub to see the box offline again", || caller.ask(remote_task_call(&machine, "task-1", None)) == Err(BOX_OFFLINE.into()));
     let cancelled = caller.ask(remote_task_call(&machine, "task-1", Some("not now"))).unwrap();
-    assert_eq!((cancelled["workState"].as_str(), cancelled["error"].as_str()), (Some("cancelled"), Some("not now")), "{cancelled}");
+    assert_eq!((cancelled["workState"].as_str(), cancelled["error"].as_str()), (Some("cancelled"), Some(format!("not now. {NOT_CONFIRMED_PRIVATE}").as_str())), "{cancelled}");
     wait_for("the cancelled box to go", || hub.boxes.live().is_empty() && ana.rows(&hub) == 0);
 }
 
@@ -6345,7 +6345,7 @@ fn a_worker_box_offline_past_the_grace_ends_and_fails_its_task_with_that_reason(
     let status = task_status(&mac_dir, &captain, &task);
     assert_eq!(
         (status["workState"].as_str(), status["error"].as_str()),
-        (Some("failed"), Some("Upstash Box: its box went offline and did not come back within 1 s")),
+        (Some("failed"), Some(format!("Upstash Box: its box went offline and did not come back within 1 s. {NOT_CONFIRMED_PRIVATE}").as_str())),
         "not \"the box did not connect\": {status}"
     );
     wait_for("the row to go", || ana.rows(&hub) == 0);
@@ -6361,7 +6361,7 @@ fn box_ends(boxes: &FakeBoxes) -> Vec<String> {
 
 /// `git -C dir args` with `home` as HOME, as the box runs it; panics unless it succeeds, and answers its output.
 fn git_at(home: &Path, dir: &Path, args: &[&str]) -> String {
-    let ran = std::process::Command::new("git").arg("-C").arg(dir).args(args).env("HOME", home).output().unwrap();
+    let ran = std::process::Command::new("git").arg("-C").arg(dir).args(args).env("HOME", home).env_remove("GIT_CONFIG_GLOBAL").output().unwrap();
     assert!(ran.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&ran.stderr));
     String::from_utf8(ran.stdout).unwrap()
 }
@@ -6529,7 +6529,7 @@ fn a_worker_box_whose_session_never_starts_a_turn_ends_and_fails_its_task_with_t
     let status = task_status(&mac_dir, &captain, &task);
     assert_eq!(
         (status["workState"].as_str(), status["error"].as_str()),
-        (Some("failed"), Some("Upstash Box: the worker did not start its first turn within 2 s")),
+        (Some("failed"), Some(format!("Upstash Box: the worker did not start its first turn within 2 s. {NOT_CONFIRMED_PRIVATE}").as_str())),
         "{status}"
     );
     wait_for("the row to go", || ana.rows(&hub) == 0);
@@ -10992,7 +10992,7 @@ fn a_worker_box_end_reaches_a_parent_that_was_offline_and_the_box_ends_done_at_o
     wait_for("mac to hear how its worker ended", || task_status(&mac_dir, &captain, &task)["workState"] == "result_available");
     let status = task_status(&mac_dir, &captain, &task);
     eprintln!("scenario: mac's task {task}: {} \"{}\"", status["workState"], status["summary"].as_str().unwrap_or_default());
-    assert_eq!(status["summary"].as_str(), Some("Suite green; 412 tests pass."), "{status}");
+    assert_eq!(status["summary"].as_str(), Some(format!("Suite green; 412 tests pass.\n\n{NOT_CONFIRMED_PRIVATE}").as_str()), "{status}");
     assert!(status["usage"]["box_ms"].as_u64().is_some_and(|ms| ms > 0), "with the box's time: {status}");
     wait_for("the held row to go once mac answered it", || held_ends(&hub, None) == 0);
     eprintln!("scenario: held ends after mac took it: {}", held_ends(&hub, None));
@@ -11075,14 +11075,14 @@ fn a_parent_that_looks_before_its_held_end_is_delivered_reads_the_end_not_a_gone
     });
     wait_for("the hub to offer mac the held end", || busy.calls("remote_ended") == 1);
     let look = busy.ask(remote_task_call(&machine, &task, None)).unwrap();
-    assert_eq!((look["workState"].as_str(), look["summary"].as_str()), (Some("result_available"), Some("Suite green; 412 tests pass.")), "the held end, not 'this account has no machine': {look}");
+    assert_eq!((look["workState"].as_str(), look["summary"].as_str()), (Some("result_available"), Some(format!("Suite green; 412 tests pass.\n\n{NOT_CONFIRMED_PRIVATE}").as_str())), "the held end, not 'this account has no machine': {look}");
     drop(busy);
 
     // The real mac reconnects: its check and the delivery race, and the task ends with the held result.
     mac.link = Some(link::spawn(creds, mac.machine.clone(), "0.0.0-test"));
     wait_for("mac's task to end", || task_status(&mac_dir, &captain, &task)["workState"] != "working");
     let status = task_status(&mac_dir, &captain, &task);
-    assert_eq!((status["workState"].as_str(), status["summary"].as_str()), (Some("result_available"), Some("Suite green; 412 tests pass.")), "not gone from this account: {status}");
+    assert_eq!((status["workState"].as_str(), status["summary"].as_str()), (Some("result_available"), Some(format!("Suite green; 412 tests pass.\n\n{NOT_CONFIRMED_PRIVATE}").as_str())), "not gone from this account: {status}");
     wait_for("the held row to go", || held_ends(&hub, None) == 0);
     assert_eq!(ana.client.hub(json!({ "cmd": "unclaimed_ends" })), Ok(json!([])), "mac had it, so it is not listed unclaimed");
 }
@@ -11127,7 +11127,7 @@ fn a_box_ended_notice_its_parent_missed_is_held_and_told_once_it_is_back() {
     mac.link = Some(link::spawn(creds, mac.machine.clone(), "0.0.0-test"));
     wait_for("mac to hear its box ended", || task_status(&mac_dir, &captain, &task)["workState"] == "failed");
     let status = task_status(&mac_dir, &captain, &task);
-    assert_eq!(status["error"].as_str(), Some("Upstash Box: the box ended before its task did: someone removed its machine"), "not gone from this account: {status}");
+    assert_eq!(status["error"].as_str(), Some(format!("Upstash Box: the box ended before its task did: someone removed its machine. {NOT_CONFIRMED_PRIVATE}").as_str()), "not gone from this account: {status}");
     wait_for("the held row to go", || held_ends(&hub, None) == 0);
 }
 
