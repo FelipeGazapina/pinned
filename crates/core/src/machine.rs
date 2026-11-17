@@ -595,6 +595,8 @@ struct Tab {
     seen: Option<SystemTime>,
     /// When the latest submit went in. Cleared by Done, Failed, and a new session.
     turn_pending: Option<Instant>,
+    /// When Claude Code's PreCompact hook last marked the session compacting.
+    compacting_since: Option<Instant>,
     /// Set while a worker's turn has ended with background work it started still pending: Claude
     /// Code resumes the session when that work hands back, so the turn end is not the worker's end.
     background_wait: Option<BackgroundWait>,
@@ -669,6 +671,7 @@ impl Tab {
             message: self.message.clone(),
             resume_at: self.resume_at,
             held: self.held_at_limit,
+            compacting: false,
             connector: self.env.iter().find(|(k, _)| k == CONNECTOR_ENV).map(|(_, v)| v.clone()),
             subject: session_of(&self.env).map(|(_, subject)| subject),
             opened: tab_number(id).into(),
@@ -4625,6 +4628,7 @@ impl Machine {
                     // After the event: the turn that just ended did not answer what the hook hands over.
                     return hooks::Answer { reply, sent: Some(Box::new(move |read| machine.handed(taken, read))) };
                 }
+                Message::Compacting { .. } => Ok(String::new()),
                 Message::Usage { usage, account } => {
                     machine.record_usage(account.unwrap_or_else(accounts::default_account), usage);
                     Ok(String::new())
@@ -6356,6 +6360,7 @@ impl Machine {
             keys: vec![],
             seen: None,
             turn_pending: None,
+            compacting_since: None,
             background_wait: None,
             draft: Draft::default(),
             owes_reload: false,
@@ -11083,6 +11088,38 @@ while True:
         let done = serde_json::to_string(&Message::Agent(AgentEvent { hook_feedback: true, ..hook(&tab, AgentStatus::Done) })).unwrap();
         assert_eq!(ask(&sock, &done), Ok("[Orchestrator] Check the build.".into()));
         assert_eq!(m.sent.lock().unwrap().in_flight(&project).iter().map(|s| s.request_id.as_str()).collect::<Vec<_>>(), ["r-1"]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_compaction_marks_its_tab_busy_until_its_end_its_turn_end_or_ten_minutes_clear_it() {
+        let dir = temp("compacting");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let sock = dir.join("pinned.sock");
+        let m = Machine::new(Launch { sock: sock.clone(), ..launch() }, Some(dir.join("config")), None, |_| {});
+        m.listen(|_| Err("not the machine's".into())).unwrap();
+        let path = project.display().to_string();
+        let tab = idle_captain(&m, &path, &dir.join("typed.bin"));
+        let mark = |compacting| serde_json::to_string(&Message::Compacting { tab: tab.clone(), compacting }).unwrap();
+        let shown = |m: &Machine| m.view(&tab).map(|v| (v.compacting, v.status)).unwrap();
+
+        assert_eq!(shown(&m), (false, Some(AgentStatus::Done)), "an idle tab is not compacting");
+        assert_eq!(ask(&sock, &mark(true)), Ok(String::new()));
+        assert_eq!(shown(&m), (true, Some(AgentStatus::Working)), "PreCompact marks the tab, which reads busy");
+        assert_eq!(ask(&sock, &mark(false)), Ok(String::new()));
+        assert_eq!(shown(&m), (false, Some(AgentStatus::Done)), "PostCompact clears the mark, and the tab reads its own status again");
+
+        assert_eq!(ask(&sock, &mark(true)), Ok(String::new()));
+        m.record_event(hook(&tab, AgentStatus::Done));
+        assert_eq!(shown(&m), (false, Some(AgentStatus::Done)), "a turn's Stop clears a mark whose end never came");
+
+        assert_eq!(ask(&sock, &mark(true)), Ok(String::new()));
+        m.tab(&tab, |t| t.compacting_since = Some(Instant::now() - Duration::from_secs(60))).unwrap();
+        assert_eq!(shown(&m), (true, Some(AgentStatus::Working)), "a mark a minute old still holds");
+        m.tab(&tab, |t| t.compacting_since = Some(Instant::now() - Duration::from_secs(601))).unwrap();
+        assert_eq!(shown(&m), (false, Some(AgentStatus::Done)), "a mark older than ten minutes lapses on its own");
         let _ = std::fs::remove_dir_all(dir);
     }
 
