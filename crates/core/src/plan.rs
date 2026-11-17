@@ -1528,12 +1528,34 @@ fn clean_id(id: &Option<String>) -> Option<String> {
         .map(String::from)
 }
 
-/// A name or title: one line, no control characters, counted in characters after trimming.
+/// U+2028 and U+2029 break a line where `char::is_control` sees none.
+fn line_separator(c: char) -> bool {
+    matches!(c, '\u{2028}' | '\u{2029}')
+}
+
+/// Embeddings, overrides, isolates and marks that make text read in another order than it is stored.
+fn direction_mark(c: char) -> bool {
+    matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' | '\u{061C}')
+}
+
+/// Characters that show nothing, so two names that read the same can differ.
+fn invisible(c: char) -> bool {
+    matches!(c, '\u{200B}'..='\u{200D}' | '\u{2060}' | '\u{FEFF}')
+}
+
+/// A name or title: one line, no control, direction or invisible characters, counted in
+/// characters after trimming.
 fn one_line(field: &str, raw: &str, max: usize, required: bool) -> Result<String, String> {
-    if raw.chars().any(char::is_control) {
+    if raw.chars().any(|c| c.is_control() || line_separator(c)) {
         return Err(format!(
             "{field} may not contain a line break or other control character. Nothing changed."
         ));
+    }
+    if raw.chars().any(direction_mark) {
+        return Err(format!("{field} may not contain a character that changes the text's direction. Nothing changed."));
+    }
+    if raw.chars().any(invisible) {
+        return Err(format!("{field} may not contain an invisible character. Nothing changed."));
     }
     let text = raw.trim();
     if text.is_empty() && required {
@@ -1547,12 +1569,19 @@ fn one_line(field: &str, raw: &str, max: usize, required: bool) -> Result<String
     Ok(text.to_string())
 }
 
-/// Free text (what, note, reason): line breaks allowed, other control characters not, counted after trimming.
+/// Free text (what, note, reason): `\n` line breaks allowed, other control characters, line
+/// separators and direction marks not, counted after trimming.
 fn text_field(field: &str, raw: &str, max: usize) -> Result<String, String> {
     if raw.chars().any(|c| c.is_control() && c != '\n') {
         return Err(format!(
             "{field} may hold line breaks but no other control character. Nothing changed."
         ));
+    }
+    if raw.chars().any(line_separator) {
+        return Err(format!("{field} may break lines only with a plain line break. Nothing changed."));
+    }
+    if raw.chars().any(direction_mark) {
+        return Err(format!("{field} may not contain a character that changes the text's direction. Nothing changed."));
     }
     let text = raw.trim();
     if text.chars().count() > max {
