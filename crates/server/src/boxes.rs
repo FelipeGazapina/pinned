@@ -626,8 +626,14 @@ impl ExtendTurn {
 
     /// The turn's connection and transaction once its lines are held, and its locks.
     async fn locked(hub: &Hub, account: Uuid, machine: Uuid, lines: Vec<InLine>, deadline: tokio::time::Instant, of_account: bool) -> Result<ExtendTurn, String> {
-        let held = hub.db.own_client().await.map_err(busy_turn)?;
-        held.batch_execute("begin").await.map_err(busy_turn)?;
+        // Opening and beginning wait no longer than the turn: a Postgres that takes the connection and
+        // never answers would hold this hub's lines for its own timeouts, about 35 s.
+        let opened = tokio::time::timeout_at(deadline, async {
+            let held = hub.db.own_client().await.map_err(busy_turn)?;
+            held.batch_execute("begin").await.map_err(busy_turn)?;
+            Ok::<_, String>(held)
+        });
+        let held = opened.await.map_err(|_| busy_turn("Postgres did not answer within the turn's wait"))??;
         let turn = ExtendTurn { held, _lines: lines, deadline };
         turn.lock(&format!("select pg_advisory_xact_lock({EXTEND_KEY})"), &[&account, &machine]).await?;
         if of_account {
@@ -651,7 +657,7 @@ impl ExtendTurn {
     }
 }
 
-/// A turn whose connection could not be opened or begun did nothing: it is refused as busy.
+/// A turn whose connection could not be opened or begun in time did nothing: it is refused as busy.
 fn busy_turn(e: impl std::fmt::Display) -> String {
     eprintln!("pinned-server: a box's extend turn could not open its connection: {e}");
     crate::db::BUSY.to_owned()
