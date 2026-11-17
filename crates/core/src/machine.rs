@@ -11589,6 +11589,32 @@ exec sleep 30
         }
     }
 
+    /// Codex and Cursor know no local command that starts no turn: a submit typed there holds the
+    /// notice until Done however long ago it went in.
+    #[test]
+    #[cfg(unix)]
+    fn a_codex_or_cursor_typed_submit_still_waits_for_done() {
+        for (name, account) in [("typed-codex", Account::builtin(Provider::Codex)), ("typed-cursor", Account::builtin(Provider::Cursor))] {
+            let (m, tab, file) = pty_file(name);
+            m.tab(&tab, |t| {
+                t.account = account;
+                t.status = Some(AgentStatus::Done);
+            })
+            .unwrap();
+            m.write_input(&tab, b"/model\r").unwrap();
+            let id = finish_task(&m, crate::delegate::Parent::Tab(tab.clone()), "Typed");
+            m.tab(&tab, |t| t.turn_pending = Some(Instant::now() - Duration::from_secs(11))).unwrap();
+            assert!(!m.tab(&tab, |t| t.notice_idle()).unwrap(), "{name} reads idle with its submit unanswered");
+            m.maybe_deliver(&tab);
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            assert!(!read_pty(&file).contains("[pinned]"), "{name} typed the notice before Done: {}", read_pty(&file));
+            m.record_event(done_event(&tab));
+            let needle = format!("[pinned] Delegated task {id} \"Typed\"");
+            wait_for("the notice after Done", || read_pty(&file).contains(&needle));
+            let _ = std::fs::remove_file(file);
+        }
+    }
+
     #[test]
     #[cfg(unix)]
     fn focus_reports_do_not_hold_a_notice() {
@@ -11845,6 +11871,77 @@ while True:
         assert_eq!(enqueue(&m, &path, "Then the footer.", "r-2"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })), "a repeat after the drain still answers the first outcome and types nothing");
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(std::fs::read(&file).unwrap(), both);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A local command the user types, such as `/effort`, starts no turn and fires no hook. Once
+    /// `IDLE_NOTICE_GRACE` has passed its submit no longer holds the Capitão's queue.
+    #[test]
+    #[cfg(unix)]
+    fn a_typed_local_command_does_not_hold_the_captains_queue() {
+        let dir = temp("enqueue-typed-command");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let file = dir.join("typed.bin");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let path = project.display().to_string();
+        let tab = idle_captain(&m, &path, &file);
+
+        m.write_input(&tab, b"/effort\r").unwrap();
+        m.tab(&tab, |t| t.turn_pending = Some(Instant::now() - Duration::from_secs(11))).unwrap();
+        assert!(m.tab(&tab, |t| t.notice_idle()).unwrap(), "a typed submit no hook answered still holds the Capitão");
+        assert_eq!(enqueue(&m, &path, "Ship the form.", "r-1"), Ok(json!({ "outcome": "entregue", "tab": tab })));
+        let both = b"/effort\r\x1b[200~[Orchestrator] Ship the form.\x1b[201~\r";
+        assert_eq!(typed(&file, both), both);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A typed prompt that Claude Code took as a turn holds the queue until that turn ends, however long it runs.
+    #[test]
+    #[cfg(unix)]
+    fn a_typed_prompt_that_started_a_turn_still_holds_the_queue() {
+        let dir = temp("enqueue-typed-turn");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let file = dir.join("typed.bin");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let path = project.display().to_string();
+        let tab = idle_captain(&m, &path, &file);
+
+        m.write_input(&tab, b"Fix the footer.\r").unwrap();
+        m.record_event(hook(&tab, AgentStatus::Working));
+        m.tab(&tab, |t| t.turn_pending = Some(Instant::now() - Duration::from_secs(11))).unwrap();
+        assert!(!m.tab(&tab, |t| t.notice_idle()).unwrap(), "the turn the typed prompt started reads idle");
+        assert_eq!(enqueue(&m, &path, "Ship the form.", "r-1"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(std::fs::read(&file).unwrap(), b"Fix the footer.\r", "a queued message was typed into the turn");
+
+        m.record_event(hook(&tab, AgentStatus::Done));
+        let both = b"Fix the footer.\r\x1b[200~[Orchestrator] Ship the form.\x1b[201~\r";
+        assert_eq!(typed(&file, both), both);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A prompt pinned typed itself is a real one: it holds the queue until its hook comes, past the grace too.
+    #[test]
+    #[cfg(unix)]
+    fn a_prompt_pinned_types_still_waits_for_its_hook() {
+        let dir = temp("enqueue-own-prompt");
+        let project = dir.join("site");
+        std::fs::create_dir_all(&project).unwrap();
+        let file = dir.join("typed.bin");
+        let m = Machine::new(launch(), Some(dir.join("config")), None, |_| {});
+        let path = project.display().to_string();
+        let tab = idle_captain(&m, &path, &file);
+
+        assert_eq!(enqueue(&m, &path, "Ship the form.", "r-1"), Ok(json!({ "outcome": "entregue", "tab": tab })));
+        let first = b"\x1b[200~[Orchestrator] Ship the form.\x1b[201~\r";
+        assert_eq!(typed(&file, first), first);
+        m.tab(&tab, |t| t.turn_pending = Some(Instant::now() - Duration::from_secs(11))).unwrap();
+        assert!(!m.tab(&tab, |t| t.notice_idle()).unwrap(), "pinned's own prompt reads idle before its hook");
+        assert_eq!(enqueue(&m, &path, "Then the footer.", "r-2"), Ok(json!({ "outcome": "na_fila", "tab": tab, "position": 1 })));
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(std::fs::read(&file).unwrap(), first, "a queued message was typed over pinned's own prompt");
         let _ = std::fs::remove_dir_all(dir);
     }
 
