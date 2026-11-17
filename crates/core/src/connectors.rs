@@ -1447,7 +1447,7 @@ impl Store {
     /// The runs the won `fires` start: a graph run for a workflow drawn as a graph, else today's
     /// session. A fire whose workflow is gone or off, or whose issue a graph run already works on,
     /// starts nothing and comes back in the last list.
-    fn fire_changes(&mut self, fires: Vec<Fire>, now: DateTime<Utc>, exe: &str, runs: &[runner::Run]) -> (Vec<GraphStart>, Vec<(Run, String)>, Vec<Fire>) {
+    fn fire_changes(&mut self, fires: Vec<Fire>, now: DateTime<Utc>, exe: &str, runs: &[runner::Run]) -> (Vec<GraphStart>, Vec<(Run, ChangeFire)>, Vec<Fire>) {
         let (mut starts, mut work, mut unstarted) = (Vec::<GraphStart>::new(), vec![], vec![]);
         for fire in fires {
             let Some(c) = self.connectors.iter().find(|c| c.id == fire.workflow && c.enabled) else {
@@ -1460,14 +1460,14 @@ impl Store {
                 let key = subject_key(&subject);
                 let taken = subject_taken(runs, &key) || starts.iter().any(|start| start.connector == c.id && subject_key(&start.subject) == key);
                 match found.trigger(now) {
-                    Some(input) if !taken => starts.push(GraphStart { connector: c.id.clone(), subject, input, fire: Some(fire.key) }),
+                    Some(input) if !taken => starts.push(GraphStart { connector: c.id.clone(), subject, input, fire: Some(fire.carried()) }),
                     _ => unstarted.push(fire),
                 }
                 continue;
             }
             let change = &fire.change;
             let issue = linear::Issue { id: change.issue_id.clone(), identifier: change.identifier.clone(), title: change.title.clone(), description: change.description.clone(), url: change.url.clone() };
-            work.push((issue_run_for(c, &issue, Some(&issue_change(change)), exe, false), fire.key));
+            work.push((issue_run_for(c, &issue, Some(&issue_change(change)), exe, false), fire.carried()));
         }
         (starts, work, unstarted)
     }
@@ -1478,8 +1478,8 @@ struct GraphStart {
     connector: String,
     subject: Subject,
     input: TriggerInput,
-    /// The key of the won fire that starts it, given back when it does not start.
-    fire: Option<String>,
+    /// The won fire that starts it, given back when it does not start.
+    fire: Option<ChangeFire>,
 }
 
 /// Replies for a graph run's thread, typed into its session rather than today's delivery.
@@ -2060,7 +2060,23 @@ fn cap_lines() -> Vec<String> {
 struct Fire {
     workflow: String,
     key: String,
+    at: DateTime<Utc>,
     change: linear::Change,
+}
+
+/// The won fire a Linear change's run or graph start carries until it starts: its claim key, its
+/// issue, and the change's time, at which the loop guards count the start once it starts.
+#[derive(Clone, Debug)]
+struct ChangeFire {
+    key: String,
+    issue: String,
+    at: DateTime<Utc>,
+}
+
+impl Fire {
+    fn carried(&self) -> ChangeFire {
+        ChangeFire { key: self.key.clone(), issue: self.change.issue_id.clone(), at: self.at }
+    }
 }
 
 /// What one check's read of the account's Linear changes did.
@@ -2708,8 +2724,8 @@ impl Connectors {
         changes.sort_by_key(|(at, _)| *at);
         let mut seen = BTreeSet::new();
         let mut held = None;
-        // The changes this read left for the next check, as (workflow, issue, change time): the
-        // guards count them as starts.
+        // The changes this read fired or left for the next check, as (workflow, issue, change
+        // time): their runs have not started, and the guards count them as starts.
         let mut pending: Vec<(String, String, DateTime<Utc>)> = vec![];
         'changes: for (at, change) in changes {
             let key = fire_key(&change);
@@ -2748,9 +2764,10 @@ impl Connectors {
                 match self.claim_change(&c.id, &key) {
                     Ok(true) => match refused {
                         Some(refusal) => self.refuse(&c.id, &key, &change.issue_id, refusal, now),
+                        // The guards keep its start once its run starts (`fire_started`).
                         None => {
-                            self.guards.lock().unwrap().started(&c.id, &change.issue_id, at, now);
-                            pass.fires.push(Fire { workflow: c.id.clone(), key: key.clone(), change: change.clone() });
+                            pending.push((c.id.clone(), change.issue_id.clone(), at));
+                            pass.fires.push(Fire { workflow: c.id.clone(), key: key.clone(), at, change: change.clone() });
                         }
                     },
                     // Another check of the account fired it.
@@ -2836,10 +2853,16 @@ impl Connectors {
         let _ = self.save(&store);
     }
 
+    /// The won fire of `workflow` started its run: the loop guards keep the start, at its change's
+    /// time. A run that does not start keeps none, so its retry is neither cooled nor capped by it.
+    fn fire_started(&self, workflow: &str, fire: &ChangeFire) {
+        self.guards.lock().unwrap().started(workflow, &fire.issue, fire.at, Utc::now());
+    }
+
     /// Starts a session for everything new the enabled connectors match, and passes new thread
     /// messages on. A failing connector doesn't hold up the others, but a rate limit skips the
     /// rest of that integration until the next check instead of hammering it.
-    async fn poll(&self) -> (Vec<(Work, Option<String>)>, Option<String>) {
+    async fn poll(&self) -> (Vec<(Work, Option<ChangeFire>)>, Option<String>) {
         self.fill_bots().await;
         let now = Utc::now();
         // A manual workflow has no poller: it runs only when someone runs it now.
@@ -2905,8 +2928,8 @@ impl Connectors {
                         store.undo_changes(undo);
                     }
                     let (starts, work) = std::mem::take(&mut fired);
-                    unsaved.extend(starts.into_iter().filter_map(|start| Some((start.connector, start.fire?))));
-                    unsaved.extend(work.into_iter().map(|(run, key)| (run.connector, key)));
+                    unsaved.extend(starts.into_iter().filter_map(|start| Some((start.connector, start.fire?.key))));
+                    unsaved.extend(work.into_iter().map(|(run, fire)| (run.connector, fire.key)));
                 }
             }
             (settled, fired, unstarted)
@@ -2918,16 +2941,20 @@ impl Connectors {
         }
         let (fire_starts, fire_work) = fired;
         settled.starts.extend(fire_starts);
-        let mut work: Vec<(Work, Option<String>)> = std::mem::take(&mut settled.work).into_iter().map(|work| (work, None)).collect();
+        let mut work: Vec<(Work, Option<ChangeFire>)> = std::mem::take(&mut settled.work).into_iter().map(|work| (work, None)).collect();
         // Each change's run carries its own won fire to its hand-over.
-        work.extend(fire_work.into_iter().map(|(run, key)| (Work::Run(run), Some(key))));
+        work.extend(fire_work.into_iter().map(|(run, fire)| (Work::Run(run), Some(fire))));
         for start in settled.starts {
-            let fire = start.fire.map(|key| (start.connector.clone(), key));
+            let fire = start.fire.map(|fire| (start.connector.clone(), fire));
             let event = Event::Graph { connector: start.connector, subject: start.subject, input: start.input, at: now.to_rfc3339() };
-            if let Err(e) = self.start_graph(event).await {
-                errors.push(e);
-                if let Some((workflow, key)) = fire {
-                    self.fire_not_started(&workflow, &key);
+            match (self.start_graph(event).await, fire) {
+                (Ok(()), Some((workflow, fire))) => self.fire_started(&workflow, &fire),
+                (Ok(()), None) => {}
+                (Err(e), fire) => {
+                    errors.push(e);
+                    if let Some((workflow, fire)) = fire {
+                        self.fire_not_started(&workflow, &fire.key);
+                    }
                 }
             }
         }
@@ -2972,7 +2999,7 @@ impl Connectors {
     }
 
     /// `hand_over` of `work`, with the won fire of the Linear change whose run it is, if one is.
-    async fn hand_over_fired<F, Fut, R>(&self, work: Work, fire: Option<String>, open: &F) -> Result<(), String>
+    async fn hand_over_fired<F, Fut, R>(&self, work: Work, fire: Option<ChangeFire>, open: &F) -> Result<(), String>
     where
         F: Fn(Work) -> Fut,
         Fut: Future<Output = R>,
@@ -3013,7 +3040,7 @@ impl Connectors {
     /// `hand_over` of a run: `granted` when a hub's team already gave the event its place, and
     /// `fire` the won fire of the Linear change that made it, which it gives back when it does not
     /// start.
-    async fn hand_over_run<F, Fut, R>(&self, mut run: Run, open: &F, granted: bool, fire: Option<String>) -> Result<(), String>
+    async fn hand_over_run<F, Fut, R>(&self, mut run: Run, open: &F, granted: bool, fire: Option<ChangeFire>) -> Result<(), String>
     where
         F: Fn(Work) -> Fut,
         Fut: Future<Output = R>,
@@ -3022,8 +3049,8 @@ impl Connectors {
         let (connector, subject, folder, mentioned) = (run.connector.clone(), run.subject.clone(), run.cwd.clone(), run.mentioned.clone());
         // A Linear change's run gives its won claim back when it does not start.
         let not_started = || {
-            if let Some(key) = &fire {
-                self.fire_not_started(&connector, key);
+            if let Some(fire) = &fire {
+                self.fire_not_started(&connector, &fire.key);
             }
         };
         // A hub's team decides here, once, before the Ask step's model call and before Linear or
@@ -3068,8 +3095,8 @@ impl Connectors {
                     self.release(&connector, &subject).await;
                     // Its model was asked: the claim stays, so a later read of the change does
                     // not ask again.
-                    if let Some(key) = &fire {
-                        self.fire_stopped(&connector, key);
+                    if let Some(fire) = &fire {
+                        self.fire_stopped(&connector, &fire.key);
                     }
                     self.keep_stopped(&connector, &subject)?;
                     return Ok(());
@@ -3092,6 +3119,9 @@ impl Connectors {
         if let Err(why) = answer.taken() {
             not_started();
             return Err(self.unclaim(&connector, &subject, &folder, &why));
+        }
+        if let Some(fire) = &fire {
+            self.fire_started(&connector, fire);
         }
         // The session starts even when Linear won't move the issue or Slack won't take the
         // reaction; the check reports why.
