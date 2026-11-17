@@ -1871,9 +1871,12 @@ impl Machine {
     /// Opens a tab beside `tab` whose claude resumes its conversation through the message `through`, as
     /// T3 Code's "Fork from this response" does, and returns the new tab's id.
     pub fn fork(&self, tab: &str, through: &str) -> Result<TabId, String> {
-        let (cwd, account, env, bypass) = self.tab(tab, |t| (t.cwd.clone(), t.account.clone(), t.env.clone(), t.bypass))?;
+        let (cwd, account, env, bypass, read_only) = self.tab(tab, |t| (t.cwd.clone(), t.account.clone(), t.env.clone(), t.bypass, t.read_only))?;
         let new = self.fork_session(tab, thread::Cut::Through(through), true)?.ok_or("there is nothing to fork before this message")?;
         let id = self.add_tab(cwd, account, vec!["--resume".into(), new.clone()], env, bypass, Some(new));
+        if read_only {
+            let _ = self.tab(&id, |t| (t.permission_mode, t.read_only) = (Some(crate::delegate::READ_ONLY_MODE.into()), true));
+        }
         self.emit_tabs();
         Ok(id)
     }
@@ -2470,6 +2473,11 @@ impl Machine {
             t.owes_turn = t.claude_session.is_none() && !args.is_empty();
             let asked = args.clone();
             t.bare = t.claude_session.as_deref().is_some_and(|session| args == crate::delegate::resume_args(t.account.provider, session));
+            // Every start of a read-only worker refuses its tools, whatever path asked for it. A
+            // role's own --disallowedTools comes after this.
+            if t.read_only && t.account.provider == Provider::Claude {
+                crate::delegate::keep_read_only(&mut args);
+            }
             t.mode_live = args.iter().any(|a| a == "--permission-mode");
             t.effort = args.iter().position(|a| a == "--effort").and_then(|at| args.get(at + 1).cloned());
             if let Some(model) = t.model.clone().filter(|_| !args.iter().any(|a| a == "--model")) {
@@ -2679,6 +2687,9 @@ impl Machine {
     /// Turns the tab's permission skipping on or off and returns its folder. Claude reads the flag
     /// only at launch, so the tab restarts on its own conversation.
     pub fn set_bypass(&self, tab: &str, on: bool, cols: u16, rows: u16) -> Result<String, String> {
+        if on && self.tab(tab, |t| t.read_only)? {
+            return Err("a read-only worker cannot switch to Full access".into());
+        }
         let unchanged = self.tab(tab, |t| {
             let unchanged = t.bypass == on && t.live();
             t.bypass = on;
@@ -4769,7 +4780,7 @@ impl Machine {
                 let account = self.account_for(Some(&s.account), &s.cwd).ok()?;
                 let (launch, resume_at) = s.reopen(now, account.provider);
                 // A read-only worker resumes in the mode it started in, so its children stay read-only.
-                let read_only = s.read_only && account.provider == Provider::Claude;
+                let read_only = s.read_only;
                 let mode = if read_only { Some(crate::delegate::READ_ONLY_MODE.to_owned()) } else { s.permission_mode };
                 let id = self.add_tab(s.cwd, account, launch, s.env, s.bypass, Some(s.session));
                 let _ = self.tab(&id, |t| (t.interrupted, t.resume_at, t.held_at_limit, t.model, t.permission_mode, t.read_only, t.asleep, t.cut_by_sleep) = (s.interrupted, resume_at, s.held, s.model, mode, read_only, !s.interrupted, s.cut_by_sleep));
@@ -6226,7 +6237,12 @@ impl Machine {
                 continue;
             }
             let failed = matches!(info.state, crate::delegate::WorkState::Failed | crate::delegate::WorkState::Cancelled);
-            let launch = info.conversation.as_deref().map(|id| crate::delegate::resume_args(info.provider, id)).unwrap_or_default();
+            // A read-only child's conversation resumes read-only, as `open_delegated` opens it.
+            let read_only = info.access == crate::delegate::Access::ReadOnly && info.provider == Provider::Claude;
+            let mut launch = info.conversation.as_deref().map(|id| crate::delegate::resume_args(info.provider, id)).unwrap_or_default();
+            if read_only && !launch.is_empty() {
+                launch.extend(crate::delegate::claude_read_only_args());
+            }
             let made = (info.isolated && info.conversation.is_some()).then(|| info.cwd.clone());
             let _ = self.tab(&tab, |t| {
                 t.status = Some(if failed { AgentStatus::Failed } else { AgentStatus::Done });
@@ -6234,6 +6250,9 @@ impl Machine {
                 t.updated = Some(unix_now());
                 t.launch = launch;
                 t.made = made;
+                if read_only {
+                    (t.permission_mode, t.read_only) = (Some(crate::delegate::READ_ONLY_MODE.into()), true);
+                }
             });
             changed = true;
         }

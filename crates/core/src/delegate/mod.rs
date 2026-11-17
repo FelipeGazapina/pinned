@@ -93,6 +93,28 @@ pub fn claude_read_only_args() -> Vec<String> {
     vec!["--allowedTools".into(), reads.join(","), "--disallowedTools".into(), refused.join(","), "--permission-mode".into(), READ_ONLY_MODE.into()]
 }
 
+/// Gives a read-only Claude session's launch `args` the flags of `claude_read_only_args` when it
+/// lacks them, in place of any mode it asks for: right after its `--resume <id>`, or first when it
+/// resumes nothing. Never last, where a prompt may end the launch.
+pub fn keep_read_only(args: &mut Vec<String>) {
+    let read_only = claude_read_only_args();
+    if args.windows(2).any(|w| w[0] == "--disallowedTools" && w[1] == read_only[3]) {
+        return;
+    }
+    let mut kept = Vec::with_capacity(args.len() + read_only.len());
+    let mut rest = std::mem::take(args).into_iter();
+    while let Some(arg) = rest.next() {
+        if arg == "--permission-mode" {
+            rest.next();
+        } else {
+            kept.push(arg);
+        }
+    }
+    let at = kept.iter().position(|arg| arg == "--resume").map_or(0, |at| (at + 2).min(kept.len()));
+    kept.splice(at..at, read_only);
+    *args = kept;
+}
+
 /// What the child is allowed to do. Never wider than the parent tab: plan narrows a bypassed
 /// parent to read-only, and a parent that asks before acting does not hand the child a bypass.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
