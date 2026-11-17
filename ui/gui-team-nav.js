@@ -44,14 +44,18 @@ function tcNavHtml(team, page) {
     .join("");
   const groups = tcStore.groups.map((g) => row("team-group", `<span class="label">@${esc(g.handle)}</span>`, { attrs: ` data-handle="${esc(g.handle)}"` })).join("");
   const me = tcMe();
+  // Drawn only for a reason this app knows; the time names its day when it is not today.
+  const held = me.owner && team.line_held?.why === "settings_unread" ? `<div class="tc-none" role="status" data-line-held>Bots are waiting: the team's settings could not be read since ${esc(tcWhen(team.line_held.since))}.</div>` : "";
   const calls = tcNavOpens("team-calls")
     ? `<button type="button" class="nav-row tc-row${page === "team-calls" ? " active" : ""}" data-tc-nav="team-calls"><span class="label">Calls</span><span class="count"${open ? "" : " hidden"} title="${open} waiting on you">${open || ""}</span></button>`
     : "";
   return `<div class="tc-team"><span class="tc-mark tc-team-mark" aria-hidden="true">${esc(tcInitials(team.name))}</span><span class="tc-team-name">${esc(team.name)}</span></div>
+    ${held}
     ${calls}
     <div class="tc-section"><div class="tc-head">Bots</div>${bots}${row("team-bot-new", `<span class="label">Create a bot</span>`, { attrs: ' data-create="true"' })}</div>
     <div class="tc-section"><div class="tc-head">Groups</div>${groups}</div>
     ${me.owner && tcNavOpens("team-invites") ? `<div class="tc-section"><div class="tc-head">People</div>${row("team-invites", `<span class="label">Invite people</span>`)}</div>` : ""}
+    ${me.owner ? `<div class="tc-section"><div class="tc-head">AI account</div><button type="button" class="nav-row tc-row" data-tc-nav="team-connect"><span class="label">Connect AI account</span></button></div>` : ""}
     <div class="tc-section tc-projects"><div class="tc-head">Projects</div>${tcStore.projects.map(tcProjectHtml).join("") || `<div class="tc-none">${tcStore.loaded ? "No projects in the team yet." : "Loading…"}</div>`}</div>
     <div class="tc-me"><span class="tc-mark tc-person" style="--tc-hue:${tcHue(me.account || me.name)}" aria-hidden="true">${esc(tcInitials(me.name))}</span><span class="tc-me-name">${esc(me.name)}</span></div>`;
 }
@@ -88,6 +92,7 @@ function tcNavDraw() {
 /** Opens the page a row names: a bot or a group through `openTeamBot(workflow)` / `openTeamGroup(handle)`. */
 function tcNavOpen(button) {
   const key = button.dataset.tcNav;
+  if (key === "team-connect") return openTeamConnect();
   if (!tcNavOpens(key)) return;
   if (key === "team-bot" && button.dataset.workflow) openTeamBot(button.dataset.workflow);
   else if (key === "team-group" && button.dataset.handle) openTeamGroup(button.dataset.handle);

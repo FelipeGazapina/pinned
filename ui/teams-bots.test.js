@@ -62,6 +62,9 @@ function app({ answers = {}, team = OWNER_TEAM, email = "bruno@acme.dev", pages 
       context.SHELL_PAGES[name]?.show?.();
     },
     closePage: () => context.opened.push("closed"),
+    // The team's Connect AI account opener, a cross-file global: it records the page it was asked from.
+    connectOpened: [],
+    openTeamConnect: () => context.connectOpened.push(context.document.body.dataset.page),
     // The calls UI's run opener, a cross-file global.
     runsOpened: [],
     openTeamRun: (id) => {
@@ -967,4 +970,49 @@ test("every reason the hub counts a skipped event under has its own label", asyn
   assert.equal(new Set(rows.map((r) => r[1])).size, reasons.length, "no two reasons share a label");
   assert.deepEqual(rows.find((r) => r[0] === "replies_dropped"), ["replies_dropped", "Replies dropped (the run never started)", "8"]);
   assert.deepEqual(Object.keys(a.read("TB_TEXT.bot.skippedLabels")).sort(), [...reasons].sort(), "and the app labels no reason the hub lacks");
+});
+
+test("the bot page's needKeys note: the owner gets Connect AI account, which opens the connect step from this page", async () => {
+  const a = app({ team: { ...OWNER_TEAM, credential: { upstash: false, claude: false, github: false, slack: false } }, answers: botAnswers({ bots: [bot({ on: false })] }) });
+  await openBot(a);
+  const t = text(a.page());
+  assert.ok(t.includes("The team needs its Upstash key and Claude token before a bot can run."));
+  assert.ok(!t.includes("team's settings"), "no settings page is named");
+  assert.deepEqual(a.control("connect-ai"), { disabled: false });
+  await a.click("connect-ai");
+  assert.deepEqual(a.context.connectOpened, ["team-bot"]);
+});
+
+test("a member is asked to have the owner connect the team's AI account, by name, and gets no button", async () => {
+  const a = app({ team: { ...MEMBER_TEAM, credential: { upstash: false, claude: false, github: false, slack: false } }, answers: botAnswers({ bots: [bot({ on: false })] }) });
+  await openBot(a);
+  assert.equal(a.control("connect-ai"), null);
+  assert.ok(text(a.page()).includes("Ask Ana Prado to connect the team's AI account."));
+  assert.ok(!text(a.page()).includes("team's settings"), "no settings page is named");
+  assert.deepEqual(a.context.connectOpened, []);
+});
+
+test("while the team's line is held, the key notes are not shown: the read failed, the keys may be there", async () => {
+  const none = { upstash: false, claude: false, github: false, slack: false };
+  const held = { ...OWNER_TEAM, credential: none, line_held: { since: 1795359900, why: "settings_unread" } };
+  const needKeys = "The team needs its Upstash key and Claude token before a bot can run.";
+  const slackOff = "The team's Slack is not connected yet, so this starts nothing until the owner connects it.";
+
+  const page = app({ team: held, answers: botAnswers({ bots: [bot({ on: false })] }) });
+  await openBot(page);
+  assert.ok(!text(page.page()).includes(needKeys), "no key note on an off bot while held");
+  const plain = app({ team: { ...OWNER_TEAM, credential: none }, answers: botAnswers({ bots: [bot({ on: false })] }) });
+  await openBot(plain);
+  assert.ok(text(plain.page()).includes(needKeys), "the key note while not held and the keys are missing");
+
+  const wizard = async (team) => {
+    const a = app({ team, answers: wizardAnswers(saving()) });
+    await a.open("team-bot-new");
+    await a.click("idea", { idea: "weekly" });
+    await a.click("next");
+    await a.click("trigger", { kind: "slack-mention" });
+    return text(a.page());
+  };
+  assert.ok(!(await wizard(held)).includes(slackOff), "no Slack note while held");
+  assert.ok((await wizard({ ...OWNER_TEAM, credential: none })).includes(slackOff), "the Slack note while not held and Slack is missing");
 });
