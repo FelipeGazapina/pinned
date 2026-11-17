@@ -145,7 +145,7 @@ function needsYouCardHtml(card, answer = null) {
   const body =
     card.kind === "approval" && card.ask?.command ? `<pre>${esc(card.ask.command)}</pre>`
       : card.kind === "agent" && Object.keys(card.confirmation.args ?? {}).length && !AGENT_TITLE_ONLY.has(card.confirmation.action) ? `<pre>${esc(JSON.stringify(card.confirmation.args, null, 2))}</pre>`
-      : card.line && card.line !== card.title ? `<p class="ny-line">${esc(card.line)}</p>`
+      : card.kind !== "agent" && card.line && card.line !== card.title ? `<p class="ny-line">${esc(card.line)}</p>`
       : "";
   const unsupervised = card.sleep?.delegated ? `<p class="ny-line">${esc(`${nyPlural(card.sleep.delegated, "delegated task")} still running with nobody to supervise ${card.sleep.delegated === 1 ? "it" : "them"}.`)}</p>` : "";
   const agentLine = unsupervised + (card.kind === "agent" ? `<p class="ny-line">${esc(card.line)}</p>` : "");
