@@ -2027,6 +2027,13 @@ mod tests {
             ("cat ~/.claude/.credentials.json", Some(Secrets)),
             ("cat {home}/.config/pinned/accounts/a/login.json", Some(Secrets)),
             ("cat {home}/.config/pinned/accounts/work/.credentials.json", Some(Secrets)),
+            // The session's own Claude home, which has no `.claude` component when pinned runs an
+            // added account.
+            ("cat {claude}/.credentials.json", Some(Secrets)),
+            ("cp {claude}/.credentials.json /tmp/x", Some(Secrets)),
+            ("cat \"$CLAUDE_CONFIG_DIR/.credentials.json\"", Some(Secrets)),
+            ("echo x > ~/.claude/.credentials.json", Some(Secrets)),
+            ("echo x > {claude}/.credentials.json", Some(Secrets)),
             ("cat .env", Some(Secrets)),
             ("cat .env.local", Some(Secrets)),
             ("cat cert.pem", Some(Secrets)),
@@ -2051,11 +2058,30 @@ mod tests {
             ("cat .env.template", None),
             ("git log -- .env.example", None),
             ("cat {home}/.config/pinned/uploads/shot.png", None),
+            ("cat .credentials.json", None),
+            ("echo x > .credentials.json", None),
             ("cargo test id_map", None),
             ("env FOO=1 cargo test", None),
             ("set -e", None),
             ("export FOO=1", None),
         ]);
+    }
+
+    #[test]
+    fn secrets_with_no_claude_home() {
+        // A session whose Claude home is unknown: `$CLAUDE_CONFIG_DIR` before a credentials file is
+        // a credential still.
+        let f = fx();
+        let unknown = AskCtx { claude_home: None, ..ctx(&f, FOO) };
+        let rows = [
+            ("cat \"$CLAUDE_CONFIG_DIR/.credentials.json\"", Some(Secrets)),
+            ("cat ${CLAUDE_CONFIG_DIR}/.credentials.json", Some(Secrets)),
+        ];
+        let bad: Vec<String> = rows.iter().filter_map(|(line, want)| {
+            let got = never(&unknown, &Ask::Bash { command: &sub(&f, line) }).map(|h| h.item);
+            (got != *want).then(|| format!("{line:?} (no Claude home): wanted {want:?}, got {got:?}"))
+        }).collect();
+        assert!(bad.is_empty(), "\n{}", bad.join("\n"));
     }
 
     #[test]
@@ -2372,6 +2398,9 @@ mod tests {
             ("{claude}/hooks/x.sh", Some(SelfGrant)),
             ("{claude}/skills/x/SKILL.md", Some(WriteOutside)),
             ("{claude}/projects/p/x.jsonl", Some(WriteOutside)),
+            ("~/.claude/.credentials.json", Some(Secrets)),
+            ("{claude}/.credentials.json", Some(Secrets)),
+            (".credentials.json", None),
             ("~/.ssh/config", Some(Secrets)),
             ("~/.aws/credentials", Some(Secrets)),
             (".env", Some(Secrets)),
@@ -2385,9 +2414,11 @@ mod tests {
             ("~/.config/gh/hosts.yml", Some(Secrets)),
             ("~/.claude/.credentials.json", Some(Secrets)),
             ("{home}/.config/pinned/accounts/work/.credentials.json", Some(Secrets)),
+            ("{claude}/.credentials.json", Some(Secrets)),
             ("cert.pem", Some(Secrets)),
             ("~/.netrc", Some(Secrets)),
             ("README.md", None),
+            (".credentials.json", None),
             ("crates/x.rs", None),
             (".env.example", None),
             ("/etc/hosts", None),
