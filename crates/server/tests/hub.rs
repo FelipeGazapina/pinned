@@ -9676,6 +9676,92 @@ fn an_extend_box_ask_that_cannot_open_its_turn_connection_is_busy_and_asked_agai
     assert_eq!(again["outcome"], "pending", "the same request id asks again: {again}");
 }
 
+/// How many rows `sql`, a count, finds in `database`.
+fn count_on(database: &str, sql: &str) -> i64 {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    runtime.block_on(async {
+        let (client, connection) = tokio_postgres::connect(&format!("{}/{database}", postgres()), tokio_postgres::NoTls).await.unwrap();
+        tokio::spawn(connection);
+        client.query_one(sql, &[]).await.unwrap().get(0)
+    })
+}
+
+/// A loopback port in front of the test Postgres: it passes each connection through, or, once
+/// stalled, takes new ones and never answers, as a Postgres that hangs does. Connections it
+/// passed before go on.
+struct StallingPostgres {
+    _runtime: tokio::runtime::Runtime,
+    port: u16,
+    stalled: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl StallingPostgres {
+    fn start() -> StallingPostgres {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let listener = runtime.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let stalled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (target, stalls) = (StallingPostgres::target(), stalled.clone());
+        runtime.spawn(async move {
+            let mut taken = vec![];
+            while let Ok((mut client, _)) = listener.accept().await {
+                if stalls.load(Ordering::SeqCst) {
+                    taken.push(client);
+                    continue;
+                }
+                let target = target.clone();
+                tokio::spawn(async move {
+                    if let Ok(mut server) = tokio::net::TcpStream::connect(target).await {
+                        let _ = tokio::io::copy_bidirectional(&mut client, &mut server).await;
+                    }
+                });
+            }
+        });
+        StallingPostgres { _runtime: runtime, port, stalled }
+    }
+
+    /// The test Postgres's host and port.
+    fn target() -> String {
+        let config: tokio_postgres::Config = postgres().parse().unwrap();
+        let tokio_postgres::config::Host::Tcp(host) = &config.get_hosts()[0] else { panic!("the test Postgres is reached over TCP") };
+        format!("{host}:{}", config.get_ports().first().copied().unwrap_or(5432))
+    }
+
+    /// The url of `database` through this port.
+    fn url(&self, database: &str) -> String {
+        format!("{}/{database}", postgres().replace(&StallingPostgres::target(), &format!("127.0.0.1:{}", self.port)))
+    }
+
+    fn stall(&self, stalled: bool) {
+        self.stalled.store(stalled, Ordering::SeqCst);
+    }
+}
+
+/// An ask whose turn connection Postgres takes and never answers did nothing: it hears the hub is
+/// busy when its 2 s wait ends, not after the connection's own timeouts, writes no row, and the
+/// same request id asks again once Postgres answers.
+#[test]
+fn an_extend_box_ask_whose_turn_connection_never_answers_is_busy_within_its_wait() {
+    let ExtendSetup { mut hub, account, ana, machine, .. } = extend_setup("extend_stalled_connection");
+    let postgres = StallingPostgres::start();
+    let addr = hub.stop();
+    let running = hub.runtime.block_on(pinned_server::start(pinned_server::Config { db: postgres.url(&hub.database), ..hub.config(&addr) })).unwrap();
+    hub.running = Some(running);
+    let account = hub.runtime.block_on(hub.hub().account(account)).unwrap();
+    wait_for("ana's tab at the restarted hub", || account.tab(&ana.machine, &ana.tab).is_some());
+    postgres.stall(true);
+    let (refused, waited) = hub.runtime.block_on(async {
+        let ask = timed_extend(&hub, &account, &ana, &machine, 0.5, Some("r-stalled"));
+        tokio::time::timeout(Duration::from_secs(20), ask).await.expect("answered within 20 s").unwrap()
+    });
+    postgres.stall(false);
+    assert_eq!(refused, Err(pinned_core::wire::HUB_BUSY.to_owned()));
+    assert!(waited < Duration::from_millis(2600), "busy when its 2 s wait ends: {waited:?}");
+    assert_eq!(count_on(&hub.database, "select count(*) from agent_actions where action = 'extend_box'"), 0, "the busy ask wrote no row");
+    let (again, _) = hub.runtime.block_on(timed_extend(&hub, &account, &ana, &machine, 0.5, Some("r-stalled"))).unwrap();
+    assert_eq!(again.as_ref().map(|a| a["outcome"].clone()), Ok(json!("pending")), "the same request id asks again: {again:?}");
+}
+
 #[test]
 fn a_worker_box_follows_only_its_access_setting_and_the_owner_answers_its_ask_on_a_locked_app() {
     let hub = TestHub::start_with_boxes("locked_box_worker", Signup::Open, fast());
