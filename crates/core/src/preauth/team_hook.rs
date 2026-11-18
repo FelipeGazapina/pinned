@@ -121,6 +121,7 @@ pub fn decide(payload: &str, env: &HookEnv, ask: impl FnOnce(Message) -> Result<
     match std::env::var("PINNED_HOOK_TEST_FAULT").as_deref() {
         Ok("panic") => panic!("a fault the test forced"),
         Ok("stall") => std::thread::sleep(std::time::Duration::from_secs(20)),
+        Ok(fault) if fault.starts_with("stall-ms:") => std::thread::sleep(std::time::Duration::from_millis(fault["stall-ms:".len()..].parse().unwrap())),
         _ => {}
     }
     let Ok(hook) = serde_json::from_str::<Value>(payload) else { return Some(deny(UNREADABLE)) };
@@ -664,10 +665,24 @@ mod tests {
     /// `the_hook_process`) with `fault` forced inside `decide`: its stdout, stderr, exit code and time.
     #[cfg(unix)]
     fn hook_process(fault: &str) -> (String, String, Option<i32>, std::time::Duration) {
+        hook_process_on(fault, &payload("Write", json!({ "file_path": "/work/site/notes.txt", "content": "hi" })))
+    }
+
+    /// `hook_process` on the payload `stdin`.
+    #[cfg(unix)]
+    fn hook_process_on(fault: &str, stdin: &str) -> (String, String, Option<i32>, std::time::Duration) {
         use std::io::Write;
         use std::process::{Command, Stdio};
         let started = std::time::Instant::now();
-        let mut child = Command::new(std::env::current_exe().unwrap())
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        // The same hook inside a pinned session as outside one: none of the session's own variables.
+        for (name, _) in std::env::vars_os() {
+            if name.to_str().is_some_and(|name| name.starts_with("PINNED_")) {
+                command.env_remove(name);
+            }
+        }
+        let mut child = command
+            .env_remove("CLAUDE_PROJECT_DIR")
             .args(["--exact", "preauth::team_hook::tests::the_hook_process", "--ignored", "--nocapture", "--test-threads", "1"])
             .env("PINNED_HOOK_TEST_FAULT", fault)
             .env("PINNED_HOOK_TEST_WATCHDOG_MS", "1000")
@@ -676,7 +691,7 @@ mod tests {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        child.stdin.take().unwrap().write_all(payload("Write", json!({ "file_path": "/work/site/notes.txt", "content": "hi" })).as_bytes()).unwrap();
+        child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
         let out = child.wait_with_output().unwrap();
         (String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned(), out.status.code(), started.elapsed())
     }
@@ -699,8 +714,24 @@ mod tests {
             assert!(stderr.contains(reason), "{fault}: {stderr}");
             assert!(took < std::time::Duration::from_secs(10), "{fault} answered in {took:?}");
         }
+        let (_, stderr, _, _) = hook_process("panic");
+        assert!(stderr.contains("pinned team-guard panicked at crates/core/src/preauth/team_hook.rs:"), "the panic's place: {stderr}");
+        assert!(!stderr.contains("a fault the test forced"), "the panic's own text: {stderr}");
         let (stdout, _, code, _) = hook_process("none");
         assert_eq!(code, Some(0), "{stdout}");
         assert!(!stdout.contains("permissionDecision"), "a call the hook has no rule for runs: {stdout}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_hook_that_answers_as_its_watchdog_fires_prints_one_answer_and_exits_with_its_code() {
+        // The watchdog fires at 1000 ms; an unreadable payload is the hook's own deny.
+        for ms in [970, 985, 995, 1000, 1000, 1000, 1005] {
+            let (stdout, stderr, code, _) = hook_process_on(&format!("stall-ms:{ms}"), "not a payload");
+            assert_eq!(stdout.matches(r#"{"hookSpecificOutput""#).count(), 1, "a stall of {ms} ms printed {stdout:?} {stderr:?}");
+            let (watchdog, own) = (stdout.contains(&deny(COULD_NOT_CHECK)), stdout.contains(&deny(UNREADABLE)));
+            assert!(watchdog || own, "a stall of {ms} ms printed {stdout:?}");
+            assert_eq!(code, Some(if watchdog { 2 } else { 0 }), "a stall of {ms} ms printed {stdout:?} and exited with {code:?}");
+        }
     }
 }
