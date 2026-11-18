@@ -416,6 +416,8 @@ mod tests {
         assert_eq!(found.iter().map(|f| f.rule.as_str()).collect::<Vec<_>>(), ["A1", "P1"]);
         assert_eq!(found[0].what.chars().count(), FINDING_CHARS);
         assert_eq!((found[1].lines.clone(), found[1].what.as_str()), (vec![7], "no test for this"));
+        let (long, _) = findings(&json!({ "findings": [{ "rule": "A1", "file": "f".repeat(5000), "lines": (1..=1000).collect::<Vec<u32>>(), "what": "x" }] }).to_string(), &rules).unwrap();
+        assert_eq!((long[0].file.chars().count(), long[0].lines.len()), (300, 20), "a finding's file or lines are not clipped");
         assert_eq!(findings("[]", &rules), None, "a bare list is not an answer");
         assert_eq!(findings("It is fine [1].", &rules), None);
         assert_eq!(findings("I could not review it.", &rules), None);
