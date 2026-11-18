@@ -366,6 +366,11 @@ mod tests {
 
         /// `team`, its worker in a worktree of its own when `isolated`.
         fn team_in(name: &str, switch: Switch, parallel: u32, author: &str, isolated: bool) -> Team {
+            team_with(name, switch, parallel, author, isolated, false, None)
+        }
+
+        /// `team_in`, the app's HEAD unborn at the start when `unborn`, git found first in `git_dir`.
+        fn team_with(name: &str, switch: Switch, parallel: u32, author: &str, isolated: bool, unborn: bool, git_dir: Option<&Path>) -> Team {
             let dir = std::env::temp_dir().join(format!("pinned-review-run-{name}-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(&dir);
             std::fs::create_dir_all(&dir).unwrap();
@@ -374,12 +379,15 @@ mod tests {
             std::fs::create_dir_all(app.join("src")).unwrap();
             std::fs::write(app.join("src/parser.rs"), "fn parse() {}\n").unwrap();
             git(&app, &["init", "-q"]);
-            git(&app, &["add", "."]);
-            git(&app, &["commit", "-q", "-m", "start"]);
+            if !unborn {
+                git(&app, &["add", "."]);
+                git(&app, &["commit", "-q", "-m", "start"]);
+            }
             git(&app, &["remote", "add", "origin", "https://github.com/acme/site.git"]);
 
             let claude = fake_claude(&dir);
-            let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), ..launch() }, Some(dir.join("config")), None, |_| {});
+            let path_env = git_dir.map(|git_dir| format!("{}:{}", git_dir.display(), std::env::var("PATH").unwrap_or_default()));
+            let m = Machine::new(Launch { bins: BTreeMap::from([(Provider::Claude, claude.clone())]), path_env, ..launch() }, Some(dir.join("config")), None, |_| {});
             m.call(Call::AddAccount { provider: Provider::Claude, name: "Work".into(), auth: None, key: None }).unwrap();
             m.set_local_taste(&TasteScope::Captains, TastePatch { ladder: Some(vec![model(HAIKU), model(SONNET), model(OPUS)]), parallel: Some(parallel), ..TastePatch::default() }).unwrap();
             m.set_local_reviewer(ReviewerPatch { rules: Some(vec![rule("A1", ACCOUNT_RULE)]), ..ReviewerPatch::default() }).unwrap();
@@ -452,6 +460,23 @@ mod tests {
                 let argv: Vec<String> = std::fs::read_to_string(&file).unwrap().trim_end_matches('\0').split('\0').map(String::from).collect();
                 let after = |flag: &str| argv.iter().position(|a| a == flag).map(|at| argv[at + 1].clone()).unwrap_or_default();
                 (after("--append-system-prompt"), after("-p"), argv)
+            }
+
+            /// The reviewer's first prompt, or None when the task ended with no reviewer started.
+            fn reviewed(&self) -> Option<String> {
+                let file = self.claude.with_extension("review");
+                wait_for("the reviewer to start or the task to end", || file.exists() || self.m.delegates.get(&self.task).is_some_and(|t| t.state.terminal()));
+                file.exists().then(|| self.reviewer().1)
+            }
+
+            /// The reviewer's first prompt, which must hold `text`.
+            fn reads(&self, text: &str) {
+                let prompt = self.reviewed().unwrap_or_else(|| panic!("no review ran, so {text:?} was not read"));
+                assert!(prompt.contains(text), "the diff does not hold {text:?}: {prompt}");
+            }
+
+            fn base(&self) -> String {
+                self.m.delegates.get(&self.task).unwrap().base.expect("the task's start commit is kept")
             }
 
             fn no_reviewer_started(&self) {
@@ -767,6 +792,176 @@ mod tests {
             on.end_turn();
             on.reviewer();
             assert_eq!(on.rounds().len(), 1, "with the switch on the review runs");
+        }
+
+        #[test]
+        fn the_review_reads_the_folder_the_task_started_in_not_the_tabs_cwd() {
+            let t = team("tabcwd", Switch::On, 6, SONNET);
+            t.change(CHANGED, json!({ "findings": [] }));
+            git(&t.app, &["worktree", "add", "-q", ".claude/worktrees/x"]);
+            let moved = t.app.join(".claude/worktrees/x/src").display().to_string();
+            t.m.record_event(AgentEvent { cwd: Some(moved), ..event(&t.worker, AgentStatus::Working, None) });
+            t.end_turn();
+            t.reads(CHANGED);
+        }
+
+        #[test]
+        fn a_file_changed_while_the_review_ran_is_not_reviewed() {
+            let t = team("stale", Switch::On, 6, SONNET);
+            t.change(CHANGED, json!({ "findings": [] }));
+            std::fs::write(t.claude.with_extension("hold"), "").unwrap();
+            t.end_turn();
+            wait_for("the review to start", || t.m.delegates.requested(&format!("review:{}", t.task), Some("round-1")).is_some());
+            std::fs::write(t.work.join("src/parser.rs"), "fn parse() { unreachable!() }\n").unwrap();
+            std::fs::remove_file(t.claude.with_extension("hold")).unwrap();
+            assert_eq!(t.not_reviewed(), "the worker changed its files while the review ran");
+        }
+
+        #[test]
+        fn a_replaced_base_does_not_hide_the_change() {
+            let t = team("replace", Switch::On, 6, SONNET);
+            t.change(CHANGED, json!({ "findings": [] }));
+            git(&t.work, &["commit", "-qam", "parser"]);
+            git(&t.work, &["replace", &t.base(), "HEAD"]);
+            t.end_turn();
+            t.reads(CHANGED);
+        }
+
+        #[test]
+        fn the_workers_info_attributes_do_not_blank_the_diff() {
+            let t = team("attributes", Switch::On, 6, SONNET);
+            std::fs::write(t.app.join(".git/info/attributes"), "* -diff\n").unwrap();
+            t.change(CHANGED, json!({ "findings": [] }));
+            t.end_turn();
+            t.reads(CHANGED);
+        }
+
+        #[test]
+        fn the_workers_info_exclude_does_not_hide_a_new_file() {
+            let t = team("exclude", Switch::On, 6, SONNET);
+            std::fs::write(t.app.join(".git/info/exclude"), "*\n").unwrap();
+            t.change(CHANGED, json!({ "findings": [] }));
+            std::fs::write(t.app.join("src/added.rs"), "fn added_here() {}\n").unwrap();
+            t.end_turn();
+            t.reads("fn added_here() {}");
+        }
+
+        #[test]
+        fn index_flags_and_core_worktree_do_not_hide_a_change() {
+            for flag in ["--assume-unchanged", "--skip-worktree"] {
+                let t = team(&format!("flag{flag}"), Switch::On, 6, SONNET);
+                t.change(CHANGED, json!({ "findings": [] }));
+                git(&t.app, &["update-index", flag, "src/parser.rs"]);
+                t.end_turn();
+                t.reads(CHANGED);
+            }
+            let t = team("coreworktree", Switch::On, 6, SONNET);
+            let clean = t.dir.join("clean");
+            std::fs::create_dir_all(clean.join("src")).unwrap();
+            std::fs::copy(t.app.join("src/parser.rs"), clean.join("src/parser.rs")).unwrap();
+            git(&t.app, &["config", "core.worktree", &clean.display().to_string()]);
+            t.change(CHANGED, json!({ "findings": [] }));
+            t.end_turn();
+            t.reads(CHANGED);
+        }
+
+        #[test]
+        fn a_clean_filter_neither_hides_the_change_nor_runs() {
+            let t = team("filter", Switch::On, 6, SONNET);
+            let marker = t.dir.join("filter-ran");
+            let filter = t.dir.join("filter.sh");
+            std::fs::write(&filter, format!("#!/bin/sh\ntouch {}\ncat > /dev/null\nprintf 'fn parse() {{}}\\n'\n", marker.display())).unwrap();
+            std::fs::set_permissions(&filter, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+            git(&t.app, &["config", "filter.x.clean", &filter.display().to_string()]);
+            std::fs::write(t.app.join(".git/info/attributes"), "* filter=x\n").unwrap();
+            t.change(CHANGED, json!({ "findings": [] }));
+            t.end_turn();
+            t.reads(CHANGED);
+            assert!(!marker.exists(), "the worker's filter program ran");
+        }
+
+        #[test]
+        fn a_nested_repository_is_named_as_not_read() {
+            let t = team("nested", Switch::On, 6, SONNET);
+            std::fs::create_dir_all(t.app.join("sub")).unwrap();
+            git(&t.app.join("sub"), &["init", "-q"]);
+            std::fs::write(t.app.join("sub/inner.rs"), "fn inner() {}\n").unwrap();
+            t.change(CHANGED, json!({ "findings": [] }));
+            t.end_turn();
+            let note = t.not_reviewed();
+            assert!(note.contains("not read: nested repository sub"), "{note}");
+        }
+
+        #[test]
+        fn an_empty_diff_under_on_is_nothing_to_review_and_off_runs_no_git() {
+            let t = team("empty", Switch::On, 6, SONNET);
+            t.answer(&json!({ "findings": [] }).to_string(), false);
+            t.end_turn();
+            let rounds = t.rounds();
+            assert_eq!(rounds.len(), 1, "{rounds:?}");
+            assert_eq!(serde_json::to_value(rounds[0].state).unwrap(), "nothing_to_review", "{rounds:?}");
+            t.no_reviewer_started();
+
+            let fake = std::env::temp_dir().join(format!("pinned-review-run-fakegit-{}", std::process::id()));
+            std::fs::create_dir_all(&fake).unwrap();
+            let log = fake.join("calls");
+            let real = crate::process::command("sh").args(["-c", "command -v git"]).output().unwrap();
+            let real = String::from_utf8_lossy(&real.stdout).trim().to_owned();
+            std::fs::write(fake.join("git"), format!("#!/bin/sh\necho \"$*\" >> {}\nexec {real} \"$@\"\n", log.display())).unwrap();
+            std::fs::set_permissions(fake.join("git"), std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+            let t = team_with("offgit", Switch::Off, 6, SONNET, false, false, Some(&fake));
+            assert!(log.exists(), "the counting git is not the one pinned runs");
+            std::fs::remove_file(&log).unwrap();
+            t.change(CHANGED, json!({ "findings": [] }));
+            t.end_turn();
+            assert_eq!(t.state(), "result_available");
+            let calls = std::fs::read_to_string(&log).unwrap_or_default();
+            assert!(calls.is_empty(), "with the switch off git ran: {calls}");
+            let _ = std::fs::remove_dir_all(&fake);
+        }
+
+        #[test]
+        fn a_force_added_ignored_committed_file_is_in_the_diff() {
+            let t = team("forced", Switch::On, 6, SONNET);
+            t.answer(&json!({ "findings": [] }).to_string(), false);
+            std::fs::write(t.app.join(".gitignore"), "*.gen\n").unwrap();
+            std::fs::write(t.app.join("src/data.gen"), "fn generated_here() {}\n").unwrap();
+            git(&t.app, &["add", "-f", ".gitignore", "src/data.gen"]);
+            git(&t.app, &["commit", "-qm", "generated"]);
+            git(&t.app, &["rm", "-q", "--cached", "src/data.gen"]);
+            t.end_turn();
+            t.reads("fn generated_here() {}");
+        }
+
+        #[test]
+        fn a_gitignore_that_ignores_itself_is_listed() {
+            let t = team("selfignore", Switch::On, 6, SONNET);
+            t.answer(&json!({ "findings": [] }).to_string(), false);
+            std::fs::create_dir_all(t.app.join("src/hide")).unwrap();
+            std::fs::write(t.app.join("src/hide/.gitignore"), "*\n").unwrap();
+            std::fs::write(t.app.join("src/hide/x.rs"), "fn hidden_here() {}\n").unwrap();
+            t.end_turn();
+            t.reads("src/hide/.gitignore");
+        }
+
+        #[test]
+        fn a_first_commit_on_an_unborn_head_is_reviewed() {
+            let t = team_with("unborn", Switch::On, 6, SONNET, false, true, None);
+            t.change(CHANGED, json!({ "findings": [] }));
+            git(&t.app, &["add", "-A"]);
+            git(&t.app, &["commit", "-qm", "first"]);
+            t.end_turn();
+            t.reads(CHANGED);
+        }
+
+        #[test]
+        fn the_reviewer_loads_no_skill() {
+            let t = team("skills", Switch::On, 6, SONNET);
+            t.change(CHANGED, json!({ "findings": [] }));
+            t.end_turn();
+            let (_, _, argv) = t.reviewer();
+            assert!(argv.iter().any(|a| a == "--disable-slash-commands"), "the reviewer may load skills: {argv:?}");
+            assert!(values(&argv, "--disallowedTools").iter().any(|d| d == "Skill"), "Skill is not denied: {argv:?}");
         }
     }
 }

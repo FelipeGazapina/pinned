@@ -2782,4 +2782,37 @@ mod tests {
         assert!(!held.contains("FAKEFAKE") && !held.contains('\0'), "{held}");
         assert_eq!(held, "key [hidden] done");
     }
+
+    #[test]
+    fn each_held_author_counts_once_with_its_running_review() {
+        let delegates = Delegates::default();
+        let start = |title: &str, parent: Parent, role: Option<&str>| NewTask {
+            parent,
+            tool: None,
+            title: title.into(),
+            account: "claude".into(),
+            provider: Provider::Claude,
+            model: None,
+            cwd: std::env::temp_dir(),
+            mode: Mode::Async,
+            access: Access::Auto,
+            isolated: false,
+            caller_key: format!("key-{title}"),
+            client_request_id: None,
+            role: role.map(str::to_owned),
+        };
+        let fresh = |claim: Claim| match claim {
+            Claim::Fresh(task) => task.id,
+            Claim::Existing(_) | Claim::Full(_) => panic!("a review or worker within the limit did not start"),
+        };
+        let reviewer = Some(crate::agent::Role::Reviewer.name());
+        let a = fresh(delegates.claim(start("A", Parent::Tab("tab-1".into()), None), Some(2)));
+        let b = fresh(delegates.claim(start("B", Parent::Tab("tab-1".into()), None), Some(2)));
+        // A ends its turn: its review runs in its place.
+        fresh(delegates.claim_in_place_of(start("RA", Parent::Task(a.clone()), reviewer), Some(2), Some(&a)));
+        // B ends its turn: its review also runs, since A and RA hold one place.
+        fresh(delegates.claim_in_place_of(start("RB", Parent::Task(b.clone()), reviewer), Some(2), Some(&b)));
+        // Two places are taken, by A with RA and by B with RB: a third start is refused.
+        assert!(matches!(delegates.claim(start("C", Parent::Tab("tab-1".into()), None), Some(2)), Claim::Full(2)), "a third worker started past the limit");
+    }
 }

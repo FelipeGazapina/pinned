@@ -424,6 +424,15 @@ mod tests {
     }
 
     #[test]
+    fn a_family_alias_is_the_same_model_as_its_ids() {
+        assert!(same_model("opus", "claude-opus-5-5") && same_model("claude-sonnet-5-5[1m]", "Sonnet") && same_model("haiku", "claude-haiku-5-5-20261101"));
+        assert!(!same_model("opus", "claude-sonnet-5-5") && !same_model("fable", "claude-opus-5-5") && !same_model("claude-opus-5-5", "claude-opus-4-1"));
+        let ladder = [rung("claude-haiku-5-5"), rung("claude-sonnet-5-5"), rung("claude-opus-5-5")];
+        let (_, tried) = models(&ladder, None, Some(&rung("claude-sonnet-5-5")), "sonnet");
+        assert_eq!(tried, ["claude-haiku-5-5", "claude-opus-5-5"], "an author on the sonnet alias got sonnet as its reviewer");
+    }
+
+    #[test]
     fn findings_keep_only_known_rules_and_clip_what() {
         let rules = [rule("A1", "No unwrap."), rule("P1", "Tests first.")];
         let answer = format!(
